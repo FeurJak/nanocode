@@ -1,6 +1,7 @@
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
+    ops::Bound,
 };
 
 use nanocode_durability_core::{EncodedPayload, StoreError};
@@ -388,6 +389,22 @@ impl Fold {
     pub fn cells(&self) -> impl Iterator<Item = (&str, u64, &[Box<RawValue>])> {
         self.cells
             .iter()
+            .map(|((session, cell), updates)| (session.as_str(), *cell, updates.as_slice()))
+    }
+
+    pub fn cells_of(
+        &self,
+        session: Option<&str>,
+    ) -> impl Iterator<Item = (&str, u64, &[Box<RawValue>])> {
+        let range = match session {
+            Some(session) => (
+                Bound::Included((session.to_owned(), 0)),
+                Bound::Included((session.to_owned(), u64::MAX)),
+            ),
+            None => (Bound::Unbounded, Bound::Unbounded),
+        };
+        self.cells
+            .range(range)
             .map(|((session, cell), updates)| (session.as_str(), *cell, updates.as_slice()))
     }
 

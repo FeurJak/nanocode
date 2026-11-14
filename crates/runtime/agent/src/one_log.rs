@@ -57,7 +57,7 @@ pub struct OneLog {
     effects: Atom<Effects>,
     live: Atom<BTreeSet<(String, u64)>>,
     log: nanocode_turnlog::TurnLog,
-    owners: Atom<BTreeMap<String, OwnerToken>>,
+    owners: Atom<nanocode_sync::Map<String, OwnerToken>>,
     recovering: Atom<BTreeSet<String>>,
     restarts: u64,
     unsaved: Atom<BTreeMap<(String, u64), u64>>,
@@ -329,10 +329,7 @@ impl OneLog {
             .read(|fold| {
                 let mut sessions: BTreeMap<String, Vec<CellJournal>> = BTreeMap::new();
                 let mut catalogs: HashMap<String, Arc<[Value]>> = HashMap::new();
-                for (session, _, updates) in fold.cells() {
-                    if only.is_some_and(|only| only != session) {
-                        continue;
-                    }
+                for (session, _, updates) in fold.cells_of(only) {
                     let mut decoded = Vec::with_capacity(updates.len());
                     for update in updates {
                         let mut update = serde_json::from_str::<CellJournalUpdate>(update.get())

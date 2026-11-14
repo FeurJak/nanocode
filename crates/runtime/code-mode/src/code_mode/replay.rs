@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
 
 use nanocode_code_mode_engine::{JournalEntry, SharedJournal};
-use nanocode_sync::{Atom, Inbox, Owned};
+use nanocode_sync::{Atom, Inbox, Owned, Set};
 
 use crate::embedded::HostFuture;
 
@@ -279,11 +279,11 @@ pub struct CellJournals(Arc<Journals>);
 #[derive(Default)]
 struct Journals {
     cells: Atom<Vec<Weak<CellRecord>>>,
-    held: Atom<HashSet<String>>,
+    held: Atom<Set<String>>,
     restored: Atom<HashMap<String, Arc<Restored>>>,
     finished: Atom<Vec<Arc<CellRecord>>>,
     dormant: Atom<Vec<(Arc<CellJournal>, Arc<Restored>)>>,
-    loaded: Atom<HashSet<String>>,
+    loaded: Atom<Set<String>>,
     stored: Atom<HashMap<String, HashMap<String, Arc<RawValue>>>>,
     saving_stored: Arc<Owned<()>>,
     sink: Option<Arc<dyn CellJournalSink>>,
