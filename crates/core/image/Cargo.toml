@@ -13,7 +13,6 @@ memchr.workspace = true
 nanocode-sys.workspace = true
 nanocode-trace.workspace = true
 nanocode-types-core = { workspace = true  }
-nanocode-durability-core = { workspace = true }
 nanocode-sync.workspace = true
 nanocode-compression.workspace = true
 nanocode-digest.workspace = true

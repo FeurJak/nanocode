@@ -40,7 +40,7 @@ pub use durable::{
 use durable::{Cursor, Effect, Journal, Snapshot};
 use history::HistoryMessage;
 use nanocode_http::layer::retry;
-use nanocode_image::{ImageHistory, ImageWindow};
+use nanocode_tool_host::image::{ImageHistory, ImageWindow};
 use nanocode_platform::Instant;
 use nanocode_platform::sleep;
 use nanocode_sync::{Atom, Owned, Sequencer, Slot};

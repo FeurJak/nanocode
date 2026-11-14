@@ -4,7 +4,8 @@ use nanocode_agent_core::{
     input::{Prompt, PromptInput, PromptMessageRole, UserInput},
 };
 use nanocode_durability::BlobUrl;
-use nanocode_image::{ImageHistory, prepare_base64_images};
+use nanocode_image::prepare_base64_images;
+use nanocode_tool_host::image::ImageHistory;
 use nanocode_sys::base64::STANDARD;
 use serde_json::json;
 

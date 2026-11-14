@@ -8,19 +8,19 @@ use nanocode_sync::Swap;
 use nanocode_sys::base64::STANDARD;
 mod bmp;
 mod decode;
-mod history;
 mod metadata;
 mod pam;
 mod pixels;
 mod pnm;
 mod resample;
 mod thumbnail;
+mod window;
 
 pub use decode::{
     DEFAULT_ALLOC_BYTES_MAX, DecodeError, Decoded, Decoder, Format, Limits, dimensions,
     guess_format,
 };
-pub use history::{ImageHistory, ImageWindow, SharedBlobStore};
+pub use window::ImageWindow;
 pub use pixels::{Image, Pixels, RgbLayout};
 pub use resample::lanczos3;
 pub use thumbnail::thumbnail;

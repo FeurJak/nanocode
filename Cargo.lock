@@ -73,6 +73,7 @@ dependencies = [
  "nanocode-subagents",
  "nanocode-sync",
  "nanocode-sys",
+ "nanocode-tool-host",
  "nanocode-tool-runtime",
  "nanocode-tools",
  "nanocode-turnlog",
@@ -514,7 +515,6 @@ dependencies = [
  "memchr",
  "nanocode-compression",
  "nanocode-digest",
- "nanocode-durability-core",
  "nanocode-gif",
  "nanocode-jpeg",
  "nanocode-platform",
@@ -916,6 +916,7 @@ version = "0.7.0"
 dependencies = [
  "nanocode-code-mode",
  "nanocode-digest",
+ "nanocode-durability-core",
  "nanocode-home",
  "nanocode-http",
  "nanocode-image",
@@ -927,6 +928,7 @@ dependencies = [
  "nanocode-trace",
  "nanocode-turnlog",
  "nanocode-types",
+ "nanocode-types-core",
  "serde",
  "serde_json",
 ]
