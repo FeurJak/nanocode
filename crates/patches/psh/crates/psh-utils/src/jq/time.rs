@@ -3,33 +3,9 @@
 //! wday, yday]`, with the C locale's names. Written for psh after jq's manual and the
 //! POSIX `strftime`/`strptime` descriptions.
 
-use crate::timefmt::{civil_from_days, days_from_civil};
+use crate::timefmt::{DAY_NAMES as DAYS, MONTH_NAMES as MONTHS, civil_from_days, days_from_civil};
 
 use super::val::{Error, Val, ValR, err};
-
-const DAYS: [&str; 7] = [
-    "Sunday",
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-    "Saturday",
-];
-const MONTHS: [&str; 12] = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-];
 
 /// A broken-down time.
 #[derive(Clone, Copy, Debug)]

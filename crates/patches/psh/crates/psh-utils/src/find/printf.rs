@@ -5,7 +5,7 @@
 use psh_engine::host::{ExtraMetadata, FileKind, Metadata};
 use psh_engine::util::UtilCtx;
 
-use crate::timefmt::{self, NS, Tm};
+use crate::timefmt::{self, DAY_NAMES as DAYS, MONTH_NAMES as MONTHS, NS, Tm, iso_week};
 
 /// What the directives need beyond `lstat`/`stat`, fetched before formatting.
 #[derive(Clone, Copy, Debug, Default)]
@@ -360,30 +360,6 @@ fn directive(
     }
 }
 
-const DAYS: [&str; 7] = [
-    "Sunday",
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-    "Saturday",
-];
-const MONTHS: [&str; 12] = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-];
-
 fn frac(tm: &Tm) -> String {
     format!("{:09}0", tm.nsec)
 }
@@ -495,28 +471,5 @@ fn strftime(ctx: &UtilCtx<'_>, ns: i64, k: u8) -> String {
             frac(&tm)
         ),
         _ => String::new(),
-    }
-}
-
-/// The ISO 8601 year and week of a date.
-fn iso_week(tm: &Tm) -> (i64, u32) {
-    let wday = (tm.wday + 6) % 7; // Monday = 0
-    let yday = i64::from(tm.yday);
-    let week = (yday - i64::from(wday) + 10) / 7;
-    let leap = |y: i64| (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
-    let weeks_in = |y: i64| -> i64 {
-        let jan1 = (timefmt::days_from_civil(y, 1, 1) + 3).rem_euclid(7); // Monday = 0
-        if jan1 == 3 || (jan1 == 2 && leap(y)) {
-            53
-        } else {
-            52
-        }
-    };
-    if week < 1 {
-        (tm.year - 1, weeks_in(tm.year - 1) as u32)
-    } else if week > weeks_in(tm.year) {
-        (tm.year + 1, 1)
-    } else {
-        (tm.year, week as u32)
     }
 }

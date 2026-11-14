@@ -672,7 +672,7 @@ fn is_leap(y: i64) -> bool {
 }
 
 /// The ISO 8601 week-based year and week of a broken-down time.
-fn iso_week(tm: &Tm) -> (i64, i64) {
+pub(crate) fn iso_week(tm: &Tm) -> (i64, i64) {
     let wday = i64::from((tm.wday + 6) % 7); // Monday = 0
     let yday = i64::from(tm.yday);
     let week = (yday - wday + 10) / 7;

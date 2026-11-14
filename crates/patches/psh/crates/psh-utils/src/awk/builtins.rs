@@ -2,31 +2,7 @@
 
 use psh_engine::util::UtilCtx;
 
-use crate::timefmt::{self, NS, Tm};
-
-const DAYS: [&str; 7] = [
-    "Sunday",
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-    "Saturday",
-];
-const MONTHS: [&str; 12] = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-];
+use crate::timefmt::{self, DAY_NAMES as DAYS, MONTH_NAMES as MONTHS, NS, Tm, iso_week};
 
 fn tm_of(ctx: &UtilCtx<'_>, t: i64, utc: bool) -> Tm {
     let ns = t.saturating_mul(NS);
@@ -35,30 +11,6 @@ fn tm_of(ctx: &UtilCtx<'_>, t: i64, utc: bool) -> Tm {
     } else {
         timefmt::local(ctx, ns)
     }
-}
-
-/// ISO 8601 week-based year and week of a time.
-fn iso_week(tm: &Tm) -> (i64, u32) {
-    let wday = (tm.wday + 6) % 7; // Monday = 0
-    let yday = tm.yday as i64;
-    let mut year = tm.year;
-    let mut week = (yday - wday as i64 + 10) / 7;
-    if week < 1 {
-        year -= 1;
-        let prev_len = if is_leap(year) { 366 } else { 365 };
-        week = (yday + prev_len - wday as i64 + 10) / 7;
-    } else {
-        let len = if is_leap(year) { 366 } else { 365 };
-        if week == 53 && yday - wday as i64 + 3 >= len {
-            year += 1;
-            week = 1;
-        }
-    }
-    (year, week as u32)
-}
-
-fn is_leap(y: i64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
 pub fn strftime(ctx: &UtilCtx<'_>, fmt: &[u8], t: i64, utc: bool) -> Vec<u8> {
