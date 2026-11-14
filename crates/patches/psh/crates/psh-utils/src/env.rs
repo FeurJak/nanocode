@@ -12,7 +12,7 @@
 use std::io;
 
 use psh_engine::host::{FileKind, error_text};
-use psh_engine::util::{SpawnEnv, UtilCtx};
+use psh_engine::util::{STANDALONE_BUILTINS, SpawnEnv, UtilCtx};
 
 use crate::common;
 use crate::opts::{Spec, both};
@@ -143,6 +143,24 @@ pub async fn run(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
             return common::write_failed(ctx, &e).await;
         }
         return 0;
+    }
+    let name = &rest[0];
+    let path = match env.set.iter().rev().find(|(k, _)| k == "PATH") {
+        Some((_, v)) => Some(v.clone()),
+        None if env.clear || env.unset.iter().any(|n| n == "PATH") => None,
+        None => ctx.var(b"PATH").map(<[u8]>::to_vec),
+    };
+    if let Some(path) = path
+        && !name.contains(&b'/')
+        && !STANDALONE_BUILTINS
+            .iter()
+            .any(|b| b.as_bytes() == name.as_slice())
+        && !ctx.is_utility(name).await
+        && ctx.search_path(name, &path).await.is_empty()
+    {
+        let msg = format!("{}: No such file or directory", common::quote(ctx, name));
+        ctx.error(&msg).await;
+        return 127;
     }
     let mut child = ctx.spawn(rest.to_vec(), env).await;
     child.wait().await

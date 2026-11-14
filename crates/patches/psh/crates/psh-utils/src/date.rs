@@ -35,6 +35,11 @@ pub const SPEC: Spec = Spec {
 
 const DEFAULT_FORMAT: &[u8] = b"%a %b %e %H:%M:%S %Z %Y";
 
+const BSD_USAGE: &[u8] = b"usage: date [-jnRu] [-I[date|hours|minutes|seconds|ns]] [-f input_fmt]
+            [ -z output_zone ] [-r filename|seconds] [-v[+|-]val[y|m|w|d|H|M|S]]
+            [[[[mm]dd]HH]MM[[cc]yy][.SS] | new_date] [+output_fmt]
+";
+
 /// `-I` and `-IFMT` are `--iso-8601[=FMT]` (an optional value only attached).
 fn rewrite_iso(argv: &[Vec<u8>]) -> Vec<Vec<u8>> {
     let mut out = Vec::with_capacity(argv.len());
@@ -200,6 +205,7 @@ pub async fn run(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
                 Err(msg) => {
                     ctx.error_raw(msg.as_bytes()).await;
                     ctx.error("illegal time format").await;
+                    ctx.error_raw(BSD_USAGE).await;
                     return 1;
                 }
             },
@@ -207,6 +213,7 @@ pub async fn run(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
                 Some(t) => t,
                 None => {
                     ctx.error("illegal time format").await;
+                    ctx.error_raw(BSD_USAGE).await;
                     return 1;
                 }
             },

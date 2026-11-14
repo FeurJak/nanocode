@@ -98,7 +98,12 @@ pub async fn run(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
                             .await;
                     }
                 } else {
-                    ctx.error(&format!("cannot stat '{}': {}", s(name), error_text(&e)))
+                    let call = if cfg!(target_os = "linux") {
+                        "statx"
+                    } else {
+                        "stat"
+                    };
+                    ctx.error(&format!("cannot {call} '{}': {}", s(name), error_text(&e)))
                         .await;
                 }
                 status = 1;
