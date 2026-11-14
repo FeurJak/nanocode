@@ -651,7 +651,7 @@ impl ModelRun {
         let canonical_context = context
             .capture(
                 &tools.context_directory(),
-                tools.default_shell_name(),
+                &tools.context_shell(),
                 self.context_source.execution_environment(),
             )
             .full_item();

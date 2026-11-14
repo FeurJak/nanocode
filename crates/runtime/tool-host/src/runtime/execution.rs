@@ -85,6 +85,14 @@ impl ToolRuntime {
     }
 
     #[must_use]
+    pub fn context_shell(&self) -> Arc<str> {
+        match &self.inner {
+            Runtime::Native(runtime) => Arc::from(runtime.default_shell_name()),
+            Runtime::Host(runtime) => runtime.context_shell(),
+        }
+    }
+
+    #[must_use]
     pub fn context_directory(&self) -> Arc<str> {
         match &self.inner {
             Runtime::Native(runtime) => Arc::from(runtime.working_directory()),

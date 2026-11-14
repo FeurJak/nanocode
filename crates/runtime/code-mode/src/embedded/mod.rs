@@ -294,6 +294,12 @@ pub trait CodeModeHost: Send + Sync + 'static {
             .and_then(|description| description.workspace)
     }
 
+    fn shell(&self, _session_id: &str) -> Option<String> {
+        self.describe()
+            .and_then(|description| description.environment)
+            .and_then(|environment| environment.shell)
+    }
+
     fn runs_cells(&self) -> bool {
         true
     }
@@ -468,6 +474,9 @@ impl<T: CodeModeHost + ?Sized> CodeModeHost for std::sync::Arc<T> {
     }
     fn working_directory(&self, session_id: &str) -> Option<String> {
         (**self).working_directory(session_id)
+    }
+    fn shell(&self, session_id: &str) -> Option<String> {
+        (**self).shell(session_id)
     }
     fn runs_cells(&self) -> bool {
         (**self).runs_cells()

@@ -130,6 +130,16 @@ impl EmbeddedToolRuntime {
     }
 
     #[must_use]
+    pub fn context_shell(&self) -> Arc<str> {
+        match (&self.host, &self.session_id) {
+            (Some(host), Some(session_id)) => host
+                .shell(session_id)
+                .map_or_else(|| Arc::from(self.default_shell_name()), Arc::from),
+            _ => Arc::from(self.default_shell_name()),
+        }
+    }
+
+    #[must_use]
     pub fn context_directory(&self) -> Arc<str> {
         match (&self.host, &self.session_id) {
             (Some(host), Some(session_id)) => host

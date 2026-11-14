@@ -104,7 +104,8 @@ pub fn local_environment() -> HandEnvironment {
                 shell
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
-            }),
+            })
+            .or_else(|| Some(nanocode_home::shell::default_shell_name().to_owned())),
     }
 }
 

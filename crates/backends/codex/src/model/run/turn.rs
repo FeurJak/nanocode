@@ -461,7 +461,7 @@ impl ModelRun {
         }
         let current_context = session.context.capture(
             &session.tools.context_directory(),
-            session.tools.default_shell_name(),
+            &session.tools.context_shell(),
             self.context_source.execution_environment(),
         );
         let canonical_context = current_context.full_item();
@@ -565,7 +565,7 @@ impl ModelRun {
             context.observe_host_instructions(&self.config.host_instructions());
             let context_snapshot = context.capture(
                 &tools.context_directory(),
-                tools.default_shell_name(),
+                &tools.context_shell(),
                 self.context_source.execution_environment(),
             );
             let mut history = task_input(&self.config, &task, user_content, &context_snapshot);
