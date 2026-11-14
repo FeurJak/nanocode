@@ -180,6 +180,9 @@ impl Shared {
                 None => self.queue.pop(),
             };
             let Some(task) = next else {
+                if DEFERRED.with(|deferred| !deferred.borrow().is_empty()) {
+                    self.reactor.try_turn(Some(Duration::ZERO), || {});
+                }
                 return wake_deferred() || ran > 0;
             };
             task.run();
