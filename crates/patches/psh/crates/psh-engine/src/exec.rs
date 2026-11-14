@@ -1746,13 +1746,28 @@ fn compound_text(items: &[crate::arrays::ArrayItem]) -> Vec<u8> {
     out
 }
 
+pub(crate) fn simple_line(code: &Code, cmd: &Command, s: &SimpleCommand) -> u32 {
+    let first = [
+        s.assigns.first().map(|a| a.span),
+        s.words.first().map(|w| w.span),
+        cmd.redirects.first().map(|r| r.span),
+    ]
+    .into_iter()
+    .flatten()
+    .min_by_key(|sp| sp.start);
+    match first {
+        Some(sp) if sp.end > sp.start => code.line(sp.end - 1),
+        _ => code.line(cmd.span.start),
+    }
+}
+
 async fn prepare_simple(
     vp: &mut Vp,
     code: &Rc<Code>,
     cmd: &Command,
     s: &SimpleCommand,
 ) -> Result<Prepared, Unwind> {
-    vp.line = code.line(cmd.span.start);
+    vp.line = simple_line(code, cmd, s);
     let via = if vp.opts.get(SetOpt::Posix) {
         s.words
             .iter()
@@ -1880,7 +1895,7 @@ fn run_simple<'a>(
         if tail {
             vp.exec_tail = None;
         }
-        vp.line = code.line(cmd.span.start);
+        vp.line = simple_line(code, cmd, s);
         let (argv, assigns) = match Box::pin(prepare_simple(vp, code, cmd, s)).await? {
             Prepared::Done(status) => return Ok(status),
             Prepared::Run(argv, assigns) => {
@@ -2795,8 +2810,9 @@ async fn redirect_fd(vp: &mut Vp, code: &Rc<Code>, r: &Redirect, fd: u32) -> Res
             let mut body = if doc.quoted {
                 literal_body(code, &doc.body)
             } else {
+                warn(vp, &doc.warnings, |o| code.line(o)).await;
                 if let Some(e) = &doc.error {
-                    vp.error(&e.message).await;
+                    body_error(vp, code, e, doc.error_subst).await;
                     return Ok(false);
                 }
                 match Box::pin(expand::expand_heredoc(vp, code, &doc.body)).await {
@@ -2805,17 +2821,7 @@ async fn redirect_fd(vp: &mut Vp, code: &Rc<Code>, r: &Redirect, fd: u32) -> Res
                 }
             };
             if !doc.terminated {
-                // The input ended before the delimiter: bash warns, naming the line the
-                // input ended on, and the last line gets its newline.
-                let started = vp.line;
-                let wanted = psh_syntax::literal_text(&code.ast, &doc.delimiter)
-                    .unwrap_or_else(|| code.ast.text(doc.delimiter.span).to_string());
-                vp.line = code.line(doc.body.span.end.max(doc.body.span.start + 1) - 1);
-                vp.error(&format!(
-                    "warning: here-document at line {started} delimited by end-of-file (wanted `{wanted}')"
-                ))
-                .await;
-                vp.line = started;
+                // The input ended before the delimiter: the last line gets its newline.
                 if !body.is_empty() && !body.ends_with(b"\n") {
                     body.push(b'\n');
                 }
@@ -3322,6 +3328,77 @@ pub(crate) async fn process_subst(
     Ok(format!("/dev/fd/{n}").into_bytes())
 }
 
+pub(crate) async fn warn(vp: &mut Vp, warnings: &[psh_syntax::Warning], line: impl Fn(u32) -> u32) {
+    let saved = vp.line;
+    for w in warnings {
+        let (at, msg) = match w {
+            psh_syntax::Warning::HereDocEof {
+                at,
+                start,
+                delimiter,
+                from,
+            } => {
+                let (l, s) = match from {
+                    Some(f) => (line(*at) - line(*f) + 1, line(*start) - line(*f) + 1),
+                    None => (line(*at), line(*start)),
+                };
+                (
+                    l,
+                    format!(
+                        "warning: here-document at line {s} delimited by end-of-file (wanted `{}')",
+                        String::from_utf8_lossy(delimiter)
+                    ),
+                )
+            }
+            psh_syntax::Warning::Unterminated { at, count } => (
+                line(*at),
+                format!(
+                    "warning: command substitution: {count} unterminated here-document{}",
+                    if *count == 1 { "" } else { "s" }
+                ),
+            ),
+        };
+        vp.line = at;
+        vp.error(&msg).await;
+    }
+    vp.line = saved;
+}
+
+async fn body_error(vp: &Vp, code: &Code, e: &psh_syntax::ParseError, subst: Option<u32>) {
+    let Some(subst) = subst else {
+        vp.error(&e.message).await;
+        return;
+    };
+    let line = code.line(e.span.start);
+    let prefix = format!("{}: command substitution: line {line}: ", vp.msg_name());
+    let mut msg = Vec::new();
+    for l in e.message.split('\n') {
+        msg.extend_from_slice(format!("{prefix}{l}\n").as_bytes());
+    }
+    if e.message
+        .lines()
+        .last()
+        .is_some_and(|l| l.starts_with("syntax error near"))
+    {
+        let src = code.ast.source_bytes();
+        let at = (e.span.start as usize).min(src.len());
+        let from = src[..at]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |i| i + 1)
+            .max(subst as usize);
+        let to = src[at..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(src.len(), |i| at + i);
+        msg.extend_from_slice(prefix.as_bytes());
+        msg.push(b'`');
+        msg.extend_from_slice(&src[from..to]);
+        msg.extend_from_slice(b"'\n");
+    }
+    vp.error_raw(&msg).await;
+}
+
 /// `` `text` ``: parsed when it runs, as bash does.
 pub(crate) async fn command_subst_text(
     vp: &mut Vp,
@@ -3341,6 +3418,7 @@ pub(crate) async fn command_subst_text(
                 line_base: code.line(offset) - 1,
                 arith: Default::default(),
             });
+            warn(vp, inner.ast.warnings(), |o| inner.line(o)).await;
             subst(vp, inner, root).await
         }
         Err(e) => {

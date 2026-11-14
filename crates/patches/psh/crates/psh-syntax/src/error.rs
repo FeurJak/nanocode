@@ -14,6 +14,7 @@ pub struct ParseError {
     /// The input ended inside a construct: more input could complete it.
     pub incomplete: bool,
     pub resume: Option<usize>,
+    pub warnings: alloc::vec::Vec<crate::Warning>,
 }
 
 impl fmt::Display for ParseError {

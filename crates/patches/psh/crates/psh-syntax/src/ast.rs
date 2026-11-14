@@ -63,6 +63,8 @@ pub struct Ast {
     pub(crate) alias_uses: Vec<crate::alias::AliasUse>,
     /// Where the next chunk starts.
     pub(crate) chunk_end: usize,
+    pub(crate) warnings: Vec<Warning>,
+    pub(crate) continues: bool,
 }
 
 impl Ast {
@@ -119,9 +121,17 @@ impl Ast {
         self.source.restore(text)
     }
 
+    pub fn continues(&self) -> bool {
+        self.continues
+    }
+
     /// The top-level list: the script's commands in order.
     pub fn root(&self) -> ListId {
         self.root
+    }
+
+    pub fn warnings(&self) -> &[Warning] {
+        &self.warnings
     }
 
     pub fn list(&self, id: ListId) -> &List {
@@ -500,6 +510,22 @@ pub struct HereDoc {
     /// The body of an unquoted here-doc did not parse (an unclosed `$(`, say). Bash only
     /// reports this when the here-doc is expanded; the body is then one literal part.
     pub error: Option<crate::ParseError>,
+    pub error_subst: Option<u32>,
+    pub warnings: Vec<Warning>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Warning {
+    HereDocEof {
+        at: u32,
+        start: u32,
+        delimiter: Vec<u8>,
+        from: Option<u32>,
+    },
+    Unterminated {
+        at: u32,
+        count: usize,
+    },
 }
 
 /// A `[[ … ]]` expression.

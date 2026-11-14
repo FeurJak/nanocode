@@ -117,7 +117,7 @@ fn simple<'a>(
         return None;
     }
     vp.core.fg_signal.set(None);
-    vp.line = code.line(cmd.span.start);
+    vp.line = exec::simple_line(code, cmd, s);
     let Some(b) = builtin else {
         for a in &s.assigns {
             let AssignValue::Scalar(w) = &a.value else {

@@ -932,7 +932,8 @@ async fn run_stdin_lines(mut vp: Vp) -> (i32, Vp) {
         let more = match &chunk {
             Some(Err(e)) => e.incomplete || at_end(e),
             Some(Ok(ast)) => {
-                !heredocs_terminated(ast) || (parser.offset() >= buf.len() && continues(&text))
+                !heredocs_terminated(ast)
+                    || (parser.offset() >= buf.len() && (continues(&text) || ast.continues()))
             }
             None => continues(&text),
         };
@@ -1030,6 +1031,11 @@ async fn run_chunk(
             vp.error_raw(b"\n").await;
         }
     }
+    let warnings = match &chunk {
+        Ok(ast) => ast.warnings(),
+        Err(e) => &e.warnings[..],
+    };
+    exec::warn(vp, warnings, |o| lines.line(o)).await;
     match chunk {
         // `set -n`: read, but do not run.
         Ok(_) if vp.opts.get(options::SetOpt::Noexec) => None,

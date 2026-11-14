@@ -40,6 +40,11 @@ pub(crate) async fn run_text(vp: &mut Vp, text: &[u8], line_base: u32, origin: O
             let end = parser.offset().min(text.len());
             vp.error_raw(&text[start..end]).await;
         }
+        let warnings = match &chunk {
+            Ok(ast) => ast.warnings(),
+            Err(e) => &e.warnings[..],
+        };
+        exec::warn(vp, warnings, |o| lines.line(o) + line_base).await;
         match chunk {
             Ok(_) if vp.opts.get(crate::options::SetOpt::Noexec) => {}
             Ok(ast) => {

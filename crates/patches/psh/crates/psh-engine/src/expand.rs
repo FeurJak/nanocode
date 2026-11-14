@@ -1142,10 +1142,11 @@ async fn expand_part(
                 for p in inner {
                     if matches!(p.kind, Part::BadSubst) {
                         let q = text.strip_prefix(b"$").unwrap_or(text);
-                        vp.error(&format!(
-                            "{}: bad substitution",
-                            String::from_utf8_lossy(&q[1..q.len() - 1])
-                        ))
+                        let q = String::from_utf8_lossy(&q[1..q.len() - 1]);
+                        vp.error(&match code.ast.bytes(p.span).starts_with(b"$[") {
+                            true => format!("bad substitution: no closing `]' in {q}"),
+                            false => format!("{q}: bad substitution"),
+                        })
                         .await;
                         return Err(Unwind::Abort(1));
                     }

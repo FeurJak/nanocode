@@ -284,6 +284,7 @@ fn chunk<'a>(
         Err(mut e) => {
             // Point errors in alias text at the alias word.
             e.span = original_span(&p.uses, e.span);
+            e.warnings = core::mem::take(&mut p.warnings);
             return Err(e);
         }
     }
@@ -461,8 +462,8 @@ struct Pending {
     delim: Vec<u8>,
     strip: bool,
     quoted: bool,
-    /// Left without a body by the `$(…)` it is in.
-    leaked: bool,
+    start: usize,
+    subst: Option<usize>,
 }
 
 struct Checkpoint {
@@ -471,6 +472,8 @@ struct Checkpoint {
     cmds: usize,
     heredocs: usize,
     pending: usize,
+    warnings: usize,
+    gap: Option<(usize, usize)>,
 }
 
 type R<T> = Result<T, ParseError>;
@@ -501,6 +504,11 @@ struct P<'a> {
     /// The closing token of the innermost `$(…)`, `<(…)` or `${ …; }`, for "while
     /// looking for matching" in error messages.
     closer: Option<&'static str>,
+    warnings: Vec<Warning>,
+    gap: Option<(usize, usize)>,
+    subst: Option<usize>,
+    body: Option<(usize, usize, u32)>,
+    err_subst: Option<usize>,
 }
 
 fn is_blank(c: u8) -> bool {
@@ -583,6 +591,7 @@ impl<'a> P<'a> {
                 message: String::from("script too large"),
                 incomplete: false,
                 resume: None,
+                warnings: Vec::new(),
             });
         }
         Ok(P {
@@ -603,6 +612,11 @@ impl<'a> P<'a> {
             comsub: 0,
             heredoc_body: 0,
             closer: None,
+            warnings: Vec::new(),
+            gap: None,
+            subst: None,
+            body: None,
+            err_subst: None,
         })
     }
 
@@ -623,6 +637,17 @@ impl<'a> P<'a> {
             script_len,
             alias_uses: Vec::new(),
             chunk_end: self.chunk_end,
+            warnings: self.warnings,
+            continues: self.gap.is_some_and(|(nl, end)| {
+                end >= self.end
+                    && self.b[..nl]
+                        .iter()
+                        .rev()
+                        .take_while(|&&b| b == b'\\')
+                        .count()
+                        % 2
+                        == 1
+            }),
         }
     }
 
@@ -656,6 +681,8 @@ impl<'a> P<'a> {
             cmds: self.cmds.len(),
             heredocs: self.heredocs.len(),
             pending: self.pending.len(),
+            warnings: self.warnings.len(),
+            gap: self.gap,
         }
     }
 
@@ -665,6 +692,8 @@ impl<'a> P<'a> {
         self.cmds.truncate(cp.cmds);
         self.heredocs.truncate(cp.heredocs);
         self.pending.truncate(cp.pending);
+        self.warnings.truncate(cp.warnings);
+        self.gap = cp.gap;
     }
 
     fn enter(&mut self) -> R<()> {
@@ -687,6 +716,7 @@ impl<'a> P<'a> {
             message,
             incomplete: false,
             resume: None,
+            warnings: Vec::new(),
         }
     }
 
@@ -700,6 +730,7 @@ impl<'a> P<'a> {
             message,
             incomplete: true,
             resume: None,
+            warnings: Vec::new(),
         }
     }
 
@@ -868,7 +899,9 @@ impl<'a> P<'a> {
             }
             match self.peek() {
                 Some(c) if is_blank(c) => self.pos += 1,
-                Some(b'\\') if self.peek_at(1) == Some(b'\n') => self.pos += 2,
+                Some(b'\\') if self.peek_at(1) == Some(b'\n') => {
+                    self.pos = self.after_gap(self.pos + 2)
+                }
                 Some(b'#') => loop {
                     match self.peek() {
                         Some(b'\n') => break,
@@ -903,7 +936,7 @@ impl<'a> P<'a> {
 
     fn newline(&mut self) -> R<()> {
         debug_assert_eq!(self.peek(), Some(b'\n'));
-        self.pos += 1;
+        self.pos = self.after_gap(self.pos + 1);
         if !self.pending.is_empty() {
             self.read_heredoc_bodies()?;
         }
@@ -917,6 +950,7 @@ impl<'a> P<'a> {
             let body_start = self.pos;
             let mut body_end = self.end;
             let mut terminated = false;
+            let mut at = self.end.saturating_sub(1);
             while self.pos < self.end {
                 let line_start = self.pos;
                 let mut line_end = line_start;
@@ -969,6 +1003,7 @@ impl<'a> P<'a> {
                 {
                     body_end = line_start;
                     self.pos = content + p.delim.len();
+                    at = content;
                     break;
                 }
                 self.pos = (line_end + 1).min(self.end);
@@ -976,6 +1011,16 @@ impl<'a> P<'a> {
             if !terminated && body_end == self.end {
                 self.pos = self.end;
             }
+            if !terminated {
+                self.warnings.push(Warning::HereDocEof {
+                    at: at as u32,
+                    start: p.start as u32,
+                    delimiter: p.delim.clone(),
+                    from: None,
+                });
+            }
+            let mut error_subst = None;
+            let mut warnings = Vec::new();
             let after = self.pos;
             let mut parts = Vec::new();
             if p.quoted {
@@ -1013,15 +1058,26 @@ impl<'a> P<'a> {
                 // is reported then, not as a syntax error of the script.
                 let cp = self.checkpoint();
                 let (depth, comsub) = (self.depth, self.comsub);
+                let body = self.body.replace((body_start, body_end, comsub));
+                self.err_subst = None;
                 self.heredoc_body += 1;
                 let r = self.parse_parts(Ctx::HereDoc { strip: p.strip }, &mut parts);
                 self.heredoc_body -= 1;
-                if let Err(e) = r {
-                    self.rewind(cp);
-                    (self.depth, self.comsub) = (depth, comsub);
-                    parts.clear();
-                    push_lit(&mut parts, body_start, body_end);
-                    error = Some(e);
+                self.body = body;
+                match r {
+                    Err(e) => {
+                        self.rewind(cp);
+                        (self.depth, self.comsub) = (depth, comsub);
+                        parts.clear();
+                        push_lit(&mut parts, body_start, body_end);
+                        error = Some(e);
+                        error_subst = self.err_subst.take().map(|s| s as u32);
+                    }
+                    Ok(()) => {
+                        let open = core::mem::take(&mut self.pending);
+                        self.leave_open(open, body_end);
+                        warnings = self.warnings.split_off(cp.warnings);
+                    }
                 }
                 self.end = saved_end;
             }
@@ -1033,8 +1089,39 @@ impl<'a> P<'a> {
             };
             doc.terminated = terminated;
             doc.error = error;
+            doc.error_subst = error_subst;
+            doc.warnings = warnings;
         }
         Ok(())
+    }
+
+    fn leave_open(&mut self, open: Vec<Pending>, body_end: usize) {
+        for p in &open {
+            self.warnings.push(Warning::HereDocEof {
+                at: body_end.saturating_sub(1) as u32,
+                start: p.start as u32,
+                delimiter: p.delim.clone(),
+                from: None,
+            });
+        }
+        for p in &open {
+            if let Some(s) = p.subst {
+                self.warnings.push(Warning::HereDocEof {
+                    at: s as u32,
+                    start: p.start as u32,
+                    delimiter: p.delim.clone(),
+                    from: Some(s as u32),
+                });
+            }
+        }
+        for p in open {
+            let doc = &mut self.heredocs[p.id.index()];
+            doc.body = Word {
+                span: sp(body_end, body_end),
+                parts: Vec::new(),
+            };
+            doc.terminated = false;
+        }
     }
 
     /// Here-docs of the enclosing command line wait while a nested `$(…)` is parsed:
@@ -1044,23 +1131,51 @@ impl<'a> P<'a> {
         core::mem::take(&mut self.pending)
     }
 
-    /// Here-docs a `$(…)` left without a body (`echo "$(cat <<B)"`) read theirs first,
-    /// in order, before those of the line around it (bash).
-    fn unstash_pending(&mut self, outer: Vec<Pending>) {
-        let inner = core::mem::take(&mut self.pending);
-        let (leaked, direct): (Vec<Pending>, Vec<Pending>) =
-            outer.into_iter().partition(|p| p.leaked);
-        self.pending = leaked;
-        self.pending.extend(inner.into_iter().map(|mut p| {
-            p.leaked = true;
-            p
-        }));
-        self.pending.extend(direct);
+    /// Here-docs a `$(…)` left without a body read theirs at once, from the line after the
+    /// one the substitution ends on, and bash warns; the rest of that line then continues
+    /// after those bodies.
+    fn unstash_pending(&mut self, outer: Vec<Pending>, ok: bool) -> R<()> {
+        let inner = core::mem::replace(&mut self.pending, outer);
+        if inner.is_empty() {
+            return Ok(());
+        }
+        if !ok || self.heredoc_body > 0 {
+            self.pending.extend(inner);
+            return Ok(());
+        }
+        let nl = self.b[self.pos..self.end]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|n| self.pos + n);
+        let (from, at) = match (self.gap, nl) {
+            (Some((g, end)), Some(nl)) if g == nl => (end, end - 1),
+            (_, Some(nl)) => (nl + 1, self.pos),
+            (_, None) => (self.end, self.pos),
+        };
+        self.warnings.push(Warning::Unterminated {
+            at: at as u32,
+            count: inner.len(),
+        });
+        let outer = core::mem::replace(&mut self.pending, inner);
+        let pos = core::mem::replace(&mut self.pos, from);
+        let r = self.read_heredoc_bodies();
+        if let Some(nl) = nl {
+            self.gap = Some((nl, self.pos));
+        }
+        self.pos = pos;
+        self.pending = outer;
+        r
     }
 
     /// At the end of the input, here-docs still waiting for a body get an empty one.
     fn finish_pending(&mut self) {
         for p in core::mem::take(&mut self.pending) {
+            self.warnings.push(Warning::HereDocEof {
+                at: self.end.saturating_sub(1) as u32,
+                start: p.start as u32,
+                delimiter: p.delim,
+                from: None,
+            });
             let doc = &mut self.heredocs[p.id.index()];
             doc.body = Word {
                 span: sp(self.end, self.end),
@@ -1076,9 +1191,16 @@ impl<'a> P<'a> {
     /// tokenizing, so they may even split an operator.
     fn cont(&self, mut i: usize) -> usize {
         while i + 1 < self.end && self.b[i] == b'\\' && self.b[i + 1] == b'\n' {
-            i += 2;
+            i = self.after_gap(i + 2);
         }
         i
+    }
+
+    fn after_gap(&self, i: usize) -> usize {
+        match self.gap {
+            Some((nl, end)) if i == nl + 1 => end,
+            _ => i,
+        }
     }
 
     /// The logical chars at the cursor: up to three (char, index) pairs, skipping line
@@ -2088,13 +2210,16 @@ impl<'a> P<'a> {
                     },
                     terminated: false,
                     error: None,
+                    error_subst: None,
+                    warnings: Vec::new(),
                 });
                 self.pending.push(Pending {
                     id,
                     delim,
                     strip,
                     quoted,
-                    leaked: false,
+                    start,
+                    subst: self.subst,
                 });
                 RedirTarget::HereDoc(id)
             }
@@ -2698,7 +2823,7 @@ impl<'a> P<'a> {
             let start = self.pos;
             match c {
                 b'\\' => match self.peek_at(1) {
-                    Some(b'\n') => self.pos += 2,
+                    Some(b'\n') => self.pos = self.after_gap(self.pos + 2),
                     None => {
                         self.pos += 1;
                         push_lit(out, start, self.pos);
@@ -2992,6 +3117,7 @@ impl<'a> P<'a> {
         self.comsub += 1;
         let outer = self.stash_pending();
         let closer = self.closer.replace(")");
+        let subst = self.subst.replace(start + 2);
         let r = self.parse_compound_list(
             Term::Paren,
             Opener {
@@ -3001,9 +3127,11 @@ impl<'a> P<'a> {
             },
             true,
         );
-        self.unstash_pending(outer);
+        self.subst = subst;
         self.comsub -= 1;
         self.closer = closer;
+        self.note_subst_error(&r, start);
+        self.unstash_pending(outer, r.is_ok())?;
         let list = r?;
         self.skip_blanks();
         if self.peek() != Some(b')') {
@@ -3011,6 +3139,43 @@ impl<'a> P<'a> {
         }
         self.pos += 1;
         Ok(list)
+    }
+
+    fn dq_bracket_quote(&self, mut i: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        while i < self.end {
+            match self.b[i] {
+                b'\\' => i += 1,
+                b'[' => depth += 1,
+                b']' if depth == 0 => return None,
+                b']' => depth -= 1,
+                b'"' => return Some(i),
+                _ => {}
+            }
+            i += 1;
+        }
+        None
+    }
+
+    fn note_subst_error<T>(&mut self, r: &R<T>, start: usize) {
+        if r.is_err() && self.heredoc_body > 0 && self.err_subst.is_none() {
+            self.err_subst = Some(start + 2);
+        }
+    }
+
+    fn unclosed(&self, what: &str) -> ParseError {
+        match self.body {
+            Some((s, e, comsub)) if comsub == self.comsub => {
+                let body = self.lossy(s, e);
+                let message = if what == "}" {
+                    format!("{body}: bad substitution")
+                } else {
+                    format!("bad substitution: no closing `{what}' in {body}")
+                };
+                self.error_at(s, s, message)
+            }
+            _ => self.unterminated(what),
+        }
     }
 
     /// The `)` that balances an open `(` before `from`, counting parens outside quotes
@@ -3055,6 +3220,7 @@ impl<'a> P<'a> {
         let end = core::mem::replace(&mut self.end, close);
         self.comsub += 1;
         let outer = self.stash_pending();
+        let subst = self.subst.replace(start + 2);
         let r = self.parse_compound_list(
             Term::End,
             Opener {
@@ -3064,9 +3230,11 @@ impl<'a> P<'a> {
             },
             true,
         );
-        self.unstash_pending(outer);
+        self.subst = subst;
         self.comsub -= 1;
         self.end = end;
+        self.note_subst_error(&r, start);
+        self.unstash_pending(outer, r.is_ok())?;
         let list = r?;
         if self.pos != close {
             return Err(self.unexpected());
@@ -3101,7 +3269,11 @@ impl<'a> P<'a> {
         match self.peek_at(1) {
             Some(b'(') => {
                 if self.peek_at(2) == Some(b'(')
-                    && let Some(close) = self.scan_arith(start + 3)?
+                    && let Some(close) =
+                        self.scan_arith(start + 3).map_err(|e| match self.body {
+                            Some(_) => self.unclosed(")"),
+                            None => e,
+                        })?
                 {
                     let word = self.parse_arith_text(start + 3, close)?;
                     self.pos = close + 2;
@@ -3127,12 +3299,22 @@ impl<'a> P<'a> {
                 });
             }
             Some(b'[') => {
+                if ctx == Ctx::Double
+                    && let Some(quote) = self.dq_bracket_quote(start + 2)
+                {
+                    self.pos = quote;
+                    out.push(WordPart {
+                        span: sp(start, quote),
+                        kind: Part::BadSubst,
+                    });
+                    return Ok(());
+                }
                 self.pos += 2;
                 let s = self.pos;
                 let mut parts = Vec::new();
                 self.parse_parts(Ctx::ArithBracket, &mut parts)?;
                 if self.peek() != Some(b']') {
-                    return Err(self.unterminated("]"));
+                    return Err(self.unclosed("]"));
                 }
                 let word = Word {
                     span: sp(s, self.pos),
@@ -3260,8 +3442,8 @@ impl<'a> P<'a> {
                 },
                 true,
             );
-            self.unstash_pending(outer);
             self.closer = closer;
+            self.unstash_pending(outer, r.is_ok())?;
             let list = r?;
             self.skip_blanks();
             if self.peek() != Some(b'}') {
@@ -3323,7 +3505,7 @@ impl<'a> P<'a> {
                 self.parse_parts(Ctx::Subscript, &mut parts)?;
                 if self.peek() != Some(b']') || self.pos == s {
                     if self.at_eof() {
-                        return Err(self.unterminated("}"));
+                        return Err(self.unclosed("}"));
                     }
                     return self.finish_bad_subst(start, dq);
                 }
@@ -3345,7 +3527,7 @@ impl<'a> P<'a> {
             stop: 0,
         };
         let Some(c) = self.peek() else {
-            return Err(self.unterminated("}"));
+            return Err(self.unclosed("}"));
         };
         let op = match c {
             b'}' => ParamOp::None,
@@ -3482,7 +3664,7 @@ impl<'a> P<'a> {
         };
         if self.peek() != Some(b'}') {
             if self.at_eof() {
-                return Err(self.unterminated("}"));
+                return Err(self.unclosed("}"));
             }
             return self.finish_bad_subst(start, dq);
         }
@@ -3532,7 +3714,7 @@ impl<'a> P<'a> {
             &mut parts,
         )?;
         if self.peek() != Some(b'}') {
-            return Err(self.unterminated("}"));
+            return Err(self.unclosed("}"));
         }
         self.pos += 1;
         Ok(WordPart {
