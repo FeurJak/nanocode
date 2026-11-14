@@ -2194,7 +2194,7 @@ pub(crate) async fn run_external_with(
         return Ok(0);
     }
     let name = argv[0].clone();
-    let shown = String::from_utf8_lossy(&name).into_owned();
+    let mut shown = String::from_utf8_lossy(&name).into_owned();
     if vp.opts.restricted && !opts.shell && name.contains(&b'/') {
         vp.error(&format!(
             "{shown}: restricted: cannot specify `/' in command names"
@@ -2216,6 +2216,10 @@ pub(crate) async fn run_external_with(
             Some(p) => p,
             None => {
                 vp.host().not_found(&name);
+                if builtins::set::needs_ansi(&name, vp.utf8()) {
+                    shown = String::from_utf8_lossy(&builtins::set::ansi_c_quote(&name, vp.utf8()))
+                        .into_owned();
+                }
                 vp.error(&format!("{shown}: command not found")).await;
                 return Ok(127);
             }
