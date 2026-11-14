@@ -43,8 +43,20 @@ impl Payload<'_> {
     }
 }
 
+struct Pipe {
+    call: Option<u64>,
+    written: Vec<u8>,
+    replay: Option<Replay>,
+}
+
+struct Replay {
+    shown: Vec<u8>,
+    matched: usize,
+}
+
 pub struct Printer<O> {
     answers: O,
+    pipe: Option<Pipe>,
     notices: Vec<u8>,
     block: Option<Block>,
     open: bool,
@@ -53,9 +65,14 @@ pub struct Printer<O> {
 }
 
 impl<O: Write> Printer<O> {
-    pub fn new(answers: O) -> Self {
+    pub fn new(answers: O, terminal: bool) -> Self {
         Self {
             answers,
+            pipe: (!terminal).then(|| Pipe {
+                call: None,
+                written: Vec::new(),
+                replay: None,
+            }),
             notices: Vec::new(),
             block: None,
             open: false,
@@ -110,10 +127,10 @@ impl<O: Write> Printer<O> {
                 if !self.calls.contains_key(&*key) {
                     self.calls.insert(key.clone().into_owned(), payload.model_call_index);
                 }
-                self.answer(&key, text)
+                self.answer(&key, payload.model_call_index, text)
             }
             AgentEventKind::AssistantMessage if !self.streamed.contains(&*payload.key()) => {
-                self.answer(&payload.key(), text)
+                self.answer(&payload.key(), payload.model_call_index, text)
             }
             AgentEventKind::ToolCall => {
                 self.notice(&format!("· {}", payload.tool.as_deref().unwrap_or("tool")))
@@ -136,6 +153,7 @@ impl<O: Write> Printer<O> {
 
     pub fn finish(mut self, final_message: &str) -> io::Result<()> {
         self.close()?;
+        self.settle()?;
         if self.streamed.is_empty() {
             writeln!(self.answers, "{final_message}")?;
         }
@@ -156,6 +174,23 @@ impl<O: Write> Printer<O> {
             shown |= self.streamed.remove(&key);
         }
         let notice = crate::events::retry_notice(payload);
+        if let Some(pipe) = &mut self.pipe {
+            if pipe.call == call {
+                let shown = match pipe.replay.take() {
+                    Some(replay) => replay.shown,
+                    None => std::mem::take(&mut pipe.written),
+                };
+                pipe.written.clear();
+                if !shown.is_empty() {
+                    pipe.replay = Some(Replay { shown, matched: 0 });
+                    if matches!(self.block, Some(Block::Answer(_))) {
+                        self.block = None;
+                        self.open = false;
+                    }
+                }
+            }
+            return self.notice(&format!("nanocode: {notice}"));
+        }
         if shown {
             self.notice(&format!("nanocode: {notice}; the partial reply above is discarded"))
         } else {
@@ -163,17 +198,74 @@ impl<O: Write> Printer<O> {
         }
     }
 
-    fn answer(&mut self, key: &str, text: &str) -> io::Result<()> {
+    fn answer(&mut self, key: &str, call: Option<u64>, text: &str) -> io::Result<()> {
         if text.is_empty() {
             return Ok(());
         }
         if matches!(&self.block, Some(Block::Answer(current)) if current == key) {
-            self.answers.write_all(text.as_bytes())?;
+            self.emit(text.as_bytes())?;
             self.open = !text.ends_with('\n');
             return Ok(());
         }
         self.streamed.insert(key.to_owned());
+        self.close()?;
+        if self.pipe.as_ref().is_some_and(|pipe| pipe.call != call) {
+            self.settle()?;
+            if let Some(pipe) = &mut self.pipe {
+                pipe.call = call;
+                pipe.written.clear();
+            }
+        }
         self.write(Block::Answer(key.to_owned()), text)
+    }
+
+    fn emit(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let Some(pipe) = &mut self.pipe else {
+            return self.answers.write_all(bytes);
+        };
+        pipe.written.extend_from_slice(bytes);
+        let Some(replay) = &mut pipe.replay else {
+            return self.answers.write_all(bytes);
+        };
+        let rest = &replay.shown[replay.matched..];
+        let same = rest.iter().zip(bytes).take_while(|(a, b)| a == b).count();
+        if same == bytes.len() {
+            replay.matched += same;
+            Ok(())
+        } else if same == rest.len() {
+            pipe.replay = None;
+            self.answers.write_all(&bytes[same..])
+        } else {
+            self.diverge()
+        }
+    }
+
+    fn settle(&mut self) -> io::Result<()> {
+        match self.pipe.as_ref().and_then(|pipe| pipe.replay.as_ref()) {
+            Some(replay) if replay.matched < replay.shown.len() => self.diverge(),
+            _ => {
+                if let Some(pipe) = &mut self.pipe {
+                    pipe.replay = None;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn diverge(&mut self) -> io::Result<()> {
+        let Some(pipe) = &mut self.pipe else {
+            return Ok(());
+        };
+        if pipe.replay.take().is_some_and(|replay| !replay.shown.ends_with(b"\n")) {
+            self.answers.write_all(b"\n")?;
+        }
+        self.answers
+            .write_all(b"--- nanocode: retried reply; the partial reply above is discarded ---\n")?;
+        self.answers.write_all(&pipe.written)?;
+        writeln!(
+            self.notices,
+            "nanocode: the retried reply differs from the partial reply above, so it follows a separator line in full"
+        )
     }
 
     fn write(&mut self, block: Block, text: &str) -> io::Result<()> {
@@ -186,7 +278,7 @@ impl<O: Write> Printer<O> {
         if matches!(block, Block::Reasoning(_)) {
             self.notices.extend_from_slice(text.as_bytes());
         } else {
-            self.answers.write_all(text.as_bytes())?;
+            self.emit(text.as_bytes())?;
         }
         self.block = Some(block);
         self.open = !text.ends_with('\n');
@@ -208,7 +300,7 @@ impl<O: Write> Printer<O> {
                 self.notices.push(b'\n');
             }
             Some(Block::Answer(_)) if self.open => {
-                self.answers.write_all(b"\n")?;
+                self.emit(b"\n")?;
             }
             _ => {}
         }
