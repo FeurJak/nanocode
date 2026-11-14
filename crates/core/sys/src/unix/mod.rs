@@ -17,11 +17,11 @@ use std::{
     process::Command,
 };
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 const PSEUDOTERMINAL_MULTIPLEXER: &std::ffi::CStr = c"/dev/ptmx";
 #[cfg(target_vendor = "apple")]
 const PSEUDOTERMINAL_NAME_BYTES: usize = 128;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 const PSEUDOTERMINAL_DIRECTORY: &str = "/dev/pts/";
 
 fn checked(result: libc::c_int) -> io::Result<libc::c_int> {
@@ -163,7 +163,7 @@ pub fn set_window_size(fd: impl AsFd, size: WindowSize) -> io::Result<()> {
     checked(unsafe { libc::ioctl(raw(&fd), libc::TIOCSWINSZ, &raw const size) }).map(drop)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn open_pseudoterminal() -> io::Result<(OwnedFd, OwnedFd)> {
     let flags = libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC;
     let controller = match checked(unsafe { libc::open(PSEUDOTERMINAL_MULTIPLEXER.as_ptr(), flags) }) {

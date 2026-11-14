@@ -57,7 +57,7 @@ pub(crate) fn run_bash_with_environment<'call>(
         }
         environment.push((OsString::from("PSH_NAME"), bash));
         let shell = selection::chosen().ok_or("this host has not made psh its shell")?;
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(unix)]
         let warm = match super::embedded::spawn(
             command,
             workspace,
@@ -67,7 +67,7 @@ pub(crate) fn run_bash_with_environment<'call>(
             Some(spawned) => Some(spawned),
             None => super::warm::spawn(command, workspace, &shell, false, &environment).await,
         };
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(not(unix))]
         let warm = None;
         let mut spawned = match warm {
             Some(spawned) => spawned,
@@ -90,7 +90,7 @@ pub(crate) fn run_bash_with_environment<'call>(
                     );
                     collect(&mut spawned.child, captures, output, &secrets).await
                 }
-                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                #[cfg(unix)]
                 process::ProcessOutput::Streams { stdout, stderr } => {
                     let captures = (
                         Capture::new(Some(stdout), max_stdout),

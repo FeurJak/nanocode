@@ -179,7 +179,7 @@ impl ProcessChild {
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(unix)]
     pub(super) fn served(
         mut guard: ProcessGroupGuard,
         mut exit: oneshot::Receiver<io::Result<i32>>,
@@ -215,7 +215,7 @@ impl ProcessChild {
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(unix)]
     pub(super) fn process_group(&self) -> SharedProcessGroup {
         self.process_group.clone()
     }
@@ -339,12 +339,12 @@ pub(super) enum ProcessOutput {
         stderr: Option<ChildStderr>,
     },
     Pty(std::fs::File),
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(unix)]
     Streams {
         stdout: super::embedded::Reader,
         stderr: super::embedded::Reader,
     },
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(unix)]
     Stream(super::embedded::Reader),
 }
 
@@ -557,7 +557,7 @@ enum Guarded {
     Group(i32),
     #[cfg(not(unix))]
     Group(u32),
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(unix)]
     Running(Arc<dyn crate::embedded::Running>),
 }
 
@@ -574,7 +574,7 @@ impl ProcessGroupGuard {
         Self { guarded }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(unix)]
     pub(super) fn embedded(running: Arc<dyn crate::embedded::Running>) -> Self {
         Self {
             guarded: Some(Guarded::Running(running)),
@@ -591,7 +591,7 @@ impl ProcessGroupGuard {
                     Ok(()) | Err(_) => Ok(()),
                 }
             }
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            #[cfg(unix)]
             Some(Guarded::Running(running)) => {
                 running.interrupt();
                 Ok(())
@@ -609,7 +609,7 @@ impl ProcessGroupGuard {
         let process_group = match &self.guarded {
             None => return Ok(()),
             Some(Guarded::Group(process_group)) => *process_group,
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            #[cfg(unix)]
             Some(Guarded::Running(running)) => {
                 running.stop();
                 return Ok(());

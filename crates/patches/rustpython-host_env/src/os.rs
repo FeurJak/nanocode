@@ -797,9 +797,14 @@ pub fn set_errno(value: i32) {
     unsafe { suppress_iph!(_set_errno(value)) };
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(target_os = "linux")]
 pub fn set_errno(value: i32) {
     unsafe { *libc::__errno_location() = value };
+}
+
+#[cfg(target_os = "android")]
+pub fn set_errno(value: i32) {
+    unsafe { *libc::__errno() = value };
 }
 
 #[cfg(target_vendor = "apple")]

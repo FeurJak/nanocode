@@ -38,7 +38,12 @@ unsafe fn errno_location() -> *mut libc::c_int {
     unsafe { libc::__errno_location() }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "android")]
+unsafe fn errno_location() -> *mut libc::c_int {
+    unsafe { libc::__errno() }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 unsafe fn errno_location() -> *mut libc::c_int {
     unsafe { libc::__error() }
 }

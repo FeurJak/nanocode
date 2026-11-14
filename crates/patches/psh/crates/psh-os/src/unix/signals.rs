@@ -108,10 +108,15 @@ fn set_errno(e: i32) {
     unsafe {
         *libc::__error() = e;
     }
-    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[cfg(target_os = "linux")]
     // SAFETY: __errno_location returns this thread's errno location.
     unsafe {
         *libc::__errno_location() = e;
+    }
+    #[cfg(target_os = "android")]
+    // SAFETY: __errno returns this thread's errno location.
+    unsafe {
+        *libc::__errno() = e;
     }
     #[cfg(not(any(
         target_os = "macos",

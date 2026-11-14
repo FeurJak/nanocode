@@ -570,6 +570,7 @@ pub const RLIMIT_NOFILE: c_int = 7;
 pub const RLIMIT_NPROC: c_int = 6;
 pub const RLIMIT_RSS: c_int = 5;
 pub const RLIMIT_RTPRIO: c_int = 14;
+pub const RLIMIT_RTTIME: c_int = 15;
 pub const RLIMIT_SIGPENDING: c_int = 11;
 pub const RLIMIT_STACK: c_int = 3;
 pub const RLIM_INFINITY: rlim_t = !0;
@@ -627,8 +628,10 @@ pub const SYS_sendto: c_long = 206;
 pub const SYS_setpgid: c_long = 154;
 pub const SYS_setsid: c_long = 157;
 pub const SYS_socket: c_long = 198;
+pub const TIOCGPTN: c_int = u32_cast_int(0x80045430);
 pub const TIOCGWINSZ: c_int = 0x5413;
 pub const TIOCSCTTY: c_int = 0x540E;
+pub const TIOCSPTLCK: c_int = 0x40045431;
 pub const TIOCSWINSZ: c_int = 0x5414;
 pub(super) const ULONG_SIZE: usize = 64;
 pub const UTIME_OMIT: c_long = 1073741822;
@@ -790,6 +793,13 @@ unsafe extern "C" {
     pub fn getrandom(buf: *mut c_void, buflen: size_t, flags: c_uint) -> ssize_t;
     pub fn getrlimit(resource: c_int, rlim: *mut rlimit) -> c_int;
     pub fn ioctl(fd: c_int, request: Ioctl, ...) -> c_int;
+    pub fn mremap(
+        addr: *mut c_void,
+        len: size_t,
+        new_len: size_t,
+        flags: c_int,
+        ...
+    ) -> *mut c_void;
     pub fn prctl(option: c_int, ...) -> c_int;
     pub fn pthread_attr_getstack(
         attr: *const pthread_attr_t,

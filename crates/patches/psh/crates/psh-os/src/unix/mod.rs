@@ -288,11 +288,19 @@ fn metadata(m: &std::fs::Metadata) -> Metadata {
     }
 }
 
+#[cfg(target_os = "android")]
+const ANDROID_DEFAULT_PATH: &[u8] = b"/product/bin:/apex/com.android.runtime/bin:/apex/com.android.art/bin:/system_ext/bin:/system/bin:/system/xbin:/odm/bin:/vendor/bin:/vendor/xbin";
+
+#[cfg(target_os = "android")]
+const EFFECTIVE_IDS: libc::c_int = 0;
+#[cfg(not(target_os = "android"))]
+const EFFECTIVE_IDS: libc::c_int = libc::AT_EACCESS;
+
 /// `faccessat` with the effective ids, as `test -r/-w/-x` checks.
 fn eaccess(p: &[u8], mode: libc::c_int) -> io::Result<bool> {
     let c = CString::new(p).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
     // SAFETY: a valid NUL-terminated path; no other pointers.
-    let rc = unsafe { libc::faccessat(libc::AT_FDCWD, c.as_ptr(), mode, libc::AT_EACCESS) };
+    let rc = unsafe { libc::faccessat(libc::AT_FDCWD, c.as_ptr(), mode, EFFECTIVE_IDS) };
     if rc == 0 {
         return Ok(true);
     }
@@ -652,6 +660,12 @@ impl Host for UnixHost {
         spawn::process_umask()
     }
 
+    #[cfg(target_os = "android")]
+    fn standard_path(&self) -> Vec<u8> {
+        ANDROID_DEFAULT_PATH.to_vec()
+    }
+
+    #[cfg(not(target_os = "android"))]
     fn standard_path(&self) -> Vec<u8> {
         let mut buf = vec![0u8; 256];
         loop {

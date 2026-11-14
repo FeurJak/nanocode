@@ -16,15 +16,15 @@ pub use handover::{TERMINATED, hand_over, leave_reader, read_outputs_if_requeste
 mod marked;
 #[cfg(unix)]
 pub use marked::terminate_marked;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(unix)]
 mod embedded;
 mod output;
 mod process;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(unix)]
 pub use embedded::{Contained, Embedded, Running, Sink, embed};
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(unix)]
 mod login;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(unix)]
 mod warm;
 use nanocode_home::shell as selection;
 
@@ -263,7 +263,7 @@ pub struct ShellSessions {
     uses: AtomicU64,
     sessions: Arc<Sessions>,
     next_session_id: AtomicI64,
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(unix)]
     login_shell: Option<PathBuf>,
     environment: Arc<Vec<(OsString, OsString)>>,
     secrets: Option<SecretEnvironment>,
@@ -288,7 +288,7 @@ impl ShellSessions {
             uses: AtomicU64::new(0),
             sessions: Arc::new(Sessions::new()),
             next_session_id: AtomicI64::new(1),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            #[cfg(unix)]
             login_shell: selection::login_shell(),
             environment,
             secrets: None,
@@ -402,7 +402,7 @@ impl ShellSessions {
                 250,
                 MAX_EXEC_YIELD_MS,
             );
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            #[cfg(unix)]
             if login && let Some(login_shell) = &self.login_shell {
                 let reported = timeout(
                     yield_time,
@@ -444,7 +444,7 @@ impl ShellSessions {
             let shell = requested.unwrap_or(shell);
             let terminations = self.terminations.load(Ordering::SeqCst);
             let script = command.script.clone();
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            #[cfg(unix)]
             let warm = match command.tty || !stands_in {
                 true => None,
                 false => match embedded::spawn(
@@ -457,7 +457,7 @@ impl ShellSessions {
                     None => warm::spawn(&script, &workdir, &shell, login, &environment).await,
                 },
             };
-            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            #[cfg(not(unix))]
             let warm = None;
             let spawned = match warm {
                 Some(spawned) => Ok(spawned),
@@ -767,7 +767,7 @@ impl Session {
                 chunks,
                 Arc::clone(&activity),
             )],
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            #[cfg(unix)]
             process::ProcessOutput::Streams { stdout, stderr } => vec![
                 nanocode_platform::spawn_task(output::drain(
                     Some(stdout),
@@ -782,7 +782,7 @@ impl Session {
                     Arc::clone(&exited),
                 )),
             ],
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            #[cfg(unix)]
             process::ProcessOutput::Stream(both) => {
                 vec![nanocode_platform::spawn_task(output::drain(
                     Some(both),
