@@ -3,6 +3,7 @@ use core::{mem, ptr};
 #[cfg(any(
     all(target_os = "linux", target_env = "gnu", target_arch = "x86_64"),
     all(target_os = "linux", target_env = "gnu", target_arch = "aarch64"),
+    all(target_os = "linux", target_env = "gnu", target_arch = "riscv64"),
     all(target_os = "linux", target_env = "musl", target_arch = "x86_64"),
     all(target_os = "linux", target_env = "musl", target_arch = "aarch64"),
     all(target_os = "android", target_arch = "aarch64"),
@@ -25,6 +26,7 @@ mod unix;
 #[cfg(any(
     all(target_os = "linux", target_env = "gnu", target_arch = "x86_64"),
     all(target_os = "linux", target_env = "gnu", target_arch = "aarch64"),
+    all(target_os = "linux", target_env = "gnu", target_arch = "riscv64"),
     all(target_os = "linux", target_env = "musl", target_arch = "x86_64"),
     all(target_os = "linux", target_env = "musl", target_arch = "aarch64"),
     all(target_os = "android", target_arch = "aarch64"),
@@ -36,6 +38,7 @@ pub use unix::*;
 #[cfg(any(
     all(target_os = "linux", target_env = "gnu", target_arch = "x86_64"),
     all(target_os = "linux", target_env = "gnu", target_arch = "aarch64"),
+    all(target_os = "linux", target_env = "gnu", target_arch = "riscv64"),
     all(target_os = "linux", target_env = "musl", target_arch = "x86_64"),
     all(target_os = "linux", target_env = "musl", target_arch = "aarch64")
 ))]
@@ -54,13 +57,15 @@ mod linux;
 #[cfg(any(
     all(target_os = "linux", target_env = "gnu", target_arch = "x86_64"),
     all(target_os = "linux", target_env = "gnu", target_arch = "aarch64"),
+    all(target_os = "linux", target_env = "gnu", target_arch = "riscv64"),
     all(target_os = "linux", target_env = "musl", target_arch = "x86_64"),
     all(target_os = "linux", target_env = "musl", target_arch = "aarch64")
 ))]
 pub use linux::*;
 #[cfg(any(
     all(target_os = "linux", target_env = "gnu", target_arch = "x86_64"),
-    all(target_os = "linux", target_env = "gnu", target_arch = "aarch64")
+    all(target_os = "linux", target_env = "gnu", target_arch = "aarch64"),
+    all(target_os = "linux", target_env = "gnu", target_arch = "riscv64")
 ))]
 #[allow(
     non_camel_case_types,
@@ -76,7 +81,8 @@ pub use linux::*;
 mod linux_gnu;
 #[cfg(any(
     all(target_os = "linux", target_env = "gnu", target_arch = "x86_64"),
-    all(target_os = "linux", target_env = "gnu", target_arch = "aarch64")
+    all(target_os = "linux", target_env = "gnu", target_arch = "aarch64"),
+    all(target_os = "linux", target_env = "gnu", target_arch = "riscv64")
 ))]
 pub use linux_gnu::*;
 #[cfg(all(target_os = "linux", target_env = "gnu", target_arch = "x86_64"))]
@@ -109,6 +115,21 @@ pub use linux_gnu_x86_64::*;
 mod linux_gnu_aarch64;
 #[cfg(all(target_os = "linux", target_env = "gnu", target_arch = "aarch64"))]
 pub use linux_gnu_aarch64::*;
+#[cfg(all(target_os = "linux", target_env = "gnu", target_arch = "riscv64"))]
+#[allow(
+    non_camel_case_types,
+    non_snake_case,
+    non_upper_case_globals,
+    dead_code,
+    unused_unsafe,
+    clippy::all,
+    clippy::missing_const_for_fn,
+    clippy::use_self,
+    clippy::missing_safety_doc
+)]
+mod linux_gnu_riscv64;
+#[cfg(all(target_os = "linux", target_env = "gnu", target_arch = "riscv64"))]
+pub use linux_gnu_riscv64::*;
 #[cfg(any(
     all(target_os = "linux", target_env = "musl", target_arch = "x86_64"),
     all(target_os = "linux", target_env = "musl", target_arch = "aarch64")

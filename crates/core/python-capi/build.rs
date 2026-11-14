@@ -243,7 +243,7 @@ fn main() {
     let compile = |source: &Path, object: &Path, defines: &[String]| {
         let mut command = Command::new(&compiler);
         if target != host {
-            command.arg(format!("--target={target}"));
+            command.arg(format!("--target={}", target.replace("riscv64gc-", "riscv64-")));
         }
         if wasm {
             command
