@@ -86,7 +86,11 @@ case $target in
     "$bolt" "$train/linked" -o "$train/cdsort" -data="$train/profile.fdata" $layout -reorder-functions=cdsort -generate-function-order="$train/cdsort.order" >&2
     rm "$train/cdsort"
     python3 "$root/scripts/order-cli.py" "$train/cdsort.order" "$train/startup" "$train/oneshot" "$train/tools" > "$train/startup.order"
-    "$bolt" "$train/linked" -o "$train/optimized" -data="$train/profile.fdata" $layout -reorder-functions=user -function-order="$train/startup.order" >&2
+    "$bolt" "$train/linked" -o "$train/optimized" -data="$train/profile.fdata" $layout -reorder-functions=user -function-order="$train/startup.order" > "$train/optimized.log" 2>&1
+    cat "$train/optimized.log" >&2
+    if grep -q 'original .text too small' "$train/optimized.log"; then
+      "$bolt" "$train/linked" -o "$train/optimized" -data="$train/profile.fdata" $layout -lite -reorder-functions=user -function-order="$train/startup.order" >&2
+    fi
     "$(dirname "$bolt")/llvm-strip" --remove-section=.note.bolt_info -o "$out/$bin" "$train/optimized"
     python3 "$root/scripts/trim-cli.py" "$out/$bin"
     ;;
