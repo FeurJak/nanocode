@@ -139,6 +139,7 @@ default_table='
 1 canary_tail_rows_appended canary --scenario turns --policy turnlog --snapshot-rows 4 --mutation tail_rows_appended
 1 canary_retire_skipped canary --scenario turns --policy turnlog --retain 1 --mutation retire_skipped
 1 canary_hedge_unmarked canary:200 --scenario runtime --mutation hedge-unmarked
+1 canary_http_real_elapsed canary:40 --scenario runtime --store kv --wire http --twice --mutation http-real-elapsed
 1 canary_child_acks_early canary:1000 --scenario runtime --children remote --mutation child-acks-early
 1 canary_child_adopts_turn canary:400 --scenario runtime --children remote --mutation child-adopts-turn
 1 canary_child_forgets_notice canary:100 --scenario runtime --children remote --mutation child-forgets-notice
