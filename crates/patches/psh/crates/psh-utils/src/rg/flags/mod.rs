@@ -22,18 +22,11 @@ use std::{
 
 pub(crate) use crate::rg::flags::config::Source as ConfigSource;
 pub(crate) use crate::rg::flags::{
-    complete::{
-        bash::generate as generate_complete_bash,
-        fish::generate as generate_complete_fish,
-        powershell::generate as generate_complete_powershell,
-        zsh::generate as generate_complete_zsh,
-    },
     doc::{
         help::{
             generate_long as generate_help_long,
             generate_short as generate_help_short,
         },
-        man::generate as generate_man_page,
         version::{
             generate_long as generate_version_long,
             generate_pcre2 as generate_version_pcre2,
@@ -42,13 +35,11 @@ pub(crate) use crate::rg::flags::{
     },
     hiargs::HiArgs,
     lowargs::{
-        EngineChoice, GenerateMode, LowArgs, Mode, PatternSource, SearchMode,
-        SpecialMode,
+        EngineChoice, LowArgs, Mode, PatternSource, SearchMode, SpecialMode,
     },
     parse::{ParseResult, parse_low},
 };
 
-mod complete;
 mod config;
 mod defs;
 mod doc;
@@ -151,18 +142,6 @@ trait Flag: Debug + Send + Sync + UnwindSafe + RefUnwindSafe + 'static {
     /// detail what this flag does. This should be in mandoc/mdoc format.
     fn doc_long(&self) -> &'static str;
 
-    /// If this is a non-switch flag that accepts a small set of specific
-    /// values, then this should list them.
-    ///
-    /// This returns an empty slice by default.
-    fn doc_choices(&self) -> &'static [&'static str] {
-        &[]
-    }
-
-    fn completion_type(&self) -> CompletionType {
-        CompletionType::Other
-    }
-
     /// Given the parsed value (which might just be a switch), this should
     /// update the state in `args` based on the value given for this flag.
     ///
@@ -239,21 +218,6 @@ impl Category {
             Category::OtherBehaviors => "other-behaviors",
         }
     }
-}
-
-/// The kind of argument a flag accepts, to be used for shell completions.
-#[derive(Clone, Copy, Debug)]
-enum CompletionType {
-    /// No special category. is_switch() and doc_choices() may apply.
-    Other,
-    /// A path to a file.
-    Filename,
-    /// A command in $PATH.
-    Executable,
-    /// The name of a file type, as used by e.g. --type.
-    Filetype,
-    /// The name of an encoding_rs encoding, as used by --encoding.
-    Encoding,
 }
 
 /// Represents a value parsed from the command line.

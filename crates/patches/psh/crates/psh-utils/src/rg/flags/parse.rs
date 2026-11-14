@@ -102,7 +102,6 @@ fn set_log_levels(low: &LowArgs) {
     crate::rg::messages::set_ignore_messages(!low.no_ignore_messages);
 }
 
-
 /// Return the metadata for the flag of the given name.
 pub(super) fn lookup(name: &str) -> Option<&'static dyn Flag> {
     // N.B. Creating a new parser might look expensive, but it only builds

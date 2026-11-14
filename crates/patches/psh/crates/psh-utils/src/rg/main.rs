@@ -78,7 +78,6 @@ fn run(ctx: &mut SyncCtx, low: flags::LowArgs) -> anyhow::Result<i32> {
         Mode::Search(mode) => search_parallel(ctx, &args, mode)?,
         Mode::Files => files(ctx, &args)?,
         Mode::Types => return types(ctx, &args),
-        Mode::Generate(mode) => return generate(ctx, mode),
     };
     Ok(if matched && (args.quiet() || !messages::errored()) {
         0
@@ -523,30 +522,6 @@ fn types(ctx: &mut SyncCtx, args: &HiArgs) -> anyhow::Result<i32> {
     }
     stdout.flush()?;
     Ok(if count == 0 { 1 } else { 0 })
-}
-
-/// Implements ripgrep's "generate" modes.
-///
-/// These modes correspond to generating some kind of ancillary data related
-/// to ripgrep. At present, this includes ripgrep's man page (in roff format)
-/// and supported shell completions.
-fn generate(
-    ctx: &mut SyncCtx,
-    mode: crate::rg::flags::GenerateMode,
-) -> anyhow::Result<i32> {
-    use crate::rg::flags::GenerateMode;
-
-    let output = match mode {
-        GenerateMode::Man => flags::generate_man_page(),
-        GenerateMode::CompleteBash => flags::generate_complete_bash(),
-        GenerateMode::CompleteZsh => flags::generate_complete_zsh(),
-        GenerateMode::CompleteFish => flags::generate_complete_fish(),
-        GenerateMode::CompletePowerShell => {
-            flags::generate_complete_powershell()
-        }
-    };
-    writeln!(ctx.writer(1), "{}", output.trim_end())?;
-    Ok(0)
 }
 
 /// Implements ripgrep's "special" modes.

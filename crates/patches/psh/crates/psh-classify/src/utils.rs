@@ -229,7 +229,6 @@ pub static UTILITIES: &[Utility] = &[
             "--regex-size-limit",
             "--hostname-bin",
             "--hyperlink-format",
-            "--generate",
         ],
         Script("ef"),
         &[

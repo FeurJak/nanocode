@@ -163,8 +163,6 @@ pub(crate) enum Mode {
     /// List all file type definitions configured, including the default file
     /// types and any additional file types added to the command line.
     Types,
-    /// Generate various things like the man page and completion files.
-    Generate(GenerateMode),
 }
 
 impl Default for Mode {
@@ -215,21 +213,6 @@ pub(crate) enum SearchMode {
     CountMatches,
     /// Print matches in a JSON lines format.
     JSON,
-}
-
-/// The thing to generate via the --generate flag.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum GenerateMode {
-    /// Generate the raw roff used for the man page.
-    Man,
-    /// Completions for bash.
-    CompleteBash,
-    /// Completions for zsh.
-    CompleteZsh,
-    /// Completions for fish.
-    CompleteFish,
-    /// Completions for PowerShell.
-    CompletePowerShell,
 }
 
 /// Indicates how ripgrep should treat binary data.
@@ -405,7 +388,6 @@ impl ContextMode {
             }) => *both = Some(lines),
         }
     }
-
 }
 
 /// A context mode for a finite number of lines.

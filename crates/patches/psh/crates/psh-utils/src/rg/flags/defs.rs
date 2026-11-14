@@ -29,14 +29,11 @@ use crate::rg::flags::{
     Category, Flag, FlagValue,
     lowargs::{
         BinaryMode, BoundaryMode, BufferMode, CaseMode, ColorChoice,
-        ContextMode, EncodingMode, EngineChoice, GenerateMode, LoggingMode,
-        LowArgs, MmapMode, Mode, PatternSource, SearchMode, SortMode,
-        SortModeKind, SpecialMode, TypeChange,
+        ContextMode, EncodingMode, EngineChoice, LoggingMode, LowArgs,
+        MmapMode, Mode, PatternSource, SearchMode, SortMode, SortModeKind,
+        SpecialMode, TypeChange,
     },
 };
-
-
-use super::CompletionType;
 
 /// A list of all flags in ripgrep via implementations of `Flag`.
 ///
@@ -73,7 +70,6 @@ pub(super) const FLAGS: &[&dyn Flag] = &[
     &FilesWithoutMatch,
     &FixedStrings,
     &Follow,
-    &Generate,
     &Glob,
     &GlobCaseInsensitive,
     &Heading,
@@ -191,7 +187,6 @@ This overrides the \flag{passthru} flag and partially overrides the
     }
 }
 
-
 /// --auto-hybrid-regex
 #[derive(Debug)]
 struct AutoHybridRegex;
@@ -253,7 +248,6 @@ backreferences without explicitly needing to enable them.
     }
 }
 
-
 /// -B/--before-context
 #[derive(Debug)]
 struct BeforeContext;
@@ -291,7 +285,6 @@ This overrides the \flag{passthru} flag and partially overrides the
         Ok(())
     }
 }
-
 
 /// --binary
 #[derive(Debug)]
@@ -359,7 +352,6 @@ This flag overrides the \flag{text} flag.
     }
 }
 
-
 /// --block-buffered
 #[derive(Debug)]
 struct BlockBuffered;
@@ -403,7 +395,6 @@ This overrides the \flag{line-buffered} flag.
     }
 }
 
-
 /// --byte-offset
 #[derive(Debug)]
 struct ByteOffset;
@@ -445,7 +436,6 @@ transformations on the data, such as decompression or a \flag{pre} filter.
     }
 }
 
-
 /// -s/--case-sensitive
 #[derive(Debug)]
 struct CaseSensitive;
@@ -485,7 +475,6 @@ This flag overrides the \flag{ignore-case} and \flag{smart-case} flags.
         Ok(())
     }
 }
-
 
 /// --color
 #[derive(Debug)]
@@ -558,9 +547,6 @@ the \flag{colors} flag to manually set all color styles to \fBnone\fP:
 .sp
 "
     }
-    fn doc_choices(&self) -> &'static [&'static str] {
-        &["never", "auto", "always", "ansi"]
-    }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
         args.color = match convert::str(&v.unwrap_value())? {
@@ -573,7 +559,6 @@ the \flag{colors} flag to manually set all color styles to \fBnone\fP:
         Ok(())
     }
 }
-
 
 /// --colors
 #[derive(Debug)]
@@ -663,7 +648,6 @@ used alongside these extended color codes.
     }
 }
 
-
 /// --column
 #[derive(Debug)]
 struct Column;
@@ -700,7 +684,6 @@ to the start of each match.
         Ok(())
     }
 }
-
 
 /// -C/--context
 #[derive(Debug)]
@@ -742,7 +725,6 @@ the order. For example, \fB\-A2 \-C1\fP is equivalent to \fB\-A2 \-B1\fP.
         Ok(())
     }
 }
-
 
 /// --context-separator
 #[derive(Debug)]
@@ -793,7 +775,6 @@ is still inserted. To completely disable context separators, use the
         Ok(())
     }
 }
-
 
 /// -c/--count
 #[derive(Debug)]
@@ -851,7 +832,6 @@ is combined with \flag{only-matching}, then ripgrep behaves as if
     }
 }
 
-
 /// --count-matches
 #[derive(Debug)]
 struct CountMatches;
@@ -895,7 +875,6 @@ given.
         Ok(())
     }
 }
-
 
 /// --crlf
 #[derive(Debug)]
@@ -945,7 +924,6 @@ This flag overrides \flag{null-data}.
     }
 }
 
-
 /// --debug
 #[derive(Debug)]
 struct Debug;
@@ -982,7 +960,6 @@ To get even more debug output, use the \flag{trace} flag, which implies
         Ok(())
     }
 }
-
 
 /// --dfa-size-limit
 #[derive(Debug)]
@@ -1023,7 +1000,6 @@ provided the input is treated as bytes.
         Ok(())
     }
 }
-
 
 /// -E/--encoding
 #[derive(Debug)]
@@ -1071,9 +1047,6 @@ The encoding detection that ripgrep uses can be reverted to its automatic mode
 via the \flag-negate{encoding} flag.
 "
     }
-    fn completion_type(&self) -> CompletionType {
-        CompletionType::Encoding
-    }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
         let value = match v {
@@ -1095,7 +1068,6 @@ via the \flag-negate{encoding} flag.
         Ok(())
     }
 }
-
 
 /// --engine
 #[derive(Debug)]
@@ -1139,9 +1111,6 @@ This overrides previous uses of the \flag{pcre2} and \flag{auto-hybrid-regex}
 flags.
 "
     }
-    fn doc_choices(&self) -> &'static [&'static str] {
-        &["default", "pcre2", "auto"]
-    }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
         let v = v.unwrap_value();
@@ -1155,7 +1124,6 @@ flags.
         Ok(())
     }
 }
-
 
 /// --field-context-separator
 #[derive(Debug)]
@@ -1196,7 +1164,6 @@ The \fB-\fP character is the default value.
     }
 }
 
-
 /// --field-match-separator
 #[derive(Debug)]
 struct FieldMatchSeparator;
@@ -1235,7 +1202,6 @@ The \fB:\fP character is the default value.
         Ok(())
     }
 }
-
 
 /// -f/--file
 #[derive(Debug)]
@@ -1276,9 +1242,6 @@ When \flag{file} or \flag{regexp} is used, then ripgrep treats all positional
 arguments as files or directories to search.
 "
     }
-    fn completion_type(&self) -> CompletionType {
-        CompletionType::Filename
-    }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
         let path = PathBuf::from(v.unwrap_value());
@@ -1286,7 +1249,6 @@ arguments as files or directories to search.
         Ok(())
     }
 }
-
 
 /// --files
 #[derive(Debug)]
@@ -1320,7 +1282,6 @@ This overrides \flag{type-list}.
         Ok(())
     }
 }
-
 
 /// -l/--files-with-matches
 #[derive(Debug)]
@@ -1365,7 +1326,6 @@ This overrides \flag{files-without-match}.
     }
 }
 
-
 /// -l/--files-without-match
 #[derive(Debug)]
 struct FilesWithoutMatch;
@@ -1400,7 +1360,6 @@ This overrides \flag{files-with-matches}.
         Ok(())
     }
 }
-
 
 /// -F/--fixed-strings
 #[derive(Debug)]
@@ -1438,7 +1397,6 @@ should not need be escaped.
         Ok(())
     }
 }
-
 
 /// -L/--follow
 #[derive(Debug)]
@@ -1478,77 +1436,6 @@ also report errors for broken links. To suppress error messages, use the
         Ok(())
     }
 }
-
-
-/// --generate
-#[derive(Debug)]
-struct Generate;
-
-impl Flag for Generate {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_long(&self) -> &'static str {
-        "generate"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("KIND")
-    }
-    fn doc_category(&self) -> Category {
-        Category::OtherBehaviors
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Generate man pages and completion scripts."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
-This flag instructs ripgrep to generate some special kind of output identified
-by \fIKIND\fP and then quit without searching. \fIKIND\fP can be one of the
-following values:
-.sp
-.TP 15
-\fBman\fP
-Generates a manual page for ripgrep in the \fBroff\fP format.
-.TP 15
-\fBcomplete\-bash\fP
-Generates a completion script for the \fBbash\fP shell.
-.TP 15
-\fBcomplete\-zsh\fP
-Generates a completion script for the \fBzsh\fP shell.
-.TP 15
-\fBcomplete\-fish\fP
-Generates a completion script for the \fBfish\fP shell.
-.TP 15
-\fBcomplete\-powershell\fP
-Generates a completion script for PowerShell.
-.PP
-The output is written to \fBstdout\fP. The list above may expand over time.
-"
-    }
-    fn doc_choices(&self) -> &'static [&'static str] {
-        &[
-            "man",
-            "complete-bash",
-            "complete-zsh",
-            "complete-fish",
-            "complete-powershell",
-        ]
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        let genmode = match convert::str(&v.unwrap_value())? {
-            "man" => GenerateMode::Man,
-            "complete-bash" => GenerateMode::CompleteBash,
-            "complete-zsh" => GenerateMode::CompleteZsh,
-            "complete-fish" => GenerateMode::CompleteFish,
-            "complete-powershell" => GenerateMode::CompletePowerShell,
-            unk => anyhow::bail!("choice '{unk}' is unrecognized"),
-        };
-        args.mode.update(Mode::Generate(genmode));
-        Ok(())
-    }
-}
-
 
 /// -g/--glob
 #[derive(Debug)]
@@ -1609,7 +1496,6 @@ the glob \fIfoo\fP. Instead, you should use
     }
 }
 
-
 /// --glob-case-insensitive
 #[derive(Debug)]
 struct GlobCaseInsensitive;
@@ -1642,7 +1528,6 @@ This effectively treats \flag{glob} as \flag{iglob}.
         Ok(())
     }
 }
-
 
 /// --heading
 #[derive(Debug)]
@@ -1684,7 +1569,6 @@ cat\fP.
     }
 }
 
-
 /// -h/--help
 #[derive(Debug)]
 struct Help;
@@ -1725,7 +1609,6 @@ show only a single line for every flag.
         Ok(())
     }
 }
-
 
 /// -./--hidden
 #[derive(Debug)]
@@ -1775,7 +1658,6 @@ file.
     }
 }
 
-
 /// --hostname-bin
 #[derive(Debug)]
 struct HostnameBin;
@@ -1812,9 +1694,6 @@ to calling \fBgethostname\fP. On Windows, this corresponds to calling
 ripgrep uses your system's hostname for producing hyperlinks.
 "#
     }
-    fn completion_type(&self) -> CompletionType {
-        CompletionType::Executable
-    }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
         let path = PathBuf::from(v.unwrap_value());
@@ -1823,7 +1702,6 @@ ripgrep uses your system's hostname for producing hyperlinks.
         Ok(())
     }
 }
-
 
 /// --hyperlink-format
 #[derive(Debug)]
@@ -1957,19 +1835,6 @@ https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda
         &DOC
     }
 
-    fn doc_choices(&self) -> &'static [&'static str] {
-        static CHOICES: LazyLock<Vec<String>> = LazyLock::new(|| {
-            let mut aliases = crate::printer::hyperlink_aliases();
-            aliases.sort_by_key(|alias| {
-                alias.display_priority().unwrap_or(i16::MAX)
-            });
-            aliases.iter().map(|alias| alias.name().to_string()).collect()
-        });
-        static BORROWED: LazyLock<Vec<&'static str>> =
-            LazyLock::new(|| CHOICES.iter().map(|name| &**name).collect());
-        &*BORROWED
-    }
-
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
         let v = v.unwrap_value();
         let string = convert::str(&v)?;
@@ -1978,7 +1843,6 @@ https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda
         Ok(())
     }
 }
-
 
 /// --iglob
 #[derive(Debug)]
@@ -2017,7 +1881,6 @@ matched case insensitively.
         Ok(())
     }
 }
-
 
 /// -i/--ignore-case
 #[derive(Debug)]
@@ -2061,7 +1924,6 @@ This flag overrides \flag{case-sensitive} and \flag{smart-case}.
     }
 }
 
-
 /// --ignore-file
 #[derive(Debug)]
 struct IgnoreFile;
@@ -2097,9 +1959,6 @@ If you are looking for a way to include or exclude files and directories
 directly on the command line, then use \flag{glob} instead.
 "
     }
-    fn completion_type(&self) -> CompletionType {
-        CompletionType::Filename
-    }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
         let path = PathBuf::from(v.unwrap_value());
@@ -2107,7 +1966,6 @@ directly on the command line, then use \flag{glob} instead.
         Ok(())
     }
 }
-
 
 /// --ignore-file-case-insensitive
 #[derive(Debug)]
@@ -2143,7 +2001,6 @@ useful on case insensitive file systems (such as Windows).
     }
 }
 
-
 /// --include-zero
 #[derive(Debug)]
 struct IncludeZero;
@@ -2178,7 +2035,6 @@ grep.
         Ok(())
     }
 }
-
 
 /// -v/--invert-match
 #[derive(Debug)]
@@ -2221,7 +2077,6 @@ matching lines.
         Ok(())
     }
 }
-
 
 /// --json
 #[derive(Debug)]
@@ -2305,7 +2160,6 @@ A more complete description of the JSON format used can be found here:
     }
 }
 
-
 /// --line-buffered
 #[derive(Debug)]
 struct LineBuffered;
@@ -2353,7 +2207,6 @@ This overrides the \flag{block-buffered} flag.
     }
 }
 
-
 /// -n/--line-number
 #[derive(Debug)]
 struct LineNumber;
@@ -2390,7 +2243,6 @@ This flag can be disabled by \flag{no-line-number}.
         Ok(())
     }
 }
-
 
 /// -N/--no-line-number
 #[derive(Debug)]
@@ -2432,7 +2284,6 @@ Line numbers can be forcefully turned on by \flag{line-number}.
     }
 }
 
-
 /// -x/--line-regexp
 #[derive(Debug)]
 struct LineRegexp;
@@ -2470,7 +2321,6 @@ This overrides the \flag{word-regexp} flag.
         Ok(())
     }
 }
-
 
 /// -M/--max-columns
 #[derive(Debug)]
@@ -2511,7 +2361,6 @@ When this flag is omitted or is set to \fB0\fP, then it has no effect.
     }
 }
 
-
 /// --max-columns-preview
 #[derive(Debug)]
 struct MaxColumnsPreview;
@@ -2551,7 +2400,6 @@ If the \flag{max-columns} flag is not set, then this has no effect.
         Ok(())
     }
 }
-
 
 /// -m/--max-count
 #[derive(Debug)]
@@ -2599,7 +2447,6 @@ ripgrep won't search anything.
     }
 }
 
-
 /// --max-depth
 #[derive(Debug)]
 struct MaxDepth;
@@ -2646,7 +2493,6 @@ An alternative spelling for this flag is \fB\-\-maxdepth\fP.
     }
 }
 
-
 /// --max-filesize
 #[derive(Debug)]
 struct MaxFilesize;
@@ -2685,7 +2531,6 @@ Examples: \fB\-\-max-filesize 50K\fP or \fB\-\-max\-filesize 80M\fP.
         Ok(())
     }
 }
-
 
 /// --mmap
 #[derive(Debug)]
@@ -2731,7 +2576,6 @@ possibility by disabling memory maps.
         Ok(())
     }
 }
-
 
 /// -U/--multiline
 #[derive(Debug)]
@@ -2805,7 +2649,6 @@ This overrides the \flag{stop-on-nonmatch} flag.
     }
 }
 
-
 /// --multiline-dotall
 #[derive(Debug)]
 struct MultilineDotall;
@@ -2854,7 +2697,6 @@ regardless of whether "dot all" mode is enabled or not.
     }
 }
 
-
 /// --no-config
 #[derive(Debug)]
 struct NoConfig;
@@ -2889,7 +2731,6 @@ pre-defined locations, then this flag will also disable that behavior as well.
         Ok(())
     }
 }
-
 
 /// --no-ignore
 #[derive(Debug)]
@@ -2938,7 +2779,6 @@ behavior to this flag and can be considered an alias. However, subsequent
     }
 }
 
-
 /// --no-ignore-dot
 #[derive(Debug)]
 struct NoIgnoreDot;
@@ -2975,7 +2815,6 @@ does not impact whether filter rules from \fB.gitignore\fP files are respected.
     }
 }
 
-
 /// --no-ignore-exclude
 #[derive(Debug)]
 struct NoIgnoreExclude;
@@ -3008,7 +2847,6 @@ For example, this includes \fBgit\fP's \fB.git/info/exclude\fP.
         Ok(())
     }
 }
-
 
 /// --no-ignore-files
 #[derive(Debug)]
@@ -3043,7 +2881,6 @@ are ignored.
     }
 }
 
-
 /// --no-ignore-global
 #[derive(Debug)]
 struct NoIgnoreGlobal;
@@ -3077,7 +2914,6 @@ defaults to \fB$HOME/.config/git/ignore\fP).
         Ok(())
     }
 }
-
 
 /// --no-ignore-messages
 #[derive(Debug)]
@@ -3114,7 +2950,6 @@ noise produced by the messages.
     }
 }
 
-
 /// --no-ignore-parent
 #[derive(Debug)]
 struct NoIgnoreParent;
@@ -3149,7 +2984,6 @@ files that should be applied. In some cases this may not be desirable.
         Ok(())
     }
 }
-
 
 /// --no-ignore-vcs
 #[derive(Debug)]
@@ -3194,7 +3028,6 @@ well.
     }
 }
 
-
 /// --no-messages
 #[derive(Debug)]
 struct NoMessages;
@@ -3229,7 +3062,6 @@ of the pattern are still shown.
     }
 }
 
-
 /// --no-pcre2-unicode
 #[derive(Debug)]
 struct NoPcre2Unicode;
@@ -3263,7 +3095,6 @@ Note that Unicode mode is enabled by default.
         Ok(())
     }
 }
-
 
 /// --no-require-git
 #[derive(Debug)]
@@ -3305,7 +3136,6 @@ where the repository state is absent.
         Ok(())
     }
 }
-
 
 /// --no-unicode
 #[derive(Debug)]
@@ -3367,7 +3197,6 @@ interpretation is needed.
     }
 }
 
-
 /// -0/--null
 #[derive(Debug)]
 struct Null;
@@ -3403,7 +3232,6 @@ option is useful for use with \fBxargs\fP.
         Ok(())
     }
 }
-
 
 /// --null-data
 #[derive(Debug)]
@@ -3447,7 +3275,6 @@ Using this flag implies \flag{text}. It also overrides \flag{crlf}.
         Ok(())
     }
 }
-
 
 /// --one-file-system
 #[derive(Debug)]
@@ -3495,7 +3322,6 @@ This is similar to \fBfind\fP's \fB\-xdev\fP or \fB\-mount\fP flag.
     }
 }
 
-
 /// -o/--only-matching
 #[derive(Debug)]
 struct OnlyMatching;
@@ -3529,7 +3355,6 @@ part on a separate output line.
         Ok(())
     }
 }
-
 
 /// --path-separator
 #[derive(Debug)]
@@ -3584,7 +3409,6 @@ is, the path separator is automatically chosen based on the environment.
     }
 }
 
-
 /// --passthru
 #[derive(Debug)]
 struct Passthru;
@@ -3628,7 +3452,6 @@ This overrides the \flag{context}, \flag{after-context} and
         Ok(())
     }
 }
-
 
 /// -P/--pcre2
 #[derive(Debug)]
@@ -3687,7 +3510,6 @@ engine).
     }
 }
 
-
 /// --pcre2-version
 #[derive(Debug)]
 struct PCRE2Version;
@@ -3719,7 +3541,6 @@ ripgrep will print an error message and exit with an error code.
         Ok(())
     }
 }
-
 
 /// --pre
 #[derive(Debug)]
@@ -3796,9 +3617,6 @@ format, then \fBpzstd\fP is used to decompress the contents to stdout.
 This overrides the \flag{search-zip} flag.
 "#
     }
-    fn completion_type(&self) -> CompletionType {
-        CompletionType::Executable
-    }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
         let path = match v {
@@ -3816,7 +3634,6 @@ This overrides the \flag{search-zip} flag.
         Ok(())
     }
 }
-
 
 /// --pre-glob
 #[derive(Debug)]
@@ -3873,7 +3690,6 @@ This flag has no effect if the \flag{pre} flag is not used.
     }
 }
 
-
 /// -p/--pretty
 #[derive(Debug)]
 struct Pretty;
@@ -3912,7 +3728,6 @@ if you're piping ripgrep to another program or file. For example: \fBrg -p
     }
 }
 
-
 /// -q/--quiet
 #[derive(Debug)]
 struct Quiet;
@@ -3950,7 +3765,6 @@ first file that does not match any ignore rules.
         Ok(())
     }
 }
-
 
 /// --regex-size-limit
 #[derive(Debug)]
@@ -3994,7 +3808,6 @@ provided the input is treated as bytes.
         Ok(())
     }
 }
-
 
 /// -e/--regexp
 #[derive(Debug)]
@@ -4050,7 +3863,6 @@ arguments as files or directories to search.
         Ok(())
     }
 }
-
 
 /// -r/--replace
 #[derive(Debug)]
@@ -4117,7 +3929,6 @@ This flag can be used with the \flag{only-matching} flag.
     }
 }
 
-
 /// -z/--search-zip
 #[derive(Debug)]
 struct SearchZip;
@@ -4169,7 +3980,6 @@ This overrides the \flag{pre} flag.
     }
 }
 
-
 /// -S/--smart-case
 #[derive(Debug)]
 struct SmartCase;
@@ -4217,7 +4027,6 @@ This overrides the \flag{case-sensitive} and \flag{ignore-case} flags.
     }
 }
 
-
 /// --sort-files
 #[derive(Debug)]
 struct SortFiles;
@@ -4259,7 +4068,6 @@ This flag overrides \flag{sort} and \flag{sortr}.
         Ok(())
     }
 }
-
 
 /// --sort
 #[derive(Debug)]
@@ -4316,9 +4124,6 @@ Note that sorting results currently always forces ripgrep to abandon
 parallelism and run in a single thread.
 "
     }
-    fn doc_choices(&self) -> &'static [&'static str] {
-        &["none", "path", "modified", "accessed", "created"]
-    }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
         let kind = match convert::str(&v.unwrap_value())? {
@@ -4336,7 +4141,6 @@ parallelism and run in a single thread.
         Ok(())
     }
 }
-
 
 /// --sortr
 #[derive(Debug)]
@@ -4394,9 +4198,6 @@ Note that sorting results currently always forces ripgrep to abandon
 parallelism and run in a single thread.
 "
     }
-    fn doc_choices(&self) -> &'static [&'static str] {
-        &["none", "path", "modified", "accessed", "created"]
-    }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
         let kind = match convert::str(&v.unwrap_value())? {
@@ -4414,7 +4215,6 @@ parallelism and run in a single thread.
         Ok(())
     }
 }
-
 
 /// --stats
 #[derive(Debug)]
@@ -4459,7 +4259,6 @@ Note that this flag has no effect if \flag{files}, \flag{files-with-matches} or
     }
 }
 
-
 /// --stop-on-nonmatch
 #[derive(Debug)]
 struct StopOnNonmatch;
@@ -4495,7 +4294,6 @@ This overrides the \flag{multiline} flag.
         Ok(())
     }
 }
-
 
 /// -a/--text
 #[derive(Debug)]
@@ -4549,7 +4347,6 @@ This flag overrides the \flag{binary} flag.
     }
 }
 
-
 /// -j/--threads
 #[derive(Debug)]
 struct Threads;
@@ -4588,7 +4385,6 @@ heuristics.
     }
 }
 
-
 /// --trace
 #[derive(Debug)]
 struct Trace;
@@ -4620,7 +4416,6 @@ information you're looking for.
         Ok(())
     }
 }
-
 
 /// --trim
 #[derive(Debug)]
@@ -4654,7 +4449,6 @@ removed.
         Ok(())
     }
 }
-
 
 /// -t/--type
 #[derive(Debug)]
@@ -4696,9 +4490,6 @@ any rules found in ignore files.
 To see the list of available file types, use the \flag{type-list} flag.
 "#
     }
-    fn completion_type(&self) -> CompletionType {
-        CompletionType::Filetype
-    }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
         args.type_changes.push(TypeChange::Select {
@@ -4707,7 +4498,6 @@ To see the list of available file types, use the \flag{type-list} flag.
         Ok(())
     }
 }
-
 
 /// --type-add
 #[derive(Debug)]
@@ -4774,7 +4564,6 @@ Punctuation characters are not allowed.
     }
 }
 
-
 /// --type-clear
 #[derive(Debug)]
 struct TypeClear;
@@ -4814,7 +4603,6 @@ not persisted. See \fBCONFIGURATION FILES\fP for a workaround.
     }
 }
 
-
 /// --type-not
 #[derive(Debug)]
 struct TypeNot;
@@ -4852,9 +4640,6 @@ will only search files that are unrecognized by its type definitions.
 To see the list of available file types, use the \flag{type-list} flag.
 "#
     }
-    fn completion_type(&self) -> CompletionType {
-        CompletionType::Filetype
-    }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
         args.type_changes.push(TypeChange::Negate {
@@ -4863,7 +4648,6 @@ To see the list of available file types, use the \flag{type-list} flag.
         Ok(())
     }
 }
-
 
 /// --type-list
 #[derive(Debug)]
@@ -4897,7 +4681,6 @@ of globs for that type on the same line.
         Ok(())
     }
 }
-
 
 /// -u/--unrestricted
 #[derive(Debug)]
@@ -4956,7 +4739,6 @@ text files via the \flag{text} flag.
     }
 }
 
-
 /// --version
 #[derive(Debug)]
 struct Version;
@@ -4994,7 +4776,6 @@ information, such as the presence of target specific optimizations and the
     }
 }
 
-
 /// --vimgrep
 #[derive(Debug)]
 struct Vimgrep;
@@ -5030,9 +4811,6 @@ not impact the total size of the output, just the heap memory that ripgrep will
 use.
 "
     }
-    fn doc_choices(&self) -> &'static [&'static str] {
-        &[]
-    }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
         assert!(v.unwrap_switch(), "--vimgrep has no negation");
@@ -5040,7 +4818,6 @@ use.
         Ok(())
     }
 }
-
 
 /// --with-filename
 #[derive(Debug)]
@@ -5081,7 +4858,6 @@ This flag overrides \flag{no-filename}.
     }
 }
 
-
 /// --no-filename
 #[derive(Debug)]
 struct WithFilenameNo;
@@ -5111,9 +4887,6 @@ file or stdin.
 This flag overrides \flag{with-filename}.
 "
     }
-    fn doc_choices(&self) -> &'static [&'static str] {
-        &[]
-    }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
         assert!(v.unwrap_switch(), "--no-filename has no defined negation");
@@ -5121,7 +4894,6 @@ This flag overrides \flag{with-filename}.
         Ok(())
     }
 }
-
 
 /// -w/--word-regexp
 #[derive(Debug)]
@@ -5163,7 +4935,6 @@ This overrides the \flag{line-regexp} flag.
         Ok(())
     }
 }
-
 
 mod convert {
     use std::ffi::{OsStr, OsString};

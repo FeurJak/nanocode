@@ -7,7 +7,6 @@ Modules for generating documentation for ripgrep's flags.
 */
 
 pub(crate) mod help;
-pub(crate) mod man;
 pub(crate) mod version;
 
 /// Searches for `\tag{...}` occurrences in `doc` and calls `replacement` for

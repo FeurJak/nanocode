@@ -10,7 +10,6 @@ use crate::ansi::{HyperlinkSpec, WriteColor};
 #[derive(Clone, Debug)]
 pub(crate) struct HyperlinkAlias {
     name: &'static str,
-    description: &'static str,
     format: &'static str,
     display_priority: Option<i16>,
 }
@@ -18,10 +17,6 @@ pub(crate) struct HyperlinkAlias {
 impl HyperlinkAlias {
     pub(crate) const fn name(&self) -> &'static str {
         self.name
-    }
-
-    pub(crate) const fn description(&self) -> &'static str {
-        self.description
     }
 
     pub(crate) const fn display_priority(&self) -> Option<i16> {
@@ -43,78 +38,38 @@ const DEFAULT_FILE_FORMAT: &str = if cfg!(windows) {
 };
 
 const HYPERLINK_ALIASES: &[HyperlinkAlias] = &[
-    alias(
-        "cursor",
-        "Cursor scheme (cursor://)",
-        "cursor://file{path}:{line}:{column}",
-        None,
-    ),
-    alias(
-        "default",
-        "RFC 8089 scheme (file://) (platform-aware)",
-        DEFAULT_FILE_FORMAT,
-        Some(0),
-    ),
-    alias(
-        "file",
-        "RFC 8089 scheme (file://) with host",
-        "file://{host}{path}",
-        None,
-    ),
-    alias(
-        "grep+",
-        "grep+ scheme (grep+://)",
-        "grep+://{path}:{line}",
-        None,
-    ),
-    alias(
-        "kitty",
-        "kitty-style RFC 8089 scheme (file://) with line number",
-        "file://{host}{path}#{line}",
-        None,
-    ),
+    alias("cursor", "cursor://file{path}:{line}:{column}", None),
+    alias("default", DEFAULT_FILE_FORMAT, Some(0)),
+    alias("file", "file://{host}{path}", None),
+    alias("grep+", "grep+://{path}:{line}", None),
+    alias("kitty", "file://{host}{path}#{line}", None),
     alias(
         "macvim",
-        "MacVim scheme (mvim://)",
         "mvim://open?url=file://{path}&line={line}&column={column}",
         None,
     ),
-    alias("none", "disable hyperlinks", "", Some(1)),
+    alias("none", "", Some(1)),
     alias(
         "textmate",
-        "TextMate scheme (txmt://)",
         "txmt://open?url=file://{path}&line={line}&column={column}",
         None,
     ),
-    alias(
-        "vscode",
-        "VS Code scheme (vscode://)",
-        "vscode://file{path}:{line}:{column}",
-        None,
-    ),
+    alias("vscode", "vscode://file{path}:{line}:{column}", None),
     alias(
         "vscode-insiders",
-        "VS Code Insiders scheme (vscode-insiders://)",
         "vscode-insiders://file{path}:{line}:{column}",
         None,
     ),
-    alias(
-        "vscodium",
-        "VSCodium scheme (vscodium://)",
-        "vscodium://file{path}:{line}:{column}",
-        None,
-    ),
+    alias("vscodium", "vscodium://file{path}:{line}:{column}", None),
 ];
 
 const fn alias(
     name: &'static str,
-    description: &'static str,
     format: &'static str,
     display_priority: Option<i16>,
 ) -> HyperlinkAlias {
     HyperlinkAlias {
         name,
-        description,
         format,
         display_priority,
     }
