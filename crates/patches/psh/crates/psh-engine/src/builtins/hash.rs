@@ -322,6 +322,10 @@ pub(super) async fn hash(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     }
     let mut status = 0;
     if let Some(p) = set {
+        if vp.opts.restricted && p.contains(&b'/') {
+            vp.error(&format!("hash: {}: restricted", s(&p))).await;
+            return Ok(1);
+        }
         let is_dir = matches!(
             vp.host().stat(&vp.abs_path(&p), true).await,
             Ok(m) if m.kind == FileKind::Dir

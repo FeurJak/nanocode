@@ -683,6 +683,10 @@ impl Host for UnixHost {
             .collect()
     }
 
+    fn user_shell(&self, uid: u32) -> Option<Vec<u8>> {
+        Some(fs::user_shell(uid).unwrap_or_else(|| b"/bin/sh".to_vec()))
+    }
+
     fn home_dir(&self, user: &[u8]) -> Option<Vec<u8>> {
         let name = CString::new(user).ok()?;
         let mut buf = vec![0u8; 16 * 1024];

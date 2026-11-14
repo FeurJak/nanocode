@@ -2201,7 +2201,7 @@ fn transform_var(
 }
 
 /// `${x@P}`: the prompt escapes of a non-interactive shell.
-fn prompt(vp: &Vp, s: &[u8]) -> Vec<u8> {
+pub(crate) fn prompt(vp: &Vp, s: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < s.len() {
@@ -2220,6 +2220,7 @@ fn prompt(vp: &Vp, s: &[u8]) -> Vec<u8> {
             b'\\' => out.push(b'\\'),
             b'$' => out.push(b'$'),
             b's' => out.extend_from_slice(vp.msg_name().as_bytes()),
+            b'v' => out.extend_from_slice(b"5.3"),
             b'u' => out.extend_from_slice(vp.var("USER").unwrap_or_default()),
             b'w' | b'W' => {
                 let pwd = vp.var("PWD").unwrap_or_default().to_vec();

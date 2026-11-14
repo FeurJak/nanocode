@@ -71,7 +71,7 @@ pub(crate) const SET_OPTS: &[(SetOpt, &str, Option<u8>, bool)] = &[
 ];
 
 /// The order of the letters in `$-`.
-const DASH_ORDER: &[u8] = b"abefhkmnptuvxBCEHPT";
+const DASH_ORDER: &[u8] = b"abefhikmnprtuvxBCEHPT";
 
 /// The options of `shopt`, in the order `shopt` lists them, with their defaults in a
 /// non-interactive bash 5.3.
@@ -185,6 +185,15 @@ pub(crate) struct Options {
     /// The script runs as `-c` (`c` in `$-`), or from stdin (`s`).
     pub dash_c: bool,
     pub stdin: bool,
+    pub interactive: bool,
+    pub restricted: bool,
+    pub dump: Option<Dump>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Dump {
+    Strings,
+    Po,
 }
 
 impl Default for Options {
@@ -194,6 +203,9 @@ impl Default for Options {
             shopt: 0,
             dash_c: false,
             stdin: false,
+            interactive: false,
+            restricted: false,
+            dump: None,
         };
         for (opt, _, _, on) in SET_OPTS {
             o.set(*opt, *on);
@@ -254,9 +266,12 @@ impl Options {
     pub(crate) fn dash(&self) -> Vec<u8> {
         let mut out = Vec::new();
         for &c in DASH_ORDER {
-            if let Some(opt) = by_letter(c)
-                && self.get(opt)
-            {
+            let on = match c {
+                b'i' => self.interactive,
+                b'r' => self.restricted,
+                c => by_letter(c).is_some_and(|opt| self.get(opt)),
+            };
+            if on {
                 out.push(c);
             }
         }

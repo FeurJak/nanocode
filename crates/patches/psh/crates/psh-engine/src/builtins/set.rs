@@ -85,11 +85,10 @@ pub(crate) async fn set(vp: &mut Vp, args: &[Vec<u8>]) -> R {
             }
             match options::by_letter(c) {
                 Some(opt) => steps.push(Step::Opt(opt, on)),
-                // `+r` (restricted mode off) is accepted; restricted mode itself is not
-                // something psh has.
-                None if c == b'r' && !on => {}
-                None if c == b'r' => {
-                    return crate::expand::unsupported(vp, "set -r (restricted mode)").await;
+                None if c == b'r' && (on || !vp.opts.restricted) => {
+                    if on {
+                        restrict(vp);
+                    }
                 }
                 None => {
                     let st = if plus {
@@ -209,6 +208,12 @@ pub(crate) fn apply_invocation_options(vp: &mut Vp, words: &[Vec<u8>]) {
     while i < words.len() {
         let w = &words[i];
         let on = w.first() == Some(&b'-');
+        if w == b"--dump-po-strings" {
+            vp.opts.dump = Some(options::Dump::Po);
+            vp.opts.set(SetOpt::Noexec, true);
+            i += 1;
+            continue;
+        }
         for &c in &w[1..] {
             match c {
                 b'o' | b'O' => {
@@ -226,6 +231,18 @@ pub(crate) fn apply_invocation_options(vp: &mut Vp, words: &[Vec<u8>]) {
                     }
                 }
                 b's' => vp.opts.stdin = true,
+                b'i' => vp.opts.interactive = true,
+                b'r' => {
+                    restrict(vp);
+                    vp.opts.set_shopt_at(
+                        options::shopt_index("restricted_shell").expect("known shopt"),
+                        true,
+                    );
+                }
+                b'D' => {
+                    vp.opts.dump.get_or_insert(options::Dump::Strings);
+                    vp.opts.set(SetOpt::Noexec, true);
+                }
                 c => {
                     if let Some(opt) = options::by_letter(c) {
                         vp.opts.set(opt, on);
@@ -236,6 +253,13 @@ pub(crate) fn apply_invocation_options(vp: &mut Vp, words: &[Vec<u8>]) {
         i += 1;
     }
     options::sync(vp);
+}
+
+pub(crate) fn restrict(vp: &mut Vp) {
+    vp.opts.restricted = true;
+    for name in ["PATH", "SHELL", "ENV", "BASH_ENV", "HISTFILE"] {
+        vp.vars.entry(name).readonly = true;
+    }
 }
 
 /// `set -x` (D1285): `PS4` (expanded, its first char repeated per level of command
@@ -260,13 +284,34 @@ async fn xtrace_inner(vp: &mut Vp, line: &[u8]) {
     }
 }
 
+pub(crate) async fn prompt(vp: &mut Vp, raw: &[u8]) -> Vec<u8> {
+    let decoded = crate::expand::prompt(vp, raw);
+    let xtrace = vp.opts.get(SetOpt::Xtrace);
+    let shown = expand_quoted(vp, decoded).await;
+    vp.opts.set(SetOpt::Xtrace, xtrace);
+    shown
+}
+
 /// The expanded `PS4` prefix; tracing is off while it expands.
 async fn ps4(vp: &mut Vp) -> Vec<u8> {
     let raw = vp
         .var("PS4")
         .map(<[u8]>::to_vec)
         .unwrap_or_else(|| b"+ ".to_vec());
-    let expanded = if raw.contains(&b'$') || raw.contains(&b'`') {
+    let expanded = expand_quoted(vp, raw).await;
+    vp.opts.set(SetOpt::Xtrace, true);
+    let mut out = Vec::new();
+    if let Some(&first) = expanded.first() {
+        for _ in 1..vp.xtrace_level {
+            out.push(first);
+        }
+    }
+    out.extend_from_slice(&expanded);
+    out
+}
+
+async fn expand_quoted(vp: &mut Vp, raw: Vec<u8>) -> Vec<u8> {
+    if raw.contains(&b'$') || raw.contains(&b'`') {
         // Expanded as the inside of double quotes.
         let mut src = b": \"".to_vec();
         for &b in &raw {
@@ -302,7 +347,6 @@ async fn ps4(vp: &mut Vp) -> Vec<u8> {
                     }
                     None => None,
                 };
-                vp.opts.set(SetOpt::Xtrace, true);
                 vp.line = line;
                 r.unwrap_or(raw)
             }
@@ -310,15 +354,7 @@ async fn ps4(vp: &mut Vp) -> Vec<u8> {
         }
     } else {
         raw
-    };
-    let mut out = Vec::new();
-    if let Some(&first) = expanded.first() {
-        for _ in 1..vp.xtrace_level {
-            out.push(first);
-        }
     }
-    out.extend_from_slice(&expanded);
-    out
 }
 
 /// A word as `set -x` shows it: as is when it needs no quotes, else in single quotes,

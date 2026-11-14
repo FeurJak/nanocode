@@ -61,7 +61,9 @@ fn simple<'a>(
     s: &'a SimpleCommand,
     check: bool,
 ) -> Option<Now<'a>> {
-    if vp.exec_tail == Some(std::ptr::from_ref(cmd) as usize) {
+    if vp.exec_tail == Some(std::ptr::from_ref(cmd) as usize)
+        || vp.vars.get("_").is_some_and(|v| v.readonly)
+    {
         return None;
     }
     let builtin = match s.words.first() {

@@ -830,7 +830,7 @@ impl Host for StdHost {
                 continue;
             }
             let end = match fd {
-                ChildFd::Null => End::Null,
+                ChildFd::Null | ChildFd::Closed => End::Null,
                 ChildFd::Pipe { input: true } => {
                     let (r, w) = std::io::pipe()?;
                     pipes.push((n, Rc::new(PumpFile::writer(w)) as Rc<dyn HostFile>));

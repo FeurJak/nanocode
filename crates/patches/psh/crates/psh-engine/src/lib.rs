@@ -303,6 +303,7 @@ impl Shell {
             job: None,
             exec_tail: None,
             exec_now: false,
+            fg_text: None,
             in_subst: false,
             ignores: 0,
             funcs: Rc::new(Default::default()),
@@ -419,13 +420,36 @@ impl Shell {
         vp.args = script.args;
         vp.opts.dash_c = script.dash_c;
         builtins::apply_invocation_options(&mut vp, &script.options);
+        if vp.opts.interactive {
+            let mut history = vp.var("HOME").unwrap_or_default().to_vec();
+            history.extend_from_slice(b"/.bash_history");
+            for (name, value) in [
+                ("PS1", b"\\s-\\v\\$ ".to_vec()),
+                ("PS2", b"> ".to_vec()),
+                ("HISTFILE", history),
+                ("HISTSIZE", b"500".to_vec()),
+                ("HISTFILESIZE", b"500".to_vec()),
+            ] {
+                if vp.vars.get(name).is_none() {
+                    vp.vars.insert(name, Var::scalar(value));
+                }
+            }
+            vp.opts.set_shopt_at(
+                options::shopt_index("expand_aliases").expect("known shopt"),
+                true,
+            );
+            options::sync(&mut vp);
+        } else {
+            vp.vars.remove("PS1");
+            vp.vars.remove("PS2");
+        }
         let input = if script.stdin {
             Input::Stdin
         } else {
             Input::Text(script.source)
         };
         let listings = builtins::invocation_listings(&script.options);
-        let monitor = invocation::sets(&script.options, b'm', b"monitor");
+        let monitor = invocation::sets(&script.options, b'm', b"monitor") || vp.opts.interactive;
         let fut = async move {
             if monitor && !matches!(vp.fd(2).as_deref(), Some(FdObj::File(f)) if f.is_terminal()) {
                 let name = vp.msg_name();
@@ -434,6 +458,9 @@ impl Shell {
                 );
                 vp.error_raw(msg.as_bytes()).await;
                 vp.opts.set(options::SetOpt::Monitor, false);
+                options::sync(&mut vp);
+            } else if monitor {
+                vp.opts.set(options::SetOpt::Monitor, true);
                 options::sync(&mut vp);
             }
             let emacs = vp.opts.get(options::SetOpt::Emacs);
@@ -690,6 +717,11 @@ pub(crate) fn initial_vars(host: &dyn Host, env: &[(Vec<u8>, Vec<u8>)], cwd: &[u
     if let Some(p) = info.ppid {
         vars.insert("PPID", ro_int(p));
     }
+    if vars.get("SHELL").is_none()
+        && let Some(shell) = host.user_shell(info.uid)
+    {
+        vars.insert("SHELL", Var::scalar(shell));
+    }
     for (name, v) in [
         ("HOSTNAME", info.hostname.clone()),
         ("OSTYPE", info.ostype.clone().into_bytes()),
@@ -727,9 +759,8 @@ pub(crate) fn initial_vars(host: &dyn Host, env: &[(Vec<u8>, Vec<u8>)], cwd: &[u
     );
     vars.insert("OPTERR", Var::scalar(b"1".to_vec()));
     // What bash sets when the environment has none (D1329). Prompts belong to
-    // interactive shells: a non-interactive bash drops inherited PS1 and PS2.
-    vars.remove("PS1");
-    vars.remove("PS2");
+    // interactive shells: a non-interactive bash drops inherited PS1 and PS2 when it
+    // starts (`Shell::start`, `start_afresh`).
     let defaults: [(&str, &[u8]); 3] = [
         ("PS4", b"+ "),
         ("TERM", b"dumb"),
@@ -776,7 +807,9 @@ pub(crate) enum Input {
 
 /// The main vproc: runs the script, then the EXIT trap (D1283).
 pub(crate) async fn run_script(mut vp: Vp, input: Input) -> (i32, Vp) {
-    import_functions(&mut vp).await;
+    if !vp.opts.restricted {
+        import_functions(&mut vp).await;
+    }
     if let Some(old) = vp.var("OLDPWD")
         && !matches!(vp.host().stat(&vp.abs_path(old), true).await, Ok(m) if m.kind == host::FileKind::Dir)
     {
@@ -904,7 +937,7 @@ async fn run_stdin_lines(mut vp: Vp) -> (i32, Vp) {
     let mut eof = false;
     loop {
         if !eof && !text.contains(&b'\n') {
-            match read_line(&mut vp, &mut text).await {
+            match read_prompted(&mut vp, &mut text, "PS1").await {
                 Ok(more) => eof = !more,
                 Err(st) => return (st, vp),
             }
@@ -938,7 +971,7 @@ async fn run_stdin_lines(mut vp: Vp) -> (i32, Vp) {
             None => continues(&text),
         };
         if more && !eof {
-            match read_line(&mut vp, &mut text).await {
+            match read_prompted(&mut vp, &mut text, "PS2").await {
                 Ok(m) => eof = !m,
                 Err(st) => return (st, vp),
             }
@@ -964,6 +997,24 @@ async fn run_stdin_lines(mut vp: Vp) -> (i32, Vp) {
     }
     let st = vp.status;
     (st, vp)
+}
+
+async fn read_prompted(vp: &mut Vp, text: &mut Vec<u8>, prompt: &str) -> Result<bool, i32> {
+    if !vp.opts.interactive {
+        return read_line(vp, text).await;
+    }
+    let raw = vp.var(prompt).map(<[u8]>::to_vec).unwrap_or_default();
+    let shown = builtins::set::prompt(vp, &raw).await;
+    vp.error_raw(&shown).await;
+    let start = text.len();
+    let more = read_line(vp, text).await?;
+    let typed = if more || text.len() > start {
+        text[start..].to_vec()
+    } else {
+        b"exit\n".to_vec()
+    };
+    vp.error_raw(&typed).await;
+    Ok(more)
 }
 
 /// Whether the text ends in a line continuation (a backslash that is not escaped, then
@@ -1014,6 +1065,67 @@ async fn read_line(vp: &mut Vp, text: &mut Vec<u8>) -> Result<bool, i32> {
     }
 }
 
+async fn dump_strings(vp: &Vp, ast: &psh_syntax::Ast, lines: &LineIndex, dump: options::Dump) {
+    let mut spans = Vec::new();
+    for id in ast.cmd_ids() {
+        let psh_syntax::CommandKind::Simple(sc) = &ast.cmd(id).kind else {
+            continue;
+        };
+        let values = sc.assigns.iter().filter_map(|a| match &a.value {
+            psh_syntax::AssignValue::Scalar(w) => Some(w),
+            psh_syntax::AssignValue::Array(_) => None,
+        });
+        for w in sc.words.iter().chain(values) {
+            spans.extend(
+                w.parts
+                    .iter()
+                    .filter(|p| matches!(p.kind, psh_syntax::Part::Locale(_)))
+                    .map(|p| p.span),
+            );
+        }
+    }
+    spans.sort_by_key(|s| s.start);
+    let input = if vp.opts.dash_c {
+        "-c".to_string()
+    } else if vp.opts.stdin {
+        "stdin".to_string()
+    } else {
+        String::from_utf8_lossy(&vp.arg0).into_owned()
+    };
+    let mut out = String::new();
+    for span in spans {
+        let text = ast.text(span);
+        let Some(inner) = text.strip_prefix("$\"").and_then(|t| t.strip_suffix('"')) else {
+            continue;
+        };
+        match dump {
+            options::Dump::Strings => out.push_str(&format!("\"{inner}\"\n")),
+            options::Dump::Po => {
+                let mut msg = String::from("\"");
+                for c in inner.chars() {
+                    match c {
+                        '\n' => msg.push_str("\\n\"\n\""),
+                        '"' | '\\' => {
+                            msg.push('\\');
+                            msg.push(c);
+                        }
+                        c => msg.push(c),
+                    }
+                }
+                msg.push('"');
+                let first = if inner.contains('\n') { "\"\"\n" } else { "" };
+                out.push_str(&format!(
+                    "#: {input}:{}\nmsgid {first}{msg}\nmsgstr \"\"\n",
+                    lines.line(span.start)
+                ));
+            }
+        }
+    }
+    if let Some(fd) = vp.fd(1) {
+        let _ = fd.write_all(out.as_bytes()).await;
+    }
+}
+
 /// Runs one parsed chunk of a script (`echo`: its text, for `set -v`), or reports its
 /// syntax error. `Some(status)`: the script ends.
 async fn run_chunk(
@@ -1036,6 +1148,9 @@ async fn run_chunk(
         Err(e) => &e.warnings[..],
     };
     exec::warn(vp, warnings, |o| lines.line(o)).await;
+    if let (Some(dump), Ok(ast)) = (vp.opts.dump, &chunk) {
+        dump_strings(vp, ast, lines, dump).await;
+    }
     match chunk {
         // `set -n`: read, but do not run.
         Ok(_) if vp.opts.get(options::SetOpt::Noexec) => None,

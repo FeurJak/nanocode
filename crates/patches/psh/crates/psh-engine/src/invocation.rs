@@ -29,13 +29,16 @@ pub enum Invocation {
 }
 
 /// bash's long options that psh takes (before the single-letter ones, as with bash):
-/// `--posix` turns on POSIX mode and `--verbose` is `-v`; the others change nothing
-/// in a non-interactive shell (`--login` reads no profile, D1410; `--rcfile` and
-/// `--init-file` name a file only an interactive shell reads). The psh binary hands
+/// `--posix` turns on POSIX mode, `--verbose` is `-v`, `--restricted` is `-r` and
+/// `--dump-strings` is `-D`; the others change nothing in a non-interactive shell
+/// (`--login` reads no profile, D1410; `--rcfile` and `--init-file` name a file only an
+/// interactive shell reads). The psh binary hands
 /// these to [`parse_args`] and parses its own long options (`--parse`, `--help`, …)
 /// itself (D1340).
-pub const LONG_OPTIONS: [&str; 9] = [
+pub const LONG_OPTIONS: [&str; 12] = [
     "--debug",
+    "--dump-po-strings",
+    "--dump-strings",
     "--init-file",
     "--login",
     "--noediting",
@@ -43,19 +46,13 @@ pub const LONG_OPTIONS: [&str; 9] = [
     "--norc",
     "--posix",
     "--rcfile",
+    "--restricted",
     "--verbose",
 ];
 
 /// bash's long options psh does not implement: an error that says so. A `bash` run in
 /// psh hands its command line to the real program for these (D1410).
-const UNSUPPORTED_LONG: [&str; 6] = [
-    "--debugger",
-    "--dump-po-strings",
-    "--dump-strings",
-    "--pretty-print",
-    "--restricted",
-    "--wordexp",
-];
+const UNSUPPORTED_LONG: [&str; 3] = ["--debugger", "--pretty-print", "--wordexp"];
 
 pub fn errexit(options: &[Vec<u8>]) -> bool {
     sets(options, b'e', b"errexit")
@@ -67,6 +64,7 @@ pub(crate) fn sets(options: &[Vec<u8>], letter: u8, name: &[u8]) -> bool {
     while let Some(w) = words.next() {
         let set = w.first() == Some(&b'-');
         match w.get(1..).unwrap_or_default() {
+            [b'-', ..] => {}
             b"o" => {
                 if words.next().is_some_and(|n| n == name) {
                     on = set;
@@ -118,6 +116,9 @@ pub fn parse_args(args: &[Vec<u8>]) -> Result<Invocation, String> {
                 b"--posix" => options.extend([b"-o".to_vec(), b"posix".to_vec()]),
                 b"--login" => options.extend([b"-O".to_vec(), b"login_shell".to_vec()]),
                 b"--verbose" => options.push(b"-v".to_vec()),
+                b"--restricted" => options.push(b"-r".to_vec()),
+                b"--dump-strings" => options.push(b"-D".to_vec()),
+                b"--dump-po-strings" => options.push(a.clone()),
                 b"--rcfile" | b"--init-file" => {
                     if args.get(i + 1).is_none() {
                         return Err(format!(
@@ -150,9 +151,7 @@ pub fn parse_args(args: &[Vec<u8>]) -> Result<Invocation, String> {
                 // A login shell reads no profile here: the environment is the
                 // embedder's (D1410).
                 b'l' if on => options.extend([b"-O".to_vec(), b"login_shell".to_vec()]),
-                b'i' if on => return Err("-i: interactive shells are not supported".into()),
-                b'r' if on => return Err("-r: restricted shells are not supported".into()),
-                b'D' if on => return Err("-D: not supported".into()),
+                b'i' | b'r' | b'D' if on => letters.push(c),
                 b'o' | b'O' => {
                     let Some(name) = args.get(i + 1) else {
                         options.extend([vec![a[0], c], Vec::new()]);

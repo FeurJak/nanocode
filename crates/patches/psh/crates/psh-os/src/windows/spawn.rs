@@ -669,7 +669,7 @@ pub(crate) fn spawn(shared: &Arc<Shared>, mut spec: SpawnSpec) -> io::Result<Spa
                 };
                 inheritable(h.as_raw_handle())?
             }
-            ChildFd::Null => {
+            ChildFd::Null | ChildFd::Closed => {
                 let f = std::fs::OpenOptions::new()
                     .read(true)
                     .write(true)

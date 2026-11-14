@@ -6,11 +6,28 @@ use nanocode_sys::libc;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::task::{Context, Poll};
 
 use psh_engine::HostFile;
 
 use super::ready;
+
+static CLOSED_AT_START: AtomicU8 = AtomicU8::new(0);
+
+#[used]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".init_array"))]
+#[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__mod_init_func"))]
+static RECORD_CLOSED: extern "C" fn() = record_closed;
+
+extern "C" fn record_closed() {
+    for n in 0..3 {
+        // SAFETY: fcntl(F_GETFD) only reads the descriptor table.
+        if unsafe { libc::fcntl(n, libc::F_GETFD) } < 0 {
+            CLOSED_AT_START.fetch_or(1 << n, Ordering::Relaxed);
+        }
+    }
+}
 
 /// An open descriptor of the host.
 pub struct UnixFile {
@@ -72,6 +89,9 @@ impl UnixFile {
 
     /// A duplicate of the process's descriptor `n` (0, 1, 2 for the shell's stdio).
     pub fn stdio(n: RawFd) -> io::Result<UnixFile> {
+        if (0..3).contains(&n) && CLOSED_AT_START.load(Ordering::Relaxed) & (1 << n) != 0 {
+            return Err(io::Error::from_raw_os_error(libc::EBADF));
+        }
         // SAFETY: fcntl(F_DUPFD_CLOEXEC) only reads the descriptor table; a failure
         // (n not open) is reported, a success returns a new descriptor we own.
         let fd = unsafe { libc::fcntl(n, libc::F_DUPFD_CLOEXEC, 3) };

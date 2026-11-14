@@ -230,6 +230,7 @@ pub enum ChildFd {
     Dup(u32),
     /// The null device.
     Null,
+    Closed,
 }
 
 #[derive(Default)]
@@ -650,6 +651,10 @@ pub trait Host {
     /// The home directory of a user (`~user`), if the host knows it.
     fn home_dir(&self, user: &[u8]) -> Option<Vec<u8>> {
         let _ = user;
+        None
+    }
+    fn user_shell(&self, uid: u32) -> Option<Vec<u8>> {
+        let _ = uid;
         None
     }
     /// A command name that is no function, builtin, utility or program, told before

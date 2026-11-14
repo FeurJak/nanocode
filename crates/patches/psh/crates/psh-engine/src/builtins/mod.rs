@@ -395,6 +395,10 @@ pub(crate) fn normalize(path: &[u8]) -> Vec<u8> {
 }
 
 async fn cd(vp: &mut Vp, args: &[Vec<u8>]) -> R {
+    if vp.opts.restricted {
+        vp.error("cd: restricted").await;
+        return Ok(1);
+    }
     let mut physical = false;
     let mut i = 1;
     while i < args.len() && args[i].len() > 1 && args[i][0] == b'-' {

@@ -67,6 +67,7 @@ pub(crate) struct Setup {
     umask: Option<libc::mode_t>,
     /// Resource limits the child starts with (`ulimit`).
     rlimits: Vec<(super::rlimit::Resource, libc::rlimit)>,
+    close: Vec<RawFd>,
 }
 
 /// The signals the process ignores now, except SIGPIPE (Rust programs ignore it before
@@ -360,6 +361,7 @@ pub(crate) fn spawn(shared: &Arc<Shared>, mut spec: SpawnSpec) -> io::Result<Spa
     let mut held: Vec<Rc<dyn HostFile>> = Vec::new();
     let mut pipes: Vec<(u32, Rc<dyn HostFile>)> = Vec::new();
     let mut null: Option<usize> = None;
+    let mut close = Vec::new();
     for (n, fd) in std::mem::take(&mut spec.fds) {
         let target = i32::try_from(n).map_err(|_| invalid("descriptor out of range"))?;
         let idx = match fd {
@@ -390,6 +392,11 @@ pub(crate) fn spawn(shared: &Arc<Shared>, mut spec: SpawnSpec) -> io::Result<Spa
                     None => return Err(invalid("dup of a descriptor not given")),
                 }
             }
+            ChildFd::Closed => {
+                installs.retain(|(t, _)| *t != target);
+                close.push(target);
+                continue;
+            }
             ChildFd::Null => match null {
                 Some(i) => i,
                 None => {
@@ -404,6 +411,7 @@ pub(crate) fn spawn(shared: &Arc<Shared>, mut spec: SpawnSpec) -> io::Result<Spa
             },
         };
         installs.retain(|(t, _)| *t != target);
+        close.retain(|&t| t != target);
         installs.push((target, idx));
     }
     // Every source above every target: installing one target (dup2) never clobbers a
@@ -428,6 +436,7 @@ pub(crate) fn spawn(shared: &Arc<Shared>, mut spec: SpawnSpec) -> io::Result<Spa
             .filter(|&m| m != process_umask())
             .map(|m| m as libc::mode_t),
         rlimits: super::rlimit::for_child(&spec.rlimits),
+        close,
     };
     let mut extra_ignored = false;
     // Linux numbers (D1283) to the OS's.
@@ -450,6 +459,7 @@ pub(crate) fn spawn(shared: &Arc<Shared>, mut spec: SpawnSpec) -> io::Result<Spa
     // process does not ignore itself.
     let fork = setup.umask.is_some()
         || !setup.rlimits.is_empty()
+        || !setup.close.is_empty()
         || extra_ignored
         || shared.fork_only.load(std::sync::atomic::Ordering::Relaxed);
     let mut tries = 0;
@@ -662,6 +672,9 @@ fn fork_exec(exec: &Exec, fds: &[(i32, RawFd)], setup: &Setup, floor: RawFd) -> 
                 if libc::dup2(src, target) < 0 {
                     fail(errno());
                 }
+            }
+            for &target in &setup.close {
+                libc::close(target);
             }
             // A descriptor another thread opened without close-on-exec, or before it
             // could set it (std on macOS makes pipes with `pipe` + `fcntl`), would live

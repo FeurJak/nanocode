@@ -114,6 +114,14 @@ pub fn set_times(p: &[u8], atime: Option<i64>, mtime: Option<i64>, follow: bool)
 const NAME_BUF: usize = 1024;
 
 pub fn user_name(uid: u32) -> Option<Vec<u8>> {
+    passwd_field(uid, |pw| pw.pw_name)
+}
+
+pub fn user_shell(uid: u32) -> Option<Vec<u8>> {
+    passwd_field(uid, |pw| pw.pw_shell)
+}
+
+fn passwd_field(uid: u32, field: fn(&libc::passwd) -> *mut libc::c_char) -> Option<Vec<u8>> {
     let mut buf = vec![0u8; NAME_BUF];
     loop {
         // SAFETY: an all-zero passwd is a valid value of the plain C struct.
@@ -127,11 +135,12 @@ pub fn user_name(uid: u32) -> Option<Vec<u8>> {
             buf.resize(buf.len() * 4, 0);
             continue;
         }
-        if rc != 0 || out.is_null() || pw.pw_name.is_null() {
+        let value = field(&pw);
+        if rc != 0 || out.is_null() || value.is_null() {
             return None;
         }
-        // SAFETY: getpwuid_r succeeded: pw_name is a NUL-terminated string in `buf`.
-        return Some(unsafe { CStr::from_ptr(pw.pw_name) }.to_bytes().to_vec());
+        // SAFETY: getpwuid_r succeeded: the field is a NUL-terminated string in `buf`.
+        return Some(unsafe { CStr::from_ptr(value) }.to_bytes().to_vec());
     }
 }
 

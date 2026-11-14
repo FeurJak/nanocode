@@ -362,6 +362,7 @@ pub(crate) struct Vp {
     /// that command's external starts, `exec_now` says so.
     pub exec_tail: Option<usize>,
     pub exec_now: bool,
+    pub fg_text: Option<String>,
     /// A command substitution's vproc: its programs' signal deaths are not reported.
     pub in_subst: bool,
     pub ignores: u64,

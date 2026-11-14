@@ -425,7 +425,7 @@ impl psh_engine::Host for Host {
                     .find(|(known, _)| *known == other)
                     .map(|(_, file)| file.clone())
                     .ok_or(io::ErrorKind::InvalidInput)?,
-                ChildFd::Null => Rc::new(Device::Null),
+                ChildFd::Null | ChildFd::Closed => Rc::new(Device::Null),
                 ChildFd::Pipe { input } => {
                     let (reader, writer) = file::pipe();
                     if input {

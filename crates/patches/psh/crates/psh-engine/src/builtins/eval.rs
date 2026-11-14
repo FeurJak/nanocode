@@ -157,6 +157,10 @@ pub(super) async fn source(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         vp.error_raw(usage.as_bytes()).await;
         return Ok(2);
     };
+    if vp.opts.restricted && file.contains(&b'/') {
+        vp.error(&format!("{name}: {}: restricted", s(file))).await;
+        return Ok(1);
+    }
     let path = match find_file(vp, file, search.as_deref()).await {
         Some(p) => p,
         None => {

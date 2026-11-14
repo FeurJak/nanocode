@@ -774,9 +774,10 @@ fn run_command_with<'a>(
         if vp.last_args.len() > last_args {
             let last = vp.last_args.swap_remove(last_args);
             vp.last_args.truncate(last_args);
-            // bash also says `_: readonly variable` each time; an await here would
-            // grow every level of a recursion (D1059), so a readonly `_` stays silent.
-            set_underscore(vp, last);
+            if !set_underscore(vp, last) {
+                let f: LocalBoxFuture<'_, ()> = Box::pin(vp.error("_: readonly variable"));
+                f.await;
+            }
         }
         let status = result?;
         match after_command(vp, code, cmd, status, check) {
@@ -787,13 +788,15 @@ fn run_command_with<'a>(
 }
 
 /// `$_` after a command: its last word, not exported (bash), unless `_` is readonly.
-pub(crate) fn set_underscore(vp: &mut Vp, last: Vec<u8>) {
+pub(crate) fn set_underscore(vp: &mut Vp, last: Vec<u8>) -> bool {
     vp.cmd_name = None;
     let var = vp.vars.entry("_");
-    if !var.readonly {
-        var.set(last);
-        var.exported = false;
+    if var.readonly {
+        return false;
     }
+    var.set(last);
+    var.exported = false;
+    true
 }
 
 /// Before a command: pending signals, the DEBUG trap (D1283, D1284).
@@ -1985,6 +1988,9 @@ fn run_simple<'a>(
                 };
             }
         };
+        if vp.top && vp.job.is_none() && vp.opts.get(SetOpt::Monitor) {
+            vp.fg_text = Some(String::from_utf8_lossy(&command_text(code, cmd)).into_owned());
+        }
         if cmd.redirects.is_empty() {
             vp.exec_now = tail;
             return run_argv(vp, argv, assigns).await;
@@ -2177,6 +2183,13 @@ pub(crate) async fn run_external_with(
     }
     let name = argv[0].clone();
     let shown = String::from_utf8_lossy(&name).into_owned();
+    if vp.opts.restricted && !opts.shell && name.contains(&b'/') {
+        vp.error(&format!(
+            "{shown}: restricted: cannot specify `/' in command names"
+        ))
+        .await;
+        return Ok(1);
+    }
     let program = if opts.shell || name.contains(&b'/') {
         name.clone()
     } else {
@@ -2239,6 +2252,9 @@ pub(crate) async fn run_external_with(
         && matches!(vp.sigs, crate::state::Sigs::Shell)
         && vp.opts.get(SetOpt::Monitor))
     .then(|| {
+        if let Some(text) = vp.fg_text.take() {
+            return text;
+        }
         argv.iter()
             .map(|a| {
                 let plain = !a.is_empty()
@@ -2520,7 +2536,7 @@ async fn spawn_program(
     }
     for (n, h) in has.iter().enumerate() {
         if !h {
-            fds.push((n as u32, ChildFd::Null));
+            fds.push((n as u32, ChildFd::Closed));
         }
     }
     // Kept for a script psh runs itself (D1300).
@@ -2618,6 +2634,8 @@ pub(crate) fn start_afresh(sub: &mut Vp) {
         crate::vars::Var::scalar(crate::state::bash_path(&sub.core)),
     );
     sub.vars = vars;
+    sub.vars.remove("PS1");
+    sub.vars.remove("PS2");
     sub.foreign_env = Rc::new(foreign);
     sub.subshell_level = 0;
     // The functions `export -f` marked are the new shell's, and stay marked.
@@ -2850,6 +2868,19 @@ async fn redirect_fd(vp: &mut Vp, code: &Rc<Code>, r: &Redirect, fd: u32) -> Res
             .await;
         return Ok(false);
     };
+    if vp.opts.restricted
+        && matches!(
+            r.op,
+            RedirOp::Write
+                | RedirOp::Clobber
+                | RedirOp::Append
+                | RedirOp::ReadWrite
+                | RedirOp::WriteBoth
+                | RedirOp::AppendBoth
+        )
+    {
+        return restricted_output(vp, &target).await;
+    }
     match r.op {
         RedirOp::DupRead | RedirOp::DupWrite => {
             if target == b"-" {
@@ -2904,6 +2935,9 @@ async fn redirect_fd(vp: &mut Vp, code: &Rc<Code>, r: &Redirect, fd: u32) -> Res
             }
             if r.op == RedirOp::DupWrite && matches!(r.fd, None | Some(RedirFd::Number(1))) {
                 // `>& file` and `1>& file` are `&> file`.
+                if vp.opts.restricted {
+                    return restricted_output(vp, &target).await;
+                }
                 let Some(opts) = clobber_check(vp, &target).await else {
                     return Ok(false);
                 };
@@ -2935,6 +2969,15 @@ async fn redirect_fd(vp: &mut Vp, code: &Rc<Code>, r: &Redirect, fd: u32) -> Res
         RedirOp::AppendBoth => open_to(vp, &target, OpenOptions::append(), &[1, 2]).await,
         RedirOp::HereString | RedirOp::HereDoc | RedirOp::HereDocStrip => Ok(true),
     }
+}
+
+async fn restricted_output(vp: &Vp, target: &[u8]) -> Result<bool, Unwind> {
+    vp.error(&format!(
+        "{}: restricted: cannot redirect output",
+        String::from_utf8_lossy(target)
+    ))
+    .await;
+    Ok(false)
 }
 
 async fn open_to(

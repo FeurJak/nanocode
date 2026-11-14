@@ -119,17 +119,37 @@ pub(crate) async fn lookup(vp: &Vp, name: &[u8]) -> Option<&'static UtilEntry> {
         Mode::PathFallback | Mode::SandboxOnly => true,
         Mode::WindowsShadow => !cfg!(windows),
     };
-    if fallback
-        && !policy.sandbox
-        && !policy.force_names.iter().any(|n| n == name)
-        && (entry.mode == Mode::SandboxOnly
-            || crate::builtins::hash::search(vp, name, None)
-                .await
-                .is_some())
-    {
+    if policy.sandbox || policy.force_names.iter().any(|n| n == name) {
+        return Some(entry);
+    }
+    if entry.mode == Mode::SandboxOnly || (vp.var("PATH").is_none() && !cfg!(windows)) {
         return None;
     }
-    Some(entry)
+    let found = match crate::builtins::hash::hashed(vp, name).await {
+        Some(p) => Some(p),
+        None => crate::builtins::hash::search(vp, name, None).await,
+    };
+    match found {
+        Some(_) if fallback => None,
+        Some(found) if !cfg!(windows) && overrides_standard(vp, name, &found).await => None,
+        _ => Some(entry),
+    }
+}
+
+async fn overrides_standard(vp: &Vp, name: &[u8], found: &[u8]) -> bool {
+    let standard = vp.host().standard_path();
+    let dir = match found.iter().rposition(|&b| b == b'/') {
+        Some(0) => &found[..1],
+        Some(end) => &found[..end],
+        None => b"",
+    };
+    !vp.host()
+        .path_entries(&standard)
+        .iter()
+        .any(|d| d.as_slice() == dir)
+        && crate::builtins::hash::search(vp, name, Some(&standard))
+            .await
+            .is_some()
 }
 
 /// Whether a background job that is the one command `name` is a program, as bash runs

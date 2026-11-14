@@ -1292,7 +1292,7 @@ impl Host for TestHost {
                     .find(|(k, _)| *k == m)
                     .map(|(_, f)| f.clone())
                     .ok_or(io::ErrorKind::InvalidInput)?,
-                ChildFd::Null => Rc::new(NullFile),
+                ChildFd::Null | ChildFd::Closed => Rc::new(NullFile),
                 ChildFd::Pipe { input } => {
                     let (r, w) = self.pipe_pair();
                     if input {

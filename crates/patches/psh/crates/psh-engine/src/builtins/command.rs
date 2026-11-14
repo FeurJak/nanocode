@@ -179,6 +179,10 @@ pub(super) async fn command(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         i += 1;
     }
     let rest = &args[i..];
+    if default_path && vp.opts.restricted {
+        vp.error("command: -p: restricted").await;
+        return Ok(1);
+    }
     if rest.is_empty() {
         return Ok(0);
     }
@@ -440,6 +444,10 @@ pub(super) async fn exec_(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     let Some(name) = rest.first() else {
         return Ok(0);
     };
+    if vp.opts.restricted {
+        vp.error("exec: restricted").await;
+        return Ok(1);
+    }
     if login {
         let mut a0 = b"-".to_vec();
         a0.extend_from_slice(opts.arg0.as_deref().unwrap_or(name));
