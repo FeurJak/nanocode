@@ -447,6 +447,14 @@ pub(crate) struct Vp {
     pub sigs: Sigs,
     /// Levels of command substitution and `eval`: `set -x` repeats PS4's first char.
     pub xtrace_level: u32,
+    pub cmd_name: Option<CmdName>,
+    pub arith_notes: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum CmdName {
+    Builtin(&'static str),
+    Function,
 }
 
 /// A function: its body command in the chunk that defined it.

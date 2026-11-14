@@ -79,6 +79,11 @@ pub(crate) async fn run_text(vp: &mut Vp, text: &[u8], line_base: u32, origin: O
                     msg.extend_from_slice(b"'\n");
                 }
                 vp.error_raw(&msg).await;
+                if e.resume.is_some() && !vp.opts.get(crate::options::SetOpt::Posix) {
+                    status = 1;
+                    vp.status = status;
+                    continue;
+                }
                 return Ok(2);
             }
         }
@@ -105,6 +110,7 @@ pub(super) async fn eval(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     let line_base = vp.line.saturating_sub(1);
     // `set -x` shows one more `+` inside eval (D1285).
     vp.xtrace_level += 1;
+    vp.cmd_name = Some(crate::state::CmdName::Builtin("eval"));
     let r = run_text(vp, &text, line_base, Origin::Eval).await;
     vp.xtrace_level -= 1;
     r
@@ -184,6 +190,10 @@ pub(super) async fn source(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         // `BASH_ARGV` records `source`'s own arguments: the file and what follows.
         args: args[i..].to_vec(),
     });
+    vp.cmd_name = Some(crate::state::CmdName::Builtin(match args[0].as_slice() {
+        b"." => ".",
+        _ => "source",
+    }));
     let r = Box::pin(run_text(vp, &text, 0, Origin::File)).await;
     vp.calls.pop();
     vp.line = line;

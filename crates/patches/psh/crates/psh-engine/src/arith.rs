@@ -73,16 +73,19 @@ impl ArithEnv for Env<'_> {
                     }
                 }
             },
-            Some(ArithIndex::Key(k)) => {
-                let v = self.vp.get_elem(&name, &unquote(k))?;
-                self.unset_base(&name, v)
-            }
-            // Out of range below the start: 0, without an error (bash).
-            Some(ArithIndex::Num(i)) => {
-                let v = self
-                    .vp
-                    .get_elem(&name, i.to_string().as_bytes())
-                    .unwrap_or(None);
+            Some(index) => {
+                let v = match index {
+                    ArithIndex::Key(k) => self.vp.get_elem(&name, &unquote(k)),
+                    ArithIndex::Num(i) => self.vp.get_elem(&name, i.to_string().as_bytes()),
+                };
+                // Out of range below the start: 0, with bash's message.
+                let v = match v {
+                    Err(msg) if msg.ends_with(": bad array subscript") => {
+                        self.vp.arith_notes.push(msg);
+                        None
+                    }
+                    v => v?,
+                };
                 self.unset_base(&name, v)
             }
         }
@@ -175,6 +178,12 @@ fn unquote(k: &[u8]) -> std::borrow::Cow<'_, [u8]> {
         i += 1;
     }
     std::borrow::Cow::Owned(out)
+}
+
+pub(crate) async fn notes(vp: &mut Vp) {
+    for msg in std::mem::take(&mut vp.arith_notes) {
+        vp.error(&msg).await;
+    }
 }
 
 /// Evaluates `text`; the error is bash's message without the `line N:` prefix.

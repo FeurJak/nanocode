@@ -93,6 +93,7 @@ pub(crate) fn find(name: &[u8]) -> Option<Builtin> {
         b"fg" => (builtin!(jobs::fg), false),
         b"bg" => (builtin!(jobs::bg), false),
         b"caller" => (builtin!(command::caller), false),
+        b"compgen" => (builtin!(compgen), false),
         b"help" => (builtin!(help::help), false),
         b"umask" => (builtin!(umask::umask), false),
         b"dirs" => (builtin!(dirs::dirs), false),
@@ -251,6 +252,43 @@ pub(crate) const SPECIAL: &[&[u8]] = &[
 /// same name (macOS has `/usr/bin/read`, `/usr/bin/type`, ... as sh wrappers).
 async fn unsupported(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     crate::expand::unsupported(vp, &s(&args[0])).await
+}
+
+async fn compgen(vp: &mut Vp, args: &[Vec<u8>]) -> R {
+    let [_, flag, name, rest @ ..] = args else {
+        return unsupported(vp, args).await;
+    };
+    if flag != b"-F" || rest.len() > 1 {
+        return unsupported(vp, args).await;
+    }
+    vp.error("compgen: warning: -F option may not work as you expect")
+        .await;
+    let Some(f) = vp.funcs.get(&*s(name)).cloned() else {
+        vp.error(&format!("completion: function `{}' not found", s(name)))
+            .await;
+        return Ok(1);
+    };
+    let word = rest.first().cloned().unwrap_or_default();
+    let argv = vec![name.clone(), b"compgen".to_vec(), word, Vec::new()];
+    crate::exec::call_function(vp, f, argv, Vec::new()).await?;
+    let words = vp
+        .var_ref("COMPREPLY")
+        .map(|v| v.values())
+        .unwrap_or_default();
+    unset(
+        vp,
+        &[b"unset".to_vec(), b"-v".to_vec(), b"COMPREPLY".to_vec()],
+    )
+    .await?;
+    if words.is_empty() {
+        return Ok(1);
+    }
+    let mut text = Vec::new();
+    for w in words {
+        text.extend_from_slice(&w);
+        text.push(b'\n');
+    }
+    out(vp, "compgen", &text).await
 }
 
 /// Writes to a descriptor of the vproc. A closed pipe ends the vproc as SIGPIPE would
@@ -837,7 +875,9 @@ async fn let_(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     }
     let mut last = 0;
     for a in &args[1..] {
-        match crate::arith::eval(vp, a) {
+        let r = crate::arith::eval(vp, a);
+        crate::arith::notes(vp).await;
+        match r {
             Ok(v) => last = v,
             Err(msg) if vp.arith_unbound => {
                 vp.error(&msg).await;

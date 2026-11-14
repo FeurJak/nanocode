@@ -788,6 +788,7 @@ fn run_command_with<'a>(
 
 /// `$_` after a command: its last word, not exported (bash), unless `_` is readonly.
 pub(crate) fn set_underscore(vp: &mut Vp, last: Vec<u8>) {
+    vp.cmd_name = None;
     let var = vp.vars.entry("_");
     if !var.readonly {
         var.set(last);
@@ -1332,7 +1333,11 @@ async fn run_arith_for(vp: &mut Vp, code: &Rc<Code>, f: &psh_syntax::ArithForCom
         arith_for_debug(vp, code, &f.cond).await?;
         vp.line = line;
         let cond = match crate::now::arith_word(vp, code, &f.cond) {
-            Some(Ok(v)) => Some(v),
+            Some(Ok(v)) if vp.arith_notes.is_empty() => Some(v),
+            Some(Ok(v)) => {
+                crate::arith::notes(vp).await;
+                Some(v)
+            }
             Some(Err(msg)) => arith_error(vp, msg, "((: ").await?,
             None => arith_command(vp, code, &f.cond, "((: ", true).await?,
         };
@@ -1363,7 +1368,11 @@ async fn run_arith_for(vp: &mut Vp, code: &Rc<Code>, f: &psh_syntax::ArithForCom
         arith_for_debug(vp, code, &f.step).await?;
         vp.line = line;
         let step = match crate::now::arith_word(vp, code, &f.step) {
-            Some(Ok(v)) => Some(v),
+            Some(Ok(v)) if vp.arith_notes.is_empty() => Some(v),
+            Some(Ok(v)) => {
+                crate::arith::notes(vp).await;
+                Some(v)
+            }
             Some(Err(msg)) => arith_error(vp, msg, "((: ").await?,
             None => arith_command(vp, code, &f.step, "((: ", true).await?,
         };
@@ -1406,6 +1415,7 @@ async fn arith_command(
         Some(lit) => crate::arith::eval_literal(vp, lit),
         None => crate::arith::eval(vp, text),
     };
+    crate::arith::notes(vp).await;
     match value {
         Ok(v) => Ok(Some(v)),
         Err(msg) => arith_error(vp, msg, prefix).await,
@@ -1421,10 +1431,12 @@ pub(crate) async fn arith_error(
         vp.error(&msg).await;
         return Err(Unwind::Exit(expand::expansion_exit_status(vp)));
     }
-    let prefix = match msg.ends_with(": readonly variable") {
-        true => "",
-        false => prefix,
-    };
+    crate::arith::notes(vp).await;
+    let prefix =
+        match msg.ends_with(": readonly variable") || msg.ends_with(": bad array subscript") {
+            true => "",
+            false => prefix,
+        };
     vp.error(&format!("{prefix}{msg}")).await;
     Ok(None)
 }
@@ -1475,7 +1487,7 @@ async fn run_case(vp: &mut Vp, code: &Rc<Code>, cmd: &Command, c: &psh_syntax::C
 }
 
 /// Calls a function: new positional parameters and a frame for its locals.
-async fn call_function(
+pub(crate) async fn call_function(
     vp: &mut Vp,
     f: Rc<Func>,
     argv: Vec<Vec<u8>>,
@@ -1511,6 +1523,7 @@ async fn call_function(
         sourced: false,
         args: vp.args.clone(),
     });
+    vp.cmd_name = Some(crate::state::CmdName::Function);
     for (n, v) in assigns {
         let var = vp.vars.entry(&n);
         var.set(v);
@@ -1934,6 +1947,7 @@ fn run_simple<'a>(
                     Ok(1)
                 };
                 let special = !via && builtins::is_special(vp, which.name().as_bytes());
+                let bad = vp.bad_assign;
                 let r = if via {
                     vp.bad_assign = false;
                     r
@@ -1950,7 +1964,10 @@ fn run_simple<'a>(
                         }
                     }
                 }
-                return r;
+                return match r {
+                    Ok(1) if tail && bad => Ok(builtins::declare::EX_BADASSIGN & 0xff),
+                    r => r,
+                };
             }
         };
         if cmd.redirects.is_empty() {

@@ -342,6 +342,8 @@ impl Shell {
             fork_job: false,
             sigs: state::Sigs::Shell,
             xtrace_level: 1,
+            cmd_name: None,
+            arith_notes: Vec::new(),
             umask: None,
             dirstack: Vec::new(),
             rlimits: Vec::new(),
@@ -1070,6 +1072,10 @@ async fn run_chunk(
                 msg.extend_from_slice(b"'\n");
             }
             vp.error_raw(&msg).await;
+            if e.resume.is_some() && !vp.opts.get(options::SetOpt::Posix) {
+                vp.status = 1;
+                return None;
+            }
             vp.status = 2;
             Some(2)
         }

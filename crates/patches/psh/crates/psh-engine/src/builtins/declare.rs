@@ -134,6 +134,8 @@ fn closing_bracket(w: &[u8], open: usize) -> Option<usize> {
     None
 }
 
+pub(crate) const EX_BADASSIGN: i32 = 260;
+
 /// Which builtin runs.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Which {
@@ -513,9 +515,23 @@ declare -fx {n}
                 vp.bad_assign = true;
                 status = 1;
             }
+            Err(DeclError::Msg(msg))
+                if matches!(a, DeclArg::Array { .. }) && msg.contains(": cannot convert ") =>
+            {
+                let prefix = match vp.cmd_name {
+                    Some(crate::state::CmdName::Builtin(n)) => format!("{n}: "),
+                    Some(crate::state::CmdName::Function) => vp
+                        .calls
+                        .last()
+                        .map_or(String::new(), |c| format!("{}: ", c.func)),
+                    None => String::new(),
+                };
+                vp.error(&format!("{prefix}{msg}")).await;
+                status = 1;
+            }
             Err(DeclError::Msg(msg)) => {
                 vp.error(&format!("{bname}: {msg}")).await;
-                vp.bad_assign = true;
+                vp.bad_assign |= !msg.contains(": cannot ");
                 status = 1;
             }
             Err(DeclError::Quiet) => status = 1,

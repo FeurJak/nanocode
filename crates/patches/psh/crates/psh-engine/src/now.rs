@@ -139,6 +139,15 @@ fn simple<'a>(
             }
         }
         exec::set_underscore(vp, Vec::new());
+        if !vp.arith_notes.is_empty() {
+            return Some(Now::Later(Box::pin(async move {
+                crate::arith::notes(vp).await;
+                match finish(vp, code, cmd, 0, check) {
+                    Now::Done(r) => r,
+                    Now::Later(f) => f.await,
+                }
+            })));
+        }
         return Some(finish(vp, code, cmd, 0, check));
     };
     let argv = match expand::words_now(vp, code, &s.words) {
@@ -166,6 +175,9 @@ fn simple<'a>(
     }
     vp.exec_now = false;
     let mut fut: LocalBoxFuture<'a, R> = Box::pin(async move {
+        if !vp.arith_notes.is_empty() {
+            crate::arith::notes(vp).await;
+        }
         let r = crate::builtins::call(vp, b, &argv).await;
         restore(vp, saved);
         exec::set_underscore(vp, last);
@@ -213,7 +225,14 @@ fn arith<'a>(
     }
     vp.line = code.line(cmd.span.start);
     match crate::arith::eval_literal(vp, &lit) {
-        Ok(v) => Some(finish(vp, code, cmd, i32::from(v == 0), check)),
+        Ok(v) if vp.arith_notes.is_empty() => Some(finish(vp, code, cmd, i32::from(v == 0), check)),
+        Ok(v) => Some(Now::Later(Box::pin(async move {
+            crate::arith::notes(vp).await;
+            match finish(vp, code, cmd, i32::from(v == 0), check) {
+                Now::Done(r) => r,
+                Now::Later(f) => f.await,
+            }
+        }))),
         Err(msg) => Some(Now::Later(Box::pin(async move {
             let status = match exec::arith_error(vp, msg, "((: ").await? {
                 Some(v) => i32::from(v == 0),

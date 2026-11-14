@@ -168,7 +168,10 @@ impl Parser {
                 None
             }
             Err(e) => {
-                self.done = true;
+                match e.resume {
+                    Some(pos) => self.pos = pos,
+                    None => self.done = true,
+                }
                 Some(Err(e))
             }
         }
@@ -574,6 +577,7 @@ impl<'a> P<'a> {
                 span: Span::default(),
                 message: String::from("script too large"),
                 incomplete: false,
+                resume: None,
             });
         }
         Ok(P {
@@ -677,6 +681,7 @@ impl<'a> P<'a> {
             span: sp(start, end),
             message,
             incomplete: false,
+            resume: None,
         }
     }
 
@@ -689,6 +694,7 @@ impl<'a> P<'a> {
             span: sp(self.end, self.end),
             message,
             incomplete: true,
+            resume: None,
         }
     }
 
@@ -2290,7 +2296,19 @@ impl<'a> P<'a> {
             } else {
                 match self.read_word(Ctx::Word, true)? {
                     Some(w) => w,
-                    None => return Err(self.unexpected()),
+                    None => {
+                        let mut e = self.unexpected();
+                        if !e.incomplete {
+                            let from = e.span.end as usize;
+                            e.resume = Some(
+                                match self.b[from..self.end].iter().position(|&c| c == b'\n') {
+                                    Some(i) => from + i + 1,
+                                    None => self.end,
+                                },
+                            );
+                        }
+                        return Err(e);
+                    }
                 }
             };
             elems.push(ArrayElem {

@@ -157,7 +157,9 @@ async fn binary(
 }
 
 async fn arith(vp: &mut Vp, text: &[u8]) -> Option<i64> {
-    match crate::arith::eval(vp, text) {
+    let r = crate::arith::eval(vp, text);
+    crate::arith::notes(vp).await;
+    match r {
         Ok(v) => Some(v),
         Err(msg) => {
             vp.error(&format!("[[: {msg}")).await;

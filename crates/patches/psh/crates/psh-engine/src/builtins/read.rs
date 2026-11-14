@@ -397,11 +397,7 @@ fn split(line: &[(u8, bool)], ifs: &[u8], n: usize) -> Vec<Vec<u8>> {
     }
     // The last variable: the rest, without trailing IFS whitespace; a single field
     // followed by one separator loses the separator.
-    let mut end = line.len();
-    while end > p && is_ws(&line[end - 1]) {
-        end -= 1;
-    }
-    let rest = &line[p..end];
+    let rest = &line[p..];
     let mut f = 0;
     while f < rest.len() && !is_ifs(&rest[f]) {
         f += 1;
@@ -421,11 +417,22 @@ fn split(line: &[(u8, bool)], ifs: &[u8], n: usize) -> Vec<Vec<u8>> {
     };
     if after == rest.len() {
         out.push(text(&rest[..f]));
-    } else {
-        out.push(text(rest));
+        return out;
     }
+    let blank = |&(b, _): &(u8, bool)| ifs.contains(&b) && matches!(b, b' ' | b'\t' | b'\n');
+    let mut end = rest.len();
+    while end > 1 && blank(&rest[end - 1]) {
+        end -= 1;
+    }
+    let mut value = text(&rest[..end]);
+    if end == 1 && rest[0].1 && blank(&rest[0]) {
+        value = vec![CTLESC];
+    }
+    out.push(value);
     out
 }
+
+const CTLESC: u8 = 1;
 
 /// Splits a line into all its fields, as `read -a` does: like word splitting, a
 /// separator at the end makes no empty field.

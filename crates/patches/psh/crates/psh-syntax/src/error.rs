@@ -13,6 +13,7 @@ pub struct ParseError {
     pub message: String,
     /// The input ended inside a construct: more input could complete it.
     pub incomplete: bool,
+    pub resume: Option<usize>,
 }
 
 impl fmt::Display for ParseError {

@@ -62,6 +62,7 @@ pub(crate) struct Fields {
     /// patterns are not built. Escaping a long value into one was most of the time of
     /// `s="$s$i,"` in a loop.
     text_only: bool,
+    word: psh_syntax::Span,
 }
 
 fn is_ifs_ws(b: u8) -> bool {
@@ -69,6 +70,13 @@ fn is_ifs_ws(b: u8) -> bool {
 }
 
 impl Fields {
+    fn shown<'a>(&self, code: &'a Code, part: &'a [u8]) -> &'a [u8] {
+        match self.word.end > self.word.start {
+            true => code.ast.bytes(self.word),
+            false => part,
+        }
+    }
+
     pub(crate) fn new(vp: &Vp, split: bool) -> Fields {
         let mut ifs = match vp.var("IFS") {
             Some(v) => v.to_vec(),
@@ -99,6 +107,7 @@ impl Fields {
             rep: false,
             assign: false,
             text_only: false,
+            word: psh_syntax::Span::default(),
         }
     }
 
@@ -378,6 +387,7 @@ pub(crate) async fn expand_words(
 ) -> Result<Fields, Unwind> {
     let mut f = Fields::new(vp, true);
     for w in words {
+        f.word = w.span;
         for pieces in brace_expand(code, &w.parts) {
             expand_pieces(vp, code, &pieces, false, &mut f, Ctx::Word).await?;
             f.finish_word();
@@ -398,6 +408,7 @@ pub(crate) async fn expand_single(
     let mut f = Fields::new(vp, false);
     f.assign = ctx == Ctx::Assign;
     f.text_only = true;
+    f.word = word.span;
     let pieces: Vec<Piece> = word.parts.iter().map(Piece::Part).collect();
     expand_pieces(vp, code, &pieces, false, &mut f, ctx).await?;
     f.finish_word();
@@ -500,10 +511,14 @@ async fn part(
     first: bool,
 ) -> Result<(), Unwind> {
     match expand_part_now(vp, code, part, quoted, f, ctx, first) {
-        Now::Done => Ok(()),
-        Now::Arith(msg) => Err(arith_failed(vp, &msg).await),
-        Now::Later => Box::pin(expand_part(vp, code, part, quoted, f, ctx, first)).await,
+        Now::Done => {}
+        Now::Arith(msg) => return Err(arith_failed(vp, &msg).await),
+        Now::Later => Box::pin(expand_part(vp, code, part, quoted, f, ctx, first)).await?,
     }
+    if !vp.arith_notes.is_empty() {
+        crate::arith::notes(vp).await;
+    }
+    Ok(())
 }
 
 enum Now {
@@ -881,6 +896,7 @@ pub(crate) fn single_now(vp: &mut Vp, code: &Rc<Code>, w: &Word) -> Result<Vec<u
         rep: false,
         assign: true,
         text_only: true,
+        word: w.span,
     };
     for (i, p) in w.parts.iter().enumerate() {
         part_sync(vp, code, p, false, &mut f, Ctx::Assign, i == 0)?;
@@ -1003,13 +1019,21 @@ async fn expand_part(
             } else {
                 Ctx::Word
             };
+            let word = f.word;
+            let open = if matches!(part.kind, Part::Locale(_)) {
+                2
+            } else {
+                1
+            };
+            f.word = psh_syntax::Span::new(part.span.start + open, part.span.end - 1);
             expand_parts(vp, code, inner, true, f, inner_ctx).await?;
+            f.word = word;
         }
         Part::Param(p) => param(vp, code, p, part, quoted, f).await?,
         Part::BadSubst => {
             vp.error(&format!(
                 "{}: bad substitution",
-                String::from_utf8_lossy(text)
+                String::from_utf8_lossy(f.shown(code, text))
             ))
             .await;
             return Err(Unwind::Abort(1));
@@ -1371,8 +1395,14 @@ async fn param(
         crate::jobs::settle(&vp.core.sched, &job).await;
     }
     let name_text = code.ast.text(p.name_span).as_bytes();
+    let word = f.word;
     let bad = |vp: &Vp| {
-        let msg = format!("{}: bad substitution", code.ast.text(part.span));
+        let span = if word.end > word.start {
+            word
+        } else {
+            part.span
+        };
+        let msg = format!("{}: bad substitution", code.ast.text(span));
         let vp = vp.clone();
         async move {
             vp.error(&msg).await;
@@ -2186,7 +2216,9 @@ fn quotes_closed(s: &[u8]) -> bool {
 /// An arithmetic word (offsets, lengths): expanded, then evaluated.
 async fn arith_word(vp: &mut Vp, code: &Rc<Code>, w: &Word) -> Result<i64, Unwind> {
     let (text, _) = expand_single(vp, code, w, Ctx::Arith).await?;
-    match crate::arith::eval(vp, &text) {
+    let r = crate::arith::eval(vp, &text);
+    crate::arith::notes(vp).await;
+    match r {
         Ok(v) => Ok(v),
         Err(msg) => {
             vp.error(&msg).await;
