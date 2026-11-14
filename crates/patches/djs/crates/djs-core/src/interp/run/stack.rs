@@ -167,6 +167,15 @@ impl Exec<'_> {
                 out.push_out((f, pc, flags & frame::FLAG_CONSTRUCT != 0));
             }
             let cont = Continuation::from_flags(flags);
+            if cont == Continuation::GenNext
+                && below.is_none()
+                && (out.len() as u32) < limit
+                && let Some(next) =
+                    realm::installed_intrinsic(self.heap, super::suspend::GENERATOR_NEXT)
+                        .as_object()
+            {
+                out.push_out((next, 0, false));
+            }
             if cont.is_bottom() || out.len() as u32 >= limit {
                 break;
             }

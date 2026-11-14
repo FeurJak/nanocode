@@ -698,7 +698,7 @@ impl<'h> Exec<'h> {
             Continuation::DiscardResult => {}
             Continuation::Replace(slot) | Continuation::Retry(slot) => self.set(slot, p),
             // (`%EachDense` calls plain closures only.)
-            Continuation::Each | Continuation::GenStep => unreachable!(),
+            Continuation::Each | Continuation::GenStep | Continuation::GenNext => unreachable!(),
             // `Vm::call` of an async host function: done at once (it must not run jobs,
             // which could collect); the next `run` drains the queue.
             Continuation::Entry => {
@@ -750,6 +750,9 @@ impl<'h> Exec<'h> {
         if cont == Continuation::GenStep {
             return self.gen_step_return(v);
         }
+        if cont == Continuation::GenNext {
+            return self.gen_next_return(v);
+        }
         match cont {
             Continuation::PushResult => self.push(v),
             Continuation::DiscardResult => {}
@@ -760,7 +763,8 @@ impl<'h> Exec<'h> {
             Continuation::Entry
             | Continuation::Job
             | Continuation::Each
-            | Continuation::GenStep => {
+            | Continuation::GenStep
+            | Continuation::GenNext => {
                 unreachable!()
             }
         }
@@ -928,6 +932,9 @@ impl<'h> Exec<'h> {
             self.load_frame();
             if cont == Continuation::GenStep {
                 self.gen_step_abort(ret_pc);
+            }
+            if cont == Continuation::GenNext {
+                self.gen_next_abort();
             }
             key = if cont.is_retry() && self.native == 0 {
                 ret_pc

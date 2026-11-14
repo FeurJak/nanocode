@@ -52,6 +52,10 @@ impl Exec<'_> {
         // (`call0`..`call3` cost as much as `call`: the table's check.)
         let info = &OPS[Op::Call as usize];
         let next = self.pc + size;
+        if argc <= 1 && self.gen_next_hit(o, base, argc, next) {
+            self.fuel -= info.cost.fuel() as i64;
+            return true;
+        }
         // `arr.push(x)`, the commonest @fast call, straight to the heap's append (0231):
         // what `try_fast_call` and its `array_push` entry do, without the generic steps.
         if argc == 1

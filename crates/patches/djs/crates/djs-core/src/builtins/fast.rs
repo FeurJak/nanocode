@@ -257,6 +257,8 @@ pub(crate) static FAST: &[FastFn] = &[
     f("GlobalBtoa", btoa),
     f("GlobalAtob", atob),
     f("ObjectAssign", object_assign),
+    // ---- generators: the interpreter enters the frame itself (interp/run/suspend.rs) ----
+    f("GeneratorPrototypeNext", no_call),
 ];
 
 // ---- argument helpers ----------------------------------------------------------------

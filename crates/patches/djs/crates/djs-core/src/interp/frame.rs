@@ -63,6 +63,10 @@ pub enum Continuation {
     /// entered again for the next element, or the loop's k goes to the caller.
     Each,
     GenStep,
+    /// A plain generator's frame entered by `g.next(v)` in place of %GeneratorPrototype%.next:
+    /// the caller's `next this` stay below the frame, and a yield or return pushes the
+    /// iterator result in their place.
+    GenNext,
 }
 
 /// Continuation kind bits of `flags` (bits 0-3); the `Replace` slot is in bits 8-30.
@@ -80,6 +84,7 @@ impl Continuation {
             6 => Continuation::Retry((flags as u32 & 0x7FFF_FFFF) >> SLOT_SHIFT),
             7 => Continuation::Each,
             8 => Continuation::GenStep,
+            9 => Continuation::GenNext,
             _ => Continuation::Entry,
         }
     }
@@ -97,6 +102,7 @@ impl Continuation {
             Continuation::Retry(slot) => 6 | ((slot << SLOT_SHIFT) & 0x7FFF_FFFF) as i32,
             Continuation::Each => 7,
             Continuation::GenStep => 8,
+            Continuation::GenNext => 9,
         }
     }
 

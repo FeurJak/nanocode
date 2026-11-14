@@ -1391,31 +1391,31 @@ GeneratorStep: reentrant
   builtins/generator.ts:29:14  GeneratorResume (intrinsic)
 
 GeneratorPrototypeNext: reentrant (%GeneratorPrototype%.next, %GeneratorPrototypeNext)
-  builtins/generator.ts:56:10  GeneratorStep (builtin)
+  builtins/generator.ts:57:10  GeneratorStep (builtin)
 
 GeneratorPrototypeReturn: reentrant (%GeneratorPrototype%.return)
-  builtins/generator.ts:69:10  GeneratorStep (builtin)
+  builtins/generator.ts:70:10  GeneratorStep (builtin)
 
 GeneratorPrototypeThrow: reentrant (%GeneratorPrototype%.throw)
-  builtins/generator.ts:82:10  GeneratorStep (builtin)
+  builtins/generator.ts:83:10  GeneratorStep (builtin)
 
 GeneratorPrototypeToStringTag: leaf (value %GeneratorPrototype%[Symbol.toStringTag])
 
 AsyncAwait: reentrant (%AsyncAwait)
-  builtins/generator.ts:105:15  PromiseResolve (builtin)
-  builtins/generator.ts:107:12  GeneratorResume (intrinsic)
+  builtins/generator.ts:106:15  PromiseResolve (builtin)
+  builtins/generator.ts:108:12  GeneratorResume (intrinsic)
 
 AsyncFunctionReturn: reentrant (%AsyncFunctionReturn)
-  builtins/generator.ts:126:3  ResolvePromise (builtin)
+  builtins/generator.ts:127:3  ResolvePromise (builtin)
 
 GeneratorFunctionConstructor: reentrant (%GeneratorFunctionConstructor)
-  builtins/generator.ts:140:10  CreateDynamicFunction (builtin)
+  builtins/generator.ts:141:10  CreateDynamicFunction (builtin)
 
 AsyncGeneratorFunctionConstructor: reentrant (%AsyncGeneratorFunctionConstructor)
-  builtins/generator.ts:148:10  CreateDynamicFunction (builtin)
+  builtins/generator.ts:149:10  CreateDynamicFunction (builtin)
 
 AsyncFunctionConstructor: reentrant (%AsyncFunctionConstructor)
-  builtins/generator.ts:156:10  CreateDynamicFunction (builtin)
+  builtins/generator.ts:157:10  CreateDynamicFunction (builtin)
 
 DynamicImport: reentrant (%DynamicImport)
   builtins/import.ts:14:23  ToString (builtin)

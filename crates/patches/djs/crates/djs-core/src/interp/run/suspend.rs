@@ -54,7 +54,7 @@ const PROMISE: u32 = 4;
 const KIND: u32 = 5;
 pub(crate) const QUEUE: u32 = 6;
 
-const GENERATOR_NEXT: u16 = intrinsics::id("GeneratorPrototypeNext");
+pub(super) const GENERATOR_NEXT: u16 = intrinsics::id("GeneratorPrototypeNext");
 const ASYNC_AWAIT: u16 = intrinsics::id("AsyncAwait");
 const ASYNC_FUNCTION_RETURN: u16 = intrinsics::id("AsyncFunctionReturn");
 
@@ -214,7 +214,11 @@ impl Exec<'_> {
     /// Saves the frame `stack[bp..sp)` into `g`, to resume at `pc`.
     pub(super) fn yield_hit(&mut self, next: u32) -> bool {
         let flags = self.header_int(frame::FLAGS) as i32;
-        if Continuation::from_flags(flags) != Continuation::GenStep {
+        let cont = Continuation::from_flags(flags);
+        if cont == Continuation::GenNext {
+            return self.yield_next_hit(next);
+        }
+        if cont != Continuation::GenStep {
             return false;
         }
         let Some(g) = self
@@ -252,6 +256,120 @@ impl Exec<'_> {
         }
         self.safepoint();
         true
+    }
+
+    /// `g.next(v)` (`next this v` at `base`) where `f` is %GeneratorPrototype%.next and `g`
+    /// a plain generator at its start or a yield: enters the saved frame with `GenNext`
+    /// as %GeneratorResume would from the builtin, leaving `next this` below it.
+    pub(super) fn gen_next_hit(&mut self, f: Obj, base: u32, argc: u32, next: u32) -> bool {
+        if Value::object(f) != realm::installed_intrinsic(self.heap, GENERATOR_NEXT) {
+            return false;
+        }
+        let Some(g) = self
+            .get(base + 1)
+            .as_object()
+            .filter(|&o| self.heap.object_class(o) == ObjectClass::Generator)
+        else {
+            return false;
+        };
+        let [state, saved, pc, hp_off, _, kind] = self.heap.object_slots(g, STATE);
+        let (Some(GENERATOR), Some(state @ (START | SUSPENDED)), Some(arr)) =
+            (kind.as_int(), state.as_int(), saved.as_internal())
+        else {
+            return false;
+        };
+        let value = if argc == 1 {
+            self.get(base + 2)
+        } else {
+            Value::UNDEFINED
+        };
+        let pc = pc.as_int().unwrap_or(0) as u32;
+        let hp_off = hp_off.as_int().unwrap_or(0) as u32;
+        let t = self.template_of(
+            self.heap
+                .value_array_get(arr, 0)
+                .as_object()
+                .expect("callee"),
+        );
+        let sp = self.sp;
+        self.sp = base + 2;
+        if self
+            .enter_saved(g, arr, t, pc, hp_off, next, Continuation::GenNext)
+            .is_err()
+        {
+            self.sp = sp;
+            return false;
+        }
+        if state != START {
+            self.push(value);
+            self.push(Value::FALSE);
+        }
+        self.safepoint();
+        true
+    }
+
+    /// A plain `yield` in a `GenNext` frame: suspends it and gives the caller
+    /// `{ value, done: false }` in place of `next this`.
+    fn yield_next_hit(&mut self, next: u32) -> bool {
+        let Some(g) = self
+            .get(self.lp + self.imm_u16(1))
+            .as_object()
+            .filter(|&o| self.heap.object_class(o) == ObjectClass::Generator)
+        else {
+            return false;
+        };
+        let [_, saved, _, _, _, kind] = self.heap.object_slots(g, STATE);
+        if kind.as_int() != Some(GENERATOR) {
+            return false;
+        }
+        let v = self.get(self.sp - 1);
+        let proto = intrinsic_obj(self.heap, Intrinsic::ObjectProto);
+        let Ok(r) = self.heap.new_iter_result(Some(proto), v, false) else {
+            return false;
+        };
+        self.sp -= 1;
+        if self.suspend_into(g, saved, SUSPENDED, next).is_err() {
+            self.push(v);
+            return false;
+        }
+        self.pop_frame();
+        self.sp -= 1;
+        self.set(self.sp - 1, Value::object(r));
+        self.safepoint();
+        true
+    }
+
+    /// A `GenNext` frame handed control back with `v` (the frame is popped, `next this`
+    /// on top): what GeneratorStep makes of it.
+    pub(super) fn gen_next_return(&mut self, v: Value) -> Step {
+        let g = self.get(self.sp - 1).as_object().expect("generator");
+        let r = match state_of(self.heap, g) {
+            SUSPENDED => {
+                let proto = intrinsic_obj(self.heap, Intrinsic::ObjectProto);
+                Value::object(self.heap.new_iter_result(Some(proto), v, false)?)
+            }
+            SUSPENDED_RAW => v,
+            _ => {
+                set_state(self.heap, g, COMPLETED);
+                let proto = intrinsic_obj(self.heap, Intrinsic::ObjectProto);
+                Value::object(self.heap.new_iter_result(Some(proto), v, true)?)
+            }
+        };
+        self.sp -= 1;
+        self.set(self.sp - 1, r);
+        self.safepoint();
+        Ok(None)
+    }
+
+    /// An exception left a `GenNext` frame (`sp` is the frame's base, above `next this`).
+    pub(super) fn gen_next_abort(&mut self) {
+        if let Some(g) = self
+            .get(self.sp - 1)
+            .as_object()
+            .filter(|&o| self.heap.object_class(o) == ObjectClass::Generator)
+        {
+            set_state(self.heap, g, COMPLETED);
+        }
     }
 
     pub(super) fn resume_hit(&mut self, it: Value, f: Value) -> bool {
