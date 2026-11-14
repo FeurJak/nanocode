@@ -364,6 +364,7 @@ pub(crate) struct Vp {
     pub exec_now: bool,
     /// A command substitution's vproc: its programs' signal deaths are not reported.
     pub in_subst: bool,
+    pub ignores: u64,
     /// Function definitions; shared with subshells until one defines or unsets.
     pub funcs: Rc<HashMap<String, Rc<Func>>>,
     /// One frame per running function call: the variables its `local`s shadow.

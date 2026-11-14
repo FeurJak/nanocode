@@ -34,6 +34,8 @@ use crate::host::{Host, HostFile};
 /// The capacity of a pipe, as on Linux.
 pub(crate) const PIPE_CAPACITY: usize = 64 * 1024;
 
+pub(crate) const PIPE_BUF: usize = 4096;
+
 struct Inner {
     buf: VecDeque<u8>,
     /// Once materialized: what is still to go into the OS pipe, behind what it holds.

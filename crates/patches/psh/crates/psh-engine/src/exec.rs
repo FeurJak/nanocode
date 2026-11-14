@@ -2052,13 +2052,22 @@ fn run_argv(
     // shell's exec tail.
     Box::pin(async move {
         match crate::util::lookup(vp, &argv[0]).await {
-            Some(e) => {
+            Some(e) if !reads_own_process(vp, &argv).await => {
                 vp.exec_now = false;
                 crate::util::run(vp, e, argv, assigns).await
             }
-            None => run_external(vp, argv, assigns).await,
+            _ => run_external(vp, argv, assigns).await,
         }
     })
+}
+
+async fn reads_own_process(vp: &Vp, argv: &[Vec<u8>]) -> bool {
+    argv[1..]
+        .iter()
+        .any(|a| a.starts_with(b"/proc/self/") || a.starts_with(b"/proc/thread-self/"))
+        && crate::builtins::hash::search(vp, &argv[0], None)
+            .await
+            .is_some()
 }
 
 pub(crate) async fn run_builtin(
@@ -2197,11 +2206,15 @@ pub(crate) async fn run_external_with(
         vp.env(&extra)
     };
     // `trap '' SIG` passes on to children (D1284); background jobs also ignore INT and
-    // QUIT, as bash's do without job control.
+    // QUIT, as bash's do without job control, and substitutions what `subst_ignores` says.
+    let monitor = vp.opts.get(SetOpt::Monitor);
     let sig_ignore: Vec<i32> = (1..64)
         .filter(|&sig| {
             vp.signal_trap_ignored(sig)
-                || (vp.job.is_some() && (sig == crate::host::SIGINT || sig == crate::host::SIGQUIT))
+                || vp.ignores & (1u64 << sig) != 0
+                || (vp.job.is_some()
+                    && !monitor
+                    && (sig == crate::host::SIGINT || sig == crate::host::SIGQUIT))
         })
         .collect();
     let forked = vp.core.forked.get().is_some();
@@ -2314,13 +2327,19 @@ pub(crate) async fn run_external_with(
             }
         }
     });
-    // A signal that ends the shell ends the wait; the external is abandoned (D1903).
+    // A signal that ends the shell ends the wait; the external runs on, as a child of
+    // bash does (D1903).
     let waited = if (opts.shell && (opts.exec || opts.process)) || (opts.real && nested.is_some()) {
         waited.await
     } else {
         match crate::signals::or_signal(vp, crate::signals::Gives::Program, waited).await {
             Ok(st) => st,
-            Err(sig) => return Ok(128 + sig),
+            Err(sig) => {
+                if let Some(p) = proc.proc.borrow_mut().take() {
+                    p.release();
+                }
+                return Ok(128 + sig);
+            }
         }
     };
     let st = match (waited, stop_text) {
@@ -3158,6 +3177,7 @@ async fn subst(vp: &mut Vp, code: Rc<Code>, list: ListId) -> Result<(Vec<u8>, i3
     sub.xtrace_level += 1;
     // Its programs' signal deaths are not reported (D1303).
     sub.in_subst = true;
+    sub.ignores |= subst_ignores(vp, false);
     let (r, w) = pipe::pipe();
     sub.fds.set(1, Rc::new(FdObj::PipeWrite(w)));
     let reader = FdObj::PipeRead(r);
@@ -3254,6 +3274,18 @@ pub(crate) async fn fun_subst(
     }
 }
 
+fn subst_ignores(vp: &Vp, process: bool) -> u64 {
+    if vp.opts.get(SetOpt::Monitor) {
+        (1..64)
+            .filter(|&sig| crate::signals::stops(sig))
+            .fold(0, |mask, sig| mask | 1u64 << sig)
+    } else if process {
+        1u64 << crate::host::SIGINT | 1u64 << crate::host::SIGQUIT
+    } else {
+        0
+    }
+}
+
 /// `<(list)` (`output` false) or `>(list)`: the list runs as a vproc on one end of a
 /// pipe; the word is `/dev/fd/N` for the other end, a descriptor of this vproc (63 and
 /// down, as bash) until the command completes.
@@ -3264,6 +3296,7 @@ pub(crate) async fn process_subst(
     output: bool,
 ) -> Result<Vec<u8>, Unwind> {
     let mut sub = enter(vp).await?;
+    sub.ignores |= subst_ignores(vp, true);
     if sub.traps.map.values().any(|t| !t.active) {
         Rc::make_mut(&mut sub.traps).map.retain(|_, t| t.active);
     }

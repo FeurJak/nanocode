@@ -176,7 +176,10 @@ async fn shell(mut sub: Vp, argv: Vec<Vec<u8>>, ignore: Vec<Signal>, caller: Cal
     // No process id to give (D1413): a script that reads one runs under the real
     // program, if there is one; else reading it fails.
     if let Input::Text(source) = &input
-        && crate::pidscan::uses_pid(source)
+        && (crate::pidscan::uses_pid(source)
+            || (sub.job.is_none()
+                && sub.core.forked.get().is_none()
+                && source.windows(4).any(|w| w == b"PPID")))
         && let Some(status) = real_program(&mut sub, &argv).await
     {
         return status;

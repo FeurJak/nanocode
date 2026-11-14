@@ -272,10 +272,7 @@ pub fn catch(
 }
 
 /// Ends the process by `sig` with its default action, so the parent sees the signal
-/// (as bash does when a signal ends it); exits with `128 + sig` if that fails. When the
-/// process leads its process group (a harness started it in a group of its own), the
-/// signal goes to the whole group: what the shell's externals left behind there dies
-/// with it, even when only the shell's pid was signalled (D1067).
+/// (as bash does when a signal ends it); exits with `128 + sig` if that fails.
 pub fn die_by(sig: Signal) -> ! {
     let os = super::signum::to_os(sig).unwrap_or(libc::SIGTERM);
     // SAFETY: plain calls with valid arguments; the process ends here.
@@ -285,9 +282,6 @@ pub fn die_by(sig: Signal) -> ! {
         libc::sigemptyset(&raw mut set);
         libc::sigaddset(&raw mut set, os);
         libc::pthread_sigmask(libc::SIG_UNBLOCK, &raw const set, std::ptr::null_mut());
-        if libc::getpgrp() == libc::getpid() {
-            libc::kill(0, os);
-        }
         libc::raise(os);
     }
     std::process::exit(128 + sig)

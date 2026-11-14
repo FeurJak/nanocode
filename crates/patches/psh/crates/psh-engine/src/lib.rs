@@ -304,6 +304,7 @@ impl Shell {
             exec_tail: None,
             exec_now: false,
             in_subst: false,
+            ignores: 0,
             funcs: Rc::new(Default::default()),
             frames: Vec::new(),
             loops: 0,

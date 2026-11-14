@@ -47,6 +47,18 @@ impl FdObj {
     }
 
     pub(crate) async fn write_all(&self, mut data: &[u8]) -> io::Result<()> {
+        if matches!(self, FdObj::PipeWrite(_)) && data.len() > crate::pipe::PIPE_BUF {
+            let mut yielded = false;
+            poll_fn(|cx| {
+                if yielded {
+                    return Poll::Ready(());
+                }
+                yielded = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            })
+            .await;
+        }
         while !data.is_empty() {
             let n = poll_fn(|cx| self.poll_write(cx, data)).await?;
             if n == 0 {
