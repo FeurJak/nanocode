@@ -2136,10 +2136,8 @@ pub(crate) async fn run_external_with(
     }
     let name = argv[0].clone();
     let shown = String::from_utf8_lossy(&name).into_owned();
-    let program = if opts.shell {
+    let program = if opts.shell || name.contains(&b'/') {
         name.clone()
-    } else if name.contains(&b'/') {
-        vp.abs_path(&name)
     } else {
         // `PATH=… cmd`: the command is looked up in that PATH, past the hash table and
         // without remembering what it finds (bash).
@@ -2149,13 +2147,17 @@ pub(crate) async fn run_external_with(
             _ => builtins::hash::find(vp, &name, opts.path.as_deref(), true).await,
         };
         match found {
-            Some(p) => vp.abs_path(&p),
+            Some(p) => p,
             None => {
                 vp.host().not_found(&name);
                 vp.error(&format!("{shown}: command not found")).await;
                 return Ok(127);
             }
         }
+    };
+    let program = match opts.exec && !opts.shell {
+        true => vp.abs_path(program.strip_prefix(b"./").unwrap_or(&program)),
+        false => program,
     };
     if let Some(a) = opts.arg0 {
         argv[0] = a;
@@ -2208,7 +2210,7 @@ pub(crate) async fn run_external_with(
     let spawned = if opts.shell {
         crate::util::start_nested(vp, argv, &assigns, sig_ignore, opts.exec, opts.process).await?
     } else {
-        match spawn_program(vp, program, argv, env, sig_ignore, &name, &shown).await {
+        match spawn_program(vp, program, argv, env, sig_ignore, &name).await {
             Ok(s) => s,
             Err(r) => return r,
         }
@@ -2436,7 +2438,6 @@ async fn spawn_program(
     env: Vec<(Vec<u8>, Vec<u8>)>,
     sig_ignore: Vec<i32>,
     name: &[u8],
-    shown: &str,
 ) -> Result<crate::host::Spawned, R> {
     let mut fds = Vec::new();
     let mut has = [false; 3];
@@ -2489,11 +2490,12 @@ async fn spawn_program(
         rlimits: vp.rlimits.clone(),
         group: vp.opts.get(SetOpt::Monitor),
     };
-    let program = spec.program.clone();
+    let shown = String::from_utf8_lossy(&spec.program).into_owned();
+    let program = vp.abs_path(&spec.program);
     match vp.host().spawn(spec) {
         Ok(s) => Ok(s),
         Err(e) if crate::host::RunInShell::is(&e) => {
-            Err(Box::pin(run_in_shell(vp, &program, script_argv, shown)).await)
+            Err(Box::pin(run_in_shell(vp, &program, script_argv, &shown)).await)
         }
         // Spawning a directory fails with EACCES; bash says what it is.
         Err(_) if matches!(vp.host().stat(&program, true).await, Ok(m) if m.kind == crate::host::FileKind::Dir) =>

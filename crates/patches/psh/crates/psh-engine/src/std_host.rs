@@ -795,7 +795,7 @@ impl Host for StdHost {
     }
 
     fn spawn(&self, spec: SpawnSpec) -> io::Result<Spawned> {
-        let mut cmd = Command::new(path(&spec.program));
+        let mut cmd = Command::new(path(&spec.cwd).join(path(&spec.program)));
         cmd.args(spec.argv.iter().skip(1).map(|a| os(a)))
             .env_clear()
             .envs(spec.env.iter().map(|(k, v)| (os(k), os(v))))

@@ -422,7 +422,17 @@ impl Shell {
             Input::Text(script.source)
         };
         let listings = builtins::invocation_listings(&script.options);
+        let monitor = invocation::sets(&script.options, b'm', b"monitor");
         let fut = async move {
+            if monitor && !matches!(vp.fd(2).as_deref(), Some(FdObj::File(f)) if f.is_terminal()) {
+                let name = vp.msg_name();
+                let msg = format!(
+                    "{name}: cannot set terminal process group (-1): Inappropriate ioctl for device\n{name}: no job control in this shell\n"
+                );
+                vp.error_raw(msg.as_bytes()).await;
+                vp.opts.set(options::SetOpt::Monitor, false);
+                options::sync(&mut vp);
+            }
             let emacs = vp.opts.get(options::SetOpt::Emacs);
             vp.opts
                 .set(options::SetOpt::Emacs, !listings.is_empty() || emacs);
@@ -762,7 +772,19 @@ pub(crate) enum Input {
 }
 
 /// The main vproc: runs the script, then the EXIT trap (D1283).
-pub(crate) async fn run_script(vp: Vp, input: Input) -> (i32, Vp) {
+pub(crate) async fn run_script(mut vp: Vp, input: Input) -> (i32, Vp) {
+    import_functions(&mut vp).await;
+    if let Some(old) = vp.var("OLDPWD")
+        && !matches!(vp.host().stat(&vp.abs_path(old), true).await, Ok(m) if m.kind == host::FileKind::Dir)
+    {
+        vp.vars.insert(
+            "OLDPWD",
+            Var {
+                exported: true,
+                ..Var::default()
+            },
+        );
+    }
     let (mut status, mut vp) = match input {
         Input::Text(source) => run_script_lines(vp, source).await,
         Input::Stdin => run_stdin_lines(vp).await,
@@ -774,6 +796,75 @@ pub(crate) async fn run_script(vp: Vp, input: Input) -> (i32, Vp) {
     let status = builtins::trap::exit_trap(&mut vp, status).await;
     vp.status = status;
     (status, vp)
+}
+
+async fn import_functions(vp: &mut Vp) {
+    let entries: Vec<(usize, String)> = vp
+        .foreign_env
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (k, _))| {
+            let name = k.strip_prefix(b"BASH_FUNC_")?.strip_suffix(b"%%")?;
+            Some((i, String::from_utf8(name.to_vec()).ok()?))
+        })
+        .collect();
+    let mut imported = Vec::new();
+    for (i, name) in entries {
+        let value = &vp.foreign_env[i].1;
+        let text = [name.as_bytes(), b" ", value].concat();
+        let mut parser = Parser::from_bytes(&text, Options::default());
+        let ast = match parser.next_chunk() {
+            Some(Ok(ast)) if value.starts_with(b"() {") && parser.next_chunk().is_none() => {
+                Some(ast).filter(|ast| defines(ast, &name))
+            }
+            _ => None,
+        };
+        let Some(ast) = ast else {
+            let msg = format!(
+                "{}: warning: error importing function definition for `{name}'\n",
+                vp.msg_name()
+            );
+            vp.error_raw(msg.as_bytes()).await;
+            continue;
+        };
+        let root = ast.root();
+        let code = Rc::new(Code {
+            ast: Arc::new(ast),
+            lines: Rc::new(LineIndex::from_bytes(&text)),
+            line_base: 0,
+            arith: Default::default(),
+        });
+        if matches!(exec::run_list(vp, &code, root).await, Ok(0)) {
+            imported.push(i);
+            if !vp.exported_funcs.contains(&name) {
+                Rc::make_mut(&mut vp.exported_funcs).push(name);
+            }
+        }
+    }
+    if !imported.is_empty() {
+        let env = Rc::make_mut(&mut vp.foreign_env);
+        let mut i = 0;
+        env.retain(|_| {
+            i += 1;
+            !imported.contains(&(i - 1))
+        });
+    }
+}
+
+fn defines(ast: &psh_syntax::Ast, name: &str) -> bool {
+    let list = ast.list(ast.root());
+    let [item] = list.items.as_slice() else {
+        return false;
+    };
+    let [stage] = item.first.stages.as_slice() else {
+        return false;
+    };
+    item.rest.is_empty()
+        && !item.background
+        && item.first.bangs == 0
+        && item.first.time.is_none()
+        && matches!(&ast.cmd(stage.cmd).kind, psh_syntax::CommandKind::Function(f)
+            if psh_syntax::literal_text(ast, &f.name).as_deref() == Some(name))
 }
 
 /// Parses and runs the script one top-level line at a time.

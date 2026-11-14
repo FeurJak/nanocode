@@ -57,6 +57,34 @@ const UNSUPPORTED_LONG: [&str; 6] = [
     "--wordexp",
 ];
 
+pub fn errexit(options: &[Vec<u8>]) -> bool {
+    sets(options, b'e', b"errexit")
+}
+
+pub(crate) fn sets(options: &[Vec<u8>], letter: u8, name: &[u8]) -> bool {
+    let mut on = false;
+    let mut words = options.iter();
+    while let Some(w) = words.next() {
+        let set = w.first() == Some(&b'-');
+        match w.get(1..).unwrap_or_default() {
+            b"o" => {
+                if words.next().is_some_and(|n| n == name) {
+                    on = set;
+                }
+            }
+            b"O" => {
+                words.next();
+            }
+            letters => {
+                if letters.contains(&letter) {
+                    on = set;
+                }
+            }
+        }
+    }
+    on
+}
+
 /// Parses the arguments after the program name: `-c`, `-s`, and `set`'s and `shopt`'s
 /// options (`-e`, `+x`, `-o pipefail`, `-O extglob`, `--posix`), which come back in
 /// `options` for `Script::options` (D1280).
@@ -88,6 +116,7 @@ pub fn parse_args(args: &[Vec<u8>]) -> Result<Invocation, String> {
         if a.starts_with(b"--") {
             match a.as_slice() {
                 b"--posix" => options.extend([b"-o".to_vec(), b"posix".to_vec()]),
+                b"--login" => options.extend([b"-O".to_vec(), b"login_shell".to_vec()]),
                 b"--verbose" => options.push(b"-v".to_vec()),
                 b"--rcfile" | b"--init-file" => {
                     if args.get(i + 1).is_none() {
@@ -120,7 +149,7 @@ pub fn parse_args(args: &[Vec<u8>]) -> Result<Invocation, String> {
                 b's' if on => stdin = true,
                 // A login shell reads no profile here: the environment is the
                 // embedder's (D1410).
-                b'l' if on => {}
+                b'l' if on => options.extend([b"-O".to_vec(), b"login_shell".to_vec()]),
                 b'i' if on => return Err("-i: interactive shells are not supported".into()),
                 b'r' if on => return Err("-r: restricted shells are not supported".into()),
                 b'D' if on => return Err("-D: not supported".into()),
@@ -129,19 +158,10 @@ pub fn parse_args(args: &[Vec<u8>]) -> Result<Invocation, String> {
                         options.extend([vec![a[0], c], Vec::new()]);
                         continue;
                     };
-                    let known = if c == b'o' {
-                        crate::options::by_name(name).is_some()
-                    } else {
-                        std::str::from_utf8(name)
-                            .ok()
-                            .and_then(crate::options::shopt_index)
-                            .is_some()
-                    };
-                    if !known {
+                    if c == b'o' && crate::options::by_name(name).is_none() {
                         return Err(format!(
-                            "{}: invalid {}option name",
-                            String::from_utf8_lossy(name),
-                            if c == b'O' { "shell " } else { "" }
+                            "{}: invalid option name",
+                            String::from_utf8_lossy(name)
                         ));
                     }
                     options.extend([vec![a[0], c], name.clone()]);
@@ -157,6 +177,22 @@ pub fn parse_args(args: &[Vec<u8>]) -> Result<Invocation, String> {
             options.push(letters);
         }
         i += 1;
+    }
+    if let Some(name) = options
+        .windows(2)
+        .filter(|w| matches!(w[0].as_slice(), b"-O" | b"+O") && !w[1].is_empty())
+        .map(|w| &w[1])
+        .find(|n| {
+            std::str::from_utf8(n)
+                .ok()
+                .and_then(crate::options::shopt_index)
+                .is_none()
+        })
+    {
+        return Err(format!(
+            "line 0: {}: invalid shell option name",
+            String::from_utf8_lossy(name)
+        ));
     }
     if help {
         return Ok(Invocation::Help);

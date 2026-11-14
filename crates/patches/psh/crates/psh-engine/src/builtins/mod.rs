@@ -553,8 +553,18 @@ async fn pwd(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         }
     }
     let mut dir = vp.cwd.clone();
-    if physical && let Ok(p) = vp.host().canonicalize(&dir).await {
-        dir = p;
+    if physical {
+        match vp.host().canonicalize(&dir).await {
+            Ok(p) => dir = p,
+            Err(e) => {
+                let msg = format!(
+                    "pwd: error retrieving current directory: getcwd: cannot access parent directories: {}\n",
+                    error_text(&e)
+                );
+                vp.error_raw(msg.as_bytes()).await;
+                return Ok(1);
+            }
+        }
     }
     dir.push(b'\n');
     out(vp, "pwd", &dir).await

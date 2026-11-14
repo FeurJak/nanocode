@@ -623,7 +623,7 @@ impl Drop for Attributes {
 }
 
 pub(crate) fn spawn(shared: &Arc<Shared>, mut spec: SpawnSpec) -> io::Result<Spawned> {
-    let program = path::native(&spec.program)?;
+    let program = path::native(&spec.cwd)?.join(path::native(&spec.program)?);
     let argv: Vec<&str> = spec
         .argv
         .iter()

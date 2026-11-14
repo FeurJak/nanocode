@@ -79,9 +79,17 @@ async fn lookup(vp: &Vp, name: &[u8], o: Lookup) -> Vec<Kind> {
             found.push(Kind::Builtin);
         }
         if crate::util::lookup(vp, name).await.is_some() {
-            match hash::search(vp, name, None).await {
-                Some(p) if !o.all => found.push(Kind::File(p, false)),
-                _ => found.push(Kind::Utility),
+            let hashed = match o.all {
+                true => None,
+                false => hash::hashed(vp, name).await,
+            };
+            match hashed {
+                Some(p) => found.push(Kind::File(p, true)),
+                None => match hash::search(vp, name, None).await {
+                    Some(p) if !o.all => found.push(Kind::File(p, false)),
+                    Some(_) => {}
+                    None => found.push(Kind::Utility),
+                },
             }
         }
         if !found.is_empty() && !o.all {

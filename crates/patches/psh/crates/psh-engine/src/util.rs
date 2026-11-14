@@ -94,7 +94,7 @@ pub struct UtilPolicy {
 pub(crate) async fn lookup(vp: &Vp, name: &[u8]) -> Option<&'static UtilEntry> {
     // A path, or a name bound to a path with `hash -p` (or remembered from running the
     // program), names the program; `bash` and `sh` run in psh before utilities (D1410).
-    if crate::builtins::hash::hashed(vp, name).await.is_some() {
+    if crate::builtins::hash::names_program(vp, name).await {
         return None;
     }
     if nested::is_shell(vp, name) {
@@ -158,6 +158,9 @@ pub(crate) async fn run(
     argv: Vec<Vec<u8>>,
     assigns: Vec<(String, Vec<u8>)>,
 ) -> R {
+    if !is_nested_shell(entry) {
+        crate::builtins::hash::remember_utility(vp, &argv[0]).await;
+    }
     let r = run_with(vp, entry, argv, assigns, false).await;
     if vp.top && !is_nested_shell(entry) {
         vp.sigs.child_ended(&vp.core);
@@ -900,7 +903,7 @@ impl UtilCtx<'_> {
                 Err(_) => sub.fds.close(0),
             }
         }
-        let cleared = env.clear;
+        let cleared = env.clear || env.unset.iter().any(|n| n == "_");
         UtilChild {
             fut: Box::pin(async move {
                 let mut sub = sub;

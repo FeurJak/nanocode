@@ -110,8 +110,13 @@ const NESTED_OFF_VAR: &str = "PSH_NESTED_OFF";
 
 const NAME_VAR: &str = "PSH_NAME";
 
+static ARG0: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+
 fn name() -> Vec<u8> {
-    std::env::var_os(NAME_VAR).map_or_else(|| b"psh".to_vec(), os_bytes)
+    std::env::var_os(NAME_VAR).map_or_else(
+        || ARG0.get().cloned().unwrap_or_else(|| b"psh".to_vec()),
+        os_bytes,
+    )
 }
 
 /// The standalone shell's configuration: the OS host and its stdio, the utilities (with
@@ -214,6 +219,11 @@ fn utilities() -> &'static [psh_engine::util::UtilEntry] {
 /// The first call decides the registry for the process.
 pub fn run_with(args: Vec<std::ffi::OsString>, extra: &[psh_engine::util::UtilEntry]) -> ExitCode {
     UTILITIES.get_or_init(|| psh_utils::REGISTRY.iter().chain(extra).copied().collect());
+    run(args)
+}
+
+pub fn run_as(arg0: std::ffi::OsString, args: Vec<std::ffi::OsString>) -> ExitCode {
+    ARG0.get_or_init(|| os_bytes(arg0));
     run(args)
 }
 
@@ -327,7 +337,8 @@ fn shell(args: &[Vec<u8>]) -> ExitCode {
 /// a usage error, a file that cannot be read).
 fn script(args: &[Vec<u8>], name: Vec<u8>) -> Result<Script, ExitCode> {
     let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
-    Ok(match parse_args(args) {
+    let login = name.starts_with(b"-");
+    let mut script = match parse_args(args) {
         Err(msg) => return Err(usage_error(&msg)),
         // `--help` after bash's options (`psh -e --help`).
         Ok(Invocation::Help) => {
@@ -377,7 +388,14 @@ fn script(args: &[Vec<u8>], name: Vec<u8>) -> Result<Script, ExitCode> {
                 };
                 eprintln!("psh: {}: {why}", text(&path));
                 let missing = !dir && e.kind() == std::io::ErrorKind::NotFound;
-                return Err(ExitCode::from(if missing { 127 } else { 126 }));
+                let status = if psh_engine::invocation::errexit(&options) {
+                    1
+                } else if missing {
+                    127
+                } else {
+                    126
+                };
+                return Err(ExitCode::from(status));
             }
         },
         // Read as it runs, one command at a time, as bash does (D1414).
@@ -389,7 +407,13 @@ fn script(args: &[Vec<u8>], name: Vec<u8>) -> Result<Script, ExitCode> {
             options,
             stdin: true,
         },
-    })
+    };
+    if login {
+        script
+            .options
+            .extend([b"-O".to_vec(), b"login_shell".to_vec()]);
+    }
+    Ok(script)
 }
 
 /// Runs `script` in a shell made from `cfg`, on the engine thread: its status, and the

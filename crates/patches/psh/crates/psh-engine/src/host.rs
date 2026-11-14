@@ -234,7 +234,8 @@ pub enum ChildFd {
 
 #[derive(Default)]
 pub struct SpawnSpec {
-    /// The program to execute, as resolved (`resolve`, or a name with a slash).
+    /// The program to execute, as resolved (`resolve`, or a name with a slash); a
+    /// relative path is relative to `cwd`.
     pub program: Vec<u8>,
     /// The arguments, `argv[0]` first (the name as the user wrote it).
     pub argv: Vec<Vec<u8>>,

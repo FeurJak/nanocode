@@ -19,6 +19,7 @@ pub(crate) struct HashTable {
     /// Name, path, hits; in insertion order.
     entries: Vec<(Vec<u8>, Vec<u8>, u32)>,
     dot: Vec<Vec<u8>>,
+    utility: Vec<Vec<u8>>,
 }
 
 impl HashTable {
@@ -27,6 +28,7 @@ impl HashTable {
             self.path = path.to_vec();
             self.entries.clear();
             self.dot.clear();
+            self.utility.clear();
         }
     }
 
@@ -36,6 +38,7 @@ impl HashTable {
 
     fn remove(&mut self, name: &[u8]) -> bool {
         self.dot.retain(|n| n != name);
+        self.utility.retain(|n| n != name);
         let before = self.entries.len();
         self.entries.retain(|e| e.0 != name);
         self.entries.len() != before
@@ -50,6 +53,7 @@ impl HashTable {
     }
 
     fn insert(&mut self, name: &[u8], path: Vec<u8>, hits: u32) {
+        self.utility.retain(|n| n != name);
         match self.entries.iter_mut().find(|e| e.0 == name) {
             Some(e) => {
                 e.1 = path;
@@ -80,7 +84,31 @@ pub(crate) async fn hashed(vp: &Vp, name: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let path = vp.hash.get(name)?;
-    Some(check(vp, name, path, vp.hash.dot.iter().any(|n| n == name)).await)
+    check(vp, name, path, vp.hash.dot.iter().any(|n| n == name)).await
+}
+
+pub(crate) async fn names_program(vp: &Vp, name: &[u8]) -> bool {
+    !vp.hash.utility.iter().any(|n| n == name) && hashed(vp, name).await.is_some()
+}
+
+pub(crate) async fn remember_utility(vp: &mut Vp, name: &[u8]) {
+    if vp.core.utilities.sandbox || (vp.var("PATH").is_none() && !cfg!(windows)) {
+        return;
+    }
+    let synced = vp.var("PATH") == Some(vp.hash.path.as_slice());
+    if synced && vp.hash.get(name).is_some() {
+        if let Some(e) = table(vp).entries.iter_mut().find(|e| e.0 == name) {
+            e.2 += 1;
+        }
+        return;
+    }
+    if let Some((found, dot)) = search_dot(vp, name, None).await
+        && executable(vp, &found).await
+    {
+        let t = table(vp);
+        t.insert_dot(name, found, 1, dot);
+        t.utility.push(name.to_vec());
+    }
 }
 
 async fn executable(vp: &Vp, path: &[u8]) -> bool {
@@ -92,7 +120,7 @@ async fn executable(vp: &Vp, path: &[u8]) -> bool {
         )
 }
 
-async fn check(vp: &Vp, name: &[u8], path: &[u8], dot: bool) -> Vec<u8> {
+async fn check(vp: &Vp, name: &[u8], path: &[u8], dot: bool) -> Option<Vec<u8>> {
     let relative = !path.starts_with(b"/") && vp.abs_path(path) != path;
     if dot || relative {
         let tail = if relative { path } else { name };
@@ -102,10 +130,16 @@ async fn check(vp: &Vp, name: &[u8], path: &[u8], dot: bool) -> Vec<u8> {
             [b"./".as_slice(), tail].concat()
         };
         if executable(vp, &here).await {
-            return here;
+            return Some(here);
+        }
+        if path.starts_with(b".")
+            && let Some(end) = path.iter().rposition(|&b| b == b'/')
+            && same_dir(vp, &path[..end]).await
+        {
+            return None;
         }
     }
-    path.to_vec()
+    Some(path.to_vec())
 }
 
 async fn same_dir(vp: &Vp, dir: &[u8]) -> bool {
@@ -184,11 +218,12 @@ pub(crate) async fn find(
         && let Some(e) = table(vp).entries.iter().find(|e| e.0 == name).cloned()
     {
         let dot = vp.hash.dot.iter().any(|n| n == name);
-        let p = check(vp, name, &e.1, dot).await;
-        if let Some(e) = table(vp).entries.iter_mut().find(|e| e.0 == name) {
-            e.2 += hit;
+        if let Some(p) = check(vp, name, &e.1, dot).await {
+            if let Some(e) = table(vp).entries.iter_mut().find(|e| e.0 == name) {
+                e.2 += hit;
+            }
+            return Some(p);
         }
-        return Some(p);
     }
     if path.is_none() && vp.var("PATH").is_none() && !cfg!(windows) {
         return search(vp, name, None).await;
@@ -316,7 +351,7 @@ pub(super) async fn hash(vp: &mut Vp, args: &[Vec<u8>]) -> R {
             let entry = table(vp).get(n).cloned();
             let dot = vp.hash.dot.iter().any(|d| d == n);
             let entry = match entry {
-                Some(p) => Some(check(vp, n, &p, dot).await),
+                Some(p) => check(vp, n, &p, dot).await,
                 None => None,
             };
             match entry {
