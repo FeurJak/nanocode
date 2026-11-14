@@ -190,6 +190,17 @@ impl Exec<'_> {
             }
             Err(_) => return Ok(false),
         };
+        if let Some(o) = v.as_object()
+            && self.heap.object_class(o) == ObjectClass::Error
+        {
+            let stack = match self.lazy_stack(next - 1, true) {
+                Ok(Some(s)) => s,
+                Ok(None) => return Ok(false),
+                Err(HeapError::HostOutOfMemory) => return Err(HeapError::HostOutOfMemory.into()),
+                Err(_) => return Ok(false),
+            };
+            self.heap.set_object_slot(o, 0, stack);
+        }
         self.fuel -= FAST_FUEL;
         self.sp = base;
         self.push(v);

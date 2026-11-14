@@ -259,6 +259,19 @@ pub(crate) static FAST: &[FastFn] = &[
     f("ObjectAssign", object_assign),
     // ---- generators: the interpreter enters the frame itself (interp/run/suspend.rs) ----
     f("GeneratorPrototypeNext", no_call),
+    // ---- Error constructors: the interpreter records the stack (interp/run/fastpath.rs) ----
+    ctor("ErrorConstructor", no_call, |h, a| error_new(h, a, Intrinsic::ErrorProto)),
+    ctor("EvalErrorConstructor", no_call, |h, a| error_new(h, a, Intrinsic::EvalErrorProto)),
+    ctor("RangeErrorConstructor", no_call, |h, a| error_new(h, a, Intrinsic::RangeErrorProto)),
+    ctor("ReferenceErrorConstructor", no_call, |h, a| {
+        error_new(h, a, Intrinsic::ReferenceErrorProto)
+    }),
+    ctor("SyntaxErrorConstructor", no_call, |h, a| error_new(h, a, Intrinsic::SyntaxErrorProto)),
+    ctor("TypeErrorConstructor", no_call, |h, a| error_new(h, a, Intrinsic::TypeErrorProto)),
+    ctor("URIErrorConstructor", no_call, |h, a| error_new(h, a, Intrinsic::UriErrorProto)),
+    ctor("InternalErrorConstructor", no_call, |h, a| {
+        error_new(h, a, Intrinsic::InternalErrorProto)
+    }),
 ];
 
 // ---- argument helpers ----------------------------------------------------------------
@@ -1966,6 +1979,26 @@ fn empty_collection(heap: &mut Heap, args: &[Value], class: ObjectClass, proto: 
     }
     let proto = realm::intrinsic_obj(heap, proto);
     Ok(Some(Value::object(heap.collection_new(class, proto)?)))
+}
+
+/// ErrorConstruct (builtins/error.ts) for a primitive message and no options object,
+/// without the stack, which the interpreter records.
+fn error_new(heap: &mut Heap, args: &[Value], proto: Intrinsic) -> Fast {
+    if arg(args, 1).as_object().is_some() {
+        return Ok(None);
+    }
+    let m = arg(args, 0);
+    let msg = if m.is_undefined() {
+        None
+    } else {
+        let Some(s) = str(heap, m)? else {
+            return Ok(None);
+        };
+        Some(s)
+    };
+    let proto = realm::intrinsic_obj(heap, proto);
+    let o = heap.new_error_object(proto, msg.map(Value::string))?;
+    Ok(Some(Value::object(o)))
 }
 
 /// The time value of a Date `this`.

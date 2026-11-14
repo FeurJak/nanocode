@@ -167,6 +167,7 @@ function ErrorConstruct(newTarget: Value, fallback: Str, message: Value, options
 /**
  * Error ( message [ , options ] ), 20.5.1.1.
  * @constructor Error
+ * @fast
  * @length 1
  */
 function ErrorConstructor(message?: Value, options?: Value): Obj {
@@ -176,6 +177,7 @@ function ErrorConstructor(message?: Value, options?: Value): Obj {
 /**
  * EvalError, 20.5.5.1.
  * @constructor EvalError
+ * @fast
  * @extends Error
  * @length 1
  */
@@ -186,6 +188,7 @@ function EvalErrorConstructor(message?: Value, options?: Value): Obj {
 /**
  * RangeError, 20.5.5.2.
  * @constructor RangeError
+ * @fast
  * @extends Error
  * @length 1
  */
@@ -196,6 +199,7 @@ function RangeErrorConstructor(message?: Value, options?: Value): Obj {
 /**
  * ReferenceError, 20.5.5.3.
  * @constructor ReferenceError
+ * @fast
  * @extends Error
  * @length 1
  */
@@ -206,6 +210,7 @@ function ReferenceErrorConstructor(message?: Value, options?: Value): Obj {
 /**
  * SyntaxError, 20.5.5.4.
  * @constructor SyntaxError
+ * @fast
  * @extends Error
  * @length 1
  */
@@ -216,6 +221,7 @@ function SyntaxErrorConstructor(message?: Value, options?: Value): Obj {
 /**
  * TypeError, 20.5.5.5.
  * @constructor TypeError
+ * @fast
  * @extends Error
  * @length 1
  */
@@ -226,6 +232,7 @@ function TypeErrorConstructor(message?: Value, options?: Value): Obj {
 /**
  * URIError, 20.5.5.6.
  * @constructor URIError
+ * @fast
  * @extends Error
  * @length 1
  */
@@ -277,6 +284,7 @@ function ErrorPrototypeToString(this: Value): Str {
 /**
  * InternalError (QuickJS's, for out of memory; stack overflow is a RangeError, D013).
  * @constructor InternalError
+ * @fast
  * @extends Error
  * @length 1
  */

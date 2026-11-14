@@ -318,9 +318,21 @@ impl Exec<'_> {
         pc: u32,
         skip_prelude: bool,
     ) -> Result<Value, HeapError> {
+        match self.lazy_stack(pc, skip_prelude)? {
+            Some(v) => Ok(v),
+            None => self.new_stack(pc, skip_prelude, None, None),
+        }
+    }
+
+    /// [`Exec::capture_stack`] without `Error.prepareStackTrace`: `None` when it applies.
+    pub(crate) fn lazy_stack(
+        &mut self,
+        pc: u32,
+        skip_prelude: bool,
+    ) -> Result<Option<Value>, HeapError> {
         let ctor = realm::error_constructor_cached(self.heap);
         if self.prepare_stack_trace(ctor).is_some() {
-            return self.new_stack(pc, skip_prelude, None, None);
+            return Ok(None);
         }
         let limit = realm::stack_trace_limit_cached(self.heap, ctor);
         let mut frames = core::mem::take(&mut self.heap.frame_scratch);
@@ -328,7 +340,7 @@ impl Exec<'_> {
         self.raw_frames(pc, skip_prelude, None, limit, &mut frames);
         let arr = self.frames_array(&frames);
         self.heap.frame_scratch = frames;
-        arr
+        arr.map(Some)
     }
 
     fn frames_array(&mut self, frames: &[RawFrame]) -> Result<Value, HeapError> {

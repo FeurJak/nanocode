@@ -709,6 +709,34 @@ impl Heap {
         Ok(o)
     }
 
+    /// A new Error object with an own non-enumerable `message` if one is given.
+    pub(crate) fn new_error_object(
+        &mut self,
+        proto: Obj,
+        message: Option<Value>,
+    ) -> Result<Obj, HeapError> {
+        let o = self.alloc_object(ObjectClass::Error, Some(proto), ObjectClass::Error.slots())?;
+        let Some(m) = message else {
+            return Ok(o);
+        };
+        let flags = PropFlags::WRITABLE | PropFlags::CONFIGURABLE;
+        let mut s = self.error_shape;
+        if s == 0
+            || self.shape_count(s) != 1
+            || self.shape_desc(s, 0) != (atoms::MESSAGE, flags.bits() as u32)
+        {
+            let root = self.root_shape()?;
+            let Some(c) = self.shape_child(root, atoms::MESSAGE, flags.bits() as u32)? else {
+                self.define_own_property(o, atoms::MESSAGE, &PropertyDescriptor::data(m, flags))?;
+                return Ok(o);
+            };
+            s = c;
+            self.error_shape = s;
+        }
+        self.adopt_shape(o, s, &[m])?;
+        Ok(o)
+    }
+
     pub(crate) fn adopt_shape(
         &mut self,
         o: Obj,
