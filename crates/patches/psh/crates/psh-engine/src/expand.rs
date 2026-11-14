@@ -1420,10 +1420,22 @@ pub(crate) fn expansion_exit_status(vp: &Vp) -> i32 {
     }
 }
 
-/// `set -u`: `NAME: unbound variable`, and the shell ends (D1282).
+/// How an unset parameter that is an error (`set -u`, `${x?}`) unwinds: it ends a
+/// non-interactive shell; an interactive one abandons the command line with status 1
+/// and reads on, as bash does.
+pub(crate) fn unset_error(vp: &Vp) -> Unwind {
+    if vp.opts.interactive {
+        Unwind::Abort(1)
+    } else {
+        Unwind::Exit(expansion_exit_status(vp))
+    }
+}
+
+/// `set -u`: `NAME: unbound variable`, and the shell ends (D1282), unless it is
+/// interactive (`unset_error`).
 pub(crate) async fn unbound<T>(vp: &Vp, name: &str) -> Result<T, Unwind> {
     vp.error(&format!("{name}: unbound variable")).await;
-    Err(Unwind::Exit(expansion_exit_status(vp)))
+    Err(unset_error(vp))
 }
 
 /// A subscript text from a nameref or `unset 'a[…]'`: expanded like a word (quotes
@@ -1971,7 +1983,7 @@ async fn param(
                         String::from_utf8_lossy(name_text)
                     ))
                     .await;
-                    Err(Unwind::Exit(expansion_exit_status(vp)))
+                    Err(unset_error(vp))
                 }
             }
         }

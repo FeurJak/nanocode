@@ -184,6 +184,16 @@ async fn shell(mut sub: Vp, argv: Vec<Vec<u8>>, ignore: Vec<Signal>, caller: Cal
     {
         return status;
     }
+    // An interactive shell that reads its commands as they come (`… | "$BASH" -i`) is a
+    // process of its own, with its `$$` and its signals (it ignores SIGTERM): psh's
+    // own program runs it, as it runs a script that reads a process id.
+    if matches!(input, Input::Stdin)
+        && crate::invocation::sets(&options, b'i', b"interactive")
+        && sub.core.own_program.as_deref() == Some(&argv[0][..])
+        && let Some(status) = real_program(&mut sub, &argv).await
+    {
+        return status;
+    }
     let shlvl = sub.var("SHLVL").map(<[u8]>::to_vec);
     crate::exec::start_afresh(&mut sub);
     if caller.in_place {

@@ -255,6 +255,9 @@ async fn fork_copy(vp: &mut Vp, job: bool) -> Option<i32> {
             vp.core.forked.set(Some(None));
             vp.top = true;
             vp.sigs = crate::state::Sigs::Shell;
+            // A copy catches every signal, as the shell did before (D1900).
+            vp.core.trap_wants.set(u64::MAX);
+            vp.core.update_catch();
             vp.bashpid = Some(vp.core.host.pid());
             if !job {
                 return None;

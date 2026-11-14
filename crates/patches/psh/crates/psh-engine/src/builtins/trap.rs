@@ -301,6 +301,37 @@ pub(crate) fn terminates(sig: i32) -> bool {
     !matches!(sig, 17 | 18 | 19 | 20 | 21 | 22 | 23 | 28)
 }
 
+/// Recomputes the signals the shell's traps need caught (`Core::update_catch`): the
+/// trapped and ignored ones; every one for an EXIT trap (it runs when a signal ends the
+/// shell), an interactive shell (it ignores or handles them) or a forked copy (it
+/// ignores INT and QUIT, D1900). Only the shell's own vproc takes the process's
+/// signals.
+pub(crate) fn update_wants(vp: &Vp) {
+    if !vp.top || !matches!(vp.sigs, crate::state::Sigs::Shell) {
+        return;
+    }
+    let all = vp.opts.interactive || vp.core.forked.get().is_some();
+    let mut wants = 0u64;
+    for (k, t) in &vp.traps.map {
+        if !t.active {
+            continue;
+        }
+        match k {
+            TrapKey::Signal(n) if (1..64).contains(n) => wants |= 1u64 << n,
+            TrapKey::Exit => wants = u64::MAX,
+            _ => {}
+        }
+    }
+    vp.core.trap_wants.set(if all { u64::MAX } else { wants });
+    vp.core.update_catch();
+}
+
+/// Whether the shell itself ignores `sig` when no trap is set: an interactive shell
+/// ignores SIGTERM, as bash does, so `kill $$` does not end it.
+pub(crate) fn shell_ignores(sig: i32, interactive: bool) -> bool {
+    interactive && sig == crate::host::SIGTERM
+}
+
 /// Delivers pending signals to the shell (D1284): at a safepoint of the vproc that is
 /// the shell itself. A trap runs its action; an ignored signal does nothing; otherwise
 /// the default action ends the shell with `128+n` after the EXIT trap.
@@ -367,6 +398,7 @@ pub(crate) async fn take_signals(vp: &mut Vp) -> Result<(), Unwind> {
                 n.clone().stop_until_cont(sig).await;
             }
             None if terminates(sig)
+                && !shell_ignores(sig, vp.opts.interactive)
                 && (sig != crate::host::SIGQUIT || vp.core.forked.get().is_some()) =>
             {
                 vp.sigs.died_of(&vp.core, sig);
@@ -513,6 +545,7 @@ pub(crate) async fn trap(vp: &mut Vp, args: &[Vec<u8>]) -> R {
             .is_some_and(|a| !a.is_empty());
         vp.sigs.set_chld_trap(&vp.core, on);
     }
+    update_wants(vp);
     for spec in bad {
         status = invalid_spec(vp, &spec).await;
     }

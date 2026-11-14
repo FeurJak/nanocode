@@ -454,6 +454,12 @@ fn run_script(
     script: Script,
     control: &std::sync::OnceLock<psh_engine::ControlHandle>,
 ) -> (i32, Option<i32>) {
+    // Only the signals the shell needs stay caught (`Signals`).
+    #[cfg(unix)]
+    let cfg = ShellConfig {
+        catch: Some(Rc::new(psh_os::unix::signals::catch_only)),
+        ..cfg
+    };
     let mut shell = Shell::new(cfg);
     Signals::attach(control, shell.control());
     shell.start(script);

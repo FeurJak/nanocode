@@ -241,15 +241,21 @@ async fn run_with(
             ctx.vp.core.clone(),
             ctx.vp.sigs.clone(),
             ctx.vp.traps.clone(),
+            ctx.vp.opts.interactive,
         )
     });
     let status = loop {
         let ran = {
             let mut fut = std::pin::pin!((entry.run)(&mut ctx, &argv));
             std::future::poll_fn(|cx| {
-                if let Some((core, sigs, traps)) = &watch
-                    && let Some(sig) =
-                        crate::signals::breaking_in(core, sigs, traps, Gives::Interrupt)
+                if let Some((core, sigs, traps, interactive)) = &watch
+                    && let Some(sig) = crate::signals::breaking_in(
+                        core,
+                        sigs,
+                        traps,
+                        *interactive,
+                        Gives::Interrupt,
+                    )
                 {
                     return Poll::Ready(Err(sig));
                 }
@@ -259,7 +265,7 @@ async fn run_with(
                     // dropped and the utility starts again on the answers.
                     Poll::Pending if replay.borrow().again => Poll::Ready(Ok(None)),
                     Poll::Pending => {
-                        if let Some((core, sigs, _)) = &watch {
+                        if let Some((core, sigs, _, _)) = &watch {
                             sigs.on_signal(core, cx.waker());
                         }
                         Poll::Pending

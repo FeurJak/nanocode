@@ -119,6 +119,12 @@ pub struct ShellConfig {
     /// falls through to it, should it be installed as `bash` (D1413).
     pub own_program: Option<Vec<u8>>,
     pub inherited: Vec<(u32, Rc<dyn HostFile>)>,
+    /// Called on the engine thread with the signals (a bit each, Linux numbers) the
+    /// shell needs caught, whenever that set changes: those its traps name (all for an
+    /// EXIT trap or an interactive shell), and all while it waits for a foreground
+    /// command. A standalone shell catches those and leaves the rest at their default
+    /// action, as bash does. `None` (the default): nothing is told.
+    pub catch: Option<Rc<dyn Fn(u64)>>,
 }
 
 impl ShellConfig {
@@ -146,6 +152,7 @@ impl ShellConfig {
             nested_shells: true,
             own_program: None,
             inherited: Vec::new(),
+            catch: None,
         }
     }
 }
@@ -279,6 +286,10 @@ impl Shell {
             rng: Cell::new(0),
             seconds_base: Cell::new(cfg.host.now().as_nanos() as i128),
             forked: Cell::new(None),
+            catch: cfg.catch.clone(),
+            trap_wants: Cell::new(0),
+            fg_waits: Cell::new(0),
+            caught: Cell::new(u64::MAX),
         });
         let (mut vars, foreign) = initial_vars(&*cfg.host, &cfg.env, &cfg.cwd);
         vars.insert("BASH", Var::scalar(state::bash_path(&core)));
@@ -427,6 +438,7 @@ impl Shell {
         vp.args = script.args;
         vp.opts.dash_c = script.dash_c;
         builtins::apply_invocation_options(&mut vp, &script.options);
+        builtins::trap::update_wants(&vp);
         if vp.opts.interactive {
             let mut history = vp.var("HOME").unwrap_or_default().to_vec();
             history.extend_from_slice(b"/.bash_history");

@@ -123,7 +123,7 @@ pub(crate) fn breaking(vp: &crate::state::Vp, gives: Gives) -> Option<Signal> {
     if !vp.top || vp.in_trap.is_some() {
         return None;
     }
-    breaking_in(&vp.core, &vp.sigs, &vp.traps, gives)
+    breaking_in(&vp.core, &vp.sigs, &vp.traps, vp.opts.interactive, gives)
 }
 
 /// [`breaking`] for a wait that cannot borrow its vproc (an in-process utility holds
@@ -132,9 +132,10 @@ pub(crate) fn breaking_in(
     core: &crate::state::Core,
     sigs: &crate::state::Sigs,
     traps: &crate::builtins::trap::Traps,
+    interactive: bool,
     gives: Gives,
 ) -> Option<Signal> {
-    use crate::builtins::trap::{TrapKey, terminates};
+    use crate::builtins::trap::{TrapKey, shell_ignores, terminates};
     let pending = sigs.peek(core);
     let gives = if sigs.group() { Gives::Trapped } else { gives };
     (1..64).filter(|s| pending & (1u64 << s) != 0).find(|&sig| {
@@ -145,6 +146,7 @@ pub(crate) fn breaking_in(
             }
             None => {
                 terminates(sig)
+                    && !shell_ignores(sig, interactive)
                     && (sig != crate::host::SIGQUIT || core.forked.get().is_some())
                     && (gives != Gives::Program || sig != crate::host::SIGINT)
             }
@@ -159,6 +161,7 @@ pub(crate) async fn or_signal<F: std::future::Future>(
     fut: F,
 ) -> Result<F::Output, Signal> {
     let mut fut = std::pin::pin!(fut);
+    let mut waiting: Option<FgWait> = None;
     std::future::poll_fn(|cx| {
         if let Some(sig) = breaking(vp, gives) {
             return std::task::Poll::Ready(Err(sig));
@@ -168,10 +171,33 @@ pub(crate) async fn or_signal<F: std::future::Future>(
             std::task::Poll::Pending => {
                 if vp.top {
                     vp.sigs.on_signal(&vp.core, cx.waker());
+                    if waiting.is_none() && matches!(gives, Gives::Fatal | Gives::Program) {
+                        waiting = Some(FgWait::new(&vp.core));
+                    }
                 }
                 std::task::Poll::Pending
             }
         }
     })
     .await
+}
+
+/// A wait for a foreground command in progress (`Core::fg_waits`): the shell catches
+/// every signal until it ends, so one that ends the shell abandons the command first
+/// (D1903).
+struct FgWait(std::rc::Rc<crate::state::Core>);
+
+impl FgWait {
+    fn new(core: &std::rc::Rc<crate::state::Core>) -> FgWait {
+        core.fg_waits.set(core.fg_waits.get() + 1);
+        core.update_catch();
+        FgWait(core.clone())
+    }
+}
+
+impl Drop for FgWait {
+    fn drop(&mut self) {
+        self.0.fg_waits.set(self.0.fg_waits.get().saturating_sub(1));
+        self.0.update_catch();
+    }
 }

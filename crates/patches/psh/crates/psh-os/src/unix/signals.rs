@@ -29,6 +29,11 @@ static WAKE_FD: AtomicI32 = AtomicI32::new(-1);
 static WATCHER: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);
 /// Whether [`watch`] has nothing left to start.
 static WATCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// The signals [`catch`] manages (OS numbers, a bit each), and those of them with the
+/// handler installed now ([`catch_only`]).
+static MANAGED: AtomicU64 = AtomicU64::new(0);
+static INSTALLED: AtomicU64 = AtomicU64::new(0);
+
 /// What [`catch`] calls for each delivery.
 static CALLBACK: std::sync::OnceLock<Box<dyn Fn(Signal) + Send + Sync>> =
     std::sync::OnceLock::new();
@@ -261,19 +266,59 @@ pub fn catch(
         let Some(sig) = super::signum::to_os(sig) else {
             continue;
         };
-        // SAFETY: sigaction is plain data; the handler only does async-signal-safe
-        // work (atomics, write).
-        unsafe {
-            let mut act: libc::sigaction = std::mem::zeroed();
-            act.sa_sigaction = on_signal as *const () as libc::sighandler_t;
-            act.sa_flags = libc::SA_RESTART;
-            libc::sigemptyset(&raw mut act.sa_mask);
-            if libc::sigaction(sig, &raw const act, std::ptr::null_mut()) != 0 {
-                return Err(io::Error::last_os_error());
-            }
+        if !(1..64).contains(&sig) {
+            continue;
+        }
+        install(sig, true)?;
+        MANAGED.fetch_or(1 << sig, Ordering::SeqCst);
+        INSTALLED.fetch_or(1 << sig, Ordering::SeqCst);
+    }
+    Ok(())
+}
+
+/// Installs the handler for `sig` (OS number), or its default action.
+fn install(sig: libc::c_int, handler: bool) -> io::Result<()> {
+    // SAFETY: sigaction is plain data; the handler only does async-signal-safe work
+    // (atomics, write).
+    unsafe {
+        let mut act: libc::sigaction = std::mem::zeroed();
+        act.sa_sigaction = if handler {
+            on_signal as *const () as libc::sighandler_t
+        } else {
+            libc::SIG_DFL
+        };
+        act.sa_flags = libc::SA_RESTART;
+        libc::sigemptyset(&raw mut act.sa_mask);
+        if libc::sigaction(sig, &raw const act, std::ptr::null_mut()) != 0 {
+            return Err(io::Error::last_os_error());
         }
     }
     Ok(())
+}
+
+/// Narrows what [`catch`] caught to the signals in `wants` (Linux numbers, a bit
+/// each): the others of its signals go back to their default action, until a later call
+/// wants them again. bash catches a signal only while it needs it (a trap, a wait for
+/// a foreground command), and a process reading its caught-signal mask sees that.
+pub fn catch_only(wants: u64) {
+    let managed = MANAGED.load(Ordering::SeqCst);
+    let installed = INSTALLED.load(Ordering::SeqCst);
+    let mut now = 0u64;
+    for sig in 1..64 {
+        if managed & (1 << sig) == 0 {
+            continue;
+        }
+        let linux = super::signum::from_os(sig);
+        let want = (1..64).contains(&linux) && wants & (1u64 << linux) != 0;
+        if want != (installed & (1 << sig) != 0) && install(sig as libc::c_int, want).is_err() {
+            now |= installed & (1 << sig);
+            continue;
+        }
+        if want {
+            now |= 1 << sig;
+        }
+    }
+    INSTALLED.store(now, Ordering::SeqCst);
 }
 
 /// Ends the process by `sig` with its default action, so the parent sees the signal

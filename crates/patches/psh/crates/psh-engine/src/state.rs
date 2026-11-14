@@ -45,6 +45,16 @@ pub(crate) struct Core {
     /// (`Host::prepare_fork`): `None` in the shell itself, `Some(None)` while the job
     /// runs, `Some(Some(status))` once it ended, which ends the run.
     pub forked: Cell<Option<Option<i32>>>,
+    /// Told the signals the shell needs caught (`ShellConfig::catch`).
+    pub catch: Option<Rc<dyn Fn(u64)>>,
+    /// The signals the shell's traps need caught, a bit each (all of them for an EXIT
+    /// trap, an interactive shell or a forked copy).
+    pub trap_wants: Cell<u64>,
+    /// Waits for a foreground command in progress: while one runs, every signal is
+    /// caught, so the shell abandons the command before it ends (D1903).
+    pub fg_waits: Cell<u32>,
+    /// What `catch` was last told; all bits until it was told anything.
+    pub caught: Cell<u64>,
 }
 
 /// Where a vproc's pending signals are (D1411): the shell's mask, which the embedder's
@@ -225,6 +235,24 @@ impl Sigs {
 }
 
 impl Core {
+    /// Tells `catch` the signals the shell needs caught now, if that changed: those
+    /// its traps need, and all of them while it waits for a foreground command. The
+    /// others keep their default action, as in bash: a process that reads its own
+    /// caught-signal mask sees only those.
+    pub(crate) fn update_catch(&self) {
+        let Some(catch) = &self.catch else {
+            return;
+        };
+        let wants = if self.fg_waits.get() > 0 {
+            u64::MAX
+        } else {
+            self.trap_wants.get()
+        };
+        if self.caught.replace(wants) != wants {
+            catch(wants);
+        }
+    }
+
     pub(crate) fn next_job_id(&self) -> u32 {
         self.jobs.set(self.jobs.get() + 1);
         // Looks like a pid, cannot be one of ours.
