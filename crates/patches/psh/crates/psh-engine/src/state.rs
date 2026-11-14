@@ -366,6 +366,7 @@ pub(crate) struct Vp {
     /// A command substitution's vproc: its programs' signal deaths are not reported.
     pub in_subst: bool,
     pub ignores: u64,
+    pub program: bool,
     /// Function definitions; shared with subshells until one defines or unsets.
     pub funcs: Rc<HashMap<String, Rc<Func>>>,
     /// One frame per running function call: the variables its `local`s shadow.
@@ -378,6 +379,7 @@ pub(crate) struct Vp {
     /// Descriptors of the running command's process substitutions (`<(…)`), closed
     /// when it completes.
     pub subst_fds: Vec<u32>,
+    pub last_procsub: Option<crate::sched::Join<i32>>,
     /// `{var}>` redirections of the running command: they outlast it (D1326), so the
     /// restore of its descriptors applies them again (`None`: closed).
     pub var_fds: Vec<(u32, Option<crate::fd::Fd>)>,
@@ -1089,10 +1091,11 @@ impl Vp {
         env
     }
 
-    /// The name in front of messages: the file being sourced, else `$0` (a script psh
-    /// runs itself has its own, D1300).
+    /// The name in front of messages: the file of the innermost function or sourced
+    /// file (bash's `BASH_SOURCE[0]`), else `$0` (a script psh runs itself has its own,
+    /// D1300).
     pub(crate) fn msg_name(&self) -> String {
-        match self.calls.iter().rev().find(|c| c.sourced) {
+        match self.calls.last() {
             Some(c) => c.source.clone(),
             None => String::from_utf8_lossy(&self.arg0).into_owned(),
         }

@@ -640,11 +640,18 @@ async fn declare_one(
             vp.frames[k].temps.retain(|t| t != name);
         }
         if fresh {
+            let tempenv = vp
+                .frames
+                .iter()
+                .rev()
+                .find(|f| f.saved.iter().any(|(n, _)| n == name))
+                .is_some_and(|f| f.temps.iter().any(|t| t == name));
             vp.make_local(name);
             // A new local starts without a value and gets only the attributes given
-            // now, unless -I copies the shadowed one.
+            // now, unless -I copies the shadowed one or it shadows a temporary binding
+            // of a caller (`v=t f`, `v=t eval f`), which it copies as bash does.
             let start = match vp.vars.get(name) {
-                Some(v) if o.inherit && !v.nameref => v.clone(),
+                Some(v) if (o.inherit || tempenv) && !v.nameref => v.clone(),
                 _ => Var::default(),
             };
             vp.vars.insert(name, start);

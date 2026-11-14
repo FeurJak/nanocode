@@ -958,7 +958,7 @@ fn run_compound<'a>(vp: &'a mut Vp, code: &'a Rc<Code>, cmd: &'a Command) -> Loc
         CommandKind::Case(c) => Box::pin(run_case(vp, code, cmd, c)),
         CommandKind::Cond(e) => Box::pin(crate::cond::run(vp, code, cmd, e)),
         CommandKind::Arith(w) => Box::pin(async move {
-            vp.line = code.line(cmd.span.start);
+            vp.line = code.line(cmd.span.end.saturating_sub(1));
             match arith_command(vp, code, w, "((: ", false).await? {
                 Some(v) => Ok(i32::from(v == 0)),
                 None => Ok(1),
@@ -1163,8 +1163,8 @@ async fn run_for_items(
     for item in items {
         safepoint(&vp.core.sched).await;
         // The DEBUG trap and `set -x` see the loop header on every iteration.
-        if !vp.traps.map.is_empty() {
-            Box::pin(debug_trap(vp, code, cmd)).await?;
+        if !vp.traps.map.is_empty() && Box::pin(debug_trap(vp, code, cmd)).await? {
+            continue;
         }
         if vp.opts.get(SetOpt::Xtrace) {
             builtins::set::xtrace(vp, &command_text(code, cmd)).await;
@@ -1655,7 +1655,11 @@ async fn prefix_assigns(
                         builtins::set::xtrace(vp, &line).await;
                     }
                     // Assigned at once: later assignments see earlier ones (`a=1 b=$a`).
-                    vp.assign_with(name, v, a.append)
+                    let r = vp.assign_with(name, v, a.append);
+                    if r.is_ok() && name == "BASH_XTRACEFD" {
+                        builtins::set::check_xtracefd(vp).await;
+                    }
+                    r
                 } else {
                     // The value with the variable's attributes (`-i` adds on `+=`); it
                     // is set for the command's duration only.
@@ -1963,6 +1967,7 @@ fn run_simple<'a>(
                     .collect();
                 for (n, v) in assigns {
                     vp.set_var(&n, v);
+                    vp.vars.entry(&n).exported = true;
                 }
                 let saved = vp.fds.clone();
                 vp.bad_assign = false;
@@ -2617,10 +2622,7 @@ async fn run_in_shell(vp: &mut Vp, program: &[u8], argv: Vec<Vec<u8>>, shown: &s
         return Ok(126);
     }
     drop(file);
-    // bash's test: a NUL before the first newline in the first 80 bytes.
-    let head = &source[..source.len().min(80)];
-    let first_line = head.split(|&b| b == b'\n').next().unwrap_or(head);
-    if first_line.contains(&0) {
+    if crate::invocation::binary_file(&source) {
         vp.error(&format!(
             "{shown}: cannot execute binary file: Exec format error"
         ))
@@ -3383,7 +3385,7 @@ pub(crate) async fn process_subst(
     vp.fds.set(n, ours);
     vp.subst_fds.push(n);
     // Detached: it runs while the command reads or writes the other end.
-    drop(spawn_sub(sub, code.clone(), Body::List(list)));
+    vp.last_procsub = Some(spawn_sub(sub, code.clone(), Body::List(list)));
     Ok(format!("/dev/fd/{n}").into_bytes())
 }
 

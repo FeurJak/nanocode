@@ -1332,11 +1332,28 @@ fn expand_text(
             }
         }
         // `"${x-'b'}"`: the quotes stay.
-        Part::Single if quoted && ctx == Ctx::Operand => f.quoted(text),
+        Part::Single if quoted && ctx == Ctx::Operand => {
+            let mut v = Vec::with_capacity(text.len());
+            let mut i = 0;
+            while i < text.len() {
+                match (text[i], text.get(i + 1)) {
+                    (b'\\', Some(b'\n')) => {}
+                    (b'\\', Some(&n)) => v.extend_from_slice(&[b'\\', n]),
+                    (c, _) => {
+                        v.push(c);
+                        i += 1;
+                        continue;
+                    }
+                }
+                i += 2;
+            }
+            f.quoted(&v)
+        }
         Part::Single if !quoted && ctx == Ctx::Arith => f.quoted(text),
         Part::Single => f.quoted(&text[1..text.len() - 1]),
         Part::AnsiC => {
-            let inner = &text[2..text.len() - 1];
+            let open = text.iter().position(|&b| b == b'\'').unwrap_or(1);
+            let inner = &text[open + 1..text.len() - 1];
             let mut v = psh_syntax::decode_ansi_c(inner);
             if let Some(nul) = v.iter().position(|&b| b == 0) {
                 v.truncate(nul);
@@ -2102,7 +2119,8 @@ fn transform_var(
         _ => String::new(),
     };
     // `${!ref@a}`: the variable `ref` names.
-    if p.prefix == ParamPrefix::Indirect && p.name == ParamName::Var {
+    let indirect = p.prefix == ParamPrefix::Indirect && (p.name == ParamName::Var || via.is_some());
+    if indirect {
         name = match via {
             Some(t) => {
                 String::from_utf8_lossy(t.split(|&b| b == b'[').next().unwrap_or(t)).into_owned()
@@ -2116,6 +2134,7 @@ fn transform_var(
     }
     let var = match p.name {
         ParamName::Var => vp.var_ref(&name).cloned(),
+        _ if indirect => vp.var_ref(&name).cloned(),
         _ => None,
     };
     let list = matches!(p.index, Some(Subscript::At | Subscript::Star));

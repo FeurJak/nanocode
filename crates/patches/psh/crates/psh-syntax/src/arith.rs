@@ -207,7 +207,7 @@ impl ArithError {
             None => {
                 let start = text
                     .iter()
-                    .position(|c| !matches!(c, b' ' | b'\t' | b'\n'))
+                    .position(|c| !matches!(c, b' ' | b'\t'))
                     .unwrap_or(text.len());
                 &text[start..]
             }

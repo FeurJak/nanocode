@@ -259,8 +259,7 @@ async fn unsupported(vp: &mut Vp, args: &[Vec<u8>]) -> R {
 /// (status 141); other errors print `NAME: write error: …` and return false.
 pub(crate) async fn write_fd(vp: &Vp, fd: u32, name: &str, data: &[u8]) -> Result<bool, Unwind> {
     let Some(f) = vp.fd(fd) else {
-        vp.error(&format!("{name}: write error: Bad file descriptor"))
-            .await;
+        write_error(vp, name, "Bad file descriptor").await;
         return Ok(false);
     };
     match f.write_all(data).await {
@@ -273,17 +272,25 @@ pub(crate) async fn write_fd(vp: &Vp, fd: u32, name: &str, data: &[u8]) -> Resul
                     if !action.is_empty() {
                         vp.own_sigs.set(vp.own_sigs.get() | 1u64 << pipe);
                     }
-                    vp.error(&format!("{name}: write error: {}", error_text(&e)))
-                        .await;
+                    write_error(vp, name, &error_text(&e)).await;
                     Ok(false)
                 }
             }
         }
         Err(e) => {
-            vp.error(&format!("{name}: write error: {}", error_text(&e)))
-                .await;
+            write_error(vp, name, &error_text(&e)).await;
             Ok(false)
         }
+    }
+}
+
+async fn write_error(vp: &Vp, name: &str, text: &str) {
+    match vp.program {
+        true => {
+            vp.error_raw(format!("{name}: write error: {text}\n").as_bytes())
+                .await;
+        }
+        false => vp.error(&format!("{name}: write error: {text}")).await,
     }
 }
 

@@ -1020,6 +1020,7 @@ async fn run_wrapped(
     }
     let name = argv[0].clone();
     if STANDALONE_BUILTINS.iter().any(|b| b.as_bytes() == name) {
+        vp.program = true;
         return crate::exec::run_builtin(vp, argv, assigns).await;
     }
     if let Some(e) = lookup(vp, &name).await {

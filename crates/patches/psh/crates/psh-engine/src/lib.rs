@@ -118,6 +118,7 @@ pub struct ShellConfig {
     /// The program this shell runs in (the `psh` binary), if any: a nested `bash` never
     /// falls through to it, should it be installed as `bash` (D1413).
     pub own_program: Option<Vec<u8>>,
+    pub inherited: Vec<(u32, Rc<dyn HostFile>)>,
 }
 
 impl ShellConfig {
@@ -144,6 +145,7 @@ impl ShellConfig {
             utilities: util::UtilPolicy::default(),
             nested_shells: true,
             own_program: None,
+            inherited: Vec::new(),
         }
     }
 }
@@ -287,6 +289,9 @@ impl Shell {
                 fds.set(n, Rc::new(FdObj::File(f)));
             }
         }
+        for (n, f) in cfg.inherited {
+            fds.set(n, Rc::new(FdObj::File(f)));
+        }
         let vp = Vp {
             core: core.clone(),
             vars,
@@ -306,11 +311,13 @@ impl Shell {
             fg_text: None,
             in_subst: false,
             ignores: 0,
+            program: false,
             funcs: Rc::new(Default::default()),
             frames: Vec::new(),
             loops: 0,
             getopts: (0, 0),
             subst_fds: Vec::new(),
+            last_procsub: None,
             var_fds: Vec::new(),
             stage_subshell: false,
             time_subshell: None,
@@ -1189,6 +1196,13 @@ async fn run_chunk(
                 false => &e.message,
             };
             for l in message.split('\n') {
+                let line = match l.starts_with("syntax error in conditional expression") {
+                    true => source[..(e.span.start as usize).min(source.len())]
+                        .windows(2)
+                        .rposition(|w| w == b"[[")
+                        .map_or(line, |i| lines.line(i as u32)),
+                    false => line,
+                };
                 msg.extend_from_slice(format!("{name}: {dash_c}line {line}: {l}\n").as_bytes());
             }
             if !errexit
@@ -1197,7 +1211,10 @@ async fn run_chunk(
                     .last()
                     .is_some_and(|l| l.starts_with("syntax error near"))
             {
-                let text = source_line(source, line);
+                let text = match &e.alias_text {
+                    Some(t) => t.as_slice(),
+                    None => source_line(source, line),
+                };
                 msg.extend_from_slice(format!("{name}: {dash_c}line {line}: `").as_bytes());
                 msg.extend_from_slice(text);
                 msg.extend_from_slice(b"'\n");
@@ -1219,10 +1236,7 @@ pub(crate) fn parse_error_line(
     source: &[u8],
 ) -> u32 {
     let unterminated_line = e.span.start as usize >= source.len()
-        && !source.ends_with(
-            b"
-",
-        )
+        && !source.ends_with(b"\n")
         && e.message
             .lines()
             .last()

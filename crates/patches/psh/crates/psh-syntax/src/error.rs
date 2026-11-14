@@ -1,6 +1,7 @@
 //! Parse errors.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt;
 
 use crate::span::Span;
@@ -16,6 +17,7 @@ pub struct ParseError {
     pub incomplete: bool,
     pub resume: Option<usize>,
     pub warnings: alloc::vec::Vec<crate::Warning>,
+    pub alias_text: Option<Vec<u8>>,
 }
 
 impl fmt::Display for ParseError {

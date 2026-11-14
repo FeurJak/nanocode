@@ -142,7 +142,8 @@ impl Parser {
     }
 
     /// The next chunk, or `None` at the end of the input. After an error, returns
-    /// `None`.
+    /// `None`, except after one that discards its line: the next chunk starts on the
+    /// next line.
     pub fn next_chunk(&mut self) -> Option<Result<Ast, ParseError>> {
         if self.done {
             return None;
@@ -282,6 +283,10 @@ fn chunk<'a>(
         Ok(true) => {}
         Ok(false) => return Ok(None),
         Err(mut e) => {
+            if let Some(k) = region(&p.uses, e.span.start, false) {
+                let t = p.uses[k].text;
+                e.alias_text = Some(buf[t.start as usize..t.end as usize].to_vec());
+            }
             // Point errors in alias text at the alias word.
             e.span = original_span(&p.uses, e.span);
             e.warnings = core::mem::take(&mut p.warnings);
@@ -592,6 +597,7 @@ impl<'a> P<'a> {
                 incomplete: false,
                 resume: None,
                 warnings: Vec::new(),
+                alias_text: None,
             });
         }
         Ok(P {
@@ -717,6 +723,7 @@ impl<'a> P<'a> {
             incomplete: false,
             resume: None,
             warnings: Vec::new(),
+            alias_text: None,
         }
     }
 
@@ -731,6 +738,7 @@ impl<'a> P<'a> {
             incomplete: true,
             resume: None,
             warnings: Vec::new(),
+            alias_text: None,
         }
     }
 

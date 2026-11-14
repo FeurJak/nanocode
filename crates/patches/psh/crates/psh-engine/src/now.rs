@@ -101,7 +101,9 @@ fn simple<'a>(
     };
     for a in &s.assigns {
         match (&a.index, &a.value) {
-            (None, AssignValue::Scalar(w)) if expand::word_now(code, w, false) => {}
+            (None, AssignValue::Scalar(w))
+                if expand::word_now(code, w, false) && code.ast.text(a.name) != "BASH_XTRACEFD" => {
+            }
             _ => return None,
         }
     }

@@ -165,6 +165,9 @@ pub(super) async fn wait(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         return Ok(st);
     }
     if ids.is_empty() {
+        if let Some(j) = vp.last_procsub.take() {
+            j.await;
+        }
         // Every job; the status is 0.
         let all = vp.jobs.borrow().all();
         for j in all

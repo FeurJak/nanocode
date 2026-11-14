@@ -169,10 +169,23 @@ pub(crate) async fn list_options(vp: &Vp, on: bool) -> R {
 
 /// `set` without arguments: every variable with a value, sorted, quoted for re-input.
 async fn list_vars(vp: &Vp) -> R {
-    let mut vars: Vec<_> = vp.vars.iter().filter(|(_, v)| v.get().is_some()).collect();
+    let mut vars: Vec<_> = vp
+        .vars
+        .iter()
+        .filter(|(_, v)| v.is_array() || v.get().is_some())
+        .collect();
     vars.sort_by(|a, b| a.0.cmp(b.0));
     let mut buf = Vec::new();
     for (n, v) in vars {
+        if v.is_array() {
+            let d = super::declare::declaration(n, v, vp.utf8());
+            let head = format!("declare -{} {n}", v.flags()).len();
+            if d.get(head) == Some(&b'=') {
+                buf.extend_from_slice(n.as_bytes());
+                buf.extend_from_slice(&d[head..]);
+            }
+            continue;
+        }
         buf.extend_from_slice(n.as_bytes());
         buf.push(b'=');
         // bash's `set` quoting ('…' or $'…'), shared with `declare` (0026).
@@ -292,6 +305,26 @@ pub(crate) async fn prompt(vp: &mut Vp, raw: &[u8]) -> Vec<u8> {
     shown
 }
 
+pub(crate) async fn check_xtracefd(vp: &mut Vp) {
+    let Some(v) = vp
+        .var("BASH_XTRACEFD")
+        .filter(|v| !v.is_empty())
+        .map(<[u8]>::to_vec)
+    else {
+        return;
+    };
+    let fd = std::str::from_utf8(&v)
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok());
+    if !fd.is_some_and(|n| vp.fd(n).is_some()) {
+        vp.error(&format!(
+            "BASH_XTRACEFD: {}: invalid value for trace file descriptor",
+            String::from_utf8_lossy(&v)
+        ))
+        .await;
+    }
+}
+
 /// The expanded `PS4` prefix; tracing is off while it expands.
 async fn ps4(vp: &mut Vp) -> Vec<u8> {
     let raw = vp.var("PS4").map(<[u8]>::to_vec).unwrap_or_default();
@@ -347,7 +380,32 @@ async fn expand_quoted(vp: &mut Vp, raw: Vec<u8>) -> Vec<u8> {
                 vp.line = line;
                 r.unwrap_or(raw)
             }
-            Err(_) => raw,
+            Err(_) => {
+                let mut bare = b": ".to_vec();
+                bare.extend_from_slice(&raw);
+                match psh_syntax::parse_bytes(&bare, psh_syntax::Options::default()) {
+                    Err(e) if e.message.ends_with("matching `}'") => {
+                        vp.error(&format!(
+                            "{}: bad substitution",
+                            String::from_utf8_lossy(&raw)
+                        ))
+                        .await;
+                        raw
+                    }
+                    Err(e) if e.message.ends_with("matching `)'") => {
+                        let msg = format!(
+                            "{}: command substitution: line {}: {}\n",
+                            vp.msg_name(),
+                            vp.line + 2,
+                            e.message
+                        );
+                        vp.error_raw(msg.as_bytes()).await;
+                        let open = raw.windows(2).position(|w| w == b"$(").unwrap_or(raw.len());
+                        raw[..open].to_vec()
+                    }
+                    _ => raw,
+                }
+            }
         }
     } else {
         raw

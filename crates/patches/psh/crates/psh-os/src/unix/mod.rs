@@ -80,6 +80,28 @@ pub fn close_inherited() {
     }
 }
 
+pub fn inherited_fds() -> Vec<libc::c_int> {
+    let listed: Vec<libc::c_int> = std::fs::read_dir("/dev/fd")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+        .filter(|&fd| fd > 2)
+        .collect();
+    listed
+        .into_iter()
+        // SAFETY: F_GETFD only reads the descriptor's flags.
+        .filter(|&fd| unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0)
+        .collect()
+}
+
+pub fn adopt_inherited(fd: libc::c_int) -> io::Result<UnixFile> {
+    let file = UnixFile::stdio(fd)?;
+    // SAFETY: `fd` was inherited and is owned by no value of this process.
+    unsafe { libc::close(fd) };
+    Ok(file)
+}
+
 use spawn::Shared;
 
 /// Settings of a [`UnixHost`].
@@ -737,8 +759,9 @@ fn info(fake_pid: bool) -> psh_engine::host::HostInfo {
             if got > 0 {
                 buf.truncate(got as usize);
                 groups = buf;
-                if !groups.contains(&gid) {
-                    groups.insert(0, gid);
+                match groups.iter().position(|&g| g == gid) {
+                    Some(i) => groups.swap(0, i),
+                    None => groups.insert(0, gid),
                 }
             }
         }

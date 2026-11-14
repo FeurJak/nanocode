@@ -353,11 +353,8 @@ async fn read_script(sub: &Vp, name: &[u8], path: &[u8]) -> Result<Vec<u8>, i32>
             126
         });
     }
-    // bash's test, as for a file it runs itself (D1300): a NUL in the first line of the
-    // first 80 bytes.
-    let head = &source[..source.len().min(80)];
-    let first_line = head.split(|&b| b == b'\n').next().unwrap_or(head);
-    if first_line.contains(&0) {
+    // bash's test, as for a file it runs itself (D1300).
+    if crate::invocation::binary_file(&source) {
         return Err(refused(sub, &shown, "cannot execute binary file").await);
     }
     Ok(source)

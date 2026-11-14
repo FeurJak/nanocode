@@ -54,6 +54,18 @@ pub const LONG_OPTIONS: [&str; 12] = [
 /// psh hands its command line to the real program for these (D1410).
 const UNSUPPORTED_LONG: [&str; 3] = ["--debugger", "--pretty-print", "--wordexp"];
 
+pub fn binary_file(source: &[u8]) -> bool {
+    let sample = &source[..source.len().min(80)];
+    if sample.starts_with(b"\x7fELF") {
+        return true;
+    }
+    let lines = if sample.starts_with(b"#!") { 2 } else { 1 };
+    sample
+        .split_inclusive(|&b| b == b'\n')
+        .take(lines)
+        .any(|l| l.contains(&0))
+}
+
 pub fn errexit(options: &[Vec<u8>]) -> bool {
     sets(options, b'e', b"errexit")
 }

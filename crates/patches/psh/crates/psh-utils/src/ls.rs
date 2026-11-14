@@ -325,6 +325,7 @@ pub async fn run(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
             || !(o.layout == Layout::Long || o.directory || o.classify || o.slash);
         let meta = match ctx.stat_extra(&op, o.deref || o.deref_args).await {
             Ok(m) => m,
+            Err(e) if !explicit && e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
                 let msg = format!(
                     "cannot access {}: {}",

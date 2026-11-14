@@ -474,6 +474,14 @@ impl<T> Join<T> {
     }
 }
 
+impl<T> Clone for Join<T> {
+    fn clone(&self) -> Self {
+        Join {
+            state: self.state.clone(),
+        }
+    }
+}
+
 impl<T> Future for Join<T> {
     type Output = T;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {

@@ -112,6 +112,9 @@ const NAME_VAR: &str = "PSH_NAME";
 
 static ARG0: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
 
+#[cfg(unix)]
+static INHERITED: std::sync::OnceLock<Vec<i32>> = std::sync::OnceLock::new();
+
 fn name() -> Vec<u8> {
     std::env::var_os(NAME_VAR).map_or_else(
         || ARG0.get().cloned().unwrap_or_else(|| b"psh".to_vec()),
@@ -143,6 +146,18 @@ fn shell_config() -> ShellConfig {
     cfg.cwd = std::env::current_dir()
         .map(|p| os_bytes(p.into_os_string()))
         .unwrap_or_else(|_| b"/".to_vec());
+    #[cfg(unix)]
+    {
+        cfg.inherited = INHERITED
+            .get()
+            .into_iter()
+            .flatten()
+            .filter_map(|&n| {
+                let file = psh_os::unix::adopt_inherited(n).ok()?;
+                Some((n as u32, Rc::new(file) as Rc<dyn HostFile>))
+            })
+            .collect();
+    }
     #[cfg(unix)]
     if let Some((_, pwd)) = cfg.env.iter().find(|(k, _)| k == b"PWD")
         && pwd.starts_with(b"/")
@@ -224,6 +239,10 @@ pub fn run_with(args: Vec<std::ffi::OsString>, extra: &[psh_engine::util::UtilEn
 
 pub fn run_as(arg0: std::ffi::OsString, args: Vec<std::ffi::OsString>) -> ExitCode {
     ARG0.get_or_init(|| os_bytes(arg0));
+    #[cfg(unix)]
+    if args.first().is_none_or(|a| a != "--warm") {
+        INHERITED.get_or_init(psh_os::unix::inherited_fds);
+    }
     run(args)
 }
 
@@ -339,6 +358,14 @@ fn script(args: &[Vec<u8>], name: Vec<u8>) -> Result<Script, ExitCode> {
     let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
     let login = name.starts_with(b"-");
     let mut script = match parse_args(args) {
+        Err(msg) if msg.starts_with("line 0: ") => {
+            eprintln!("{}: {msg}", text(&name));
+            return Err(ExitCode::from(2));
+        }
+        Err(msg) if msg.ends_with(": invalid option name") => {
+            eprintln!("{0}: line 0: {0}: {msg}", text(&name));
+            return Err(ExitCode::from(2));
+        }
         Err(msg) => return Err(usage_error(&msg)),
         // `--help` after bash's options (`psh -e --help`).
         Ok(Invocation::Help) => {
@@ -368,6 +395,10 @@ fn script(args: &[Vec<u8>], name: Vec<u8>) -> Result<Script, ExitCode> {
             args,
             options,
         }) => match std::fs::read(os_path(&path)) {
+            Ok(src) if psh_engine::invocation::binary_file(&src) => {
+                eprintln!("{0}: {0}: cannot execute binary file", text(&path));
+                return Err(ExitCode::from(126));
+            }
             Ok(src) => Script {
                 source: src,
                 arg0: path,
