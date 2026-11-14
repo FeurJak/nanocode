@@ -403,7 +403,9 @@ fn format(v: Val, name: &str) -> ValR {
                 x => Ok(Val::str(one(x)?)),
             }
         }
-        "base64" => Ok(Val::str(base64_encode(text(&v).as_bytes()))),
+        "base64" => Ok(Val::str(
+            nanocode_sys::base64::STANDARD.encode(text(&v).as_bytes()),
+        )),
         "base64d" => {
             let t = text(&v);
             let clean = t.trim_end_matches('=');
@@ -427,24 +429,6 @@ fn format(v: Val, name: &str) -> ValR {
 }
 
 const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-fn base64_encode(b: &[u8]) -> String {
-    let mut out = String::new();
-    for chunk in b.chunks(3) {
-        let n = chunk.len();
-        let v = (u32::from(chunk[0]) << 16)
-            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
-            | u32::from(*chunk.get(2).unwrap_or(&0));
-        for i in 0..4 {
-            if i <= n {
-                out.push(B64[(v >> (18 - 6 * i) & 63) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
-}
 
 /// jq decodes what it can and ignores trailing garbage after padding.
 fn base64_decode(b: &[u8]) -> Option<Vec<u8>> {

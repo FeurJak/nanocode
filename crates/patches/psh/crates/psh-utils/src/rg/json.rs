@@ -1,5 +1,5 @@
-// The JSON printer below (`JSONBuilder`, `JSON`, `JSONSink`, `SubMatches`, the message
-// types and `base64_standard`) is copied from grep-printer 0.3.1 (`src/json.rs`,
+// The JSON printer below (`JSONBuilder`, `JSON`, `JSONSink`, `SubMatches` and the
+// message types) is copied from grep-printer 0.3.1 (`src/json.rs`,
 // `src/jsont.rs`) in ripgrep (https://github.com/BurntSushi/ripgrep): Copyright (c)
 // 2015 Andrew Gallant. Licensed under the MIT License (see NOTICE).
 
@@ -210,7 +210,10 @@ fn message(kind: &str, data: Json) -> Json {
 fn data_bytes(bytes: &[u8]) -> Json {
     match std::str::from_utf8(bytes) {
         Ok(text) => Json::obj().set("text", Json::Str(text.into())),
-        Err(_) => Json::obj().set("bytes", Json::Str(base64_standard(bytes))),
+        Err(_) => Json::obj().set(
+            "bytes",
+            Json::Str(nanocode_sys::base64::STANDARD.encode(bytes)),
+        ),
     }
 }
 
@@ -224,7 +227,10 @@ fn data_path(path: Option<&Path>) -> Json {
             Some(text) => Json::obj().set("text", Json::Str(text.into())),
             None => Json::obj().set(
                 "bytes",
-                Json::Str(base64_standard(path.as_os_str().as_bytes())),
+                Json::Str(
+                    nanocode_sys::base64::STANDARD
+                        .encode(path.as_os_str().as_bytes()),
+                ),
             ),
         }
     }
@@ -665,50 +671,4 @@ impl<'a> SubMatches<'a> {
             SubMatches::Big(ref x) => x,
         }
     }
-}
-
-/// Encodes bytes as standard base64 (with padding), as grep-printer does.
-fn base64_standard(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    let mut out = String::new();
-    let mut it = bytes.chunks_exact(3);
-    while let Some(chunk) = it.next() {
-        let group24 = (usize::from(chunk[0]) << 16)
-            | (usize::from(chunk[1]) << 8)
-            | usize::from(chunk[2]);
-        let index1 = (group24 >> 18) & 0b111_111;
-        let index2 = (group24 >> 12) & 0b111_111;
-        let index3 = (group24 >> 6) & 0b111_111;
-        let index4 = (group24 >> 0) & 0b111_111;
-        out.push(char::from(ALPHABET[index1]));
-        out.push(char::from(ALPHABET[index2]));
-        out.push(char::from(ALPHABET[index3]));
-        out.push(char::from(ALPHABET[index4]));
-    }
-    match it.remainder() {
-        &[] => {}
-        &[byte0] => {
-            let group8 = usize::from(byte0);
-            let index1 = (group8 >> 2) & 0b111_111;
-            let index2 = (group8 << 4) & 0b111_111;
-            out.push(char::from(ALPHABET[index1]));
-            out.push(char::from(ALPHABET[index2]));
-            out.push('=');
-            out.push('=');
-        }
-        &[byte0, byte1] => {
-            let group16 = (usize::from(byte0) << 8) | usize::from(byte1);
-            let index1 = (group16 >> 10) & 0b111_111;
-            let index2 = (group16 >> 4) & 0b111_111;
-            let index3 = (group16 << 2) & 0b111_111;
-            out.push(char::from(ALPHABET[index1]));
-            out.push(char::from(ALPHABET[index2]));
-            out.push(char::from(ALPHABET[index3]));
-            out.push('=');
-        }
-        _ => unreachable!("remainder must have length < 3"),
-    }
-    out
 }

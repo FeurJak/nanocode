@@ -177,29 +177,9 @@ async fn run_encode(
         } else {
             carry.len() / 3 * 3
         };
-        let full = whole / 3 * 3;
-        let mut syms = Vec::with_capacity(whole / 3 * 4 + 4);
-        for c in carry[..full].as_chunks::<3>().0 {
-            let n = u32::from(c[0]) << 16 | u32::from(c[1]) << 8 | u32::from(c[2]);
-            syms.extend_from_slice(&[
-                ALPHABET[(n >> 18) as usize & 63],
-                ALPHABET[(n >> 12) as usize & 63],
-                ALPHABET[(n >> 6) as usize & 63],
-                ALPHABET[n as usize & 63],
-            ]);
-        }
-        if whole > full {
-            let c = &carry[full..whole];
-            let b1 = c.get(1).copied().unwrap_or(0);
-            syms.push(ALPHABET[usize::from(c[0] >> 2)]);
-            syms.push(ALPHABET[usize::from((c[0] & 3) << 4 | b1 >> 4)]);
-            syms.push(if c.len() > 1 {
-                ALPHABET[usize::from((b1 & 15) << 2)]
-            } else {
-                b'='
-            });
-            syms.push(b'=');
-        }
+        let syms = nanocode_sys::base64::STANDARD
+            .encode(&carry[..whole])
+            .into_bytes();
         let mut text = if let Some(lines) = syms.len().checked_div(wrap) {
             let mut text = Vec::with_capacity(syms.len() + lines + 2);
             let mut rest = &syms[..];
