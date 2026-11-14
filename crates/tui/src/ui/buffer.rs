@@ -1,4 +1,4 @@
-use std::ops::{Index, IndexMut};
+use std::ops::{Index, IndexMut, Range};
 
 use super::{
     layout::{Position, Rect},
@@ -340,7 +340,16 @@ impl Buffer {
 
     #[must_use]
     pub fn diff_iter<'next>(&self, next: &'next Self) -> BufferDiff<'_, 'next> {
-        BufferDiff::new(self, next)
+        BufferDiff::new(self, next, 0..next.content.len().min(self.content.len()))
+    }
+
+    #[must_use]
+    pub fn diff_range<'next>(
+        &self,
+        next: &'next Self,
+        cells: Range<usize>,
+    ) -> BufferDiff<'_, 'next> {
+        BufferDiff::new(self, next, cells)
     }
 
     #[must_use]
@@ -398,11 +407,12 @@ pub struct BufferDiff<'previous, 'next> {
     next: &'next [Cell],
     area: Rect,
     position: usize,
+    end: usize,
     trailing: Option<Trailing>,
 }
 
 impl<'previous, 'next> BufferDiff<'previous, 'next> {
-    fn new(previous: &'previous Buffer, next: &'next Buffer) -> Self {
+    fn new(previous: &'previous Buffer, next: &'next Buffer, cells: Range<usize>) -> Self {
         assert_eq!(previous.area.x, next.area.x, "diffed buffers share x");
         assert_eq!(previous.area.y, next.area.y, "diffed buffers share y");
         assert_eq!(
@@ -415,7 +425,8 @@ impl<'previous, 'next> BufferDiff<'previous, 'next> {
             previous: &previous.content,
             next: &next.content,
             area,
-            position: 0,
+            position: cells.start,
+            end: cells.end,
             trailing: None,
         }
     }
@@ -437,7 +448,7 @@ impl<'next> Iterator for BufferDiff<'_, 'next> {
     type Item = (u16, u16, &'next Cell);
 
     fn next(&mut self) -> Option<Self::Item> {
-        let length = self.next.len().min(self.previous.len());
+        let length = self.end;
         if let Some(Trailing { next, end, force }) = &mut self.trailing {
             while *next < *end {
                 let index = *next;

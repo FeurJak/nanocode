@@ -1,7 +1,7 @@
 use std::io::Write;
 
 use crate::ui::{
-    buffer::Cell,
+    buffer::{Buffer, Cell},
     style::{Color, Modifier},
 };
 
@@ -65,24 +65,22 @@ fn color(bytes: &mut Vec<u8>, layer: u8, color: Color) {
 
 const FOREGROUND: u8 = 3;
 const BACKGROUND: u8 = 4;
-const UNDERLINE: u8 = 5;
 
-fn colors(bytes: &mut Vec<u8>, foreground: Color, background: Color, monochrome: bool) {
+fn colors(
+    bytes: &mut Vec<u8>,
+    foreground: Option<Color>,
+    background: Option<Color>,
+    monochrome: bool,
+) {
     bytes.extend_from_slice(b"\x1b[");
-    if !monochrome {
+    if !monochrome && let Some(foreground) = foreground {
         color(bytes, FOREGROUND, foreground);
     }
-    bytes.push(b';');
-    if !monochrome {
-        color(bytes, BACKGROUND, background);
+    if foreground.is_some() && background.is_some() {
+        bytes.push(b';');
     }
-    bytes.push(b'm');
-}
-
-fn reset_color(bytes: &mut Vec<u8>, layer: u8, monochrome: bool) {
-    bytes.extend_from_slice(b"\x1b[");
-    if !monochrome {
-        color(bytes, layer, Color::Reset);
+    if !monochrome && let Some(background) = background {
+        color(bytes, BACKGROUND, background);
     }
     bytes.push(b'm');
 }
@@ -149,33 +147,90 @@ fn modifiers(bytes: &mut Vec<u8>, from: Modifier, to: Modifier) {
 
 pub(crate) fn draw<'a>(
     bytes: &mut Vec<u8>,
+    screen: &Buffer,
     cells: impl Iterator<Item = (u16, u16, &'a Cell)>,
     monochrome: bool,
-) {
+) -> bool {
     let mut foreground = Color::Reset;
     let mut background = Color::Reset;
     let mut modifier = Modifier::empty();
-    let mut last: Option<(u16, u16)> = None;
+    let mut last: Option<(u16, u16, bool)> = None;
+    let mut rows = None;
     for (x, y, cell) in cells {
-        if !last.is_some_and(|(column, row)| column.checked_add(1) == Some(x) && row == y) {
-            move_to(bytes, x, y);
+        rows = match rows {
+            None => Some((y, false)),
+            Some((row, many)) => Some((row, many || row != y)),
+        };
+        match last {
+            Some((column, row, _)) if row == y && column.checked_add(1) == Some(x) => {}
+            Some((column, row, true)) if row == y && column < x => {
+                let gap = screen.index_of(column + 1, y)..screen.index_of(x, y);
+                advance(
+                    bytes,
+                    &screen.content[gap],
+                    x,
+                    y,
+                    (foreground, background, modifier),
+                );
+            }
+            _ => move_to(bytes, x, y),
         }
-        last = Some((x, y));
+        last = Some((x, y, cell.cell_width() == 1));
         if cell.modifier != modifier {
             modifiers(bytes, modifier, cell.modifier);
             modifier = cell.modifier;
         }
         if cell.fg != foreground || cell.bg != background {
-            colors(bytes, cell.fg, cell.bg, monochrome);
+            colors(
+                bytes,
+                (cell.fg != foreground).then_some(cell.fg),
+                (cell.bg != background).then_some(cell.bg),
+                monochrome,
+            );
             foreground = cell.fg;
             background = cell.bg;
         }
         bytes.extend_from_slice(cell.symbol_bytes());
     }
-    reset_color(bytes, FOREGROUND, monochrome);
-    reset_color(bytes, BACKGROUND, monochrome);
-    reset_color(bytes, UNDERLINE, monochrome);
-    attribute(bytes, RESET);
+    if foreground != Color::Reset || background != Color::Reset || !modifier.is_empty() {
+        attribute(bytes, RESET);
+    }
+    rows.is_some_and(|(_, many)| many)
+}
+
+fn advance(bytes: &mut Vec<u8>, gap: &[Cell], x: u16, y: u16, style: (Color, Color, Modifier)) {
+    let forward = gap.len();
+    let jump = 4 + digits(u32::from(y) + 1) + digits(u32::from(x) + 1);
+    let step = 3 + digits(forward as u32);
+    let fill = gap.iter().try_fold(0, |length, cell| {
+        (cell.cell_width() == 1 && (cell.fg, cell.bg, cell.modifier) == style)
+            .then(|| length + cell.symbol_bytes().len())
+    });
+    match fill {
+        Some(length) if length <= jump.min(step) => {
+            for cell in gap {
+                bytes.extend_from_slice(cell.symbol_bytes());
+            }
+        }
+        _ if step < jump => {
+            write!(bytes, "\x1b[{forward}C").expect("writing to a Vec cannot fail");
+        }
+        _ => move_to(bytes, x, y),
+    }
+}
+
+const fn digits(value: u32) -> usize {
+    match value.checked_ilog10() {
+        Some(log) => log as usize + 1,
+        None => 1,
+    }
+}
+
+pub(crate) fn scroll(bytes: &mut Vec<u8>, top: u16, bottom: u16, lines: u16, up: bool) {
+    write!(bytes, "\x1b[{};{}r", u32::from(top) + 1, bottom).expect("writing to a Vec cannot fail");
+    move_to(bytes, 0, top);
+    let operation = if up { 'M' } else { 'L' };
+    write!(bytes, "\x1b[{lines}{operation}\x1b[r").expect("writing to a Vec cannot fail");
 }
 
 pub const BEGIN_SYNCHRONIZED_UPDATE: &str = "\x1b[?2026h";

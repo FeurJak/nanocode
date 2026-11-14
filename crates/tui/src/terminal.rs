@@ -113,6 +113,7 @@ pub struct TerminalSession {
     regions: Vec<Rect>,
     spinners: Vec<Position>,
     selection: Option<Selection>,
+    changed: Vec<usize>,
 }
 
 impl TerminalSession {
@@ -139,6 +140,7 @@ impl TerminalSession {
             regions: Vec::new(),
             spinners: Vec::new(),
             selection: None,
+            changed: Vec::new(),
         })
     }
 
@@ -186,10 +188,17 @@ impl TerminalSession {
             downsample(&mut self.current);
         }
         let diff_encode = nanocode_trace::info_span!("tui.terminal.diff_encode").entered();
+        let scroll = if self.stale {
+            None
+        } else {
+            scroll(&mut self.previous, &self.current, &mut self.changed)
+        };
         let frame = Frame {
             bytes: &mut self.bytes,
+            screen: &self.current,
             area,
             stale: self.stale,
+            scroll,
             cursor,
             shown: self.cursor,
             monochrome: self.monochrome,
@@ -197,7 +206,11 @@ impl TerminalSession {
         let encoded = if self.stale {
             frame.encode(self.current.blank_diff_iter())
         } else {
-            frame.encode(self.previous.diff_iter(&self.current))
+            let width = usize::from(area.width);
+            frame.encode(self.changed.iter().flat_map(|&y| {
+                self.previous
+                    .diff_range(&self.current, y * width..(y + 1) * width)
+            }))
         };
         let Some(changed_cells) = encoded else {
             span.record("frame.changed_cells", 0);
@@ -246,12 +259,10 @@ impl TerminalSession {
         self.bytes.clear();
         self.bytes
             .extend_from_slice(ansi::BEGIN_SYNCHRONIZED_UPDATE.as_bytes());
-        if self.cursor.is_some() {
-            self.bytes.extend_from_slice(ansi::HIDE_CURSOR.as_bytes());
-        }
         let previous = &self.previous;
-        ansi::draw(
+        let synchronized = ansi::draw(
             &mut self.bytes,
+            previous,
             self.spinners.iter().filter_map(|position| {
                 previous
                     .cell(*position)
@@ -261,10 +272,8 @@ impl TerminalSession {
         );
         if let Some(position) = self.cursor {
             ansi::move_to(&mut self.bytes, position.x, position.y);
-            self.bytes.extend_from_slice(ansi::SHOW_CURSOR.as_bytes());
         }
-        self.bytes
-            .extend_from_slice(ansi::END_SYNCHRONIZED_UPDATE.as_bytes());
+        finish(&mut self.bytes, synchronized);
         span.record("frame.bytes", self.bytes.len());
         self.output.write_all(&self.bytes)?;
         self.output.flush()?;
@@ -416,10 +425,20 @@ impl Drop for TerminalSession {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct Scroll {
+    top: u16,
+    bottom: u16,
+    lines: u16,
+    up: bool,
+}
+
 struct Frame<'a> {
     bytes: &'a mut Vec<u8>,
+    screen: &'a Buffer,
     area: Rect,
     stale: bool,
+    scroll: Option<Scroll>,
     cursor: Option<Position>,
     shown: Option<Position>,
     monochrome: bool,
@@ -433,7 +452,7 @@ impl Frame<'_> {
         let mut changed_cells = 0;
         let mut updates = updates.inspect(|_| changed_cells += 1).peekable();
         let has_updates = updates.peek().is_some();
-        if !self.stale && !has_updates && self.cursor == self.shown {
+        if !self.stale && self.scroll.is_none() && !has_updates && self.cursor == self.shown {
             return None;
         }
         self.bytes.clear();
@@ -447,26 +466,100 @@ impl Frame<'_> {
                 self.bytes.extend_from_slice(ansi::CLEAR_LINE.as_bytes());
             }
         }
-        if has_updates {
-            if self.shown.is_some() {
-                self.bytes.extend_from_slice(ansi::HIDE_CURSOR.as_bytes());
-            }
-            ansi::draw(self.bytes, updates, self.monochrome);
+        if let Some(Scroll {
+            top,
+            bottom,
+            lines,
+            up,
+        }) = self.scroll
+        {
+            ansi::scroll(self.bytes, top, bottom, lines, up);
         }
+        let rows = has_updates && ansi::draw(self.bytes, self.screen, updates, self.monochrome);
         match self.cursor {
             Some(position) => {
                 ansi::move_to(self.bytes, position.x, position.y);
-                self.bytes.extend_from_slice(ansi::SHOW_CURSOR.as_bytes());
+                if self.shown.is_none() {
+                    self.bytes.extend_from_slice(ansi::SHOW_CURSOR.as_bytes());
+                }
             }
             None if self.shown.is_some() => {
                 self.bytes.extend_from_slice(ansi::HIDE_CURSOR.as_bytes());
             }
             None => {}
         }
-        self.bytes
-            .extend_from_slice(ansi::END_SYNCHRONIZED_UPDATE.as_bytes());
+        finish(self.bytes, self.stale || self.scroll.is_some() || rows);
         Some(changed_cells)
     }
+}
+
+fn finish(bytes: &mut Vec<u8>, synchronized: bool) {
+    if synchronized {
+        bytes.extend_from_slice(ansi::END_SYNCHRONIZED_UPDATE.as_bytes());
+    } else {
+        bytes.drain(..ansi::BEGIN_SYNCHRONIZED_UPDATE.len());
+    }
+}
+
+fn scroll(previous: &mut Buffer, current: &Buffer, changed: &mut Vec<usize>) -> Option<Scroll> {
+    changed.clear();
+    let width = usize::from(current.area.width);
+    let rows = previous.content.len().checked_div(width)?;
+    changed.extend((0..rows).filter(|&y| row(previous, width, y) != row(current, width, y)));
+    let top = *changed.first()?;
+    let bottom = *changed.last()? + 1;
+    let span = bottom - top;
+    let misses = changed.len();
+    let kept = |lines: usize, up: bool| {
+        span - lines
+            - (top..bottom - lines)
+                .filter(|&y| {
+                    let (from, to) = if up { (y + lines, y) } else { (y, y + lines) };
+                    row(previous, width, from) != row(current, width, to)
+                })
+                .take(misses)
+                .count()
+    };
+    let mut best = (span - misses, None);
+    for lines in 1..misses {
+        for up in [true, false] {
+            let (first, last) = if up {
+                ((top + lines, top), (bottom - 1, bottom - 1 - lines))
+            } else {
+                ((top, top + lines), (bottom - 1 - lines, bottom - 1))
+            };
+            let anchored = row(previous, width, first.0) == row(current, width, first.1)
+                || row(previous, width, last.0) == row(current, width, last.1);
+            if anchored {
+                let rows = kept(lines, up);
+                if rows > best.0 {
+                    best = (rows, Some((lines, up)));
+                }
+            }
+        }
+    }
+    let (lines, up) = best.1?;
+    let region = &mut previous.content[top * width..bottom * width];
+    let blank = if up {
+        region.rotate_left(lines * width);
+        (span - lines) * width..span * width
+    } else {
+        region.rotate_right(lines * width);
+        0..lines * width
+    };
+    region[blank].iter_mut().for_each(Cell::reset);
+    changed.clear();
+    changed.extend((top..bottom).filter(|&y| row(previous, width, y) != row(current, width, y)));
+    Some(Scroll {
+        top: top as u16,
+        bottom: bottom as u16,
+        lines: lines as u16,
+        up,
+    })
+}
+
+fn row(buffer: &Buffer, width: usize, y: usize) -> &[Cell] {
+    &buffer.content[y * width..(y + 1) * width]
 }
 
 fn execute(output: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
