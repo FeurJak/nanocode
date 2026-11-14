@@ -1908,7 +1908,14 @@ impl<'a> P<'a> {
             } else {
                 "syntax error: arithmetic expression required"
             };
-            return Err(self.error_at(open, close + 2, String::from(message)));
+            return Err(self.error_at(
+                open,
+                close + 2,
+                format!(
+                    "{message}\nsyntax error: `(({}))'",
+                    self.lossy(open + 2, close)
+                ),
+            ));
         }
         self.pos = close + 2;
         self.skip_blanks();
@@ -2507,7 +2514,8 @@ impl<'a> P<'a> {
                 s,
                 e,
                 format!(
-                    "syntax error in conditional expression: unexpected token `{text}'\nsyntax error near `{text}'"
+                    "syntax error in conditional expression: unexpected token `{text}'\nsyntax error near `{}'",
+                    self.cond_near(e)
                 ),
             ));
         }
@@ -2545,15 +2553,35 @@ impl<'a> P<'a> {
         }
     }
 
-    /// The token bash names after "syntax error near" for a `[[ ]]` token: of some
-    /// two-char operators only the last char.
-    fn cond_near(text: &str) -> &str {
-        match text {
-            ";;" => ";",
-            ">|" => "|",
-            "<&" | ">&" => "&",
-            t => t,
+    /// The text bash names after "syntax error near" for a `[[ ]]` token ending at `end`:
+    /// its input line read back from the next unread byte to a blank or one of `;|&`.
+    fn cond_near(&self, end: usize) -> String {
+        let last = end.saturating_sub(1);
+        let start = self.b[..last]
+            .iter()
+            .rposition(|&c| c == b'\n')
+            .map_or(0, |n| n + 1);
+        let stop = self.b[last..self.end]
+            .iter()
+            .position(|&c| c == b'\n')
+            .map_or(self.end, |n| last + n + 1);
+        let t = &self.b[start..stop];
+        let mut i = end - start;
+        if i > 0 && i >= t.len() {
+            i -= 1;
         }
+        while i > 0 && matches!(t[i], b' ' | b'\t' | b'\n') {
+            i -= 1;
+        }
+        let token_end = if i > 0 { i + 1 } else { 0 };
+        while i > 0 && !matches!(t[i], b' ' | b'\t' | b'\n' | b';' | b'|' | b'&') {
+            i -= 1;
+        }
+        while i != token_end && matches!(t[i], b' ' | b'\t' | b'\n') {
+            i += 1;
+        }
+        let token_end = if token_end == 0 { i + 1 } else { token_end };
+        String::from_utf8_lossy(&t[i..token_end]).into_owned()
     }
 
     /// A primary was expected at the cursor.
@@ -2570,7 +2598,7 @@ impl<'a> P<'a> {
         } else {
             format!(
                 "unexpected token `{text}' in conditional command\nsyntax error near `{}'",
-                Self::cond_near(&text)
+                self.cond_near(e)
             )
         };
         self.error_at(s, e, message)
@@ -2579,10 +2607,10 @@ impl<'a> P<'a> {
     /// The argument of a unary or binary operator is missing.
     fn cond_arg_error(&self, kind: &str, op: &str) -> ParseError {
         let (s, e, text) = self.cond_token();
-        let near = if text == "newline" || text == "EOF" {
-            op
+        let near = if text == "EOF" {
+            String::from(op)
         } else {
-            Self::cond_near(&text)
+            self.cond_near(e)
         };
         self.error_at(
             s,
@@ -2656,14 +2684,30 @@ impl<'a> P<'a> {
         let start = self.pos;
         if self.peek() == Some(b'(') {
             self.pos += 1;
-            let inner = self.parse_cond_or(open)?;
+            let inner = match self.parse_cond_or(open) {
+                Ok(inner) => inner,
+                Err(mut err) => {
+                    if !err.incomplete {
+                        match err.message.rfind('\n') {
+                            Some(n) => err.message.insert_str(n, "\nexpected `)'"),
+                            None => err.message.insert_str(0, "expected `)'\n"),
+                        }
+                    }
+                    return Err(err);
+                }
+            };
             self.skip_linebreaks()?;
             if self.peek() != Some(b')') {
                 let (s, e, text) = self.cond_token();
+                let near = if text == "EOF" {
+                    text.clone()
+                } else {
+                    self.cond_near(e)
+                };
                 return Err(self.error_at(
                     s,
                     e,
-                    format!("unexpected token `{text}', expected `)'\nsyntax error near `{text}'"),
+                    format!("unexpected token `{text}', expected `)'\nsyntax error near `{near}'"),
                 ));
             }
             self.pos += 1;
@@ -2741,7 +2785,7 @@ impl<'a> P<'a> {
                 e,
                 format!(
                     "unexpected token `{text}', conditional binary operator expected\nsyntax error near `{}'",
-                    if text == "newline" { first_text } else { &text }
+                    self.cond_near(e)
                 ),
             ));
         };
@@ -2766,7 +2810,7 @@ impl<'a> P<'a> {
                     e,
                     format!(
                         "syntax error in conditional expression: unexpected token `{text}'\nsyntax error near `{}'",
-                        Self::cond_near(&text)
+                        self.cond_near(e)
                     ),
                 ));
             }

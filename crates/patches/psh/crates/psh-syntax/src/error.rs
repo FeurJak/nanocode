@@ -8,7 +8,8 @@ use crate::span::Span;
 /// A syntax error: where, and bash's message for it (without bash's `line N:` prefix).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParseError {
-    /// The offending token, or an empty span at the end of the input.
+    /// The offending token, an empty span at the opening quote of an unterminated quote,
+    /// or an empty span at the end of the input.
     pub span: Span,
     pub message: String,
     /// The input ended inside a construct: more input could complete it.

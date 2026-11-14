@@ -79,6 +79,7 @@ fn andor<'a>(vp: &'a mut Vp, code: &'a Rc<Code>, ao: &'a AndOr) -> LocalBoxFutur
 /// `cmd &`: a job, run as a detached subshell task (D1900).
 async fn run_background(vp: &mut Vp, code: &Rc<Code>, list: ListId, item: usize) -> R {
     let mut sub = enter(vp).await?;
+    sub.loops = 0;
     let code = code.clone();
     let ao = &code.ast.list(list).items[item];
     let text = code.ast.text(ao.span).trim_end();
@@ -184,6 +185,7 @@ async fn coproc(
         return Ok(1);
     }
     let mut sub = enter(vp).await?;
+    sub.loops = 0;
     let (to_r, to_w) = pipe::pipe();
     let (from_r, from_w) = pipe::pipe();
     sub.fds.set(0, Rc::new(FdObj::PipeRead(to_r)));
@@ -461,7 +463,7 @@ async fn debug_trap(vp: &mut Vp, code: &Rc<Code>, cmd: &Command) -> Result<bool,
     let action = vp.traps.action(TrapKey::Debug).unwrap_or_default();
     let status = vp.status;
     vp.in_debug_trap = true;
-    let n = trap::run_action_status(vp, &action, status).await;
+    let n = trap::run_action_status(vp, TrapKey::Debug, &action, status).await;
     vp.in_debug_trap = false;
     let n = n?;
     if n == 2 && vp.in_function() {
@@ -596,8 +598,8 @@ async fn run_pipeline_stages(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
         let mut sub = enter(vp).await?;
         sub.jobs = Rc::new(std::cell::RefCell::new(vp.jobs.borrow().for_stage()));
         sub.stage_subshell = matches!(code.ast.cmd(stage.cmd).kind, CommandKind::Subshell(_));
-        if matches!(cmd.kind, CommandKind::Simple(_)) {
-            sub.loops = vp.loops;
+        if !matches!(code.ast.cmd(stage.cmd).kind, CommandKind::Simple(_)) {
+            sub.loops = 0;
         }
         if let Some(r) = next_in.take() {
             sub.fds.set(0, r);
@@ -976,7 +978,8 @@ async fn run_subshell(vp: &mut Vp, code: &Rc<Code>, list: ListId) -> R {
         .time_subshell
         .take()
         .map(|posix| (posix, crate::timing::start(vp)));
-    let sub = enter(vp).await?;
+    let mut sub = enter(vp).await?;
+    sub.loops = 0;
     let own_pid = vp.core.host.forks()
         && sub.fds.all_files()
         && code.ast.text(code.ast.list(list).span).contains("BASHPID");
@@ -1048,6 +1051,7 @@ async fn define_function(
 ) -> R {
     vp.line = code.line(cmd.span.start);
     let Some(name) = psh_syntax::literal_text(&code.ast, &f.name) else {
+        vp.line = code.line(cmd.span.end.saturating_sub(1));
         vp.error(&format!(
             "`{}': not a valid identifier",
             code.ast.text(f.name.span)
@@ -1544,7 +1548,7 @@ pub(crate) async fn call_function(
             let line = vp.line;
             let st = vp.status;
             vp.in_debug_trap = true;
-            let r = trap::run_action_status(vp, &a, st).await;
+            let r = trap::run_action_status(vp, TrapKey::Debug, &a, st).await;
             vp.in_debug_trap = false;
             vp.line = line;
             r.map(|_| ())
@@ -1689,6 +1693,14 @@ async fn prefix_assigns(
                 let (sub, st1) = Box::pin(expand::expand_single(vp, code, idx, ctx)).await?;
                 let (v, st2) = Box::pin(expand::assign_value(vp, code, w)).await?;
                 *subst_status = st2.or(st1).or(*subst_status);
+                if argv.is_empty() && vp.opts.get(SetOpt::Xtrace) {
+                    let op: &[u8] = if a.append { b"+=" } else { b"=" };
+                    let lhs = code
+                        .ast
+                        .text(psh_syntax::Span::new(a.name.start, idx.span.end + 1));
+                    let line = builtins::set::xtrace_assign(lhs.as_bytes(), op, &v);
+                    builtins::set::xtrace(vp, &line).await;
+                }
                 vp.assign_elem(name, &sub, v, a.append)
             }
             (Some(idx), AssignValue::Array(_)) => Err(format!(

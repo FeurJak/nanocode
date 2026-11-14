@@ -294,10 +294,7 @@ pub(crate) async fn prompt(vp: &mut Vp, raw: &[u8]) -> Vec<u8> {
 
 /// The expanded `PS4` prefix; tracing is off while it expands.
 async fn ps4(vp: &mut Vp) -> Vec<u8> {
-    let raw = vp
-        .var("PS4")
-        .map(<[u8]>::to_vec)
-        .unwrap_or_else(|| b"+ ".to_vec());
+    let raw = vp.var("PS4").map(<[u8]>::to_vec).unwrap_or_default();
     let expanded = expand_quoted(vp, raw).await;
     vp.opts.set(SetOpt::Xtrace, true);
     let mut out = Vec::new();
@@ -374,6 +371,9 @@ pub(crate) fn xtrace_word(w: &[u8]) -> Vec<u8> {
     });
     if !needs {
         return w.to_vec();
+    }
+    if w == b"'" {
+        return b"\\'".to_vec();
     }
     let mut out = vec![b'\''];
     for &b in w {

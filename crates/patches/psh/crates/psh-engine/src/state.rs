@@ -501,12 +501,11 @@ impl Vp {
         &*self.core.host
     }
 
-    /// A copy for a subshell, one level deeper. Loops of the parent cannot be broken
-    /// out of from it.
+    /// A copy for a subshell, one level deeper. `break` and `continue` end it when it is
+    /// in loops of the parent, except where the caller resets `loops` (`( )`, `&`).
     pub(crate) fn subshell(&self) -> Vp {
         let mut sub = self.clone();
         sub.depth += 1;
-        sub.loops = 0;
         sub.top = false;
         sub.own_sigs = Cell::new(0);
         sub.fork_job = false;

@@ -979,6 +979,9 @@ async fn run_stdin_lines(mut vp: Vp) -> (i32, Vp) {
         }
         let Some(chunk) = chunk else {
             // Only blank lines and comments.
+            if vp.opts.get(options::SetOpt::Verbose) {
+                vp.error_raw(&text).await;
+            }
             if eof {
                 break;
             }
@@ -1175,18 +1178,24 @@ async fn run_chunk(
             }
         }
         Err(e) => {
-            let line = lines.line(e.span.start);
+            let line = parse_error_line(lines, &e, source);
             vp.line = line;
             let dash_c = if vp.opts.dash_c { "-c: " } else { "" };
             let name = vp.msg_name();
+            let errexit = vp.opts.get(options::SetOpt::Errexit) && !vp.no_errexit;
             let mut msg = Vec::new();
-            for l in e.message.split('\n') {
+            let message = match errexit {
+                true => e.message.split('\n').next().unwrap_or_default(),
+                false => &e.message,
+            };
+            for l in message.split('\n') {
                 msg.extend_from_slice(format!("{name}: {dash_c}line {line}: {l}\n").as_bytes());
             }
-            if e.message
-                .lines()
-                .last()
-                .is_some_and(|l| l.starts_with("syntax error near"))
+            if !errexit
+                && e.message
+                    .lines()
+                    .last()
+                    .is_some_and(|l| l.starts_with("syntax error near"))
             {
                 let text = source_line(source, line);
                 msg.extend_from_slice(format!("{name}: {dash_c}line {line}: `").as_bytes());
@@ -1202,6 +1211,23 @@ async fn run_chunk(
             Some(2)
         }
     }
+}
+
+pub(crate) fn parse_error_line(
+    lines: &LineIndex,
+    e: &psh_syntax::ParseError,
+    source: &[u8],
+) -> u32 {
+    let unterminated_line = e.span.start as usize >= source.len()
+        && !source.ends_with(
+            b"
+",
+        )
+        && e.message
+            .lines()
+            .last()
+            .is_some_and(|l| l.starts_with("syntax error: unexpected end of file"));
+    lines.line(e.span.start) + u32::from(unterminated_line)
 }
 
 fn source_line(source: &[u8], line: u32) -> &[u8] {

@@ -17,6 +17,7 @@ pub(crate) enum Origin {
     Eval,
     /// `FILE: line N: …` (the file being sourced is already the message name).
     File,
+    Trap(&'static str),
 }
 
 /// Parses and runs `text` one top-level command line at a time, as the script itself
@@ -62,14 +63,24 @@ pub(crate) async fn run_text(vp: &mut Vp, text: &[u8], line_base: u32, origin: O
                 vp.status = status;
             }
             Err(e) => {
-                let line = lines.line(e.span.start) + line_base;
+                let line = crate::parse_error_line(&lines, &e, text) + line_base;
                 let prefix = match origin {
                     Origin::Eval => format!("{}: eval: line {line}: ", vp.msg_name()),
                     Origin::File => format!("{}: line {line}: ", vp.msg_name()),
+                    Origin::Trap(tag) => format!("{}: {tag}: line {line}: ", vp.msg_name()),
                 };
+                let errexit = vp.opts.get(crate::options::SetOpt::Errexit) && !vp.no_errexit;
                 let mut msg = Vec::new();
-                for l in e.message.split('\n') {
+                let message = match errexit {
+                    true => e.message.split('\n').next().unwrap_or_default(),
+                    false => &e.message,
+                };
+                for l in message.split('\n') {
                     msg.extend_from_slice(format!("{prefix}{l}\n").as_bytes());
+                }
+                if errexit {
+                    vp.error_raw(&msg).await;
+                    return Err(Unwind::Exit(2));
                 }
                 if e.message
                     .lines()
@@ -203,7 +214,9 @@ pub(super) async fn source(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         b"." => ".",
         _ => "source",
     }));
+    vp.xtrace_level += 1;
     let r = Box::pin(run_text(vp, &text, 0, Origin::File)).await;
+    vp.xtrace_level -= 1;
     vp.calls.pop();
     vp.line = line;
     if let Some(a) = saved_args {

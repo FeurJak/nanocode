@@ -198,7 +198,7 @@ pub(super) async fn mapfile(vp: &mut Vp, args: &[Vec<u8>]) -> R {
             skipped += 1;
             continue;
         }
-        if strip && line.last() == Some(&delim) {
+        if (strip || delim == 0) && line.last() == Some(&delim) {
             line.pop();
         }
         if let Some(nul) = line.iter().position(|&b| b == 0) {

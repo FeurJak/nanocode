@@ -753,13 +753,10 @@ async fn return_(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     if rest.first().is_some_and(|a| a == b"--") {
         rest = &rest[1..];
     }
-    if rest.len() > 1 {
-        vp.error("return: too many arguments").await;
-        return Err(Unwind::Abort(1));
-    }
     match rest.first() {
         None => Err(Unwind::Return(vp.status)),
         Some(a) => match parse_int(a) {
+            Some(_) if rest.len() > 1 => too_many_arguments(vp, "return").await,
             Some(n) => Err(Unwind::Return((n & 0xff) as i32)),
             None => {
                 vp.error(&format!("return: {}: numeric argument required", s(a)))
@@ -773,6 +770,15 @@ async fn return_(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     }
 }
 
+async fn too_many_arguments(vp: &mut Vp, name: &str) -> R {
+    vp.error(&format!("{name}: too many arguments")).await;
+    Err(if vp.opts.dash_c {
+        Unwind::Exit(1)
+    } else {
+        Unwind::Abort(2)
+    })
+}
+
 async fn break_(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     loop_control(vp, args, "break").await
 }
@@ -782,25 +788,28 @@ async fn continue_(vp: &mut Vp, args: &[Vec<u8>]) -> R {
 }
 
 async fn loop_control(vp: &mut Vp, args: &[Vec<u8>], name: &str) -> R {
+    if vp.loops == 0 {
+        if !vp.opts.get(crate::options::SetOpt::Posix) {
+            vp.error(&format!(
+                "{name}: only meaningful in a `for', `while', or `until' loop"
+            ))
+            .await;
+        }
+        return Ok(0);
+    }
     let args = match args.get(1) {
         Some(a) if a == b"--" => &args[1..],
         _ => args,
     };
-    if args.len() > 2 && vp.loops > 0 {
-        vp.error(&format!("{name}: too many arguments")).await;
-        return Err(Unwind::Abort(1));
-    }
     let n = match args.get(1) {
         None => 1,
         Some(a) => match parse_int(a) {
+            Some(_) if args.len() > 2 => return too_many_arguments(vp, name).await,
             Some(n) if n >= 1 => n,
             Some(_) => {
                 // bash leaves every enclosing loop, with status 1.
                 vp.error(&format!("{name}: {}: loop count out of range", s(a)))
                     .await;
-                if vp.loops == 0 {
-                    return Ok(1);
-                }
                 vp.status = 1;
                 return Err(Unwind::Break(vp.loops));
             }
@@ -812,16 +821,6 @@ async fn loop_control(vp: &mut Vp, args: &[Vec<u8>], name: &str) -> R {
             }
         },
     };
-    if vp.loops == 0 && vp.opts.get(crate::options::SetOpt::Posix) {
-        return Ok(0);
-    }
-    if vp.loops == 0 {
-        vp.error(&format!(
-            "{name}: only meaningful in a `for', `while', or `until' loop"
-        ))
-        .await;
-        return Ok(0);
-    }
     let n = n.min(i64::from(vp.loops)) as u32;
     Err(if name == "break" {
         Unwind::Break(n)
@@ -1017,13 +1016,10 @@ async fn shift(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         Some(a) if a == b"--" => &args[1..],
         _ => args,
     };
-    if args.len() > 2 {
-        vp.error("shift: too many arguments").await;
-        return Err(Unwind::Abort(1));
-    }
     let n = match args.get(1) {
         None => 1,
         Some(a) => match parse_int(a) {
+            Some(_) if args.len() > 2 => return too_many_arguments(vp, "shift").await,
             Some(n) if n >= 0 => n as usize,
             Some(_) => {
                 vp.error(&format!("shift: {}: shift count out of range", s(a)))

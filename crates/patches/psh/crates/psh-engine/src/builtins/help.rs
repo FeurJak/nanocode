@@ -393,21 +393,22 @@ pub(super) async fn history(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     }
     match rest {
         [] => Ok(0),
-        [n] if std::str::from_utf8(n)
-            .ok()
-            .and_then(|t| t.trim().parse::<i64>().ok())
-            .is_some() =>
+        [n, more @ ..]
+            if std::str::from_utf8(n)
+                .ok()
+                .and_then(|t| t.trim().parse::<i64>().ok())
+                .is_some() =>
         {
-            Ok(0)
+            if more.is_empty() {
+                Ok(0)
+            } else {
+                super::too_many_arguments(vp, "history").await
+            }
         }
-        [n] => {
+        [n, ..] => {
             vp.error(&format!("history: {}: numeric argument required", s(n)))
                 .await;
-            Ok(1)
-        }
-        _ => {
-            vp.error("history: too many arguments").await;
-            Ok(1)
+            Ok(2)
         }
     }
 }

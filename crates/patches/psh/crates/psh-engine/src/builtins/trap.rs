@@ -146,25 +146,33 @@ impl Traps {
     }
 }
 
-/// Runs a trap action in this vproc with `$?` set to `status`, and restores `$?`
-/// after it (D1283). `exit` in the action ends the shell as usual.
-pub(crate) async fn run_action(vp: &mut Vp, action: &[u8], status: i32) -> Result<(), Unwind> {
-    let line_base = vp.line.saturating_sub(1);
-    run_action_from(vp, action, status, line_base).await
+async fn run_text(vp: &mut Vp, key: TrapKey, action: &[u8]) -> R {
+    let (tag, line_base) = match key {
+        TrapKey::Exit => ("exit trap", 0),
+        TrapKey::Signal(_) => ("trap", 0),
+        TrapKey::Debug => ("debug trap", vp.line.saturating_sub(1)),
+        TrapKey::Err => ("error trap", vp.line.saturating_sub(1)),
+        TrapKey::Return => ("return trap", vp.line.saturating_sub(1)),
+    };
+    super::eval::run_text(vp, action, line_base, super::eval::Origin::Trap(tag)).await
 }
 
-async fn run_action_from(
+/// Runs a trap action in this vproc with `$?` set to `status`, and restores `$?`
+/// after it (D1283). `exit` in the action ends the shell as usual.
+pub(crate) async fn run_action(
     vp: &mut Vp,
+    key: TrapKey,
     action: &[u8],
     status: i32,
-    line_base: u32,
 ) -> Result<(), Unwind> {
     let saved_in = vp.in_trap;
     let saved_line = vp.line;
     let pipestatus = vp.vars.get("PIPESTATUS").cloned();
     vp.in_trap = Some(status);
     vp.status = status;
-    let r = super::eval::run_text(vp, action, line_base, super::eval::Origin::Eval).await;
+    vp.xtrace_level += 1;
+    let r = run_text(vp, key, action).await;
+    vp.xtrace_level -= 1;
     vp.in_trap = saved_in;
     vp.line = saved_line;
     vp.status = status;
@@ -177,13 +185,14 @@ async fn run_action_from(
     }
 }
 
-pub(crate) async fn run_action_status(vp: &mut Vp, action: &[u8], status: i32) -> R {
+pub(crate) async fn run_action_status(vp: &mut Vp, key: TrapKey, action: &[u8], status: i32) -> R {
     let saved_in = vp.in_trap;
     let saved_line = vp.line;
     vp.in_trap = Some(status);
     vp.status = status;
-    let line_base = vp.line.saturating_sub(1);
-    let r = super::eval::run_text(vp, action, line_base, super::eval::Origin::Eval).await;
+    vp.xtrace_level += 1;
+    let r = run_text(vp, key, action).await;
+    vp.xtrace_level -= 1;
     let last = vp.status;
     vp.in_trap = saved_in;
     vp.line = saved_line;
@@ -202,7 +211,7 @@ pub(crate) async fn exit_trap(vp: &mut Vp, status: i32) -> i32 {
         return status;
     };
     Rc::make_mut(&mut vp.traps).map.remove(&TrapKey::Exit);
-    match run_action_from(vp, &action, status, 0).await {
+    match run_action(vp, TrapKey::Exit, &action, status).await {
         Err(Unwind::Exit(n)) => n,
         _ => status,
     }
@@ -216,7 +225,7 @@ pub(crate) async fn err_trap(vp: &mut Vp, status: i32) -> Result<(), Unwind> {
     match vp.traps.action(TrapKey::Err) {
         Some(action) if !action.is_empty() => {
             vp.in_err_trap = true;
-            let r = run_action(vp, &action, status).await;
+            let r = run_action(vp, TrapKey::Err, &action, status).await;
             vp.in_err_trap = false;
             r
         }
@@ -235,7 +244,7 @@ pub(crate) async fn run_trap(vp: &mut Vp, key: TrapKey) -> Result<(), Unwind> {
         Some(action) if !action.is_empty() => {
             let st = vp.status;
             vp.in_debug_trap |= debug;
-            let r = run_action(vp, &action, st).await;
+            let r = run_action(vp, key, &action, st).await;
             if debug {
                 vp.in_debug_trap = false;
             }
@@ -340,7 +349,7 @@ pub(crate) async fn take_signals(vp: &mut Vp) -> Result<(), Unwind> {
                 let mut r = Ok(());
                 for _ in 0..runs {
                     let st = vp.status;
-                    r = run_action_from(vp, &action, st, 0).await;
+                    r = run_action(vp, TrapKey::Signal(sig), &action, st).await;
                     if r.is_ok() {
                         r = Box::pin(take_signals(vp)).await;
                     }
