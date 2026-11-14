@@ -10,7 +10,7 @@
 //! its handler resets. Collections, fuel and heap images see an ordinary frame and
 //! ordinary stack values.
 
-use super::hot::{fill, ld, ld32, st};
+use super::hot::{fill, ld, ld32, st, window, write_values};
 use super::*;
 use crate::builtins::dense::index;
 use crate::heap::cells::{Object, ValueArray};
@@ -398,15 +398,19 @@ impl Exec<'_> {
         let vals = ValueArray::VALUES.at(self.stack, 0);
         let slot = |i: u32| vals + 8 * i;
         let b = self.heap.arena().bytes();
-        let get = |i: u32| ld(b, slot(base + i));
+        let w: [u8; 8 * (STATE as usize + 1)] = window(b, slot(base));
+        let get = |i: u32| {
+            let i = 8 * i as usize;
+            Value::from_raw(u64::from_le_bytes(w[i..i + 8].try_into().unwrap()))
+        };
         if get(STATE) != get(F) {
             return None;
         }
         let mode = get(MODE).as_int()?;
         let k = get(K).as_int()?;
         let store = match mode {
-            FOR_EACH => None,
-            MAP | REDUCE => Some(v),
+            FOR_EACH | REDUCE => None,
+            MAP => Some(v),
             _ => match (mode, v.as_bool()?) {
                 (SOME | FIND_INDEX | FIND, false) | (EVERY, true) | (FILTER, false) => None,
                 (FILTER, true) => Some(get(KVALUE)),
@@ -437,8 +441,7 @@ impl Exec<'_> {
             let a = get(A).as_object()?;
             let i = match mode {
                 MAP => k as u32,
-                FILTER => self.heap.array_length(a),
-                _ => 0,
+                _ => self.heap.array_length(a),
             };
             if !matches!(self.heap.create_element_fast(a, i, sv), Ok(true)) {
                 return None;
@@ -449,16 +452,13 @@ impl Exec<'_> {
         let kv = Value::int(next as i32);
         st(b, slot(base + K), kv);
         st(b, slot(base + KVALUE), x);
-        let mut at = bp + 2;
         if mode == REDUCE {
             st(b, slot(base + THIS), v);
-            st(b, slot(at), v);
-            at += 1;
+            write_values(b, slot(bp + 2), &[v, x, kv, o]);
+        } else {
+            write_values(b, slot(bp + 2), &[x, kv, o]);
         }
-        st(b, slot(at), x);
-        st(b, slot(at + 1), kv);
-        st(b, slot(at + 2), o);
-        fill(b, slot(at + 3), hp - at - 3, Value::UNDEFINED);
+        fill(b, slot(bp + 2 + argc), n - argc, Value::UNDEFINED);
         fill(b, slot(lp), locals, Value::UNDEFINED);
         Some(lp + locals)
     }

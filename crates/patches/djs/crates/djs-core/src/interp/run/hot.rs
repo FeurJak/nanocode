@@ -294,7 +294,7 @@ pub(super) fn template_head(b: &[u8], t: u32) -> TemplateHead {
 
 /// `N` bytes at `off`, with one range check.
 #[inline(always)]
-fn window<const N: usize>(b: &[u8], off: u32) -> [u8; N] {
+pub(super) fn window<const N: usize>(b: &[u8], off: u32) -> [u8; N] {
     arena_read(b, off as usize)
 }
 
