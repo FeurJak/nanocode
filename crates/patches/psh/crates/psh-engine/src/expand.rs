@@ -2885,9 +2885,34 @@ pub(crate) async fn glob(vp: &Vp, pat: &[u8]) -> Vec<Vec<u8>> {
             }
         }
     }
-    out.sort();
+    match vp.collates() {
+        true => out.sort_by(|a, b| collate(a, b)),
+        false => out.sort(),
+    }
     out.dedup();
     out
+}
+
+fn collate(a: &[u8], b: &[u8]) -> core::cmp::Ordering {
+    const PUNCT: &[u8] = b" _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$";
+    let alnum =
+        |s: &[u8]| -> Vec<u8> { s.iter().copied().filter(|c| !PUNCT.contains(c)).collect() };
+    let (x, y) = (alnum(a), alnum(b));
+    let folded = |s: &[u8]| s.to_ascii_lowercase();
+    let rank = |s: &[u8]| -> Vec<usize> {
+        s.iter()
+            .map(|c| PUNCT.iter().position(|p| p == c).unwrap_or(PUNCT.len()))
+            .collect()
+    };
+    folded(&x)
+        .cmp(&folded(&y))
+        .then_with(|| {
+            x.iter()
+                .map(|c| c.is_ascii_uppercase())
+                .cmp(y.iter().map(|c| c.is_ascii_uppercase()))
+        })
+        .then_with(|| rank(a).cmp(&rank(b)))
+        .then_with(|| a.cmp(b))
 }
 
 /// Assignment values, for exec.

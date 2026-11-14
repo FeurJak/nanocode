@@ -1045,6 +1045,17 @@ impl Vp {
         false
     }
 
+    pub(crate) fn collates(&self) -> bool {
+        for name in ["LC_ALL", "LC_COLLATE", "LANG"] {
+            if let Some(v) = self.var(name)
+                && !v.is_empty()
+            {
+                return !(v == b"C" || v == b"POSIX" || v.starts_with(b"C."));
+            }
+        }
+        false
+    }
+
     /// The environment for an external: exported variables with values, plus
     /// `extra` (assignments in front of the command), which win.
     pub(crate) fn env(&self, extra: &[(String, Vec<u8>)]) -> Vec<(Vec<u8>, Vec<u8>)> {
