@@ -45,6 +45,17 @@ fn position((from_left, n): (bool, usize), len: usize) -> Option<usize> {
     }
 }
 
+pub(crate) fn tilde_entry(vp: &Vp, name: &[u8]) -> Option<Vec<u8>> {
+    let i = match name.first()? {
+        b'+' | b'-' => index_arg(name)?,
+        _ => index_arg(&[b"+", name].concat())?,
+    };
+    match position(i, vp.dirstack.len() + 1)? {
+        0 => Some(vp.cwd.clone()),
+        n => vp.dirstack.get(n - 1).cloned(),
+    }
+}
+
 /// `~` for `HOME` at the start of an entry, as `dirs` shows it without `-l`.
 fn tilde(vp: &Vp, dir: &[u8]) -> Vec<u8> {
     if let Some(home) = vp.var("HOME").filter(|h| !h.is_empty() && *h != b"/")

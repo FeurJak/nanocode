@@ -3163,7 +3163,11 @@ async fn subst(vp: &mut Vp, code: Rc<Code>, list: ListId) -> Result<(Vec<u8>, i3
             }
         };
         vp.status = status;
-        out.retain(|&b| b != 0);
+        if out.contains(&0) {
+            vp.error("warning: command substitution: ignored null byte in input")
+                .await;
+            out.retain(|&b| b != 0);
+        }
         strip_newlines(vp, &mut out);
         return Ok((out, status));
     }

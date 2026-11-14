@@ -399,8 +399,13 @@ enum Ctx {
     Double,
     /// An unquoted here-doc body (bounded by `end`).
     HereDoc { strip: bool },
-    /// The word of a `${name op word}`; `stop` is an extra terminator (`/`, `:`) or 0.
-    Operand { dq: bool, stop: u8 },
+    /// The word of a `${name op word}`; `stop` is an extra terminator (`/`, `:`) or 0;
+    /// `lit_squote`: single quotes are literal and their text expands (`"${x-'$y'}"`).
+    Operand {
+        dq: bool,
+        lit_squote: bool,
+        stop: u8,
+    },
     /// Inside `[…]` of a subscript.
     Subscript,
     /// Arithmetic text: `$((…))` and `((…))` (bounded by `end`), or a clause of
@@ -704,6 +709,13 @@ impl<'a> P<'a> {
         ))
     }
 
+    fn unterminated_from(&self, what: &str, start: usize) -> ParseError {
+        ParseError {
+            span: sp(start, start),
+            ..self.unterminated(what)
+        }
+    }
+
     /// Source bytes as text for messages (invalid UTF-8 replaced).
     fn lossy(&self, start: usize, end: usize) -> String {
         String::from_utf8_lossy(&self.b[start..end]).into_owned()
@@ -911,13 +923,38 @@ impl<'a> P<'a> {
                 while line_end < self.end && self.b[line_end] != b'\n' {
                     line_end += 1;
                 }
+                while !p.quoted
+                    && line_end < self.end
+                    && self.b[line_start..line_end]
+                        .iter()
+                        .rev()
+                        .take_while(|&&b| b == b'\\')
+                        .count()
+                        % 2
+                        == 1
+                {
+                    line_end += 1;
+                    while line_end < self.end && self.b[line_end] != b'\n' {
+                        line_end += 1;
+                    }
+                }
                 let mut content = line_start;
                 if p.strip {
                     while content < line_end && self.b[content] == b'\t' {
                         content += 1;
                     }
                 }
-                let line = &self.b[content..line_end];
+                let joined: Vec<u8>;
+                let line = if self.b[content..line_end].contains(&b'\n') {
+                    joined = self.b[content..line_end]
+                        .split(|&b| b == b'\n')
+                        .flat_map(|l| l.strip_suffix(b"\\").unwrap_or(l))
+                        .copied()
+                        .collect();
+                    &joined[..]
+                } else {
+                    &self.b[content..line_end]
+                };
                 if line == &p.delim[..] {
                     body_end = line_start;
                     self.pos = (line_end + 1).min(self.end);
@@ -1434,7 +1471,8 @@ impl<'a> P<'a> {
         self.maybe_alias();
         self.skip_blanks();
         let start = self.pos;
-        let kind = if self.at(b"((") {
+        let kind = if self.peek() == Some(b'(') && self.byte(self.cont(self.pos + 1)) == Some(b'(')
+        {
             match self.parse_arith_command()? {
                 Some(k) => k,
                 None => self.parse_subshell()?,
@@ -1529,10 +1567,11 @@ impl<'a> P<'a> {
     /// `(( … ))`, or `None` if the parentheses do not close with `))` (then it is a
     /// nested subshell).
     fn parse_arith_command(&mut self) -> R<Option<CommandKind>> {
-        let Some(close) = self.scan_arith(self.pos + 2)? else {
+        let from = self.cont(self.pos + 1) + 1;
+        let Some(close) = self.scan_arith(from)? else {
             return Ok(None);
         };
-        let word = self.parse_arith_text(self.pos + 2, close)?;
+        let word = self.parse_arith_text(from, close)?;
         self.pos = close + 2;
         Ok(Some(CommandKind::Arith(word)))
     }
@@ -2467,7 +2506,7 @@ impl<'a> P<'a> {
 
     fn parse_cond_not(&mut self, open: usize) -> R<CondExpr> {
         self.skip_linebreaks()?;
-        if self.run() == b"!" {
+        if self.run() == b"!" && !(self.opts.extglob && self.peek_at(1) == Some(b'(')) {
             let start = self.pos;
             self.pos += 1;
             let inner = self.parse_cond_not(open)?;
@@ -2688,13 +2727,41 @@ impl<'a> P<'a> {
                     if matches!(ctx, Ctx::Double | Ctx::HereDoc { .. }) {
                         self.pos += 1;
                         push_lit(out, start, self.pos);
+                    } else if matches!(
+                        ctx,
+                        Ctx::Operand {
+                            lit_squote: true,
+                            ..
+                        }
+                    ) {
+                        let Some(n) = self.b[start + 1..self.end].iter().position(|&b| b == b'\'')
+                        else {
+                            return Err(self.unterminated_from("'", start));
+                        };
+                        let close = start + 1 + n;
+                        push_lit(out, start, start + 1);
+                        let saved_end = self.end;
+                        self.end = close;
+                        self.pos = start + 1;
+                        let mut r = Ok(());
+                        while r.is_ok() && self.pos < close {
+                            r = self.parse_parts(Ctx::Double, out);
+                            if r.is_ok() && self.pos < close {
+                                self.pos += 1;
+                                push_lit(out, self.pos - 1, self.pos);
+                            }
+                        }
+                        self.end = saved_end;
+                        r?;
+                        self.pos = close + 1;
+                        push_lit(out, close, self.pos);
                     } else {
                         self.pos += 1;
                         while self.peek().is_some_and(|c| c != b'\'') {
                             self.pos += 1;
                         }
                         if self.at_eof() {
-                            return Err(self.unterminated("'"));
+                            return Err(self.unterminated_from("'", start));
                         }
                         self.pos += 1;
                         out.push(self.single_quoted(start, self.pos));
@@ -2711,7 +2778,7 @@ impl<'a> P<'a> {
                         let mut inner = Vec::new();
                         self.parse_parts(Ctx::Double, &mut inner)?;
                         if self.peek() != Some(b'"') {
-                            return Err(self.unterminated("\""));
+                            return Err(self.unterminated_from("\"", start));
                         }
                         self.pos += 1;
                         out.push(WordPart {
@@ -2724,7 +2791,7 @@ impl<'a> P<'a> {
                     self.pos += 1;
                     loop {
                         match self.peek() {
-                            None => return Err(self.unterminated("`")),
+                            None => return Err(self.unterminated_from("`", start)),
                             Some(b'\\') => self.pos += 2.min(self.end - self.pos),
                             Some(b'`') => break,
                             Some(_) => self.pos += 1,
@@ -3082,12 +3149,18 @@ impl<'a> P<'a> {
                 out.push(part);
             }
             // `$'…'` also in a double-quoted `${…}` operand (bash's extquote, on by
-            // default).
-            Some(b'\'') if !dq || matches!(ctx, Ctx::Operand { dq: true, .. }) => {
+            // default) and in arithmetic.
+            Some(b'\'')
+                if !dq
+                    || matches!(
+                        ctx,
+                        Ctx::Operand { dq: true, .. } | Ctx::Arith { .. } | Ctx::ArithBracket
+                    ) =>
+            {
                 self.pos += 2;
                 loop {
                     match self.peek() {
-                        None => return Err(self.unterminated("'")),
+                        None => return Err(self.unterminated_from("'", start)),
                         Some(b'\\') => self.pos += 2.min(self.end - self.pos),
                         Some(b'\'') => break,
                         Some(_) => self.pos += 1,
@@ -3099,12 +3172,12 @@ impl<'a> P<'a> {
                     kind: Part::AnsiC,
                 });
             }
-            Some(b'"') if !dq => {
+            Some(b'"') if !dq || matches!(ctx, Ctx::Arith { .. } | Ctx::ArithBracket) => {
                 self.pos += 2;
                 let mut inner = Vec::new();
                 self.parse_parts(Ctx::Double, &mut inner)?;
                 if self.peek() != Some(b'"') {
-                    return Err(self.unterminated("\""));
+                    return Err(self.unterminated_from("\"", start));
                 }
                 self.pos += 1;
                 out.push(WordPart {
@@ -3261,7 +3334,16 @@ impl<'a> P<'a> {
                 self.pos += 1;
             }
         }
-        let operand = |stop: u8| Ctx::Operand { dq, stop };
+        let operand = |stop: u8| Ctx::Operand {
+            dq,
+            lit_squote: false,
+            stop,
+        };
+        let default_operand = Ctx::Operand {
+            dq,
+            lit_squote: dq,
+            stop: 0,
+        };
         let Some(c) = self.peek() else {
             return Err(self.unterminated("}"));
         };
@@ -3279,7 +3361,7 @@ impl<'a> P<'a> {
             b':' if matches!(self.peek_at(1), Some(b'-' | b'=' | b'?' | b'+')) => {
                 let kind = default_kind(self.b[self.pos + 1]);
                 self.pos += 2;
-                let word = self.operand_word(operand(0))?;
+                let word = self.operand_word(default_operand)?;
                 ParamOp::Default {
                     kind,
                     colon: true,
@@ -3299,7 +3381,7 @@ impl<'a> P<'a> {
             }
             b'-' | b'=' | b'?' | b'+' => {
                 self.pos += 1;
-                let word = self.operand_word(operand(0))?;
+                let word = self.operand_word(default_operand)?;
                 ParamOp::Default {
                     kind: default_kind(c),
                     colon: false,
@@ -3441,7 +3523,14 @@ impl<'a> P<'a> {
     /// Skips to the `}` closing a `${…}` that is not a valid expansion.
     fn finish_bad_subst(&mut self, start: usize, dq: bool) -> R<WordPart> {
         let mut parts = Vec::new();
-        self.parse_parts(Ctx::Operand { dq, stop: 0 }, &mut parts)?;
+        self.parse_parts(
+            Ctx::Operand {
+                dq,
+                lit_squote: false,
+                stop: 0,
+            },
+            &mut parts,
+        )?;
         if self.peek() != Some(b'}') {
             return Err(self.unterminated("}"));
         }

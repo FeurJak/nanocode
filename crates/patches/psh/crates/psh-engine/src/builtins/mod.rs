@@ -3,8 +3,9 @@
 
 pub(crate) mod alias;
 mod command;
+mod compgen;
 pub(crate) mod declare;
-mod dirs;
+pub(crate) mod dirs;
 mod eval;
 pub(crate) mod hash;
 mod help;
@@ -73,6 +74,7 @@ pub(crate) fn find(name: &[u8]) -> Option<Builtin> {
         b"local" => (builtin!(declare_words), false),
         b"let" => (builtin!(let_), false),
         b"getopts" => (builtin!(getopts), false),
+        b"compgen" => (builtin!(compgen::compgen), false),
         b"mapfile" | b"readarray" => (builtin!(mapfile::mapfile), false),
         b"test" => (builtin!(test::test), false),
         b"[" => (builtin!(test::bracket), false),
@@ -93,7 +95,6 @@ pub(crate) fn find(name: &[u8]) -> Option<Builtin> {
         b"fg" => (builtin!(jobs::fg), false),
         b"bg" => (builtin!(jobs::bg), false),
         b"caller" => (builtin!(command::caller), false),
-        b"compgen" => (builtin!(compgen), false),
         b"help" => (builtin!(help::help), false),
         b"umask" => (builtin!(umask::umask), false),
         b"dirs" => (builtin!(dirs::dirs), false),
@@ -252,43 +253,6 @@ pub(crate) const SPECIAL: &[&[u8]] = &[
 /// same name (macOS has `/usr/bin/read`, `/usr/bin/type`, ... as sh wrappers).
 async fn unsupported(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     crate::expand::unsupported(vp, &s(&args[0])).await
-}
-
-async fn compgen(vp: &mut Vp, args: &[Vec<u8>]) -> R {
-    let [_, flag, name, rest @ ..] = args else {
-        return unsupported(vp, args).await;
-    };
-    if flag != b"-F" || rest.len() > 1 {
-        return unsupported(vp, args).await;
-    }
-    vp.error("compgen: warning: -F option may not work as you expect")
-        .await;
-    let Some(f) = vp.funcs.get(&*s(name)).cloned() else {
-        vp.error(&format!("completion: function `{}' not found", s(name)))
-            .await;
-        return Ok(1);
-    };
-    let word = rest.first().cloned().unwrap_or_default();
-    let argv = vec![name.clone(), b"compgen".to_vec(), word, Vec::new()];
-    crate::exec::call_function(vp, f, argv, Vec::new()).await?;
-    let words = vp
-        .var_ref("COMPREPLY")
-        .map(|v| v.values())
-        .unwrap_or_default();
-    unset(
-        vp,
-        &[b"unset".to_vec(), b"-v".to_vec(), b"COMPREPLY".to_vec()],
-    )
-    .await?;
-    if words.is_empty() {
-        return Ok(1);
-    }
-    let mut text = Vec::new();
-    for w in words {
-        text.extend_from_slice(&w);
-        text.push(b'\n');
-    }
-    out(vp, "compgen", &text).await
 }
 
 /// Writes to a descriptor of the vproc. A closed pipe ends the vproc as SIGPIPE would
@@ -925,8 +889,16 @@ async fn getopts(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     } else {
         vp.args.clone()
     };
-    let mut optind = vp.var("OPTIND").and_then(parse_int).unwrap_or(1).max(1);
-    let mut pos = if vp.getopts.0 == optind {
+    let set_optind = vp.var("OPTIND").and_then(parse_int).unwrap_or(1);
+    let mut optind = set_optind.max(1);
+    let opterr = vp.var("OPTERR").filter(|v| !v.is_empty()).is_none_or(|v| {
+        let t = v.trim_ascii_start();
+        let t = t.strip_prefix(b"-").or(t.strip_prefix(b"+")).unwrap_or(t);
+        t.iter()
+            .take_while(|b| b.is_ascii_digit())
+            .any(|&b| b != b'0')
+    });
+    let mut pos = if vp.getopts.0 == set_optind {
         vp.getopts.1
     } else {
         0
@@ -984,12 +956,14 @@ async fn getopts(vp: &mut Vp, args: &[Vec<u8>]) -> R {
                     value = b":".to_vec();
                     optarg = Some(vec![c]);
                 } else {
-                    let msg = format!(
-                        "{}: option requires an argument -- {}\n",
-                        String::from_utf8_lossy(&vp.arg0),
-                        c as char
-                    );
-                    vp.error_raw(msg.as_bytes()).await;
+                    if opterr {
+                        let msg = format!(
+                            "{}: option requires an argument -- {}\n",
+                            String::from_utf8_lossy(&vp.arg0),
+                            c as char
+                        );
+                        vp.error_raw(msg.as_bytes()).await;
+                    }
                     value = b"?".to_vec();
                 }
             }
@@ -999,7 +973,7 @@ async fn getopts(vp: &mut Vp, args: &[Vec<u8>]) -> R {
             next(&mut optind, &mut pos);
             if silent {
                 optarg = Some(vec![c]);
-            } else {
+            } else if opterr {
                 let msg = format!(
                     "{}: illegal option -- {}\n",
                     String::from_utf8_lossy(&vp.arg0),

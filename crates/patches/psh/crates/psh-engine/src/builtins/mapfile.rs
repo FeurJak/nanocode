@@ -201,6 +201,9 @@ pub(super) async fn mapfile(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         if strip && line.last() == Some(&delim) {
             line.pop();
         }
+        if let Some(nul) = line.iter().position(|&b| b == 0) {
+            line.truncate(nul);
+        }
         if let Some(cb) = &callback
             && stored % quantum == quantum - 1
         {

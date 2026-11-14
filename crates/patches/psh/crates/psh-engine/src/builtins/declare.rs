@@ -994,9 +994,14 @@ async fn print_all(vp: &mut Vp, which: Which, o: &Opts) -> R {
                 buf.push(b'\n');
                 continue;
             }
-            if !v.is_array() {
-                continue;
+            if v.is_array() {
+                let d = declaration(n, v, vp.utf8());
+                if let Some(eq) = d.iter().position(|&b| b == b'=') {
+                    buf.extend_from_slice(n.as_bytes());
+                    buf.extend_from_slice(&d[eq..]);
+                }
             }
+            continue;
         }
         buf.extend_from_slice(&declaration(n, v, vp.utf8()));
     }

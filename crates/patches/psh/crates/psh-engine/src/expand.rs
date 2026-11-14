@@ -63,10 +63,11 @@ pub(crate) struct Fields {
     /// `s="$s$i,"` in a loop.
     text_only: bool,
     word: psh_syntax::Span,
+    extglob: bool,
 }
 
 fn is_ifs_ws(b: u8) -> bool {
-    matches!(b, b' ' | b'\t' | b'\n')
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0b' | b'\x0c')
 }
 
 impl Fields {
@@ -108,6 +109,7 @@ impl Fields {
             assign: false,
             text_only: false,
             word: psh_syntax::Span::default(),
+            extglob: vp.opts.shopt(Shopt::Extglob),
         }
     }
 
@@ -150,7 +152,7 @@ impl Fields {
         self.cur.text.extend_from_slice(s);
         if !self.text_only {
             self.cur.pat.extend_from_slice(s);
-            if pattern::has_glob_chars(s) {
+            if pattern::has_glob_chars_ext(s, self.extglob) {
                 self.cur.glob = true;
             }
         }
@@ -202,7 +204,9 @@ impl Fields {
             self.begin();
             self.cur.text.push(b);
             self.cur.pat.push(b);
-            if matches!(b, b'*' | b'?' | b'[') {
+            if matches!(b, b'*' | b'?' | b'[')
+                || (self.extglob && matches!(b, b'+' | b'@' | b'!') && s.get(i) == Some(&b'('))
+            {
                 self.cur.glob = true;
             }
             self.cur.started = true;
@@ -266,14 +270,17 @@ impl Fields {
 enum Piece<'a> {
     Part(&'a WordPart),
     Text(Vec<u8>),
+    Var(Vec<u8>),
 }
 
 /// Brace expansion of a word into piece lists (one per resulting word).
 fn brace_expand<'a>(code: &'a Code, parts: &'a [WordPart]) -> Vec<Vec<Piece<'a>>> {
     let mut results: Vec<Vec<Piece<'a>>> = vec![Vec::new()];
+    let mut braced = false;
     for part in parts {
         match &part.kind {
             Part::Brace(b) => {
+                braced = true;
                 let alts: Vec<Vec<Piece<'a>>> = match &**b {
                     Brace::Alts(words) => words
                         .iter()
@@ -308,6 +315,11 @@ fn brace_expand<'a>(code: &'a Code, parts: &'a [WordPart]) -> Vec<Vec<Piece<'a>>
             }
         }
     }
+    if braced {
+        for r in &mut results {
+            join_names(code, r);
+        }
+    }
     results
 }
 
@@ -315,6 +327,72 @@ fn clone_piece<'a>(p: &Piece<'a>) -> Piece<'a> {
     match p {
         Piece::Part(p) => Piece::Part(p),
         Piece::Text(t) => Piece::Text(t.clone()),
+        Piece::Var(n) => Piece::Var(n.clone()),
+    }
+}
+
+fn join_names(code: &Code, pieces: &mut Vec<Piece<'_>>) {
+    if let Some(Piece::Part(p)) = pieces.first()
+        && matches!(p.kind, Part::Lit)
+        && code.ast.bytes(p.span).first() == Some(&b'~')
+    {
+        let mut tilde = code.ast.bytes(p.span).to_vec();
+        while let Some(next) = pieces.get(1) {
+            match next {
+                Piece::Part(p) if matches!(p.kind, Part::Lit) => {
+                    tilde.extend_from_slice(code.ast.bytes(p.span));
+                }
+                Piece::Text(t) => tilde.extend_from_slice(t),
+                _ => break,
+            }
+            pieces.remove(1);
+        }
+        pieces[0] = Piece::Text(tilde);
+    }
+    let name_char = |b: &u8| b.is_ascii_alphanumeric() || *b == b'_';
+    let mut i = 0;
+    while i + 1 < pieces.len() {
+        let joins = match &pieces[i + 1] {
+            Piece::Part(p) if matches!(p.kind, Part::Lit) => {
+                code.ast.bytes(p.span).first().is_some_and(name_char)
+            }
+            Piece::Text(t) => t.first().is_some_and(name_char),
+            _ => false,
+        };
+        if !joins {
+            i += 1;
+            continue;
+        }
+        let mut name = match &mut pieces[i] {
+            Piece::Var(n) => std::mem::take(n),
+            Piece::Part(WordPart {
+                kind: Part::Param(p),
+                ..
+            }) if !p.braced && p.name == ParamName::Var => code.ast.bytes(p.name_span).to_vec(),
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        while let Some(next) = pieces.get(i + 1) {
+            let text = match next {
+                Piece::Part(p) if matches!(p.kind, Part::Lit) => code.ast.bytes(p.span),
+                Piece::Text(t) => t.as_slice(),
+                _ => break,
+            };
+            let n = text.iter().take_while(|b| name_char(b)).count();
+            if n == 0 {
+                break;
+            }
+            name.extend_from_slice(&text[..n]);
+            if n < text.len() {
+                pieces[i + 1] = Piece::Text(text[n..].to_vec());
+                break;
+            }
+            pieces.remove(i + 1);
+        }
+        pieces[i] = Piece::Var(name);
+        i += 1;
     }
 }
 
@@ -332,13 +410,13 @@ fn seq(start: &str, end: &str, step: Option<&str>) -> Option<Vec<Vec<u8>>> {
         // Zero padding when either end has a leading zero.
         let pad = |s: &str| {
             let d = s.trim_start_matches('-');
-            if d.len() > 1 && d.starts_with('0') {
-                s.len()
-            } else {
-                0
-            }
+            d.len() > 1 && d.starts_with('0')
         };
-        let width = pad(start).max(pad(end));
+        let width = if pad(start) || pad(end) {
+            start.len().max(end.len())
+        } else {
+            0
+        };
         let mut out = Vec::new();
         let mut i = a;
         loop {
@@ -493,8 +571,37 @@ fn expand_pieces<'a>(
     Box::pin(async move {
         for (i, piece) in pieces.iter().enumerate() {
             match piece {
+                Piece::Text(t) if t == b"`" => {
+                    let mut rest = t.clone();
+                    for p in &pieces[i + 1..] {
+                        match p {
+                            Piece::Part(p) => rest.extend_from_slice(code.ast.bytes(p.span)),
+                            Piece::Text(t) => rest.extend_from_slice(t),
+                            Piece::Var(n) => {
+                                rest.push(b'$');
+                                rest.extend_from_slice(n);
+                            }
+                        }
+                    }
+                    vp.error(&format!(
+                        "bad substitution: no closing \"`\" in {}",
+                        String::from_utf8_lossy(&rest)
+                    ))
+                    .await;
+                    return Err(Unwind::Abort(1));
+                }
+                Piece::Text(t) if i == 0 && t.first() == Some(&b'~') => {
+                    literal_with_tilde(vp, t, true, ctx, f);
+                }
                 Piece::Text(t) => f.literal(t),
                 Piece::Part(p) => part(vp, code, p, quoted, f, ctx, i == 0).await?,
+                Piece::Var(name) => {
+                    let val = by_name(vp, name).unwrap_or(Val::Unset);
+                    if matches!(val, Val::Unset) && vp.opts.get(SetOpt::Nounset) {
+                        return unbound(vp, &String::from_utf8_lossy(name)).await;
+                    }
+                    emit_val(vp, f, val, quoted)?;
+                }
             }
         }
         Ok(())
@@ -743,15 +850,7 @@ pub(crate) fn word_now(code: &Code, w: &Word, words: bool) -> bool {
 
 fn part_static(code: &Code, p: &WordPart, words: bool, quoted: bool) -> bool {
     match &p.kind {
-        Part::Lit => {
-            quoted
-                || !words
-                || !code
-                    .ast
-                    .bytes(p.span)
-                    .iter()
-                    .any(|b| matches!(b, b'*' | b'?' | b'['))
-        }
+        Part::Lit => quoted || !words || no_glob(code.ast.bytes(p.span)),
         Part::Escaped | Part::Single | Part::AnsiC => true,
         Part::Double(inner) => inner.iter().all(|p| part_static(code, p, words, true)),
         Part::Param(p) => {
@@ -784,7 +883,10 @@ fn part_static(code: &Code, p: &WordPart, words: bool, quoted: bool) -> bool {
 }
 
 fn no_glob(s: &[u8]) -> bool {
-    !s.iter().any(|b| matches!(b, b'*' | b'?' | b'['))
+    !s.iter().enumerate().any(|(i, b)| {
+        matches!(b, b'*' | b'?' | b'[')
+            || (*b == b'(' && i > 0 && matches!(s[i - 1], b'+' | b'@' | b'!'))
+    })
 }
 
 pub(crate) fn params_now(vp: &Vp, code: &Code, w: &Word, words: bool) -> bool {
@@ -897,6 +999,7 @@ pub(crate) fn single_now(vp: &mut Vp, code: &Rc<Code>, w: &Word) -> Result<Vec<u
         assign: true,
         text_only: true,
         word: w.span,
+        extglob: false,
     };
     for (i, p) in w.parts.iter().enumerate() {
         part_sync(vp, code, p, false, &mut f, Ctx::Assign, i == 0)?;
@@ -927,6 +1030,15 @@ fn tilde(vp: &Vp, name: &[u8]) -> Option<Vec<u8>> {
         b"" => vp.var("HOME").map(<[u8]>::to_vec),
         b"+" => vp.var("PWD").map(<[u8]>::to_vec),
         b"-" => vp.var("OLDPWD").map(<[u8]>::to_vec),
+        n if n
+            .strip_prefix(b"+")
+            .or_else(|| n.strip_prefix(b"-"))
+            .unwrap_or(n)
+            .iter()
+            .all(u8::is_ascii_digit) =>
+        {
+            crate::builtins::dirs::tilde_entry(vp, n)
+        }
         // `~user`, from the host (D1322).
         user if is_name(user)
             || user
@@ -1026,7 +1138,22 @@ async fn expand_part(
                 1
             };
             f.word = psh_syntax::Span::new(part.span.start + open, part.span.end - 1);
-            expand_parts(vp, code, inner, true, f, inner_ctx).await?;
+            Box::pin(async {
+                for p in inner {
+                    if matches!(p.kind, Part::BadSubst) {
+                        let q = text.strip_prefix(b"$").unwrap_or(text);
+                        vp.error(&format!(
+                            "{}: bad substitution",
+                            String::from_utf8_lossy(&q[1..q.len() - 1])
+                        ))
+                        .await;
+                        return Err(Unwind::Abort(1));
+                    }
+                    self::part(vp, code, p, true, f, inner_ctx, false).await?;
+                }
+                Ok(())
+            })
+            .await?;
             f.word = word;
         }
         Part::Param(p) => param(vp, code, p, part, quoted, f).await?,
@@ -1099,26 +1226,41 @@ async fn expand_part(
             emit(f, &out, quoted);
         }
         Part::ExtGlob { op, alts } => {
-            // The pattern `op(alt|alt)` with each alternative expanded as a pattern;
-            // the text, should nothing match, is the same with quotes removed.
-            let mut pat = vec![*op, b'('];
-            let mut txt = vec![*op, b'('];
+            // The pattern `op(alt|alt)` with each alternative expanded in place, split
+            // like the rest of the word; the text, should nothing match, is the same with
+            // quotes removed.
+            f.pattern(&[*op, b'('], &[*op, b'(']);
             for (i, alt) in alts.iter().enumerate() {
                 if i > 0 {
-                    pat.push(b'|');
-                    txt.push(b'|');
+                    f.pattern(b"|", b"|");
                 }
-                let mut sub = Fields::new(vp, false);
-                expand_parts(vp, code, &alt.parts, false, &mut sub, Ctx::Word).await?;
-                sub.finish_word();
-                for fl in sub.out {
-                    pat.extend_from_slice(&fl.pat);
-                    txt.extend_from_slice(&fl.text);
+                for p in &alt.parts {
+                    Box::pin(self::part(vp, code, p, false, f, Ctx::Word, false)).await?;
                 }
             }
-            pat.push(b')');
-            txt.push(b')');
-            f.pattern(&txt, &pat);
+            f.pattern(b")", b")");
+        }
+        Part::Array(lit)
+            if f.out
+                .first()
+                .is_some_and(|w| w.text == b"let" || w.text == b"eval") =>
+        {
+            let (items, st) = expand_array_lit(vp, code, lit).await?;
+            f.subst_status = st.or(f.subst_status);
+            let mut text = b"(".to_vec();
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    text.push(b' ');
+                }
+                if let Some(key) = &item.key {
+                    text.push(b'[');
+                    text.extend_from_slice(key);
+                    text.extend_from_slice(if item.append { b"]+=" } else { b"]=" });
+                }
+                text.extend_from_slice(&item.value);
+            }
+            text.push(b')');
+            f.quoted(&text);
         }
         Part::Array(_) => {
             for op in *b"=+" {
@@ -1197,6 +1339,10 @@ fn expand_text(
             let mut v = psh_syntax::decode_ansi_c(inner);
             if let Some(nul) = v.iter().position(|&b| b == 0) {
                 v.truncate(nul);
+            }
+            if !quoted && ctx == Ctx::Arith {
+                v.insert(0, b'\'');
+                v.push(b'\'');
             }
             f.quoted(&v);
         }
@@ -1602,7 +1748,16 @@ async fn param(
             {
             } else {
                 let target = match &val {
-                    Val::Str(s) => s.clone(),
+                    Val::Str(s) => Some(s.clone()),
+                    Val::Unset
+                        if p.name == ParamName::Var
+                            && vp
+                                .vars
+                                .get(code.ast.text(p.name_span))
+                                .is_some_and(|v| v.is_array()) =>
+                    {
+                        None
+                    }
                     Val::Unset => {
                         vp.error(&format!(
                             "{}: invalid indirect expansion",
@@ -1611,7 +1766,7 @@ async fn param(
                         .await;
                         return Err(Unwind::Abort(1));
                     }
-                    Val::List(l, _) if !l.is_empty() && is_list => l.join(&b' '),
+                    Val::List(l, _) if !l.is_empty() && is_list => Some(l.join(&b' ')),
                     Val::List(..) if is_list => {
                         vp.error(&format!(
                             "{}[{}]: invalid indirect expansion",
@@ -1627,25 +1782,30 @@ async fn param(
                     }
                     Val::List(..) => return bad(vp).await,
                 };
-                via = Some(target.clone());
-                val = match indirect(vp, code, &target).await? {
-                    Some(Val::Unset)
-                        if vp.opts.get(SetOpt::Nounset)
-                            && !matches!(p.op, ParamOp::Default { .. }) =>
-                    {
-                        return unbound(vp, &format!("!{}", String::from_utf8_lossy(name_text)))
+                if let Some(target) = target {
+                    via = Some(target.clone());
+                    val = match indirect(vp, code, &target).await? {
+                        Some(Val::Unset)
+                            if vp.opts.get(SetOpt::Nounset)
+                                && !matches!(p.op, ParamOp::Default { .. }) =>
+                        {
+                            return unbound(
+                                vp,
+                                &format!("!{}", String::from_utf8_lossy(name_text)),
+                            )
                             .await;
-                    }
-                    Some(v) => v,
-                    None => {
-                        vp.error(&format!(
-                            "{}: invalid variable name",
-                            String::from_utf8_lossy(&target)
-                        ))
-                        .await;
-                        return Err(Unwind::Abort(1));
-                    }
-                };
+                        }
+                        Some(v) => v,
+                        None => {
+                            vp.error(&format!(
+                                "{}: invalid variable name",
+                                String::from_utf8_lossy(&target)
+                            ))
+                            .await;
+                            return Err(Unwind::Abort(1));
+                        }
+                    };
+                }
             }
         }
     }
@@ -1658,6 +1818,7 @@ async fn param(
             let is_set = match &val {
                 Val::Unset => false,
                 Val::Str(s) => !(*colon && s.is_empty()),
+                Val::List(l, _) if via.is_some() => !l.is_empty(),
                 // `"$*"` with `:` is null when it joins to nothing; `$@` when it has no
                 // elements or one empty one.
                 Val::List(l, true) if *colon && quoted => !l.join(&ifs_first(vp)[..]).is_empty(),
@@ -2451,14 +2612,17 @@ async fn glob_fields(vp: &mut Vp, f: &mut Fields) -> Result<(), Unwind> {
             continue;
         }
         let matches = glob(vp, &field.pat).await;
-        if matches.is_empty() && is_pattern(&field.pat) {
+        if matches.is_empty() && is_pattern(&field.pat, f.extglob) {
             if vp.opts.shopt(Shopt::Failglob) {
                 vp.error(&format!(
                     "no match: {}",
                     String::from_utf8_lossy(&field.text)
                 ))
                 .await;
-                return Err(Unwind::Abort(1));
+                return Err(match vp.opts.get(SetOpt::Errexit) {
+                    true => Unwind::Exit(1),
+                    false => Unwind::Abort(1),
+                });
             }
             if !vp.opts.shopt(Shopt::Nullglob) {
                 f.out.push(field);
@@ -2481,17 +2645,59 @@ async fn glob_fields(vp: &mut Vp, f: &mut Fields) -> Result<(), Unwind> {
 
 /// Whether a glob pattern can match anything but itself: an unescaped `*` or `?`, or a
 /// `[` with a `]` after it (a lone `[` is an ordinary char). For `nullglob`/`failglob`.
-fn is_pattern(pat: &[u8]) -> bool {
+fn is_pattern(pat: &[u8], extglob: bool) -> bool {
     let mut i = 0;
     while i < pat.len() {
         match pat[i] {
             b'\\' => i += 2,
             b'*' | b'?' => return true,
+            b'+' | b'@' | b'!' if extglob && pat.get(i + 1) == Some(&b'(') => return true,
             b'[' if pat[i + 1..].contains(&b']') => return true,
             _ => i += 1,
         }
     }
     false
+}
+
+fn ignore_specs(v: &[u8]) -> Vec<&[u8]> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i < v.len() {
+        match v[i] {
+            b'\\' => i += 2,
+            b'[' => i = bracket_end(v, i + 1).unwrap_or(i + 1),
+            b':' => {
+                out.push(&v[start..i]);
+                i += 1;
+                start = i;
+            }
+            _ => i += 1,
+        }
+    }
+    out.push(&v[start..]);
+    out
+}
+
+fn bracket_end(v: &[u8], mut i: usize) -> Option<usize> {
+    if matches!(v.get(i), Some(b'!' | b'^')) {
+        i += 1;
+    }
+    if v.get(i) == Some(&b']') {
+        i += 1;
+    }
+    while i < v.len() {
+        match v[i] {
+            b']' => return Some(i + 1),
+            b'[' if v.get(i + 1) == Some(&b':') => {
+                let close = v[i + 2..].windows(2).position(|w| w == b":]")?;
+                i += close + 4;
+            }
+            b'\\' => i += 2,
+            _ => i += 1,
+        }
+    }
+    None
 }
 
 /// Unescapes a pattern component that has no pattern chars.
@@ -2514,13 +2720,18 @@ fn unescape(p: &[u8]) -> Vec<u8> {
 pub(crate) async fn glob(vp: &Vp, pat: &[u8]) -> Vec<Vec<u8>> {
     let opts = vp.match_opts(vp.opts.shopt(Shopt::Nocaseglob));
     // A non-empty GLOBIGNORE turns dotglob on (bash).
-    let ignore: Vec<Pattern> = vp
+    let ignore: Vec<Vec<Pattern>> = vp
         .var("GLOBIGNORE")
         .filter(|v| !v.is_empty())
         .map(|v| {
-            v.split(|&b| b == b':')
+            ignore_specs(v)
+                .into_iter()
                 .filter(|p| !p.is_empty())
-                .map(|p| Pattern::with(p, opts))
+                .map(|p| {
+                    p.split(|&b| b == b'/')
+                        .map(|c| Pattern::with(c, opts))
+                        .collect()
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -2656,7 +2867,14 @@ pub(crate) async fn glob(vp: &Vp, pat: &[u8]) -> Vec<Vec<u8>> {
     if globignore {
         out.retain(|o| {
             let base = o.rsplit(|&b| b == b'/').next().unwrap_or(o);
-            base != b"." && base != b".." && !ignore.iter().any(|p| p.matches(o, opts.utf8))
+            base != b"."
+                && base != b".."
+                && !ignore.iter().any(|p| {
+                    p.len() == o.split(|&b| b == b'/').count()
+                        && p.iter()
+                            .zip(o.split(|&b| b == b'/'))
+                            .all(|(p, c)| p.matches(c, opts.utf8))
+                })
         });
     }
     if pat.ends_with(b"/") {

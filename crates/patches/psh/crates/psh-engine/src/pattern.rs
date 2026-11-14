@@ -613,6 +613,46 @@ fn put(out: &mut Vec<u8>, rep: &[Rep], matched: &[u8]) {
     }
 }
 
+fn match_len(pat: &[Unit]) -> Option<usize> {
+    let is = |c: Unit, b: u8| c == u32::from(b);
+    let mut len = 0;
+    let mut i = 0;
+    while i < pat.len() {
+        let c = pat[i];
+        i += 1;
+        if is(c, b'*')
+            || (b"?+@!".iter().any(|&b| is(c, b)) && pat.get(i) == Some(&u32::from(b'(')))
+        {
+            return None;
+        }
+        if is(c, b'\\') {
+            i += 1;
+        } else if is(c, b'[') {
+            let start = i;
+            let mut class = false;
+            loop {
+                let &c = pat.get(i)?;
+                i += 1;
+                if i > start + 1 && is(c, b']') {
+                    break;
+                }
+                let next = pat.get(i).copied();
+                if is(c, b'\\') {
+                    i += 1;
+                } else if is(c, b'[') && next.is_some_and(|n| is(n, b':')) {
+                    i += 1;
+                    class = true;
+                } else if class && is(c, b':') && next.is_some_and(|n| is(n, b']')) {
+                    i += 1;
+                    class = false;
+                }
+            }
+        }
+        len += 1;
+    }
+    Some(len)
+}
+
 pub(crate) fn replace_with(
     text: &[u8],
     pat: &[u8],
@@ -622,12 +662,14 @@ pub(crate) fn replace_with(
 ) -> Vec<u8> {
     let utf8 = opts.utf8;
     let p = Pattern::with(pat, opts);
+    let fixed = match_len(&units(pat, utf8).0);
     let (u, offs) = units(text, utf8);
     let n = u.len();
+    let fits = |len: usize| fixed.is_none_or(|m| m == len);
     match mode {
         ReplaceMode::Prefix => {
             for k in (0..=n).rev() {
-                if p.matches_units(&u[..k]) {
+                if fits(k) && p.matches_units(&u[..k]) {
                     let mut out = Vec::new();
                     put(&mut out, rep, &text[..offs[k]]);
                     out.extend_from_slice(&text[offs[k]..]);
@@ -638,7 +680,7 @@ pub(crate) fn replace_with(
         }
         ReplaceMode::Suffix => {
             for k in 0..=n {
-                if p.matches_units(&u[k..]) {
+                if fits(n - k) && p.matches_units(&u[k..]) {
                     let mut out = text[..offs[k]].to_vec();
                     put(&mut out, rep, &text[offs[k]..]);
                     return out;
@@ -651,7 +693,9 @@ pub(crate) fn replace_with(
             let mut i = 0;
             let mut last = 0;
             while i <= n {
-                let found = (i..=n).rev().find(|&e| e > i && p.matches_units(&u[i..e]));
+                let found = (i..=n)
+                    .rev()
+                    .find(|&e| e > i && fits(e - i) && p.matches_units(&u[i..e]));
                 match found {
                     Some(e) => {
                         out.extend_from_slice(&text[offs[last]..offs[i]]);
