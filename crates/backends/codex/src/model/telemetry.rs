@@ -372,6 +372,8 @@ pub(super) struct RunStats {
     pub(super) usage: UsageTotals,
     pub(super) warmup_usage: UsageTotals,
     pub(super) last_response_id: Option<String>,
+    #[serde(default)]
+    pub(super) hedge_input_tokens: u64,
 }
 
 impl RunStats {
@@ -399,6 +401,7 @@ impl RunStats {
             estimated_cost,
             cost_status,
         })
+        .with_hedge_input_tokens(self.hedge_input_tokens)
     }
 }
 

@@ -256,6 +256,10 @@ impl ModelRun {
                     ..Usage::default()
                 };
                 self.stats.usage.add(&duplicate, model, service_tier);
+                self.stats.hedge_input_tokens = self
+                    .stats
+                    .hedge_input_tokens
+                    .saturating_add(usage.input_tokens);
             }
         }
         self.stats.last_response_id = transport_continuation_valid.then(|| response.id.clone());

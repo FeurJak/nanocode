@@ -181,6 +181,9 @@ fn add_usage(total: &mut Usage, usage: &Usage) {
         .cache_creation_input_tokens
         .saturating_add(usage.cache_creation_input_tokens);
     total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
+    total.hedge_input_tokens = total
+        .hedge_input_tokens
+        .saturating_add(usage.hedge_input_tokens);
 }
 
 fn reported_cost(usd: UsdAmount) -> EstimatedUsdCost {
@@ -211,6 +214,7 @@ fn turn_usage(usage: &Usage) -> TurnUsage {
         estimated_cost,
         cost_status,
     })
+    .with_hedge_input_tokens(usage.hedge_input_tokens)
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -5319,6 +5323,13 @@ impl State {
             .scope(self.observed_response(messages, tools, cancel, events, index, context))
             .await;
         if let Ok(outcome) = &mut outcome {
+            if outcome.hedge.dispatched() {
+                let usage = &mut outcome.message.usage;
+                usage.hedge_input_tokens = usage
+                    .input_tokens
+                    .saturating_add(usage.cache_read_input_tokens)
+                    .saturating_add(usage.cache_creation_input_tokens);
+            }
             let usage = &outcome.message.usage;
             let estimate = self.estimate_cost(template, usage);
             outcome.message.usage.estimated_cost = if outcome.hedge.dispatched() {

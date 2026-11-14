@@ -403,6 +403,9 @@ pub(super) fn record_hedge(span: &Span, hedge: HedgeOutcome) {
             span.record("hedge.status", "throttled");
             span.record("hedge.deadline_ns", deadline_ns);
         }
+        HedgeOutcome::Unestimated => {
+            span.record("hedge.status", "unestimated");
+        }
         HedgeOutcome::Unneeded => {}
     }
 }

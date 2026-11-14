@@ -23,6 +23,14 @@ impl HedgePolicy {
         quantile_percent: 90,
         window: NonZeroUsize::new(100).expect("the default hedge window is not zero"),
     };
+
+    #[must_use]
+    pub fn estimate_samples(self) -> usize {
+        match 100usize.saturating_sub(usize::from(self.quantile_percent)) {
+            0 => 1,
+            tail => 100usize.div_ceil(tail),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -46,6 +54,7 @@ pub enum HedgeOutcome {
     Throttled {
         deadline_ns: u64,
     },
+    Unestimated,
     #[default]
     Unneeded,
 }
@@ -112,6 +121,10 @@ impl Hedging {
 
     #[must_use]
     pub fn deadline(&self, model: &str) -> Duration {
+        self.estimate(model).unwrap_or(self.policy.floor)
+    }
+
+    fn estimate(&self, model: &str) -> Option<Duration> {
         let mut times = self.models.read(|models| {
             models.get(model).map_or_else(Vec::new, |window| {
                 window
@@ -121,16 +134,12 @@ impl Hedging {
                     .collect::<Vec<_>>()
             })
         });
-        let needed = match 100usize.saturating_sub(usize::from(self.policy.quantile_percent)) {
-            0 => 1,
-            tail => 100usize.div_ceil(tail),
-        };
-        if times.len() < needed {
-            return self.policy.floor;
+        if times.len() < self.policy.estimate_samples() {
+            return None;
         }
         times.sort_unstable();
         let rank = (times.len() * usize::from(self.policy.quantile_percent)).div_ceil(100);
-        times[rank.clamp(1, times.len()) - 1].max(self.policy.floor)
+        Some(times[rank.clamp(1, times.len()) - 1].max(self.policy.floor))
     }
 
     fn admit(&self, model: &str) -> bool {
@@ -139,7 +148,8 @@ impl Hedging {
             let window = models.entry(model.into()).or_default();
             let hedged =
                 window.pending + window.samples.iter().filter(|sample| sample.hedged).count();
-            let admitted = hedged < (self.policy.window.get() * cap).div_ceil(100);
+            let requests = window.samples.len() + window.pending + 1;
+            let admitted = (hedged + 1) * 100 <= requests * cap;
             if admitted {
                 window.pending += 1;
             }
@@ -192,7 +202,20 @@ impl Hedging {
         H: Future<Output = Result<T, E>>,
     {
         let started = nanocode_platform::now();
-        let deadline = self.deadline(model);
+        let Some(deadline) = self.estimate(model) else {
+            let result = primary.await;
+            self.record(
+                model,
+                result
+                    .is_ok()
+                    .then(|| nanocode_platform::now().saturating_duration_since(started)),
+                false,
+            );
+            return Hedged {
+                outcome: HedgeOutcome::Unestimated,
+                result,
+            };
+        };
         let deadline_ns = u64::try_from(deadline.as_nanos()).unwrap_or(u64::MAX);
         let mut primary = std::pin::pin!(primary);
         let early = nanocode_sync::select! {

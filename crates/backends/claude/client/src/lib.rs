@@ -1411,6 +1411,12 @@ pub struct Usage {
     pub estimated_cost: Option<EstimatedUsdCost>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub iterations: Vec<UsageIteration>,
+    #[serde(default, skip_serializing_if = "no_tokens")]
+    pub hedge_input_tokens: u64,
+}
+
+const fn no_tokens(tokens: &u64) -> bool {
+    *tokens == 0
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

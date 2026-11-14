@@ -14,6 +14,8 @@ pub struct TurnUsage {
     total_tokens: u64,
     estimated_cost: Option<Box<EstimatedUsdCost>>,
     cost_status: CostStatus,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    hedge_input_tokens: u64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -30,6 +32,8 @@ pub struct AgentUsage {
     pub estimated_cost_turns: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub unpriced_turns: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub hedge_input_tokens: u64,
 }
 
 impl AgentUsage {
@@ -46,6 +50,9 @@ impl AgentUsage {
         self.reasoning_output_tokens = self
             .reasoning_output_tokens
             .saturating_add(turn.reasoning_output_tokens);
+        self.hedge_input_tokens = self
+            .hedge_input_tokens
+            .saturating_add(turn.hedge_input_tokens);
         let Some(cost) = turn.estimated_cost() else {
             self.unpriced_turns = self.unpriced_turns.saturating_add(1);
             return;
@@ -100,7 +107,19 @@ impl TurnUsage {
             total_tokens: reported.total_tokens,
             estimated_cost: reported.estimated_cost.map(Box::new),
             cost_status: reported.cost_status,
+            hedge_input_tokens: 0,
         }
+    }
+
+    #[must_use]
+    pub const fn with_hedge_input_tokens(mut self, tokens: u64) -> Self {
+        self.hedge_input_tokens = tokens;
+        self
+    }
+
+    #[must_use]
+    pub const fn hedge_input_tokens(&self) -> u64 {
+        self.hedge_input_tokens
     }
 
     #[must_use]
