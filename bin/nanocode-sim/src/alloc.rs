@@ -463,7 +463,7 @@ pub fn judge(
             .wrong
             .map(|message| format!("{} :: {message}", first.shape));
     }
-    let second = run_seed(seed, ops, mutation);
+    let second = crate::host::second_pass(|| run_seed(seed, ops, mutation));
     (second.digest != first.digest || second.wrong.is_some()).then(|| {
         format!(
             "{} :: nondeterminism: trace digest {:016x} then {:016x}",

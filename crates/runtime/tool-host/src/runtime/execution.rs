@@ -1335,7 +1335,7 @@ impl Drop for OpenToolSpan {
         self.span.record("otel.status_code", "ERROR");
         self.span.record(
             "duration_ns",
-            u64::try_from(self.opened_at.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            u64::try_from(nanocode_platform::elapsed(self.opened_at).as_nanos()).unwrap_or(u64::MAX),
         );
     }
 }
@@ -1364,7 +1364,7 @@ pub(super) fn finish_tool_execution_span(
     );
     span.record(
         "duration_ns",
-        u64::try_from(started_at.elapsed().as_nanos()).unwrap_or(u64::MAX),
+        u64::try_from(nanocode_platform::elapsed(started_at).as_nanos()).unwrap_or(u64::MAX),
     );
     if let Some(process) = execution.process_trace() {
         if let Some(exit_code) = process.exit_code {

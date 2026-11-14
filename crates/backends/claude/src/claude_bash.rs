@@ -356,7 +356,7 @@ async fn stall(jobs: &Arc<Jobs>, job: &Job, binding: &Binding) {
             quiet = nanocode_platform::now();
             continue;
         }
-        if quiet.elapsed() < STALL_SILENCE {
+        if nanocode_platform::elapsed(quiet) < STALL_SILENCE {
             continue;
         }
         let Some(tail) = tail(path, metadata.len()).await else {

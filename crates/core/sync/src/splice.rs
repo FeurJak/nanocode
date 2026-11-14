@@ -98,7 +98,7 @@ async fn half(
         if to.write_all(&buffer[..read]).await.is_err() {
             break;
         }
-        last.fetch_max(millis(start.elapsed()), Ordering::Relaxed);
+        last.fetch_max(millis(nanocode_platform::elapsed(start)), Ordering::Relaxed);
     }
     drop(to.shutdown().await);
 }

@@ -78,7 +78,7 @@ impl State {
         } else {
             CACHE_LIFETIME
         };
-        let elapsed = self.requested.read(|requested| *requested)?.elapsed();
+        let elapsed = nanocode_platform::elapsed(self.requested.read(|requested| *requested)?);
         if elapsed >= lifetime {
             return None;
         }

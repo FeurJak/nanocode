@@ -3435,7 +3435,7 @@ impl Drop for StartedToolCall<'_> {
                 AgentEventKind::ToolResult,
                 json!({
                     "call_id": self.id, "tool": self.name, "status": "cancelled",
-                    "duration_ns": self.began.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+                    "duration_ns": nanocode_platform::elapsed(self.began).as_nanos().min(u128::from(u64::MAX)) as u64,
                     "started_after_ns": null, "result": {"text": Self::REASON},
                     "outcome_unknown": true,
                 }),
@@ -3733,7 +3733,7 @@ impl LiveNestedCalls<'_> {
                 AgentEventKind::ToolResult,
                 json!({
                     "call_id": call_id, "tool": tool, "status": "unknown",
-                    "duration_ns": began.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+                    "duration_ns": nanocode_platform::elapsed(began).as_nanos().min(u128::from(u64::MAX)) as u64,
                     "started_after_ns": null, "result": {"text": Self::UNKNOWN},
                     "outcome_unknown": true, "parent_call_id": parent,
                 }),
@@ -3950,7 +3950,7 @@ async fn start_turn(
             }
             running.settle_code_turn(&events, model_call_index).await;
             let (reasoning_mode, effort) = running.run_labels();
-            let ns = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+            let ns = nanocode_platform::elapsed(started).as_nanos().min(u128::from(u64::MAX)) as u64;
             running.emit_run_finished(&events, &result, reasoning_mode, &effort, ns, None);
         }
         running.steering.acquire().await.remove(&key);
@@ -5039,7 +5039,7 @@ impl State {
             && self.cache_ttl().is_none()
             && self
                 .requested
-                .read(|requested| requested.is_some_and(|at| at.elapsed() > CACHE_LIFETIME));
+                .read(|requested| requested.is_some_and(|at| nanocode_platform::elapsed(at) > CACHE_LIFETIME));
         if outlived {
             self.cache_one_hour.store(true, Ordering::SeqCst);
         }
@@ -5084,7 +5084,7 @@ impl State {
             "attempt": 1,
             "connection_generation": 0,
             "status": "completed",
-            "duration_ns": u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            "duration_ns": u64::try_from(nanocode_platform::elapsed(started).as_nanos()).unwrap_or(u64::MAX),
             "time_to_first_event_ns": 0,
             "time_to_first_output_ns": null,
             "usage": null,
@@ -5122,7 +5122,7 @@ impl State {
                 AgentEventKind::ModelCompactionFailed,
                 json!({
                     "after_model_call_index": after_model_call_index,
-                    "duration_ns": u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                    "duration_ns": u64::try_from(nanocode_platform::elapsed(started).as_nanos()).unwrap_or(u64::MAX),
                     "error": error.to_string(),
                 }),
             ),
@@ -5386,7 +5386,7 @@ impl State {
             .request_response(messages, tools, cancel, Some(events), index, context)
             .instrument(span.clone())
             .await;
-        let duration_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let duration_ns = u64::try_from(nanocode_platform::elapsed(started).as_nanos()).unwrap_or(u64::MAX);
         let failure = outcome.as_ref().err().map(|failure| &failure.error);
         telemetry::finish_model_call(&span, duration_ns, failure);
         if let Some(error) = failure {
@@ -5413,7 +5413,7 @@ impl State {
         context: ResponseContext<'_>,
     ) -> std::result::Result<ResponseOutcome, ResponseFailure> {
         let started = nanocode_platform::now();
-        let elapsed_ns = || u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let elapsed_ns = || u64::try_from(nanocode_platform::elapsed(started).as_nanos()).unwrap_or(u64::MAX);
         let completed = |response: &crate::MessageResponse,
                          attempt: u32,
                          first_event: u64,
@@ -5795,7 +5795,7 @@ impl State {
                         sent: Arc::clone(&sent),
                         wire_profile: context.wire_profile.cloned(),
                         origin: context.origin.clone(),
-                        reach: attempt_started.elapsed(),
+                        reach: nanocode_platform::elapsed(attempt_started),
                     });
                 }
             }
@@ -5987,7 +5987,7 @@ impl State {
                     accepted,
                     first_event_ns: first_event,
                     first_output_ns: first_output,
-                    duration_ns: u64::try_from(attempt_started.elapsed().as_nanos())
+                    duration_ns: u64::try_from(nanocode_platform::elapsed(attempt_started).as_nanos())
                         .unwrap_or(u64::MAX),
                 },
             );
@@ -6299,7 +6299,7 @@ impl State {
         if let Some(snapshot) = self.publish_round_boundary(&conversation).await {
             result = result.map(|completed| self.retain_boundary(completed, snapshot));
         }
-        let ns = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+        let ns = nanocode_platform::elapsed(started).as_nanos().min(u128::from(u64::MAX)) as u64;
         self.emit_run_finished(events, &result, reasoning_mode, &effort, ns, Some(&spent));
         result
     }
@@ -7140,7 +7140,7 @@ impl State {
                         if cancel.stopped() {
                             return Ok(ContentBlock::tool_result_content(
                                 id,
-                                ToolResultContent::Text(StartedToolCall::session_stopped(began.elapsed())),
+                                ToolResultContent::Text(StartedToolCall::session_stopped(nanocode_platform::elapsed(began))),
                                 true,
                             ));
                         }
@@ -7296,7 +7296,7 @@ impl State {
                     } else {
                         "completed"
                     },
-                    duration_ns: began.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+                    duration_ns: nanocode_platform::elapsed(began).as_nanos().min(u128::from(u64::MAX)) as u64,
                 },
                 &content,
                 original_bytes,
@@ -9287,7 +9287,7 @@ impl LifecycleBackend for Driver {
                             AgentEventKind::ModelCompactionFailed,
                             json!({
                                 "after_model_call_index": 0,
-                                "duration_ns": u64::try_from(compaction_started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                                "duration_ns": u64::try_from(nanocode_platform::elapsed(compaction_started).as_nanos()).unwrap_or(u64::MAX),
                                 "error": error.to_string(),
                             }),
                         ),

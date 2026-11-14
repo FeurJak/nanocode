@@ -382,7 +382,7 @@ impl ToolRegistry {
         );
         span.record(
             "tool.admission.wait_ns",
-            u64::try_from(queued_at.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            u64::try_from(nanocode_platform::elapsed(queued_at).as_nanos()).unwrap_or(u64::MAX),
         );
         let started_at = nanocode_platform::now();
         let dispatch = self

@@ -79,6 +79,7 @@ pub enum WireMutation {
     ToolResultTwice,
     DropCancelledPrompt,
     HedgeUnmarked,
+    RealElapsed,
 }
 
 impl WireMutation {
@@ -89,6 +90,7 @@ impl WireMutation {
             "tool-result-twice" => Some(Self::ToolResultTwice),
             "drop-cancelled-prompt" => Some(Self::DropCancelledPrompt),
             "hedge-unmarked" => Some(Self::HedgeUnmarked),
+            "http-real-elapsed" => Some(Self::RealElapsed),
             _ => None,
         }
     }
@@ -101,11 +103,12 @@ impl WireMutation {
             Self::ToolResultTwice => "tool-result-twice",
             Self::DropCancelledPrompt => "drop-cancelled-prompt",
             Self::HedgeUnmarked => "hedge-unmarked",
+            Self::RealElapsed => "http-real-elapsed",
         }
     }
 
     pub const NAMES: &'static str =
-        "http-reuse-dirty|http-no-read-timeout|tool-result-twice|drop-cancelled-prompt|hedge-unmarked";
+        "http-reuse-dirty|http-no-read-timeout|tool-result-twice|drop-cancelled-prompt|hedge-unmarked|http-real-elapsed";
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -256,6 +259,7 @@ pub struct HttpServer {
     connections: AtomicU64,
     dirty: Slot<&'static str>,
     read_timeout: Duration,
+    opened: nanocode_platform::Instant,
 }
 
 impl HttpServer {
@@ -276,6 +280,7 @@ impl HttpServer {
             connections: AtomicU64::new(0),
             dirty: Slot::new(None),
             read_timeout,
+            opened: nanocode_platform::now(),
         }
     }
 
@@ -416,7 +421,11 @@ impl Connect for Connector {
                 nanocode_platform::sleep(Duration::from_millis(hang_ms)).await;
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "sim: connect hung"));
             }
-            nanocode_platform::sleep(Duration::from_millis(latency_ms)).await;
+            let leaked = match server.mutation {
+                WireMutation::RealElapsed => server.opened.elapsed(),
+                _ => Duration::ZERO,
+            };
+            nanocode_platform::sleep(Duration::from_millis(latency_ms) + leaked).await;
             if refuse {
                 server.world.count(|counts| counts.faults += 1);
                 server

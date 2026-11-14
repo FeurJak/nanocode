@@ -426,7 +426,7 @@ fn judge(seed: u64, args: &Args, totals: &mut Stats) -> Option<String> {
         verbose: false,
         ..args.options
     };
-    let second = run_seed(seed, quiet);
+    let second = crate::host::second_pass(|| run_seed(seed, quiet));
     (second.digest != first.digest || second.wrong.is_some()).then(|| {
         format!(
             "{} :: nondeterminism: trace digest {:016x} then {:016x}",
@@ -446,7 +446,7 @@ fn judge_agents(seed: u64, args: &Args, totals: &mut AgentStats) -> Option<Strin
             .wrong
             .map(|message| format!("{} :: {message}", first.shape));
     }
-    let second = agents::run_seed(seed);
+    let second = crate::host::second_pass(|| agents::run_seed(seed));
     (second.digest != first.digest || second.wrong.is_some()).then(|| {
         format!(
             "{} :: nondeterminism: trace digest {:016x} then {:016x}",
@@ -470,7 +470,7 @@ fn judge_whole(seed: u64, args: &Args, totals: &mut WholeStats) -> Option<String
         verbose: false,
         ..args.whole
     };
-    let second = whole::run_seed(seed, quiet);
+    let second = crate::host::second_pass(|| whole::run_seed(seed, quiet));
     (second.digest != first.digest || second.wrong.is_some()).then(|| {
         format!(
             "{} :: nondeterminism: trace digest {:016x} then {:016x}, {}",
@@ -514,7 +514,7 @@ fn judge_turns(
         verbose: false,
         ..args.turns
     };
-    let second = turns::run_seed(seed, quiet);
+    let second = crate::host::second_pass(|| turns::run_seed(seed, quiet));
     (second.digest != first.digest || second.wrong.is_some()).then(|| {
         format!(
             "{} :: nondeterminism: trace digest {:016x} then {:016x}",

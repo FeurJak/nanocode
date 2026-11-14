@@ -1027,7 +1027,7 @@ pub fn judge_seed(
             .wrong
             .map(|message| format!("{} :: {message}", first.shape));
     }
-    let second = run_seed(seed, mutation, false);
+    let second = crate::host::second_pass(|| run_seed(seed, mutation, false));
     (second.digest != first.digest || second.wrong.is_some()).then(|| {
         format!(
             "{} :: nondeterminism: trace digest {:016x} then {:016x}",

@@ -111,6 +111,10 @@ pub async fn timeout_at<F: std::future::Future>(
     timeout(deadline.saturating_duration_since(Instant::now()), future).await
 }
 
+pub fn elapsed(since: Instant) -> Duration {
+    now().saturating_duration_since(since)
+}
+
 pub fn unix_millis() -> u64 {
     system_time()
         .duration_since(UNIX_EPOCH)

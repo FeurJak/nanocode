@@ -209,7 +209,7 @@ async fn spawn_host() -> Result<EmbeddedHost, String> {
     );
     span.record(
         "duration_ns",
-        u64::try_from(started_at.elapsed().as_nanos()).unwrap_or(u64::MAX),
+        u64::try_from(nanocode_platform::elapsed(started_at).as_nanos()).unwrap_or(u64::MAX),
     );
     result
 }
@@ -502,7 +502,7 @@ impl Drop for PendingCallReceipts {
                 }),
                 success: false,
                 started_after_ns: pending.started_after_ns,
-                duration_ns: u64::try_from(pending.started.elapsed().as_nanos())
+                duration_ns: u64::try_from(nanocode_platform::elapsed(pending.started).as_nanos())
                     .unwrap_or(u64::MAX),
                 metadata: None,
             };
@@ -1247,7 +1247,7 @@ fn finish_cell_span(span: &nanocode_trace::Span, execution: &CodeModeExecution, 
     );
     span.record(
         "duration_ns",
-        u64::try_from(started_at.elapsed().as_nanos()).unwrap_or(u64::MAX),
+        u64::try_from(nanocode_platform::elapsed(started_at).as_nanos()).unwrap_or(u64::MAX),
     );
 }
 
@@ -2360,7 +2360,7 @@ fn observed_execution(
     let content = output::truncate_content(content, max_output_tokens);
     CodeModeExecution {
         cell: None,
-        output: with_status(status, started_at.elapsed().as_secs_f64(), content),
+        output: with_status(status, nanocode_platform::elapsed(started_at).as_secs_f64(), content),
         success,
         nested_calls: ordered_calls(nested_calls),
         notifications,
@@ -2739,7 +2739,7 @@ impl EmbeddedHost {
                     if event_count == 1 {
                         nanocode_trace::Span::current().record(
                             "runtime.first_event_ns",
-                            u64::try_from(actor_started_at.elapsed().as_nanos())
+                            u64::try_from(nanocode_platform::elapsed(actor_started_at).as_nanos())
                                 .unwrap_or(u64::MAX),
                         );
                     }
@@ -3140,7 +3140,7 @@ async fn keep_stored(
 fn record_elapsed(field: &'static str, started_at: Instant) {
     nanocode_trace::Span::current().record(
         field,
-        u64::try_from(started_at.elapsed().as_nanos()).unwrap_or(u64::MAX),
+        u64::try_from(nanocode_platform::elapsed(started_at).as_nanos()).unwrap_or(u64::MAX),
     );
 }
 
@@ -3248,7 +3248,7 @@ async fn execute_nested_call(
         }
         Nested::Run => caught(tools.execute_nested(&name, Value::clone(&input), context)).await,
     };
-    let duration_ns = u64::try_from(started_at.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    let duration_ns = u64::try_from(nanocode_platform::elapsed(started_at).as_nanos()).unwrap_or(u64::MAX);
     let encoded = execution.structured_json().map(str::to_owned);
     let value = execution.take_structured_result();
     let process_trace = execution.process_trace().copied().map(Into::into);
@@ -3288,7 +3288,7 @@ fn failed_execution(
     message: &str,
     nested_calls: Vec<NestedToolCall>,
 ) -> CodeModeExecution {
-    CodeModeExecution::failed(started_at.elapsed().as_secs_f64(), message, nested_calls)
+    CodeModeExecution::failed(nanocode_platform::elapsed(started_at).as_secs_f64(), message, nested_calls)
 }
 
 fn with_status(

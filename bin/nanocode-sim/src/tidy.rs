@@ -19,11 +19,13 @@ const SIMULATED: &[&str] = &[
 
 const BYPASSES_HOST: &str = "bypasses nanocode-platform's host";
 const WAKE_ORDER: &str = "yields its futures in the order they were woken, which tokio's watch and HashMap iteration draw at random; use nanocode_sync::InOrder";
+const REAL_ELAPSED: &str = "reads std's real clock on native, where nanocode_platform::Instant is std::time::Instant; use nanocode_platform::elapsed";
 const JOIN_ORDER: &str = "polls in the order its futures were woken (join_all does past 30 futures, through FuturesOrdered); use nanocode_sync::join_in_order or try_join_in_order";
 
 const BANNED: &[(&str, &str)] = &[
     ("SystemTime::now", BYPASSES_HOST),
     ("Instant::now", BYPASSES_HOST),
+    (".elapsed()", REAL_ELAPSED),
     ("thread::spawn", BYPASSES_HOST),
     ("thread::Builder", BYPASSES_HOST),
     ("getrandom", BYPASSES_HOST),
@@ -67,6 +69,12 @@ const ALLOWED: &[Allowed] = &[
     },
     Allowed {
         path: "crates/core/sync/src/lease.rs",
+        call: ".elapsed()",
+        uses: 2,
+        why: "a lease's watchdog measures renewals from its own Instant::now readings on its own thread; leases guard a host's external locks and no simulated crate takes one",
+    },
+    Allowed {
+        path: "crates/core/sync/src/lease.rs",
         call: "thread::spawn",
         uses: 1,
         why: "a lease's watchdog runs on its own thread so that it expires the lease even when the Tokio runtime stalls",
@@ -106,6 +114,12 @@ const ALLOWED: &[Allowed] = &[
         call: "Instant::now",
         uses: 5,
         why: "span durations (append, encode, write, queue wait) timed with the real clock, mostly on the writer's own thread where no host runs; they reach tracing fields only",
+    },
+    Allowed {
+        path: "crates/integrations/store-jsonl/src/lib.rs",
+        call: ".elapsed()",
+        uses: 5,
+        why: "span durations measured from the store's own real-clock Instant::now readings, mostly on its writer's thread; they reach tracing fields only",
     },
     Allowed {
         path: "crates/integrations/store-jsonl/src/lib.rs",

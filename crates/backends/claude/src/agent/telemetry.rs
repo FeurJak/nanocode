@@ -210,7 +210,7 @@ pub(super) struct CallPipeline {
 }
 
 pub(super) fn elapsed_ns(started: nanocode_platform::Instant) -> u64 {
-    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    u64::try_from(nanocode_platform::elapsed(started).as_nanos()).unwrap_or(u64::MAX)
 }
 
 pub(super) fn record_model_response(

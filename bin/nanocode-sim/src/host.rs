@@ -39,6 +39,29 @@ static HOST: SimulatedHost = SimulatedHost {
     uuid_stamps: std::sync::atomic::AtomicU64::new(0),
 };
 
+static SECOND_PASS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn second_pass<R>(run: impl FnOnce() -> R) -> R {
+    SECOND_PASS.store(true, std::sync::atomic::Ordering::Relaxed);
+    let result = run();
+    SECOND_PASS.store(false, std::sync::atomic::Ordering::Relaxed);
+    result
+}
+
+fn origin() -> Instant {
+    let now = Instant::now();
+    let span = Duration::from_secs(SIMULATED_START_UNIX_SECS);
+    if SECOND_PASS.load(std::sync::atomic::Ordering::Relaxed) {
+        now.checked_sub(span).expect(
+            "the second pass's origin lies as far before the real clock as the simulated epoch",
+        )
+    } else {
+        now.checked_add(span).expect(
+            "the first pass's origin lies as far after the real clock as the simulated epoch",
+        )
+    }
+}
+
 impl Host for SimulatedHost {
     fn now(&self) -> Instant {
         with(|simulation| simulation.started + Duration::from_nanos(simulation.clock.now_ns()))
@@ -100,7 +123,7 @@ pub fn enter(seed: u64, clock: &Arc<Clock>) {
             clock: Arc::clone(clock),
             random: Rng::derive(seed, "host"),
             spawned: Vec::new(),
-            started: Instant::now(),
+            started: origin(),
         });
     });
 }

@@ -38,7 +38,7 @@ pub fn put(bytes: Vec<u8>) -> u64 {
         bytes: Slot::new(Some(bytes)),
     });
     buffers().update(|buffers| {
-        buffers.retain(|_, buffer| buffer.at.elapsed() < UNCLAIMED);
+        buffers.retain(|_, buffer| nanocode_platform::elapsed(buffer.at) < UNCLAIMED);
         buffers.insert(id, Arc::clone(&buffer));
     });
     id

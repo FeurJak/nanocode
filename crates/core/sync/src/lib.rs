@@ -1397,7 +1397,7 @@ impl<T: Clone + Send + Sync + 'static> Refreshed<T> {
         let (stale, held) = self.entries.read(|entries| match entries.held(key) {
             None => (true, None),
             Some(entry) => (
-                entry.at.is_none_or(|at| at.elapsed() >= fresh)
+                entry.at.is_none_or(|at| nanocode_platform::elapsed(at) >= fresh)
                     || entry.value.as_ref().is_some_and(outdated),
                 Some((entry.refreshing, entry.value.clone())),
             ),
