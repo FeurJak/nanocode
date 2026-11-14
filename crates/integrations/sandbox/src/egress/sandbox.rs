@@ -46,7 +46,7 @@ impl Drop for Egress {
 
 fn private(host: &str) -> String {
     format!(
-        "{host} resolves only to private, loopback or link-local addresses, which this proxy does not reach."
+        "{host} resolves only to private, loopback, link-local or other special-purpose addresses, which this proxy does not reach."
     )
 }
 

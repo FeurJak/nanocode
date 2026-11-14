@@ -1,5 +1,5 @@
 use crate::egress::{
-    address::{Cidr, TAILNET_SUFFIX, host_matches, is_public, reachable},
+    address::{Cidr, Literal, TAILNET_SUFFIX, host_matches, is_public, literal, reachable},
     addresses::Addresses,
     audit::{Audit, Kind, Reporting},
     authority::Authority,
@@ -361,23 +361,27 @@ impl<A: Authority> Proxy<A> {
                 (Some(private_hosts), &[][..])
             }
         };
-        let literal = host
-            .strip_prefix('[')
-            .and_then(|host| host.strip_suffix(']'))
-            .unwrap_or(host);
-        let addresses: Vec<SocketAddr> = match literal.parse::<IpAddr>() {
-            Ok(ip) => vec![SocketAddr::new(ip, port)],
-            Err(_) => timeout(connect, self.dial.resolve(literal, port))
-                .await
-                .ok()
-                .and_then(Result::ok)
-                .ok_or_else(|| {
-                    self.noted(host, false);
-                    refuse(
-                        StatusCode::BAD_GATEWAY,
-                        &format!("{host} does not resolve."),
-                    )
-                })?,
+        let unresolved = || {
+            self.noted(host, false);
+            refuse(
+                StatusCode::BAD_GATEWAY,
+                &format!("{host} does not resolve."),
+            )
+        };
+        let addresses: Vec<SocketAddr> = match literal(host) {
+            Literal::Address(ip) => vec![SocketAddr::new(ip, port)],
+            Literal::Malformed => return Err(unresolved()),
+            Literal::Name => {
+                let name = host
+                    .strip_prefix('[')
+                    .and_then(|host| host.strip_suffix(']'))
+                    .unwrap_or(host);
+                timeout(connect, self.dial.resolve(name, port))
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .ok_or_else(unresolved)?
+            }
         };
         let addresses: Vec<SocketAddr> = match private_hosts {
             None if addresses.is_empty()

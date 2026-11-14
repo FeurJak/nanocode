@@ -107,7 +107,7 @@ fn usage() -> ExitCode {
         "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|capture|executor] [--ops N] [--twice] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--retain TURNS] [--state-bytes N] [--event-bytes N]\n       runtime: [--store memory|kv|log] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       websocket: [--mutation {}]
        http_server: [--mutation {}]
        alloc: [--mutation overstate_size|forget_free|scribble]
-       egress: [--mutation widen_allowlist|corrupt_tunnel_byte]
+       egress: [--mutation widen_allowlist|corrupt_tunnel_byte|rebind_on_connect|trust_private]
        mpp: [--mutation {}]
        sync: [--mutation {}]
        streams: [--mutation {}]

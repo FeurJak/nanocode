@@ -1,7 +1,7 @@
 use std::{
     cell::{Cell, RefCell},
     io,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     ops::Range,
     process::ExitCode,
     sync::{
@@ -13,8 +13,8 @@ use std::{
 
 use nanocode_http::{header, wire};
 use nanocode_sandbox::egress::{
-    Caching, Credential, Dial, Dialing, Fixed, Grant, Identity, Injecting, Limits, Proxy, Reach,
-    Resolving, Rules, Texts, Tls, Upstream,
+    Caching, Cidr, Credential, Dial, Dialing, Fixed, Grant, Identity, Injecting, Limits, Proxy,
+    Reach, Resolving, Rules, Texts, Tls, Upstream,
 };
 use nanocode_sync::Atom;
 use rustls::RootCertStore;
@@ -31,6 +31,13 @@ const PAYLOAD_BYTES_MAX: u64 = 6000;
 const PATH_SEGMENTS_MAX: u64 = 3;
 const CONNECT_PPM: u64 = 450_000;
 const POST_PPM: u64 = 400_000;
+const PUBLIC_POLICY_PPM: u64 = 500_000;
+const LITERAL_PPM: u64 = 300_000;
+const MALFORMED_PPM: u64 = 150_000;
+const REFUSED_LITERAL_PPM: u64 = 500_000;
+const TRAILING_DOT_PPM: u64 = 100_000;
+const SPECIAL_ANSWERS_MAX: u64 = 3;
+const MIXED_REFUSED_MAX: u64 = 2;
 const PIECE_MAX: u64 = 4096;
 const TINY_PIECES_PPM: u64 = 200_000;
 const TINY_PIECE_MAX: u64 = 7;
@@ -51,16 +58,68 @@ const STATUS_FORBIDDEN: u16 = 403;
 const STATUS_BAD_GATEWAY: u16 = 502;
 const ORIGIN_STATUSES: [u16; 4] = [200, 201, 404, 500];
 const HOP_HEADER: &str = "proxy-connection";
+const SIM_BLOCK: (Ipv4Addr, u32) = (Ipv4Addr::new(93, 184, 0, 0), 24);
+const EVIL: Ipv4Addr = Ipv4Addr::new(93, 184, 0, 66);
+const MIXED_PUBLIC: Ipv4Addr = Ipv4Addr::new(93, 184, 0, 3);
+const REBIND_PUBLIC: Ipv4Addr = Ipv4Addr::new(93, 184, 0, 4);
+
+const REFUSED_V4: [(Ipv4Addr, u32); 15] = [
+    (Ipv4Addr::new(0, 0, 0, 0), 8),
+    (Ipv4Addr::new(10, 0, 0, 0), 8),
+    (Ipv4Addr::new(100, 64, 0, 0), 10),
+    (Ipv4Addr::new(127, 0, 0, 0), 8),
+    (Ipv4Addr::new(169, 254, 0, 0), 16),
+    (Ipv4Addr::new(172, 16, 0, 0), 12),
+    (Ipv4Addr::new(192, 0, 0, 0), 24),
+    (Ipv4Addr::new(192, 0, 2, 0), 24),
+    (Ipv4Addr::new(192, 88, 99, 0), 24),
+    (Ipv4Addr::new(192, 168, 0, 0), 16),
+    (Ipv4Addr::new(198, 18, 0, 0), 15),
+    (Ipv4Addr::new(198, 51, 100, 0), 24),
+    (Ipv4Addr::new(203, 0, 113, 0), 24),
+    (Ipv4Addr::new(224, 0, 0, 0), 4),
+    (Ipv4Addr::new(240, 0, 0, 0), 4),
+];
+
+const REFUSED_V6: [(Ipv6Addr, u32); 11] = [
+    (Ipv6Addr::new(0x64, 0xff9b, 1, 0, 0, 0, 0, 0), 48),
+    (Ipv6Addr::new(0x100, 0, 0, 0, 0, 0, 0, 0), 64),
+    (Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 0), 23),
+    (Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32),
+    (Ipv6Addr::new(0x2002, 0, 0, 0, 0, 0, 0, 0), 16),
+    (Ipv6Addr::new(0x3fff, 0, 0, 0, 0, 0, 0, 0), 20),
+    (Ipv6Addr::new(0x5f00, 0, 0, 0, 0, 0, 0, 0), 16),
+    (Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 0), 7),
+    (Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10),
+    (Ipv6Addr::new(0xfec0, 0, 0, 0, 0, 0, 0, 0), 10),
+    (Ipv6Addr::new(0xff00, 0, 0, 0, 0, 0, 0, 0), 8),
+];
+
+const GLOBAL_UNICAST: (Ipv6Addr, u32) = (Ipv6Addr::new(0x2000, 0, 0, 0, 0, 0, 0, 0), 3);
+
+const EMBEDDINGS: [(Ipv6Addr, u32); 3] = [
+    (Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0, 0), 96),
+    (Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0), 96),
+    (Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0, 0), 96),
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EgressMutation {
     None,
     WidenAllowlist,
     CorruptTunnelByte,
+    RebindOnConnect,
+    TrustPrivate,
 }
 
 impl EgressMutation {
-    const ALL: [Self; 3] = [Self::None, Self::WidenAllowlist, Self::CorruptTunnelByte];
+    const ALL: [Self; 5] = [
+        Self::None,
+        Self::WidenAllowlist,
+        Self::CorruptTunnelByte,
+        Self::RebindOnConnect,
+        Self::TrustPrivate,
+    ];
 
     pub fn parse(name: &str) -> Option<Self> {
         Self::ALL
@@ -73,6 +132,8 @@ impl EgressMutation {
             Self::None => "none",
             Self::WidenAllowlist => "widen_allowlist",
             Self::CorruptTunnelByte => "corrupt_tunnel_byte",
+            Self::RebindOnConnect => "rebind_on_connect",
+            Self::TrustPrivate => "trust_private",
         }
     }
 
@@ -86,6 +147,208 @@ impl EgressMutation {
     }
 }
 
+fn within_v4(address: Ipv4Addr, (network, prefix): (Ipv4Addr, u32)) -> bool {
+    let shift = u32::BITS - prefix;
+    address.to_bits().checked_shr(shift).unwrap_or(0)
+        == network.to_bits().checked_shr(shift).unwrap_or(0)
+}
+
+fn within_v6(address: Ipv6Addr, (network, prefix): (Ipv6Addr, u32)) -> bool {
+    let shift = u128::BITS - prefix;
+    address.to_bits().checked_shr(shift).unwrap_or(0)
+        == network.to_bits().checked_shr(shift).unwrap_or(0)
+}
+
+fn low_v4(v6: Ipv6Addr) -> Ipv4Addr {
+    Ipv4Addr::from_bits(
+        u32::try_from(v6.to_bits() & u128::from(u32::MAX)).expect("the low 32 bits fit in u32"),
+    )
+}
+
+fn canonical(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V6(v6) if EMBEDDINGS.iter().any(|prefix| within_v6(v6, *prefix)) => {
+            IpAddr::V4(low_v4(v6))
+        }
+        _ => address,
+    }
+}
+
+fn refused(address: IpAddr) -> bool {
+    match canonical(address) {
+        IpAddr::V4(v4) => REFUSED_V4.iter().any(|range| within_v4(v4, *range)),
+        IpAddr::V6(v6) => {
+            !within_v6(v6, GLOBAL_UNICAST) || REFUSED_V6.iter().any(|range| within_v6(v6, *range))
+        }
+    }
+}
+
+fn inside_v4(rng: &mut Rng, (network, prefix): (Ipv4Addr, u32)) -> Ipv4Addr {
+    let random =
+        u32::try_from(rng.draw() >> u32::BITS).expect("the high half of a u64 fits in u32");
+    let mask = u32::MAX.checked_shr(prefix).unwrap_or(0);
+    Ipv4Addr::from_bits(network.to_bits() | (random & mask))
+}
+
+fn inside_v6(rng: &mut Rng, (network, prefix): (Ipv6Addr, u32)) -> Ipv6Addr {
+    let random = (u128::from(rng.draw()) << u64::BITS) | u128::from(rng.draw());
+    let mask = u128::MAX.checked_shr(prefix).unwrap_or(0);
+    Ipv6Addr::from_bits(network.to_bits() | (random & mask))
+}
+
+fn embed(rng: &mut Rng, v4: Ipv4Addr) -> IpAddr {
+    let choice = rng.pick(EMBEDDINGS.len() + 1);
+    EMBEDDINGS
+        .get(choice)
+        .map_or(IpAddr::V4(v4), |(prefix, _)| {
+            IpAddr::V6(Ipv6Addr::from_bits(
+                prefix.to_bits() | u128::from(v4.to_bits()),
+            ))
+        })
+}
+
+fn refused_address(rng: &mut Rng) -> IpAddr {
+    let address = match rng.pick(3) {
+        0 => {
+            let range = REFUSED_V4[rng.pick(REFUSED_V4.len())];
+            let v4 = inside_v4(rng, range);
+            embed(rng, v4)
+        }
+        1 => {
+            let range = REFUSED_V6[rng.pick(REFUSED_V6.len())];
+            IpAddr::V6(inside_v6(rng, range))
+        }
+        _ => loop {
+            let v6 =
+                Ipv6Addr::from_bits((u128::from(rng.draw()) << u64::BITS) | u128::from(rng.draw()));
+            if !within_v6(v6, GLOBAL_UNICAST)
+                && !EMBEDDINGS.iter().any(|prefix| within_v6(v6, *prefix))
+            {
+                break IpAddr::V6(v6);
+            }
+        },
+    };
+    assert!(refused(address), "a refused sample is refused: {address}");
+    address
+}
+
+fn public_address(rng: &mut Rng) -> IpAddr {
+    if rng.chance(PUBLIC_POLICY_PPM) {
+        loop {
+            let v4 = Ipv4Addr::from_bits(
+                u32::try_from(rng.draw() >> u32::BITS).expect("the high half of a u64 fits in u32"),
+            );
+            if !refused(IpAddr::V4(v4)) && !within_v4(v4, SIM_BLOCK) {
+                break embed(rng, v4);
+            }
+        }
+    } else {
+        loop {
+            let v6 = IpAddr::V6(inside_v6(rng, GLOBAL_UNICAST));
+            if !refused(v6) {
+                break v6;
+            }
+        }
+    }
+}
+
+fn spell_part(rng: &mut Rng, value: u32) -> String {
+    match rng.pick(3) {
+        0 => format!("{value}"),
+        1 => format!("0{value:o}"),
+        _ => format!("0x{value:x}"),
+    }
+}
+
+fn spell_v4(rng: &mut Rng, v4: Ipv4Addr) -> String {
+    let bits = v4.to_bits();
+    let leading = u32::try_from(rng.pick(4)).expect("at most three leading parts");
+    let width = u32::BITS - u8::BITS * leading;
+    let mut parts = (1..=leading)
+        .map(|index| {
+            let value = (bits >> (u32::BITS - u8::BITS * index)) & u32::from(u8::MAX);
+            spell_part(rng, value)
+        })
+        .collect::<Vec<_>>();
+    let last = bits & u32::MAX.checked_shr(u32::BITS - width).unwrap_or(0);
+    parts.push(spell_part(rng, last));
+    let mut spelled = parts.join(".");
+    if rng.chance(TRAILING_DOT_PPM) {
+        spelled.push('.');
+    }
+    spelled
+}
+
+fn spell(rng: &mut Rng, address: IpAddr) -> (String, String) {
+    match address {
+        IpAddr::V4(v4) => {
+            let spelled = spell_v4(rng, v4);
+            (spelled.clone(), spelled)
+        }
+        IpAddr::V6(v6) => {
+            let segments = v6.segments();
+            let spelled = match rng.pick(3) {
+                0 => v6.to_string(),
+                1 => segments
+                    .iter()
+                    .map(|segment| format!("{segment:x}"))
+                    .collect::<Vec<_>>()
+                    .join(":"),
+                _ => format!(
+                    "{}:{}",
+                    segments[..6]
+                        .iter()
+                        .map(|segment| format!("{segment:x}"))
+                        .collect::<Vec<_>>()
+                        .join(":"),
+                    low_v4(v6)
+                ),
+            };
+            (format!("[{spelled}]"), spelled)
+        }
+    }
+}
+
+fn malformed(rng: &mut Rng) -> String {
+    let byte = |rng: &mut Rng| rng.range(0, u64::from(u8::MAX));
+    match rng.pick(5) {
+        0 => format!(
+            "{}.{}.{}.{}",
+            rng.range(u64::from(u8::MAX) + 1, u64::from(u16::MAX)),
+            byte(rng),
+            byte(rng),
+            byte(rng)
+        ),
+        1 => format!(
+            "{}.{}",
+            byte(rng),
+            rng.range(1 << (u32::BITS - u8::BITS), u64::from(u32::MAX))
+        ),
+        2 => format!(
+            "0{}.{}.{}.{}",
+            rng.range(8, 9),
+            byte(rng),
+            byte(rng),
+            byte(rng)
+        ),
+        3 => format!(
+            "{}.{}.{}.{}.{}",
+            byte(rng),
+            byte(rng),
+            byte(rng),
+            byte(rng),
+            byte(rng)
+        ),
+        _ => format!("{}", rng.range(u64::from(u32::MAX) + 1, u64::MAX)),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Policy {
+    Listed,
+    Public,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Class {
     Public,
@@ -94,6 +357,9 @@ enum Class {
     Denied,
     Unresolvable,
     Unreachable,
+    Special,
+    Mixed,
+    Rebinding,
 }
 
 struct HostEntry {
@@ -102,7 +368,7 @@ struct HostEntry {
     address: Option<Ipv4Addr>,
 }
 
-const HOSTS: [HostEntry; 7] = [
+const HOSTS: [HostEntry; 10] = [
     HostEntry {
         name: "api.sim",
         class: Class::Public,
@@ -126,7 +392,7 @@ const HOSTS: [HostEntry; 7] = [
     HostEntry {
         name: "evil.sim",
         class: Class::Denied,
-        address: Some(Ipv4Addr::new(93, 184, 0, 66)),
+        address: Some(EVIL),
     },
     HostEntry {
         name: "ghost.sim",
@@ -138,28 +404,41 @@ const HOSTS: [HostEntry; 7] = [
         class: Class::Unreachable,
         address: Some(Ipv4Addr::new(93, 184, 0, 99)),
     },
+    HostEntry {
+        name: "special.sim",
+        class: Class::Special,
+        address: None,
+    },
+    HostEntry {
+        name: "mixed.sim",
+        class: Class::Mixed,
+        address: Some(MIXED_PUBLIC),
+    },
+    HostEntry {
+        name: "rebind.sim",
+        class: Class::Rebinding,
+        address: Some(REBIND_PUBLIC),
+    },
 ];
 
-fn allowed_hosts(mutation: EgressMutation) -> Vec<String> {
+fn entry_at(address: IpAddr) -> Option<&'static HostEntry> {
+    let address = canonical(address);
     HOSTS
         .iter()
-        .filter(|host| host.class != Class::Denied || mutation == EgressMutation::WidenAllowlist)
-        .map(|host| host.name.to_owned())
-        .collect()
+        .find(|host| host.address.map(IpAddr::V4) == Some(address))
 }
 
-fn private_hosts() -> Vec<String> {
-    HOSTS
-        .iter()
-        .filter(|host| host.class == Class::PrivateListed)
-        .map(|host| host.name.to_owned())
-        .collect()
+fn key_of(address: IpAddr) -> String {
+    entry_at(address).map_or_else(
+        || canonical(address).to_string(),
+        |host| host.name.to_owned(),
+    )
 }
 
-fn host_at(address: SocketAddr) -> Option<&'static HostEntry> {
+fn listed_private(key: &str) -> bool {
     HOSTS
         .iter()
-        .find(|host| host.address.map(IpAddr::V4) == Some(address.ip()))
+        .any(|host| host.class == Class::PrivateListed && host.name == key)
 }
 
 #[derive(Clone, Debug)]
@@ -176,14 +455,86 @@ enum Kind {
     },
 }
 
+enum Target {
+    Named(&'static HostEntry),
+    Literal {
+        authority: String,
+        bare: String,
+        address: Option<IpAddr>,
+    },
+}
+
 struct Request {
-    host: &'static HostEntry,
+    target: Target,
     kind: Kind,
     latency_ms: u64,
 }
 
+impl Request {
+    fn authority(&self) -> &str {
+        match &self.target {
+            Target::Named(host) => host.name,
+            Target::Literal { authority, .. } => authority,
+        }
+    }
+
+    fn bare(&self) -> &str {
+        match &self.target {
+            Target::Named(host) => host.name,
+            Target::Literal { bare, .. } => bare,
+        }
+    }
+
+    fn key(&self) -> Option<String> {
+        match &self.target {
+            Target::Named(host) => Some(host.name.to_owned()),
+            Target::Literal { address, .. } => address.map(key_of),
+        }
+    }
+
+    const fn port(&self) -> u16 {
+        match self.kind {
+            Kind::Tunnel { .. } => TUNNEL_PORT,
+            Kind::Plain { .. } => PLAIN_PORT,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Answers {
+    special: Vec<IpAddr>,
+    mixed: Vec<IpAddr>,
+    rebound: IpAddr,
+    evil: IpAddr,
+}
+
+impl Answers {
+    fn of(seed: u64) -> Self {
+        let mut rng = Rng::derive(seed, "egress-answers");
+        let special = (0..rng.range(1, SPECIAL_ANSWERS_MAX))
+            .map(|_| refused_address(&mut rng))
+            .collect();
+        let mut mixed = (0..rng.range(1, MIXED_REFUSED_MAX))
+            .map(|_| refused_address(&mut rng))
+            .collect::<Vec<_>>();
+        let at = rng.pick(mixed.len() + 1);
+        mixed.insert(at, IpAddr::V4(MIXED_PUBLIC));
+        let rebound = refused_address(&mut rng);
+        let evil = embed(&mut rng, EVIL);
+        Self {
+            special,
+            mixed,
+            rebound,
+            evil,
+        }
+    }
+}
+
 struct Script {
+    policy: Policy,
+    deny: String,
     requests: Vec<Request>,
+    answers: Answers,
     read_piece_max: usize,
     write_piece_max: usize,
 }
@@ -208,12 +559,48 @@ fn count(value: usize) -> u64 {
     u64::try_from(value).expect("a length fits in u64")
 }
 
+fn literal(rng: &mut Rng) -> Target {
+    if rng.chance(MALFORMED_PPM) {
+        let spelled = malformed(rng);
+        return Target::Literal {
+            authority: spelled.clone(),
+            bare: spelled,
+            address: None,
+        };
+    }
+    let address = if rng.chance(REFUSED_LITERAL_PPM) {
+        refused_address(rng)
+    } else {
+        public_address(rng)
+    };
+    let (authority, bare) = spell(rng, address);
+    Target::Literal {
+        authority,
+        bare,
+        address: Some(address),
+    }
+}
+
 impl Script {
     fn of(seed: u64) -> Self {
         let mut rng = Rng::derive(seed, "egress-script");
+        let policy = if rng.chance(PUBLIC_POLICY_PPM) {
+            Policy::Public
+        } else {
+            Policy::Listed
+        };
+        let deny = if rng.chance(PUBLIC_POLICY_PPM) {
+            format!("{EVIL}/{}", u32::BITS)
+        } else {
+            format!("{}/{}", EVIL.to_ipv6_mapped(), u128::BITS)
+        };
         let requests = (0..rng.range(1, REQUESTS_MAX))
             .map(|index| {
-                let host = &HOSTS[rng.pick(HOSTS.len())];
+                let target = if rng.chance(LITERAL_PPM) {
+                    literal(&mut rng)
+                } else {
+                    Target::Named(&HOSTS[rng.pick(HOSTS.len())])
+                };
                 let kind = if rng.chance(CONNECT_PPM) {
                     let length = rng.range(1, PAYLOAD_BYTES_MAX);
                     Kind::Tunnel {
@@ -244,7 +631,7 @@ impl Script {
                     }
                 };
                 Request {
-                    host,
+                    target,
                     kind,
                     latency_ms: rng.range(0, LATENCY_MS_MAX),
                 }
@@ -253,10 +640,21 @@ impl Script {
         let tiny = rng.chance(TINY_PIECES_PPM);
         let piece_max = if tiny { TINY_PIECE_MAX } else { PIECE_MAX };
         Self {
+            policy,
+            deny,
             requests,
+            answers: Answers::of(seed),
             read_piece_max: size(rng.range(1, piece_max)),
             write_piece_max: size(rng.range(1, piece_max)),
         }
+    }
+
+    fn literals(&self) -> Vec<String> {
+        self.requests
+            .iter()
+            .filter(|request| matches!(request.target, Target::Literal { .. }))
+            .map(|request| request.bare().trim_end_matches('.').to_owned())
+            .collect()
     }
 
     fn describe(&self) -> String {
@@ -265,7 +663,7 @@ impl Script {
             .iter()
             .map(|request| match &request.kind {
                 Kind::Tunnel { payload } => {
-                    format!("CONNECT {} {}B", request.host.name, payload.len())
+                    format!("CONNECT {} {}B", request.authority(), payload.len())
                 }
                 Kind::Plain {
                     post,
@@ -276,30 +674,70 @@ impl Script {
                 } => format!(
                     "{} {}{path} {}B -> {status} {}B",
                     if *post { "POST" } else { "GET" },
-                    request.host.name,
+                    request.authority(),
                     body.len(),
                     answer.len()
                 ),
             })
             .collect::<Vec<_>>()
             .join(" | ");
+        let answers = &self.answers;
         format!(
-            "scenario=egress read_piece_max={} write_piece_max={} requests=[{requests}]",
-            self.read_piece_max, self.write_piece_max
+            "scenario=egress policy={:?} deny={} special={:?} mixed={:?} rebound={} evil={} read_piece_max={} write_piece_max={} requests=[{requests}]",
+            self.policy,
+            self.deny,
+            answers.special,
+            answers.mixed,
+            answers.rebound,
+            answers.evil,
+            self.read_piece_max,
+            self.write_piece_max
         )
     }
 }
 
-#[derive(Clone, Debug, Default)]
+fn allowed_hosts(script: &Script, mutation: EgressMutation) -> Vec<String> {
+    HOSTS
+        .iter()
+        .filter(|host| host.class != Class::Denied || mutation == EgressMutation::WidenAllowlist)
+        .map(|host| host.name.to_owned())
+        .chain(script.literals())
+        .collect()
+}
+
+fn private_hosts(script: &Script, mutation: EgressMutation) -> Vec<String> {
+    let trusted = |class: Class| {
+        class == Class::PrivateListed
+            || (mutation == EgressMutation::TrustPrivate
+                && matches!(class, Class::Special | Class::Mixed | Class::Rebinding))
+    };
+    let literals = if mutation == EgressMutation::TrustPrivate {
+        script.literals()
+    } else {
+        Vec::new()
+    };
+    HOSTS
+        .iter()
+        .filter(|host| trusted(host.class))
+        .map(|host| host.name.to_owned())
+        .chain(literals)
+        .collect()
+}
+
+#[derive(Clone, Debug)]
 struct Dialed {
-    host: String,
+    key: String,
+    address: IpAddr,
     received: Vec<u8>,
 }
 
 struct SimDial {
     seed: u64,
     connections: AtomicU64,
+    rebinds: AtomicU64,
+    answers: Answers,
     dialed: Arc<Atom<Vec<Dialed>>>,
+    strays: Arc<Atom<Vec<String>>>,
     plain: Arc<Vec<(String, u16, Vec<u8>)>>,
     clock: Arc<Clock>,
     latency_ms: u64,
@@ -308,27 +746,62 @@ struct SimDial {
     mutation: EgressMutation,
 }
 
+impl SimDial {
+    fn rebind(&self) -> IpAddr {
+        if self
+            .rebinds
+            .fetch_add(1, Ordering::SeqCst)
+            .is_multiple_of(2)
+        {
+            IpAddr::V4(REBIND_PUBLIC)
+        } else {
+            self.answers.rebound
+        }
+    }
+}
+
 impl Dial for SimDial {
     fn resolve(&self, host: &str, port: u16) -> Resolving {
-        let found = HOSTS
-            .iter()
-            .find(|entry| entry.name == host)
-            .and_then(|entry| entry.address)
-            .map(|address| vec![SocketAddr::new(IpAddr::V4(address), port)]);
+        let answer = match HOSTS.iter().find(|entry| entry.name == host) {
+            None => {
+                self.strays.update(|strays| strays.push(host.to_owned()));
+                None
+            }
+            Some(entry) => match entry.class {
+                Class::Special => Some(self.answers.special.clone()),
+                Class::Mixed => Some(self.answers.mixed.clone()),
+                Class::Rebinding => Some(vec![self.rebind()]),
+                Class::Denied => Some(vec![self.answers.evil]),
+                _ => entry.address.map(|address| vec![IpAddr::V4(address)]),
+            },
+        };
+        let found = answer.map(|addresses| {
+            addresses
+                .into_iter()
+                .map(|address| SocketAddr::new(address, port))
+                .collect::<Vec<_>>()
+        });
         Box::pin(async move {
             found.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "sim: no such host"))
         })
     }
 
     fn connect(&self, address: SocketAddr) -> Dialing {
-        let Some(entry) = host_at(address).filter(|entry| entry.class != Class::Unreachable) else {
+        let rebinds = entry_at(address.ip()).is_some_and(|entry| entry.class == Class::Rebinding);
+        let address = if self.mutation == EgressMutation::RebindOnConnect && rebinds {
+            SocketAddr::new(self.rebind(), address.port())
+        } else {
+            address
+        };
+        if entry_at(address.ip()).is_some_and(|entry| entry.class == Class::Unreachable) {
             return Box::pin(async {
                 Err(io::Error::new(
                     io::ErrorKind::ConnectionRefused,
                     "sim: connection refused",
                 ))
             });
-        };
+        }
+        let key = key_of(address.ip());
         let number = self.connections.fetch_add(1, Ordering::SeqCst);
         let (client, server) = socket::pair(
             Rng::derive(self.seed ^ number, "egress-upstream"),
@@ -337,7 +810,8 @@ impl Dial for SimDial {
         );
         let index = self.dialed.update(|dialed| {
             dialed.push(Dialed {
-                host: entry.name.to_owned(),
+                key: key.clone(),
+                address: address.ip(),
                 received: Vec::new(),
             });
             dialed.len() - 1
@@ -346,7 +820,7 @@ impl Dial for SimDial {
             server,
             index,
             port: address.port(),
-            host: entry.name.to_owned(),
+            host: key,
             dialed: Arc::clone(&self.dialed),
             plain: Arc::clone(&self.plain),
             clock: Arc::clone(&self.clock),
@@ -541,7 +1015,7 @@ impl Reader<'_> {
 }
 
 async fn client(request: &Request, side: ServerSide, log: &RefCell<Vec<Seen>>, trace: &Trace) {
-    let host = request.host.name;
+    let host = request.authority();
     let mut reader = Reader {
         side: &side,
         buffer: Vec::new(),
@@ -637,9 +1111,28 @@ fn refused_text(host: &str) -> String {
     format!("{host} is not on the allowlist.")
 }
 
-fn proxy(mutation: EgressMutation, dial: Arc<SimDial>) -> Result<Arc<Proxy<Fixed>>, String> {
+fn proxy(
+    script: &Script,
+    mutation: EgressMutation,
+    dial: Arc<SimDial>,
+) -> Result<Arc<Proxy<Fixed>>, String> {
     let tls = Tls::with_roots("nanocode-sim", RootCertStore::empty())
         .map_err(|error| format!("egress CA: {error}"))?;
+    let reach = match script.policy {
+        Policy::Listed => Reach::Listed {
+            hosts: allowed_hosts(script, mutation),
+            private_hosts: private_hosts(script, mutation),
+            tailnet: None,
+        },
+        Policy::Public => Reach::Public {
+            deny: vec![
+                script
+                    .deny
+                    .parse::<Cidr>()
+                    .map_err(|error| format!("deny: {error}"))?,
+            ],
+        },
+    };
     let rules = Rules {
         caching: Caching {
             granted: Duration::ZERO,
@@ -654,11 +1147,7 @@ fn proxy(mutation: EgressMutation, dial: Arc<SimDial>) -> Result<Arc<Proxy<Fixed
             name: "sim".into(),
             token: String::new(),
         }),
-        reach: Reach::Listed {
-            hosts: allowed_hosts(mutation),
-            private_hosts: private_hosts(),
-            tailnet: None,
-        },
+        reach,
         passthrough: Vec::new(),
         injecting: Injecting::Set,
         intercept_port: None,
@@ -688,50 +1177,79 @@ fn proxy(mutation: EgressMutation, dial: Arc<SimDial>) -> Result<Arc<Proxy<Fixed
     ))
 }
 
-fn expect(request: &Request) -> Vec<Seen> {
-    let host = request.host.name;
-    let refusal = |status: u16, text: String| {
-        vec![
-            Seen::Status(status),
-            Seen::Body(format!("{text}\n").into_bytes()),
-        ]
-    };
-    match request.host.class {
-        Class::Denied => refusal(STATUS_FORBIDDEN, refused_text(host)),
-        Class::PrivateRefused => refusal(STATUS_FORBIDDEN, private_text(host)),
-        Class::Unresolvable => refusal(STATUS_BAD_GATEWAY, format!("{host} does not resolve.")),
-        Class::Unreachable => {
-            let port = match request.kind {
-                Kind::Tunnel { .. } => TUNNEL_PORT,
-                Kind::Plain { .. } => PLAIN_PORT,
-            };
-            refusal(
+enum Outcome {
+    Reach(String),
+    Refuse(u16, String),
+    Rebound(String, String),
+}
+
+fn outcome(request: &Request, policy: Policy) -> Outcome {
+    let bare = request.bare();
+    let private = || Outcome::Refuse(STATUS_FORBIDDEN, private_text(bare));
+    let unresolved = || Outcome::Refuse(STATUS_BAD_GATEWAY, format!("{bare} does not resolve."));
+    match &request.target {
+        Target::Literal { address: None, .. } => unresolved(),
+        Target::Literal {
+            address: Some(address),
+            ..
+        } if refused(*address) => private(),
+        Target::Literal {
+            address: Some(address),
+            ..
+        } => Outcome::Reach(key_of(*address)),
+        Target::Named(host) => match (host.class, policy) {
+            (Class::Public, _) | (Class::PrivateListed | Class::Mixed, Policy::Listed) => {
+                Outcome::Reach(host.name.to_owned())
+            }
+            (Class::Denied, Policy::Listed) => {
+                Outcome::Refuse(STATUS_FORBIDDEN, refused_text(bare))
+            }
+            (Class::PrivateListed | Class::Mixed | Class::Denied, Policy::Public)
+            | (Class::PrivateRefused | Class::Special, _) => private(),
+            (Class::Rebinding, _) => Outcome::Rebound(host.name.to_owned(), private_text(bare)),
+            (Class::Unresolvable, _) => unresolved(),
+            (Class::Unreachable, _) => Outcome::Refuse(
                 STATUS_BAD_GATEWAY,
-                format!("{host}:{port} can't be reached."),
-            )
-        }
-        Class::Public | Class::PrivateListed => match &request.kind {
-            Kind::Tunnel { payload } => {
-                vec![Seen::Status(STATUS_OK), Seen::Tunnel(payload.clone())]
-            }
-            Kind::Plain { status, answer, .. } => {
-                vec![Seen::Status(*status), Seen::Body(answer.clone())]
-            }
+                format!("{bare}:{} can't be reached.", request.port()),
+            ),
         },
     }
 }
 
-const fn reaches(request: &Request) -> bool {
-    matches!(request.host.class, Class::Public | Class::PrivateListed)
+fn reached(request: &Request) -> Vec<Seen> {
+    match &request.kind {
+        Kind::Tunnel { payload } => vec![Seen::Status(STATUS_OK), Seen::Tunnel(payload.clone())],
+        Kind::Plain { status, answer, .. } => {
+            vec![Seen::Status(*status), Seen::Body(answer.clone())]
+        }
+    }
+}
+
+fn refusal(status: u16, text: &str) -> Vec<Seen> {
+    vec![
+        Seen::Status(status),
+        Seen::Body(format!("{text}\n").into_bytes()),
+    ]
+}
+
+fn alternatives(request: &Request, policy: Policy) -> Vec<(Vec<Seen>, Option<String>)> {
+    match outcome(request, policy) {
+        Outcome::Reach(key) => vec![(reached(request), Some(key))],
+        Outcome::Refuse(status, text) => vec![(refusal(status, &text), None)],
+        Outcome::Rebound(key, text) => vec![
+            (reached(request), Some(key)),
+            (refusal(STATUS_FORBIDDEN, &text), None),
+        ],
+    }
 }
 
 fn check_upstream(request: &Request, received: &[u8]) -> Result<(), String> {
+    let name = request.authority();
     match &request.kind {
         Kind::Tunnel { payload } => {
             if received != payload.as_slice() {
                 return Err(format!(
-                    "the upstream of {} received {} tunnelled bytes where the client sent {}",
-                    request.host.name,
+                    "the upstream of {name} received {} tunnelled bytes where the client sent {}",
                     received.len(),
                     payload.len()
                 ));
@@ -741,33 +1259,27 @@ fn check_upstream(request: &Request, received: &[u8]) -> Result<(), String> {
             post, path, body, ..
         } => {
             let end = head_end(received)
-                .ok_or_else(|| format!("the origin {} got no request head", request.host.name))?;
+                .ok_or_else(|| format!("the origin {name} got no request head"))?;
             let head = String::from_utf8_lossy(&received[..end]).to_ascii_lowercase();
             let method = if *post { "post" } else { "get" };
             let line = format!("{method} {path} http/1.1\r\n");
             if !head.starts_with(&line) {
                 return Err(format!(
-                    "the origin {} got {:?} where the proxy owes {line:?}",
-                    request.host.name,
+                    "the origin {name} got {:?} where the proxy owes {line:?}",
                     head.lines().next().unwrap_or_default()
                 ));
             }
-            if !head.contains(&format!("\r\nhost: {}\r\n", request.host.name)) {
-                return Err(format!(
-                    "the origin {} got no host header naming it",
-                    request.host.name
-                ));
+            if !head.contains(&format!("\r\nhost: {name}\r\n")) {
+                return Err(format!("the origin {name} got no host header naming it"));
             }
             if head.contains(&format!("\r\n{HOP_HEADER}:")) {
                 return Err(format!(
-                    "the origin {} got the hop-by-hop {HOP_HEADER} header",
-                    request.host.name
+                    "the origin {name} got the hop-by-hop {HOP_HEADER} header"
                 ));
             }
             if &received[end..] != body.as_slice() {
                 return Err(format!(
-                    "the origin {} got a body of {} bytes where the client sent {}",
-                    request.host.name,
+                    "the origin {name} got a body of {} bytes where the client sent {}",
                     received.len() - end,
                     body.len()
                 ));
@@ -777,13 +1289,43 @@ fn check_upstream(request: &Request, received: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+fn show(list: &[Seen]) -> String {
+    list.iter()
+        .map(|seen| match seen {
+            Seen::Status(status) => format!("status {status}"),
+            Seen::Tunnel(bytes) => format!("tunnel {}B", bytes.len()),
+            Seen::Body(bytes) => format!(
+                "body {:?}",
+                String::from_utf8_lossy(&bytes[..bytes.len().min(80)])
+            ),
+            Seen::Failed(error) => format!("failed {error}"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn judge(
     script: &Script,
     seen: &[Vec<Seen>],
     dialed: &[Dialed],
+    strays: &[String],
     ended: Ended,
     now_ns: u64,
 ) -> Result<(), String> {
+    for dialed in dialed {
+        let trusted = script.policy == Policy::Listed && listed_private(&dialed.key);
+        if refused(dialed.address) && !trusted {
+            return Err(format!(
+                "the proxy connected to {} for {}, an address the policy refuses",
+                dialed.address, dialed.key
+            ));
+        }
+    }
+    if let Some(stray) = strays.first() {
+        return Err(format!(
+            "the proxy asked the resolver for {stray}, an address literal it must judge as written"
+        ));
+    }
     if ended == Ended::Stuck {
         return Err(format!(
             "every task waits and no timer is set: a hang (client saw {seen:?})"
@@ -795,51 +1337,50 @@ fn judge(
             "the run took {run_ms} ms of virtual time, over {RUN_MS_MAX} ms"
         ));
     }
+    let mut owed: Vec<(String, &Request)> = Vec::new();
     for (index, request) in script.requests.iter().enumerate() {
-        let wanted = expect(request);
-        if seen[index] != wanted {
-            let show = |list: &[Seen]| {
-                list.iter()
-                    .map(|seen| match seen {
-                        Seen::Status(status) => format!("status {status}"),
-                        Seen::Tunnel(bytes) => format!("tunnel {}B", bytes.len()),
-                        Seen::Body(bytes) => format!(
-                            "body {:?}",
-                            String::from_utf8_lossy(&bytes[..bytes.len().min(80)])
-                        ),
-                        Seen::Failed(error) => format!("failed {error}"),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
+        let wanted = alternatives(request, script.policy);
+        let Some((_, key)) = wanted.iter().find(|(sequence, _)| *sequence == seen[index]) else {
             return Err(format!(
                 "request {index} to {}: the client saw [{}] where the policy says [{}]",
-                request.host.name,
+                request.authority(),
                 show(&seen[index]),
-                show(&wanted)
+                wanted
+                    .iter()
+                    .map(|(sequence, _)| show(sequence))
+                    .collect::<Vec<_>>()
+                    .join("] or [")
             ));
+        };
+        if let Some(key) = key {
+            owed.push((key.clone(), request));
         }
     }
-    for host in HOSTS.iter() {
-        let owed = script
-            .requests
+    let mut keys = owed
+        .iter()
+        .map(|(key, _)| key.clone())
+        .chain(dialed.iter().map(|dialed| dialed.key.clone()))
+        .collect::<Vec<_>>();
+    keys.sort();
+    keys.dedup();
+    for key in keys {
+        let requests = owed
             .iter()
-            .filter(|request| request.host.name == host.name && reaches(request))
+            .filter(|(owed, _)| *owed == key)
+            .map(|(_, request)| *request)
             .collect::<Vec<_>>();
-        let reached = dialed
+        let mut unmatched = dialed
             .iter()
-            .filter(|dialed| dialed.host == host.name)
+            .filter(|dialed| dialed.key == key)
             .collect::<Vec<_>>();
-        if owed.len() != reached.len() {
+        if requests.len() != unmatched.len() {
             return Err(format!(
-                "the proxy opened {} upstream connections to {} where the policy allows {}",
-                reached.len(),
-                host.name,
-                owed.len()
+                "the proxy opened {} upstream connections to {key} where the policy allows {}",
+                unmatched.len(),
+                requests.len()
             ));
         }
-        let mut unmatched: Vec<&Dialed> = reached;
-        for request in owed {
+        for request in requests {
             let at = unmatched
                 .iter()
                 .position(|dialed| check_upstream(request, &dialed.received).is_ok())
@@ -861,6 +1402,7 @@ pub struct EgressStats {
     pub seeds: u64,
     pub tunnels: u64,
     pub plain: u64,
+    pub literals: u64,
     pub refused: u64,
     pub upstream: u64,
 }
@@ -870,6 +1412,7 @@ impl EgressStats {
         self.seeds += other.seeds;
         self.tunnels += other.tunnels;
         self.plain += other.plain;
+        self.literals += other.literals;
         self.refused += other.refused;
         self.upstream += other.upstream;
     }
@@ -902,19 +1445,19 @@ fn simulate(seed: u64, mutation: EgressMutation, verbose: bool) -> EgressOutcome
                 status,
                 answer,
                 ..
-            } => Some((
-                format!("{}{path}", request.host.name),
-                *status,
-                answer.clone(),
-            )),
+            } => Some((format!("{}{path}", request.key()?), *status, answer.clone())),
             Kind::Tunnel { .. } => None,
         })
         .collect::<Vec<_>>();
     let dialed = Arc::new(Atom::new(Vec::new()));
+    let strays = Arc::new(Atom::new(Vec::new()));
     let dial = Arc::new(SimDial {
         seed,
         connections: AtomicU64::new(0),
+        rebinds: AtomicU64::new(0),
+        answers: script.answers.clone(),
         dialed: Arc::clone(&dialed),
+        strays: Arc::clone(&strays),
         plain: Arc::new(plain),
         clock: Arc::clone(&clock),
         latency_ms: script
@@ -925,7 +1468,7 @@ fn simulate(seed: u64, mutation: EgressMutation, verbose: bool) -> EgressOutcome
         write_piece_max: script.write_piece_max,
         mutation,
     });
-    let proxy = match proxy(mutation, dial) {
+    let proxy = match proxy(&script, mutation, dial) {
         Ok(proxy) => proxy,
         Err(error) => {
             return EgressOutcome {
@@ -959,31 +1502,24 @@ fn simulate(seed: u64, mutation: EgressMutation, verbose: bool) -> EgressOutcome
         .map(RefCell::into_inner)
         .collect::<Vec<_>>();
     let dialed = dialed.get().as_ref().clone();
-    let wrong = judge(&script, &seen, &dialed, ended, clock.now_ns()).err();
+    let strays = strays.get().as_ref().clone();
+    let wrong = judge(&script, &seen, &dialed, &strays, ended, clock.now_ns()).err();
     trace.line(&format!("verdict {wrong:?}"));
+    let tally = |keep: &dyn Fn(&Request) -> bool| {
+        count(
+            script
+                .requests
+                .iter()
+                .filter(|request| keep(request))
+                .count(),
+        )
+    };
     let stats = EgressStats {
         seeds: 1,
-        tunnels: count(
-            script
-                .requests
-                .iter()
-                .filter(|request| matches!(request.kind, Kind::Tunnel { .. }))
-                .count(),
-        ),
-        plain: count(
-            script
-                .requests
-                .iter()
-                .filter(|request| matches!(request.kind, Kind::Plain { .. }))
-                .count(),
-        ),
-        refused: count(
-            script
-                .requests
-                .iter()
-                .filter(|request| !reaches(request))
-                .count(),
-        ),
+        tunnels: tally(&|request| matches!(request.kind, Kind::Tunnel { .. })),
+        plain: tally(&|request| matches!(request.kind, Kind::Plain { .. })),
+        literals: tally(&|request| matches!(request.target, Target::Literal { .. })),
+        refused: tally(&|request| matches!(outcome(request, script.policy), Outcome::Refuse(..))),
         upstream: count(dialed.len()),
     };
     EgressOutcome {
