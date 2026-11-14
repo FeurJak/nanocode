@@ -10,7 +10,7 @@
 use std::cmp::Ordering;
 use std::hash::{BuildHasher, Hasher};
 
-use psh_engine::host::OpenOptions;
+use psh_engine::host::{OpenOptions, error_text};
 use psh_engine::util::UtilCtx;
 
 use crate::common;
@@ -881,8 +881,12 @@ pub async fn run(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
         let input = match common::Input::open(ctx, name).await {
             Ok(i) => i,
             Err(e) => {
-                let text = format!("cannot read: {}", String::from_utf8_lossy(name));
-                common::file_error(ctx, text.as_bytes(), &e).await;
+                let text = format!(
+                    "cannot read: {}: {}",
+                    common::quote_name(name, false),
+                    error_text(&e)
+                );
+                ctx.error(&text).await;
                 return 2;
             }
         };

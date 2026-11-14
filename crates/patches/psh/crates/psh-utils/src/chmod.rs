@@ -136,7 +136,16 @@ fn change<'a, 'v>(
             Ok(m) => m,
             Err(e) => {
                 if !o.quiet {
-                    let msg = format!("cannot access '{}': {}", s(&f), error_text(&e));
+                    let dangling = e.kind() == std::io::ErrorKind::NotFound
+                        && ctx
+                            .stat(&f, false)
+                            .await
+                            .is_ok_and(|m| m.kind == FileKind::Symlink);
+                    let msg = if dangling {
+                        format!("cannot operate on dangling symlink '{}'", s(&f))
+                    } else {
+                        format!("cannot access '{}': {}", s(&f), error_text(&e))
+                    };
                     ctx.error(&msg).await;
                 }
                 return false;

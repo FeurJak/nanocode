@@ -326,7 +326,11 @@ pub async fn run(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
         let meta = match ctx.stat_extra(&op, o.deref || o.deref_args).await {
             Ok(m) => m,
             Err(e) => {
-                let msg = format!("cannot access '{}': {}", s(&op), error_text(&e));
+                let msg = format!(
+                    "cannot access {}: {}",
+                    common::quote_name(&op, true),
+                    error_text(&e)
+                );
                 ctx.error(&msg).await;
                 status = 2;
                 continue;

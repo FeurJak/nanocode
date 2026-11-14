@@ -66,7 +66,7 @@ pub async fn usage(ctx: &mut UtilCtx<'_>, msg: &str) -> i32 {
 /// A value quoted for a message as GNU quotes it (D1163): `‘x’` when the locale's
 /// character set is UTF-8 (`LC_ALL`, `LC_CTYPE`, `LANG`), `'x'` otherwise. For values
 /// and operands in messages (`invalid field value ‘x’`), not for the `NAME: FILE:
-/// reason` prefix of file errors, which GNU leaves unquoted.
+/// reason` prefix of file errors, which GNU quotes only as the shell needs ([`quote_name`]).
 pub fn quote(ctx: &UtilCtx<'_>, s: &[u8]) -> String {
     quote_in(ctx.utf8(), s)
 }
@@ -81,6 +81,57 @@ pub fn quote_in(utf8: bool, s: &[u8]) -> String {
     }
 }
 
+pub fn quote_name(name: &[u8], always: bool) -> String {
+    let invalid = name.utf8_chunks().any(|c| !c.invalid().is_empty());
+    let text = String::from_utf8_lossy(name);
+    let special = invalid
+        || text.char_indices().any(|(i, c)| {
+            c.is_control()
+                || " '\"\\|&;()<>!{}*[]?$`".contains(c)
+                || (matches!(c, '#' | '~') && i == 0)
+        });
+    if !always && !name.is_empty() && !special {
+        return text.into_owned();
+    }
+    if !invalid
+        && text.contains('\'')
+        && !text.chars().any(|c| c.is_control() || "\"$\\`".contains(c))
+    {
+        return format!("\"{text}\"");
+    }
+    let escape = |out: &mut String, bytes: &[u8]| {
+        out.push_str("'$'");
+        for &b in bytes {
+            match b {
+                0x07 => out.push_str("\\a"),
+                0x08 => out.push_str("\\b"),
+                0x0c => out.push_str("\\f"),
+                b'\n' => out.push_str("\\n"),
+                b'\r' => out.push_str("\\r"),
+                b'\t' => out.push_str("\\t"),
+                0x0b => out.push_str("\\v"),
+                b => out.push_str(&format!("\\{b:03o}")),
+            }
+        }
+        out.push_str("''");
+    };
+    let mut out = String::from("'");
+    for chunk in name.utf8_chunks() {
+        for c in chunk.valid().chars() {
+            match c {
+                '\'' => out.push_str("'\\''"),
+                c if c.is_control() => escape(&mut out, c.encode_utf8(&mut [0; 4]).as_bytes()),
+                c => out.push(c),
+            }
+        }
+        if !chunk.invalid().is_empty() {
+            escape(&mut out, chunk.invalid());
+        }
+    }
+    out.push('\'');
+    out
+}
+
 /// The status after a failed write to stdout: a closed pipe ends the utility silently
 /// like SIGPIPE ends a program (141); other errors are reported.
 pub async fn write_failed(ctx: &mut UtilCtx<'_>, e: &io::Error) -> i32 {
@@ -93,7 +144,7 @@ pub async fn write_failed(ctx: &mut UtilCtx<'_>, e: &io::Error) -> i32 {
 
 /// `NAME: FILE: reason` for a file that cannot be read.
 pub async fn file_error(ctx: &mut UtilCtx<'_>, file: &[u8], e: &io::Error) {
-    let text = format!("{}: {}", String::from_utf8_lossy(file), error_text(e));
+    let text = format!("{}: {}", quote_name(file, false), error_text(e));
     ctx.error(&text).await;
 }
 
