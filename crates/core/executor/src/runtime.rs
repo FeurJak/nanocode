@@ -169,9 +169,9 @@ impl Shared {
         }
     }
 
-    fn run_queue(&self, mut held: Option<&mut Consumer>) -> bool {
-        let mut ran = 0;
-        while ran < EVENT_INTERVAL {
+    fn run_queue(&self, mut held: Option<&mut Consumer>, ticks: &mut u32) -> bool {
+        let mut ran = false;
+        while *ticks < EVENT_INTERVAL {
             if self.is_shutdown() {
                 return true;
             }
@@ -181,13 +181,16 @@ impl Shared {
             };
             let Some(task) = next else {
                 if DEFERRED.with(|deferred| !deferred.borrow().is_empty()) {
+                    *ticks = 0;
                     self.reactor.try_turn(Some(Duration::ZERO), || {});
                 }
-                return wake_deferred() || ran > 0;
+                return wake_deferred() || ran;
             };
             task.run();
-            ran += 1;
+            ran = true;
+            *ticks += 1;
         }
+        *ticks = 0;
         self.reactor.try_turn(Some(Duration::ZERO), || {});
         wake_deferred();
         true
@@ -231,11 +234,12 @@ impl Shared {
         let handle = Handle(self.clone());
         let _context = handle.enter();
         let _driving = Driving::enter(self.reactor, self.drives);
+        let mut ticks = 0;
         loop {
             if self.is_shutdown() {
                 break;
             }
-            if !self.run_queue(held.as_deref_mut()) {
+            if !self.run_queue(held.as_deref_mut(), &mut ticks) {
                 self.idle(slot, None);
             }
         }
@@ -398,6 +402,7 @@ impl Handle {
             consumer: Some(consumer),
         };
         let _driving = Driving::enter(shared.reactor, shared.drives);
+        let mut ticks = 0;
         {
             loop {
                 if main.woken.swap(false, Ordering::SeqCst) {
@@ -407,8 +412,9 @@ impl Handle {
                     {
                         return output;
                     }
+                    ticks += 1;
                 }
-                if !shared.run_queue(core.consumer.as_deref_mut()) {
+                if !shared.run_queue(core.consumer.as_deref_mut(), &mut ticks) {
                     shared.idle(slot, Some(&main.woken));
                 }
             }
