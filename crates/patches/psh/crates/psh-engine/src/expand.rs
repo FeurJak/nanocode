@@ -1096,7 +1096,16 @@ async fn expand_part(
             txt.push(b')');
             f.pattern(&txt, &pat);
         }
-        Part::Array(_) => return unsupported(vp, "array assignment").await,
+        Part::Array(_) => {
+            for op in *b"=+" {
+                if f.cur.text.last() == Some(&op) {
+                    f.cur.text.pop();
+                    if f.cur.pat.last() == Some(&op) {
+                        f.cur.pat.pop();
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -2132,6 +2141,7 @@ async fn indirect(vp: &mut Vp, code: &Rc<Code>, target: &[u8]) -> Result<Option<
     if let Some(open) = target.iter().position(|&b| b == b'[')
         && target.ends_with(b"]")
         && is_name(&target[..open])
+        && quotes_closed(&target[open + 1..target.len() - 1])
     {
         let name = vp
             .resolve(&String::from_utf8_lossy(&target[..open]))
@@ -2157,6 +2167,20 @@ async fn indirect(vp: &mut Vp, code: &Rc<Code>, target: &[u8]) -> Result<Option<
         ));
     }
     Ok(by_name(vp, target))
+}
+
+fn quotes_closed(s: &[u8]) -> bool {
+    let (mut single, mut double, mut escaped) = (false, false, false);
+    for &b in s {
+        match b {
+            _ if escaped => escaped = false,
+            b'\\' if !single => escaped = true,
+            b'\'' if !double => single = !single,
+            b'"' if !single => double = !double,
+            _ => {}
+        }
+    }
+    !single && !double && !escaped
 }
 
 /// An arithmetic word (offsets, lengths): expanded, then evaluated.

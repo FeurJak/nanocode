@@ -451,7 +451,7 @@ async fn debug_trap(vp: &mut Vp, code: &Rc<Code>, cmd: &Command) -> Result<bool,
     let action = vp.traps.action(TrapKey::Debug).unwrap_or_default();
     let status = vp.status;
     let n = trap::run_action_status(vp, &action, status).await?;
-    if n == 2 && !vp.frames.is_empty() {
+    if n == 2 && vp.in_function() {
         return Err(Unwind::Return(status));
     }
     Ok(n != 0)
@@ -1979,10 +1979,24 @@ pub(crate) async fn run_builtin(
     if let Some(b) = builtins::get(vp, &name) {
         // Assignments in front of a builtin, special or not (bash outside POSIX mode),
         // last for the builtin only and are exported to what it runs (`x=1 eval cmd`).
-        let saved: Vec<(String, Option<crate::state::Var>)> = assigns
+        let mut saved: Vec<(String, Option<crate::state::Var>)> = assigns
             .iter()
             .map(|(n, _)| (n.clone(), vp.vars.get(n).cloned()))
             .collect();
+        let scoped = !saved.is_empty()
+            && matches!(
+                name.as_slice(),
+                b"eval" | b"source" | b"." | b"unset" | b"mapfile" | b"readarray"
+            );
+        if scoped {
+            let temps = saved.iter().map(|(n, _)| n.clone()).collect();
+            vp.frames.push(Frame {
+                builtin: true,
+                saved: std::mem::take(&mut saved),
+                temps,
+                ..Frame::default()
+            });
+        }
         for (n, v) in assigns {
             let var = vp.vars.entry(&n);
             var.set(v);
@@ -1991,6 +2005,9 @@ pub(crate) async fn run_builtin(
         }
         vp.bad_assign = false;
         let r = builtins::call(vp, b, &argv).await;
+        if scoped && let Some(frame) = vp.frames.pop() {
+            saved = frame.saved;
+        }
         let keep = builtins::is_special(vp, &name);
         for (n, old) in saved {
             match old {

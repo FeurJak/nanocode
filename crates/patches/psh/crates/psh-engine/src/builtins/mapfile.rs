@@ -180,9 +180,13 @@ pub(super) async fn mapfile(vp: &mut Vp, args: &[Vec<u8>]) -> R {
                 }
                 break None;
             }
-            let n = poll_fn(|cx| input.poll_read(cx, &mut chunk))
-                .await
-                .unwrap_or(0);
+            let read = poll_fn(|cx| input.poll_read(cx, &mut chunk));
+            let read = crate::signals::or_signal(vp, crate::signals::Gives::Trapped, read).await;
+            let Ok(read) = read else {
+                super::trap::take_signals(vp).await?;
+                continue;
+            };
+            let n = read.unwrap_or(0);
             if n == 0 {
                 eof = true;
             } else {

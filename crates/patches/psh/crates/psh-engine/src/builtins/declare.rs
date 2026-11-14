@@ -227,7 +227,7 @@ impl Opts {
 /// The entry point for the five builtins with already expanded arguments.
 pub(crate) async fn run(vp: &mut Vp, which: Which, args: Vec<DeclArg>) -> R {
     let bname = which.name();
-    if which == Which::Local && vp.frames.is_empty() {
+    if which == Which::Local && !vp.in_function() {
         vp.error("local: can only be used in a function").await;
         return Ok(1);
     }
@@ -420,14 +420,14 @@ declare -fx {n}
     }
     // In a function, declare and typeset (and local) make locals; -g and export /
     // readonly do not.
-    let local = !vp.frames.is_empty()
+    let local = vp.in_function()
         && !o.global
         && matches!(which, Which::Declare | Which::Typeset | Which::Local);
     let mut status = 0;
     for a in rest {
         if which == Which::Local && matches!(a, DeclArg::Word(w) if w == b"-") {
             let set = vp.opts.set_bits();
-            if let Some(f) = vp.frames.last_mut() {
+            if let Some(f) = vp.frames.iter_mut().rfind(|f| !f.builtin) {
                 f.options.get_or_insert(set);
             }
             continue;
@@ -616,14 +616,12 @@ async fn declare_one(
         if vp.vars.get(name).is_some_and(|v| v.readonly) {
             return Err(format!("{name}: readonly variable").into());
         }
-        let fresh = vp
-            .frames
-            .last()
-            .is_some_and(|f| !f.saved.iter().any(|(s, _)| s == name));
+        let k = vp.local_frame(name);
+        let fresh = k.is_some_and(|k| !vp.frames[k].saved.iter().any(|(s, _)| s == name));
         // A temporary binding (`x=t f`) made local is a local from now on: unset no
         // longer reveals what it shadowed.
-        if let Some(f) = vp.frames.last_mut() {
-            f.temps.retain(|t| t != name);
+        if let Some(k) = k {
+            vp.frames[k].temps.retain(|t| t != name);
         }
         if fresh {
             vp.make_local(name);
@@ -921,7 +919,7 @@ async fn print_named(vp: &mut Vp, bname: &str, names: &[DeclArg]) -> R {
             DeclArg::Word(w)
                 if is_name(w)
                     && (bname != "local"
-                        || vp.frames.last().is_some_and(|f| {
+                        || vp.frames.iter().rfind(|f| !f.builtin).is_some_and(|f| {
                             f.saved.iter().any(|(n, _)| n.as_bytes() == w.as_slice())
                         })) =>
             {
@@ -946,7 +944,7 @@ async fn print_named(vp: &mut Vp, bname: &str, names: &[DeclArg]) -> R {
 
 /// Without names: every variable (with the attributes asked for), as declarations.
 async fn print_all(vp: &mut Vp, which: Which, o: &Opts) -> R {
-    let locals: Vec<String> = match (which, vp.frames.last()) {
+    let locals: Vec<String> = match (which, vp.frames.iter().rfind(|f| !f.builtin)) {
         (Which::Local, Some(f)) => f
             .saved
             .iter()

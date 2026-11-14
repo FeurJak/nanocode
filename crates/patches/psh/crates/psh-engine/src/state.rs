@@ -479,6 +479,7 @@ pub(crate) struct Frame {
     pub saved: Vec<(String, Option<Var>)>,
     /// The names of `saved` that are assignments in front of the call, not locals.
     pub temps: Vec<String>,
+    pub builtin: bool,
 }
 
 impl Vp {
@@ -698,14 +699,25 @@ impl Vp {
             .is_some_and(|t| t.action.is_empty())
     }
 
-    /// Makes `name` local to the innermost function call (saving its outer value once).
+    /// Makes `name` local to the innermost function call, or to the assignments in front
+    /// of a builtin that bound it (saving its outer value once).
     pub(crate) fn make_local(&mut self, name: &str) {
         let old = self.vars.get(name).cloned();
-        if let Some(frame) = self.frames.last_mut()
-            && !frame.saved.iter().any(|(n, _)| n == name)
+        if let Some(k) = self.local_frame(name)
+            && !self.frames[k].saved.iter().any(|(n, _)| n == name)
         {
-            frame.saved.push((name.to_string(), old));
+            self.frames[k].saved.push((name.to_string(), old));
         }
+    }
+
+    pub(crate) fn local_frame(&self, name: &str) -> Option<usize> {
+        self.frames
+            .iter()
+            .rposition(|f| !f.builtin || f.saved.iter().any(|(n, _)| n == name))
+    }
+
+    pub(crate) fn in_function(&self) -> bool {
+        self.frames.iter().any(|f| !f.builtin)
     }
 
     pub(crate) fn fd(&self, n: u32) -> Option<Fd> {

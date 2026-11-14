@@ -1988,6 +1988,10 @@ impl<'a> P<'a> {
             }
             let word = if decl {
                 self.read_decl_arg()?
+            } else if words.is_empty()
+                && let Some(w) = self.subscript_word()?
+            {
+                Some(w)
             } else {
                 self.read_word(Ctx::Word, true)?
             };
@@ -2160,6 +2164,34 @@ impl<'a> P<'a> {
             return Ok(None);
         };
         Ok(Some((sp(start, name_end), index, append)))
+    }
+
+    fn subscript_word(&mut self) -> R<Option<Word>> {
+        let start = self.pos;
+        let Some(name_end) = self.name_end(start) else {
+            return Ok(None);
+        };
+        if self.b.get(name_end) != Some(&b'[') {
+            return Ok(None);
+        }
+        let cp = self.checkpoint();
+        self.pos = name_end + 1;
+        let mut sub = Vec::new();
+        self.parse_parts(Ctx::Subscript, &mut sub)?;
+        if self.peek() != Some(b']') || !self.b[name_end..self.pos].contains(&b' ') {
+            self.rewind(cp);
+            return Ok(None);
+        }
+        let mut parts = Vec::new();
+        push_lit(&mut parts, start, name_end + 1);
+        parts.append(&mut sub);
+        self.pos += 1;
+        push_lit(&mut parts, self.pos - 1, self.pos);
+        self.parse_parts(Ctx::Word, &mut parts)?;
+        Ok(Some(Word {
+            span: sp(start, self.pos),
+            parts,
+        }))
     }
 
     fn try_assign(&mut self) -> R<Option<Assign>> {

@@ -664,15 +664,14 @@ async fn unset(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         }
         // Unsetting an assignment in front of the running function brings back the
         // value under it; that variable is then the one later assignments change (bash).
-        let top = vp.frames.len();
-        if let Some((k, frame)) = vp
+        if let Some(k) = vp
             .frames
-            .iter_mut()
-            .enumerate()
-            .rev()
-            .find(|(_, f)| f.saved.iter().any(|(s, _)| *s == n))
+            .iter()
+            .rposition(|f| f.saved.iter().any(|(s, _)| *s == n))
         {
-            if k + 1 == top && !frame.temps.contains(&n) {
+            let current = vp.frames[k + 1..].iter().all(|f| f.builtin);
+            let frame = &mut vp.frames[k];
+            if current && !frame.temps.contains(&n) {
                 vp.vars.insert(&n, crate::vars::Var::default());
                 continue;
             }
@@ -729,7 +728,7 @@ async fn exit(vp: &mut Vp, args: &[Vec<u8>]) -> R {
 }
 
 async fn return_(vp: &mut Vp, args: &[Vec<u8>]) -> R {
-    if vp.frames.is_empty() && !vp.calls.iter().any(|c| c.sourced) {
+    if !vp.in_function() && !vp.calls.iter().any(|c| c.sourced) {
         vp.error("return: can only `return' from a function or sourced script")
             .await;
         return Ok(2);
