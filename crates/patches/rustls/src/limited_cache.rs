@@ -17,6 +17,8 @@ pub(crate) struct LimitedCache<K: Clone + Hash + Eq, V> {
 
     // first item is the oldest key
     oldest: VecDeque<K>,
+
+    max: usize,
 }
 
 impl<K, V> LimitedCache<K, V>
@@ -38,8 +40,7 @@ where
             }
         };
 
-        // ensure next insertion does not require a realloc
-        if inserted_new_item && self.oldest.capacity() == self.oldest.len() {
+        if inserted_new_item && self.oldest.len() > self.max {
             if let Some(oldest_key) = self.oldest.pop_front() {
                 self.map.remove(&oldest_key);
             }
@@ -64,6 +65,7 @@ where
         Self {
             map: HashMap::with_capacity(capacity_order_of_magnitude),
             oldest: VecDeque::with_capacity(capacity_order_of_magnitude),
+            max: capacity_order_of_magnitude,
         }
     }
 
@@ -83,8 +85,7 @@ where
             }
         };
 
-        // ensure next insertion does not require a realloc
-        if inserted_new_item && self.oldest.capacity() == self.oldest.len() {
+        if inserted_new_item && self.oldest.len() > self.max {
             if let Some(oldest_key) = self.oldest.pop_front() {
                 self.map.remove(&oldest_key);
             }

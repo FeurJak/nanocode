@@ -69,6 +69,10 @@ impl<'a> InboundOpaqueMessage<'a> {
             return Err(PeerMisbehaved::IllegalTlsInnerPlaintext.into());
         }
 
+        if self.typ == ContentType::ChangeCipherSpec {
+            return Err(PeerMisbehaved::IllegalMiddleboxChangeCipherSpec.into());
+        }
+
         if payload.len() > MAX_FRAGMENT_LEN {
             return Err(Error::PeerSentOversizedRecord);
         }

@@ -243,7 +243,12 @@ impl CommonState {
     }
 
     /// Like send_msg_encrypt, but operate on an appdata directly.
-    fn send_appdata_encrypt(&mut self, payload: OutboundChunks<'_>, limit: Limit) -> usize {
+    fn send_appdata_encrypt(
+        &mut self,
+        payload: OutboundChunks<'_>,
+        limit: Limit,
+        stop_for_key_update: bool,
+    ) -> usize {
         // Here, the limit on sendable_tls applies to encrypted data,
         // but we're respecting it for plaintext data -- so we'll
         // be out by whatever the cipher+record overhead is.  That's a
@@ -262,7 +267,25 @@ impl CommonState {
                 ProtocolVersion::TLSv1_2,
                 payload.split_at(len).0,
             );
+
+        if let Some(last) = (iter.len() as u64).checked_sub(1) {
+            if !self.check_pre_encrypt_action(last) {
+                return len;
+            }
+        }
+
+        let mut sent = 0;
         for m in iter {
+            if stop_for_key_update
+                && self.negotiated_version == Some(ProtocolVersion::TLSv1_3)
+                && self.record_layer.write_seq() > 0
+                && self.record_layer.pre_encrypt_action(1) != PreEncryptAction::Nothing
+            {
+                self.refresh_traffic_keys_pending = true;
+                return sent;
+            }
+
+            sent += m.payload.len();
             self.send_single_fragment(m);
         }
 
@@ -277,42 +300,50 @@ impl CommonState {
             return;
         }
 
-        match self
-            .record_layer
-            .next_pre_encrypt_action()
-        {
-            PreEncryptAction::Nothing => {}
-
-            // Close connection once we start to run out of
-            // sequence space.
-            PreEncryptAction::RefreshOrClose => {
-                match self.negotiated_version {
-                    Some(ProtocolVersion::TLSv1_3) => {
-                        // driven by caller, as we don't have the `State` here
-                        self.refresh_traffic_keys_pending = true;
-                    }
-                    _ => {
-                        error!(
-                            "traffic keys exhausted, closing connection to prevent security failure"
-                        );
-                        self.send_close_notify();
-                        return;
-                    }
-                }
-            }
-
-            // Refuse to wrap counter at all costs.  This
-            // is basically untestable unfortunately.
-            PreEncryptAction::Refuse => {
-                return;
-            }
-        };
+        if !self.check_pre_encrypt_action(0) {
+            return;
+        }
 
         let em = self.record_layer.encrypt_outgoing(m);
         self.queue_tls_message(em);
     }
 
-    fn send_plain_non_buffering(&mut self, payload: OutboundChunks<'_>, limit: Limit) -> usize {
+    fn check_pre_encrypt_action(&mut self, add: u64) -> bool {
+        match self
+            .record_layer
+            .pre_encrypt_action(add)
+        {
+            PreEncryptAction::Nothing => true,
+
+            // Close connection once we start to run out of
+            // sequence space.
+            PreEncryptAction::RefreshOrClose => match self.negotiated_version {
+                Some(ProtocolVersion::TLSv1_3) => {
+                    // driven by caller, as we don't have the `State` here
+                    self.refresh_traffic_keys_pending = true;
+                    true
+                }
+                _ => {
+                    error!(
+                        "traffic keys exhausted, closing connection to prevent security failure"
+                    );
+                    self.send_close_notify();
+                    false
+                }
+            },
+
+            // Refuse to wrap counter at all costs.  This
+            // is basically untestable unfortunately.
+            PreEncryptAction::Refuse => false,
+        }
+    }
+
+    fn send_plain_non_buffering(
+        &mut self,
+        payload: OutboundChunks<'_>,
+        limit: Limit,
+        stop_for_key_update: bool,
+    ) -> usize {
         debug_assert!(self.may_send_application_data);
         debug_assert!(self.record_layer.is_encrypting());
 
@@ -321,7 +352,7 @@ impl CommonState {
             return 0;
         }
 
-        self.send_appdata_encrypt(payload, limit)
+        self.send_appdata_encrypt(payload, limit, stop_for_key_update)
     }
 
     /// Mark the connection as ready to send application data.
@@ -353,7 +384,7 @@ impl CommonState {
         }
 
         while let Some(buf) = sendable_plaintext.pop() {
-            self.send_plain_non_buffering(buf.as_slice().into(), Limit::No);
+            self.send_plain_non_buffering(buf.as_slice().into(), Limit::No, false);
         }
     }
 
@@ -600,7 +631,7 @@ impl CommonState {
             return len;
         }
 
-        self.send_plain_non_buffering(payload, limit)
+        self.send_plain_non_buffering(payload, limit, true)
     }
 }
 

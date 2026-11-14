@@ -198,10 +198,14 @@ impl RecordLayer {
     /// "the next message processed by `encrypt_outgoing`"
     pub(crate) fn pre_encrypt_action(&self, add: u64) -> PreEncryptAction {
         match self.write_seq.saturating_add(add) {
-            v if v == self.write_seq_max => PreEncryptAction::RefreshOrClose,
             SEQ_HARD_LIMIT.. => PreEncryptAction::Refuse,
+            v if v >= self.write_seq_max => PreEncryptAction::RefreshOrClose,
             _ => PreEncryptAction::Nothing,
         }
+    }
+
+    pub(crate) fn write_seq(&self) -> u64 {
+        self.write_seq
     }
 
     pub(crate) fn is_encrypting(&self) -> bool {

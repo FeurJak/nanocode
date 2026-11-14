@@ -11,7 +11,7 @@ use crate::check::inappropriate_handshake_message;
 use crate::common_state::{CommonState, HandshakeFlightTls13, HandshakeKind, State};
 use crate::conn::ConnectionRandoms;
 use crate::enums::{AlertDescription, ContentType, HandshakeType, ProtocolVersion};
-use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
+use crate::error::{Error, InvalidMessage, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::HandshakeHash;
 use crate::log::{debug, trace};
 use crate::msgs::codec::Codec;
@@ -708,6 +708,13 @@ impl State<ServerConnectionData> for ExpectCertificate {
             HandshakeType::Certificate,
             HandshakePayload::CertificateTls13
         )?;
+
+        if !certp.context.0.is_empty() {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::DecodeError,
+                InvalidMessage::InvalidCertRequest,
+            ));
+        }
 
         // We don't send any CertificateRequest extensions, so any extensions
         // here are illegal.
