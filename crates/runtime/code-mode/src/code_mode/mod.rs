@@ -299,6 +299,7 @@ enum CellUpdate {
     },
     Content(ToolOutputContent),
     Yielded,
+    Replayed,
     Completed,
     Terminated,
     ScriptFailed {
@@ -1841,12 +1842,25 @@ async fn observe_updates(
         yield_after.map(|yield_after| Box::pin(nanocode_platform::sleep(yield_after)));
     let mut preempt_remaining = None;
     let mut yield_fired = false;
+    let mut replaying = cell.record.as_ref().is_some_and(|record| {
+        record.status(|status| {
+            matches!(
+                status.life,
+                CellLife::Active {
+                    replay: Replay::Replaying,
+                    ..
+                }
+            )
+        })
+    });
     let mut holding = false;
     let mut stream_open = false;
     let mut stream_timer = Box::pin(nanocode_platform::sleep(STREAM_OUTPUT_AFTER));
     loop {
-        let mut yield_deadline_elapsed = yield_fired
-            || yield_deadline.is_some_and(|yield_deadline| yield_deadline <= nanocode_platform::now());
+        let mut yield_deadline_elapsed = !replaying
+            && (yield_fired
+                || yield_deadline
+                    .is_some_and(|yield_deadline| yield_deadline <= nanocode_platform::now()));
         if yield_deadline_elapsed
             && preempt_remaining.is_none()
             && nothing_to_report(observation)
@@ -1903,7 +1917,7 @@ async fn observe_updates(
                     Some(timer) => timer.as_mut().await,
                     None => std::future::pending().await,
                 }
-            } => {
+            }, if !yield_fired => {
                 yield_fired = true;
                 continue;
             }
@@ -2021,6 +2035,7 @@ async fn observe_updates(
                     stream_output(&cell.origin_call_id, observation, observer);
                 }
             }
+            Some(CellUpdate::Replayed) => replaying = false,
             Some(CellUpdate::Yielded) if terminating => {}
             Some(CellUpdate::Yielded) => {
                 return yielded_observation(
@@ -2808,6 +2823,7 @@ impl EmbeddedHost {
                             if let Some(record) = record.as_deref() {
                                 record.update(|status| status.life = status.life.replayed());
                             }
+                            let _ = updates.send(CellUpdate::Replayed);
                             if let Some(plan) = plan.take() {
                                 self.resume_replayed(cell_id, &plan, held, &mut calls)?;
                             }
