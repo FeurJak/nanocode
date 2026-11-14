@@ -56,6 +56,15 @@ impl AllocMutation {
             Self::Scribble => "scribble",
         }
     }
+
+    pub fn names() -> String {
+        Self::ALL
+            .iter()
+            .skip(1)
+            .map(|mutation| mutation.name())
+            .collect::<Vec<_>>()
+            .join("|")
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]

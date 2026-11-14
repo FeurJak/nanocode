@@ -30,6 +30,8 @@ nanocode-executor.workspace = true
 nanocode-http.workspace = true
 nanocode-mpp.workspace = true
 nanocode-platform.workspace = true
+nanocode-process.workspace = true
+nanocode-process-contracts.workspace = true
 nanocode-sandbox = { path = "../../crates/integrations/sandbox" }
 nanocode-subagents.workspace = true
 rustls.workspace = true

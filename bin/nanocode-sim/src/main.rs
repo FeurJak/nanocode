@@ -1,6 +1,8 @@
 mod agents;
 #[cfg(unix)]
 mod alloc;
+#[cfg(unix)]
+mod capture;
 mod cells;
 mod children;
 mod disk;
@@ -23,6 +25,7 @@ mod socket;
 mod store;
 mod streams;
 mod sync;
+mod tasks;
 mod tidy;
 mod turnlog;
 mod turns;
@@ -48,6 +51,7 @@ use crate::{
     streams::{StreamsMutation, StreamsStats},
     hands::{HandsMutation, HandsStats},
     sync::{SyncMutation, SyncStats},
+    tasks::{TasksMutation, TasksStats},
     websocket::{WebSocketMutation, WebSocketStats},
     whole::{ChildMode, StoreKind, WholeOptions, WholeStats, WireKind},
     children::ChildMutation,
@@ -70,6 +74,8 @@ enum Scenario {
     Sync,
     Streams,
     Hands,
+    Capture,
+    Executor,
 }
 
 struct Args {
@@ -85,24 +91,29 @@ struct Args {
     sync: SyncMutation,
     streams: StreamsMutation,
     hands: HandsMutation,
+    tasks: TasksMutation,
     #[cfg(unix)]
     alloc: alloc::AllocMutation,
     #[cfg(unix)]
     egress: egress::EgressMutation,
+    #[cfg(unix)]
+    capture: capture::CaptureMutation,
 }
 
 type Caught = BTreeMap<Invariant, (u64, u64, (u64, u64))>;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: nanocode-sim --tidy | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands] [--ops N] [--twice] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--retain TURNS] [--state-bytes N] [--event-bytes N]\n       runtime: [--store memory|kv|log] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       websocket: [--mutation {}]
+        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|capture|executor] [--ops N] [--twice] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--retain TURNS] [--state-bytes N] [--event-bytes N]\n       runtime: [--store memory|kv|log] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       websocket: [--mutation {}]
        http_server: [--mutation {}]
        alloc: [--mutation overstate_size|forget_free|scribble]
        egress: [--mutation widen_allowlist|corrupt_tunnel_byte]
        mpp: [--mutation {}]
        sync: [--mutation {}]
        streams: [--mutation {}]
-       hands: [--mutation {}]",
+       hands: [--mutation {}]
+       capture: [--mutation skip_trim|drop_chunk]
+       executor: [--mutation {}]",
         Mutation::names(),
         TurnMutation::names(),
         onelog::PROTECTIONS.join("|"),
@@ -113,7 +124,8 @@ fn usage() -> ExitCode {
         MppMutation::names(),
         SyncMutation::names(),
         StreamsMutation::names(),
-        HandsMutation::names()
+        HandsMutation::names(),
+        TasksMutation::names()
     );
     ExitCode::from(2)
 }
@@ -159,6 +171,9 @@ fn parse_args(args: &[String]) -> Option<Args> {
     let mut sync = SyncMutation::None;
     let mut streams = StreamsMutation::None;
     let mut hands = HandsMutation::None;
+    let mut tasks = TasksMutation::None;
+    #[cfg(unix)]
+    let mut capture = capture::CaptureMutation::None;
     #[cfg(unix)]
     let mut alloc = alloc::AllocMutation::None;
     #[cfg(unix)]
@@ -197,6 +212,9 @@ fn parse_args(args: &[String]) -> Option<Args> {
                     "sync" => Scenario::Sync,
                     "streams" => Scenario::Streams,
                     "hands" => Scenario::Hands,
+                    "executor" => Scenario::Executor,
+                    #[cfg(unix)]
+                    "capture" => Scenario::Capture,
                     #[cfg(unix)]
                     "alloc" => Scenario::Alloc,
                     #[cfg(unix)]
@@ -229,6 +247,11 @@ fn parse_args(args: &[String]) -> Option<Args> {
         (Scenario::Sync, Some(name)) => sync = SyncMutation::parse(name)?,
         (Scenario::Streams, Some(name)) => streams = StreamsMutation::parse(name)?,
         (Scenario::Hands, Some(name)) => hands = HandsMutation::parse(name)?,
+        (Scenario::Executor, Some(name)) => tasks = TasksMutation::parse(name)?,
+        #[cfg(unix)]
+        (Scenario::Capture, Some(name)) => capture = capture::CaptureMutation::parse(name)?,
+        #[cfg(not(unix))]
+        (Scenario::Capture, Some(_)) => return None,
         #[cfg(unix)]
         (Scenario::Alloc, Some(name)) => alloc = alloc::AllocMutation::parse(name)?,
         #[cfg(unix)]
@@ -255,10 +278,13 @@ fn parse_args(args: &[String]) -> Option<Args> {
         sync,
         streams,
         hands,
+        tasks,
         #[cfg(unix)]
         alloc,
         #[cfg(unix)]
         egress,
+        #[cfg(unix)]
+        capture,
     })
 }
 
@@ -284,6 +310,13 @@ fn replay(seed: u64, args: &Args) -> String {
     }
     if args.scenario == Scenario::Agents {
         return format!("nanocode-sim --scenario agents --seed {seed}");
+    }
+    if args.scenario == Scenario::Executor {
+        return tasks::replay(seed, args.tasks);
+    }
+    #[cfg(unix)]
+    if args.scenario == Scenario::Capture {
+        return capture::replay(seed, args.capture);
     }
     #[cfg(unix)]
     if args.scenario == Scenario::Alloc {
@@ -534,6 +567,7 @@ fn report_turns(
 fn alloc_experiment(args: &Args) -> bool {
     (args.scenario == Scenario::Alloc && args.alloc != alloc::AllocMutation::None)
         || (args.scenario == Scenario::Egress && args.egress != egress::EgressMutation::None)
+        || (args.scenario == Scenario::Capture && args.capture != capture::CaptureMutation::None)
 }
 
 #[cfg(not(unix))]
@@ -546,6 +580,36 @@ const fn mutation_name(whole: &WholeOptions) -> &'static str {
         ChildMutation::None => whole.mutation.name(),
         mutation => mutation.name(),
     }
+}
+
+fn mutations() -> ExitCode {
+    let mut lines = Vec::new();
+    let mut add = |scenario: &str, names: String| {
+        for name in names.split('|').filter(|name| !name.is_empty() && *name != "none") {
+            lines.push(format!("MUTATION scenario={scenario} mutation={name}"));
+        }
+    };
+    add("store", Mutation::names());
+    add("turns", TurnMutation::names());
+    add("runtime", WireMutation::NAMES.to_owned());
+    add("runtime", ChildMutation::NAMES.to_owned());
+    add("websocket", WebSocketMutation::names());
+    add("http_server", HttpServerMutation::names());
+    add("mpp", MppMutation::names());
+    add("sync", SyncMutation::names());
+    add("streams", StreamsMutation::names());
+    add("hands", HandsMutation::names());
+    add("executor", TasksMutation::names());
+    #[cfg(unix)]
+    {
+        add("alloc", alloc::AllocMutation::names());
+        add("egress", egress::EgressMutation::names());
+        add("capture", capture::CaptureMutation::names());
+    }
+    for line in lines {
+        println!("{line}");
+    }
+    ExitCode::SUCCESS
 }
 
 fn tidy() -> ExitCode {
@@ -572,6 +636,9 @@ fn main() -> ExitCode {
     if args == ["--tidy"] {
         return tidy();
     }
+    if args == ["--mutations"] {
+        return mutations();
+    }
     log::install();
     if let Err(error) = host::install() {
         eprintln!("could not install the simulated platform host: {error}");
@@ -593,6 +660,7 @@ fn main() -> ExitCode {
         || (args.scenario == Scenario::Sync && args.sync != SyncMutation::None)
         || (args.scenario == Scenario::Streams && args.streams != StreamsMutation::None)
         || (args.scenario == Scenario::Hands && args.hands != HandsMutation::None)
+        || (args.scenario == Scenario::Executor && args.tasks != TasksMutation::None)
         || alloc_experiment(&args);
     let (mut passed, mut failed) = (0_u64, 0_u64);
     let mut totals = Stats::default();
@@ -605,6 +673,9 @@ fn main() -> ExitCode {
     let mut sync_totals = SyncStats::default();
     let mut streams_totals = StreamsStats::default();
     let mut hands_totals = HandsStats::default();
+    let mut tasks_totals = TasksStats::default();
+    #[cfg(unix)]
+    let mut capture_totals = capture::CaptureStats::default();
     #[cfg(unix)]
     let mut alloc_totals = alloc::AllocStats::default();
     #[cfg(unix)]
@@ -658,6 +729,23 @@ fn main() -> ExitCode {
                 args.options.verbose,
                 &mut streams_totals,
             ),
+            Scenario::Executor => tasks::judge(
+                seed,
+                args.tasks,
+                args.twice,
+                args.options.verbose,
+                &mut tasks_totals,
+            ),
+            #[cfg(unix)]
+            Scenario::Capture => capture::judge(
+                seed,
+                args.capture,
+                args.twice,
+                args.options.verbose,
+                &mut capture_totals,
+            ),
+            #[cfg(not(unix))]
+            Scenario::Capture => unreachable!("the capture scenario parses only on unix"),
             #[cfg(unix)]
             Scenario::Alloc => alloc::judge(
                 seed,
@@ -685,7 +773,10 @@ fn main() -> ExitCode {
             continue;
         };
         failed += 1;
-        let replay = replay(seed, &args);
+        let mut replay = replay(seed, &args);
+        if args.twice && !replay.contains("--twice") {
+            replay.push_str(" --twice");
+        }
         if mutation == Mutation::None && !experiment {
             println!("FAIL seed={seed} Wrong {message} :: replay: {replay}");
         } else if failed <= u64::try_from(CAUGHT_SHOWN_MAX).expect("a small count fits in u64") {
@@ -714,6 +805,13 @@ fn main() -> ExitCode {
     }
     if args.scenario == Scenario::Hands {
         return hands::report(&args.seeds, passed, failed, args.twice, args.hands, &hands_totals);
+    }
+    if args.scenario == Scenario::Executor {
+        return tasks::report(&args.seeds, passed, failed, args.twice, args.tasks, &tasks_totals);
+    }
+    #[cfg(unix)]
+    if args.scenario == Scenario::Capture {
+        return capture::report(&args.seeds, passed, failed, args.twice, args.capture, &capture_totals);
     }
     if args.scenario == Scenario::Sync {
         return sync::report(&args.seeds, passed, failed, args.twice, args.sync, &sync_totals);

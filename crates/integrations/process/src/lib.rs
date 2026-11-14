@@ -916,9 +916,7 @@ impl SessionState {
         output_unit: OutputUnit,
     ) -> Result<(String, Option<usize>), nanocode_sync::Stopped> {
         let mut captured = self.output.take().await?;
-        captured.trim_truncated_secrets(&self.secrets);
-        let mut raw = String::from_utf8_lossy(&captured.with_omission_marker()).into_owned();
-        self.secrets.text(&mut raw);
+        let raw = captured.render(&self.secrets);
         let limit = output::effective_token_limit(max_output_tokens);
         let original_token_count = captured.total_bytes.saturating_add(3) / 4;
         let (output, _) = match captured.omission_marker() {
@@ -932,14 +930,14 @@ impl SessionState {
 }
 
 #[derive(Default)]
-pub(crate) struct CapturedOutput {
+pub struct CapturedOutput {
     head: Vec<u8>,
     tail: VecDeque<u8>,
     omitted_bytes: usize,
 }
 
 impl CapturedOutput {
-    pub(crate) fn push(&mut self, bytes: &[u8], limit: usize) {
+    pub fn push(&mut self, bytes: &[u8], limit: usize) {
         if bytes.is_empty() {
             return;
         }
@@ -975,7 +973,7 @@ impl CapturedOutput {
         }
     }
 
-    fn take(&mut self) -> CapturedChunk {
+    pub fn take(&mut self) -> CapturedChunk {
         let head = std::mem::take(&mut self.head);
         let tail = std::mem::take(&mut self.tail);
         let omitted_bytes = std::mem::take(&mut self.omitted_bytes);
@@ -991,7 +989,7 @@ impl CapturedOutput {
     }
 }
 
-struct CapturedChunk {
+pub struct CapturedChunk {
     head: Vec<u8>,
     tail: VecDeque<u8>,
     omitted_bytes: usize,
@@ -999,7 +997,18 @@ struct CapturedChunk {
 }
 
 impl CapturedChunk {
-    fn trim_truncated_secrets(&mut self, secrets: &nanocode_process_contracts::Redactor) {
+    pub fn render(&mut self, secrets: &nanocode_process_contracts::Redactor) -> String {
+        self.trim_truncated_secrets(secrets);
+        let mut raw = String::from_utf8_lossy(&self.with_omission_marker()).into_owned();
+        secrets.text(&mut raw);
+        raw
+    }
+
+    pub const fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+
+    pub fn trim_truncated_secrets(&mut self, secrets: &nanocode_process_contracts::Redactor) {
         if self.omitted_bytes == 0 || secrets.forms().next().is_none() {
             return;
         }
@@ -1036,11 +1045,11 @@ impl CapturedChunk {
             .saturating_add(tail_cut);
     }
 
-    fn omission_marker(&self) -> Option<String> {
+    pub fn omission_marker(&self) -> Option<String> {
         (self.omitted_bytes > 0).then(|| format!("... {} bytes omitted ...", self.omitted_bytes))
     }
 
-    fn with_omission_marker(&self) -> Vec<u8> {
+    pub fn with_omission_marker(&self) -> Vec<u8> {
         let marker = self.omission_marker();
         let marker_length = marker.as_ref().map_or(0, |marker| marker.len() + 2);
         let mut output = Vec::with_capacity(

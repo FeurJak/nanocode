@@ -800,6 +800,8 @@ dependencies = [
  "nanocode-io",
  "nanocode-mpp",
  "nanocode-platform",
+ "nanocode-process",
+ "nanocode-process-contracts",
  "nanocode-sandbox",
  "nanocode-subagents",
  "nanocode-sync",

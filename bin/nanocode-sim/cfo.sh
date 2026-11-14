@@ -12,16 +12,36 @@ budget_secs=${NANOCODE_CFO_BUDGET_SECS:-3600}
 refresh_secs=${NANOCODE_CFO_REFRESH_SECS:-300}
 job_secs_target=${NANOCODE_CFO_JOB_SECS:-60}
 job_secs_max=${NANOCODE_CFO_TIMEOUT_SECS:-1800}
-workers=${NANOCODE_CFO_WORKERS:-24}
-fuzz_cpus=${NANOCODE_CFO_FUZZ_CPUS:-8-31}
-build_cpus=${NANOCODE_CFO_BUILD_CPUS:-0-5}
-build_jobs=${NANOCODE_CFO_BUILD_JOBS:-6}
+fuzz_cpus=${NANOCODE_CFO_FUZZ_CPUS:-20-31}
+build_cpus=${NANOCODE_CFO_BUILD_CPUS:-16-19}
+build_jobs=${NANOCODE_CFO_BUILD_JOBS:-4}
+db_remote=${NANOCODE_CFO_DB:-https://github.com/gakonst/nanocode-cfo-db}
+host=${NANOCODE_CFO_HOST:-$(hostname -s)}
+triage_secs=${NANOCODE_CFO_TRIAGE_SECS:-600}
 canary_seeds=${NANOCODE_CFO_CANARY_SEEDS:-400}
 memory_max=${NANOCODE_CFO_MEMORY_MAX:-32G}
+commits_kept=32
+failures_kept=4
+upload_tries=32
+log_bytes_max=$(( 4 << 20 ))
+log_days=7
+results_bytes_max=$(( 1 << 30 ))
+triage_window_bytes=$(( 64 << 20 ))
+upload_first_bytes=$(( 64 << 20 ))
+failing_shown=3
+message_chars=240
 batch_first=20
 seeds_min=1
 seeds_max=1000000
 seed_mask=$(( (1 << 62) - 1 ))
+cpu_count() {
+  local total=0 part
+  for part in $(echo "$1" | tr ',' ' '); do
+    total=$(( total + ${part#*-} - ${part%-*} + 1 ))
+  done
+  echo "$total"
+}
+workers=${NANOCODE_CFO_WORKERS:-$(cpu_count "$fuzz_cpus")}
 results=$root/results.jsonl
 logs=$root/failures
 default_table='
@@ -100,6 +120,38 @@ default_table='
 1 canary_sync_watch_rewind canary --scenario sync --mutation watch_rewind
 1 canary_sync_broadcast_extra canary --scenario sync --mutation broadcast_extra
 1 canary_sync_ring_off_by_one canary --scenario sync --mutation ring_off_by_one
+4 turns_turnlog_events pass --scenario turns --policy turnlog --event-bytes 32768
+4 turns_turnlog_snapshots pass --scenario turns --policy turnlog --snapshot-rows 4 --state-bytes 131072
+2 turns_turnlog_retain pass --scenario turns --policy turnlog --retain 1
+4 runtime_kv_remote pass --scenario runtime --store kv --children remote
+1 runtime_kv_remote_twice pass --scenario runtime --store kv --children remote --twice
+8 hands pass --scenario hands
+2 hands_twice pass --scenario hands --twice
+8 executor pass --scenario executor
+2 executor_twice pass --scenario executor --twice
+8 capture pass --scenario capture
+2 capture_twice pass --scenario capture --twice
+1 canary_ack_buffered_admission canary --scenario turns --policy turnlog --mutation ack_buffered_admission
+1 canary_ack_buffered_result canary --scenario turns --policy turnlog --mutation ack_buffered_result
+1 canary_archive_drops_events canary --scenario turns --policy turnlog --event-bytes 32768 --mutation archive_drops_events
+1 canary_snapshot_kept canary --scenario turns --policy turnlog --snapshot-rows 4 --state-bytes 131072 --mutation snapshot_kept
+1 canary_snapshot_rows_ignored canary --scenario turns --policy turnlog --snapshot-rows 4 --mutation snapshot_rows_ignored
+1 canary_tail_rows_appended canary --scenario turns --policy turnlog --snapshot-rows 4 --mutation tail_rows_appended
+1 canary_retire_skipped canary --scenario turns --policy turnlog --retain 1 --mutation retire_skipped
+1 canary_hedge_unmarked canary:200 --scenario runtime --mutation hedge-unmarked
+1 canary_child_acks_early canary:1000 --scenario runtime --children remote --mutation child-acks-early
+1 canary_child_adopts_turn canary:400 --scenario runtime --children remote --mutation child-adopts-turn
+1 canary_child_forgets_notice canary:100 --scenario runtime --children remote --mutation child-forgets-notice
+1 canary_child_settles_lazily canary:100 --scenario runtime --children remote --mutation child-settles-lazily
+1 canary_hands_ack_before_store canary:100 --scenario hands --mutation ack_before_store
+1 canary_hands_skip_record canary:200 --scenario hands --mutation skip_record
+1 canary_hands_forget_pending canary:200 --scenario hands --mutation forget_pending
+1 canary_hands_cross_replies canary:200 --scenario hands --mutation cross_replies
+1 canary_hands_mangle_runtime canary:200 --scenario hands --mutation mangle_runtime
+1 canary_executor_skip_abort canary --scenario executor --mutation skip_abort
+1 canary_executor_leak_cancelled canary --scenario executor --mutation leak_cancelled
+1 canary_capture_skip_trim canary --scenario capture --mutation skip_trim
+1 canary_capture_drop_chunk canary --scenario capture --mutation drop_chunk
 '
 default_known='
 '
@@ -107,7 +159,7 @@ discovered_weight=8
 discovered_twice_weight=2
 
 usage() {
-  echo "usage: cfo.sh run | supervise | install | summary [HOURS] | failures [HOURS]" >&2
+  echo "usage: cfo.sh run | supervise | install | upload | triage | summary [HOURS] | failures [HOURS]" >&2
   exit 2
 }
 
@@ -150,6 +202,7 @@ fetch_and_build() {
   fi
   mkdir -p "$root/bins/$sha"
   cp "$root/target/release/nanocode-sim" "$root/bins/$sha/nanocode-sim"
+  housekeep
   record "{\"time\":$started,\"commit\":\"$sha\",\"scenario\":\"build\",\"ok\":true,\"wall_secs\":$(( $(now) - started ))}"
   echo "$sha"
 }
@@ -169,6 +222,16 @@ $discovered_weight $scenario pass --scenario $scenario
 $discovered_twice_weight ${scenario}_twice pass --scenario $scenario --twice"
     fi
   done
+  local line mutation
+  while read -r line scenario mutation; do
+    scenario=${scenario#scenario=}
+    mutation=${mutation#mutation=}
+    [ "$line" = MUTATION ] && [ -n "$mutation" ] && [ "$mutation" != none ] || continue
+    if ! echo "$table" | grep -q -- "--scenario $scenario .*--mutation $mutation\( \|$\)"; then
+      table="$table
+1 canary_${scenario}_$mutation canary --scenario $scenario --mutation $mutation"
+    fi
+  done < <("$bin" --mutations 2>/dev/null)
   names=() weights=() kinds=() flags=()
   while read -r weight name kind rest; do
     [ -z "$weight" ] && continue
@@ -237,21 +300,22 @@ run_job() {
     message=$(grep -m1 '^FAIL\|^MUTATION\|panicked\|^error' "$out")
     [ -z "$message" ] && message="exit $status: $(tail -3 "$out")"
   fi
-  local replay="$bin --seeds $seed..$end $flags" known=false line
+  local replay="$bin --seeds $seed..$end $flags" known=false line log_name=""
+  [ "$ok" = false ] && log_name=$started-$name-$seed.log
   if [ "$ok" = false ] && [ "$kind" = pass ] && [ "$failed" -gt 0 ] && grep -q '^FAIL' "$out"; then
     known=true
     while read -r line; do
       known_failure "$name" "$line" || { known=false; break; }
     done < <(grep '^FAIL' "$out")
   fi
-  record "{\"time\":$started,\"commit\":\"$sha\",\"scenario\":\"$name\",\"kind\":\"$kind\",\"seed\":$seed,\"count\":$count,\"ok\":$ok,\"known\":$known,\"exit\":$status,\"passed\":$passed,\"failed\":$failed,\"wall_secs\":$wall,\"replay\":\"$(json_text "$replay")\",\"message\":\"$(json_text "$message")\"}"
+  record "{\"time\":$started,\"commit\":\"$sha\",\"scenario\":\"$name\",\"kind\":\"$kind\",\"seed\":$seed,\"count\":$count,\"ok\":$ok,\"known\":$known,\"exit\":$status,\"passed\":$passed,\"failed\":$failed,\"wall_secs\":$wall,\"log\":\"$log_name\",\"replay\":\"$(json_text "$replay")\",\"message\":\"$(json_text "$message")\"}"
   if [ "$kind" = pass ]; then
     grep '^FAIL' "$out" | head -32 | while read -r line; do
       local failing command seen=false
       known_failure "$name" "$line" && seen=true
       failing=$(echo "$line" | sed -n 's/^FAIL seed=\([0-9]*\).*/\1/p')
       command=$(echo "$line" | sed -n 's/.*:: replay: nanocode-sim//p')
-      record "{\"time\":$started,\"commit\":\"$sha\",\"scenario\":\"$name\",\"kind\":\"seed\",\"seed\":${failing:-0},\"count\":1,\"ok\":false,\"known\":$seen,\"replay\":\"$(json_text "$bin$command")\",\"message\":\"$(json_text "$line")\"}"
+      record "{\"time\":$started,\"commit\":\"$sha\",\"scenario\":\"$name\",\"kind\":\"seed\",\"seed\":${failing:-0},\"count\":1,\"ok\":false,\"known\":$seen,\"log\":\"$log_name\",\"replay\":\"$(json_text "$bin$command")\",\"message\":\"$(json_text "$line")\"}"
     done
   fi
   if [ "$ok" = false ]; then
@@ -272,7 +336,7 @@ refill() {
 
 run() {
   mkdir -p "$root/tmp" "$root/state"
-  local started sha bin last_refresh deadline building="" at
+  local started sha bin last_refresh deadline building="" uploading="" at
   started=$(now)
   deadline=$(( started + budget_secs ))
   sha=$(fetch_and_build) || sha=$(ls -t "$root/bins" 2>/dev/null | head -1)
@@ -290,6 +354,10 @@ run() {
       last_refresh=$t
       ( fetch_and_build >"$root/tmp/build.sha" ) &
       building=$!
+      if [ -z "$uploading" ]; then
+        ( upload; triage ) >"$root/tmp/upload.log" 2>&1 &
+        uploading=$!
+      fi
     fi
     while [ "${#running[@]}" -lt "$workers" ] && [ "$(now)" -lt "$deadline" ]; do
       at=$(pick)
@@ -304,9 +372,13 @@ run() {
       ( wall=$(run_job "$at" "$sha" "$bin" "$seed" "$count"); echo "$at $count $wall" >"$root/tmp/done.$BASHPID" ) &
       running[$!]=$at
     done
-    [ "${#running[@]}" -eq 0 ] && [ -z "$building" ] && break
+    [ "${#running[@]}" -eq 0 ] && [ -z "$building" ] && [ -z "$uploading" ] && break
     local finished=""
     wait -n -p finished
+    if [ -n "$uploading" ] && [ "$finished" = "$uploading" ]; then
+      uploading=""
+      continue
+    fi
     if [ -n "$building" ] && [ "$finished" = "$building" ]; then
       local next
       next=$(cat "$root/tmp/build.sha" 2>/dev/null)
@@ -367,12 +439,14 @@ RestartSec=10
 MemoryMax=$memory_max
 KillMode=control-group
 Nice=10
+CPUAffinity=$build_cpus $fuzz_cpus
 
 [Install]
 WantedBy=default.target
 EOF
   systemctl --user daemon-reload
-  systemctl --user enable --now nanocode-cfo.service
+  systemctl --user enable nanocode-cfo.service
+  systemctl --user restart nanocode-cfo.service
 }
 
 field_awk='
@@ -383,6 +457,357 @@ function field(name,   pattern, value) {
   gsub(/^"|"$/, "", value)
   return value
 }'
+
+merge_awk='
+function see(commit, time) {
+  if (!(commit in seen) || time < seen[commit]) seen[commit] = time
+}
+function add_failure(key, seed, time, replay, message, known, logname, more,   n) {
+  n = kept[key] + 0
+  if (n < failures_kept) {
+    f_seed[key, n] = seed
+    f_time[key, n] = time
+    f_replay[key, n] = replay
+    f_message[key, n] = message
+    f_known[key, n] = known
+    f_log[key, n] = logname
+    f_more[key, n] = more
+    kept[key] = n + 1
+  } else {
+    f_more[key, failures_kept - 1] += 1 + more
+  }
+}
+function stats(key, kind, runs, count, failed, bad, known, killed, first, last) {
+  kinds[key] = kind
+  r_runs[key] += runs
+  r_seeds[key] += count
+  r_failed[key] += failed
+  r_bad[key] += bad
+  r_known[key] += known
+  r_killed[key] += killed
+  if (!(key in r_first) || first < r_first[key]) r_first[key] = first
+  if (last > r_last[key]) r_last[key] = last
+}
+{
+  type = field("type")
+  commit = field("commit")
+  if (type == "machine") {
+    if (field("host") != host) machines[field("host")] = field("time")
+    next
+  }
+  if (commit == "") next
+  time = field("time") + 0
+  if (time > 0) see(commit, time)
+  if (type == "commit") {
+    if (field("build") != "") build[commit] = field("build")
+    if (field("build_message") != "") build_message[commit] = field("build_message")
+    next
+  }
+  if (type == "fuzzer") {
+    stats(commit SUBSEP field("fuzzer"), field("kind"), field("runs"), field("seeds"), field("failed_seeds"), field("failed_runs"), field("known_runs"), field("killed_runs"), field("first") + 0, field("last") + 0)
+    next
+  }
+  if (type == "failure") {
+    key = commit SUBSEP field("fuzzer")
+    add_failure(key, field("seed"), time, field("replay"), field("message"), field("known"), field("log"), field("more") + 0)
+    if (field("reproduced") != "") triage[key, field("seed")] = "\"reproduced\":" field("reproduced") ",\"first_bad\":\"" field("first_bad") "\",\"last_good\":\"" field("last_good") "\""
+    next
+  }
+  scenario = field("scenario")
+  kind = field("kind")
+  if (scenario == "build") {
+    build[commit] = field("ok") == "true" ? "ok" : "failed"
+    if (field("ok") != "true") build_message[commit] = field("message")
+    next
+  }
+  key = commit SUBSEP scenario
+  if (kind == "triage") {
+    triage[key, field("seed")] = "\"reproduced\":" field("reproduced") ",\"first_bad\":\"" field("first_bad") "\",\"last_good\":\"" field("last_good") "\""
+    next
+  }
+  if (kind == "seed") {
+    add_failure(key, field("seed"), time, field("replay"), field("message"), field("known"), field("log"), 0)
+    next
+  }
+  ok = field("ok") == "true"
+  known = field("known") == "true"
+  stats(key, kind ~ /^canary/ ? "canary" : "pass", 1, field("count"), field("failed"), !ok && !known, !ok && known, field("exit") == "137", time, time)
+  if (!ok && (kind ~ /^canary/ || field("failed") + 0 == 0 || field("message") !~ /^FAIL/))
+    add_failure(key, field("seed"), time, field("replay"), field("message"), field("known"), field("log"), 0)
+}
+END {
+  n = 0
+  for (commit in seen) order[++n] = seen[commit] "\t" commit
+  asort(order, order, "@val_str_desc")
+  for (i = 1; i <= n && i <= commits_kept; i++) {
+    split(order[i], parts, "\t")
+    keep[parts[2]] = 1
+  }
+  printf "{\"type\":\"machine\",\"host\":\"%s\",\"time\":%d}\n", host, now
+  for (machine in machines) printf "{\"type\":\"machine\",\"host\":\"%s\",\"time\":%d}\n", machine, machines[machine]
+  for (commit in keep) printf "{\"type\":\"commit\",\"commit\":\"%s\",\"time\":%d,\"build\":\"%s\",\"build_message\":\"%s\"}\n", commit, seen[commit], build[commit], build_message[commit]
+  for (key in kinds) {
+    split(key, parts, SUBSEP)
+    if (!(parts[1] in keep)) continue
+    printf "{\"type\":\"fuzzer\",\"commit\":\"%s\",\"fuzzer\":\"%s\",\"kind\":\"%s\",\"runs\":%d,\"seeds\":%d,\"failed_seeds\":%d,\"failed_runs\":%d,\"known_runs\":%d,\"killed_runs\":%d,\"first\":%d,\"last\":%d}\n", parts[1], parts[2], kinds[key], r_runs[key], r_seeds[key], r_failed[key], r_bad[key], r_known[key], r_killed[key], r_first[key], r_last[key]
+  }
+  for (key in kept) {
+    split(key, parts, SUBSEP)
+    if (!(parts[1] in keep)) continue
+    for (i = 0; i < kept[key]; i++) {
+      extra = ((key, f_seed[key, i]) in triage) ? "," triage[key, f_seed[key, i]] : ""
+      printf "{\"type\":\"failure\",\"commit\":\"%s\",\"fuzzer\":\"%s\",\"seed\":%s,\"time\":%d,\"known\":%s,\"more\":%d,\"log\":\"%s\",\"replay\":\"%s\",\"message\":\"%s\"%s}\n", parts[1], parts[2], f_seed[key, i] == "" ? 0 : f_seed[key, i], f_time[key, i], f_known[key, i] == "true" ? "true" : "false", f_more[key, i], f_log[key, i], f_replay[key, i], f_message[key, i], extra
+      if (f_log[key, i] != "") print f_log[key, i] >keep_logs
+    }
+  }
+}'
+
+readme_awk='
+function unescape(text) {
+  gsub(/\\"/, "\"", text)
+  gsub(/\\\\/, "\\", text)
+  return text
+}
+function cell(text) {
+  text = unescape(text)
+  gsub(/\|/, "\\|", text)
+  gsub(/`/, "'"'"'", text)
+  if (length(text) > message_chars) text = substr(text, 1, message_chars) "…"
+  return text
+}
+function command(text) {
+  text = unescape(text)
+  sub(/^[^ ]*nanocode-sim/, "nanocode-sim", text)
+  return text
+}
+function day(time) {
+  return strftime("%Y-%m-%d %H:%M", time, 1)
+}
+{
+  type = field("type")
+  if (type == "machine") machines[field("host")] = field("time")
+  else if (type == "commit") {
+    commit = field("commit")
+    seen[commit] = field("time") + 0
+    build[commit] = field("build")
+    build_message[commit] = field("build_message")
+  } else if (type == "fuzzer") {
+    commit = field("commit")
+    key = commit SUBSEP field("fuzzer")
+    kinds[key] = field("kind")
+    runs[key] = field("runs")
+    seeds[key] = field("seeds")
+    failed[key] = field("failed_seeds")
+    bad[key] = field("failed_runs")
+    if (kinds[key] == "pass") {
+      c_seeds[commit] += field("seeds")
+      c_failed[commit] += field("failed_seeds")
+      c_runs[commit] += field("runs")
+      if (field("failed_runs") + 0 > 0) c_failing[commit] = c_failing[commit] " " field("fuzzer")
+    } else {
+      c_canaries[commit]++
+      if (field("failed_runs") + 0 > 0) c_missed[commit] = c_missed[commit] " " field("fuzzer")
+    }
+  } else if (type == "failure" && field("known") != "true") {
+    commit = field("commit")
+    n = nfail[commit]++
+    fl_fuzzer[commit, n] = field("fuzzer")
+    fl_seed[commit, n] = field("seed")
+    fl_more[commit, n] = field("more")
+    fl_log[commit, n] = field("log")
+    fl_replay[commit, n] = field("replay")
+    fl_message[commit, n] = field("message")
+    fl_triage[commit, n] = field("reproduced") == "" ? "" : field("reproduced") == "true" ? "reproduces alone; first bad " substr(field("first_bad"), 1, 9) (field("last_good") == "" ? " or older" : ", last good " substr(field("last_good"), 1, 9)) : "does not reproduce alone (load or nondeterminism)"
+  }
+}
+END {
+  n = 0
+  for (commit in seen) order[++n] = seen[commit] "\t" commit
+  asort(order, order, "@val_str_desc")
+  print "# nanocode CFO results"
+  print ""
+  print "Continuous fuzzing of [nanocodexyz/nanocode](https://github.com/nanocodexyz/nanocode) master by `bin/nanocode-sim/cfo.sh`, modeled on tempoxyz/zempo-cfo-db. Updated " day(now) " UTC. Records: `fuzzing/data.jsonl`; failure logs: `fuzzing/logs/`. A failing seed on master is fixed, or its change reverted, at once."
+  print ""
+  print "## Machines"
+  print ""
+  print "| host | last upload (UTC) |"
+  print "|---|---|"
+  for (machine in machines) print "| " machine " | " day(machines[machine]) " |"
+  print ""
+  print "## Failing commits"
+  print ""
+  shown = 0
+  for (i = 1; i <= n && shown < failing_shown; i++) {
+    split(order[i], parts, "\t")
+    commit = parts[2]
+    if (c_failing[commit] == "" && build[commit] != "failed" && c_missed[commit] == "") continue
+    shown++
+    print "### [" substr(commit, 1, 9) "](https://github.com/nanocodexyz/nanocode/commit/" commit ") (first fuzzed " day(seen[commit]) " UTC)"
+    print ""
+    if (build[commit] == "failed") print "Build failed: `" cell(build_message[commit]) "`\n"
+    print "| fuzzer | seed | failure | replay | log | triage |"
+    print "|---|---|---|---|---|---|"
+    for (j = 0; j < nfail[commit]; j++) {
+      more = fl_more[commit, j] + 0 > 0 ? " (+" fl_more[commit, j] " more)" : ""
+      log_cell = fl_log[commit, j] == "" ? "" : "[log](fuzzing/logs/" fl_log[commit, j] ")"
+      print "| " fl_fuzzer[commit, j] more " | " fl_seed[commit, j] " | " cell(fl_message[commit, j]) " | `" command(fl_replay[commit, j]) "` | " log_cell " | " fl_triage[commit, j] " |"
+    }
+    print ""
+  }
+  if (shown == 0) print "None of the newest " n " commits has an unknown failure.\n"
+  newest = ""
+  for (i = 1; i <= n; i++) {
+    split(order[i], parts, "\t")
+    if (c_canaries[parts[2]] > 0) { newest = parts[2]; break }
+  }
+  print "## Canaries"
+  print ""
+  if (newest != "") {
+    print "On " substr(newest, 1, 9) ". A canary runs a mutation the simulator must catch. A canary that caught nothing means its check stopped working."
+    print ""
+    print "| canary | runs | seeds | caught seeds | catch rate | missed runs |"
+    print "|---|---|---|---|---|---|"
+    m = 0
+    for (key in kinds) {
+      split(key, parts, SUBSEP)
+      if (parts[1] != newest || kinds[key] != "canary") continue
+      rows[++m] = parts[2]
+    }
+    asort(rows)
+    for (j = 1; j <= m; j++) {
+      key = newest SUBSEP rows[j]
+      printf "| %s | %d | %d | %d | %.1f%% | %d |\n", rows[j], runs[key], seeds[key], failed[key], (seeds[key] > 0 ? 100 * failed[key] / seeds[key] : 0), bad[key]
+    }
+    print ""
+  }
+  print "## Seeds per commit"
+  print ""
+  print "| commit | first fuzzed (UTC) | build | runs | seeds | failed seeds | failing fuzzers | missed canaries |"
+  print "|---|---|---|---|---|---|---|---|"
+  for (i = 1; i <= n; i++) {
+    split(order[i], parts, "\t")
+    commit = parts[2]
+    print "| " substr(commit, 1, 9) " | " day(seen[commit]) " | " build[commit] " | " c_runs[commit] + 0 " | " c_seeds[commit] + 0 " | " c_failed[commit] + 0 " | " c_failing[commit] " | " c_missed[commit] " |"
+  }
+}'
+
+upload() {
+  local db=$root/db offset size lines consumed try name file
+  mkdir -p "$root/state" "$root/tmp"
+  if [ ! -d "$db/.git" ]; then
+    rm -rf "$db"
+    git clone -q "$db_remote" "$db" || return 1
+  fi
+  size=$(stat -c %s "$results" 2>/dev/null || echo 0)
+  offset=$(cat "$root/state/uploaded" 2>/dev/null || echo $(( size > upload_first_bytes ? size - upload_first_bytes : 0 )))
+  [ "$size" -lt "$offset" ] && offset=0
+  tail -c +$(( offset + 1 )) "$results" | head -c $(( size - offset )) >"$root/tmp/upload.raw"
+  lines=$(wc -l <"$root/tmp/upload.raw")
+  head -n "$lines" "$root/tmp/upload.raw" >"$root/tmp/upload.jsonl"
+  consumed=$(wc -c <"$root/tmp/upload.jsonl")
+  if [ "$offset" -gt 0 ] && [ "$(tail -c +"$offset" "$results" | head -c 1)" != $'\n' ]; then
+    sed -i 1d "$root/tmp/upload.jsonl"
+  fi
+  rm -f "$root/tmp/upload.raw"
+  for ((try = 0; try < upload_tries; try++)); do
+    git -C "$db" fetch -q origin 2>/dev/null
+    if git -C "$db" rev-parse -q --verify origin/data >/dev/null; then
+      git -C "$db" checkout -q -B data origin/data || return 1
+      git -C "$db" reset -q --hard origin/data || return 1
+    else
+      git -C "$db" checkout -q --orphan data 2>/dev/null
+      git -C "$db" rm -rfq . 2>/dev/null
+    fi
+    git -C "$db" clean -fdxq
+    mkdir -p "$db/fuzzing/logs"
+    touch "$db/fuzzing/data.jsonl"
+    : >"$root/tmp/keep_logs"
+    cat "$db/fuzzing/data.jsonl" "$root/tmp/upload.jsonl" | gawk -v host="$host" -v now="$(now)" \
+      -v commits_kept="$commits_kept" -v failures_kept="$failures_kept" -v keep_logs="$root/tmp/keep_logs" \
+      "$field_awk$merge_awk" >"$root/tmp/data.jsonl" || return 1
+    mv "$root/tmp/data.jsonl" "$db/fuzzing/data.jsonl"
+    while read -r name; do
+      file=$db/fuzzing/logs/$name
+      [ -f "$file" ] || [ ! -f "$logs/$name" ] || tail -c "$log_bytes_max" "$logs/$name" >"$file"
+    done <"$root/tmp/keep_logs"
+    for file in "$db"/fuzzing/logs/*; do
+      [ -f "$file" ] || continue
+      grep -qxF "$(basename "$file")" "$root/tmp/keep_logs" || rm -f "$file"
+    done
+    gawk -v now="$(now)" -v failing_shown="$failing_shown" -v message_chars="$message_chars" \
+      "$field_awk$readme_awk" "$db/fuzzing/data.jsonl" >"$db/README.md" || return 1
+    git -C "$db" add -A
+    if git -C "$db" diff --cached --quiet; then
+      echo $(( offset + consumed )) >"$root/state/uploaded"
+      return 0
+    fi
+    git -C "$db" -c user.name="cfo-$host" -c user.email="cfo-$host@users.noreply.github.com" commit -q -m "🌱 $host" || return 1
+    if git -C "$db" push -q origin data; then
+      echo $(( offset + consumed )) >"$root/state/uploaded"
+      return 0
+    fi
+  done
+  return 1
+}
+
+fails() {
+  local sha=$1 status
+  shift
+  timeout --signal=KILL "$triage_secs" taskset -c "$build_cpus" "$root/bins/$sha/nanocode-sim" "$@" >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] && [ "$status" -ne 2 ]
+}
+
+triage() {
+  local picked commit scenario seed rest started reproduced=false first_bad="" last_good="" list bad good mid args
+  mkdir -p "$root/state"
+  touch "$root/state/triaged"
+  picked=$(tail -c "$triage_window_bytes" "$results" | grep '"kind":"seed"' | grep '"known":false' |
+    gawk "$field_awk"'{ print field("commit"), field("scenario"), field("seed"), field("replay") }' |
+    while read -r commit scenario seed bin rest; do
+      grep -qxF "$commit $scenario" "$root/state/triaged" || echo "$commit $scenario $seed $rest"
+    done | tail -1)
+  [ -z "$picked" ] && return 0
+  read -r commit scenario seed rest <<<"$picked"
+  echo "$commit $scenario" >>"$root/state/triaged"
+  [ -x "$root/bins/$commit/nanocode-sim" ] || return 0
+  started=$(now)
+  read -r -a args <<<"$rest"
+  if fails "$commit" "${args[@]}"; then
+    reproduced=true
+    mapfile -t list < <(git -C "$root/nanocode" rev-list --first-parent "$commit" 2>/dev/null | while read -r sha; do
+      [ -x "$root/bins/$sha/nanocode-sim" ] && echo "$sha"
+    done)
+    bad=0
+    good=${#list[@]}
+    if [ "$good" -gt 1 ] && ! fails "${list[good - 1]}" "${args[@]}"; then
+      good=$(( good - 1 ))
+      while [ $(( good - bad )) -gt 1 ]; do
+        mid=$(( (bad + good) / 2 ))
+        if fails "${list[mid]}" "${args[@]}"; then bad=$mid; else good=$mid; fi
+      done
+      last_good=${list[good]}
+    else
+      bad=$(( good - 1 ))
+    fi
+    first_bad=${list[bad]:-$commit}
+  fi
+  record "{\"time\":$started,\"commit\":\"$commit\",\"scenario\":\"$scenario\",\"kind\":\"triage\",\"seed\":$seed,\"reproduced\":$reproduced,\"first_bad\":\"$first_bad\",\"last_good\":\"$last_good\",\"wall_secs\":$(( $(now) - started )),\"replay\":\"$(json_text "$rest")\"}"
+}
+
+housekeep() {
+  local size uploaded
+  ls -t "$root/bins" 2>/dev/null | tail -n +$(( commits_kept + 1 )) | while read -r old; do
+    rm -rf "${root:?}/bins/$old"
+  done
+  find "$logs" -name '*.log' -mtime +"$log_days" -delete 2>/dev/null
+  size=$(stat -c %s "$results" 2>/dev/null || echo 0)
+  uploaded=$(cat "$root/state/uploaded" 2>/dev/null || echo 0)
+  if [ "$size" -gt "$results_bytes_max" ] && [ "$uploaded" -ge "$size" ]; then
+    mv "$results" "$results.1"
+    echo 0 >"$root/state/uploaded"
+  fi
+}
 
 summary() {
   local since=$(( $(now) - ${1:-24} * 3600 ))
@@ -436,6 +861,8 @@ case ${1:-} in
   run) run ;;
   supervise) supervise ;;
   install) install ;;
+  upload) upload ;;
+  triage) triage ;;
   summary) summary "${2:-24}" ;;
   failures) failures "${2:-24}" ;;
   *) usage ;;
