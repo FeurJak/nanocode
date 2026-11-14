@@ -60,6 +60,7 @@ pub struct Connection {
     io: Io,
     buffer: Vec<u8>,
     start: usize,
+    end: usize,
 }
 
 impl Connection {
@@ -72,6 +73,7 @@ impl Connection {
     pub const fn with_unread(io: Io, unread: Vec<u8>) -> Self {
         Self {
             io,
+            end: unread.len(),
             buffer: unread,
             start: 0,
         }
@@ -79,15 +81,15 @@ impl Connection {
 
     #[must_use]
     pub fn unread(&self) -> &[u8] {
-        &self.buffer[self.start..]
+        &self.buffer[self.start..self.end]
     }
 
     pub fn consume(&mut self, count: usize) {
         assert!(count <= self.unread().len());
         self.start += count;
-        if self.start == self.buffer.len() {
-            self.buffer.clear();
+        if self.start == self.end {
             self.start = 0;
+            self.end = 0;
         }
     }
 
@@ -99,11 +101,17 @@ impl Connection {
 
     pub async fn fill(&mut self) -> io::Result<usize> {
         if self.start > 0 {
-            self.buffer.drain(..self.start);
+            self.buffer.copy_within(self.start..self.end, 0);
+            self.end -= self.start;
             self.start = 0;
         }
-        self.buffer.reserve(READ_BYTES);
-        self.io.read_buf(&mut self.buffer).await
+        let wanted = self.end + READ_BYTES;
+        if self.buffer.len() < wanted {
+            self.buffer.resize(wanted, 0);
+        }
+        let read = self.io.read(&mut self.buffer[self.end..]).await?;
+        self.end += read;
+        Ok(read)
     }
 
     pub async fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
@@ -120,6 +128,7 @@ impl Connection {
 
     #[must_use]
     pub fn into_parts(mut self) -> (Io, Vec<u8>) {
+        self.buffer.truncate(self.end);
         self.buffer.drain(..self.start);
         (self.io, self.buffer)
     }
