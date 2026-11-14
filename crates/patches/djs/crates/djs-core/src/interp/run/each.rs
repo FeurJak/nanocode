@@ -330,6 +330,12 @@ impl Exec<'_> {
             self.safepoint();
             return None;
         }
+        self.each_leave(v)
+    }
+
+    /// `each_return` when `each_again` declined.
+    #[inline(never)]
+    fn each_leave(&mut self, v: Value) -> Option<Status> {
         let base = self.bp - STATE;
         let mode = self.get(base + MODE).as_int().unwrap_or(FOR_EACH);
         let k = self.each_k(base);
@@ -432,9 +438,7 @@ impl Exec<'_> {
             return None;
         }
         let x = ld(b, ValueArray::VALUES.at(el, next));
-        let argc = if mode == REDUCE { 4 } else { 3 };
-        let n = hp - bp - 2;
-        if x.is_hole() || n < argc {
+        if x.is_hole() {
             return None;
         }
         if let Some(sv) = store {
@@ -458,7 +462,8 @@ impl Exec<'_> {
         } else {
             write_values(b, slot(bp + 2), &[x, kv, o]);
         }
-        fill(b, slot(bp + 2 + argc), n - argc, Value::UNDEFINED);
+        let argc = if mode == REDUCE { 4 } else { 3 };
+        fill(b, slot(bp + 2 + argc), hp - bp - 2 - argc, Value::UNDEFINED);
         fill(b, slot(lp), locals, Value::UNDEFINED);
         Some(lp + locals)
     }
