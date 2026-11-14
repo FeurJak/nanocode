@@ -225,6 +225,7 @@ pub struct Tools {
     pub(crate) exec_yield: Option<std::time::Duration>,
     pub(crate) output_budget: Option<usize>,
     pub(crate) full_exec_description: bool,
+    background_jobs: bool,
     #[cfg(not(target_family = "wasm"))]
     pub(super) deferred_tools_guidance_enabled: bool,
 
@@ -298,6 +299,7 @@ impl Default for Tools {
             exec_yield: None,
             output_budget: None,
             full_exec_description: false,
+            background_jobs: false,
             #[cfg(not(target_family = "wasm"))]
             deferred_tools_guidance_enabled: false,
 
@@ -486,6 +488,17 @@ impl Tools {
     pub const fn with_full_exec_description(mut self) -> Self {
         self.full_exec_description = true;
         self
+    }
+
+    #[must_use]
+    pub const fn with_background_jobs(mut self, enabled: bool) -> Self {
+        self.background_jobs = enabled;
+        self
+    }
+
+    #[must_use]
+    pub const fn background_jobs_enabled(&self) -> bool {
+        self.background_jobs
     }
 
     #[must_use]

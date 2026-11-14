@@ -9,6 +9,7 @@ use nanocode_tool_host::workspace_runtime::{WorkspaceExecutor, WorkspaceToolFact
 use super::{
     StandardTool, Tool, ToolContext, ToolInput, ToolOutput,
     apply_patch::ApplyPatchHandler,
+    jobs::{JobHandler, JobTool},
     shell::{ExecCommandHandler, WriteStdinHandler},
     view_image::ViewImageHandler,
 };
@@ -18,6 +19,8 @@ pub struct WorkspaceToolRuntime {
     exec_command: Arc<ExecCommandHandler>,
     view_image: Arc<ViewImageHandler>,
     write_stdin: Arc<WriteStdinHandler>,
+    jobs: Vec<Arc<JobHandler>>,
+    workspace: PathBuf,
     sessions: Arc<dyn ShellExecutor>,
 }
 
@@ -41,7 +44,17 @@ impl WorkspaceTools {
         Self {
             source: nanocode_tool_host::WorkspaceTools::with_factory(
                 workspace,
-                CodexWorkspaceFactory,
+                CodexWorkspaceFactory { jobs: false },
+            ),
+        }
+    }
+
+    #[must_use]
+    pub fn with_jobs(workspace: impl Into<PathBuf>) -> Self {
+        Self {
+            source: nanocode_tool_host::WorkspaceTools::with_factory(
+                workspace,
+                CodexWorkspaceFactory { jobs: true },
             ),
         }
     }
@@ -77,7 +90,9 @@ impl nanocode_tool_host::ToolSource for WorkspaceTools {
     }
 }
 
-struct CodexWorkspaceFactory;
+struct CodexWorkspaceFactory {
+    jobs: bool,
+}
 
 struct ConfiguredWorkspaceFactory(Arc<dyn ProcessExecutors>);
 
@@ -107,11 +122,15 @@ impl WorkspaceToolFactory for CodexWorkspaceFactory {
         environment: Vec<(OsString, OsString)>,
         max_wire_bytes: Option<u64>,
     ) -> Arc<dyn WorkspaceExecutor> {
-        Arc::new(WorkspaceToolRuntime::with_optional_view_image_wire_limit(
+        let runtime = WorkspaceToolRuntime::with_optional_view_image_wire_limit(
             root,
             max_wire_bytes,
             Arc::new(environment),
-        ))
+        );
+        Arc::new(match self.jobs {
+            true => runtime.with_job_tools(),
+            false => runtime,
+        })
     }
 
     fn code_mode_policy(&self) -> Option<Arc<dyn nanocode_tool_host::CodeModeToolPolicy>> {
@@ -121,12 +140,14 @@ impl WorkspaceToolFactory for CodexWorkspaceFactory {
 
 impl WorkspaceExecutor for WorkspaceToolRuntime {
     fn tools(&self) -> Vec<Arc<dyn Tool>> {
-        vec![
+        let mut tools: Vec<Arc<dyn Tool>> = vec![
             self.apply_patch.clone(),
             self.exec_command.clone(),
             self.view_image.clone(),
             self.write_stdin.clone(),
-        ]
+        ];
+        tools.extend(self.jobs.iter().map(|job| Arc::clone(job) as Arc<dyn Tool>));
+        tools
     }
 
     fn timeout_ms(&self, name: &str) -> Option<u64> {
@@ -135,6 +156,9 @@ impl WorkspaceExecutor for WorkspaceToolRuntime {
                 Some(nanocode_process_contracts::MAX_EXEC_YIELD_MS + 10_000)
             }
             name if name == StandardTool::WriteStdin.name() => {
+                Some(nanocode_process_contracts::MAX_POLL_YIELD_MS + 10_000)
+            }
+            name if JobTool::named(name).is_some() => {
                 Some(nanocode_process_contracts::MAX_POLL_YIELD_MS + 10_000)
             }
             _ => None,
@@ -206,8 +230,16 @@ impl WorkspaceToolRuntime {
                 },
             )),
             write_stdin: Arc::new(WriteStdinHandler::new(Arc::clone(&sessions))),
+            jobs: Vec::new(),
+            workspace,
             sessions,
         }
+    }
+
+    #[must_use]
+    pub fn with_job_tools(mut self) -> Self {
+        self.jobs = JobHandler::all(&self.workspace, &self.sessions);
+        self
     }
 
     pub async fn execute_tool(
@@ -229,7 +261,12 @@ impl WorkspaceToolRuntime {
             name if name == StandardTool::ExecCommand.name() => Some(self.exec_command.as_ref()),
             name if name == StandardTool::ViewImage.name() => Some(self.view_image.as_ref()),
             name if name == StandardTool::WriteStdin.name() => Some(self.write_stdin.as_ref()),
-            _ => None,
+            name => JobTool::named(name).and_then(|kind| {
+                self.jobs
+                    .iter()
+                    .find(|job| job.kind() == kind)
+                    .map(|job| job.as_ref() as &dyn Tool)
+            }),
         }
     }
 

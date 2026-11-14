@@ -3,18 +3,33 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
+use nanocode_process_contracts::JOB_TOOLS;
 use nanocode_tool_host::{
     CodeModeToolObservation, CodeModeToolPolicy, WorkspaceToolRouting, contract::ToolOutputContent,
 };
 use serde_json::Value;
 
-use super::StandardTool;
+use super::{StandardTool, jobs::JobTool};
 
 static POLICY: LazyLock<Arc<dyn CodeModeToolPolicy>> =
     LazyLock::new(|| Arc::new(StandardToolPolicy));
 
 pub(crate) fn standard_tool_policy() -> Arc<dyn CodeModeToolPolicy> {
     Arc::clone(&POLICY)
+}
+
+static JOBS_HIDDEN: LazyLock<Arc<dyn CodeModeToolPolicy>> = LazyLock::new(|| Arc::new(JobsHidden));
+
+pub(crate) fn jobs_hidden_policy() -> Arc<dyn CodeModeToolPolicy> {
+    Arc::clone(&JOBS_HIDDEN)
+}
+
+struct JobsHidden;
+
+impl CodeModeToolPolicy for JobsHidden {
+    fn hidden_host_tool(&self, name: &str) -> bool {
+        JOB_TOOLS.contains(&name)
+    }
 }
 
 struct StandardToolPolicy;
@@ -32,6 +47,12 @@ impl CodeModeToolPolicy for StandardToolPolicy {
         ]
         .into_iter()
         .find_map(|(tool, routing)| (tool.name() == name).then_some(routing))
+        .or_else(|| {
+            JobTool::named(name).map(|tool| match tool {
+                JobTool::Start => WorkspaceToolRouting::ProcessStart,
+                JobTool::Wait | JobTool::Kill => WorkspaceToolRouting::ProcessInput,
+            })
+        })
     }
 
     fn exclusive(&self, name: &str) -> bool {
@@ -48,6 +69,7 @@ impl CodeModeToolPolicy for StandardToolPolicy {
         ]
         .into_iter()
         .any(|tool| tool.name() == name)
+            || JobTool::named(name).is_some()
     }
 
     fn hidden_host_tool(&self, name: &str) -> bool {
@@ -64,10 +86,11 @@ impl CodeModeToolPolicy for StandardToolPolicy {
         let mut running = BTreeSet::new();
         for observed in calls {
             let call = observed.call;
-            if call.name != exec_command && call.name != write_stdin {
+            let job = JobTool::named(&call.name);
+            if call.name != exec_command && call.name != write_stdin && job.is_none() {
                 continue;
             }
-            if call.name == write_stdin
+            if (call.name == write_stdin || matches!(job, Some(JobTool::Wait | JobTool::Kill)))
                 && let Some(session_id) = call.input.get("session_id").and_then(Value::as_i64)
             {
                 running.remove(&session_id);

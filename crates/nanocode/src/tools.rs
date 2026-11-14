@@ -33,7 +33,7 @@ pub mod attachment {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AttachmentError>> + Send>>
     {
         nanocode_agent_host::run_runner_with_workspace_tools(config, tools, |workspace| {
-            nanocode_backend_codex::tools::WorkspaceTools::new(workspace).into_source()
+            nanocode_backend_codex::tools::WorkspaceTools::with_jobs(workspace).into_source()
         })
     }
 }

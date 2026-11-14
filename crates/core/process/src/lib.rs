@@ -276,6 +276,7 @@ pub const DEFAULT_POLL_YIELD_MS: u64 = 5_000;
 pub const MIN_POLL_YIELD_MS: u64 = 5_000;
 pub const MAX_EXEC_YIELD_MS: u64 = 30_000;
 pub const MAX_POLL_YIELD_MS: u64 = 300_000;
+pub const JOB_TOOLS: [&str; 3] = ["job_start", "job_wait", "job_kill"];
 
 const BYTES_PER_TOKEN: usize = 4;
 

@@ -25,4 +25,8 @@ impl CodeModeToolPolicy for ClaudeToolPolicy {
     fn exclusive(&self, name: &str) -> bool {
         ["Write", "Edit"].contains(&name)
     }
+
+    fn hidden_host_tool(&self, name: &str) -> bool {
+        nanocode_process_contracts::JOB_TOOLS.contains(&name)
+    }
 }

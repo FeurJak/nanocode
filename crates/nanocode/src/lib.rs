@@ -78,7 +78,7 @@ pub mod hand {
         let directory = directory.into();
         crate::claude::hand_tools_with(directory.clone(), files)?
             .into_builder()
-            .add(crate::tools::WorkspaceTools::new(directory))
+            .add(crate::tools::WorkspaceTools::with_jobs(directory))
             .build()
             .map_err(|error| crate::NanocodeError::InvalidRequest(error.to_string()))
     }

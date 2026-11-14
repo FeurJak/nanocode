@@ -16,6 +16,7 @@ pub use standard::StandardTool;
 #[cfg(not(target_family = "wasm"))]
 mod gateway_unsupported;
 mod host;
+pub mod jobs;
 pub use host::{host_file_tools, host_tools};
 mod plan;
 mod shell;
@@ -54,8 +55,13 @@ pub fn tool_runtime(
     tools: &nanocode_tool_host::Tools,
 ) -> nanocode_tool_host::runtime::ToolRuntime {
     let workspace = workspace.as_ref();
+    let tools = match tools.background_jobs_enabled() {
+        true => tools.clone(),
+        false => tools
+            .clone()
+            .with_code_mode_policy(code_mode_policy::jobs_hidden_policy()),
+    };
     let tools = tools
-        .clone()
         .with_code_mode_policy(code_mode_policy::standard_tool_policy())
         .with_exec_yield(CODE_MODE_EXEC_YIELD)
         .with_output_budget(CODE_MODE_OUTPUT_TOKENS)
@@ -70,7 +76,11 @@ pub fn tool_runtime(
     #[cfg(not(target_family = "wasm"))]
     {
         let tools = if tools.workspace_enabled() && tools.workspace_source().is_none() {
-            tools.with_workspace_source(WorkspaceTools::new(workspace).source)
+            let source = match tools.background_jobs_enabled() {
+                true => WorkspaceTools::with_jobs(workspace),
+                false => WorkspaceTools::new(workspace),
+            };
+            tools.with_workspace_source(source.source)
         } else {
             tools
         };
