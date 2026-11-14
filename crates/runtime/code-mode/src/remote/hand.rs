@@ -2342,6 +2342,30 @@ impl State {
             return Ok(());
         }
         if let Some(selected_tools) = &selected
+            && let Some((session, catalog)) = self.sessions.get(&session_id)
+            && catalog
+                .state
+                .read(|state| &state.selected_tools != selected_tools)
+        {
+            if catalog.state.read(|state| !state.origins.is_empty())
+                || !session.running_tasks().is_empty()
+                || self
+                    .running
+                    .iter()
+                    .any(|(other, running)| *other != id && running.work.session_id == session_id)
+            {
+                self.finish(
+                    id,
+                    Err("hand tool selection cannot change while this session runs work; nothing was dispatched".into()),
+                );
+                return Ok(());
+            }
+            if let Some((session, _)) = self.sessions.remove(&session_id) {
+                self.publish_sessions();
+                session.close().await;
+            }
+        }
+        if let Some(selected_tools) = &selected
             && !self.sessions.contains_key(&session_id)
         {
             let catalog = CallbackCatalog {
@@ -2377,18 +2401,6 @@ impl State {
                     return Ok(());
                 }
             }
-        }
-        if let Some(selected_tools) = &selected
-            && let Some((_, catalog)) = self.sessions.get(&session_id)
-            && catalog
-                .state
-                .read(|state| &state.selected_tools != selected_tools)
-        {
-            self.finish(
-                id,
-                Err("hand tool selection cannot change within a session".into()),
-            );
-            return Ok(());
         }
         if matches!(
             &operation,
