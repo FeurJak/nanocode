@@ -174,17 +174,31 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// `-v name[sub]`: but for an associative array the subscript is arithmetic
-/// (`a[i+1]`, through a nameref too); then the element is looked up by its number.
-fn is_set(vp: &mut Vp, name: &str) -> T {
+/// `-v name[sub]`: the subscript of an indexed array is arithmetic (`a[i+1]`, through a
+/// nameref too), and the element is looked up by its number; the subscript of an
+/// associative array is a key with its quotes removed and `$name` substituted.
+async fn is_set(vp: &mut Vp, name: &str) -> T {
     if let Some(open) = name.find('[')
         && name.ends_with(']')
     {
         let (base, sub) = (&name[..open], &name[open + 1..name.len() - 1]);
-        let numeric = vp.var_ref(base).is_some_and(|v| !v.is_assoc());
-        if numeric && !matches!(sub, "@" | "*") && sub.trim().parse::<i64>().is_err() {
-            let n = crate::arith::eval(vp, sub.as_bytes())?;
-            return Ok(vp.is_set(&format!("{base}[{n}]")));
+        let target = vp.resolve(base).into_owned();
+        match vp.vars.get(&target).map(crate::vars::Var::is_assoc) {
+            _ if matches!(sub, "@" | "*") => {}
+            Some(true) => {
+                let key = vp.simple_sub(sub.as_bytes());
+                return Ok(vp.is_set(&format!("{target}[{}]", s(&key))));
+            }
+            Some(false) => {
+                return match vp.resolve_index(&target, sub.as_bytes())? {
+                    Some(i) => Ok(vp.is_set(&format!("{target}[{i}]"))),
+                    None => {
+                        vp.error(&format!("{target}: bad array subscript")).await;
+                        Ok(false)
+                    }
+                };
+            }
+            None => {}
         }
     }
     Ok(vp.is_set(name))
@@ -220,7 +234,7 @@ pub(crate) async fn unary(vp: &mut Vp, op: &[u8], arg: &[u8]) -> T {
             {
                 return Ok(false);
             }
-            return is_set(vp, name);
+            return is_set(vp, name).await;
         }
         b'o' => {
             return Ok(crate::options::by_name(arg).is_some_and(|o| vp.opts.get(o)));

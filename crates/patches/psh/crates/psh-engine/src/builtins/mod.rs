@@ -590,6 +590,12 @@ async fn unset(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         if (funcs && !vars_only)
             || (!vars_only && vp.vars.get(n).is_none() && vp.funcs.contains_key(n))
         {
+            if vp.readonly_funcs.iter().any(|f| f == n) {
+                vp.error(&format!("unset: {n}: cannot unset: readonly function"))
+                    .await;
+                status = 1;
+                continue;
+            }
             std::rc::Rc::make_mut(&mut vp.funcs).remove(n);
             continue;
         }
@@ -665,8 +671,11 @@ async fn unset(vp: &mut Vp, args: &[Vec<u8>]) -> R {
             .enumerate()
             .rev()
             .find(|(_, f)| f.saved.iter().any(|(s, _)| *s == n))
-            && (k + 1 < top || frame.temps.contains(&n))
         {
+            if k + 1 == top && !frame.temps.contains(&n) {
+                vp.vars.insert(&n, crate::vars::Var::default());
+                continue;
+            }
             frame.temps.retain(|t| *t != n);
             let i = frame.saved.iter().position(|(s, _)| *s == n).unwrap_or(0);
             let (_, old) = frame.saved.remove(i);
@@ -952,9 +961,10 @@ async fn getopts(vp: &mut Vp, args: &[Vec<u8>]) -> R {
             value = b"?".to_vec();
         }
     }
-    if valid {
-        vp.set_var(&name, value);
-    }
+    let bound = match valid {
+        true => vp.assign(&name, value),
+        false => Ok(()),
+    };
     match optarg {
         Some(v) => vp.set_var("OPTARG", v),
         None => {
@@ -963,6 +973,10 @@ async fn getopts(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     }
     vp.set_var("OPTIND", optind.to_string().into_bytes());
     vp.getopts = (optind, pos);
+    if let Err(msg) = bound {
+        vp.error(&msg).await;
+        return Ok(1);
+    }
     if !valid {
         vp.error(&format!("getopts: `{name}': not a valid identifier"))
             .await;

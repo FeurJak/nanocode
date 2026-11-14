@@ -42,7 +42,7 @@ impl DeclArg {
         if let Some(open) = w.iter().position(|&b| b == b'[')
             && open < eq
             && is_name(&w[..open])
-            && let Some(close) = w[open..].iter().position(|&b| b == b']').map(|c| c + open)
+            && let Some(close) = closing_bracket(&w, open)
             && close > eq
         {
             match &w[close + 1..] {
@@ -56,7 +56,7 @@ impl DeclArg {
             None => (&w[..eq], false),
         };
         let (name, index) = match lhs.iter().position(|&b| b == b'[') {
-            Some(i) if lhs.ends_with(b"]") && !lhs[i + 1..lhs.len() - 1].contains(&b']') => {
+            Some(i) if closing_bracket(lhs, i) == Some(lhs.len() - 1) => {
                 (lhs[..i].to_vec(), Some(lhs[i + 1..lhs.len() - 1].to_vec()))
             }
             _ => (lhs.to_vec(), None),
@@ -104,6 +104,34 @@ impl DeclArg {
             DeclArg::Array { name, .. } => String::from_utf8_lossy(name).into_owned(),
         }
     }
+
+    fn written(&self) -> String {
+        match self {
+            DeclArg::Assign {
+                index: Some(_),
+                append,
+                value,
+                ..
+            } => {
+                let op = if *append { "+=" } else { "=" };
+                format!("{}{op}{}", self.shown(), String::from_utf8_lossy(value))
+            }
+            _ => self.shown(),
+        }
+    }
+}
+
+fn closing_bracket(w: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, &b) in w.iter().enumerate().skip(open) {
+        match b {
+            b'[' => depth += 1,
+            b']' if depth == 1 => return Some(i),
+            b']' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Which builtin runs.
@@ -157,6 +185,7 @@ struct Opts {
     /// `-I`: a new local starts as a copy of the variable it shadows.
     inherit: bool,
     unexport: bool,
+    export_like: bool,
     print: bool,
     funcs: bool,
     func_names: bool,
@@ -208,7 +237,10 @@ pub(crate) async fn run(vp: &mut Vp, which: Which, args: Vec<DeclArg>) -> R {
     {
         return Ok(2);
     }
-    let mut o = Opts::default();
+    let mut o = Opts {
+        export_like: matches!(which, Which::Export | Which::Readonly),
+        ..Opts::default()
+    };
     match which {
         Which::Export => o.export = Some(true),
         Which::Readonly => o.readonly = Some(true),
@@ -383,7 +415,7 @@ declare -fx {n}
     if rest.is_empty() {
         return print_all(vp, which, &o).await;
     }
-    if o.print {
+    if o.print && !matches!(which, Which::Export | Which::Readonly) {
         return print_named(vp, bname, rest).await;
     }
     // In a function, declare and typeset (and local) make locals; -g and export /
@@ -430,9 +462,22 @@ declare -fx {n}
             status = 1;
             continue;
         }
+        if o.export_like
+            && let DeclArg::Assign {
+                name,
+                append,
+                value,
+                ..
+            } = &a
+            && vp.opts.get(crate::options::SetOpt::Xtrace)
+        {
+            let op: &[u8] = if *append { b"+=" } else { b"=" };
+            let line = super::set::xtrace_assign(name, op, value);
+            super::set::xtrace(vp, &line).await;
+        }
         if o.funcs {
             // `export -f` marks the function for the shells and programs started from
-            // here (`export -nf` takes the mark away); `readonly -f` only checks the name.
+            // here (`export -nf` takes the mark away); `readonly -f` marks it readonly.
             if !vp.funcs.contains_key(&name) {
                 vp.error(&format!("{bname}: {name}: not a function")).await;
                 status = 1;
@@ -442,10 +487,23 @@ declare -fx {n}
                 if o.export != Some(false) {
                     exported.push(name);
                 }
+            } else if !vp.readonly_funcs.contains(&name) {
+                std::rc::Rc::make_mut(&mut vp.readonly_funcs).push(name);
             }
             continue;
         }
-        match declare_one(vp, &name, &a, &o, local).await {
+        let shadowed =
+            match o.global && !matches!(a, DeclArg::Assign { index: Some(_), .. }) {
+                true => vp.frames.iter().enumerate().find_map(|(k, f)| {
+                    f.saved.iter().position(|(n, _)| *n == name).map(|i| (k, i))
+                }),
+                false => None,
+            };
+        let r = match shadowed {
+            Some(slot) => declare_global(vp, bname, slot, &name, &a, &o).await,
+            None => declare_one(vp, bname, &name, &a, &o, local).await,
+        };
+        match r {
             Ok(()) => {}
             Err(DeclError::Msg(msg))
                 if matches!(which, Which::Export | Which::Readonly)
@@ -460,6 +518,7 @@ declare -fx {n}
                 vp.bad_assign = true;
                 status = 1;
             }
+            Err(DeclError::Quiet) => status = 1,
             Err(DeclError::Unwind(u)) => return Err(u),
         }
     }
@@ -478,6 +537,7 @@ fn usage(which: Which) -> String {
 
 enum DeclError {
     Msg(String),
+    Quiet,
     Unwind(crate::state::Unwind),
 }
 
@@ -520,9 +580,32 @@ async fn reparse_compound(
     Ok(Some(items))
 }
 
+async fn declare_global(
+    vp: &mut Vp,
+    bname: &str,
+    slot: (usize, usize),
+    name: &str,
+    a: &DeclArg,
+    o: &Opts,
+) -> Result<(), DeclError> {
+    let (k, i) = slot;
+    let global = vp.frames[k].saved[i].1.take();
+    let shadow = vp.vars.remove(name);
+    if let Some(g) = global {
+        vp.vars.insert(name, g);
+    }
+    let r = declare_one(vp, bname, name, a, o, false).await;
+    vp.frames[k].saved[i].1 = vp.vars.remove(name);
+    if let Some(s) = shadow {
+        vp.vars.insert(name, s);
+    }
+    r
+}
+
 /// Declares one name with the options, and assigns its value if given.
 async fn declare_one(
     vp: &mut Vp,
+    bname: &str,
     name: &str,
     a: &DeclArg,
     o: &Opts,
@@ -553,12 +636,51 @@ async fn declare_one(
             vp.vars.insert(name, start);
         }
     }
+    if o.nameref.is_none() {
+        let dropped = match a {
+            DeclArg::Assign { index: Some(_), .. } => vp.drop_nameref(name),
+            DeclArg::Array { .. } => vp.drop_nameref(&vp.resolve(name)),
+            _ => None,
+        };
+        if let Some(msg) = dropped {
+            vp.error(&msg).await;
+        }
+    }
     let target = if o.nameref.is_some() {
         name.to_string()
     } else {
         vp.resolve(name).into_owned()
     };
+    let (target, elem) = match target.find('[') {
+        Some(open) if o.nameref.is_none() && target.ends_with(']') => {
+            let sub = vp.simple_sub(&target.as_bytes()[open + 1..target.len() - 1]);
+            if o.export_like {
+                vp.error(&format!("{bname}: `{target}': not a valid identifier"))
+                    .await;
+                if let DeclArg::Assign {
+                    index: None,
+                    append,
+                    value,
+                    ..
+                } = a
+                {
+                    vp.assign_elem(&target[..open], &sub, value.clone(), *append)?;
+                }
+                return Ok(());
+            }
+            (target[..open].to_string(), Some(sub))
+        }
+        _ => (target, None),
+    };
     let has_value = !matches!(a, DeclArg::Word(_));
+    if Opts::on(o.nameref) && Opts::on(o.integer) && has_value {
+        return Err(DeclError::Quiet);
+    }
+    if Opts::on(o.nameref)
+        && matches!(a, DeclArg::Assign { index: None, value, .. } if value.is_empty())
+    {
+        return Err("`': not a valid identifier".to_string().into());
+    }
     let existed = vp.vars.get(&target).is_some();
     if o.unexport && !has_value && !existed {
         return Ok(());
@@ -588,13 +710,14 @@ async fn declare_one(
         {
             return Err(format!("{target}: cannot destroy array variables in this way").into());
         }
-        if Opts::on(o.assoc) && matches!(var.value, Value::Indexed(_)) {
+        let converts = has_value || !o.export_like;
+        if converts && Opts::on(o.assoc) && matches!(var.value, Value::Indexed(_)) {
             return Err(format!("{target}: cannot convert indexed to associative array").into());
         }
-        if Opts::on(o.indexed) && var.is_assoc() {
+        if converts && Opts::on(o.indexed) && var.is_assoc() {
             return Err(format!("{target}: cannot convert associative to indexed array").into());
         }
-        if Opts::on(o.assoc) && !var.is_assoc() {
+        if converts && Opts::on(o.assoc) && !var.is_assoc() {
             var.declared_only = matches!(var.value, Value::Unset);
             var.value = match std::mem::take(&mut var.value) {
                 Value::Str(s) => {
@@ -605,7 +728,7 @@ async fn declare_one(
                 _ => Value::Assoc(Default::default()),
             };
         }
-        if Opts::on(o.indexed) && !var.is_array() {
+        if converts && Opts::on(o.indexed) && !var.is_array() {
             var.declared_only = matches!(var.value, Value::Unset);
             crate::arrays::to_indexed(&mut var.value);
         }
@@ -663,6 +786,8 @@ async fn declare_one(
             let is_array = vp.vars.get(&target).is_some_and(|v| v.is_array());
             if o.nameref == Some(true) {
                 vp.vars.entry(&target).set(value.clone());
+            } else if let Some(sub) = &elem {
+                vp.assign_elem(&target, sub, value.clone(), *append)?;
             } else if is_array
                 && value.first() == Some(&b'(')
                 && value.last() == Some(&b')')
@@ -703,7 +828,8 @@ async fn declare_one(
         && !o.unexport
         && vp.opts.get(crate::options::SetOpt::Allexport)
     {
-        vp.vars.entry(&target).exported = true;
+        let var = vp.vars.entry(&target);
+        var.exported |= !var.is_array();
     }
     if Opts::on(o.readonly) {
         vp.vars.entry(&target).readonly = true;
@@ -808,7 +934,7 @@ async fn print_named(vp: &mut Vp, bname: &str, names: &[DeclArg]) -> R {
         match found {
             Some(d) => buf.extend_from_slice(&d),
             None => {
-                vp.error(&format!("{bname}: {}: not found", a.shown()))
+                vp.error(&format!("{bname}: {}: not found", a.written()))
                     .await;
                 status = 1;
             }

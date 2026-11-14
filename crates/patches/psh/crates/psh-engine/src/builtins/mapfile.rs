@@ -87,6 +87,13 @@ pub(super) async fn mapfile(vp: &mut Vp, args: &[Vec<u8>]) -> R {
                         b'n' => count = n,
                         b'O' => origin = Some(n),
                         b's' => skip = n,
+                        b'u' if vp.fd(n as u32).is_none() => {
+                            vp.error(&format!(
+                                "{bname}: {n}: invalid file descriptor: Bad file descriptor"
+                            ))
+                            .await;
+                            return Ok(1);
+                        }
                         b'u' => fd = n as u32,
                         _ => {
                             if n == 0 {

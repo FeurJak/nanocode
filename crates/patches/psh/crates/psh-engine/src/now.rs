@@ -128,9 +128,13 @@ fn simple<'a>(
                 Err(msg) => return Some(arith_failed(vp, msg)),
             };
             if let Err(msg) = vp.assign_with(code.ast.text(a.name), v, a.append) {
+                let errexit = vp.opts.get(crate::options::SetOpt::Errexit);
                 return Some(Now::Later(Box::pin(async move {
                     vp.error(&msg).await;
-                    Err(Unwind::Abort(1))
+                    Err(match errexit {
+                        true => Unwind::Exit(1),
+                        false => Unwind::Abort(1),
+                    })
                 })));
             }
         }

@@ -994,6 +994,10 @@ async fn define_function(
         vp.error(&format!("`{name}': is a special builtin")).await;
         return Err(Unwind::Exit(2));
     }
+    if vp.readonly_funcs.contains(&name) {
+        vp.error(&format!("{name}: readonly function")).await;
+        return Ok(1);
+    }
     let source = vp.msg_name();
     Rc::make_mut(&mut vp.funcs).insert(
         name,
@@ -1355,6 +1359,10 @@ pub(crate) async fn arith_error(
         vp.error(&msg).await;
         return Err(Unwind::Exit(expand::expansion_exit_status(vp)));
     }
+    let prefix = match msg.ends_with(": readonly variable") {
+        true => "",
+        false => prefix,
+    };
     vp.error(&format!("{prefix}{msg}")).await;
     Ok(None)
 }
@@ -1529,8 +1537,27 @@ async fn prefix_assigns(
     for a in &s.assigns {
         let name = code.ast.text(a.name);
         let r = match (&a.index, &a.value) {
-            (None, AssignValue::Scalar(w)) => {
-                let (v, st) = Box::pin(expand::assign_value(vp, code, w)).await?;
+            (None, AssignValue::Array(lit)) if argv.is_empty() => {
+                let (items, st) = Box::pin(expand::expand_array_lit(vp, code, lit)).await?;
+                *subst_status = st.or(*subst_status);
+                if let Some(msg) = vp.drop_nameref(&vp.resolve(name)) {
+                    vp.error(&msg).await;
+                }
+                if vp.opts.get(SetOpt::Xtrace) {
+                    let quote = builtins::set::xtrace_word;
+                    let line = compound_trace(name.as_bytes(), a.append, &items, quote);
+                    builtins::set::xtrace(vp, &line).await;
+                }
+                vp.assign_array(name, items, a.append)
+            }
+            (None, value) => {
+                let (v, st) = match value {
+                    AssignValue::Scalar(w) => Box::pin(expand::assign_value(vp, code, w)).await?,
+                    AssignValue::Array(lit) => {
+                        let (items, st) = Box::pin(expand::expand_array_lit(vp, code, lit)).await?;
+                        (compound_text(&items), st)
+                    }
+                };
                 *subst_status = st.or(*subst_status);
                 if argv.is_empty() {
                     if vp.opts.get(SetOpt::Xtrace) {
@@ -1557,9 +1584,20 @@ async fn prefix_assigns(
                     vp.prepare_value_unchecked(&target, v, a.append).map(|v| {
                         temps.push((target.clone(), vp.vars.get(&target).cloned()));
                         vp.vars.entry(&target).set(v.clone());
-                        assigns.push((name.to_string(), v));
+                        assigns.push((target, v));
                     })
                 }
+            }
+            (Some(idx), _) if !argv.is_empty() => {
+                vp.error(&format!(
+                    "`{name}[{}]': not a valid identifier",
+                    code.ast.text(idx.span)
+                ))
+                .await;
+                continue;
+            }
+            (Some(idx), AssignValue::Scalar(_)) if idx.span.start == idx.span.end => {
+                Err(format!("{name}[]: bad array subscript"))
             }
             (Some(idx), AssignValue::Scalar(w)) => {
                 let ctx = expand::subscript_ctx(vp, name);
@@ -1568,11 +1606,6 @@ async fn prefix_assigns(
                 *subst_status = st2.or(st1).or(*subst_status);
                 vp.assign_elem(name, &sub, v, a.append)
             }
-            (None, AssignValue::Array(lit)) => {
-                let (items, st) = Box::pin(expand::expand_array_lit(vp, code, lit)).await?;
-                *subst_status = st.or(*subst_status);
-                vp.assign_array(name, items, a.append)
-            }
             (Some(idx), AssignValue::Array(_)) => Err(format!(
                 "{name}[{}]: cannot assign list to array member",
                 code.ast.text(idx.span)
@@ -1580,7 +1613,7 @@ async fn prefix_assigns(
         };
         if let Err(msg) = r {
             vp.error(&msg).await;
-            if vp.opts.get(SetOpt::Posix)
+            if (vp.opts.get(SetOpt::Posix) || vp.opts.get(SetOpt::Errexit))
                 && argv.first().is_none_or(|n| builtins::is_special(vp, n))
             {
                 return Err(Unwind::Exit(1));
@@ -1589,6 +1622,46 @@ async fn prefix_assigns(
         }
     }
     Ok(())
+}
+
+fn compound_trace(
+    name: &[u8],
+    append: bool,
+    items: &[crate::arrays::ArrayItem],
+    quote: impl Fn(&[u8]) -> Vec<u8>,
+) -> Vec<u8> {
+    let mut line = name.to_vec();
+    line.extend_from_slice(if append { b"+=(" } else { b"=(" });
+    for (n, item) in items.iter().enumerate() {
+        if n > 0 {
+            line.push(b' ');
+        }
+        if let Some(k) = &item.key {
+            line.push(b'[');
+            line.extend_from_slice(&quote(k));
+            line.extend_from_slice(if item.append { b"]+=" } else { b"]=" });
+        }
+        line.extend_from_slice(&quote(&item.value));
+    }
+    line.push(b')');
+    line
+}
+
+fn compound_text(items: &[crate::arrays::ArrayItem]) -> Vec<u8> {
+    let mut out = vec![b'('];
+    for (n, item) in items.iter().enumerate() {
+        if n > 0 {
+            out.push(b' ');
+        }
+        if let Some(k) = &item.key {
+            out.push(b'[');
+            out.extend_from_slice(k);
+            out.extend_from_slice(if item.append { b"]+=" } else { b"]=" });
+        }
+        out.extend_from_slice(&item.value);
+    }
+    out.push(b')');
+    out
 }
 
 async fn prepare_simple(
@@ -1662,7 +1735,8 @@ async fn prepare_simple(
     if argv.is_empty() && vp.opts.get(SetOpt::Allexport) {
         for a in &s.assigns {
             let name = vp.resolve(code.ast.text(a.name)).into_owned();
-            vp.vars.entry(&name).exported = true;
+            let var = vp.vars.entry(&name);
+            var.exported |= !var.is_array();
         }
     }
 
@@ -1737,26 +1811,38 @@ fn run_simple<'a>(
                 if vp.opts.get(SetOpt::Xtrace) {
                     let mut words = vec![code.ast.text(s.words[0].span).as_bytes().to_vec()];
                     for a in &args {
-                        if let builtins::declare::DeclArg::Word(w)
-                        | builtins::declare::DeclArg::Assign { value: w, .. } = a
-                        {
-                            let mut word = Vec::new();
-                            if let builtins::declare::DeclArg::Assign { name, .. } = a {
-                                word.extend_from_slice(name);
-                                word.push(b'=');
+                        match a {
+                            builtins::declare::DeclArg::Word(w) => words.push(w.clone()),
+                            builtins::declare::DeclArg::Assign {
+                                name,
+                                index,
+                                append,
+                                value,
+                            } => {
+                                let mut word = name.clone();
+                                if let Some(i) = index {
+                                    word.push(b'[');
+                                    word.extend_from_slice(i);
+                                    word.push(b']');
+                                }
+                                word.extend_from_slice(if *append { b"+=" } else { b"=" });
+                                word.extend_from_slice(value);
+                                words.push(word);
                             }
-                            word.extend_from_slice(w);
-                            words.push(word);
+                            builtins::declare::DeclArg::Array {
+                                name,
+                                append,
+                                items,
+                            } => {
+                                let utf8 = vp.utf8();
+                                let quote = |v: &[u8]| expand::quote(v, utf8);
+                                let line = compound_trace(name, *append, items, quote);
+                                builtins::set::xtrace(vp, &line).await;
+                                words.push(name.clone());
+                            }
                         }
                     }
                     Box::pin(xtrace_command(vp, &assigns, &words)).await;
-                    // The declaration's own assignments follow, as in bash.
-                    for a in &args {
-                        if let builtins::declare::DeclArg::Assign { name, value, .. } = a {
-                            let line = builtins::set::xtrace_assign(name, b"=", value);
-                            builtins::set::xtrace(vp, &line).await;
-                        }
-                    }
                 }
                 // Assignments in front of a declaration builtin last for it only.
                 let old: Vec<_> = assigns
@@ -2570,7 +2656,10 @@ async fn redirect_fd(vp: &mut Vp, code: &Rc<Code>, r: &Redirect, fd: u32) -> Res
                     vp.error(&e.message).await;
                     return Ok(false);
                 }
-                Box::pin(expand::expand_heredoc(vp, code, &doc.body)).await?
+                match Box::pin(expand::expand_heredoc(vp, code, &doc.body)).await {
+                    Err(Unwind::Exit(_)) => return Ok(false),
+                    r => r?,
+                }
             };
             if !doc.terminated {
                 // The input ended before the delimiter: bash warns, naming the line the

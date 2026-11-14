@@ -394,6 +394,7 @@ pub(crate) struct Vp {
     /// with them, and a program gets them as bash passes them (`BASH_FUNC_name%%`).
     pub exported_funcs: Rc<Vec<String>>,
     pub traced_funcs: Rc<Vec<String>>,
+    pub readonly_funcs: Rc<Vec<String>>,
     /// `$BASHPID`: the shell's pid; `None` in a subshell or a nested `bash`, which are
     /// no processes: reading it there is an error (D1413).
     pub bashpid: Option<u32>,
@@ -769,7 +770,7 @@ impl Vp {
     /// A nameref's subscript where no async expansion is possible: quotes around it
     /// removed, `$name` and `${name}` substituted (the expander does the full job where
     /// it can, `expand::expand_sub_text`).
-    fn simple_sub(&self, sub: &[u8]) -> Vec<u8> {
+    pub(crate) fn simple_sub(&self, sub: &[u8]) -> Vec<u8> {
         let t = sub.trim_ascii();
         if t.len() >= 2 && (t[0] == b'"' || t[0] == b'\'') && t[t.len() - 1] == t[0] {
             return t[1..t.len() - 1].to_vec();

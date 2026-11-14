@@ -88,7 +88,8 @@ pub(super) async fn printf(vp: &mut Vp, args: &[Vec<u8>]) -> R {
             let r = match n.split_once('[') {
                 Some((base, sub)) => {
                     let sub = sub.strip_suffix(']').unwrap_or(sub);
-                    vp.assign_elem(base, sub.as_bytes(), f.out, false)
+                    let sub = crate::expand::expand_sub_text(vp, sub.as_bytes()).await?;
+                    vp.assign_elem(base, &sub, f.out, false)
                 }
                 None => vp.assign(&n, f.out),
             };

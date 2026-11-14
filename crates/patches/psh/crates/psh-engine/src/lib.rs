@@ -42,10 +42,10 @@ mod pipe;
 mod sched;
 mod signals;
 mod state;
-mod timing;
 #[cfg(any(unix, windows))]
 pub mod std_host;
 pub mod testhost;
+mod timing;
 pub mod util;
 mod vars;
 
@@ -316,6 +316,7 @@ impl Shell {
             arith_unbound: false,
             exported_funcs: Rc::new(Vec::new()),
             traced_funcs: Rc::new(Vec::new()),
+            readonly_funcs: Rc::new(Vec::new()),
             bashpid: Some(cfg.host.pid()),
             shell_pid: Some(cfg.host.pid()),
             script_args: Vec::new(),

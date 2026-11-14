@@ -50,7 +50,10 @@ pub(crate) async fn run_text(vp: &mut Vp, text: &[u8], line_base: u32, origin: O
                     line_base,
                     arith: Default::default(),
                 });
-                status = exec::run_list(vp, &code, root).await?;
+                status = match exec::run_list(vp, &code, root).await {
+                    Err(Unwind::Abort(st)) if vp.top => st,
+                    r => r?,
+                };
                 vp.status = status;
             }
             Err(e) => {

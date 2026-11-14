@@ -2735,6 +2735,17 @@ impl<'a> P<'a> {
                             }
                             _ => false,
                         },
+                        Ctx::Operand { stop: b':', .. } => match c {
+                            b'?' => {
+                                depth += 1;
+                                false
+                            }
+                            b':' if depth > 0 => {
+                                depth -= 1;
+                                false
+                            }
+                            _ => c == b'}' || c == b':',
+                        },
                         // Bash does not pair braces in `${…}`: the first unquoted
                         // `}` ends it (`${x:-{a}b}` is `${x:-{a}` and `b}`).
                         Ctx::Operand { stop, .. } => c == b'}' || (stop != 0 && c == stop),
@@ -3187,7 +3198,7 @@ impl<'a> P<'a> {
                 let s = self.pos;
                 let mut parts = Vec::new();
                 self.parse_parts(Ctx::Subscript, &mut parts)?;
-                if self.peek() != Some(b']') {
+                if self.peek() != Some(b']') || self.pos == s {
                     if self.at_eof() {
                         return Err(self.unterminated("}"));
                     }

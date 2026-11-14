@@ -1439,6 +1439,9 @@ async fn param(
         let items = match items {
             Ok(items) => items,
             Err(msg) => {
+                let msg = length
+                    .as_ref()
+                    .map_or(msg.as_str(), |w| code.ast.text(w.span));
                 vp.error(&format!("{msg}: substring expression < 0")).await;
                 return Err(Unwind::Abort(1));
             }
@@ -1552,6 +1555,12 @@ async fn param(
                     Ok(n) if first.is_some() => Val::Str(n.as_bytes().to_vec()),
                     _ => first.map_or(Val::Unset, Val::Str),
                 };
+            } else if matches!(val, Val::Unset)
+                && p.name == ParamName::Var
+                && vp
+                    .var_ref(code.ast.text(p.name_span))
+                    .is_some_and(crate::vars::Var::is_array)
+            {
             } else {
                 let target = match &val {
                     Val::Str(s) => s.clone(),
@@ -1811,14 +1820,36 @@ async fn param(
                 None => None,
             };
             let mut err = None;
-            let val = map_val(val, |s| match substring(s, off, len, utf8) {
-                Ok(v) => v,
-                Err(e) => {
-                    err = Some(e);
-                    Vec::new()
+            let array = via
+                .as_ref()
+                .and_then(|t| t.strip_suffix(b"[@]").or_else(|| t.strip_suffix(b"[*]")))
+                .filter(|b| is_name(b))
+                .map(|b| String::from_utf8_lossy(b).into_owned())
+                .filter(|b| !is_scalar(vp, b));
+            let val = match array {
+                Some(b) => {
+                    let star = via.as_ref().is_some_and(|t| t.ends_with(b"[*]"));
+                    let name = vp.resolve(&b).into_owned();
+                    match slice_array(vp, &name, off, len) {
+                        Ok(items) => Val::List(items, star),
+                        Err(e) => {
+                            err = Some(e);
+                            Val::Unset
+                        }
+                    }
                 }
-            });
+                None => map_val(val, |s| match substring(s, off, len, utf8) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        err = Some(e);
+                        Vec::new()
+                    }
+                }),
+            };
             if let Some(e) = err {
+                let e = length
+                    .as_ref()
+                    .map_or(e.as_str(), |w| code.ast.text(w.span));
                 vp.error(&format!("{e}: substring expression < 0")).await;
                 return Err(Unwind::Abort(1));
             }
@@ -1844,7 +1875,7 @@ async fn param(
                     emit_val(vp, f, val, quoted)
                 }
                 b'A' | b'a' | b'K' | b'k' => {
-                    let val = transform_var(vp, code, p, op, val);
+                    let val = transform_var(vp, code, p, op, val, via.as_deref());
                     emit_val(vp, f, val, quoted)
                 }
                 _ => bad(vp).await,
@@ -1856,7 +1887,14 @@ async fn param(
 
 /// `${x@A}`, `@a`, `@K`, `@k`: transformations that need the variable, not only
 /// its value.
-fn transform_var(vp: &Vp, code: &Rc<Code>, p: &psh_syntax::Param, op: u8, val: Val) -> Val {
+fn transform_var(
+    vp: &Vp,
+    code: &Rc<Code>,
+    p: &psh_syntax::Param,
+    op: u8,
+    val: Val,
+    via: Option<&[u8]>,
+) -> Val {
     use crate::builtins::declare::{declaration, value_quote};
     let mut name = match p.name {
         ParamName::Var => vp.resolve(code.ast.text(p.name_span)).into_owned(),
@@ -1864,10 +1902,15 @@ fn transform_var(vp: &Vp, code: &Rc<Code>, p: &psh_syntax::Param, op: u8, val: V
     };
     // `${!ref@a}`: the variable `ref` names.
     if p.prefix == ParamPrefix::Indirect && p.name == ParamName::Var {
-        name = vp
-            .var(&name)
-            .map(|v| String::from_utf8_lossy(v).into_owned())
-            .unwrap_or_default();
+        name = match via {
+            Some(t) => {
+                String::from_utf8_lossy(t.split(|&b| b == b'[').next().unwrap_or(t)).into_owned()
+            }
+            None => vp
+                .var(&name)
+                .map(|v| String::from_utf8_lossy(v).into_owned())
+                .unwrap_or_default(),
+        };
         name = vp.resolve(&name).into_owned();
     }
     let var = match p.name {
