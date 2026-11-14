@@ -149,12 +149,21 @@ impl Traps {
 /// Runs a trap action in this vproc with `$?` set to `status`, and restores `$?`
 /// after it (D1283). `exit` in the action ends the shell as usual.
 pub(crate) async fn run_action(vp: &mut Vp, action: &[u8], status: i32) -> Result<(), Unwind> {
+    let line_base = vp.line.saturating_sub(1);
+    run_action_from(vp, action, status, line_base).await
+}
+
+async fn run_action_from(
+    vp: &mut Vp,
+    action: &[u8],
+    status: i32,
+    line_base: u32,
+) -> Result<(), Unwind> {
     let saved_in = vp.in_trap;
     let saved_line = vp.line;
     let pipestatus = vp.vars.get("PIPESTATUS").cloned();
     vp.in_trap = Some(status);
     vp.status = status;
-    let line_base = vp.line.saturating_sub(1);
     let r = super::eval::run_text(vp, action, line_base, super::eval::Origin::Eval).await;
     vp.in_trap = saved_in;
     vp.line = saved_line;
@@ -193,7 +202,7 @@ pub(crate) async fn exit_trap(vp: &mut Vp, status: i32) -> i32 {
         return status;
     };
     Rc::make_mut(&mut vp.traps).map.remove(&TrapKey::Exit);
-    match run_action(vp, &action, status).await {
+    match run_action_from(vp, &action, status, 0).await {
         Err(Unwind::Exit(n)) => n,
         _ => status,
     }
@@ -201,24 +210,36 @@ pub(crate) async fn exit_trap(vp: &mut Vp, status: i32) -> i32 {
 
 /// The ERR trap after a failed command (the caller checked errexit's exemptions).
 pub(crate) async fn err_trap(vp: &mut Vp, status: i32) -> Result<(), Unwind> {
-    if vp.in_trap.is_some() {
+    if vp.in_err_trap {
         return Ok(());
     }
     match vp.traps.action(TrapKey::Err) {
-        Some(action) if !action.is_empty() => run_action(vp, &action, status).await,
+        Some(action) if !action.is_empty() => {
+            vp.in_err_trap = true;
+            let r = run_action(vp, &action, status).await;
+            vp.in_err_trap = false;
+            r
+        }
         _ => Ok(()),
     }
 }
 
-/// Runs the action of `key` (DEBUG, RETURN) if one is set and no trap is running.
+/// Runs the action of `key` if one is set: DEBUG unless DEBUG's action is running,
+/// RETURN unless a trap is running.
 pub(crate) async fn run_trap(vp: &mut Vp, key: TrapKey) -> Result<(), Unwind> {
-    if vp.in_trap.is_some() {
+    let debug = key == TrapKey::Debug;
+    if (debug && vp.in_debug_trap) || (!debug && vp.in_trap.is_some()) {
         return Ok(());
     }
     match vp.traps.action(key) {
         Some(action) if !action.is_empty() => {
             let st = vp.status;
-            run_action(vp, &action, st).await
+            vp.in_debug_trap |= debug;
+            let r = run_action(vp, &action, st).await;
+            if debug {
+                vp.in_debug_trap = false;
+            }
+            r
         }
         _ => Ok(()),
     }
@@ -319,7 +340,7 @@ pub(crate) async fn take_signals(vp: &mut Vp) -> Result<(), Unwind> {
                 let mut r = Ok(());
                 for _ in 0..runs {
                     let st = vp.status;
-                    r = run_action(vp, &action, st).await;
+                    r = run_action_from(vp, &action, st, 0).await;
                     if r.is_ok() {
                         r = Box::pin(take_signals(vp)).await;
                     }

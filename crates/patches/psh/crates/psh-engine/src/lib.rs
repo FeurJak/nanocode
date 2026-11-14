@@ -311,6 +311,7 @@ impl Shell {
             subst_fds: Vec::new(),
             var_fds: Vec::new(),
             stage_subshell: false,
+            time_subshell: None,
             last_args: Vec::new(),
             subshell_level: 0,
             arith_unbound: false,
@@ -327,11 +328,14 @@ impl Shell {
             disabled: Default::default(),
             opts,
             no_errexit: false,
+            err_trap_new: false,
             bad_assign: false,
             traps: Rc::new(builtins::trap::Traps::ignored_at_start(
                 &cfg.host.ignored_at_start(),
             )),
             in_trap: None,
+            in_debug_trap: false,
+            in_err_trap: false,
             signal_trap: false,
             own_sigs: Cell::new(0),
             top: true,
@@ -946,7 +950,7 @@ async fn run_chunk(
             match exec::run_list(vp, &code, root).await {
                 Ok(s) => {
                     vp.status = s;
-                    None
+                    (vp.opts.get(options::SetOpt::Onecmd) && !vp.opts.dash_c).then_some(s)
                 }
                 Err(u) => {
                     let st = u.status(vp.status);

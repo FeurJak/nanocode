@@ -5,7 +5,7 @@ use std::rc::Rc;
 use crate::host::{SIGTERM, Signal, error_text};
 use crate::jobs::Job;
 use crate::signals;
-use crate::state::{R, Vp};
+use crate::state::{R, Unwind, Vp};
 
 use super::{out, s};
 
@@ -407,6 +407,15 @@ pub(super) async fn kill(vp: &mut Vp, args: &[Vec<u8>]) -> R {
             let nested = matches!(vp.sigs, crate::state::Sigs::Nested(_));
             if pid <= 0 && !(nested && signals::stops(sig)) {
                 let _ = vp.host().kill(pid, sig);
+            }
+            if pid <= 0 && sig != 0 && !vp.top {
+                match vp.traps.action(super::trap::TrapKey::Signal(sig)) {
+                    None if super::trap::terminates(sig) => return Err(Unwind::Exit(128 + sig)),
+                    Some(action) if !action.is_empty() => {
+                        vp.own_sigs.set(vp.own_sigs.get() | 1u64 << sig);
+                    }
+                    _ => {}
+                }
             }
             continue;
         }

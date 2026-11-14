@@ -114,6 +114,7 @@ pub(crate) enum Gives {
     /// would have got it and ended (`sleep 60` under a trap on INT ends at Ctrl-C with
     /// 130, and then the trap runs).
     Interrupt,
+    Program,
 }
 
 /// The pending signal that ends a wait of `vp` now, if any. Only the shell's own vproc
@@ -142,7 +143,11 @@ pub(crate) fn breaking_in(
             Some(_) => {
                 gives == Gives::Trapped || (gives == Gives::Interrupt && sig == crate::host::SIGINT)
             }
-            None => terminates(sig) && (sig != crate::host::SIGQUIT || core.forked.get().is_some()),
+            None => {
+                terminates(sig)
+                    && (sig != crate::host::SIGQUIT || core.forked.get().is_some())
+                    && (gives != Gives::Program || sig != crate::host::SIGINT)
+            }
         }
     })
 }

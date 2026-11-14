@@ -134,6 +134,14 @@ async fn run_background(vp: &mut Vp, code: &Rc<Code>, list: ListId, item: usize)
         // commands inside it are).
         let p = &ao.first;
         let r = if ao.rest.is_empty() && p.stages.len() == 1 && !p.negated() && p.time.is_none() {
+            let traps = sub
+                .traps
+                .map
+                .values()
+                .any(|t| t.active && !t.action.is_empty());
+            if direct && !traps {
+                sub.exec_tail = Some(std::ptr::from_ref(code.ast.cmd(p.stages[0].cmd)) as usize);
+            }
             run_command_unchecked(&mut sub, &code, p.stages[0].cmd).await
         } else {
             Box::pin(run_andor(&mut sub, &code, ao)).await
@@ -435,12 +443,14 @@ async fn report_signal_death(vp: &mut Vp, code: &Rc<Code>, cmd: &Command, status
 
 /// The DEBUG trap before a command, with `BASH_COMMAND` set to its text (D1283).
 async fn debug_trap(vp: &mut Vp, code: &Rc<Code>, cmd: &Command) -> Result<bool, Unwind> {
-    if vp.in_trap.is_some() {
+    if vp.in_debug_trap {
         return Ok(false);
     }
     // Any trap may read it (`trap 'echo "failed: $BASH_COMMAND"' EXIT`), not only DEBUG.
-    let text = command_text(code, cmd);
-    vp.vars.entry("BASH_COMMAND").set(text);
+    if vp.in_trap.is_none() {
+        let text = command_text(code, cmd);
+        vp.vars.entry("BASH_COMMAND").set(text);
+    }
     if vp.traps.action(TrapKey::Debug).is_none_or(|a| a.is_empty()) {
         return Ok(false);
     }
@@ -450,7 +460,10 @@ async fn debug_trap(vp: &mut Vp, code: &Rc<Code>, cmd: &Command) -> Result<bool,
     }
     let action = vp.traps.action(TrapKey::Debug).unwrap_or_default();
     let status = vp.status;
-    let n = trap::run_action_status(vp, &action, status).await?;
+    vp.in_debug_trap = true;
+    let n = trap::run_action_status(vp, &action, status).await;
+    vp.in_debug_trap = false;
+    let n = n?;
     if n == 2 && vp.in_function() {
         return Err(Unwind::Return(status));
     }
@@ -458,13 +471,15 @@ async fn debug_trap(vp: &mut Vp, code: &Rc<Code>, cmd: &Command) -> Result<bool,
 }
 
 async fn arith_for_debug(vp: &mut Vp, code: &Rc<Code>, w: &psh_syntax::Word) -> Result<(), Unwind> {
-    if vp.traps.map.is_empty() || vp.in_trap.is_some() {
+    if vp.traps.map.is_empty() || vp.in_debug_trap {
         return Ok(());
     }
-    let mut text = b"(( ".to_vec();
-    text.extend_from_slice(code.ast.text(w.span).trim().as_bytes());
-    text.extend_from_slice(b" ))");
-    vp.vars.entry("BASH_COMMAND").set(text);
+    if vp.in_trap.is_none() {
+        let mut text = b"(( ".to_vec();
+        text.extend_from_slice(code.ast.text(w.span).trim().as_bytes());
+        text.extend_from_slice(b" ))");
+        vp.vars.entry("BASH_COMMAND").set(text);
+    }
     trap::run_trap(vp, TrapKey::Debug).await
 }
 
@@ -513,8 +528,14 @@ async fn run_pipeline(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
     // `time`: bash reports after the pipeline, also when the shell exits inside it,
     // and not when a function returns from inside it.
     let start = crate::timing::start(vp);
+    let subshell = matches!(p.stages.as_slice(), [stage]
+        if matches!(code.ast.cmd(stage.cmd).kind, CommandKind::Subshell(_)));
+    if subshell {
+        vp.time_subshell = Some(time.posix);
+    }
     let r = Box::pin(run_untimed(vp, code, p)).await;
-    if !matches!(r, Err(Unwind::Return(_))) {
+    let subshell_ran = subshell && vp.time_subshell.take().is_none();
+    if !subshell_ran && !matches!(r, Err(Unwind::Return(_))) {
         crate::timing::report(vp, time.posix, start).await;
     }
     r
@@ -575,6 +596,9 @@ async fn run_pipeline_stages(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
         let mut sub = enter(vp).await?;
         sub.jobs = Rc::new(std::cell::RefCell::new(vp.jobs.borrow().for_stage()));
         sub.stage_subshell = matches!(code.ast.cmd(stage.cmd).kind, CommandKind::Subshell(_));
+        if matches!(cmd.kind, CommandKind::Simple(_)) {
+            sub.loops = vp.loops;
+        }
         if let Some(r) = next_in.take() {
             sub.fds.set(0, r);
         }
@@ -616,6 +640,13 @@ async fn run_pipeline_stages(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
         last
     };
     set_pipestatus(vp, &statuses);
+    if last != 0
+        && p.stages
+            .last()
+            .is_some_and(|s| matches!(code.ast.cmd(s.cmd).kind, CommandKind::Subshell(_)))
+    {
+        check_failure(vp, last).await?;
+    }
     check_failure(vp, status).await
 }
 
@@ -644,6 +675,7 @@ pub(crate) enum Body {
     List(ListId),
     /// A pipeline stage: its own status is the pipeline's to judge, not errexit's.
     Stage(CmdId),
+    Timed(ListId, bool, crate::timing::Start),
 }
 
 /// Runs a subshell as its own task; the handle yields its exit status.
@@ -653,6 +685,13 @@ pub(crate) fn spawn_sub(sub: Vp, code: Rc<Code>, body: Body) -> Join<i32> {
         let mut sub = sub;
         let r = match body {
             Body::List(l) => run_list(&mut sub, &code, l).await,
+            Body::Timed(l, posix, start) => {
+                let r = run_list(&mut sub, &code, l).await;
+                if !matches!(r, Err(Unwind::Return(_))) {
+                    crate::timing::report(&mut sub, posix, start).await;
+                }
+                r
+            }
             Body::Stage(c) => {
                 let cmd = code.ast.cmd(c);
                 // bash does not exec while a trap could still run in the subshell.
@@ -835,8 +874,17 @@ pub(crate) fn after_errexit<'a>(
     status: i32,
     check: bool,
 ) -> Option<LocalBoxFuture<'a, R>> {
-    if !check || status == 0 || vp.no_errexit {
+    if status == 0 {
         return None;
+    }
+    let err_trap_new = std::mem::take(&mut vp.err_trap_new);
+    if !check || vp.no_errexit {
+        return None;
+    }
+    if err_trap_new {
+        return vp.opts.get(SetOpt::Errexit).then(|| {
+            Box::pin(std::future::ready(Err(Unwind::Exit(status)))) as LocalBoxFuture<'a, R>
+        });
     }
     // `$LINENO` in the ERR trap: this command's line, not the last line a function it
     // called ran; `$BASH_COMMAND` its text.
@@ -855,11 +903,12 @@ async fn with_redirects(vp: &mut Vp, code: &Rc<Code>, cmd: &Command) -> R {
         None
     } else {
         let saved = vp.fds.clone();
-        vp.line = code.line(cmd.redirects[0].span.start);
+        let line = std::mem::replace(&mut vp.line, code.line(cmd.redirects[0].span.start));
         match Box::pin(apply_redirects(vp, code, &cmd.redirects)).await {
             Ok(true) => {}
             Ok(false) => {
                 restore_fds(vp, saved);
+                vp.line = line;
                 // The compound command failed itself: errexit and ERR see it (D1281).
                 set_pipestatus(vp, &[1]);
                 return check_failure(vp, 1).await;
@@ -919,6 +968,10 @@ async fn run_subshell(vp: &mut Vp, code: &Rc<Code>, list: ListId) -> R {
     if std::mem::take(&mut vp.stage_subshell) {
         return run_list(vp, code, list).await;
     }
+    let timed = vp
+        .time_subshell
+        .take()
+        .map(|posix| (posix, crate::timing::start(vp)));
     let sub = enter(vp).await?;
     let own_pid = vp.core.host.forks()
         && sub.fds.all_files()
@@ -931,6 +984,11 @@ async fn run_subshell(vp: &mut Vp, code: &Rc<Code>, list: ListId) -> R {
                 return status;
             }
             let r = run_list(&mut sub, &code, list).await;
+            if let Some((posix, start)) = timed
+                && !matches!(r, Err(Unwind::Return(_)))
+            {
+                crate::timing::report(&mut sub, posix, start).await;
+            }
             let last = sub.status;
             let status = r.unwrap_or_else(|u| u.status(last));
             let status = Box::pin(trap::exit_trap(&mut sub, status)).await;
@@ -940,7 +998,11 @@ async fn run_subshell(vp: &mut Vp, code: &Rc<Code>, list: ListId) -> R {
             status
         })
     } else {
-        spawn_sub(sub, code.clone(), Body::List(list))
+        let body = match timed {
+            Some((posix, start)) => Body::Timed(list, posix, start),
+            None => Body::List(list),
+        };
+        spawn_sub(sub, code.clone(), body)
     };
     // A bash subshell is a process: it runs on when the shell dies of a signal (D1903).
     let status = match crate::signals::or_signal(vp, crate::signals::Gives::Fatal, join).await {
@@ -1459,12 +1521,15 @@ async fn call_function(
         .traced_funcs
         .iter()
         .any(|n| n.as_bytes() == argv0.as_slice());
+    let err_before = !vp.traps.map.is_empty() && vp.traps.action(TrapKey::Err).is_some();
     let hidden = trap::enter_function(vp, traced);
     let entered = match vp.traps.action(TrapKey::Debug) {
-        Some(a) if !a.is_empty() && vp.in_trap.is_none() => {
+        Some(a) if !a.is_empty() && !vp.in_debug_trap => {
             let line = vp.line;
             let st = vp.status;
+            vp.in_debug_trap = true;
             let r = trap::run_action_status(vp, &a, st).await;
+            vp.in_debug_trap = false;
             vp.line = line;
             r.map(|_| ())
         }
@@ -1497,11 +1562,15 @@ async fn call_function(
     vp.depth -= 1;
     vp.loops = loops;
     vp.args = args;
-    match r {
+    let r = match r {
         Err(Unwind::Return(s)) => Ok(s),
         Err(Unwind::Break(_) | Unwind::Continue(_)) => Ok(vp.status),
         r => r,
+    };
+    if !err_before && matches!(r, Ok(s) if s != 0) && vp.traps.action(TrapKey::Err).is_some() {
+        vp.err_trap_new = true;
     }
+    r
 }
 
 /// The RETURN trap after a function body (it sees the function's status in `$?`), and
@@ -1890,13 +1959,18 @@ fn run_simple<'a>(
         }
 
         let name = String::from_utf8_lossy(&argv[0]).into_owned();
-        // `exec` without a command keeps its redirections.
-        if name == "exec" && argv.len() == 1 {
+        // The `exec` builtin keeps its redirections, with or without a command.
+        if name == "exec"
+            && (argv.len() == 1
+                || builtins::is_special(vp, b"exec")
+                || !vp.funcs.contains_key("exec"))
+        {
             let ok = Box::pin(apply_redirects(vp, code, &cmd.redirects)).await;
             // Nothing is restored, so nothing to apply again.
             vp.var_fds.clear();
             return match ok? {
-                true => Ok(0),
+                true if argv.len() == 1 => Ok(0),
+                true => run_argv(vp, argv, assigns).await,
                 false if builtins::is_special(vp, b"exec") => Err(Unwind::Exit(1)),
                 false => Ok(1),
             };
@@ -2225,7 +2299,7 @@ pub(crate) async fn run_external_with(
     let waited = if (opts.shell && (opts.exec || opts.process)) || (opts.real && nested.is_some()) {
         waited.await
     } else {
-        match crate::signals::or_signal(vp, crate::signals::Gives::Fatal, waited).await {
+        match crate::signals::or_signal(vp, crate::signals::Gives::Program, waited).await {
             Ok(st) => st,
             Err(sig) => return Ok(128 + sig),
         }
@@ -2237,6 +2311,20 @@ pub(crate) async fn run_external_with(
         }
         (Waited::Stopped(sig), None) => return Ok(128 + sig),
     };
+    let int = 1u64 << crate::host::SIGINT;
+    if vp.top
+        && vp.sigs.peek(&vp.core) & int != 0
+        && st != crate::host::ExitStatus::Signaled(crate::host::SIGINT)
+        && vp
+            .traps
+            .action(TrapKey::Signal(crate::host::SIGINT))
+            .is_none()
+    {
+        let pending = vp.sigs.take(&vp.core) & !int;
+        for sig in (1..64).filter(|s| pending & (1u64 << s) != 0) {
+            vp.sigs.raise(&vp.core, sig);
+        }
+    }
     // For the report of a signal death (D1303).
     vp.core.fg_signal.set(match st {
         crate::host::ExitStatus::Signaled(sig) if !vp.in_subst && vp.job.is_none() => {
@@ -2827,6 +2915,19 @@ async fn open_to(
     }
     if target.is_empty() {
         vp.error(": No such file or directory").await;
+        return Ok(false);
+    }
+    if let Some(&(_, Some(soft), _)) = vp
+        .rlimits
+        .iter()
+        .find(|e| e.0 == crate::host::Rlimit::NoFile)
+        && (0..).find(|n| vp.fds.get(*n).is_none()).map(u64::from) >= Some(soft)
+    {
+        vp.error(&format!(
+            "{}: Too many open files",
+            String::from_utf8_lossy(target)
+        ))
+        .await;
         return Ok(false);
     }
     let path = vp.abs_path(target);

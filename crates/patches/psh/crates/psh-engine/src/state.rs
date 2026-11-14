@@ -382,6 +382,7 @@ pub(crate) struct Vp {
     /// This vproc is a pipeline stage that is a `( … )`: the subshell is the stage
     /// itself (bash counts it once in `BASH_SUBSHELL`).
     pub stage_subshell: bool,
+    pub time_subshell: Option<bool>,
     /// The last words of the simple commands running, innermost last: `$_` once each
     /// completes.
     pub last_args: Vec<Vec<u8>>,
@@ -427,12 +428,15 @@ pub(crate) struct Vp {
     /// one (D1281).
     pub no_errexit: bool,
     pub bad_assign: bool,
+    pub err_trap_new: bool,
     /// Traps (D1283); shared with subshells until one changes them.
     pub traps: Rc<crate::builtins::trap::Traps>,
-    /// A trap action is running, entered with this `$?`: DEBUG and ERR traps do not
-    /// fire inside it, and a bare `exit` uses this status.
+    /// A trap action is running, entered with this `$?`: a bare `exit` uses this
+    /// status.
     pub in_trap: Option<i32>,
     pub signal_trap: bool,
+    pub in_debug_trap: bool,
+    pub in_err_trap: bool,
     pub own_sigs: Cell<u64>,
     /// This is the shell itself, not a subshell: it takes the shell's signals.
     pub top: bool,
@@ -504,6 +508,7 @@ impl Vp {
         sub.jobs = Default::default();
         sub.subshell_level += 1;
         sub.stage_subshell = false;
+        sub.time_subshell = None;
         sub.bashpid = None;
         sub
     }
