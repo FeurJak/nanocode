@@ -253,6 +253,22 @@ nanocode wins every Claude p50 in both lanes, by 0.4 to 1.3 s. It loses Claude p
 
 A cold turn now sends its provider request 56 to 63 ms after it arrives, 41 to 48 ms after a warm one, and the provider's first byte is the same cold and warm (532 to 632 ms p50), so the first request from a new object no longer pays the extra 0.5 to 1 s it paid on 2026-11-13. The rest of what the client waits for is the provider (its first byte, and on Codex 0.4 to 0.5 s of reasoning events before the first text) and this host's egress proxy, whose bare round trip to Cloudflare is 544 to 602 ms. A cold first text under 500 ms end to end is below the provider's own first byte, so the cold gate applies to the Worker's share: the time to the provider request plus the first delta's relay (0 to 1 ms in the object, nanocode-ts DECISIONS.md). That share is 56 to 63 ms at p50 on both providers and 434 ms at p99 on Codex, and misses on Claude at p99 (750 ms), where the slowest cold turns wait 703 ms for admission, the first admission commit of a claimed pooled object. A warm turn's share is 15 ms p50 (30 ms p99 on Codex, 234 on Claude), so the warm difference to native nanocode on the same model is the network path (client to edge to session object to provider, against client to provider) and the provider's spread, not work in the Worker. 2 cold Claude turns and 1 cold and 4 warm Codex turns sent a second provider request: the hedge, at the 1.5 s floor, since a 3-turn session's isolate window rarely holds the 10 first bytes the p90 estimate needs.
 
+2026-11-14, live GPT rows at n = 30 on master 8e5cd38d8 (hedging by default) against Codex CLI 0.166.0, dev-georgios, ChatGPT login, `bench/sla/run.ts --live --lanes=live-nc-codex@now,live-codex --samples=30 --turns=3 --settle=3000`, lanes interleaved, every prompt unique, Enter to the first token drawn, p50 / p99 ms (p99 is the slowest of 30). The box ran other work at load average 43 to 85 (gpt-6-luna), about 200 (gpt-6.1-sol) and 170 to 200 (gpt-6-astra) on 32 cores; the bench processes ran at nice -15 from gpt-6-astra on. **Bold** marks a cell nanocode loses.
+
+| model | turn | nanocode | Codex CLI 0.166.0 |
+|---|---|---|---|
+| gpt-6-luna | 1 | 1,100 / 1,415 | 1,726 / 2,717 |
+|  | 2 | 1,241 / 2,740 | 1,543 / 4,280 |
+|  | 3 | 1,154 / **2,423** | 1,411 / 2,389 |
+| gpt-6.1-sol (load 200) | 1 | 1,753 / **21,175** | 2,979 / 16,623 (n 27) |
+|  | 2 | 1,733 / 4,402 | 2,073 / 8,112 |
+|  | 3 | 1,872 / 2,763 | 2,154 / 8,954 |
+| gpt-6-astra | 1 | 1,721 / **4,923** | 2,724 / 4,690 |
+|  | 2 | 1,569 / 3,100 | 1,986 / 5,174 |
+|  | 3 | 1,668 / 3,447 | 1,925 / 5,627 |
+
+nanocode wins every p50 cell, by 0.26 to 1.23 s, and 6 of 9 p99 cells, against 4 of 9 on 1d4463636 for the same three models. The three p99 losses are one sample of 30 each: gpt-6-luna turn 3 by 34 ms, gpt-6-astra turn 1 by 233 ms, and gpt-6.1-sol turn 1 at load average 200, where both clients' slowest turn 1 took 16 to 21 s; the Codex CLI lane lost 3 gpt-6.1-sol turn-1 samples to a prompt queued behind its startup, which nanocode-ts 77b6af2 now waits out. gpt-6.1-terra, gpt-6.1-sol again at lower load, and the Claude rows (claude-haiku-5-5, claude-sonnet-5-5, claude-opus-5-5 against Claude Code 2.1.318 on the same host) are queued behind these.
+
 ## Not measured yet
 
 - A new Worker session's Durable Object start (836 to 905 ms p50 before its `fetch` runs): how much is placement for a new name and how much is the isolate and module start, and whether a client warm before the first turn hides it. Tool calls and Code Mode cells on Workers.
