@@ -277,6 +277,15 @@ fn found(
     Ok((files, false))
 }
 
+fn same_file(file: &fs::File, path: &Path) -> std::io::Result<bool> {
+    let held = identity(&file.metadata()?).ok();
+    match fs::metadata(path) {
+        Ok(named) => Ok(identity(&named).ok() == held),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 fn names(path: &Path) -> Vec<String> {
     [path.to_owned(), archive::archived(path)]
         .iter()
@@ -409,21 +418,24 @@ impl Sessions {
         }
         let path = self.owner_path(&key);
         let held = self.listing.change(&[], || {
-            fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(&path)
-                .and_then(|mut file| match file.try_lock() {
+            loop {
+                let mut file = fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .read(true)
+                    .write(true)
+                    .open(&path)?;
+                match file.try_lock() {
+                    Ok(()) if !same_file(&file, &path)? => {}
                     Ok(()) => {
                         file.set_len(0)?;
                         file.write_all(std::process::id().to_string().as_bytes())?;
-                        Ok(Some(file))
+                        return Ok(Some(file));
                     }
-                    Err(fs::TryLockError::WouldBlock) => Ok(None),
-                    Err(fs::TryLockError::Error(error)) => Err(error),
-                })
+                    Err(fs::TryLockError::WouldBlock) => return Ok(None),
+                    Err(fs::TryLockError::Error(error)) => return Err(error),
+                }
+            }
         });
         match held {
             Ok(Some(file)) => {
@@ -1283,6 +1295,8 @@ impl Sessions {
                 continue;
             }
             let path = self.path(&key);
+            let owner_path = self.owner_path(&key);
+            let owner = self.held.remove(&key);
             let summaries = &mut self.summaries;
             let stored = self.listing.change(&names(&path), || {
                 let from = identity(&fs::metadata(&path).map_err(backend)?)?;
@@ -1298,11 +1312,23 @@ impl Sessions {
                 }
                 let stored = fs::metadata(archive::archived(&path)).map_err(backend)?;
                 summaries.moved(&from, &identity(&stored)?, stored.len(), None)?;
+                if owner.is_some() {
+                    match fs::remove_file(&owner_path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(backend(error)),
+                    }
+                }
                 Ok::<_, StoreError>(true)
-            })?;
-            if stored {
-                archived += 1;
+            });
+            match (&stored, owner) {
+                (Ok(true), _) => archived += 1,
+                (_, Some(owner)) => {
+                    self.held.insert(key, owner);
+                }
+                (_, None) => {}
             }
+            stored?;
         }
         Ok(archived)
     }
