@@ -182,7 +182,7 @@ impl Shared {
             let Some(task) = next else {
                 if DEFERRED.with(|deferred| !deferred.borrow().is_empty()) {
                     *ticks = 0;
-                    self.reactor.try_turn(Some(Duration::ZERO), || {});
+                    self.reactor.try_turn(Some(Duration::ZERO), || false, || {});
                 }
                 return wake_deferred() || ran;
             };
@@ -191,7 +191,7 @@ impl Shared {
             *ticks += 1;
         }
         *ticks = 0;
-        self.reactor.try_turn(Some(Duration::ZERO), || {});
+        self.reactor.try_turn(Some(Duration::ZERO), || false, || {});
         wake_deferred();
         true
     }
@@ -215,10 +215,9 @@ impl Shared {
             slot.state.store(RUNNING, Ordering::SeqCst);
             return;
         }
-        if self
-            .reactor
-            .try_turn(None, || slot.state.store(RUNNING, Ordering::SeqCst))
-        {
+        if self.reactor.try_turn(None, pending, || {
+            slot.state.store(RUNNING, Ordering::SeqCst)
+        }) {
             slot.state.store(RUNNING, Ordering::SeqCst);
             return;
         }

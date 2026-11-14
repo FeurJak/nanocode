@@ -437,11 +437,18 @@ impl Reactor {
         self.notify_waiting();
     }
 
-    pub fn try_turn(&self, timeout: Option<Duration>, woken: impl FnOnce()) -> bool {
+    pub fn try_turn(
+        &self,
+        timeout: Option<Duration>,
+        ready: impl FnOnce() -> bool,
+        woken: impl FnOnce(),
+    ) -> bool {
         let Some(mut driver) = self.driver.take() else {
             return false;
         };
-        self.turn_with(&mut driver, timeout, woken);
+        if !ready() {
+            self.turn_with(&mut driver, timeout, woken);
+        }
         self.release(driver);
         true
     }
