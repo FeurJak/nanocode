@@ -2271,20 +2271,25 @@ impl RegistryState {
             .ok_or_else(|| std::io::Error::other(format!("agent {id} is closed")))
     }
 
-    fn listed(&self, session_id: &str, include_self: bool, after: Option<AgentId>) -> Vec<AgentId> {
+    fn listed(
+        &self,
+        session_id: &str,
+        include_self: bool,
+        after: Option<AgentId>,
+        limit: Option<std::num::NonZeroUsize>,
+    ) -> Vec<AgentId> {
         let Some(scope) = self.scopes.get(self.root_session_id(session_id)) else {
             return Vec::new();
         };
         let caller = scope.topology.agent_for_session(session_id);
-        let mut ids = scope
+        let ids = scope
             .topology
-            .ids()
-            .into_iter()
-            .filter(|id| include_self || caller != Some(*id))
-            .filter(|id| after.is_none_or(|after| *id > after))
-            .collect::<Vec<_>>();
-        ids.sort_unstable();
-        ids
+            .ids_after(after)
+            .filter(|id| include_self || caller != Some(*id));
+        match limit {
+            Some(limit) => ids.take(limit.get().saturating_add(1)).collect(),
+            None => ids.collect(),
+        }
     }
 
     fn directory(
@@ -7842,13 +7847,10 @@ impl Registry {
         self.await_restored(session_id).await?;
         let mut agents = if include_completed {
             let session = session_id.to_owned();
-            let mut ids = self
+            let ids = self
                 .state
-                .call(move |state| state.listed(&session, include_self, after))
+                .call(move |state| state.listed(&session, include_self, after, limit))
                 .await;
-            if let Some(limit) = limit {
-                ids.truncate(limit.get().saturating_add(1));
-            }
             self.listed_cold(session_id, include_self, Some(ids))
                 .await?
         } else {
