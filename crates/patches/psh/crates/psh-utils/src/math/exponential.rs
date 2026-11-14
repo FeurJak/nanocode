@@ -1,28 +1,14 @@
-use std::f64::consts::{LOG2_10, LOG2_E};
+use std::f64::consts::LOG2_10;
 
 use super::exponential_table::{EXP2_POINTS, EXP2_VALUE_AND_ERROR_BITS};
 use super::power::pow;
-use super::rounding::{modf, scalbn};
+use super::rounding::modf;
 use super::{
-    EXPONENT_BIAS, HIGH_MAGNITUDE_MASK, NON_FINITE_HIGH_WORD, SIGNIFICAND_BITS, WORD_BITS,
-    biased_exponent, high_word, power_of_two, power_of_two_high_word,
+    EXPONENT_BIAS, HIGH_MAGNITUDE_MASK, NON_FINITE_HIGH_WORD, WORD_BITS, biased_exponent,
+    power_of_two, power_of_two_high_word,
 };
+use djs_libm::scalbn;
 
-const LN2_HIGH: f64 = 0.6931471803691238;
-const LN2_LOW: f64 = 1.9082149292705877e-10;
-const EXP: [f64; 5] = [
-    0.16666666666666602,
-    -0.0027777777777015593,
-    6.613756321437934e-05,
-    -1.6533902205465252e-06,
-    4.1381367970572385e-08,
-];
-const EXP_LARGE_HIGH_WORD: u32 = 0x4086_232b;
-const EXP_OVERFLOW_LIMIT: f64 = 709.782712893384;
-const EXP_UNDERFLOW_LIMIT: f64 = -745.1332191019411;
-const HALF_LN2_HIGH_WORD: u32 = 0x3fd6_2e42;
-const THREE_HALVES_LN2_HIGH_WORD: u32 = 0x3ff0_a2b2;
-const EXP_TINY_HIGH_WORD: u32 = power_of_two_high_word(-28);
 const OVERFLOW_SCALE: f64 = power_of_two(1023);
 const EXP2_ROUNDING_BITS: u64 = 0x4338_0000_0000_0000;
 const EXP2: [u64; 5] = [
@@ -71,61 +57,6 @@ const POWERS_OF_TEN: [f64; 31] = [
     100000000000000.0,
     1000000000000000.0,
 ];
-const EXPM1: [f64; 5] = [
-    -0.03333333333333313,
-    0.0015873015872548146,
-    -7.93650757867488e-05,
-    4.008217827329362e-06,
-    -2.0109921818362437e-07,
-];
-const EXPM1_LARGE_HIGH_WORD: u32 = 0x4043_687a;
-const EXPM1_TINY_HIGH_WORD: u32 = power_of_two_high_word(-54);
-const EXPM1_EXACT_SCALE_MAX: i32 = 56;
-const EXPM1_SPLIT_SCALE: i32 = 20;
-const EXPM1_OVERFLOW_SCALE: i32 = 1024;
-const SCALED_EXP_OFFSET_BITS: u64 = 0x4096_2066_151a_dd8b;
-const SCALED_EXP_HALF_SCALE: f64 = power_of_two(1021);
-
-fn reduce_ln2(x: f64, magnitude: u32, negative: bool) -> (f64, f64, i32) {
-    let k = if magnitude >= THREE_HALVES_LN2_HIGH_WORD {
-        (LOG2_E * x + if negative { -0.5 } else { 0.5 }) as i32
-    } else if negative {
-        -1
-    } else {
-        1
-    };
-    (x - f64::from(k) * LN2_HIGH, f64::from(k) * LN2_LOW, k)
-}
-
-pub fn exp(x: f64) -> f64 {
-    let high = high_word(x);
-    let negative = high >> 31 != 0;
-    let magnitude = high & HIGH_MAGNITUDE_MASK;
-    if magnitude >= EXP_LARGE_HIGH_WORD {
-        if x.is_nan() {
-            return x;
-        }
-        if x > EXP_OVERFLOW_LIMIT {
-            return x * OVERFLOW_SCALE;
-        }
-        if x < EXP_UNDERFLOW_LIMIT {
-            return 0.0;
-        }
-    }
-    let (x, high_part, low_part, k) = if magnitude > HALF_LN2_HIGH_WORD {
-        let (high_part, low_part, k) = reduce_ln2(x, magnitude, negative);
-        (high_part - low_part, high_part, low_part, k)
-    } else if magnitude > EXP_TINY_HIGH_WORD {
-        (x, x, 0.0, 0)
-    } else {
-        return 1.0 + x;
-    };
-    let xx = x * x;
-    let p = &EXP;
-    let c = x - xx * (p[0] + xx * (p[1] + xx * (p[2] + xx * (p[3] + xx * p[4]))));
-    let y = 1.0 + (x * c / (2.0 - c) - low_part + high_part);
-    if k == 0 { y } else { scalbn(y, k) }
-}
 
 pub fn exp2(x: f64) -> f64 {
     let points = EXP2_POINTS as u32;
@@ -169,75 +100,4 @@ pub fn exp10(x: f64) -> f64 {
         return exp2(LOG2_10 * fraction) * power;
     }
     pow(10.0, x)
-}
-
-fn expm1_scale(x: f64, e: f64, k: i32) -> f64 {
-    let scale = f64::from_bits(((EXPONENT_BIAS + k) as u64) << SIGNIFICAND_BITS);
-    if !(0..=EXPM1_EXACT_SCALE_MAX).contains(&k) {
-        let y = x - e + 1.0;
-        let y = if k == EXPM1_OVERFLOW_SCALE {
-            y * 2.0 * OVERFLOW_SCALE
-        } else {
-            y * scale
-        };
-        return y - 1.0;
-    }
-    let inverse = f64::from_bits(((EXPONENT_BIAS - k) as u64) << SIGNIFICAND_BITS);
-    if k < EXPM1_SPLIT_SCALE {
-        (x - e + (1.0 - inverse)) * scale
-    } else {
-        (x - (e + inverse) + 1.0) * scale
-    }
-}
-
-pub fn expm1(x: f64) -> f64 {
-    let bits = x.to_bits();
-    let magnitude = (bits >> WORD_BITS) as u32 & HIGH_MAGNITUDE_MASK;
-    let negative = bits >> 63 != 0;
-    if magnitude >= EXPM1_LARGE_HIGH_WORD {
-        if x.is_nan() {
-            return x;
-        }
-        if negative {
-            return -1.0;
-        }
-        if x > EXP_OVERFLOW_LIMIT {
-            return x * OVERFLOW_SCALE;
-        }
-    }
-    let (x, c, k) = if magnitude > HALF_LN2_HIGH_WORD {
-        let (high_part, low_part, k) = reduce_ln2(x, magnitude, negative);
-        let x = high_part - low_part;
-        (x, (high_part - x) - low_part, k)
-    } else if magnitude < EXPM1_TINY_HIGH_WORD {
-        return x;
-    } else {
-        (x, 0.0, 0)
-    };
-    let half_x = 0.5 * x;
-    let half_x_squared = x * half_x;
-    let hxs = half_x_squared;
-    let q = &EXPM1;
-    let r1 = 1.0 + hxs * (q[0] + hxs * (q[1] + hxs * (q[2] + hxs * (q[3] + hxs * q[4]))));
-    let t = 3.0 - r1 * half_x;
-    let e = hxs * ((r1 - t) / (6.0 - x * t));
-    if k == 0 {
-        return x - (x * e - hxs);
-    }
-    let e = x * (e - c) - c;
-    let e = e - hxs;
-    if k == -1 {
-        return 0.5 * (x - e) - 0.5;
-    }
-    if k == 1 {
-        if x < -0.25 {
-            return -2.0 * (e - (x + 0.5));
-        }
-        return 1.0 + 2.0 * (x - e);
-    }
-    expm1_scale(x, e, k)
-}
-
-pub(super) fn exp_scaled(x: f64) -> f64 {
-    exp(x - f64::from_bits(SCALED_EXP_OFFSET_BITS)) * SCALED_EXP_HALF_SCALE * SCALED_EXP_HALF_SCALE
 }

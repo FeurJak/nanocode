@@ -1,10 +1,9 @@
 use std::f64::consts::PI;
 
-use super::exponential::exp;
-use super::logarithm::log;
 use super::power::pow;
 use super::trigonometric::sin_pi;
 use super::{HIGH_MAGNITUDE_MASK, NON_FINITE_HIGH_WORD, power_of_two, power_of_two_high_word};
+use djs_libm::{exp, log};
 
 const NEAR_ZERO: [f64; 12] = [
     0.07721566490153287,

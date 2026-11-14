@@ -1159,6 +1159,7 @@ version = "0.0.0"
 name = "psh-utils"
 version = "0.0.0"
 dependencies = [
+ "djs-libm",
  "memchr",
  "nanocode-compression",
  "nanocode-digest",

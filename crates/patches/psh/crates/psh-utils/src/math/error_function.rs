@@ -1,8 +1,8 @@
-use super::exponential::exp;
 use super::{
     HIGH_MAGNITUDE_MASK, NON_FINITE_HIGH_WORD, high_word, power_of_two, power_of_two_high_word,
     with_low_word,
 };
+use djs_libm::exp;
 
 const ERX: f64 = 0.8450629115104675;
 const EFX8: f64 = 1.0270333367641007;

@@ -3,26 +3,20 @@ mod error_function;
 mod exponential;
 mod exponential_table;
 mod gamma;
-mod hyperbolic;
-mod inverse_trigonometric;
-mod logarithm;
 mod power;
-mod reduction;
 mod rounding;
 mod trigonometric;
 
 pub use bessel::{j0, j1, jn, y0, y1, yn};
-pub use error_function::{erf, erfc};
-pub use exponential::{exp, exp2, exp10, expm1};
-pub use gamma::{lgamma, lgamma_r, tgamma};
-pub use hyperbolic::{acosh, asinh, atanh, cosh, sinh, tanh};
-pub use inverse_trigonometric::{acos, asin, atan, atan2};
-pub use logarithm::{log, log1p, log2, log10};
-pub use power::{cbrt, hypot, pow};
-pub use rounding::{
-    fdim, fmax, fmin, fmod, frexp, ilogb, ldexp, modf, nextafter, remainder, rint, round, scalbn,
+pub use djs_libm::{
+    acos, acosh, asin, asinh, atan, atan2, atanh, cbrt, cos, cosh, exp, expm1, fmod, hypot, ldexp,
+    log, log1p, log2, log10, scalbn, sin, sinh, tan, tanh,
 };
-pub use trigonometric::{cos, sin, tan};
+pub use error_function::{erf, erfc};
+pub use exponential::{exp2, exp10};
+pub use gamma::{lgamma, lgamma_r, tgamma};
+pub use power::pow;
+pub use rounding::{fdim, fmax, fmin, frexp, ilogb, modf, nextafter, remainder, rint, round};
 
 fn difference(minuend: f64, subtrahend: f64) -> f64 {
     minuend - subtrahend

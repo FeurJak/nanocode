@@ -3,9 +3,6 @@ use super::{
     SIGNIFICAND_MASK, biased_exponent, power_of_two,
 };
 
-const NORMAL_EXPONENT_MAX: i32 = EXPONENT_BIAS;
-const NORMAL_EXPONENT_MIN: i32 = 1 - EXPONENT_BIAS;
-const PRECISION_BITS: i32 = SIGNIFICAND_BITS as i32 + 1;
 const SUBNORMAL_SCALE_EXPONENT: i32 = 64;
 const ROUND_HALF_BELOW: f64 = 0.5 - 0.25 * f64::EPSILON;
 const ILOGB_OF_ZERO_OR_NAN: i32 = i32::MIN;
@@ -49,36 +46,6 @@ pub fn rint(x: f64) -> f64 {
         (true, false) => -0.0,
         (false, _) => rounded,
     }
-}
-
-pub fn scalbn(x: f64, n: i32) -> f64 {
-    let mut x = x;
-    let mut n = n;
-    let up = power_of_two(NORMAL_EXPONENT_MAX);
-    let down_exponent = NORMAL_EXPONENT_MIN + PRECISION_BITS;
-    let down = power_of_two(down_exponent);
-    if n > NORMAL_EXPONENT_MAX {
-        x *= up;
-        n -= NORMAL_EXPONENT_MAX;
-        if n > NORMAL_EXPONENT_MAX {
-            x *= up;
-            n -= NORMAL_EXPONENT_MAX;
-            n = n.min(NORMAL_EXPONENT_MAX);
-        }
-    } else if n < NORMAL_EXPONENT_MIN {
-        x *= down;
-        n -= down_exponent;
-        if n < NORMAL_EXPONENT_MIN {
-            x *= down;
-            n -= down_exponent;
-            n = n.max(NORMAL_EXPONENT_MIN);
-        }
-    }
-    x * power_of_two(n)
-}
-
-pub fn ldexp(x: f64, n: i32) -> f64 {
-    scalbn(x, n)
 }
 
 pub fn frexp(x: f64) -> (f64, i32) {
@@ -165,18 +132,6 @@ pub fn nextafter(x: f64, y: f64) -> f64 {
         x_bits + 1
     };
     f64::from_bits(next)
-}
-
-pub fn fmod(x: f64, y: f64) -> f64 {
-    let exponent_mask = u64::from(EXPONENT_FIELD_MAX) << SIGNIFICAND_BITS;
-    let x_magnitude = x.to_bits() & MAGNITUDE_MASK;
-    let y_magnitude = y.to_bits() & MAGNITUDE_MASK;
-    let x_non_finite = x_magnitude & exponent_mask == exponent_mask;
-    let y_nan_or_zero = y_magnitude.wrapping_sub(1) & exponent_mask == exponent_mask;
-    if x_non_finite || y_nan_or_zero {
-        return super::quotient(x * y, x * y);
-    }
-    x % y
 }
 
 pub fn fmin(x: f64, y: f64) -> f64 {

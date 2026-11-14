@@ -1,11 +1,10 @@
 use std::f64::consts::FRAC_2_PI;
 
-use super::logarithm::log;
-use super::trigonometric::{cos, sin};
 use super::{
     HIGH_MAGNITUDE_MASK, NON_FINITE_HIGH_WORD, high_word, low_word, power_of_two,
     power_of_two_high_word,
 };
+use djs_libm::{cos, log, sin};
 
 struct Asymptotic {
     p_numerator: [f64; 6],

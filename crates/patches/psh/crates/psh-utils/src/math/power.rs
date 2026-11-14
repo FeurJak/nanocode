@@ -1,10 +1,9 @@
-use super::rounding::scalbn;
 use super::{
-    EXPONENT_BIAS, EXPONENT_FIELD_MAX, HIGH_SIGNIFICAND_BITS, HIGH_SIGNIFICAND_MASK,
-    MAGNITUDE_MASK, NON_FINITE_HIGH_WORD, ONE_HIGH_WORD, SIGN_MASK, SIGNIFICAND_BITS,
-    SIGNIFICAND_MASK, SMALLEST_NORMAL_HIGH_WORD, from_words, high_word, low_word, power_of_two,
-    power_of_two_high_word, with_high_word, with_low_word,
+    EXPONENT_BIAS, HIGH_SIGNIFICAND_BITS, HIGH_SIGNIFICAND_MASK, NON_FINITE_HIGH_WORD,
+    ONE_HIGH_WORD, SIGNIFICAND_BITS, SMALLEST_NORMAL_HIGH_WORD, from_words, high_word, low_word,
+    power_of_two, power_of_two_high_word, with_high_word, with_low_word,
 };
+use djs_libm::scalbn;
 
 const BASE: [f64; 2] = [1.0, 1.5];
 const LOG2_BASE_HIGH: [f64; 2] = [0.0, 0.5849624872207642];
@@ -56,12 +55,6 @@ const IMPLICIT_HIGH_BIT: i32 = SMALLEST_NORMAL_HIGH_WORD as i32;
 const MIDDLE_HIGH_BIAS: u32 = 0x2000_0000;
 const MIDDLE_HIGH_ROUND: u32 = 0x0008_0000;
 const MIDDLE_HIGH_BASE_SHIFT: u32 = 18;
-
-const HYPOT_EXPONENT_GAP: i64 = 64;
-const HYPOT_HIGH_EXPONENT: i64 = 510;
-const HYPOT_LOW_EXPONENT: i64 = 450;
-const HYPOT_SCALE: f64 = power_of_two(700);
-const HYPOT_SCALE_INVERSE: f64 = power_of_two(-700);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Parity {
@@ -334,164 +327,4 @@ pub fn pow(x: f64, y: f64) -> f64 {
     let p_low = (y - y1) * t1 + y * t2;
     let p_high = y1 * t1;
     exp2_split(s, p_high, p_low)
-}
-
-pub fn hypot(x: f64, y: f64) -> f64 {
-    let split = power_of_two(27) + 1.0;
-    let square = |x: f64| {
-        let xc = x * split;
-        let high = x - xc + xc;
-        let low = x - high;
-        let square_high = x * x;
-        let square_low = high * high - square_high + 2.0 * high * low + low * low;
-        (square_high, square_low)
-    };
-    let x_bits = x.to_bits() & MAGNITUDE_MASK;
-    let y_bits = y.to_bits() & MAGNITUDE_MASK;
-    let (x_bits, y_bits) = if x_bits < y_bits {
-        (y_bits, x_bits)
-    } else {
-        (x_bits, y_bits)
-    };
-    let x_exponent = (x_bits >> SIGNIFICAND_BITS) as i64;
-    let y_exponent = (y_bits >> SIGNIFICAND_BITS) as i64;
-    let x = f64::from_bits(x_bits);
-    let y = f64::from_bits(y_bits);
-    if y_exponent == i64::from(EXPONENT_FIELD_MAX) {
-        return y;
-    }
-    if x_exponent == i64::from(EXPONENT_FIELD_MAX) || y_bits == 0 {
-        return x;
-    }
-    if x_exponent - y_exponent > HYPOT_EXPONENT_GAP {
-        return x + y;
-    }
-    let bias = i64::from(EXPONENT_BIAS);
-    let (scale, x, y) = if x_exponent > bias + HYPOT_HIGH_EXPONENT {
-        (
-            HYPOT_SCALE,
-            x * HYPOT_SCALE_INVERSE,
-            y * HYPOT_SCALE_INVERSE,
-        )
-    } else if y_exponent < bias - HYPOT_LOW_EXPONENT {
-        (HYPOT_SCALE_INVERSE, x * HYPOT_SCALE, y * HYPOT_SCALE)
-    } else {
-        (1.0, x, y)
-    };
-    let (x_high, x_low) = square(x);
-    let (y_high, y_low) = square(y);
-    scale * (y_low + x_low + y_high + x_high).sqrt()
-}
-
-const CUBE_ROOT_EXPONENT_OFFSET: u32 = 3072;
-const CUBE_ROOT_RESULT_BIAS: u32 = 342;
-const CUBE_ROOT_SCALE_BITS: [u64; 3] = [
-    0x3ff0_0000_0000_0000,
-    0x3ff4_28a2_f98d_728b,
-    0x3ff9_65fe_a53d_6e3d,
-];
-const CUBE_ROOT_POLYNOMIAL_BITS: [u64; 4] = [
-    0x3fe1_b0ba_bccf_ef9c,
-    0x3fe2_c9a3_e94d_1da5,
-    0xbfc4_dc30_b1a1_ddba,
-    0x3f97_a8d3_e4ec_9b07,
-];
-const CUBE_ROOT_NEWTON_BITS: [u64; 2] = [0x3fd5_5555_5555_5555, 0x3fcc_71c7_1c71_c71c];
-const CUBE_ROOT_RECIPROCAL_SCALES: [f64; 6] = [1.0, -1.0, 0.5, -0.5, 0.25, -0.25];
-const CUBE_ROOT_EXCEPTIONS_BITS: [(u64, u64); 2] = [
-    (0x4009_b782_23aa_307c, 0x3ff7_9d15_d0e8_d59c),
-    (0x401a_202b_fc89_ddff, 0x3ffd_e87a_a837_820f),
-];
-const CUBE_ROOT_ROUND_SHIFT: u32 = 30;
-const CUBE_ROOT_TIE_SHIFT: u32 = 15;
-const CUBE_ROOT_TIE_OFFSET: u64 = 164;
-const CUBE_ROOT_TIE_MASK: u64 = 0xffff_ffff_ffff_0000;
-
-struct CubeRootStep {
-    y: f64,
-    dy: f64,
-    near_tie: bool,
-}
-
-fn cube_root_step(y: f64, zz: f64, rr: f64, tie_limit: f64) -> CubeRootStep {
-    let u0 = f64::from_bits(CUBE_ROOT_NEWTON_BITS[0]);
-    let y2 = y * y;
-    let y2_low = y.mul_add(y, -y2);
-    let y3 = y2 * y;
-    let y3_low = y.mul_add(y2, -y3) + y * y2_low;
-    let h = ((y3 - zz) + y3_low) * rr;
-    let dy = h * (y * u0);
-    let next = y - dy;
-    let dy = (y - next) - dy;
-    let half_ulp = power_of_two(-53);
-    let ady = dy.abs();
-    let near_tie = (ady - half_ulp).abs() < tie_limit
-        || (ady - (power_of_two(-52) + half_ulp)).abs() < tie_limit;
-    CubeRootStep {
-        y: next,
-        dy,
-        near_tie,
-    }
-}
-
-pub fn cbrt(x: f64) -> f64 {
-    let bits = x.to_bits();
-    let mut significand = bits & SIGNIFICAND_MASK;
-    let sign = bits >> 63;
-    let mut exponent = (bits >> SIGNIFICAND_BITS) as u32 & EXPONENT_FIELD_MAX;
-    if (exponent + 1) & EXPONENT_FIELD_MAX < 2 {
-        let magnitude = bits & !SIGN_MASK;
-        if exponent == EXPONENT_FIELD_MAX || magnitude == 0 {
-            return x + x;
-        }
-        let shift = magnitude.leading_zeros() - (u64::BITS - 1 - SIGNIFICAND_BITS);
-        significand = (significand << shift) & SIGNIFICAND_MASK;
-        exponent = exponent.wrapping_sub(shift - 1);
-    }
-    let exponent = exponent.wrapping_add(CUBE_ROOT_EXPONENT_OFFSET);
-    let one = (EXPONENT_BIAS as u64) << SIGNIFICAND_BITS;
-    let z_bits = significand | one;
-    let third = exponent / 3;
-    let remainder = exponent % 3;
-    let zz = f64::from_bits((z_bits + (u64::from(remainder) << SIGNIFICAND_BITS)) | sign << 63);
-    let scale = f64::from_bits(CUBE_ROOT_SCALE_BITS[remainder as usize] | sign << 63);
-    let z = f64::from_bits(z_bits);
-    let r = 1.0 / z;
-    let rr = r * CUBE_ROOT_RECIPROCAL_SCALES[(remainder as usize) << 1 | sign as usize];
-    let c = CUBE_ROOT_POLYNOMIAL_BITS.map(f64::from_bits);
-    let u0 = f64::from_bits(CUBE_ROOT_NEWTON_BITS[0]);
-    let u1 = f64::from_bits(CUBE_ROOT_NEWTON_BITS[1]);
-    let z2 = z * z;
-    let mut y = (c[0] + z * c[1]) + z2 * (c[2] + z * c[3]);
-    let h = y * y * (y * r) - 1.0;
-    y -= (h * y) * (u0 - u1 * h);
-    y *= scale;
-    let mut step = cube_root_step(y, zz, rr, power_of_two(-75));
-    if step.near_tie {
-        step = cube_root_step(step.y, zz, rr, power_of_two(-98));
-        if step.near_tie {
-            for (input, output) in CUBE_ROOT_EXCEPTIONS_BITS {
-                if zz.abs() == f64::from_bits(input) {
-                    step.y = f64::from_bits(output).copysign(zz);
-                }
-            }
-        }
-    }
-    let shift = (third
-        .wrapping_sub(CUBE_ROOT_RESULT_BIAS)
-        .wrapping_sub(EXPONENT_BIAS as u32) as u64)
-        << SIGNIFICAND_BITS;
-    let mut result = step.y.to_bits().wrapping_add(shift);
-    let m0 = result << CUBE_ROOT_ROUND_SHIFT;
-    let m1 = m0 >> 63;
-    if m0 ^ m1 <= 1 << CUBE_ROOT_ROUND_SHIFT {
-        let rounded =
-            (step.y.to_bits() + (CUBE_ROOT_TIE_OFFSET << CUBE_ROOT_TIE_SHIFT)) & CUBE_ROOT_TIE_MASK;
-        if ((f64::from_bits(rounded) - step.y) - step.dy).abs() < power_of_two(-60)
-            || zz.abs() == 1.0
-        {
-            result = (result + (1 << CUBE_ROOT_TIE_SHIFT)) & CUBE_ROOT_TIE_MASK;
-        }
-    }
-    f64::from_bits(result)
 }
