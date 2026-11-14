@@ -1290,19 +1290,14 @@ impl Sessions {
                 opened.journal.harden()?;
                 drop(opened);
                 let compacted = identity(&fs::metadata(&path).map_err(backend)?)?;
-                if compacted != from {
-                    summaries.moved(&from, &compacted, 0, None)?;
-                }
-                let from = compacted;
-                let Some(digest) = archive::archive(&path).map_err(backend)? else {
+                if !archive::archive(&path).map_err(backend)? {
+                    if compacted != from {
+                        summaries.moved(&from, &compacted, 0, None)?;
+                    }
                     return Ok(false);
-                };
+                }
                 let stored = fs::metadata(archive::archived(&path)).map_err(backend)?;
-                let anchor = Anchor {
-                    position: 0,
-                    digest,
-                };
-                summaries.moved(&from, &identity(&stored)?, stored.len(), Some(anchor))?;
+                summaries.moved(&from, &identity(&stored)?, stored.len(), None)?;
                 Ok::<_, StoreError>(true)
             })?;
             if stored {

@@ -4,15 +4,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use nanocode_digest::Sha256;
 use nanocode_zstd::{DecoderOptions, FrameHeader, StreamingDecoder, parse_frame_header};
 
 use super::sync_journal;
 
 const SUFFIX: &str = ".zst";
-const FORMAT: u8 = 1;
+const FORMAT: u8 = 2;
+const FIRST_FORMAT: u8 = 1;
 const LEVEL: i32 = 1;
-static DICTIONARY: &[u8] = include_bytes!("session.dict");
+static DICTIONARY: &[u8] = include_bytes!("session2.dict");
+static FIRST_DICTIONARY: &[u8] = include_bytes!("session.dict");
 
 pub(super) fn archived(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
@@ -39,8 +40,10 @@ pub(super) fn compress(bytes: &[u8]) -> io::Result<Vec<u8>> {
 
 pub(super) fn decompress(archive: &[u8]) -> io::Result<Vec<u8>> {
     let invalid = |message: &str| io::Error::new(io::ErrorKind::InvalidData, message.to_owned());
-    let Some((&FORMAT, frame)) = archive.split_first() else {
-        return Err(invalid("unknown JSONL archive format"));
+    let (dictionary, frame) = match archive.split_first() {
+        Some((&FORMAT, frame)) => (DICTIONARY, frame),
+        Some((&FIRST_FORMAT, frame)) => (FIRST_DICTIONARY, frame),
+        _ => return Err(invalid("unknown JSONL archive format")),
     };
     let size = match parse_frame_header(frame) {
         Ok(FrameHeader::Zstandard(header)) => header.content_size,
@@ -53,14 +56,14 @@ pub(super) fn decompress(archive: &[u8]) -> io::Result<Vec<u8>> {
         single_frame: true,
         ..DecoderOptions::default()
     };
-    let mut decoder = StreamingDecoder::with_dictionary(options, DICTIONARY);
+    let mut decoder = StreamingDecoder::with_dictionary(options, dictionary);
     let unreadable = |error| io::Error::new(io::ErrorKind::InvalidData, error);
     decoder.push(frame).map_err(unreadable)?;
     decoder.finish().map_err(unreadable)?;
     Ok(decoder.take_output())
 }
 
-pub(super) fn archive(path: &Path) -> io::Result<Option<[u8; 32]>> {
+pub(super) fn archive(path: &Path) -> io::Result<bool> {
     let before = fs::metadata(path)?;
     let bytes = fs::read(path)?;
     let directory = path.parent().unwrap_or_else(|| Path::new("."));
@@ -70,11 +73,11 @@ pub(super) fn archive(path: &Path) -> io::Result<Option<[u8; 32]>> {
     let after = fs::metadata(path)?;
     if !unchanged(&before, &after) || after.len() != bytes.len() as u64 {
         fs::remove_file(&target)?;
-        return Ok(None);
+        return Ok(false);
     }
     fs::remove_file(path)?;
     sync_directory(directory)?;
-    Ok(Some(Sha256::digest(&archive)))
+    Ok(true)
 }
 
 pub(super) fn restore(path: &Path) -> io::Result<()> {
