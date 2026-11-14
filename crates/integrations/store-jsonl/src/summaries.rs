@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt,
     fs::{self, File, OpenOptions},
     io::{BufReader, Read, Seek, SeekFrom, Write},
@@ -13,7 +13,7 @@ use nanocode_digest::Sha256;
 use nanocode_durability_core::{StateSummary, StoreError};
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
-    de::{DeserializeSeed, MapAccess, Visitor},
+    de::{self, DeserializeSeed, MapAccess, Visitor},
 };
 use serde_json::value::RawValue;
 
@@ -22,13 +22,15 @@ use super::{
     index::digest_anchor,
 };
 
-const FILE: &str = ".summaries";
+const FILE: &str = ".summaries-v2";
+const PREVIOUS: &str = ".summaries";
 const LEGACY: [&str; 2] = [".summaries.json.zst", ".summaries.json"];
 const LENGTH_BYTES: usize = 4;
 const PLAIN: u8 = b'{';
 
 pub(super) struct Summaries {
     path: PathBuf,
+    previous: PathBuf,
     legacy: [PathBuf; 2],
     loaded: Loaded,
     entries: HashMap<String, Box<Summary>>,
@@ -44,11 +46,25 @@ enum Loaded {
 
 #[derive(Clone, Deserialize, Serialize)]
 pub(super) struct Summary {
+    #[serde(rename = "f", alias = "file")]
     pub(super) file: String,
+    #[serde(rename = "l", alias = "length")]
     pub(super) length: u64,
+    #[serde(rename = "r", alias = "revision")]
     pub(super) revision: u64,
+    #[serde(
+        rename = "s",
+        alias = "summary",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub(super) summary: Option<Raw>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "a",
+        alias = "anchor",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub(super) anchor: Option<Anchor>,
 }
 
@@ -86,12 +102,15 @@ impl<'de> Deserialize<'de> for Raw {
 
 #[derive(Deserialize)]
 struct Based<'a> {
+    #[serde(rename = "f", alias = "file")]
     file: String,
+    #[serde(rename = "l", alias = "length")]
     length: u64,
+    #[serde(rename = "r", alias = "revision")]
     revision: u64,
-    #[serde(borrow)]
+    #[serde(rename = "s", alias = "summary", default, borrow)]
     summary: Option<&'a RawValue>,
-    #[serde(default)]
+    #[serde(rename = "a", alias = "anchor", default)]
     anchor: Option<Anchor>,
 }
 
@@ -134,12 +153,159 @@ impl<'de> Visitor<'de> for Base<'_> {
     }
 }
 
-pub(super) fn raw_summary(summary: Option<&StateSummary>) -> Result<Option<Raw>, StoreError> {
-    summary
-        .map(serde_json::value::to_raw_value)
-        .transpose()
-        .map(|raw| raw.map(Raw::Owned))
-        .map_err(backend)
+#[derive(Serialize)]
+struct PackedOut<'a> {
+    #[serde(rename = "s", skip_serializing_if = "Option::is_none")]
+    scope: Option<&'a str>,
+    #[serde(rename = "p", skip_serializing_if = "Option::is_none")]
+    parent: Option<&'a str>,
+    #[serde(rename = "t", skip_serializing_if = "Option::is_none")]
+    title: Option<&'a str>,
+    #[serde(rename = "v", skip_serializing_if = "Option::is_none")]
+    preview: Option<&'a str>,
+    #[serde(rename = "a", skip_serializing_if = "no_attributes")]
+    attributes: &'a BTreeMap<String, String>,
+    #[serde(rename = "u")]
+    updated_at_ms: u64,
+    #[serde(rename = "r")]
+    value: &'a RawValue,
+}
+
+#[derive(Deserialize)]
+struct Packed<'a> {
+    #[serde(rename = "s", default)]
+    scope: Option<String>,
+    #[serde(rename = "p", default)]
+    parent: Option<String>,
+    #[serde(rename = "t", default)]
+    title: Option<String>,
+    #[serde(rename = "v", default)]
+    preview: Option<String>,
+    #[serde(rename = "a", default)]
+    attributes: BTreeMap<String, String>,
+    #[serde(rename = "u")]
+    updated_at_ms: u64,
+    #[serde(rename = "r", borrow)]
+    value: &'a RawValue,
+}
+
+fn no_attributes(attributes: &&BTreeMap<String, String>) -> bool {
+    attributes.is_empty()
+}
+
+fn created_at_ms(state_id: &str) -> Option<u64> {
+    let (high, rest) = state_id.split_once('-')?;
+    let (low, _) = rest.split_once('-')?;
+    (high.len() == 8
+        && low.len() == 4
+        && high
+            .bytes()
+            .chain(low.bytes())
+            .all(|byte| byte.is_ascii_hexdigit()))
+    .then(|| u64::from_str_radix(&format!("{high}{low}"), 16).ok())
+    .flatten()
+}
+
+fn derived(state_id: &str, scope: &str, updated_at_ms: u64) -> Option<[(&'static str, String); 5]> {
+    let id = serde_json::to_string(state_id).ok()?;
+    Some([
+        ("session_id", id.clone()),
+        ("workspace", serde_json::to_string(scope).ok()?),
+        (
+            "lineage",
+            format!(
+                "{{\"root_session_id\":{id},\"parent_session_id\":null,\"origin\":\"root\",\"depth\":0}}"
+            ),
+        ),
+        ("created_at_ms", created_at_ms(state_id)?.to_string()),
+        ("updated_at_ms", updated_at_ms.to_string()),
+    ])
+}
+
+fn packed_value(state_id: &str, summary: &StateSummary) -> Option<String> {
+    let derived = derived(state_id, summary.scope.as_deref()?, summary.updated_at_ms)?;
+    let mut fields = serde_json::from_str::<BTreeMap<String, &RawValue>>(&summary.value).ok()?;
+    for (key, text) in &derived {
+        if fields.remove(*key)?.get() != text {
+            return None;
+        }
+    }
+    serde_json::to_string(&fields).ok()
+}
+
+pub(super) fn raw_summary(
+    state_id: &str,
+    summary: Option<&StateSummary>,
+) -> Result<Option<Raw>, StoreError> {
+    let Some(summary) = summary else {
+        return Ok(None);
+    };
+    let value = match packed_value(state_id, summary) {
+        Some(object) => object,
+        None => serde_json::to_string(&summary.value).map_err(backend)?,
+    };
+    let value = serde_json::from_str::<&RawValue>(&value).map_err(backend)?;
+    serde_json::value::to_raw_value(&PackedOut {
+        scope: summary.scope.as_deref(),
+        parent: summary.parent.as_deref(),
+        title: summary.title.as_deref(),
+        preview: summary.preview.as_deref(),
+        attributes: &summary.attributes,
+        updated_at_ms: summary.updated_at_ms,
+        value,
+    })
+    .map(|raw| Some(Raw::Owned(raw)))
+    .map_err(backend)
+}
+
+pub(super) fn unpacked(state_id: &str, raw: &str) -> serde_json::Result<StateSummary> {
+    let packed = serde_json::from_str::<Packed>(raw)?;
+    let stored = packed.value.get();
+    let value = match stored.strip_prefix('{') {
+        None => serde_json::from_str::<String>(stored)?,
+        Some(rest) => {
+            let derived = packed
+                .scope
+                .as_deref()
+                .and_then(|scope| derived(state_id, scope, packed.updated_at_ms))
+                .ok_or_else(|| {
+                    <serde_json::Error as de::Error>::custom(
+                        "a packed session summary without the fields it leaves out",
+                    )
+                })?;
+            let mut value = String::with_capacity(
+                stored.len()
+                    + derived
+                        .iter()
+                        .map(|(key, text)| key.len() + text.len() + 4)
+                        .sum::<usize>(),
+            );
+            value.push('{');
+            for (index, (key, text)) in derived.iter().enumerate() {
+                if index > 0 {
+                    value.push(',');
+                }
+                value.push('"');
+                value.push_str(key);
+                value.push_str("\":");
+                value.push_str(text);
+            }
+            if !rest.trim_start().starts_with('}') {
+                value.push(',');
+            }
+            value.push_str(rest);
+            value
+        }
+    };
+    Ok(StateSummary {
+        scope: packed.scope,
+        parent: packed.parent,
+        title: packed.title,
+        preview: packed.preview,
+        attributes: packed.attributes,
+        updated_at_ms: packed.updated_at_ms,
+        value,
+    })
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -299,6 +465,7 @@ impl Summaries {
     pub(super) fn new(directory: &Path) -> Self {
         Self {
             path: directory.join(FILE),
+            previous: directory.join(PREVIOUS),
             legacy: LEGACY.map(|name| directory.join(name)),
             loaded: Loaded::Nothing,
             entries: HashMap::new(),
@@ -308,12 +475,43 @@ impl Summaries {
 
     pub(super) fn refresh(&mut self) {
         match fs::metadata(&self.path) {
-            Ok(metadata) => self.refresh_journal(&metadata),
-            Err(_) => self.refresh_legacy(),
+            Ok(metadata) => self.refresh_journal(&self.path.clone(), &metadata),
+            Err(_) => match fs::metadata(&self.previous) {
+                Ok(metadata) => self.refresh_previous(&metadata),
+                Err(_) => self.refresh_legacy(),
+            },
         }
     }
 
-    fn refresh_journal(&mut self, metadata: &fs::Metadata) {
+    fn refresh_previous(&mut self, metadata: &fs::Metadata) {
+        let Ok(current) = identity(metadata) else {
+            return;
+        };
+        if self.loaded == Loaded::Legacy(current.clone()) {
+            return;
+        }
+        self.loaded = Loaded::Nothing;
+        self.refresh_journal(&self.previous.clone(), metadata);
+        let mut unreadable = Vec::new();
+        for (state_id, entry) in &mut self.entries {
+            let Some(raw) = &entry.summary else {
+                continue;
+            };
+            match serde_json::from_str::<StateSummary>(raw.get())
+                .map_err(backend)
+                .and_then(|summary| raw_summary(state_id, Some(&summary)))
+            {
+                Ok(summary) => entry.summary = summary,
+                Err(_) => unreadable.push(state_id.clone()),
+            }
+        }
+        for state_id in unreadable {
+            self.entries.remove(&state_id);
+        }
+        self.loaded = Loaded::Legacy(current);
+    }
+
+    fn refresh_journal(&mut self, path: &Path, metadata: &fs::Metadata) {
         let Ok(identity) = identity(metadata) else {
             return;
         };
@@ -327,7 +525,7 @@ impl Summaries {
         if start == Some(metadata.len()) {
             return;
         }
-        let read = File::open(&self.path).and_then(|mut file| {
+        let read = File::open(path).and_then(|mut file| {
             file.seek(SeekFrom::Start(start.unwrap_or(0)))?;
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes)?;
@@ -417,7 +615,9 @@ impl Summaries {
         };
         match read {
             Ok(entries) => self.entries = entries,
-            Err(error) => nanocode_trace::warn!(%error, "ignoring unreadable JSONL session summaries"),
+            Err(error) => {
+                nanocode_trace::warn!(%error, "ignoring unreadable JSONL session summaries")
+            }
         }
         self.loaded = Loaded::Legacy(current);
     }
@@ -601,7 +801,7 @@ impl Summaries {
             identity: identity(&file.metadata().map_err(backend)?)?,
             end: (LENGTH_BYTES + frame.len()) as u64,
         };
-        for legacy in &self.legacy {
+        for legacy in self.legacy.iter().chain([&self.previous]) {
             match fs::remove_file(legacy) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -613,13 +813,23 @@ impl Summaries {
 }
 
 #[derive(Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
 enum Change {
+    #[serde(rename = "r", alias = "remember")]
     Remember(HashMap<String, Summary>),
+    #[serde(rename = "m", alias = "moved")]
     Moved {
+        #[serde(rename = "f", alias = "from")]
         from: String,
+        #[serde(rename = "t", alias = "to")]
         to: String,
+        #[serde(rename = "l", alias = "length")]
         length: u64,
+        #[serde(
+            rename = "a",
+            alias = "anchor",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
         anchor: Option<Anchor>,
     },
 }

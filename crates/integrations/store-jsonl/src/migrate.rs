@@ -323,7 +323,7 @@ fn summary(
                 file: file.to_owned(),
                 length,
                 revision,
-                summary: raw_summary(summary.as_ref()).ok()?,
+                summary: raw_summary(id, summary.as_ref()).ok()?,
                 anchor: None,
             })
         })

@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     cmp::Reverse,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     fs::{self, Metadata},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -14,7 +14,6 @@ use nanocode_durability_core::{
     StoreError, StoreRecord, StoreReplacement, StoreUpdate, StoredState, SummaryFilter,
 };
 use serde::Deserialize;
-use serde_json::value::RawValue;
 
 use nanocode_digest::Sha256;
 
@@ -24,7 +23,7 @@ use super::{
     listing::Listing,
     process_alive,
     shared::Shared,
-    summaries::{Anchor, Summaries, Summary, raw_summary},
+    summaries::{Anchor, Summaries, Summary, raw_summary, unpacked},
 };
 
 const OPEN_JOURNALS: usize = 32;
@@ -304,7 +303,7 @@ fn decoded(state_id: &str, known: &Summary) -> Option<(u64, Option<StateSummary>
     let summary = known
         .summary
         .as_ref()
-        .map(|summary| serde_json::from_str(summary.get()))
+        .map(|summary| unpacked(state_id, summary.get()))
         .transpose()
         .inspect_err(|error| unreadable(state_id, error))
         .ok()?;
@@ -317,36 +316,10 @@ fn unreadable(state_id: &str, error: &serde_json::Error) {
 
 #[derive(Deserialize)]
 struct Head<'a> {
-    #[serde(borrow)]
+    #[serde(rename = "s", default, borrow)]
     scope: Option<Cow<'a, str>>,
-    #[serde(rename = "parent")]
-    _parent: Option<Text>,
-    #[serde(rename = "title")]
-    _title: Option<Text>,
-    #[serde(rename = "preview")]
-    _preview: Option<Text>,
-    #[serde(rename = "attributes")]
-    _attributes: BTreeMap<Text, Text>,
+    #[serde(rename = "u")]
     updated_at_ms: u64,
-    #[serde(rename = "value")]
-    _value: Text,
-}
-
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
-struct Text;
-
-impl<'de> Deserialize<'de> for Text {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = <&RawValue>::deserialize(deserializer)?;
-        if raw.get().starts_with('"') {
-            Ok(Self)
-        } else {
-            Err(serde::de::Error::invalid_type(
-                serde::de::Unexpected::Other(raw.get()),
-                &"a string",
-            ))
-        }
-    }
 }
 
 pub(super) fn created(metadata: &Metadata) -> std::time::SystemTime {
@@ -1216,10 +1189,11 @@ impl Sessions {
                 && seen.revision == summary.revision
                 && seen.revision > 0
             {
+                let packed = raw_summary(&summary.state_id, summary.summary.as_ref())?;
                 remembered.push((
                     summary.state_id,
                     Summary {
-                        summary: raw_summary(summary.summary.as_ref())?,
+                        summary: packed,
                         ..seen
                     },
                 ));
@@ -1232,13 +1206,14 @@ impl Sessions {
             let revision = journal.peek(&summary.state_id)?.revision;
             if summary.revision == revision && revision > 0 {
                 let member = session_key(&summary.state_id) != journal_key;
+                let packed = raw_summary(&summary.state_id, summary.summary.as_ref())?;
                 remembered.push((
                     summary.state_id,
                     Summary {
                         file: journal.index.source.clone(),
                         length: journal.index.offset,
                         revision,
-                        summary: raw_summary(summary.summary.as_ref())?,
+                        summary: packed,
                         anchor: if member { None } else { journal.anchor() },
                     },
                 ));
