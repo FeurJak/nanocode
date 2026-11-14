@@ -7,7 +7,8 @@ use nanocode_sys::base64::STANDARD_NO_PAD;
 
 pub(crate) const WINDOW: usize = 1 << WINDOW_BITS;
 const WINDOW_BITS: i32 = 15;
-const DEFAULT_LEVEL: i32 = -1;
+pub(crate) const DEFAULT_LEVEL: i32 = -1;
+pub(crate) const FAST_LEVEL: i32 = 1;
 const STREAM_LEVEL: i32 = 7;
 const DEFAULT_MEM_LEVEL: i32 = 8;
 const FINAL_EMPTY_BLOCK: [u8; 2] = [0x03, 0x00];
@@ -71,7 +72,7 @@ fn encode(tag: char, compressed: &[u8]) -> String {
 }
 
 pub(crate) fn pack(tag: char, plain: &[u8], dictionary: &[u8]) -> Result<String, StoreError> {
-    let mut packer = Packer::new(dictionary)?;
+    let mut packer = Packer::new(DEFAULT_LEVEL, dictionary)?;
     packer.write(plain)?;
     Ok(packer.finish(tag)?.packed)
 }
@@ -89,11 +90,11 @@ pub(crate) struct Packed {
 }
 
 impl Packer {
-    pub(crate) fn new(dictionary: &[u8]) -> Result<Self, StoreError> {
+    pub(crate) fn new(level: i32, dictionary: &[u8]) -> Result<Self, StoreError> {
         Ok(Self {
             chunk: vec![0; WINDOW],
             compressed: Vec::new(),
-            deflate: compressor(DEFAULT_LEVEL, dictionary)?,
+            deflate: compressor(level, dictionary)?,
             plain: 0,
         })
     }

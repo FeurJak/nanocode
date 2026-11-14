@@ -79,7 +79,7 @@ const ARCHIVE: Dialects = [
     "UPDATE nanocode_log SET body = $3::text WHERE scope = $1::text AND seq = CAST($2::text AS BIGINT)",
 ];
 const EXTEND: Dialects = [
-    "UPDATE nanocode_log SET seq = CAST(?3 AS INTEGER), body = substr(body, 1, length(body) - CAST(?4 AS INTEGER)) || ?5 WHERE scope = ?1 AND seq = CAST(?2 AS INTEGER) RETURNING CAST(seq AS TEXT)",
+    "UPDATE nanocode_log SET seq = CAST(?3 AS INTEGER), body = substr(CAST(body AS BLOB), 1, length(CAST(body AS BLOB)) - CAST(?4 AS INTEGER)) || ?5 WHERE scope = ?1 AND seq = CAST(?2 AS INTEGER) RETURNING CAST(seq AS TEXT)",
     "UPDATE nanocode_log SET seq = CAST($3::text AS BIGINT), body = substr(body, 1, length(body) - CAST($4::text AS INTEGER)) || $5::text WHERE scope = $1::text AND seq = CAST($2::text AS BIGINT) RETURNING CAST(seq AS TEXT)",
 ];
 const DROP: Dialects = [

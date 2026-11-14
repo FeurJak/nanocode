@@ -89,8 +89,8 @@ impl Snapshot {
     }
 }
 
-fn packed(fold: &Fold, keep: u64) -> Result<Snapshot, StoreError> {
-    let mut packer = codec::Packer::new(&[])?;
+fn packed(fold: &Fold, keep: u64, level: i32) -> Result<Snapshot, StoreError> {
+    let mut packer = codec::Packer::new(level, &[])?;
     let mut line = Vec::new();
     let mut base = 0;
     let mut starts = VecDeque::new();
@@ -709,7 +709,12 @@ impl Lease<'_> {
                 writer.fold.recovered_at(turn, seq);
             }
             writer.fold.committed(seq);
-            let packed = packed(&writer.fold, keep);
+            let level = if due {
+                codec::FAST_LEVEL
+            } else {
+                codec::DEFAULT_LEVEL
+            };
+            let packed = packed(&writer.fold, keep, level);
             writer.fold.committed(previous);
             let packed = packed?;
             writer.state = packed.plain;
