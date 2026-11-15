@@ -426,17 +426,4 @@ impl Heap {
         self.set_object_slot(it, 0, Value::UNDEFINED);
         None
     }
-
-    /// The live keys and values of a collection in order (for the builtins that read a
-    /// snapshot, like the Set methods' receiver copies).
-    pub fn collection_entries_list(&self, o: Obj) -> alloc::vec::Vec<(Value, Value)> {
-        let entries = self.collection_entries(o);
-        let base = self.entries_base(o);
-        (0..self.collection_used(o))
-            .filter_map(|n| {
-                let k = self.coll_key(entries, base, n);
-                (!k.is_hole()).then(|| (k, self.value_array_get(entries, base + 2 * n + 1)))
-            })
-            .collect()
-    }
 }

@@ -24,7 +24,7 @@ use core::fmt;
 
 pub use parse::{ParseOptions, parse, parse_utf8};
 pub use stringify::{
-    StringifyError, gap_from_number, gap_from_units, quote, stringify_fast, stringify_fast_at,
+    StringifyError, quote, stringify_fast, stringify_fast_at,
 };
 
 use crate::heap::HeapError;

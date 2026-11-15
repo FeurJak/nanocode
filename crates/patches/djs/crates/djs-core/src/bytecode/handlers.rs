@@ -6,8 +6,6 @@
 //! innermost. Stored at the end of the template cell (`template::handlers`, D2444) and read
 //! in place.
 
-use alloc::vec::Vec;
-
 /// A try region: `[start, end)` instruction positions, the handler position and the
 /// operand stack depth (relative to the frame's operand base) at handler entry, before
 /// the exception is pushed.
@@ -25,13 +23,6 @@ impl Handler {
     pub fn covers(&self, pc: u32) -> bool {
         self.start <= pc && pc < self.end
     }
-}
-
-/// Encodes handler records.
-pub fn encode_handlers(handlers: &[Handler]) -> Vec<u8> {
-    let mut out = alloc::vec![0; handlers.len() * RECORD];
-    write_handlers(handlers, &mut out);
-    out
 }
 
 /// Encodes handler records into `out`, which is that many records long.
@@ -64,16 +55,8 @@ impl<'a> HandlerTable<'a> {
         Ok(HandlerTable { bytes })
     }
 
-    pub fn empty() -> Self {
-        HandlerTable { bytes: &[] }
-    }
-
     pub fn len(&self) -> usize {
         self.bytes.len() / RECORD
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
     }
 
     pub fn get(&self, i: usize) -> Option<Handler> {

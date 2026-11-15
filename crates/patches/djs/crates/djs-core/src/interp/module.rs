@@ -287,28 +287,6 @@ fn init_evaluation_slots(heap: &mut Heap, r: Obj) {
     heap.set_object_slot(r, slot::PARENTS, Value::NULL);
 }
 
-/// Sets export `name` of synthetic module `m` (SetSyntheticModuleExport): importers see the
-/// new value. `false` if `m` is not synthetic or has no export `name`.
-pub(crate) fn set_synthetic_export(
-    heap: &mut Heap,
-    m: Obj,
-    name: &str,
-    v: Value,
-) -> Result<bool, HeapError> {
-    let body = heap.object_slot(m, slot::BODY).as_object();
-    if body.is_none_or(|b| heap.object_class(b) != ObjectClass::Record) {
-        return Ok(false);
-    }
-    let name = heap.atom_str(name)?;
-    let Some(&(_, e)) = meta(heap, m).local.iter().find(|x| x.0 == name) else {
-        return Ok(false);
-    };
-    let b = env_box(heap, m, e);
-    heap.arena_mut()
-        .set(b.as_internal().expect("a Box"), BoxCell::VALUE, v);
-    Ok(true)
-}
-
 /// Forgets the module with key `key` (a graph whose load failed).
 pub(crate) fn remove(heap: &mut Heap, key: &str) -> Result<(), HeapError> {
     if let Some(reg) = registry(heap) {

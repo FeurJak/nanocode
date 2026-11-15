@@ -48,22 +48,6 @@ pub enum StringifyError {
 }
 
 impl StringifyError {
-    /// The JS error constructor name and message, as QuickJS reports them. `None` for
-    /// [`StringifyError::Slow`].
-    pub fn js_error(self) -> Option<(&'static str, &'static str)> {
-        match self {
-            StringifyError::Slow => None,
-            StringifyError::Circular => Some(("TypeError", "circular reference")),
-            StringifyError::StackOverflow => {
-                Some(("RangeError", "Maximum call stack size exceeded"))
-            }
-            StringifyError::Heap(HeapError::OutOfMemory) => {
-                Some(("InternalError", "out of memory"))
-            }
-            StringifyError::Heap(_) => Some(("RangeError", "invalid string length")),
-            StringifyError::BigInt => Some(("TypeError", "Do not know how to serialize a BigInt")),
-        }
-    }
 }
 
 impl From<HeapError> for StringifyError {
@@ -72,17 +56,7 @@ impl From<HeapError> for StringifyError {
     }
 }
 
-/// The gap for a Number `space` argument: `min(10, ToIntegerOrInfinity(space))` spaces.
-pub fn gap_from_number(space: f64) -> Vec<u16> {
-    // `as` truncates toward zero and saturates; NaN becomes 0.
-    let n = (space.clamp(0.0, 10.0) as usize).min(10);
-    alloc::vec![b' ' as u16; n]
-}
 
-/// The gap for a String `space` argument: its first 10 code units.
-pub fn gap_from_units(space: &[u16]) -> &[u16] {
-    &space[..space.len().min(10)]
-}
 
 /// `JSON.stringify(value, undefined, space)` for plain data, with `gap` already computed
 /// from `space` (see [`gap_from_number`] / [`gap_from_units`]). `Ok(None)` is the

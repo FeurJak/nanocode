@@ -118,12 +118,6 @@ impl Heap {
         self.arena().get(slot, HandleSlot::VALUE)
     }
 
-    /// Replaces the value of a live handle.
-    pub fn set_handle(&mut self, h: Handle, v: Value) {
-        let slot = self.live_slot(h);
-        self.arena_mut().set(slot, HandleSlot::VALUE, v);
-    }
-
     /// Releases a handle. Its value is no longer a root. Dropping twice panics.
     pub fn drop_handle(&mut self, h: Handle) {
         let slot = self.live_slot(h);

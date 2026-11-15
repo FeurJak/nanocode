@@ -30,7 +30,7 @@ mod ryu;
 
 pub use format::{to_exponential, to_fixed, to_precision, to_string, to_string_radix};
 pub use parse::{
-    literal_digits_value, literal_value, narrow_units, parse_float, parse_int, string_to_number,
+    literal_digits_value, narrow_units, parse_float, parse_int, string_to_number,
 };
 
 /// Longest output of [`to_string`]: `-0.0000012345678901234567`.
@@ -48,6 +48,7 @@ pub struct NumStr<const N: usize> {
     len: usize,
     buf: [u8; N],
 }
+
 
 impl<const N: usize> NumStr<N> {
     fn new() -> Self {
@@ -80,14 +81,6 @@ impl<const N: usize> NumStr<N> {
     pub fn as_str(&self) -> &str {
         // Only ASCII is ever written.
         core::str::from_utf8(self.as_bytes()).unwrap_or("")
-    }
-
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
     }
 }
 

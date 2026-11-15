@@ -173,17 +173,6 @@ impl ImageDeps {
             .map(|d| (d, self.get(d), ours.get(d)))
     }
 
-    /// All components in one hash: what a session image's header records of its base.
-    pub fn hash(&self) -> u32 {
-        let mut h: u32 = 0x811c_9dc5;
-        for d in ImageDep::ALL {
-            for b in self.get(d).to_le_bytes() {
-                h = (h ^ b as u32).wrapping_mul(0x0100_0193);
-            }
-        }
-        h
-    }
-
     /// Writes the descriptor into a heap's roots cell.
     pub(crate) fn write(&self, heap: &mut crate::heap::Heap) {
         let a = heap.arena_mut();

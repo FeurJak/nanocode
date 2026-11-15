@@ -297,10 +297,6 @@ impl BigInt {
         }
     }
 
-    /// From a sign and limbs (normalizes).
-    pub fn from_parts(neg: bool, mag: &[u32]) -> BigInt {
-        BigInt::new(neg, mag.to_vec())
-    }
 
     pub fn from_u64(v: u64) -> BigInt {
         BigInt::new(false, vec![v as u32, (v >> 32) as u32])
@@ -449,11 +445,6 @@ impl BigInt {
         Ok(BigInt::new(neg, result.mag))
     }
 
-    /// The work of `pow` in fuel units, estimated from the result size.
-    pub fn pow_cost(&self, e: u64) -> u64 {
-        let n = (self.bits().saturating_mul(e) / 32) as usize + 1;
-        mul_cost(n, n) / 2
-    }
 
     /// `!self` = `-self - 1`.
     pub fn not(&self) -> Result<BigInt> {

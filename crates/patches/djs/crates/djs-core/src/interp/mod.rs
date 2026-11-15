@@ -19,6 +19,9 @@ pub(crate) mod run;
 pub mod state;
 
 pub use frame::Continuation;
-pub use realm::{ErrorKind, Intrinsic, error_stack_slot, error_summary, intrinsic, new_error};
-pub use run::{ExecOptions, STACK_OVERFLOW, Status};
+pub use realm::ErrorKind;
+pub use realm::{Intrinsic, error_stack_slot, error_summary, intrinsic, new_error};
+pub use run::ExecOptions;
+pub use run::STACK_OVERFLOW;
+pub use run::Status;
 pub use state::RunState;

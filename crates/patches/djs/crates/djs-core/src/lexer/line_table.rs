@@ -56,11 +56,6 @@ impl LineTable {
         self.ascii = ascii;
     }
 
-    /// The number of lines (at least 1).
-    pub fn line_count(&self) -> u32 {
-        self.starts.len() as u32
-    }
-
     /// The 1-based line containing byte offset `pos`. Offsets past the end map to the
     /// last line.
     pub fn line(&self, pos: u32) -> u32 {

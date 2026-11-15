@@ -32,8 +32,8 @@ use crate::interp::realm::{self, Intrinsic, define_hidden, intrinsic_obj};
 use crate::interp::run::{self, Exec};
 use crate::interp::{Continuation, state};
 pub use crate::interp::{ErrorKind, ExecOptions, RunState, Status};
-use crate::value::{Obj, Str, Value};
-pub use compat::{COMPAT_VERSION, FEATURES, IMAGE_DEPS, ImageDep, ImageDeps, RECORDS_HASH};
+use crate::value::{Obj, Value};
+pub use compat::{IMAGE_DEPS, ImageDep, ImageDeps};
 pub use module::{IMPORT_FN_ID, ModuleKind, ModuleLoader, ModuleSource};
 
 /// `HostCall::FLAGS`: returned by `Vm::new_host_calls` already.
@@ -275,16 +275,6 @@ impl Vm {
         Vm::over(Heap::from_bytes_trusted(bytes, opts.memory_limit)?, opts)
     }
 
-    /// Replaces this VM's state by an image this process made, as
-    /// [`Vm::from_bytes_trusted`] would restore it, but keeps what the VM holds outside
-    /// its heap (its options, and what it derived from the base once): for a host that
-    /// dumps many images with one VM (a wasm host's dump module, D2701).
-    pub fn replace_image(&mut self, bytes: Vec<u8>) -> Result<(), LoadError> {
-        let fresh = Vm::from_bytes_trusted(bytes, self.opts)?;
-        self.heap = fresh.heap;
-        Ok(())
-    }
-
     /// [`Vm::replace_image`] from a borrowed image, copied into this VM's own arena
     /// buffer: one copy and, once the buffer is big enough, no allocation (D3182). For an
     /// embedder that resets a VM to the same snapshot after every call (djs-embed). On an
@@ -393,18 +383,6 @@ impl Vm {
         Ok(())
     }
 
-    /// A new VM from a base snapshot: the image of an idle VM with its prelude installed,
-    /// made at build time (`djs-prelude`, D1321). Creating a VM is then a copy, with no
-    /// compile. The image is trusted (its cells are not verified: it was verified when it
-    /// was built), but its header and dependency descriptor are checked.
-    ///
-    /// What the base holds: the realm (global object, intrinsics, builtins), the atoms
-    /// and the compiled prelude. Nothing per VM: no handles, no host functions, no
-    /// pending calls. Per-VM state is set up after the copy (see `after_copy`).
-    pub fn from_base(base: &[u8], opts: VmOptions) -> Result<Vm, LoadError> {
-        Vm::from_base_reserved(base, opts, 0)
-    }
-
     /// [`Vm::from_base`] with the arena capacity a heap of `live` bytes would get (its
     /// next GC threshold plus the slack): for an embedder that knows how big the heap
     /// gets, such as pi's cold start, which runs its prelude next (D2043). Growing later
@@ -461,11 +439,6 @@ impl Vm {
         self.heap.set_frozen_builtins(self.opts.frozen_builtins);
         self.heap.force_prefix_barrier(self.opts.prefix_barrier);
         Ok(())
-    }
-
-    /// Whether the builtins are frozen ([`VmOptions::frozen_builtins`], D2304).
-    pub fn frozen_builtins(&self) -> bool {
-        self.heap.frozen_builtins()
     }
 
     /// Sets what WeakRef and FinalizationRegistry do (D1680); set it before running code.
@@ -535,10 +508,6 @@ impl Vm {
         &mut self.heap
     }
 
-    pub fn options(&self) -> VmOptions {
-        self.opts
-    }
-
     pub fn set_options(&mut self, opts: VmOptions) {
         self.opts = opts;
     }
@@ -550,13 +519,6 @@ impl Vm {
     /// The global object.
     pub fn global(&self) -> Obj {
         intrinsic_obj(&self.heap, Intrinsic::Global)
-    }
-
-    /// The global lexical record: Script-level `let`/`const`/`class` bindings as data
-    /// properties of a hidden object (D1220). For tools that read the heap (the REPL's
-    /// completion); an uninitialized binding holds `Value::UNINITIALIZED`.
-    pub fn global_lexical(&self) -> Obj {
-        crate::interp::realm::global_lex(&self.heap)
     }
 
     /// A closure for a top-level `FuncTemplate` (one without captures).
@@ -648,15 +610,6 @@ impl Vm {
         out
     }
 
-    /// Every async host call that is not resolved yet, oldest first (after a restore,
-    /// the embedder re-issues or replays these).
-    pub fn pending_host_calls(&self) -> Vec<u32> {
-        self.async_calls()
-            .into_iter()
-            .map(|c| self.heap.arena().get(c, HostCall::ID))
-            .collect()
-    }
-
     /// The `HostCall` cells of the pending async calls.
     fn async_calls(&self) -> Vec<u32> {
         let table = state::host_calls(&self.heap);
@@ -670,12 +623,6 @@ impl Vm {
                     .is_some()
             })
             .collect()
-    }
-
-    /// A new ordinary object.
-    pub fn new_object(&mut self) -> Result<Obj, HeapError> {
-        let proto = intrinsic_obj(&self.heap, Intrinsic::ObjectProto);
-        self.heap.new_object(Some(proto))
     }
 
     /// Defines a property of an object the way builtins are defined (writable,
@@ -727,24 +674,10 @@ impl Vm {
         );
     }
 
-    /// Reseeds `Math.random` (see `VmOptions::random_seed`). The state lives in the
-    /// heap, so a snapshot continues the same sequence. The key of the VM's string hash
-    /// follows the seed (D2433): changing it rehashes the VM's own atoms and Map/Set
-    /// tables, which costs time and, against a reference image, snapshot size.
-    pub fn set_random_seed(&mut self, seed: u64) {
-        crate::builtins::number::set_seed(&mut self.heap, seed);
-    }
-
     /// Reseeds `Math.random` alone, keeping the hash key: for an embedder that keyed the
     /// VM once (pi keys its prelude image and reseeds every session from it, D2433).
     pub fn set_math_random_seed(&mut self, seed: u64) {
         self.set_math_random(seed, false);
-    }
-
-    /// Restores a dumped run's `Math.random` state (a plain dump's `$djs.seed(lo, hi)`):
-    /// as a state that ran, which the next dump writes again (D2837).
-    pub fn restore_math_random(&mut self, state: u64) {
-        self.set_math_random(state, true);
     }
 
     /// [`Vm::set_math_random_seed`], or with `restore` [`Vm::restore_math_random`].
@@ -754,15 +687,6 @@ impl Vm {
 
     pub fn new_error(&mut self, kind: ErrorKind, message: &str) -> Result<Value, HeapError> {
         realm::new_error(&mut self.heap, kind, message)
-    }
-
-    /// A one-byte string of `len` zero units for the embedder to fill in place (0162,
-    /// D2551): its code units are the `len` bytes at arena offset
-    /// [`Heap::str_data_offset`], one Latin-1 unit per byte, and the embedder fills them
-    /// before anything else allocates (which may move the arena). Saves a large host string
-    /// the staging copy and the transcode.
-    pub fn reserve_string(&mut self, len: u32) -> Result<Str, HeapError> {
-        self.heap.alloc_str_uninit(len, false)
     }
 
     /// Decodes a wire buffer (docs/wire.md) into a value of this VM's realm: objects and
@@ -777,17 +701,6 @@ impl Vm {
             ..Default::default()
         };
         crate::wire::decode(&mut self.heap, bytes, &opts)
-    }
-
-    /// Encodes plain data as a wire buffer of at most `max_bytes` (`wire::encode`): reads
-    /// the heap, never runs JS.
-    #[cfg(feature = "embed")]
-    pub fn encode_wire(
-        &self,
-        v: Value,
-        max_bytes: usize,
-    ) -> Result<Vec<u8>, crate::wire::EncodeError> {
-        crate::wire::encode(&self.heap, v, max_bytes)
     }
 
     /// Starts a call of `f`: pushes the entry frame (or parks on a host function). `run`
@@ -899,15 +812,6 @@ impl Vm {
         (self.after_run(st), used)
     }
 
-    /// The stack trace of the current call while it is suspended (out of fuel or parked
-    /// on a host call), in the format of `Error.prototype.stack`; empty without frames.
-    /// For debuggers (0064).
-    pub fn backtrace(&mut self) -> String {
-        let ex = Exec::new(&mut self.heap, self.opts.exec);
-        // Not the program's Error.stackTraceLimit: a debugger's view.
-        ex.stack_trace(ex.pc(), run::STACK_TRACE_LIMIT)
-    }
-
     /// The pending host call `call_id` (parked or async).
     pub fn host_call(&self, call_id: u32) -> Option<HostCallInfo> {
         let c = run::host_call_cell(&self.heap, call_id)?;
@@ -924,81 +828,6 @@ impl Vm {
         })
     }
 
-    /// Continues an open call of a plain dump (D2890): while parked on the sync host call
-    /// `parked`, a `resume(id, name, args, state)` hook the dump calls, opens async host
-    /// call `id` of host function `fn_id` (the host's for `name`) with the elements of
-    /// `args`, and returns its promise from the parked call. The call keeps its id, so a
-    /// later dump writes it as it was; the next new call gets a higher one. It is not
-    /// reported by [`Vm::new_host_calls`]: the host has it already. `Err`: the reason, for
-    /// the host to throw at the parked call (only out of memory comes after the parked
-    /// call returned).
-    pub fn open_host_call(&mut self, parked: u32, fn_id: u32) -> Result<(), &'static str> {
-        // Plain code over closures and iterator adapters: this is in the shipped module,
-        // under the size budget (D020).
-        let i = state::interp(&self.heap);
-        if self.state() != RunState::HostCall
-            || self.heap.arena().get(i, Interp::HOST_CALL) != parked
-        {
-            return Err("not parked on that call");
-        }
-        let c = run::host_call_cell(&self.heap, parked).ok_or("not parked on that call")?;
-        let args: Ref = self.heap.arena().get(c, HostCall::ARGS);
-        let argc = self.heap.arena().get(args.0, ValueArray::LEN);
-        let arg = |n: u32| {
-            if n < argc {
-                self.heap.value_array_get(args.0, n)
-            } else {
-                Value::UNDEFINED
-            }
-        };
-        let (id, list) = (arg(0).as_int(), arg(2).as_object());
-        let Some(id) = id.filter(|&n| n > 0).map(|n| n as u32) else {
-            return Err("resume: not a call id");
-        };
-        let Some(a) =
-            list.filter(|&o| self.heap.object_class(o) == crate::heap::ObjectClass::Array)
-        else {
-            return Err("resume: the arguments are not an array");
-        };
-        // (Sync calls take ids from the same counter: `parked` itself may have `id`.)
-        if id != parked && run::host_call_cell(&self.heap, id).is_some() {
-            return Err("resume: the call is open already");
-        }
-        const OOM: &str = "out of memory";
-        let n = self.heap.array_length(a);
-        let arr = self.heap.alloc_value_array(n).map_err(|_| OOM)?;
-        for k in 0..n {
-            let v = self
-                .heap
-                .get_element_fast(a, k)
-                .ok_or("resume: the arguments are an array with holes")?;
-            self.heap.value_array_set(arr, k, v);
-        }
-        self.heap.arena_mut().set(arr, ValueArray::LEN, n);
-        let proto = intrinsic_obj(&self.heap, Intrinsic::PromiseProto);
-        let p = Value::object(run::promise::alloc(&mut self.heap, Some(proto)).map_err(|_| OOM)?);
-        // The parked call returns first, so that its id is free again. Out of memory
-        // after it leaves the promise pending forever: the host gives up the load.
-        self.resolve_host_call(parked, Ok(p)).map_err(|_| OOM)?;
-        run::add_loaded_host_call(&mut self.heap, id, fn_id, arr, p).map_err(|_| OOM)?;
-        let c = run::host_call_cell(&self.heap, id).ok_or(OOM)?;
-        let flags = self.heap.arena().get(c, HostCall::FLAGS);
-        self.heap
-            .arena_mut()
-            .set(c, HostCall::FLAGS, flags | HOST_CALL_REPORTED);
-        Ok(())
-    }
-
-    /// Sets the id the next host call gets (a plain dump's `$djs.seed(lo, hi, next)`,
-    /// D2897): the host restores the dumped VM's counter once the dump has loaded, since
-    /// the hooks, sync calls, took ids of their own. 0 is never an id.
-    pub fn set_next_call_id(&mut self, id: u32) {
-        let i = state::interp(&self.heap);
-        self.heap
-            .arena_mut()
-            .set(i, Interp::NEXT_CALL_ID, id.max(1));
-    }
-
     /// Completes the host call `call_id` with a value (`Ok`) or an exception (`Err`).
     /// The call the VM is parked on returns or throws at the call; `run` continues
     /// afterwards. An async call (D1374) goes into the host inbox (D1670), in any VM
@@ -1012,19 +841,6 @@ impl Vm {
         result: Result<Value, Value>,
     ) -> Result<(), VmError> {
         self.complete_host_call(call_id, result, None)
-    }
-
-    /// [`Vm::resolve_host_call`] with the clock `Date.now()` reads from when the result is
-    /// applied (ms since the epoch, as [`Vm::set_now`]): for an async call, when `run`
-    /// takes it from the inbox; for the parked call, now. Lets a host give every result
-    /// its own virtual time (a replay) without running the VM between results.
-    pub fn resolve_host_call_at(
-        &mut self,
-        call_id: u32,
-        result: Result<Value, Value>,
-        now_ms: f64,
-    ) -> Result<(), VmError> {
-        self.complete_host_call(call_id, result, Some(now_ms))
     }
 
     fn complete_host_call(
@@ -1333,20 +1149,6 @@ impl Vm {
         .map(|_| ())
     }
 
-    /// A hash of the VM's state that does not depend on when it last collected (D1730):
-    /// FNV-1a (64 bits) over the image a collection would leave. Computed on a copy, so
-    /// the VM itself is unchanged and a check never perturbs the run it checks. Two VMs
-    /// with the same graph (the same script, inputs and engine build) have the same hash,
-    /// whatever their fuel slices, snapshots or collection points were (D1090, D1601).
-    /// Needs memory for the copy and its collection (about three times the arena).
-    pub fn canonical_hash(&self) -> Result<u64, HeapError> {
-        let limit = (self.heap.bytes().len()).max(self.opts.memory_limit);
-        let mut copy = Heap::from_bytes_trusted(self.heap.bytes().to_vec(), limit)
-            .map_err(|_| HeapError::OutOfMemory)?;
-        Self::collect_heap(&mut copy, Collection::Canonical)?;
-        Ok(fnv64(copy.bytes()))
-    }
-
     /// Queues a cleanup job for every FinalizationRegistry with cells whose targets
     /// died in a collection (HostEnqueueFinalizationRegistryCleanupJob); the number of
     /// jobs. They run at the next `run`. Collections do this themselves unless
@@ -1373,74 +1175,5 @@ fn tidy_stack(heap: &mut Heap, shrink: bool) {
     let _ = state::move_stack(heap, sp, cap);
 }
 
-/// The `hash` of a script's `$djs.source(name, hash)` (D2882): FNV-1a of its source text,
-/// its parameter names and its compile options, folded to 32 bits, 8 hex digits (D2839:
-/// enough to tell a host's scripts apart; the name stays). The host's script must have
-/// the same, or `Vm::source_function` refuses it.
-pub fn script_hash(source: &str, params: &str, bits: u32) -> String {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    let bits = cat!(bits);
-    for b in params
-        .bytes()
-        .chain([0])
-        .chain(bits.bytes())
-        .chain([0])
-        .chain(source.bytes())
-    {
-        h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
-    }
-    let h = (h ^ (h >> 32)) as u32;
-    let mut s = String::new();
-    for i in (0..8).rev() {
-        let d = (h >> (i * 4)) & 0xf;
-        s.push(char::from_digit(d, 16).unwrap_or('0'));
-    }
-    s
-}
-
-/// FNV-1a, 64 bits.
-fn fnv64(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in bytes {
-        h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
-    }
-    h
-}
-
 impl Vm {
-    /// A plain dump's `$djs.source(name, hash)` (D2882): the host's script `name`, `src`
-    /// compiled with the options it ran with, as the codemode body function the dump's
-    /// continuations name as their origin. Refused (for the host to throw) when it is not
-    /// the script the dump refers to: another text, parameters or options.
-    pub fn source_function(
-        &mut self,
-        src: &[u8],
-        opts: &crate::compiler::CompileOptions<'_>,
-        hash: &str,
-    ) -> Result<Value, String> {
-        let f = self
-            .compile(src, opts)
-            .map_err(|e| cat!("source: the script does not compile: ", e.message))?;
-        let h = &self.heap;
-        let t = f.as_object().map(|o| h.closure_template(o));
-        let script = t.and_then(|t| crate::bytecode::template::debug_info(h, t).script.get());
-        let Some(script) = script else {
-            return Err(String::from("source: not a script"));
-        };
-        let a = h.arena();
-        let text = |r: Ref| {
-            r.get()
-                .map(|s| h.str_to_string(crate::value::Str(s)))
-                .unwrap_or_default()
-        };
-        let source = crate::bytecode::template::script_text(h, script).unwrap_or_default();
-        let params = text(a.get::<Ref>(script, crate::heap::cells::Script::PARAMS));
-        let bits = a.get::<u32>(script, crate::heap::cells::Script::OPTIONS);
-        if script_hash(&source, &params, bits) != hash {
-            return Err(String::from(
-                "source: the host's script is not the one the dump refers to (another text, parameters or options)",
-            ));
-        }
-        Ok(f)
-    }
 }

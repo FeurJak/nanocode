@@ -550,11 +550,6 @@ impl Heap {
         }
     }
 
-    /// Whether the prefix write barrier is armed.
-    pub fn prefix_barrier_armed(&self) -> bool {
-        self.arena.trap_end() != 0
-    }
-
     /// Debug builds with the barrier armed: panics if any byte of the prefix (past the
     /// roots cell) differs from what it was when the barrier was armed (D2065).
     pub fn check_prefix(&self) {

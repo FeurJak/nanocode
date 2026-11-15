@@ -28,13 +28,6 @@ pub const MODULES: bool = EMBED;
 #[cfg(all(feature = "embed", not(feature = "full")))]
 compile_error!("djs-core's `embed` feature needs `full` (D3175): enable both, or neither");
 
-/// Whether this build has the Unicode tables (`\p{..}` in regular expressions and full
-/// normalization: the `unicode` feature, D2411).
-pub const UNICODE: bool = cfg!(all(
-    feature = "regexp-unicode-props",
-    feature = "unicode-normalization"
-));
-
 pub(crate) use buf::PushOut;
 
 pub mod bigint;

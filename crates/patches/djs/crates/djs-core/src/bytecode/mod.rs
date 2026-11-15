@@ -26,18 +26,16 @@ pub mod stack;
 pub mod template;
 
 
-pub use code::{Code, CodeBuf, CodeError, Final, FinishScratch, Label, P1, Phase1, Phase1Code};
-pub use decode::{DecodeError, Insn, insns};
-pub use disasm::{DisasmContext, disasm};
-pub use handlers::{Handler, HandlerTable, encode_handlers};
-pub use imm::ImmKind;
-pub use lines::{LineTableBuilder, line_entries, lookup_line};
+pub use code::{Code, CodeBuf, FinishScratch, Label, Phase1, Phase1Code};
+pub use decode::Insn;
+pub use handlers::{Handler, HandlerTable};
+pub use lines::{LineTableBuilder, lookup_line};
 pub use ops::{
-    CostClass, OP_COUNT, OP_NAMES, OPS, OPS_HASH, Op, OpInfo, build_hash, capture_desc, flags,
+      OP_NAMES, OPS, OPS_HASH, Op, build_hash, capture_desc, flags,
     global_decls, special,
 };
-pub use stack::{StackError, StackScratch, UNKNOWN_DEPTH, check_stack, stack_depths};
+pub use stack::{StackScratch, UNKNOWN_DEPTH, stack_depths};
 pub use template::{
-    TemplateError, TemplateParts, alloc_script, alloc_template, alloc_template_in, bytes_of,
+    TemplateError, TemplateParts, alloc_script, alloc_template_in,
     func_flags,
 };

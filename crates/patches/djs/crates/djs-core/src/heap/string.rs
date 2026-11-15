@@ -1456,16 +1456,6 @@ impl Heap {
         }
     }
 
-    /// Whether `s` has the same code units as the Rust string `t`.
-    pub fn str_eq_str(&self, s: Str, t: &str) -> bool {
-        if let Some(StrView::Latin1(b)) = self.str_view(s)
-            && is_ascii(t.as_bytes())
-        {
-            return b == t.as_bytes();
-        }
-        self.str_units(s).eq(t.encode_utf16())
-    }
-
     /// Converts to a Rust string, replacing lone surrogates with U+FFFD. For tests,
     /// debugging and host output.
     pub fn str_to_string(&self, s: Str) -> String {

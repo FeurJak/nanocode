@@ -45,7 +45,6 @@ mod using;
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::string::String;
-use alloc::vec::Vec;
 use core::fmt;
 
 use crate::heap::{Heap, HeapError, Ref};
@@ -123,18 +122,6 @@ impl<'a> CompileOptions<'a> {
         }
     }
 
-    pub fn async_body(filename: &'a str, params: &'a [&'a str]) -> Self {
-        CompileOptions {
-            goal: Goal::AsyncBody,
-            filename,
-            params,
-            privileged: false,
-            typescript: false,
-            experimental_decorators: false,
-            emit_decorator_metadata: false,
-        }
-    }
-
     /// The options that decide the code, as a Script cell keeps them (`Script::OPTIONS`):
     /// the goal in the low two bits, then TypeScript, legacy decorators, metadata (also
     /// what a dump's `$djs.source` hash counts, D2882).
@@ -152,14 +139,6 @@ impl<'a> CompileOptions<'a> {
             | u32::from(self.emit_decorator_metadata) << 4
             | u32::from(self.privileged) << 5;
         bits
-    }
-
-    /// The same options with the TypeScript grammar.
-    pub fn ts(self) -> Self {
-        CompileOptions {
-            typescript: true,
-            ..self
-        }
     }
 
     /// A privileged Script (the prelude, D1172).
@@ -317,8 +296,6 @@ pub fn compile_module(
     }
 }
 
-pub use parser::{ClassSpan, ClassSpanKind};
-
 /// The kinds of CreateDynamicFunction (20.2.1.1.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DynamicKind {
@@ -365,28 +342,6 @@ pub fn compile_dynamic_function(
         p.compile_dynamic(flavor, params_close)
     })
     .map_err(|e| error_at(src, e))
-}
-
-/// TypeScript erasure for the strip-types oracle (TESTING.md): compiles `src` with the
-/// TypeScript grammar and returns it with every erased type range blanked (spaces;
-/// line breaks stay, so positions do not move). The heap only holds the compiled
-/// template, which the caller drops.
-pub fn strip_types(
-    heap: &mut Heap,
-    src: &[u8],
-    opts: &CompileOptions<'_>,
-) -> Result<Vec<u8>, CompileError> {
-    let opts = CompileOptions {
-        typescript: true,
-        ..*opts
-    };
-    let result = parse(heap, src, &opts, |mut p| {
-        p.erased = Some(Vec::new());
-        p.strip = true;
-        p.compile()
-    });
-    let (_, ranges, _) = result.map_err(|e| error_at(src, e))?;
-    Ok(ts::blank(src, ranges.unwrap_or_default()))
 }
 
 /// Module code compiles with [`compile_module`] only: it needs its metadata.

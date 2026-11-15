@@ -665,11 +665,6 @@ pub fn intrinsic_name(id: u16) -> &'static str {
         .unwrap_or("?")
 }
 
-/// All names, by id (from the run-time tables).
-pub fn names() -> impl Iterator<Item = &'static str> {
-    (0..COUNT as u16).map(intrinsic_name)
-}
-
 /// The id of the intrinsic named by a string literal, computed at compile time (an
 /// unknown name fails the build): for the compiler, which emits calls to intrinsics by
 /// name, without a search of the names per emitted call (0225).

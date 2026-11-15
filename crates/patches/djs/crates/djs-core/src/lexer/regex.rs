@@ -2,9 +2,7 @@
 //! terminators, escapes and classes, and the flags. The regex compiler validates the
 //! pattern itself.
 
-use super::{
-    Kw, LexError, Lexer, MSG_UTF8, Span, Token, TokenKind, decode_utf8, is_ascii_ident_part,
-};
+use super::{Kw, LexError, Lexer, MSG_UTF8, Token, TokenKind, decode_utf8, is_ascii_ident_part};
 use crate::unicode;
 
 const MSG_EOF: &str = "unexpected end of regexp";
@@ -118,22 +116,5 @@ impl<'a> Lexer<'a> {
             Some((_, len)) => Ok(len),
             None => Err(LexError::new(p, MSG_UTF8)),
         }
-    }
-
-    /// The body (between the slashes) and the flags of a [`TokenKind::Regex`] token.
-    pub fn regex_parts(&self, tok: &Token) -> (Span, Span) {
-        debug_assert_eq!(tok.kind, TokenKind::Regex);
-        // Flags never contain `/`, so the last `/` closes the body.
-        let text = self.text(tok);
-        let close = text.iter().rposition(|&b| b == b'/').unwrap_or(0) as u32;
-        let body = Span {
-            start: tok.start + 1,
-            end: (tok.start + close).max(tok.start + 1),
-        };
-        let flags = Span {
-            start: tok.start + close + 1,
-            end: tok.end,
-        };
-        (body, flags)
     }
 }

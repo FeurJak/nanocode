@@ -32,7 +32,7 @@ use core::fmt;
 use crate::unicode;
 
 pub use line_table::{LineCursor, LineTable};
-pub use number::{NumberBase, NumberLiteral, strip_separators};
+pub use number::strip_separators;
 pub use token::{Kw, Span, Token, TokenKind};
 
 /// A lexical error: a byte position and a message (QuickJS wording where it has one).
@@ -86,19 +86,8 @@ impl<'a> Lexer<'a> {
         Ok(lexer)
     }
 
-    pub fn source(&self) -> &'a [u8] {
-        self.src
-    }
 
-    /// Moves to `pos` (a token start): a lazy function's parameters (D2990).
-    pub fn seek(&mut self, pos: u32) {
-        self.pos = pos;
-    }
 
-    /// The position where the next token scan starts (just after the last token).
-    pub fn pos(&self) -> u32 {
-        self.pos
-    }
 
     /// The source text of a token.
     pub fn text(&self, tok: &Token) -> &'a [u8] {

@@ -4,8 +4,6 @@
 //! inline small form. JS equality compares the values ([`Heap::bigint_eq`]), never the
 //! cell offsets.
 
-use core::cmp::Ordering;
-
 use super::cells::{BigInt as Cell, flags};
 use super::{CellKind, Heap, HeapError};
 use crate::bigint::BigInt;
@@ -80,11 +78,6 @@ impl Heap {
             || (self.bigint_neg(a) == self.bigint_neg(b)
                 && self.bigint_len(a) == self.bigint_len(b)
                 && self.bigint_limbs(a).eq(self.bigint_limbs(b)))
-    }
-
-    /// Compares two BigInts.
-    pub fn bigint_cmp(&self, a: Value, b: Value) -> Ordering {
-        self.bigint(a).cmp(&self.bigint(b))
     }
 
     /// A hash of a BigInt's value.

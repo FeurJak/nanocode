@@ -122,22 +122,6 @@ pub struct Phase1Code {
     pub label_count: u32,
 }
 
-impl Phase1Code {
-    /// The instructions encoded as bytes (label ids in the jumps), for listings and
-    /// tests.
-    pub fn bytes(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        for (i, p) in self.insns.iter().enumerate() {
-            let insn = p.insn(i as u32);
-            out.push(insn.op as u8);
-            for (i, &k) in insn.op.info().imms.iter().enumerate() {
-                out.extend_from_slice(&insn.imm(i).to_le_bytes()[..k.width() as usize]);
-            }
-        }
-        out
-    }
-}
-
 /// A bytecode buffer with typed emitters.
 pub struct CodeBuf<M: LabelMode = Final> {
     /// Final mode: the code.
@@ -169,25 +153,7 @@ impl<M: LabelMode> Default for CodeBuf<M> {
     }
 }
 
-impl CodeBuf<Final> {
-    /// An empty buffer for final code.
-    pub fn new() -> Self {
-        Self::make(0)
-    }
-
-    /// A final-code buffer with labels `0..count` already created: the re-emit reuses
-    /// the label ids of the phase-1 code.
-    pub fn with_labels(count: u32) -> Self {
-        Self::make(count)
-    }
-}
-
 impl CodeBuf<Phase1> {
-    /// An empty buffer for phase-1 code.
-    pub fn phase1() -> Self {
-        Self::phase1_from(Self::make(0))
-    }
-
     pub fn phase1_from(mut b: Self) -> Self {
         b.code.clear();
         b.insns.clear();
@@ -202,19 +168,6 @@ impl CodeBuf<Phase1> {
 }
 
 impl<M: LabelMode> CodeBuf<M> {
-    fn make(count: u32) -> Self {
-        let init = if M::SYMBOLIC { 0 } else { UNPLACED };
-        CodeBuf {
-            code: Vec::new(),
-            insns: Vec::new(),
-            labels: alloc::vec![init; count as usize],
-            fixups: Vec::new(),
-            last: None,
-            error: None,
-            _mode: PhantomData,
-        }
-    }
-
     pub fn new_label(&mut self) -> Label {
         let l = Label(self.labels.len() as u32);
         self.labels.push(if M::SYMBOLIC { 0 } else { UNPLACED });
@@ -229,10 +182,6 @@ impl<M: LabelMode> CodeBuf<M> {
         } else {
             self.code.reserve(bytes);
         }
-    }
-
-    pub fn label_count(&self) -> u32 {
-        self.labels.len() as u32
     }
 
     /// Places `l` at the current position. Nothing emitted before a label can be removed
@@ -264,15 +213,6 @@ impl<M: LabelMode> CodeBuf<M> {
         } else {
             self.code.len() as u32
         }
-    }
-
-    /// The final code so far (empty in phase-1 mode).
-    pub fn code(&self) -> &[u8] {
-        &self.code
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.pos() == 0
     }
 
     /// The last instruction, unless a label was placed after it.
@@ -408,14 +348,6 @@ impl CodeBuf<Final> {
         self.put(op, a, 0);
     }
 
-    /// Resolves the jump targets, shortens the jumps whose offset fits a byte
-    /// (D2443), and returns the code.
-    pub fn finish(mut self) -> Result<Code, CodeError> {
-        let mut code = Code::default();
-        self.finish_in(&mut code, &mut FinishScratch::default())?;
-        Ok(code)
-    }
-
     /// [`CodeBuf::finish`] into `done`, whose allocations and those of `scratch` are
     /// used again (a unit's functions were nine allocations each here). The buffer is
     /// left for [`CodeBuf::reset`].
@@ -540,11 +472,6 @@ impl CodeBuf<Phase1> {
         self.insns.copy_within(start..mid, start + moved.len());
         self.insns[start..start + moved.len()].copy_from_slice(&moved);
         self.last = None;
-    }
-
-    /// Checks that every label used by a jump was placed and returns the code.
-    pub fn finish(mut self) -> Result<Phase1Code, CodeError> {
-        self.take_finished()
     }
 
     pub fn take_finished(&mut self) -> Result<Phase1Code, CodeError> {

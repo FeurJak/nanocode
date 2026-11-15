@@ -403,11 +403,6 @@ impl<'h> Exec<'h> {
             .map_or(0, |start| start.saturating_sub(self.fuel).max(0) as u64)
     }
 
-    /// The current pc (for `Vm::backtrace`).
-    pub(crate) fn pc(&self) -> u32 {
-        self.pc
-    }
-
     /// Writes the registers to the `Interp` cell.
     pub(crate) fn flush(&mut self) {
         let i = state::interp(self.heap);
@@ -4046,29 +4041,6 @@ fn add_host_call(
     heap.value_array_set(table2, len, Value::internal(c));
     heap.arena_mut().set(table2, ValueArray::LEN, len + 1);
     Ok(id)
-}
-
-/// Adds an async host call with the embedder's `id` and `promise` (an open call of a
-/// dump, 0171, D2890). The id counter stays as it is, or moves past `id`.
-pub(crate) fn add_loaded_host_call(
-    heap: &mut Heap,
-    id: u32,
-    fn_id: u32,
-    args: u32,
-    promise: Value,
-) -> Result<(), HeapError> {
-    let i = state::interp(heap);
-    let next = heap.arena().get(i, Interp::NEXT_CALL_ID);
-    heap.arena_mut().set(i, Interp::NEXT_CALL_ID, id);
-    let r = add_host_call(heap, fn_id, args, Value::UNDEFINED, promise);
-    let i = state::interp(heap);
-    let next = if next > id {
-        next
-    } else {
-        id.wrapping_add(1).max(1)
-    };
-    heap.arena_mut().set(i, Interp::NEXT_CALL_ID, next);
-    r.map(|_| ())
 }
 
 /// Whether an async host call is pending (its promise unsettled), D1374.

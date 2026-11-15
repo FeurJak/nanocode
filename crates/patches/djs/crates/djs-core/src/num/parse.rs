@@ -582,17 +582,6 @@ pub fn parse_int<T: CodeUnit>(s: &[T], radix: i32) -> f64 {
     apply_sign(neg, v)
 }
 
-/// The value of a numeric literal: decimal (`1_000.5e-3`, `.5`, `5.`), `0x`, `0o` or `0b`,
-/// with `_` separators. The lexer has validated the syntax; this only computes the value
-/// (correctly rounded). Legacy octal (`017`) and `08` are not valid in strict code and are
-/// read as decimal. Returns NaN for input that is not a numeric literal.
-pub fn literal_value(s: &[u8]) -> f64 {
-    match radix_prefix(s, true) {
-        Some(radix) => literal_digits_value(radix, &s[2..]),
-        None => literal_digits_value(10, s),
-    }
-}
-
 /// [`literal_value`] for a literal already split by the lexer (`lexer::NumberLiteral`):
 /// `radix` is 10, 16, 8 or 2 and `digits` excludes the `0x`/`0o`/`0b` prefix. Decimal digits
 /// include the fraction and exponent.

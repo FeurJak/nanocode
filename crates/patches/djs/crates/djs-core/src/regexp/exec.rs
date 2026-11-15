@@ -17,7 +17,6 @@ use crate::PushOut;
 
 use alloc::vec::Vec;
 
-use super::Program;
 use super::charset::{canonicalize, is_line_terminator, is_word_char};
 use super::compiler::*;
 
@@ -135,10 +134,6 @@ impl Input<'_> {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
     fn unit(&self, i: usize) -> u32 {
         match self {
             Input::Latin1(s) => s[i] as u32,
@@ -174,38 +169,10 @@ impl Caps<'_> {
         self.slots.len() / 2
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.slots.is_empty()
-    }
-
     /// The `(start, end)` of group `i`, or `None` if it did not participate.
     pub fn get(&self, i: usize) -> Option<(usize, usize)> {
         let (s, e) = (self.slots[2 * i], self.slots[2 * i + 1]);
         (s != UNSET && e != UNSET).then_some((s as usize, e as usize))
-    }
-}
-
-/// Owned capture positions ([`exec`]'s result).
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Captures {
-    slots: Vec<u32>,
-}
-
-impl Captures {
-    pub fn caps(&self) -> Caps<'_> {
-        Caps { slots: &self.slots }
-    }
-
-    pub fn len(&self) -> usize {
-        self.caps().len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.slots.is_empty()
-    }
-
-    pub fn get(&self, i: usize) -> Option<(usize, usize)> {
-        self.caps().get(i)
     }
 }
 
@@ -217,15 +184,6 @@ pub enum Outcome {
     NoMatch,
     /// The fuel ran out; [`resume_in`] continues (with the same program and input).
     OutOfFuel,
-    /// The backtrack stack would exceed [`ExecLimits::max_stack`].
-    StackOverflow,
-}
-
-pub enum ExecResult {
-    Match(Captures),
-    NoMatch,
-    /// The fuel ran out; pass the state to [`resume`] (with the same program and input).
-    OutOfFuel(ExecState),
     /// The backtrack stack would exceed [`ExecLimits::max_stack`].
     StackOverflow,
 }
@@ -297,66 +255,6 @@ impl ExecState {
             nslots,
             mem,
         })
-    }
-}
-
-/// The program's words as byte quads (for [`exec`], which takes a [`Program`]).
-fn quads(prog: &Program) -> Vec<[u8; 4]> {
-    prog.words().iter().map(|w| w.to_le_bytes()).collect()
-}
-
-/// Runs `prog` on `input` starting at `start` (a UTF-16 index). Unless the program is
-/// sticky, the match is searched for from `start` on. Each instruction costs one unit of
-/// `fuel` (a backreference costs its length, and may take `fuel` below zero: the caller
-/// carries the overdraft). The match stops with [`ExecResult::OutOfFuel`] once `fuel` is
-/// not positive.
-pub fn exec(
-    prog: &Program,
-    input: Input<'_>,
-    start: usize,
-    fuel: &mut i64,
-    limits: ExecLimits,
-) -> ExecResult {
-    let sticky = prog.flags().contains(super::Flags::STICKY);
-    exec_at(prog, input, start, sticky, fuel, limits)
-}
-
-/// [`exec`] with stickiness chosen by the caller.
-pub fn exec_at(
-    prog: &Program,
-    input: Input<'_>,
-    start: usize,
-    sticky: bool,
-    fuel: &mut i64,
-    limits: ExecLimits,
-) -> ExecResult {
-    let q = quads(prog);
-    let mut st = ExecState::new();
-    let o = exec_in(Prog(&q), input, start, sticky, fuel, limits, &mut st);
-    result(Prog(&q), o, st)
-}
-
-/// Continues a match suspended by running out of fuel.
-pub fn resume(
-    prog: &Program,
-    input: Input<'_>,
-    mut state: ExecState,
-    fuel: &mut i64,
-    limits: ExecLimits,
-) -> ExecResult {
-    let q = quads(prog);
-    let o = resume_in(Prog(&q), input, fuel, limits, &mut state);
-    result(Prog(&q), o, state)
-}
-
-fn result(prog: Prog<'_>, o: Outcome, st: ExecState) -> ExecResult {
-    match o {
-        Outcome::Match => ExecResult::Match(Captures {
-            slots: st.captures(prog).slots.to_vec(),
-        }),
-        Outcome::NoMatch => ExecResult::NoMatch,
-        Outcome::OutOfFuel => ExecResult::OutOfFuel(st),
-        Outcome::StackOverflow => ExecResult::StackOverflow,
     }
 }
 

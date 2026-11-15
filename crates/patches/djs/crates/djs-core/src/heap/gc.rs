@@ -232,11 +232,6 @@ impl Heap {
         self.gc_pending
     }
 
-    /// The arena size at which `gc_pending` will be set.
-    pub fn gc_threshold(&self) -> u32 {
-        self.gc_threshold
-    }
-
     /// Collects garbage in place (mark-compact, `compactor.rs`, 0101): a full collection
     /// of the whole heap. Must only be called at a safepoint: every `Obj`, `Str`, `Sym`
     /// and `Value` held outside the heap is invalid afterwards; keep [`Handle`]s instead.

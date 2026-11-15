@@ -92,25 +92,6 @@ impl Kind {
             Float64 | BigInt64 | BigUint64 => 8,
         }
     }
-
-    /// The constructor name (`Uint8Array`, ...).
-    pub fn name(self) -> &'static str {
-        use Kind::*;
-        match self {
-            Int8 => "Int8Array",
-            Uint8 => "Uint8Array",
-            Uint8Clamped => "Uint8ClampedArray",
-            Int16 => "Int16Array",
-            Uint16 => "Uint16Array",
-            Int32 => "Int32Array",
-            Uint32 => "Uint32Array",
-            Float16 => "Float16Array",
-            Float32 => "Float32Array",
-            Float64 => "Float64Array",
-            BigInt64 => "BigInt64Array",
-            BigUint64 => "BigUint64Array",
-        }
-    }
 }
 
 /// ToInt32-style modular conversion of a Number to an integer of `bits` bits.
@@ -547,18 +528,6 @@ impl Heap {
     ) -> Result<Option<Property>, HeapError> {
         let p = self.get_own_property(o, key);
         self.materialize(o, key, p)
-    }
-
-    /// `find_property` with BigInt typed array elements allocated.
-    pub fn find_property_alloc(
-        &mut self,
-        o: Obj,
-        key: Atom,
-    ) -> Result<Option<(Obj, Property)>, HeapError> {
-        let Some((holder, p)) = self.find_property(o, key) else {
-            return Ok(None);
-        };
-        Ok(self.materialize(holder, key, Some(p))?.map(|p| (holder, p)))
     }
 
     /// Writes element `i`; false (nothing written) if it is not a valid index.

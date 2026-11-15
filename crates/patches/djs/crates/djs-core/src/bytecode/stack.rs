@@ -94,11 +94,6 @@ const DECODE: u32 = 1 << 31;
 /// A handler depth that [`stack_depths`] skips: to be computed from the code.
 pub const UNKNOWN_DEPTH: u32 = u32::MAX;
 
-/// Checks final code and returns its maximum operand stack depth.
-pub fn check_stack(code: &[u8], handlers: &[Handler]) -> Result<u16, StackError> {
-    walk(code, handlers, false, &mut StackScratch::default())
-}
-
 /// The buffers of the stack checker, reused across the functions of a compile (0096:
 /// four allocations per function otherwise). After [`check_stack_in`], `caches` holds
 /// the positions of the `Cache` immediates in code order.

@@ -106,20 +106,6 @@ impl ImmKind {
         )
     }
 
-    /// The kind a one-byte kind narrows (itself for the others): what the operand
-    /// means.
-    pub const fn wide(self) -> ImmKind {
-        match self {
-            ImmKind::Loc8 => ImmKind::Loc,
-            ImmKind::Arg8 => ImmKind::Arg,
-            ImmKind::Const8 => ImmKind::Const,
-            ImmKind::Intrinsic8 => ImmKind::Intrinsic,
-            ImmKind::Builtin8 => ImmKind::Builtin,
-            ImmKind::Target8 => ImmKind::Target,
-            k => k,
-        }
-    }
-
     /// A jump target (either width).
     pub const fn is_target(self) -> bool {
         matches!(self, ImmKind::Target | ImmKind::Target8)

@@ -95,25 +95,6 @@ impl Heap {
         for_each_slot(self.cell_kind(cell), cell, self.cell_size(cell), f);
     }
 
-    /// The offsets of all cells the cell at `cell` references.
-    pub fn cell_refs(&self, cell: u32) -> Vec<u32> {
-        let mut out = Vec::new();
-        self.trace_cell(cell, |slot| {
-            if let Some(t) = self.slot_target(slot) {
-                out.push(t)
-            }
-        });
-        out
-    }
-
-    /// The cell a slot references, if any.
-    pub fn slot_target(&self, slot: Slot) -> Option<u32> {
-        match slot {
-            Slot::Value(off) => self.arena().read::<Value>(off).ref_offset(),
-            Slot::Ref(off) => self.arena().read::<Ref>(off).get(),
-        }
-    }
-
     /// Checks the whole heap: every header, every length field, and every traced slot
     /// (valid encoding, pointing at the start of a cell of a fitting kind). Never panics,
     /// whatever the bytes are.

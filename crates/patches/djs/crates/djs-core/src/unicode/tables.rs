@@ -3,8 +3,6 @@
 // Ranges are packed as `start << LEN_BITS | (len - 1)` and sorted by start. Only
 // code points >= 0x80 are listed; ASCII is handled by the callers.
 
-pub const UNICODE_VERSION: &str = "17.0.0";
-
 pub(super) const LEN_BITS: u32 = 11;
 
 /// Non-ASCII `ID_Start`.

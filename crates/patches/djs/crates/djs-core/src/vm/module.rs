@@ -291,16 +291,6 @@ impl Vm {
         r.map_err(|f| self.fault_to_value(f))
     }
 
-    /// Sets export `name` of synthetic module `key` to `v` (SetSyntheticModuleExport):
-    /// importers read the new value from then on. `false` if there is no synthetic module
-    /// `key` or it has no export `name`.
-    pub fn set_module_export(&mut self, key: &str, name: &str, v: Value) -> Result<bool, VmError> {
-        let Some(m) = module::find(&mut self.heap, key)? else {
-            return Ok(false);
-        };
-        Ok(module::set_synthetic_export(&mut self.heap, m, name, v)?)
-    }
-
     /// Lets `import()` load modules through the host (`on`), in modules and scripts alike:
     /// a call becomes an async host call with fn id [`IMPORT_FN_ID`] and the arguments
     /// specifier, referrer (the importing module's key or script's name) and the `type`
@@ -383,17 +373,6 @@ impl Vm {
     /// Whether a module `key` is loaded (and linked).
     pub fn has_module(&mut self, key: &str) -> bool {
         matches!(module::find(&mut self.heap, key), Ok(Some(m)) if module::status_of(&self.heap, m) >= status::LINKED)
-    }
-
-    /// The namespace object of the loaded module `key` (made on first use), or `None`.
-    pub fn module_namespace(&mut self, key: &str) -> Result<Option<Value>, VmError> {
-        let Some(m) = self.linked_module(key)? else {
-            return Ok(None);
-        };
-        match module::namespace(&mut self.heap, m) {
-            Ok(ns) => Ok(Some(Value::object(ns))),
-            Err(f) => Err(fault_vm_error(f)),
-        }
     }
 
     /// The current value of export `name` of the loaded module `key`: `None` if there is

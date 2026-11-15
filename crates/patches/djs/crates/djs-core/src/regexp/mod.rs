@@ -23,8 +23,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 pub use exec::{
-    Caps, Captures, ExecLimits, ExecResult, ExecState, Input, Outcome, Prog, exec, exec_at,
-    exec_in, resume, resume_in,
+    Caps, ExecLimits, ExecState, Input, Outcome, Prog,
+    exec_in, resume_in,
 };
 
 /// RegExp flags.
@@ -41,9 +41,6 @@ impl Flags {
     pub const UNICODE_SETS: Flags = Flags(1 << 6);
     pub const STICKY: Flags = Flags(1 << 7);
 
-    pub const fn empty() -> Flags {
-        Flags(0)
-    }
 
     pub const fn bits(self) -> u16 {
         self.0
@@ -125,30 +122,6 @@ impl Program {
     /// The program as words (for storing it).
     pub fn words(&self) -> &[u32] {
         &self.words
-    }
-
-    /// Rebuilds a program from [`Program::words`] of the same build.
-    pub fn from_words(words: Vec<u32>) -> Program {
-        Program { words }
-    }
-
-    pub fn flags(&self) -> Flags {
-        Flags::from_bits(self.words[compiler::H_FLAGS] as u16)
-    }
-
-    /// Number of capture groups, including group 0 (the whole match).
-    pub fn capture_count(&self) -> usize {
-        self.words[compiler::H_CAPTURES] as usize
-    }
-
-    /// The name of capture group `index` as UTF-16, if it has one.
-    pub fn group_name(&self, index: usize) -> Option<&[u32]> {
-        compiler::group_name(&self.words, index)
-    }
-
-    /// True if any group has a name.
-    pub fn has_group_names(&self) -> bool {
-        self.words[compiler::H_MODE] & compiler::M_NAMES != 0
     }
 }
 

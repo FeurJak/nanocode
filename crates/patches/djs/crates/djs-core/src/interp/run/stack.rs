@@ -214,14 +214,6 @@ impl Exec<'_> {
         format_trace(self.heap, frames)
     }
 
-    /// The stack trace in QuickJS's format: one `    at name (file:line:col)` line per
-    /// frame, innermost first, at most `limit` lines (`Error.stackTraceLimit`, D2030).
-    /// Callers are positioned at their call (`ret_pc - 1`). Prelude frames are hidden,
-    /// except installed builtin methods, which show as `at name (native)`.
-    pub(crate) fn stack_trace(&self, pc: u32, limit: u32) -> String {
-        self.format_trace(&self.trace_frames(pc, false, None, limit, None))
-    }
-
     /// The `Error.prepareStackTrace` function and the Error constructor to call it with,
     /// if it applies now (qjs's js_get_prepare_stack_trace): an own data property of the
     /// realm's Error constructor (read without running code) that is callable, with JS

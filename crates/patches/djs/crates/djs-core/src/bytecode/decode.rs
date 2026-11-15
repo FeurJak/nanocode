@@ -256,26 +256,6 @@ impl Iterator for Insns<'_> {
 // trap on corrupt code), never undefined behavior.
 
 #[inline]
-pub fn read_u8(code: &[u8], at: usize) -> u8 {
-    code[at]
-}
-
-#[inline]
 pub fn read_i8(code: &[u8], at: usize) -> i8 {
     code[at] as i8
-}
-
-#[inline]
-pub fn read_u16(code: &[u8], at: usize) -> u16 {
-    u16::from_le_bytes([code[at], code[at + 1]])
-}
-
-#[inline]
-pub fn read_u32(code: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes([code[at], code[at + 1], code[at + 2], code[at + 3]])
-}
-
-#[inline]
-pub fn read_i32(code: &[u8], at: usize) -> i32 {
-    read_u32(code, at) as i32
 }

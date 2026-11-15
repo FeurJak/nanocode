@@ -145,30 +145,6 @@ impl TokenKind {
     pub fn is_identifier_name(self) -> bool {
         self == TokenKind::Ident || self.is_reserved_word()
     }
-
-    /// Assignment operators, `=` included.
-    pub fn is_assign_op(self) -> bool {
-        use TokenKind::*;
-        matches!(
-            self,
-            Assign
-                | PlusAssign
-                | MinusAssign
-                | StarAssign
-                | SlashAssign
-                | PercentAssign
-                | StarStarAssign
-                | ShlAssign
-                | ShrAssign
-                | UShrAssign
-                | AmpAssign
-                | PipeAssign
-                | CaretAssign
-                | AmpAmpAssign
-                | PipePipeAssign
-                | QuestionQuestionAssign
-        )
-    }
 }
 
 /// Keyword id of an identifier name: every reserved word plus the contextual keywords
@@ -276,10 +252,6 @@ impl Kw {
         } else {
             Kw::None
         }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        KW_NAMES[self as usize]
     }
 
     /// The token kind of a reserved word, `None` for contextual keywords.
@@ -408,14 +380,6 @@ pub struct Span {
 }
 
 impl Span {
-    pub fn len(&self) -> u32 {
-        self.end - self.start
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.start == self.end
-    }
-
     /// The bytes of this span. Out-of-range spans give an empty slice.
     pub fn slice<'a>(&self, src: &'a [u8]) -> &'a [u8] {
         src.get(self.start as usize..self.end as usize)

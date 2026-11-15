@@ -1,12 +1,7 @@
 //! Heap helpers for compiled code cells (`FuncTemplate`, `FuncInfo`, `Bytes`) and the
 //! template disassembler. The cell layouts live in `heap/cells.rs`.
 
-use alloc::string::String;
-use alloc::vec::Vec;
-use core::fmt::Write;
-
-use super::disasm::{DisasmContext, disasm};
-use super::handlers::{Handler, HandlerTable, write_handlers};
+use super::handlers::{Handler, write_handlers};
 use super::stack::{StackError, StackScratch, check_stack_in};
 use crate::heap::cells::{Bytes, CellKind, FuncInfo, FuncTemplate, Script, U32Array, ValueArray};
 use crate::heap::{Atom, Heap, HeapError, Ref};
@@ -121,14 +116,6 @@ impl From<HeapError> for TemplateError {
     }
 }
 
-/// Checks the code with the stack checker (which also computes `STACK`) and writes a
-/// `FuncTemplate` cell, its code, capture descriptors and handler table inline (D2444),
-/// with its `ValueArray` of constants and a `FuncInfo` for the children and debug info.
-/// Empty parts are stored as null.
-pub fn alloc_template(heap: &mut Heap, p: &TemplateParts<'_>) -> Result<Ref, TemplateError> {
-    alloc_template_in(heap, p, &mut StackScratch::default())
-}
-
 /// [`alloc_template`] with the stack checker's buffers reused (the compiler's loop over
 /// the functions of a unit).
 pub fn alloc_template_in(
@@ -237,14 +224,6 @@ pub fn handlers(heap: &Heap, t: u32) -> &[u8] {
     a.slice(start, (end - start) / 16 * 16)
 }
 
-/// The number of child templates of template `t`.
-pub fn child_count(heap: &Heap, t: u32) -> u32 {
-    let a = heap.arena();
-    a.get::<Ref>(t, FuncTemplate::INFO)
-        .get()
-        .map_or(0, |i| a.get(i, FuncInfo::CHILD_COUNT))
-}
-
 /// Child template `i` of template `t` (`fclosure i`), if it has one.
 pub fn child(heap: &Heap, t: u32, i: u32) -> Option<Ref> {
     let a = heap.arena();
@@ -350,13 +329,6 @@ pub fn script_source(heap: &Heap, script: u32) -> Option<&[u8]> {
     Some(bytes_of(heap, r))
 }
 
-/// [`script_source`] as a `String`.
-pub fn script_text(heap: &Heap, script: u32) -> Option<alloc::string::String> {
-    core::str::from_utf8(script_source(heap, script)?)
-        .ok()
-        .map(alloc::string::String::from)
-}
-
 fn alloc_value_array(heap: &mut Heap, values: &[Value]) -> Result<Ref, HeapError> {
     let len = u32::try_from(values.len()).map_err(|_| HeapError::OutOfMemory)?;
     let size = ValueArray::VALUES
@@ -407,86 +379,4 @@ pub fn bytes_of(heap: &Heap, r: Ref) -> &[u8] {
             heap.arena().slice(Bytes::DATA.at(off, 0), len)
         }
     }
-}
-
-/// Template `t`'s constants.
-pub fn consts(heap: &Heap, t: u32) -> Vec<Value> {
-    value_array(heap, heap.arena().get(t, FuncTemplate::CONSTS))
-}
-
-fn value_array(heap: &Heap, r: Ref) -> Vec<Value> {
-    let Some(off) = r.get() else {
-        return Vec::new();
-    };
-    let len = heap.arena().get(off, ValueArray::LEN);
-    (0..len)
-        .map(|i| heap.arena().read(ValueArray::VALUES.at(off, i)))
-        .collect()
-}
-
-fn u32_array(heap: &Heap, r: Ref) -> Vec<u32> {
-    let Some(off) = r.get() else {
-        return Vec::new();
-    };
-    let len = heap.arena().get(off, U32Array::LEN);
-    (0..len)
-        .map(|i| heap.arena().read(U32Array::DATA.at(off, i)))
-        .collect()
-}
-
-/// Disassembles a function template and, after it, all its descendants: a header line
-/// per function (name, sizes), the handler table, then the code with names and
-/// constants resolved.
-pub fn disasm_template(heap: &Heap, template: Ref) -> String {
-    let mut out = String::new();
-    // Explicit work list rather than recursion: templates nest as deep as the source.
-    let mut work = alloc::vec![(template, String::from("0"))];
-    while let Some((t, path)) = work.pop() {
-        let Some(off) = t.get() else { continue };
-        let a = heap.arena();
-        let name = Atom::from_id(a.get(off, FuncTemplate::NAME));
-        let locals = a.get(off, FuncTemplate::LOCALS);
-        let consts = value_array(heap, a.get(off, FuncTemplate::CONSTS));
-        let debug = debug_info(heap, off);
-        let names: Vec<Atom> = u32_array(heap, debug.names)
-            .into_iter()
-            .map(Atom::from_id)
-            .collect();
-        let shown = if name.is_null() {
-            String::from("<anonymous>")
-        } else {
-            heap.atom_name(name)
-        };
-        let _ = writeln!(
-            out,
-            "function {path} {shown}: params={} locals={locals} stack={} captures={}",
-            a.get(off, FuncTemplate::PARAMS),
-            a.get(off, FuncTemplate::STACK),
-            a.get(off, FuncTemplate::CAPTURES),
-        );
-        if let Ok(h) = HandlerTable::new(handlers(heap, off)) {
-            for h in h.iter() {
-                let _ = writeln!(
-                    out,
-                    "  handler [{}, {}) -> {} depth {}",
-                    h.start, h.end, h.target, h.depth
-                );
-            }
-        }
-        let cx = DisasmContext {
-            heap: Some(heap),
-            consts: &consts,
-            names: &names,
-            locals: locals as usize,
-            phase1: false,
-            lines: bytes_of(heap, debug.lines),
-        };
-        out.push_str(&disasm(code(heap, off), &cx));
-        for i in (0..child_count(heap, off)).rev() {
-            if let Some(c) = child(heap, off, i) {
-                work.push((c, alloc::format!("{path}.{i}")));
-            }
-        }
-    }
-    out
 }

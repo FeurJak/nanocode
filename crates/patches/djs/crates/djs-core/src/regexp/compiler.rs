@@ -220,23 +220,6 @@ pub(crate) fn compile(parsed: &Parsed, flags: Flags) -> super::Program {
     super::Program { words: c.code }
 }
 
-/// The name of group `index` from a program's words.
-pub(crate) fn group_name(words: &[u32], index: usize) -> Option<&[u32]> {
-    let count = words[H_CAPTURES] as usize;
-    if index == 0 || index >= count {
-        return None;
-    }
-    let mut p = H_LEN;
-    for i in 1..count {
-        let len = words[p] as usize;
-        if i == index {
-            return (len > 0).then(|| &words[p + 1..p + 1 + len]);
-        }
-        p += 1 + len;
-    }
-    None
-}
-
 /// The input characters that can start a match of `node`, and whether it can match empty.
 /// `None` if unknown (a backreference can start with anything). Assertions and lookarounds
 /// are treated as matching empty, which over-approximates.

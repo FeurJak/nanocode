@@ -121,11 +121,6 @@ pub mod capture_desc {
     /// Set: from the creating closure's captures; clear: from a local slot of the
     /// creating frame.
     pub const OUTER: u32 = 1 << 31;
-    /// A lazy template's (D2990): the captured binding is immutable (`const`, a
-    /// function expression's own name).
-    pub const IMMUTABLE: u32 = 1 << 16;
-    /// A lazy template's: reads of the captured binding are TDZ-checked.
-    pub const CHECKED: u32 = 1 << 17;
 
     pub const fn local(slot: u16) -> u32 {
         slot as u32
@@ -133,11 +128,6 @@ pub mod capture_desc {
 
     pub const fn outer(capture: u16) -> u32 {
         OUTER | capture as u32
-    }
-
-    /// `(is_outer, index)`
-    pub const fn decode(word: u32) -> (bool, u16) {
-        (word & OUTER != 0, word as u16)
     }
 }
 
