@@ -697,6 +697,31 @@ impl Heap {
         value: Value,
         done: bool,
     ) -> Result<Obj, HeapError> {
+        let all = PropFlags::ALL.bits() as u32;
+        let s = self.iter_result_shape;
+        if s != 0
+            && self.shape_count(s) == 2
+            && self.shape_desc(s, 0) == (atoms::VALUE, all)
+            && self.shape_desc(s, 1) == (atoms::DONE, all)
+        {
+            // The object and its values block in the cached shape, written once each.
+            let size = Object::SLOTS.cell_size(0).ok_or(HeapError::OutOfMemory)?;
+            let o = self.alloc_cell(CellKind::Object, size)?;
+            let size = PropValues::VALUES
+                .cell_size(2)
+                .ok_or(HeapError::OutOfMemory)?;
+            let v = self.alloc_cell(CellKind::PropValues, size)?;
+            let a = self.arena_mut();
+            a.set_untracked(o, Object::CLASS, ObjectClass::Ordinary as u32);
+            a.set_untracked(o, Object::PROTO, Ref(proto.map_or(0, |p| p.0)));
+            a.set_untracked(o, crate::heap::Header::FLAGS, OBJ_EXTENSIBLE);
+            a.set_untracked(o, Object::PROPS, Ref(v));
+            a.write_untracked(PropValues::VALUES.at(v, 0), value);
+            a.write_untracked(PropValues::VALUES.at(v, 1), Value::bool(done));
+            a.set_untracked(v, PropValues::LEN, 2);
+            a.set_untracked(v, PropValues::SHAPE, Ref(s));
+            return Ok(Obj(o));
+        }
         let mut last = self.iter_result_shape;
         let keys = [atoms::VALUE, atoms::DONE];
         let o = self.new_object_from_entries_like(
