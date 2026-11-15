@@ -787,7 +787,7 @@ triage() {
   mkdir -p "$root/state"
   touch "$root/state/triaged"
   picked=$(tail -c "$triage_window_bytes" "$results" | grep '"kind":"seed"' | grep '"known":false' |
-    gawk "$field_awk"'{ print field("commit"), field("scenario"), field("seed"), field("replay") }' |
+    awk "$field_awk"'{ print field("commit"), field("scenario"), field("seed"), field("replay") }' |
     while read -r commit scenario seed bin rest; do
       grep -qxF "$commit $scenario" "$root/state/triaged" || echo "$commit $scenario $seed $rest"
     done | tail -1)
