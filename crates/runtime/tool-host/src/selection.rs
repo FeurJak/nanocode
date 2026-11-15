@@ -299,7 +299,7 @@ impl Default for Tools {
             exec_yield: None,
             output_budget: None,
             full_exec_description: false,
-            background_jobs: false,
+            background_jobs: true,
             #[cfg(not(target_family = "wasm"))]
             deferred_tools_guidance_enabled: false,
 
