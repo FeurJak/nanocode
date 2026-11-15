@@ -60,6 +60,8 @@ def next_action(body):
     wanted = SHELL_STEPS.search(user_text(items[last_user])) if last_user >= 0 else None
     done = sum(1 for item in items[last_user + 1:] if str(item.get("type", "")).endswith("call_output"))
     offered = [*(body.get("tools") or []), *(tool for item in items if item.get("type") == "additional_tools" for tool in item.get("tools") or [])]
+    while any(tool.get("type") == "namespace" for tool in offered):
+        offered = [nested for tool in offered for nested in (tool.get("tools") or [] if tool.get("type") == "namespace" else [tool])]
     tools = {(tool.get("type"), tool.get("name")) for tool in offered}
     if wanted and done < int(wanted.group(1)):
         if ("function", "exec_command") in tools:
