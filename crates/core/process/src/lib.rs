@@ -130,6 +130,8 @@ pub struct ExecCommandResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub original_token_count: Option<usize>,
     pub output: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_left_seconds: Option<u64>,
 }
 
 pub struct ForegroundOutput {
@@ -273,6 +275,7 @@ impl ExecCommandResult {
             session_id: None,
             original_token_count: None,
             output,
+            time_left_seconds: None,
         }
     }
 }

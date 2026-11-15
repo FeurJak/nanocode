@@ -244,6 +244,10 @@ impl JobHandler {
             ),
             (None, None, _) => "Job ended without an exit code.".to_owned(),
         };
+        let status = match result.time_left_seconds {
+            Some(time_left_seconds) => format!("{status}\nTime left: {time_left_seconds} seconds"),
+            None => status,
+        };
         let text = if tail.is_empty() {
             format!("{status}\nNo output yet.")
         } else {

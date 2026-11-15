@@ -104,6 +104,9 @@ pub(super) fn prepare<'a>(
         if let Some(min_wait_ms) = args.min_wait_ms {
             nanocode_process::set_min_wait_ms(min_wait_ms);
         }
+        if let Some(time_limit) = args.time_limit {
+            nanocode_process::set_time_limit(std::time::Duration::from_secs(time_limit));
+        }
         let runner_configs = host::runner_configs(&args.remote)?;
         let config = HostConfig {
             workspace,

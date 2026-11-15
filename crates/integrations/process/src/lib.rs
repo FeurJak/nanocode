@@ -66,6 +66,18 @@ pub fn set_min_wait_ms(value: u64) {
     MIN_WAIT_MS.store(value, Ordering::Relaxed);
 }
 
+static DEADLINE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+pub fn set_time_limit(limit: Duration) {
+    let _ = DEADLINE.set(Instant::now() + limit);
+}
+
+fn time_left() -> Option<u64> {
+    DEADLINE
+        .get()
+        .map(|deadline| deadline.saturating_duration_since(Instant::now()).as_secs())
+}
+
 fn waited(yield_time: Duration) -> Duration {
     yield_time.max(Duration::from_millis(MIN_WAIT_MS.load(Ordering::Relaxed)))
 }
@@ -918,6 +930,7 @@ impl SessionState {
             session_id: exit_code.is_none().then_some(self.id),
             original_token_count,
             output,
+            time_left_seconds: time_left(),
         }
     }
 

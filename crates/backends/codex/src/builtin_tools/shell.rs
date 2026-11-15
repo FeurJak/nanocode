@@ -88,6 +88,7 @@ impl Tool for ExecCommandHandler {
                                 "Exit code: 0\nWall time: 0 seconds\nOutput:\n{summary}"
                             ),
                             session_id: None,
+                            time_left_seconds: None,
                             wall_time_seconds: 0.0,
                         }));
                     }
@@ -216,6 +217,9 @@ fn shell_response_text(result: &ExecCommandResult) -> String {
         "Wall time: {:.4} seconds",
         result.wall_time_seconds
     ));
+    if let Some(time_left_seconds) = result.time_left_seconds {
+        sections.push(format!("Time left: {time_left_seconds} seconds"));
+    }
     if let Some(exit_code) = result.exit_code {
         sections.push(format!("Process exited with code {exit_code}"));
     }

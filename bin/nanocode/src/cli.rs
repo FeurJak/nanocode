@@ -287,6 +287,10 @@ const SESSION: Group = Group::new(&[
         .long("min-wait-ms")
         .env("NANOCODE_MIN_WAIT_MS")
         .help("Codex harness: exec_command and empty write_stdin polls wait up to this long for the process to exit before they return, at least their requested wait; Codex CLI caps exec_command at 30000 ms (off by default)"),
+    Argument::value("time_limit", "SECONDS", Parser::U64)
+        .long("time-limit")
+        .env("NANOCODE_TIME_LIMIT")
+        .help("Codex harness: exec_command, write_stdin and job results report the seconds left of this wall-clock limit, counted from the start of the run; Codex CLI reports none (off by default)"),
 ]);
 
 const ATTEMPTS: Group = Group::named(
@@ -680,6 +684,7 @@ pub struct SessionArgs {
     pub subagents: bool,
     pub lenient_patches: bool,
     pub min_wait_ms: Option<u64>,
+    pub time_limit: Option<u64>,
     pub gateway: GatewayArgs,
     pub remote: RemoteArgs,
 }
@@ -748,6 +753,7 @@ impl SessionArgs {
             subagents: matches.flag("subagents"),
             lenient_patches: matches.flag("lenient_patches"),
             min_wait_ms: matches.u64("min_wait_ms"),
+            time_limit: matches.u64("time_limit"),
             gateway: GatewayArgs::from_matches(matches),
             remote: RemoteArgs::from_matches(matches),
         }
@@ -791,6 +797,7 @@ impl SessionArgs {
             subagents: self.subagents || root.subagents,
             lenient_patches: self.lenient_patches || root.lenient_patches,
             min_wait_ms: self.min_wait_ms.or(root.min_wait_ms),
+            time_limit: self.time_limit.or(root.time_limit),
             gateway: GatewayArgs {
                 gateway: self.gateway.gateway.or(root.gateway.gateway),
                 cloudflare_account: self
