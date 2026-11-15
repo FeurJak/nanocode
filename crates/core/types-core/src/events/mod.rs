@@ -11,11 +11,11 @@ pub use data::OpenAiEvent;
 #[doc(inline)]
 pub use data::{
     AcceptedInput, AgentEventData, AssistantDelta, AssistantEvent, AssistantMessage,
-    CompactionCompleted, CompactionFailed, CompactionStarted, ContextEvent, EventUsage,
-    ModelCallCompleted, ModelCallFailed, ModelCallPipeline, ModelCallStarted, ModelCallTiming,
-    ModelEvent, ModelWarmupCompleted, ModelWarmupFailed, ModelWarmupStarted, ReasoningEvent,
-    ReasoningSummaryDelta, RunError, RunEvent, RunMetrics, RunStarted, RunStatus, RunSteered,
-    RunTerminal, TextDeltaRef, ToolCall, ToolEvent, ToolInputDelta, ToolNotification,
+    CompactionCompleted, CompactionFailed, CompactionStarted, ContextEvent, ContextNotice,
+    EventUsage, ModelCallCompleted, ModelCallFailed, ModelCallPipeline, ModelCallStarted,
+    ModelCallTiming, ModelEvent, ModelWarmupCompleted, ModelWarmupFailed, ModelWarmupStarted,
+    ReasoningEvent, ReasoningSummaryDelta, RunError, RunEvent, RunMetrics, RunStarted, RunStatus,
+    RunSteered, RunTerminal, TextDeltaRef, ToolCall, ToolEvent, ToolInputDelta, ToolNotification,
     ToolResultEvent, ToolStatus, TransportEvent,
 };
 pub use observed::{MessagePhases, ModelRetries, Retry, Shown, Streaming};

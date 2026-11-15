@@ -152,17 +152,21 @@ impl Reminders {
             *announced = was.max(passed);
             was
         });
-        (passed > announced).then(|| {
-            let steps = if passed == REMINDER_PERCENTS.len() {
-                LAST_REMINDER
-            } else {
-                EARLY_REMINDER
-            };
-            format!(
-                "Time limit: {} When the time is up the task stops, and only what is on disk then counts. {steps}",
-                self.deadline.remain(remaining)
-            )
-        })
+        if passed == 0 {
+            return None;
+        }
+        let remain = self.deadline.remain(remaining);
+        if passed <= announced {
+            return Some(format!("Time limit: {remain}"));
+        }
+        let steps = if passed == REMINDER_PERCENTS.len() {
+            LAST_REMINDER
+        } else {
+            EARLY_REMINDER
+        };
+        Some(format!(
+            "Time limit: {remain} When the time is up the task stops, and only what is on disk then counts. {steps}"
+        ))
     }
 
     pub(crate) fn remain(&self) -> String {

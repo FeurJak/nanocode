@@ -8703,7 +8703,17 @@ impl State {
                         .and_then(crate::deadline::Reminders::notice),
                 );
                 if !parts.is_empty() {
-                    pending.push(Message::text(Role::System, parts.join("\n\n")).into());
+                    let text = parts.join("\n\n");
+                    self.emit(
+                        &request.events,
+                        AgentEventKind::ContextNotice,
+                        json!({
+                            "after_model_call_index": index.saturating_add(1),
+                            "role": Role::System,
+                            "text": &text,
+                        }),
+                    );
+                    pending.push(Message::text(Role::System, text).into());
                 }
 
                 conversation.messages = pending.clone();
@@ -8907,10 +8917,17 @@ impl State {
                     .is_some_and(crate::deadline::Reminders::last_passed)
             {
                 cursor.finish_checked = true;
-                pending.push(Message::text(
-                        Role::User,
-                        crate::finish_check::notice(self.deadline.as_ref()),
-                    ).into());
+                let notice = crate::finish_check::notice(self.deadline.as_ref());
+                self.emit(
+                    &request.events,
+                    AgentEventKind::ContextNotice,
+                    json!({
+                        "after_model_call_index": index.saturating_add(1),
+                        "role": Role::User,
+                        "text": &notice,
+                    }),
+                );
+                pending.push(Message::text(Role::User, notice).into());
                 conversation.messages = pending.clone();
                 cursor.output_continuations = 0;
                 cursor.index = index + 1;

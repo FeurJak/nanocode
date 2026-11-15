@@ -90,6 +90,9 @@ pub enum AgentEventKind {
     #[serde(rename = "model.compaction.failed")]
     ModelCompactionFailed,
 
+    #[serde(rename = "context.notice")]
+    ContextNotice,
+
     #[serde(rename = "model.attempt.started")]
     ModelAttemptStarted,
 
@@ -204,6 +207,9 @@ impl AgentEvent {
             }
             AgentEventKind::ModelCompactionFailed => {
                 AgentEventData::Context(ContextEvent::CompactionFailed(self.decode_payload()?))
+            }
+            AgentEventKind::ContextNotice => {
+                AgentEventData::Context(ContextEvent::Notice(self.decode_payload()?))
             }
             AgentEventKind::ModelAttemptStarted
             | AgentEventKind::ModelAttemptFailed

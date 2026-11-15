@@ -542,6 +542,8 @@ pub enum ContextEvent {
     CompactionCompleted(CompactionCompleted),
 
     CompactionFailed(CompactionFailed),
+
+    Notice(ContextNotice),
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -579,6 +581,15 @@ pub struct CompactionFailed {
     pub duration_ns: u64,
 
     pub error: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ContextNotice {
+    pub after_model_call_index: u32,
+
+    pub role: String,
+
+    pub text: String,
 }
 
 #[derive(Clone, Debug)]
