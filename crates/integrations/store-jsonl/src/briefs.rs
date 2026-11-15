@@ -483,16 +483,21 @@ pub(super) fn query(
         let Some((source, length, created, position)) = present(row, directory)? else {
             continue;
         };
-        if !row.key.with_text(|state_id| keep(state_id)) {
-            continue;
-        }
-        let known = row
+        let kept = || row.key.with_text(|state_id| keep(state_id));
+        let Some(known) = row
             .summary
             .as_ref()
-            .filter(|known| known.file == source && known.length == length)?;
+            .filter(|known| known.file == source && known.length == length)
+        else {
+            if kept() {
+                return None;
+            }
+            continue;
+        };
         let (listed, updated_at_ms) = match &known.brief {
             Brief::Unlisted => continue,
-            Brief::Unreadable => return None,
+            Brief::Unreadable if kept() => return None,
+            Brief::Unreadable => continue,
             Brief::Listed {
                 scope: listed,
                 updated_at_ms,
@@ -515,10 +520,11 @@ pub(super) fn query(
         candidates.push((Reverse(updated_at_ms), Reverse(created), position, at));
     }
     candidates.sort_unstable();
-    candidates.truncate(limit);
     Some(
         candidates
             .into_iter()
+            .filter(|(_, _, _, at)| index.rows[*at].key.with_text(|state_id| keep(state_id)))
+            .take(limit)
             .filter_map(|(Reverse(updated_at_ms), _, _, at)| {
                 let row = &index.rows[at];
                 let Some(Known {
