@@ -38,9 +38,15 @@ struct Finished {
 }
 
 #[derive(Clone, Copy)]
-struct SelfCheck {
+struct Counts {
     passed: u64,
     total: u64,
+}
+
+struct Checked {
+    counts: Option<Counts>,
+    elapsed: Duration,
+    exit: Exit,
 }
 
 struct Changes {
@@ -54,7 +60,7 @@ enum Output {
     Files(Vec<(PathBuf, Option<Entry>, Vec<u8>)>),
 }
 
-const SELF_CHECK: &str = "Before you end, find the checks this task gives or implies (its tests, a checker or an example with expected output, each requirement it states), run them in the copy and fix what fails. End the reply with one line of the form `self-check: <passed>/<total>` counting those checks.";
+const SELF_CHECK: &str = "Before you end, find the checks this task gives or implies (its tests, a checker or an example with expected output, each requirement it states), run them in the copy and fix what fails. End the reply with one line of the form `check: <command>`, where the command is one shell line that runs those checks from the copy's directory, exits 0 only when every check passes and prints its counts as a test runner's summary (such as `4 passed, 1 failed`) or as a last line `<passed>/<total>`. That command runs again in the copy after you end, and its own exit and counts decide whether this attempt is kept.";
 
 pub async fn run(args: &SessionArgs, count: u64, piped: Option<String>) -> Result<()> {
     if count < 2 {
@@ -128,25 +134,36 @@ pub async fn run(args: &SessionArgs, count: u64, piped: Option<String>) -> Resul
     }
     drop(sender);
     let mut arrived: Vec<Option<Finished>> = labels.iter().map(|_| None).collect();
-    let mut order = Vec::new();
     let mut passed = None;
     while let Some((index, done)) = arrivals.next().await {
         let done: Finished = done?;
-        let reported = match self_check(&done.answer) {
-            Some(check) => format!(", reporting self-check {}/{}", check.passed, check.total),
-            None => String::new(),
-        };
+        let label = &labels[index];
         eprintln!(
-            "nanocode: attempt {} {} after {:.1?}{reported}",
-            labels[index],
+            "nanocode: attempt {label} {} after {:.1?}",
             done.exit.describe(),
             done.elapsed
         );
-        if pick == AttemptPickArg::SelfCheck && passed.is_none() && done.passes() {
-            passed = Some(index);
-            drop(stop.send(Some(labels[index].clone())));
+        if pick == AttemptPickArg::SelfCheck && passed.is_none() {
+            match check_command(&done.answer) {
+                Some(command) => {
+                    let checked = check(&root, label, command, deadline).await?;
+                    let counts = match checked.counts {
+                        Some(counts) => format!(", counting {}/{}", counts.passed, counts.total),
+                        None => ", printing no counts".to_owned(),
+                    };
+                    eprintln!(
+                        "nanocode: attempt {label}'s check `{command}` {} after {:.1?}{counts}",
+                        checked.exit.describe(),
+                        checked.elapsed
+                    );
+                    if checked.passes() {
+                        passed = Some(index);
+                        drop(stop.send(Some(label.clone())));
+                    }
+                }
+                None => eprintln!("nanocode: attempt {label} named no check command"),
+            }
         }
-        order.push(index);
         arrived[index] = Some(done);
     }
     let mut finished = arrived
@@ -195,14 +212,12 @@ pub async fn run(args: &SessionArgs, count: u64, piped: Option<String>) -> Resul
             }
         }
         AttemptPickArg::SelfCheck => {
-            let chosen = picked(&finished, &order, passed, &kept)?;
+            let index = passed.ok_or_else(|| {
+                format!("no attempt's check command passed every check it counted; {kept}")
+            })?;
+            let chosen = u64::try_from(index + 1)?;
             eprintln!(
-                "nanocode: self-check picked attempt {chosen}{}",
-                if passed.is_some() {
-                    ", which passed every check it ran"
-                } else {
-                    ", as no attempt passed every check it ran"
-                }
+                "nanocode: self-check picked attempt {chosen}, whose check command passed every check it counted"
             );
             chosen
         }
@@ -380,59 +395,99 @@ fn majority(found: &[Option<Output>]) -> Option<Vec<usize>> {
     (best.len() >= 2 && !tied).then_some(best)
 }
 
-fn picked(
-    finished: &[Finished],
-    order: &[usize],
-    passed: Option<usize>,
-    kept: &str,
-) -> Result<u64> {
-    let index = match passed {
-        Some(index) => index,
-        None => order
-            .iter()
-            .rev()
-            .copied()
-            .filter(|index| finished[*index].candidate())
-            .max_by_key(|index| {
-                let done = &finished[*index];
-                (
-                    self_check(&done.answer).map(|check| check.passed),
-                    done.exit.succeeded(),
-                )
-            })
-            .ok_or_else(|| {
-                format!("every attempt failed without reporting a self-check; {kept}")
-            })?,
-    };
-    Ok(u64::try_from(index + 1)?)
-}
-
-fn self_check(answer: &str) -> Option<SelfCheck> {
+fn check_command(answer: &str) -> Option<&str> {
     answer
         .lines()
         .rev()
-        .find_map(|line| line.trim().trim_matches('`').strip_prefix("self-check:"))
-        .and_then(|counts| counts.trim().split_once('/'))
-        .and_then(|(passed, total)| {
-            Some(SelfCheck {
-                passed: passed.trim().parse().ok()?,
-                total: total.trim().parse().ok()?,
-            })
-        })
-        .filter(|check| check.passed <= check.total)
+        .find_map(|line| line.trim().trim_matches('`').strip_prefix("check:"))
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
 }
 
-impl Finished {
-    fn candidate(&self) -> bool {
-        self.exit.succeeded()
-            || matches!(self.exit, Exit::Stopped(_))
-            || self_check(&self.answer).is_some()
-    }
+fn counts(output: &str) -> Option<Counts> {
+    output.lines().rev().find_map(|line| {
+        if let Some((passed, total)) = line.trim().split_once('/')
+            && let (Ok(passed), Ok(total)) = (passed.trim().parse(), total.trim().parse())
+        {
+            return Some(Counts { passed, total }).filter(|counts| counts.passed <= counts.total);
+        }
+        let words: Vec<&str> = line
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .collect();
+        let (mut passed, mut failed, mut found) = (0u64, 0u64, false);
+        for pair in words.windows(2) {
+            let Ok(number) = pair[0].parse::<u64>() else {
+                continue;
+            };
+            let word = pair[1].to_ascii_lowercase();
+            if word == "passed" {
+                passed += number;
+            } else if ["failed", "error", "errors"].contains(&word.as_str()) {
+                failed += number;
+            } else {
+                continue;
+            }
+            found = true;
+        }
+        found.then_some(Counts {
+            passed,
+            total: passed + failed,
+        })
+    })
+}
 
+async fn check(
+    root: &Path,
+    label: &str,
+    command: &str,
+    deadline: Option<Duration>,
+) -> Result<Checked> {
+    let output = root.join(format!("{label}.check"));
+    let (stdout, stderr) = blocking({
+        let output = output.clone();
+        move || {
+            let file = File::create(output)?;
+            Ok((file.try_clone()?, file))
+        }
+    })
+    .await?;
+    let shell = chosen()?;
+    let started = Instant::now();
+    let mut child = Command::new(shell.path())
+        .args(shell.args(command, false))
+        .current_dir(root.join(label))
+        .stdin(Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr)
+        .spawn()?;
+    let (_stop, stopping) = watch::channel(None);
+    let ended = nanocode_sync::select! {
+        status = child.wait() => Ok(status),
+        exit = halted(deadline, stopping) => Err(exit),
+    };
+    let exit = match ended {
+        Ok(status) => Exit::Exited(status?),
+        Err(exit) => {
+            stop(&mut child).await?;
+            exit
+        }
+    };
+    let elapsed = started.elapsed();
+    let printed = blocking(move || fs::read(output)).await?;
+    Ok(Checked {
+        counts: counts(&String::from_utf8_lossy(&printed)),
+        elapsed,
+        exit,
+    })
+}
+
+impl Checked {
     fn passes(&self) -> bool {
         self.exit.succeeded()
-            && self_check(&self.answer)
-                .is_some_and(|check| check.total > 0 && check.passed == check.total)
+            && self
+                .counts
+                .is_some_and(|counts| counts.total > 0 && counts.passed == counts.total)
     }
 }
 
@@ -442,7 +497,7 @@ impl Exit {
             Self::Exited(status) => format!("ended with {status}"),
             Self::Stopped(limit) => format!("stopped at the {limit:?} --attempt-timeout"),
             Self::Cancelled(winner) => {
-                format!("stopped once attempt {winner} passed its self-check")
+                format!("stopped once attempt {winner} passed its check")
             }
         }
     }

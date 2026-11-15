@@ -113,7 +113,7 @@ impl AttemptPickArg {
     const CHOICES: [Choice; 2] = [
         Choice::new("verifier").help("A verifier turn checks every finished attempt and picks one"),
         Choice::new("self-check").help(
-            "Each attempt runs the task's own checks and reports them; the first to pass them all wins and the rest stop, else the one with the most passing checks",
+            "Each attempt names a command that runs the task's checks, which runs again in its copy; the first attempt whose command exits 0 with every counted check passing wins and the rest stop, and when none does nothing is applied",
         ),
     ];
 }
@@ -277,7 +277,7 @@ const ATTEMPTS: Group = Group::named(
         Argument::value("attempt_timeout", "SECONDS", Parser::U64)
             .long("attempt-timeout")
             .requires("attempts")
-            .help("Stop each attempt and the verifier after this many seconds; a stopped attempt's copy stays a candidate"),
+            .help("Stop each attempt, its check command and the verifier after this many seconds; a stopped attempt's copy stays a candidate for the verifier"),
         Argument::value("attempt_pick", "PICK", Parser::Choice(&AttemptPickArg::CHOICES))
             .long("attempt-pick")
             .requires("attempts")
