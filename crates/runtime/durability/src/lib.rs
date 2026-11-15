@@ -40,7 +40,10 @@ pub use nanocode_durability_core::{
     StoreReplacement, StoreUpdate, StoredEvent, StoredState, SummaryFilter, SummaryUpdate,
     Versioned, base64_data_url, get_blob, migrate_format, migrate_format_then,
 };
-pub use paged::{PagedWriter, PayloadReader, Prepared, Sequence, SequenceLog, load_sequence};
+pub use paged::{
+    PagedWriter, PayloadReader, Prepared, Sequence, SequenceLog, load_sequence,
+    load_sequence_payloads,
+};
 pub use pool::pool_state;
 pub use record_cache::{CachedStore, RecordCache};
 pub use session::{

@@ -245,13 +245,14 @@ impl ModelCheckpoint {
         prompt_cache_key: Arc<str>,
         canonical_context: ResponseItem,
         history: Vec<ResponseItem>,
+        loaded: Option<ResponseHistory>,
         client_authored: std::collections::BTreeSet<String>,
         global_instructions: Option<Arc<str>>,
         context_baseline: Option<ContextBaseline>,
     ) -> Result<Self> {
         let context_baseline =
             context_baseline.unwrap_or_else(|| ContextBaseline::reconstruct(&history));
-        let mut conversation = ConversationState::resume(canonical_context, history)?;
+        let mut conversation = ConversationState::resume(canonical_context, history, loaded)?;
         conversation
             .managed
             .restore_client_authored(client_authored);
@@ -824,6 +825,7 @@ pub(crate) fn prepare_history_checkpoint(
         prompt_cache_key,
         canonical_context,
         history,
+        None,
         client_authored,
         context_source.global_instructions(),
         context_baseline,

@@ -8,7 +8,7 @@ use crate::client::{ModelConfig, Thinking, pricing::ServiceTier, responses::Stri
 
 pub const DEFAULT_FUNCTION_NAMESPACE: &str = "functions";
 
-type EncodedItems = [std::sync::OnceLock<Option<Box<[Box<RawValue>]>>>; 16];
+type EncodedItems = [std::sync::OnceLock<Option<Box<[Arc<str>]>>>; 16];
 
 type PrefixItems = [std::sync::OnceLock<Option<Box<[Arc<str>]>>>; 16];
 
@@ -190,6 +190,7 @@ struct HistorySegment {
     len: usize,
     encoded: EncodedItems,
     totals: std::sync::OnceLock<HistoryTotals>,
+    stored: Option<Box<[Arc<str>]>>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -257,6 +258,26 @@ impl ResponseHistory {
         }
     }
 
+    #[doc(hidden)]
+    #[must_use]
+    pub fn loaded(entries: Vec<(ResponseItem, Arc<str>)>) -> Self {
+        if entries.is_empty() {
+            return Self::default();
+        }
+        let (items, stored): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+        Self {
+            head: Some(Arc::new(HistorySegment {
+                previous: None,
+                len: items.len(),
+                items: Arc::new(items),
+                encoded: std::array::from_fn(|_| std::sync::OnceLock::new()),
+                totals: std::sync::OnceLock::new(),
+                stored: Some(stored.into()),
+            })),
+            tail: Arc::default(),
+        }
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.head.as_ref().map_or(0, |segment| segment.len) + self.tail.len()
@@ -297,6 +318,7 @@ impl ResponseHistory {
             items,
             encoded: std::array::from_fn(|_| std::sync::OnceLock::new()),
             totals: std::sync::OnceLock::new(),
+            stored: None,
         }));
     }
 
@@ -666,11 +688,19 @@ impl RequestInput<'_> {
             | (usize::from(self.top_level_tools) << 3)
     }
 
-    fn encode(&self, items: &[ResponseItem]) -> Option<Box<[Box<RawValue>]>> {
-        items
+    fn encode(&self, segment: &HistorySegment) -> Option<Box<[Arc<str>]>> {
+        segment
+            .items
             .iter()
-            .filter(|item| self.supports(item))
-            .map(|item| to_raw_value(&self.element(item)).ok())
+            .enumerate()
+            .filter(|(_, item)| self.supports(item))
+            .map(
+                |(index, item)| match (self.element(item).rewritten(), &segment.stored) {
+                    (Some(item), _) => serde_json::to_string(&item).ok().map(Arc::from),
+                    (None, Some(stored)) => Some(Arc::clone(&stored[index])),
+                    (None, None) => serde_json::to_string(item).ok().map(Arc::from),
+                },
+            )
             .collect()
     }
 
@@ -729,12 +759,12 @@ impl RequestInput<'_> {
         for (index, segment) in segments.iter().rev().enumerate() {
             let skip = if index == 0 { offset } else { 0 };
             match segment.encoded[self.flags()]
-                .get_or_init(|| self.encode(&segment.items))
+                .get_or_init(|| self.encode(segment))
                 .as_deref()
                 .filter(|_| skip == 0)
             {
                 Some(encoded) => {
-                    pieces.extend(encoded.iter().map(|item| Cow::Borrowed(item.get())));
+                    pieces.extend(encoded.iter().map(|item| Cow::Borrowed(&**item)));
                 }
                 None => self.items(pieces, &segment.items[skip..])?,
             }

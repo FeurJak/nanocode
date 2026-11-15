@@ -394,6 +394,16 @@ impl EncodedPayload {
         })
     }
 
+    pub fn shared_json(&self) -> Result<Arc<str>> {
+        match &self.body {
+            Body::Content {
+                json: Text::Json(json),
+                ..
+            } => Ok(Arc::clone(json)),
+            _ => self.json().map(Arc::from),
+        }
+    }
+
     #[cfg_attr(target_family = "wasm", allow(dead_code))]
     pub fn from_key(key: &str) -> Self {
         Self::by_key(key)

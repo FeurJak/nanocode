@@ -6,7 +6,7 @@ use std::{
 use nanocode_agent_core::TurnUsage;
 use nanocode_durability::{
     EncodedPayload, Error, PagedWriter, PayloadReader, Prepared, Result, Sequence, SequenceLog,
-    load_sequence,
+    load_sequence, load_sequence_payloads,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
@@ -171,6 +171,22 @@ pub(crate) fn prepare_continuation(
     })
 }
 
+static LOADED: nanocode_sync::SwapOption<(ResponseHistory, SequenceLog)> =
+    nanocode_sync::SwapOption::const_empty();
+
+fn loaded_history(payloads: Vec<EncodedPayload>) -> Result<ResponseHistory> {
+    let mut entries = Vec::with_capacity(payloads.len());
+    let mut log = SequenceLog::default();
+    for payload in payloads {
+        log.push(payload.reference())?;
+        entries.push((payload.decode()?, payload.shared_json()?));
+    }
+    log.release();
+    let history = ResponseHistory::loaded(entries);
+    LOADED.store(Some(Arc::new((history.clone(), log))));
+    Ok(history)
+}
+
 #[derive(Default)]
 pub(crate) struct ContinuationCache {
     history: ResponseHistory,
@@ -203,6 +219,14 @@ impl ContinuationCache {
     }
 
     fn sync_history(&mut self, history: &ResponseHistory) -> Result<()> {
+        if self.history_log.is_empty()
+            && let Some(loaded) = LOADED.load_full()
+            && !loaded.0.is_empty()
+            && loaded.0.shared_prefix_len(history) == loaded.0.len()
+        {
+            LOADED.store(None);
+            (self.history, self.history_log) = Arc::unwrap_or_clone(loaded);
+        }
         let unchanged = self
             .history
             .shared_prefix_len(history)
@@ -426,15 +450,13 @@ pub(crate) async fn load_snapshot_with_keys(
     saved: Snapshot,
 ) -> Result<(SessionSnapshot, HashSet<String>)> {
     let mut keys = HashSet::new();
-    let history = load_sequence(reader, saved.history, &mut keys).await?;
+    let history = loaded_history(load_sequence_payloads(reader, saved.history, &mut keys).await?)?;
     let prefix = match saved.prefix {
         Some(value) => Some(load_sequence(reader, value, &mut keys).await?),
         None => None,
     };
     Ok((
-        saved
-            .head
-            .with_context(ResponseHistory::new(history), prefix.map(Arc::from)),
+        saved.head.with_context(history, prefix.map(Arc::from)),
         keys,
     ))
 }

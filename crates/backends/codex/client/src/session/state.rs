@@ -129,16 +129,30 @@ impl ManagedSessionState {
         }
     }
 
-    pub fn resume(mut items: Vec<ResponseItem>) -> Result<Self, ManagedSessionStateError> {
+    pub fn resume(items: Vec<ResponseItem>) -> Result<Self, ManagedSessionStateError> {
+        Self::resume_loaded(items, None)
+    }
+
+    #[doc(hidden)]
+    pub fn resume_loaded(
+        mut items: Vec<ResponseItem>,
+        loaded: Option<ResponseHistory>,
+    ) -> Result<Self, ManagedSessionStateError> {
         if items.is_empty() {
             return Err(ManagedSessionStateError::EmptyHistory);
         }
+        let loaded = loaded.filter(|_| {
+            items.iter().all(|item| {
+                item.id().is_some_and(|id| !id.is_empty()) || item.id_prefix().is_none()
+            })
+        });
         assign_missing_response_item_ids(&mut items);
         if !has_well_formed_tool_calls(&items) {
             return Err(ManagedSessionStateError::MalformedToolCalls);
         }
         let history_len = items.len();
-        let mut state = Self::new(items);
+        let mut state = Self::new(Vec::new());
+        state.context = ContextManager::resume(items, loaded);
         if state.context.len() != history_len {
             return Err(ManagedSessionStateError::UnsupportedHistoryItem);
         }

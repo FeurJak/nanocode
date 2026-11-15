@@ -255,6 +255,18 @@ pub async fn load_sequence<T: DeserializeOwned>(
     sequence: Sequence,
     keys: &mut HashSet<String>,
 ) -> Result<Vec<T>> {
+    load_sequence_payloads(reader, sequence, keys)
+        .await?
+        .iter()
+        .map(EncodedPayload::decode)
+        .collect()
+}
+
+pub async fn load_sequence_payloads(
+    reader: PayloadReader<'_>,
+    sequence: Sequence,
+    keys: &mut HashSet<String>,
+) -> Result<Vec<EncodedPayload>> {
     let references = match sequence.tail {
         None => return Ok(Vec::new()),
         Some(Tail::Chained(tail)) => chained(reader, tail, keys).await?,
@@ -266,11 +278,7 @@ pub async fn load_sequence<T: DeserializeOwned>(
     for reference in &references {
         keys.insert(reference.key().to_owned());
     }
-    let mut items = Vec::with_capacity(references.len());
-    for payload in reader.load_payloads(references).await? {
-        items.push(payload.decode()?);
-    }
-    Ok(items)
+    reader.load_payloads(references).await
 }
 
 async fn unsealed(

@@ -178,7 +178,7 @@ impl ModelRun {
         session.conversation = if history.is_empty() && saved.phase == ExecutionPhase::Compact {
             ConversationState::empty(saved.canonical_context)
         } else {
-            ConversationState::resume(saved.canonical_context, history)?
+            ConversationState::resume(saved.canonical_context, history, None)?
         };
         session
             .conversation

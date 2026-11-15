@@ -464,6 +464,7 @@ impl SessionSnapshot {
                     Arc::clone(&prompt_cache_key),
                     self.canonical_context.clone(),
                     history.clone(),
+                    Some(self.history.clone()),
                     self.client_authored.clone(),
                     None,
                     self.context_snapshot.clone(),

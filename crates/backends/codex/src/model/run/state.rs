@@ -94,6 +94,7 @@ impl ConversationState {
     pub(super) fn resume(
         mut canonical_context: ResponseItem,
         history: Vec<ResponseItem>,
+        loaded: Option<ResponseHistory>,
     ) -> Result<Self> {
         if !canonical_context.is_user_message() {
             return Err(NanocodeError::InvalidCheckpoint(
@@ -101,7 +102,7 @@ impl ConversationState {
             ));
         }
         assign_missing_response_item_id(&mut canonical_context);
-        let managed = ManagedSessionState::resume(history)
+        let managed = ManagedSessionState::resume_loaded(history, loaded)
             .map_err(|error| NanocodeError::InvalidCheckpoint(error.to_string()))?;
         let mut state = Self {
             canonical_context: Arc::new(canonical_context),
