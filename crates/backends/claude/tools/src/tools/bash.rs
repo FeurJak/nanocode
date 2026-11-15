@@ -20,6 +20,23 @@ pub const DEFAULT_BACKGROUND_TIMEOUT_MS: u64 = 600_000;
 
 pub const MAX_BACKGROUND_TIMEOUT_MS: u64 = 7_200_000;
 
+pub const KILLED_LINE: &str = "[killed]";
+
+const EXITED_PREFIX: &str = "[exited with code ";
+
+#[must_use]
+pub fn exited_line(code: &str) -> String {
+    format!("{EXITED_PREFIX}{code}]")
+}
+
+#[must_use]
+pub fn closes_output(line: &str) -> bool {
+    line == KILLED_LINE
+        || line
+            .strip_prefix(EXITED_PREFIX)
+            .is_some_and(|code| code.ends_with(']'))
+}
+
 #[must_use]
 pub fn direct_run_time(input: &Value) -> std::time::Duration {
     let milliseconds = match input.get("run_in_background").and_then(Value::as_bool) {
@@ -286,9 +303,11 @@ impl<E: BashExecutor> ClaudeBash<E> {
         };
         let kept = kept.as_ref().map(|(file, bytes)| (file.as_str(), *bytes));
         let (stdout, stderr, truncated) = match kept.filter(|_| !nested) {
-            Some((file, bytes)) if result.exit_code == 0 => {
-                (persisted(&result.stdout, file, bytes), result.stderr.clone(), true)
-            }
+            Some((file, bytes)) if result.exit_code == 0 => (
+                persisted(&result.stdout, file, bytes),
+                result.stderr.clone(),
+                true,
+            ),
             Some(_) => (result.stdout.clone(), result.stderr.clone(), true),
             None => bounded_output(&result, stream_bytes, kept),
         };

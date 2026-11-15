@@ -2,7 +2,10 @@ use crate::{
     agent::Steer,
     tools::{
         BashExecution, BashExecutor, BashRequest, BashResult, ClaudeBash,
-        bash::{DEFAULT_BACKGROUND_TIMEOUT_MS, MAX_BACKGROUND_TIMEOUT_MS, MAX_TIMEOUT_MS},
+        bash::{
+            DEFAULT_BACKGROUND_TIMEOUT_MS, KILLED_LINE, MAX_BACKGROUND_TIMEOUT_MS, MAX_TIMEOUT_MS,
+            exited_line,
+        },
     },
 };
 use nanocode_agent_core::{Agent, PromptRequest, WeakAgent};
@@ -169,9 +172,11 @@ impl Job {
     fn exit_line(&self) -> String {
         let killed = self.expired.load(Ordering::SeqCst) || self.capped.is_fired();
         match &*self.result.borrow() {
-            Some(Ok(result)) if !killed => format!("\n[exited with code {}]\n", result.exit_code),
-            Some(Err(_)) if !killed => "\n[exited with code unknown]\n".to_owned(),
-            _ => "\n[killed]\n".to_owned(),
+            Some(Ok(result)) if !killed => {
+                format!("\n{}\n", exited_line(&result.exit_code.to_string()))
+            }
+            Some(Err(_)) if !killed => format!("\n{}\n", exited_line("unknown")),
+            _ => format!("\n{KILLED_LINE}\n"),
         }
     }
     async fn close_output(&self) {

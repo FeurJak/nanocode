@@ -175,26 +175,31 @@ pub(super) fn install(
         })
     }));
     let cell_yield = tools.cell_yield();
+    let held =
+        (headless && tools.has_code_mode_host() && handle.root_session_id() == handle.session_id())
+            .then(Arc::<Watches>::default);
     if tools.exposure() != nanocode_tool_host::ToolExposure::DirectOnly
         || !tools.has_code_mode_host()
     {
-        native = catalog(native, &runtime, handle.session_id(), cell_yield, false)?;
+        native = catalog(native, &runtime, handle.session_id(), cell_yield, None)?;
     } else {
         let dynamic = Arc::clone(&runtime);
         let session_id = handle.session_id().to_owned();
+        let watches = held.clone();
         native = native.dynamic_tools(move || {
-            catalog(ClaudeTools::new(), &dynamic, &session_id, cell_yield, true).unwrap_or_else(|error| {
+            catalog(ClaudeTools::new(), &dynamic, &session_id, cell_yield, Some(watches.as_ref())).unwrap_or_else(|error| {
                 nanocode_trace::warn!(target: "nanocode_claude", %error, "direct hand tools are unavailable");
                 ClaudeTools::new()
             })
         });
     }
-    if headless && tools.has_code_mode_host() && handle.root_session_id() == handle.session_id() {
+    if let Some(watches) = held {
         native = hold_hand_jobs(
             native,
             &runtime,
             handle.session_id(),
             cell_yield.unwrap_or(nanocode_tool_host::code_mode_spec::DEFAULT_YIELD),
+            watches,
         );
     }
     native.shared_catalog = Some((tools, workspace, handle.clone()));
@@ -206,6 +211,7 @@ fn hold_hand_jobs(
     runtime: &Arc<ToolRuntime>,
     session_id: &str,
     wait: std::time::Duration,
+    watches: Arc<Watches>,
 ) -> ClaudeTools {
     let steer: Arc<nanocode_sync::Atom<Option<crate::agent::Steer>>> = Arc::default();
     let bound = Arc::clone(&steer);
@@ -219,8 +225,10 @@ fn hold_hand_jobs(
             let runtime = Arc::clone(&runtime);
             let session_id = Arc::clone(&session_id);
             let steer = Option::clone(&steer.get());
+            let watches = Arc::clone(&watches);
             async move {
                 loop {
+                    let wait = watches.left().map_or(wait, |left| left.min(wait));
                     let jobs = match runtime.hand_notices(&session_id, wait).await {
                         Ok(jobs) => jobs,
                         Err(error) => {
@@ -228,24 +236,407 @@ fn hold_hand_jobs(
                             return;
                         }
                     };
-                    if !jobs.notices.is_empty() {
-                        let Some(steer) = steer else {
-                            nanocode_trace::warn!(target: "nanocode_claude", "background job notices found no bound agent");
-                            return;
-                        };
-                        for notice in jobs.notices {
-                            if !steer(crate::notification::reminder(&notice)).await {
-                                nanocode_trace::debug!("background job notice found no running turn");
-                            }
+                    let notices = watches.notices(&runtime, &session_id, jobs.notices).await;
+                    let prompt = match notices.is_empty() {
+                        true => watches.due(),
+                        false => None,
+                    };
+                    if notices.is_empty() && prompt.is_none() {
+                        if jobs.busy {
+                            continue;
                         }
-                        return;
+                        match watches.left() {
+                            Some(left) => {
+                                nanocode_platform::sleep(left).await;
+                                continue;
+                            }
+                            None => return,
+                        }
                     }
-                    if !jobs.busy {
+                    let Some(steer) = steer else {
+                        nanocode_trace::warn!(target: "nanocode_claude", "background job notices found no bound agent");
                         return;
+                    };
+                    for notice in notices {
+                        if !steer(crate::notification::reminder(&notice)).await {
+                            nanocode_trace::debug!("background job notice found no running turn");
+                        }
                     }
+                    if let Some(prompt) = prompt
+                        && !steer(prompt).await
+                    {
+                        nanocode_trace::debug!("scheduled wakeup found no running turn");
+                    }
+                    return;
                 }
             }
         })
+}
+
+#[derive(Default)]
+struct Watches {
+    monitors: nanocode_sync::Atom<Vec<Monitor>>,
+    polls: std::sync::atomic::AtomicU64,
+    wakeup: nanocode_sync::Atom<Option<Wakeup>>,
+}
+
+#[derive(Clone)]
+struct Monitor {
+    call_id: String,
+    description: String,
+    events: u64,
+    id: String,
+    model: String,
+    output: String,
+    read: u64,
+    started: std::time::SystemTime,
+    timeout_ms: u64,
+}
+
+#[derive(Clone)]
+struct Wakeup {
+    at: std::time::SystemTime,
+    prompt: String,
+}
+
+impl Watches {
+    fn left(&self) -> Option<std::time::Duration> {
+        self.wakeup.read(|wakeup| {
+            wakeup.as_ref().map(|wakeup| {
+                wakeup
+                    .at
+                    .duration_since(nanocode_platform::system_time())
+                    .unwrap_or_default()
+            })
+        })
+    }
+
+    fn due(&self) -> Option<String> {
+        let now = nanocode_platform::system_time();
+        self.wakeup.update(
+            |wakeup| match wakeup.as_ref().is_some_and(|wakeup| wakeup.at <= now) {
+                true => wakeup.take().map(|wakeup| wakeup.prompt),
+                false => None,
+            },
+        )
+    }
+
+    async fn notices(
+        &self,
+        runtime: &ToolRuntime,
+        session_id: &str,
+        notices: Vec<String>,
+    ) -> Vec<String> {
+        let mut texts = Vec::new();
+        for monitor in self.monitors.get().iter() {
+            let poll = self.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let Some((events, read)) = monitor_events(runtime, session_id, monitor, poll).await
+            else {
+                continue;
+            };
+            let delivered = u64::from(!events.is_empty());
+            self.monitors.update(|monitors| {
+                if let Some(known) = monitors.iter_mut().find(|known| known.id == monitor.id) {
+                    known.read += read;
+                    known.events += delivered;
+                }
+            });
+            if !events.is_empty() {
+                texts.push(monitor_notification(monitor, &events));
+            }
+        }
+        for notice in notices {
+            let ended = self.monitors.update(|monitors| {
+                let at = monitors.iter().position(|monitor| {
+                    notice.contains(&format!("<task-id>{}</task-id>", monitor.id))
+                })?;
+                Some(monitors.remove(at))
+            });
+            texts.push(match ended {
+                Some(monitor) if monitor_expired(&monitor) => {
+                    monitor_notification(&monitor, &monitor_expiry(&monitor))
+                }
+                _ => notice,
+            });
+        }
+        texts
+    }
+}
+
+const MONITOR_MAX_TIMEOUT_MS: u64 = 600_000;
+const WAKEUP_DELAY_SECONDS: std::ops::RangeInclusive<f64> = 60.0..=3600.0;
+
+fn watch_tools(
+    native: ClaudeTools,
+    runtime: &Arc<ToolRuntime>,
+    watches: &Arc<Watches>,
+) -> ClaudeTools {
+    let monitor = crate::upstream::tool_definition("Monitor")
+        .expect("upstream Monitor definition")
+        .clone();
+    let wakeup = crate::upstream::tool_definition("ScheduleWakeup")
+        .expect("upstream ScheduleWakeup definition")
+        .clone();
+    let runtime = Arc::clone(runtime);
+    let started = Arc::clone(watches);
+    let scheduled = Arc::clone(watches);
+    native
+        .tool_with_context(monitor, move |input, invocation| {
+            let runtime = Arc::clone(&runtime);
+            let watches = Arc::clone(&started);
+            async move { start_monitor(&runtime, &watches, &input, &invocation).await }
+        })
+        .tool_with_context(wakeup, move |input, _| {
+            let watches = Arc::clone(&scheduled);
+            async move { schedule_wakeup(&watches, &input) }
+        })
+}
+
+async fn start_monitor(
+    runtime: &ToolRuntime,
+    watches: &Watches,
+    input: &Value,
+    invocation: &ClaudeToolInvocation,
+) -> std::result::Result<ClaudeToolReply, String> {
+    if input.get("ws").is_some() {
+        return Err("Monitor cannot open a WebSocket here: this hand runs commands only, so watch the source with a `command`.".into());
+    }
+    let command = input
+        .get("command")
+        .and_then(Value::as_str)
+        .ok_or("Monitor needs a `command`.")?;
+    let description = input
+        .get("description")
+        .and_then(Value::as_str)
+        .ok_or("Monitor needs a `description`.")?;
+    let timeout_ms = match input.get("timeout_ms") {
+        Some(timeout) => timeout
+            .as_u64()
+            .ok_or("`timeout_ms` must be a whole number of milliseconds.")?,
+        None => {
+            let schema = nanocode_backend_claude_tools::upstream::tool("Monitor").input_schema();
+            schema
+                .as_value()
+                .pointer("/properties/timeout_ms/default")
+                .and_then(Value::as_u64)
+                .expect("upstream Monitor default timeout")
+        }
+    }
+    .min(MONITOR_MAX_TIMEOUT_MS);
+    let bash = json!({
+        "command": command,
+        "description": description,
+        "run_in_background": true,
+        "timeout": timeout_ms,
+    });
+    let context = tool_context(invocation).with_run_time(Some(
+        nanocode_backend_claude_tools::tools::bash::direct_run_time(&bash),
+    ));
+    let raw = serde_json::value::to_raw_value(&bash).map_err(|error| error.to_string())?;
+    let mut output = runtime
+        .execute_tool("Bash", ToolInput::Function(raw), context)
+        .await
+        .map_err(|error| error.to_string())?;
+    if !output.success {
+        return tool_reply(output);
+    }
+    let started = output.take_structured_result();
+    let (Some(id), Some(file)) = (
+        started.get("task_id").and_then(Value::as_str),
+        started.get("output_file").and_then(Value::as_str),
+    ) else {
+        return Err(format!(
+            "Monitor did not start: the hand's Bash returned no background task and output file ({started})."
+        ));
+    };
+    let monitor = Monitor {
+        call_id: invocation.call_id.clone(),
+        description: description.to_owned(),
+        events: 0,
+        id: id.to_owned(),
+        model: invocation.model.clone(),
+        output: file.to_owned(),
+        read: 0,
+        started: nanocode_platform::system_time(),
+        timeout_ms,
+    };
+    watches
+        .monitors
+        .update(|monitors| monitors.push(monitor.clone()));
+    Ok(ClaudeToolReply {
+        content: ToolResultContent::Text(format!(
+            "Monitor started (task {id}, expires in {} unless the source ends first; you get one notice at expiry \u{2014} re-arm if you still need the watch). You will be notified on each event. Keep working \u{2014} do not poll or sleep. An event that arrives after your reply is not the user's reply.",
+            whole_time(timeout_ms)
+        )),
+        is_error: false,
+        metadata: None,
+        structured_result: Some(json!({"taskId": id, "timeoutMs": timeout_ms})),
+    })
+}
+
+async fn monitor_events(
+    runtime: &ToolRuntime,
+    session_id: &str,
+    monitor: &Monitor,
+    poll: u64,
+) -> Option<(String, u64)> {
+    let input = json!({
+        "command": format!(
+            "tail -c +{} '{}' | head -c {}",
+            monitor.read + 1,
+            monitor.output.replace('\'', "'\\''"),
+            nanocode_backend_claude_tools::tools::bash::MAX_STREAM_BYTES
+        ),
+        "description": format!("Read new output of monitor {}", monitor.id),
+    });
+    let call_id = format!("{}/poll-{poll}", monitor.call_id);
+    let context = ToolContext::new(&monitor.model, session_id, &call_id, &[], usize::MAX)
+        .with_run_time(Some(
+            nanocode_backend_claude_tools::tools::bash::direct_run_time(&input),
+        ));
+    let raw = serde_json::value::to_raw_value(&input).ok()?;
+    let mut output = match runtime
+        .execute_tool("Bash", ToolInput::Function(raw), context)
+        .await
+    {
+        Ok(output) => output,
+        Err(error) => {
+            nanocode_trace::warn!(target: "nanocode_claude", %error, task_id = %monitor.id, "monitor output could not be read from the hand");
+            return None;
+        }
+    };
+    let result = output.take_structured_result();
+    let stdout = result.get("stdout").and_then(Value::as_str)?;
+    let end = stdout.rfind('\n').map_or(0, |at| at + 1);
+    let events = stdout[..end]
+        .lines()
+        .filter(|line| {
+            !line.trim().is_empty()
+                && !nanocode_backend_claude_tools::tools::bash::closes_output(line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some((events, end as u64))
+}
+
+fn monitor_notification(monitor: &Monitor, event: &str) -> String {
+    let escape = |text: &str| {
+        text.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    };
+    format!(
+        "<task-notification>\n<task-id>{}</task-id>\n<summary>Monitor event: \"{}\"</summary>\n<event>{}</event>\n</task-notification>",
+        monitor.id,
+        escape(&monitor.description),
+        escape(event)
+    )
+}
+
+fn monitor_expired(monitor: &Monitor) -> bool {
+    nanocode_platform::system_time()
+        .duration_since(monitor.started)
+        .is_ok_and(|elapsed| elapsed.as_millis() >= u128::from(monitor.timeout_ms))
+}
+
+fn monitor_expiry(monitor: &Monitor) -> String {
+    let after = whole_time(monitor.timeout_ms);
+    match monitor.events {
+        0 => format!(
+            "[Monitor expired after {after} with no events delivered. Re-arm it if you still need the watch \u{2014} and widen the filter if silence was unexpected.]"
+        ),
+        1 => format!(
+            "[Monitor expired after {after} with 1 event delivered. Re-arm it if you still need the watch.]"
+        ),
+        events => format!(
+            "[Monitor expired after {after} with {events} events delivered. Re-arm it if you still need the watch.]"
+        ),
+    }
+}
+
+fn whole_time(milliseconds: u64) -> String {
+    let seconds = milliseconds / 1000;
+    [
+        (seconds / 3600, "h"),
+        (seconds / 60 % 60, "m"),
+        (seconds % 60, "s"),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, unit)| format!("{count}{unit}"))
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
+fn schedule_wakeup(
+    watches: &Watches,
+    input: &Value,
+) -> std::result::Result<ClaudeToolReply, String> {
+    let outcome = "Then write the loop's outcome for the user as ordinary visible response text \u{2014} and end the turn.";
+    if input.get("stop").and_then(Value::as_bool) == Some(true) {
+        let cancelled = watches.wakeup.update(Option::take).is_some();
+        let text = match cancelled {
+            true => format!(
+                "Loop stopped \u{2014} cancelled 1 pending wakeup(s); no further dynamic-loop wakeups scheduled. If you armed a Monitor for this loop, TaskStop it now. {outcome}"
+            ),
+            false => format!(
+                "Loop stopped \u{2014} any dynamic loop in this session is ended; there was no pending wakeup to cancel. If you armed a Monitor for this loop, TaskStop it now. {outcome}"
+            ),
+        };
+        return Ok(ClaudeToolReply {
+            content: ToolResultContent::Text(text),
+            is_error: false,
+            metadata: None,
+            structured_result: Some(json!({
+                "cancelledWakeups": u8::from(cancelled),
+                "clampedDelaySeconds": 0,
+                "scheduledFor": 0,
+                "stopped": true,
+                "wasClamped": false,
+            })),
+        });
+    }
+    let (Some(delay), Some(_)) = (
+        input.get("delaySeconds").and_then(Value::as_f64),
+        input.get("reason").and_then(Value::as_str),
+    ) else {
+        return Err("`delaySeconds` and `reason` are required when `stop` is not true.".into());
+    };
+    let prompt = input
+        .get("prompt")
+        .and_then(Value::as_str)
+        .ok_or("`prompt` is required when `stop` is not true.")?;
+    let clamped = delay.clamp(*WAKEUP_DELAY_SECONDS.start(), *WAKEUP_DELAY_SECONDS.end());
+    let at = nanocode_platform::system_time() + std::time::Duration::from_secs_f64(clamped);
+    watches.wakeup.set(Some(Wakeup {
+        at,
+        prompt: prompt.to_owned(),
+    }));
+    let note = match clamped == delay {
+        true => String::new(),
+        false => format!(" (clamped to {clamped}s from your requested value)"),
+    };
+    let unix = at
+        .duration_since(nanocode_platform::UNIX_EPOCH)
+        .unwrap_or_default();
+    let local = unix.as_secs() as i64 + i64::from(nanocode_platform::utc_offset_seconds(at));
+    let day = local.rem_euclid(86_400);
+    Ok(ClaudeToolReply {
+        content: ToolResultContent::Text(format!(
+            "Next wakeup scheduled for {:02}:{:02}:{:02} (in {}s){note}. If you owe the user a status update this tick, write it now as ordinary response text; then end the turn \u{2014} the harness re-invokes you when the wakeup fires or a task-notification arrives.",
+            day / 3600,
+            day / 60 % 60,
+            day % 60,
+            clamped.round()
+        )),
+        is_error: false,
+        metadata: None,
+        structured_result: Some(json!({
+            "clampedDelaySeconds": clamped,
+            "scheduledFor": unix.as_millis() as u64,
+            "wasClamped": clamped != delay,
+        })),
+    })
 }
 
 fn catalog(
@@ -253,8 +644,9 @@ fn catalog(
     runtime: &Arc<ToolRuntime>,
     session_id: &str,
     cell_yield: Option<std::time::Duration>,
-    direct: bool,
+    watches: Option<Option<&Arc<Watches>>>,
 ) -> Result<ClaudeTools> {
+    let direct = watches.is_some();
     for definition in flatten(runtime.model_specs(session_id)) {
         let strict = match &definition {
             RuntimeDefinition::Function {
@@ -327,6 +719,11 @@ fn catalog(
             let call = call.clone();
             async move { call.run(&runtime, input, &invocation).await }
         });
+    }
+    if let Some(Some(watches)) = watches
+        && native.shared_tool_names.contains("Bash")
+    {
+        native = watch_tools(native, runtime, watches);
     }
     Ok(native)
 }

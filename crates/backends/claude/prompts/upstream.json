@@ -40,7 +40,9 @@
     "TaskCreate": "expanded",
     "TaskGet": "expanded",
     "TaskList": "expanded",
-    "TaskUpdate": "expanded"
+    "TaskUpdate": "expanded",
+    "Monitor": "full",
+    "ScheduleWakeup": "full"
   },
   "artifacts": [
     {
@@ -49,14 +51,14 @@
     },
     {
       "path": "tools/src/tools/upstream.json",
-      "sha256": "8a2fe12b39cddcaa5eb0a7f1d090fd978692b5c4802b82b10e71f03bf7eae3b0"
+      "sha256": "95d3c4f33853899144a9400180e24b21bfdda2b9b59cf2d454807e5f0681ad35"
     },
     {
       "path": "prompts/bash-first.json",
       "sha256": "54bcf5498b99c422f504472ff1878900f431b0cd3fc28b8e08438f3c09055b11"
     }
   ],
-  "scope": "Exact SDK identity and core text blocks, and model-visible tool names, descriptions and input schemas from official CLI requests to a local Messages stub with a dummy API key. Request-specific billing, authentication, cache policy, environment, project memory and attribution remain separate host context. Bash uses the upstream default catalog profile, which has no Glob or Grep and searches through the shell. Captured contract availability is not a claim of implementing every Claude Code host action. TaskOutput, TodoWrite and Skill remain separately supplied SDK extensions when registered. The bypass profile and bash_first_models captures, run with --dangerously-skip-permissions, give prompts/bash-first.json: the bypass permissions note and the Bash line it removes, for the models whose capture carries that note.",
+  "scope": "Exact SDK identity and core text blocks, and model-visible tool names, descriptions and input schemas from official CLI requests to a local Messages stub with a dummy API key. Request-specific billing, authentication, cache policy, environment, project memory and attribution remain separate host context. Bash uses the upstream default catalog profile, which has no Glob or Grep and searches through the shell. Captured contract availability is not a claim of implementing every Claude Code host action. TaskOutput, TodoWrite and Skill remain separately supplied SDK extensions when registered. The bypass profile and bash_first_models captures, run with --dangerously-skip-permissions, give prompts/bash-first.json: the bypass permissions note and the Bash line it removes, for the models whose capture carries that note. Monitor and ScheduleWakeup come from the full profile, as a default print-mode request carries them; the Claude direct catalog serves them on a hand from its background jobs.",
   "bash_first_models": [
     "claude-fable-5-1",
     "claude-fable-5-2",
