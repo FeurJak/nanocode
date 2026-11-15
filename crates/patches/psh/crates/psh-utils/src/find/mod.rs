@@ -297,7 +297,7 @@ impl<'p> Run<'p> {
                 match ctx.read_dir_kinds(&f.path).await {
                     Err(e) => self.fail(ctx, &f.path, &e).await,
                     Ok(mut names) => {
-                        names.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+                        crate::order::sort_by(&mut names, |a, b| a.0.name.cmp(&b.0.name));
                         stack.push((f.meta.dev, f.meta.ino, f.path.clone()));
                         for (n, kind) in names {
                             if self.quit {

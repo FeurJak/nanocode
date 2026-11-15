@@ -99,7 +99,9 @@ impl CacheTree {
         }
         // git keeps the subtrees by the length of their names, then by name.
         let mut children: Vec<&CacheTree> = self.children.iter().collect();
-        children.sort_by(|a, b| (a.name.len(), &a.name).cmp(&(b.name.len(), &b.name)));
+        crate::order::sort_by(&mut children, |a, b| {
+            (a.name.len(), &a.name).cmp(&(b.name.len(), &b.name))
+        });
         for child in children {
             child.write(out);
         }

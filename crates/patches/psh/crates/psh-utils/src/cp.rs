@@ -621,7 +621,7 @@ async fn copy_dir(
     }
     let entries = match ctx.read_dir(src).await {
         Ok(mut e) => {
-            e.sort_by(|a, b| a.name.cmp(&b.name));
+            crate::order::sort_by(&mut e, |a, b| a.name.cmp(&b.name));
             e
         }
         Err(e) => {

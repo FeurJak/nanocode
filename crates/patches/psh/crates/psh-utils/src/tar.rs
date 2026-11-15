@@ -446,7 +446,7 @@ impl Tar<'_, '_> {
                             {
                                 names.push(base.to_vec());
                             }
-                            names.sort();
+                            crate::order::sort(&mut names);
                             for child in names.into_iter().rev() {
                                 stack.push((join(&disk, &child), join(&entry.name, &child)));
                             }

@@ -34,7 +34,9 @@ fn above(paths: &[Vec<u8>]) -> Vec<Vec<u8>> {
         }
     }
     let mut dirs: Vec<Vec<u8>> = dirs.into_iter().collect();
-    dirs.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    crate::order::sort_by(&mut dirs, |a, b| {
+        b.len().cmp(&a.len()).then_with(|| a.cmp(b))
+    });
     dirs
 }
 
@@ -1004,7 +1006,9 @@ fn remove_tree(git: &Git<'_>, top: &[u8]) -> Res<()> {
         }
         dirs.push(at);
     }
-    dirs.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    crate::order::sort_by(&mut dirs, |a, b| {
+        b.len().cmp(&a.len()).then_with(|| a.cmp(b))
+    });
     for dir in dirs {
         git.op(Op::Rmdir(dir));
     }

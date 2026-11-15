@@ -773,7 +773,7 @@ impl HiArgs {
             SortModeKind::Path if !sort.reverse => return Box::new(haystacks),
             SortModeKind::Path => {
                 let mut haystacks = haystacks.collect::<Vec<Haystack>>();
-                haystacks.sort_by(|ref h1, ref h2| {
+                crate::order::sort_by(&mut haystacks, |ref h1, ref h2| {
                     h1.path().cmp(h2.path()).reverse()
                 });
                 return Box::new(haystacks.into_iter());
@@ -791,7 +791,7 @@ impl HiArgs {
                     .collect()
             }
         };
-        with_timestamps.sort_by(|(_, t1), (_, t2)| {
+        crate::order::sort_by(&mut with_timestamps, |(_, t1), (_, t2)| {
             let ordering = match (*t1, *t2) {
                 // Both have metadata, do the obvious thing.
                 (Some(t1), Some(t2)) => t1.cmp(&t2),

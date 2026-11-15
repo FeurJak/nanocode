@@ -167,7 +167,7 @@ impl<'a> Fs<'a> {
         match self.ctx.read_dir(path) {
             Ok(entries) => {
                 let mut names: Vec<Vec<u8>> = entries.into_iter().map(|e| e.name).collect();
-                names.sort();
+                crate::order::sort(&mut names);
                 Ok(names)
             }
             Err(e) if absent(&e) => Ok(Vec::new()),
@@ -444,7 +444,7 @@ impl<'a> Odb<'a> {
     pub fn made(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
         const BEST_SPEED: u8 = 1;
         let mut made: Vec<(Oid, (Kind, Data))> = self.made.borrow_mut().drain().collect();
-        made.sort_by_key(|(oid, _)| *oid);
+        crate::order::sort_by_key(&mut made, |(oid, _)| *oid);
         made.into_iter()
             .map(|(oid, (kind, data))| {
                 let mut raw = format!("{} {}\0", kind.name(), data.len()).into_bytes();
@@ -811,7 +811,7 @@ impl<'a> Odb<'a> {
                 }
             }
         }
-        found.sort();
+        crate::order::sort(&mut found);
         found.dedup();
         Ok(found)
     }

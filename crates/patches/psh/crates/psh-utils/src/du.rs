@@ -279,7 +279,7 @@ fn walk<'a, 'v>(
         let mut total = own;
         match ctx.read_dir(&path).await {
             Ok(mut entries) => {
-                entries.sort_by(|a, b| a.name.cmp(&b.name));
+                crate::order::sort_by(&mut entries, |a, b| a.name.cmp(&b.name));
                 for e in entries {
                     let child = join(&path, &e.name);
                     if let Some(n) = walk(ctx, w, child, depth + 1, o, Some(m.dev)).await {

@@ -133,7 +133,7 @@ impl Tree<'_, '_> {
             }
             entries.push((name, meta, is_dir || to_dir));
         }
-        entries.sort_by(|a, b| {
+        crate::order::sort_by(&mut entries, |a, b| {
             let first = if self.o.dirs_first {
                 b.2.cmp(&a.2)
             } else {

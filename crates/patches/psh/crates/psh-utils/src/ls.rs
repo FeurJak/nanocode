@@ -688,7 +688,7 @@ fn sort(entries: &mut [Entry], o: &Opts) {
                 || (e.kind() == Some(FileKind::Symlink)
                     && e.target_meta.is_some_and(|m| m.kind == FileKind::Dir))
         };
-        entries.sort_by_key(|e| !is_dir(e));
+        crate::order::sort_by_key(entries, |e| !is_dir(e));
     }
 }
 

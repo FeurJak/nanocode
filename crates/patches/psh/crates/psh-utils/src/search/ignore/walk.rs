@@ -937,7 +937,7 @@ fn read_sorted(dir: &Path, depth: usize) -> Vec<Result<DirEntry, WalkError>> {
             }
         })
         .collect();
-    entries.sort_by(|a, b| match (a, b) {
+    crate::order::sort_by(&mut entries, |a, b| match (a, b) {
         (Ok(a), Ok(b)) => a.file_name().cmp(b.file_name()),
         (Err(_), Err(_)) => std::cmp::Ordering::Equal,
         (Ok(_), Err(_)) => std::cmp::Ordering::Greater,

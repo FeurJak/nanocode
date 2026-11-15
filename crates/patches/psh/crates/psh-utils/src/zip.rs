@@ -353,7 +353,7 @@ pub async fn zip(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
                 match ctx.read_dir(&path).await {
                     Ok(entries) => {
                         let mut names: Vec<Vec<u8>> = entries.into_iter().map(|e| e.name).collect();
-                        names.sort();
+                        crate::order::sort(&mut names);
                         for child in names.into_iter().rev() {
                             stack.push((join(&path, &child), false));
                         }

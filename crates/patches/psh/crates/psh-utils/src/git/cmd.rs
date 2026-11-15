@@ -1063,7 +1063,7 @@ fn remote_names(repo: &Repo<'_>) -> Vec<String> {
             Some(name.to_string())
         })
         .collect();
-    names.sort();
+    crate::order::sort(&mut names);
     names.dedup();
     names
 }

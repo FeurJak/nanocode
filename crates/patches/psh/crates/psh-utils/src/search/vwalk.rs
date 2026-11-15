@@ -808,7 +808,7 @@ impl Walk<'_, '_> {
             Ok(list) => list,
             Err(e) => return self.io_err(&path, depth, e),
         };
-        names.sort_by(|a, b| a.name.cmp(&b.name));
+        crate::order::sort_by(&mut names, |a, b| a.name.cmp(&b.name));
         if self.o.follow_links {
             self.ancestors.push((dev, ino, path.clone()));
         }

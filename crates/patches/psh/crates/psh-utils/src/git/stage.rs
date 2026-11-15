@@ -669,7 +669,7 @@ pub fn rm(git: &Git<'_>, io: &mut Io<'_>, args: &[String]) -> Res<i32> {
         }
         doomed.extend(matched.iter().map(|e| e.path.clone()));
     }
-    doomed.sort();
+    crate::order::sort(&mut doomed);
     doomed.dedup();
     if !force {
         let head_tree = match git.repo.head()? {
@@ -740,7 +740,9 @@ pub fn rm(git: &Git<'_>, io: &mut Io<'_>, args: &[String]) -> Res<i32> {
         }
     }
     // Deepest first, so that a directory emptied of directories goes too.
-    dirs.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    crate::order::sort_by(&mut dirs, |a, b| {
+        b.len().cmp(&a.len()).then_with(|| a.cmp(b))
+    });
     dirs.dedup();
     for dir in dirs {
         git.op(Op::Rmdir(join(&root, &dir)));
@@ -978,7 +980,9 @@ pub fn clean(git: &Git<'_>, io: &mut Io<'_>, args: &[String]) -> Res<i32> {
         }
     }
     if !dry {
-        emptied.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        crate::order::sort_by(&mut emptied, |a, b| {
+            b.len().cmp(&a.len()).then_with(|| a.cmp(b))
+        });
         for dir in emptied {
             git.op(Op::Rmdir(join(&root, &dir)));
         }

@@ -73,7 +73,7 @@ fn keys(v: &Val, sorted: bool) -> ValR {
         Val::Obj(o) => {
             let mut k: Vec<Rc<str>> = o.keys().cloned().collect();
             if sorted {
-                k.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+                crate::order::sort_by(&mut k, |a, b| a.as_bytes().cmp(b.as_bytes()));
             }
             Ok(k.into_iter().map(Val::Str).collect())
         }
@@ -660,7 +660,7 @@ fn natives() -> Natives {
         ("sort", v(0), |cv| {
             bome(
                 arr(cv.1, "cannot be sorted, as it is not an array").map(|mut a| {
-                    a.sort();
+                    crate::order::sort(&mut a);
                     Val::arr(a)
                 }),
             )
@@ -668,14 +668,14 @@ fn natives() -> Natives {
         ("_sort_by_impl", v(1), |cv| {
             unary(cv, |x, k| {
                 let mut kv = keyed(x, k, "cannot be sorted, as it is not an array")?;
-                kv.sort_by(|a, b| a.0.cmp(&b.0));
+                crate::order::sort_by(&mut kv, |a, b| a.0.cmp(&b.0));
                 Ok(kv.into_iter().map(|(_, v)| v).collect())
             })
         }),
         ("_group_by_impl", v(1), |cv| {
             unary(cv, |x, k| {
                 let mut kv = keyed(x, k, "cannot be grouped, as it is not an array")?;
-                kv.sort_by(|a, b| a.0.cmp(&b.0));
+                crate::order::sort_by(&mut kv, |a, b| a.0.cmp(&b.0));
                 let mut groups: Vec<Val> = Vec::new();
                 let mut cur: Vec<Val> = Vec::new();
                 let mut last: Option<Val> = None;

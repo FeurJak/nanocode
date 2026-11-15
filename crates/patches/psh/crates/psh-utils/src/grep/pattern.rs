@@ -284,7 +284,7 @@ fn span_pats(prepared: &[Prepared], o: MatchOptions) -> Result<Pats, PatternErro
             .iter()
             .map(|p| p.rust.as_deref().unwrap())
             .collect();
-        lits.sort_by_key(|l| std::cmp::Reverse(l.len()));
+        crate::order::sort_by_key(&mut lits, |l| std::cmp::Reverse(l.len()));
         let joined: Vec<String> = lits.iter().map(|l| format!("(?:{l})")).collect();
         let one = Prepared {
             rust: Some(joined.join("|")),

@@ -387,7 +387,7 @@ pub fn blame(git: &Git<'_>, io: &mut Io<'_>, args: &[String]) -> Res<i32> {
         });
     }
     blame.run(Some(start))?;
-    blame.entries.sort_by_key(|e| e.lno);
+    crate::order::sort_by_key(&mut blame.entries, |e| e.lno);
 
     // What each version's commit prints as.
     struct Shown {

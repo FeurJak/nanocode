@@ -1739,7 +1739,7 @@ Alternatively, a format string may correspond to one of the following aliases:
             );
 
             let mut aliases = crate::printer::hyperlink_aliases();
-            aliases.sort_by_key(|alias| {
+            crate::order::sort_by_key(&mut aliases, |alias| {
                 alias.display_priority().unwrap_or(i16::MAX)
             });
             for (i, alias) in aliases.iter().enumerate() {

@@ -931,7 +931,7 @@ impl Differ {
             }
         };
         let mut names: Vec<Vec<u8>> = la.iter().chain(lb.iter()).cloned().collect();
-        names.sort();
+        crate::order::sort(&mut names);
         names.dedup();
         names.retain(|n| {
             let s = String::from_utf8_lossy(n);

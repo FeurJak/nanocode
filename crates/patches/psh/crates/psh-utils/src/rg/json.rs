@@ -176,7 +176,7 @@ pub(crate) fn summary(s: &Stats, elapsed: Duration) -> Json {
 fn sorted(j: Json) -> Json {
     match j {
         Json::Obj(mut fields) => {
-            fields.sort_by(|a, b| a.0.cmp(b.0));
+            crate::order::sort_by(&mut fields, |a, b| a.0.cmp(b.0));
             Json::Obj(
                 fields.into_iter().map(|(k, v)| (k, sorted(v))).collect(),
             )

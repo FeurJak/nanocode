@@ -85,7 +85,7 @@ pub fn worktree(git: &Git<'_>, io: &mut Io<'_>, args: &[String]) -> Res<i32> {
             bare: false,
         });
     }
-    linked.sort_by(|a, b| a.path.cmp(&b.path));
+    crate::order::sort_by(&mut linked, |a, b| a.path.cmp(&b.path));
     list.extend(linked);
     if porcelain {
         for tree in &list {
@@ -397,7 +397,9 @@ pub fn describe(git: &Git<'_>, io: &mut Io<'_>, args: &[String]) -> Res<i32> {
             start.hex()
         )));
     }
-    found.sort_by(|a, b| a.depth.cmp(&b.depth).then(a.order.cmp(&b.order)));
+    crate::order::sort_by(&mut found, |a, b| {
+        a.depth.cmp(&b.depth).then(a.order.cmp(&b.order))
+    });
     if let Some(c) = gave_up {
         push(&mut queue, &mut counter, c)?;
     }

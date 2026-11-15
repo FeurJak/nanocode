@@ -96,7 +96,7 @@ impl Map {
     /// The entries sorted by key (jq compares and sorts objects this way).
     pub fn sorted(&self) -> Vec<(&Rc<str>, &Val)> {
         let mut v: Vec<_> = self.iter().collect();
-        v.sort_by(|a, b| a.0.cmp(b.0));
+        crate::order::sort_by(&mut v, |a, b| a.0.cmp(b.0));
         v
     }
 }

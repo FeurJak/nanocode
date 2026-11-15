@@ -246,7 +246,7 @@ fn report(
     let mut others = untracked(&work, mode, &spec, &env_home)?;
     if mode != Untracked::No && !restored.is_empty() {
         others.extend(restored);
-        others.sort();
+        crate::order::sort(&mut others);
         others.dedup();
     }
     let unstaged = work.unstaged(&spec)?;

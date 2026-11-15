@@ -575,7 +575,7 @@ impl<'r, 'a> Work<'r, 'a> {
                 }
             }
         }
-        changes.sort_by(|a, b| a.path.cmp(&b.path));
+        crate::order::sort_by(&mut changes, |a, b| a.path.cmp(&b.path));
         Ok(changes)
     }
 
@@ -794,6 +794,6 @@ pub fn untracked(
     // Every tracked file that is there was passed, when nothing limited the walk.
     work.scanned
         .set(spec.literal().is_some_and(|paths| paths.is_empty()));
-    scan.found.sort();
+    crate::order::sort(&mut scan.found);
     Ok(scan.found)
 }

@@ -331,7 +331,7 @@ impl fmt::Display for HyperlinkFormatError {
         match self {
             HyperlinkFormatError::NoVariables => {
                 let mut aliases = hyperlink_aliases();
-                aliases.sort_by_key(|alias| alias.display_priority().unwrap_or(i16::MAX));
+                crate::order::sort_by_key(&mut aliases, |alias| alias.display_priority().unwrap_or(i16::MAX));
                 let names: Vec<&str> = aliases.iter().map(|alias| alias.name()).collect();
                 write!(
                     f,

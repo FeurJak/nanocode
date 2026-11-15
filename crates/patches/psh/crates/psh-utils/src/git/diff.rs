@@ -486,7 +486,7 @@ pub fn detect_renames(repo: &Repo<'_>, changes: Vec<Change>, minimum: u32) -> Re
                 }
                 matrix.extend_from_slice(&best);
             }
-            matrix.sort_by(compare);
+            crate::order::sort_by(&mut matrix, compare);
             for m in &matrix {
                 let Some(d) = m.dst else { break };
                 if m.score < minimum {

@@ -638,7 +638,7 @@ fn paint(repo: &Repo<'_>, one: Oid, others: &[Oid]) -> Res<Vec<Oid>> {
             put(&mut queue, *parent)?;
         }
     }
-    results.sort_by_key(|r| std::cmp::Reverse(r.0));
+    crate::order::sort_by_key(&mut results, |r| std::cmp::Reverse(r.0));
     Ok(results
         .into_iter()
         .filter(|(_, oid)| flags[oid] & STALE == 0)

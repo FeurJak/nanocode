@@ -539,7 +539,7 @@ impl<'a> Repo<'a> {
                 }
             }
         }
-        refs.sort_by(|a, b| a.name.cmp(&b.name));
+        crate::order::sort_by(&mut refs, |a, b| a.name.cmp(&b.name));
         Ok(self.packed.get_or_init(|| refs))
     }
 
@@ -606,7 +606,7 @@ impl<'a> Repo<'a> {
             }
         }
         found.retain(|(name, _)| name.starts_with(prefix));
-        found.sort();
+        crate::order::sort(&mut found);
         Ok(found)
     }
 
@@ -658,7 +658,7 @@ impl<'a> Repo<'a> {
         if let Some(text) = self.fs.read_opt(&join(&self.common_dir, b"shallow"))? {
             oids.extend(text.split(|&b| b == b'\n').filter_map(Oid::from_hex));
         }
-        oids.sort();
+        crate::order::sort(&mut oids);
         Ok(self.shallow.get_or_init(|| oids))
     }
 

@@ -139,7 +139,7 @@ impl TypesBuilder {
             .iter()
             .map(|(name, globs)| {
                 let mut globs = globs.clone();
-                globs.sort();
+                crate::order::sort(&mut globs);
                 FileTypeDef {
                     name: name.clone(),
                     globs,

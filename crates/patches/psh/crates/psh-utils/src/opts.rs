@@ -302,7 +302,7 @@ impl Spec {
             .filter(|o| o.arg == Arg::Required)
             .filter_map(|o| o.long.map(|n| format!("--{n}")))
             .collect();
-        l.sort();
+        crate::order::sort(&mut l);
         l
     }
 
@@ -338,7 +338,7 @@ pub fn check_against_classifier(spec: &Spec) -> Vec<String> {
         ));
     }
     let mut want_long: Vec<String> = u.long_values.iter().map(|s| s.to_string()).collect();
-    want_long.sort();
+    crate::order::sort(&mut want_long);
     if spec.long_values() != want_long {
         problems.push(format!(
             "{}: long options with values: utility {:?}, classifier {:?}",

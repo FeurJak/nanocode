@@ -217,7 +217,7 @@ impl Receiver<'_> {
         self.streaming = true;
         let mut buffer = std::mem::take(&mut self.buffer);
         // fd sorts what it buffered by path (`Path`'s order: by components).
-        buffer.sort_by(|a, b| components(&a.0).cmp(components(&b.0)));
+        crate::order::sort_by(&mut buffer, |a, b| components(&a.0).cmp(components(&b.0)));
         for (path, is_dir, style) in buffer {
             self.print(&path, is_dir, style);
         }

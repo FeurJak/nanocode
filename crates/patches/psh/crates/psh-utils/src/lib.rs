@@ -11,6 +11,7 @@ mod fsutil;
 mod hasher;
 mod math;
 mod modes;
+mod order;
 pub mod opts;
 pub mod search;
 mod sum_hash;
