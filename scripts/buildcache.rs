@@ -284,8 +284,8 @@ fn rust(cache: &Path, scripts: &Path, mut args: Vec<OsString>, mut environment: 
     if restore(&entry, &out_dir, &environment, kind, &inputs, &roots).is_ok() {
         return ExitCode::SUCCESS;
     }
-    if let Some(remote) = environment.get(OsStr::new("NANOCODE_BUILDCACHE_URL")).filter(|remote| !remote.is_empty())
-        && fetch(cache, remote, kind, &key, &entry).is_ok()
+    if let Some(remote) = remote(cache, scripts, &environment)
+        && fetch(cache, &remote, kind, &key, &entry).is_ok()
         && restore(&entry, &out_dir, &environment, kind, &inputs, &roots).is_ok()
     {
         return ExitCode::SUCCESS;
@@ -1068,7 +1068,7 @@ fn fetch(cache: &Path, remote: &OsStr, kind: Kind, key: &str, entry: &Path) -> i
         url.extend_from_slice(format!("/{directory}/{key}").as_bytes());
         url
     };
-    let packed = download(&url)?;
+    let packed = unpacked(download(&url)?)?;
     fs::create_dir_all(cache.join(directory))?;
     let staging = cache.join(directory).join(format!(".data.{}.{}", std::process::id(), unique()));
     let placed = unpack(&packed, &staging).and_then(|()| match kind {
@@ -1098,6 +1098,90 @@ fn fetch(cache: &Path, remote: &OsStr, kind: Kind, key: &str, entry: &Path) -> i
         let _ = fs::remove_dir_all(&staging);
     }
     placed
+}
+
+fn remote(cache: &Path, scripts: &Path, environment: &Environment) -> Option<OsString> {
+    match environment.get(OsStr::new("NANOCODE_BUILDCACHE_URL")) {
+        Some(remote) if remote == "off" => None,
+        Some(remote) if !remote.is_empty() => Some(remote.clone()),
+        _ => prefetched(cache, scripts, environment),
+    }
+}
+
+fn prefetched(cache: &Path, scripts: &Path, environment: &Environment) -> Option<OsString> {
+    let root = cache.parent()?;
+    let directory = root.join("remote");
+    let template = || {
+        let mut template = OsString::from("file://");
+        template.push(&directory);
+        template.push("/{dir}/{key}");
+        Some(template)
+    };
+    if directory.is_dir() {
+        return template();
+    }
+    let cold = ["units", "workspace"]
+        .iter()
+        .all(|name| fs::read_dir(cache.join(name)).map_or(true, |mut entries| entries.next().is_none()));
+    if !cold {
+        return None;
+    }
+    let lock = fs::OpenOptions::new().create(true).truncate(false).write(true).open(root.join("remote.lock")).ok()?;
+    lock.lock().ok()?;
+    if directory.is_dir() {
+        return template();
+    }
+    let failed = root.join("remote.failed");
+    let build = std::os::unix::process::parent_id().to_string();
+    if fs::read_to_string(&failed).is_ok_and(|previous| previous == build) {
+        return None;
+    }
+    let fetched = Command::new(scripts.join("buildcache-prefetch"))
+        .env_clear()
+        .envs(environment)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if fetched && directory.is_dir() {
+        return template();
+    }
+    let _ = fs::write(&failed, build);
+    None
+}
+
+fn filter(command: &mut Command, input: &[u8]) -> io::Result<Vec<u8>> {
+    let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
+    let mut stdin = child.stdin.take().ok_or_else(|| io::Error::other("no stdin"))?;
+    let output = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || stdin.write_all(input));
+        let output = child.wait_with_output();
+        writer.join().map_err(|_| io::Error::other("writer panicked"))??;
+        output
+    })?;
+    if !output.status.success() {
+        return Err(io::Error::other("filter failed"));
+    }
+    Ok(output.stdout)
+}
+
+fn unpacked(data: Vec<u8>) -> io::Result<Vec<u8>> {
+    let tool = match data.get(..4) {
+        Some([0x28, 0xb5, 0x2f, 0xfd]) => "zstd",
+        Some([0x1f, 0x8b, _, _]) => "gzip",
+        _ => return Ok(data),
+    };
+    filter(Command::new(tool).arg("-dcq"), &data)
+}
+
+fn compressed(packed: Vec<u8>) -> Vec<u8> {
+    for (tool, args) in [("zstd", &["-q", "-9", "--long=27", "-T0", "-c"][..]), ("gzip", &["-q", "-9", "-c"][..])] {
+        if let Ok(data) = filter(Command::new(tool).args(args), &packed) {
+            return data;
+        }
+    }
+    packed
 }
 
 fn download(url: &[u8]) -> io::Result<Vec<u8>> {
@@ -1250,7 +1334,7 @@ fn publish(cache: &Path, to: &Path) -> io::Result<()> {
             let destination = to.join(directory).join(&name);
             let mut staging = destination.clone().into_os_string();
             staging.push(format!(".{}", std::process::id()));
-            fs::write(&staging, &packed)?;
+            fs::write(&staging, compressed(packed))?;
             fs::rename(&staging, &destination)?;
         }
     }

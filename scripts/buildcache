@@ -40,7 +40,7 @@ case $1 in
         rm -f "$helper.$$"
         rm -rf "$helper.lock"
       ) < /dev/null > /dev/null 2>&1 &
-      if [ -n "$NANOCODE_BUILDCACHE_URL" ] || [ "$1" = publish ]; then
+      if [ "$1" = publish ] || [ "${NANOCODE_BUILDCACHE_URL:-off}" != off ] || { [ -z "$NANOCODE_BUILDCACHE_URL" ] && [ ! -d "$cache/units" ] && [ ! -d "$cache/workspace" ]; }; then
         wait $!
         [ -x "$helper" ] && exec "$helper" "$scripts" "$@"
       fi
