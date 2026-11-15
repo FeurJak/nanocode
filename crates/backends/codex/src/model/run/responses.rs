@@ -658,7 +658,6 @@ pub(super) fn request_profile(
     session_id: &str,
     prompt_cache_key: &str,
     tool_specs: Vec<ToolDefinition>,
-    code_mode_tool_names: Vec<(String, String)>,
     system_prompt: &str,
     model: Model,
 ) -> Result<RequestProfile> {
@@ -668,10 +667,7 @@ pub(super) fn request_profile(
     };
     let prefix = shared_request_prefix(prompt_cache_key, tool_specs, system_prompt)
         .map_err(NanocodeError::SerializePromptPrefix)?;
-    Ok(with_code_mode_tool_names(
-        RequestProfile::new(session_id, prompt_cache_key, prefix),
-        code_mode_tool_names,
-    ))
+    Ok(RequestProfile::new(session_id, prompt_cache_key, prefix))
 }
 
 fn unknown_model_tools(specs: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
@@ -713,14 +709,13 @@ pub(super) fn attempt_factory(
     tools: &ToolRuntime,
     system_prompt: &str,
 ) -> Result<ResponsesAttemptFactory> {
-    let (tool_specs, code_mode_tool_names) = model_tool_contract(tools, events.request_id());
+    let (tool_specs, _) = model_tool_contract(tools, events.request_id());
     let prompt_cache_key = prompt_cache.key(model, &tool_specs, system_prompt)?;
     Ok(ResponsesAttemptFactory::new(
         request_profile(
             provider_session_id,
             &prompt_cache_key,
             tool_specs,
-            code_mode_tool_names,
             system_prompt,
             model,
         )?

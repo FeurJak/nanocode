@@ -130,6 +130,13 @@ def facts(request):
         if key in ('input', 'tools'):
             continue
         if key == 'client_metadata':
+            for name, item in json.loads(value.get('x-codex-turn-metadata') or '{}').items():
+                if name in ('installation_id', 'session_id', 'thread_id', 'turn_id', 'root_turn_id',
+                            'window_id', 'context_window_id', 'turn_started_at_unix_ms'):
+                    item = 'present'
+                elif isinstance(item, (dict, list)):
+                    item = digest(item)
+                out[f'turn-metadata:{name}'] = json.dumps(item, sort_keys=True)
             value = sorted(value)
         if key == 'prompt_cache_key':
             value = 'present'
@@ -166,7 +173,8 @@ try:
         fixture['request'] = capture(command, {'CODEX_HOME': '{home}/.codex', 'MOCK_KEY': 'sk-mock'}, scratch / 'codex')
         fixture_path.write_text(json.dumps(fixture, indent=1, sort_keys=True) + '\n')
     (scratch / 'nanocode').mkdir()
-    command = [str(args.nanocode.resolve()), 'exec', '--ephemeral', '-m', model, '-t', 'high', prompt]
+    command = [str(args.nanocode.resolve()), 'exec', '--ephemeral', '--codex-orchestration', 'code-mode',
+               '-m', model, '-t', 'high', prompt]
     ours = capture(command, {'NANOCODE_OPENAI_BASE_URL': '{base}', 'OPENAI_API_KEY': 'sk-mock'}, scratch / 'nanocode')
 finally:
     shutil.rmtree(scratch)

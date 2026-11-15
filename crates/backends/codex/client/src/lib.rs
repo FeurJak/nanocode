@@ -121,13 +121,6 @@ pub mod __private {
             local_trigger, remote_compaction, trigger, trim_tool_outputs_to_fit_context_window,
         };
     }
-
-    pub fn with_code_mode_tool_names(
-        profile: crate::client::responses::RequestProfile,
-        names: Vec<(String, String)>,
-    ) -> crate::client::responses::RequestProfile {
-        profile.with_code_mode_tool_names(names)
-    }
 }
 
 pub use nanocode_types::*;

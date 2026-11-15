@@ -26,7 +26,6 @@ use crate::client::{
     __private::{
         EventSink, ManagedSessionState, ModelConfig, RequestHistory, ResponsesAttemptFactory,
         TransportFallback, assign_missing_response_item_id, compaction, shared_request_prefix,
-        with_code_mode_tool_names,
     },
     Model, Prompt, Thinking,
     events::AgentEventKind,
@@ -347,18 +346,14 @@ impl ModelRun {
         } = prepared;
         let provider_session_id = Arc::clone(&checkpoint.provider_session_id);
         let active_tools = runtime.control();
-        let (_, code_mode_tool_names) = model_tool_contract(&runtime, events.request_id());
         let transport_fallback = TransportFallback::default();
         let factory = ResponsesAttemptFactory::new(
-            with_code_mode_tool_names(
-                RequestProfile::new(
-                    checkpoint.provider_session_id.to_string(),
-                    checkpoint.prompt_cache_key.to_string(),
-                    Arc::clone(&checkpoint.request_prefix),
-                )
-                .with_thread_id(events.request_id()),
-                code_mode_tool_names,
-            ),
+            RequestProfile::new(
+                checkpoint.provider_session_id.to_string(),
+                checkpoint.prompt_cache_key.to_string(),
+                Arc::clone(&checkpoint.request_prefix),
+            )
+            .with_thread_id(events.request_id()),
             events.clone(),
             Arc::clone(&transport_stats),
         )
@@ -758,12 +753,11 @@ pub(crate) fn prepare_resumed_checkpoint(
         .global_instructions()
         .or(checkpoint.global_instructions);
     let runtime = tool_runtime(checkpoint.workspace(), config, tools);
-    let (tool_specs, code_mode_tool_names) = model_tool_contract(&runtime, session_id);
+    let (tool_specs, _) = model_tool_contract(&runtime, session_id);
     checkpoint.request_prefix = request_profile(
         session_id,
         checkpoint.prompt_cache_key(),
         tool_specs,
-        code_mode_tool_names,
         &config.base_system_prompt(),
         config.model,
     )?
@@ -801,12 +795,11 @@ pub(crate) fn prepare_history_checkpoint(
         .project_instructions(&workspace)
         .map(Arc::from);
     let runtime = tool_runtime(&workspace, config, tools);
-    let (tool_specs, code_mode_tool_names) = model_tool_contract(&runtime, session_id);
+    let (tool_specs, _) = model_tool_contract(&runtime, session_id);
     let request_prefix = request_profile(
         session_id,
         prompt_cache_key.as_ref(),
         tool_specs,
-        code_mode_tool_names,
         &config.base_system_prompt(),
         config.model,
     )?
