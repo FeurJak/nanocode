@@ -681,6 +681,8 @@ fn model_max_tokens(model: &str) -> Option<u32> {
 
 pub const DEFAULT_COMPACTION_RESERVED_TOKENS: u64 = 20_000 + 13_000;
 
+pub const DEFAULT_REFUSAL_CONTINUATIONS: u32 = 1;
+
 const STANDARD_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 
 fn request_images(model: &str, context_window_tokens: u64) -> ImageWindow {
@@ -724,6 +726,7 @@ pub struct ClaudeBuilder {
     tool_input_deltas: bool,
     hedging: Option<Arc<nanocode_agent_core::hedge::Hedging>>,
     message_threads: bool,
+    refusal_continuations: u32,
     context_window_tokens: u64,
     auto_compact_window_tokens: Option<u64>,
     images: ImageHistory,
@@ -797,6 +800,7 @@ impl ClaudeBuilder {
             tool_input_deltas: false,
             hedging: None,
             message_threads: false,
+            refusal_continuations: DEFAULT_REFUSAL_CONTINUATIONS,
             context_window_tokens,
             auto_compact_window_tokens: None,
             images: ImageHistory::default(),
@@ -1082,6 +1086,11 @@ impl ClaudeBuilder {
 
     pub const fn message_threads(mut self, enabled: bool) -> Self {
         self.message_threads = enabled;
+        self
+    }
+
+    pub const fn refusal_continuations(mut self, continuations: u32) -> Self {
+        self.refusal_continuations = continuations;
         self
     }
 
@@ -1866,6 +1875,7 @@ impl ClaudeBuilder {
             tool_input_deltas: self.tool_input_deltas,
             hedging: self.hedging,
             message_thread: self.message_threads.then(Atom::default),
+            refusal_continuations: self.refusal_continuations,
             wire_cache: crate::WireCache::default(),
             context_window_tokens: self.context_window_tokens,
             auto_compact_window_tokens: self.auto_compact_window_tokens,
@@ -3540,6 +3550,7 @@ struct State {
     tool_input_deltas: bool,
     hedging: Option<Arc<nanocode_agent_core::hedge::Hedging>>,
     message_thread: Option<Atom<crate::MessageThread>>,
+    refusal_continuations: u32,
     wire_cache: crate::WireCache,
     context_window_tokens: u64,
     auto_compact_window_tokens: Option<u64>,
@@ -4446,6 +4457,7 @@ struct ResponseContext<'a> {
 const DEVELOPER_NOTICE_OPEN: &str = "<system-reminder>\n";
 const ATTRIBUTION: &str = "<system-reminder>\nAttribution for git commits and pull requests you create from here on (this replaces Claude Code's own earlier attribution guidance, such as a previous copy of this reminder; the user's own instructions about these lines, such as a CLAUDE.md or memory rule, take precedence over this reminder, but do not add attribution lines this reminder leaves out):\n- End git commit messages with:\nCo-Authored-By: Claude Code <noreply@anthropic.com>\n- End pull request descriptions with:\n\u{1f916} Generated with [Claude Code](https://claude.com/claude-code)\n</system-reminder>\n";
 const REFUSAL_RECOVERY: &str = "Your response above was stopped by a safety classifier \u{2014} this is not a tool or API error. The rest of it was withheld, and tool calls in it that had not finished did not run. Do not produce that content again, even reworded.";
+const REFUSAL_CONTINUATION: &str = "Your previous response was also stopped by a safety classifier. Continue the task: do the parts of it that you can do, take a different approach where one exists, and state plainly any part that you will not do.";
 const OUTPUT_LIMIT_CONTINUATION: &str = "Output token limit hit. Resume directly \u{2014} no apology, no recap of what you were doing. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.";
 const TOKEN_BUDGET: u64 = 15_000_000;
 const NO_VISIBLE_OUTPUT: &str = "[Your previous response had no visible output. Please continue and produce a user-visible response.]";
@@ -7945,17 +7957,33 @@ impl State {
                     .await?;
                 continue;
             }
-            if response.stop_reason == Some(StopReason::Refusal) && !cursor.refusal_recovered {
+            if response.stop_reason == Some(StopReason::Refusal)
+                && (!cursor.refusal_recovered
+                    || cursor.refusal_continuations < self.refusal_continuations)
+            {
                 if cancel.is_cancelled() {
                     return Err(NanocodeError::TurnCancelled);
                 }
-                nanocode_trace::warn!(
-                    target: "nanocode_claude",
-                    session_id = %self.session_id,
-                    model_call_index = index.saturating_add(1),
-                    "Claude's safety classifier stopped the response; keeping its finished text and asking again once, as Claude Code does"
-                );
-                cursor.refusal_recovered = true;
+                let continuing = cursor.refusal_recovered;
+                if continuing {
+                    nanocode_trace::warn!(
+                        target: "nanocode_claude",
+                        session_id = %self.session_id,
+                        model_call_index = index.saturating_add(1),
+                        continuation = cursor.refusal_continuations.saturating_add(1),
+                        limit = self.refusal_continuations,
+                        "Claude's safety classifier stopped the response again; keeping its finished text and asking the model to continue with the parts of the task it can do"
+                    );
+                    cursor.refusal_continuations += 1;
+                } else {
+                    nanocode_trace::warn!(
+                        target: "nanocode_claude",
+                        session_id = %self.session_id,
+                        model_call_index = index.saturating_add(1),
+                        "Claude's safety classifier stopped the response; keeping its finished text and asking again once, as Claude Code does"
+                    );
+                    cursor.refusal_recovered = true;
+                }
                 add_usage(usage, &response.usage);
                 if let Some(refreshed) = self.refreshed.update(Option::take) {
                     add_usage(usage, &refreshed);
@@ -7986,6 +8014,9 @@ impl State {
                         .into(),
                     );
                     pending.push(Message::text(Role::User, REFUSAL_RECOVERY).into());
+                }
+                if continuing {
+                    pending.push(Message::text(Role::User, REFUSAL_CONTINUATION).into());
                 }
                 conversation.messages = pending.clone();
                 cursor.index = index + 1;
