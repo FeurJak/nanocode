@@ -1322,6 +1322,18 @@ impl Heap {
         true
     }
 
+    pub(crate) fn element_tail(&self, o: Obj) -> Option<(u32, u32, u32)> {
+        let el = self.elements(o);
+        (el != 0).then(|| (el, self.value_array_len(el), self.value_array_capacity(el)))
+    }
+
+    pub(crate) fn set_element_count(&mut self, o: Obj, el: u32, n: u32) {
+        self.arena_mut().set(el, ValueArray::LEN, n);
+        if n > self.array_length(o) {
+            self.set_array_length_raw(o, n);
+        }
+    }
+
     /// Stores `v` in dense slot `i`, growing the elements (with holes) as needed.
     fn dense_put(&mut self, o: Obj, i: u32, v: Value) -> Result<(), HeapError> {
         debug_assert_ne!(self.object_class(o), ObjectClass::Function);

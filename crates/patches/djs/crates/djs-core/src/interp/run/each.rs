@@ -507,7 +507,10 @@ impl Exec<'_> {
                 let a = if mode == MAP {
                     self.heap.new_array_with_length_reserved(Some(proto), len)
                 } else {
-                    self.heap.new_array_with_length(Some(proto), 0)
+                    self.heap.new_array(
+                        Some(proto),
+                        self.heap.element_tail(o).map_or(0, |t| t.1.min(len)),
+                    )
                 };
                 match a {
                     Ok(a) => Value::object(a),
@@ -754,7 +757,88 @@ impl Exec<'_> {
             == Continuation::EachNative;
         let mut proven = false;
         let mut entry = false;
+        let kind = match (mode, cap.is_some(), leaf.op) {
+            (FOR_EACH, true, _) => Some(FOLD),
+            (REDUCE, false, ADD | SUB | MUL) if leaf.y.is_none() => Some(FOLD),
+            (MAP, false, ADD | SUB | MUL) => Some(MAP_TO),
+            (FILTER, false, LT | LE | GT | GE | STRICT_EQ | STRICT_NE) => Some(KEEP),
+            (
+                SOME | EVERY | FIND | FIND_INDEX,
+                false,
+                LT | LE | GT | GE | STRICT_EQ | STRICT_NE,
+            ) => Some(UNTIL),
+            _ => None,
+        };
+        let mut scan = kind.filter(|_| !stress);
         loop {
+            if let Some(kind) = scan.filter(|_| !safepoint && fuel > 0 && k as u32 + 1 < lim) {
+                let b = self.heap.arena().bytes();
+                let held = match cap {
+                    Some(at) => ld(b, at).as_int(),
+                    None if reduce => acc.as_int(),
+                    None => Some(0),
+                };
+                let out = match (kind, a) {
+                    (KEEP | MAP_TO, Some(a)) if proven => self
+                        .heap
+                        .element_tail(a)
+                        .filter(|&(_, n, _)| {
+                            n == if kind == MAP_TO {
+                                k as u32
+                            } else {
+                                self.heap.array_length(a)
+                            }
+                        })
+                        .map(|t| (a, t)),
+                    _ => None,
+                };
+                let ready = matches!(kind, UNTIL | FOLD | KEEP) || out.is_some();
+                let at = ValueArray::VALUES.at(el, k as u32);
+                if let (Some(held), true, true) = (held, ready, ld(b, at) == x) {
+                    let steps = ((fuel - 1) / cost) as u32;
+                    let (oel, n, room) = out.map_or((0, 0, 0), |(_, t)| t);
+                    let mut r = Run {
+                        acc: held,
+                        el,
+                        end: (lim - 1).min((k as u32).saturating_add(steps)),
+                        k: k as u32,
+                        n,
+                        out: ValueArray::VALUES.at(oel, 0),
+                        q: leaf.y,
+                        room,
+                        stop: mode != EVERY,
+                    };
+                    scan_any(kind, leaf.op, self.heap.arena_mut().hot_bytes(), &mut r);
+                    let done = r.k - k as u32;
+                    if done > 0 {
+                        fuel -= i64::from(done) * cost;
+                        k = r.k as i32;
+                        x = ld(self.heap.arena().bytes(), ValueArray::VALUES.at(el, r.k));
+                        if reduce {
+                            acc = Value::int(r.acc);
+                            (a0, a1) = (acc, x);
+                        } else {
+                            (a0, a1) = (x, Value::int(k));
+                        }
+                        if let Some(at) = cap {
+                            if tracked {
+                                self.heap.arena_mut().wrote(at, 8);
+                            }
+                            st(self.heap.arena_mut().hot_bytes(), at, Value::int(r.acc));
+                        }
+                        if let Some((a, _)) = out
+                            && r.n > n
+                        {
+                            self.heap.arena_mut().wrote(r.out + 8 * n, 8 * (r.n - n));
+                            self.heap.set_element_count(a, oel, r.n);
+                        }
+                    } else if x.as_int().is_none() {
+                        scan = None;
+                    }
+                } else if held.is_none() || ld(b, at) != x {
+                    scan = None;
+                }
+            }
             let b = self.heap.arena().bytes();
             let v = match cap {
                 Some(at) => {
@@ -923,6 +1007,9 @@ impl Exec<'_> {
         if !LEAF_OPS.contains(&op) || (cap.is_some() && !matches!(op, ADD | SUB | MUL)) {
             return None;
         }
+        if cap.is_some() && self.get(self.bp - STATE + MODE).as_int() != Some(FOR_EACH) {
+            return None;
+        }
         let mut fuel = 0;
         let mut p = 0;
         while p < c.len() {
@@ -1002,6 +1089,119 @@ fn leaf_eval(op: u8, x: Value, y: Value) -> Option<Value> {
         GT => Value::bool(p > q),
         _ => Value::bool(p >= q),
     })
+}
+
+const UNTIL: u8 = 0;
+const KEEP: u8 = 1;
+const MAP_TO: u8 = 2;
+const FOLD: u8 = 3;
+
+struct Run {
+    acc: i32,
+    el: u32,
+    end: u32,
+    k: u32,
+    n: u32,
+    out: u32,
+    q: Option<i32>,
+    room: u32,
+    stop: bool,
+}
+
+#[inline(always)]
+fn compare<const OP: u8>(p: i32, q: i32) -> bool {
+    match OP {
+        LT => p < q,
+        LE => p <= q,
+        GT => p > q,
+        GE => p >= q,
+        STRICT_EQ => p == q,
+        _ => p != q,
+    }
+}
+
+#[inline(always)]
+fn arith<const OP: u8>(p: i32, q: i32) -> Option<i32> {
+    match OP {
+        ADD => p.checked_add(q),
+        SUB => p.checked_sub(q),
+        _ => p.checked_mul(q).filter(|&r| r != 0),
+    }
+}
+
+fn scan<const KIND: u8, const OP: u8>(b: &mut [u8], r: &mut Run) {
+    let el = r.el;
+    let mut x = ld(b, ValueArray::VALUES.at(el, r.k));
+    while r.k < r.end {
+        let Some(p) = x.as_int() else {
+            break;
+        };
+        let q = r.q.unwrap_or(r.k as i32);
+        let mut acc = r.acc;
+        let put = match KIND {
+            UNTIL => {
+                if compare::<OP>(p, q) == r.stop {
+                    break;
+                }
+                None
+            }
+            KEEP => compare::<OP>(p, q).then_some(x),
+            MAP_TO => match arith::<OP>(p, q) {
+                Some(v) => Some(Value::int(v)),
+                None => break,
+            },
+            _ => match arith::<OP>(acc, p) {
+                Some(v) => {
+                    acc = v;
+                    None
+                }
+                None => break,
+            },
+        };
+        let nx = ld(b, ValueArray::VALUES.at(el, r.k + 1));
+        if nx.is_hole() {
+            break;
+        }
+        if let Some(v) = put {
+            if r.n == r.room {
+                break;
+            }
+            st(b, r.out + 8 * r.n, v);
+            r.n += 1;
+        }
+        r.acc = acc;
+        r.k += 1;
+        x = nx;
+    }
+}
+
+fn scan_test<const KIND: u8>(op: u8, b: &mut [u8], r: &mut Run) {
+    match op {
+        LT => scan::<KIND, LT>(b, r),
+        LE => scan::<KIND, LE>(b, r),
+        GT => scan::<KIND, GT>(b, r),
+        GE => scan::<KIND, GE>(b, r),
+        STRICT_EQ => scan::<KIND, STRICT_EQ>(b, r),
+        _ => scan::<KIND, STRICT_NE>(b, r),
+    }
+}
+
+fn scan_arith<const KIND: u8>(op: u8, b: &mut [u8], r: &mut Run) {
+    match op {
+        ADD => scan::<KIND, ADD>(b, r),
+        SUB => scan::<KIND, SUB>(b, r),
+        _ => scan::<KIND, MUL>(b, r),
+    }
+}
+
+#[inline(never)]
+fn scan_any(kind: u8, op: u8, b: &mut [u8], r: &mut Run) {
+    match kind {
+        UNTIL => scan_test::<UNTIL>(op, b, r),
+        KEEP => scan_test::<KEEP>(op, b, r),
+        MAP_TO => scan_arith::<MAP_TO>(op, b, r),
+        _ => scan_arith::<FOLD>(op, b, r),
+    }
 }
 
 /// A step of the loop that its own frame takes (`each_again`, and run_hot's `return`
