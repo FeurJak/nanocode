@@ -540,10 +540,13 @@ impl BodyReader {
 
     async fn line(&mut self, limit: usize) -> Result<usize, WireError> {
         loop {
-            if let Some(end) = find_crlf(self.connection.unread()) {
-                return Ok(end);
-            }
-            if self.connection.unread().len() > limit {
+            let unread = self.connection.unread();
+            let over = match find_crlf(unread) {
+                Some(end) if end + CRLF.len() <= limit => return Ok(end),
+                Some(_) => true,
+                None => unread.len() >= limit,
+            };
+            if over {
                 return Err(WireError::Parse(format!("chunk line over {limit} bytes")));
             }
             self.more().await?;
@@ -613,11 +616,6 @@ impl BodyReader {
                 }
                 self.connection.consume(end + CRLF.len());
                 let read = read + end + CRLF.len();
-                if read > TRAILER_BYTES_MAX {
-                    return Err(WireError::Parse(format!(
-                        "trailers over {TRAILER_BYTES_MAX} bytes"
-                    )));
-                }
                 self.state = if end == 0 {
                     State::Done
                 } else {
