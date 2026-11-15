@@ -2,21 +2,36 @@ use super::hot::{ld, st, word};
 use super::{Exec, fast, suspend};
 use crate::bytecode::{self, OPS};
 use crate::heap::cells::{FuncTemplate, ValueArray};
+use crate::heap::{Atom, atoms};
 use crate::interp::conv;
 use crate::interp::frame::HEADER;
+use crate::interp::realm::{self, Intrinsic};
 use crate::value::Value;
 use alloc::vec::Vec;
 use core::cell::Cell;
 
-fn body(b: &[u8], head: u32, end: u32) -> Result<(u32, i64, Option<u32>), u8> {
-    let (mut at, mut fuel, mut site) = (head, 0, None);
+fn body(b: &[u8], head: u32, end: u32) -> Result<(u32, i64, Option<(u32, u32)>), u8> {
+    let (mut at, mut fuel, mut site, mut prev, mut call, mut field) = (head, 0, None, head, false, false);
     while at < end {
         let w = word(b, at);
         let op = w as u8;
         let offset = match op {
             fast::ITER_NEXT_LOC if site.is_none() => {
-                site = Some(at);
+                site = Some((at, prev));
                 (w >> 24) as u32 as i32
+            }
+            fast::GET_METHOD
+                if site.is_none()
+                    && word(b, at + u32::from(OPS[op as usize].size)) as u8 == fast::CALL0 =>
+            {
+                site = Some((at, prev));
+                call = true;
+                0
+            }
+            fast::CALL0 if call => 0,
+            fast::GET_FIELD => {
+                field = true;
+                0
             }
             fast::JUMP | fast::JUMP_IF_FALSE | fast::JUMP_IF_TRUE => (w >> 8) as u32 as i32,
             fast::JUMP8 | fast::JUMP_IF_FALSE8 | fast::JUMP_IF_TRUE8 => (w >> 8) as u8 as i8 as i32,
@@ -75,11 +90,15 @@ fn body(b: &[u8], head: u32, end: u32) -> Result<(u32, i64, Option<u32>), u8> {
         };
         let info = &OPS[op as usize];
         fuel += info.cost.fuel() as i64;
+        prev = at;
         at += info.size as u32;
         let to = at as i64 + offset as i64;
         if to < at as i64 {
             return if to == head as i64 {
-                Ok((at, fuel, site))
+                match (field, call) {
+                    (true, false) => Err(fast::GET_FIELD),
+                    _ => Ok((at, fuel, site)),
+                }
             } else {
                 Err(op)
             };
@@ -300,6 +319,35 @@ enum I {
 }
 
 impl I {
+    fn reads(&self, x: u8) -> bool {
+        match *self {
+            I::Add { a, c, .. }
+            | I::BAnd { a, c, .. }
+            | I::BOr { a, c, .. }
+            | I::BXor { a, c, .. }
+            | I::Branch { a, c, .. }
+            | I::Compare { a, c, .. }
+            | I::Div { a, c, .. }
+            | I::Equal { a, c, .. }
+            | I::GetElem { a, c, .. }
+            | I::Mod { a, c, .. }
+            | I::Mul { a, c, .. }
+            | I::Sar { a, c, .. }
+            | I::Shl { a, c, .. }
+            | I::Sub { a, c, .. }
+            | I::StepBranch { x: a, c, .. } => a == x || c == x,
+            I::IsNullish { a, .. }
+            | I::IsUndefined { a, .. }
+            | I::JumpIf { a, .. }
+            | I::Latch { x: a, .. }
+            | I::Mov { a, .. }
+            | I::Not { a, .. }
+            | I::Step { a, .. } => a == x,
+            I::PutElem { a, c, v, .. } => a == x || c == x || v == x,
+            I::Jump { .. } | I::Leave { .. } | I::Nop | I::Resume => false,
+        }
+    }
+
     fn dst(&mut self) -> Option<&mut u8> {
         match self {
             I::Add { d, .. }
@@ -500,6 +548,7 @@ struct Exit {
 
 #[derive(Clone, Copy)]
 enum Src {
+    Fresh(u8),
     Shadow(u32),
     Slot(u32),
     Value(Value),
@@ -530,12 +579,22 @@ impl Frame {
 
 struct Gen {
     at: u32,
+    call: bool,
     frame: Frame,
     guard: [u32; 2],
     resume: u32,
     resume_pc: u32,
     yield_cost: u32,
     yield_ip: u32,
+}
+
+#[derive(Clone, Copy)]
+struct Virtual {
+    flag: u8,
+    local: u8,
+    obj: u8,
+    slot: u32,
+    value: u8,
 }
 
 #[derive(Clone, Default)]
@@ -550,7 +609,9 @@ struct Plan {
     labels: Vec<(u32, u32, Option<u16>)>,
     mark: Option<u16>,
     outs: Vec<(usize, u16)>,
+    entry: Option<u32>,
     prog: Vec<Ins>,
+    result: Option<Virtual>,
     rollback: Option<u16>,
     shadows: Vec<(u8, u8)>,
     stacks: Vec<u8>,
@@ -562,6 +623,7 @@ impl Plan {
     fn reg(&mut self, src: Src) -> Option<u8> {
         let found = self.init.iter().position(|s| match (*s, src) {
             (Src::Shadow(x), Src::Shadow(y)) | (Src::Slot(x), Src::Slot(y)) => x == y,
+            (Src::Fresh(x), Src::Fresh(y)) => x == y,
             (Src::Value(x), Src::Value(y)) => x.to_bits() == y.to_bits(),
             _ => false,
         });
@@ -685,6 +747,9 @@ impl Plan {
     }
 
     fn step(&mut self, f: &Frame, ip: u32, cost: u32, slot: u32, delta: i32) -> Option<()> {
+        if self.result.is_some_and(|v| v.slot == slot) {
+            return None;
+        }
         let x = self.reg(Src::Slot(slot))?;
         self.materialize(f, self.stk.len(), Some(x))?;
         self.mark(ip)?;
@@ -694,6 +759,9 @@ impl Plan {
     }
 
     fn put(&mut self, f: &Frame, ip: u32, cost: u32, slot: u32, keep: bool) -> Option<()> {
+        if self.result.is_some_and(|v| v.slot == slot) {
+            return None;
+        }
         let x = self.reg(Src::Slot(slot))?;
         let src = *self.stk.last()?;
         let n = self.stk.len() - 1;
@@ -781,7 +849,7 @@ impl Plan {
                                 let br = self.prog.pop()?;
                                 let bound = match self.init[usize::from(c)] {
                                     Src::Value(v) => v.as_int().and_then(|n| range(mask, n)),
-                                    Src::Shadow(_) | Src::Slot(_) => None,
+                                    Src::Fresh(_) | Src::Shadow(_) | Src::Slot(_) => None,
                                 };
                                 let step = &mut self.prog[s];
                                 step.i = match bound {
@@ -1151,8 +1219,99 @@ fn translate(b: &[u8], f: &Frame, fused: Option<&Gen>) -> Option<Plan> {
                 let target = (next as i64 + imm16 as u8 as i8 as i64) as u32;
                 reach = p.jump(f, ip, cost, target, Some(op == fast::JUMP_IF_TRUE8))?
             }
+            fast::GET_METHOD => {
+                let g = fused.filter(|g| g.at == ip && g.call)?;
+                let after = next + u32::from(OPS[fast::CALL0 as usize].size);
+                let pw = word(b, after);
+                let (loc, keep) = local_put(pw)?;
+                let slot = f.slot(f.lp + loc);
+                let it = p.reg(Src::Slot(g.guard[0]))?;
+                let local = p.reg(Src::Slot(slot))?;
+                if p.mark.is_none()
+                    || p.stk.pop()? != it
+                    || slot == g.guard[0]
+                    || p.stk.contains(&local)
+                    || !p.labels.is_empty()
+                    || p.entry.is_some_and(|e| e != slot)
+                    || p.writes.iter().any(|w| w.1 == slot)
+                {
+                    return None;
+                }
+                p.fuel += cost;
+                let mut scratch = p.clone();
+                let from = scratch.writes.len();
+                scratch.resume(b, ip, g, &[])?;
+                let shadows: Vec<u32> = scratch.writes[from..].iter().map(|w| w.1).collect();
+                p.resume(b, ip, g, &shadows)?;
+                let v = p.stk.pop()?;
+                let obj = p.reg(Src::Fresh(0))?;
+                let value = p.reg(Src::Fresh(1))?;
+                let flag = p.reg(Src::Fresh(2))?;
+                let yes = p.reg(Src::Value(Value::TRUE))?;
+                let put = &OPS[pw as u8 as usize];
+                p.prog.push(Ins {
+                    exit: 0,
+                    fuel: put.cost.fuel(),
+                    i: I::Mov { a: v, d: value },
+                });
+                p.prog.push(Ins {
+                    exit: 0,
+                    fuel: 0,
+                    i: I::Mov { a: yes, d: flag },
+                });
+                p.fuse = None;
+                if keep {
+                    p.stk.push(obj);
+                }
+                p.result = Some(Virtual {
+                    flag,
+                    local,
+                    obj,
+                    slot,
+                    value,
+                });
+                ip = after + put.size as u32;
+                continue;
+            }
+            fast::GET_FIELD => {
+                let top = *p.stk.last()?;
+                let v = match p.result {
+                    Some(v) => v,
+                    None => {
+                        let slot = match p.init[usize::from(top)] {
+                            Src::Slot(x) if x >= f.slot(f.lp) && x < f.slot(f.sp) => x,
+                            _ => return None,
+                        };
+                        if p.entry.is_some_and(|e| e != slot) {
+                            return None;
+                        }
+                        p.entry = Some(slot);
+                        Virtual {
+                            flag: 0,
+                            local: top,
+                            obj: top,
+                            slot,
+                            value: p.reg(Src::Fresh(1))?,
+                        }
+                    }
+                };
+                let key = Atom::from_id(imm32);
+                let src = if top != v.obj && top != v.local {
+                    return None;
+                } else if key == atoms::DONE {
+                    p.reg(Src::Value(Value::FALSE))?
+                } else if key == atoms::VALUE {
+                    v.value
+                } else {
+                    return None;
+                };
+                p.mark(ip)?;
+                p.fuel += cost;
+                p.stk.pop();
+                p.stk.push(src);
+            }
             fast::ITER_NEXT_LOC => {
-                let g = fused.filter(|g| g.at == ip)?;
+                let g = fused.filter(|g| g.at == ip && !g.call)?;
                 if next as i64 + (w >> 24) as u32 as i32 as i64 != f.head as i64 {
                     return None;
                 }
@@ -1197,7 +1356,29 @@ fn translate(b: &[u8], f: &Frame, fused: Option<&Gen>) -> Option<Plan> {
         *p.prog[at].i.target()? = to;
     }
     u8::try_from(p.prog.len() - 1).ok()?;
+    if p.entry.is_some() && p.result.is_none() {
+        return None;
+    }
+    if let Some(v) = p.result
+        && p.prog.iter().any(|i| i.i.reads(v.obj) || i.i.reads(v.local))
+    {
+        return None;
+    }
     Some(p)
+}
+
+fn local_put(w: u64) -> Option<(u32, bool)> {
+    let op = w as u8;
+    let imm16 = (w >> 8) as u16 as u32;
+    Some(match op {
+        fast::PUT_LOC => (imm16, false),
+        fast::PUT_LOC0..=fast::PUT_LOC3 => ((op - fast::PUT_LOC0) as u32, false),
+        fast::PUT_LOC8 => (imm16 & 0xFF, false),
+        fast::SET_LOC => (imm16, true),
+        fast::SET_LOC0..=fast::SET_LOC3 => ((op - fast::SET_LOC0) as u32, true),
+        fast::SET_LOC8 => (imm16 & 0xFF, true),
+        _ => return None,
+    })
 }
 
 impl Exec<'_> {
@@ -1230,7 +1411,7 @@ impl Exec<'_> {
             return;
         };
         let fused = match site {
-            Some(at) => match self.gen_site(at) {
+            Some((at, prev)) => match self.gen_site(at, prev) {
                 Some(g) => Some(g),
                 None => return,
             },
@@ -1259,13 +1440,39 @@ impl Exec<'_> {
         if self.fuel <= pass {
             return;
         }
+        let spare = match plan.result {
+            Some(_) => {
+                let proto = realm::intrinsic_obj(self.heap, Intrinsic::ObjectProto);
+                match self.heap.new_iter_result(Some(proto), Value::UNDEFINED, false) {
+                    Ok(o) if !self.heap.gc_pending() => Some(o),
+                    _ => return,
+                }
+            }
+            None => None,
+        };
+        let entry = match (plan.result, plan.entry) {
+            (Some(v), Some(slot)) => {
+                let o = self.heap.arena().read::<Value>(slot).as_object();
+                match o.and_then(|o| self.heap.iter_result_fields(o)) {
+                    Some((value, done)) if done == Value::FALSE => Some((v.value, value)),
+                    _ => return,
+                }
+            }
+            _ => None,
+        };
+        let b: &mut [u8] = self.heap.arena_mut().hot_bytes();
         let mut r = [Value::UNDEFINED; 256];
         for (k, s) in plan.init.iter().enumerate() {
             r[k] = match *s {
                 Src::Shadow(x) | Src::Slot(x) => ld(b, x),
+                Src::Fresh(_) => Value::UNDEFINED,
                 Src::Value(v) => v,
             };
         }
+        if let Some((g, value)) = entry {
+            r[usize::from(g)] = value;
+        }
+
         let nop = lower(&Ins {
             exit: 0,
             fuel: 0,
@@ -1600,11 +1807,25 @@ impl Exec<'_> {
                 }
             }
         };
+        let made = match (plan.result, spare) {
+            (Some(v), Some(o)) if r[usize::from(v.flag)] == Value::TRUE => {
+                self.heap.set_own_data_value(o, atoms::VALUE, r[v.value as usize]);
+                Some((v, Value::object(o)))
+            }
+            _ => None,
+        };
         let b: &mut [u8] = self.heap.arena_mut().hot_bytes();
         let e = plan.exits[exit as usize];
         let list = &plan.stacks[e.at as usize..(e.at + e.len) as usize];
         for (j, &g) in list.iter().enumerate() {
-            st(b, vals + 8 * (f.sp + j as u32), r[g as usize]);
+            let x = match made {
+                Some((v, o)) if g == v.obj || g == v.local => o,
+                _ => r[g as usize],
+            };
+            st(b, vals + 8 * (f.sp + j as u32), x);
+        }
+        if let Some((v, o)) = made {
+            st(b, v.slot, o);
         }
         for &(g, x) in &plan.writes {
             let s = match plan.shadows.iter().find(|s| s.0 == g) {
@@ -1618,11 +1839,30 @@ impl Exec<'_> {
         self.fuel = if e.rollback { mark } else { fuel };
     }
 
-    fn gen_site(&self, at: u32) -> Option<Gen> {
+    fn gen_site(&self, at: u32, prev: u32) -> Option<Gen> {
         let b = self.heap.arena().bytes();
-        let loc = u32::from(u16::from_le_bytes([b[(at + 1) as usize], b[(at + 2) as usize]]));
-        let guard = [self.lp + loc, self.lp + loc + 1].map(|i| ValueArray::VALUES.at(self.stack, i));
-        let (it, next) = (ld(b, guard[0]), ld(b, guard[1]));
+        let slot = |i: u32| ValueArray::VALUES.at(self.stack, self.lp + i);
+        let w = word(b, at);
+        let call = w as u8 == fast::GET_METHOD;
+        let (guard, it, next) = if call {
+            let p = word(b, prev);
+            let loc = match p as u8 {
+                fast::GET_LOC => (p >> 8) as u16 as u32,
+                fast::GET_LOC8 => (p >> 8) as u8 as u32,
+                op @ fast::GET_LOC0..=fast::GET_LOC3 => (op - fast::GET_LOC0) as u32,
+                _ => return None,
+            };
+            if Atom::from_id((w >> 8) as u32) != atoms::NEXT {
+                return None;
+            }
+            let it = ld(b, slot(loc));
+            let next = self.ic_get(it, atoms::NEXT, (w >> 40) as u16 as u32)?;
+            ([slot(loc); 2], it, next)
+        } else {
+            let loc = (w >> 8) as u16 as u32;
+            let guard = [slot(loc), slot(loc + 1)];
+            (guard, ld(b, guard[0]), ld(b, guard[1]))
+        };
         let (arr, pc, hp_off) = suspend::suspended_frame(self.heap, it, next)?;
         if arr < self.heap.arena().tracked_end() {
             return None;
@@ -1644,8 +1884,14 @@ impl Exec<'_> {
         if !ok {
             return None;
         }
+        let enter = if call {
+            bytecode::Op::Call
+        } else {
+            bytecode::Op::IterNextLoc
+        };
         Some(Gen {
             at,
+            call,
             frame: Frame {
                 bp: 0,
                 consts: a.get(t, FuncTemplate::CONSTS).0,
@@ -1657,7 +1903,7 @@ impl Exec<'_> {
                 vals: ValueArray::VALUES.at(arr, 0),
             },
             guard,
-            resume: fuel(bytecode::Op::IterNextLoc) + len / 8 + fuel(bytecode::Op::JumpIfFalse8) + fuel(bytecode::Op::Drop),
+            resume: fuel(enter) + len / 8 + fuel(bytecode::Op::JumpIfFalse8) + fuel(bytecode::Op::Drop),
             resume_pc: code + jump + size(bytecode::Op::Drop),
             yield_cost: fuel(bytecode::Op::Yield) + len / 8,
             yield_ip: code + yield_at,

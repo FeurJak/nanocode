@@ -745,6 +745,27 @@ impl Heap {
         Ok(o)
     }
 
+    pub(crate) fn iter_result_fields(&self, o: Obj) -> Option<(Value, Value)> {
+        let all = PropFlags::ALL.bits() as u32;
+        let s = self.iter_result_shape;
+        let a = self.arena();
+        let v = a.get(o.0, Object::PROPS).0;
+        let ok = s != 0
+            && a.get(o.0, Object::CLASS) == ObjectClass::Ordinary as u32
+            && v != 0
+            && a.get(v, PropValues::SHAPE).0 == s
+            && a.get(v, PropValues::LEN) == 2
+            && self.shape_count(s) == 2
+            && self.shape_desc(s, 0) == (atoms::VALUE, all)
+            && self.shape_desc(s, 1) == (atoms::DONE, all);
+        ok.then(|| {
+            (
+                a.read::<Value>(PropValues::VALUES.at(v, 0)),
+                a.read::<Value>(PropValues::VALUES.at(v, 1)),
+            )
+        })
+    }
+
     /// A new Error object with an own non-enumerable `message` if one is given.
     pub(crate) fn new_error_object(
         &mut self,
