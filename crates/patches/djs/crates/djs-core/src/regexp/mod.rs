@@ -26,6 +26,7 @@ pub use exec::{
     Caps, ExecLimits, ExecState, Input, Outcome, Prog,
     exec_in, resume_in,
 };
+pub(crate) use exec::Simple;
 
 /// RegExp flags.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]

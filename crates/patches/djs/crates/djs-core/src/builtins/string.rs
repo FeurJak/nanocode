@@ -71,6 +71,9 @@ pub(crate) fn substring(heap: &mut Heap, s: Str, start: u32, end: u32) -> Result
     if let Some(slice) = heap.substring_slice(s, start, end)? {
         return Ok(slice);
     }
+    if let Some(copy) = heap.alloc_latin1_range(s, start, end)? {
+        return Ok(copy);
+    }
     join(heap, &mut [(s, start, end)])
 }
 

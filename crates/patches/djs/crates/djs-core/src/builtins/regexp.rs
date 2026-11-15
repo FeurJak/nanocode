@@ -1232,17 +1232,23 @@ pub(crate) fn split_now(
         let input = input(view);
         let unicode = prog.flags().unicode_mode();
         let limits = ExecLimits::default();
+        let simple = regexp::Simple::of(prog);
         'matches: loop {
             if q >= size {
                 break true;
             }
-            match regexp::exec_in(prog, input, q, false, &mut left, limits, st) {
-                Outcome::Match => {}
-                Outcome::NoMatch => break true,
-                Outcome::OutOfFuel | Outcome::StackOverflow => break false,
-            }
-            let caps = st.captures(prog);
-            let (at, e) = caps.get(0).expect("group 0 matched");
+            let (at, e) = match simple.and_then(|m| m.search(input, q, &mut left)) {
+                Some(Some(found)) => found,
+                Some(None) => break true,
+                None => {
+                    match regexp::exec_in(prog, input, q, false, &mut left, limits, st) {
+                        Outcome::Match => {}
+                        Outcome::NoMatch => break true,
+                        Outcome::OutOfFuel | Outcome::StackOverflow => break false,
+                    }
+                    st.captures(prog).get(0).expect("group 0 matched")
+                }
+            };
             if at >= size {
                 break true;
             }
@@ -1254,8 +1260,8 @@ pub(crate) fn split_now(
             if full(&cuts) {
                 break true;
             }
-            for g in 1..caps.len() {
-                cuts.push_out(caps.get(g));
+            for g in 1..prog.capture_count() {
+                cuts.push_out(st.captures(prog).get(g));
                 if full(&cuts) {
                     break 'matches true;
                 }

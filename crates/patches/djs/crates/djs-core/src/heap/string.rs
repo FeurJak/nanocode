@@ -573,6 +573,21 @@ impl Heap {
         Ok(Str(dst))
     }
 
+    pub(crate) fn alloc_latin1_range(
+        &mut self,
+        s: Str,
+        a: u32,
+        b: u32,
+    ) -> Result<Option<Str>, HeapError> {
+        if self.arena().get(s.0, Header::KIND) != CellKind::Str8 as u8 {
+            return Ok(None);
+        }
+        let dst = self.alloc_flat(b - a, false)?;
+        self.arena_mut()
+            .copy_within(s.0 + Str8::DATA.offset + a, b - a, dst + Str8::DATA.offset);
+        Ok(Some(Str(dst)))
+    }
+
     /// `Array.prototype.join` over the first `len` slots of an Array's dense store when
     /// each is a flat one-byte string or a slice, `undefined` or `null`, and `sep` is a flat one-byte
     /// string: the result written once, straight from the cells (0129: no list of

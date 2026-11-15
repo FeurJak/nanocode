@@ -300,6 +300,134 @@ pub fn exec_in(
     resume_in(prog, input, fuel, limits, st)
 }
 
+#[inline(always)]
+fn in_first(code: Prog<'_>, first: usize, c: u32) -> bool {
+    let n = code.at(first) as usize;
+    if c < 256 {
+        code.at(first + 1 + 2 * n + (c >> 5) as usize) >> (c & 31) & 1 != 0
+    } else {
+        in_ranges(code.sub(first + 1, 2 * n), c)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Simple<'a> {
+    body: Prog<'a>,
+    code: Prog<'a>,
+    first: usize,
+    plus: bool,
+}
+
+impl<'a> Simple<'a> {
+    pub(crate) fn of(code: Prog<'a>) -> Option<Simple<'a>> {
+        let first = code.at(H_SEARCH) as usize;
+        if code.flags().unicode_mode()
+            || code.at(H_CAPTURES) != 1
+            || code.at(H_MODE) & M_ANCHOR != 0
+            || first == 0
+        {
+            return None;
+        }
+        let a = code.at(H_ANCHORED) as usize;
+        if code.at(a) != SAVE || code.at(a + 1) != 0 {
+            return None;
+        }
+        let pc = a + 7;
+        let plus = code.at(a + 2) == SET_REG && code.at(pc) & OP_MASK == STAR;
+        let at = if plus { pc + 6 } else { a + 2 };
+        let len = match code.at(at) {
+            CHAR => 2,
+            CLASS => 2 + 2 * code.at(at + 1) as usize,
+            _ => return None,
+        };
+        let end = if plus {
+            let r = code.at(pc + 1);
+            if code.at(pc) & !F_LEAD != STAR | F_GREEDY | F_LAST
+                || code.at(a + 3) != r
+                || code.at(a + 4) != 0
+                || code.at(a + 5) != SET_POS
+                || code.at(a + 6) != r + 1
+                || code.at(pc + 2) != 1
+                || code.at(pc + 3) != u32::MAX
+                || code.at(pc + 4) as usize != len
+                || code.at(pc + 5) != 0
+            {
+                return None;
+            }
+            star_next(code, pc) as usize
+        } else {
+            at + len
+        };
+        if code.at(end) != SAVE || code.at(end + 1) != 1 || code.at(end + 2) != MATCH {
+            return None;
+        }
+        Some(Simple {
+            body: code.sub(at, len),
+            code,
+            first,
+            plus,
+        })
+    }
+
+    #[inline(always)]
+    fn matches(self, c: u32) -> bool {
+        if self.body.at(0) == CHAR {
+            c == self.body.at(1)
+        } else {
+            in_ranges(self.body.sub(2, self.body.0.len() - 2), c)
+        }
+    }
+
+    pub(crate) fn search(
+        self,
+        input: Input<'_>,
+        start: usize,
+        fuel: &mut i64,
+    ) -> Option<Option<(usize, usize)>> {
+        if start > input.len() {
+            return Some(None);
+        }
+        let found = match input {
+            Input::Latin1(b) => self.scan(start, b.len(), |i| b[i] as u32),
+            Input::Utf16(u) => self.scan(start, u.len(), |i| u[i] as u32),
+            Input::Utf16Le(b) => self.scan(start, b.len() / 2, |i| {
+                u16::from_le_bytes([b[2 * i], b[2 * i + 1]]) as u32
+            }),
+        }?;
+        let cost = match found {
+            None => input.len() - start,
+            Some((at, end)) if self.plus => at - start + 6 + (end - at),
+            Some((at, _)) => at - start + 4,
+        } as i64;
+        if cost >= *fuel {
+            return None;
+        }
+        *fuel -= cost;
+        Some(found)
+    }
+
+    #[inline(always)]
+    fn scan(
+        self,
+        start: usize,
+        len: usize,
+        unit: impl Fn(usize) -> u32,
+    ) -> Option<Option<(usize, usize)>> {
+        let Some(at) = (start..len).find(|&i| in_first(self.code, self.first, unit(i))) else {
+            return Some(None);
+        };
+        if !self.matches(unit(at)) {
+            return None;
+        }
+        let end = if self.plus {
+            (at + 1..len).find(|&i| !self.matches(unit(i))).unwrap_or(len)
+        } else {
+            at + 1
+        };
+        Some(Some((at, end)))
+    }
+}
+
 /// Continues a match in `st` that ran out of fuel.
 pub fn resume_in(
     prog: Prog<'_>,
@@ -574,12 +702,7 @@ impl Machine<'_, '_> {
     /// Latin-1 characters in 8 words).
     #[inline(always)]
     fn in_first(&self, first: usize, c: u32) -> bool {
-        let n = self.code.at(first) as usize;
-        if c < 256 {
-            self.code.at(first + 1 + 2 * n + (c >> 5) as usize) >> (c & 31) & 1 != 0
-        } else {
-            in_ranges(self.code.sub(first + 1, 2 * n), c)
-        }
+        in_first(self.code, first, c)
     }
 
     /// `find` for code units (no `u`/`v`) and no line anchor: a tight loop per input
