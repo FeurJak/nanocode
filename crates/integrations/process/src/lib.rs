@@ -78,8 +78,10 @@ fn time_left() -> Option<u64> {
         .map(|deadline| deadline.saturating_duration_since(Instant::now()).as_secs())
 }
 
-fn waited(yield_time: Duration) -> Duration {
-    yield_time.max(Duration::from_millis(MIN_WAIT_MS.load(Ordering::Relaxed)))
+fn waited(yield_time: Duration, min_wait_ms: Option<u64>) -> Duration {
+    yield_time.max(Duration::from_millis(
+        min_wait_ms.unwrap_or_else(|| MIN_WAIT_MS.load(Ordering::Relaxed)),
+    ))
 }
 
 type Prepare = std::sync::LazyLock<(), Box<dyn FnOnce() + Send>>;
@@ -527,13 +529,14 @@ impl ShellSessions {
                 sessions: Arc::clone(&self.sessions),
             };
             let (max_output_tokens, output_unit) = (command.max_output_tokens, command.output_unit);
+            let min_wait_ms = command.min_wait_ms;
             session
                 .last_used
                 .store(self.uses.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
             let busy = Busy::new(&session);
             let initial = session.owner.run(move |state| {
                 Box::pin(state.wait_for_output(
-                    waited(yield_time),
+                    waited(yield_time, min_wait_ms),
                     max_output_tokens,
                     output_unit,
                     started_at,
@@ -605,7 +608,7 @@ impl ShellSessions {
             };
             let yield_time = duration_ms(request.yield_time_ms, default, minimum, maximum);
             let yield_time = if request.chars.is_empty() {
-                waited(yield_time)
+                waited(yield_time, request.min_wait_ms)
             } else {
                 yield_time
             };

@@ -11,6 +11,7 @@ mod queue;
 use std::{collections::HashMap, sync::Arc};
 
 use nanocode_sync::Atom;
+use nanocode_tool_contracts::ToolSettings;
 
 pub use admission::{Admission, CatalogError, admit_runtime, read_catalog};
 pub use client::{
@@ -66,6 +67,8 @@ pub struct RemoteContext {
     pub output_token_budget: usize,
     pub instruction_revision: Option<u64>,
     pub host_context: Option<String>,
+    #[serde(default, skip_serializing_if = "ToolSettings::is_default")]
+    pub tool_settings: ToolSettings,
 }
 
 fn serialize_output_budget<S: serde::Serializer>(
@@ -102,6 +105,7 @@ impl RemoteContext {
             output_token_budget: usize::try_from(9_007_199_254_740_991_u64).unwrap_or(usize::MAX),
             instruction_revision: None,
             host_context: None,
+            tool_settings: ToolSettings::DEFAULT,
         }
     }
 
@@ -115,7 +119,14 @@ impl RemoteContext {
             output_token_budget: context.output_token_budget(),
             instruction_revision: context.instruction_revision(),
             host_context: context.host_context().map(Into::into),
+            tool_settings: context.tool_settings(),
         }
+    }
+
+    #[must_use]
+    pub const fn with_tool_settings(mut self, tool_settings: ToolSettings) -> Self {
+        self.tool_settings = tool_settings;
+        self
     }
 
     pub fn owned(&self) -> OwnedToolContext {
@@ -130,6 +141,7 @@ impl RemoteContext {
         .with_turn_id(self.turn_id.as_deref().map(Arc::from))
         .with_instruction_revision(self.instruction_revision)
         .with_host_context(self.host_context.as_deref().map(Arc::from))
+        .with_tool_settings(self.tool_settings)
     }
 }
 

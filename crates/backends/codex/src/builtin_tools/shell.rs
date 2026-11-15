@@ -74,7 +74,7 @@ impl Tool for ExecCommandHandler {
                         .workspace
                         .join(arguments.workdir.as_deref().unwrap_or_default());
                     let directory = base.join(cd.as_deref().unwrap_or_default());
-                    summary = match self.patches.apply(patch, directory.clone()).await {
+                    summary = match self.patches.apply(patch, directory.clone(), context).await {
                         Ok(summary) => summary,
                         Err(error) => return Ok(ToolOutput::error(error)),
                     };
@@ -110,6 +110,7 @@ impl Tool for ExecCommandHandler {
                 )
                 .with_output_unit(output_unit)
                 .with_output_token_budget(context.output_token_budget())
+                .with_min_wait_ms(context.tool_settings().min_wait_ms)
                 .from_caller(context.session_id());
                 let mut result = self.sessions.execute(command, &self.workspace).await;
                 result.output.insert_str(0, &summary);
@@ -161,6 +162,7 @@ impl Tool for WriteStdinHandler {
                     Some(max_output_tokens),
                 )
                 .with_output_unit(output_unit)
+                .with_min_wait_ms(context.tool_settings().min_wait_ms)
                 .from_caller(context.session_id());
                 let result = self.sessions.write_stdin(request).await;
                 Ok(shell_execution(&result))

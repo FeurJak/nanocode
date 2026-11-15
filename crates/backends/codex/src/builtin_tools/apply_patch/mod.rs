@@ -22,6 +22,10 @@ pub fn set_lenient_matching(enabled: bool) {
     LENIENT_MATCHING.store(enabled, Ordering::Relaxed);
 }
 
+fn lenient(context: ToolContext<'_>) -> bool {
+    context.tool_settings().lenient_patches || LENIENT_MATCHING.load(Ordering::Relaxed)
+}
+
 #[cfg(not(target_family = "wasm"))]
 pub(crate) struct ApplyPatchHandler {
     workspace: PathBuf,
@@ -43,7 +47,7 @@ impl Tool for ApplyPatchHandler {
     fn execute<'life0, 'life1, 'async_trait>(
         &'life0 self,
         input: ToolInput,
-        _context: ToolContext<'life1>,
+        context: ToolContext<'life1>,
     ) -> std::pin::Pin<Box<dyn Future<Output = ToolResult> + Send + 'async_trait>>
     where
         'life0: 'async_trait,
@@ -54,8 +58,13 @@ impl Tool for ApplyPatchHandler {
             let output: ToolResult = {
                 let input = patch_input(input)?;
                 let workspace = self.workspace.clone();
+                let lenient = lenient(context);
                 Ok(
-                    match nanocode_platform::spawn_blocking(move || apply(&input, &workspace)).await {
+                    match nanocode_platform::spawn_blocking(move || {
+                        apply_in(&input, &workspace, lenient)
+                    })
+                    .await
+                    {
                         Ok(Ok(output)) => {
                             ToolOutput::text(output).with_structured_result(json!({}))
                         }
@@ -83,7 +92,7 @@ impl HostApplyPatchHandler {
         Self { workspace, files }
     }
 
-    async fn apply(&self, patch: &str) -> Result<String, String> {
+    async fn apply(&self, patch: &str, lenient: bool) -> Result<String, String> {
         let hunks = parse(patch)?;
         validate_unique_targets(&hunks, |path| {
             normalize_path(&resolve(&self.workspace, path))
@@ -104,7 +113,7 @@ impl HostApplyPatchHandler {
                 })?;
             initial_files.insert(path, contents);
         }
-        let plan = plan_hunks(hunks, &initial_files)?;
+        let plan = plan_hunks(hunks, &initial_files, lenient)?;
         for operation in plan.operations() {
             match operation {
                 PatchOperation::Write { path, contents } => {
@@ -133,7 +142,7 @@ impl Tool for HostApplyPatchHandler {
     fn execute<'life0, 'life1, 'async_trait>(
         &'life0 self,
         input: ToolInput,
-        _context: ToolContext<'life1>,
+        context: ToolContext<'life1>,
     ) -> nanocode_tools::ToolCallFuture<'async_trait, ToolResult>
     where
         'life0: 'async_trait,
@@ -143,7 +152,7 @@ impl Tool for HostApplyPatchHandler {
         Box::pin(async move {
             let output: ToolResult = {
                 let input = patch_input(input)?;
-                Ok(match self.apply(&input).await {
+                Ok(match self.apply(&input, lenient(context)).await {
                     Ok(output) => ToolOutput::text(output).with_structured_result(json!({})),
                     Err(error) => {
                         ToolOutput::error(format!("apply_patch verification failed: {error}"))
@@ -162,17 +171,27 @@ pub(crate) enum Patches {
 }
 
 impl Patches {
-    pub(crate) async fn apply(&self, patch: String, directory: PathBuf) -> Result<String, String> {
+    pub(crate) async fn apply(
+        &self,
+        patch: String,
+        directory: PathBuf,
+        context: ToolContext<'_>,
+    ) -> Result<String, String> {
+        let lenient = lenient(context);
         match self {
             Self::Host(files) => {
                 HostApplyPatchHandler::new(directory, std::sync::Arc::clone(files))
-                    .apply(&patch)
+                    .apply(&patch, lenient)
                     .await
                     .map_err(|error| format!("apply_patch verification failed: {error}"))
             }
             #[cfg(not(target_family = "wasm"))]
             Self::Local => {
-                match nanocode_platform::spawn_blocking(move || apply(&patch, &directory)).await {
+                match nanocode_platform::spawn_blocking(move || {
+                    apply_in(&patch, &directory, lenient)
+                })
+                .await
+                {
                     Ok(Ok(output)) => Ok(output),
                     Ok(Err(error)) => Err(format!("apply_patch verification failed: {error}")),
                     Err(error) => Err(format!("apply_patch task failed: {error}")),
@@ -328,12 +347,17 @@ fn required_files_from_hunks(hunks: &[Hunk]) -> Vec<PathBuf> {
 
 pub fn plan(patch: &str, initial_files: &HashMap<PathBuf, String>) -> Result<PatchPlan, String> {
     let hunks = parse(patch)?;
-    plan_hunks(hunks, initial_files)
+    plan_hunks(
+        hunks,
+        initial_files,
+        LENIENT_MATCHING.load(Ordering::Relaxed),
+    )
 }
 
 fn plan_hunks(
     hunks: Vec<Hunk>,
     initial_files: &HashMap<PathBuf, String>,
+    lenient: bool,
 ) -> Result<PatchPlan, String> {
     let mut files = initial_files.clone();
     let mut operations = Vec::new();
@@ -364,7 +388,7 @@ fn plan_hunks(
                 let original = files
                     .get(&path)
                     .ok_or_else(|| format!("Failed to read file to update {}", path.display()))?;
-                let updated = apply_chunks(original, &chunks, &path)?;
+                let updated = apply_chunks(original, &chunks, &path, lenient)?;
                 if let Some(destination) = move_path {
                     files.remove(&path);
                     files.insert(destination.clone(), updated.clone());
@@ -412,6 +436,11 @@ struct ApplyPatchArgs {
 
 #[cfg(not(target_family = "wasm"))]
 pub fn apply(patch: &str, workspace: &Path) -> Result<String, String> {
+    apply_in(patch, workspace, LENIENT_MATCHING.load(Ordering::Relaxed))
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn apply_in(patch: &str, workspace: &Path, lenient: bool) -> Result<String, String> {
     let hunks = parse(patch)?;
     validate_unique_targets(&hunks, |path| normalize_path(&resolve(workspace, path)))?;
 
@@ -426,7 +455,7 @@ pub fn apply(patch: &str, workspace: &Path) -> Result<String, String> {
         })?;
         initial_files.insert(path, contents);
     }
-    let plan = plan_hunks(hunks, &initial_files)?;
+    let plan = plan_hunks(hunks, &initial_files, lenient)?;
     for operation in plan.operations() {
         match operation {
             PatchOperation::Write { path, contents } => {
@@ -533,7 +562,12 @@ fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
-fn apply_chunks(original: &str, chunks: &[UpdateFileChunk], path: &Path) -> Result<String, String> {
+fn apply_chunks(
+    original: &str,
+    chunks: &[UpdateFileChunk],
+    path: &Path,
+    lenient: bool,
+) -> Result<String, String> {
     let mut original_lines = original
         .split('\n')
         .map(ToOwned::to_owned)
@@ -542,7 +576,6 @@ fn apply_chunks(original: &str, chunks: &[UpdateFileChunk], path: &Path) -> Resu
         original_lines.pop();
     }
 
-    let lenient = LENIENT_MATCHING.load(Ordering::Relaxed);
     let mut lenient_error = None;
     let mut replacements = Vec::new();
     let mut line_index = 0;

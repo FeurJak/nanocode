@@ -732,6 +732,7 @@ impl CodeModeRuntime {
                 .max_output_tokens
                 .unwrap_or(context.output_token_budget),
             host_context: context.host_context.clone(),
+            tool_settings: context.tool_settings,
         };
         let stored = journal.stored_values();
         let metadata = journal.tools;
@@ -3362,7 +3363,8 @@ async fn execute_nested_call(
     .with_shared_history(&owned.history)
     .with_instruction_revision(context.instruction_revision())
     .with_host_context(context.host_context())
-    .with_turn_id(context.turn_id());
+    .with_turn_id(context.turn_id())
+    .with_tool_settings(context.tool_settings());
     let mut execution = match how {
         Nested::Recover => {
             let recovered = match tools.recover_nested(&name, Value::clone(&input), context) {

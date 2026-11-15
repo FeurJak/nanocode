@@ -44,6 +44,7 @@ pub struct EmbeddedToolRuntime {
     output_budget: Option<usize>,
     full_exec_description: bool,
     direct: bool,
+    tool_settings: nanocode_tool_contracts::ToolSettings,
 }
 
 struct LocalTool {
@@ -84,6 +85,15 @@ impl EmbeddedToolRuntime {
             output_budget: None,
             full_exec_description: false,
             direct: false,
+            tool_settings: nanocode_tool_contracts::ToolSettings::DEFAULT,
+        }
+    }
+
+    const fn stamp<'call>(&self, context: ToolContext<'call>) -> ToolContext<'call> {
+        if self.tool_settings.is_default() {
+            context
+        } else {
+            context.with_tool_settings(self.tool_settings)
         }
     }
 
@@ -109,6 +119,7 @@ impl EmbeddedToolRuntime {
         self.output_budget = tools.output_budget();
         self.full_exec_description = tools.full_exec_description;
         self.direct = tools.exposure() == ToolExposure::DirectOnly;
+        self.tool_settings = tools.tool_settings();
         self.local
             .extend(tools.registered.iter().map(|registered| LocalTool {
                 name: Arc::from(registered.handler.definition().name()),
@@ -465,6 +476,7 @@ impl EmbeddedToolRuntime {
         input: ToolInput,
         context: ToolContext<'_>,
     ) -> Result<ToolOutput, CodeModeHostError> {
+        let context = self.stamp(context);
         crate::effects::gated(
             self.effect_gate.as_ref(),
             name,
@@ -517,6 +529,7 @@ impl EmbeddedToolRuntime {
         source: &str,
         context: ToolContext<'_>,
     ) -> Result<CodeModeExecution, CodeModeHostError> {
+        let context = self.stamp(context);
         let Some(host) = &self.host else {
             return Ok(code_mode_unavailable("exec"));
         };
@@ -559,6 +572,11 @@ impl EmbeddedToolRuntime {
         context: OwnedToolContext,
         observer: &mut dyn CodeModeObserver,
     ) -> Result<CodeModeExecution, CodeModeHostError> {
+        let context = if self.tool_settings.is_default() {
+            context
+        } else {
+            context.with_tool_settings(self.tool_settings)
+        };
         let Some(host) = &self.host else {
             return Ok(code_mode_unavailable("exec"));
         };
@@ -616,13 +634,17 @@ impl EmbeddedToolRuntime {
     }
 
     pub async fn recover_tool(&self, name: &str, context: ToolContext<'_>) -> Option<ToolOutput> {
-        self.recovery.as_ref()?.recover(name, context).await
+        self.recovery
+            .as_ref()?
+            .recover(name, self.stamp(context))
+            .await
     }
 
     pub async fn recover_code(
         &self,
         context: ToolContext<'_>,
     ) -> Result<Option<CodeModeExecution>, CodeModeHostError> {
+        let context = self.stamp(context);
         match &self.host {
             Some(host) if host.tool_mode() == EmbeddedToolMode::CodeOnly => {
                 host.recover_with_local_tools(context, self.cell_tools())
@@ -648,6 +670,7 @@ impl EmbeddedToolRuntime {
         context: ToolContext<'_>,
         observer: &mut dyn CodeModeObserver,
     ) -> Result<CodeModeExecution, CodeModeHostError> {
+        let context = self.stamp(context);
         let Some(host) = &self.host else {
             return Ok(code_mode_unavailable("wait"));
         };

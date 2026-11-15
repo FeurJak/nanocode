@@ -241,6 +241,8 @@ pub struct Tools {
 
     effect_gate: Option<Arc<dyn crate::effects::EffectGate>>,
 
+    tool_settings: nanocode_tool_contracts::ToolSettings,
+
     pub(crate) brief_code_tools: Arc<[String]>,
 
     pub(crate) code_tools_layout: crate::code_mode_description::ExecLayout,
@@ -312,6 +314,7 @@ impl Default for Tools {
             excluded_code_tools: HashSet::new(),
             recovery: None,
             effect_gate: None,
+            tool_settings: nanocode_tool_contracts::ToolSettings::DEFAULT,
             brief_code_tools: Arc::from([]),
             code_tools_layout: crate::code_mode_description::ExecLayout::default(),
             text_pins: None,
@@ -616,6 +619,10 @@ impl Tools {
 
     pub(crate) fn effect_gate(&self) -> Option<Arc<dyn crate::effects::EffectGate>> {
         self.effect_gate.clone()
+    }
+
+    pub(crate) const fn tool_settings(&self) -> nanocode_tool_contracts::ToolSettings {
+        self.tool_settings
     }
 
     #[must_use]
@@ -1129,6 +1136,12 @@ impl ToolsBuilder {
     #[must_use]
     pub fn effect_gate(mut self, gate: Arc<dyn crate::effects::EffectGate>) -> Self {
         self.tools.effect_gate = Some(gate);
+        self
+    }
+
+    #[must_use]
+    pub const fn tool_settings(mut self, tool_settings: nanocode_tool_contracts::ToolSettings) -> Self {
+        self.tools.tool_settings = tool_settings;
         self
     }
 

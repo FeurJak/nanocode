@@ -7,6 +7,7 @@ pub struct ToolRuntime {
     inner: Runtime,
     recovery: Option<Arc<dyn crate::ToolRecovery>>,
     effect_gate: Option<Arc<dyn crate::effects::EffectGate>>,
+    tool_settings: nanocode_tool_contracts::ToolSettings,
 }
 
 enum Runtime {
@@ -47,6 +48,7 @@ impl ToolRuntime {
             inner: Runtime::Native(NativeToolRuntime::new(workspace, builtin_tools)),
             recovery: None,
             effect_gate: None,
+            tool_settings: nanocode_tool_contracts::ToolSettings::DEFAULT,
         }
     }
 
@@ -73,6 +75,23 @@ impl ToolRuntime {
             inner,
             recovery: tools.recovery(),
             effect_gate: tools.effect_gate(),
+            tool_settings: tools.tool_settings(),
+        }
+    }
+
+    const fn stamp<'call>(&self, context: ToolContext<'call>) -> ToolContext<'call> {
+        if self.tool_settings.is_default() {
+            context
+        } else {
+            context.with_tool_settings(self.tool_settings)
+        }
+    }
+
+    const fn stamp_owned(&self, context: OwnedToolContext) -> OwnedToolContext {
+        if self.tool_settings.is_default() {
+            context
+        } else {
+            context.with_tool_settings(self.tool_settings)
         }
     }
 
@@ -183,6 +202,7 @@ impl ToolRuntime {
         'call,
         Result<CodeModeExecution, crate::embedded::CodeModeHostError>,
     > {
+        let context = self.stamp(context);
         Box::pin(async move {
             self.barrier().await?;
             match &self.inner {
@@ -201,6 +221,7 @@ impl ToolRuntime {
         'call,
         Result<CodeModeExecution, crate::embedded::CodeModeHostError>,
     > {
+        let context = self.stamp(context);
         Box::pin(async move {
             self.barrier().await?;
             match &self.inner {
@@ -226,6 +247,7 @@ impl ToolRuntime {
         'call,
         Result<CodeModeExecution, crate::embedded::CodeModeHostError>,
     > {
+        let context = self.stamp_owned(context);
         Box::pin(async move {
             self.barrier().await?;
             match &self.inner {
@@ -244,6 +266,7 @@ impl ToolRuntime {
         'call,
         Result<CodeModeExecution, crate::embedded::CodeModeHostError>,
     > {
+        let context = self.stamp_owned(context);
         Box::pin(async move {
             self.barrier().await?;
             match &self.inner {
@@ -269,6 +292,7 @@ impl ToolRuntime {
         'call,
         Result<CodeModeExecution, crate::embedded::CodeModeHostError>,
     > {
+        let context = self.stamp(context);
         Box::pin(async move {
             self.barrier().await?;
             match &self.inner {
@@ -287,6 +311,7 @@ impl ToolRuntime {
         'call,
         Result<CodeModeExecution, crate::embedded::CodeModeHostError>,
     > {
+        let context = self.stamp(context);
         Box::pin(async move {
             self.barrier().await?;
             match &self.inner {
@@ -311,6 +336,7 @@ impl ToolRuntime {
         'call,
         Result<Option<CodeModeExecution>, crate::embedded::CodeModeHostError>,
     > {
+        let context = self.stamp(context);
         Box::pin(async move {
             match &self.inner {
                 Runtime::Native(runtime) => runtime.recover_code(context).await,
@@ -324,6 +350,7 @@ impl ToolRuntime {
         name: &'call str,
         context: ToolContext<'call>,
     ) -> nanocode_sync::future::BoxFuture<'call, Option<ToolOutput>> {
+        let context = self.stamp(context);
         Box::pin(async move {
             match &self.inner {
                 Runtime::Native(_) => self.recovery.as_ref()?.recover(name, context).await,
@@ -341,6 +368,7 @@ impl ToolRuntime {
         'call,
         Result<ToolOutput, crate::embedded::CodeModeHostError>,
     > {
+        let context = self.stamp(context);
         Box::pin(async move {
             match &self.inner {
                 Runtime::Native(runtime) => {
@@ -365,6 +393,7 @@ impl ToolRuntime {
         input: Value,
         context: ToolContext<'call>,
     ) -> nanocode_sync::future::BoxFuture<'call, ToolOutput> {
+        let context = self.stamp(context);
         match &self.inner {
             Runtime::Native(runtime) => runtime.execute_nested_tool(name, input, context),
             Runtime::Host(_) => Box::pin(async move {

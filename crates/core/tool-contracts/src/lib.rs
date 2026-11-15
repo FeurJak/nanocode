@@ -71,6 +71,27 @@ pub struct ToolContext<'a> {
     instruction_revision: Option<u64>,
     run_time: Option<Duration>,
     directory: Option<&'a std::path::Path>,
+    tool_settings: ToolSettings,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ToolSettings {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lenient_patches: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_wait_ms: Option<u64>,
+}
+
+impl ToolSettings {
+    pub const DEFAULT: Self = Self {
+        lenient_patches: false,
+        min_wait_ms: None,
+    };
+
+    #[must_use]
+    pub const fn is_default(&self) -> bool {
+        !self.lenient_patches && self.min_wait_ms.is_none()
+    }
 }
 
 impl<'a> ToolContext<'a> {
@@ -93,6 +114,7 @@ impl<'a> ToolContext<'a> {
             instruction_revision: None,
             run_time: None,
             directory: None,
+            tool_settings: ToolSettings::DEFAULT,
         }
     }
 
@@ -141,6 +163,17 @@ impl<'a> ToolContext<'a> {
     #[must_use]
     pub const fn directory(self) -> Option<&'a std::path::Path> {
         self.directory
+    }
+
+    #[must_use]
+    pub const fn with_tool_settings(mut self, tool_settings: ToolSettings) -> Self {
+        self.tool_settings = tool_settings;
+        self
+    }
+
+    #[must_use]
+    pub const fn tool_settings(self) -> ToolSettings {
+        self.tool_settings
     }
 
     #[doc(hidden)]

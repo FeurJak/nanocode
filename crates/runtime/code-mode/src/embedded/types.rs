@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use nanocode_tool_contracts::{SharedHistory, ToolContext, ToolOutputBody};
+use nanocode_tool_contracts::{SharedHistory, ToolContext, ToolOutputBody, ToolSettings};
 use nanocode_types_core::responses::ResponseItem;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
@@ -14,6 +14,7 @@ pub struct OwnedToolContext {
     pub history: Arc<SharedHistory>,
     pub output_token_budget: usize,
     pub host_context: Option<Arc<str>>,
+    pub tool_settings: ToolSettings,
 }
 
 pub(crate) fn shared_history(context: ToolContext<'_>) -> Arc<SharedHistory> {
@@ -41,6 +42,7 @@ impl OwnedToolContext {
             history: Arc::new(SharedHistory::new(history)),
             output_token_budget,
             host_context: None,
+            tool_settings: ToolSettings::DEFAULT,
         }
     }
 
@@ -64,6 +66,7 @@ impl OwnedToolContext {
         .with_instruction_revision(context.instruction_revision())
         .with_host_context(context.host_context().map(Arc::from))
         .with_turn_id(context.turn_id().map(Arc::from))
+        .with_tool_settings(context.tool_settings())
     }
 
     #[must_use]
@@ -79,6 +82,7 @@ impl OwnedToolContext {
         .with_instruction_revision(self.instruction_revision)
         .with_host_context(self.host_context.as_deref())
         .with_turn_id(self.turn_id.as_deref())
+        .with_tool_settings(self.tool_settings)
     }
 
     #[must_use]
@@ -97,6 +101,12 @@ impl OwnedToolContext {
     #[must_use]
     pub fn with_host_context(mut self, host_context: Option<Arc<str>>) -> Self {
         self.host_context = host_context;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_tool_settings(mut self, tool_settings: ToolSettings) -> Self {
+        self.tool_settings = tool_settings;
         self
     }
 

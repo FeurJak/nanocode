@@ -25,6 +25,7 @@ pub struct ExecCommand {
     pub output_unit: OutputUnit,
     pub caller: Option<String>,
     pub output_token_budget: Option<usize>,
+    pub min_wait_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -55,6 +56,7 @@ impl ExecCommand {
             output_unit: OutputUnit::Tokens,
             caller: None,
             output_token_budget: None,
+            min_wait_ms: None,
         }
     }
 
@@ -67,6 +69,12 @@ impl ExecCommand {
     #[must_use]
     pub const fn with_output_token_budget(mut self, tokens: usize) -> Self {
         self.output_token_budget = Some(tokens);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_min_wait_ms(mut self, min_wait_ms: Option<u64>) -> Self {
+        self.min_wait_ms = min_wait_ms;
         self
     }
 
@@ -84,6 +92,7 @@ pub struct WriteStdin {
     pub max_output_tokens: Option<usize>,
     pub output_unit: OutputUnit,
     pub caller: Option<String>,
+    pub min_wait_ms: Option<u64>,
 }
 
 impl WriteStdin {
@@ -100,12 +109,19 @@ impl WriteStdin {
             max_output_tokens,
             output_unit: OutputUnit::Tokens,
             caller: None,
+            min_wait_ms: None,
         }
     }
 
     #[must_use]
     pub const fn with_output_unit(mut self, output_unit: OutputUnit) -> Self {
         self.output_unit = output_unit;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_min_wait_ms(mut self, min_wait_ms: Option<u64>) -> Self {
+        self.min_wait_ms = min_wait_ms;
         self
     }
 
