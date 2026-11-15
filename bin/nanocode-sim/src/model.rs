@@ -167,7 +167,7 @@ impl Model {
     pub fn plan(&mut self, attempt: Attempt, records: &[StoreRecord]) {
         for record in records.iter().filter(|record| !record.value.is_empty()) {
             self.records
-                .insert(record.key.clone(), record.value.clone());
+                .insert(record.key.clone(), record.value.to_string());
         }
         self.attempts.push(attempt);
     }

@@ -425,7 +425,7 @@ impl EncodedPayload {
                 value.push_str(content);
                 records.push(crate::StoreRecord {
                     key: self.key().to_owned(),
-                    value,
+                    value: value.into(),
                 });
                 return;
             }
@@ -436,7 +436,7 @@ impl EncodedPayload {
             if !known(&key) {
                 records.push(crate::StoreRecord {
                     key,
-                    value: content[offset..end].to_owned(),
+                    value: content[offset..end].into(),
                 });
             }
             offset = end;
@@ -446,13 +446,13 @@ impl EncodedPayload {
             if !known(&key) {
                 records.push(crate::StoreRecord {
                     key,
-                    value: text.clone(),
+                    value: text.as_str().into(),
                 });
             }
         }
         records.push(crate::StoreRecord {
             key: self.key().to_owned(),
-            value: layout.root.clone(),
+            value: layout.root.as_str().into(),
         });
     }
 

@@ -308,7 +308,10 @@ impl Proc {
                 format!("k{:016x}", fnv(FNV_OFFSET, value.as_bytes()))
             };
             refs.push(key.clone());
-            records.push(StoreRecord { key, value });
+            records.push(StoreRecord {
+                key,
+                value: value.into(),
+            });
         }
         for inherited in &held.refs {
             if !world.slots
@@ -755,11 +758,11 @@ fn rewrite(world: &World, key: &str, records: &mut Vec<StoreRecord>) {
     };
     records.push(StoreRecord {
         key: key.to_owned(),
-        value: String::new(),
+        value: Default::default(),
     });
     records.push(StoreRecord {
         key: key.to_owned(),
-        value,
+        value: value.into(),
     });
 }
 

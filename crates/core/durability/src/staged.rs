@@ -56,7 +56,7 @@ impl Staged {
             })
             .map(|(key, value)| StoreRecord {
                 key: key.clone(),
-                value: value.to_string(),
+                value: Arc::clone(value),
             })
             .collect()
     }
@@ -338,7 +338,7 @@ impl StagedWrites {
         }
         let mut written = BTreeMap::new();
         for record in records {
-            written.insert(record.key.as_str(), record.value.as_str());
+            written.insert(record.key.as_str(), &*record.value);
         }
         if written.iter().any(|(key, value)| {
             staged

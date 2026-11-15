@@ -3,6 +3,7 @@ use std::future::Future;
 use std::{
     cmp::{Ordering, Reverse},
     collections::{BinaryHeap, HashMap},
+    sync::Arc,
 };
 
 use nanocode_sync::{mpsc, oneshot};
@@ -77,7 +78,7 @@ struct Write {
 
 #[derive(Default)]
 struct Tables {
-    records: HashMap<(String, String), String>,
+    records: HashMap<(String, String), Arc<str>>,
     states: HashMap<String, StoredState>,
     owners: HashMap<String, OwnerToken>,
     created: Vec<String>,
@@ -138,7 +139,7 @@ impl Tables {
                 .records
                 .get(&(state_id.to_owned(), record.key.clone()))
                 .or_else(|| staged.get(&record.key).copied());
-            if retained.is_some_and(|value| value != &record.value) {
+            if retained.is_some_and(|value| *value != record.value) {
                 return Err(StoreError::NotCommitted(format!(
                     "durability record `{}` has conflicting content",
                     record.key
@@ -415,7 +416,12 @@ impl MemoryStore {
                         key,
                         result,
                     } => {
-                        drop(result.send(Ok(tables.records.get(&(state_id, key)).cloned())));
+                        drop(
+                            result.send(Ok(tables
+                                .records
+                                .get(&(state_id, key))
+                                .map(|value| value.to_string()))),
+                        );
                     }
                     Command::ReadRecords {
                         state_id,
@@ -425,7 +431,12 @@ impl MemoryStore {
                         drop(
                             result.send(Ok(keys
                                 .into_iter()
-                                .map(|key| tables.records.get(&(state_id.clone(), key)).cloned())
+                                .map(|key| {
+                                    tables
+                                        .records
+                                        .get(&(state_id.clone(), key))
+                                        .map(|value| value.to_string())
+                                })
                                 .collect())),
                         );
                     }

@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    sync::Arc,
+};
 
 use nanocode_agent_core::Origin;
 use serde::{Deserialize, Serialize};
@@ -458,7 +461,7 @@ impl SessionStore {
                         value
                             .map(|value| StoreRecord {
                                 key: key.clone(),
-                                value,
+                                value: value.into(),
                             })
                             .ok_or_else(|| {
                                 Error::InvalidState(format!("missing payload record {key}"))
@@ -772,8 +775,8 @@ impl BranchImport {
         for record in &page.records {
             EncodedPayload::verify_record(&record.key, &record.value)?;
             if verified
-                .insert(record.key.as_str(), record.value.as_str())
-                .is_some_and(|value| value != record.value)
+                .insert(record.key.as_str(), &record.value)
+                .is_some_and(|value| *value != record.value)
             {
                 return Err(Error::InvalidState(format!(
                     "branch page holds record {} twice with different content",
@@ -785,7 +788,7 @@ impl BranchImport {
             .into_iter()
             .map(|(key, value)| StoreRecord {
                 key: key.to_owned(),
-                value: value.to_owned(),
+                value: Arc::clone(value),
             })
             .collect();
         let mut staged = state.clone();

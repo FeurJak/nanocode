@@ -119,7 +119,7 @@ pub type StoreFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 pub struct StoreRecord {
     pub key: String,
 
-    pub value: String,
+    pub value: Arc<str>,
 }
 
 pub struct StoreReplacement {

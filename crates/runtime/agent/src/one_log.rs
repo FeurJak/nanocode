@@ -1394,10 +1394,10 @@ impl OneLogStore {
         let revision = actual + 1;
         for record in records {
             let key = stored_key(state_id, &record.key);
-            if lease.fold().stored(&key) != Some(record.value.as_str()) {
+            if lease.fold().stored(&key) != Some(&*record.value) {
                 lease.push(Record::Stored {
                     key,
-                    value: record.value.clone(),
+                    value: record.value.to_string(),
                 })?;
             }
         }
@@ -1599,10 +1599,10 @@ impl StateStore for OneLogStore {
             let mut lease = self.0.log.lease().await;
             for record in records {
                 let key = stored_key(state_id, &record.key);
-                if lease.fold().stored(&key) != Some(record.value.as_str()) {
+                if lease.fold().stored(&key) != Some(&*record.value) {
                     lease.push(Record::Stored {
                         key,
-                        value: record.value.clone(),
+                        value: record.value.to_string(),
                     })?;
                 }
             }

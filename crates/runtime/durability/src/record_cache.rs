@@ -148,7 +148,7 @@ impl RecordCache {
 fn written(records: &[StoreRecord]) -> Vec<(String, Arc<str>)> {
     records
         .iter()
-        .map(|record| (record.key.clone(), Arc::from(record.value.as_str())))
+        .map(|record| (record.key.clone(), Arc::clone(&record.value)))
         .collect()
 }
 

@@ -1171,7 +1171,7 @@ impl<H: Sql + ?Sized> RowStore<H> {
                 let tail = sealing.as_ref().map_or(0, |sealing| sealing.bytes);
                 let added = fresh.iter().map(|at| {
                     let record = &write.records[*at];
-                    (record.key.as_str(), record.value.as_str())
+                    (record.key.as_str(), &*record.value)
                 });
                 let (page, encoded) = match sealing {
                     Some(sealing) => {
@@ -1251,7 +1251,7 @@ impl<H: Sql + ?Sized> RowStore<H> {
             revision,
             bytes: planned.encoded.len(),
             records: fresh
-                .map(|record| (record.key.as_str().into(), record.value.as_str().into()))
+                .map(|record| (record.key.as_str().into(), Arc::clone(&record.value)))
                 .collect(),
         }
     }
@@ -1448,7 +1448,7 @@ impl<H: Sql + ?Sized> RowStore<H> {
             let body = self.pack(
                 fresh
                     .iter()
-                    .map(|at| (records[*at].key.as_str(), records[*at].value.as_str())),
+                    .map(|at| (records[*at].key.as_str(), &*records[*at].value)),
             )?;
             let page = pages.to_string();
             let mut statements = Vec::with_capacity(3);

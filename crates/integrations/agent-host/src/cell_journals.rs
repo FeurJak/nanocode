@@ -279,7 +279,7 @@ fn blanked(cell_id: u64, cell: Cell) -> Vec<StoreRecord> {
     keys.into_iter()
         .map(|key| StoreRecord {
             key,
-            value: String::new(),
+            value: Arc::default(),
         })
         .collect()
 }
@@ -466,7 +466,7 @@ impl CellJournalSink for DurableCellJournals {
             if let Some(previous) = saved.clone() {
                 records.push(StoreRecord {
                     key: previous,
-                    value: String::new(),
+                    value: Arc::default(),
                 });
             }
             let key = payload.key().to_owned();

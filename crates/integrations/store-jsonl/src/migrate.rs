@@ -139,7 +139,10 @@ fn legacy_records(
         else {
             let key = located[index].0.clone();
             let value = legacy_record(journal, id, &key)?;
-            each(StoreRecord { key, value })?;
+            each(StoreRecord {
+                key,
+                value: value.into(),
+            })?;
             index += 1;
             continue;
         };
@@ -179,7 +182,7 @@ fn legacy_records(
             };
             each(StoreRecord {
                 key: key.clone(),
-                value,
+                value: value.into(),
             })?;
         }
         index = last;

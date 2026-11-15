@@ -37,7 +37,7 @@ impl Shared {
             .map(|StoreRecord { key, value }| {
                 let value = if value.len() < self.threshold {
                     if value.starts_with(MARK) {
-                        format!("{MARK}{value}")
+                        format!("{MARK}{value}").into()
                     } else {
                         value
                     }
@@ -46,7 +46,7 @@ impl Shared {
                     added |= self
                         .put(&blob, value.as_bytes())
                         .map_err(|error| backend(format!("shared record {blob}: {error}")))?;
-                    format!("{MARK}{blob}")
+                    format!("{MARK}{blob}").into()
                 };
                 Ok(StoreRecord { key, value })
             })

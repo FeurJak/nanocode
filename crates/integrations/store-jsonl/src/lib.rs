@@ -688,7 +688,7 @@ fn stored_records(records: &[IndexedRecord<'_>]) -> Result<Vec<StoreRecord>, Sto
         .map(|record| {
             Ok(StoreRecord {
                 key: record.key.to_string(),
-                value: text(record.value, true)?,
+                value: text(record.value, true)?.into(),
             })
         })
         .collect()
@@ -778,7 +778,7 @@ impl Serialize for Spanned<'_, StoreRecord> {
         record.serialize_field(
             "value",
             &Spanned {
-                value: self.value.value.as_str(),
+                value: &*self.value.value,
                 spans: self.spans,
             },
         )?;
@@ -1748,7 +1748,7 @@ impl Journal {
         Ok(self
             .resolved(candidate, &record.key)?
             .filter(|(found, value)| {
-                *value == record.value
+                **value == *record.value
                     && record.value.len() > SHARED_RECORD.len_utf8() + found.len()
             })
             .map(|(found, _)| found))
@@ -1783,11 +1783,11 @@ impl Journal {
             .map(|(record, holder)| match holder {
                 Some(holder) => StoreRecord {
                     key: record.key,
-                    value: format!("{SHARED_RECORD}{holder}"),
+                    value: format!("{SHARED_RECORD}{holder}").into(),
                 },
                 None if record.value.starts_with(SHARED_RECORD) => StoreRecord {
                     key: record.key,
-                    value: format!("{SHARED_RECORD}{}", record.value),
+                    value: format!("{SHARED_RECORD}{}", record.value).into(),
                 },
                 None => record,
             })
@@ -1922,7 +1922,7 @@ impl Journal {
         id: &str,
         records: &[StoreRecord],
     ) -> Result<Vec<bool>, StoreError> {
-        let mut staged = HashMap::new();
+        let mut staged = HashMap::<&str, &str>::new();
         let mut fresh = Vec::with_capacity(records.len());
         let (mut encoded, mut stored) = (Vec::new(), Vec::new());
         for record in records {
@@ -1935,7 +1935,7 @@ impl Journal {
                 Some(equal) => Some(equal),
                 None => staged
                     .get(record.key.as_str())
-                    .map(|value| *value == record.value),
+                    .map(|value| **value == *record.value),
             };
             if retained == Some(false) {
                 return Err(StoreError::NotCommitted(format!(
@@ -1944,7 +1944,7 @@ impl Journal {
                 )));
             }
             fresh.push(retained.is_none());
-            staged.insert(record.key.as_str(), record.value.as_str());
+            staged.insert(record.key.as_str(), &*record.value);
         }
         Ok(fresh)
     }
@@ -1956,7 +1956,7 @@ impl Journal {
         let Some(existing) = self.record(id, &record.key)? else {
             return Ok(false);
         };
-        Ok(shared.load(existing)? == shared.load(record.value.clone())?)
+        Ok(shared.load(existing)? == shared.load(record.value.to_string())?)
     }
 
     fn matches(
@@ -1996,7 +1996,7 @@ impl Journal {
         }
         Ok(Some(
             self.record(id, &record.key)?
-                .is_some_and(|value| value == record.value),
+                .is_some_and(|value| *value == *record.value),
         ))
     }
 

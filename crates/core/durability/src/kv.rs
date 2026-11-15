@@ -288,7 +288,7 @@ impl<B: KeyValue + ?Sized> KeyValueStore<B> {
             return Ok(());
         }
         let current = self.stored_record(&key).await?;
-        if current.value == record.value {
+        if *current.value == *record.value {
             return Ok(());
         }
         if !current.value.is_empty() {
@@ -300,7 +300,7 @@ impl<B: KeyValue + ?Sized> KeyValueStore<B> {
         {
             return Ok(());
         }
-        if self.stored_record(&key).await?.value == record.value {
+        if *self.stored_record(&key).await?.value == *record.value {
             return Ok(());
         }
         Err(conflicting_record(&record.key))

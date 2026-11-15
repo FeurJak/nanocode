@@ -282,11 +282,7 @@ impl Pool {
             self.listed.set(Some(Arc::new(keys.clone())));
         }
         drop(writer);
-        self.hold(
-            fresh
-                .into_iter()
-                .map(|record| (record.key, Arc::from(record.value))),
-        );
+        self.hold(fresh.into_iter().map(|record| (record.key, record.value)));
         Ok(())
     }
 }

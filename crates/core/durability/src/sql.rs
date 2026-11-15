@@ -419,7 +419,7 @@ fn values_json(records: &[StoreRecord]) -> Result<String, StoreError> {
     records_json(
         records
             .iter()
-            .map(|record| (record.key.as_str(), record.value.as_str()))
+            .map(|record| (record.key.as_str(), &*record.value))
             .collect::<std::collections::BTreeMap<_, _>>()
             .into_iter()
             .map(|(key, value)| (key, value, None)),
@@ -1158,7 +1158,7 @@ impl<H: Sql + ?Sized> SqlStore<H> {
             for record in replacement.records {
                 unique
                     .entry(record.key.as_str())
-                    .or_insert((record.value.as_str(), replacement.state_id));
+                    .or_insert((&*record.value, replacement.state_id));
             }
         }
         let settle = if commits
