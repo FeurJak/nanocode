@@ -751,6 +751,7 @@ pub struct ClaudeBuilder {
     tool_input_deltas: bool,
     hedging: Option<Arc<nanocode_agent_core::hedge::Hedging>>,
     message_threads: bool,
+    omit_custom_model_thinking: bool,
     refusal_continuations: u32,
     steer_preempts_model: bool,
     context_window_tokens: u64,
@@ -829,6 +830,7 @@ impl ClaudeBuilder {
             tool_input_deltas: false,
             hedging: None,
             message_threads: false,
+            omit_custom_model_thinking: false,
             refusal_continuations: DEFAULT_REFUSAL_CONTINUATIONS,
             steer_preempts_model: false,
             context_window_tokens,
@@ -1119,6 +1121,11 @@ impl ClaudeBuilder {
 
     pub const fn message_threads(mut self, enabled: bool) -> Self {
         self.message_threads = enabled;
+        self
+    }
+
+    pub const fn omit_custom_model_thinking(mut self, enabled: bool) -> Self {
+        self.omit_custom_model_thinking = enabled;
         self
     }
 
@@ -1950,6 +1957,7 @@ impl ClaudeBuilder {
             tool_input_deltas: self.tool_input_deltas,
             hedging: self.hedging,
             message_thread: self.message_threads.then(Atom::default),
+            omit_custom_model_thinking: self.omit_custom_model_thinking,
             refusal_continuations: self.refusal_continuations,
             steer_preempts_model: self.steer_preempts_model,
             wire_cache: crate::WireCache::default(),
@@ -3633,6 +3641,7 @@ struct State {
     tool_input_deltas: bool,
     hedging: Option<Arc<nanocode_agent_core::hedge::Hedging>>,
     message_thread: Option<Atom<crate::MessageThread>>,
+    omit_custom_model_thinking: bool,
     refusal_continuations: u32,
     steer_preempts_model: bool,
     wire_cache: crate::WireCache,
@@ -5399,6 +5408,14 @@ impl State {
     fn cleared(&self, mut messages: Vec<HistoryMessage>) -> Vec<HistoryMessage> {
         if self.message_thread.is_none() {
             clearing::clear_tool_results(&mut messages);
+        }
+        if self.omit_custom_model_thinking
+            && self
+                .model()
+                .parse::<nanocode_agent_core::ClaudeModel>()
+                .is_err()
+        {
+            history::strip_thinking(&mut messages);
         }
         messages
     }

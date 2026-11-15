@@ -837,7 +837,9 @@ impl Host {
         .direct_subagents(config.subagents == Subagents::AllModels)
         .headless(config.headless)
         .configure(move |builder| {
-            let builder = builder.hedging(std::sync::Arc::clone(&hedging));
+            let builder = builder
+                .hedging(std::sync::Arc::clone(&hedging))
+                .omit_custom_model_thinking(no_reasoning_replay);
             let builder = match max_output {
                 Some(tokens) => builder.max_tokens(tokens),
                 None if builder.knows_max_tokens() => builder,

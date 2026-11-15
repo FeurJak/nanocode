@@ -258,7 +258,7 @@ const SESSION: Group = Group::new(&[
         .help("Directory for saved sessions, history and pasted images (defaults to ~/.nanocode)"),
     Argument::flag("no_reasoning_replay")
         .long("no-reasoning-replay")
-        .help("Leave earlier reasoning out of every request to a custom model on the Codex harness"),
+        .help("Leave earlier reasoning out of every request to a custom model (Codex reasoning items, Claude thinking blocks)"),
     Argument::value("tool_output_token_limit", "TOKENS", Parser::U64)
         .long("tool-output-token-limit")
         .help("Codex harness: cut each tool output of a custom model to this many tokens (4 bytes each), head and tail kept, as Codex CLI's tool_output_token_limit does (defaults to 2500, Codex CLI's 10,000 bytes)"),
