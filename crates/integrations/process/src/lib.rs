@@ -274,7 +274,7 @@ pub struct ShellSessions {
     sessions: Arc<Sessions>,
     next_session_id: AtomicI64,
     #[cfg(unix)]
-    login_shell: Option<PathBuf>,
+    login_shell: std::sync::OnceLock<Option<PathBuf>>,
     environment: Arc<Vec<(OsString, OsString)>>,
     secrets: Option<SecretEnvironment>,
     per_caller: bool,
@@ -299,7 +299,7 @@ impl ShellSessions {
             sessions: Arc::new(Sessions::new()),
             next_session_id: AtomicI64::new(1),
             #[cfg(unix)]
-            login_shell: selection::login_shell(),
+            login_shell: std::sync::OnceLock::new(),
             environment,
             secrets: None,
             per_caller: false,
@@ -413,7 +413,9 @@ impl ShellSessions {
                 MAX_EXEC_YIELD_MS,
             );
             #[cfg(unix)]
-            if login && let Some(login_shell) = &self.login_shell {
+            if login
+                && let Some(login_shell) = self.login_shell.get_or_init(selection::login_shell)
+            {
                 let reported = timeout(
                     yield_time,
                     login::environment(login_shell, &workdir, &environment, &host_secrets),
