@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "djs-base"
+version = "0.0.0"
+dependencies = [
+ "djs-core",
+]
+
+[[package]]
 name = "djs-core"
 version = "0.0.0"
 dependencies = [
@@ -788,6 +795,7 @@ dependencies = [
 name = "nanocode-sim"
 version = "0.7.0"
 dependencies = [
+ "djs-base",
  "graviola",
  "nanocode",
  "nanocode-agent-core",

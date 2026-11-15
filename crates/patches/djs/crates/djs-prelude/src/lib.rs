@@ -1,6 +1,6 @@
 //! The base snapshot (ARCH G2, "Images and dumps"; D1321): the image of an idle VM with its
-//! realm and prelude, made by `build.rs` when djs-core changes and embedded here. A new
-//! VM is a copy of it, with no compile at startup.
+//! realm and prelude, made by djs-base (`scripts/base.sh`) when djs-core changes, checked
+//! in under `base/` and embedded here. A new VM is a copy of it, with no compile at startup.
 //!
 //! What the base holds: the atom table, the realm (global object, intrinsics, builtin
 //! functions), the compiled prelude and the interpreter state of an idle VM. Nothing per
@@ -16,22 +16,20 @@ extern crate alloc;
 use djs_core::heap::{HeapError, LoadError};
 use djs_core::vm::{Vm, VmOptions};
 
-include!(concat!(env!("OUT_DIR"), "/base_end.rs"));
-include!(concat!(env!("OUT_DIR"), "/built_by.rs"));
-// The base image loads only into the djs-core that made it. The build script's djs-core
-// is a build-dependency with features of its own: a feature that reaches the library but
-// not the build script (djs-core's `full`, `unicode`, ...) fails here instead of at the
-// first `new_vm` (D2411).
+include!("../base/base.rs");
+// The base image loads only into the djs-core that made it. A change to djs-core's sources,
+// djs-libm's or the prelude, or other djs-core features than djs-base's, fails here
+// instead of at the first `new_vm` (D2411).
 const _: () = assert!(
     BUILT_BY == djs_core::vm::BUILD_HASH,
-    "the base image was built with other djs-core features than this build: enable them through djs-prelude's features"
+    "base/base.img was made by another djs-core build: run crates/patches/djs/scripts/base.sh, or enable djs-base's djs-core features through djs-prelude's"
 );
 
 // `BASE_NAMES`: the base's builtins and their paths for dumps (`DumpOptions::base_names`).
 
 /// The base image (`Vm::bytes` of a fresh, collected VM of this build).
 #[cfg(feature = "raw")]
-pub static BASE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/base.img"));
+pub static BASE: &[u8] = include_bytes!("../base/base.img");
 
 // The coded base as the wasm module's custom section `djs_base` (`BASE_SECTION`): not in
 // linear memory, so not readable by the instance itself. A `pub` static without
@@ -63,7 +61,7 @@ pub fn new_vm_from_reserved(base: &[u8], opts: VmOptions, live: usize) -> Result
     match Vm::from_base_reserved(base, opts, live) {
         Ok(vm) => Ok(vm),
         Err(LoadError::TooLarge) => Err(HeapError::OutOfMemory),
-        // Made by this build's build.rs and verified there: anything else is a build bug.
+        // Made for this build by djs-base and verified there: anything else is a build bug.
         Err(e) => panic!("the embedded base snapshot does not load: {e}"),
     }
 }

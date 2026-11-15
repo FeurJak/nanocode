@@ -4,7 +4,7 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "The base snapshot: djs-core's realm with the prelude installed, made at build time (D1321)."
+description = "The base snapshot: djs-core's realm with the prelude installed, made by djs-base and checked in (D1321)."
 
 [lib]
 # No doctests (scripts/gate.py `targets` fails if one appears): none to compile (0197).
@@ -12,9 +12,8 @@ doctest = false
 
 [features]
 default = ["raw", "full", "unicode", "embed"]
-# djs-core's features (D2411), for the base image this crate builds: its build script's
-# djs-core must have the same as the library's (a build-dependency resolves its features
-# on its own), which lib.rs checks by the build hash.
+# djs-core's features (D2411), for the djs-core the base image loads into: they must be
+# those djs-base made the image with, which lib.rs checks by the build hash.
 full = ["djs-core/full"]
 # djs-core's `embed` (D3175): the base image has the builtins only Rust hosts get.
 embed = ["djs-core/embed"]
@@ -24,10 +23,7 @@ unicode-normalization = ["djs-core/unicode-normalization"]
 # `BASE`, the image as it is: native builds (copied per VM with no decode).
 raw = []
 
+# No build script: base/ holds the image djs-base makes (scripts/base.sh), so nothing here
+# waits for djs-core's code generation, only its metadata.
 [dependencies]
-djs-core = { path = "../djs-core", default-features = false }
-
-# build.rs creates the base image with a host build of djs-core. Cargo reruns it whenever
-# djs-core changes, which includes builtins/gen/prelude.js (include_str! in vm/).
-[build-dependencies]
 djs-core = { path = "../djs-core", default-features = false }

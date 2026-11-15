@@ -243,8 +243,8 @@
 //!   and djs-libm (djs's copy of libm's math functions): no third-party crate.
 //! - **Git checkouts.** The crates read files elsewhere in the repository at build time
 //!   (the builtins' compiled JavaScript in `builtins/gen/`); cargo's git checkout is the
-//!   whole repository, so they resolve. The build script of djs-prelude makes the base
-//!   image (the realm every snapshot starts from) on the build machine.
+//!   whole repository, so they resolve. The base image (the realm every snapshot starts
+//!   from) is checked in with djs-prelude (`base/`, made by `scripts/base.sh`).
 //! - **Cross builds.** djs-embed builds for any target djs-core does, with nothing but a
 //!   linker for it: no C code, no target-specific build step. The base image a cross build
 //!   embeds is byte for byte the one the target makes itself (heap cells are little-endian

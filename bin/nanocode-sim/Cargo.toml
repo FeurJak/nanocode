@@ -17,6 +17,7 @@ test = false
 bench = false
 
 [dependencies]
+djs-base = { path = "../../crates/patches/djs/crates/djs-base" }
 nanocode-bytes.workspace = true
 nanocode-io.workspace = true
 nanocode = { path = "../../crates/nanocode", default-features = false, features = ["local-cells"] }

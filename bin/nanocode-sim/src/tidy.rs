@@ -17,6 +17,8 @@ const SIMULATED: &[&str] = &[
     "crates/runtime/tool-host/src",
 ];
 
+const BASE_DIR: &str = "crates/patches/djs/crates/djs-prelude/base";
+
 const BYPASSES_HOST: &str = "bypasses nanocode-platform's host";
 const WAKE_ORDER: &str = "yields its futures in the order they were woken, which tokio's watch and HashMap iteration draw at random; use nanocode_sync::InOrder";
 const REAL_ELAPSED: &str = "reads std's real clock on native, where nanocode_platform::Instant is std::time::Instant; use nanocode_platform::elapsed";
@@ -305,6 +307,13 @@ pub fn check(root: &Path) -> std::io::Result<Vec<String>> {
                 allowed.path, allowed.call, allowed.uses
             ));
         }
+    }
+    let base = djs_base::make();
+    let base_dir = root.join(BASE_DIR);
+    for file in djs_base::stale(&base_dir, &base) {
+        problems.push(format!(
+            "{BASE_DIR}/{file}: not what this djs-core makes; run crates/patches/djs/scripts/base.sh"
+        ));
     }
     Ok(problems)
 }
