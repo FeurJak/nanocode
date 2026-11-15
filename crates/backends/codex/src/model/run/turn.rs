@@ -1077,9 +1077,14 @@ impl ModelRun {
                     session.conversation.clear_delta();
                     continue;
                 }
-                return message.ok_or(NanocodeError::MalformedResponse {
-                    detail: "model completed without a final message or exec call",
-                });
+                if message.is_none() {
+                    nanocode_trace::warn!(
+                        target: "nanocode",
+                        model_call_index = call_index,
+                        "turn ended without a final message or exec call after the empty-response reprompt"
+                    );
+                }
+                return Ok(message.unwrap_or_default());
             }
 
             session.conversation.clear_delta();
