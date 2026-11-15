@@ -652,13 +652,11 @@ async fn latest_session(host: &Host) -> Result<String> {
         .as_ref()
         .ok_or("--continue requires durability")?;
     store
-        .newest_page(host.config.workspace.as_path(), 1, |record| {
-            sessions::user_facing(record.lineage.origin)
-        })
+        .brief_page(Some(host.config.workspace.as_path()), 1, sessions::user_facing)
         .await?
         .into_iter()
         .next()
-        .map(|session| session.record.session_id)
+        .map(|session| session.session_id)
         .ok_or_else(|| "no saved session for this workspace".into())
 }
 

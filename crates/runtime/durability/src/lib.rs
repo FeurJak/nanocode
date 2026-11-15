@@ -23,14 +23,14 @@ pub use catalog::{BranchBoundary, InitialSettings, SessionRecord};
 pub use catalog::{
     BranchCursor, BranchExport, BranchExportMode, BranchImport, BranchPage, BranchPoint, CancelTo,
     CancelledPending, IntoSessionStore, LIST_LIMIT, Resumable, SessionPage, SessionQuery,
-    SessionReader, SessionStore, SessionSummary, StoredSession, StoredTurn, TranscriptItem,
+    SessionBrief, SessionReader, SessionStore, SessionSummary, StoredSession, StoredTurn, TranscriptItem,
     TurnStatus,
 };
 pub use child_journal::{JournalClaim, JournalSeed};
 pub use format::{AdmittedTurn, CheckpointFormat, FormatFuture};
 pub use memory::MemoryStore;
 pub use nanocode_durability_core::{
-    BlobKey, BlobStore, BlobUrl, Colocation, Committed, EncodedPayload, Error, EventCursor,
+    BlobKey, BlobStore, BlobUrl, BriefFilter, BriefState, Colocation, Committed, EncodedPayload, Error, EventCursor,
     EventHit, EventHits, EventOrder, EventPage, EventQuery, EventRange, Examined, IndexedState,
     KeyValue, KeyValueStore, KnownSummary, ListedState, ListedSummary, LockKey, LocksHeld,
     Migration, MissingColumn, OwnedCommit, OwnedState, OwnerId, OwnerToken, PageCodec, Result,

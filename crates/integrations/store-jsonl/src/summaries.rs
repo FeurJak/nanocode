@@ -22,7 +22,7 @@ use super::{
     index::digest_anchor,
 };
 
-const FILE: &str = ".summaries-v2";
+pub(super) const FILE: &str = ".summaries-v2";
 const PREVIOUS: &str = ".summaries";
 const LEGACY: [&str; 2] = [".summaries.json.zst", ".summaries.json"];
 const LENGTH_BYTES: usize = 4;
@@ -193,7 +193,7 @@ fn no_attributes(attributes: &&BTreeMap<String, String>) -> bool {
     attributes.is_empty()
 }
 
-fn created_at_ms(state_id: &str) -> Option<u64> {
+pub(super) fn created_at_ms(state_id: &str) -> Option<u64> {
     let (high, rest) = state_id.split_once('-')?;
     let (low, _) = rest.split_once('-')?;
     (high.len() == 8
@@ -622,6 +622,13 @@ impl Summaries {
         self.loaded = Loaded::Legacy(current);
     }
 
+    pub(super) fn journal(&self) -> Option<Journaled<'_>> {
+        match &self.loaded {
+            Loaded::Journal { identity, end } => Some((identity, *end, &self.entries)),
+            _ => None,
+        }
+    }
+
     pub(super) fn forget(&mut self) {
         if self.copied.is_empty() {
             self.entries = HashMap::new();
@@ -813,7 +820,7 @@ impl Summaries {
 }
 
 #[derive(Deserialize, Serialize)]
-enum Change {
+pub(super) enum Change {
     #[serde(rename = "r", alias = "remember")]
     Remember(HashMap<String, Summary>),
     #[serde(rename = "m", alias = "moved")]
@@ -923,6 +930,8 @@ impl Change {
 }
 
 type Entries = (HashMap<String, Box<Summary>>, Vec<u8>, u64);
+
+pub(super) type Journaled<'a> = (&'a str, u64, &'a HashMap<String, Box<Summary>>);
 
 fn base(mut bytes: Vec<u8>) -> Result<Entries, StoreError> {
     let unreadable = || backend("JSONL session summaries are truncated");

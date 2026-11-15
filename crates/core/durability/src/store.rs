@@ -174,6 +174,16 @@ pub struct ListedState {
 pub type SummaryFilter = Arc<dyn Fn(&str, &StateSummary) -> bool + Send + Sync>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BriefState {
+    pub preview: Option<String>,
+    pub scope: Option<String>,
+    pub state_id: String,
+    pub updated_at_ms: u64,
+}
+
+pub type BriefFilter = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KnownSummary {
     pub state_id: String,
     pub revision: u64,
@@ -516,6 +526,15 @@ pub trait StateStore: MaybeSend {
         _limit: usize,
         _keep: SummaryFilter,
     ) -> StoreFuture<'a, Result<Option<Vec<ListedState>>, StoreError>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn list_briefs<'a>(
+        &'a mut self,
+        _scope: Option<String>,
+        _limit: usize,
+        _keep: BriefFilter,
+    ) -> StoreFuture<'a, Result<Option<Vec<BriefState>>, StoreError>> {
         Box::pin(async { Ok(None) })
     }
 

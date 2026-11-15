@@ -29,9 +29,9 @@ struct Known {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct Stamp {
-    directory: String,
-    modified: u128,
+pub(super) struct Stamp {
+    pub(super) directory: String,
+    pub(super) modified: u128,
 }
 
 pub(super) struct Entry<'a> {
@@ -47,20 +47,20 @@ pub(super) struct Scan {
     stamp: Stamp,
 }
 
-fn nanos(time: SystemTime) -> Option<u128> {
+pub(super) fn nanos(time: SystemTime) -> Option<u128> {
     time.duration_since(UNIX_EPOCH)
         .ok()
         .map(|elapsed| elapsed.as_nanos())
 }
 
-fn time(nanos: u128) -> Option<SystemTime> {
+pub(super) fn time(nanos: u128) -> Option<SystemTime> {
     let second = Duration::from_secs(1).as_nanos();
     let seconds = u64::try_from(nanos / second).ok()?;
     let rest = u32::try_from(nanos % second).ok()?;
     UNIX_EPOCH.checked_add(Duration::new(seconds, rest))
 }
 
-fn stamp(metadata: &Metadata) -> Option<Stamp> {
+pub(super) fn stamp(metadata: &Metadata) -> Option<Stamp> {
     Some(Stamp {
         directory: identity(metadata).ok()?,
         modified: nanos(metadata.modified().ok()?)?,
@@ -168,6 +168,33 @@ fn parse(text: &str) -> Option<(Vec<Entry<'_>>, Stamp)> {
         return None;
     }
     Some((entries.into_iter().flatten().collect(), stamp?))
+}
+
+pub(super) fn line(line: &str) -> Option<Line<'_>> {
+    let mut fields = line.strip_suffix('\n')?.split('\t');
+    let first = fields.next()?;
+    let parsed = if first == STAMP {
+        Line::Stamp(Stamp {
+            directory: fields.next()?.to_owned(),
+            modified: fields.next()?.parse().ok()?,
+        })
+    } else if first == REMOVED {
+        Line::Removed(fields.next()?)
+    } else {
+        Line::Entry(Entry {
+            created: time(first.parse().ok()?)?,
+            length: fields.next()?.parse().ok()?,
+            source: fields.next()?,
+            name: fields.next()?,
+        })
+    };
+    fields.next().is_none().then_some(parsed)
+}
+
+pub(super) enum Line<'a> {
+    Entry(Entry<'a>),
+    Removed(&'a str),
+    Stamp(Stamp),
 }
 
 fn last_stamp(file: &mut File, length: u64) -> Option<Stamp> {

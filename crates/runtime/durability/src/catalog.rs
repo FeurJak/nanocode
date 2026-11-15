@@ -257,11 +257,11 @@ mod store {
 
     use super::{BranchBoundary, SessionRecord};
     use crate::{
-        AdmittedTurn, CheckpointFormat, DurableSession, DurableState, EncodedPayload, Error,
-        EventHits, EventPage, EventQuery, EventRange, KnownSummary, ListedState, ListedSummary,
-        OperationState, OperationStatus, OwnerId, PayloadReader, Result, SessionWrite, StateCommit,
-        StateCursor, StateQuery, StateReader, StateStore, StateSummary, StoreError, SummaryFilter,
-        SummaryUpdate, Transition,
+        AdmittedTurn, BriefFilter, CheckpointFormat, DurableSession, DurableState, EncodedPayload,
+        Error, EventHits, EventPage, EventQuery, EventRange, KnownSummary, ListedState,
+        ListedSummary, OperationState, OperationStatus, OwnerId, PayloadReader, Result,
+        SessionWrite, StateCommit, StateCursor, StateQuery, StateReader, StateStore, StateSummary,
+        StoreError, SummaryFilter, SummaryUpdate, Transition,
         format::Formats,
         session::reduce_peeked,
         shared_store::{SharedReader, SharedStore, WeakSharedStore},
@@ -292,6 +292,28 @@ mod store {
         pub record: SessionRecord,
 
         pub preview: Option<String>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+    pub struct SessionBrief {
+        pub preview: Option<String>,
+
+        pub session_id: String,
+
+        pub updated_at_ms: u64,
+
+        pub workspace: Option<PathBuf>,
+    }
+
+    impl From<SessionSummary> for SessionBrief {
+        fn from(session: SessionSummary) -> Self {
+            Self {
+                preview: session.preview,
+                session_id: session.record.session_id,
+                updated_at_ms: session.record.updated_at_ms,
+                workspace: session.record.workspace,
+            }
+        }
     }
 
     #[derive(Clone, Debug, Default)]
@@ -703,6 +725,43 @@ mod store {
             };
             self.summaries_page(listed, Some(workspace), limit, wanted)
                 .await
+        }
+
+        pub async fn brief_page(
+            &self,
+            workspace: Option<&Path>,
+            limit: usize,
+            origins: impl Fn(Origin) -> bool + Send + Sync + 'static,
+        ) -> Result<Vec<SessionBrief>> {
+            let scope = workspace.map(Path::to_str);
+            if origins(Origin::Root) && scope.is_none_or(|scope| scope.is_some()) {
+                let filter: BriefFilter = Arc::new(|state_id: &str| !is_auxiliary_state(state_id));
+                let scope = scope.flatten().map(str::to_owned);
+                if let Some(listed) = self.store.clone().list_briefs(scope, limit, filter).await? {
+                    return Ok(listed
+                        .into_iter()
+                        .map(|state| SessionBrief {
+                            preview: state.preview,
+                            session_id: state.state_id,
+                            updated_at_ms: state.updated_at_ms,
+                            workspace: state.scope.map(PathBuf::from),
+                        })
+                        .collect());
+                }
+            }
+            let sessions = match workspace {
+                Some(workspace) if limit < usize::MAX => {
+                    self.newest_page(workspace, limit, move |record| {
+                        origins(record.lineage.origin)
+                    })
+                    .await?
+                }
+                _ => {
+                    self.list_page(workspace, limit, |record| origins(record.lineage.origin))
+                        .await?
+                }
+            };
+            Ok(sessions.into_iter().map(SessionBrief::from).collect())
         }
 
         async fn summaries_page(

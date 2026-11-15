@@ -1,6 +1,7 @@
 #![cfg(not(target_family = "wasm"))]
 
 mod archive;
+mod briefs;
 mod compact;
 mod index;
 mod listing;
@@ -15,9 +16,9 @@ use sessions::Sessions;
 
 use nanocode_digest::Sha256;
 use nanocode_durability_core::{
-    Colocation, Committed, KnownSummary, ListedState, OwnedCommit, OwnedState, OwnerId, OwnerToken,
-    Settle, StateCommit, StateStore, StoreError, StoreFuture, StoreHandles, StoreRecord,
-    StoreReplacement, StoreUpdate, StoredState, SummaryFilter,
+    BriefFilter, BriefState, Colocation, Committed, KnownSummary, ListedState, OwnedCommit,
+    OwnedState, OwnerId, OwnerToken, Settle, StateCommit, StateStore, StoreError, StoreFuture,
+    StoreHandles, StoreRecord, StoreReplacement, StoreUpdate, StoredState, SummaryFilter,
 };
 use nanocode_sync::{mpsc, oneshot};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser::SerializeStruct};
@@ -3086,6 +3087,14 @@ impl StateStore for JsonlStore {
         keep: SummaryFilter,
     ) -> StoreFuture<'a, Result<Option<Vec<ListedState>>, StoreError>> {
         self.list(move |sessions| sessions.newest_summaries(&scope, limit, &keep).map(Some))
+    }
+    fn list_briefs<'a>(
+        &'a mut self,
+        scope: Option<String>,
+        limit: usize,
+        keep: BriefFilter,
+    ) -> StoreFuture<'a, Result<Option<Vec<BriefState>>, StoreError>> {
+        self.list(move |sessions| sessions.list_briefs(scope.as_deref(), limit, &keep))
     }
     fn remember_summaries<'a>(
         &'a mut self,

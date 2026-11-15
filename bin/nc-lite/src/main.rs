@@ -6,7 +6,7 @@ use nanocode_agent::events::{AgentEvent, AgentEventKind};
 use nanocode_agent::{Agent, AgentEvents, Model};
 use nanocode_backend_codex::client::{OpenAi, auth::OpenAiAuth, transport::ResponsesGateway};
 use nanocode_backend_codex::{Codex, CodexHarness};
-use nanocode_durability::{MemoryStore, SessionStore, SessionSummary};
+use nanocode_durability::{MemoryStore, SessionBrief, SessionStore};
 use nanocode_store_jsonl::{JsonlArchiver, JsonlStore};
 use nanocode_tool_runtime::{ToolExposure, Tools};
 use serde::Deserialize;
@@ -193,12 +193,12 @@ impl Lite {
         match (&self.store, continue_last) {
             (Some(store), true) => {
                 let latest = store
-                    .newest_page(&std::env::current_dir()?, 1, |_| true)
+                    .brief_page(Some(&std::env::current_dir()?), 1, |_| true)
                     .await?
                     .into_iter()
                     .next()
                     .ok_or("no saved session for this workspace")?;
-                Ok(self.runtime.open_session(&latest.record.session_id).await?)
+                Ok(self.runtime.open_session(&latest.session_id).await?)
             }
             (None, true) => Err("--continue needs a store; remove --ephemeral".into()),
             _ => Ok(self
@@ -230,14 +230,11 @@ async fn open_store(home: &std::path::Path) -> Result<(SessionStore, JsonlArchiv
     ))
 }
 
-async fn workspace_sessions(store: &SessionStore) -> Result<Vec<SessionSummary>> {
+async fn workspace_sessions(store: &SessionStore) -> Result<Vec<SessionBrief>> {
     let workspace = std::env::current_dir()?;
     Ok(store
-        .list()
-        .await?
-        .into_iter()
-        .filter(|s| s.record.workspace.as_deref() == Some(workspace.as_path()))
-        .collect())
+        .brief_page(Some(&workspace), usize::MAX, |_| true)
+        .await?)
 }
 
 async fn sessions(config: &Config) -> Result<()> {
@@ -248,7 +245,7 @@ async fn sessions(config: &Config) -> Result<()> {
         writeln!(
             out,
             "{}  {}",
-            session.record.session_id,
+            session.session_id,
             session.preview.unwrap_or_default()
         )?;
     }

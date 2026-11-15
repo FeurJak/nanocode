@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use nanocode_durability_core::{
-    Committed, KnownSummary, ListedState, OwnedCommit, OwnedState, OwnerId, OwnerToken,
-    StagedWrites, StateCommit, StateStore, StoreError, StoreFuture, StoreHandles, StoreRecord,
-    StoreUpdate, StoredState, SummaryFilter,
+    BriefFilter, BriefState, Committed, KnownSummary, ListedState, OwnedCommit, OwnedState,
+    OwnerId, OwnerToken, StagedWrites, StateCommit, StateStore, StoreError, StoreFuture,
+    StoreHandles, StoreRecord, StoreUpdate, StoredState, SummaryFilter,
 };
 use nanocode_sync::Atom;
 
@@ -255,6 +255,15 @@ impl<S: StateStore + ?Sized + 'static> StateStore for CachedStore<S> {
         keep: SummaryFilter,
     ) -> StoreFuture<'a, Result<Option<Vec<ListedState>>, StoreError>> {
         self.base.newest_summaries(scope, limit, keep)
+    }
+
+    fn list_briefs<'a>(
+        &'a mut self,
+        scope: Option<String>,
+        limit: usize,
+        keep: BriefFilter,
+    ) -> StoreFuture<'a, Result<Option<Vec<BriefState>>, StoreError>> {
+        self.base.list_briefs(scope, limit, keep)
     }
 
     fn remember_summaries<'a>(

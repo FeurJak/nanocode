@@ -422,7 +422,7 @@ impl Tui {
                 .await?
                 .into_iter()
                 .map(|session| {
-                    let id = session.record.session_id;
+                    let id = session.session_id;
                     let mark = if current.as_deref() == Some(id.as_str()) {
                         "*"
                     } else {

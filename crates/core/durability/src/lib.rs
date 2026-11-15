@@ -23,7 +23,7 @@ pub use state::{
     Operations, RetainedCheckpoint, SteerState, StepState, StepStatus, Transition,
 };
 pub use store::{
-    Colocation, Committed, EventCursor, EventHit, EventHits, EventOrder, EventPage, EventQuery,
+    BriefFilter, BriefState, Colocation, Committed, EventCursor, EventHit, EventHits, EventOrder, EventPage, EventQuery,
     EventRange, IndexedState, KnownSummary, ListedState, ListedSummary, OwnedCommit, OwnedState,
     OwnerId, OwnerToken, Settle, StateCommit, StateCursor, StatePage, StateQuery, StateReader,
     StateStore, StateSummary, StoreError, StoreEvent, StoreFuture, StoreHandles, StoreRecord,

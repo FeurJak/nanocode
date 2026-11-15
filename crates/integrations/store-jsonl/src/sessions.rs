@@ -10,16 +10,17 @@ use std::{
 };
 
 use nanocode_durability_core::{
-    KnownSummary, ListedState, ListedSummary, OwnedState, OwnerId, OwnerToken, StateSummary,
-    StoreError, StoreRecord, StoreReplacement, StoreUpdate, StoredState, SummaryFilter,
+    BriefFilter, BriefState, KnownSummary, ListedState, ListedSummary, OwnedState, OwnerId,
+    OwnerToken, StateSummary, StoreError, StoreRecord, StoreReplacement, StoreUpdate, StoredState,
+    SummaryFilter,
 };
 use serde::Deserialize;
 
 use nanocode_digest::Sha256;
 
 use super::{
-    CompactionStats, JOURNAL_READ_BUFFER_BYTES, Journal, Replacement, archive, backend, cores,
-    identity,
+    CompactionStats, JOURNAL_READ_BUFFER_BYTES, Journal, Replacement, archive, backend, briefs,
+    cores, identity,
     listing::Listing,
     process_alive,
     shared::Shared,
@@ -109,7 +110,7 @@ pub(super) fn file_name(key: &str) -> String {
     name
 }
 
-fn key_of(name: &str) -> Option<String> {
+pub(super) fn key_of(name: &str) -> Option<String> {
     let name = archive::unarchived(name).unwrap_or(name);
     let mut rest = name.strip_suffix(EXTENSION)?.as_bytes();
     let mut bytes = Vec::with_capacity(rest.len());
@@ -1177,6 +1178,62 @@ impl Sessions {
             summary: ListedSummary::Unknown,
         }));
         Ok(newest)
+    }
+
+    pub(super) fn list_briefs(
+        &mut self,
+        scope: Option<&str>,
+        limit: usize,
+        keep: &BriefFilter,
+    ) -> Result<Option<Vec<BriefState>>, StoreError> {
+        if self.homes.keys().any(|member| keep(member)) {
+            return Ok(None);
+        }
+        let directory = &self.directory;
+        let bytes = fs::read(directory.join(briefs::FILE)).unwrap_or_default();
+        if let Some(mut decoded) = briefs::decode(&bytes)
+            && let Some(replayed) = briefs::refresh(&mut decoded.index, directory)
+        {
+            let listed = briefs::query(&decoded.index, directory, scope, limit, keep);
+            if replayed > 0 {
+                let delta = briefs::encode(&decoded.index, bytes.len(), false).filter(|delta| {
+                    decoded.end == bytes.len()
+                        && bytes.len() - decoded.base + delta.len() <= decoded.base
+                });
+                match delta {
+                    Some(delta) => {
+                        briefs::append(directory, &delta, bytes.len() as u64);
+                    }
+                    None => {
+                        if let Some(all) = briefs::encode(&decoded.index, 0, true) {
+                            drop(
+                                self.listing
+                                    .change(&[], || briefs::replace(directory, &all)),
+                            );
+                        }
+                    }
+                }
+            }
+            return Ok(listed);
+        }
+        if !self.listing.settled() {
+            return Ok(None);
+        }
+        self.summaries.refresh();
+        let Some(journal) = self.summaries.journal() else {
+            return Ok(None);
+        };
+        let Some(index) = briefs::build(directory, journal) else {
+            return Ok(None);
+        };
+        let listed = briefs::query(&index, directory, scope, limit, keep);
+        if let Some(all) = briefs::encode(&index, 0, true) {
+            drop(
+                self.listing
+                    .change(&[], || briefs::replace(directory, &all)),
+            );
+        }
+        Ok(listed)
     }
 
     pub(super) fn remember_summaries(

@@ -5,10 +5,10 @@ use nanocode_sync::{mpsc, oneshot};
 use nanocode_trace::Instrument;
 
 use crate::{
-    Committed, EventHits, EventPage, EventQuery, EventRange, KnownSummary, ListedState,
-    OwnedCommit, OwnedState, OwnerId, OwnerToken, Settle, StateCommit, StatePage, StateQuery,
-    StateReader, StateStore, StoreError, StoreEvent, StoreFuture, StoredState, SummaryFilter,
-    SummaryUpdate,
+    BriefFilter, BriefState, Committed, EventHits, EventPage, EventQuery, EventRange, KnownSummary,
+    ListedState, OwnedCommit, OwnedState, OwnerId, OwnerToken, Settle, StateCommit, StatePage,
+    StateQuery, StateReader, StateStore, StoreError, StoreEvent, StoreFuture, StoredState,
+    SummaryFilter, SummaryUpdate,
 };
 #[cfg(not(target_family = "wasm"))]
 use crate::{Error, StoreUpdate};
@@ -104,6 +104,12 @@ enum Command {
         limit: usize,
         keep: SummaryFilter,
         result: oneshot::Sender<Result<Option<Vec<ListedState>>, StoreError>>,
+    },
+    ListBriefs {
+        scope: Option<String>,
+        limit: usize,
+        keep: BriefFilter,
+        result: oneshot::Sender<Result<Option<Vec<BriefState>>, StoreError>>,
     },
     RememberSummaries {
         summaries: Vec<KnownSummary>,
@@ -1274,6 +1280,14 @@ async fn run<S: StateStore + ?Sized>(store: &mut S, request: StoreRequest) {
             } => {
                 drop(result.send(store.newest_summaries(scope, limit, keep).await));
             }
+            Command::ListBriefs {
+                scope,
+                limit,
+                keep,
+                result,
+            } => {
+                drop(result.send(store.list_briefs(scope, limit, keep).await));
+            }
             Command::RememberSummaries { summaries, result } => {
                 drop(result.send(store.remember_summaries(summaries).await));
             }
@@ -1767,6 +1781,36 @@ impl StateStore for SharedStore {
             self.commands
                 .send(StoreRequest {
                     command: Command::NewestSummaries {
+                        scope,
+                        limit,
+                        keep,
+                        result,
+                    },
+                    span,
+                    queued: nanocode_platform::now(),
+                })
+                .map_err(|_| stopped())?;
+            receiver.await.map_err(|_| stopped())?
+        })
+    }
+
+    fn list_briefs<'a>(
+        &'a mut self,
+        scope: Option<String>,
+        limit: usize,
+        keep: BriefFilter,
+    ) -> StoreFuture<'a, Result<Option<Vec<BriefState>>, StoreError>> {
+        let span = nanocode_trace::info_span!(
+            "durability.store",
+            operation = "list_briefs",
+            state.limit = limit,
+            queue.duration_ms = nanocode_trace::field::Empty
+        );
+        Box::pin(async move {
+            let (result, receiver) = oneshot::channel();
+            self.commands
+                .send(StoreRequest {
+                    command: Command::ListBriefs {
                         scope,
                         limit,
                         keep,
