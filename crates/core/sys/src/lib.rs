@@ -18,6 +18,8 @@ pub mod entry;
 mod exclusive;
 pub mod libc;
 pub mod lz4;
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+mod math;
 pub mod memchr;
 #[cfg(target_os = "macos")]
 pub mod core_foundation;
