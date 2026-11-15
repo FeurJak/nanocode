@@ -243,8 +243,11 @@ async fn warm_state(
     fold: &mut Fold,
     state: &str,
 ) -> Result<u64, StoreError> {
-    Ok(warm(host, scope, fold, state).await?
-        + warm(host, scope, fold, &format!("{state}\n")).await?)
+    let content = format!("{state}\n");
+    let loads = warm(host, scope, fold, state).await? + warm(host, scope, fold, &content).await?;
+    fold.touch(state);
+    fold.touch(&content);
+    Ok(loads)
 }
 
 fn packed(fold: &Fold, keep: u64, level: i32, groups: &[Group]) -> Result<Snapshot, StoreError> {
@@ -1121,6 +1124,7 @@ impl Lease<'_> {
             Some(part) => {
                 let packed = part.head;
                 writer.fold.sectioned(&part.sections.groups);
+                writer.fold.evict();
                 writer.stats.sections += sectioned_rows;
                 writer.stats.snapshot_bytes += part.sections.bytes as u64;
                 writer.fold.seal(seq, keep);

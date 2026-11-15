@@ -361,54 +361,47 @@ impl OneLog {
         Ok(CellJournals::with_sink(self.sink()))
     }
 
-    async fn cells(
-        &self,
-        only: &str,
-    ) -> Result<BTreeMap<String, Vec<CellJournal>>, StoreError> {
-        self.log.load_owner(TOOLS_MARK).await?;
-        self.log
-            .read_owner(only, |fold| {
-                let mut sessions: BTreeMap<String, Vec<CellJournal>> = BTreeMap::new();
-                let mut catalogs: HashMap<String, Arc<[Value]>> = HashMap::new();
-                for (session, _, updates) in fold.cells_of(Some(only)) {
-                    let mut decoded = Vec::with_capacity(updates.len());
-                    for update in updates {
-                        let mut update = serde_json::from_str::<CellJournalUpdate>(update.get())
-                            .map_err(|error| invalid(format!("cell journal update: {error}")))?;
-                        if let Some(header) = update.header.as_mut()
-                            && let [Value::Object(mark)] = &*header.tools
-                            && let Some(digest) = mark.get(TOOLS_MARK).and_then(Value::as_str)
-                        {
-                            let tools = match catalogs.get(digest) {
-                                Some(tools) => Arc::clone(tools),
-                                None => {
-                                    let catalog = fold
-                                        .stored(&stored_key(TOOLS_MARK, digest))
-                                        .ok_or_else(|| invalid(format!("tool catalog {digest}")))?;
-                                    let tools: Arc<[Value]> =
-                                        serde_json::from_str::<Vec<Value>>(catalog)
-                                            .map_err(|error| {
-                                                invalid(format!("tool catalog: {error}"))
-                                            })?
-                                            .into();
-                                    catalogs.insert(digest.to_owned(), Arc::clone(&tools));
-                                    tools
-                                }
-                            };
-                            header.tools = tools;
+    async fn cells(&self, only: &str) -> Result<BTreeMap<String, Vec<CellJournal>>, StoreError> {
+        let mut lease = self.log.lease().await;
+        lease.load_owner(TOOLS_MARK).await?;
+        lease.load_owner(only).await?;
+        let fold = lease.fold();
+        let mut sessions: BTreeMap<String, Vec<CellJournal>> = BTreeMap::new();
+        let mut catalogs: HashMap<String, Arc<[Value]>> = HashMap::new();
+        for (session, _, updates) in fold.cells_of(Some(only)) {
+            let mut decoded = Vec::with_capacity(updates.len());
+            for update in updates {
+                let mut update = serde_json::from_str::<CellJournalUpdate>(update.get())
+                    .map_err(|error| invalid(format!("cell journal update: {error}")))?;
+                if let Some(header) = update.header.as_mut()
+                    && let [Value::Object(mark)] = &*header.tools
+                    && let Some(digest) = mark.get(TOOLS_MARK).and_then(Value::as_str)
+                {
+                    let tools = match catalogs.get(digest) {
+                        Some(tools) => Arc::clone(tools),
+                        None => {
+                            let catalog = fold
+                                .stored(&stored_key(TOOLS_MARK, digest))
+                                .ok_or_else(|| invalid(format!("tool catalog {digest}")))?;
+                            let tools: Arc<[Value]> = serde_json::from_str::<Vec<Value>>(catalog)
+                                .map_err(|error| invalid(format!("tool catalog: {error}")))?
+                                .into();
+                            catalogs.insert(digest.to_owned(), Arc::clone(&tools));
+                            tools
                         }
-                        decoded.push(update);
-                    }
-                    if let Some(journal) = CellJournal::fold(decoded) {
-                        sessions
-                            .entry(session.to_owned())
-                            .or_default()
-                            .push(journal);
-                    }
+                    };
+                    header.tools = tools;
                 }
-                Ok(sessions)
-            })
-            .await?
+                decoded.push(update);
+            }
+            if let Some(journal) = CellJournal::fold(decoded) {
+                sessions
+                    .entry(session.to_owned())
+                    .or_default()
+                    .push(journal);
+            }
+        }
+        Ok(sessions)
     }
 
     pub async fn field(&self, key: &str, value: Box<RawValue>) -> Result<(), StoreError> {

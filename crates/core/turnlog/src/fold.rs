@@ -124,6 +124,7 @@ pub struct Fold {
     last_event: u64,
     models: BTreeMap<String, Vec<Box<RawValue>>>,
     owners: BTreeMap<String, Owner>,
+    read: BTreeSet<String>,
     segment_row: u64,
     segments: Vec<Segment>,
     seq: u64,
@@ -307,6 +308,72 @@ impl Fold {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn touch(&mut self, owner: &str) {
+        if self.owners.contains_key(owner) && !self.read.contains(owner) {
+            self.read.insert(owner.to_owned());
+        }
+    }
+
+    pub(crate) fn evict(&mut self) {
+        let read = std::mem::take(&mut self.read);
+        let idle = |owner: &str| {
+            !read.contains(owner) && matches!(self.owners.get(owner), Some(Owner::Warm { .. }))
+        };
+        let evicted = self
+            .owners
+            .keys()
+            .filter(|owner| {
+                idle(owner)
+                    && (appended(owner) || {
+                        let content = format!("{owner}\n");
+                        idle(&content)
+                            || matches!(self.owners.get(&content), None | Some(Owner::Cold { .. }))
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for owner in evicted {
+            let Some(Owner::Warm { sections }) = self.owners.remove(&owner) else {
+                continue;
+            };
+            let content = appended(&owner);
+            let prefix = if content {
+                owner.clone()
+            } else {
+                format!("{owner}\n")
+            };
+            let keys = self
+                .stored
+                .range::<str, _>((Bound::Included(prefix.as_str()), Bound::Unbounded))
+                .take_while(|(key, _)| key.starts_with(&prefix))
+                .filter(|(key, _)| key[prefix.len()..].starts_with("b3:") == content)
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            for key in keys {
+                self.stored.remove(&key);
+            }
+            let checkpoint = !content && self.checkpoints.remove(&owner).is_some();
+            if !content {
+                let cells = self
+                    .cells
+                    .range((owner.clone(), 0)..=(owner.clone(), u64::MAX))
+                    .map(|(cell, _)| cell.clone())
+                    .collect::<Vec<_>>();
+                for cell in cells {
+                    self.cells.remove(&cell);
+                }
+            }
+            self.owners.insert(
+                owner,
+                Owner::Cold {
+                    checkpoint,
+                    pending: Vec::new(),
+                    sections,
+                },
+            );
+        }
     }
 
     pub(crate) fn unloaded(&self) -> Vec<String> {
