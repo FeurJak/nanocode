@@ -11,4 +11,4 @@ pub use connection::{Notification, PgConnection};
 pub use error::{DatabaseError, PgError};
 pub use options::{Host, PgOptions, TlsMode};
 pub use pool::{PgPool, Pooled};
-pub use sql::{PgSql, PgTransaction};
+pub use sql::{PgSql, PgTimes, PgTransaction};

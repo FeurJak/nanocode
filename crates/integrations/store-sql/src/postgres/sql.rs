@@ -2,62 +2,94 @@ use crate::postgres::{PgConnection, PgError, PgPool};
 use nanocode_durability_core::{
     Settle, Sql, SqlAccess, SqlDialect, SqlRow, SqlStatement, StoreError, StoreFuture,
 };
+use nanocode_platform::Instant;
 use nanocode_sync::Owned;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PgTimes {
+    pub waited: Duration,
+    pub ran: Duration,
+}
 
 pub struct PgSql {
     writes: PgPool,
     reads: PgPool,
+    timed: Option<fn(&'static str, PgTimes)>,
 }
 
 impl PgSql {
     #[must_use]
     pub const fn reading(writes: PgPool, reads: PgPool) -> Self {
-        Self { writes, reads }
+        Self {
+            writes,
+            reads,
+            timed: None,
+        }
     }
-}
 
-async fn transact(
-    pool: &PgPool,
-    settle: Settle,
-    statements: &[SqlStatement<'_>],
-) -> Result<Vec<Vec<SqlRow>>, StoreError> {
-    let mut connection = pool.acquire().await.map_err(backend)?;
-    connection
-        .transaction(settle, statements)
-        .await
-        .map_err(backend)
+    #[must_use]
+    pub fn timed(mut self, timed: fn(&'static str, PgTimes)) -> Self {
+        self.timed = Some(timed);
+        self
+    }
+
+    async fn transact(
+        &self,
+        pool: &PgPool,
+        operation: &'static str,
+        settle: Settle,
+        statements: &[SqlStatement<'_>],
+    ) -> Result<Vec<Vec<SqlRow>>, StoreError> {
+        let started = Instant::now();
+        let mut connection = pool.acquire().await.map_err(backend)?;
+        let acquired = Instant::now();
+        let result = connection
+            .transaction(settle, statements)
+            .await
+            .map_err(backend);
+        if let Some(timed) = self.timed {
+            timed(
+                operation,
+                PgTimes {
+                    waited: acquired - started,
+                    ran: acquired.elapsed(),
+                },
+            );
+        }
+        result
+    }
 }
 
 impl Sql for PgSql {
     fn transaction<'a>(
         &'a self,
-        _operation: &'static str,
+        operation: &'static str,
         statements: &'a [SqlStatement<'a>],
     ) -> StoreFuture<'a, Result<Vec<Vec<SqlRow>>, StoreError>> {
-        Box::pin(transact(&self.writes, Settle::Durable, statements))
+        Box::pin(self.transact(&self.writes, operation, Settle::Durable, statements))
     }
 
     fn run<'a>(
         &'a self,
         access: SqlAccess,
-        _operation: &'static str,
+        operation: &'static str,
         statements: &'a [SqlStatement<'a>],
     ) -> StoreFuture<'a, Result<Vec<Vec<SqlRow>>, StoreError>> {
         let pool = match access {
             SqlAccess::Read => &self.reads,
             SqlAccess::Write | SqlAccess::Schema => &self.writes,
         };
-        Box::pin(transact(pool, Settle::Durable, statements))
+        Box::pin(self.transact(pool, operation, Settle::Durable, statements))
     }
 
     fn write<'a>(
         &'a self,
         settle: Settle,
-        _operation: &'static str,
+        operation: &'static str,
         statements: &'a [SqlStatement<'a>],
     ) -> StoreFuture<'a, Result<Vec<Vec<SqlRow>>, StoreError>> {
-        Box::pin(transact(&self.writes, settle, statements))
+        Box::pin(self.transact(&self.writes, operation, settle, statements))
     }
 
     fn dialect(&self) -> SqlDialect {
