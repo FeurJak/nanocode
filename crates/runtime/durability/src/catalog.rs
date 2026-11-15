@@ -470,6 +470,13 @@ mod store {
         pub checkpointed: bool,
     }
 
+    type HydratedCheckpoint = (
+        Value,
+        EncodedPayload,
+        HashSet<String>,
+        Option<crate::Hydrated>,
+    );
+
     #[derive(Clone, Debug)]
     pub struct StoredSession {
         pub summary: SessionSummary,
@@ -493,6 +500,7 @@ mod store {
         state_id: String,
         checkpoint_key: Option<String>,
         checkpoint_payload: Option<(EncodedPayload, Arc<HashSet<String>>)>,
+        hydrated: Option<crate::Hydrated>,
         record_inferred: bool,
     }
 
@@ -939,12 +947,15 @@ mod store {
 
         pub async fn load(&self, id: &str) -> Result<StoredSession> {
             let state = self.require(id).await?;
-            let (checkpoint, checkpoint_payload) = match self.loaded_checkpoint(id, &state).await? {
-                Some((checkpoint, payload, records)) => {
-                    (Some(checkpoint), Some((payload, Arc::new(records))))
-                }
-                None => (None, None),
-            };
+            let (checkpoint, checkpoint_payload, hydrated) =
+                match self.loaded_checkpoint(id, &state).await? {
+                    Some((checkpoint, payload, records, hydrated)) => (
+                        Some(checkpoint),
+                        Some((payload, Arc::new(records))),
+                        hydrated,
+                    ),
+                    None => (None, None, None),
+                };
             let record = match (state.session(), &checkpoint) {
                 (Some(record), _) => record.clone(),
                 (None, Some(checkpoint)) => self.infer_record(id, checkpoint)?,
@@ -991,6 +1002,7 @@ mod store {
                         .latest_checkpoint()
                         .map(|payload| payload.key().to_owned()),
                     checkpoint_payload,
+                    hydrated,
                     record_inferred: state.session().is_none(),
                 },
             })
@@ -1176,6 +1188,7 @@ mod store {
                     key.clone(),
                     checkpoint.clone(),
                     stored.loaded.checkpoint_payload.clone(),
+                    stored.loaded.hydrated.clone(),
                 );
             }
             Ok(state)
@@ -1626,7 +1639,7 @@ mod store {
             &self,
             id: &str,
             state: &DurableState,
-        ) -> Result<Option<(Value, EncodedPayload, HashSet<String>)>> {
+        ) -> Result<Option<HydratedCheckpoint>> {
             let Some(payload) = state.latest_checkpoint() else {
                 return Ok(None);
             };
@@ -1634,15 +1647,18 @@ mod store {
             let loaded = payload
                 .load_noting(&mut self.store.clone(), id, &mut records)
                 .await?;
-            let value = self
-                .hydrate_value(
-                    id,
-                    loaded.decode()?,
-                    state.session().map(SessionRecord::family),
-                    &mut records,
-                )
+            let value: Value = loaded.decode()?;
+            if is_portable(&value) {
+                return Ok(Some((value, loaded, records, None)));
+            }
+            let format = match state.session().map(SessionRecord::family) {
+                Some(family) => self.formats.family(family)?,
+                None => self.formats.owner(&value)?,
+            };
+            let (value, hydrated) = format
+                .hydrate_typed(PayloadReader::store(&self.store, id), value, &mut records)
                 .await?;
-            Ok(Some((value, loaded, records)))
+            Ok(Some((value, loaded, records, hydrated)))
         }
 
         async fn native_checkpoint(&self, id: &str, state: &DurableState) -> Result<Option<Value>> {

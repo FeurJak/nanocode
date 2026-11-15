@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fmt, future::Future, pin::Pin, sync::Arc};
+use std::{any::Any, collections::HashSet, fmt, future::Future, pin::Pin, sync::Arc};
 
 use nanocode_sync::Swap;
 
@@ -11,6 +11,25 @@ use crate::{EncodedPayload, Error, PayloadReader, Result, SessionRecord};
 pub type FormatFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 #[cfg(target_family = "wasm")]
 pub type FormatFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+
+#[derive(Clone)]
+pub struct Hydrated(Arc<dyn Any + Send + Sync>);
+
+impl Hydrated {
+    pub fn new<T: Any + Send + Sync>(value: T) -> Self {
+        Self(Arc::new(value))
+    }
+
+    pub fn take<T: Any + Clone + Send + Sync>(self) -> Option<T> {
+        Arc::downcast::<T>(self.0).ok().map(Arc::unwrap_or_clone)
+    }
+}
+
+impl fmt::Debug for Hydrated {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Hydrated")
+    }
+}
 
 pub struct AdmittedTurn<'a> {
     pub input: &'a Value,
@@ -37,6 +56,15 @@ pub trait CheckpointFormat: Send + Sync {
         _read: &'a mut HashSet<String>,
     ) -> FormatFuture<'a, Result<Value>> {
         self.hydrate(reader, stored)
+    }
+
+    fn hydrate_typed<'a>(
+        &'a self,
+        reader: PayloadReader<'a>,
+        stored: Value,
+        read: &'a mut HashSet<String>,
+    ) -> FormatFuture<'a, Result<(Value, Option<Hydrated>)>> {
+        Box::pin(async move { Ok((self.hydrate_noting(reader, stored, read).await?, None)) })
     }
 
     fn hydrate_continuation<'a>(

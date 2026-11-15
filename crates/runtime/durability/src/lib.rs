@@ -27,7 +27,7 @@ pub use catalog::{
     TurnStatus,
 };
 pub use child_journal::{JournalClaim, JournalSeed};
-pub use format::{AdmittedTurn, CheckpointFormat, FormatFuture};
+pub use format::{AdmittedTurn, CheckpointFormat, FormatFuture, Hydrated};
 pub use memory::MemoryStore;
 pub use nanocode_durability_core::{
     BlobKey, BlobStore, BlobUrl, BriefFilter, BriefState, Colocation, Committed, EncodedPayload, Error, EventCursor,

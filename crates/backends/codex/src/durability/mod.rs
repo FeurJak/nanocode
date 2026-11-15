@@ -77,9 +77,9 @@ impl<F> DurableAgentExt for CodexBuilder<F> {
         let mut known_records = HashSet::new();
         if let Some(checkpoint) = checkpoint {
             let preloaded = state
-                .take_checkpoint_preload_with_records(checkpoint.key())
-                .and_then(|(preloaded, records)| {
-                    context::preloaded_snapshot(preloaded, records, checkpoint.key())
+                .take_checkpoint_preload_hydrated(checkpoint.key())
+                .and_then(|(preloaded, records, hydrated)| {
+                    context::preloaded_snapshot(preloaded, records, hydrated, checkpoint.key())
                 });
             let (restored, keys) = match preloaded {
                 Some(preloaded) => preloaded,

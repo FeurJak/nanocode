@@ -2695,9 +2695,16 @@ pub struct DurableSession {
 
 pub(crate) type LoadedCheckpoint = (EncodedPayload, Arc<HashSet<String>>);
 
+type HydratedPreload = (
+    serde_json::Value,
+    Option<Arc<HashSet<String>>>,
+    Option<crate::Hydrated>,
+);
+
 struct CheckpointPreload {
     key: String,
     checkpoint: serde_json::Value,
+    hydrated: Option<crate::Hydrated>,
     loaded: Option<LoadedCheckpoint>,
 }
 
@@ -2897,11 +2904,13 @@ impl DurableSession {
         key: String,
         checkpoint: serde_json::Value,
         loaded: Option<LoadedCheckpoint>,
+        hydrated: Option<crate::Hydrated>,
     ) {
         let loaded = loaded.filter(|(payload, _)| payload.key() == key);
         self.preload.store(Some(Arc::new(CheckpointPreload {
             key,
             checkpoint,
+            hydrated,
             loaded,
         })));
     }
@@ -2915,6 +2924,11 @@ impl DurableSession {
         &self,
         key: &str,
     ) -> Option<(serde_json::Value, Option<Arc<HashSet<String>>>)> {
+        self.take_checkpoint_preload_hydrated(key)
+            .map(|(checkpoint, records, _)| (checkpoint, records))
+    }
+
+    pub fn take_checkpoint_preload_hydrated(&self, key: &str) -> Option<HydratedPreload> {
         self.preload
             .swap(None)
             .filter(|preloaded| preloaded.key == key)
@@ -2927,12 +2941,14 @@ impl DurableSession {
                                 .loaded
                                 .as_ref()
                                 .map(|(_, records)| Arc::clone(records)),
+                            shared.hydrated.clone(),
                         )
                     },
                     |preloaded| {
                         (
                             preloaded.checkpoint,
                             preloaded.loaded.map(|(_, records)| records),
+                            preloaded.hydrated,
                         )
                     },
                 )

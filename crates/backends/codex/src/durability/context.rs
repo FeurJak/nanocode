@@ -384,9 +384,13 @@ pub(crate) async fn restore_snapshot(
 pub(crate) fn preloaded_snapshot(
     checkpoint: serde_json::Value,
     records: Option<Arc<HashSet<String>>>,
+    hydrated: Option<nanocode_durability::Hydrated>,
     key: &str,
 ) -> Option<(SessionSnapshot, HashSet<String>)> {
-    let snapshot = SessionSnapshot::deserialize(checkpoint).ok()?;
+    let snapshot = match hydrated.and_then(nanocode_durability::Hydrated::take::<SessionSnapshot>) {
+        Some(snapshot) => snapshot,
+        None => SessionSnapshot::deserialize(checkpoint).ok()?,
+    };
     if let Some(records) = records {
         return Some((snapshot, Arc::unwrap_or_clone(records)));
     }

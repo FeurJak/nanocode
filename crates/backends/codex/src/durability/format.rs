@@ -5,8 +5,8 @@ use nanocode_agent_core::{
     session::{ToolOutcome, TranscriptItem},
 };
 use nanocode_durability::{
-    AdmittedTurn, CheckpointFormat, EncodedPayload, Error, FormatFuture, PayloadReader, Result,
-    SessionRecord,
+    AdmittedTurn, CheckpointFormat, EncodedPayload, Error, FormatFuture, Hydrated, PayloadReader,
+    Result, SessionRecord,
 };
 use serde::Deserialize as _;
 use serde_json::Value;
@@ -39,6 +39,19 @@ impl CheckpointFormat for CodexCheckpointFormat {
         read: &'a mut HashSet<String>,
     ) -> FormatFuture<'a, Result<Value>> {
         Box::pin(hydrate(reader, stored, read))
+    }
+
+    fn hydrate_typed<'a>(
+        &'a self,
+        reader: PayloadReader<'a>,
+        stored: Value,
+        read: &'a mut HashSet<String>,
+    ) -> FormatFuture<'a, Result<(Value, Option<Hydrated>)>> {
+        Box::pin(async move {
+            let snapshot = load(reader, stored, read).await?;
+            let value = serde_json::to_value(&snapshot).map_err(Error::InvalidPayload)?;
+            Ok((value, Some(Hydrated::new(snapshot))))
+        })
     }
 
     fn hydrate_continuation<'a>(
@@ -153,10 +166,18 @@ async fn hydrate(
     stored: Value,
     read: &mut HashSet<String>,
 ) -> Result<Value> {
+    serde_json::to_value(load(reader, stored, read).await?).map_err(Error::InvalidPayload)
+}
+
+async fn load(
+    reader: PayloadReader<'_>,
+    stored: Value,
+    read: &mut HashSet<String>,
+) -> Result<SessionSnapshot> {
     let saved: context::Snapshot = serde_json::from_value(stored).map_err(Error::InvalidPayload)?;
     let (snapshot, keys) = context::load_snapshot_with_keys(reader, saved).await?;
     read.extend(keys);
-    serde_json::to_value(snapshot).map_err(Error::InvalidPayload)
+    Ok(snapshot)
 }
 
 fn is_injected_context(text: &str) -> bool {
