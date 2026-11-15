@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/openai/codex",
-  "revision": "c6e4438a5d5befe6c8e59b01b6534eb8f0792230",
+  "revision": "d32063f96c2dff1dc96af839b3952abb6acfeda4",
   "profile": {
     "platform": "non-Windows schema profile, also used by WASM hosts",
     "exec_permission_approvals_enabled": false,
@@ -11,7 +11,7 @@
   "sources": [
     {
       "path": "codex-rs/models-manager/models.json",
-      "sha256": "943ca7fe1d19ed019054158303f0dbbd80b3bef43b3aa425a71aa7cb3fb52c2b"
+      "sha256": "1384625c0b6b3e67d3c60da29becea2b017f2c283fc1e2d05b8edafb4698eb10"
     },
     {
       "path": "codex-rs/core/src/tools/handlers/shell_spec.rs",
@@ -49,7 +49,7 @@
   "local_artifacts": [
     {
       "path": "src/builtin_tools/standard.rs",
-      "sha256": "f8bab81213b87a03a6a1f45cbac90c6c199564a173f872e3db2868da220bedbc"
+      "sha256": "345530b01a839a36bfde01fa752f3baeabc272420767a9ede34578f7c575ef42"
     },
     {
       "path": "src/builtin_tools/apply_patch/apply_patch.lark",
@@ -57,23 +57,23 @@
     },
     {
       "path": "client/src/openai/config.rs",
-      "sha256": "809ceb1a45b8b8137739bb1e982bb31a2f674dcc42e138d26e2dbf96bfe592fc"
+      "sha256": "b513ba45f8e2e12e22814b2fc83a7432eaeaf2cf1fac39e7cc6883eba0aecb3e"
     },
     {
       "path": "src/model/input.rs",
-      "sha256": "de293ff9457d8db884622842bc2770f206d2d3e41d3fe7acdc39d8ff9f5cd48c"
+      "sha256": "caed6845cea1b719abd13d175e42d09248ffb3ec332c040cb705d00d1c27d799"
     },
     {
       "path": "src/model/run/mod.rs",
-      "sha256": "71cf5c4462237d5401a56d32fc57adabf17fa47f2616a62b92e6ee776e401f7f"
+      "sha256": "1a2c1b7df1b1f3570d09fb8b58cc78e1891c5fb056066ae9d681fb0e5f3736f3"
     },
     {
       "path": "src/model/run/turn.rs",
-      "sha256": "136331bddd12df10e611032cd6bea6b1af2493d04e623d53a9a9f5b7b753842a"
+      "sha256": "d66ef043bbd922e433634e378098071c448f0aa33b33870c05ca15f73e3e408a"
     },
     {
       "path": "src/model/run/lifecycle.rs",
-      "sha256": "6f2a91d916cc7c158b31a8fcee846ae47de20d2d13884766027a14b013a5d858"
+      "sha256": "f470b4515b7ed09a50a9b13106f086ae531c0bc81dbfe9ba89963ecf710ceda6"
     }
   ],
   "scope": "Reviewed StandardTool definitions only, before host routing or Code Mode exposure. Tool source and implementation hashes certify the reviewed artifacts; they are not an automatic Rust semantic equivalence proof. Input names, descriptions, schemas, strict=false and apply_patch grammar match the selected upstream profile. Output schemas remain host metadata and are skipped on the Responses wire, as upstream does. Host handlers, availability, Code Mode, remote routing, permission policy, output budgets and result rendering are SDK behavior.",
