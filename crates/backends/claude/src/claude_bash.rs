@@ -1321,6 +1321,22 @@ impl nanocode_tool_host::CodeModeToolPolicy for JobNotices {
     ) -> nanocode_tool_host::embedded::HostFuture<'a, ()> {
         Box::pin(self.0.noticed(session_id))
     }
+    fn running_output<'a>(
+        &'a self,
+        call_id: &'a str,
+    ) -> nanocode_tool_host::embedded::HostFuture<'a, Option<String>> {
+        Box::pin(async move {
+            let path = self.0.entries.read(|entries| {
+                entries
+                    .jobs
+                    .values()
+                    .find(|job| job.call_id.as_deref() == Some(call_id))
+                    .and_then(|job| job.output.clone())
+            })?;
+            let size = nanocode_executor::fs::metadata(&path).await.ok()?.len();
+            tail(&path, size).await
+        })
+    }
 }
 struct TaskStopTool {
     jobs: Arc<Jobs>,

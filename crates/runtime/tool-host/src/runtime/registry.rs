@@ -923,6 +923,20 @@ impl nanocode_code_mode::CodeModeToolset for ToolRegistry {
             .collect()
     }
 
+    fn running_output<'a>(
+        &'a self,
+        call_id: &'a str,
+    ) -> crate::embedded::HostFuture<'a, Option<String>> {
+        Box::pin(async move {
+            for policy in &self.policies {
+                if let Some(output) = policy.running_output(call_id).await {
+                    return Some(output);
+                }
+            }
+            None
+        })
+    }
+
     fn session_notice<'a>(&'a self, session_id: &'a str) -> crate::embedded::HostFuture<'a, ()> {
         let waits: Vec<_> = self
             .policies
