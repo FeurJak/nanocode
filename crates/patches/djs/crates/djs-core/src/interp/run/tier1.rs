@@ -555,6 +555,32 @@ fn lower(ins: &Ins) -> Op {
 fn accumulate(r: &mut [Value; 256], o: &Op, a: usize, c: usize, fuel: &mut i64, pass: i64) -> Option<u16> {
     let (mut s, mut y, mut left) = (r[a], r[c].as_int().unwrap_or_default(), *fuel);
     let step = i32::from(o.lc as i8);
+    let lfuel = i64::from(o.lfuel);
+    let (lo, hi, at) = (i64::from(o.n), i64::from(o.n) + i64::from(o.span), i64::from(y));
+    let room = match step.signum() {
+        1 => (hi - at) / i64::from(step),
+        -1 => (at - lo) / -i64::from(step),
+        _ => i64::MAX,
+    };
+    let m = if lfuel > 0 && left > pass && hi <= i64::from(i32::MAX) && (lo..=hi).contains(&at) {
+        room.min((left - pass - 1) / lfuel)
+    } else {
+        0
+    };
+    if m > 0 {
+        let mut sf = match s.as_int() {
+            Some(x) => f64::from(x),
+            None => f64::from_bits(s.to_bits()),
+        };
+        let (mut yf, d) = (f64::from(y), f64::from(step));
+        for _ in 0..m {
+            sf += yf;
+            yf += d;
+        }
+        s = number(sf);
+        y = (at + m * i64::from(step)) as i32;
+        left -= m * lfuel;
+    }
     let out = loop {
         s = match s.as_int() {
             Some(x) => match x.checked_add(y) {
