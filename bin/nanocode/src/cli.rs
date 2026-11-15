@@ -299,13 +299,15 @@ const GATEWAY: Group = Group::named(
             .long("tempo-close-session")
             .env("NANOCODE_TEMPO_CLOSE_SESSION")
             .help(
-                "Close the Tempo gateway session cooperatively on exit, which returns the unspent deposit at once, instead of keeping it open for the next run to reuse",
+                "Close the Tempo gateway's session and those of the services shell commands paid cooperatively on exit, which returns the unspent deposit at once; the default, so this flag only spells it out. A session another running process still pays from stays open",
             ),
         Argument::flag("tempo_keep_session")
             .long("tempo-keep-session")
-            .hidden()
             .env("NANOCODE_TEMPO_KEEP_SESSION")
-            .conflicts(&["tempo_close_session"]),
+            .conflicts(&["tempo_close_session"])
+            .help(
+                "Keep the Tempo sessions open on exit for the next run to reuse instead of closing them cooperatively, which leaves their unspent deposit locked until a later run closes them",
+            ),
         Argument::value("tempo_deposit", "BASE_UNITS", Parser::U128)
             .long("tempo-deposit")
             .env("NANOCODE_TEMPO_DEPOSIT")

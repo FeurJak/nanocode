@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
+    fs::File,
     path::PathBuf,
     sync::{
         Arc,
@@ -258,10 +259,14 @@ struct Payments {
     failure: Arc<Atom<Option<String>>>,
     session: Option<String>,
     wallets: Arc<Atom<HashMap<String, Wallet>>>,
-    slots: Arc<Atom<HashMap<String, String>>>,
-    closing: Arc<Atom<Vec<(SessionProvider, String)>>>,
+    slots: Arc<Atom<HashMap<String, Slot>>>,
+    closing: Arc<Atom<Vec<Closable>>>,
     short: Arc<Atom<bool>>,
 }
+
+type Slot = (String, Arc<File>);
+
+type Closable = (SessionProvider, String, Arc<File>);
 
 #[derive(Clone, Default)]
 struct Ledger {
@@ -393,27 +398,30 @@ impl Payments {
         })
     }
 
-    fn store(&self, origin: String, service: &str) -> Result<FileChannelStore> {
-        let namespace = match self.slots.read(|slots| slots.get(&origin).cloned()) {
-            Some(namespace) => namespace,
+    fn store(&self, origin: String, service: &str) -> Result<(FileChannelStore, Arc<File>)> {
+        let (namespace, users) = match self.slots.read(|slots| slots.get(&origin).cloned()) {
+            Some(slot) => slot,
             None => {
-                let namespace = match session_slot(&origin, self.session.as_deref())?.as_str() {
+                let (slot, users) = session_slot(&origin, self.session.as_deref())?;
+                let namespace = match slot.as_str() {
                     "0" => origin.clone(),
                     slot => format!("{origin}#{slot}"),
                 };
+                let users = Arc::new(users);
                 self.slots.update(|slots| {
                     slots
                         .entry(origin.clone())
-                        .or_insert_with(|| namespace.clone())
+                        .or_insert_with(|| (namespace.clone(), users.clone()))
                         .clone()
                 })
             }
         };
-        Ok(FileChannelStore::open(FileChannelStoreOptions {
+        let store = FileChannelStore::open(FileChannelStoreOptions {
             namespace,
             path: None,
             request_url: Some(service.to_owned()),
-        })?)
+        })?;
+        Ok((store, users))
     }
 
     fn sessions(
@@ -427,16 +435,21 @@ impl Payments {
             Some(variant) => format!("{origin}~{variant}"),
             None => origin,
         };
-        let store = self.store(origin, service.as_str())?;
+        let (store, users) = self.store(origin, service.as_str())?;
         let wallet = wallet.clone().with_session_store(store);
         let host = service.host_str().unwrap_or_default().to_owned();
         let session = wallet.session_for(service.as_str())?;
         self.ledger.update(|ledger| {
             ledger.sessions.insert(host.clone(), session.clone());
         });
-        if terms.closes {
+        let close = match terms.close {
+            Close::Keep => None,
+            Close::Responses => Some(format!("{service}/responses")),
+            Close::Service => Some(service.to_string()),
+        };
+        if let Some(url) = close {
             self.closing.update(|closing| {
-                closing.push((session.clone(), format!("{service}/responses")));
+                closing.push((session.clone(), url.clone(), users.clone()));
             });
         }
         Ok(wallet)
@@ -658,28 +671,44 @@ enum Gas {
     Held,
 }
 
+#[derive(Clone, Copy)]
+enum Close {
+    Keep,
+    Responses,
+    Service,
+}
+
+impl Close {
+    const fn on_exit(args: &GatewayArgs, close: Self) -> Self {
+        match args.tempo_keep_session {
+            true => Self::Keep,
+            false => close,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Terms {
     currency: Address,
     gas: Gas,
     deposit: Option<u128>,
     variant: Option<String>,
-    closes: bool,
+    close: Close,
 }
 
 impl Terms {
-    fn mainnet(deposit: Option<u128>) -> Result<Self> {
+    fn mainnet(deposit: Option<u128>, close: Close) -> Result<Self> {
         Ok(Self {
             currency: machine_token(CHAIN_ID).ok_or("MACH is not deployed on Tempo mainnet")?,
             gas: Gas::Challenge,
             deposit,
             variant: None,
-            closes: false,
+            close,
         })
     }
 
     fn tempo(args: &GatewayArgs) -> Result<Self> {
-        let machine = Self::mainnet(None)?.currency;
+        let machine = Self::mainnet(None, Close::Keep)?.currency;
         let wanted = args
             .tempo_currency
             .as_deref()
@@ -706,7 +735,7 @@ impl Terms {
             },
             deposit: Some(args.tempo_deposit.unwrap_or(2 * MACH)),
             variant: (currency != machine).then_some(wanted),
-            closes: args.tempo_close_session,
+            close: Close::on_exit(args, Close::Responses),
         })
     }
 }
@@ -1629,8 +1658,10 @@ pub(crate) async fn close(closing: Closing) {
         return;
     }
     let client = nanocode_http::client();
-    for (session, url) in sessions.iter() {
-        close_session(&client, session, url).await;
+    for (session, url, users) in sessions.iter() {
+        if users.try_lock().is_ok() {
+            close_session(&client, session, url).await;
+        }
     }
 }
 
@@ -1720,26 +1751,31 @@ fn gas_token(token: &str) -> Result<Address> {
     Ok(address)
 }
 
-fn session_slot(origin: &str, named: Option<&str>) -> Result<String> {
-    if let Some(name) = named.map(str::trim).filter(|name| !name.is_empty()) {
-        return Ok(name.to_owned());
-    }
+fn session_slot(origin: &str, named: Option<&str>) -> Result<(String, File)> {
     let dir = default_channel_database_path()?.with_file_name("mpp-sessions");
     std::fs::create_dir_all(&dir)?;
-    let key: String = origin
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
-    for slot in 0..SESSION_SLOTS {
-        let lock = dir.join(format!("{key}-{slot}.lock"));
-        let file = std::fs::OpenOptions::new()
+    let safe = |text: &str| -> String {
+        text.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect()
+    };
+    let key = safe(origin);
+    let open = |name: String| {
+        std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(lock)?;
+            .open(dir.join(format!("{key}-{name}.lock")))
+    };
+    if let Some(name) = named.map(str::trim).filter(|name| !name.is_empty()) {
+        let file = open(format!("named-{}", safe(name)))?;
+        file.lock_shared()?;
+        return Ok((name.to_owned(), file));
+    }
+    for slot in 0..SESSION_SLOTS {
+        let file = open(slot.to_string())?;
         if file.try_lock_shared().is_ok() {
-            std::mem::forget(file);
-            return Ok(slot.to_string());
+            return Ok((slot.to_string(), file));
         }
     }
     Err(format!(
@@ -1781,10 +1817,16 @@ fn paid_origins() -> Result<Vec<String>> {
 
 fn tools(clients: ModelClients, payments: &Payments, args: &GatewayArgs) -> Result<ModelClients> {
     Ok(clients
-        .mcp_server("mercator", payments.mcp(MERCATOR, &Terms::mainnet(None)?)?)
+        .mcp_server(
+            "mercator",
+            payments.mcp(MERCATOR, &Terms::mainnet(None, Close::Keep)?)?,
+        )
         .mcp_server(
             "gateway",
-            payments.mcp(GATEWAY, &Terms::mainnet(Some(tool_deposit(args)))?)?,
+            payments.mcp(
+                GATEWAY,
+                &Terms::mainnet(Some(tool_deposit(args)), Close::Keep)?,
+            )?,
         ))
 }
 
@@ -1802,7 +1844,10 @@ fn shell(
     }
     let policy = Policy::Origins(paid_origins()?);
     match payments.pay_tools(
-        Terms::mainnet(Some(tool_deposit(args)))?,
+        Terms::mainnet(
+            Some(tool_deposit(args)),
+            Close::on_exit(args, Close::Service),
+        )?,
         Vec::new(),
         std::future::ready(policy),
         identity,
