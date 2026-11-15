@@ -45,7 +45,7 @@ impl Tool for ApplyPatchHandler {
     {
         Box::pin(async move {
             let output: ToolResult = {
-                let input = input.into_freeform()?;
+                let input = patch_input(input)?;
                 let workspace = self.workspace.clone();
                 Ok(
                     match nanocode_platform::spawn_blocking(move || apply(&input, &workspace)).await {
@@ -135,7 +135,7 @@ impl Tool for HostApplyPatchHandler {
     {
         Box::pin(async move {
             let output: ToolResult = {
-                let input = input.into_freeform()?;
+                let input = patch_input(input)?;
                 Ok(match self.apply(&input).await {
                     Ok(output) => ToolOutput::text(output).with_structured_result(json!({})),
                     Err(error) => {
@@ -172,6 +172,21 @@ impl Patches {
                 }
             }
         }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct FunctionPatch {
+    #[serde(alias = "patch")]
+    input: String,
+}
+
+fn patch_input(input: ToolInput) -> Result<String, nanocode_tools::ToolInputError> {
+    match input {
+        ToolInput::Freeform(input) => Ok(input),
+        ToolInput::Function(_) => input
+            .decode_json::<FunctionPatch>()
+            .map(|arguments| arguments.input),
     }
 }
 
