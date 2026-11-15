@@ -1737,12 +1737,15 @@ fn session_slot(origin: &str, named: Option<&str>) -> Result<String> {
             .truncate(false)
             .write(true)
             .open(lock)?;
-        if file.try_lock().is_ok() {
+        if file.try_lock_shared().is_ok() {
             std::mem::forget(file);
             return Ok(slot.to_string());
         }
     }
-    Err(format!("{SESSION_SLOTS} agents already pay this endpoint from this wallet").into())
+    Err(format!(
+        "every one of the {SESSION_SLOTS} session slots of this endpoint is held exclusively by another process"
+    )
+    .into())
 }
 
 fn asker(args: &GatewayArgs, exec: bool) -> Asker {

@@ -293,7 +293,7 @@ const GATEWAY: Group = Group::named(
             .long("tempo-session")
             .env("NANOCODE_TEMPO_SESSION")
             .help(
-                "Pay each Tempo service (the Tempo gateway's models and tools, Mercator and the services shell commands reach) from this named session instead of the lowest of 64 slots no other process holds",
+                "Pay each Tempo service (the Tempo gateway's models and tools, Mercator and the services shell commands reach) from this named session instead of the shared one every process pays it from",
             ),
         Argument::flag("tempo_close_session")
             .long("tempo-close-session")
