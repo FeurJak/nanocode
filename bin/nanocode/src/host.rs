@@ -785,7 +785,7 @@ impl Host {
                 Some(Route::Boundless) => boundless.clone(),
                 _ => None,
             })
-            .direct_tools_for(move |request| codex_direct || !native_model(&request.model))
+            .direct_tools_for(move |_| codex_direct)
             .direct_subagents(config.subagents == Subagents::AllModels)
             .headless(config.headless)
             .configure(move |builder| {
