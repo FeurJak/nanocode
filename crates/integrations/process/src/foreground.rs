@@ -79,6 +79,7 @@ pub(crate) fn run_bash_with_environment<'call>(
             command,
             workspace,
             &environment,
+            false,
             super::embedded::Streams::Apart,
         ) {
             Some(spawned) => Some(spawned),

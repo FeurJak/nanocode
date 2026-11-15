@@ -170,6 +170,12 @@ impl RunKiller {
         self.0.kill_all();
     }
 
+    /// Sends INT to every group of the run with a live member, as a terminal's Ctrl-C
+    /// reaches the programs of a shell's group.
+    pub fn interrupt(&self) {
+        self.0.interrupt();
+    }
+
     /// The run's groups that still have a live member (zombies included), as
     /// [`UnixHost::leftovers`]; usable after the host is gone (leak checks).
     pub fn leftovers(&self) -> Vec<i32> {

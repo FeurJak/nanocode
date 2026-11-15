@@ -211,6 +211,14 @@ impl Shared {
         lock(&self.scopes).retain(|x| *x != s);
     }
 
+    pub(crate) fn interrupt(&self) {
+        for scope in lock(&self.scopes).iter() {
+            if matches!(scope, Scope::Group(_)) && scope.alive() {
+                let _ = scope.signal(libc::SIGINT);
+            }
+        }
+    }
+
     /// Kills what is left of the run: TERM and CONT to every recorded group with a live
     /// member now, KILL to those still alive after the grace period (on a thread,
     /// counted for [`settle`]). Process scopes (`Placement::Inherit`) are skipped: their

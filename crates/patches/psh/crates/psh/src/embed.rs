@@ -1,13 +1,15 @@
 //! psh inside an embedder's own process (Unix): `contained` says whether a script is
-//! one the shell runs without starting a program, and `start` runs a script on an
-//! engine thread of its own with the embedder's sinks as its output.
+//! one the shell runs in this process, and `start` runs a script on an engine thread
+//! with the embedder's sinks as its output.
 //!
-//! For a host that runs each command of an agent in a process and wants the commands
-//! that are only builtins and psh's utilities (`cat f | head`, `grep -rn x src | wc -l`)
-//! without one. Such a run shares the embedder's process: its memory, its descriptor
-//! table and its fate. The shell's `$$` is not the process's, so `kill` cannot reach the
-//! embedder, and a program a utility falls through to leads a session of its own and is
-//! killed when the run is stopped or ends.
+//! For a host that runs each command of an agent and wants no shell process between it
+//! and the programs the command starts: builtins and psh's utilities run on the engine
+//! thread, and every other program is started directly (`posix_spawn`). Such a run
+//! shares the embedder's process: its memory, its descriptor table and its fate. The
+//! shell's `$$` is not the process's, so `kill` cannot reach the embedder. Every program
+//! leads a session of its own: an interrupt reaches each one still running, and stopping
+//! the run kills them. What programs leave running when the run ends stays, as with
+//! a shell process.
 
 use std::cell::RefCell;
 use std::io;
@@ -19,9 +21,8 @@ use std::task::{Context, Poll};
 use psh_classify::Category;
 use psh_engine::host::{FileKind, SIGINT};
 use psh_engine::std_host::{drive, engine_thread};
-use psh_engine::util::Mode;
 use psh_engine::{ControlHandle, HostFile, Script, Shell, ShellConfig};
-use psh_os::unix::{RunKiller, UnixConfig, UnixFile, UnixHost};
+use psh_os::unix::{Leftovers, RunKiller, UnixConfig, UnixFile, UnixHost};
 
 /// Where a stream of the script goes. Called on the engine thread with each write; an
 /// error is the script's write error (`BrokenPipe` ends the writer as SIGPIPE would).
@@ -36,6 +37,8 @@ pub struct Command {
     pub env: Vec<(Vec<u8>, Vec<u8>)>,
     pub stdout: Sink,
     pub stderr: Sink,
+    /// Run as a login shell (`bash -l`): `shopt login_shell` is on.
+    pub login: bool,
 }
 
 /// A `$$` no process has (above every pid a system gives out): with it psh-os refuses
@@ -45,32 +48,21 @@ const NO_PID: u32 = 99_999_999;
 /// Builtins a contained script may not use: they act on the process the shell is.
 const PROCESS_BUILTINS: [&str; 3] = ["exec", "kill", "suspend"];
 
-/// Whether `script` runs entirely inside the shell: every command it can run (also in
-/// `$(…)`, `bash -c` strings, `xargs` and `find -exec`) is a builtin or a utility that psh
-/// always runs itself with the utilities `env` leaves on, named without a path; nothing is
-/// started in the background; nothing reads the shell's process ids. What the classifier
-/// cannot see through (a command name from a variable, `eval` of a non-literal, `source`,
-/// a function defined in the script) is not contained.
-pub fn contained(script: &str, env: &[(Vec<u8>, Vec<u8>)]) -> bool {
-    let mut own = env
-        .iter()
-        .filter(|(name, _)| name.starts_with(b"PSH_"))
-        .cloned()
-        .collect();
-    let (utilities, _) = crate::settings(&mut own);
-    if utilities.off_all || script.contains("PPID") || psh_engine::uses_pid(script.as_bytes()) {
+/// Shells psh runs itself (D1410): a script given to one of them runs in this process.
+const SHELLS: [&str; 2] = ["bash", "sh"];
+
+/// Whether `script` runs in this process: every command it runs in the shell (also in
+/// `$(…)`, `bash -c` strings, `xargs` and `find -exec`) has a literal name and is not one
+/// of the builtins that act on the shell's process; nothing is started in the background
+/// and nothing long-running is started; nothing reads the shell's process ids. A builtin or
+/// shell that runs code the classifier cannot see (`source`, `eval` of a non-literal,
+/// `bash -c "$script"`) is not contained; any other program is.
+pub fn contained(script: &str, _env: &[(Vec<u8>, Vec<u8>)]) -> bool {
+    if script.contains("PPID") || psh_engine::uses_pid(script.as_bytes()) {
         return false;
     }
     let classified = psh_classify::classify(script);
-    let outside = [
-        Category::Network,
-        Category::Build,
-        Category::LongRunning,
-        Category::Vcs,
-        Category::Install,
-        Category::Unknown,
-    ];
-    if classified.error.is_some() || outside.iter().any(|c| classified.categories.contains(*c)) {
+    if classified.error.is_some() || classified.categories.contains(Category::LongRunning) {
         return false;
     }
     classified.commands.iter().all(|command| {
@@ -81,16 +73,15 @@ pub fn contained(script: &str, env: &[(Vec<u8>, Vec<u8>)]) -> bool {
         let Some(name) = word.value.as_deref() else {
             return false;
         };
-        if name.contains('/') || PROCESS_BUILTINS.contains(&name) {
+        if PROCESS_BUILTINS.contains(&name) {
             return false;
         }
-        psh_engine::is_builtin(name.as_bytes())
-            || utilities.entries.iter().any(|entry| {
-                entry.mode == Mode::Always
-                    && entry.names.contains(&name)
-                    && !(entry.destructive && utilities.off_destructive)
-                    && !utilities.off_names.iter().any(|off| off == name.as_bytes())
-            })
+        !command.categories.contains(Category::Unknown)
+            || !(psh_engine::is_builtin(name.as_bytes())
+                || command
+                    .name
+                    .as_deref()
+                    .is_some_and(|shell| SHELLS.contains(&shell)))
     })
 }
 
@@ -117,7 +108,10 @@ impl Running {
     pub fn interrupt(&self) {
         let mut state = self.state();
         match &state.shell {
-            Some((control, _)) => control.signal(SIGINT),
+            Some((control, killer)) => {
+                control.signal(SIGINT);
+                killer.interrupt();
+            }
             None => state.interrupt = true,
         }
     }
@@ -168,6 +162,8 @@ pub fn start(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             let host = UnixHost::new(UnixConfig {
                 pid: Some(NO_PID),
+                leftovers: Leftovers::Keep,
+                inherit_ignored: true,
                 ..UnixConfig::default()
             });
             let killer = host.killer();
@@ -190,7 +186,10 @@ pub fn start(
                 arg0,
                 args: Vec::new(),
                 dash_c: true,
-                options: Vec::new(),
+                options: match command.login {
+                    true => vec![b"-O".to_vec(), b"login_shell".to_vec()],
+                    false => Vec::new(),
+                },
                 stdin: false,
             });
             {

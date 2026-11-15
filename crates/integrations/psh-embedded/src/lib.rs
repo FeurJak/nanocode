@@ -36,6 +36,7 @@ impl Embedded for Psh {
                 env: bytes(&run.environment),
                 stdout: run.stdout,
                 stderr: run.stderr,
+                login: run.login,
             },
             move |status| {
                 ended(status.map_err(|_| io::Error::other("the shell panicked in this process")));

@@ -23,6 +23,7 @@ pub struct Contained {
     pub environment: Vec<(OsString, OsString)>,
     pub stdout: Sink,
     pub stderr: Sink,
+    pub login: bool,
     pub ended: Box<dyn FnOnce(io::Result<i32>) + Send>,
 }
 
@@ -116,6 +117,7 @@ pub(crate) fn spawn(
     script: &str,
     workdir: &Path,
     environment: &[(OsString, OsString)],
+    login: bool,
     streams: Streams,
 ) -> Option<process::SpawnedProcess> {
     let embedded = EMBEDDED.get()?;
@@ -142,6 +144,7 @@ pub(crate) fn spawn(
         environment: environment.to_vec(),
         stdout: out,
         stderr: err,
+        login,
         ended: Box::new(move |status| drop(exit.send(status))),
     });
     let running = started
@@ -189,6 +192,7 @@ pub(crate) async fn output(
                 }
                 Ok(())
             }),
+            login: false,
             ended: Box::new(move |status| drop(exit.send(status))),
         })
         .inspect_err(|error| nanocode_trace::warn!(%error, "the shell did not start in this process"))

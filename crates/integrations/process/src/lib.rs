@@ -463,6 +463,7 @@ impl ShellSessions {
                     &script,
                     &workdir,
                     &environment,
+                    login,
                     embedded::Streams::InOrder,
                 ) {
                     Some(spawned) => Some(spawned),
