@@ -671,7 +671,7 @@ pub(super) fn deferred_resume<'a>(
 pub(super) fn resume_restored<'a>(
     this: &'a SubagentControl,
     root_session_id: &'a str,
-) -> RegistryFuture<'a, std::io::Result<Vec<(AgentId, std::io::Result<MessageReceipt>)>>> {
+) -> RegistryFuture<'a, std::io::Result<Resumed>> {
     Box::pin(async move {
         this.registry.await_restored(root_session_id).await?;
         let mut ids = Vec::new();

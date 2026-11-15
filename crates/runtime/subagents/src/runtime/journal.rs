@@ -335,7 +335,7 @@ pub(super) fn fill_with<'a>(
     saved: &'a mut Option<String>,
     recorded: &'a mut HashMap<String, Arc<str>>,
     cache: &'a mut durable::JournalCache,
-) -> RegistryFuture<'a, Option<Vec<(AgentId, Arc<str>)>>> {
+) -> RegistryFuture<'a, Option<Saving>> {
     Box::pin(async move {
         let (Some(store), Some(registry)) = (reg.store_for(root_session_id), reg.shared()) else {
             return None;

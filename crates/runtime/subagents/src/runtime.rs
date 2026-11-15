@@ -1344,10 +1344,11 @@ enum JournalSave {
     Fenced,
 }
 
-type Filled = (
-    nanocode_agent_core::backend::JournalCommit,
-    Vec<(AgentId, Arc<str>)>,
-);
+type Filled = (nanocode_agent_core::backend::JournalCommit, Saving);
+
+type Resumed = Vec<(AgentId, std::io::Result<MessageReceipt>)>;
+
+type Saving = Vec<(AgentId, Arc<str>)>;
 
 fn acknowledge_deferred(
     registry: Weak<Registry>,
@@ -3588,7 +3589,7 @@ impl Registry {
         saved: &mut Option<String>,
         recorded: &mut HashMap<String, Arc<str>>,
         cache: &mut durable::JournalCache,
-    ) -> Option<Vec<(AgentId, Arc<str>)>> {
+    ) -> Option<Saving> {
         journal::fill_with(self, root_session_id, fill, saved, recorded, cache).await
     }
 
@@ -4293,10 +4294,7 @@ impl Registry {
         Ok(())
     }
 
-    pub async fn resume_interrupted(
-        self: &Arc<Self>,
-        root_session_id: &str,
-    ) -> Vec<(AgentId, std::io::Result<MessageReceipt>)> {
+    pub async fn resume_interrupted(self: &Arc<Self>, root_session_id: &str) -> Resumed {
         self.resume_interrupted_inner(root_session_id)
             .instrument(nanocode_trace::info_span!(
                 "subagent.resume",
@@ -4305,10 +4303,7 @@ impl Registry {
             .await
     }
 
-    async fn resume_interrupted_inner(
-        self: &Arc<Self>,
-        root_session_id: &str,
-    ) -> Vec<(AgentId, std::io::Result<MessageReceipt>)> {
+    async fn resume_interrupted_inner(self: &Arc<Self>, root_session_id: &str) -> Resumed {
         let ids = self
             .pending_resume
             .read(|pending| pending.get(root_session_id).cloned())
@@ -8128,10 +8123,7 @@ impl SubagentControl {
         lifecycle::deferred_resume(self, root_session_id).await
     }
 
-    pub async fn resume_restored(
-        &self,
-        root_session_id: &str,
-    ) -> std::io::Result<Vec<(AgentId, std::io::Result<MessageReceipt>)>> {
+    pub async fn resume_restored(&self, root_session_id: &str) -> std::io::Result<Resumed> {
         lifecycle::resume_restored(self, root_session_id).await
     }
 

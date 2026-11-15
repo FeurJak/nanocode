@@ -480,6 +480,10 @@ mod store {
         Option<crate::Hydrated>,
     );
 
+    type RecordAndBase = (SessionRecord, Option<String>);
+
+    type RevisedSummary = (u64, Option<SessionSummary>);
+
     #[derive(Clone, Debug)]
     pub struct StoredSession {
         pub summary: SessionSummary,
@@ -829,7 +833,7 @@ mod store {
             listing::summarize(self, session_ids).await
         }
 
-        async fn revised_summary(&self, id: &str) -> Result<Option<(u64, Option<SessionSummary>)>> {
+        async fn revised_summary(&self, id: &str) -> Result<Option<RevisedSummary>> {
             listing::revised_summary(self, id).await
         }
 
@@ -869,10 +873,7 @@ mod store {
             Ok(self.record_and_base(id).await?.map(|(record, _)| record))
         }
 
-        pub async fn record_and_base(
-            &self,
-            id: &str,
-        ) -> Result<Option<(SessionRecord, Option<String>)>> {
+        pub async fn record_and_base(&self, id: &str) -> Result<Option<RecordAndBase>> {
             listing::record_and_base(self, id).await
         }
 

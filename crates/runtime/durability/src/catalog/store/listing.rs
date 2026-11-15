@@ -34,7 +34,7 @@ pub(super) fn summarize<'a>(
 pub(super) fn revised_summary<'a>(
     this: &'a SessionStore,
     id: &'a str,
-) -> FormatFuture<'a, Result<Option<(u64, Option<SessionSummary>)>>> {
+) -> FormatFuture<'a, Result<Option<RevisedSummary>>> {
     Box::pin(async move {
         let Some(state) = this.peek_head(id).await? else {
             return Ok(None);
@@ -75,7 +75,7 @@ pub(super) fn summary<'a>(
 pub(super) fn record_and_base<'a>(
     this: &'a SessionStore,
     id: &'a str,
-) -> FormatFuture<'a, Result<Option<(SessionRecord, Option<String>)>>> {
+) -> FormatFuture<'a, Result<Option<RecordAndBase>>> {
     Box::pin(async move {
         let Some(state) = this.peek(id).await? else {
             return Ok(None);
