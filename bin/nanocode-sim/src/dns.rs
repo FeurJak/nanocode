@@ -3,7 +3,9 @@ use std::{
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     ops::Range,
+    pin::pin,
     process::ExitCode,
+    task::{Context, Poll, Waker},
     time::Duration,
 };
 
@@ -541,7 +543,7 @@ impl Wire for FakeWire {
         Ok(())
     }
 
-    fn receive(&mut self, buffer: &mut [u8]) -> io::Result<Option<usize>> {
+    async fn receive(&mut self, buffer: &mut [u8]) -> io::Result<Option<usize>> {
         let Some(message) = self.queue.pop_front() else {
             self.note("timeout");
             return Ok(None);
@@ -550,7 +552,7 @@ impl Wire for FakeWire {
         Ok(Some(message.len()))
     }
 
-    fn send(&mut self, message: &[u8]) -> io::Result<()> {
+    async fn send(&mut self, message: &[u8]) -> io::Result<()> {
         self.stats.queries += 1;
         let Some((id, question, name, kind)) = read_query(message) else {
             self.wrong = Some("the resolver sent a malformed query".to_owned());
@@ -596,7 +598,12 @@ impl Wire for FakeWire {
         Ok(())
     }
 
-    fn stream(&mut self, server: SocketAddr, message: &[u8], _: Duration) -> io::Result<Vec<u8>> {
+    async fn stream(
+        &mut self,
+        server: SocketAddr,
+        message: &[u8],
+        _: Duration,
+    ) -> io::Result<Vec<u8>> {
         self.stats.streamed += 1;
         let Some((id, question, name, kind)) = read_query(message) else {
             self.wrong = Some("the resolver streamed a malformed query".to_owned());
@@ -658,7 +665,11 @@ fn simulate(seed: u64, mutation: DnsMutation) -> DnsOutcome {
     } else {
         world.name.clone()
     };
-    let got = dns::lookup(&config, &world.hosts, &queried, &mut wire);
+    let Poll::Ready(got) = pin!(dns::lookup(&config, &world.hosts, &queried, &mut wire))
+        .poll(&mut Context::from_waker(Waker::noop()))
+    else {
+        panic!("the lookup waited on a wire whose every call is ready at once");
+    };
     let expected = world.expected();
     let mut wrong = wire.wrong.take();
     match (&got, &expected) {
