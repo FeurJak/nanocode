@@ -30,6 +30,10 @@ fn body(b: &[u8], head: u32, end: u32) -> Result<(u32, i64, Option<(u32, u32)>),
             }
             fast::CALL0 if call => 0,
             fast::GET_FIELD => {
+                let key = Atom::from_id((w >> 8) as u32);
+                if key != atoms::DONE && key != atoms::VALUE {
+                    return Err(op);
+                }
                 field = true;
                 0
             }
@@ -394,6 +398,7 @@ struct Ins {
 #[derive(Clone, Copy)]
 #[repr(u8)]
 enum K {
+    Accumulate,
     Add,
     AddF,
     BAnd,
@@ -536,6 +541,37 @@ fn lower(ins: &Ins) -> Op {
         }
     }
     o
+}
+
+#[inline(never)]
+fn accumulate(r: &mut [Value; 256], o: &Op, a: usize, c: usize, fuel: &mut i64, pass: i64) -> Option<u16> {
+    let (mut s, mut y, mut left) = (r[a], r[c].as_int().unwrap_or_default(), *fuel);
+    let step = i32::from(o.lc as i8);
+    let out = loop {
+        s = match s.as_int() {
+            Some(x) => match x.checked_add(y) {
+                Some(z) => Value::int(z),
+                None => Value::from_raw((f64::from(x) + f64::from(y)).to_bits()),
+            },
+            None => number(f64::from_bits(s.to_bits()) + f64::from(y)),
+        };
+        let Some(n) = y.checked_add(step) else {
+            left -= o.fuel as i64;
+            break Some(o.aux);
+        };
+        y = n;
+        left -= o.lfuel as i64;
+        if n.wrapping_sub(o.n) as u32 > o.span {
+            break None;
+        }
+        if left <= pass {
+            break Some(0);
+        }
+    };
+    r[a] = s;
+    r[c] = Value::int(y);
+    *fuel = left;
+    out
 }
 
 #[derive(Clone, Copy)]
@@ -1509,6 +1545,14 @@ impl Exec<'_> {
                 let q = &mut prog[s - 1];
                 (q.l, q.lc, q.lfuel, q.lx) = (true, o.c, q.fuel + p.fuel, o.a);
                 (q.aux, q.n, q.span) = (o.exit, o.n, o.span);
+                if s == 1
+                    && matches!(q.k.get(), K::Add)
+                    && q.a == q.d
+                    && q.a != q.c
+                    && q.c == q.lx
+                {
+                    q.k.set(K::Accumulate);
+                }
             }
         }
         let mut fuel = self.fuel;
@@ -1597,6 +1641,16 @@ impl Exec<'_> {
                 };
             }
             match o.k.get() {
+                K::Accumulate => {
+                    if r[c].as_int().is_some() && (r[a].as_int().is_some() || r[a].tag().is_none()) {
+                        match accumulate(&mut r, o, a, c, &mut fuel, pass) {
+                            Some(e) => break 'run e,
+                            None => k += 2,
+                        }
+                    } else {
+                        o.k.set(K::Add);
+                    }
+                }
                 K::Add => spin!({
                     let (p, q) = (r[a], r[c]);
                     let Some(v) = add(p, q) else {
