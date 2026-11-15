@@ -175,10 +175,6 @@ impl<P: PaymentProvider + 'static> ForwardProxy<P> {
             .enable_all()
             .build()?;
         self.listener.set_nonblocking(true)?;
-        let listener = {
-            let _runtime = runtime.enter();
-            nanocode_executor::TcpListener::from_std(self.listener)?
-        };
         let client = nanocode_http::Client::builder()
             .no_proxy()
             .redirect(nanocode_http::redirect::Policy::none())
@@ -190,36 +186,79 @@ impl<P: PaymentProvider + 'static> ForwardProxy<P> {
         let authorization = HeaderValue::from_str(&format!("Basic {credentials}"))
             .map_err(|error| Fault::config(format!("invalid proxy credentials: {error}")))?;
         let (providers, events, identity) = (self.providers, self.events, self.identity);
-        std::thread::Builder::new()
-            .name(THREAD_NAME.into())
-            .spawn(move || {
-                runtime.block_on(async move {
-                    let proxy = Arc::new(Proxy {
-                        client,
-                        policy: policy.await,
-                        events,
-                        authorization,
-                        authority,
-                        providers,
-                        paying: Atom::default(),
-                        identity,
-                    });
-                    loop {
-                        let Ok((stream, _)) = listener.accept().await else {
-                            continue;
-                        };
-                        let proxy = proxy.clone();
-                        nanocode_platform::spawn_task(async move {
-                            let _ = server::serve(
-                                Box::new(stream),
-                                server::Options::default(),
-                                move |request| proxy.clone().handle(request).boxed(),
-                            )
-                            .await;
+        let serve = move |listener: std::net::TcpListener, first: Option<std::net::TcpStream>| {
+            std::thread::Builder::new()
+                .name(THREAD_NAME.into())
+                .spawn(move || {
+                    let registered = {
+                        let _runtime = runtime.enter();
+                        nanocode_executor::TcpListener::from_std(listener).and_then(|listener| {
+                            first
+                                .map(nanocode_executor::TcpStream::from_std)
+                                .transpose()
+                                .map(|first| (listener, first))
+                        })
+                    };
+                    let (listener, first) = match registered {
+                        Ok(registered) => registered,
+                        Err(error) => {
+                            nanocode_trace::warn!(%error, "the paying proxy stopped before its first connection");
+                            return;
+                        }
+                    };
+                    runtime.block_on(async move {
+                        let proxy = Arc::new(Proxy {
+                            client,
+                            policy: policy.await,
+                            events,
+                            authorization,
+                            authority,
+                            providers,
+                            paying: Atom::default(),
+                            identity,
                         });
-                    }
+                        let mut next = first;
+                        loop {
+                            let stream = match next.take() {
+                                Some(stream) => stream,
+                                None => {
+                                    let Ok((stream, _)) = listener.accept().await else {
+                                        continue;
+                                    };
+                                    stream
+                                }
+                            };
+                            let proxy = proxy.clone();
+                            nanocode_platform::spawn_task(async move {
+                                let _ = server::serve(
+                                    Box::new(stream),
+                                    server::Options::default(),
+                                    move |request| proxy.clone().handle(request).boxed(),
+                                )
+                                .await;
+                            });
+                        }
+                    })
                 })
-            })?;
+                .map(drop)
+        };
+        let Ok(ambient) = nanocode_executor::Handle::try_current() else {
+            serve(self.listener, None)?;
+            return Ok(());
+        };
+        let waiting = nanocode_executor::TcpListener::from_std(self.listener)?;
+        drop(ambient.spawn(async move {
+            let first = waiting
+                .accept()
+                .await
+                .and_then(|(stream, _)| stream.into_std());
+            let started = waiting
+                .into_std()
+                .and_then(|listener| serve(listener, first.ok()));
+            if let Err(error) = started {
+                nanocode_trace::warn!(%error, "the paying proxy did not start");
+            }
+        }));
         Ok(())
     }
 }
