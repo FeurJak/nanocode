@@ -542,6 +542,11 @@ impl State {
         if self.lineage.depth > 0 {
             conversation.fallback_latch = FallbackLatch::Main;
         }
+        if conversation.escalated
+            && let Some(escalation) = &self.escalation
+        {
+            escalation.model.clone_into(&mut template.model);
+        }
         if let Some(model) = conversation.fallback_latch.model() {
             model.clone_into(&mut template.model);
         }

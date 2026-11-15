@@ -485,6 +485,7 @@ pub(super) fn build(mut builder: ClaudeBuilder) -> Result<(Agent, AgentEvents)> 
         headless: builder.headless,
         brief_final: builder.brief_final,
         brief_finish: builder.brief_finish,
+        escalation: builder.escalation,
         fold_finish: builder.fold_finish,
         lean_cells: builder.lean_cells,
         low_effort_rounds: builder.low_effort_rounds,

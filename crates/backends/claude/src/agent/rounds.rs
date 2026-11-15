@@ -1082,6 +1082,17 @@ pub(super) fn run_rounds<'a>(
             pending.push(assistant.clone());
             if has_tool_calls {
                 let results: Vec<_> = results.into_iter().map(Option::unwrap).collect();
+                if state.escalation.is_some() && !conversation.escalated {
+                    for result in &results {
+                        conversation.tool_error_streak = match result {
+                            ContentBlock::ToolResult {
+                                is_error: Some(true),
+                                ..
+                            } => conversation.tool_error_streak.saturating_add(1),
+                            _ => 0,
+                        };
+                    }
+                }
                 pending.push(Message::tool_results(results).into());
                 let mut parts = Vec::new();
                 if state.upstream_context {
@@ -1154,6 +1165,28 @@ pub(super) fn run_rounds<'a>(
                             .map(|text| estimate_text_tokens(text))
                             .unwrap_or(0),
                     );
+
+                if let Some(escalation) = &state.escalation
+                    && !conversation.escalated
+                    && state.lineage.root_session_id == state.session_id
+                    && escalation.trigger.due(
+                        conversation.tool_error_streak,
+                        conversation.active_context_tokens,
+                    )
+                {
+                    nanocode_trace::info!(
+                        target: "nanocode_claude",
+                        session_id = %state.session_id,
+                        model_call_index = index.saturating_add(1),
+                        from_model = %cursor.template.model,
+                        to_model = %escalation.model,
+                        tool_error_streak = conversation.tool_error_streak,
+                        context_tokens = conversation.active_context_tokens,
+                        "escalating the session to its escalation model"
+                    );
+                    conversation.escalated = true;
+                    cursor.template.model.clone_from(&escalation.model);
+                }
 
                 state.publish_round_boundary(conversation).await;
                 if interrupted {

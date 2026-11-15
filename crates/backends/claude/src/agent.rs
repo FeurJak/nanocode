@@ -712,6 +712,35 @@ pub const DEFAULT_COMPACTION_RESERVED_TOKENS: u64 = 20_000 + 13_000;
 
 pub const DEFAULT_REFUSAL_CONTINUATIONS: u32 = 1;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Escalation {
+    pub model: String,
+    pub trigger: EscalationTrigger,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EscalationTrigger {
+    ContextTokens(std::num::NonZeroU64),
+    Either {
+        context_tokens: std::num::NonZeroU64,
+        tool_errors: std::num::NonZeroU32,
+    },
+    ToolErrors(std::num::NonZeroU32),
+}
+
+impl EscalationTrigger {
+    const fn due(self, tool_errors: u32, context_tokens: u64) -> bool {
+        match self {
+            Self::ContextTokens(limit) => context_tokens >= limit.get(),
+            Self::Either {
+                context_tokens: limit,
+                tool_errors: streak,
+            } => context_tokens >= limit.get() || tool_errors >= streak.get(),
+            Self::ToolErrors(streak) => tool_errors >= streak.get(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum RefusalFallbackScope {
     #[default]
@@ -788,6 +817,7 @@ pub struct ClaudeBuilder {
     headless: bool,
     brief_final: bool,
     brief_finish: bool,
+    escalation: Option<Escalation>,
     fold_finish: bool,
     lean_cells: bool,
     low_effort_rounds: bool,
@@ -873,6 +903,7 @@ impl ClaudeBuilder {
             headless: false,
             brief_final: false,
             brief_finish: false,
+            escalation: None,
             fold_finish: false,
             lean_cells: false,
             low_effort_rounds: false,
@@ -1290,6 +1321,11 @@ impl ClaudeBuilder {
         self
     }
 
+    pub fn escalate(mut self, escalation: Escalation) -> Self {
+        self.escalation = Some(escalation);
+        self
+    }
+
     pub const fn fold_finish(mut self, fold: bool) -> Self {
         self.fold_finish = fold;
         self
@@ -1624,6 +1660,10 @@ fn bounded_json_len(value: &Value, limit: usize) -> usize {
 }
 
 const fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+const fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
 
@@ -2464,6 +2504,9 @@ struct Conversation {
     #[serde(default, skip_serializing_if = "EffortPin::is_unpinned")]
     effort_pin: EffortPin,
 
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    escalated: bool,
+
     #[serde(default, skip_serializing_if = "FallbackLatch::is_main")]
     fallback_latch: FallbackLatch,
 
@@ -2491,6 +2534,8 @@ struct Conversation {
     rounds_since_compaction: u8,
     previous_message_id: Option<String>,
     container: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    tool_error_streak: u32,
 }
 impl Conversation {
     const CODE_CALL_ROUNDS: usize = 256;
@@ -3034,6 +3079,7 @@ struct State {
     headless: bool,
     brief_final: bool,
     brief_finish: bool,
+    escalation: Option<Escalation>,
     fold_finish: bool,
     lean_cells: bool,
     low_effort_rounds: bool,
