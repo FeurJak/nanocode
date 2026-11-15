@@ -1,5 +1,5 @@
 use std::{
-    borrow::Cow,
+    cell::Cell,
     collections::{BTreeMap, BTreeSet, HashMap},
     ops::Bound,
 };
@@ -90,6 +90,12 @@ enum Owner {
 
 pub(crate) type Group = (Section, Vec<(String, bool)>);
 
+#[derive(Clone, Debug)]
+struct Links {
+    chunks: Vec<String>,
+    references: Vec<String>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Recovered {
     pub at: Option<u64>,
@@ -122,6 +128,8 @@ pub struct Fold {
     index: BTreeMap<String, usize>,
     kept: Option<(u64, u64)>,
     last_event: u64,
+    links: HashMap<String, Links>,
+    marks: BTreeMap<String, Vec<String>>,
     models: BTreeMap<String, Vec<Box<RawValue>>>,
     owners: BTreeMap<String, Owner>,
     read: BTreeSet<String>,
@@ -355,6 +363,9 @@ impl Fold {
                 self.stored.remove(&key);
             }
             let checkpoint = !content && self.checkpoints.remove(&owner).is_some();
+            if checkpoint {
+                self.marks.remove(&owner);
+            }
             if !content {
                 let cells = self
                     .cells
@@ -684,24 +695,36 @@ impl Fold {
         })
     }
 
-    fn garbage(&self, collectable: impl Fn(&str) -> bool) -> Option<Vec<bool>> {
+    fn garbage(
+        &self,
+        links: &mut HashMap<String, Links>,
+        marks: &mut BTreeMap<String, Vec<String>>,
+    ) -> Option<Vec<bool>> {
         let mut firsts: HashMap<&str, usize> = HashMap::new();
         let mut holders = Vec::new();
         for (position, (key, value)) in self.stored.iter().enumerate() {
             if let Some((state, content)) = key.split_once('\n')
                 && content.starts_with("b3:")
-                && collectable(state)
             {
                 let first = *firsts.entry(content).or_insert(holders.len());
                 holders.push((first, position, state, value.as_str()));
             }
         }
-        let mut queue = self
-            .checkpoints
-            .iter()
-            .filter(|(state, _)| collectable(state))
-            .flat_map(|(_, checkpoint)| EncodedPayload::references(&checkpoint.payload))
-            .collect::<Vec<_>>();
+        marks.retain(|state, _| self.checkpoints.contains_key(state));
+        let mut queue = Vec::new();
+        for (state, checkpoint) in &self.checkpoints {
+            let references = marks.entry(state.clone()).or_insert_with(|| {
+                EncodedPayload::references(&checkpoint.payload)
+                    .map(str::to_owned)
+                    .collect()
+            });
+            queue.extend(
+                references
+                    .iter()
+                    .filter_map(|content| firsts.get_key_value(content.as_str()))
+                    .map(|(content, _)| *content),
+            );
+        }
         let mut visited = vec![false; holders.len()];
         while let Some(content) = queue.pop() {
             let Some(&first) = firsts.get(content) else {
@@ -711,21 +734,45 @@ impl Fold {
                 continue;
             }
             let (_, _, state, value) = holders[first];
-            let chunk = |chunk: &str| {
-                self.stored
-                    .get(&format!("{state}\n{chunk}"))
-                    .map(String::as_str)
+            let chunk_key = |chunk: &str| format!("{state}\n{chunk}");
+            let known = match links.get(content) {
+                Some(known) => {
+                    if !known
+                        .chunks
+                        .iter()
+                        .all(|chunk| self.stored.contains_key(&chunk_key(chunk)))
+                    {
+                        return None;
+                    }
+                    known
+                }
+                None => {
+                    let requested = Cell::new(Vec::new());
+                    let chunk = |chunk: &str| {
+                        let mut seen = requested.take();
+                        seen.push(chunk.to_owned());
+                        requested.set(seen);
+                        self.stored.get(&chunk_key(chunk)).map(String::as_str)
+                    };
+                    let json = EncodedPayload::assembled(value, &chunk)?;
+                    let references = EncodedPayload::references(&json)
+                        .map(str::to_owned)
+                        .collect();
+                    links.entry(content.to_owned()).or_insert(Links {
+                        chunks: requested.take(),
+                        references,
+                    })
+                }
             };
-            match EncodedPayload::assembled(value, &chunk) {
-                Some(Cow::Borrowed(json)) => queue.extend(EncodedPayload::references(json)),
-                Some(Cow::Owned(json)) => queue.extend(
-                    EncodedPayload::references(&json)
-                        .filter_map(|content| firsts.get_key_value(content))
-                        .map(|(content, _)| *content),
-                ),
-                None => return None,
-            }
+            queue.extend(
+                known
+                    .references
+                    .iter()
+                    .filter_map(|content| firsts.get_key_value(content.as_str()))
+                    .map(|(content, _)| *content),
+            );
         }
+        links.retain(|content, _| firsts.contains_key(content.as_str()));
         let mut garbage = vec![false; self.stored.len()];
         for &(first, position, _, _) in &holders {
             garbage[position] = !visited[first];
@@ -741,7 +788,12 @@ impl Fold {
         let before = self.dead.len();
         self.dead.retain(|key, _| !in_collectable(key));
         let mut collected = before - self.dead.len();
-        let Some(garbage) = self.garbage(|_| true) else {
+        let mut links = std::mem::take(&mut self.links);
+        let mut marks = std::mem::take(&mut self.marks);
+        let garbage = self.garbage(&mut links, &mut marks);
+        self.links = links;
+        self.marks = marks;
+        let Some(garbage) = garbage else {
             return collected;
         };
         let mut garbage = garbage.into_iter();
@@ -1037,6 +1089,7 @@ impl Fold {
                 revision,
                 state,
             } => {
+                self.marks.remove(state);
                 self.checkpoints.insert(
                     state.clone(),
                     Checkpoint {
