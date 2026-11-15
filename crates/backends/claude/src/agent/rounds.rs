@@ -1321,7 +1321,10 @@ pub(super) fn run_rounds<'a>(
                     continue;
                 }
                 cursor.finish_checked = true;
-                let notice = nanocode_tool_host::deadline::finish_notice(state.deadline.as_ref());
+                let notice = nanocode_tool_host::deadline::finish_notice(
+                    state.deadline.as_ref(),
+                    state.brief_finish,
+                );
                 state.emit(
                     &request.events,
                     AgentEventKind::ContextNotice,

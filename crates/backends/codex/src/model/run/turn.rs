@@ -1065,7 +1065,7 @@ impl ModelRun {
                     self.append_notice(
                         &mut session.conversation,
                         call_index,
-                        &nanocode_tool_host::deadline::finish_notice(self.deadline.as_ref()),
+                        &nanocode_tool_host::deadline::finish_notice(self.deadline.as_ref(), false),
                     )?;
                     session.conversation.clear_delta();
                     continue;

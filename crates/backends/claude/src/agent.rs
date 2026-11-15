@@ -785,6 +785,7 @@ pub struct ClaudeBuilder {
     tool_hooks: Vec<Arc<dyn crate::ClaudeToolHooks>>,
     deadline: Option<crate::Deadline>,
     headless: bool,
+    brief_finish: bool,
     spawn_factory: Option<Arc<dyn AgentFactory>>,
     child_journal: Option<nanocode_agent_core::backend::ChildJournal>,
     host_context: Option<Arc<str>>,
@@ -865,6 +866,7 @@ impl ClaudeBuilder {
             tool_hooks: Vec::new(),
             deadline: None,
             headless: false,
+            brief_finish: false,
             spawn_factory: None,
             child_journal: None,
             host_context: None,
@@ -1266,6 +1268,11 @@ impl ClaudeBuilder {
 
     pub const fn headless(mut self, headless: bool) -> Self {
         self.headless = headless;
+        self
+    }
+
+    pub const fn brief_finish(mut self, brief: bool) -> Self {
+        self.brief_finish = brief;
         self
     }
 
@@ -2995,6 +3002,7 @@ struct State {
     round_notices: Vec<RoundNotices>,
     deadline: Option<crate::deadline::Reminders>,
     headless: bool,
+    brief_finish: bool,
     working_directory: Option<crate::environment::WorkingDirectory>,
     lifecycle_opened: Atom<Option<String>>,
     subagent_type: Option<String>,

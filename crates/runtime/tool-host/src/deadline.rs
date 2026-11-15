@@ -175,10 +175,15 @@ impl Reminders {
 }
 
 #[must_use]
-pub fn finish_notice(deadline: Option<&Reminders>) -> String {
+pub fn finish_notice(deadline: Option<&Reminders>, brief: bool) -> String {
     let time = deadline.map_or_else(String::new, |reminders| format!(" {}", reminders.remain()));
+    let reply = if brief {
+        "reply with one line that says the task is done"
+    } else {
+        "reply with your final message"
+    };
     format!(
-        "<system-reminder>\nThis session is non-interactive and nobody will reply.{time} Before you finish, check the work:\n- Every output the task names exists at that exact path, with a relative path resolved against the working directory.\n- The task's own check, or a direct test of the result, passes when you run it again now.\n- The task's checks use inputs you have not seen (other files, data, sizes or seeds) and run the program as a script does: stdout piped, not a terminal, and signals such as SIGINT. The result holds on at least one input you made that differs from the given example, including the case the task names, and with stdout piped when output matters.\n- The scratch files and test output you made where the task's program or its checks write, read or wait for files, such as a file in /tmp, are deleted, and nothing else is.\n- What the task's program built or set up is kept: caches and compiled artifacts (such as a compiled model or a build directory), installed packages, and the state the task asked for (repositories and their branches, served files, databases, services). None of that state is reset or emptied to make it clean.\n- Background processes you started are stopped, unless the task asked to keep them running.\n- Any choice left open is made, and its result is written.\nFix what falls short. When everything holds, reply with your final message.\n</system-reminder>"
+        "<system-reminder>\nThis session is non-interactive and nobody will reply.{time} Before you finish, check the work:\n- Every output the task names exists at that exact path, with a relative path resolved against the working directory.\n- The task's own check, or a direct test of the result, passes when you run it again now.\n- The task's checks use inputs you have not seen (other files, data, sizes or seeds) and run the program as a script does: stdout piped, not a terminal, and signals such as SIGINT. The result holds on at least one input you made that differs from the given example, including the case the task names, and with stdout piped when output matters.\n- The scratch files and test output you made where the task's program or its checks write, read or wait for files, such as a file in /tmp, are deleted, and nothing else is.\n- What the task's program built or set up is kept: caches and compiled artifacts (such as a compiled model or a build directory), installed packages, and the state the task asked for (repositories and their branches, served files, databases, services). None of that state is reset or emptied to make it clean.\n- Background processes you started are stopped, unless the task asked to keep them running.\n- Any choice left open is made, and its result is written.\nFix what falls short. When everything holds, {reply}.\n</system-reminder>"
     )
 }
 
