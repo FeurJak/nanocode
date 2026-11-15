@@ -247,6 +247,15 @@ pub(super) fn run_rounds<'a>(
                     nanocode_tool_host::deadline::folded_finish_notice(),
                 ));
             }
+            if state.brief_final
+                && state.headless
+                && state.lineage.root_session_id == state.session_id
+                && let Some(message) = prompt.last_mut()
+            {
+                message.content.push(ContentBlock::text(
+                    nanocode_tool_host::deadline::BRIEF_FINAL,
+                ));
+            }
             pending.extend(prompt.into_iter().map(HistoryMessage::from));
             if first {
                 pending.push(

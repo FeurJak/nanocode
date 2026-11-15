@@ -785,6 +785,7 @@ pub struct ClaudeBuilder {
     tool_hooks: Vec<Arc<dyn crate::ClaudeToolHooks>>,
     deadline: Option<crate::Deadline>,
     headless: bool,
+    brief_final: bool,
     brief_finish: bool,
     fold_finish: bool,
     low_effort_rounds: bool,
@@ -868,6 +869,7 @@ impl ClaudeBuilder {
             tool_hooks: Vec::new(),
             deadline: None,
             headless: false,
+            brief_final: false,
             brief_finish: false,
             fold_finish: false,
             low_effort_rounds: false,
@@ -1272,6 +1274,11 @@ impl ClaudeBuilder {
 
     pub const fn headless(mut self, headless: bool) -> Self {
         self.headless = headless;
+        self
+    }
+
+    pub const fn brief_final(mut self, brief: bool) -> Self {
+        self.brief_final = brief;
         self
     }
 
@@ -3016,6 +3023,7 @@ struct State {
     round_notices: Vec<RoundNotices>,
     deadline: Option<crate::deadline::Reminders>,
     headless: bool,
+    brief_final: bool,
     brief_finish: bool,
     fold_finish: bool,
     low_effort_rounds: bool,
