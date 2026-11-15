@@ -545,15 +545,28 @@ pub(super) fn build(mut builder: ClaudeBuilder) -> Result<(Agent, AgentEvents)> 
             let Some(state) = state.upgrade() else {
                 return false;
             };
-            let mut turns = state.steering.acquire().await;
-            let Some((_, turn)) = turns
-                .iter_mut()
-                .filter(|(_, turn)| turn.accepting)
-                .min_by_key(|(key, _)| key.0)
-            else {
+            let accepted = {
+                let mut turns = state.steering.acquire().await;
+                let Some((_, turn)) = turns
+                    .iter_mut()
+                    .filter(|(_, turn)| turn.accepting)
+                    .min_by_key(|(key, _)| key.0)
+                else {
+                    return false;
+                };
+                match state.accept_steer(turn, None, text.into()).await {
+                    Ok(true) => Ok(state.start_code_preempt().await),
+                    Ok(false) => Ok(Vec::new()),
+                    Err(error) => Err(error),
+                }
+            };
+            let Ok(preempts) = accepted else {
                 return false;
             };
-            state.accept_steer(turn, None, text.into()).await.is_ok()
+            for preempt in preempts {
+                preempt.await;
+            }
+            true
         })
     });
     let client = state.client.clone();

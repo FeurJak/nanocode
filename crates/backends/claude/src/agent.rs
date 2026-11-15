@@ -5308,8 +5308,22 @@ impl State {
         turn: &mut TurnSteering,
         id: Option<String>,
         prompt: Prompt,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         turn::accept_steer(self, turn, id, prompt).await
+    }
+
+    async fn start_code_preempt(&self) -> Vec<BackendFuture<()>> {
+        let mut started = self
+            .code_turn_preempt
+            .iter()
+            .map(|preempt| preempt())
+            .collect::<Vec<_>>();
+        std::future::poll_fn(|context| {
+            started.retain_mut(|preempt| preempt.as_mut().poll(context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        started
     }
 
     async fn settle_code_preempt(&self) {
@@ -5612,9 +5626,19 @@ impl Driver {
             if state.life.stopped() {
                 return Err(NanocodeError::AgentStopped);
             }
-            let mut turns = state.steering.acquire().await;
-            let turn = turns.get_mut(&key).ok_or(NanocodeError::TurnNotSteerable)?;
-            state.accept_steer(turn, id, prompt).await
+            let preempts = {
+                let mut turns = state.steering.acquire().await;
+                let turn = turns.get_mut(&key).ok_or(NanocodeError::TurnNotSteerable)?;
+                if state.accept_steer(turn, id, prompt).await? {
+                    state.start_code_preempt().await
+                } else {
+                    Vec::new()
+                }
+            };
+            for preempt in preempts {
+                preempt.await;
+            }
+            Ok(())
         })
     }
 }

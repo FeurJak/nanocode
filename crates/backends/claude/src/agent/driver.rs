@@ -417,7 +417,7 @@ pub(super) fn route(
         if state.life.stopped() {
             return Err(NanocodeError::AgentStopped);
         }
-        {
+        let accepted = {
             let mut turns = state.steering.acquire().await;
             if let (Some(policy), Some(id)) = (&state.policy, &request_id)
                 && policy
@@ -439,11 +439,24 @@ pub(super) fn route(
                     .filter(|(_, turn)| turn.accepting)
                     .min_by_key(|(key, _)| key.0)
             {
-                state.accept_steer(turn, request_id, prompt).await?;
-                return Ok(BackendPromptRoute::Steered);
+                Some(if state.accept_steer(turn, request_id, prompt).await? {
+                    state.start_code_preempt().await
+                } else {
+                    Vec::new()
+                })
+            } else {
+                None
             }
+        };
+        match accepted {
+            Some(preempts) => {
+                for preempt in preempts {
+                    preempt.await;
+                }
+                Ok(BackendPromptRoute::Steered)
+            }
+            None => start.await.map(BackendPromptRoute::Started),
         }
-        start.await.map(BackendPromptRoute::Started)
     })
 }
 

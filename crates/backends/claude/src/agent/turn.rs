@@ -520,7 +520,7 @@ pub(super) fn accept_steer<'a>(
     turn: &'a mut TurnSteering,
     id: Option<String>,
     prompt: Prompt,
-) -> AgentFuture<'a, Result<()>> {
+) -> AgentFuture<'a, Result<bool>> {
     Box::pin(async move {
         if id.as_ref().is_some_and(|id| id.is_empty()) {
             return Err(NanocodeError::InvalidRequest(
@@ -542,7 +542,7 @@ pub(super) fn accept_steer<'a>(
                     "steering message `{id}` was withdrawn"
                 )));
             }
-            return Ok(());
+            return Ok(false);
         }
         if !turn.accepting {
             return Err(NanocodeError::TurnNotSteerable);
@@ -568,7 +568,7 @@ pub(super) fn accept_steer<'a>(
                 )
                 .await?
             else {
-                return Ok(());
+                return Ok(false);
             };
             (index, true)
         } else {
@@ -613,9 +613,6 @@ pub(super) fn accept_steer<'a>(
         });
         turn.preempt
             .send_modify(|generation| *generation = generation.wrapping_add(1));
-        for preempt in &state.code_turn_preempt {
-            preempt().await;
-        }
-        Ok(())
+        Ok(true)
     })
 }
