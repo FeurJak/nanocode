@@ -4349,7 +4349,6 @@ impl Registry {
                         durable::resume_message(
                             &session.in_flight_calls,
                             session.in_flight_omitted,
-                            Some(&session.descriptor.task),
                         )
                     })
                     .unwrap_or_else(|| durable::RESUME_MESSAGE.to_owned())
