@@ -7,6 +7,8 @@ use crate::heap::cells::{Bytes, CellKind, FuncInfo, FuncTemplate, Script, U32Arr
 use crate::heap::{Atom, Heap, HeapError, Ref};
 use crate::value::{Str, Value};
 
+pub const CODE_SLACK: u32 = (size_of::<u64>() - 1) as u32;
+
 /// `FuncTemplate::FLAGS`: the function kind in the low 4 bits, then flags.
 pub mod func_flags {
     pub const KIND_MASK: u32 = 0xF;
@@ -130,8 +132,10 @@ pub fn alloc_template_in(
     // (not gathered in a buffer first: a copy and two allocations per function).
     let handlers_at = p.code.len() + 4 * p.captures.len();
     let code_len = u32::try_from(p.code.len()).map_err(|_| HeapError::OutOfMemory)?;
-    let data_len =
-        u32::try_from(handlers_at + 16 * p.handlers.len()).map_err(|_| HeapError::OutOfMemory)?;
+    let data_len = u32::try_from(
+        (handlers_at + 16 * p.handlers.len()).max(p.code.len() + CODE_SLACK as usize),
+    )
+    .map_err(|_| HeapError::OutOfMemory)?;
     let consts = nonempty(p.consts, |v| alloc_value_array(heap, v))?;
     let info = alloc_info(heap, p)?;
     let size = FuncTemplate::DATA

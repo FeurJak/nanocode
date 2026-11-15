@@ -863,9 +863,10 @@ fn emit_function(
                     flush(&out, &mut li, &mut lines, upd.pc);
                     if upd.op == Op::Inc
                         && put.op == Op::NamePut
-                        && let Some((k, v)) = loop_test(&all[i + 2..], storage, resolved, s)
+                        && let Some((k, head, load, v)) =
+                            loop_test(&all[i + 2..], storage, resolved, s)
                     {
-                        out.exact(Op::IncLt, s as u32);
+                        out.exact(head, s as u32);
                         for l in &all[i + 2..i + 2 + k] {
                             flush(&out, &mut li, &mut lines, l.pc);
                             out.place_label(Label(l.imm(0)));
@@ -875,7 +876,7 @@ fn emit_function(
                         flush(&out, &mut li, &mut lines, get.pc);
                         out.exact(Op::GetLoc8, s as u32);
                         flush(&out, &mut li, &mut lines, bound.pc);
-                        out.exact(Op::PushI32, v);
+                        out.exact(load, v);
                         flush(&out, &mut li, &mut lines, lt.pc);
                         out.lt();
                         flush(&out, &mut li, &mut lines, jump.pc);
@@ -1368,7 +1369,7 @@ fn loop_test(
     storage: &[Storage],
     resolved: &[Resolved],
     s: u16,
-) -> Option<(usize, u32)> {
+) -> Option<(usize, Op, Op, u32)> {
     let k = all.iter().take_while(|l| l.op == Op::Label).count();
     let [get, bound, lt, jump, ..] = all[k..] else {
         return None;
@@ -1381,12 +1382,28 @@ fn loop_test(
     {
         return None;
     }
-    let v = match bound.op {
-        Op::PushI8 => bound.imm(0) as u8 as i8 as i32 as u32,
-        Op::PushI32 => bound.imm(0),
+    let (head, load, v) = match bound.op {
+        Op::PushI8 => (
+            Op::IncLt,
+            Op::PushI32,
+            bound.imm(0) as u8 as i8 as i32 as u32,
+        ),
+        Op::PushI32 => (Op::IncLt, Op::PushI32, bound.imm(0)),
+        Op::NameGet => match resolved[bound.imm(0) as usize] {
+            Resolved {
+                target: Target::Var(v),
+                check: false,
+                ..
+            } => match storage[v as usize] {
+                Storage::Local(n) if n < 256 => (Op::IncLtLoc, Op::GetLoc8, n as u32),
+                Storage::Arg(n) if n < 256 => (Op::IncLtLoc, Op::GetArg8, n as u32),
+                _ => return None,
+            },
+            _ => return None,
+        },
         _ => return None,
     };
-    Some((k, v))
+    Some((k, head, load, v))
 }
 
 /// Pushes a number constant (small integers inline).

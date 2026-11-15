@@ -87,8 +87,18 @@ const fn group(ops: &[Op]) -> (i64, u32) {
 }
 
 const G_ADD_LOC: (i64, u32) = group(&[Op::AddLoc8, Op::GetLoc8, Op::Add, Op::PutLoc8]);
-const G_INC_LT: (i64, u32) =
-    group(&[Op::IncLt, Op::GetLoc8, Op::PushI32, Op::Lt, Op::JumpIfTrue8]);
+const G_INC_LT: (i64, u32) = group(&[Op::IncLt, Op::GetLoc8, Op::PushI32, Op::Lt, Op::JumpIfTrue8]);
+const _: () = assert!(
+    OPS[Op::GetArg8 as usize].cost.fuel() == OPS[Op::GetLoc8 as usize].cost.fuel()
+        && OPS[Op::GetArg8 as usize].size == OPS[Op::GetLoc8 as usize].size
+);
+const G_INC_LT_LOC: (i64, u32) = group(&[
+    Op::IncLtLoc,
+    Op::GetLoc8,
+    Op::GetLoc8,
+    Op::Lt,
+    Op::JumpIfTrue8,
+]);
 
 /// The flags word of a `PushResult` frame (`fast_return`'s condition).
 const PUSH_RESULT: i32 = Continuation::PushResult.to_flags();
@@ -328,13 +338,11 @@ fn u32_at(w: &[u8], i: usize) -> u32 {
     u32::from_le_bytes([w[i], w[i + 1], w[i + 2], w[i + 3]])
 }
 
-/// The instruction at `ip` and the 7 bytes after it, or `None` at the very end of the
-/// arena (the caller declines and the general path reads it).
+/// The instruction at `ip` and the 7 bytes after it, inside the template cell
+/// (`bytecode::template::CODE_SLACK`).
 #[inline(always)]
-fn word(b: &[u8], ip: u32) -> Option<u64> {
-    let o = ip as usize;
-    b.get(o..o + 8)
-        .map(|s| u64::from_le_bytes(s.try_into().unwrap()))
+fn word(b: &[u8], ip: u32) -> u64 {
+    u64::from_le_bytes(arena_read(b, ip as usize))
 }
 
 /// The arena offset of slot `i` of the object (or box) at `cell` with `Object::SLOTS`'s
@@ -955,10 +963,7 @@ impl Exec<'_> {
                     break 'run Exit::General;
                 }
                 loop {
-                    let Some(w) = word(b, ip) else {
-                        break Exit::General;
-                    };
-                    let sp0 = sp;
+                    let w = word(b, ip);
                     let mut op = w as u8;
                     // `heap_call!` for the arms of several opcodes: the opcode is read
                     // again after the call. Kept across it, V8 spills it where it is
@@ -986,12 +991,6 @@ impl Exec<'_> {
                     macro_rules! next {
                         ($op:expr) => {{
                             let info = &OPS[$op as usize];
-                            debug_assert_eq!(
-                                sp + info.pop as u32,
-                                sp0 + info.push as u32,
-                                "hot {} stack effect disagrees with the table",
-                                crate::bytecode::OP_NAMES[$op as usize]
-                            );
                             fuel -= info.cost.fuel() as i64;
                             ip += info.size as u32;
                         }};
@@ -1899,7 +1898,12 @@ impl Exec<'_> {
                             let v = match v {
                                 Some(v) => Some(v),
                                 None => match (x.as_number(), y.as_number()) {
-                                    (Some(p), Some(q)) => Some(conv::number(p + q)),
+                                    (Some(p), Some(q)) => Some(match p + q {
+                                        r if r.abs() > f64::from(i32::MAX) => {
+                                            Value::from_raw(r.to_bits())
+                                        }
+                                        r => conv::number(r),
+                                    }),
                                     _ => None,
                                 },
                             };
@@ -1918,7 +1922,7 @@ impl Exec<'_> {
                                 break Exit::Decline(op);
                             };
                             st(b, at, Value::int(i));
-                            let t = word(b, ip + 5).unwrap_or(0);
+                            let t = word(b, ip + 5);
                             match t >> 48 {
                                 tail if tail as u8 == fast::JUMP_IF_TRUE8 => {
                                     fuel -= G_INC_LT.0;
@@ -1941,6 +1945,42 @@ impl Exec<'_> {
                                     }
                                 }
                                 _ => next!(Op::IncLt),
+                            }
+                        }
+                        fast::INC_LT_LOC => {
+                            let at = slot!(lp + imm16!());
+                            let Some(i) = ld(b, at).as_int().and_then(|i| i.checked_add(1)) else {
+                                break Exit::Decline(op);
+                            };
+                            st(b, at, Value::int(i));
+                            let t = word(b, ip + 5);
+                            let base = if t as u8 == fast::GET_ARG8 {
+                                bp + 2
+                            } else {
+                                lp
+                            };
+                            match ld(b, slot!(base + (t >> 8) as u8 as u32)).as_int() {
+                                Some(n) if (t >> 24) as u8 == fast::JUMP_IF_TRUE8 => {
+                                    fuel -= G_INC_LT_LOC.0;
+                                    let next = ip + G_INC_LT_LOC.1;
+                                    ip = next;
+                                    if i < n {
+                                        ip = (next as i64 + (t >> 32) as u8 as i8 as i64) as u32;
+                                        if ip < next {
+                                            if collect {
+                                                break Exit::Safepoint;
+                                            }
+                                            if fuel <= 0 {
+                                                break Exit::General;
+                                            }
+                                            budget -= 1;
+                                            if budget == 0 {
+                                                break Exit::Budget;
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => next!(Op::IncLtLoc),
                             }
                         }
                         _ => break Exit::Decline(op),

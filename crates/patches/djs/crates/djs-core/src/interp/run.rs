@@ -237,6 +237,7 @@ mod fast {
     pub const JUMP_IF_TRUE8: u8 = Op::JumpIfTrue8 as u8;
     pub const ADD_LOC8: u8 = Op::AddLoc8 as u8;
     pub const INC_LT: u8 = Op::IncLt as u8;
+    pub const INC_LT_LOC: u8 = Op::IncLtLoc as u8;
 
     /// A `call` in any form.
     pub const fn is_call(op: u8) -> bool {
@@ -1633,7 +1634,7 @@ impl<'h> Exec<'h> {
             Op::SetLocUninit => {
                 self.set(self.lp + self.imm_u16(1), Value::UNINITIALIZED);
             }
-            Op::IncLoc | Op::DecLoc | Op::IncLt => {
+            Op::IncLoc | Op::DecLoc | Op::IncLt | Op::IncLtLoc => {
                 let slot = self.lp + self.imm_u16(1);
                 let a = self.get(slot);
                 if a.as_object().is_some() {

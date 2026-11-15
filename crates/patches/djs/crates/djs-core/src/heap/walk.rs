@@ -14,6 +14,7 @@ use super::cells::{
 use super::layout::{FieldTy, Ref};
 use super::object::ObjectClass;
 use super::{CellKind, Heap};
+use crate::bytecode::template::CODE_SLACK;
 use crate::value::{Value, tag};
 
 /// One cell found by the walker.
@@ -503,7 +504,7 @@ impl Heap {
             // The code and the capture descriptors (the handler records fill the rest).
             CellKind::FuncTemplate => a
                 .get(cell, FuncTemplate::CODE_LEN)
-                .checked_add(4 * a.get(cell, FuncTemplate::CAPTURES) as u32)
+                .checked_add((4 * a.get(cell, FuncTemplate::CAPTURES) as u32).max(CODE_SLACK))
                 .and_then(|n| FuncTemplate::DATA.cell_size(n)),
             CellKind::FuncInfo => FuncInfo::CHILDREN.cell_size(a.get(cell, FuncInfo::CHILD_COUNT)),
             CellKind::BigInt => BigInt::LIMBS.cell_size(a.get(cell, BigInt::LEN)),
