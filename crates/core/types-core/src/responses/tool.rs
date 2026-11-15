@@ -1,7 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(remote = "Self", tag = "type", rename_all = "snake_case")]
 pub enum ToolDefinition {
     Function {
@@ -66,8 +66,55 @@ impl<'de> Deserialize<'de> for ToolDefinition {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(remote = "ToolDefinition", rename_all = "snake_case")]
+enum TaggedDefinition {
+    Function {
+        name: Box<str>,
+        description: std::sync::Arc<str>,
+        strict: bool,
+        #[serde(default)]
+        defer_loading: Option<bool>,
+        #[serde(default, rename = "async")]
+        asynchronous: bool,
+        parameters: JsonSchema,
+        #[serde(default)]
+        output_schema: Option<JsonSchema>,
+    },
+    Namespace {
+        name: Box<str>,
+        description: std::sync::Arc<str>,
+        tools: Vec<ToolDefinition>,
+    },
+    Custom {
+        name: Box<str>,
+        description: std::sync::Arc<str>,
+        #[serde(default)]
+        defer_loading: Option<bool>,
+        #[serde(default, rename = "async")]
+        asynchronous: bool,
+        format: CustomToolFormat,
+    },
+    ToolSearch {
+        execution: Box<str>,
+        description: std::sync::Arc<str>,
+        parameters: JsonSchema,
+    },
+}
+
 fn decode_definition(value: Value) -> Result<ToolDefinition, serde_json::Error> {
-    ToolDefinition::deserialize(value)
+    let Value::Object(mut fields) = value else {
+        return Err(serde::de::Error::custom(
+            "a tool definition must be an object",
+        ));
+    };
+    let Some(Value::String(kind)) = fields.remove("type") else {
+        return Err(serde::de::Error::missing_field("type"));
+    };
+    TaggedDefinition::deserialize(Value::Object(serde_json::Map::from_iter([(
+        kind,
+        Value::Object(fields),
+    )])))
 }
 
 const fn is_false(value: &bool) -> bool {
