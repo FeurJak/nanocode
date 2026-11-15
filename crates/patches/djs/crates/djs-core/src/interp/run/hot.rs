@@ -86,13 +86,14 @@ const fn group(ops: &[Op]) -> (i64, u32) {
     (fuel, size)
 }
 
-const G_ADD_LOC: (i64, u32) = group(&[Op::AddLoc8, Op::GetLoc8, Op::Add, Op::PutLoc8]);
-const G_INC_LT: (i64, u32) = group(&[Op::IncLt, Op::GetLoc8, Op::PushI32, Op::Lt, Op::JumpIfTrue8]);
+pub(super) const G_ADD_LOC: (i64, u32) = group(&[Op::AddLoc8, Op::GetLoc8, Op::Add, Op::PutLoc8]);
+pub(super) const G_INC_LT: (i64, u32) =
+    group(&[Op::IncLt, Op::GetLoc8, Op::PushI32, Op::Lt, Op::JumpIfTrue8]);
 const _: () = assert!(
     OPS[Op::GetArg8 as usize].cost.fuel() == OPS[Op::GetLoc8 as usize].cost.fuel()
         && OPS[Op::GetArg8 as usize].size == OPS[Op::GetLoc8 as usize].size
 );
-const G_INC_LT_LOC: (i64, u32) = group(&[
+pub(super) const G_INC_LT_LOC: (i64, u32) = group(&[
     Op::IncLtLoc,
     Op::GetLoc8,
     Op::GetLoc8,
@@ -341,7 +342,7 @@ fn u32_at(w: &[u8], i: usize) -> u32 {
 /// The instruction at `ip` and the 7 bytes after it, inside the template cell
 /// (`bytecode::template::CODE_SLACK`).
 #[inline(always)]
-fn word(b: &[u8], ip: u32) -> u64 {
+pub(super) fn word(b: &[u8], ip: u32) -> u64 {
     u64::from_le_bytes(arena_read(b, ip as usize))
 }
 
