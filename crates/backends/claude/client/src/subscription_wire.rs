@@ -122,14 +122,31 @@ impl SubscriptionIdentity {
         };
         Ok(json!({"user_id":serde_json::to_string(&user)?}))
     }
+    pub fn session_digest(&self) -> Option<SessionDigest> {
+        self.install_id.is_none().then(|| self.device_digest())
+    }
+    fn device_digest(&self) -> SessionDigest {
+        self.account_uuid.as_ref().map_or_else(
+            || SessionDigest {
+                prefix: "omp-claude-device-id-v1:".into(),
+                suffix: String::new(),
+            },
+            |account| SessionDigest {
+                prefix: "omp-claude-device-id-v2\0".into(),
+                suffix: format!("\0{account}"),
+            },
+        )
+    }
     fn device_id(&self, session: &str) -> String {
         let install = self.install_id.as_deref().unwrap_or(session);
-        let input = self.account_uuid.as_ref().map_or_else(
-            || format!("omp-claude-device-id-v1:{install}"),
-            |account| format!("omp-claude-device-id-v2\0{install}\0{account}"),
-        );
-        hex_digest(input.as_bytes())
+        let digest = self.device_digest();
+        hex_digest(format!("{}{install}{}", digest.prefix, digest.suffix).as_bytes())
     }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SessionDigest {
+    pub prefix: String,
+    pub suffix: String,
 }
 pub(crate) fn hex_digest(input: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";

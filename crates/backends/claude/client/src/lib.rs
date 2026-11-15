@@ -22,7 +22,7 @@ mod subscription_identity;
 #[doc(hidden)]
 pub mod subscription_wire;
 pub mod transport;
-pub use subscription_wire::SubscriptionIdentity;
+pub use subscription_wire::{SessionDigest, SubscriptionIdentity};
 use transport::{HttpClient, HttpError, HttpResponse, layer::retry};
 pub mod subscription;
 pub mod thread;
@@ -1882,6 +1882,9 @@ impl ClaudeClient {
     pub fn with_install_id(mut self, install: impl Into<String>) -> Self {
         self.subscription_identity.install_id = Some(install.into());
         self
+    }
+    pub fn session_digest(&self) -> Option<SessionDigest> {
+        self.subscription_identity.session_digest()
     }
     #[doc(hidden)]
     pub fn bind_subscription_session(mut self, session: &str) -> Self {
