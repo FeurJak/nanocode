@@ -70,6 +70,7 @@ pub struct ToolContext<'a> {
     host_context: Option<&'a str>,
     instruction_revision: Option<u64>,
     run_time: Option<Duration>,
+    directory: Option<&'a std::path::Path>,
 }
 
 impl<'a> ToolContext<'a> {
@@ -91,6 +92,7 @@ impl<'a> ToolContext<'a> {
             host_context: None,
             instruction_revision: None,
             run_time: None,
+            directory: None,
         }
     }
 
@@ -128,6 +130,17 @@ impl<'a> ToolContext<'a> {
     #[must_use]
     pub const fn run_time(self) -> Option<Duration> {
         self.run_time
+    }
+
+    #[must_use]
+    pub const fn with_directory(mut self, directory: Option<&'a std::path::Path>) -> Self {
+        self.directory = directory;
+        self
+    }
+
+    #[must_use]
+    pub const fn directory(self) -> Option<&'a std::path::Path> {
+        self.directory
     }
 
     #[doc(hidden)]
