@@ -442,7 +442,11 @@ struct Op {
     lc: u8,
     lfuel: u32,
     lx: u8,
+    m: bool,
+    ma: u8,
     mask: u8,
+    md: u8,
+    mfuel: u32,
     n: i32,
     span: u32,
     to: u16,
@@ -461,7 +465,11 @@ fn lower(ins: &Ins) -> Op {
         lc: 0,
         lfuel: 0,
         lx: 0,
+        m: false,
+        ma: 0,
         mask: 0,
+        md: 0,
+        mfuel: 0,
         n: 0,
         span: 0,
         to: 0,
@@ -1555,6 +1563,35 @@ impl Exec<'_> {
                 }
             }
         }
+        let mut targets = [false; 256];
+        for o in &prog[..plan.prog.len()] {
+            if matches!(
+                o.k.get(),
+                K::Branch | K::Jump | K::JumpIf | K::Latch | K::StepBranch
+            ) {
+                targets[usize::from(o.to)] = true;
+            }
+        }
+        for l in &plan.labels {
+            if let Some(t) = l.2 {
+                targets[usize::from(t)] = true;
+            }
+        }
+        let mut s = 1;
+        while s < plan.prog.len() {
+            let o = prog[s].clone();
+            let q = &mut prog[s - 1];
+            if matches!(o.k.get(), K::Mov)
+                && !targets[s]
+                && !q.l
+                && !matches!(q.k.get(), K::Jump | K::Leave)
+            {
+                (q.m, q.ma, q.md, q.mfuel) = (true, o.a, o.d, q.fuel + o.fuel);
+                s += 2;
+            } else {
+                s += 1;
+            }
+        }
         let mut fuel = self.fuel;
         let mut mark = fuel;
         let mut k = 0u8;
@@ -1563,8 +1600,14 @@ impl Exec<'_> {
             let (a, c, d) = (o.a as usize, o.c as usize, o.d as usize);
             macro_rules! next {
                 () => {{
-                    fuel -= o.fuel as i64;
-                    k += 1;
+                    if o.m {
+                        r[usize::from(o.md)] = r[usize::from(o.ma)];
+                        fuel -= o.mfuel as i64;
+                        k += 2;
+                    } else {
+                        fuel -= o.fuel as i64;
+                        k += 1;
+                    }
                 }};
             }
             macro_rules! latch {
@@ -1587,8 +1630,7 @@ impl Exec<'_> {
                             k += 2;
                         }
                     } else {
-                        fuel -= o.fuel as i64;
-                        k += 1;
+                        next!();
                     }
                 }};
             }
