@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
-release=${NANOCODE_BUILDCACHE_RELEASE:-https://api.github.com/repos/nanocodexyz/nanocode/releases/tags/buildcache}
+command -v zstd > /dev/null && packs=buildcache || packs=buildcache-gz
+release=${NANOCODE_BUILDCACHE_RELEASE:-https://api.github.com/repos/nanocodexyz/nanocode/releases/tags/$packs}
 dir=${XDG_CACHE_HOME:-$HOME/.cache}/nanocode/remote
 rm -rf "$dir.next"
 mkdir -p "$dir.next/units" "$dir.next/workspace"
