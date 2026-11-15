@@ -3,7 +3,10 @@ use std::{path::PathBuf, sync::Arc};
 use nanocode_tools::{RunningTask, ToolDefinition};
 use serde::Deserialize;
 
-use super::{StandardTool, Tool, ToolContext, ToolInput, ToolOutput, ToolResult};
+use super::{
+    StandardTool, Tool, ToolContext, ToolInput, ToolOutput, ToolResult,
+    apply_patch::{Patches, heredoc},
+};
 
 use nanocode_process_contracts::{
     DEFAULT_MAX_OUTPUT_TOKENS, ExecCommand, ExecCommandResult, OutputUnit, ShellExecutor,
@@ -12,15 +15,21 @@ use nanocode_process_contracts::{
 use nanocode_types::Model;
 
 pub(crate) struct ExecCommandHandler {
-    workspace: PathBuf,
+    patches: Patches,
     sessions: Arc<dyn ShellExecutor>,
+    workspace: PathBuf,
 }
 
 impl ExecCommandHandler {
-    pub(crate) const fn new(workspace: PathBuf, sessions: Arc<dyn ShellExecutor>) -> Self {
+    pub(crate) const fn new(
+        workspace: PathBuf,
+        sessions: Arc<dyn ShellExecutor>,
+        patches: Patches,
+    ) -> Self {
         Self {
-            workspace,
+            patches,
             sessions,
+            workspace,
         }
     }
 }
@@ -59,6 +68,26 @@ impl Tool for ExecCommandHandler {
         Box::pin(async move {
             let output: ToolResult = {
                 let arguments = input.decode_json::<ExecCommandArguments>()?;
+                if let Some((patch, directory)) = heredoc(&arguments.cmd) {
+                    let base = self
+                        .workspace
+                        .join(arguments.workdir.as_deref().unwrap_or_default());
+                    let directory = base.join(directory.unwrap_or_default());
+                    return Ok(match self.patches.apply(patch, directory).await {
+                        Ok(summary) => shell_execution(&ExecCommandResult {
+                            chunk_id: None,
+                            error: None,
+                            exit_code: None,
+                            original_token_count: None,
+                            output: format!(
+                                "Exit code: 0\nWall time: 0 seconds\nOutput:\n{summary}"
+                            ),
+                            session_id: None,
+                            wall_time_seconds: 0.0,
+                        }),
+                        Err(error) => ToolOutput::error(error),
+                    });
+                }
                 let (max_output_tokens, output_unit) =
                     output_limit(arguments.max_output_tokens, context);
                 let command = ExecCommand::new(

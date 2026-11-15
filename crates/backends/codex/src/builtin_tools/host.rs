@@ -4,7 +4,7 @@ use nanocode_process_contracts::{FileHost, ShellExecutor};
 use nanocode_tool_host::{Tools, ToolsBuildError};
 
 use super::{
-    apply_patch::HostApplyPatchHandler,
+    apply_patch::{HostApplyPatchHandler, Patches},
     code_mode_policy::standard_tool_policy,
     plan::UpdatePlanTool,
     shell::{ExecCommandHandler, WriteStdinHandler},
@@ -22,8 +22,15 @@ pub fn host_tools(
             workspace.clone(),
             Arc::clone(&files),
         ))
-        .tool(HostViewImageHandler::new(workspace.clone(), files))
-        .tool(ExecCommandHandler::new(workspace, Arc::clone(&shell)));
+        .tool(HostViewImageHandler::new(
+            workspace.clone(),
+            Arc::clone(&files),
+        ))
+        .tool(ExecCommandHandler::new(
+            workspace,
+            Arc::clone(&shell),
+            Patches::Host(files),
+        ));
     match shell.keeps_sessions() {
         true => tools.tool(WriteStdinHandler::new(shell)),
         false => tools,

@@ -148,6 +148,107 @@ impl Tool for HostApplyPatchHandler {
     }
 }
 
+pub(crate) enum Patches {
+    Host(std::sync::Arc<dyn FileHost>),
+    #[cfg(not(target_family = "wasm"))]
+    Local,
+}
+
+impl Patches {
+    pub(crate) async fn apply(&self, patch: String, directory: PathBuf) -> Result<String, String> {
+        match self {
+            Self::Host(files) => {
+                HostApplyPatchHandler::new(directory, std::sync::Arc::clone(files))
+                    .apply(&patch)
+                    .await
+                    .map_err(|error| format!("apply_patch verification failed: {error}"))
+            }
+            #[cfg(not(target_family = "wasm"))]
+            Self::Local => {
+                match nanocode_platform::spawn_blocking(move || apply(&patch, &directory)).await {
+                    Ok(Ok(output)) => Ok(output),
+                    Ok(Err(error)) => Err(format!("apply_patch verification failed: {error}")),
+                    Err(error) => Err(format!("apply_patch task failed: {error}")),
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn heredoc(script: &str) -> Option<(String, Option<String>)> {
+    let script = script.trim_start();
+    let (directory, invocation) = match cd_prefix(script) {
+        Some((directory, rest)) => (Some(directory), rest),
+        None => (None, script),
+    };
+    let redirect = ["apply_patch", "applypatch"]
+        .iter()
+        .find_map(|name| invocation.strip_prefix(name))?
+        .trim_start_matches([' ', '\t'])
+        .strip_prefix("<<")?
+        .trim_start_matches([' ', '\t']);
+    let (header, body) = redirect.split_once('\n')?;
+    let delimiter = heredoc_delimiter(header.trim_end_matches([' ', '\t']))?;
+    let mut lines = body.split('\n');
+    let mut patch = Vec::new();
+    loop {
+        let line = lines.next()?;
+        if line == delimiter {
+            break;
+        }
+        patch.push(line);
+    }
+    lines.all(|line| line.trim().is_empty()).then(|| {
+        (
+            patch.join("\n").trim_end_matches('\n').to_owned(),
+            directory,
+        )
+    })
+}
+
+fn cd_prefix(script: &str) -> Option<(String, &str)> {
+    let argument = script.strip_prefix("cd")?;
+    let argument = argument
+        .strip_prefix([' ', '\t'])?
+        .trim_start_matches([' ', '\t']);
+    let (directory, rest) = match argument.chars().next()? {
+        '\'' => {
+            let (directory, rest) = argument[1..].split_once('\'')?;
+            (directory, rest)
+        }
+        '"' => {
+            let (directory, rest) = argument[1..].split_once('"')?;
+            (!directory.contains(['$', '\x60', '\\'])).then_some((directory, rest))?
+        }
+        _ => {
+            let end = argument
+                .find(|character: char| {
+                    character.is_whitespace() || "'\"&|;<>()$\x60\\".contains(character)
+                })
+                .unwrap_or(argument.len());
+            argument.split_at(end)
+        }
+    };
+    let rest = rest
+        .trim_start_matches([' ', '\t'])
+        .strip_prefix("&&")?
+        .trim_start_matches([' ', '\t']);
+    (!directory.is_empty()).then(|| (directory.to_owned(), rest))
+}
+
+fn heredoc_delimiter(header: &str) -> Option<&str> {
+    let delimiter = match header.chars().next()? {
+        '\'' => header.strip_prefix('\'')?.strip_suffix('\'')?,
+        '"' => header.strip_prefix('"')?.strip_suffix('"')?,
+        _ => header,
+    };
+    (!delimiter.is_empty()
+        && !delimiter.contains(|character: char| {
+            character.is_whitespace() || "'\"&|;<>()".contains(character)
+        }))
+    .then_some(delimiter)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PatchOperation {
     Write { path: PathBuf, contents: String },

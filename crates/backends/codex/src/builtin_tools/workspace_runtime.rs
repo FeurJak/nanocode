@@ -8,7 +8,7 @@ use nanocode_tool_host::workspace_runtime::{WorkspaceExecutor, WorkspaceToolFact
 
 use super::{
     StandardTool, Tool, ToolContext, ToolInput, ToolOutput,
-    apply_patch::ApplyPatchHandler,
+    apply_patch::{ApplyPatchHandler, Patches},
     jobs::{JobHandler, JobTool},
     shell::{ExecCommandHandler, WriteStdinHandler},
     view_image::ViewImageHandler,
@@ -222,6 +222,7 @@ impl WorkspaceToolRuntime {
             exec_command: Arc::new(ExecCommandHandler::new(
                 workspace.clone(),
                 Arc::clone(&sessions),
+                Patches::Local,
             )),
             view_image: Arc::new(max_wire_bytes.map_or_else(
                 || ViewImageHandler::new(workspace.clone()),
