@@ -490,14 +490,32 @@ fn decode_units<const E: u8>(b: &[u8], s: &StrTok, mut f: impl FnMut(u16)) {
 /// Out of line, so that `write_string` stays small for the common unescaped strings.
 #[inline(never)]
 fn write_escaped_latin1(b: &[u8], s: &StrTok, dst: &mut [u8]) -> usize {
+    const ONES: u64 = 0x0101_0101_0101_0101;
     let mut k = 0;
     let mut i = s.start;
     while i < s.end {
-        let run = crate::builtins::string::find_byte(&b[i..s.end], b'\\').unwrap_or(s.end - i);
-        dst[k..k + run].copy_from_slice(&b[i..i + run]);
-        k += run;
-        i += run;
-        if i < s.end {
+        while i + 8 <= s.end && k + 8 <= dst.len() {
+            let w = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
+            dst[k..k + 8].copy_from_slice(&w.to_le_bytes());
+            let x = w ^ (ONES * 0x5C);
+            let z = x.wrapping_sub(ONES) & !x & (ONES << 7);
+            if z != 0 {
+                let n = (z.trailing_zeros() / 8) as usize;
+                k += n;
+                i += n;
+                break;
+            }
+            k += 8;
+            i += 8;
+        }
+        if i == s.end {
+            break;
+        }
+        if b[i] != b'\\' {
+            dst[k] = b[i];
+            k += 1;
+            i += 1;
+        } else {
             // An escape (validated by the scan), decoded in place.
             let (u, len) = match b[i + 1] {
                 b'b' => (0x08, 2),

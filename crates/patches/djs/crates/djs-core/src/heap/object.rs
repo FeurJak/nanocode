@@ -1784,6 +1784,37 @@ impl Heap {
         Some(a.read(at))
     }
 
+    pub(crate) fn storage_below(&self, o: Obj, end: u32) -> bool {
+        let below = |c: u32| c + self.cell_size(c) <= end;
+        let p = self.props(o);
+        if !below(o.0) {
+            return false;
+        }
+        if p == 0 {
+            return true;
+        }
+        if !below(p) {
+            return false;
+        }
+        let a = self.arena();
+        let dict = self.is_dictionary(o);
+        let n = if dict {
+            a.get(p, PropTable::COUNT)
+        } else {
+            a.get(p, PropValues::LEN)
+        };
+        (0..n).all(|i| {
+            let (fl, at) = if dict {
+                let e = PropTable::ENTRIES.at(p, i);
+                (a.get(e, PropEntry::FLAGS), e + PropEntry::VALUE.offset)
+            } else {
+                let s = a.get(p, PropValues::SHAPE).0;
+                (self.shape_desc(s, i).1, PropValues::VALUES.at(p, i))
+            };
+            fl & STORE_ACCESSOR == 0 || a.read::<Value>(at).as_internal().is_none_or(below)
+        })
+    }
+
     pub(crate) fn getter_at(&self, o: Obj, i: u32, key: Atom) -> Option<Value> {
         let p = self.props(o);
         if p == 0 {

@@ -59,6 +59,8 @@ struct Tracked {
     end: u32,
     /// A bit per page below `end`
     dirty: Vec<u64>,
+    stamp: u64,
+    kept: u64,
 }
 
 
@@ -194,6 +196,8 @@ impl Arena {
             image,
             end,
             dirty: alloc::vec![0; pages.div_ceil(64)],
+            kept: 0,
+            stamp: 0,
         };
         for (off, len) in written {
             if off < end {
@@ -211,6 +215,23 @@ impl Arena {
         }
         #[cfg(not(feature = "embed"))]
         0
+    }
+
+    #[inline(always)]
+    pub(crate) fn prefix_kept(&self) -> bool {
+        #[cfg(feature = "embed")]
+        {
+            self.tracked.end != 0 && self.tracked.kept == self.tracked.stamp + 1
+        }
+        #[cfg(not(feature = "embed"))]
+        false
+    }
+
+    pub(crate) fn keep_prefix(&mut self) {
+        #[cfg(feature = "embed")]
+        if self.tracked.end != 0 {
+            self.tracked.kept = self.tracked.stamp + 1;
+        }
     }
 
     /// The tracked prefix is not its image any more (a collection moved cells).
@@ -251,6 +272,7 @@ impl Arena {
             return false;
         }
         let end = t.end as usize;
+        t.stamp += 1;
         for (w, bits) in t.dirty.iter_mut().enumerate() {
             let mut rest = core::mem::take(bits);
             while rest != 0 {
@@ -517,6 +539,7 @@ impl Arena {
         if len == 0 {
             return;
         }
+        t.stamp += 1;
         let last = off.saturating_add(len - 1).min(t.end - 1) >> DIRTY_SHIFT;
         let mut page = off >> DIRTY_SHIFT;
         while page <= last {

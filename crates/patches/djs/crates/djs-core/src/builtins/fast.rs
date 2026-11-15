@@ -958,14 +958,14 @@ const REGEXP_MATCH_ALL: u16 = intrinsic_id("RegExpPrototypeMatchAll");
 /// is the original builtin `id`: a String method that hands over to it can run its
 /// leaf case directly.
 fn symbol_method(
-    heap: &Heap,
+    heap: &mut Heap,
     v: Value,
     which: usize,
     key: crate::heap::Atom,
     id: u16,
 ) -> Option<Obj> {
     let r = regexp::pristine(heap, v)?;
-    regexp::original_method(heap, which, key, id).then_some(r)
+    (heap.arena().prefix_kept() || regexp::original_method(heap, which, key, id)).then_some(r)
 }
 
 /// What replace and replaceAll search for.

@@ -640,6 +640,28 @@ const REGEXP_PROTOTYPE_EXEC: u16 = super::fast::intrinsic_id("RegExpPrototypeExe
 const REGEXP_PROTOTYPE_TEST: u16 = super::fast::intrinsic_id("RegExpPrototypeTest");
 const REGEXP_PROTOTYPE_MATCH: u16 = super::fast::intrinsic_id("RegExpPrototypeMatch");
 const REGEXP_SPECIES: u16 = super::fast::intrinsic_id("RegExpSpecies");
+const REGEXP_SYMBOL_METHODS: [(usize, Atom, u16); 4] = [
+    (
+        REPLACE,
+        atoms::SYM_REPLACE,
+        super::fast::intrinsic_id("RegExpPrototypeReplace"),
+    ),
+    (
+        SEARCH,
+        atoms::SYM_SEARCH,
+        super::fast::intrinsic_id("RegExpPrototypeSearch"),
+    ),
+    (
+        SPLIT,
+        atoms::SYM_SPLIT,
+        super::fast::intrinsic_id("RegExpPrototypeSplit"),
+    ),
+    (
+        MATCH_ALL,
+        atoms::SYM_MATCH_ALL,
+        super::fast::intrinsic_id("RegExpPrototypeMatchAll"),
+    ),
+];
 /// The accessors of %RegExp.prototype% that a pristine RegExp must still have (D1503).
 const REGEXP_GETTERS: [(Atom, u16); 9] = [
     (
@@ -775,13 +797,40 @@ pub(crate) fn last_index(heap: &Heap, r: Obj) -> Option<f64> {
 /// original `exec`, `flags`, flag getters, `constructor` and @@match, and %RegExp%'s
 /// @@species getter is the original. Then RegExpExec, the flags, SpeciesConstructor
 /// and IsRegExp read only data, and a fast path may skip them.
-pub(crate) fn pristine(heap: &Heap, v: Value) -> Option<Obj> {
+pub(crate) fn pristine(heap: &mut Heap, v: Value) -> Option<Obj> {
     let r = as_regexp(heap, v)?;
     let proto = realm::intrinsic_obj(heap, Intrinsic::RegExpProto);
     if heap.get_prototype_of(r) != Some(proto) || !heap.only_own_key(r, atoms::LAST_INDEX) {
         return None;
     }
     last_index(heap, r)?;
+    if heap.arena().prefix_kept() {
+        return Some(r);
+    }
+    let ctor = realm_pristine(heap)?;
+    if REGEXP_SYMBOL_METHODS
+        .into_iter()
+        .all(|(which, key, id)| original_method(heap, which, key, id))
+        && realm_below(heap, proto, ctor)
+    {
+        heap.arena_mut().keep_prefix();
+    }
+    Some(r)
+}
+
+fn realm_below(heap: &Heap, proto: Obj, ctor: Obj) -> bool {
+    let end = heap.arena().tracked_end();
+    let r = realm::realm(heap);
+    let installed: crate::heap::Ref = heap.arena().get(r, crate::heap::cells::Realm::INSTALLED);
+    let below = |c: u32| c + heap.cell_size(c) <= end;
+    below(r)
+        && below(installed.0)
+        && heap.storage_below(proto, end)
+        && heap.storage_below(ctor, end)
+        && heap.storage_below(realm::intrinsic_obj(heap, Intrinsic::Constructors), end)
+}
+
+fn realm_pristine(heap: &Heap) -> Option<Obj> {
     if !original_method(heap, EXEC, atoms::EXEC, REGEXP_PROTOTYPE_EXEC)
         || !original_method(heap, MATCH, atoms::SYM_MATCH, REGEXP_PROTOTYPE_MATCH)
     {
@@ -798,8 +847,11 @@ pub(crate) fn pristine(heap: &Heap, v: Value) -> Option<Obj> {
     if proto_value(heap, CONSTRUCTOR, atoms::CONSTRUCTOR, false) != Some(ctor) {
         return None;
     }
-    match heap.get_own_property(ctor.as_object()?, atoms::SYM_SPECIES) {
-        Some(Property::Accessor { getter, .. }) if getter == installed(REGEXP_SPECIES) => Some(r),
+    let ctor = ctor.as_object()?;
+    match heap.get_own_property(ctor, atoms::SYM_SPECIES) {
+        Some(Property::Accessor { getter, .. }) if getter == installed(REGEXP_SPECIES) => {
+            Some(ctor)
+        }
         _ => None,
     }
 }
