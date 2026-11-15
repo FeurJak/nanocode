@@ -219,7 +219,7 @@
   "claude-opus-5-5: system[4]": {
    "reason": "nanocode runs native Claude models in Code Mode (exec and wait) by design: its Code Mode prompt and environment are system blocks, without Claude Code's git status, attribution and environment messages, and the core block leaves out the /fast line that only the direct Claude Code context adds.",
    "claude": "<absent>",
-   "nanocode": "055724fe1ba9 (680 chars)"
+   "nanocode": "000e907cbe03 (691 chars)"
   },
   "glm-5.2: cache markers": {
    "reason": "nanocode uses top-level automatic caching plus a marker on the last tool instead of a per-block marker on the last message.",
