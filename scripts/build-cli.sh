@@ -117,7 +117,7 @@ case $target in
     "$(dirname "$bolt")/llvm-strip" --remove-section=.note.bolt_info -o "$out/$agent" "$train/optimized"
     python3 "$root/scripts/trim-cli.py" "$out/$agent"
     if [ "$agent" != "$bin" ]; then
-      cargo build --locked --offline --release --target "$target" --manifest-path bin/nanocode-front/Cargo.toml >&2
+      CARGO_TARGET_DIR="$dir" cargo build --locked --offline --release --target "$target" --manifest-path bin/nanocode-front/Cargo.toml >&2
       cp "$dir/$target/release/nanocode-front" "$out/$bin"
     fi
     ;;
