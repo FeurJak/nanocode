@@ -160,8 +160,8 @@ pub fn alloc_template_in(
     code.copy_from_slice(p.code);
     let ic_count = number_caches(code, cache_sites);
     let (words, records) = rest.split_at_mut(4 * p.captures.len());
-    for (c, w) in p.captures.iter().zip(words.chunks_exact_mut(4)) {
-        w.copy_from_slice(&c.to_le_bytes());
+    for (c, w) in p.captures.iter().zip(words.as_chunks_mut::<4>().0) {
+        *w = c.to_le_bytes();
     }
     write_handlers(p.handlers, records);
     a.set(off, FuncTemplate::IC_COUNT, ic_count);

@@ -337,12 +337,12 @@ pub(crate) fn image_fingerprint(image: &[u8]) -> u64 {
 
 pub(crate) fn hash_words(mut h: u64, bytes: &[u8]) -> u64 {
     let mut mix = |w: u64| h = (h.rotate_left(5) ^ w).wrapping_mul(0x517c_c1b7_2722_0a95);
-    let mut words = bytes.chunks_exact(8);
-    for word in &mut words {
-        mix(u64::from_le_bytes(word.try_into().unwrap_or_default()));
+    let (words, rest) = bytes.as_chunks::<8>();
+    for word in words {
+        mix(u64::from_le_bytes(*word));
     }
     let mut tail = [0; 8];
-    tail[..words.remainder().len()].copy_from_slice(words.remainder());
+    tail[..rest.len()].copy_from_slice(rest);
     mix(u64::from_le_bytes(tail));
     mix(bytes.len() as u64);
     h

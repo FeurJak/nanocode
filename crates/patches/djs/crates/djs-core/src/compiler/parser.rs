@@ -332,6 +332,7 @@ pub struct ClassSpan {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[expect(clippy::enum_variant_names, reason = "public API: every class span kind is a static one")]
 pub enum ClassSpanKind {
     /// A static block's body, between its braces.
     StaticBlock,

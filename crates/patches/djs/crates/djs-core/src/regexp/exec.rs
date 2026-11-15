@@ -134,6 +134,10 @@ impl Input<'_> {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     fn unit(&self, i: usize) -> u32 {
         match self {
             Input::Latin1(s) => s[i] as u32,
@@ -167,6 +171,10 @@ impl Caps<'_> {
     /// Number of groups, including group 0.
     pub fn len(&self) -> usize {
         self.slots.len() / 2
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.slots.len() < 2
     }
 
     /// The `(start, end)` of group `i`, or `None` if it did not participate.

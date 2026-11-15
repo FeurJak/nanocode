@@ -307,6 +307,9 @@ impl Arena {
         self.len
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
 
     /// The memory cap in bytes.
     pub fn limit(&self) -> u32 {

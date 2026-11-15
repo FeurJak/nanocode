@@ -27,12 +27,12 @@ impl Handler {
 
 /// Encodes handler records into `out`, which is that many records long.
 pub(super) fn write_handlers(handlers: &[Handler], out: &mut [u8]) {
-    for (h, r) in handlers.iter().zip(out.chunks_exact_mut(RECORD)) {
+    for (h, r) in handlers.iter().zip(out.as_chunks_mut::<RECORD>().0) {
         for (w, b) in [h.start, h.end, h.target, h.depth]
             .iter()
-            .zip(r.chunks_exact_mut(4))
+            .zip(r.as_chunks_mut::<4>().0)
         {
-            b.copy_from_slice(&w.to_le_bytes());
+            *b = w.to_le_bytes();
         }
     }
 }
@@ -57,6 +57,10 @@ impl<'a> HandlerTable<'a> {
 
     pub fn len(&self) -> usize {
         self.bytes.len() / RECORD
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
     }
 
     pub fn get(&self, i: usize) -> Option<Handler> {
