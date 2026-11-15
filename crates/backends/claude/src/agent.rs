@@ -853,6 +853,7 @@ pub struct ClaudeBuilder {
     persist_finish: bool,
     skip_finish_check: bool,
     late_finish_check: Option<std::time::Duration>,
+    finish_check_min_requests: Option<std::num::NonZeroU32>,
     result_effort: Option<crate::Effort>,
     stop_at_target: bool,
     tool_result_tokens: Option<std::num::NonZeroU64>,
@@ -947,6 +948,7 @@ impl ClaudeBuilder {
             persist_finish: false,
             skip_finish_check: false,
             late_finish_check: None,
+            finish_check_min_requests: None,
             result_effort: None,
             stop_at_target: false,
             tool_result_tokens: None,
@@ -1406,6 +1408,11 @@ impl ClaudeBuilder {
 
     pub const fn late_finish_check(mut self, min_left: std::time::Duration) -> Self {
         self.late_finish_check = Some(min_left);
+        self
+    }
+
+    pub const fn finish_check_min_requests(mut self, min: std::num::NonZeroU32) -> Self {
+        self.finish_check_min_requests = Some(min);
         self
     }
 
@@ -3169,6 +3176,7 @@ struct State {
     persist_finish: bool,
     skip_finish_check: bool,
     late_finish_check: Option<std::time::Duration>,
+    finish_check_min_requests: Option<std::num::NonZeroU32>,
     result_effort: Option<crate::Effort>,
     stop_at_target: bool,
     tool_result_tokens: Option<std::num::NonZeroU64>,

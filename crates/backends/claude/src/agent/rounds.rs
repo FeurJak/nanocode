@@ -1406,7 +1406,11 @@ pub(super) fn run_rounds<'a>(
                         .await?;
                     continue;
                 }
-                if !state.skip_finish_check {
+                if !state.skip_finish_check
+                    && state
+                        .finish_check_min_requests
+                        .is_none_or(|min| index.saturating_add(1) >= min.get())
+                {
                     cursor.finish_checked = true;
                     let notice = nanocode_tool_host::deadline::finish_notice_with(
                         state.deadline.as_ref(),
