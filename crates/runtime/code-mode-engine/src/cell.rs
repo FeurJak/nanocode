@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::{BTreeSet, HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, VecDeque},
     sync::{
         Arc, LazyLock, OnceLock, Weak,
         atomic::{AtomicUsize, Ordering},
@@ -8,7 +8,9 @@ use std::{
     time::Duration,
 };
 
-use djs_embed::{Builder, Data, HostCall, HostFn, Instance, Limits, Snapshot, Source, Throw};
+use djs_embed::{
+    Builder, CallId, Data, HostCall, HostFn, Instance, Limits, Snapshot, Source, Throw,
+};
 use nanocode_platform::Instant;
 use nanocode_sync::{Atom, Slot};
 use serde::{Deserialize, Serialize, Serializer};
@@ -101,8 +103,9 @@ const CATALOG: u32 = 12;
 const QUIET: u32 = 13;
 const EXIT: u32 = 14;
 const STORE: u32 = 15;
+const SETTLE: u32 = 16;
 
-const HOST_FNS: [(u32, &str); 13] = [
+const HOST_FNS: [(u32, &str); 14] = [
     (TOOL, "__nanocodeTool"),
     (CONTENT, "__nanocodeContent"),
     (TEXT, "__nanocodeText"),
@@ -116,6 +119,7 @@ const HOST_FNS: [(u32, &str); 13] = [
     (SETTLED, "__nanocodeSettled"),
     (CATALOG, "__nanocodeCatalog"),
     (EXIT, "__nanocodeExit"),
+    (SETTLE, "__nanocodeSettle"),
 ];
 
 #[derive(Clone)]
@@ -330,6 +334,18 @@ pub(crate) enum Reply<'a> {
     Text(Cow<'a, str>),
     Lossy(Vec<u8>),
     Bytes(Vec<u8>),
+    Promise(u64),
+    Settle {
+        call: CallId,
+        fulfilled: bool,
+        handled: bool,
+    },
+}
+
+pub(crate) struct PendingTool {
+    pub(crate) call: Option<CallId>,
+    pub(crate) host: bool,
+    pub(crate) name: String,
 }
 
 pub(crate) struct ExecutionState {
@@ -338,7 +354,8 @@ pub(crate) struct ExecutionState {
     stored: HashMap<String, Arc<RawValue>>,
     written: HashMap<String, Arc<RawValue>>,
     tools: Option<Arc<CellTools>>,
-    pending_tools: HashSet<u64>,
+    pending_tools: HashMap<u64, PendingTool>,
+    settles: HashMap<u64, (CallId, bool)>,
     pending_timeouts: HashMap<u64, PendingTimeout>,
     timeout_order: BTreeSet<(Instant, u64)>,
     next_tool_id: u64,
@@ -381,7 +398,8 @@ impl ExecutionState {
             stored: HashMap::new(),
             written: HashMap::new(),
             tools: None,
-            pending_tools: HashSet::new(),
+            pending_tools: HashMap::new(),
+            settles: HashMap::new(),
             pending_timeouts: HashMap::new(),
             timeout_order: BTreeSet::new(),
             next_tool_id: 1,
@@ -437,6 +455,7 @@ impl ExecutionState {
     pub(crate) fn clear(&mut self) {
         self.tools = None;
         self.pending_tools.clear();
+        self.settles.clear();
         self.pending_timeouts.clear();
         self.timeout_order.clear();
         self.journal = None;
@@ -525,7 +544,7 @@ impl ExecutionState {
             ));
         }
         let known = match &entry {
-            JournalEntry::Result { id, .. } => self.pending_tools.contains(id),
+            JournalEntry::Result { id, .. } => self.pending_tools.contains_key(id),
             JournalEntry::Timer { id } => self.pending_timeouts.contains_key(id),
             _ => false,
         };
@@ -603,8 +622,7 @@ impl ExecutionState {
                 let name = text(call, 0)?;
                 let input_json = text(call, 1)?;
                 let host = call.arg(2).as_bool().unwrap_or(false);
-                self.tool(name, &input_json, host)
-                    .map(|id| Reply::Number(id as f64))
+                self.tool(name, &input_json, host).map(Reply::Promise)
             }
             CONTENT => self.content(&text(call, 0)?).map(|()| Reply::Nothing),
             TEXT => {
@@ -677,6 +695,18 @@ impl ExecutionState {
                 self.exited = Some(text(call, 0)?);
                 Ok(Reply::Nothing)
             }
+            SETTLE => {
+                let id = call.arg(0).as_number().unwrap_or(0.0) as u64;
+                let fulfilled = call.arg(2).as_bool().unwrap_or(false);
+                Ok(self
+                    .settles
+                    .remove(&id)
+                    .map_or(Reply::Nothing, |(call, host)| Reply::Settle {
+                        call,
+                        fulfilled,
+                        handled: !host && !fulfilled,
+                    }))
+            }
             CATALOG => {
                 let schemas = call.arg(0).as_number().is_some_and(|kind| kind != 0.0);
                 Ok(self.tools.as_ref().map_or(Reply::Nothing, |tools| {
@@ -696,7 +726,14 @@ impl ExecutionState {
             .map_err(|error| Throw::type_error(format!("invalid tool input: {error}")))?;
         let id = self.next_tool_id;
         self.next_tool_id = self.next_tool_id.saturating_add(1);
-        self.pending_tools.insert(id);
+        self.pending_tools.insert(
+            id,
+            PendingTool {
+                call: None,
+                host,
+                name: name.clone(),
+            },
+        );
         let cell_id = self.execution_id;
         if !self.journaling() {
             self.send(RuntimeEvent::ToolCall {
@@ -812,17 +849,27 @@ impl ExecutionState {
         }
     }
 
+    pub(crate) fn bind_tool(&mut self, id: u64, call: CallId) {
+        if let Some(tool) = self.pending_tools.get_mut(&id) {
+            tool.call = Some(call);
+        }
+    }
+
+    pub(crate) fn settle_later(&mut self, id: u64, call: CallId, host: bool) {
+        self.settles.insert(id, (call, host));
+    }
+
     pub(crate) fn resolve_tool(
         &mut self,
         id: u64,
         encoded: &str,
         success: bool,
-    ) -> Result<(), String> {
-        if !self.pending_tools.remove(&id) {
+    ) -> Result<PendingTool, String> {
+        let Some(tool) = self.pending_tools.remove(&id) else {
             return Err(format!(
                 "embedded Code Mode received a result for unknown tool call {id}"
             ));
-        }
+        };
         if self.journal.is_some() {
             self.record(
                 JournalEntry::Result {
@@ -833,7 +880,7 @@ impl ExecutionState {
                 encoded.len(),
             );
         }
-        Ok(())
+        Ok(tool)
     }
 
     pub(crate) fn awaits_tools(&self) -> bool {

@@ -22,6 +22,7 @@ use crate::{
 #[cfg(target_family = "wasm")]
 pub const DEFAULT_INTERRUPT_CHECKS: u64 = 10_000;
 
+const OUT_OF_MEMORY: &str = "Script stopped: the cell ran out of memory.";
 const EXHAUSTED: &str = "Script stopped: one synchronous run exceeded this host's CPU budget for a cell. Split long loops with await (for example await new Promise((resolve) => setTimeout(resolve, 0))).";
 
 #[cfg(target_family = "wasm")]
@@ -99,7 +100,7 @@ impl Machine {
                     let stored = state.take_written();
                     state.send(RuntimeEvent::Error {
                         cell_id: state.execution_id,
-                        message: "Script stopped: the cell ran out of memory.".to_owned(),
+                        message: OUT_OF_MEMORY.to_owned(),
                         stored,
                     });
                     return Ok(Ran::Finished);
@@ -110,17 +111,33 @@ impl Machine {
             match step {
                 Step::Yield => return Ok(Ran::Sliced),
                 Step::HostCall(id) => {
-                    let call = instance.host_call(id).map_err(failure)?;
+                    let mut call = instance.host_call(id).map_err(failure)?;
                     let reply = state.host_call(&call);
-                    let reply = match &reply {
-                        Ok(Reply::Nothing) => Ok(Value::Undefined),
-                        Ok(Reply::Number(number)) => Ok(Value::Number(*number)),
-                        Ok(Reply::Text(text)) => Ok(Value::Str(text)),
-                        Ok(Reply::Lossy(bytes)) => Ok(Value::Utf8(bytes)),
-                        Ok(Reply::Bytes(bytes)) => Ok(Value::Bytes(bytes)),
-                        Err(throw) => Err(throw.clone()),
-                    };
-                    call.reply(reply).map_err(failure)?;
+                    if let Ok(Reply::Promise(tool)) = reply {
+                        let promise = call.reply_promise().map_err(failure)?;
+                        state.bind_tool(tool, promise);
+                    } else {
+                        if let Ok(Reply::Settle {
+                            call: target,
+                            fulfilled,
+                            handled,
+                        }) = reply
+                        {
+                            call.settle_with_arg(target, 1, fulfilled, handled)
+                                .map_err(failure)?;
+                        }
+                        let reply = match &reply {
+                            Ok(Reply::Nothing | Reply::Promise(_) | Reply::Settle { .. }) => {
+                                Ok(Value::Undefined)
+                            }
+                            Ok(Reply::Number(number)) => Ok(Value::Number(*number)),
+                            Ok(Reply::Text(text)) => Ok(Value::Str(text)),
+                            Ok(Reply::Lossy(bytes)) => Ok(Value::Utf8(bytes)),
+                            Ok(Reply::Bytes(bytes)) => Ok(Value::Bytes(bytes)),
+                            Err(throw) => Err(throw.clone()),
+                        };
+                        call.reply(reply).map_err(failure)?;
+                    }
                     if let Some(encoded) = state.exited() {
                         instance.abort();
                         return ended(state, &encoded);
@@ -189,16 +206,46 @@ impl Machine {
         id: u64,
         encoded: &str,
         success: bool,
-    ) -> Result<(), String> {
-        state.resolve_tool(id, encoded, success)?;
+    ) -> Result<Idle, String> {
+        let tool = state.resolve_tool(id, encoded, success)?;
+        let call = tool
+            .call
+            .ok_or_else(|| format!("embedded Code Mode has no promise for tool call {id}"))?;
+        if success {
+            let Body::Awake(instance) = &mut self.body else {
+                return Err(parked());
+            };
+            match instance.resolve_json(call, encoded) {
+                Ok(true) => {
+                    self.phase = Phase::Running;
+                    self.settled = Some(Settled::Waiting);
+                    self.slices = 0;
+                    return Ok(Idle::Busy);
+                }
+                Ok(false) => {}
+                Err(djs_embed::Error::OutOfMemory) => {
+                    let stored = state.take_written();
+                    state.send(RuntimeEvent::Error {
+                        cell_id: state.execution_id,
+                        message: OUT_OF_MEMORY.to_owned(),
+                        stored,
+                    });
+                    return Ok(Idle::Finished);
+                }
+                Err(error) => return Err(failure(error)),
+            }
+        }
+        state.settle_later(id, call, tool.host);
         self.deliver(
             Value::Object(&[
                 ("id", Value::Number(id as f64)),
                 ("ok", Value::Bool(success)),
                 ("value", Value::Str(encoded)),
+                ("name", Value::Str(&tool.name)),
             ]),
             Settled::Waiting,
-        )
+        )?;
+        Ok(Idle::Busy)
     }
 
     fn deliver_timeout(&mut self, state: &mut ExecutionState, id: u64) -> Result<(), String> {
@@ -226,9 +273,9 @@ impl Machine {
                 encoded,
                 success,
             }) => {
-                self.deliver_result(state, id, &encoded, success)?;
+                let idle = self.deliver_result(state, id, &encoded, success)?;
                 self.settled = Some(Settled::Checkpoint);
-                return Ok(Idle::Busy);
+                return Ok(idle);
             }
             Replaying::Input(JournalEntry::Timer { id }) => {
                 self.deliver_timeout(state, id)?;
@@ -248,8 +295,7 @@ impl Machine {
             });
         }
         if let Some((id, encoded, success)) = self.results.pop_front() {
-            self.deliver_result(state, id, &encoded, success)?;
-            return Ok(Idle::Busy);
+            return self.deliver_result(state, id, &encoded, success);
         }
         match self.settled.take() {
             Some(Settled::Checkpoint) => state.send_checkpoint(),

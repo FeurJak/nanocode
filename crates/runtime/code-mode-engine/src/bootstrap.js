@@ -17,6 +17,7 @@
   const nativeValue = native("__nanocodeValue");
   const nativeSettled = native("__nanocodeSettled");
   const nativeNext = native("__nanocodeNext");
+  const nativeSettle = native("__nanocodeSettle");
   const nativeCatalog = native("__nanocodeCatalog");
   const nativeExit = native("__nanocodeExit");
   const definitionsJson = native("__nanocodeDefinitions");
@@ -87,8 +88,6 @@
   const now = typeof globalThis.performance?.now === "function"
     ? () => globalThis.performance.now()
     : () => Date.now();
-  const ignore = () => {};
-  const pendingTools = [];
   const timers = new Map();
   let stopCell = () => {};
   let settle = () => {};
@@ -424,23 +423,6 @@
     nativeClearTimeout(id);
   }
 
-  function callTool(name, encodedInput, host, observed) {
-    const id = nativeTool(name, encodedInput, host);
-    const settlers = [undefined, undefined, name, undefined];
-    const promise = new Promise((resolve, reject) => {
-      settlers[0] = resolve;
-      settlers[1] = reject;
-    });
-    if (observed) settlers[3] = promise;
-    pendingTools[id] = settlers;
-    return promise;
-  }
-
-  function reject(settlers, error) {
-    settlers[3]?.catch(ignore);
-    settlers[1](error);
-  }
-
   async function pump() {
     for (;;) {
       const event = await nativeNext();
@@ -453,17 +435,16 @@
       } else if (Array.isArray(event)) {
         for (const reason of event) uncaught(reason, true);
       } else {
-        const settlers = pendingTools[event.id];
-        pendingTools[event.id] = undefined;
-        if (settlers) {
-          try {
-            const value = jsonParse(event.value);
-            if (event.ok) settlers[0](value);
-            else reject(settlers, toolFailure(settlers[2], value));
-          } catch (error) {
-            reject(settlers, error);
-          }
+        let ok = event.ok;
+        let value;
+        try {
+          value = jsonParse(event.value);
+          if (!ok) value = toolFailure(event.name, value);
+        } catch (error) {
+          ok = false;
+          value = error;
         }
+        nativeSettle(event.id, value, ok);
       }
     }
   }
@@ -497,21 +478,20 @@
     const terminal = () => failure === undefined
       ? done
       : jsonStringify({ type: "error", message: failure });
-    const invokeTool = (name, input, host = false, observed = false) => {
+    const invokeTool = (name, input, host) => {
       const encodedInput = input === undefined ? "null" : jsonStringify(input);
-      return callTool(name, encodedInput, host, observed);
+      return nativeTool(name, encodedInput, host);
     };
     for (const definition of definitions) {
       declaredTools[definition.name] = (input) => invokeTool(
         definition.tool_name,
         input === undefined && definition.kind === "function" ? {} : input,
         false,
-        true,
       );
     }
     const tools = createCodeTools(
       Object.keys(declaredTools),
-      (name, input) => declaredTools[name] ? declaredTools[name](input) : invokeTool(name, input, false, true),
+      (name, input) => declaredTools[name] ? declaredTools[name](input) : invokeTool(name, input, false),
     );
 
     function text(value) {

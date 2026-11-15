@@ -515,6 +515,31 @@ impl Instance {
         }
     }
 
+    pub fn resolve_json(&mut self, id: CallId, text: &str) -> Result<bool, Error> {
+        self.settle_with(id, |vm| vm.resolve_host_call_json(id.0, text))
+    }
+
+    fn settle_with<R>(
+        &mut self,
+        id: CallId,
+        f: impl FnOnce(&mut Vm) -> Result<R, VmError>,
+    ) -> Result<R, Error> {
+        if self.call.as_ref().is_none_or(|c| c.over) {
+            return Err(Error::Usage("no call in progress".into()));
+        }
+        let r = self.guard(|vm| {
+            f(vm).map_err(|e| match e {
+                VmError::Heap(_) => Error::OutOfMemory,
+                _ => Error::Usage(format!("no pending host call {}", id.0)),
+            })
+        })?;
+        match r {
+            Ok(r) => Ok(r),
+            Err(e @ Error::Usage(_)) => Err(e),
+            Err(e) => self.fail(e),
+        }
+    }
+
     /// Answers the pending async host call `id` with an array of the reasons of the promises
     /// that were rejected without a handler and still have none, oldest first, and
     /// forgets them; the number of reasons. With none, the call stays pending. For a host
@@ -756,5 +781,27 @@ impl HostCall<'_> {
     /// Answers the call ([`Instance::resolve`]).
     pub fn reply(self, reply: Result<Value<'_>, Throw>) -> Result<(), Error> {
         self.instance.resolve(self.id, reply)
+    }
+
+    pub fn reply_promise(self) -> Result<CallId, Error> {
+        let id = self.id;
+        self.instance
+            .settle_with(id, |vm| vm.promise_host_call(id.0))
+            .map(CallId)
+    }
+
+    pub fn settle_with_arg(
+        &mut self,
+        target: CallId,
+        i: usize,
+        fulfilled: bool,
+        handled: bool,
+    ) -> Result<(), Error> {
+        let v = self.args.get(i).copied().unwrap_or(Raw::UNDEFINED);
+        self.instance.settle_with(target, |vm| match (fulfilled, handled) {
+            (true, _) => vm.resolve_host_call(target.0, Ok(v)),
+            (false, true) => vm.reject_host_call_handled(target.0, v),
+            (false, false) => vm.resolve_host_call(target.0, Err(v)),
+        })
     }
 }

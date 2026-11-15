@@ -4067,7 +4067,7 @@ impl<'h> Exec<'h> {
 // ------------------------------------------------------------------ host calls
 
 /// Adds a pending host call and returns its id.
-fn add_host_call(
+pub(crate) fn add_host_call(
     heap: &mut Heap,
     fn_id: u32,
     args: u32,

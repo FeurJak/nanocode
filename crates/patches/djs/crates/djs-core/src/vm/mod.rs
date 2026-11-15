@@ -832,6 +832,45 @@ impl Vm {
         })
     }
 
+    pub fn promise_host_call(&mut self, parked: u32) -> Result<u32, VmError> {
+        let c = run::host_call_cell(&self.heap, parked).ok_or(VmError::UnknownHostCall)?;
+        let fn_id = self.heap.arena().get(c, HostCall::FN);
+        let proto = intrinsic_obj(&self.heap, Intrinsic::PromiseProto);
+        let p = Value::object(run::promise::alloc(&mut self.heap, Some(proto))?);
+        let args = self.heap.alloc_value_array(0)?;
+        let id = run::add_host_call(&mut self.heap, fn_id, args, Value::UNDEFINED, p)?;
+        let c = run::host_call_cell(&self.heap, id).ok_or(VmError::UnknownHostCall)?;
+        let flags = self.heap.arena().get(c, HostCall::FLAGS);
+        self.heap
+            .arena_mut()
+            .set(c, HostCall::FLAGS, flags | HOST_CALL_REPORTED);
+        self.resolve_host_call(parked, Ok(p))?;
+        Ok(id)
+    }
+
+    pub fn resolve_host_call_json(&mut self, call_id: u32, text: &str) -> Result<bool, VmError> {
+        let opts = crate::json::ParseOptions {
+            object_proto: Some(intrinsic_obj(&self.heap, Intrinsic::ObjectProto)),
+            array_proto: Some(intrinsic_obj(&self.heap, Intrinsic::ArrayProto)),
+            ..Default::default()
+        };
+        let text = self.heap.alloc_str(text)?;
+        match crate::json::parse(&mut self.heap, text, &opts) {
+            Ok(v) => self.resolve_host_call(call_id, Ok(v)).map(|()| true),
+            Err(crate::json::ParseError::Syntax(_)) => Ok(false),
+            Err(crate::json::ParseError::Heap(e)) => Err(VmError::Heap(e)),
+        }
+    }
+
+    pub fn reject_host_call_handled(&mut self, call_id: u32, reason: Value) -> Result<(), VmError> {
+        let c = run::host_call_cell(&self.heap, call_id).ok_or(VmError::UnknownHostCall)?;
+        if let Some(p) = self.heap.arena().get::<Value>(c, HostCall::PROMISE).as_object() {
+            let f = run::promise::flags(&self.heap, p);
+            run::promise::set_flags(&mut self.heap, p, f | run::promise::FLAG_HANDLED);
+        }
+        self.resolve_host_call(call_id, Err(reason))
+    }
+
     /// Completes the host call `call_id` with a value (`Ok`) or an exception (`Err`).
     /// The call the VM is parked on returns or throws at the call; `run` continues
     /// afterwards. An async call (D1374) goes into the host inbox (D1670), in any VM
