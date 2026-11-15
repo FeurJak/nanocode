@@ -30,14 +30,29 @@ pub(crate) fn bignum_ksqr_16_32(z: &mut [u64], x: &[u64], t: &mut [u64; 24]) {
     debug_assert!(z.len() == 32);
     debug_assert!(x.len() == 16);
     // SAFETY: inline assembly. see [crate::low::inline_assembly_safety] for safety info.
-    unsafe {
-        core::arch::asm!(
+    unsafe { bignum_ksqr_16_32_assembly(z.as_mut_ptr(), x.as_ptr(), t.as_mut_ptr()) };
+}
+
+#[unsafe(naked)]
+unsafe extern "sysv64" fn bignum_ksqr_16_32_assembly(_: *mut u64, _: *const u64, _: *mut u64) {
+    core::arch::naked_asm!(
+        Cfi!(".cfi_startproc"),
         Q!("    endbr64         " ),
         Q!("    push            " "rbp"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset rbp, 0"),
         Q!("    push            " "r12"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r12, 0"),
         Q!("    push            " "r13"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r13, 0"),
         Q!("    push            " "r14"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r14, 0"),
         Q!("    push            " "r15"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r15, 0"),
         Q!("    xor             " "ebp, ebp"),
         Q!("    mov             " "rdx, QWORD PTR [rsi]"),
         Q!("    mulx            " "rax, r9, QWORD PTR [rsi + 0x8]"),
@@ -646,24 +661,21 @@ pub(crate) fn bignum_ksqr_16_32(z: &mut [u64], x: &[u64], t: &mut [u64; 24]) {
         Q!("    adox            " "rcx, rbp"),
         Q!("    mov             " "QWORD PTR [rdi + 0xf8], rcx"),
         Q!("    pop             " "r15"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r15"),
         Q!("    pop             " "r14"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r14"),
         Q!("    pop             " "r13"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r13"),
         Q!("    pop             " "r12"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r12"),
         Q!("    pop             " "rbp"),
-        inout("rdi") z.as_mut_ptr() => _,
-        inout("rsi") x.as_ptr() => _,
-        inout("rdx") t.as_mut_ptr() => _,
-        // clobbers
-        out("r10") _,
-        out("r11") _,
-        out("r12") _,
-        out("r13") _,
-        out("r14") _,
-        out("r15") _,
-        out("r8") _,
-        out("r9") _,
-        out("rax") _,
-        out("rcx") _,
-            )
-    };
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore rbp"),
+        Q!("    ret             " ),
+        Cfi!(".cfi_endproc"),
+    )
 }

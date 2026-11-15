@@ -50,14 +50,21 @@ macro_rules! mulpadd {
 /// use the variant "bignum_deamont_p256" instead.
 pub(crate) fn bignum_demont_p256(z: &mut [u64; 4], x: &[u64; 4]) {
     // SAFETY: inline assembly. see [crate::low::inline_assembly_safety] for safety info.
-    unsafe {
-        core::arch::asm!(
+    unsafe { bignum_demont_p256_assembly(z.as_mut_ptr(), x.as_ptr()) };
+}
+
+#[unsafe(naked)]
+unsafe extern "sysv64" fn bignum_demont_p256_assembly(_: *mut u64, _: *const u64) {
+    core::arch::naked_asm!(
+        Cfi!(".cfi_startproc"),
 
         Q!("    endbr64         " ),
 
         // Save one more register to play with
 
         Q!("    push            " "rbx"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset rbx, 0"),
 
         // Set up an initial 4-word window [r11,r10,r9,r8] = x
 
@@ -111,17 +118,9 @@ pub(crate) fn bignum_demont_p256(z: &mut [u64; 4], x: &[u64; 4]) {
         // Restore saved register and return
 
         Q!("    pop             " "rbx"),
-
-        inout("rdi") z.as_mut_ptr() => _,
-        inout("rsi") x.as_ptr() => _,
-        // clobbers
-        out("r10") _,
-        out("r11") _,
-        out("r8") _,
-        out("r9") _,
-        out("rax") _,
-        out("rcx") _,
-        out("rdx") _,
-            )
-    };
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore rbx"),
+        Q!("    ret             " ),
+        Cfi!(".cfi_endproc"),
+    )
 }

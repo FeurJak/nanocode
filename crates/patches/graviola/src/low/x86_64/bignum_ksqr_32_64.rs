@@ -34,15 +34,32 @@ pub(crate) fn bignum_ksqr_32_64(z: &mut [u64], x: &[u64], t: &mut [u64; 72]) {
     debug_assert!(z.len() == 64);
     debug_assert!(x.len() == 32);
     // SAFETY: inline assembly. see [crate::low::inline_assembly_safety] for safety info.
-    unsafe {
-        core::arch::asm!(
+    unsafe { bignum_ksqr_32_64_assembly(z.as_mut_ptr(), x.as_ptr(), t.as_mut_ptr()) };
+}
+
+#[unsafe(naked)]
+unsafe extern "sysv64" fn bignum_ksqr_32_64_assembly(_: *mut u64, _: *const u64, _: *mut u64) {
+    core::arch::naked_asm!(
+        Cfi!(".cfi_startproc"),
         Q!("    endbr64         " ),
         Q!("    push            " "rbp"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset rbp, 0"),
         Q!("    push            " "rbx"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset rbx, 0"),
         Q!("    push            " "r12"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r12, 0"),
         Q!("    push            " "r13"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r13, 0"),
         Q!("    push            " "r14"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r14, 0"),
         Q!("    push            " "r15"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r15, 0"),
         Q!("    mov             " "rcx, rdx"),
         Q!("    call            " Label!("Lbignum_ksqr_32_64_local_bignum_sqr_16_32", 2, After)),
         Q!("    lea             " "rsi, [rsi + 0x80]"),
@@ -445,14 +462,28 @@ pub(crate) fn bignum_ksqr_32_64(z: &mut [u64], x: &[u64], t: &mut [u64; 72]) {
         Q!("    adc             " "QWORD PTR [rcx + 0x1e8], rax"),
         Q!("    adc             " "QWORD PTR [rcx + 0x1f0], rax"),
         Q!("    adc             " "QWORD PTR [rcx + 0x1f8], rax"),
+        Cfi!(".cfi_remember_state"),
         Q!("    pop             " "r15"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r15"),
         Q!("    pop             " "r14"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r14"),
         Q!("    pop             " "r13"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r13"),
         Q!("    pop             " "r12"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r12"),
         Q!("    pop             " "rbx"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore rbx"),
         Q!("    pop             " "rbp"),
-        // proc hoisting in -> ret after Lbignum_ksqr_32_64_local_bignum_sqr_16_32
-        Q!("    jmp             " Label!("hoist_finish", 3, After)),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore rbp"),
+        Q!("    ret             " ),
+        Cfi!(".cfi_restore_state"),
+        Cfi!(".cfi_def_cfa_offset 64"),
 
         Q!(Label!("Lbignum_ksqr_32_64_local_bignum_sqr_16_32", 2) ":"),
         Q!("    xor             " "ebp, ebp"),
@@ -1063,21 +1094,6 @@ pub(crate) fn bignum_ksqr_32_64(z: &mut [u64], x: &[u64], t: &mut [u64; 72]) {
         Q!("    adox            " "rbx, rbp"),
         Q!("    mov             " "QWORD PTR [rdi + 0xf8], rbx"),
         Q!("    ret             " ),
-        Q!(Label!("hoist_finish", 3) ":"),
-        inout("rdi") z.as_mut_ptr() => _,
-        inout("rsi") x.as_ptr() => _,
-        inout("rdx") t.as_mut_ptr() => _,
-        // clobbers
-        out("r10") _,
-        out("r11") _,
-        out("r12") _,
-        out("r13") _,
-        out("r14") _,
-        out("r15") _,
-        out("r8") _,
-        out("r9") _,
-        out("rax") _,
-        out("rcx") _,
-            )
-    };
+        Cfi!(".cfi_endproc"),
+    )
 }

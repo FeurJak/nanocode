@@ -102,13 +102,22 @@ macro_rules! ishort {
 pub(crate) fn bignum_negmodinv(z: &mut [u64], x: &[u64]) {
     debug_assert!(z.len() == x.len());
     // SAFETY: inline assembly. see [crate::low::inline_assembly_safety] for safety info.
-    unsafe {
-        core::arch::asm!(
+    unsafe { bignum_negmodinv_assembly(z.len(), z.as_mut_ptr(), x.as_ptr()) };
+}
+
+#[unsafe(naked)]
+unsafe extern "sysv64" fn bignum_negmodinv_assembly(_: usize, _: *mut u64, _: *const u64) {
+    core::arch::naked_asm!(
+        Cfi!(".cfi_startproc"),
 
         Q!("    endbr64         " ),
 
         Q!("    push            " "rbx"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset rbx, 0"),
         Q!("    push            " "r12"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r12, 0"),
 
         // If k = 0 do nothing (actually we could have avoiding the pushes and pops)
 
@@ -228,18 +237,12 @@ pub(crate) fn bignum_negmodinv(z: &mut [u64], x: &[u64]) {
 
         Q!(Label!("Lbignum_negmodinv_end", 2) ":"),
         Q!("    pop             " "r12"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r12"),
         Q!("    pop             " "rbx"),
-        inout("rdi") z.len() => _,
-        inout("rsi") z.as_mut_ptr() => _,
-        inout("rdx") x.as_ptr() => _,
-        // clobbers
-        out("r10") _,
-        out("r11") _,
-        out("r12") _,
-        out("r8") _,
-        out("r9") _,
-        out("rax") _,
-        out("rcx") _,
-            )
-    };
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore rbx"),
+        Q!("    ret             " ),
+        Cfi!(".cfi_endproc"),
+    )
 }

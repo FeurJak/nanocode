@@ -59,14 +59,31 @@ use crate::low::macros::*;
 /// buffer size "buflen", but also how many elements of the buffer are
 /// needed to provide the 256 entries for the output.
 pub(crate) fn mlkem_rej_uniform_vartime(r: &mut [i16; 256], input: &[u8], table: &[i8]) -> u64 {
-    let ret: u64;
     // SAFETY: inline assembly. see [crate::low::inline_assembly_safety] for safety info.
     unsafe {
-        core::arch::asm!(
+        mlkem_rej_uniform_vartime_assembly(
+            r.as_mut_ptr(),
+            input.as_ptr(),
+            input.len(),
+            table.as_ptr(),
+        )
+    }
+}
+
+#[unsafe(naked)]
+unsafe extern "sysv64" fn mlkem_rej_uniform_vartime_assembly(
+    _: *mut i16,
+    _: *const u8,
+    _: usize,
+    _: *const i8,
+) -> u64 {
+    core::arch::naked_asm!(
+        Cfi!(".cfi_startproc"),
 
         Q!("    endbr64         " ),
 
         Q!("    sub             " "rsp, 0x210"),
+        Cfi!(".cfi_adjust_cfa_offset " "0x210"),
 
         Q!("    xor             " "eax, eax"),
         Q!("    test            " "rdx, rdx"),
@@ -122,24 +139,8 @@ pub(crate) fn mlkem_rej_uniform_vartime(r: &mut [i16; 256], input: &[u8], table:
 
         Q!(Label!("Lmlkem_rej_uniform_VARIABLE_TIME_end", 2) ":"),
         Q!("    add             " "rsp, 0x210"),
-
-        inout("rdi") r.as_mut_ptr() => _,
-        inout("rsi") input.as_ptr() => _,
-        inout("rdx") input.len() => _,
-        inout("rcx") table.as_ptr() => _,
-        out("rax") ret,
-        // clobbers
-        out("r10") _,
-        out("r11") _,
-        out("r8") _,
-        out("r9") _,
-        out("zmm0") _,
-        out("zmm1") _,
-        out("zmm2") _,
-        out("zmm3") _,
-        out("zmm4") _,
-        out("zmm5") _,
-            )
-    };
-    ret
+        Cfi!(".cfi_adjust_cfa_offset -(" "0x210" ")"),
+        Q!("    ret             " ),
+        Cfi!(".cfi_endproc"),
+    )
 }

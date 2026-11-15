@@ -11,6 +11,20 @@ macro_rules! Q {
     };
 }
 
+#[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
+macro_rules! Cfi {
+    ($($e:expr)*) => {
+        concat!($($e ,)*)
+    };
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+macro_rules! Cfi {
+    ($($e:expr)*) => {
+        ""
+    };
+}
+
 /// Label macro, which just resolves to the id as a string,
 /// but keeps the name close to it in the code.
 ///

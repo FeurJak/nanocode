@@ -368,8 +368,13 @@ macro_rules! double_twice4 {
 /// as specified in the relevant RFC (https://www.rfc-editor.org/rfc/rfc7748).
 pub(crate) fn curve25519_x25519base(res: &mut [u64; 4], scalar: &[u64; 4]) {
     // SAFETY: inline assembly. see [crate::low::inline_assembly_safety] for safety info.
-    unsafe {
-        core::arch::asm!(
+    unsafe { curve25519_x25519base_assembly(res.as_mut_ptr(), scalar.as_ptr()) };
+}
+
+#[unsafe(naked)]
+unsafe extern "sysv64" fn curve25519_x25519base_assembly(_: *mut u64, _: *const u64) {
+    core::arch::naked_asm!(
+        Cfi!(".cfi_startproc"),
         Q!(Label!("curve25519_x25519base_byte", 2) ":"),
 
         Q!("    endbr64         " ),
@@ -380,12 +385,25 @@ pub(crate) fn curve25519_x25519base(res: &mut [u64; 4], scalar: &[u64; 4]) {
         // Save registers, make room for temps, preserve input arguments.
 
         Q!("    push            " "rbx"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset rbx, 0"),
         Q!("    push            " "rbp"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset rbp, 0"),
         Q!("    push            " "r12"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r12, 0"),
         Q!("    push            " "r13"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r13, 0"),
         Q!("    push            " "r14"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r14, 0"),
         Q!("    push            " "r15"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r15, 0"),
         Q!("    sub             " "rsp, " NSPACE!()),
+        Cfi!(".cfi_adjust_cfa_offset " NSPACE!()),
 
         // Move the output pointer to a stable place
 
@@ -2270,32 +2288,32 @@ pub(crate) fn curve25519_x25519base(res: &mut [u64; 4], scalar: &[u64; 4]) {
         // Restore stack and registers
 
         Q!("    add             " "rsp, " NSPACE!()),
+        Cfi!(".cfi_adjust_cfa_offset -(" NSPACE!() ")"),
 
         Q!("    pop             " "r15"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r15"),
         Q!("    pop             " "r14"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r14"),
         Q!("    pop             " "r13"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r13"),
         Q!("    pop             " "r12"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r12"),
         Q!("    pop             " "rbp"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore rbp"),
         Q!("    pop             " "rbx"),
-        inout("rdi") res.as_mut_ptr() => _,
-        inout("rsi") scalar.as_ptr() => _,
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore rbx"),
+        Q!("    ret             " ),
+        Cfi!(".cfi_endproc"),
         Lcurve25519_x25519base_edwards25519_0g = sym Lcurve25519_x25519base_edwards25519_0g,
         Lcurve25519_x25519base_edwards25519_8g = sym Lcurve25519_x25519base_edwards25519_8g,
         Lcurve25519_x25519base_edwards25519_gtable = sym Lcurve25519_x25519base_edwards25519_gtable,
-        // clobbers
-        out("r10") _,
-        out("r11") _,
-        out("r12") _,
-        out("r13") _,
-        out("r14") _,
-        out("r15") _,
-        out("r8") _,
-        out("r9") _,
-        out("rax") _,
-        out("rcx") _,
-        out("rdx") _,
-            )
-    };
+    )
 }
 
 // ****************************************************************************

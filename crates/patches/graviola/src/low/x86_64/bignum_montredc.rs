@@ -151,19 +151,46 @@ pub(crate) fn bignum_montredc(z: &mut [u64], x: &[u64], m: &[u64], p: u64) {
     debug_assert!(z.len() == m.len());
     // SAFETY: inline assembly. see [crate::low::inline_assembly_safety] for safety info.
     unsafe {
-        core::arch::asm!(
+        bignum_montredc_assembly(z.len(), z.as_mut_ptr(), x.len(), x.as_ptr(), m.as_ptr(), p)
+    };
+}
+
+#[unsafe(naked)]
+unsafe extern "sysv64" fn bignum_montredc_assembly(
+    _: usize,
+    _: *mut u64,
+    _: usize,
+    _: *const u64,
+    _: *const u64,
+    _: u64,
+) {
+    core::arch::naked_asm!(
+        Cfi!(".cfi_startproc"),
 
         Q!("    endbr64         " ),
 
         // Save registers and allocate space on stack for non-register variable w
 
         Q!("    push            " "rbx"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset rbx, 0"),
         Q!("    push            " "rbp"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset rbp, 0"),
         Q!("    push            " "r12"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r12, 0"),
         Q!("    push            " "r13"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r13, 0"),
         Q!("    push            " "r14"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r14, 0"),
         Q!("    push            " "r15"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r15, 0"),
         Q!("    sub             " "rsp, 8"),
+        Cfi!(".cfi_adjust_cfa_offset " "8"),
 
         // If k = 0 the whole operation is trivial
 
@@ -327,27 +354,26 @@ pub(crate) fn bignum_montredc(z: &mut [u64], x: &[u64], m: &[u64], p: u64) {
 
         Q!(Label!("Lbignum_montredc_end", 2) ":"),
         Q!("    add             " "rsp, 8"),
+        Cfi!(".cfi_adjust_cfa_offset -(" "8" ")"),
         Q!("    pop             " "r15"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r15"),
         Q!("    pop             " "r14"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r14"),
         Q!("    pop             " "r13"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r13"),
         Q!("    pop             " "r12"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r12"),
         Q!("    pop             " "rbp"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore rbp"),
         Q!("    pop             " "rbx"),
-
-        inout("rdi") z.len() => _,
-        inout("rsi") z.as_mut_ptr() => _,
-        inout("rdx") x.len() => _,
-        inout("rcx") x.as_ptr() => _,
-        inout("r8") m.as_ptr() => _,
-        inout("r9") p => _,
-        // clobbers
-        out("r10") _,
-        out("r11") _,
-        out("r12") _,
-        out("r13") _,
-        out("r14") _,
-        out("r15") _,
-        out("rax") _,
-            )
-    };
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore rbx"),
+        Q!("    ret             " ),
+        Cfi!(".cfi_endproc"),
+    )
 }

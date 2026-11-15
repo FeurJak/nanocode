@@ -505,8 +505,13 @@ macro_rules! store4 {
 /// implicit z coordinate assumed to be the identity.
 pub(crate) fn p256_montjmixadd(p3: &mut [u64; 12], p1: &[u64; 12], p2: &[u64; 8]) {
     // SAFETY: inline assembly. see [crate::low::inline_assembly_safety] for safety info.
-    unsafe {
-        core::arch::asm!(
+    unsafe { p256_montjmixadd_assembly(p3.as_mut_ptr(), p1.as_ptr(), p2.as_ptr()) };
+}
+
+#[unsafe(naked)]
+unsafe extern "sysv64" fn p256_montjmixadd_assembly(_: *mut u64, _: *const u64, _: *const u64) {
+    core::arch::naked_asm!(
+        Cfi!(".cfi_startproc"),
 
         Q!("    endbr64         " ),
 
@@ -514,13 +519,26 @@ pub(crate) fn p256_montjmixadd(p3: &mut [u64; 12], p1: &[u64; 12], p2: &[u64; 8]
         // Put the input y in rbp where it lasts as long as it's needed.
 
         Q!("    push            " "rbx"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset rbx, 0"),
         Q!("    push            " "rbp"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset rbp, 0"),
         Q!("    push            " "r12"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r12, 0"),
         Q!("    push            " "r13"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r13, 0"),
         Q!("    push            " "r14"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r14, 0"),
         Q!("    push            " "r15"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r15, 0"),
 
         Q!("    sub             " "rsp, " NSPACE!()),
+        Cfi!(".cfi_adjust_cfa_offset " NSPACE!()),
 
         Q!("    mov             " "rbp, rdx"),
 
@@ -587,27 +605,26 @@ pub(crate) fn p256_montjmixadd(p3: &mut [u64; 12], p1: &[u64; 12], p2: &[u64; 8]
         // Restore stack and registers
 
         Q!("    add             " "rsp, " NSPACE!()),
+        Cfi!(".cfi_adjust_cfa_offset -(" NSPACE!() ")"),
         Q!("    pop             " "r15"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r15"),
         Q!("    pop             " "r14"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r14"),
         Q!("    pop             " "r13"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r13"),
         Q!("    pop             " "r12"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r12"),
         Q!("    pop             " "rbp"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore rbp"),
         Q!("    pop             " "rbx"),
-
-        inout("rdi") p3.as_mut_ptr() => _,
-        inout("rsi") p1.as_ptr() => _,
-        inout("rdx") p2.as_ptr() => _,
-        // clobbers
-        out("r10") _,
-        out("r11") _,
-        out("r12") _,
-        out("r13") _,
-        out("r14") _,
-        out("r15") _,
-        out("r8") _,
-        out("r9") _,
-        out("rax") _,
-        out("rcx") _,
-            )
-    };
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore rbx"),
+        Q!("    ret             " ),
+        Cfi!(".cfi_endproc"),
+    )
 }

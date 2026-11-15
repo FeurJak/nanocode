@@ -26,27 +26,51 @@ use crate::low::macros::*;
 /// Functionally equivalent to bignum_emontredc (see that file for more detail).
 /// But in general assumes that the input k is a multiple of 8.
 pub(crate) fn bignum_emontredc_8n(z: &mut [u64], m: &[u64], w: u64) -> u64 {
-    let ret: u64;
     debug_assert!(z.len() == m.len() * 2);
     debug_assert!(z.len().is_multiple_of(8));
     // SAFETY: inline assembly. see [crate::low::inline_assembly_safety] for safety info.
-    unsafe {
-        core::arch::asm!(
+    unsafe { bignum_emontredc_8n_assembly(m.len(), z.as_mut_ptr(), m.as_ptr(), w) }
+}
+
+#[unsafe(naked)]
+unsafe extern "sysv64" fn bignum_emontredc_8n_assembly(
+    _: usize,
+    _: *mut u64,
+    _: *const u64,
+    _: u64,
+) -> u64 {
+    core::arch::naked_asm!(
+        Cfi!(".cfi_startproc"),
         Q!("    endbr64         " ),
         Q!("    push            " "rbp"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset rbp, 0"),
         Q!("    push            " "rbx"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset rbx, 0"),
         Q!("    push            " "r12"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r12, 0"),
         Q!("    push            " "r13"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r13, 0"),
         Q!("    push            " "r14"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r14, 0"),
         Q!("    push            " "r15"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r15, 0"),
         Q!("    xor             " "eax, eax"),
         Q!("    shr             " "rdi, 0x3"),
         Q!("    je              " Label!("Lbignum_emontredc_8n_end", 2, After)),
         Q!("    lea             " "rbx, [rdi -0x1]"),
         Q!("    shl             " "rbx, 0x6"),
         Q!("    push            " "rbx"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
         Q!("    push            " "rdi"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
         Q!("    sub             " "rsp, 0x10"),
+        Cfi!(".cfi_adjust_cfa_offset " "0x10"),
         Q!("    mov             " "QWORD PTR [rsp], 0x0"),
         Q!("    mov             " "rdi, rdx"),
 
@@ -563,30 +587,30 @@ pub(crate) fn bignum_emontredc_8n(z: &mut [u64], m: &[u64], w: u64) -> u64 {
         Q!("    sub             " "QWORD PTR [rsp + 0x10], 0x1"),
         Q!("    jne             " Label!("Lbignum_emontredc_8n_outerloop", 3, Before)),
         Q!("    pop             " "rax"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
         Q!("    add             " "rsp, 0x18"),
+        Cfi!(".cfi_adjust_cfa_offset -(" "0x18" ")"),
 
         Q!(Label!("Lbignum_emontredc_8n_end", 2) ":"),
         Q!("    pop             " "r15"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r15"),
         Q!("    pop             " "r14"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r14"),
         Q!("    pop             " "r13"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r13"),
         Q!("    pop             " "r12"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r12"),
         Q!("    pop             " "rbx"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore rbx"),
         Q!("    pop             " "rbp"),
-        inout("rdi") m.len() => _,
-        inout("rsi") z.as_mut_ptr() => _,
-        inout("rdx") m.as_ptr() => _,
-        inout("rcx") w => _,
-        out("rax") ret,
-        // clobbers
-        out("r10") _,
-        out("r11") _,
-        out("r12") _,
-        out("r13") _,
-        out("r14") _,
-        out("r15") _,
-        out("r8") _,
-        out("r9") _,
-            )
-    };
-    ret
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore rbp"),
+        Q!("    ret             " ),
+        Cfi!(".cfi_endproc"),
+    )
 }

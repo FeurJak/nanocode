@@ -489,7 +489,24 @@ pub(crate) fn edwards25519_scalarmuldouble(
 ) {
     // SAFETY: inline assembly. see [crate::low::inline_assembly_safety] for safety info.
     unsafe {
-        core::arch::asm!(
+        edwards25519_scalarmuldouble_assembly(
+            res.as_mut_ptr(),
+            scalar.as_ptr(),
+            point.as_ptr(),
+            bscalar.as_ptr(),
+        )
+    };
+}
+
+#[unsafe(naked)]
+unsafe extern "sysv64" fn edwards25519_scalarmuldouble_assembly(
+    _: *mut u64,
+    _: *const u64,
+    _: *const u64,
+    _: *const u64,
+) {
+    core::arch::naked_asm!(
+        Cfi!(".cfi_startproc"),
 
         Q!("    endbr64         " ),
 
@@ -499,12 +516,25 @@ pub(crate) fn edwards25519_scalarmuldouble(
         // Save registers, make room for temps, preserve input arguments.
 
         Q!("    push            " "rbx"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset rbx, 0"),
         Q!("    push            " "rbp"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset rbp, 0"),
         Q!("    push            " "r12"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r12, 0"),
         Q!("    push            " "r13"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r13, 0"),
         Q!("    push            " "r14"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r14, 0"),
         Q!("    push            " "r15"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r15, 0"),
         Q!("    sub             " "rsp, " NSPACE!()),
+        Cfi!(".cfi_adjust_cfa_offset " NSPACE!()),
 
         // Move the output pointer to a stable place
 
@@ -3425,19 +3455,34 @@ pub(crate) fn edwards25519_scalarmuldouble(
         Q!("    lea             " "rsi, [rsp + " ACC!() "+ 32]"),
         Q!("    lea             " "rbp, [rsp + " TAB!() "]"),
         mul_p25519!(x_0!(), x_1!(), x_2!()),
+        Cfi!(".cfi_remember_state"),
 
         // Restore stack and registers
 
         Q!("    add             " "rsp, " NSPACE!()),
+        Cfi!(".cfi_adjust_cfa_offset -(" NSPACE!() ")"),
 
         Q!("    pop             " "r15"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r15"),
         Q!("    pop             " "r14"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r14"),
         Q!("    pop             " "r13"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r13"),
         Q!("    pop             " "r12"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r12"),
         Q!("    pop             " "rbp"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore rbp"),
         Q!("    pop             " "rbx"),
-        // proc hoisting in -> ret after Ledwards25519_scalarmuldouble_pepadd
-        Q!("    jmp             " Label!("hoist_finish", 9, After)),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore rbx"),
+        Q!("    ret             " ),
+        Cfi!(".cfi_restore_state"),
+        Cfi!(".cfi_def_cfa_offset 1536"),
 
         // ****************************************************************************
         // Localized versions of subroutines.
@@ -3448,6 +3493,7 @@ pub(crate) fn edwards25519_scalarmuldouble(
         Q!(Label!("Ledwards25519_scalarmuldouble_epdouble", 2) ":"),
 
         Q!("    sub             " "rsp, 5 * " NUMSIZE!()),
+        Cfi!(".cfi_adjust_cfa_offset " "5 *" NUMSIZE!()),
         add_twice4!(t0!(), x_1!(), y_1!()),
         sqr_4!(t1!(), z_1!()),
         sqr_4!(t2!(), x_1!()),
@@ -3463,11 +3509,13 @@ pub(crate) fn edwards25519_scalarmuldouble(
         mul_4!(w_0!(), t1!(), t4!()),
         mul_4!(x_0!(), t1!(), t3!()),
         Q!("    add             " "rsp, 5 * " NUMSIZE!()),
+        Cfi!(".cfi_adjust_cfa_offset -(" "5 *" NUMSIZE!() ")"),
         Q!("    ret             " ),
 
         Q!(Label!("Ledwards25519_scalarmuldouble_pdouble", 6) ":"),
 
         Q!("    sub             " "rsp, 5 * " NUMSIZE!()),
+        Cfi!(".cfi_adjust_cfa_offset " "5 *" NUMSIZE!()),
         add_twice4!(t0!(), x_1!(), y_1!()),
         sqr_4!(t1!(), z_1!()),
         sqr_4!(t2!(), x_1!()),
@@ -3482,11 +3530,13 @@ pub(crate) fn edwards25519_scalarmuldouble(
         mul_4!(z_0!(), t3!(), t2!()),
         mul_4!(x_0!(), t1!(), t3!()),
         Q!("    add             " "rsp, 5 * " NUMSIZE!()),
+        Cfi!(".cfi_adjust_cfa_offset -(" "5 *" NUMSIZE!() ")"),
         Q!("    ret             " ),
 
         Q!(Label!("Ledwards25519_scalarmuldouble_epadd", 3) ":"),
 
         Q!("    sub             " "rsp, 6 * " NUMSIZE!()),
+        Cfi!(".cfi_adjust_cfa_offset " "6 *" NUMSIZE!()),
         mul_4!(t0!(), w_1!(), w_2!()),
         sub_twice4!(t1!(), y_1!(), x_1!()),
         sub_twice4!(t2!(), y_2!(), x_2!()),
@@ -3507,11 +3557,13 @@ pub(crate) fn edwards25519_scalarmuldouble(
         mul_4!(y_0!(), t3!(), t5!()),
         mul_4!(z_0!(), t1!(), t3!()),
         Q!("    add             " "rsp, 6 * " NUMSIZE!()),
+        Cfi!(".cfi_adjust_cfa_offset -(" "6 *" NUMSIZE!() ")"),
         Q!("    ret             " ),
 
         Q!(Label!("Ledwards25519_scalarmuldouble_pepadd", 4) ":"),
 
         Q!("    sub             " "rsp, 6 * " NUMSIZE!()),
+        Cfi!(".cfi_adjust_cfa_offset " "6 *" NUMSIZE!()),
         double_twice4!(t0!(), z_1!()),
         sub_twice4!(t1!(), y_1!(), x_1!()),
         add_twice4!(t2!(), y_1!(), x_1!()),
@@ -3527,25 +3579,11 @@ pub(crate) fn edwards25519_scalarmuldouble(
         mul_4!(y_0!(), t0!(), t1!()),
         mul_4!(w_0!(), t5!(), t1!()),
         Q!("    add             " "rsp, 6 * " NUMSIZE!()),
+        Cfi!(".cfi_adjust_cfa_offset -(" "6 *" NUMSIZE!() ")"),
         Q!("    ret             " ),
-        Q!(Label!("hoist_finish", 9) ":"),
-        inout("rdi") res.as_mut_ptr() => _,
-        inout("rsi") scalar.as_ptr() => _,
-        inout("rdx") point.as_ptr() => _,
-        inout("rcx") bscalar.as_ptr() => _,
+        Cfi!(".cfi_endproc"),
         Ledwards25519_scalarmuldouble_table = sym Ledwards25519_scalarmuldouble_table,
-        // clobbers
-        out("r10") _,
-        out("r11") _,
-        out("r12") _,
-        out("r13") _,
-        out("r14") _,
-        out("r15") _,
-        out("r8") _,
-        out("r9") _,
-        out("rax") _,
-            )
-    };
+    )
 }
 
 // ****************************************************************************

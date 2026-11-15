@@ -44,7 +44,19 @@ pub(crate) fn sha3_keccak4_f1600(
 ) {
     // SAFETY: inline assembly. see [crate::low::inline_assembly_safety] for safety info.
     unsafe {
-        core::arch::asm!(
+        sha3_keccak4_f1600_assembly(a.as_mut_ptr(), rc.as_ptr(), rho8.as_ptr(), rho56.as_ptr())
+    };
+}
+
+#[unsafe(naked)]
+unsafe extern "sysv64" fn sha3_keccak4_f1600_assembly(
+    _: *mut [u64; 25],
+    _: *const u64,
+    _: *const u64,
+    _: *const u64,
+) {
+    core::arch::naked_asm!(
+        Cfi!(".cfi_startproc"),
 
         Q!("    endbr64         " ),
 
@@ -76,6 +88,7 @@ pub(crate) fn sha3_keccak4_f1600(
         // ymm2          A[24]   [state0[24], state1[24], state2[24], state3[24]] Input (%rdi) offsets: 0xC0, 0x188, 0x250, 0x318
 
         Q!("    mov             " "r11, rsp"),
+        Cfi!(".cfi_def_cfa_register r11"),
         Q!("    and             " "rsp, 0xffffffffffffffe0"),
         Q!("    sub             " "rsp, 0x300"),
 
@@ -653,30 +666,8 @@ pub(crate) fn sha3_keccak4_f1600(
         Q!("    vmovq           " "[rdi + 0x250], xmm15"),
         Q!("    vmovhpd         " "[rdi + 0x318], xmm15"),
         Q!("    mov             " "rsp, r11"),
-
-        inout("rdi") a.as_mut_ptr() => _,
-        inout("rsi") rc.as_ptr() => _,
-        inout("rdx") rho8.as_ptr() => _,
-        inout("rcx") rho56.as_ptr() => _,
-        // clobbers
-        out("r10") _,
-        out("r11") _,
-        out("zmm0") _,
-        out("zmm1") _,
-        out("zmm10") _,
-        out("zmm11") _,
-        out("zmm12") _,
-        out("zmm13") _,
-        out("zmm14") _,
-        out("zmm15") _,
-        out("zmm2") _,
-        out("zmm3") _,
-        out("zmm4") _,
-        out("zmm5") _,
-        out("zmm6") _,
-        out("zmm7") _,
-        out("zmm8") _,
-        out("zmm9") _,
-            )
-    };
+        Cfi!(".cfi_def_cfa_register rsp"),
+        Q!("    ret             " ),
+        Cfi!(".cfi_endproc"),
+    )
 }

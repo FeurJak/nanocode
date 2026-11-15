@@ -78,15 +78,24 @@ macro_rules! montreds {
 /// use the variant "bignum_deamont_p384" instead.
 pub(crate) fn bignum_demont_p384(z: &mut [u64; 6], x: &[u64; 6]) {
     // SAFETY: inline assembly. see [crate::low::inline_assembly_safety] for safety info.
-    unsafe {
-        core::arch::asm!(
+    unsafe { bignum_demont_p384_assembly(z.as_mut_ptr(), x.as_ptr()) };
+}
+
+#[unsafe(naked)]
+unsafe extern "sysv64" fn bignum_demont_p384_assembly(_: *mut u64, _: *const u64) {
+    core::arch::naked_asm!(
+        Cfi!(".cfi_startproc"),
 
         Q!("    endbr64         " ),
 
         // Save more registers to play with
 
         Q!("    push            " "r12"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r12, 0"),
         Q!("    push            " "r13"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r13, 0"),
 
         // Set up an initial window [r13,r12,r11,r10,r9,r8] = x
 
@@ -133,20 +142,12 @@ pub(crate) fn bignum_demont_p384(z: &mut [u64; 6], x: &[u64; 6]) {
         // Restore registers and return
 
         Q!("    pop             " "r13"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r13"),
         Q!("    pop             " "r12"),
-
-        inout("rdi") z.as_mut_ptr() => _,
-        inout("rsi") x.as_ptr() => _,
-        // clobbers
-        out("r10") _,
-        out("r11") _,
-        out("r12") _,
-        out("r13") _,
-        out("r8") _,
-        out("r9") _,
-        out("rax") _,
-        out("rcx") _,
-        out("rdx") _,
-            )
-    };
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r12"),
+        Q!("    ret             " ),
+        Cfi!(".cfi_endproc"),
+    )
 }

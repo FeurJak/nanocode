@@ -98,10 +98,15 @@ macro_rules! Q8 { () => { Q!("(25 * " N!() ")") } }
 ///  * y^2 = 1 and top bit of input is set
 ///    Cannot be the canonical encoding of (0,1) or (0,-1)
 pub(crate) fn edwards25519_decode(z: &mut [u64; 8], c: &[u8; 32]) -> bool {
-    let ret: u64;
     // SAFETY: inline assembly. see [crate::low::inline_assembly_safety] for safety info.
-    unsafe {
-        core::arch::asm!(
+    let ret = unsafe { edwards25519_decode_assembly(z.as_mut_ptr(), c.as_ptr()) };
+    ret == 0
+}
+
+#[unsafe(naked)]
+unsafe extern "sysv64" fn edwards25519_decode_assembly(_: *mut u64, _: *const u8) -> u64 {
+    core::arch::naked_asm!(
+        Cfi!(".cfi_startproc"),
 
         Q!("    endbr64         " ),
 
@@ -111,13 +116,26 @@ pub(crate) fn edwards25519_decode(z: &mut [u64; 8], c: &[u8; 32]) -> bool {
         // Save registers and make room for temporaries
 
         Q!("    push            " "rbx"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset rbx, 0"),
         Q!("    push            " "rbp"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset rbp, 0"),
         Q!("    push            " "r12"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r12, 0"),
         Q!("    push            " "r13"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r13, 0"),
         Q!("    push            " "r14"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r14, 0"),
         Q!("    push            " "r15"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r15, 0"),
 
         Q!("    sub             " "rsp, " NSPACE!()),
+        Cfi!(".cfi_adjust_cfa_offset " NSPACE!()),
 
         // Save the return pointer for the end so we can overwrite rdi later
 
@@ -457,19 +475,34 @@ pub(crate) fn edwards25519_decode(z: &mut [u64; 8], c: &[u8; 32]) -> bool {
         Q!("    mov             " "[rdi + 56], rcx"),
 
         Q!("    mov             " "rax, rdx"),
+        Cfi!(".cfi_remember_state"),
 
         // Restore stack and registers
 
         Q!("    add             " "rsp, " NSPACE!()),
+        Cfi!(".cfi_adjust_cfa_offset -(" NSPACE!() ")"),
 
         Q!("    pop             " "r15"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r15"),
         Q!("    pop             " "r14"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r14"),
         Q!("    pop             " "r13"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r13"),
         Q!("    pop             " "r12"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r12"),
         Q!("    pop             " "rbp"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore rbp"),
         Q!("    pop             " "rbx"),
-        // proc hoisting in -> ret after Ledwards25519_decode_loop
-        Q!("    jmp             " Label!("hoist_finish", 4, After)),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore rbx"),
+        Q!("    ret             " ),
+        Cfi!(".cfi_restore_state"),
+        Cfi!(".cfi_def_cfa_offset 320"),
 
         // *************************************************************
         // Local z = x * y
@@ -688,22 +721,6 @@ pub(crate) fn edwards25519_decode(z: &mut [u64; 8], c: &[u8; 32]) -> bool {
         Q!("    mov             " "[rdi + 16], rcx"),
         Q!("    mov             " "[rdi + 24], rdx"),
         Q!("    ret             " ),
-        Q!(Label!("hoist_finish", 4) ":"),
-        inout("rdi") z.as_mut_ptr() => _,
-        inout("rsi") c.as_ptr() => _,
-        out("rax") ret,
-        // clobbers
-        out("r10") _,
-        out("r11") _,
-        out("r12") _,
-        out("r13") _,
-        out("r14") _,
-        out("r15") _,
-        out("r8") _,
-        out("r9") _,
-        out("rcx") _,
-        out("rdx") _,
-            )
-    };
-    ret == 0
+        Cfi!(".cfi_endproc"),
+    )
 }

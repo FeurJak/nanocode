@@ -148,17 +148,35 @@ pub(crate) fn bignum_montifier(z: &mut [u64], m: &[u64], t: &mut [u64]) {
     debug_assert!(z.len() == m.len());
     debug_assert!(z.len() <= t.len());
     // SAFETY: inline assembly. see [crate::low::inline_assembly_safety] for safety info.
-    unsafe {
-        core::arch::asm!(
+    unsafe { bignum_montifier_assembly(m.len(), z.as_mut_ptr(), m.as_ptr(), t.as_mut_ptr()) };
+}
+
+#[unsafe(naked)]
+unsafe extern "sysv64" fn bignum_montifier_assembly(
+    _: usize,
+    _: *mut u64,
+    _: *const u64,
+    _: *mut u64,
+) {
+    core::arch::naked_asm!(
+        Cfi!(".cfi_startproc"),
 
         Q!("    endbr64         " ),
 
         // Save some additional registers for use, copy args out of RCX and RDX
 
         Q!("    push            " "rbp"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset rbp, 0"),
         Q!("    push            " "rbx"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset rbx, 0"),
         Q!("    push            " "r12"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r12, 0"),
         Q!("    push            " "r13"),
+        Cfi!(".cfi_adjust_cfa_offset 8"),
+        Cfi!(".cfi_rel_offset r13, 0"),
 
         Q!("    mov             " m!() ", rdx"),
         Q!("    mov             " t!() ", rcx"),
@@ -606,22 +624,18 @@ pub(crate) fn bignum_montifier(z: &mut [u64], m: &[u64], t: &mut [u64]) {
 
         Q!(Label!("Lbignum_montifier_end", 2) ":"),
         Q!("    pop             " "r13"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r13"),
         Q!("    pop             " "r12"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore r12"),
         Q!("    pop             " "rbx"),
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore rbx"),
         Q!("    pop             " "rbp"),
-
-        inout("rdi") m.len() => _,
-        inout("rsi") z.as_mut_ptr() => _,
-        inout("rdx") m.as_ptr() => _,
-        inout("rcx") t.as_mut_ptr() => _,
-        // clobbers
-        out("r10") _,
-        out("r11") _,
-        out("r12") _,
-        out("r13") _,
-        out("r8") _,
-        out("r9") _,
-        out("rax") _,
-            )
-    };
+        Cfi!(".cfi_adjust_cfa_offset -8"),
+        Cfi!(".cfi_restore rbp"),
+        Q!("    ret             " ),
+        Cfi!(".cfi_endproc"),
+    )
 }
