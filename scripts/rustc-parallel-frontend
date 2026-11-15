@@ -1,2 +1,5 @@
 #!/bin/sh
+case " $* " in
+  *" embed-bitcode=no "*) RUSTC_BOOTSTRAP=1 exec "$@" -Zthreads=0 -Zshare-generics=y ;;
+esac
 RUSTC_BOOTSTRAP=1 exec "$@" -Zthreads=0
