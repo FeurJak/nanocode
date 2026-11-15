@@ -410,7 +410,7 @@ fn scan_rest<const E: u8>(
 
 /// `scan_string` of one-byte input (`utf8` tells UTF-8 apart) from the first escape or
 /// multi-byte sequence at `p` on, `start` .. `p` plain: scans the rest and decodes it into
-/// `dec` in the same pass, plain bytes 8 at a time. `dec` holds the whole decoded string
+/// `dec` in the same pass, plain bytes 8 at a time. `dec[..len]` holds the decoded string
 /// unless a unit is above 0xFF (`two_byte`).
 #[inline(never)]
 fn scan_one(
@@ -422,31 +422,114 @@ fn scan_one(
     dec: &mut Vec<u8>,
 ) -> Result<(StrTok, usize), Fail> {
     const HIGH: u64 = 0x8080_8080_8080_8080;
-    let n = b.len();
-    let mut len = (p - start) as u64;
-    let mut two_byte = false;
-    dec.clear();
-    dec.extend_from_slice(&b[start..p]);
+    let mut q = p - start;
+    if dec.len() < q + 8 {
+        dec.resize(2 * q + 8, 0);
+    }
+    dec[..q].copy_from_slice(&b[start..p]);
     loop {
-        while let Some(w) = b.get(p..p + 8) {
-            let w = u64::from_le_bytes(w.try_into().unwrap());
-            let m = super::escape_mask8(w) | if utf8 { w & HIGH } else { 0 };
-            if m != 0 {
-                let k = (m.trailing_zeros() / 8) as usize;
-                if !two_byte {
-                    dec.extend_from_slice(&w.to_le_bytes());
-                    dec.truncate(dec.len() - 8 + k);
-                }
-                p += k;
-                len += k as u64;
-                break;
-            }
-            if !two_byte {
-                dec.extend_from_slice(&w.to_le_bytes());
-            }
-            p += 8;
-            len += 8;
+        if dec.len() < q + 8 {
+            dec.resize(2 * q + 8, 0);
         }
+        if let Some(w) = b.get(p..p + 8) {
+            let w = u64::from_le_bytes(w.try_into().unwrap());
+            dec[q..q + 8].copy_from_slice(&w.to_le_bytes());
+            let m = super::escape_mask8(w) | if utf8 { w & HIGH } else { 0 };
+            if m == 0 {
+                p += 8;
+                q += 8;
+                continue;
+            }
+            let k = (m.trailing_zeros() / 8) as usize;
+            p += k;
+            q += k;
+        }
+        let Some(&c) = b.get(p) else {
+            return fail(Msg::EndOfInput, quote);
+        };
+        p += 1;
+        let u = match c {
+            b'"' => break,
+            b'\\' => {
+                let Some(&e) = b.get(p) else {
+                    return fail(Msg::EndOfInput, quote);
+                };
+                p += 1;
+                match UNESCAPE[e as usize] {
+                    0 => return fail(Msg::BadEscape, p - 1),
+                    1 => {
+                        let mut u = 0;
+                        for _ in 0..4 {
+                            let Some(h) = hex(peek::<LATIN1>(b, p)) else {
+                                return fail(Msg::BadUnicode, p);
+                            };
+                            u = (u << 4) | h;
+                            p += 1;
+                        }
+                        if u > 0xFF {
+                            return scan_wide(b, p, quote, start, q as u64 + 1, utf8);
+                        }
+                        u as u8
+                    }
+                    d => d,
+                }
+            }
+            0x00..=0x1F => return fail(Msg::BadControl, p - 1),
+            _ if utf8 && c >= 0x80 => {
+                let Some((cp, l)) = utf8_char(b, p - 1) else {
+                    return fail(Msg::BadUtf8, p - 1);
+                };
+                p += l - 1;
+                if cp > 0xFF {
+                    let len = q as u64 + if cp > 0xFFFF { 2 } else { 1 };
+                    return scan_wide(b, p, quote, start, len, utf8);
+                }
+                cp as u8
+            }
+            _ => c,
+        };
+        dec[q] = u;
+        q += 1;
+    }
+    if q > MAX_LEN as usize {
+        return Err(Fail::Heap(HeapError::StringTooLong));
+    }
+    let tok = StrTok {
+        start,
+        end: p - 1,
+        len: q as u32,
+        two_byte: false,
+        escaped: true,
+    };
+    Ok((tok, p))
+}
+
+const UNESCAPE: [u8; 256] = {
+    let mut t = [0u8; 256];
+    t[b'b' as usize] = 0x08;
+    t[b'f' as usize] = 0x0C;
+    t[b'n' as usize] = 0x0A;
+    t[b'r' as usize] = 0x0D;
+    t[b't' as usize] = 0x09;
+    t[b'\\' as usize] = b'\\';
+    t[b'/' as usize] = b'/';
+    t[b'"' as usize] = b'"';
+    t[b'u' as usize] = 1;
+    t
+};
+
+#[cold]
+#[inline(never)]
+fn scan_wide(
+    b: &[u8],
+    mut p: usize,
+    quote: usize,
+    start: usize,
+    mut len: u64,
+    utf8: bool,
+) -> Result<(StrTok, usize), Fail> {
+    let n = b.len();
+    loop {
         if p >= n {
             return fail(Msg::EndOfInput, quote);
         }
@@ -461,29 +544,17 @@ fn scan_one(
                 }
                 let e = b[p];
                 p += 1;
-                let u = match e {
-                    b'b' => 0x08,
-                    b'f' => 0x0C,
-                    b'n' => 0x0A,
-                    b'r' => 0x0D,
-                    b't' => 0x09,
-                    b'\\' | b'/' | b'"' => e as u32,
-                    b'u' => {
-                        let mut u = 0;
+                match UNESCAPE[e as usize] {
+                    0 => return fail(Msg::BadEscape, p - 1),
+                    1 => {
                         for _ in 0..4 {
-                            let Some(h) = hex(peek::<LATIN1>(b, p)) else {
+                            if hex(peek::<LATIN1>(b, p)).is_none() {
                                 return fail(Msg::BadUnicode, p);
-                            };
-                            u = (u << 4) | h;
+                            }
                             p += 1;
                         }
-                        u
                     }
-                    _ => return fail(Msg::BadEscape, p - 1),
-                };
-                two_byte |= u > 0xFF;
-                if !two_byte {
-                    dec.push(u as u8);
+                    _ => {}
                 }
                 len += 1;
             }
@@ -492,18 +563,9 @@ fn scan_one(
                     return fail(Msg::BadUtf8, p - 1);
                 };
                 p += l - 1;
-                two_byte |= cp > 0xFF;
-                if !two_byte {
-                    dec.push(cp as u8);
-                }
                 len += if cp > 0xFFFF { 2 } else { 1 };
             }
-            _ => {
-                if !two_byte {
-                    dec.push(c);
-                }
-                len += 1;
-            }
+            _ => len += 1,
         }
     }
     if len > MAX_LEN as u64 {
@@ -513,7 +575,7 @@ fn scan_one(
         start,
         end: p - 1,
         len: len as u32,
-        two_byte,
+        two_byte: true,
         escaped: true,
     };
     Ok((tok, p))
@@ -1084,7 +1146,7 @@ impl<'a, 'o> Parser<'a, 'o> {
         };
         let at = (data - dst.offset()) as usize;
         if E != UTF16 && s.escaped && !s.two_byte {
-            newer[at..at + nbytes].copy_from_slice(&self.dec);
+            newer[at..at + nbytes].copy_from_slice(&self.dec[..nbytes]);
         } else {
             write_string::<E>(b, s, &mut newer[at..at + nbytes], s.two_byte);
         }
