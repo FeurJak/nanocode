@@ -11,6 +11,7 @@ pub(crate) fn environment_section(workspace: &str) -> String {
         ));
     }
     lines.extend(host_lines());
+    lines.push(format!(" - {UNTRUSTED}"));
     lines.push(format!("{DATE}{}", current_date()));
     lines.join("\n")
 }
@@ -186,6 +187,7 @@ impl ClaudeEnvironment {
         if let Some(version) = &self.os_version {
             lines.push(format!("OS Version: {version}"));
         }
+        lines.push(format!(" - {UNTRUSTED}"));
         lines.push(format!("{DATE}{}", self.date.unwrap_or_else(current_date)));
         let instructions = self.project_instructions.map(|text| {
             let heading = self.working_directory.map_or_else(
