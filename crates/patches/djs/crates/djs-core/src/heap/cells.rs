@@ -517,6 +517,8 @@ cells! {
         /// call's total fuel does not depend on how it was sliced. A Number, 0 for none,
         /// and 0 whenever the VM is quiescent (done, threw, idle).
         FUEL_DEBT: Value = 80,
+        SEGMENT: Value = 88,
+        SEGMENT_BASE: u32 = 96,
     };
 
     /// A realm record: the global object and the intrinsics, indexed by

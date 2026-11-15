@@ -468,23 +468,34 @@ impl Exec<'_> {
         let t = self.template_of(self.heap.value_array_get(arr, 0).as_object()?);
         let collect = self.opts.gc_stress || self.heap.gc_pending();
         let (stack, bp, hp) = (self.stack, self.bp, self.hp);
+        let room = self.heap.value_array_capacity(arr);
+        let seg = self.seg_base == 0 && arr >= self.heap.arena().tracked_end();
         let b = self.heap.arena_mut().hot_bytes();
         let len = ld32(b, arr + ValueArray::LEN.offset);
         let head = hot::template_head(b, t);
-        if (sp + hp_off + HEADER + head.locals + head.stack).max(sp + len + 2) > cap {
+        let need = (hp_off + HEADER + head.locals + head.stack).max(len + 2);
+        let seg = seg && need <= room;
+        if !seg && sp + need > cap {
             return None;
         }
-        let src = ValueArray::VALUES.at(arr, 0) as usize;
-        let dst = ValueArray::VALUES.at(stack, sp) as usize;
-        b.copy_within(src..src + 8 * len as usize, dst);
-        let slot = |i: u32| ValueArray::VALUES.at(stack, i);
-        let new_hp = sp + hp_off;
+        let (frames, base) = if seg {
+            let o = (arr + ValueArray::LEN.offset) as usize;
+            b[o..o + 4].copy_from_slice(&room.to_le_bytes());
+            (arr, 0)
+        } else {
+            let src = ValueArray::VALUES.at(arr, 0) as usize;
+            let dst = ValueArray::VALUES.at(stack, sp) as usize;
+            b.copy_within(src..src + 8 * len as usize, dst);
+            (stack, sp)
+        };
+        let slot = |i: u32| ValueArray::VALUES.at(frames, i);
+        let new_hp = base + hp_off;
         st(b, slot(new_hp + frame::PREV_BP), Value::int(bp as i32));
         st(b, slot(new_hp + frame::PREV_HP), Value::int(hp as i32));
         st(b, slot(new_hp + frame::RET_PC), Value::int(ret_pc as i32));
         st(b, slot(new_hp + frame::FLAGS), Value::int(cont.to_flags()));
         cost += (len / 8) as i64;
-        let mut top = sp + len;
+        let mut top = base + len;
         if state != START {
             st(b, slot(top), value);
             st(b, slot(top + 1), Value::FALSE);
@@ -516,7 +527,11 @@ impl Exec<'_> {
         let at_state = Object::SLOTS.at(g.0, STATE);
         st(b, at_state, Value::int(EXECUTING));
         self.heap.arena_mut().wrote(at_state, 8);
-        self.bp = sp;
+        if seg {
+            self.seg_base = sp;
+            self.stack = arr;
+        }
+        self.bp = base;
         self.hp = new_hp;
         self.pc = pc;
         self.enter_template(t);
@@ -533,7 +548,14 @@ impl Exec<'_> {
     #[inline(never)]
     pub(super) fn gen_yield_hot(&mut self, at: u32, sp: u32) -> Option<(u32, i64)> {
         let (stack, bp, hp) = (self.stack, self.bp, self.hp);
+        let seg = bp == 0 && self.seg_base != 0;
+        let (outer, base) = if seg {
+            (state::stack(self.heap), self.seg_base)
+        } else {
+            (stack, bp)
+        };
         let slot = |i: u32| ValueArray::VALUES.at(stack, i);
+        let oslot = |i: u32| ValueArray::VALUES.at(outer, i);
         let b = self.heap.arena_mut().hot_bytes();
         let h: [u8; 40] = hot::window(b, slot(hp));
         let hv = |k: u32| {
@@ -551,7 +573,7 @@ impl Exec<'_> {
             int(hv(frame::PREV_HP))?,
             int(hv(frame::RET_PC))?,
         );
-        if ld(b, slot(prev_hp + frame::FLAGS)).as_int()? & frame::FLAG_NATIVE != 0 {
+        if ld(b, oslot(prev_hp + frame::FLAGS)).as_int()? & frame::FLAG_NATIVE != 0 {
             return None;
         }
         let loc = u16::from_le_bytes(hot::window(b, self.code + at + 1)) as u32;
@@ -560,11 +582,19 @@ impl Exec<'_> {
             return None;
         }
         let [_, saved, _, _, _, kind] = self.heap.object_slots(g, STATE);
-        let arr = saved.as_internal()?;
         let len = sp - 1 - bp;
-        if kind.as_int() != Some(GENERATOR) || self.heap.value_array_capacity(arr) < len {
+        if kind.as_int() != Some(GENERATOR) {
             return None;
         }
+        let arr = if seg {
+            stack
+        } else {
+            let arr = saved.as_internal()?;
+            if self.heap.value_array_capacity(arr) < len {
+                return None;
+            }
+            arr
+        };
         let v = self.get(sp - 1);
         let r = if step {
             v
@@ -572,9 +602,10 @@ impl Exec<'_> {
             let proto = intrinsic_obj(self.heap, Intrinsic::ObjectProto);
             Value::object(self.heap.new_iter_result(Some(proto), v, false).ok()?)
         };
-        let dst = ValueArray::VALUES.at(arr, 0);
         let arena = self.heap.arena_mut();
-        arena.copy_within(slot(bp), 8 * len, dst);
+        if !seg {
+            arena.copy_within(slot(bp), 8 * len, ValueArray::VALUES.at(arr, 0));
+        }
         arena.set(arr, ValueArray::LEN, len);
         let size = OPS[Op::Yield as usize].size as u32;
         self.heap.set_object_slots(
@@ -582,11 +613,15 @@ impl Exec<'_> {
             STATE,
             [
                 Value::int(SUSPENDED),
-                saved,
+                Value::internal(arr),
                 Value::int((at + size) as i32),
                 Value::int((hp - bp) as i32),
             ],
         );
+        if seg {
+            self.stack = outer;
+            self.seg_base = 0;
+        }
         let caller = self.get(prev_bp).as_object().expect("frame callee");
         let t = self.template_of(caller);
         self.bp = prev_bp;
@@ -595,20 +630,20 @@ impl Exec<'_> {
         let sp = if step {
             let b = self.heap.arena_mut().hot_bytes();
             let (op, imm, sp) = if b[(self.code + ret_pc) as usize] == Op::IterNextLoc as u8 {
-                st(b, slot(bp), r);
-                (Op::IterNextLoc, 3, bp + 1)
+                st(b, oslot(base), r);
+                (Op::IterNextLoc, 3, base + 1)
             } else {
-                st(b, slot(bp - 2), r);
-                (Op::IterNext, 1, bp - 1)
+                st(b, oslot(base - 2), r);
+                (Op::IterNext, 1, base - 1)
             };
             let next = ret_pc + OPS[op as usize].size as u32;
             let offset = i32::from_le_bytes(hot::window(b, self.code + ret_pc + imm));
             self.pc = (next as i64 + offset as i64) as u32;
             sp
         } else {
-            self.set(bp - 2, r);
+            self.set(base - 2, r);
             self.pc = ret_pc;
-            bp - 1
+            base - 1
         };
         if self.retry_len == 0 {
             self.retry_len = NO_RETRY;
@@ -626,15 +661,27 @@ impl Exec<'_> {
 
     fn suspend_into(&mut self, g: Obj, saved: Value, state: i32, pc: u32) -> Result<(), Fault> {
         let len = self.sp - self.bp;
-        let arr = match saved.as_internal() {
-            Some(a) if self.heap.value_array_capacity(a) >= len => a,
-            _ => self.heap.alloc_value_array(len)?,
+        let arr = if self.bp == 0 && self.in_segment() {
+            self.stack
+        } else {
+            let arr = match saved.as_internal() {
+                Some(a) if self.heap.value_array_capacity(a) >= len => a,
+                _ => {
+                    let a = self.heap.arena();
+                    let room = self.hp - self.bp
+                        + HEADER
+                        + a.get(self.template, FuncTemplate::LOCALS) as u32
+                        + a.get(self.template, FuncTemplate::STACK) as u32;
+                    self.heap.alloc_value_array(room.max(len + 2))?
+                }
+            };
+            let src = ValueArray::VALUES.at(self.stack, self.bp);
+            let bytes = ValueArray::VALUES.at(self.stack, self.bp + len) - src;
+            self.heap
+                .arena_mut()
+                .copy_within(src, bytes, ValueArray::VALUES.at(arr, 0));
+            arr
         };
-        let src = ValueArray::VALUES.at(self.stack, self.bp);
-        let bytes = ValueArray::VALUES.at(self.stack, self.bp + len) - src;
-        self.heap
-            .arena_mut()
-            .copy_within(src, bytes, ValueArray::VALUES.at(arr, 0));
         self.heap.arena_mut().set(arr, ValueArray::LEN, len);
         self.fuel -= (len / 8) as i64;
         self.heap.set_object_slots(

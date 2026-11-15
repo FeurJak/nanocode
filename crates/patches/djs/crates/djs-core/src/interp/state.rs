@@ -66,6 +66,32 @@ pub(crate) fn host_calls(heap: &Heap) -> u32 {
     heap.arena().get(0, Roots::HOST_CALLS).0
 }
 
+pub(crate) fn segment(heap: &Heap) -> Option<u32> {
+    heap.arena()
+        .get::<Value>(interp(heap), Interp::SEGMENT)
+        .as_internal()
+}
+
+pub(crate) fn segment_base(heap: &Heap) -> u32 {
+    heap.arena().get(interp(heap), Interp::SEGMENT_BASE)
+}
+
+pub(crate) fn frames(heap: &Heap) -> u32 {
+    segment(heap).unwrap_or_else(|| stack(heap))
+}
+
+pub(crate) fn set_segment(heap: &mut Heap, segment: Option<(u32, u32)>) {
+    let i = interp(heap);
+    let a = heap.arena_mut();
+    match segment {
+        Some((arr, base)) => {
+            a.set(i, Interp::SEGMENT, Value::internal(arr));
+            a.set(i, Interp::SEGMENT_BASE, base);
+        }
+        None => a.set(i, Interp::SEGMENT, Value::UNDEFINED),
+    }
+}
+
 pub(crate) fn state(heap: &Heap) -> RunState {
     RunState::from_u32(heap.arena().get(interp(heap), Interp::STATE))
 }
@@ -163,6 +189,7 @@ pub(crate) fn init(heap: &mut Heap) -> Result<(), HeapError> {
     let a = heap.arena_mut();
     a.set(i, Interp::RESULT, Value::UNDEFINED);
     a.set(i, Interp::THROW, Value::UNDEFINED);
+    a.set(i, Interp::SEGMENT, Value::UNDEFINED);
     a.set(i, Interp::NEXT_CALL_ID, 1);
     a.set(0, Roots::INTERP, Ref(i));
     a.set(0, Roots::STACK, Ref(s));

@@ -1203,6 +1203,7 @@ impl Exec<'_> {
                         ($top:expr) => {{
                             code = self.code;
                             (bp, lp) = (self.bp, self.lp);
+                            vals = ValueArray::VALUES.at(self.stack, 0);
                             sp = $top;
                             ip = code + self.pc;
                             if collect {

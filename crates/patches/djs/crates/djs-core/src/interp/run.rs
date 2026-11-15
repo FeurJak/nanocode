@@ -308,6 +308,7 @@ pub(crate) struct Exec<'h> {
     fuel: i64,
     /// The value stack cell.
     stack: u32,
+    seg_base: u32,
     bp: u32,
     hp: u32,
     sp: u32,
@@ -359,12 +360,16 @@ impl<'h> Exec<'h> {
             a.get(i, Interp::SP),
             a.get(i, Interp::PC),
         );
-        let stack = state::stack(heap);
+        let (stack, seg_base) = match state::segment(heap) {
+            Some(s) => (s, state::segment_base(heap)),
+            None => (state::stack(heap), 0),
+        };
         Exec {
             heap,
             opts,
             fuel: 0,
             stack,
+            seg_base,
             bp,
             hp,
             sp,
@@ -413,6 +418,8 @@ impl<'h> Exec<'h> {
         a.set(i, Interp::HP, self.hp);
         a.set(i, Interp::SP, self.sp);
         a.set(i, Interp::PC, self.pc);
+        let segment = (self.seg_base != 0).then_some((self.stack, self.seg_base));
+        state::set_segment(self.heap, segment);
     }
 
     // ---------------------------------------------------------------- stack
@@ -476,7 +483,8 @@ impl<'h> Exec<'h> {
     #[inline(never)]
     fn grow_stack(&mut self, top: u32) -> Result<(), Fault> {
         let cap = self.heap.value_array_capacity(self.stack);
-        if top > self.opts.max_stack {
+        let base = self.seg_base;
+        if base + top > self.opts.max_stack {
             // V8's and quickjs-ng's error, which pi's codemode expects (D013).
             return Err(Fault::error(
                 ErrorKind::RangeError,
@@ -485,9 +493,31 @@ impl<'h> Exec<'h> {
         }
         let new_cap = top
             .max(cap.saturating_mul(2))
-            .min(self.opts.max_stack.max(top));
-        self.stack = state::move_stack(self.heap, self.sp, new_cap)?;
+            .min((self.opts.max_stack - base).max(top));
+        if base == 0 {
+            self.stack = state::move_stack(self.heap, self.sp, new_cap)?;
+            return Ok(());
+        }
+        let new = state::alloc_stack(self.heap, new_cap)?;
+        self.heap.arena_mut().copy_within(
+            ValueArray::VALUES.at(self.stack, 0),
+            8 * self.sp,
+            ValueArray::VALUES.at(new, 0),
+        );
+        self.stack = new;
         Ok(())
+    }
+
+    #[inline(always)]
+    fn in_segment(&self) -> bool {
+        self.seg_base != 0
+    }
+
+    #[inline(never)]
+    fn leave_segment(&mut self) {
+        self.sp = self.seg_base;
+        self.seg_base = 0;
+        self.stack = state::stack(self.heap);
     }
 
     // ---------------------------------------------------------------- frames
@@ -891,6 +921,9 @@ impl<'h> Exec<'h> {
             self.header_int(frame::RET_PC),
         );
         self.sp = self.bp;
+        if self.bp == 0 && self.in_segment() {
+            self.leave_segment();
+        }
         self.bp = prev_bp;
         self.hp = prev_hp;
         self.pc = ret_pc;
@@ -932,9 +965,16 @@ impl<'h> Exec<'h> {
                 return self.bottom_done(cont, Err(exc));
             }
             let ret_pc = self.header_int(frame::RET_PC);
+            let (prev_bp, prev_hp) = (
+                self.header_int(frame::PREV_BP),
+                self.header_int(frame::PREV_HP),
+            );
             self.sp = self.bp;
-            self.bp = self.header_int(frame::PREV_BP);
-            self.hp = self.header_int(frame::PREV_HP);
+            if self.bp == 0 && self.in_segment() {
+                self.leave_segment();
+            }
+            self.bp = prev_bp;
+            self.hp = prev_hp;
             self.load_frame();
             if cont == Continuation::GenStep {
                 self.gen_step_abort(ret_pc);
@@ -1011,13 +1051,20 @@ impl<'h> Exec<'h> {
         for i in self.sp..cap {
             self.set(i, Value::UNDEFINED);
         }
+        if self.in_segment() {
+            let main = state::stack(self.heap);
+            let base = self.seg_base;
+            for i in base..self.heap.value_array_capacity(main) {
+                self.heap.value_array_set(main, i, Value::UNDEFINED);
+            }
+        }
         let collected = self.heap.collect_auto();
         if let Err(HeapError::HostOutOfMemory) = collected {
             // Never a silently skipped collection (D1690).
             self.host_out_of_memory();
         }
         if collected.is_ok() {
-            self.stack = state::stack(self.heap);
+            self.stack = state::frames(self.heap);
             if self.has_frame() {
                 self.load_frame();
             }

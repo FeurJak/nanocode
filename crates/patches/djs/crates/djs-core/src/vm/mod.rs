@@ -757,7 +757,11 @@ impl Vm {
     pub fn abort(&mut self) {
         let i = state::interp(&self.heap);
         let stack = state::stack(&self.heap);
-        let sp = self.heap.arena().get(i, Interp::SP);
+        let sp = match state::segment(&self.heap) {
+            Some(_) => state::segment_base(&self.heap),
+            None => self.heap.arena().get(i, Interp::SP),
+        };
+        state::set_segment(&mut self.heap, None);
         // Popped frames must not keep garbage alive.
         for k in 0..sp.min(self.heap.value_array_capacity(stack)) {
             self.heap.value_array_set(stack, k, Value::UNDEFINED);
@@ -1168,6 +1172,15 @@ impl Vm {
 #[inline]
 fn tidy_stack(heap: &mut Heap, shrink: bool) {
     let sp = heap.arena().get(state::interp(heap), Interp::SP);
+    let sp = match state::segment(heap) {
+        Some(seg) => {
+            for k in sp..heap.value_array_capacity(seg) {
+                heap.value_array_set(seg, k, Value::UNDEFINED);
+            }
+            state::segment_base(heap)
+        }
+        None => sp,
+    };
     let cap = heap.value_array_capacity(state::stack(heap));
     let keep = crate::heap::IMAGE_STACK.max(2 * sp);
     let cap = if shrink && cap >= 2 * keep { keep } else { cap };

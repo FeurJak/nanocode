@@ -608,14 +608,15 @@ impl Exec<'_> {
         &self,
         f: Obj,
         cont: Continuation,
-        bp: u32,
+        (stack, bp): (u32, u32),
         in_prelude: bool,
     ) -> Option<Obj> {
+        let get = |i: u32| -> Value { self.heap.arena().read(ValueArray::VALUES.at(stack, i)) };
         if cont == Continuation::EachNative {
-            return self.get(bp - STATE - 1).as_object();
+            return get(bp - STATE - 1).as_object();
         }
         if in_prelude && Value::object(f) == realm::installed_intrinsic(self.heap, EACH_REST) {
-            return self.get(bp + 1).as_object();
+            return get(bp + 1).as_object();
         }
         None
     }

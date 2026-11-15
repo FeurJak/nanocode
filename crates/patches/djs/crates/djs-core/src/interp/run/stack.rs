@@ -147,12 +147,18 @@ impl Exec<'_> {
         out.reserve(limit.min(RAW_RESERVE) as usize);
         let prelude = intrinsic(self.heap, Intrinsic::PreludeScript).as_internal();
         let (mut bp, mut hp, mut pc) = (self.bp, self.hp, pc);
+        let (mut stack, main) = (self.stack, state::stack(self.heap));
         loop {
-            let f = self.get(bp).as_object().expect("frame callee");
+            let f = self
+                .heap
+                .arena()
+                .read::<Value>(ValueArray::VALUES.at(stack, bp))
+                .as_object()
+                .expect("frame callee");
             let [prev_bp, prev_hp, ret_pc, _, flags] = self
                 .heap
                 .arena()
-                .read_values(ValueArray::VALUES.at(self.stack, hp + frame::PREV_BP));
+                .read_values(ValueArray::VALUES.at(stack, hp + frame::PREV_BP));
             let flags = flags.as_int().unwrap_or(0);
             let in_prelude = in_prelude(self.heap, f, prelude);
             skip_prelude &= in_prelude;
@@ -171,7 +177,7 @@ impl Exec<'_> {
             // no frame of the builtin: the callback's frame and %EachRest's (whose `this`
             // it is) show it, as its own frame would.
             if (in_prelude || cont == Continuation::EachNative)
-                && let Some(builtin) = self.each_builtin(f, cont, bp, in_prelude)
+                && let Some(builtin) = self.each_builtin(f, cont, (stack, bp), in_prelude)
                 && (out.len() as u32) < limit
             {
                 let skipping = below.is_some();
@@ -200,6 +206,9 @@ impl Exec<'_> {
             } else {
                 ret_pc.saturating_sub(1)
             };
+            if bp == 0 && stack != main {
+                stack = main;
+            }
             hp = prev_hp.as_int().unwrap_or(0) as u32;
             bp = prev_bp.as_int().unwrap_or(0) as u32;
         }
@@ -236,16 +245,21 @@ impl Exec<'_> {
         let id = const { crate::bytecode::intrinsics::const_id("CallPrepareStackTrace") };
         let running = realm::installed_intrinsic(self.heap, id);
         let (mut bp, mut hp) = (self.bp, self.hp);
+        let (mut stack, main) = (self.stack, state::stack(self.heap));
         loop {
-            if self.get(bp) == running {
+            let get = |i: u32| -> Value { self.heap.arena().read(ValueArray::VALUES.at(stack, i)) };
+            if get(bp) == running {
                 return None;
             }
-            let flags = self.get(hp + frame::FLAGS).as_int().unwrap_or(0);
+            let flags = get(hp + frame::FLAGS).as_int().unwrap_or(0);
             if Continuation::from_flags(flags).is_bottom() {
                 break;
             }
-            let prev_bp = self.get(hp + frame::PREV_BP).as_int().unwrap_or(0) as u32;
-            hp = self.get(hp + frame::PREV_HP).as_int().unwrap_or(0) as u32;
+            let prev_bp = get(hp + frame::PREV_BP).as_int().unwrap_or(0) as u32;
+            hp = get(hp + frame::PREV_HP).as_int().unwrap_or(0) as u32;
+            if bp == 0 && stack != main {
+                stack = main;
+            }
             bp = prev_bp;
         }
         Some((f, Value::object(ctor)))
