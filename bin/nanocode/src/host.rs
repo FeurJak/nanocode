@@ -491,6 +491,7 @@ pub struct HostConfig {
     pub cyber_access_program: Option<nanocode::codex::CyberAccessProgram>,
     pub context_window: Option<u64>,
     pub max_output_tokens: Option<u32>,
+    pub compact_instructions: bool,
     pub codex_direct: bool,
     pub working_state: Option<nanocode::oai::session::working_state::WorkingStatePolicy>,
     pub hedge: nanocode::hedge::HedgePolicy,
@@ -756,6 +757,7 @@ impl Host {
         let context_window = config.context_window;
         let listed = config.clients.listing_windows();
         let max_output = config.max_output_tokens;
+        let compact_instructions = config.compact_instructions;
         let working_state = config.working_state;
         if let (Some(tokens), Some(maximum)) = (
             context_window,
@@ -793,6 +795,12 @@ impl Host {
                     }
                     _ => builder,
                 };
+                let builder =
+                    if compact_instructions && !Model::ALL.contains(&builder.selected_model()) {
+                        builder.compact_instructions()
+                    } else {
+                        builder
+                    };
                 let builder = match working_state {
                     Some(policy) => builder.working_state(policy),
                     None => builder,

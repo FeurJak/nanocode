@@ -201,6 +201,12 @@ const SESSION: Group = Group::new(&[
         .help(
             "Longest reply in tokens the Claude harness asks for (max_tokens); Codex requests carry no reply limit, as Codex's do not",
         ),
+    Argument::flag("compact_instructions")
+        .long("compact-instructions")
+        .env("NANOCODE_COMPACT_INSTRUCTIONS")
+        .help(
+            "Codex harness: send a model nanocode does not know, such as one on a custom endpoint, nanocode's compact base instructions (about 2 KB) instead of Codex's 17 KB unknown-model prompt; off unless set",
+        ),
     Argument::value("working_state_budget", "TOKENS", Parser::U64)
         .long("working-state-budget")
         .env("NANOCODE_WORKING_STATE_BUDGET")
@@ -635,6 +641,7 @@ pub struct SessionArgs {
     pub tier: Option<String>,
     pub context_window: Option<u64>,
     pub max_output_tokens: Option<u64>,
+    pub compact_instructions: bool,
     pub working_state_budget: Option<u64>,
     pub working_state_retain: Option<u64>,
     pub hedge_floor_ms: Option<u64>,
@@ -693,6 +700,7 @@ impl SessionArgs {
             tier: matches.text("tier"),
             context_window: matches.u64("context_window"),
             max_output_tokens: matches.u64("max_output_tokens"),
+            compact_instructions: matches.flag("compact_instructions"),
             working_state_budget: matches.u64("working_state_budget"),
             working_state_retain: matches.u64("working_state_retain"),
             hedge_floor_ms: matches.u64("hedge_floor_ms"),
@@ -732,6 +740,7 @@ impl SessionArgs {
             tier: self.tier.or(root.tier),
             context_window: self.context_window.or(root.context_window),
             max_output_tokens: self.max_output_tokens.or(root.max_output_tokens),
+            compact_instructions: self.compact_instructions || root.compact_instructions,
             working_state_budget: self.working_state_budget.or(root.working_state_budget),
             working_state_retain: self.working_state_retain.or(root.working_state_retain),
             hedge_floor_ms: self.hedge_floor_ms.or(root.hedge_floor_ms),

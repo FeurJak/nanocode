@@ -468,6 +468,7 @@ async fn prepare(
             .map(u32::try_from)
             .transpose()
             .map_err(|error| format!("--max-output-tokens: {error}"))?,
+        compact_instructions: args.compact_instructions,
         codex_direct: args.codex_orchestration != Some(cli::CodexOrchestrationArg::CodeMode),
         working_state: working_state_policy(args)?,
         hedge: hedge_policy(args)?,
