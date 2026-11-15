@@ -372,10 +372,19 @@ pub async fn lookup(
         ]);
     }
     let mut failure = None;
+    let mut unreachable = Vec::new();
     for candidate in candidates(config, name, absolute) {
-        match query(config, &candidate, wire).await {
+        match query(config, &candidate, wire, &mut unreachable).await {
             Ok(Some(addresses)) => return Ok(addresses),
             Ok(None) => {}
+            Err(error)
+                if config
+                    .nameservers
+                    .iter()
+                    .all(|server| unreachable.contains(server)) =>
+            {
+                return Err(error);
+            }
             Err(error) => failure = Some(error),
         }
     }
@@ -424,6 +433,7 @@ async fn query(
     config: &Config,
     name: &[u8],
     wire: &mut impl Wire,
+    unreachable: &mut Vec<SocketAddr>,
 ) -> io::Result<Option<Vec<IpAddr>>> {
     let kinds: &[u16] = if config.no_aaaa {
         &[TYPE_A]
@@ -443,12 +453,23 @@ async fn query(
     let mut failure = None;
     for attempt in 0..config.attempts {
         for server in &config.nameservers {
+            if unreachable.contains(server) {
+                continue;
+            }
             for question in &mut questions {
                 question.answer = None;
             }
             let wait = config.wait(attempt);
-            if let Err(error) =
-                exchange(config.tcp, *server, wait, name, &mut questions, wire).await
+            if let Err(error) = exchange(
+                config.tcp,
+                *server,
+                wait,
+                name,
+                &mut questions,
+                wire,
+                unreachable,
+            )
+            .await
             {
                 failure = Some(error);
                 continue;
@@ -495,6 +516,7 @@ async fn exchange(
     name: &[u8],
     questions: &mut [Question],
     wire: &mut impl Wire,
+    unreachable: &mut Vec<SocketAddr>,
 ) -> io::Result<()> {
     if tcp {
         for question in questions {
@@ -502,7 +524,10 @@ async fn exchange(
         }
         return Ok(());
     }
-    wire.open(server, wait)?;
+    if let Err(error) = wire.open(server, wait) {
+        unreachable.push(server);
+        return Err(error);
+    }
     for question in questions.iter() {
         wire.send(&question.message).await?;
     }
