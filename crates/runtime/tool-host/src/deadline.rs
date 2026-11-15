@@ -9,6 +9,7 @@ const FINISH_OPEN: &str =
     "<system-reminder>\nThis session is non-interactive and nobody will reply.";
 const FINISH_CHECK: &str = " Before you finish, check the work:\n";
 const FINISH_CHECKLIST: &str = "- Every output the task names exists at that exact path, with a relative path resolved against the working directory.\n- The task's own check, or a direct test of the result, passes when you run it again now.\n- If the task states a speed, size or score goal, the result was compared with at least one structurally different approach under repeated measurements, and the best one is kept. Beating the given baseline is not by itself the goal.\n- The task's checks use inputs you have not seen (other files, data, sizes or seeds) and run the program as a script does: stdout piped, not a terminal, and signals such as SIGINT. The result holds on at least one input you made that differs from the given example, including the case the task names, and with stdout piped when output matters.\n- The scratch files and test output you made where the task's program or its checks write, read or wait for files, such as a file in /tmp, are deleted, and nothing else is.\n- What the task's program built or set up is kept: caches and compiled artifacts (such as a compiled model or a build directory), installed packages, and the state the task asked for (repositories and their branches, served files, databases, services). None of that state is reset or emptied to make it clean.\n- Background processes you started are stopped, unless the task asked to keep them running.\n- Any choice left open is made, and its result is written.\n";
+const PERSIST_CHECK: &str = "- Every requirement and target the task states is met, and you checked it by running the result. One that is not met, or that you would report as unmet or unverified, is not done: while time remains, keep working on it with a different approach instead of reporting the gap.\n";
 pub const BRIEF_FINAL: &str = "<system-reminder>\nKeep your final message to at most three lines: the result and where it is.\n</system-reminder>";
 pub const LEAN_CELLS: &str = "<system-reminder>\nKeep each code cell to the commands the step needs, without comments or progress prints. Print only the lines you need from a file or a command, with head, tail, grep or a line range, not whole files or logs. Do not read a file again unless it changed since you read it.\n</system-reminder>";
 const TIME_LIMIT: &str = "Time limit: ";
@@ -187,6 +188,15 @@ impl Reminders {
 
 #[must_use]
 pub fn finish_notice(deadline: Option<&Reminders>, brief: bool) -> String {
+    checked_finish_notice(deadline, brief, "")
+}
+
+#[must_use]
+pub fn persisting_finish_notice(deadline: Option<&Reminders>, brief: bool) -> String {
+    checked_finish_notice(deadline, brief, PERSIST_CHECK)
+}
+
+fn checked_finish_notice(deadline: Option<&Reminders>, brief: bool, persist: &str) -> String {
     let time = deadline.map_or_else(String::new, |reminders| format!(" {}", reminders.remain()));
     let reply = if brief {
         "reply with one line that says the task is done"
@@ -194,14 +204,23 @@ pub fn finish_notice(deadline: Option<&Reminders>, brief: bool) -> String {
         "reply with your final message"
     };
     format!(
-        "{FINISH_OPEN}{time}{FINISH_CHECK}{FINISH_CHECKLIST}Fix what falls short. When everything holds, {reply}.\n</system-reminder>"
+        "{FINISH_OPEN}{time}{FINISH_CHECK}{FINISH_CHECKLIST}{persist}Fix what falls short. When everything holds, {reply}.\n</system-reminder>"
     )
 }
 
 #[must_use]
 pub fn folded_finish_notice() -> String {
+    checked_folded_finish_notice("")
+}
+
+#[must_use]
+pub fn persisting_folded_finish_notice() -> String {
+    checked_folded_finish_notice(PERSIST_CHECK)
+}
+
+fn checked_folded_finish_notice(persist: &str) -> String {
     format!(
-        "{FINISH_OPEN} Before your final message, check the work:\n{FINISH_CHECKLIST}Fix what falls short before you reply with your final message.\n</system-reminder>"
+        "{FINISH_OPEN} Before your final message, check the work:\n{FINISH_CHECKLIST}{persist}Fix what falls short before you reply with your final message.\n</system-reminder>"
     )
 }
 

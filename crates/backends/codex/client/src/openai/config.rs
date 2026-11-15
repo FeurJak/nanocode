@@ -74,6 +74,8 @@ pub struct ModelConfig {
 
     pub lean_custom_tool_arguments: bool,
 
+    pub persist_finish: bool,
+
     pub working_state: Option<crate::session::working_state::WorkingStatePolicy>,
 
     pub headless: bool,
@@ -282,6 +284,7 @@ impl ModelConfig {
             omit_custom_model_reasoning: false,
             custom_tool_output_tokens: None,
             lean_custom_tool_arguments: false,
+            persist_finish: false,
             working_state: None,
             headless: false,
             compaction_thinking: None,

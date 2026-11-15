@@ -243,9 +243,11 @@ pub(super) fn run_rounds<'a>(
                 && state.lineage.root_session_id == state.session_id
                 && let Some(message) = prompt.last_mut()
             {
-                message.content.push(ContentBlock::text(
-                    nanocode_tool_host::deadline::folded_finish_notice(),
-                ));
+                message.content.push(ContentBlock::text(if state.persist_finish {
+                    nanocode_tool_host::deadline::persisting_folded_finish_notice()
+                } else {
+                    nanocode_tool_host::deadline::folded_finish_notice()
+                }));
             }
             if state.brief_final
                 && state.headless
@@ -1390,10 +1392,17 @@ pub(super) fn run_rounds<'a>(
                     continue;
                 }
                 cursor.finish_checked = true;
-                let notice = nanocode_tool_host::deadline::finish_notice(
-                    state.deadline.as_ref(),
-                    state.brief_finish,
-                );
+                let notice = if state.persist_finish {
+                    nanocode_tool_host::deadline::persisting_finish_notice(
+                        state.deadline.as_ref(),
+                        state.brief_finish,
+                    )
+                } else {
+                    nanocode_tool_host::deadline::finish_notice(
+                        state.deadline.as_ref(),
+                        state.brief_finish,
+                    )
+                };
                 state.emit(
                     &request.events,
                     AgentEventKind::ContextNotice,
