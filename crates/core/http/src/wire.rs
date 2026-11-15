@@ -555,6 +555,11 @@ impl BodyReader {
             Chunk::Size => {
                 let end = self.line(CHUNK_LINE_BYTES_MAX).await?;
                 let line = &self.connection.unread()[..end];
+                if has_control(line) {
+                    return Err(WireError::Parse(
+                        "chunk size line with a control byte".to_owned(),
+                    ));
+                }
                 let digits = line
                     .iter()
                     .position(|byte| !byte.is_ascii_hexdigit())
@@ -601,6 +606,11 @@ impl BodyReader {
             }
             Chunk::Trailers(read) => {
                 let end = self.line(TRAILER_BYTES_MAX - read).await?;
+                if has_control(&self.connection.unread()[..end]) {
+                    return Err(WireError::Parse(
+                        "trailer line with a control byte".to_owned(),
+                    ));
+                }
                 self.connection.consume(end + CRLF.len());
                 let read = read + end + CRLF.len();
                 if read > TRAILER_BYTES_MAX {
@@ -617,6 +627,11 @@ impl BodyReader {
             }
         }
     }
+}
+
+fn has_control(line: &[u8]) -> bool {
+    line.iter()
+        .any(|byte| byte.is_ascii_control() && *byte != b'\t')
 }
 
 fn find_crlf(bytes: &[u8]) -> Option<usize> {
