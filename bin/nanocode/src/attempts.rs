@@ -48,6 +48,12 @@ struct Changes {
     written: Vec<PathBuf>,
 }
 
+#[derive(Eq, PartialEq)]
+enum Output {
+    Answer(String),
+    Files(Vec<(PathBuf, Option<Entry>, Vec<u8>)>),
+}
+
 const SELF_CHECK: &str = "Before you end, find the checks this task gives or implies (its tests, a checker or an example with expected output, each requirement it states), run them in the copy and fix what fails. End the reply with one line of the form `self-check: <passed>/<total>` counting those checks.";
 
 pub async fn run(args: &SessionArgs, count: u64, piped: Option<String>) -> Result<()> {
@@ -157,16 +163,36 @@ pub async fn run(args: &SessionArgs, count: u64, piped: Option<String>) -> Resul
     );
     let chosen = match pick {
         AttemptPickArg::Verifier => {
-            verify(
-                &original,
-                &root,
-                &labels,
-                &finished,
-                piped.as_deref(),
-                deadline,
-                &kept,
-            )
-            .await?
+            let answers: Vec<String> = finished.iter().map(|done| done.answer.clone()).collect();
+            let found = blocking({
+                let root = root.clone();
+                move || outputs(&root, &answers)
+            })
+            .await?;
+            match majority(&found) {
+                Some(members) => {
+                    let chosen = u64::try_from(members[0] + 1)?;
+                    let numbers: Vec<String> =
+                        members.iter().map(|index| labels[*index].clone()).collect();
+                    eprintln!(
+                        "nanocode: attempts {} left the same output, so attempt {chosen} was chosen without the verifier",
+                        numbers.join(", ")
+                    );
+                    chosen
+                }
+                None => {
+                    verify(
+                        &original,
+                        &root,
+                        &labels,
+                        &finished,
+                        piped.as_deref(),
+                        deadline,
+                        &kept,
+                    )
+                    .await?
+                }
+            }
         }
         AttemptPickArg::SelfCheck => {
             let chosen = picked(&finished, &order, passed, &kept)?;
@@ -279,6 +305,79 @@ async fn verify(
         verdict.elapsed
     );
     Ok(u64::try_from(chosen)?)
+}
+
+fn outputs(root: &Path, answers: &[String]) -> io::Result<Vec<Option<Output>>> {
+    let base = root.join("base");
+    let before = entries(&base)?;
+    let mut changed = Vec::new();
+    for number in 1..=answers.len() {
+        let copy = root.join(number.to_string());
+        let after = entries(&copy)?;
+        let found = changes(&base, &before, &copy, &after)?;
+        changed.push((copy, after, found));
+    }
+    let touched = |found: &Changes, path: &PathBuf| {
+        found.written.contains(path) || found.removed.contains(path)
+    };
+    let common: Vec<PathBuf> = match changed.first() {
+        Some((_, _, first)) => first
+            .written
+            .iter()
+            .chain(&first.removed)
+            .filter(|path| changed.iter().all(|(_, _, found)| touched(found, path)))
+            .cloned()
+            .collect(),
+        None => Vec::new(),
+    };
+    changed
+        .iter()
+        .zip(answers)
+        .map(|((copy, after, _), answer)| {
+            if common.is_empty() {
+                let answer = answer.trim();
+                return Ok((!answer.is_empty()).then(|| Output::Answer(answer.to_owned())));
+            }
+            let mut files = Vec::new();
+            for path in &common {
+                let entry = after.get(path).cloned();
+                let content = match entry {
+                    Some(Entry::File(..)) => fs::read(copy.join(path))?,
+                    _ => Vec::new(),
+                };
+                files.push((path.clone(), entry, content));
+            }
+            Ok(Some(Output::Files(files)))
+        })
+        .collect()
+}
+
+fn majority(found: &[Option<Output>]) -> Option<Vec<usize>> {
+    let mut best: Vec<usize> = Vec::new();
+    let mut tied = false;
+    for (index, output) in found.iter().enumerate() {
+        let Some(output) = output else {
+            continue;
+        };
+        let members: Vec<usize> = found
+            .iter()
+            .enumerate()
+            .filter(|(_, other)| other.as_ref() == Some(output))
+            .map(|(member, _)| member)
+            .collect();
+        if members.first() != Some(&index) {
+            continue;
+        }
+        match members.len().cmp(&best.len()) {
+            std::cmp::Ordering::Greater => {
+                best = members;
+                tied = false;
+            }
+            std::cmp::Ordering::Equal => tied = true,
+            std::cmp::Ordering::Less => {}
+        }
+    }
+    (best.len() >= 2 && !tied).then_some(best)
 }
 
 fn picked(
