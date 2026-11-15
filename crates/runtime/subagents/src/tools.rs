@@ -984,6 +984,7 @@ async fn build_unstarted(
     id: AgentId,
     capacity: TurnCapacity,
 ) -> AgentToolResult<()> {
+    let _warm = registry.warm(root_session_id, vec![id]).await?;
     let Some(child) = registry.unstarted(root_session_id, id).await else {
         return Ok(());
     };

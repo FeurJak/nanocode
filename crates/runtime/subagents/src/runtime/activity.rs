@@ -114,6 +114,12 @@ impl Registry {
                         activity.pending_completions.push((id, revision));
                     }
                 }
+                for pending in scope.cold_pending.values() {
+                    activity.active.extend(pending.unstarted.iter().copied());
+                    activity
+                        .pending_completions
+                        .extend(pending.completions.iter().copied());
+                }
                 activity.pending_messages = scope
                     .messages
                     .pending_recipients()
