@@ -63,6 +63,9 @@ impl Exec<'_> {
             && self.each_call(base, argc, mode, next)
         {
             self.fuel -= info.cost.fuel() as i64;
+            if self.fuel > 0 {
+                self.each_leaf();
+            }
             return true;
         }
         // `arr.push(x)`, the commonest @fast call, straight to the heap's append (0231):

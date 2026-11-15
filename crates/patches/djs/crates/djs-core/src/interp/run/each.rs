@@ -10,7 +10,7 @@
 //! its handler resets. Collections, fuel and heap images see an ordinary frame and
 //! ordinary stack values.
 
-use super::hot::{fill, ld, ld32, st, window, write_values};
+use super::hot::{fill, ld, ld32, object_slot, st, window, write_values};
 use super::*;
 use crate::builtins::dense::index;
 use crate::heap::cells::{Object, ValueArray};
@@ -503,9 +503,13 @@ impl Exec<'_> {
         }
         let a = match mode {
             MAP | FILTER => {
-                let n = if mode == MAP { len } else { 0 };
                 let proto = realm::intrinsic_obj(self.heap, Intrinsic::ArrayProto);
-                match self.heap.new_array_with_length(Some(proto), n) {
+                let a = if mode == MAP {
+                    self.heap.new_array_with_length_reserved(Some(proto), len)
+                } else {
+                    self.heap.new_array_with_length(Some(proto), 0)
+                };
+                match a {
                     Ok(a) => Value::object(a),
                     Err(e) => {
                         if matches!(e, HeapError::HostOutOfMemory) {
@@ -688,6 +692,247 @@ impl Exec<'_> {
         Ok(stop)
     }
 
+    pub(super) fn each_leaf(&mut self) {
+        let (bp, lp) = (self.bp, self.lp);
+        let base = bp - STATE;
+        let Some(leaf) = self.leaf() else {
+            return;
+        };
+        if self.pc != 0 || self.get(bp) != self.get(base + F) {
+            return;
+        }
+        let Some(mode) = self.get(base + MODE).as_int() else {
+            return;
+        };
+        if !matches!(
+            mode,
+            FOR_EACH | MAP | FILTER | SOME | EVERY | FIND | FIND_INDEX | REDUCE
+        ) {
+            return;
+        }
+        let (Some(k0), Some(len), Some(o)) = (
+            self.get(base + K).as_int(),
+            self.get(base + LEN).as_int(),
+            self.get(base + O).as_object(),
+        ) else {
+            return;
+        };
+        let cap = match leaf.cap {
+            Some(c) => {
+                let b = self.heap.arena().bytes();
+                let Some(f) = ld(b, ValueArray::VALUES.at(self.stack, bp)).as_object() else {
+                    return;
+                };
+                let Some(bx) = ld(b, object_slot(b, f.offset(), c)).as_internal() else {
+                    return;
+                };
+                Some(bx + crate::heap::cells::BoxCell::VALUE.offset)
+            }
+            None => None,
+        };
+        let tracked = cap.is_some_and(|at| at < self.heap.arena().tracked_end());
+        let stress = self.opts.gc_stress;
+        let reduce = mode == REDUCE;
+        let (mut k, mut x, mut acc) = (k0, self.get(base + KVALUE), self.get(base + THIS));
+        let (mut a0, mut a1) = (self.get(bp + 2), self.get(bp + 3));
+        let y = leaf.y.map(Value::int);
+        let cost = leaf.fuel + super::native::CALL_FUEL;
+        let mut fuel = self.fuel;
+        let mut safepoint = self.heap.gc_pending();
+        let bounds = |b: &[u8]| {
+            let el = ld32(b, o.offset() + Object::ELEMENTS.offset);
+            let n = if el == 0 {
+                0
+            } else {
+                ld32(b, el + ValueArray::LEN.offset).min(len as u32)
+            };
+            (el, n)
+        };
+        let (mut el, mut lim) = bounds(self.heap.arena().bytes());
+        let a = self.get(base + A).as_object();
+        let native = Continuation::from_flags(self.header_int(frame::FLAGS) as i32)
+            == Continuation::EachNative;
+        let mut proven = false;
+        let mut entry = false;
+        loop {
+            let b = self.heap.arena().bytes();
+            let v = match cap {
+                Some(at) => {
+                    let old = ld(b, at);
+                    if old.is_uninitialized() {
+                        break;
+                    }
+                    leaf_eval(leaf.op, old, a0)
+                }
+                None => leaf_eval(leaf.op, a0, y.unwrap_or(a1)),
+            };
+            let Some(v) = v else {
+                break;
+            };
+            let store = match mode {
+                FOR_EACH | REDUCE => None,
+                MAP => Some((k as u32, v)),
+                _ => match (mode, v.as_bool()) {
+                    (SOME | FIND_INDEX | FIND, Some(false))
+                    | (EVERY, Some(true))
+                    | (FILTER, Some(false)) => None,
+                    (FILTER, Some(true)) => Some((u32::MAX, x)),
+                    _ => break,
+                },
+            };
+            let next = k as u32 + 1;
+            if next >= lim {
+                break;
+            }
+            let nx = ld(b, ValueArray::VALUES.at(el, next));
+            if nx.is_hole() {
+                break;
+            }
+            if let Some((i, sv)) = store {
+                let Some(a) = a else {
+                    break;
+                };
+                let i = if i == u32::MAX {
+                    self.heap.array_length(a)
+                } else {
+                    i
+                };
+                if !(proven && self.heap.append_element_reserved(a, i, sv)) {
+                    if !self.each_store(a, i, sv) {
+                        break;
+                    }
+                    proven = true;
+                    (el, lim) = bounds(self.heap.arena().bytes());
+                    safepoint |= self.heap.gc_pending();
+                }
+            }
+            if let Some(at) = cap {
+                if tracked {
+                    self.heap.arena_mut().wrote(at, 8);
+                }
+                st(self.heap.arena_mut().hot_bytes(), at, v);
+            }
+            fuel -= cost;
+            let next = next as i32;
+            if reduce {
+                acc = v;
+                (a0, a1) = (v, nx);
+            } else {
+                (a0, a1) = (nx, Value::int(next));
+            }
+            (k, x) = (next, nx);
+            if stress || safepoint {
+                safepoint = true;
+                entry = true;
+                break;
+            }
+            if fuel <= 0 {
+                entry = true;
+                break;
+            }
+        }
+        self.fuel = fuel;
+        if native && !entry {
+            let b = self.heap.arena().bytes();
+            let v = match cap {
+                Some(at) => Some(ld(b, at))
+                    .filter(|old| !old.is_uninitialized())
+                    .and_then(|old| leaf_eval(leaf.op, old, a0)),
+                None => leaf_eval(leaf.op, a0, y.unwrap_or(a1)),
+            };
+            let last = k + 1 >= len;
+            let end = v.and_then(|v| match (mode, v.as_bool()) {
+                (FOR_EACH | REDUCE, _) if last => Some((v, false, None)),
+                (MAP, _) if last => Some((v, false, Some((k as u32, v)))),
+                (FILTER, Some(t)) if last => Some((v, false, t.then_some((u32::MAX, x)))),
+                (SOME | FIND_INDEX | FIND, Some(true)) | (EVERY, Some(false)) => {
+                    Some((v, true, None))
+                }
+                (SOME | FIND_INDEX | FIND, Some(false)) | (EVERY, Some(true)) if last => {
+                    Some((v, false, None))
+                }
+                _ => None,
+            });
+            if let Some((v, decided, store)) = end
+                && store.is_none_or(|(i, sv)| a.is_some_and(|a| self.each_store(a, i, sv)))
+            {
+                if let Some(at) = cap {
+                    if tracked {
+                        self.heap.arena_mut().wrote(at, 8);
+                    }
+                    st(self.heap.arena_mut().hot_bytes(), at, v);
+                }
+                self.fuel -= leaf.fuel;
+                self.set(base + KVALUE, x);
+                if reduce {
+                    self.set(base + THIS, v);
+                }
+                self.pop_frame();
+                let _ = self.each_done(base, decided.then_some(k as u32));
+                return;
+            }
+        }
+        if k == k0 {
+            return;
+        }
+        let n = HotStep {
+            k: k as u32,
+            x,
+            o: Value::object(o),
+            acc: reduce.then_some(acc),
+            store: None,
+        };
+        let vals = ValueArray::VALUES.at(self.stack, 0);
+        let locals = self.locals();
+        self.sp = hot_enter(
+            self.heap.arena_mut().hot_bytes(),
+            vals,
+            (bp, self.hp, lp, locals),
+            &n,
+        );
+        if safepoint {
+            self.safepoint();
+        }
+    }
+
+    fn leaf(&self) -> Option<Leaf> {
+        const ARG0: u8 = Op::GetArg0 as u8;
+        const ARG1: u8 = Op::GetArg1 as u8;
+        const CAP: u8 = Op::GetCapChk as u8;
+        const PUT_CAP: u8 = Op::PutCapChk as u8;
+        const PUSH0: u8 = Op::Push0 as u8;
+        const PUSH3: u8 = Op::Push3 as u8;
+        const PUSH_I8: u8 = Op::PushI8 as u8;
+        const PUSH_I32: u8 = Op::PushI32 as u8;
+        const RETURN: u8 = Op::Return as u8;
+        const RETURN_UNDEF: u8 = Op::ReturnUndef as u8;
+        let b = self.heap.arena().bytes();
+        let c = b.get(self.code as usize..(self.code + self.code_len) as usize)?;
+        let (op, y, cap) = match *c {
+            [ARG0, ARG1, op, RETURN] => (op, None, None),
+            [ARG0, p @ PUSH0..=PUSH3, op, RETURN] => (op, Some(i32::from(p - PUSH0)), None),
+            [ARG0, PUSH_I8, i, op, RETURN] => (op, Some(i32::from(i as i8)), None),
+            [ARG0, PUSH_I32, b0, b1, b2, b3, op, RETURN] => {
+                (op, Some(i32::from_le_bytes([b0, b1, b2, b3])), None)
+            }
+            [CAP, c0, c1, ARG0, op, PUT_CAP, d0, d1, RETURN_UNDEF] if [c0, c1] == [d0, d1] => {
+                (op, None, Some(u32::from(u16::from_le_bytes([c0, c1]))))
+            }
+            _ => return None,
+        };
+        if !LEAF_OPS.contains(&op) || (cap.is_some() && !matches!(op, ADD | SUB | MUL)) {
+            return None;
+        }
+        let mut fuel = 0;
+        let mut p = 0;
+        while p < c.len() {
+            let info = &OPS[c[p] as usize];
+            fuel += info.cost.fuel() as i64;
+            p += info.size as usize;
+        }
+        Some(Leaf { cap, fuel, op, y })
+    }
+
     /// A failed step, thrown as the builtin's CreateDataPropertyOrThrow at its resume
     /// point (the builtin's frame is current).
     fn each_throw(&mut self, f: Fault) -> Option<Status> {
@@ -695,6 +940,68 @@ impl Exec<'_> {
         let exc = self.fault_value(f, Some(pc));
         self.throw_value(exc, self.call_site_key(pc))
     }
+}
+
+struct Leaf {
+    cap: Option<u32>,
+    fuel: i64,
+    op: u8,
+    y: Option<i32>,
+}
+
+const ADD: u8 = Op::Add as u8;
+const GE: u8 = Op::Ge as u8;
+const GT: u8 = Op::Gt as u8;
+const LE: u8 = Op::Le as u8;
+const LT: u8 = Op::Lt as u8;
+const MUL: u8 = Op::Mul as u8;
+const STRICT_EQ: u8 = Op::StrictEq as u8;
+const STRICT_NE: u8 = Op::StrictNe as u8;
+const SUB: u8 = Op::Sub as u8;
+const LEAF_OPS: [u8; 9] = [ADD, GE, GT, LE, LT, MUL, STRICT_EQ, STRICT_NE, SUB];
+
+#[inline(always)]
+fn leaf_eval(op: u8, x: Value, y: Value) -> Option<Value> {
+    if op == STRICT_EQ || op == STRICT_NE {
+        let eq = match (x.as_int(), y.as_int()) {
+            (Some(p), Some(q)) => p == q,
+            _ => match (x.as_number(), y.as_number()) {
+                (Some(p), Some(q)) => p == q,
+                _ if x == y => true,
+                _ if (x.as_string().is_some() && y.as_string().is_some())
+                    || (x.as_bigint().is_some() && y.as_bigint().is_some()) =>
+                {
+                    return None;
+                }
+                _ => false,
+            },
+        };
+        return Some(Value::bool(eq == (op == STRICT_EQ)));
+    }
+    if let (Some(p), Some(q)) = (x.as_int(), y.as_int()) {
+        let v = match op {
+            ADD => p.checked_add(q).map(Value::int),
+            SUB => p.checked_sub(q).map(Value::int),
+            MUL => p.checked_mul(q).filter(|&r| r != 0).map(Value::int),
+            LT => Some(Value::bool(p < q)),
+            LE => Some(Value::bool(p <= q)),
+            GT => Some(Value::bool(p > q)),
+            _ => Some(Value::bool(p >= q)),
+        };
+        if v.is_some() {
+            return v;
+        }
+    }
+    let (p, q) = (x.as_number()?, y.as_number()?);
+    Some(match op {
+        ADD => conv::number(p + q),
+        SUB => conv::number(p - q),
+        MUL => conv::number(p * q),
+        LT => Value::bool(p < q),
+        LE => Value::bool(p <= q),
+        GT => Value::bool(p > q),
+        _ => Value::bool(p >= q),
+    })
 }
 
 /// A step of the loop that its own frame takes (`each_again`, and run_hot's `return`

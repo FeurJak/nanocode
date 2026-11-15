@@ -340,7 +340,7 @@ fn word(b: &[u8], ip: u32) -> Option<u64> {
 /// The arena offset of slot `i` of the object (or box) at `cell` with `Object::SLOTS`'s
 /// check that `i` is a slot (as `Heap::object_slot`).
 #[inline(always)]
-fn object_slot(b: &[u8], cell: u32, i: u32) -> u32 {
+pub(super) fn object_slot(b: &[u8], cell: u32, i: u32) -> u32 {
     let size = ld32(b, cell + Header::SIZE.offset);
     // `i < tail_capacity(size)` without its division (a call in wasm, 0107): slot `i`
     // ends inside the cell.

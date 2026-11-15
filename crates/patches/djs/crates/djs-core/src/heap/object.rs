@@ -516,6 +516,16 @@ impl Heap {
         Ok(o)
     }
 
+    pub fn new_array_with_length_reserved(
+        &mut self,
+        proto: Option<Obj>,
+        len: u32,
+    ) -> Result<Obj, HeapError> {
+        let o = self.new_array(proto, len)?;
+        self.set_array_length_raw(o, len);
+        Ok(o)
+    }
+
     /// A new ordinary object with the data properties `keys[i]: values[i]` (writable,
     /// enumerable, configurable), defined in order: a repeated key keeps its first
     /// position and its last value, as repeated CreateDataProperty calls would. The table is
@@ -1297,6 +1307,19 @@ impl Heap {
             self.set_array_length_raw(o, i + 1);
         }
         Ok(true)
+    }
+
+    pub(crate) fn append_element_reserved(&mut self, o: Obj, i: u32, v: Value) -> bool {
+        let el = self.elements(o);
+        if el == 0 || i != self.value_array_len(el) || i >= self.value_array_capacity(el) {
+            return false;
+        }
+        self.value_array_set(el, i, v);
+        self.arena_mut().set(el, ValueArray::LEN, i + 1);
+        if i >= self.array_length(o) {
+            self.set_array_length_raw(o, i + 1);
+        }
+        true
     }
 
     /// Stores `v` in dense slot `i`, growing the elements (with holes) as needed.
