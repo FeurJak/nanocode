@@ -403,18 +403,22 @@ impl Reactor {
             else {
                 return;
             };
-            loop {
+            let woke = loop {
                 match self.waiting.pop(&mut consumer) {
                     Pop::Value(thread) => {
                         self.waiting_count.fetch_sub(1, Ordering::SeqCst);
                         thread.unpark();
+                        break true;
                     }
                     Pop::Pushing => std::hint::spin_loop(),
-                    Pop::Empty => break,
+                    Pop::Empty => break false,
                 }
-            }
+            };
             self.waiting_consumer.store(Some(consumer));
             fence(Ordering::SeqCst);
+            if woke {
+                return;
+            }
         }
     }
 
