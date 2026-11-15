@@ -505,6 +505,7 @@ fn label_of(root: u64) -> String {
 
 struct Client {
     failed: RefCell<Vec<(String, u64)>>,
+    flushes: bool,
     stopped: std::cell::Cell<bool>,
 }
 
@@ -539,8 +540,43 @@ async fn open_root(
     Ok(agent)
 }
 
+async fn acknowledge(
+    agent: &nanocode::Agent,
+    store: &SessionStore,
+    flushes: bool,
+    label: &str,
+    turn: u64,
+) -> Result<(), String> {
+    agent
+        .flush()
+        .await
+        .map_err(|error| format!("{label} flush after turn {turn}: {error}"))?;
+    if flushes {
+        store
+            .flush()
+            .await
+            .map_err(|error| format!("{label} store flush after turn {turn}: {error}"))?;
+    }
+    Ok(())
+}
+
+async fn check_acked(store: &SessionStore, root: u64, world: &World) {
+    let label = label_of(root);
+    let session = session_of(root);
+    for turn in world.acked(&label).into_keys() {
+        let status = stored_status(store, &session, &format!("turn-{turn}")).await;
+        if !matches!(status, Some(TurnStatus::Completed)) {
+            world.wrong(format!(
+                "acked_turn_lost: {label} turn {turn} was acknowledged and is {status:?} after a restart"
+            ));
+        }
+    }
+}
+
 async fn submit(
     agent: &nanocode::Agent,
+    store: &SessionStore,
+    flushes: bool,
     label: &str,
     turn: u64,
     cancel: bool,
@@ -580,6 +616,7 @@ async fn submit(
     match result {
         Ok(result) => Ok(result.final_message().to_owned()),
         Err(nanocode::NanocodeError::TurnCancelled) if cancelled.get() => {
+            acknowledge(agent, store, flushes, label, turn).await?;
             world.cancelled(label, turn);
             Err(nanocode::NanocodeError::TurnCancelled.to_string())
         }
@@ -599,6 +636,7 @@ async fn stored_status(store: &SessionStore, session: &str, request_id: &str) ->
 async fn run_turn(
     agent: &nanocode::Agent,
     store: &SessionStore,
+    flushes: bool,
     label: &str,
     turn: u64,
     cancel: bool,
@@ -609,7 +647,7 @@ async fn run_turn(
     let mut attempt = 0;
     loop {
         world.trace(&format!("submit {label} {request_id} attempt {attempt}"));
-        let error = match submit(agent, label, turn, cancel && attempt == 0, world).await {
+        let error = match submit(agent, store, flushes, label, turn, cancel && attempt == 0, world).await {
             Ok(text) => return Ok(text),
             Err(error) => error,
         };
@@ -635,6 +673,9 @@ async fn run_root(
     client: &Client,
 ) -> Result<nanocode::Agent, String> {
     let agent = open_root(runtime, root, epoch, world).await?;
+    if epoch > 0 {
+        check_acked(store, root, world).await;
+    }
     let label = label_of(root);
     for turn in 0..shape.turns {
         if world.acked(&label).contains_key(&turn)
@@ -643,12 +684,9 @@ async fn run_root(
             continue;
         }
         let cancel = shape.cancel_turn == Some((root, turn)) && !client.stopped.get();
-        match run_turn(&agent, store, &label, turn, cancel, world).await {
+        match run_turn(&agent, store, client.flushes, &label, turn, cancel, world).await {
             Ok(text) => {
-                agent
-                    .flush()
-                    .await
-                    .map_err(|error| format!("{label} flush after turn {turn}: {error}"))?;
+                acknowledge(&agent, store, client.flushes, &label, turn).await?;
                 if text != final_text(&label, turn) {
                     world.wrong(format!(
                         "{label} turn {turn} answered {text:?}, not the model's final text"
@@ -834,6 +872,7 @@ async fn verify(
     let mut agents = Vec::new();
     for root in 0..shape.roots {
         agents.push(open_root(&runtime, root, number, world).await?);
+        check_acked(&store, root, world).await;
     }
     let (after, completed) = listing(&runtime, shape).await?;
     if shape.stop != Stop::Close
@@ -967,6 +1006,7 @@ pub fn simulate(seed: u64, options: WholeOptions) -> WholeOutcome {
     };
     let client = Client {
         failed: RefCell::new(Vec::new()),
+        flushes: options.mutation != WireMutation::AcksUnflushed,
         stopped: std::cell::Cell::new(false),
     };
     let mut crashes: VecDeque<u64> = shape.crashes.iter().copied().collect();

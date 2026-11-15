@@ -1580,6 +1580,16 @@ impl StateStore for OneLogStore {
         })
     }
 
+    fn flush(&mut self) -> StoreFuture<'_, Result<(), StoreError>> {
+        Box::pin(async move {
+            let mut lease = self.0.log.lease().await;
+            if lease.buffered() > 0 {
+                lease.commit(Point::Progress).await?;
+            }
+            Ok(())
+        })
+    }
+
     fn put_records<'a>(
         &'a mut self,
         state_id: &'a str,

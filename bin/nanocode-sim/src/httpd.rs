@@ -83,6 +83,7 @@ pub enum WireMutation {
     DropAckedAnswer,
     DropToolResult,
     RewriteAssistant,
+    AcksUnflushed,
 }
 
 impl WireMutation {
@@ -97,6 +98,7 @@ impl WireMutation {
             "drop-acked-answer" => Some(Self::DropAckedAnswer),
             "drop-tool-result" => Some(Self::DropToolResult),
             "rewrite-assistant" => Some(Self::RewriteAssistant),
+            "acks-unflushed" => Some(Self::AcksUnflushed),
             _ => None,
         }
     }
@@ -113,11 +115,12 @@ impl WireMutation {
             Self::DropAckedAnswer => "drop-acked-answer",
             Self::DropToolResult => "drop-tool-result",
             Self::RewriteAssistant => "rewrite-assistant",
+            Self::AcksUnflushed => "acks-unflushed",
         }
     }
 
     pub const NAMES: &'static str =
-        "http-reuse-dirty|http-no-read-timeout|tool-result-twice|drop-cancelled-prompt|hedge-unmarked|http-real-elapsed|drop-acked-answer|drop-tool-result|rewrite-assistant";
+        "http-reuse-dirty|http-no-read-timeout|tool-result-twice|drop-cancelled-prompt|hedge-unmarked|http-real-elapsed|drop-acked-answer|drop-tool-result|rewrite-assistant|acks-unflushed";
 }
 
 #[derive(Clone, Copy, Debug)]
