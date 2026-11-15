@@ -239,10 +239,16 @@ fn rust(cache: &Path, scripts: &Path, mut args: Vec<OsString>, mut environment: 
         let relevant = (name.starts_with(b"CARGO_") && name != b"CARGO_MAKEFLAGS" && (clippy || name != b"CARGO_PRIMARY_PACKAGE"))
             || (clippy && name.starts_with(b"CLIPPY_"))
             || matches!(name, b"OUT_DIR" | b"RUSTC_BOOTSTRAP" | b"MACOSX_DEPLOYMENT_TARGET" | b"SDKROOT");
-        if relevant {
+        let host = [&b"CARGO_HTTP_"[..], b"CARGO_NET_", b"CARGO_TERM_", b"CARGO_REGISTRIES_", b"CARGO_REGISTRY_", b"CARGO_CACHE_"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+            || matches!(name, b"CARGO_HOME" | b"CARGO_TARGET_DIR" | b"CARGO_BUILD_JOBS" | b"CARGO_LOG");
+        if relevant && !host {
             hasher.update(name);
             hasher.update(b"=");
-            hasher.update(&roots.hide(value.as_bytes()));
+            if name != b"CARGO" {
+                hasher.update(&roots.hide(value.as_bytes()));
+            }
             hasher.update(b"\n");
         }
     }
@@ -1054,11 +1060,14 @@ fn directory_of(kind: Kind) -> &'static str {
 
 fn fetch(cache: &Path, remote: &OsStr, kind: Kind, key: &str, entry: &Path) -> io::Result<()> {
     let directory = directory_of(kind);
-    let mut url = remote.as_bytes().to_vec();
-    while url.last() == Some(&b'/') {
-        url.pop();
-    }
-    url.extend_from_slice(format!("/{directory}/{key}").as_bytes());
+    let template = String::from_utf8_lossy(remote.as_bytes());
+    let url = if template.contains("{key}") {
+        template.replace("{dir}", directory).replace("{key}", key).into_bytes()
+    } else {
+        let mut url = template.trim_end_matches('/').as_bytes().to_vec();
+        url.extend_from_slice(format!("/{directory}/{key}").as_bytes());
+        url
+    };
     let packed = download(&url)?;
     fs::create_dir_all(cache.join(directory))?;
     let staging = cache.join(directory).join(format!(".data.{}.{}", std::process::id(), unique()));

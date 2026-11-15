@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+release=${NANOCODE_BUILDCACHE_RELEASE:-https://api.github.com/repos/nanocodexyz/nanocode/releases/tags/buildcache}
+dir=${XDG_CACHE_HOME:-$HOME/.cache}/nanocode/remote
+rm -rf "$dir.next"
+mkdir -p "$dir.next/units" "$dir.next/workspace"
+curl -sfL "$release" | grep -o '"browser_download_url": *"[^"]*"' | sed 's/.*"\(http[^"]*\)"/\1/' | while read -r url; do
+  name=${url##*/}
+  printf 'url = "%s"\noutput = "%s/%s/%s"\n' "$url" "$dir.next" "${name%%-*}" "${name#*-}"
+done > "$dir.next/config"
+curl -sfL -Z -K "$dir.next/config"
+rm -f "$dir.next/config"
+rm -rf "$dir"
+mv "$dir.next" "$dir"
+echo "file://$dir/{dir}/{key}"
