@@ -21,6 +21,7 @@ use nanocode_agent_core::{
 use nanocode_sync::{FutureExt as _, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+mod clearing;
 mod durable;
 mod event;
 mod history;
@@ -5279,6 +5280,12 @@ impl State {
                 .parse::<nanocode_agent_core::ClaudeModel>()
                 .is_ok_and(nanocode_agent_core::ClaudeModel::supports_effort_updates)
     }
+    fn cleared(&self, mut messages: Vec<HistoryMessage>) -> Vec<HistoryMessage> {
+        if self.message_thread.is_none() {
+            clearing::clear_tool_results(&mut messages);
+        }
+        messages
+    }
     fn request_template(&self, speed: Option<crate::Speed>, pin: EffortPin) -> MessagesRequest {
         let effort_updates = self.effort_updates_active();
         let effort = match pin {
@@ -5525,7 +5532,7 @@ impl State {
 
         let (mut sent, kept) = images::evict_images(
             request_images(&self.model, self.context_window_tokens),
-            wire_messages(messages, &suffix, request.effort_updates),
+            self.cleared(wire_messages(messages, &suffix, request.effort_updates)),
         );
         request
             .cache_floors_with(
@@ -5642,7 +5649,7 @@ impl State {
             let kept;
             (sent, kept) = images::evict_images(
                 request_images(&self.model, self.context_window_tokens),
-                wire_messages(messages, &suffix, request.effort_updates),
+                self.cleared(wire_messages(messages, &suffix, request.effort_updates)),
             );
             request
                 .cache_floors_with(

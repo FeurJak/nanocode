@@ -28,6 +28,7 @@ struct Entry {
     images: OnceLock<usize>,
     companions: OnceLock<bool>,
     record: OnceLock<EncodedPayload>,
+    results: OnceLock<Box<[(usize, u64)]>>,
 }
 
 impl Clone for Entry {
@@ -40,6 +41,7 @@ impl Clone for Entry {
             images: OnceLock::new(),
             companions: OnceLock::new(),
             record: OnceLock::new(),
+            results: OnceLock::new(),
         }
     }
 }
@@ -54,6 +56,7 @@ impl HistoryMessage {
         entry.images = OnceLock::new();
         entry.companions = OnceLock::new();
         entry.record = OnceLock::new();
+        entry.results = OnceLock::new();
         &mut entry.message
     }
 
@@ -63,6 +66,21 @@ impl HistoryMessage {
         }
         let images = count(self);
         *self.0.images.get_or_init(|| images)
+    }
+
+    pub(super) fn result_tokens(
+        &self,
+        measure: impl Fn(&crate::ContentBlock) -> Option<u64>,
+    ) -> &[(usize, u64)] {
+        self.0.results.get_or_init(|| {
+            self.0
+                .message
+                .content
+                .iter()
+                .enumerate()
+                .filter_map(|(block, content)| measure(content).map(|tokens| (block, tokens)))
+                .collect()
+        })
     }
 
     pub(super) fn has_companions(&self, check: impl FnOnce(&Message) -> bool) -> bool {
@@ -87,6 +105,7 @@ impl HistoryMessage {
                 images: OnceLock::new(),
                 companions: OnceLock::new(),
                 record: OnceLock::from(record),
+                results: OnceLock::new(),
             }),
             wire_id(),
         )
@@ -124,6 +143,7 @@ impl From<Message> for HistoryMessage {
                 images: OnceLock::new(),
                 companions: OnceLock::new(),
                 record: OnceLock::new(),
+                results: OnceLock::new(),
             }),
             wire_id(),
         )
