@@ -40,11 +40,18 @@ where
             }
         };
 
-        if inserted_new_item && self.oldest.len() > self.max {
+        if inserted_new_item && self.full() {
             if let Some(oldest_key) = self.oldest.pop_front() {
                 self.map.remove(&oldest_key);
             }
         }
+    }
+
+    fn full(&self) -> bool {
+        if crate::internal::mutation::on(crate::internal::mutation::Mutation::CacheByCapacity) {
+            return self.oldest.capacity() == self.oldest.len();
+        }
+        self.oldest.len() > self.max
     }
 
     pub(crate) fn get_mut<Q: Hash + Eq + ?Sized>(&mut self, k: &Q) -> Option<&mut V>
@@ -85,7 +92,7 @@ where
             }
         };
 
-        if inserted_new_item && self.oldest.len() > self.max {
+        if inserted_new_item && self.full() {
             if let Some(oldest_key) = self.oldest.pop_front() {
                 self.map.remove(&oldest_key);
             }

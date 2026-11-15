@@ -22,6 +22,10 @@ use crate::{
     rng::{FNV_OFFSET, Rng, fnv},
 };
 
+mod tls_rules;
+
+use rustls::internal::mutation::Mutation as RustlsMutation;
+
 const DATA_BYTES_MAX: u64 = 20_000;
 const SMALL_DATA_PPM: u64 = 250_000;
 const SMALL_DATA_MAX: u64 = 40;
@@ -73,10 +77,15 @@ pub enum StreamsMutation {
     DetachOnDrop,
     HalfTimeout,
     JoinRepeats,
+    Tls12WithoutEd25519,
+    TlsWriteAfterError,
+    TlsCacheByCapacity,
+    TlsEncryptedCcs,
+    TlsLateKeyUpdate,
 }
 
 impl StreamsMutation {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 14] = [
         Self::None,
         Self::DropPipeByte,
         Self::EarlyEof,
@@ -86,6 +95,11 @@ impl StreamsMutation {
         Self::DetachOnDrop,
         Self::HalfTimeout,
         Self::JoinRepeats,
+        Self::Tls12WithoutEd25519,
+        Self::TlsWriteAfterError,
+        Self::TlsCacheByCapacity,
+        Self::TlsEncryptedCcs,
+        Self::TlsLateKeyUpdate,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -105,6 +119,11 @@ impl StreamsMutation {
             Self::DetachOnDrop => "detach_on_drop",
             Self::HalfTimeout => "half_timeout",
             Self::JoinRepeats => "join_repeats",
+            Self::Tls12WithoutEd25519 => "tls12_without_ed25519",
+            Self::TlsWriteAfterError => "tls_write_after_error",
+            Self::TlsCacheByCapacity => "tls_cache_by_capacity",
+            Self::TlsEncryptedCcs => "tls_encrypted_ccs",
+            Self::TlsLateKeyUpdate => "tls_late_key_update",
         }
     }
 
@@ -123,6 +142,17 @@ impl StreamsMutation {
             early_eof: matches!(self, Self::EarlyEof),
             skip_wake: matches!(self, Self::SkipWake),
             corrupt: false,
+        }
+    }
+
+    const fn tls_bug(self) -> tls_rules::Bug {
+        match self {
+            Self::Tls12WithoutEd25519 => tls_rules::Bug::Tls12WithoutEd25519,
+            Self::TlsWriteAfterError => tls_rules::Bug::Hook(RustlsMutation::WriteAfterError),
+            Self::TlsCacheByCapacity => tls_rules::Bug::Hook(RustlsMutation::CacheByCapacity),
+            Self::TlsEncryptedCcs => tls_rules::Bug::Hook(RustlsMutation::EncryptedCcs),
+            Self::TlsLateKeyUpdate => tls_rules::Bug::Hook(RustlsMutation::LateKeyUpdate),
+            _ => tls_rules::Bug::None,
         }
     }
 
@@ -1268,6 +1298,7 @@ pub struct StreamsStats {
     dropped_sets: u64,
     tls: u64,
     tls12: u64,
+    tls_rules: u64,
     elapsed_ms: u64,
 }
 
@@ -1280,6 +1311,7 @@ impl StreamsStats {
         self.dropped_sets += other.dropped_sets;
         self.tls += other.tls;
         self.tls12 += other.tls12;
+        self.tls_rules += other.tls_rules;
         self.elapsed_ms += other.elapsed_ms;
     }
 }
@@ -1619,6 +1651,7 @@ fn stats_of(plan: &Plan, results: &Results, clock: &Clock) -> StreamsStats {
         dropped_sets: u64::from(results.dropped_check.is_some()),
         tls: u64::from(plan.tls.is_some()),
         tls12: u64::from(plan.tls.as_ref().is_some_and(|tls| tls.tls12)),
+        tls_rules: 0,
         elapsed_ms: clock.now_ns() / NS_PER_MS,
     }
 }
@@ -1641,7 +1674,7 @@ fn simulate(seed: u64, mutation: StreamsMutation, verbose: bool) -> StreamsOutco
     for note in &notes {
         trace.line(&format!("note {note:?}"));
     }
-    let stats = stats_of(&plan, &results, &clock);
+    let mut stats = stats_of(&plan, &results, &clock);
     let mut wrong = check_run(&plan, &results, &notes, ended).err();
     if wrong.is_none()
         && let Some(tls_plan) = &plan.tls
@@ -1649,6 +1682,10 @@ fn simulate(seed: u64, mutation: StreamsMutation, verbose: bool) -> StreamsOutco
         let tls_clock = Clock::new();
         crate::host::enter(seed, &tls_clock);
         wrong = tls_run(seed, tls_plan, mutation, &tls_clock).err();
+    }
+    if wrong.is_none() {
+        wrong = tls_rules::check(seed, mutation.tls_bug()).err();
+        stats.tls_rules = tls_rules::RULE_COUNT;
     }
     trace.line(&format!("verdict {wrong:?}"));
     StreamsOutcome {

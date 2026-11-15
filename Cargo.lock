@@ -787,6 +787,7 @@ dependencies = [
 name = "nanocode-sim"
 version = "0.7.0"
 dependencies = [
+ "graviola",
  "nanocode",
  "nanocode-agent-core",
  "nanocode-bytes",

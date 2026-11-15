@@ -472,6 +472,30 @@ pub mod internal {
     pub mod fuzzing {
         pub use crate::msgs::deframer::fuzz_deframer;
     }
+
+    pub mod mutation {
+        use core::sync::atomic::{AtomicU8, Ordering};
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[repr(u8)]
+        pub enum Mutation {
+            None,
+            WriteAfterError,
+            CacheByCapacity,
+            EncryptedCcs,
+            LateKeyUpdate,
+        }
+
+        static ACTIVE: AtomicU8 = AtomicU8::new(Mutation::None as u8);
+
+        pub fn set(mutation: Mutation) {
+            ACTIVE.store(mutation as u8, Ordering::Relaxed);
+        }
+
+        pub(crate) fn on(mutation: Mutation) -> bool {
+            ACTIVE.load(Ordering::Relaxed) == mutation as u8
+        }
+    }
 }
 
 /// Unbuffered connection API

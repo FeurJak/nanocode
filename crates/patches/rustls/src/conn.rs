@@ -301,6 +301,9 @@ https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof"
 
     impl<T> ConnectionCommon<T> {
         fn check_error(&self) -> io::Result<()> {
+            if crate::internal::mutation::on(crate::internal::mutation::Mutation::WriteAfterError) {
+                return Ok(());
+            }
             match &self.core.state {
                 Ok(_) => Ok(()),
                 Err(err) => Err(io::Error::new(io::ErrorKind::InvalidData, err.clone())),

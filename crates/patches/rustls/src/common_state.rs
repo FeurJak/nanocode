@@ -268,8 +268,11 @@ impl CommonState {
                 payload.split_at(len).0,
             );
 
+        let late =
+            crate::internal::mutation::on(crate::internal::mutation::Mutation::LateKeyUpdate);
+        let stop_for_key_update = stop_for_key_update && !late;
         if let Some(last) = (iter.len() as u64).checked_sub(1) {
-            if !self.check_pre_encrypt_action(last) {
+            if !late && !self.check_pre_encrypt_action(last) {
                 return len;
             }
         }

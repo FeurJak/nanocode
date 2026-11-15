@@ -69,7 +69,9 @@ impl<'a> InboundOpaqueMessage<'a> {
             return Err(PeerMisbehaved::IllegalTlsInnerPlaintext.into());
         }
 
-        if self.typ == ContentType::ChangeCipherSpec {
+        if self.typ == ContentType::ChangeCipherSpec
+            && !crate::internal::mutation::on(crate::internal::mutation::Mutation::EncryptedCcs)
+        {
             return Err(PeerMisbehaved::IllegalMiddleboxChangeCipherSpec.into());
         }
 

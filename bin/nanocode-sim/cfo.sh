@@ -81,6 +81,11 @@ default_table='
 1 canary_streams_skip_wake canary --scenario streams --mutation skip_wake
 1 canary_streams_drop_spawned canary --scenario streams --mutation drop_spawned
 1 canary_streams_corrupt_tls_byte canary --scenario streams --mutation corrupt_tls_byte
+1 canary_streams_tls12_without_ed25519 canary --scenario streams --mutation tls12_without_ed25519
+1 canary_streams_tls_write_after_error canary --scenario streams --mutation tls_write_after_error
+1 canary_streams_tls_cache_by_capacity canary --scenario streams --mutation tls_cache_by_capacity
+1 canary_streams_tls_encrypted_ccs canary --scenario streams --mutation tls_encrypted_ccs
+1 canary_streams_tls_late_key_update canary --scenario streams --mutation tls_late_key_update
 1 canary_cas_ignores_expected canary --scenario store --mutation cas_ignores_expected
 1 canary_record_insert_drops canary --scenario store --mutation record_insert_drops
 1 canary_power_loss_drops_acked canary --scenario store --mutation power_loss_drops_acked
