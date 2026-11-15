@@ -45,6 +45,11 @@ impl Pending {
         }
     }
 
+    pub(super) const fn clear(&mut self) {
+        self.start = 0;
+        self.length = 0;
+    }
+
     pub(super) fn bytes(&self) -> &[u8] {
         &self.buffer[self.start..self.start + self.length]
     }
@@ -103,6 +108,12 @@ impl BitWriter {
             buffer: 0,
             bits_valid: 0,
         }
+    }
+
+    pub(super) const fn clear(&mut self) {
+        self.pending.clear();
+        self.buffer = 0;
+        self.bits_valid = 0;
     }
 
     pub(super) fn flush_bits(&mut self) {

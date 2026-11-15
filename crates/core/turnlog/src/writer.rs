@@ -119,11 +119,12 @@ struct Sections {
 impl Sections {
     fn seal(
         &mut self,
+        spare: &mut codec::Spare,
         packer: codec::Packer,
         owners: Vec<(String, bool)>,
         limit: Option<usize>,
     ) -> Result<(), StoreError> {
-        let rows = stored(self.next, packer.finish(SECTION)?.packed, limit)?;
+        let rows = stored(self.next, packer.finish(SECTION, spare)?.packed, limit)?;
         self.bytes += rows.iter().map(|(_, body)| body.len()).sum::<usize>();
         self.groups.push((
             Section {
@@ -145,6 +146,7 @@ impl Sections {
 }
 
 fn sections(
+    spare: &mut codec::Spare,
     fold: &Fold,
     from: u64,
     level: i32,
@@ -163,7 +165,7 @@ fn sections(
     for owner in fold.writes() {
         let (packer, owners) = match &mut open {
             Some(open) => open,
-            None => open.insert((codec::Packer::new(level, &[])?, Vec::new())),
+            None => open.insert((codec::Packer::new(spare, level, &[])?, Vec::new())),
         };
         let mut written = false;
         let before = packer.plain();
@@ -188,13 +190,13 @@ fn sections(
         if packer.plain() >= WINDOW
             && let Some((packer, owners)) = open.take()
         {
-            sections.seal(packer, owners, limit)?;
+            sections.seal(spare, packer, owners, limit)?;
         }
     }
     if let Some((packer, owners)) = open.take()
         && !owners.is_empty()
     {
-        sections.seal(packer, owners, limit)?;
+        sections.seal(spare, packer, owners, limit)?;
     }
     Ok(sections)
 }
@@ -250,8 +252,14 @@ async fn warm_state(
     Ok(loads)
 }
 
-fn packed(fold: &Fold, keep: u64, level: i32, groups: &[Group]) -> Result<Snapshot, StoreError> {
-    let mut packer = codec::Packer::new(level, &[])?;
+fn packed(
+    spare: &mut codec::Spare,
+    fold: &Fold,
+    keep: u64,
+    level: i32,
+    groups: &[Group],
+) -> Result<Snapshot, StoreError> {
+    let mut packer = codec::Packer::new(spare, level, &[])?;
     let mut line = Vec::new();
     let mut base = 0;
     let mut starts = VecDeque::new();
@@ -282,7 +290,7 @@ fn packed(fold: &Fold, keep: u64, level: i32, groups: &[Group]) -> Result<Snapsh
         Ok(())
     })?;
     let start = starts.front().map_or(0, |&(start, _)| start);
-    let packed = packer.finish(SNAPSHOT)?;
+    let packed = packer.finish(SNAPSHOT, spare)?;
     Ok(Snapshot {
         base,
         packed: packed.packed,
@@ -488,8 +496,12 @@ impl Previous {
         })
     }
 
-    fn archive(&self, limit: Option<usize>) -> Result<Option<Vec<(u64, String)>>, StoreError> {
-        let body = codec::pack(ARCHIVE, self.suffix.as_bytes(), &[])?;
+    fn archive(
+        &self,
+        spare: &mut codec::Spare,
+        limit: Option<usize>,
+    ) -> Result<Option<Vec<(u64, String)>>, StoreError> {
+        let body = codec::pack(spare, ARCHIVE, self.suffix.as_bytes(), &[])?;
         let rows = stored(self.seq, body, limit)?;
         let bytes = rows.iter().map(|(_, body)| body.len()).sum::<usize>();
         Ok((bytes < self.bytes && rows.len() <= self.parts).then_some(rows))
@@ -511,7 +523,9 @@ struct Writer {
     next: u64,
     previous: Option<Previous>,
     snapshot: usize,
+    spare: codec::Spare,
     state: usize,
+    stale: bool,
     stats: Stats,
     stream: Option<Stream>,
     tail: usize,
@@ -649,7 +663,9 @@ impl TurnLog {
                 next,
                 previous,
                 snapshot,
+                spare: codec::Spare::default(),
                 state,
+                stale: false,
                 stats,
                 stream: None,
                 tail,
@@ -893,6 +909,7 @@ impl Lease<'_> {
         let floor = writer.floor.map(|seq| Record::Floor { seq });
         let plain = crate::record::encode_all(floor.iter().chain(&writer.buffer))?;
         let mut stream = match writer.stream.take() {
+            Some(stream) if writer.stale => stream.restart(writer.history.bytes())?,
             Some(stream) => stream,
             None => Stream::new(writer.history.bytes())?,
         };
@@ -929,7 +946,7 @@ impl Lease<'_> {
             } else {
                 codec::DEFAULT_LEVEL
             };
-            let sections = sections(&writer.fold, seq, level, self.limit)?;
+            let sections = sections(&mut writer.spare, &writer.fold, seq, level, self.limit)?;
             let head = sections.next;
             let mut groups = writer.fold.kept_groups();
             let superseded = writer.fold.superseded(&groups);
@@ -944,7 +961,7 @@ impl Lease<'_> {
                 writer.fold.recovered_at(turn, head);
             }
             writer.fold.committed(head);
-            let packed = packed(&writer.fold, keep, level, &groups);
+            let packed = packed(&mut writer.spare, &writer.fold, keep, level, &groups);
             writer.fold.committed(previous);
             let packed = packed?;
             writer.state = packed.plain;
@@ -988,7 +1005,7 @@ impl Lease<'_> {
         if snapshot.is_none() && writer.fold.hot_bytes() > writer.state {
             writer.state = measured(&writer.fold, keep)?;
             if writer.fold.hot_bytes() > writer.state {
-                boundary = Some(codec::pack(BOUNDARY, &plain, &[])?);
+                boundary = Some(codec::pack(&mut writer.spare, BOUNDARY, &plain, &[])?);
             }
         }
         let seq = snapshot.as_ref().map_or(seq, |part| part.seq);
@@ -1003,7 +1020,7 @@ impl Lease<'_> {
         let bytes = stored.iter().map(|(_, body)| body.len()).sum::<usize>();
         let archived = match (&snapshot, &writer.previous) {
             (Some(_), Some(previous)) => previous
-                .archive(self.limit)?
+                .archive(&mut writer.spare, self.limit)?
                 .map(|rows| (rows, previous.seq, previous.parts)),
             _ => None,
         };
@@ -1142,6 +1159,8 @@ impl Lease<'_> {
                 writer.tail = 0;
                 writer.tail_rows = stored.len() - 1;
                 writer.tried = None;
+                writer.stream = Some(stream);
+                writer.stale = true;
                 writer.stats.snapshots += 1;
                 writer.stats.snapshot_bytes += written_len as u64;
             }
@@ -1151,9 +1170,8 @@ impl Lease<'_> {
                     writer.history.clear();
                     writer.stats.boundaries += 1;
                 }
-                if boundary.is_none() {
-                    writer.stream = Some(stream);
-                }
+                writer.stream = Some(stream);
+                writer.stale = boundary.is_some();
                 writer
                     .history
                     .extend(if boundary.is_some() { &plain } else { &framed });

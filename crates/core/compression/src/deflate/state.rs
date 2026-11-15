@@ -281,6 +281,18 @@ struct Parameters {
     symbol_capacity: usize,
 }
 
+pub(super) fn checked_level(level: i32) -> Result<u8, DeflateError> {
+    let level = if level == LEVEL_DEFAULT_REQUEST {
+        LEVEL_DEFAULT
+    } else {
+        level
+    };
+    if !(0..=LEVEL_MAX).contains(&level) {
+        return Err(DeflateError::Stream);
+    }
+    Ok(u8::try_from(level).expect("a checked level fits in a byte"))
+}
+
 fn parameters(config: DeflateConfig) -> Result<Parameters, DeflateError> {
     let level = if config.level == LEVEL_DEFAULT_REQUEST {
         LEVEL_DEFAULT
@@ -365,6 +377,30 @@ impl State {
         };
         state.reset();
         Ok(state)
+    }
+
+    pub(super) fn restart(&mut self, level: u8) {
+        self.trailer_written = false;
+        self.level = level;
+        self.quick_block = QuickBlock::Closed;
+        self.match_available = false;
+        self.match_start = 0;
+        self.previous_match = 0;
+        self.string_start = 0;
+        self.window.fill(0);
+        self.lookahead = 0;
+        self.previous.fill(0);
+        self.previous_length = 0;
+        self.block_start = 0;
+        self.bits.clear();
+        self.insert = 0;
+        self.insert_hash = 0;
+        self.total_in = 0;
+        self.total_out = 0;
+        self.literal_tree = TreeDescription::new(&StaticDescription::LITERAL);
+        self.distance_tree = TreeDescription::new(&StaticDescription::DISTANCE);
+        self.bit_length_tree = TreeDescription::new(&StaticDescription::BIT_LENGTH);
+        self.reset();
     }
 
     fn reset(&mut self) {

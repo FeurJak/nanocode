@@ -134,6 +134,11 @@ impl Deflate {
         deflate(&mut self.state, &mut io, flush)
     }
 
+    pub fn reset(&mut self, level: i32) -> Result<(), DeflateError> {
+        self.state.restart(state::checked_level(level)?);
+        Ok(())
+    }
+
     pub fn set_dictionary(&mut self, dictionary: &[u8]) -> Result<(), DeflateError> {
         self.state.set_dictionary(dictionary)
     }

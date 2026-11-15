@@ -49,6 +49,23 @@ fn failed(action: &str, detail: &str) -> StoreError {
     StoreError::Backend(format!("turn log row {action} failed: {detail}"))
 }
 
+fn primed(deflate: &mut Deflate, dictionary: &[u8]) -> Result<(), StoreError> {
+    if !dictionary.is_empty() {
+        deflate
+            .set_dictionary(dictionary)
+            .map_err(|error| failed("compression", error.as_str()))?;
+    }
+    Ok(())
+}
+
+fn reused(mut deflate: Deflate, level: i32, dictionary: &[u8]) -> Result<Deflate, StoreError> {
+    deflate
+        .reset(level)
+        .map_err(|error| failed("compression", error.as_str()))?;
+    primed(&mut deflate, dictionary)?;
+    Ok(deflate)
+}
+
 fn compressor(level: i32, dictionary: &[u8]) -> Result<Deflate, StoreError> {
     let mut deflate = Deflate::new(DeflateConfig {
         level,
@@ -57,11 +74,7 @@ fn compressor(level: i32, dictionary: &[u8]) -> Result<Deflate, StoreError> {
         window_bits: -WINDOW_BITS,
     })
     .map_err(|error| failed("compression", error.as_str()))?;
-    if !dictionary.is_empty() {
-        deflate
-            .set_dictionary(dictionary)
-            .map_err(|error| failed("compression", error.as_str()))?;
-    }
+    primed(&mut deflate, dictionary)?;
     Ok(deflate)
 }
 
@@ -72,10 +85,21 @@ fn encode(tag: char, compressed: &[u8]) -> String {
     body
 }
 
-pub(crate) fn pack(tag: char, plain: &[u8], dictionary: &[u8]) -> Result<String, StoreError> {
-    let mut packer = Packer::new(DEFAULT_LEVEL, dictionary)?;
+pub(crate) fn pack(
+    spare: &mut Spare,
+    tag: char,
+    plain: &[u8],
+    dictionary: &[u8],
+) -> Result<String, StoreError> {
+    let mut packer = Packer::new(spare, DEFAULT_LEVEL, dictionary)?;
     packer.write(plain)?;
-    Ok(packer.finish(tag)?.packed)
+    Ok(packer.finish(tag, spare)?.packed)
+}
+
+#[derive(Default)]
+pub(crate) struct Spare {
+    chunk: Vec<u8>,
+    deflate: Option<Deflate>,
 }
 
 pub(crate) struct Packer {
@@ -91,11 +115,19 @@ pub(crate) struct Packed {
 }
 
 impl Packer {
-    pub(crate) fn new(level: i32, dictionary: &[u8]) -> Result<Self, StoreError> {
+    pub(crate) fn new(spare: &mut Spare, level: i32, dictionary: &[u8]) -> Result<Self, StoreError> {
+        let deflate = match spare.deflate.take() {
+            Some(deflate) => reused(deflate, level, dictionary)?,
+            None => compressor(level, dictionary)?,
+        };
+        let mut chunk = std::mem::take(&mut spare.chunk);
+        if chunk.is_empty() {
+            chunk = vec![0; WINDOW];
+        }
         Ok(Self {
-            chunk: vec![0; WINDOW],
+            chunk,
             compressed: Vec::new(),
-            deflate: compressor(level, dictionary)?,
+            deflate,
             plain: 0,
         })
     }
@@ -129,7 +161,7 @@ impl Packer {
         Ok(())
     }
 
-    pub(crate) fn finish(mut self, tag: char) -> Result<Packed, StoreError> {
+    pub(crate) fn finish(mut self, tag: char, spare: &mut Spare) -> Result<Packed, StoreError> {
         loop {
             let before = self.deflate.total_out();
             let status = self
@@ -146,31 +178,47 @@ impl Packer {
                 DeflateStatus::BufError => return Err(failed("compression", "no progress")),
             }
         }
-        Ok(Packed {
+        let packed = Packed {
             packed: encode(tag, &self.compressed),
             plain: self.plain,
-        })
+        };
+        spare.chunk = self.chunk;
+        spare.deflate = Some(self.deflate);
+        Ok(packed)
     }
 }
 
-pub(crate) struct Stream(Deflate);
+pub(crate) struct Stream {
+    chunk: Vec<u8>,
+    deflate: Deflate,
+}
 
 impl Stream {
     pub(crate) fn new(dictionary: &[u8]) -> Result<Self, StoreError> {
-        compressor(STREAM_LEVEL, dictionary).map(Self)
+        Ok(Self {
+            chunk: vec![0; WINDOW],
+            deflate: compressor(STREAM_LEVEL, dictionary)?,
+        })
+    }
+
+    pub(crate) fn restart(self, dictionary: &[u8]) -> Result<Self, StoreError> {
+        Ok(Self {
+            chunk: self.chunk,
+            deflate: reused(self.deflate, STREAM_LEVEL, dictionary)?,
+        })
     }
 
     pub(crate) fn pack(&mut self, tag: char, plain: &[u8]) -> Result<String, StoreError> {
-        let deflate = &mut self.0;
+        let deflate = &mut self.deflate;
+        let chunk = &mut self.chunk;
         let start = deflate.total_in();
         let mut compressed = Vec::new();
-        let mut chunk = vec![0; WINDOW];
         loop {
             let consumed =
                 usize::try_from(deflate.total_in() - start).expect("consumed input fits in usize");
             let before = deflate.total_out();
             deflate
-                .deflate(&plain[consumed..], &mut chunk, DeflateFlush::SyncFlush)
+                .deflate(&plain[consumed..], chunk, DeflateFlush::SyncFlush)
                 .map_err(|error| failed("compression", error.as_str()))?;
             let produced = usize::try_from(deflate.total_out() - before)
                 .expect("one call produces at most its chunk");
