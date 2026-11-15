@@ -89,13 +89,16 @@ case $target in
     offline python3 "$root/scripts/train-cli.py" "$train/instrumented" tools >&2
     mkdir "$train/tools"
     mv "$train"/profile.*.fdata "$train/tools/"
-    python3 "$root/scripts/rodata-cli.py" "$built" "$out/$bin.map" "$out/$bin.link" "$train/linked" "$train/startup" "$train/oneshot" "$train/tools" >&2
+    offline python3 "$root/scripts/train-cli.py" "$train/instrumented" codemode >&2
+    mkdir "$train/codemode"
+    mv "$train"/profile.*.fdata "$train/codemode/"
+    python3 "$root/scripts/rodata-cli.py" "$built" "$out/$bin.map" "$out/$bin.link" "$train/linked" "$train/startup" "$train/oneshot" "$train/tools" "$train/codemode" >&2
     offline python3 "$root/scripts/train-cli.py" "$train/instrumented" >&2
-    "$(dirname "$bolt")/merge-fdata" "$train"/profile.*.fdata "$train"/startup/*.fdata "$train"/oneshot/*.fdata "$train"/tools/*.fdata > "$train/profile.fdata"
+    "$(dirname "$bolt")/merge-fdata" "$train"/profile.*.fdata "$train"/startup/*.fdata "$train"/oneshot/*.fdata "$train"/tools/*.fdata "$train"/codemode/*.fdata > "$train/profile.fdata"
     layout="-reorder-blocks=ext-tsp -split-functions -split-all-cold -split-threshold=256 -split-eh -icf=$icf -use-old-text -no-huge-pages"
     "$bolt" "$train/linked" -o "$train/cdsort" -data="$train/profile.fdata" $layout -reorder-functions=cdsort -generate-function-order="$train/cdsort.order" >&2
     rm "$train/cdsort"
-    python3 "$root/scripts/order-cli.py" "$train/cdsort.order" "$train/startup" "$train/oneshot" "$train/tools" > "$train/startup.order"
+    python3 "$root/scripts/order-cli.py" "$train/cdsort.order" "$train/startup" "$train/oneshot" "$train/tools" "$train/codemode" > "$train/startup.order"
     "$bolt" "$train/linked" -o "$train/optimized" -data="$train/profile.fdata" $layout -reorder-functions=user -function-order="$train/startup.order" > "$train/optimized.log" 2>&1
     cat "$train/optimized.log" >&2
     if grep -q 'original .text too small' "$train/optimized.log"; then

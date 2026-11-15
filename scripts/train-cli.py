@@ -252,13 +252,15 @@ def main():
         shutil.rmtree(scratch)
         print("trained %s with a one-shot prompt" % binary)
         return
-    if sys.argv[2:] == ["tools"]:
-        # The bench's ten steps, three times: whether the store groups a step's writes depends on timing.
+    if sys.argv[2:] in (["tools"], ["codemode"]):
+        # The bench's ten steps, three times: whether the store groups a step's writes depends on timing. codemode runs
+        # them as Code Mode cells (exec), the opt-in orchestration, which the bench's nc tool lane still sends; nc-lite has none.
+        orchestration = ["--codex-orchestration", "code-mode"] if sys.argv[2] == "codemode" and flavor(binary) != "lite" else []
         for _ in range(3):
-            subprocess.run([binary, "exec", *session, "--ephemeral", "List the files steps=10"], env=env, cwd=work, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, check=True)
+            subprocess.run([binary, "exec", *session, *orchestration, "--ephemeral", "List the files steps=10"], env=env, cwd=work, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, check=True)
         server.shutdown()
         shutil.rmtree(scratch)
-        print("trained %s with a tool turn" % binary)
+        print("trained %s with a %s turn" % (binary, "Code Mode tool" if orchestration else "tool"))
         return
     runs = [
         [binary, "--version"],

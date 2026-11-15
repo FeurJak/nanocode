@@ -14,11 +14,11 @@ def executed(directory):
 
 
 order = [line.strip() for line in open(sys.argv[1]) if line.strip()]
-startup, oneshot, tools = (executed(directory) for directory in sys.argv[2:])
-for group in (startup - oneshot, startup & oneshot, oneshot - startup, tools - startup - oneshot):
+startup, oneshot, tools, codemode = (executed(directory) for directory in sys.argv[2:])
+for group in (startup - oneshot, startup & oneshot, oneshot - startup, tools - startup - oneshot, codemode - tools - startup - oneshot):
     for name in order:
         if name in group:
             print(name)
 for name in order:
-    if name not in startup and name not in oneshot and name not in tools:
+    if name not in startup and name not in oneshot and name not in tools and name not in codemode:
         print(name)
