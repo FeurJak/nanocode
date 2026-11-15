@@ -256,6 +256,9 @@ const SESSION: Group = Group::new(&[
         .long("home")
         .env("NANOCODE_HOME")
         .help("Directory for saved sessions, history and pasted images (defaults to ~/.nanocode)"),
+    Argument::flag("no_reasoning_replay")
+        .long("no-reasoning-replay")
+        .help("Leave earlier reasoning out of every request to a custom model on the Codex harness"),
     Argument::flag("no_mouse")
         .long("no-mouse")
         .help("Leave mouse capture off so the terminal keeps native text selection"),
@@ -655,6 +658,7 @@ pub struct SessionArgs {
     pub ephemeral: bool,
     pub home: Option<PathBuf>,
     pub no_mouse: bool,
+    pub no_reasoning_replay: bool,
     pub codex_orchestration: Option<CodexOrchestrationArg>,
     pub no_subagents: bool,
     pub subagents: bool,
@@ -716,6 +720,7 @@ impl SessionArgs {
             ephemeral: matches.flag("ephemeral"),
             home: matches.path("home"),
             no_mouse: matches.flag("no_mouse"),
+            no_reasoning_replay: matches.flag("no_reasoning_replay"),
             codex_orchestration: matches
                 .choice("codex_orchestration")
                 .map(|index| CodexOrchestrationArg::ALL[index]),
@@ -754,6 +759,7 @@ impl SessionArgs {
             ephemeral: self.ephemeral || root.ephemeral,
             home: self.home.or(root.home),
             no_mouse: self.no_mouse || root.no_mouse,
+            no_reasoning_replay: self.no_reasoning_replay || root.no_reasoning_replay,
             codex_orchestration: self.codex_orchestration.or(root.codex_orchestration),
             no_subagents: self.no_subagents || root.no_subagents,
             subagents: self.subagents || root.subagents,

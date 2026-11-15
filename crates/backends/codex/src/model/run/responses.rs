@@ -84,6 +84,11 @@ impl ModelRun {
         let service_tier = self.service_tier;
         let request_history = conversation.managed.generation_request();
         let sent = evict_images(&request_history, model);
+        let sent = if self.config.omit_custom_model_reasoning && matches!(model, Model::Custom(_)) {
+            omit_reasoning(&sent)
+        } else {
+            sent
+        };
         let previous_response_id = sent.previous_response_id();
         let started_at = Instant::now();
         self.stats.model_calls += 1;
@@ -652,6 +657,24 @@ pub(super) fn record_model_response(span: &nanocode_trace::Span, response: &Turn
         "stream.inter_delta_stall_100ms.count",
         response.pipeline_stats.inter_delta_stall_100ms_count,
     );
+}
+
+fn omit_reasoning(history: &RequestHistory) -> RequestHistory {
+    let full = history.full();
+    if !full
+        .iter_from(0)
+        .any(|item| matches!(item, ResponseItem::Reasoning { .. }))
+    {
+        return history.clone();
+    }
+    let kept = full
+        .iter_from(0)
+        .filter(|item| !matches!(item, ResponseItem::Reasoning { .. }))
+        .cloned()
+        .collect();
+    let mut sent = history.clone();
+    sent.replace_from(0, kept, false);
+    sent
 }
 
 pub(super) fn request_profile(

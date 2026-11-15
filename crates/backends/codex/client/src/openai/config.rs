@@ -68,6 +68,8 @@ pub struct ModelConfig {
 
     pub max_output_tokens: Option<u64>,
 
+    pub omit_custom_model_reasoning: bool,
+
     pub working_state: Option<crate::session::working_state::WorkingStatePolicy>,
 
     pub headless: bool,
@@ -273,6 +275,7 @@ impl ModelConfig {
             context_window_tokens: CONTEXT_WINDOW_TOKENS,
             auto_compact_token_limit: None,
             max_output_tokens: None,
+            omit_custom_model_reasoning: false,
             working_state: None,
             headless: false,
             compaction_thinking: None,

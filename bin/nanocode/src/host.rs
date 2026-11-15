@@ -493,6 +493,7 @@ pub struct HostConfig {
     pub max_output_tokens: Option<u32>,
     pub compact_instructions: bool,
     pub codex_direct: bool,
+    pub no_reasoning_replay: bool,
     pub working_state: Option<nanocode::oai::session::working_state::WorkingStatePolicy>,
     pub hedge: nanocode::hedge::HedgePolicy,
 }
@@ -773,6 +774,7 @@ impl Host {
         let hand = std::sync::Arc::new(nanocode_sync::Atom::new(None::<nanocode::HandDescription>));
         let described = std::sync::Arc::clone(&hand);
         let codex_direct = config.codex_direct;
+        let no_reasoning_replay = config.no_reasoning_replay;
         let codex = CodexHarness::new(openai)
             .client_for(move |request| match route(request) {
                 Some(Route::Tempo) => tempo_openai.clone(),
@@ -805,6 +807,7 @@ impl Host {
                     Some(policy) => builder.working_state(policy),
                     None => builder,
                 };
+                let builder = builder.omit_custom_model_reasoning(no_reasoning_replay);
                 Ok(match &*described.get() {
                     Some(hand) => builder.execution_environment(codex_environment(hand)),
                     None => builder,

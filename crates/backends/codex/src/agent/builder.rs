@@ -238,6 +238,12 @@ impl<F> CodexBuilder<F> {
     }
 
     #[must_use]
+    pub const fn omit_custom_model_reasoning(mut self, enabled: bool) -> Self {
+        self.config.omit_custom_model_reasoning = enabled;
+        self
+    }
+
+    #[must_use]
     pub const fn working_state(
         mut self,
         policy: crate::client::session::working_state::WorkingStatePolicy,
