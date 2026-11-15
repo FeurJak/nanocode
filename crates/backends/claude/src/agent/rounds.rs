@@ -618,6 +618,7 @@ pub(super) fn run_rounds<'a>(
                 cursor.model_receipt_start = Some(index.saturating_add(2));
             }
             if response.stop_reason == Some(StopReason::Refusal)
+                && state.refusal_fallback_scope != RefusalFallbackScope::Off
                 && let Some(fallback) =
                     refusal_fallback(&cursor.template.model, response.stop_details.as_ref())
             {

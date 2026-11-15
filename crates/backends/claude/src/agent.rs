@@ -717,6 +717,7 @@ pub enum RefusalFallbackScope {
     #[default]
     ReturnOnce,
     Session,
+    Off,
 }
 
 const STANDARD_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
@@ -2424,6 +2425,7 @@ impl FallbackLatch {
             },
             (RefusalFallbackScope::ReturnOnce, Self::Latched(_) | Self::Returned)
             | (RefusalFallbackScope::Session, _) => Self::Latched(options.fallback.to_owned()),
+            (RefusalFallbackScope::Off, latch) => latch,
         };
     }
 
