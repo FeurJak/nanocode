@@ -1,5 +1,4 @@
 use super::{
-    message::MAX_MESSAGE_BYTES,
     model::{AgentDescriptor, AgentId, AgentStatus, MessageDisposition, MessageId},
     runtime::{ChildSession, Completion, ListedAgent, OutputContract, StoredRuntime},
 };
@@ -2556,7 +2555,8 @@ pub(super) fn in_flight_evidence(calls: &[InFlightCall], omitted: u32) -> Option
     ))
 }
 
-const RESUME_ARGUMENT_BYTES: usize = 2 * 1024;
+const RESUME_ARGUMENT_BYTES: usize = 512;
+const RESUME_MESSAGE_BYTES: usize = 8 * 1024;
 
 pub(super) fn resume_message(calls: &[InFlightCall], omitted: u32) -> String {
     let compose = |calls: &[InFlightCall], omitted: u32| {
@@ -2577,7 +2577,7 @@ pub(super) fn resume_message(calls: &[InFlightCall], omitted: u32) -> String {
     for dropped in 0..quoted.len() {
         let more = u32::try_from(dropped).unwrap_or(u32::MAX);
         let message = compose(&quoted[dropped..], omitted.saturating_add(more));
-        if message.len() <= MAX_MESSAGE_BYTES {
+        if message.len() <= RESUME_MESSAGE_BYTES {
             return message;
         }
     }
