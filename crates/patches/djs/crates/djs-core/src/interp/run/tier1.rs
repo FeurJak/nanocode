@@ -448,6 +448,7 @@ struct Op {
     md: u8,
     mfuel: u32,
     n: i32,
+    nx: u8,
     span: u32,
     to: u16,
 }
@@ -471,6 +472,7 @@ fn lower(ins: &Ins) -> Op {
         md: 0,
         mfuel: 0,
         n: 0,
+        nx: 0,
         span: 0,
         to: 0,
     };
@@ -1659,6 +1661,22 @@ impl Exec<'_> {
                 s += 1;
             }
         }
+        for s in 0..plan.prog.len() {
+            let q = &prog[s];
+            let (mut nx, mut f) = (s + 1 + usize::from(q.m), if q.m { q.mfuel } else { q.fuel });
+            let branch = matches!(
+                q.k.get(),
+                K::Branch | K::JumpIf | K::Latch | K::StepBranch
+            );
+            if let Some(j) = prog.get(nx)
+                && matches!(j.k.get(), K::Jump)
+                && (branch || j.to != 0)
+            {
+                (nx, f) = (usize::from(j.to), f + j.fuel);
+            }
+            let q = &mut prog[s];
+            (q.mfuel, q.nx) = (f, nx as u8);
+        }
         let mut fuel = self.fuel;
         let mut mark = fuel;
         let mut k = 0u8;
@@ -1669,11 +1687,16 @@ impl Exec<'_> {
                 () => {{
                     if o.m {
                         r[usize::from(o.md)] = r[usize::from(o.ma)];
-                        fuel -= o.mfuel as i64;
-                        k += 2;
-                    } else {
-                        fuel -= o.fuel as i64;
-                        k += 1;
+                    }
+                    fuel -= o.mfuel as i64;
+                    k = o.nx;
+                }};
+            }
+            macro_rules! fall {
+                () => {{
+                    next!();
+                    if k == 0 && fuel <= pass {
+                        break 'run 0;
                     }
                 }};
             }
@@ -1801,7 +1824,7 @@ impl Exec<'_> {
                     if i.wrapping_sub(o.n) as u32 <= o.span {
                         goto!()
                     } else {
-                        next!()
+                        fall!()
                     }
                 }
                 K::StepBranch => {
@@ -1826,7 +1849,7 @@ impl Exec<'_> {
                     if o.mask >> t & 1 != 0 {
                         goto!()
                     } else {
-                        next!()
+                        fall!()
                     }
                 }
                 K::Branch => {
@@ -1836,7 +1859,7 @@ impl Exec<'_> {
                     if o.mask >> t & 1 != 0 {
                         goto!()
                     } else {
-                        next!()
+                        fall!()
                     }
                 }
                 K::Compare => {
@@ -1956,7 +1979,7 @@ impl Exec<'_> {
                     let Some(t) = r[a].as_bool() else {
                         break 'run o.exit;
                     };
-                    if t == (o.mask != 0) { goto!() } else { next!() }
+                    if t == (o.mask != 0) { goto!() } else { fall!() }
                 }
                 K::Jump => goto!(),
                 K::Nop => next!(),
