@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 license = "Apache-2.0"
 repository = "https://github.com/nanocodexyz/nanocode"
-description = "Static front for the nanocode CLI on Linux: answers --version itself and execs nanocode-agent beside it for everything else"
+description = "Static front for the nanocode CLI on Linux: answers --version itself, execs nanocode-exec beside it for exec when present, and execs nanocode-agent beside it for everything else"
 autotests = false
 autobenches = false
 

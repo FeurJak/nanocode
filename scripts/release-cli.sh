@@ -18,6 +18,7 @@ for arch in arm64 amd64; do
     rust:1.97-bullseye sh -c 'sed -i /debian-security/d /etc/apt/sources.list && wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor > /usr/share/keyrings/llvm.gpg && echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] https://apt.llvm.org/bullseye/ llvm-toolchain-bullseye-21 main" > /etc/apt/sources.list.d/llvm.list && apt-get update && apt-get install -y --no-install-recommends bolt-21 llvm-21 && LLVM_BOLT=/usr/lib/llvm-21/bin/llvm-bolt scripts/build-cli.sh nanocode-cli nanocode'
   if [ "$arch" = amd64 ]; then
     cp "target/linux-$arch/cli/$triple/nanocode-agent" "$out/nanocode-$triple"
+    cp "target/linux-$arch/cli/$triple/nanocode-exec" "$out/nanocode-exec-$triple"
     cp "target/linux-$arch/cli/$triple/nanocode" "$out/nanocode-front-$triple"
   else
     cp "target/linux-$arch/cli/$triple/nanocode" "$out/nanocode-$triple"

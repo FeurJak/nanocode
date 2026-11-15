@@ -43,6 +43,16 @@ if [ -n "$front" ] && { [ ! -x "$bin/nanocode" ] || [ "$(cat "$bin/.nanocode-fro
   echo "$front" > "$bin/.nanocode-front.sha256"
 fi
 if [ -z "$front" ] && [ -f "$bin/.nanocode-front.sha256" ]; then rm -f "$bin/nanocode-agent" "$bin/.nanocode-agent.sha256" "$bin/.nanocode-front.sha256"; fi
+only="$(grep " nanocode-exec-$target.$packed$" "$tmp/SHA256SUMS" | cut -d' ' -f1 || true)"
+if [ -n "$only" ] && { [ ! -x "$bin/nanocode-exec" ] || [ "$(cat "$bin/.nanocode-exec.sha256" 2>/dev/null)" != "$only" ]; }; then
+  curl -fsSL "$release/nanocode-exec-$target.$packed" -o "$tmp/nanocode-exec.$packed"
+  if [ "$(digest "$tmp/nanocode-exec.$packed")" != "$only" ]; then echo "nanocode: checksum mismatch for nanocode-exec-$target.$packed" >&2; exit 1; fi
+  case $packed in xz) xz -dc "$tmp/nanocode-exec.xz" > "$tmp/nanocode-exec" ;; *) gunzip -c "$tmp/nanocode-exec.gz" > "$tmp/nanocode-exec" ;; esac
+  chmod +x "$tmp/nanocode-exec"
+  mv "$tmp/nanocode-exec" "$bin/nanocode-exec"
+  echo "$only" > "$bin/.nanocode-exec.sha256"
+fi
+if [ -z "$only" ]; then rm -f "$bin/nanocode-exec" "$bin/.nanocode-exec.sha256"; fi
 ln -sf nanocode "$bin/nc"
 driver="$(grep " nanocode-cua-driver-$target.gz$" "$tmp/SHA256SUMS" | cut -d' ' -f1 || true)"
 if [ -n "$driver" ] && { [ ! -x "$bin/nanocode-cua-driver" ] || [ "$(cat "$bin/.nanocode-cua-driver.sha256" 2>/dev/null)" != "$driver" ]; }; then

@@ -24,6 +24,12 @@ path = "src/main.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "nanocode-exec"
+path = "src/exec_main.rs"
+test = false
+bench = false
+
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 nanocode-io.workspace = true
 nanocode-sys.workspace = true

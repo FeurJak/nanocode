@@ -72,57 +72,66 @@ case $target in
       NANOCODE_PYTHON_SHA256="$(digest "$out/nanocode-python")"
       export NANOCODE_PYTHON_SHA256
     fi
-    env "$nostrip" RUSTFLAGS="$flags" \
-      cargo rustc --locked --offline --profile "$profile" --target "$target" -p "$package" --bin "$bin" -- -C save-temps -C link-arg=-Wl,-Map="$out/$bin.map" --print link-args > "$out/$bin.link.new"
-    if [ -s "$out/$bin.link.new" ]; then mv "$out/$bin.link.new" "$out/$bin.link"; else rm "$out/$bin.link.new"; fi
-    built="$dir/$target/$profile/$bin"
-    train="$dir/bolt/$target/$bin"
-    rm -rf "$train"
-    mkdir -p "$train"
-    "$bolt" "$built" -instrument -instrumentation-file="$train/profile" -instrumentation-file-append-pid -o "$train/instrumented" >&2
-    offline python3 "$root/scripts/train-cli.py" "$train/instrumented" startup >&2
-    mkdir "$train/startup"
-    mv "$train"/profile.*.fdata "$train/startup/"
-    offline python3 "$root/scripts/train-cli.py" "$train/instrumented" oneshot >&2
-    mkdir "$train/oneshot"
-    mv "$train"/profile.*.fdata "$train/oneshot/"
-    offline python3 "$root/scripts/train-cli.py" "$train/instrumented" tools >&2
-    mkdir "$train/tools"
-    mv "$train"/profile.*.fdata "$train/tools/"
-    offline python3 "$root/scripts/train-cli.py" "$train/instrumented" codemode >&2
-    mkdir "$train/codemode"
-    mv "$train"/profile.*.fdata "$train/codemode/"
-    python3 "$root/scripts/rodata-cli.py" "$built" "$out/$bin.map" "$out/$bin.link" "$train/linked" "$train/startup" "$train/oneshot" "$train/tools" "$train/codemode" >&2
-    offline python3 "$root/scripts/train-cli.py" "$train/instrumented" >&2
-    "$(dirname "$bolt")/merge-fdata" "$train"/profile.*.fdata "$train"/startup/*.fdata "$train"/oneshot/*.fdata "$train"/tools/*.fdata "$train"/codemode/*.fdata > "$train/profile.fdata"
-    layout="-reorder-blocks=ext-tsp -split-functions -split-all-cold -split-threshold=256 -split-eh -icf=$icf -use-old-text -no-huge-pages"
-    "$bolt" "$train/linked" -o "$train/cdsort" -data="$train/profile.fdata" $layout -reorder-functions=cdsort -generate-function-order="$train/cdsort.order" >&2
-    rm "$train/cdsort"
-    python3 "$root/scripts/order-cli.py" "$train/cdsort.order" "$train/startup" "$train/oneshot" "$train/tools" "$train/codemode" > "$train/startup.order"
-    input="$train/linked"
-    order="$train/startup.order"
-    if [ "$package" = nanocode-cli ] && [ "$target" = x86_64-unknown-linux-gnu ]; then
-      python3 "$root/scripts/static-cli.py" "$out/$bin.link" "$train/linked.ld" "$root/scripts/cli-libc.order" "$train/static" >&2
-      cat "$root/scripts/cli-libc.order" "$train/startup.order" > "$train/static.order"
-      input="$train/static"
-      order="$train/static.order"
-    fi
-    "$bolt" "$input" -o "$train/optimized" -data="$train/profile.fdata" $layout -reorder-functions=user -function-order="$order" > "$train/optimized.log" 2>&1
-    cat "$train/optimized.log" >&2
-    if [ "$input" = "$train/static" ] && grep -q 'original .text too small' "$train/optimized.log"; then
-      reserve=$(sed -n 's/.*using 0x\([0-9a-f]*\) alignment\. \([0-9]*\) bytes needed, have \([0-9]*\) bytes available.*/\1 \2 \3/p' "$train/optimized.log" | head -n 1 | { read -r align needed have; align=$((0x$align)); echo $(( (needed - have + align - 1) / align * align )); })
-      python3 "$root/scripts/static-cli.py" "$out/$bin.link" "$train/linked.ld" "$root/scripts/cli-libc.order" "$train/static" "$reserve" >&2
+    optimize() {
+      name=$1
+      env "$nostrip" RUSTFLAGS="$flags" \
+        cargo rustc --locked --offline --profile "$profile" --target "$target" -p "$package" --bin "$name" -- -C save-temps -C link-arg=-Wl,-Map="$out/$name.map" --print link-args > "$out/$name.link.new"
+      if [ -s "$out/$name.link.new" ]; then mv "$out/$name.link.new" "$out/$name.link"; else rm "$out/$name.link.new"; fi
+      built="$dir/$target/$profile/$name"
+      train="$dir/bolt/$target/$name"
+      rm -rf "$train"
+      mkdir -p "$train"
+      "$bolt" "$built" -instrument -instrumentation-file="$train/profile" -instrumentation-file-append-pid -o "$train/instrumented" >&2
+      offline python3 "$root/scripts/train-cli.py" "$train/instrumented" "$3" >&2
+      mkdir "$train/startup"
+      mv "$train"/profile.*.fdata "$train/startup/"
+      offline python3 "$root/scripts/train-cli.py" "$train/instrumented" oneshot >&2
+      mkdir "$train/oneshot"
+      mv "$train"/profile.*.fdata "$train/oneshot/"
+      offline python3 "$root/scripts/train-cli.py" "$train/instrumented" tools >&2
+      mkdir "$train/tools"
+      mv "$train"/profile.*.fdata "$train/tools/"
+      offline python3 "$root/scripts/train-cli.py" "$train/instrumented" codemode >&2
+      mkdir "$train/codemode"
+      mv "$train"/profile.*.fdata "$train/codemode/"
+      python3 "$root/scripts/rodata-cli.py" "$built" "$out/$name.map" "$out/$name.link" "$train/linked" "$train/startup" "$train/oneshot" "$train/tools" "$train/codemode" >&2
+      if [ "$3" = startup ]; then
+        offline python3 "$root/scripts/train-cli.py" "$train/instrumented" >&2
+        mkdir "$train/session"
+        mv "$train"/profile.*.fdata "$train/session/"
+      fi
+      "$(dirname "$bolt")/merge-fdata" "$train"/*/*.fdata "$train"/oneshot/*.fdata "$train"/tools/*.fdata "$train"/codemode/*.fdata > "$train/profile.fdata"
+      layout="-reorder-blocks=ext-tsp -split-functions -split-all-cold -split-threshold=256 -split-eh -icf=$icf -use-old-text -no-huge-pages"
+      "$bolt" "$train/linked" -o "$train/cdsort" -data="$train/profile.fdata" $layout -reorder-functions=cdsort -generate-function-order="$train/cdsort.order" >&2
+      rm "$train/cdsort"
+      python3 "$root/scripts/order-cli.py" "$train/cdsort.order" "$train/startup" "$train/oneshot" "$train/tools" "$train/codemode" > "$train/startup.order"
+      input="$train/linked"
+      order="$train/startup.order"
+      if [ "$package" = nanocode-cli ] && [ "$target" = x86_64-unknown-linux-gnu ]; then
+        python3 "$root/scripts/static-cli.py" "$out/$name.link" "$train/linked.ld" "$root/scripts/cli-libc.order" "$train/static" >&2
+        cat "$root/scripts/cli-libc.order" "$train/startup.order" > "$train/static.order"
+        input="$train/static"
+        order="$train/static.order"
+      fi
       "$bolt" "$input" -o "$train/optimized" -data="$train/profile.fdata" $layout -reorder-functions=user -function-order="$order" > "$train/optimized.log" 2>&1
       cat "$train/optimized.log" >&2
-    fi
-    if grep -q 'original .text too small' "$train/optimized.log"; then
-      "$bolt" "$input" -o "$train/optimized" -data="$train/profile.fdata" $layout -lite -reorder-functions=user -function-order="$order" >&2
-    fi
+      if [ "$input" = "$train/static" ] && grep -q 'original .text too small' "$train/optimized.log"; then
+        reserve=$(sed -n 's/.*using 0x\([0-9a-f]*\) alignment\. \([0-9]*\) bytes needed, have \([0-9]*\) bytes available.*/\1 \2 \3/p' "$train/optimized.log" | head -n 1 | { read -r align needed have; align=$((0x$align)); echo $(( (needed - have + align - 1) / align * align )); })
+        python3 "$root/scripts/static-cli.py" "$out/$name.link" "$train/linked.ld" "$root/scripts/cli-libc.order" "$train/static" "$reserve" >&2
+        "$bolt" "$input" -o "$train/optimized" -data="$train/profile.fdata" $layout -reorder-functions=user -function-order="$order" > "$train/optimized.log" 2>&1
+        cat "$train/optimized.log" >&2
+      fi
+      if grep -q 'original .text too small' "$train/optimized.log"; then
+        "$bolt" "$input" -o "$train/optimized" -data="$train/profile.fdata" $layout -lite -reorder-functions=user -function-order="$order" >&2
+      fi
+      "$(dirname "$bolt")/llvm-strip" --remove-section=.note.bolt_info -o "$out/$2" "$train/optimized"
+      python3 "$root/scripts/trim-cli.py" "$out/$2"
+    }
     agent="$bin"
     if [ "$package" = nanocode-cli ] && [ "$target" = x86_64-unknown-linux-gnu ]; then agent=nanocode-agent; fi
-    "$(dirname "$bolt")/llvm-strip" --remove-section=.note.bolt_info -o "$out/$agent" "$train/optimized"
-    python3 "$root/scripts/trim-cli.py" "$out/$agent"
+    optimize "$bin" "$agent" startup
     if [ "$agent" != "$bin" ]; then
+      optimize nanocode-exec nanocode-exec oneshot
       CARGO_TARGET_DIR="$dir" cargo build --locked --offline --release --target "$target" --manifest-path bin/nanocode-front/Cargo.toml >&2
       cp "$dir/$target/release/nanocode-front" "$out/$bin"
     fi

@@ -12,11 +12,13 @@ mod front {
 
     const VERSION: &[u8] = concat!("nanocode ", env!("NANOCODE_VERSION"), "\n").as_bytes();
     const AGENT: &[u8] = b"nanocode-agent\0";
+    const EXEC: &[u8] = b"nanocode-exec\0";
     const SELF: &[u8] = b"/proc/self/exe\0";
     const PATH_MAX: usize = 4096;
     const AT_FDCWD: isize = -100;
     const NOT_RUN: usize = 127;
     const ENAMETOOLONG: isize = 36;
+    const ENOENT: isize = 2;
 
     mod nr {
         pub const WRITE: usize = 1;
@@ -111,12 +113,25 @@ mod front {
             .iter()
             .rposition(|byte| *byte == b'/')
             .map_or(0, |slash| slash + 1);
-        unsafe {
-            start
-                .add(directory)
-                .copy_from_nonoverlapping(AGENT.as_ptr(), AGENT.len())
-        };
-        let path = unsafe { core::slice::from_raw_parts(start, directory + AGENT.len()) };
+        if argc >= 2 && unsafe { equals(*argv.add(1), b"exec\0") } {
+            let (path, error) = unsafe { run(start, directory, EXEC, argv, envp) };
+            if error != -ENOENT {
+                fail(b"run", &path[..path.len() - 1], error)
+            }
+        }
+        let (path, error) = unsafe { run(start, directory, AGENT, argv, envp) };
+        fail(b"run", &path[..path.len() - 1], error)
+    }
+
+    unsafe fn run<'a>(
+        start: *mut u8,
+        directory: usize,
+        name: &[u8],
+        argv: *const *const u8,
+        envp: *const *const u8,
+    ) -> (&'a [u8], isize) {
+        unsafe { start.add(directory).copy_from_nonoverlapping(name.as_ptr(), name.len()) };
+        let path = unsafe { core::slice::from_raw_parts(start, directory + name.len()) };
         let error = unsafe {
             syscall(
                 nr::EXECVE,
@@ -126,7 +141,7 @@ mod front {
                 0,
             )
         };
-        fail(b"run", &path[..directory + AGENT.len() - 1], error)
+        (path, error)
     }
 
     #[unsafe(no_mangle)]

@@ -168,6 +168,14 @@ fn version_requested() -> Option<ExitCode> {
 }
 
 pub fn run_with(clients: ModelClients) -> ExitCode {
+    start::<false>(clients)
+}
+
+pub fn run_exec() -> ExitCode {
+    start::<true>(ModelClients::default())
+}
+
+fn start<const EXEC: bool>(clients: ModelClients) -> ExitCode {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     if let Some(code) = version_requested() {
         return code;
@@ -313,15 +321,16 @@ pub fn run_with(clients: ModelClients) -> ExitCode {
     }
     let outcome = runtime.block_on(async move {
         match cli.command {
+            Some(Command::Exec(args)) => {
+                on_worker(exec(Box::new(args.or(cli.session)), clients)).await
+            }
+            _ if EXEC => Err("this executable runs only nanocode exec".into()),
             Some(Command::Hand(args)) => hand(args).await,
             #[cfg(unix)]
             Some(Command::Cua(args)) => cua::cua(args).await,
             Some(Command::Sessions(mut args)) => {
                 args.home = args.home.or(cli.session.home);
                 on_worker(list_sessions(args)).await
-            }
-            Some(Command::Exec(args)) => {
-                on_worker(exec(Box::new(args.or(cli.session)), clients)).await
             }
             Some(Command::Models) => print_models(&clients).await,
             Some(Command::Resume { id }) => {
