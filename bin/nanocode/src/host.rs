@@ -779,6 +779,7 @@ impl Host {
             })
             .direct_tools_for(move |request| codex_direct || !native_model(&request.model))
             .direct_subagents(config.subagents == Subagents::AllModels)
+            .headless(config.headless)
             .configure(move |builder| {
                 let window = context_window
                     .or_else(|| listed_window(listed.as_ref(), builder.selected_model().as_str()));

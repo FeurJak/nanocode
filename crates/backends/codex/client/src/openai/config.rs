@@ -70,6 +70,8 @@ pub struct ModelConfig {
 
     pub working_state: Option<crate::session::working_state::WorkingStatePolicy>,
 
+    pub headless: bool,
+
     pub compaction_thinking: Option<Thinking>,
 
     pub responses_transport: ResponsesTransport,
@@ -272,6 +274,7 @@ impl ModelConfig {
             auto_compact_token_limit: None,
             max_output_tokens: None,
             working_state: None,
+            headless: false,
             compaction_thinking: None,
             responses_transport: ResponsesTransport::default(),
             websocket_warmup: false,
