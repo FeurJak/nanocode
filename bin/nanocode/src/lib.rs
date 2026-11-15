@@ -113,7 +113,7 @@ fn telemetry(
             "nanocode",
             env!("CARGO_PKG_VERSION"),
             output,
-            if matches!(cli.command, Some(Command::Hand(_))) {
+            if matches!(cli.command, Some(Command::Hand(_) | Command::Sessions(_))) {
                 nanocode_observability::Telemetry::Off
             } else {
                 nanocode_observability::Telemetry::Agent
