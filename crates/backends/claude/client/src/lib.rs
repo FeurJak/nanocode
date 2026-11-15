@@ -516,7 +516,7 @@ impl Message {
 pub struct ToolDefinition {
     pub name: String,
     pub description: std::sync::Arc<str>,
-    pub input_schema: std::sync::Arc<Value>,
+    pub input_schema: nanocode_types_core::responses::JsonSchema,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strict: Option<bool>,
     #[serde(default, skip_serializing_if = "is_false")]

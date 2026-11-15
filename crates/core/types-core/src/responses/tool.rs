@@ -270,8 +270,47 @@ pub struct JsonSchema(Schema);
 
 #[derive(Clone)]
 enum Schema {
+    Lazy(&'static LazySchema),
     Static(&'static StaticSchema),
     Value(std::sync::Arc<Value>),
+}
+
+pub struct LazySchema {
+    build: fn() -> Value,
+    json: std::sync::OnceLock<Box<serde_json::value::RawValue>>,
+    value: std::sync::OnceLock<std::sync::Arc<Value>>,
+}
+
+impl LazySchema {
+    #[must_use]
+    pub const fn new(build: fn() -> Value) -> Self {
+        Self {
+            build,
+            json: std::sync::OnceLock::new(),
+            value: std::sync::OnceLock::new(),
+        }
+    }
+
+    fn json(&self) -> &serde_json::value::RawValue {
+        self.json.get_or_init(|| {
+            serde_json::value::to_raw_value(&(self.build)())
+                .unwrap_or_else(|error| panic!("{error}"))
+        })
+    }
+
+    fn value(&self) -> &std::sync::Arc<Value> {
+        self.value
+            .get_or_init(|| std::sync::Arc::new((self.build)()))
+    }
+}
+
+#[macro_export]
+macro_rules! lazy_json_schema {
+    ($build:expr) => {{
+        static SCHEMA: $crate::responses::LazySchema =
+            $crate::responses::LazySchema::new(|| $build);
+        $crate::responses::JsonSchema::from_lazy(&SCHEMA)
+    }};
 }
 
 pub struct StaticSchema {
@@ -473,6 +512,11 @@ const fn json_number(json: &[u8], mut index: usize) -> usize {
 
 impl JsonSchema {
     #[must_use]
+    pub const fn from_lazy(schema: &'static LazySchema) -> Self {
+        Self(Schema::Lazy(schema))
+    }
+
+    #[must_use]
     pub const fn from_static(schema: &'static StaticSchema) -> Self {
         Self(Schema::Static(schema))
     }
@@ -480,14 +524,25 @@ impl JsonSchema {
     #[must_use]
     pub fn as_value(&self) -> &Value {
         match &self.0 {
+            Schema::Lazy(schema) => schema.value(),
             Schema::Static(schema) => schema.value(),
             Schema::Value(value) => value,
         }
     }
 
     #[must_use]
+    pub fn is_object(&self) -> bool {
+        match &self.0 {
+            Schema::Lazy(schema) => schema.json().get().starts_with('{'),
+            Schema::Static(schema) => schema.json.starts_with('{'),
+            Schema::Value(value) => value.is_object(),
+        }
+    }
+
+    #[must_use]
     pub fn shared(&self) -> std::sync::Arc<Value> {
         match &self.0 {
+            Schema::Lazy(schema) => std::sync::Arc::clone(schema.value()),
             Schema::Static(schema) => std::sync::Arc::clone(schema.value()),
             Schema::Value(value) => std::sync::Arc::clone(value),
         }
@@ -497,6 +552,10 @@ impl JsonSchema {
 impl std::fmt::Debug for JsonSchema {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.0 {
+            Schema::Lazy(schema) => formatter
+                .debug_tuple("JsonSchema")
+                .field(schema.value())
+                .finish(),
             Schema::Static(schema) => formatter
                 .debug_tuple("JsonSchema")
                 .field(&schema.json)
@@ -515,6 +574,12 @@ impl<'de> Deserialize<'de> for JsonSchema {
     }
 }
 
+impl From<std::sync::Arc<Value>> for JsonSchema {
+    fn from(value: std::sync::Arc<Value>) -> Self {
+        Self(Schema::Value(value))
+    }
+}
+
 impl From<Value> for JsonSchema {
     fn from(value: Value) -> Self {
         Self(Schema::Value(std::sync::Arc::new(value)))
@@ -524,6 +589,7 @@ impl From<Value> for JsonSchema {
 impl PartialEq for JsonSchema {
     fn eq(&self, other: &Self) -> bool {
         match (&self.0, &other.0) {
+            (Schema::Lazy(left), Schema::Lazy(right)) if std::ptr::eq(*left, *right) => true,
             (Schema::Static(left), Schema::Static(right)) if std::ptr::eq(*left, *right) => true,
             (Schema::Value(left), Schema::Value(right)) if std::sync::Arc::ptr_eq(left, right) => {
                 true
@@ -539,9 +605,12 @@ impl Serialize for JsonSchema {
         S: Serializer,
     {
         match &self.0 {
-            Schema::Static(schema) => serde_json::from_str::<&serde_json::value::RawValue>(schema.json)
-                .map_err(serde::ser::Error::custom)?
-                .serialize(serializer),
+            Schema::Lazy(schema) => schema.json().serialize(serializer),
+            Schema::Static(schema) => {
+                serde_json::from_str::<&serde_json::value::RawValue>(schema.json)
+                    .map_err(serde::ser::Error::custom)?
+                    .serialize(serializer)
+            }
             Schema::Value(value) => value.serialize(serializer),
         }
     }

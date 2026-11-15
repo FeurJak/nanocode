@@ -1,4 +1,5 @@
 use nanocode_tool_host::{ToolOutput, contract::ToolOutputContent};
+use nanocode_types::responses::JsonSchema;
 use serde_json::{Value, json};
 
 pub(super) fn media(content: Vec<ToolOutputContent>) -> ToolOutput {
@@ -6,26 +7,30 @@ pub(super) fn media(content: Vec<ToolOutputContent>) -> ToolOutput {
     ToolOutput::content(content).with_structured_result(value)
 }
 
-pub(super) fn schema(name: &str) -> Value {
+pub(super) fn schema(name: &str) -> JsonSchema {
     match name {
-        "Read" => read(json!({"type": "array", "items": {"oneOf": [
-            {"type": "object", "properties": {
-                "type": {"const": "input_text"}, "text": {"type": "string"}
-            }, "required": ["type", "text"], "additionalProperties": false},
-            image(),
-            {"type": "object", "description": "a whole PDF, which the exec result shows you as a document", "properties": {
-                "type": {"const": "input_file"}, "file_data": {"type": "string"}
-            }, "required": ["type", "file_data"], "additionalProperties": false}
-        ]}})),
-        "Write" => json!({"type": "string", "description": "Wrote {shown_path}"}),
-        "Edit" => {
-            json!({"type": "string", "description": "Edited {shown_path} ({count} replacement(s))"})
+        "Read" => {
+            nanocode_tools::lazy_json_schema!(read(json!({"type": "array", "items": {"oneOf": [
+                {"type": "object", "properties": {
+                    "type": {"const": "input_text"}, "text": {"type": "string"}
+                }, "required": ["type", "text"], "additionalProperties": false},
+                image(),
+                {"type": "object", "description": "a whole PDF, which the exec result shows you as a document", "properties": {
+                    "type": {"const": "input_file"}, "file_data": {"type": "string"}
+                }, "required": ["type", "file_data"], "additionalProperties": false}
+            ]}})))
         }
-        "Bash" => bash(
+        "Write" => {
+            nanocode_tools::json_schema!({"type": "string", "description": "Wrote {shown_path}"})
+        }
+        "Edit" => {
+            nanocode_tools::json_schema!({"type": "string", "description": "Edited {shown_path} ({count} replacement(s))"})
+        }
+        "Bash" => nanocode_tools::lazy_json_schema!(bash(
             "the last line says so in brackets and names `output_file`, which holds all of it.",
             json!({"type": ["string", "null"], "description": "The file with everything the command printed, stdout and stderr together, when `truncated` or `background` is true: read it in parts with another command."}),
-        ),
-        "TaskStop" => json!({"type": "object", "properties": {
+        )),
+        "TaskStop" => nanocode_tools::json_schema!({"type": "object", "properties": {
             "message": {"type": "string"}, "task_id": {"type": "string"},
             "task_type": {"enum": ["local_bash", "local_agent"]}, "command": {"type": "string"}
         }, "required": ["message", "task_id", "task_type", "command"], "additionalProperties": false}),
@@ -33,14 +38,16 @@ pub(super) fn schema(name: &str) -> Value {
     }
 }
 
-pub(super) fn host_schema(name: &str) -> Value {
+pub(super) fn host_schema(name: &str) -> JsonSchema {
     match name {
-        "Read" => read(json!({"type": "array", "items": image(), "minItems": 1, "maxItems": 1})),
-        "Bash" => bash(
+        "Read" => nanocode_tools::lazy_json_schema!(read(
+            json!({"type": "array", "items": image(), "minItems": 1, "maxItems": 1})
+        )),
+        "Bash" => nanocode_tools::lazy_json_schema!(bash(
             "the last line says so in brackets.",
             json!({"type": "null"}),
-        ),
-        "TaskOutput" => task_output(),
+        )),
+        "TaskOutput" => nanocode_tools::lazy_json_schema!(task_output()),
         _ => schema(name),
     }
 }

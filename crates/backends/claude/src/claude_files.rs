@@ -18,17 +18,14 @@ pub(super) fn selection(
     code_mode: bool,
 ) -> Result<Tools, ToolsBuildError> {
     let mut tools = Tools::builder().without_defaults();
-    for schema in ClaudeWorkspaceFiles::definitions() {
-        let name = schema["name"].as_str().unwrap_or_default().to_owned();
-        let description = schema["description"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
+    for name in ["Read", "Edit", "Write"] {
+        let upstream = nanocode_backend_claude_tools::upstream::tool(name);
+        let name = name.to_owned();
         tools = tools.tool(ClaudeFileTool {
             definition: ToolDefinition::function(
                 name.clone(),
-                description,
-                schema["input_schema"].clone(),
+                upstream.description.clone(),
+                upstream.input_schema(),
             )
             .with_output_schema(super::claude_output::schema(&name)),
             name,

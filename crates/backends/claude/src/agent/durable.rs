@@ -906,7 +906,7 @@ impl State {
             .and_then(|_| {
                 cursor.template.tools.iter().find_map(|tool| match tool {
                     ClaudeToolSpec::Client(tool) if tool.name == name => Some(
-                        crate::tools::input::validate(name, &tool.input_schema, input),
+                        crate::tools::input::validate(name, tool.input_schema.as_value(), input),
                     ),
                     _ => None,
                 })

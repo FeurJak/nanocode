@@ -1167,10 +1167,10 @@ struct BashTool {
 }
 impl Tool for BashTool {
     fn definition(&self) -> ToolDefinition {
-        let schema = ClaudeBash::<LocalBash>::definitions().remove(0);
-        let (before, after) = schema["description"]
-            .as_str()
-            .and_then(|description| description.split_once(UPSTREAM_TIMEOUT))
+        let upstream = nanocode_backend_claude_tools::upstream::tool("Bash");
+        let (before, after) = upstream
+            .description
+            .split_once(UPSTREAM_TIMEOUT)
             .expect("upstream Bash timeout sentence");
         let (between, after) = after
             .split_once(UPSTREAM_BACKGROUND)
@@ -1185,7 +1185,7 @@ impl Tool for BashTool {
             format!(
                 "{before}{UPSTREAM_TIMEOUT}{timeout}{between}{UPSTREAM_BACKGROUND}{background}{after}"
             ),
-            schema["input_schema"].clone(),
+            upstream.input_schema(),
         )
         .with_output_schema(super::claude_output::schema("Bash"))
     }
@@ -1351,13 +1351,11 @@ struct TaskStopTool {
 }
 impl Tool for TaskStopTool {
     fn definition(&self) -> ToolDefinition {
-        let definition = crate::upstream::tool_value("TaskStop");
+        let upstream = nanocode_backend_claude_tools::upstream::tool("TaskStop");
         ToolDefinition::function(
             "TaskStop",
-            definition["description"]
-                .as_str()
-                .expect("upstream tool description"),
-            definition["input_schema"].clone(),
+            upstream.description.clone(),
+            upstream.input_schema(),
         )
         .with_output_schema(super::claude_output::schema("TaskStop"))
     }

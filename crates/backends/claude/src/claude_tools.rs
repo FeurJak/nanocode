@@ -270,7 +270,7 @@ fn catalog(
             } if &*name == "exec" => (
                 name,
                 exec_description(&description),
-                exec_schema(cell_yield),
+                exec_schema(cell_yield).into(),
                 Call::Exec,
             ),
             RuntimeDefinition::Function {
@@ -278,7 +278,7 @@ fn catalog(
                 description,
                 parameters,
                 ..
-            } if &*name == "wait" => (name, description, parameters.shared(), Call::Wait),
+            } if &*name == "wait" => (name, description, parameters, Call::Wait),
             RuntimeDefinition::Function {
                 name,
                 description,
@@ -287,15 +287,12 @@ fn catalog(
             } => {
                 let call = Call::Function(Arc::from(name.as_ref()));
                 let description = match direct && &*name == "Bash" {
-                    true => {
-                        nanocode_backend_claude_tools::upstream::tool_value("Bash")["description"]
-                            .as_str()
-                            .expect("upstream Bash description")
-                            .into()
-                    }
+                    true => nanocode_backend_claude_tools::upstream::tool("Bash")
+                        .description
+                        .clone(),
                     false => description,
                 };
-                (name, description, parameters.shared(), call)
+                (name, description, parameters, call)
             }
             RuntimeDefinition::ToolSearch {
                 description,
@@ -304,7 +301,7 @@ fn catalog(
             } => (
                 "tool_search".into(),
                 description,
-                parameters.shared(),
+                parameters,
                 Call::Function(Arc::from("tool_search")),
             ),
             other => {

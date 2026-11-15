@@ -99,12 +99,12 @@ enum Handler {
 pub struct FunctionTool {
     name: String,
     description: String,
-    parameters: Value,
+    parameters: nanocode_types_core::responses::JsonSchema,
     handler: Handler,
     parallel: bool,
     content_results: bool,
     json_strings: bool,
-    output_schema: Option<Value>,
+    output_schema: Option<nanocode_types_core::responses::JsonSchema>,
 }
 
 impl FunctionTool {
@@ -112,7 +112,7 @@ impl FunctionTool {
     pub fn new(
         name: impl Into<String>,
         description: impl Into<String>,
-        parameters: Value,
+        parameters: impl Into<nanocode_types_core::responses::JsonSchema>,
         handler: Arc<dyn FunctionHandler>,
     ) -> Self {
         Self::with_handler(name, description, parameters, Handler::Json(handler))
@@ -121,13 +121,13 @@ impl FunctionTool {
     fn with_handler(
         name: impl Into<String>,
         description: impl Into<String>,
-        parameters: Value,
+        parameters: impl Into<nanocode_types_core::responses::JsonSchema>,
         handler: Handler,
     ) -> Self {
         Self {
             name: name.into(),
             description: description.into(),
-            parameters,
+            parameters: parameters.into(),
             handler,
             parallel: false,
             content_results: false,
@@ -153,7 +153,7 @@ impl FunctionTool {
     pub fn typed_with_parameters<Args, Error>(
         name: impl Into<String>,
         description: impl Into<String>,
-        parameters: Value,
+        parameters: impl Into<nanocode_types_core::responses::JsonSchema>,
         handler: impl TypedHandler<Args, Error>,
     ) -> Self
     where
@@ -183,8 +183,11 @@ impl FunctionTool {
     }
 
     #[must_use]
-    pub fn output_schema(mut self, schema: Value) -> Self {
-        self.output_schema = Some(schema);
+    pub fn output_schema(
+        mut self,
+        schema: impl Into<nanocode_types_core::responses::JsonSchema>,
+    ) -> Self {
+        self.output_schema = Some(schema.into());
         self
     }
 
@@ -284,7 +287,7 @@ impl Tool for FunctionTool {
                 None => definition,
             };
         }
-        definition.with_output_schema(json!({
+        definition.with_output_schema(nanocode_tools::json_schema!({
             "type": "object",
             "properties": {
                 "content": {"type": "array", "items": {"type": "object"}},

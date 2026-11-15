@@ -9,7 +9,7 @@ use serde_json::{
     value::{RawValue, to_raw_value},
 };
 
-pub use crate::{json_schema, responses::ToolDefinition};
+pub use crate::{json_schema, lazy_json_schema, responses::ToolDefinition};
 
 use crate::ImageDetail;
 

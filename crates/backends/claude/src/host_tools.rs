@@ -73,13 +73,14 @@ pub fn host_file_tools(
 
 fn file_tools(workspace: Arc<Path>, files: Arc<dyn FileHost>) -> nanocode_tool_host::ToolsBuilder {
     let mut tools = Tools::builder().without_defaults();
-    for schema in text_files::definitions() {
-        let name = schema["name"].as_str().unwrap_or_default().to_owned();
+    for name in ["Read", "Edit", "Write"] {
+        let upstream = nanocode_backend_claude_tools::upstream::tool(name);
+        let name = name.to_owned();
         tools = tools.tool(HostFileTool {
             definition: ToolDefinition::function(
                 name.clone(),
-                schema["description"].as_str().unwrap_or_default(),
-                schema["input_schema"].clone(),
+                upstream.description.clone(),
+                upstream.input_schema(),
             )
             .with_output_schema(crate::claude_output::host_schema(&name)),
             name,
@@ -464,12 +465,12 @@ impl HostTaskTool {
 impl Tool for HostTaskTool {
     fn definition(&self) -> ToolDefinition {
         let name = self.tool.name();
-        if matches!(self.tool, HostTool::TaskStop) {
-            let definition = nanocode_backend_claude_tools::upstream::tool_value(name);
+        if !matches!(self.tool, HostTool::TaskOutput) {
+            let upstream = nanocode_backend_claude_tools::upstream::tool(name);
             return ToolDefinition::function(
                 name,
-                definition["description"].as_str().unwrap_or_default(),
-                definition["input_schema"].clone(),
+                upstream.description.clone(),
+                upstream.input_schema(),
             )
             .with_output_schema(crate::claude_output::host_schema(name));
         }
@@ -506,11 +507,11 @@ struct HostBashTool(ClaudeBash<HostBash>);
 
 impl Tool for HostBashTool {
     fn definition(&self) -> ToolDefinition {
-        let schema = ClaudeBash::<HostBash>::definitions().remove(0);
+        let upstream = nanocode_backend_claude_tools::upstream::tool("Bash");
         ToolDefinition::function(
             "Bash",
-            schema["description"].as_str().unwrap_or_default(),
-            schema["input_schema"].clone(),
+            upstream.description.clone(),
+            upstream.input_schema(),
         )
         .with_output_schema(crate::claude_output::host_schema("Bash"))
     }

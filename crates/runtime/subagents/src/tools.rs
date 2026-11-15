@@ -1186,7 +1186,9 @@ fn spawn_agent_definition(mut policy: SpawnPolicy, code_mode: bool) -> ToolDefin
         spawn_agent_parameters_for(&policy),
     )
     .with_strict_parameters()
-    .with_output_schema(SPAWN_AGENT_OUTPUT_SCHEMA.clone());
+    .with_output_schema(nanocode_tool_contracts::lazy_json_schema!(
+        spawn_agent_output_schema()
+    ));
     DEFINITIONS.update(|definitions| {
         definitions.insert(key.clone(), definition.clone());
     });
@@ -1464,7 +1466,7 @@ impl Tool for SubmitResult {
             ToolDefinition::function(
             SUBMIT_RESULT_TOOL,
             "Submits the current child subagent turn's final JSON output. Supply only output matching the task schema. After an accepted receipt, send a brief final assistant message with no further tool calls; do not finish with an empty response. If superseded, incorporate pending instructions and submit the updated result. Invalid values can be corrected and retried.",
-            schema(r##"{
+            nanocode_tool_contracts::json_schema!({
                 "type": "object",
                 "properties": {
                     "output": {
@@ -1479,9 +1481,9 @@ impl Tool for SubmitResult {
                 },
                 "required": ["output"],
                 "additionalProperties": false
-            }"##),
+            }),
         )
-        .with_output_schema(schema(r##"{
+        .with_output_schema(nanocode_tool_contracts::json_schema!({
             "type": "object",
             "properties": {
                 "accepted": { "type": "boolean" },
@@ -1493,7 +1495,7 @@ impl Tool for SubmitResult {
             },
             "required": ["accepted", "status"],
             "additionalProperties": false
-        }"##))
+        }))
         })
     }
 
@@ -1570,7 +1572,7 @@ impl Tool for SendAgentMessage {
             ToolDefinition::function(
                 SEND_AGENT_MESSAGE_TOOL,
                 "Sends a bounded directed message to any other agent in the same task tree. Deferred messages start an idle agent or queue behind its active turn. If a send is queued, do not wait for it inside the current turn; finish the turn so queued messages can be delivered. Urgent messages steer a running agent at its next safe model boundary. Delegate messages replace the recipient's assigned task, retain its output schema, and require management authority.",
-                {
+                nanocode_tool_contracts::lazy_json_schema!({
                     let mut parameters = schema(
                         r##"{
                 "type": "object",
@@ -1609,7 +1611,7 @@ impl Tool for SendAgentMessage {
                     );
                     parameters["properties"]["message"]["maxLength"] = MAX_MESSAGE_BYTES.into();
                     parameters
-                },
+                }),
             )
         })
     }
@@ -1728,18 +1730,16 @@ impl Tool for ListModels {
             ToolDefinition::function(
                 LIST_MODELS_TOOL,
                 "Lists the models this host reaches through providers, each named <provider>/<model> with the harness that runs it, and what each provider is and how it is paid. Pass one as spawn_agent's model to run a subagent on it.",
-                schema(
-                    r##"{
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Lists only the models whose name contains this, ignoring case."
-                    }
-                },
-                "additionalProperties": false
-            }"##,
-                ),
+                nanocode_tool_contracts::json_schema!({
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Lists only the models whose name contains this, ignoring case."
+                        }
+                    },
+                    "additionalProperties": false
+                }),
             )
         })
     }
@@ -1802,34 +1802,32 @@ impl Tool for ListAgents {
             ToolDefinition::function(
                 LIST_AGENTS_TOOL,
                 "Lists agents in the same task tree in agent_id order. Pending, running, and recoverable interrupted agents are returned by default. Set include_completed to retrieve terminal statuses and completed results in status.output. After reuse or closure, last_output retains the latest completed result. In a large tree, page with limit: the result's next_after_agent_id, present while more agents remain, is the after_agent_id of the next page.",
-                schema(
-                    r##"{
-                "type": "object",
-                "properties": {
-                    "include_completed": {
-                        "type": "boolean",
-                        "default": false,
-                        "description": "Also includes completed, failed, closed, and nonrecoverable interrupted agents."
+                nanocode_tool_contracts::json_schema!({
+                    "type": "object",
+                    "properties": {
+                        "include_completed": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Also includes completed, failed, closed, and nonrecoverable interrupted agents."
+                        },
+                        "include_self": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Includes the calling agent for topology inspection. Self-messaging remains unavailable."
+                        },
+                        "after_agent_id": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Lists only agents whose agent_id is greater than this one."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Lists at most this many agents."
+                        }
                     },
-                    "include_self": {
-                        "type": "boolean",
-                        "default": false,
-                        "description": "Includes the calling agent for topology inspection. Self-messaging remains unavailable."
-                    },
-                    "after_agent_id": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "description": "Lists only agents whose agent_id is greater than this one."
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "Lists at most this many agents."
-                    }
-                },
-                "additionalProperties": false
-            }"##,
-                ),
+                    "additionalProperties": false
+                }),
             )
         })
     }
@@ -1907,7 +1905,7 @@ impl Tool for WaitAgent {
             ToolDefinition::function(
             WAIT_AGENT_TOOL,
             description,
-            schema(r##"{
+            nanocode_tool_contracts::json_schema!({
                 "type": "object",
                 "properties": {
                     "agent_ids": {
@@ -1924,9 +1922,9 @@ impl Tool for WaitAgent {
                 },
                 "required": ["agent_ids"],
                 "additionalProperties": false
-            }"##),
+            }),
         )
-        .with_output_schema(WAIT_AGENT_OUTPUT_SCHEMA.clone())
+        .with_output_schema(nanocode_tool_contracts::lazy_json_schema!(wait_agent_output_schema()))
         })
     }
 
@@ -2027,20 +2025,18 @@ impl Tool for ChangeAgentLifecycle {
             ToolDefinition::function(
                 self.tool_name(),
                 description,
-                schema(
-                    r##"{
-                "type": "object",
-                "properties": {
-                    "agent_id": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "The root of the subagent subtree to stop."
-                    }
-                },
-                "required": ["agent_id"],
-                "additionalProperties": false
-            }"##,
-                ),
+                nanocode_tool_contracts::json_schema!({
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "The root of the subagent subtree to stop."
+                        }
+                    },
+                    "required": ["agent_id"],
+                    "additionalProperties": false
+                }),
             )
         })
     }
@@ -2227,10 +2223,6 @@ impl Tool for TurnAuthority {
             .recover(input, context.with_host_context(host_context))
     }
 }
-
-static SPAWN_AGENT_OUTPUT_SCHEMA: LazyLock<Value> = LazyLock::new(spawn_agent_output_schema);
-
-static WAIT_AGENT_OUTPUT_SCHEMA: LazyLock<Value> = LazyLock::new(wait_agent_output_schema);
 
 fn spawn_agent_output_schema() -> Value {
     schema(

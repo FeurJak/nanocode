@@ -817,14 +817,8 @@ fn same_metadata(built: &ToolDefinition, current: &ToolDefinition) -> bool {
     std::mem::discriminant(built) == std::mem::discriminant(current)
         && built.name() == current.name()
         && same(Some(built.description()), Some(current.description()))
-        && same(
-            built.parameters().map(|schema| schema.as_value()),
-            current.parameters().map(|schema| schema.as_value()),
-        )
-        && same(
-            built.output_schema().map(|schema| schema.as_value()),
-            current.output_schema().map(|schema| schema.as_value()),
-        )
+        && same(built.parameters(), current.parameters())
+        && same(built.output_schema(), current.output_schema())
 }
 
 fn nested_definition(definition: ToolDefinition) -> ToolDefinition {

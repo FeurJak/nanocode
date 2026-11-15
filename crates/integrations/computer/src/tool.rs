@@ -526,7 +526,11 @@ pub fn step_line(input: &Value) -> String {
 }
 
 pub fn definition(capabilities: Capabilities) -> ToolDefinition {
-    ToolDefinition::function("computer", description(capabilities), schema())
+    ToolDefinition::function(
+        "computer",
+        description(capabilities),
+        nanocode_tool_contracts::lazy_json_schema!(schema()),
+    )
 }
 
 fn description(capabilities: Capabilities) -> String {

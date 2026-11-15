@@ -1,14 +1,10 @@
-use std::sync::LazyLock;
-
 use nanocode_tools::SchemaSettings;
 use serde_json::{Map, Value};
 
 use super::wire::SearchCommands;
 
-static COMMANDS_SCHEMA: LazyLock<Value> = LazyLock::new(generate_commands_schema);
-
-pub(crate) fn commands_schema() -> Value {
-    COMMANDS_SCHEMA.clone()
+pub(crate) fn commands_schema() -> nanocode_types::responses::JsonSchema {
+    nanocode_tools::lazy_json_schema!(generate_commands_schema())
 }
 
 fn generate_commands_schema() -> Value {

@@ -50,7 +50,7 @@ impl JobTool {
                 format!(
                     "Waits for a background job to exit, up to yield_time_ms, and returns its status with the last lines of its output (the middle of long output is dropped, so the end of a build log or test run is what you see). Returns as soon as the job exits. yield_time_ms defaults to {MAX_POLL_YIELD_MS} ms, its maximum, and is at least {MIN_POLL_YIELD_MS} ms; while the job runs, call it again rather than polling with short waits. A job that is still running reports the latest lines it printed, also when it printed nothing new."
                 ),
-                json!({
+                nanocode_tools::lazy_json_schema!(json!({
                     "type": "object",
                     "properties": {
                         "session_id": { "type": "number", "description": "The job's session_id from job_start or exec_command." },
@@ -60,7 +60,7 @@ impl JobTool {
                     },
                     "required": ["session_id"],
                     "additionalProperties": false
-                }),
+                })),
             ),
             Self::Kill => ToolDefinition::function(
                 self.name(),

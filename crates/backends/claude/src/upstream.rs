@@ -41,16 +41,20 @@ pub(crate) fn bash_first() -> &'static BashFirst {
 pub fn tool_definitions() -> &'static [ToolDefinition] {
     static TOOLS: OnceLock<Vec<ToolDefinition>> = OnceLock::new();
     TOOLS.get_or_init(|| {
-        serde_json::from_str(nanocode_backend_claude_tools::upstream::TOOL_DEFINITIONS)
-            .expect("verified upstream Claude tool contracts")
+        nanocode_backend_claude_tools::upstream::tools()
+            .iter()
+            .map(|tool| ToolDefinition {
+                name: tool.name.into(),
+                description: tool.description.clone(),
+                input_schema: tool.input_schema(),
+                strict: None,
+                defer_loading: false,
+                cache_control: None,
+            })
+            .collect()
     })
 }
 
 pub fn tool_definition(name: &str) -> Option<&'static ToolDefinition> {
     tool_definitions().iter().find(|tool| tool.name == name)
-}
-
-#[cfg(not(target_family = "wasm"))]
-pub(crate) fn tool_value(name: &str) -> Value {
-    nanocode_backend_claude_tools::upstream::tool_value(name)
 }

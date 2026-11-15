@@ -38,7 +38,7 @@ fn build_definition() -> ToolDefinition {
     ToolDefinition::function(
         "image_gen__imagegen",
         DESCRIPTION,
-        json!({
+        nanocode_tools::json_schema!({
             "type": "object",
             "properties": {
                 "prompt": { "type": "string" },

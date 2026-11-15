@@ -2219,7 +2219,7 @@ pub fn web_search_tool(
     nanocode_tool_host::FunctionTool::new(
         upstream.name.clone(),
         upstream.description.to_string(),
-        Value::clone(&upstream.input_schema),
+        upstream.input_schema.clone(),
         Arc::new(NestedSearch { client, max_tokens }),
     )
     .parallel_tool_calls(true)
