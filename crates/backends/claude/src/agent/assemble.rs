@@ -489,6 +489,7 @@ pub(super) fn build(mut builder: ClaudeBuilder) -> Result<(Agent, AgentEvents)> 
         fold_finish: builder.fold_finish,
         lean_cells: builder.lean_cells,
         low_effort_rounds: builder.low_effort_rounds,
+        tool_result_tokens: builder.tool_result_tokens,
         working_directory: working_directory.map(crate::environment::WorkingDirectory::new),
         nested_tools,
         recovery,

@@ -821,6 +821,7 @@ pub struct ClaudeBuilder {
     fold_finish: bool,
     lean_cells: bool,
     low_effort_rounds: bool,
+    tool_result_tokens: Option<std::num::NonZeroU64>,
     spawn_factory: Option<Arc<dyn AgentFactory>>,
     child_journal: Option<nanocode_agent_core::backend::ChildJournal>,
     host_context: Option<Arc<str>>,
@@ -907,6 +908,7 @@ impl ClaudeBuilder {
             fold_finish: false,
             lean_cells: false,
             low_effort_rounds: false,
+            tool_result_tokens: None,
             spawn_factory: None,
             child_journal: None,
             host_context: None,
@@ -1338,6 +1340,11 @@ impl ClaudeBuilder {
 
     pub const fn low_effort_rounds(mut self, low: bool) -> Self {
         self.low_effort_rounds = low;
+        self
+    }
+
+    pub const fn tool_result_tokens(mut self, limit: std::num::NonZeroU64) -> Self {
+        self.tool_result_tokens = Some(limit);
         self
     }
 
@@ -3083,6 +3090,7 @@ struct State {
     fold_finish: bool,
     lean_cells: bool,
     low_effort_rounds: bool,
+    tool_result_tokens: Option<std::num::NonZeroU64>,
     working_directory: Option<crate::environment::WorkingDirectory>,
     lifecycle_opened: Atom<Option<String>>,
     subagent_type: Option<String>,

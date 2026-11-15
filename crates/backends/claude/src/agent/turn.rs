@@ -202,7 +202,12 @@ pub(super) fn call_tool<'a>(
         .await?;
         let (content, original_bytes) = match name {
             "Read" => (content, None),
-            "exec" | "wait" => bound_tool_result(content, TOOL_RESULT_TOKEN_LIMIT),
+            "exec" | "wait" => bound_tool_result(
+                content,
+                state
+                    .tool_result_tokens
+                    .map_or(TOOL_RESULT_TOKEN_LIMIT, std::num::NonZeroU64::get),
+            ),
             _ => bound_tool_result(content, DIRECT_TOOL_RESULT_TOKEN_LIMIT),
         };
         state.emit(
