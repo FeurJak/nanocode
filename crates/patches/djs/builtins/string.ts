@@ -295,6 +295,132 @@ function StringPrototypeSubstr(this: Value, start: Value, length: Value): Str {
   return StrSubstring(s, intStart, intEnd);
 }
 
+// ---- HTML methods (B.2.2.2 - B.2.2.14) --------------------------------------------------
+
+/** CreateHTML ( string, tag, attribute, value ), B.2.2.2.1. */
+function CreateHTML(string: Value, tag: Str, attribute: Str, value: Value): Str {
+  const s: Str = ThisToString(string);
+  let p1: Str = "<" + tag;
+  if (attribute !== "") {
+    const v: Str = ToString(value);
+    let escaped: Str = "";
+    let from: f64 = 0;
+    let i: f64 = StrIndexOf(v, "\"", 0);
+    while (i >= 0) {
+      escaped = escaped + StrSubstring(v, from, i) + "&quot;";
+      from = i + 1;
+      i = StrIndexOf(v, "\"", from);
+    }
+    escaped = escaped + StrSubstring(v, from, StrLen(v));
+    p1 = p1 + " " + attribute + "=\"" + escaped + "\"";
+  }
+  return p1 + ">" + s + "</" + tag + ">";
+}
+
+/**
+ * String.prototype.anchor ( name ), B.2.2.2.
+ * @builtin String.prototype.anchor
+ */
+function StringPrototypeAnchor(this: Value, name: Value): Str {
+  return CreateHTML(this, "a", "name", name);
+}
+
+/**
+ * String.prototype.big (  ), B.2.2.3.
+ * @builtin String.prototype.big
+ */
+function StringPrototypeBig(this: Value): Str {
+  return CreateHTML(this, "big", "", undefined);
+}
+
+/**
+ * String.prototype.blink (  ), B.2.2.4.
+ * @builtin String.prototype.blink
+ */
+function StringPrototypeBlink(this: Value): Str {
+  return CreateHTML(this, "blink", "", undefined);
+}
+
+/**
+ * String.prototype.bold (  ), B.2.2.5.
+ * @builtin String.prototype.bold
+ */
+function StringPrototypeBold(this: Value): Str {
+  return CreateHTML(this, "b", "", undefined);
+}
+
+/**
+ * String.prototype.fixed (  ), B.2.2.6.
+ * @builtin String.prototype.fixed
+ */
+function StringPrototypeFixed(this: Value): Str {
+  return CreateHTML(this, "tt", "", undefined);
+}
+
+/**
+ * String.prototype.fontcolor ( color ), B.2.2.7.
+ * @builtin String.prototype.fontcolor
+ */
+function StringPrototypeFontcolor(this: Value, color: Value): Str {
+  return CreateHTML(this, "font", "color", color);
+}
+
+/**
+ * String.prototype.fontsize ( size ), B.2.2.8.
+ * @builtin String.prototype.fontsize
+ */
+function StringPrototypeFontsize(this: Value, size: Value): Str {
+  return CreateHTML(this, "font", "size", size);
+}
+
+/**
+ * String.prototype.italics (  ), B.2.2.9.
+ * @builtin String.prototype.italics
+ */
+function StringPrototypeItalics(this: Value): Str {
+  return CreateHTML(this, "i", "", undefined);
+}
+
+/**
+ * String.prototype.link ( url ), B.2.2.10.
+ * @builtin String.prototype.link
+ */
+function StringPrototypeLink(this: Value, url: Value): Str {
+  return CreateHTML(this, "a", "href", url);
+}
+
+/**
+ * String.prototype.small (  ), B.2.2.11.
+ * @builtin String.prototype.small
+ */
+function StringPrototypeSmall(this: Value): Str {
+  return CreateHTML(this, "small", "", undefined);
+}
+
+/**
+ * String.prototype.strike (  ), B.2.2.12.
+ * @builtin String.prototype.strike
+ */
+function StringPrototypeStrike(this: Value): Str {
+  return CreateHTML(this, "strike", "", undefined);
+}
+
+/**
+ * String.prototype.sub (  ), B.2.2.13.
+ * @builtin String.prototype.sub
+ */
+function StringPrototypeSub(this: Value): Str {
+  return CreateHTML(this, "sub", "", undefined);
+}
+
+/**
+ * String.prototype.sup (  ), B.2.2.14.
+ * @builtin String.prototype.sup
+ */
+function StringPrototypeSup(this: Value): Str {
+  return CreateHTML(this, "sup", "", undefined);
+}
+
 /**
  * String.prototype.concat ( ...args ), 22.1.3.5.
  * @builtin String.prototype.concat

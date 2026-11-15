@@ -838,14 +838,19 @@ DatePrototypeToUTCString: leaf (Date.prototype.toUTCString, Date.prototype.toGMT
 
 DatePrototypeGetYear: leaf (Date.prototype.getYear)
 
+DatePrototypeSetYear: reentrant (Date.prototype.setYear)
+  builtins/date.ts:484:16  ToNumber (builtin)
+  builtins/date.ts:486:21  ToIntegerOrInfinity (builtin)
+  builtins/date.ts:492:3  CreateDataPropertyOrThrow (intrinsic)
+
 DatePrototypeToJSON: reentrant (Date.prototype.toJSON, %DatePrototypeToJSON)
-  builtins/date.ts:485:21  ToPrimitive (builtin)
-  builtins/date.ts:492:15  Get (intrinsic)
-  builtins/date.ts:492:10  Call (intrinsic)
+  builtins/date.ts:503:21  ToPrimitive (builtin)
+  builtins/date.ts:510:15  Get (intrinsic)
+  builtins/date.ts:510:10  Call (intrinsic)
 
 DatePrototypeToPrimitive: reentrant (Date.prototype[Symbol.toPrimitive], %DatePrototypeToPrimitive)
-  builtins/date.ts:506:12  OrdinaryToPrimitive (builtin)
-  builtins/date.ts:509:12  OrdinaryToPrimitive (builtin)
+  builtins/date.ts:524:12  OrdinaryToPrimitive (builtin)
+  builtins/date.ts:527:12  OrdinaryToPrimitive (builtin)
 
 DecoratorKindName: leaf
 
@@ -2368,105 +2373,131 @@ ObjectPrototypeGetProto: reentrant (get Object.prototype.__proto__)
 ObjectPrototypeSetProto: reentrant (set Object.prototype.__proto__)
   builtins/object.ts:227:3  SetPrototypeOrThrow (builtin)
 
+ObjectPrototypeDefineGetter: reentrant (Object.prototype.__defineGetter__)
+  builtins/object.ts:236:10  DefineLegacyAccessor (builtin)
+
+ObjectPrototypeDefineSetter: reentrant (Object.prototype.__defineSetter__)
+  builtins/object.ts:244:10  DefineLegacyAccessor (builtin)
+
+DefineLegacyAccessor: reentrant
+  builtins/object.ts:254:3  CreateDataPropertyOrThrow (intrinsic)
+  builtins/object.ts:255:3  CreateDataPropertyOrThrow (intrinsic)
+  builtins/object.ts:256:3  CreateDataPropertyOrThrow (intrinsic)
+  builtins/object.ts:257:22  ToPropertyKey (builtin)
+  builtins/object.ts:258:3  DefinePropertyOrThrow (builtin)
+
+ObjectPrototypeLookupGetter: reentrant (Object.prototype.__lookupGetter__)
+  builtins/object.ts:267:10  LookupLegacyAccessor (builtin)
+
+ObjectPrototypeLookupSetter: reentrant (Object.prototype.__lookupSetter__)
+  builtins/object.ts:275:10  LookupLegacyAccessor (builtin)
+
+LookupLegacyAccessor: reentrant
+  builtins/object.ts:281:22  ToPropertyKey (builtin)
+  builtins/object.ts:283:25  GetOwnPropertyDescriptorObject (intrinsic)
+  builtins/object.ts:285:11  HasOwnProperty (intrinsic)
+  builtins/object.ts:286:16  Get (intrinsic)
+  builtins/object.ts:290:26  GetPrototypeOf (intrinsic)
+
 ObjectCreateBuiltin: reentrant (Object.create)
-  builtins/object.ts:241:5  ObjectDefinePropertiesHelper (builtin)
+  builtins/object.ts:308:5  ObjectDefinePropertiesHelper (builtin)
 
 ObjectDefinePropertiesHelper: reentrant
-  builtins/object.ts:249:21  OwnPropertyKeys (intrinsic)
-  builtins/object.ts:250:18  LengthOfArrayLike (builtin)
-  builtins/object.ts:256:24  Get (intrinsic)
-  builtins/object.ts:257:24  OwnPropertyAttributes (intrinsic)
-  builtins/object.ts:259:30  Get (intrinsic)
-  builtins/object.ts:260:7  CreateDataPropertyOrThrow (intrinsic)
-  builtins/object.ts:261:47  ToPropertyDescriptor (builtin)
-  builtins/object.ts:261:7  CreateDataPropertyOrThrow (intrinsic)
-  builtins/object.ts:266:30  Get (intrinsic)
-  builtins/object.ts:266:54  Get (intrinsic)
-  builtins/object.ts:266:5  DefinePropertyOrThrow (builtin)
+  builtins/object.ts:316:21  OwnPropertyKeys (intrinsic)
+  builtins/object.ts:317:18  LengthOfArrayLike (builtin)
+  builtins/object.ts:323:24  Get (intrinsic)
+  builtins/object.ts:324:24  OwnPropertyAttributes (intrinsic)
+  builtins/object.ts:326:30  Get (intrinsic)
+  builtins/object.ts:327:7  CreateDataPropertyOrThrow (intrinsic)
+  builtins/object.ts:328:47  ToPropertyDescriptor (builtin)
+  builtins/object.ts:328:7  CreateDataPropertyOrThrow (intrinsic)
+  builtins/object.ts:333:30  Get (intrinsic)
+  builtins/object.ts:333:54  Get (intrinsic)
+  builtins/object.ts:333:5  DefinePropertyOrThrow (builtin)
 
 ObjectDefineProperties: reentrant (Object.defineProperties)
-  builtins/object.ts:279:10  ObjectDefinePropertiesHelper (builtin)
+  builtins/object.ts:346:10  ObjectDefinePropertiesHelper (builtin)
 
 EnumerableOwnProperties: reentrant
-  builtins/object.ts:288:12  OwnPropertyKeys (intrinsic)
-  builtins/object.ts:294:21  OwnPropertyKeys (intrinsic)
-  builtins/object.ts:295:18  LengthOfArrayLike (builtin)
-  builtins/object.ts:299:24  Get (intrinsic)
-  builtins/object.ts:300:24  OwnPropertyAttributes (intrinsic)
-  builtins/object.ts:302:28  Get (intrinsic)
-  builtins/object.ts:304:9  CreateDataPropertyOrThrow (intrinsic)
-  builtins/object.ts:307:9  CreateDataPropertyOrThrow (intrinsic)
-  builtins/object.ts:308:9  CreateDataPropertyOrThrow (intrinsic)
-  builtins/object.ts:309:9  CreateDataPropertyOrThrow (intrinsic)
+  builtins/object.ts:355:12  OwnPropertyKeys (intrinsic)
+  builtins/object.ts:361:21  OwnPropertyKeys (intrinsic)
+  builtins/object.ts:362:18  LengthOfArrayLike (builtin)
+  builtins/object.ts:366:24  Get (intrinsic)
+  builtins/object.ts:367:24  OwnPropertyAttributes (intrinsic)
+  builtins/object.ts:369:28  Get (intrinsic)
+  builtins/object.ts:371:9  CreateDataPropertyOrThrow (intrinsic)
+  builtins/object.ts:374:9  CreateDataPropertyOrThrow (intrinsic)
+  builtins/object.ts:375:9  CreateDataPropertyOrThrow (intrinsic)
+  builtins/object.ts:376:9  CreateDataPropertyOrThrow (intrinsic)
 
 ObjectKeys: reentrant (Object.keys)
-  builtins/object.ts:322:10  EnumerableOwnProperties (builtin)
+  builtins/object.ts:389:10  EnumerableOwnProperties (builtin)
 
 ObjectValues: reentrant (Object.values)
-  builtins/object.ts:330:10  EnumerableOwnProperties (builtin)
+  builtins/object.ts:397:10  EnumerableOwnProperties (builtin)
 
 ObjectEntries: reentrant (Object.entries)
-  builtins/object.ts:338:10  EnumerableOwnProperties (builtin)
+  builtins/object.ts:405:10  EnumerableOwnProperties (builtin)
 
 ObjectAssign: reentrant (Object.assign)
-  builtins/object.ts:349:18  LengthOfArrayLike (builtin)
-  builtins/object.ts:351:31  Get (intrinsic)
-  builtins/object.ts:354:25  OwnPropertyKeys (intrinsic)
-  builtins/object.ts:355:26  LengthOfArrayLike (builtin)
-  builtins/object.ts:357:28  Get (intrinsic)
-  builtins/object.ts:358:28  OwnPropertyAttributes (intrinsic)
-  builtins/object.ts:360:24  Get (intrinsic)
-  builtins/object.ts:360:11  Set (intrinsic)
+  builtins/object.ts:416:18  LengthOfArrayLike (builtin)
+  builtins/object.ts:418:31  Get (intrinsic)
+  builtins/object.ts:421:25  OwnPropertyKeys (intrinsic)
+  builtins/object.ts:422:26  LengthOfArrayLike (builtin)
+  builtins/object.ts:424:28  Get (intrinsic)
+  builtins/object.ts:425:28  OwnPropertyAttributes (intrinsic)
+  builtins/object.ts:427:24  Get (intrinsic)
+  builtins/object.ts:427:11  Set (intrinsic)
 
 ObjectFreeze: reentrant (Object.freeze)
-  builtins/object.ts:376:8  SetIntegrityLevel (intrinsic)
+  builtins/object.ts:443:8  SetIntegrityLevel (intrinsic)
 
 ObjectSeal: reentrant (Object.seal)
-  builtins/object.ts:390:8  SetIntegrityLevel (intrinsic)
+  builtins/object.ts:457:8  SetIntegrityLevel (intrinsic)
 
 ObjectPreventExtensions: reentrant (Object.preventExtensions)
-  builtins/object.ts:404:8  PreventExtensions (intrinsic)
+  builtins/object.ts:471:8  PreventExtensions (intrinsic)
 
 ObjectIsFrozen: reentrant (Object.isFrozen)
-  builtins/object.ts:415:26  TestIntegrityLevel (intrinsic)
+  builtins/object.ts:482:26  TestIntegrityLevel (intrinsic)
 
 ObjectIsSealed: reentrant (Object.isSealed)
-  builtins/object.ts:423:26  TestIntegrityLevel (intrinsic)
+  builtins/object.ts:490:26  TestIntegrityLevel (intrinsic)
 
 ObjectIsExtensible: reentrant (Object.isExtensible)
-  builtins/object.ts:431:25  IsExtensible (intrinsic)
+  builtins/object.ts:498:25  IsExtensible (intrinsic)
 
 ObjectGetOwnPropertySymbols: reentrant (Object.getOwnPropertySymbols)
-  builtins/object.ts:439:10  OwnPropertyKeys (intrinsic)
+  builtins/object.ts:506:10  OwnPropertyKeys (intrinsic)
 
 ObjectGetOwnPropertyDescriptors: reentrant (Object.getOwnPropertyDescriptors)
-  builtins/object.ts:448:21  OwnPropertyKeys (intrinsic)
-  builtins/object.ts:449:18  LengthOfArrayLike (builtin)
-  builtins/object.ts:452:24  Get (intrinsic)
-  builtins/object.ts:453:25  GetOwnPropertyDescriptorObject (intrinsic)
-  builtins/object.ts:455:7  CreateDataPropertyOrThrow (intrinsic)
+  builtins/object.ts:515:21  OwnPropertyKeys (intrinsic)
+  builtins/object.ts:516:18  LengthOfArrayLike (builtin)
+  builtins/object.ts:519:24  Get (intrinsic)
+  builtins/object.ts:520:25  GetOwnPropertyDescriptorObject (intrinsic)
+  builtins/object.ts:522:7  CreateDataPropertyOrThrow (intrinsic)
 
 ObjectHasOwn: reentrant (Object.hasOwn)
-  builtins/object.ts:467:30  ToPropertyKey (builtin)
-  builtins/object.ts:467:10  HasOwnProperty (intrinsic)
+  builtins/object.ts:534:30  ToPropertyKey (builtin)
+  builtins/object.ts:534:10  HasOwnProperty (intrinsic)
 
 ObjectIs: leaf (Object.is)
 
 ObjectPrototypeToString: reentrant (Object.prototype.toString)
-  builtins/object.ts:483:10  ObjectToString (builtin)
+  builtins/object.ts:550:10  ObjectToString (builtin)
 
 ObjectToString: reentrant
-  builtins/object.ts:497:22  Get (intrinsic)
+  builtins/object.ts:564:22  Get (intrinsic)
 
 ObjectPrototypeToLocaleString: reentrant (Object.prototype.toLocaleString)
-  builtins/object.ts:509:15  GetV (intrinsic)
-  builtins/object.ts:509:10  Call (intrinsic)
+  builtins/object.ts:576:15  GetV (intrinsic)
+  builtins/object.ts:576:10  Call (intrinsic)
 
 ObjectPrototypeValueOf: leaf (Object.prototype.valueOf)
 
 ObjectPrototypeIsPrototypeOf: reentrant (Object.prototype.isPrototypeOf)
-  builtins/object.ts:529:18  GetPrototypeOf (intrinsic)
-  builtins/object.ts:534:9  GetPrototypeOf (intrinsic)
+  builtins/object.ts:596:18  GetPrototypeOf (intrinsic)
+  builtins/object.ts:601:9  GetPrototypeOf (intrinsic)
 
 ResolvePromise: reentrant (%ResolvePromise)
   builtins/promise.ts:31:12  Get (intrinsic)
@@ -3586,76 +3617,119 @@ StringPrototypeSubstr: reentrant (String.prototype.substr)
   builtins/string.ts:283:25  RelativeIndex (builtin)
   builtins/string.ts:286:17  ToIntegerOrInfinity (builtin)
 
+CreateHTML: reentrant
+  builtins/string.ts:302:18  ThisToString (builtin)
+  builtins/string.ts:305:20  ToString (builtin)
+
+StringPrototypeAnchor: reentrant (String.prototype.anchor)
+  builtins/string.ts:325:10  CreateHTML (builtin)
+
+StringPrototypeBig: reentrant (String.prototype.big)
+  builtins/string.ts:333:10  CreateHTML (builtin)
+
+StringPrototypeBlink: reentrant (String.prototype.blink)
+  builtins/string.ts:341:10  CreateHTML (builtin)
+
+StringPrototypeBold: reentrant (String.prototype.bold)
+  builtins/string.ts:349:10  CreateHTML (builtin)
+
+StringPrototypeFixed: reentrant (String.prototype.fixed)
+  builtins/string.ts:357:10  CreateHTML (builtin)
+
+StringPrototypeFontcolor: reentrant (String.prototype.fontcolor)
+  builtins/string.ts:365:10  CreateHTML (builtin)
+
+StringPrototypeFontsize: reentrant (String.prototype.fontsize)
+  builtins/string.ts:373:10  CreateHTML (builtin)
+
+StringPrototypeItalics: reentrant (String.prototype.italics)
+  builtins/string.ts:381:10  CreateHTML (builtin)
+
+StringPrototypeLink: reentrant (String.prototype.link)
+  builtins/string.ts:389:10  CreateHTML (builtin)
+
+StringPrototypeSmall: reentrant (String.prototype.small)
+  builtins/string.ts:397:10  CreateHTML (builtin)
+
+StringPrototypeStrike: reentrant (String.prototype.strike)
+  builtins/string.ts:405:10  CreateHTML (builtin)
+
+StringPrototypeSub: reentrant (String.prototype.sub)
+  builtins/string.ts:413:10  CreateHTML (builtin)
+
+StringPrototypeSup: reentrant (String.prototype.sup)
+  builtins/string.ts:421:10  CreateHTML (builtin)
+
 StringPrototypeConcat: reentrant (String.prototype.concat)
-  builtins/string.ts:305:16  ThisToString (builtin)
-  builtins/string.ts:306:18  LengthOfArrayLike (builtin)
-  builtins/string.ts:308:19  Get (intrinsic)
-  builtins/string.ts:308:10  ToString (builtin)
+  builtins/string.ts:431:16  ThisToString (builtin)
+  builtins/string.ts:432:18  LengthOfArrayLike (builtin)
+  builtins/string.ts:434:19  Get (intrinsic)
+  builtins/string.ts:434:10  ToString (builtin)
 
 StringPrototypeRepeat: reentrant (String.prototype.repeat)
-  builtins/string.ts:319:18  ThisToString (builtin)
-  builtins/string.ts:320:18  ToIntegerOrInfinity (builtin)
+  builtins/string.ts:445:18  ThisToString (builtin)
+  builtins/string.ts:446:18  ToIntegerOrInfinity (builtin)
 
 StringPad: reentrant
-  builtins/string.ts:332:29  ToLength (builtin)
-  builtins/string.ts:337:56  ToString (builtin)
+  builtins/string.ts:458:29  ToLength (builtin)
+  builtins/string.ts:463:56  ToString (builtin)
 
 StringPrototypePadEnd: reentrant (String.prototype.padEnd)
-  builtins/string.ts:353:20  ThisToString (builtin)
-  builtins/string.ts:353:10  StringPad (builtin)
+  builtins/string.ts:479:20  ThisToString (builtin)
+  builtins/string.ts:479:10  StringPad (builtin)
 
 StringPrototypePadStart: reentrant (String.prototype.padStart)
-  builtins/string.ts:362:20  ThisToString (builtin)
-  builtins/string.ts:362:10  StringPad (builtin)
+  builtins/string.ts:488:20  ThisToString (builtin)
+  builtins/string.ts:488:10  StringPad (builtin)
 
 StringPrototypeToLowerCase: reentrant (String.prototype.toLowerCase)
-  builtins/string.ts:373:20  ThisToString (builtin)
+  builtins/string.ts:499:20  ThisToString (builtin)
 
 StringPrototypeToUpperCase: reentrant (String.prototype.toUpperCase)
-  builtins/string.ts:382:20  ThisToString (builtin)
+  builtins/string.ts:508:20  ThisToString (builtin)
 
 StringPrototypeToLocaleLowerCase: reentrant (String.prototype.toLocaleLowerCase)
-  builtins/string.ts:391:20  ThisToString (builtin)
+  builtins/string.ts:517:20  ThisToString (builtin)
 
 StringPrototypeToLocaleUpperCase: reentrant (String.prototype.toLocaleUpperCase)
-  builtins/string.ts:400:20  ThisToString (builtin)
+  builtins/string.ts:526:20  ThisToString (builtin)
 
 StringPrototypeTrim: reentrant (String.prototype.trim)
-  builtins/string.ts:409:18  ThisToString (builtin)
+  builtins/string.ts:535:18  ThisToString (builtin)
 
 StringPrototypeTrimStart: reentrant (String.prototype.trimStart, String.prototype.trimLeft)
-  builtins/string.ts:419:18  ThisToString (builtin)
+  builtins/string.ts:545:18  ThisToString (builtin)
 
 StringPrototypeTrimEnd: reentrant (String.prototype.trimEnd, String.prototype.trimRight)
-  builtins/string.ts:429:18  ThisToString (builtin)
+  builtins/string.ts:555:18  ThisToString (builtin)
 
 StringPrototypeIsWellFormed: reentrant (String.prototype.isWellFormed)
-  builtins/string.ts:437:26  ThisToString (builtin)
+  builtins/string.ts:563:26  ThisToString (builtin)
 
 StringPrototypeToWellFormed: reentrant (String.prototype.toWellFormed)
-  builtins/string.ts:445:26  ThisToString (builtin)
+  builtins/string.ts:571:26  ThisToString (builtin)
 
 StringPrototypeNormalize: reentrant (String.prototype.normalize)
-  builtins/string.ts:454:18  ThisToString (builtin)
-  builtins/string.ts:457:9  ToString (builtin)
+  builtins/string.ts:580:18  ThisToString (builtin)
+  builtins/string.ts:583:9  ToString (builtin)
 
 StringFromCharCode: reentrant (String.fromCharCode)
-  builtins/string.ts:487:3  CoerceNumbers (builtin)
+  builtins/string.ts:613:3  CoerceNumbers (builtin)
 
 StringFromCodePoint: reentrant (String.fromCodePoint)
-  builtins/string.ts:500:18  LengthOfArrayLike (builtin)
-  builtins/string.ts:502:25  Get (intrinsic)
-  builtins/string.ts:503:55  ToNumber (builtin)
-  builtins/string.ts:507:5  CreateDataPropertyOrThrow (intrinsic)
+  builtins/string.ts:626:18  LengthOfArrayLike (builtin)
+  builtins/string.ts:628:25  Get (intrinsic)
+  builtins/string.ts:629:55  ToNumber (builtin)
+  builtins/string.ts:633:5  CreateDataPropertyOrThrow (intrinsic)
 
 StringRaw: reentrant (String.raw)
-  builtins/string.ts:519:34  Get (intrinsic)
-  builtins/string.ts:520:29  LengthOfArrayLike (builtin)
-  builtins/string.ts:524:25  LengthOfArrayLike (builtin)
-  builtins/string.ts:527:19  Get (intrinsic)
-  builtins/string.ts:527:10  ToString (builtin)
-  builtins/string.ts:532:21  Get (intrinsic)
-  builtins/string.ts:532:12  ToString (builtin)
+  builtins/string.ts:645:34  Get (intrinsic)
+  builtins/string.ts:646:29  LengthOfArrayLike (builtin)
+  builtins/string.ts:650:25  LengthOfArrayLike (builtin)
+  builtins/string.ts:653:19  Get (intrinsic)
+  builtins/string.ts:653:10  ToString (builtin)
+  builtins/string.ts:658:21  Get (intrinsic)
+  builtins/string.ts:658:12  ToString (builtin)
 
 SymbolConstructor: reentrant (constructor Symbol)
   builtins/symbol.ts:14:20  ToString (builtin)

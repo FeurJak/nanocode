@@ -229,6 +229,73 @@ function ObjectPrototypeSetProto(this: Value, proto: Value): Value {
 }
 
 /**
+ * Object.prototype.__defineGetter__ ( P, getter ), B.2.2.2.
+ * @builtin Object.prototype.__defineGetter__
+ */
+function ObjectPrototypeDefineGetter(this: Value, p: Value, getter: Value): Value {
+  return DefineLegacyAccessor(this, p, getter, "get");
+}
+
+/**
+ * Object.prototype.__defineSetter__ ( P, setter ), B.2.2.3.
+ * @builtin Object.prototype.__defineSetter__
+ */
+function ObjectPrototypeDefineSetter(this: Value, p: Value, setter: Value): Value {
+  return DefineLegacyAccessor(this, p, setter, "set");
+}
+
+/** The steps of __defineGetter__ and __defineSetter__. */
+function DefineLegacyAccessor(v: Value, p: Value, fn: Value, field: Str): Value {
+  const o: Obj = ToObject(v);
+  if (!IsCallable(fn)) {
+    throw NewTypeError("not a function");
+  }
+  const desc: Obj = ObjectCreate(null);
+  CreateDataPropertyOrThrow(desc, field, fn);
+  CreateDataPropertyOrThrow(desc, "enumerable", true);
+  CreateDataPropertyOrThrow(desc, "configurable", true);
+  const key: Value = ToPropertyKey(p);
+  DefinePropertyOrThrow(o, key, desc);
+  return undefined;
+}
+
+/**
+ * Object.prototype.__lookupGetter__ ( P ), B.2.2.4.
+ * @builtin Object.prototype.__lookupGetter__
+ */
+function ObjectPrototypeLookupGetter(this: Value, p: Value): Value {
+  return LookupLegacyAccessor(this, p, "get");
+}
+
+/**
+ * Object.prototype.__lookupSetter__ ( P ), B.2.2.5.
+ * @builtin Object.prototype.__lookupSetter__
+ */
+function ObjectPrototypeLookupSetter(this: Value, p: Value): Value {
+  return LookupLegacyAccessor(this, p, "set");
+}
+
+/** The steps of __lookupGetter__ and __lookupSetter__. */
+function LookupLegacyAccessor(v: Value, p: Value, field: Str): Value {
+  let o: Obj = ToObject(v);
+  const key: Value = ToPropertyKey(p);
+  while (true) {
+    const desc: Value = GetOwnPropertyDescriptorObject(o, key);
+    if (desc !== undefined) {
+      if (HasOwnProperty(AsObj(desc), field)) {
+        return Get(AsObj(desc), field);
+      }
+      return undefined;
+    }
+    const proto: Value = GetPrototypeOf(o);
+    if (proto === null) {
+      return undefined;
+    }
+    o = AsObj(proto);
+  }
+}
+
+/**
  * Object.create ( O, Properties ), 20.1.2.2.
  * @builtin Object.create
  */

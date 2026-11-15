@@ -2364,7 +2364,22 @@ function DatePrototypeGetYear() {
   return y - 1900;
 }
 
-// builtins/date.ts:483 Date.prototype.toJSON %DatePrototypeToJSON
+// builtins/date.ts:482 Date.prototype.setYear
+function DatePrototypeSetYear(year) {
+  const t = %DateValue(this);
+  let y = ((%IsObject(year)) ? %ToNumberPrimitive(ToPrimitive(year, "number")) : %ToNumberPrimitive(year));
+  if (y === y) {
+    const yi = (%ToIntegerOrInfinityNumber(((%IsObject(y)) ? %ToNumberPrimitive(ToPrimitive(y, "number")) : %ToNumberPrimitive(y))));
+    if (yi >= 0 && yi <= 99) {
+      y = 1900 + yi;
+    }
+  }
+  const nums = %ArrayCreate(0);
+  %CreateDataPropertyOrThrow(nums, 0, y);
+  return %DateSetValue(this, %DateSetFields(t, 0, nums, true));
+}
+
+// builtins/date.ts:501 Date.prototype.toJSON %DatePrototypeToJSON
 function DatePrototypeToJSON(key) {
   const o = %ToObject(this);
   const tv = ToPrimitive(o, "number");
@@ -2377,7 +2392,7 @@ function DatePrototypeToJSON(key) {
   return %Call(%Get(o, "toISOString"), o);
 }
 
-// builtins/date.ts:501 Date.prototype[Symbol.toPrimitive] %DatePrototypeToPrimitive
+// builtins/date.ts:519 Date.prototype[Symbol.toPrimitive] %DatePrototypeToPrimitive
 function DatePrototypeToPrimitive(hint) {
   if (!%IsObject(this)) {
     throw %NewTypeError("not an object");
@@ -7036,7 +7051,62 @@ function ObjectPrototypeSetProto(proto) {
   return undefined;
 }
 
-// builtins/object.ts:235 Object.create
+// builtins/object.ts:235 Object.prototype.__defineGetter__
+function ObjectPrototypeDefineGetter(p, getter) {
+  return DefineLegacyAccessor(this, p, getter, "get");
+}
+
+// builtins/object.ts:243 Object.prototype.__defineSetter__
+function ObjectPrototypeDefineSetter(p, setter) {
+  return DefineLegacyAccessor(this, p, setter, "set");
+}
+
+// builtins/object.ts:248
+function DefineLegacyAccessor(v, p, fn, field) {
+  const o = %ToObject(v);
+  if (!%IsCallable(fn)) {
+    throw %NewTypeError("not a function");
+  }
+  const desc = %ObjectCreate(null);
+  %CreateDataPropertyOrThrow(desc, field, fn);
+  %CreateDataPropertyOrThrow(desc, "enumerable", true);
+  %CreateDataPropertyOrThrow(desc, "configurable", true);
+  const key = ToPropertyKey(p);
+  DefinePropertyOrThrow(o, key, desc);
+  return undefined;
+}
+
+// builtins/object.ts:266 Object.prototype.__lookupGetter__
+function ObjectPrototypeLookupGetter(p) {
+  return LookupLegacyAccessor(this, p, "get");
+}
+
+// builtins/object.ts:274 Object.prototype.__lookupSetter__
+function ObjectPrototypeLookupSetter(p) {
+  return LookupLegacyAccessor(this, p, "set");
+}
+
+// builtins/object.ts:279
+function LookupLegacyAccessor(v, p, field) {
+  let o = %ToObject(v);
+  const key = ToPropertyKey(p);
+  while (true) {
+    const desc = %GetOwnPropertyDescriptorObject(o, key);
+    if (desc !== undefined) {
+      if (%HasOwnProperty(%AsObj(desc), field)) {
+        return %Get(%AsObj(desc), field);
+      }
+      return undefined;
+    }
+    const proto = %GetPrototypeOf(o);
+    if (proto === null) {
+      return undefined;
+    }
+    o = %AsObj(proto);
+  }
+}
+
+// builtins/object.ts:302 Object.create
 function ObjectCreateBuiltin(o, properties) {
   if (!%IsObject(o) && o !== null) {
     throw %NewTypeError("not a prototype");
@@ -7048,7 +7118,7 @@ function ObjectCreateBuiltin(o, properties) {
   return obj;
 }
 
-// builtins/object.ts:247
+// builtins/object.ts:314
 function ObjectDefinePropertiesHelper(o, properties) {
   const props = %ToObject(properties);
   const keys = %OwnPropertyKeys(props, 2);
@@ -7072,7 +7142,7 @@ function ObjectDefinePropertiesHelper(o, properties) {
   return o;
 }
 
-// builtins/object.ts:275 Object.defineProperties
+// builtins/object.ts:342 Object.defineProperties
 function ObjectDefineProperties(o, properties) {
   if (!%IsObject(o)) {
     throw %NewTypeError("not an object");
@@ -7080,7 +7150,7 @@ function ObjectDefineProperties(o, properties) {
   return ObjectDefinePropertiesHelper(%AsObj(o), properties);
 }
 
-// builtins/object.ts:286
+// builtins/object.ts:353
 function EnumerableOwnProperties(o, kind) {
   if (kind === 0) {
     return %OwnPropertyKeys(o, 3);
@@ -7112,22 +7182,22 @@ function EnumerableOwnProperties(o, kind) {
   return result;
 }
 
-// builtins/object.ts:321 Object.keys
+// builtins/object.ts:388 Object.keys
 function ObjectKeys(o) {
   return EnumerableOwnProperties(%ToObject(o), 0);
 }
 
-// builtins/object.ts:329 Object.values
+// builtins/object.ts:396 Object.values
 function ObjectValues(o) {
   return EnumerableOwnProperties(%ToObject(o), 1);
 }
 
-// builtins/object.ts:337 Object.entries
+// builtins/object.ts:404 Object.entries
 function ObjectEntries(o) {
   return EnumerableOwnProperties(%ToObject(o), 2);
 }
 
-// builtins/object.ts:347 Object.assign
+// builtins/object.ts:414 Object.assign
 function ObjectAssign(target, ...sources) {
   const to = %ToObject(target);
   const n = LengthOfArrayLike(sources);
@@ -7149,7 +7219,7 @@ function ObjectAssign(target, ...sources) {
   return to;
 }
 
-// builtins/object.ts:372 Object.freeze
+// builtins/object.ts:439 Object.freeze
 function ObjectFreeze(o) {
   if (!%IsObject(o)) {
     return o;
@@ -7160,7 +7230,7 @@ function ObjectFreeze(o) {
   return o;
 }
 
-// builtins/object.ts:386 Object.seal
+// builtins/object.ts:453 Object.seal
 function ObjectSeal(o) {
   if (!%IsObject(o)) {
     return o;
@@ -7171,7 +7241,7 @@ function ObjectSeal(o) {
   return o;
 }
 
-// builtins/object.ts:400 Object.preventExtensions
+// builtins/object.ts:467 Object.preventExtensions
 function ObjectPreventExtensions(o) {
   if (!%IsObject(o)) {
     return o;
@@ -7182,27 +7252,27 @@ function ObjectPreventExtensions(o) {
   return o;
 }
 
-// builtins/object.ts:414 Object.isFrozen
+// builtins/object.ts:481 Object.isFrozen
 function ObjectIsFrozen(o) {
   return !%IsObject(o) || %TestIntegrityLevel(%AsObj(o), true);
 }
 
-// builtins/object.ts:422 Object.isSealed
+// builtins/object.ts:489 Object.isSealed
 function ObjectIsSealed(o) {
   return !%IsObject(o) || %TestIntegrityLevel(%AsObj(o), false);
 }
 
-// builtins/object.ts:430 Object.isExtensible
+// builtins/object.ts:497 Object.isExtensible
 function ObjectIsExtensible(o) {
   return %IsObject(o) && %IsExtensible(%AsObj(o));
 }
 
-// builtins/object.ts:438 Object.getOwnPropertySymbols
+// builtins/object.ts:505 Object.getOwnPropertySymbols
 function ObjectGetOwnPropertySymbols(o) {
   return %OwnPropertyKeys(%ToObject(o), 1);
 }
 
-// builtins/object.ts:446 Object.getOwnPropertyDescriptors
+// builtins/object.ts:513 Object.getOwnPropertyDescriptors
 function ObjectGetOwnPropertyDescriptors(o) {
   const obj = %ToObject(o);
   const keys = %OwnPropertyKeys(obj, 2);
@@ -7218,23 +7288,23 @@ function ObjectGetOwnPropertyDescriptors(o) {
   return descriptors;
 }
 
-// builtins/object.ts:465 Object.hasOwn
+// builtins/object.ts:532 Object.hasOwn
 function ObjectHasOwn(o, p) {
   const obj = %ToObject(o);
   return %HasOwnProperty(obj, ToPropertyKey(p));
 }
 
-// builtins/object.ts:474 Object.is
+// builtins/object.ts:541 Object.is
 function ObjectIs(value1, value2) {
   return %SameValue(value1, value2);
 }
 
-// builtins/object.ts:482 Object.prototype.toString
+// builtins/object.ts:549 Object.prototype.toString
 function ObjectPrototypeToString() {
   return ObjectToString(this);
 }
 
-// builtins/object.ts:487
+// builtins/object.ts:554
 function ObjectToString(v) {
   if (v === undefined) {
     return "[object Undefined]";
@@ -7251,17 +7321,17 @@ function ObjectToString(v) {
   return "[object " + builtinTag + "]";
 }
 
-// builtins/object.ts:508 Object.prototype.toLocaleString
+// builtins/object.ts:575 Object.prototype.toLocaleString
 function ObjectPrototypeToLocaleString() {
   return %Call(%GetV(this, "toString"), this);
 }
 
-// builtins/object.ts:516 Object.prototype.valueOf
+// builtins/object.ts:583 Object.prototype.valueOf
 function ObjectPrototypeValueOf() {
   return %ToObject(this);
 }
 
-// builtins/object.ts:524 Object.prototype.isPrototypeOf
+// builtins/object.ts:591 Object.prototype.isPrototypeOf
 function ObjectPrototypeIsPrototypeOf(v) {
   if (!%IsObject(v)) {
     return false;
@@ -10266,7 +10336,92 @@ function StringPrototypeSubstr(start, length) {
   return %StrSubstring(s, intStart, intEnd);
 }
 
-// builtins/string.ts:304 String.prototype.concat
+// builtins/string.ts:301
+function CreateHTML(string, tag, attribute, value) {
+  const s = ((string === undefined || string === null) ? %Throw(%NewTypeError("null or undefined are forbidden")) : ToString(string));
+  let p1 = "<" + tag;
+  if (attribute !== "") {
+    const v = ToString(value);
+    let escaped = "";
+    let from = 0;
+    let i = %StrIndexOf(v, "\"", 0);
+    while (i >= 0) {
+      escaped = escaped + %StrSubstring(v, from, i) + "&quot;";
+      from = i + 1;
+      i = %StrIndexOf(v, "\"", from);
+    }
+    escaped = escaped + %StrSubstring(v, from, (%StrLength(v)));
+    p1 = p1 + " " + attribute + "=\"" + escaped + "\"";
+  }
+  return p1 + ">" + s + "</" + tag + ">";
+}
+
+// builtins/string.ts:324 String.prototype.anchor
+function StringPrototypeAnchor(name) {
+  return CreateHTML(this, "a", "name", name);
+}
+
+// builtins/string.ts:332 String.prototype.big
+function StringPrototypeBig() {
+  return CreateHTML(this, "big", "", undefined);
+}
+
+// builtins/string.ts:340 String.prototype.blink
+function StringPrototypeBlink() {
+  return CreateHTML(this, "blink", "", undefined);
+}
+
+// builtins/string.ts:348 String.prototype.bold
+function StringPrototypeBold() {
+  return CreateHTML(this, "b", "", undefined);
+}
+
+// builtins/string.ts:356 String.prototype.fixed
+function StringPrototypeFixed() {
+  return CreateHTML(this, "tt", "", undefined);
+}
+
+// builtins/string.ts:364 String.prototype.fontcolor
+function StringPrototypeFontcolor(color) {
+  return CreateHTML(this, "font", "color", color);
+}
+
+// builtins/string.ts:372 String.prototype.fontsize
+function StringPrototypeFontsize(size) {
+  return CreateHTML(this, "font", "size", size);
+}
+
+// builtins/string.ts:380 String.prototype.italics
+function StringPrototypeItalics() {
+  return CreateHTML(this, "i", "", undefined);
+}
+
+// builtins/string.ts:388 String.prototype.link
+function StringPrototypeLink(url) {
+  return CreateHTML(this, "a", "href", url);
+}
+
+// builtins/string.ts:396 String.prototype.small
+function StringPrototypeSmall() {
+  return CreateHTML(this, "small", "", undefined);
+}
+
+// builtins/string.ts:404 String.prototype.strike
+function StringPrototypeStrike() {
+  return CreateHTML(this, "strike", "", undefined);
+}
+
+// builtins/string.ts:412 String.prototype.sub
+function StringPrototypeSub() {
+  return CreateHTML(this, "sub", "", undefined);
+}
+
+// builtins/string.ts:420 String.prototype.sup
+function StringPrototypeSup() {
+  return CreateHTML(this, "sup", "", undefined);
+}
+
+// builtins/string.ts:430 String.prototype.concat
 function StringPrototypeConcat(...args) {
   let r = ((this === undefined || this === null) ? %Throw(%NewTypeError("null or undefined are forbidden")) : ToString(this));
   const n = LengthOfArrayLike(args);
@@ -10276,7 +10431,7 @@ function StringPrototypeConcat(...args) {
   return r;
 }
 
-// builtins/string.ts:318 String.prototype.repeat
+// builtins/string.ts:444 String.prototype.repeat
 function StringPrototypeRepeat(count) {
   const s = ((this === undefined || this === null) ? %Throw(%NewTypeError("null or undefined are forbidden")) : ToString(this));
   const n = (%ToIntegerOrInfinityNumber(((%IsObject(count)) ? %ToNumberPrimitive(ToPrimitive(count, "number")) : %ToNumberPrimitive(count))));
@@ -10289,7 +10444,7 @@ function StringPrototypeRepeat(count) {
   return %StrRepeat(s, n);
 }
 
-// builtins/string.ts:331
+// builtins/string.ts:457
 function StringPad(s, maxLength, fillString, atStart) {
   const intMaxLength = ToLength(maxLength);
   const stringLength = (%StrLength(s));
@@ -10306,62 +10461,62 @@ function StringPad(s, maxLength, fillString, atStart) {
   return atStart ? truncated + s : s + truncated;
 }
 
-// builtins/string.ts:352 String.prototype.padEnd
+// builtins/string.ts:478 String.prototype.padEnd
 function StringPrototypePadEnd(maxLength, fillString) {
   return StringPad(((this === undefined || this === null) ? %Throw(%NewTypeError("null or undefined are forbidden")) : ToString(this)), maxLength, fillString, false);
 }
 
-// builtins/string.ts:361 String.prototype.padStart
+// builtins/string.ts:487 String.prototype.padStart
 function StringPrototypePadStart(maxLength, fillString) {
   return StringPad(((this === undefined || this === null) ? %Throw(%NewTypeError("null or undefined are forbidden")) : ToString(this)), maxLength, fillString, true);
 }
 
-// builtins/string.ts:372 String.prototype.toLowerCase
+// builtins/string.ts:498 String.prototype.toLowerCase
 function StringPrototypeToLowerCase() {
   return %StrToCase(((this === undefined || this === null) ? %Throw(%NewTypeError("null or undefined are forbidden")) : ToString(this)), false);
 }
 
-// builtins/string.ts:381 String.prototype.toUpperCase
+// builtins/string.ts:507 String.prototype.toUpperCase
 function StringPrototypeToUpperCase() {
   return %StrToCase(((this === undefined || this === null) ? %Throw(%NewTypeError("null or undefined are forbidden")) : ToString(this)), true);
 }
 
-// builtins/string.ts:390 String.prototype.toLocaleLowerCase
+// builtins/string.ts:516 String.prototype.toLocaleLowerCase
 function StringPrototypeToLocaleLowerCase() {
   return %StrToCase(((this === undefined || this === null) ? %Throw(%NewTypeError("null or undefined are forbidden")) : ToString(this)), false);
 }
 
-// builtins/string.ts:399 String.prototype.toLocaleUpperCase
+// builtins/string.ts:525 String.prototype.toLocaleUpperCase
 function StringPrototypeToLocaleUpperCase() {
   return %StrToCase(((this === undefined || this === null) ? %Throw(%NewTypeError("null or undefined are forbidden")) : ToString(this)), true);
 }
 
-// builtins/string.ts:408 String.prototype.trim
+// builtins/string.ts:534 String.prototype.trim
 function StringPrototypeTrim() {
   return %StrTrim(((this === undefined || this === null) ? %Throw(%NewTypeError("null or undefined are forbidden")) : ToString(this)), 0);
 }
 
-// builtins/string.ts:418 String.prototype.trimStart String.prototype.trimLeft
+// builtins/string.ts:544 String.prototype.trimStart String.prototype.trimLeft
 function StringPrototypeTrimStart() {
   return %StrTrim(((this === undefined || this === null) ? %Throw(%NewTypeError("null or undefined are forbidden")) : ToString(this)), 1);
 }
 
-// builtins/string.ts:428 String.prototype.trimEnd String.prototype.trimRight
+// builtins/string.ts:554 String.prototype.trimEnd String.prototype.trimRight
 function StringPrototypeTrimEnd() {
   return %StrTrim(((this === undefined || this === null) ? %Throw(%NewTypeError("null or undefined are forbidden")) : ToString(this)), 2);
 }
 
-// builtins/string.ts:436 String.prototype.isWellFormed
+// builtins/string.ts:562 String.prototype.isWellFormed
 function StringPrototypeIsWellFormed() {
   return %StrIsWellFormed(((this === undefined || this === null) ? %Throw(%NewTypeError("null or undefined are forbidden")) : ToString(this)));
 }
 
-// builtins/string.ts:444 String.prototype.toWellFormed
+// builtins/string.ts:570 String.prototype.toWellFormed
 function StringPrototypeToWellFormed() {
   return %StrToWellFormed(((this === undefined || this === null) ? %Throw(%NewTypeError("null or undefined are forbidden")) : ToString(this)));
 }
 
-// builtins/string.ts:453 String.prototype.normalize
+// builtins/string.ts:579 String.prototype.normalize
 function StringPrototypeNormalize(form) {
   const s = ((this === undefined || this === null) ? %Throw(%NewTypeError("null or undefined are forbidden")) : ToString(this));
   let f = "NFC";
@@ -10387,13 +10542,13 @@ function StringPrototypeNormalize(form) {
   return %AsStr(r);
 }
 
-// builtins/string.ts:486 String.fromCharCode
+// builtins/string.ts:612 String.fromCharCode
 function StringFromCharCode(...codeUnits) {
   CoerceNumbers(codeUnits);
   return %StrFromCodeUnits(codeUnits);
 }
 
-// builtins/string.ts:496 String.fromCodePoint
+// builtins/string.ts:622 String.fromCodePoint
 function StringFromCodePoint(...codePoints) {
   if (%AllCodePoints(codePoints)) {
     return %StrFromCodePoints(codePoints);
@@ -10410,7 +10565,7 @@ function StringFromCodePoint(...codePoints) {
   return %StrFromCodePoints(codePoints);
 }
 
-// builtins/string.ts:517 String.raw
+// builtins/string.ts:643 String.raw
 function StringRaw(template, ...substitutions) {
   const cooked = %ToObject(template);
   const literals = %ToObject(%Get(cooked, "raw"));
@@ -12513,6 +12668,7 @@ function GlobalAtob(...args) {
 %InstallMethod("Date.prototype", "setUTCDate", DatePrototypeSetUTCDate, 1);
 %InstallMethod("Date.prototype", "setMonth", DatePrototypeSetMonth, 2);
 %InstallMethod("Date.prototype", "setUTCMonth", DatePrototypeSetUTCMonth, 2);
+%InstallMethod("Date.prototype", "setYear", DatePrototypeSetYear, 1);
 %InstallMethod("Date.prototype", "setFullYear", DatePrototypeSetFullYear, 3);
 %InstallMethod("Date.prototype", "setUTCFullYear", DatePrototypeSetUTCFullYear, 3);
 %InstallMethod("Date.prototype", "toJSON", DatePrototypeToJSON, 1);
@@ -12687,6 +12843,10 @@ function GlobalAtob(...args) {
 %InstallMethod("Object.prototype", "propertyIsEnumerable", ObjectPrototypePropertyIsEnumerable, 1);
 %InstallAccessor("Object.prototype", "__proto__", ObjectPrototypeGetProto, false);
 %InstallAccessor("Object.prototype", "__proto__", ObjectPrototypeSetProto, true);
+%InstallMethod("Object.prototype", "__defineGetter__", ObjectPrototypeDefineGetter, 2);
+%InstallMethod("Object.prototype", "__defineSetter__", ObjectPrototypeDefineSetter, 2);
+%InstallMethod("Object.prototype", "__lookupGetter__", ObjectPrototypeLookupGetter, 1);
+%InstallMethod("Object.prototype", "__lookupSetter__", ObjectPrototypeLookupSetter, 1);
 %InstallMethod("Promise.prototype", "then", PromisePrototypeThen, 2);
 %InstallMethod("Promise.prototype", "catch", PromisePrototypeCatch, 1);
 %InstallMethod("Promise.prototype", "finally", PromisePrototypeFinally, 1);
@@ -12779,6 +12939,19 @@ function GlobalAtob(...args) {
 %InstallMethod("String.prototype", "toUpperCase", StringPrototypeToUpperCase, 0);
 %InstallMethod("String.prototype", "toLocaleLowerCase", StringPrototypeToLocaleLowerCase, 0);
 %InstallMethod("String.prototype", "toLocaleUpperCase", StringPrototypeToLocaleUpperCase, 0);
+%InstallMethod("String.prototype", "anchor", StringPrototypeAnchor, 1);
+%InstallMethod("String.prototype", "big", StringPrototypeBig, 0);
+%InstallMethod("String.prototype", "blink", StringPrototypeBlink, 0);
+%InstallMethod("String.prototype", "bold", StringPrototypeBold, 0);
+%InstallMethod("String.prototype", "fixed", StringPrototypeFixed, 0);
+%InstallMethod("String.prototype", "fontcolor", StringPrototypeFontcolor, 1);
+%InstallMethod("String.prototype", "fontsize", StringPrototypeFontsize, 1);
+%InstallMethod("String.prototype", "italics", StringPrototypeItalics, 0);
+%InstallMethod("String.prototype", "link", StringPrototypeLink, 1);
+%InstallMethod("String.prototype", "small", StringPrototypeSmall, 0);
+%InstallMethod("String.prototype", "strike", StringPrototypeStrike, 0);
+%InstallMethod("String.prototype", "sub", StringPrototypeSub, 0);
+%InstallMethod("String.prototype", "sup", StringPrototypeSup, 0);
 %InstallPrototypeConstructor("String");
 %InstallMethod("String.prototype", "normalize", StringPrototypeNormalize, 0);
 %InstallMethod("String.prototype", "localeCompare", StringPrototypeLocaleCompare, 1);

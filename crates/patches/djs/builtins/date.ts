@@ -476,6 +476,24 @@ function DatePrototypeGetYear(this: Value): f64 {
 }
 
 /**
+ * Date.prototype.setYear ( year ), B.2.3.2.
+ * @builtin Date.prototype.setYear
+ */
+function DatePrototypeSetYear(this: Value, year: Value): f64 {
+  const t: f64 = DateValue(this);
+  let y: f64 = ToNumber(year);
+  if (y === y) {
+    const yi: f64 = ToIntegerOrInfinity(y);
+    if (yi >= 0 && yi <= 99) {
+      y = 1900 + yi;
+    }
+  }
+  const nums: Obj = ArrayCreate(0);
+  CreateDataPropertyOrThrow(nums, 0, y);
+  return DateSetValue(this, DateSetFields(t, 0, nums, true));
+}
+
+/**
  * Date.prototype.toJSON ( key ), 21.4.4.37.
  * @builtin Date.prototype.toJSON
  * @intrinsic
