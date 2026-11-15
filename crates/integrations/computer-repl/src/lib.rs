@@ -239,6 +239,18 @@ impl ComputerConfig {
             Ok(other) => {
                 Err(format!("NANOCODE_CUA must be cua-driver or sky, not {other:?}").into())
             }
+            Err(_)
+                if cfg!(target_os = "linux")
+                    && std::env::var_os("CUA_DRIVER_PATH").is_none()
+                    && ["DISPLAY", "WAYLAND_DISPLAY"].iter().all(|name| {
+                        std::env::var_os(name).is_none_or(|value| value.is_empty())
+                    }) =>
+            {
+                Err(
+                    "computer use needs a graphical session: DISPLAY and WAYLAND_DISPLAY are unset"
+                        .into(),
+                )
+            }
             Err(_) => Self::cua_driver(),
         }
     }
