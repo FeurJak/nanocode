@@ -1,6 +1,7 @@
 use super::hot::{ld, st, word};
 use super::{Exec, fast};
 use crate::bytecode::OPS;
+use core::cell::Cell;
 use crate::heap::cells::ValueArray;
 use crate::interp::conv;
 use crate::value::Value;
@@ -122,6 +123,17 @@ fn number(n: f64) -> Value {
         Value::from_raw(n.to_bits())
     } else {
         conv::number(n)
+    }
+}
+
+#[inline(always)]
+fn add(p: Value, q: Value) -> Option<Value> {
+    match (p.as_int(), q.as_int()) {
+        (Some(x), Some(y)) => Some(match x.checked_add(y) {
+            Some(z) => Value::int(z),
+            None => Value::from_raw((f64::from(x) + f64::from(y)).to_bits()),
+        }),
+        _ => Some(number(p.as_number()? + q.as_number()?)),
     }
 }
 
@@ -325,6 +337,7 @@ struct Ins {
 #[repr(u8)]
 enum K {
     Add,
+    AddF,
     BAnd,
     BOr,
     BXor,
@@ -352,7 +365,7 @@ enum K {
     Sub,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Op {
     a: u8,
     aux: u16,
@@ -360,7 +373,7 @@ struct Op {
     d: u8,
     exit: u16,
     fuel: u32,
-    k: K,
+    k: Cell<K>,
     l: bool,
     lc: u8,
     lfuel: u32,
@@ -379,7 +392,7 @@ fn lower(ins: &Ins) -> Op {
         d: 0,
         exit: ins.exit,
         fuel: ins.fuel,
-        k: K::Nop,
+        k: Cell::new(K::Nop),
         l: false,
         lc: 0,
         lfuel: 0,
@@ -390,7 +403,7 @@ fn lower(ins: &Ins) -> Op {
         to: 0,
     };
     let mut abc = |k: K, a: u8, c: u8, d: u8| {
-        o.k = k;
+        o.k = Cell::new(k);
         (o.a, o.c, o.d) = (a, c, d);
     };
     match ins.i {
@@ -1023,19 +1036,21 @@ impl Exec<'_> {
                 Src::Value(v) => v,
             };
         }
-        let mut prog = [lower(&Ins {
+        let nop = lower(&Ins {
             exit: 0,
             fuel: 0,
             i: I::Nop,
-        }); 256];
-        for (o, ins) in prog.iter_mut().zip(&plan.prog) {
-            *o = lower(ins);
-        }
+        });
+        let mut prog: [Op; 256] = core::array::from_fn(|s| match plan.prog.get(s) {
+            Some(ins) => lower(ins),
+            None => nop.clone(),
+        });
         for s in 1..plan.prog.len() {
-            let (o, p) = (prog[s], &plan.prog[s]);
+            let (o, p) = (prog[s].clone(), &plan.prog[s]);
             let suffix = matches!(
-                prog[s - 1].k,
+                prog[s - 1].k.get(),
                 K::Add
+                    | K::AddF
                     | K::BAnd
                     | K::BOr
                     | K::BXor
@@ -1053,15 +1068,15 @@ impl Exec<'_> {
                     | K::Sub
             );
             let label = plan.labels.iter().any(|l| l.2 == Some(s as u16));
-            if matches!(o.k, K::Latch) && o.to == 0 && suffix && !label {
+            if matches!(o.k.get(), K::Latch) && o.to == 0 && suffix && !label {
                 let q = &mut prog[s - 1];
-                (q.l, q.lc, q.lfuel, q.lx) = (true, o.c, p.fuel, o.a);
+                (q.l, q.lc, q.lfuel, q.lx) = (true, o.c, q.fuel + p.fuel, o.a);
                 (q.aux, q.n, q.span) = (o.exit, o.n, o.span);
             }
         }
         let mut fuel = self.fuel;
         let mut k = 0u8;
-        let exit = loop {
+        let exit = 'run: loop {
             let o = &prog[usize::from(k)];
             let (a, c, d) = (o.a as usize, o.c as usize, o.d as usize);
             macro_rules! next {
@@ -1072,25 +1087,37 @@ impl Exec<'_> {
             }
             macro_rules! latch {
                 () => {{
-                    fuel -= o.fuel as i64;
                     if o.l {
                         let x = o.lx as usize;
                         let Some(i) = r[x].as_int().and_then(|i| i.checked_add(i32::from(o.lc as i8)))
                         else {
-                            break o.aux;
+                            fuel -= o.fuel as i64;
+                            break 'run o.aux;
                         };
                         r[x] = Value::int(i);
                         fuel -= o.lfuel as i64;
                         if i.wrapping_sub(o.n) as u32 <= o.span {
                             if fuel <= pass {
-                                break 0;
+                                break 'run 0;
                             }
                             k = 0;
                         } else {
                             k += 2;
                         }
                     } else {
+                        fuel -= o.fuel as i64;
                         k += 1;
+                    }
+                }};
+            }
+            macro_rules! spin {
+                ($body:block) => {{
+                    let at = k;
+                    loop {
+                        $body
+                        if k != at {
+                            break;
+                        }
                     }
                 }};
             }
@@ -1099,7 +1126,7 @@ impl Exec<'_> {
                     fuel -= o.fuel as i64;
                     if o.to == 0 {
                         if fuel <= pass {
-                            break 0;
+                            break 'run 0;
                         }
                     }
                     k = o.to as u8;
@@ -1117,9 +1144,9 @@ impl Exec<'_> {
                         None => match (p.as_number(), q.as_number()) {
                             (Some(x), Some(y)) => match ($float)(x, y) {
                                 Some(v) => v,
-                                None => break o.exit,
+                                None => break 'run o.exit,
                             },
-                            _ => break o.exit,
+                            _ => break 'run o.exit,
                         },
                     };
                     r[d] = v;
@@ -1131,28 +1158,43 @@ impl Exec<'_> {
                     |_: f64, _: f64| -> Option<Value> { None }
                 };
             }
-            match o.k {
-                K::Add => {
+            match o.k.get() {
+                K::Add => spin!({
                     let (p, q) = (r[a], r[c]);
-                    let v = match (p.as_int(), q.as_int()) {
-                        (Some(x), Some(y)) => match x.checked_add(y) {
-                            Some(z) => Value::int(z),
-                            None => Value::from_raw((f64::from(x) + f64::from(y)).to_bits()),
-                        },
-                        _ => match (p.as_number(), q.as_number()) {
-                            (Some(x), Some(y)) => number(x + y),
-                            _ => break o.exit,
-                        },
+                    let Some(v) = add(p, q) else {
+                        break 'run o.exit;
+                    };
+                    r[d] = v;
+                    if p.tag().is_none() && q.as_int().is_some() {
+                        o.k.set(K::AddF);
+                        latch!();
+                        break;
+                    }
+                    latch!();
+                }),
+                K::AddF => spin!({
+                    let (p, q) = (r[a], r[c]);
+                    let v = match (p.tag(), q.as_int()) {
+                        (None, Some(y)) => number(f64::from_bits(p.to_bits()) + f64::from(y)),
+                        _ => {
+                            o.k.set(K::Add);
+                            let Some(v) = add(p, q) else {
+                                break 'run o.exit;
+                            };
+                            r[d] = v;
+                            latch!();
+                            break;
+                        }
                     };
                     r[d] = v;
                     latch!();
-                }
+                }),
                 K::Latch => {
                     let Some(i) = r[a]
                         .as_int()
                         .and_then(|i| i.checked_add(i32::from(o.c as i8)))
                     else {
-                        break o.exit;
+                        break 'run o.exit;
                     };
                     r[a] = Value::int(i);
                     if i.wrapping_sub(o.n) as u32 <= o.span {
@@ -1166,7 +1208,7 @@ impl Exec<'_> {
                         .as_int()
                         .and_then(|i| i.checked_add(i32::from(o.d as i8)))
                     else {
-                        break o.exit;
+                        break 'run o.exit;
                     };
                     r[a] = Value::int(i);
                     let n = r[c];
@@ -1176,7 +1218,7 @@ impl Exec<'_> {
                             Some(n) => order_float(f64::from(i), n),
                             None => {
                                 fuel -= o.n as i64;
-                                break o.aux;
+                                break 'run o.aux;
                             }
                         },
                     };
@@ -1188,7 +1230,7 @@ impl Exec<'_> {
                 }
                 K::Branch => {
                     let Some(t) = order(r[a], r[c]) else {
-                        break o.exit;
+                        break 'run o.exit;
                     };
                     if o.mask >> t & 1 != 0 {
                         goto!()
@@ -1198,7 +1240,7 @@ impl Exec<'_> {
                 }
                 K::Compare => {
                     let Some(t) = order(r[a], r[c]) else {
-                        break o.exit;
+                        break 'run o.exit;
                     };
                     r[d] = Value::bool(o.mask >> t & 1 != 0);
                     next!();
@@ -1208,10 +1250,10 @@ impl Exec<'_> {
                         r[a].as_object(),
                         r[c].as_int().and_then(|i| u32::try_from(i).ok()),
                     ) else {
-                        break o.exit;
+                        break 'run o.exit;
                     };
                     let Some(v) = self.heap.get_element_fast(obj, i) else {
-                        break o.exit;
+                        break 'run o.exit;
                     };
                     r[d] = v;
                     latch!();
@@ -1221,14 +1263,14 @@ impl Exec<'_> {
                         r[a].as_object(),
                         r[c].as_int().and_then(|i| u32::try_from(i).ok()),
                     ) else {
-                        break o.exit;
+                        break 'run o.exit;
                     };
                     if !matches!(self.heap.set_element_fast(obj, i, r[d]), Ok(true)) {
-                        break o.exit;
+                        break 'run o.exit;
                     }
                     if self.heap.gc_pending() {
                         fuel -= o.fuel as i64;
-                        break o.aux;
+                        break 'run o.aux;
                     }
                     next!();
                 }
@@ -1241,7 +1283,7 @@ impl Exec<'_> {
                         .as_int()
                         .and_then(|i| i.checked_add(i32::from(o.c as i8)))
                     else {
-                        break o.exit;
+                        break 'run o.exit;
                     };
                     r[d] = Value::int(i);
                     latch!();
@@ -1278,7 +1320,7 @@ impl Exec<'_> {
                         _ if (p.as_string().is_some() && q.as_string().is_some())
                             || (p.as_bigint().is_some() && q.as_bigint().is_some()) =>
                         {
-                            break o.exit;
+                            break 'run o.exit;
                         }
                         _ => false,
                     };
@@ -1296,7 +1338,7 @@ impl Exec<'_> {
                     } else if v.as_object().is_some() {
                         true
                     } else {
-                        break o.exit;
+                        break 'run o.exit;
                     };
                     r[d] = Value::bool(!truthy);
                     latch!();
@@ -1311,7 +1353,7 @@ impl Exec<'_> {
                 }
                 K::JumpIf => {
                     let Some(t) = r[a].as_bool() else {
-                        break o.exit;
+                        break 'run o.exit;
                     };
                     if t == (o.mask != 0) { goto!() } else { next!() }
                 }
@@ -1319,7 +1361,7 @@ impl Exec<'_> {
                 K::Nop => next!(),
                 K::Leave => {
                     fuel -= o.fuel as i64;
-                    break o.to;
+                    break 'run o.to;
                 }
             }
         };
