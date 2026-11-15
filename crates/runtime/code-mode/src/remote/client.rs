@@ -262,6 +262,7 @@ struct Client {
     settles: bool,
     tool_selection: bool,
     caches_local_tools: bool,
+    local_tools_keyed: Atom<Option<(Vec<ToolDefinition>, String)>>,
     ledger: Option<Arc<dyn RemoteLedger>>,
     _stop: oneshot::Sender<()>,
 }
@@ -320,7 +321,7 @@ fn resumed(
                         other => other,
                     };
                     if from_hand && let Some(client) = client.upgrade() {
-                        client.settle_reply(id, &result).await;
+                        client.settle_reply_behind(id, &result);
                     }
                     return result.map_err(replied);
                 }
@@ -535,6 +536,7 @@ impl RemoteClient {
             settles,
             tool_selection,
             caches_local_tools,
+            local_tools_keyed: Atom::default(),
             ledger,
             _stop: stop,
         });
@@ -657,7 +659,7 @@ fn prepare_call(
                 match frame {
                     Frame::Reply { result, .. } => {
                         if from_hand {
-                            guard.client.settle_reply(id, &result).await;
+                            guard.client.settle_reply_behind(id, &result);
                         }
                         return result
                             .map_err(replied)?
@@ -716,6 +718,15 @@ impl Client {
                 "the request was not recorded: {issue}; the operation was not dispatched"
             ))
         })
+    }
+
+    fn settle_reply_behind(self: &Arc<Self>, id: u64, reply: &RemoteReply) {
+        if self.ledger.is_none() {
+            return;
+        }
+        let client = Arc::clone(self);
+        let reply = reply.clone();
+        nanocode_platform::spawn(async move { client.settle_reply(id, &reply).await });
     }
 
     async fn settle_reply(&self, id: u64, reply: &RemoteReply) {
@@ -1132,6 +1143,22 @@ impl Client {
         });
     }
 
+    fn local_tools_key(&self, definitions: &[ToolDefinition]) -> Option<String> {
+        let known = self.local_tools_keyed.read(|keyed| {
+            keyed
+                .as_ref()
+                .filter(|(known, _)| known.as_slice() == definitions)
+                .map(|(_, key)| key.clone())
+        });
+        if known.is_some() {
+            return known;
+        }
+        let key = local_tools_key(definitions)?;
+        self.local_tools_keyed
+            .set(Some((definitions.to_vec(), key.clone())));
+        Some(key)
+    }
+
     fn elide_local_tools(
         &self,
         operation: RemoteOperation,
@@ -1148,7 +1175,7 @@ impl Client {
             return (operation, None);
         };
         let key = if self.caches_local_tools && !local_tools.is_empty() {
-            local_tools_key(&local_tools)
+            self.local_tools_key(&local_tools)
         } else {
             None
         };
@@ -1601,7 +1628,7 @@ impl RemoteTransport for RemoteClient {
                                 other => other,
                             };
                             if from_hand {
-                                client.settle_reply(guard.id, &result).await;
+                                client.settle_reply_behind(guard.id, &result);
                             }
                             let result = result.map_err(replied)?;
                             if let Some(issue) = undelivered {

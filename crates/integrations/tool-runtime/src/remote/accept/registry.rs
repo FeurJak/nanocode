@@ -165,7 +165,7 @@ impl Redial {
     }
 }
 
-struct Shared(Arc<Redial>);
+struct Shared(Arc<Redial>, bool);
 
 impl RemoteLink for Shared {
     fn send(
@@ -203,6 +203,10 @@ impl RemoteLink for Shared {
 
     fn resumes(&self) -> Option<String> {
         self.0.current().and_then(|wire| wire.link.resumes())
+    }
+
+    fn caches_local_tools(&self) -> bool {
+        self.1
     }
 }
 
@@ -467,7 +471,7 @@ impl Acceptor {
             changes: Arc::clone(&self.changes),
         };
         let (client, driver, resumed) = RemoteClient::durable(
-            Shared(Arc::clone(&redial)),
+            Shared(Arc::clone(&redial), catalog.caches_local_tools),
             self.options.operation_timeout,
             pending,
             Arc::new(ledger),
