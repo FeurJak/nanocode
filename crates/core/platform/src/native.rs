@@ -8,6 +8,15 @@ use std::{
 
 pub type HostFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
+trait Pinned: Future + Send + Sized + 'static {
+    #[inline(never)]
+    fn pinned(self) -> Pin<Box<dyn Future<Output = Self::Output> + Send + 'static>> {
+        Box::pin(self)
+    }
+}
+
+impl<F: Future + Send + 'static> Pinned for F {}
+
 pub trait Host: Send + Sync + 'static {
     fn now(&self) -> Instant;
     fn system_time(&self) -> SystemTime;
@@ -211,8 +220,9 @@ impl Handle {
         }
     }
 
+    #[inline]
     pub fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
-        let future: HostFuture = Box::pin(future);
+        let future: HostFuture = future.pinned();
         match self {
             Self::Host(host) => host.spawn(future),
             Self::Executor(runtime) => drop(runtime.spawn(future)),
@@ -220,49 +230,49 @@ impl Handle {
     }
 }
 
+#[inline]
 pub fn spawn(future: impl Future<Output = ()> + Send + 'static) {
-    let future: HostFuture = Box::pin(future);
+    let future: HostFuture = future.pinned();
     match host() {
         Some(host) => host.spawn(future),
         None => drop(nanocode_executor::spawn(future)),
     }
 }
 
+#[inline]
 #[track_caller]
 pub fn spawn_task<T: Send + 'static>(
     future: impl Future<Output = T> + Send + 'static,
 ) -> nanocode_executor::JoinHandle<T> {
+    let future = future.pinned();
     match host() {
         Some(host) => nanocode_executor::spawn_with(future, |driven| host.spawn(driven)),
-        None => {
-            let future: Pin<Box<dyn Future<Output = T> + Send + 'static>> = Box::pin(future);
-            nanocode_executor::spawn(future)
-        }
+        None => nanocode_executor::spawn(future),
     }
 }
 
+#[inline]
 #[track_caller]
 pub fn spawn_on<T: Send + 'static>(
     runtime: &nanocode_executor::Handle,
     future: impl Future<Output = T> + Send + 'static,
 ) -> nanocode_executor::JoinHandle<T> {
-    let future: Pin<Box<dyn Future<Output = T> + Send + 'static>> = Box::pin(future);
+    let future = future.pinned();
     runtime.spawn(future)
 }
 
+#[inline]
 #[track_caller]
 pub fn spawn_joined<T: Send + 'static>(
     set: &mut nanocode_executor::JoinSet<T>,
     future: impl Future<Output = T> + Send + 'static,
 ) -> nanocode_executor::AbortHandle {
+    let future = future.pinned();
     match host() {
         Some(host) => set.push(nanocode_executor::spawn_with(future, |driven| {
             host.spawn(driven);
         })),
-        None => {
-            let future: Pin<Box<dyn Future<Output = T> + Send + 'static>> = Box::pin(future);
-            set.spawn(future)
-        }
+        None => set.spawn(future),
     }
 }
 

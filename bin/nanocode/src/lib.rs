@@ -37,7 +37,7 @@ use std::{
 use nanocode::{
     ModelSelection, ServiceTier, Thinking, agent::events::SharedTextDelta, durability::TranscriptItem,
 };
-use nanocode_sync::StreamExt;
+use nanocode_sync::{FutureExt, StreamExt};
 
 use crate::{
     cli::{Cli, Command, GatewayArgs, HandArgs, HarnessArg, SessionArgs, SessionsArgs},
@@ -690,16 +690,17 @@ async fn exec(args: Box<SessionArgs>, clients: ModelClients) -> Result<()> {
     .ok_or("exec requires a prompt, as an argument or on stdin")?;
     if let Some(count) = args.attempts {
         let piped = piped.filter(|piped| !piped.trim().is_empty());
-        return Box::pin(attempts::run(&args, count, piped)).await;
+        return attempts::run(&args, count, piped).boxed().await;
     }
-    let prepared = Box::pin(prepare(
+    let prepared = prepare(
         &args,
         clients,
         &mut |message| {
             eprintln!("nanocode: {message}");
         },
         true,
-    ))
+    )
+    .boxed()
     .await?;
     let mut runner_events = prepared.runner_events;
     nanocode_platform::spawn_task(async move {
@@ -718,12 +719,12 @@ async fn exec(args: Box<SessionArgs>, clients: ModelClients) -> Result<()> {
     };
     let resume = match (&args.resume, args.continue_last) {
         (Some(id), _) if !id.is_empty() => Some(id.clone()),
-        (_, true) => Some(Box::pin(latest_session(&host)).await?),
+        (_, true) => Some(latest_session(&host).boxed().await?),
         _ => None,
     };
     let (mut agent, events, pending) = match resume.clone() {
         Some(id) => {
-            let ready = Box::pin(app::open_session(
+            let ready = app::open_session(
                 &host,
                 &id,
                 args.thinking
@@ -731,7 +732,8 @@ async fn exec(args: Box<SessionArgs>, clients: ModelClients) -> Result<()> {
                     .map(host::parse_thinking)
                     .transpose()?,
                 args.tier.as_deref().map(host::parse_tier).transpose()?,
-            ))
+            )
+            .boxed()
             .await?;
             let (asked, runs) = (
                 prepared.route.label(&prepared.model),
@@ -748,7 +750,7 @@ async fn exec(args: Box<SessionArgs>, clients: ModelClients) -> Result<()> {
         }
         None => {
             let (agent, events) =
-                Box::pin(host.start(&prepared.model, prepared.thinking, prepared.route)).await?;
+                host.start(&prepared.model, prepared.thinking, prepared.route).boxed().await?;
             app::apply_tier(&agent, &prepared.model, prepared.tier).await?;
             (agent, events, Vec::new())
         }
@@ -819,7 +821,7 @@ async fn exec(args: Box<SessionArgs>, clients: ModelClients) -> Result<()> {
     }
     let flushed = agent.flush().await;
     let unanswered =
-        outcome.is_err() && resume.is_none() && Box::pin(unanswered(&host, agent.session_id())).await;
+        outcome.is_err() && resume.is_none() && unanswered(&host, agent.session_id()).boxed().await;
     if unanswered {
         drop(writeln!(
             stderr,
@@ -830,7 +832,7 @@ async fn exec(args: Box<SessionArgs>, clients: ModelClients) -> Result<()> {
         drop(writeln!(stderr, "session {}", agent.session_id()));
     }
     let shutdown = host.runtime.shutdown().await;
-    let archived = Box::pin(host::archive(&host.config)).await;
+    let archived = host::archive(&host.config).boxed().await;
     outcome?;
     flushed?;
     shutdown?;

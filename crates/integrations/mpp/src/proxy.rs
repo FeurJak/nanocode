@@ -16,6 +16,7 @@ use nanocode_http::server::{self, Outgoing, Reply, Upgraded};
 use nanocode_http::types::uri::Authority;
 use nanocode_http::{Method, StatusCode};
 use nanocode_sync::Atom;
+use nanocode_sync::FutureExt;
 use nanocode_sync::StreamExt;
 use nanocode_tls::rustls::ServerConfig;
 use nanocode_tls::rustls::crypto::CryptoProvider;
@@ -212,7 +213,7 @@ impl<P: PaymentProvider + 'static> ForwardProxy<P> {
                             let _ = server::serve(
                                 Box::new(stream),
                                 server::Options::default(),
-                                move |request| proxy.clone().handle(request),
+                                move |request| proxy.clone().handle(request).boxed(),
                             )
                             .await;
                         });
@@ -333,6 +334,7 @@ impl<P: PaymentProvider + 'static> Proxy<P> {
                         Err(error) => respond(StatusCode::BAD_REQUEST, &error.to_string()),
                     }
                 }
+                .boxed()
             },
         )
         .await;

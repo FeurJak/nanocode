@@ -3,6 +3,7 @@ use std::{
     fmt,
     future::Future,
     io,
+    pin::Pin,
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering, fence},
@@ -380,8 +381,15 @@ impl Handle {
         blocking::spawn(Some(self), &self.0.blocking, work)
     }
 
+    #[inline]
     #[track_caller]
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
+        let future: Pin<&mut dyn Future<Output = F::Output>> = std::pin::pin!(future);
+        self.block_on_pinned(future)
+    }
+
+    #[track_caller]
+    fn block_on_pinned<T>(&self, future: Pin<&mut dyn Future<Output = T>>) -> T {
         assert!(!BLOCKING_THREAD.with(Cell::get), "{NESTED}");
         let _context = self.enter();
         if self.0.kind == Kind::CurrentThread
@@ -687,6 +695,7 @@ impl Runtime {
         self.handle.spawn_blocking(work)
     }
 
+    #[inline]
     #[track_caller]
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
         self.handle.block_on(future)
