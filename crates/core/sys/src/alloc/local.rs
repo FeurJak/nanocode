@@ -14,7 +14,7 @@ use super::segment::{
 const PAGE_SCAN_MAX: usize = 8;
 const COLLECT_PAGES_MIN: usize = 32;
 const COLLECT_LIVE_DIVISOR: usize = 4;
-const DIRTY_SLICES_MAX: usize = 64;
+const DIRTY_SLICES_MAX: usize = 4;
 const SHRINK_IN_PLACE_DIVISOR: usize = 2;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -119,7 +119,7 @@ impl State {
                 return;
             }
             (*page).free_local(block);
-            if (*page).used.get() == 0 && self.heads[(*page).class.get()].get() != page {
+            if (*page).used.get() == 0 {
                 self.retire(page);
             }
         }
