@@ -138,6 +138,12 @@ struct PaymentLease {
     _store: StoreLease,
 }
 
+#[derive(Clone, Copy)]
+struct TopUpSize {
+    chunk: u128,
+    floor: u128,
+}
+
 struct PreparedTopUp {
     key: String,
     channel_id: Hash,
@@ -628,7 +634,7 @@ impl SessionProvider {
         required: u128,
         deposit: u128,
         suggested: Option<&str>,
-    ) -> Result<Option<u128>, Fault> {
+    ) -> Result<Option<TopUpSize>, Fault> {
         let Some(shortfall) = required
             .checked_sub(deposit)
             .filter(|shortfall| *shortfall > 0)
@@ -640,7 +646,36 @@ impl SessionProvider {
             .transpose()
             .map_err(|error| Fault::config(format!("invalid suggestedDeposit: {error}")))?
             .unwrap_or_default();
-        Ok(Some(shortfall.max(self.top_up_amount.unwrap_or(suggested))))
+        Ok(Some(TopUpSize {
+            chunk: self.top_up_chunk(suggested, required).max(shortfall),
+            floor: shortfall.max(self.top_up_amount.unwrap_or(suggested)),
+        }))
+    }
+
+    fn top_up_chunk(&self, suggested: u128, spent: u128) -> u128 {
+        self.top_up_amount
+            .unwrap_or_default()
+            .max(suggested)
+            .max(spent)
+    }
+
+    async fn prepare_sized_top_up(
+        &self,
+        headers: HeaderMap,
+        challenge: &Challenge,
+        channel_id: &str,
+        size: TopUpSize,
+    ) -> Result<PreparedTopUp, Fault> {
+        match self
+            .prepare_top_up(headers.clone(), challenge, channel_id, size.chunk)
+            .await
+        {
+            Err(_) if size.floor < size.chunk => {
+                self.prepare_top_up(headers, challenge, channel_id, size.floor)
+                    .await
+            }
+            prepared => prepared,
+        }
     }
 
     fn stored_entry(entry: &ChannelEntry) -> StoredChannelEntry {
@@ -1125,6 +1160,14 @@ impl SessionProvider {
         let Some(entry) = self.channel_by_id(channel_id) else {
             return;
         };
+        let suggested = session_request(challenge)
+            .ok()
+            .and_then(|request| request.suggested_deposit?.parse::<u128>().ok())
+            .unwrap_or_default();
+        let size = TopUpSize {
+            chunk: self.top_up_chunk(suggested, entry.cumulative_amount),
+            floor: amount,
+        };
         let reserve = price.saturating_mul(u128::from(self.prepaid_requests) + 1);
         if entry.deposit.saturating_sub(entry.cumulative_amount) >= reserve {
             return;
@@ -1149,7 +1192,7 @@ impl SessionProvider {
                     headers,
                     &challenge,
                     &channel_id,
-                    amount,
+                    size,
                     reserve,
                 )
                 .await;
@@ -1644,10 +1687,10 @@ impl SessionProvider {
         headers: HeaderMap,
         challenge: &Challenge,
         channel_id: &str,
-        additional: u128,
+        size: TopUpSize,
     ) -> Result<Option<Receipt>, Fault> {
         let prepared = self
-            .prepare_top_up(headers, challenge, channel_id, additional)
+            .prepare_sized_top_up(headers, challenge, channel_id, size)
             .await?;
         let receipt = self
             .submit_top_up(client, url, challenge, &prepared)
@@ -1662,10 +1705,10 @@ impl SessionProvider {
         url: &str,
         challenge: &Challenge,
         channel_id: &str,
-        additional: u128,
+        size: TopUpSize,
     ) -> Result<Option<Receipt>, Fault> {
         let prepared = self
-            .prepare_top_up(HeaderMap::new(), challenge, channel_id, additional)
+            .prepare_sized_top_up(HeaderMap::new(), challenge, channel_id, size)
             .await?;
         let uncertain = || {
             let id = prepared.channel_id;
@@ -1705,7 +1748,7 @@ impl SessionProvider {
         headers: HeaderMap,
         challenge: &Challenge,
         channel_id: &str,
-        additional: u128,
+        size: TopUpSize,
         reserve: u128,
     ) -> Result<(), Fault> {
         let Some(key) = self.channel_key_of(channel_id) else {
@@ -1720,7 +1763,7 @@ impl SessionProvider {
             return Ok(());
         }
         let prepared = self
-            .prepare_top_up(headers, challenge, channel_id, additional)
+            .prepare_sized_top_up(headers, challenge, channel_id, size)
             .await?;
         self.submit_top_up(client, url, challenge, &prepared)
             .await?;
@@ -2371,7 +2414,7 @@ impl SessionProvider {
                 entry.deposit = entry.deposit.max(current.deposit);
             }
             if entry.cumulative_amount > entry.deposit {
-                let additional = self
+                let size = self
                     .required_top_up(
                         entry.cumulative_amount,
                         entry.deposit,
@@ -2385,25 +2428,12 @@ impl SessionProvider {
                         url,
                         headers,
                     } => {
-                        self.top_up_with_lease(
-                            client,
-                            url,
-                            headers,
-                            challenge,
-                            &channel_id,
-                            additional,
-                        )
-                        .await?;
+                        self.top_up_with_lease(client, url, headers, challenge, &channel_id, size)
+                            .await?;
                     }
                     TopUpRoute::Management { transport, url } => {
-                        self.top_up_with_management(
-                            transport,
-                            url,
-                            challenge,
-                            &channel_id,
-                            additional,
-                        )
-                        .await?;
+                        self.top_up_with_management(transport, url, challenge, &channel_id, size)
+                            .await?;
                     }
                 }
                 entry.deposit = self
