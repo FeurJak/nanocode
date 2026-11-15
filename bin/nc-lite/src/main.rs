@@ -192,7 +192,8 @@ impl Lite {
     async fn session(&self, continue_last: bool) -> Result<(Agent, AgentEvents)> {
         match (&self.store, continue_last) {
             (Some(store), true) => {
-                let latest = workspace_sessions(store)
+                let latest = store
+                    .newest_page(&std::env::current_dir()?, 1, |_| true)
                     .await?
                     .into_iter()
                     .next()
