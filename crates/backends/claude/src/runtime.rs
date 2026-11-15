@@ -22,6 +22,7 @@ pub struct ClaudeHarness {
     direct_tools_for: Option<Direct>,
     direct_subagents: bool,
     headless: bool,
+    deadline: Option<crate::Deadline>,
 }
 impl ClaudeHarness {
     #[must_use]
@@ -34,6 +35,7 @@ impl ClaudeHarness {
             direct_tools_for: None,
             direct_subagents: false,
             headless: false,
+            deadline: None,
         }
     }
 
@@ -102,6 +104,12 @@ impl ClaudeHarness {
         self.direct_subagents = enabled;
         self
     }
+
+    #[must_use]
+    pub const fn deadline(mut self, deadline: crate::Deadline) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
 }
 impl From<ClaudeClient> for ClaudeHarness {
     fn from(client: ClaudeClient) -> Self {
@@ -153,6 +161,7 @@ impl RuntimeBackend for ClaudeHarness {
             .as_ref()
             .is_some_and(|direct_tools_for| direct_tools_for(&spec));
         let direct_subagents = self.direct_subagents;
+        let deadline = self.deadline;
         #[cfg(not(target_family = "wasm"))]
         let headless = self.headless;
         Box::pin(async move {
@@ -194,6 +203,9 @@ impl RuntimeBackend for ClaudeHarness {
             }
             if let Some(configure) = configure {
                 builder = configure(builder)?.workspace(workspace.to_string_lossy().into_owned());
+            }
+            if let Some(deadline) = deadline {
+                builder = builder.deadline(deadline);
             }
             #[cfg(not(target_family = "wasm"))]
             if direct && !remote {

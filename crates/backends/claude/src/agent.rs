@@ -624,6 +624,29 @@ fn hooked_handler(
     })
 }
 
+fn deadline_handler(name: String, handler: Handler, deadline: crate::Deadline) -> Handler {
+    Arc::new(move |input, invocation| {
+        let cap = deadline.cap(&name, &input);
+        let handler = handler.clone();
+        Box::pin(async move {
+            match cap {
+                crate::deadline::Cap::Unchanged => handler(input, invocation).await,
+                crate::deadline::Cap::Expired(text) => Ok(ClaudeToolReply {
+                    content: ToolResultContent::Text(text),
+                    is_error: true,
+                    metadata: None,
+                    structured_result: None,
+                }),
+                crate::deadline::Cap::Capped { input, notice } => {
+                    let mut reply = handler(input, invocation).await?;
+                    crate::deadline::append(&mut reply.content, &notice);
+                    Ok(reply)
+                }
+            }
+        })
+    })
+}
+
 pub const LATEST_MODEL: &str = "claude-opus-5-5";
 
 #[derive(Clone)]
@@ -744,6 +767,7 @@ pub struct ClaudeBuilder {
     tools_adapter: Option<Arc<dyn Fn(ClaudeTools) -> Result<ClaudeTools> + Send + Sync>>,
     dynamic_tools: Vec<DynamicToolsFactory>,
     tool_hooks: Vec<Arc<dyn crate::ClaudeToolHooks>>,
+    deadline: Option<crate::Deadline>,
     spawn_factory: Option<Arc<dyn AgentFactory>>,
     child_journal: Option<nanocode_agent_core::backend::ChildJournal>,
     host_context: Option<Arc<str>>,
@@ -819,6 +843,7 @@ impl ClaudeBuilder {
             tools_adapter: None,
             dynamic_tools: Vec::new(),
             tool_hooks: Vec::new(),
+            deadline: None,
             spawn_factory: None,
             child_journal: None,
             host_context: None,
@@ -1192,6 +1217,11 @@ impl ClaudeBuilder {
 
     pub fn tool_hooks(mut self, hooks: Arc<dyn crate::ClaudeToolHooks>) -> Self {
         self.tool_hooks.push(hooks);
+        self
+    }
+
+    pub const fn deadline(mut self, deadline: crate::Deadline) -> Self {
+        self.deadline = Some(deadline);
         self
     }
 
@@ -1765,6 +1795,11 @@ impl ClaudeBuilder {
             working_directory = adapted.working_directory.or(working_directory);
             self.client_tool_search = false;
         }
+        if let Some(deadline) = self.deadline {
+            for (name, handler) in &mut handlers {
+                *handler = deadline_handler(name.clone(), handler.clone(), deadline);
+            }
+        }
         let mut names = handlers.keys().map(String::as_str).collect::<HashSet<_>>();
         for tool in &self.server_tools {
             if tool.kind.is_empty() || tool.name.is_empty() || !names.insert(&tool.name) {
@@ -1922,6 +1957,7 @@ impl ClaudeBuilder {
             code_quiet,
             turn_hold,
             round_notices,
+            deadline: self.deadline.map(crate::deadline::Reminders::new),
             working_directory: working_directory.map(crate::environment::WorkingDirectory::new),
             nested_tools,
             recovery,
@@ -3547,6 +3583,7 @@ struct State {
     code_quiet: Vec<CodeQuiet>,
     turn_hold: Vec<ToolCleanup>,
     round_notices: Vec<RoundNotices>,
+    deadline: Option<crate::deadline::Reminders>,
     working_directory: Option<crate::environment::WorkingDirectory>,
     lifecycle_opened: Atom<Option<String>>,
     subagent_type: Option<String>,
@@ -8479,12 +8516,9 @@ impl State {
             if has_tool_calls {
                 let results: Vec<_> = results.into_iter().map(Option::unwrap).collect();
                 pending.push(Message::tool_results(results).into());
+                let mut parts = Vec::new();
                 if self.upstream_context {
-                    let mut parts = self
-                        .round_notices
-                        .iter()
-                        .flat_map(|notices| notices())
-                        .collect::<Vec<_>>();
+                    parts.extend(self.round_notices.iter().flat_map(|notices| notices()));
                     parts.extend(
                         self.working_directory
                             .as_ref()
@@ -8503,9 +8537,14 @@ impl State {
                                 .saturating_sub(used.saturating_sub(conversation.tokens_anchor))
                         ));
                     }
-                    if !parts.is_empty() {
-                        pending.push(Message::text(Role::System, parts.join("\n\n")).into());
-                    }
+                }
+                parts.extend(
+                    self.deadline
+                        .as_ref()
+                        .and_then(crate::deadline::Reminders::notice),
+                );
+                if !parts.is_empty() {
+                    pending.push(Message::text(Role::System, parts.join("\n\n")).into());
                 }
 
                 conversation.messages = pending.clone();

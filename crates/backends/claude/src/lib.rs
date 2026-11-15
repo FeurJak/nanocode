@@ -20,6 +20,9 @@ pub use hooks::{
 
 pub use nanocode_agent_core::ClaudeModel;
 
+mod deadline;
+pub use deadline::Deadline;
+
 mod agent;
 pub use agent::{
     Claude, ClaudeBuilder, ClaudeCheckpointView, ClaudeNestedToolUpdate, ClaudeToolInvocation,

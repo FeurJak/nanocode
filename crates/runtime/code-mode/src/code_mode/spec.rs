@@ -175,7 +175,7 @@ pub fn exec_spec_yielding(spec: ToolDefinition, after: std::time::Duration) -> T
     spec.with_description(description)
 }
 
-pub(crate) const EXEC_PRAGMA_PREFIX: &str = "// @exec:";
+pub const EXEC_PRAGMA_PREFIX: &str = "// @exec:";
 pub(crate) const MAX_JS_SAFE_INTEGER: u64 = (1_u64 << 53) - 1;
 
 pub(crate) fn integer_value(value: &Value) -> Result<u64, String> {
