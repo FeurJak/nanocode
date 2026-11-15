@@ -521,6 +521,7 @@ impl Fold {
             };
             if owner.contains('\n') {
                 self.stored.remove(&owner);
+                self.dead.remove(&owner);
             } else {
                 if self.checkpoints.remove(&owner).is_some() {
                     self.marks.remove(&owner);
@@ -542,6 +543,37 @@ impl Fold {
                 },
             );
         }
+        let idle = self
+            .pages
+            .iter()
+            .filter_map(|(first, page)| match page {
+                Page::Loaded(section) => Some((first.clone(), *section)),
+                Page::Cold(_) => None,
+            })
+            .filter(|(first, _)| {
+                self.page_owners(first).all(|(_, state)| {
+                    matches!(state, Owner::Cold { entry, pending } if pending.is_empty() && !entry.legacy && !entry.sections.is_empty())
+                })
+            })
+            .collect::<Vec<_>>();
+        for (first, section) in idle {
+            let owners = self
+                .page_owners(&first)
+                .map(|(owner, _)| owner.clone())
+                .collect::<Vec<_>>();
+            for owner in owners {
+                self.owners.remove(&owner);
+            }
+            self.pages.insert(first, Page::Cold(section));
+        }
+    }
+
+    fn page_owners(&self, first: &str) -> impl Iterator<Item = (&String, &Owner)> {
+        let end = self.page_end(first);
+        self.owners.range::<str, _>((
+            Bound::Included(first),
+            end.map_or(Bound::Unbounded, |end| Bound::Excluded(end.as_str())),
+        ))
     }
 
     pub(crate) fn is_legacy(&self, owner: &str) -> bool {
@@ -783,10 +815,10 @@ impl Fold {
             }
             Some(Owner::Warm { delta, .. }) => {
                 for key in &delta.keys {
-                    if let Some(value) = self.stored.get(key) {
+                    if let Some(value) = self.stored(key) {
                         take(Record::Stored {
                             key: key.clone(),
-                            value: value.clone(),
+                            value: value.to_owned(),
                         })?;
                     }
                 }
@@ -813,10 +845,10 @@ impl Fold {
         mut take: impl FnMut(Record) -> Result<(), StoreError>,
     ) -> Result<bool, StoreError> {
         if owner.contains('\n') {
-            if let Some(value) = self.stored.get(owner) {
+            if let Some(value) = self.stored(owner) {
                 take(Record::Stored {
                     key: owner.to_owned(),
-                    value: value.clone(),
+                    value: value.to_owned(),
                 })?;
             }
             return Ok(false);
