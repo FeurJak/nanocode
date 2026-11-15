@@ -607,6 +607,19 @@ impl Exec<'_> {
     }
 
     #[inline(never)]
+    fn fclosure_hit(&mut self) -> Option<bool> {
+        if self.each_fused() {
+            return Some(true);
+        }
+        let v = self.closure(self.imm_u32(1)).ok()?;
+        self.push(v);
+        let info = &OPS[Op::FClosure as usize];
+        self.fuel -= info.cost.fuel() as i64;
+        self.pc += info.size as u32;
+        Some(false)
+    }
+
+    #[inline(never)]
     fn decline_plain(&mut self, op: u8) -> bool {
         let o = match op {
             OBJECT => {
@@ -648,16 +661,6 @@ impl Exec<'_> {
                 }
                 self.sp -= 1;
                 Op::ArrayPush
-            }
-            FCLOSURE => {
-                if self.each_fused() {
-                    return true;
-                }
-                let Ok(v) = self.closure(self.imm_u32(1)) else {
-                    return false;
-                };
-                self.push(v);
-                Op::FClosure
             }
             NEW_BOX_INIT => {
                 let Ok(b) = self.new_box(self.get(self.sp - 1)) else {
@@ -860,7 +863,6 @@ impl Exec<'_> {
             OBJECT
                 | ARRAY_FROM
                 | ARRAY_PUSH
-                | FCLOSURE
                 | NEW_BOX_INIT
                 | PUSH_ATOM
                 | REQUIRE_OBJECT_COERCIBLE
@@ -2001,6 +2003,22 @@ impl Exec<'_> {
                                     }
                                 }
                                 _ => next!(Op::IncLtLoc),
+                            }
+                        }
+                        FCLOSURE => {
+                            if fuel <= 0 {
+                                break Exit::General;
+                            }
+                            (self.pc, self.sp, self.fuel) = (ip - code, sp, fuel);
+                            let Some(fused) = heap_call!(self.fclosure_hit()) else {
+                                break Exit::Decline(FCLOSURE);
+                            };
+                            (ip, sp, fuel) = (code + self.pc, self.sp, self.fuel);
+                            if fuel <= 0 {
+                                break Exit::General;
+                            }
+                            if fused && collect {
+                                break Exit::Safepoint;
                             }
                         }
                         _ => break Exit::Decline(op),

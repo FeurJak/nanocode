@@ -1270,7 +1270,6 @@ impl Exec<'_> {
         self.sp -= 2;
         self.push(r);
         self.pc = at + 1;
-        self.safepoint();
         true
     }
 
