@@ -1116,8 +1116,11 @@ pub(super) fn run_rounds<'a>(
                     .saturating_add(response.usage.cache_creation_input_tokens)
                     .saturating_add(response.usage.output_tokens)
                     .saturating_add(
-                        serde_json::to_string(pending.last().expect("tool result was appended"))
-                            .map(|text| estimate_text_tokens(&text))
+                        pending
+                            .last()
+                            .expect("tool result was appended")
+                            .json()
+                            .map(|text| estimate_text_tokens(text))
                             .unwrap_or(0),
                     );
 

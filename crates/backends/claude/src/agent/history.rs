@@ -130,7 +130,7 @@ impl HistoryMessage {
         self.json().map(drop)
     }
 
-    fn json(&self) -> serde_json::Result<&Arc<str>> {
+    pub(super) fn json(&self) -> serde_json::Result<&Arc<str>> {
         if let Some(json) = self.0.json.get() {
             return Ok(json);
         }
