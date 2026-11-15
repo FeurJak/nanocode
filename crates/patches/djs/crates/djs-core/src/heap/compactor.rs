@@ -393,7 +393,22 @@ impl Marker<'_> {
             let saved: Value = self.arena.read(Object::SLOTS.at(g, 1));
             if let Some(a) = saved.as_internal().filter(|&a| a < old) {
                 let h: u64 = self.arena.read(a);
-                self.scan_old(h as u8, a, (h >> 32) as u32);
+                let (kb, size) = (h as u8, (h >> 32) as u32);
+                let (end, shift) = (a + size, super::arena::Cards::SHIFT);
+                let mut k = (a >> shift) as usize;
+                while ((k as u32) << shift) < end {
+                    if self.arena.card_dirty(k) {
+                        k += 1;
+                        continue;
+                    }
+                    let first = k;
+                    while ((k as u32) << shift) < end && !self.arena.card_dirty(k) {
+                        k += 1;
+                    }
+                    let lo = ((first as u32) << shift).max(a);
+                    let hi = ((k as u32) << shift).min(end);
+                    self.scan_range(kb, a, size, lo, hi);
+                }
                 self.drain();
             }
         }
@@ -941,6 +956,18 @@ impl Heap {
                 all_collections = false;
             }
         };
+        #[cfg(debug_assertions)]
+        if remembered_ok {
+            let mut seen: Vec<u32> = remembered.clone();
+            seen.sort_unstable();
+            if let Some(w) = seen.windows(2).find(|w| w[0] == w[1]) {
+                panic!(
+                    "remembered twice: {:#x} (old {old}, {} remembered) D3200",
+                    w[0],
+                    remembered.len()
+                );
+            }
+        }
         if remembered_ok {
             for &e in &remembered {
                 let s = e & !(REMEMBER_REF | REMEMBER_REHASH);
