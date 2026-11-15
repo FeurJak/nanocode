@@ -1166,6 +1166,21 @@ impl Exec<'_> {
                             }
                         }};
                     }
+                    // Takes the frame a generator switch left in `Exec` (`gen_resume_hot`,
+                    // `gen_yield_hot`) with stack top `$top`: entry and return are safepoints.
+                    macro_rules! switch_frame {
+                        ($top:expr) => {{
+                            code = self.code;
+                            end = code + self.code_len;
+                            (bp, hp, lp) = (self.bp, self.hp, self.lp);
+                            consts = self.consts;
+                            sp = $top;
+                            ip = code + self.pc;
+                            if collect {
+                                break Exit::Safepoint;
+                            }
+                        }};
+                    }
                     match op {
                         fast::GET_LOC => {
                             push!(ld(b, slot!(lp + imm16!())));
@@ -1575,14 +1590,44 @@ impl Exec<'_> {
                             // spilled for every instruction, D2441.)
                             jump!(Op::IterNext, true, ld32(b, ip + 1) as i32)
                         }
-                        fast::ITER_NEXT_LOC => {
-                            let at = lp + imm16!();
-                            let (it, f) = (ld(b, slot!(at)), ld(b, slot!(at + 1)));
-                            let Some(v) = heap_call!(self.iter_next_hit(it, f)) else {
-                                break Exit::Decline(fast::ITER_NEXT_LOC);
-                            };
-                            push!(v);
-                            jump!(Op::IterNextLoc, true, ld32(b, ip + 3) as i32)
+                        fast::ITER_NEXT_LOC | YIELD => {
+                            // A plain generator's frame entered in place (`resume_hit`), or
+                            // left back to the loop or `next` call that entered it.
+                            let (mut it, mut f) = (Value::UNDEFINED, Value::UNDEFINED);
+                            let mut generator = None;
+                            if op == YIELD {
+                                generator = heap_call_op!(self.gen_yield_hot(ip - code, sp));
+                            } else {
+                                let at = lp + imm16!();
+                                (it, f) = (ld(b, slot!(at)), ld(b, slot!(at + 1)));
+                                if let Some(g) = it.as_object().filter(|o| {
+                                    ld32(b, o.offset() + Object::CLASS.offset)
+                                        == ObjectClass::Generator as u32
+                                }) {
+                                    generator = heap_call_op!(self.gen_resume_hot(
+                                        (ip - code, sp, cap),
+                                        g,
+                                        f,
+                                        fuel
+                                    ));
+                                    if generator.is_none() {
+                                        break Exit::Decline(op);
+                                    }
+                                }
+                            }
+                            if let Some((top, cost)) = generator {
+                                fuel -= cost;
+                                switch_frame!(top);
+                            } else {
+                                if op == YIELD {
+                                    break Exit::Decline(op);
+                                }
+                                let Some(v) = heap_call!(self.iter_next_hit(it, f)) else {
+                                    break Exit::Decline(fast::ITER_NEXT_LOC);
+                                };
+                                push!(v);
+                                jump!(Op::IterNextLoc, true, ld32(b, ip + 3) as i32)
+                            }
                         }
                         fast::CALL_INTRINSIC | fast::CALL_INTRINSIC8 => {
                             // (One arm for both: two copies of `intrinsic_hit` are a

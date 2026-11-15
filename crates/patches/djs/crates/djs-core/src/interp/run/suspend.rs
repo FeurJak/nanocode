@@ -31,6 +31,8 @@
 //! the frame with a call of a builtin (`%AsyncAwait`, `%AsyncFunctionReturn`) with the
 //! frame's own continuation: a tail call.
 
+use super::hot::{self, ld, ld32, st};
+use crate::heap::cells::Object;
 use super::*;
 
 pub(crate) const START: i32 = 0;
@@ -409,6 +411,187 @@ impl Exec<'_> {
         }
         self.safepoint();
         true
+    }
+
+    /// `iter_next_loc` at `at` on the Generator `g` with `next` `f`, from the tier-0 loop
+    /// (stack top `sp`, capacity `cap`, `fuel` left): `resume_hit` for a plain generator
+    /// at its start or a yield, without growing the stack or collecting. The resumption's
+    /// `undefined false` go straight to the `jump_if_false8` after the yield and the
+    /// `drop` of the value at its target, as those instructions would run them, while the
+    /// fuel lasts and no collection is wanted. Returns the frame's `sp` and the fuel it
+    /// charged; `None` with nothing changed.
+    #[inline(never)]
+    pub(super) fn gen_resume_hot(
+        &mut self,
+        (at, sp, cap): (u32, u32, u32),
+        g: Obj,
+        f: Value,
+        fuel: i64,
+    ) -> Option<(u32, i64)> {
+        let [state, saved, pc, hp_off, _, kind] = self.heap.object_slots(g, STATE);
+        let (Some(GENERATOR), Some(state @ (START | SUSPENDED)), Some(arr)) =
+            (kind.as_int(), state.as_int(), saved.as_internal())
+        else {
+            return None;
+        };
+        if f != realm::installed_intrinsic(self.heap, GENERATOR_NEXT) {
+            return None;
+        }
+        let (mut pc, hp_off) = (pc.as_int()? as u32, hp_off.as_int()? as u32);
+        let t = self.template_of(self.heap.value_array_get(arr, 0).as_object()?);
+        let collect = self.opts.gc_stress || self.heap.gc_pending();
+        let (stack, bp, hp) = (self.stack, self.bp, self.hp);
+        let b = self.heap.arena_mut().hot_bytes();
+        let len = ld32(b, arr + ValueArray::LEN.offset);
+        let head = hot::template_head(b, t);
+        if (sp + hp_off + HEADER + head.locals + head.stack).max(sp + len + 2) > cap {
+            return None;
+        }
+        let src = ValueArray::VALUES.at(arr, 0) as usize;
+        let dst = ValueArray::VALUES.at(stack, sp) as usize;
+        b.copy_within(src..src + 8 * len as usize, dst);
+        let slot = |i: u32| ValueArray::VALUES.at(stack, i);
+        let new_hp = sp + hp_off;
+        st(b, slot(new_hp + frame::PREV_BP), Value::int(bp as i32));
+        st(b, slot(new_hp + frame::PREV_HP), Value::int(hp as i32));
+        st(b, slot(new_hp + frame::RET_PC), Value::int(at as i32));
+        st(
+            b,
+            slot(new_hp + frame::FLAGS),
+            Value::int(Continuation::GenStep.to_flags()),
+        );
+        let mut cost = OPS[Op::IterNextLoc as usize].cost.fuel() as i64 + (len / 8) as i64;
+        let mut top = sp + len;
+        if state != START {
+            st(b, slot(top), Value::UNDEFINED);
+            st(b, slot(top + 1), Value::FALSE);
+            top += 2;
+            let code = FuncTemplate::DATA.at(t, 0);
+            let jump = &OPS[Op::JumpIfFalse8 as usize];
+            let drop = &OPS[Op::Drop as usize];
+            if !collect
+                && pc + jump.size as u32 <= head.code_len
+                && b[(code + pc) as usize] == Op::JumpIfFalse8 as u8
+                && fuel - cost - jump.cost.fuel() as i64 > 0
+            {
+                let offset = b[(code + pc + 1) as usize] as i8;
+                if offset >= 0 {
+                    pc += jump.size as u32 + offset as u32;
+                    top -= 1;
+                    cost += jump.cost.fuel() as i64;
+                    if pc < head.code_len
+                        && b[(code + pc) as usize] == Op::Drop as u8
+                        && fuel - cost - drop.cost.fuel() as i64 > 0
+                    {
+                        pc += drop.size as u32;
+                        top -= 1;
+                        cost += drop.cost.fuel() as i64;
+                    }
+                }
+            }
+        }
+        self.heap.set_object_slot(g, STATE, Value::int(EXECUTING));
+        self.bp = sp;
+        self.hp = new_hp;
+        self.pc = pc;
+        self.enter_template(t);
+        if self.retry_len == 0 {
+            self.retry_len = NO_RETRY;
+        }
+        Some((top, cost))
+    }
+
+    /// `yield loc` at `at` from the tier-0 loop (stack top `sp`) in a `GenStep` or
+    /// `GenNext` frame of a plain generator whose saved frame has room: `yield_hit` and
+    /// the return to its bytecode caller, without collecting. Returns the caller's `sp`
+    /// and the fuel charged; `None` with nothing changed.
+    #[inline(never)]
+    pub(super) fn gen_yield_hot(&mut self, at: u32, sp: u32) -> Option<(u32, i64)> {
+        let (stack, bp, hp) = (self.stack, self.bp, self.hp);
+        let slot = |i: u32| ValueArray::VALUES.at(stack, i);
+        let b = self.heap.arena_mut().hot_bytes();
+        let h: [u8; 40] = hot::window(b, slot(hp));
+        let hv = |k: u32| {
+            let k = 8 * k as usize;
+            Value::from_raw(u64::from_le_bytes(h[k..k + 8].try_into().unwrap()))
+        };
+        let cont = Continuation::from_flags(hv(frame::FLAGS).as_int()?);
+        let step = cont == Continuation::GenStep;
+        if !step && cont != Continuation::GenNext {
+            return None;
+        }
+        let int = |v: Value| v.as_int().map(|i| i as u32);
+        let (prev_bp, prev_hp, ret_pc) = (
+            int(hv(frame::PREV_BP))?,
+            int(hv(frame::PREV_HP))?,
+            int(hv(frame::RET_PC))?,
+        );
+        if ld(b, slot(prev_hp + frame::FLAGS)).as_int()? & frame::FLAG_NATIVE != 0 {
+            return None;
+        }
+        let loc = u16::from_le_bytes(hot::window(b, self.code + at + 1)) as u32;
+        let g = ld(b, slot(self.lp + loc)).as_object()?;
+        if ld32(b, g.offset() + Object::CLASS.offset) != ObjectClass::Generator as u32 {
+            return None;
+        }
+        let [_, saved, _, _, _, kind] = self.heap.object_slots(g, STATE);
+        let arr = saved.as_internal()?;
+        let len = sp - 1 - bp;
+        if kind.as_int() != Some(GENERATOR) || self.heap.value_array_capacity(arr) < len {
+            return None;
+        }
+        let v = self.get(sp - 1);
+        let r = if step {
+            v
+        } else {
+            let proto = intrinsic_obj(self.heap, Intrinsic::ObjectProto);
+            Value::object(self.heap.new_iter_result(Some(proto), v, false).ok()?)
+        };
+        let dst = ValueArray::VALUES.at(arr, 0);
+        let arena = self.heap.arena_mut();
+        arena.copy_within(slot(bp), 8 * len, dst);
+        arena.set(arr, ValueArray::LEN, len);
+        let size = OPS[Op::Yield as usize].size as u32;
+        self.heap.set_object_slots(
+            g,
+            STATE,
+            [
+                Value::int(SUSPENDED),
+                saved,
+                Value::int((at + size) as i32),
+                Value::int((hp - bp) as i32),
+            ],
+        );
+        let caller = self.get(prev_bp).as_object().expect("frame callee");
+        let t = self.template_of(caller);
+        self.bp = prev_bp;
+        self.hp = prev_hp;
+        self.enter_template(t);
+        let sp = if step {
+            let b = self.heap.arena_mut().hot_bytes();
+            let (op, imm, sp) = if b[(self.code + ret_pc) as usize] == Op::IterNextLoc as u8 {
+                st(b, slot(bp), r);
+                (Op::IterNextLoc, 3, bp + 1)
+            } else {
+                st(b, slot(bp - 2), r);
+                (Op::IterNext, 1, bp - 1)
+            };
+            let next = ret_pc + OPS[op as usize].size as u32;
+            let offset = i32::from_le_bytes(hot::window(b, self.code + ret_pc + imm));
+            self.pc = (next as i64 + offset as i64) as u32;
+            sp
+        } else {
+            self.set(bp - 2, r);
+            self.pc = ret_pc;
+            bp - 1
+        };
+        if self.retry_len == 0 {
+            self.retry_len = NO_RETRY;
+        }
+        Some((
+            sp,
+            OPS[Op::Yield as usize].cost.fuel() as i64 + (len / 8) as i64,
+        ))
     }
 
     fn suspend_frame(&mut self, g: Obj, state: i32, pc: u32) -> Result<(), Fault> {
