@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use nanocode_executor::process::Command;
+use nanocode_executor::process::{Child, Command};
 
 use crate::{cli::SessionArgs, host::Result};
 
@@ -287,7 +287,7 @@ async fn attempt(
     let exit = match (exited, deadline) {
         (Some(status), _) => Exit::Exited(status?),
         (None, Some(limit)) => {
-            child.kill().await?;
+            stop(&mut child).await?;
             Exit::Stopped(limit)
         }
         (None, None) => unreachable!("an attempt without a deadline ends only by exiting"),
@@ -299,6 +299,93 @@ async fn attempt(
         elapsed,
         exit,
     })
+}
+
+#[cfg(target_os = "linux")]
+async fn stop(child: &mut Child) -> Result<()> {
+    if let Some(id) = child.id() {
+        let id = i32::try_from(id)?;
+        let spawned = blocking(move || stopped_tree(id)).await?;
+        for process in spawned {
+            kill_spawned(process)?;
+        }
+    }
+    Ok(child.kill().await?)
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn stop(child: &mut Child) -> Result<()> {
+    Ok(child.kill().await?)
+}
+
+#[cfg(target_os = "linux")]
+fn stopped_tree(id: i32) -> io::Result<Vec<i32>> {
+    let gone = |error: &io::Error| error.raw_os_error() == Some(nanocode_sys::libc::ESRCH);
+    match nanocode_platform::unix::signal_process(id, nanocode_sys::libc::SIGSTOP) {
+        Err(error) if gone(&error) => return Ok(Vec::new()),
+        result => result?,
+    }
+    let mut found = Vec::new();
+    loop {
+        let spawned: Vec<i32> = parents()?
+            .into_iter()
+            .filter(|(process, parent)| {
+                (*parent == id || found.contains(parent)) && !found.contains(process)
+            })
+            .map(|(process, _)| process)
+            .collect();
+        if spawned.is_empty() {
+            return Ok(found);
+        }
+        for process in spawned {
+            match nanocode_platform::unix::signal_process(process, nanocode_sys::libc::SIGSTOP) {
+                Err(error) if gone(&error) => {}
+                result => result?,
+            }
+            found.push(process);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parents() -> io::Result<Vec<(i32, i32)>> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir("/proc")? {
+        let entry = entry?;
+        let Some(process) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse().ok())
+        else {
+            continue;
+        };
+        let stat = match fs::read_to_string(entry.path().join("stat")) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            stat => stat?,
+        };
+        let parent = stat
+            .rsplit_once(')')
+            .and_then(|(_, fields)| fields.split_whitespace().nth(1))
+            .ok_or_else(|| io::Error::other(format!("/proc/{process}/stat has no parent field")))?
+            .parse()
+            .map_err(io::Error::other)?;
+        found.push((process, parent));
+    }
+    Ok(found)
+}
+
+#[cfg(target_os = "linux")]
+fn kill_spawned(id: i32) -> io::Result<()> {
+    let gone = |error: &io::Error| error.raw_os_error() == Some(nanocode_sys::libc::ESRCH);
+    match nanocode_platform::unix::signal_group(id, nanocode_sys::libc::SIGKILL) {
+        Err(error) if gone(&error) => {
+            match nanocode_platform::unix::signal_process(id, nanocode_sys::libc::SIGKILL) {
+                Err(error) if gone(&error) => Ok(()),
+                result => result,
+            }
+        }
+        result => result,
+    }
 }
 
 async fn diff(root: &Path, label: &str) -> Result<String> {
