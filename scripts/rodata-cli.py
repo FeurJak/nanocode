@@ -90,6 +90,7 @@ merged = (".rodata.cst", ".rodata.str")
 order = []
 placed = set()
 for directory in profiles:
+    group = []
     pending = []
     for name in sorted(executed(directory)):
         for start, end in functions.get(name, []):
@@ -100,8 +101,9 @@ for directory in profiles:
             continue
         placed.add(i)
         if not inputs[i][2].startswith(merged):
-            order.append(inputs[i][2])
+            group.append(i)
         pending.extend(references.get(i, ()))
+    order.extend(inputs[i][2] for i in sorted(group, key=lambda i: inputs[i][1]))
 script = output + ".ld"
 with open(script, "w") as out:
     out.write("SECTIONS { .rodata : {\n  *(%s)\n" % " ".join(prefix + "*" for prefix in merged))
