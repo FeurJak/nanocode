@@ -3980,13 +3980,22 @@ impl Registry {
                 && session.turn_revision() == Some(commits.revision)
             {
                 session.in_flight_calls.retain(|call| {
-                    !(matches!(call.state, durable::CallState::Live { .. })
-                        && commits.call_ids.contains(&call.call_id))
+                    matches!(call.state, durable::CallState::Live { .. })
+                        && !commits.call_ids.contains(&call.call_id)
                 });
                 let progress = &mut session.in_flight_progress;
                 let omitted = commits.omitted.min(progress.committable);
                 progress.committable -= omitted;
-                session.in_flight_omitted = session.in_flight_omitted.saturating_sub(omitted);
+                let live = progress
+                    .nested
+                    .values()
+                    .fold(progress.settled.saturating_add(progress.committable), |sum, count| {
+                        sum.saturating_add(*count)
+                    });
+                session.in_flight_omitted = session
+                    .in_flight_omitted
+                    .saturating_sub(omitted)
+                    .min(live);
             }
             if progressed && session.active() {
                 session.resume_attempts = 0;
