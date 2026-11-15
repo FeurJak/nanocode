@@ -2,10 +2,7 @@ use std::{
     future::{Future, poll_fn},
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -58,8 +55,17 @@ pub struct Config {
 
 pub struct System {
     config: Config,
-    covers: u64,
     hosts: String,
+    stamp: [Option<Stamp>; 2],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Stamp {
+    changed: (i64, i64),
+    device: u64,
+    inode: u64,
+    modified: (i64, i64),
+    size: u64,
 }
 
 pub trait Wire {
@@ -213,35 +219,41 @@ impl Config {
     }
 }
 
-static REQUESTED: AtomicU64 = AtomicU64::new(0);
-
 thread_local! {
     static LOADED: std::cell::Cell<Option<Arc<System>>> = const { std::cell::Cell::new(None) };
 }
 
 impl System {
     #[must_use]
-    pub fn request() -> u64 {
-        REQUESTED.fetch_add(1, Ordering::SeqCst) + 1
-    }
-
-    #[must_use]
-    pub fn load(request: u64) -> Arc<Self> {
+    pub fn load() -> Arc<Self> {
+        let stamp = [stamp(HOSTS_PATH), stamp(RESOLV_CONF_PATH)];
         if let Some(loaded) = LOADED.take() {
             LOADED.set(Some(loaded.clone()));
-            if loaded.covers >= request {
+            if loaded.stamp == stamp {
                 return loaded;
             }
         }
-        let covers = REQUESTED.load(Ordering::SeqCst);
         let system = Arc::new(Self {
             hosts: std::fs::read_to_string(HOSTS_PATH).unwrap_or_default(),
             config: Config::system(),
-            covers,
+            stamp,
         });
         LOADED.set(Some(system.clone()));
         system
     }
+}
+
+fn stamp(path: &str) -> Option<Stamp> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(Stamp {
+        changed: (metadata.ctime(), metadata.ctime_nsec()),
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        modified: (metadata.mtime(), metadata.mtime_nsec()),
+        size: metadata.size(),
+    })
 }
 
 impl Wire for Sockets {

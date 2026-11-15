@@ -16,6 +16,7 @@ use crate::{
     sys::AsRaw,
 };
 
+#[cfg(not(target_os = "linux"))]
 const LOOKUP_THREAD: &str = "nanocode-lookup";
 #[cfg(windows)]
 const CONNECT_THREAD: &str = "nanocode-connect";
@@ -271,26 +272,13 @@ async fn resolve(addresses: impl ToSocketAddrs) -> io::Result<Vec<SocketAddr>> {
 
 #[cfg(target_os = "linux")]
 async fn lookup(host: String) -> io::Result<Vec<SocketAddr>> {
-    static WORKER: std::sync::OnceLock<Arc<crate::blocking::Pool>> = std::sync::OnceLock::new();
-
     let (name, port) = host
         .rsplit_once(':')
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid socket address"))?;
     let port = port
         .parse::<u16>()
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid port value"))?;
-    let worker = WORKER.get_or_init(|| {
-        Arc::new(crate::blocking::Pool::new(
-            1,
-            crate::blocking::KEEP_ALIVE,
-            Some(LOOKUP_THREAD.to_owned()),
-        ))
-    });
-    let request = crate::dns::System::request();
-    let system = crate::blocking::spawn(None, worker, move || crate::dns::System::load(request))
-        .await
-        .map_err(|_| io::Error::other("the lookup worker failed"))?;
-    crate::dns::resolve(&system, name, port).await
+    crate::dns::resolve(&crate::dns::System::load(), name, port).await
 }
 
 #[cfg(not(target_os = "linux"))]
