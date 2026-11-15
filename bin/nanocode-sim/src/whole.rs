@@ -759,6 +759,17 @@ async fn settled(runtime: &Nanocode, shape: &Shape, world: &World) -> Result<(),
                     entry.agent_id, entry.status
                 ));
             }
+            if shape.stop == Stop::Never
+                && shape.cancel_turn.is_none()
+                && let Some(label) = word_after(&entry.task, CHILD_MARK)
+                && world.receipted(label)
+                && !matches!(&entry.status, nanocode::AgentStatus::Completed { output } if *output == json!(format!("{label} done")))
+            {
+                world.wrong(format!(
+                    "receipted_child_lost: {session} agent {} ({label}) received an accepted submit_result receipt and ended {:?}",
+                    entry.agent_id, entry.status
+                ));
+            }
         }
     }
     Ok(())
@@ -919,6 +930,9 @@ pub fn simulate(seed: u64, options: WholeOptions) -> WholeOutcome {
     let clock = Clock::new();
     crate::host::enter(seed, &clock);
     let world = World::new(Arc::clone(&clock), options.verbose);
+    if options.store_mutation == Mutation::PowerLossDropsAcceptance {
+        world.hold_receipts();
+    }
     let wire = match shape.wire {
         WireKind::Transport => Wire::Transport(Arc::new(Network::new(seed, Arc::clone(&world), shape.faults, options.mutation))),
         WireKind::Http => Wire::Http(Arc::new(HttpServer::new(seed, Arc::clone(&world), shape.http_faults, options.mutation, IDLE_TIMEOUT))),
@@ -973,6 +987,7 @@ pub fn simulate(seed: u64, options: WholeOptions) -> WholeOutcome {
             result.replace(Some(outcome));
         });
         let crash_at = crashes.pop_front();
+        world.crash_pending(crash_at.is_some());
         let ended = executor.run(vec![task], crash_at);
         drop(executor);
         drop_spawned();

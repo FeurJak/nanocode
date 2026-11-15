@@ -1016,6 +1016,9 @@ async fn answer(
             return refusal(&error);
         }
     };
+    if reply.held {
+        nanocode_platform::sleep(Duration::from_millis(crate::whole::CRASH_HORIZON_MS)).await;
+    }
     let encoded = encode(coding, reply.body.as_bytes());
     let (headers, body, mut after) = framed(server, coding, framing, malformed, encoded);
     let head = malform(head_bytes(200, &headers), malformed, body.len());

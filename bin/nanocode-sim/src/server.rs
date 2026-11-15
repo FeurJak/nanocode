@@ -12,6 +12,8 @@ pub const ROOT_MARK: &str = "SIMROOT";
 pub const CHILD_MARK: &str = "SIMCHILD";
 pub const EFFECT_TOOL: &str = "sim_effect";
 const REWRITTEN_TEXT: &str = "rewritten";
+const RECEIPT_MARK: &str = "\"accepted\":true";
+const REMINDER_LEAD: &str = "Before finishing, call `submit_result`";
 const RUNNING_MARK: &str = "Script running with cell ID ";
 pub const EFFECTS_MAX: u64 = 2;
 pub const CHILDREN_MAX: u64 = 3;
@@ -119,6 +121,7 @@ struct Conversation {
     agent: Agent,
     steps: u64,
     running_cell: Option<String>,
+    reminded: bool,
     prefix: u64,
 }
 
@@ -180,6 +183,10 @@ fn read(messages: &[Value]) -> Option<Conversation> {
                 .next()
                 .map(str::to_owned)
         });
+    let reminded = (last.get("role").and_then(Value::as_str) == Some("user"))
+        && text_of(last.get("content").unwrap_or(&Value::Null))
+            .trim_start()
+            .starts_with(REMINDER_LEAD);
     let prefix = messages.iter().fold(FNV_OFFSET, |hash, message| {
         fnv(hash, canonical(message).to_string().as_bytes())
     });
@@ -187,6 +194,7 @@ fn read(messages: &[Value]) -> Option<Conversation> {
         agent,
         steps: u64::try_from(steps).expect("a step count fits in u64"),
         running_cell,
+        reminded,
         prefix,
     })
 }
@@ -281,6 +289,7 @@ fn events(model: &str, id: &str, block: &Value, delta: Option<Value>, stop: &str
 pub struct Reply {
     pub body: String,
     pub label: String,
+    pub held: bool,
 }
 
 pub struct ModelServer {
@@ -337,6 +346,19 @@ fn answers_only(message: &Value) -> bool {
         && blocks(message)
             .iter()
             .all(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+}
+
+fn accepted_receipt(messages: &[Value]) -> bool {
+    messages
+        .iter()
+        .filter(|message| role(message) == Some("user"))
+        .flat_map(|message| blocks(message).iter())
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+        .any(|block| {
+            text_of(block.get("content").unwrap_or(&Value::Null))
+                .replace('\\', "")
+                .contains(RECEIPT_MARK)
+        })
 }
 
 fn duplicate_first_tool_result(messages: &mut [Value]) {
@@ -498,6 +520,24 @@ impl ModelServer {
         self.world.count(|counts| counts.requests += 1);
         self.check(&label, &messages);
         self.check_tool_results(&label, &messages);
+        let receipted =
+            matches!(conversation.agent, Agent::Child { .. }) && accepted_receipt(&messages);
+        if receipted {
+            self.world.receipt(&label);
+        }
+        let held = receipted
+            && self.world.holds_receipt()
+            && accepted_receipt(
+                messages
+                    .last()
+                    .map(std::slice::from_ref)
+                    .unwrap_or_default(),
+            );
+        if held {
+            self.world.trace(&format!(
+                "model holds {label}'s answer to its receipt until the crash"
+            ));
+        }
         if let Agent::Root { turn, .. } = conversation.agent {
             self.world.see(&label, turn);
             self.check_root(&label, turn, &messages);
@@ -513,6 +553,7 @@ impl ModelServer {
         Ok(Reply {
             body: events(&model, &id, &block, delta, stop),
             label,
+            held,
         })
     }
 
@@ -524,6 +565,11 @@ impl ModelServer {
             return tool_use(&tool_id, "wait", &input);
         }
         let label = conversation.agent.label();
+        if conversation.reminded && matches!(conversation.agent, Agent::Child { .. }) {
+            self.world.count(|counts| counts.submitted += 1);
+            let input = json!({"code": code(&Action::Submit, label)});
+            return tool_use(&tool_id, "exec", &input);
+        }
         let actions = plan(self.seed, &conversation.agent);
         let step = usize::try_from(conversation.steps).expect("a step count fits in usize");
         if let Some(action) = actions.get(step) {

@@ -631,10 +631,11 @@ fn mutations() -> ExitCode {
             lines.push(format!("MUTATION scenario={scenario} mutation={name}"));
         }
     };
-    add("store", Mutation::names());
+    add("store", Mutation::store_names());
     add("turns", TurnMutation::names());
     add("runtime", WireMutation::NAMES.to_owned());
     add("runtime", ChildMutation::NAMES.to_owned());
+    add("runtime", Mutation::runtime_names());
     add("agents", AgentsMutation::names());
     add("websocket", WebSocketMutation::names());
     add("http_server", HttpServerMutation::names());

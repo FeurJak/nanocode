@@ -19,6 +19,7 @@ use crate::{
     rng::{FNV_OFFSET, Rng, fnv},
 };
 
+const ACCEPTED_FIELD: &str = "\"accepted_output\"";
 const ACKED_WRITES_DROPPED_MAX: u64 = 3;
 const CAS_IGNORES_EXPECTED_PPM: u64 = 500_000;
 const KV_LIES_PPM: u64 = 250_000;
@@ -26,6 +27,8 @@ const PHANTOM_KEY: &str = "phantom";
 const RECORD_INSERT_DROPS_PPM: u64 = 250_000;
 const RECORD_INSERT_OVERWRITES_PPM: u64 = 500_000;
 const RECORD_PREFIX: &str = "record/";
+const STATE_PREFIX: &str = "state/";
+const SUBAGENTS_SUFFIX: &str = ":subagents";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mutation {
@@ -33,6 +36,7 @@ pub enum Mutation {
     CasIgnoresExpected,
     RecordInsertDrops,
     PowerLossDropsAcked,
+    PowerLossDropsAcceptance,
     RecordInsertOverwrites,
     CacheKeepsBlank,
     StagedRefusesRewrite,
@@ -44,11 +48,12 @@ pub enum Mutation {
 }
 
 impl Mutation {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::None,
         Self::CasIgnoresExpected,
         Self::RecordInsertDrops,
         Self::PowerLossDropsAcked,
+        Self::PowerLossDropsAcceptance,
         Self::RecordInsertOverwrites,
         Self::CacheKeepsBlank,
         Self::StagedRefusesRewrite,
@@ -71,6 +76,7 @@ impl Mutation {
             Self::CasIgnoresExpected => "cas_ignores_expected",
             Self::RecordInsertDrops => "record_insert_drops",
             Self::PowerLossDropsAcked => "power_loss_drops_acked",
+            Self::PowerLossDropsAcceptance => "power_loss_drops_acceptance",
             Self::RecordInsertOverwrites => "record_insert_overwrites",
             Self::CacheKeepsBlank => "cache_keeps_blank",
             Self::StagedRefusesRewrite => "staged_refuses_rewrite",
@@ -84,6 +90,28 @@ impl Mutation {
 
     pub fn names() -> String {
         Self::ALL.map(Self::name).join("|")
+    }
+
+    pub const fn runtime_only(self) -> bool {
+        matches!(self, Self::PowerLossDropsAcceptance)
+    }
+
+    pub fn store_names() -> String {
+        Self::ALL
+            .into_iter()
+            .filter(|mutation| !mutation.runtime_only())
+            .map(Self::name)
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    pub fn runtime_names() -> String {
+        Self::ALL
+            .into_iter()
+            .filter(|mutation| mutation.runtime_only())
+            .map(Self::name)
+            .collect::<Vec<_>>()
+            .join("|")
     }
 }
 
@@ -124,6 +152,8 @@ pub struct Kv {
     profile: Profile,
     mutation: Mutation,
     pub faults_on: bool,
+    accepting: BTreeSet<String>,
+    acceptances: BTreeMap<String, Option<Entry>>,
     pending: BTreeMap<String, Entry>,
     durable: BTreeMap<String, Entry>,
     unsynced: VecDeque<(u64, String, Entry)>,
@@ -169,6 +199,9 @@ impl Kv {
             self.seq, entry.version, entry.value
         );
         self.trace(&line);
+        if self.mutation == Mutation::PowerLossDropsAcceptance {
+            self.track_acceptance(key, &entry);
+        }
         self.pending.insert(key.to_owned(), entry.clone());
         match self.profile.durability {
             Durability::OnAck | Durability::LyingCache { .. } => {
@@ -204,7 +237,7 @@ impl Kv {
 
     pub fn power_loss(&mut self) -> PowerLoss {
         let (reverted, survived_seq) = match self.profile.durability {
-            Durability::OnAck => (self.drop_acked(), self.seq),
+            Durability::OnAck => (self.drop_acked() + self.drop_acceptance(), self.seq),
             Durability::Async { .. } => self.lose_unsynced(),
             Durability::LyingCache { lost_ppm } => (self.lose_cached(lost_ppm), self.seq),
         };
@@ -233,6 +266,40 @@ impl Kv {
             }
         }
         reverted
+    }
+
+    fn drop_acceptance(&mut self) -> u64 {
+        if self.mutation != Mutation::PowerLossDropsAcceptance {
+            return 0;
+        }
+        self.accepting.clear();
+        let mut reverted = 0;
+        for (key, prev) in std::mem::take(&mut self.acceptances) {
+            self.revert(&key, prev);
+            reverted += 1;
+        }
+        reverted
+    }
+
+    fn track_acceptance(&mut self, key: &str, entry: &Entry) {
+        if let Some(scope) = key
+            .strip_prefix(RECORD_PREFIX)
+            .and_then(|rest| rest.split('/').nth(1))
+            .filter(|scope| scope.ends_with(SUBAGENTS_SUFFIX))
+        {
+            if entry.value.contains(ACCEPTED_FIELD) {
+                self.accepting.insert(scope.to_owned());
+            }
+            return;
+        }
+        if let Some(scope) = key
+            .strip_prefix(STATE_PREFIX)
+            .filter(|scope| scope.ends_with(SUBAGENTS_SUFFIX))
+            && self.accepting.remove(scope)
+        {
+            let prev = self.durable.get(key).cloned();
+            self.acceptances.insert(key.to_owned(), prev);
+        }
     }
 
     fn lose_unsynced(&mut self) -> (u64, u64) {
@@ -468,6 +535,8 @@ impl SimKv {
             profile,
             mutation,
             faults_on: true,
+            accepting: BTreeSet::new(),
+            acceptances: BTreeMap::new(),
             pending: BTreeMap::new(),
             durable: BTreeMap::new(),
             unsynced: VecDeque::new(),

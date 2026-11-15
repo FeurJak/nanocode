@@ -33,6 +33,9 @@ struct State {
     acked: BTreeMap<String, BTreeMap<u64, String>>,
     seen: BTreeMap<String, BTreeSet<u64>>,
     cancelled: BTreeMap<String, BTreeSet<u64>>,
+    receipts: BTreeSet<String>,
+    holds_receipts: bool,
+    crash_pending: bool,
     violations: Vec<String>,
     counts: WorldCounts,
     digest: u64,
@@ -155,6 +158,28 @@ impl World {
 
     pub fn cancelled_turns(&self, label: &str) -> BTreeSet<u64> {
         self.with(|state| state.cancelled.get(label).cloned().unwrap_or_default())
+    }
+
+    pub fn receipt(&self, label: &str) {
+        if self.with(|state| state.receipts.insert(label.to_owned())) {
+            self.trace(&format!("receipt {label}"));
+        }
+    }
+
+    pub fn receipted(&self, label: &str) -> bool {
+        self.with(|state| state.receipts.contains(label))
+    }
+
+    pub fn hold_receipts(&self) {
+        self.with(|state| state.holds_receipts = true);
+    }
+
+    pub fn crash_pending(&self, pending: bool) {
+        self.with(|state| state.crash_pending = pending);
+    }
+
+    pub fn holds_receipt(&self) -> bool {
+        self.with(|state| state.holds_receipts && state.crash_pending)
     }
 
     pub fn first_violation(&self) -> Option<String> {

@@ -290,6 +290,9 @@ impl Network {
                 timeout: false,
                 unsent: false,
             })?;
+        if reply.held {
+            nanocode_platform::sleep(Duration::from_millis(crate::whole::CRASH_HORIZON_MS)).await;
+        }
         nanocode_platform::sleep(Duration::from_millis(headers_ms)).await;
         let bytes = reply.body.into_bytes();
         let mut parts = VecDeque::new();
