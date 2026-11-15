@@ -87,7 +87,7 @@ members = [
     "bin/nanocode-sim",
 ]
 default-members = ["crates/nanocode"]
-exclude = ["crates/patches"]
+exclude = ["crates/patches", "bin/nanocode-front"]
 resolver = "2"
 
 [workspace.package]

@@ -19,18 +19,31 @@ packed=gz
 if command -v xz >/dev/null 2>&1 && grep -q " nanocode-$target.xz$" "$tmp/SHA256SUMS"; then packed=xz; fi
 expected="$(grep " nanocode-$target.$packed$" "$tmp/SHA256SUMS" | cut -d' ' -f1)"
 if [ -z "$expected" ]; then echo "nanocode: the release has no build for $target" >&2; exit 1; fi
+front="$(grep " nanocode-front-$target.gz$" "$tmp/SHA256SUMS" | cut -d' ' -f1 || true)"
+agent=nanocode
+if [ -n "$front" ]; then agent=nanocode-agent; fi
 mkdir -p "$bin"
-if [ ! -x "$bin/nanocode" ] || [ "$(cat "$bin/.nanocode.sha256" 2>/dev/null)" != "$expected" ]; then
+if [ ! -x "$bin/$agent" ] || [ "$(cat "$bin/.$agent.sha256" 2>/dev/null)" != "$expected" ]; then
   echo "nanocode: downloading $target" >&2
   curl -fsSL "$release/nanocode-$target.$packed" -o "$tmp/nanocode.$packed"
   if [ "$(digest "$tmp/nanocode.$packed")" != "$expected" ]; then echo "nanocode: checksum mismatch for nanocode-$target.$packed" >&2; exit 1; fi
   case $packed in xz) xz -dc "$tmp/nanocode.xz" > "$tmp/nanocode" ;; *) gunzip -c "$tmp/nanocode.gz" > "$tmp/nanocode" ;; esac
   chmod +x "$tmp/nanocode"
-  mv "$tmp/nanocode" "$bin/nanocode"
-  ln -sf nanocode "$bin/nc"
-  echo "$expected" > "$bin/.nanocode.sha256"
+  mv "$tmp/nanocode" "$bin/$agent"
+  echo "$expected" > "$bin/.$agent.sha256"
   echo "nanocode: installed $bin/nc" >&2
 fi
+if [ -n "$front" ] && { [ ! -x "$bin/nanocode" ] || [ "$(cat "$bin/.nanocode-front.sha256" 2>/dev/null)" != "$front" ]; }; then
+  curl -fsSL "$release/nanocode-front-$target.gz" -o "$tmp/nanocode-front.gz"
+  if [ "$(digest "$tmp/nanocode-front.gz")" != "$front" ]; then echo "nanocode: checksum mismatch for nanocode-front-$target.gz" >&2; exit 1; fi
+  gunzip -c "$tmp/nanocode-front.gz" > "$tmp/nanocode-front"
+  chmod +x "$tmp/nanocode-front"
+  mv "$tmp/nanocode-front" "$bin/nanocode"
+  rm -f "$bin/.nanocode.sha256"
+  echo "$front" > "$bin/.nanocode-front.sha256"
+fi
+if [ -z "$front" ] && [ -f "$bin/.nanocode-front.sha256" ]; then rm -f "$bin/nanocode-agent" "$bin/.nanocode-agent.sha256" "$bin/.nanocode-front.sha256"; fi
+ln -sf nanocode "$bin/nc"
 driver="$(grep " nanocode-cua-driver-$target.gz$" "$tmp/SHA256SUMS" | cut -d' ' -f1 || true)"
 if [ -n "$driver" ] && { [ ! -x "$bin/nanocode-cua-driver" ] || [ "$(cat "$bin/.nanocode-cua-driver.sha256" 2>/dev/null)" != "$driver" ]; }; then
   curl -fsSL "$release/nanocode-cua-driver-$target.gz" -o "$tmp/nanocode-cua-driver.gz"
