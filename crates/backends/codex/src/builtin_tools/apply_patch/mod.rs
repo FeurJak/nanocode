@@ -389,7 +389,7 @@ struct ApplyPatchArgs {
 }
 
 #[cfg(not(target_family = "wasm"))]
-pub(super) fn apply(patch: &str, workspace: &Path) -> Result<String, String> {
+pub fn apply(patch: &str, workspace: &Path) -> Result<String, String> {
     let hunks = parse(patch)?;
     validate_unique_targets(&hunks, |path| normalize_path(&resolve(workspace, path)))?;
 

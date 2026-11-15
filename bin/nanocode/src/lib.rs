@@ -18,6 +18,7 @@ mod history;
 mod host;
 mod login;
 mod models;
+mod patch;
 mod python;
 mod sessions;
 mod side;
@@ -126,7 +127,7 @@ fn telemetry(
     }
 }
 
-const SHELL_UTILITIES: &[psh_engine::util::UtilEntry] = &[python::UTILITY];
+const SHELL_UTILITIES: &[psh_engine::util::UtilEntry] = &[patch::UTILITY, python::UTILITY];
 
 #[cfg(unix)]
 fn embedded(cli: &Cli) -> bool {
