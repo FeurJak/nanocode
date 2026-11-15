@@ -288,12 +288,25 @@ known_failure() {
 run_job() {
   local at=$1 sha=$2 bin=$3 seed=$4 count=$5
   local name=${names[$at]} kind=${kinds[$at]} flags=${flags[$at]}
-  local end=$(( seed + count )) out started status wall ok passed failed message
+  local end=$(( seed + count )) out started status wall ok passed failed message timed_out
   out=$(mktemp "$root/tmp/job.XXXXXX")
   started=$(now)
-  timeout --signal=KILL "$job_secs_max" taskset -c "$fuzz_cpus" "$bin" --seeds "$seed..$end" $flags >"$out" 2>&1
+  timeout --verbose --signal=KILL "$job_secs_max" taskset -c "$fuzz_cpus" "$bin" --seeds "$seed..$end" $flags >"$out" 2>&1
   status=$?
   wall=$(( $(now) - started ))
+  timed_out=false
+  if grep -q '^timeout: sending signal KILL to command' "$out"; then
+    timed_out=true
+  else
+    case $status in
+      129 | 130 | 137 | 143)
+        echo "$name seed $seed: killed from outside (exit $status: a service restart or out of memory), not recorded" >&2
+        rm -f "$out"
+        echo "$wall skipped"
+        return 0
+        ;;
+    esac
+  fi
   passed=$(grep '^RESULT' "$out" | sed -n 's/.* passed=\([0-9]*\).*/\1/p' | tail -1)
   failed=$(grep '^RESULT' "$out" | sed -n 's/.* failed=\([0-9]*\).*/\1/p' | tail -1)
   passed=${passed:-0}
@@ -304,8 +317,8 @@ run_job() {
     pass) [ "$status" -eq 0 ] && ok=true ;;
     canary*) [ "$status" -eq 0 ] && grep -q '^MUTATION .* caught by' "$out" && ok=true ;;
   esac
-  if [ "$status" -eq 137 ] && ! grep -q '^RESULT' "$out"; then
-    message="killed: timeout after ${job_secs_max}s or out of memory"
+  if [ "$timed_out" = true ]; then
+    message="killed: timeout after ${job_secs_max}s"
   elif [ "$ok" = false ]; then
     message=$(grep -m1 '^FAIL\|^MUTATION\|panicked\|^error' "$out")
     [ -z "$message" ] && message="exit $status: $(tail -3 "$out")"
@@ -318,7 +331,7 @@ run_job() {
       known_failure "$name" "$line" || { known=false; break; }
     done < <(grep '^FAIL' "$out")
   fi
-  record "{\"time\":$started,\"commit\":\"$sha\",\"scenario\":\"$name\",\"kind\":\"$kind\",\"seed\":$seed,\"count\":$count,\"ok\":$ok,\"known\":$known,\"exit\":$status,\"passed\":$passed,\"failed\":$failed,\"wall_secs\":$wall,\"log\":\"$log_name\",\"replay\":\"$(json_text "$replay")\",\"message\":\"$(json_text "$message")\"}"
+  record "{\"time\":$started,\"commit\":\"$sha\",\"scenario\":\"$name\",\"kind\":\"$kind\",\"seed\":$seed,\"count\":$count,\"ok\":$ok,\"known\":$known,\"exit\":$status,\"timed_out\":$timed_out,\"passed\":$passed,\"failed\":$failed,\"wall_secs\":$wall,\"log\":\"$log_name\",\"replay\":\"$(json_text "$replay")\",\"message\":\"$(json_text "$message")\"}"
   if [ "$kind" = pass ]; then
     grep '^FAIL' "$out" | head -32 | while read -r line; do
       local failing command seen=false
@@ -405,10 +418,11 @@ run() {
       unset "running[$finished]"
       local done_file=$root/tmp/done.$finished
       if [ -f "$done_file" ]; then
-        local job_at job_count job_wall scaled
-        read -r job_at job_count job_wall <"$done_file"
+        local job_at job_count job_wall job_skipped scaled
+        read -r job_at job_count job_wall job_skipped <"$done_file"
         rm -f "$done_file"
         spent[job_at]=$(( spent[job_at] - job_secs_target + job_wall ))
+        [ -n "$job_skipped" ] && continue
         scaled=$(( job_count * job_secs_target / (job_wall > 0 ? job_wall : 1) ))
         [ "$scaled" -gt $(( job_count * 2 )) ] && scaled=$(( job_count * 2 ))
         [ "$scaled" -lt "$seeds_min" ] && scaled=$seeds_min
