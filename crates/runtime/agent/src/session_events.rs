@@ -422,7 +422,7 @@ async fn run(
         if waiting.is_empty()
             && batch.last().is_some_and(|event| event.delta().is_some())
             && let Some(since) = flushed
-                .map(|instant| nanocode_platform::elapsed(instant))
+                .map(nanocode_platform::elapsed)
                 .filter(|since| *since < window)
         {
             let requested = poll_fn(|context| {
