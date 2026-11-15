@@ -1040,6 +1040,7 @@ impl Exec<'_> {
             fixed,
             fuel: leaf.fuel,
             init,
+            method: false,
             mode,
             op: leaf.op,
             species: crate::builtins::fast::frozen_species(self.heap),

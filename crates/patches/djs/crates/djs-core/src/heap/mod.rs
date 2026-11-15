@@ -188,6 +188,7 @@ pub(crate) struct EachSite {
     pub(crate) fixed: i64,
     pub(crate) fuel: i64,
     pub(crate) init: Option<i32>,
+    pub(crate) method: bool,
     pub(crate) mode: i32,
     pub(crate) op: u8,
     pub(crate) species: bool,

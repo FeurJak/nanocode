@@ -35,11 +35,11 @@ use crate::bytecode::{OPS, Op};
 use crate::heap::HeapError;
 use crate::heap::cells::{FuncTemplate, Header, Object, Realm, Roots, ValueArray};
 use crate::heap::layout::{arena_read, arena_write};
-use crate::heap::{Atom, ObjectClass, atoms};
+use crate::heap::{Atom, ObjectClass, Property, atoms};
 use crate::interp::conv::{self, FaultKind};
 use crate::interp::frame::{self, Continuation, HEADER};
 use crate::interp::realm::{self, Intrinsic};
-use crate::value::{Kind, Str, Value};
+use crate::value::{Kind, Obj, Str, Value};
 
 /// Backward jumps before `run_hot` returns to the run loop anyway: V8 tiers wasm code up
 /// only between calls (no OSR, 0081 F0), so a loop that never leaves `run_hot` would
@@ -617,6 +617,51 @@ impl Exec<'_> {
         self.fuel -= info.cost.fuel() as i64;
         self.pc += info.size as u32;
         Some(false)
+    }
+
+    #[inline(never)]
+    fn each_method_hit(&mut self, key: Atom, ic: u32) -> Option<bool> {
+        let get = &OPS[Op::GetMethod as usize];
+        let o = self.get(self.sp - 1);
+        let Some(callee) = self.each_method(key, o) else {
+            let r = self.field_hit(fast::GET_METHOD, key, ic, o, Value::UNDEFINED)?;
+            self.set(self.sp - 1, r);
+            self.push(o);
+            self.fuel -= get.cost.fuel() as i64;
+            self.pc += get.size as u32;
+            return Some(false);
+        };
+        self.set(self.sp - 1, callee);
+        self.push(o);
+        self.fuel -= get.cost.fuel() as i64;
+        self.pc += get.size as u32;
+        if self.fuel <= 0 {
+            return Some(false);
+        }
+        Some(self.fclosure_hit().unwrap_or(false))
+    }
+
+    fn each_method(&mut self, key: Atom, o: Value) -> Option<Value> {
+        let site = self.heap.each_site;
+        if site.code != self.code + self.pc + OPS[Op::GetMethod as usize].size as u32 {
+            return None;
+        }
+        let o = o.as_object().filter(|&o| self.is_class(o, ObjectClass::Array))?;
+        let proto = realm::intrinsic_obj(self.heap, Intrinsic::ArrayProto);
+        if !(self.heap.frozen(proto) && self.heap.bare(o, proto)) {
+            return None;
+        }
+        let callee = Value::object(Obj(site.callee));
+        if !site.method {
+            if !matches!(
+                self.heap.get_own_property(proto, key),
+                Some(Property::Data { value, .. }) if value == callee
+            ) {
+                return None;
+            }
+            self.heap.each_site.method = true;
+        }
+        Some(callee)
     }
 
     #[inline(never)]
@@ -1562,6 +1607,25 @@ impl Exec<'_> {
                                 jump!(Op::JumpIfTrue, c)
                             } else {
                                 jump!(Op::JumpIfFalse, !c)
+                            }
+                        }
+                        fast::GET_METHOD
+                            if b[(ip + OPS[Op::GetMethod as usize].size as u32) as usize]
+                                == FCLOSURE =>
+                        {
+                            (self.pc, self.sp, self.fuel) = (ip - code, sp, fuel);
+                            let Some(fused) = heap_call!(self.each_method_hit(
+                                Atom::from_id(imm32!()),
+                                (w >> 40) as u16 as u32
+                            )) else {
+                                break Exit::Decline(fast::GET_METHOD);
+                            };
+                            (ip, sp, fuel) = (code + self.pc, self.sp, self.fuel);
+                            if fuel <= 0 {
+                                break Exit::General;
+                            }
+                            if fused && collect {
+                                break Exit::Safepoint;
                             }
                         }
                         fast::GET_FIELD
