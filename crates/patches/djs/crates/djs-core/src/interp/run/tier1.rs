@@ -434,6 +434,7 @@ struct Op {
     a: u8,
     aux: u16,
     c: u8,
+    chk: bool,
     d: u8,
     exit: u16,
     fuel: u32,
@@ -449,8 +450,16 @@ struct Op {
     mfuel: u32,
     n: i32,
     nx: u8,
+    ra: u8,
+    rd: u8,
+    res: bool,
+    rfuel: u32,
     span: u32,
     to: u16,
+    w: bool,
+    wa: u8,
+    wd: u8,
+    wfuel: u32,
 }
 
 fn lower(ins: &Ins) -> Op {
@@ -458,6 +467,7 @@ fn lower(ins: &Ins) -> Op {
         a: 0,
         aux: 0,
         c: 0,
+        chk: false,
         d: 0,
         exit: ins.exit,
         fuel: ins.fuel,
@@ -473,8 +483,16 @@ fn lower(ins: &Ins) -> Op {
         mfuel: 0,
         n: 0,
         nx: 0,
+        ra: 0,
+        rd: 0,
+        res: false,
+        rfuel: 0,
         span: 0,
         to: 0,
+        w: false,
+        wa: 0,
+        wd: 0,
+        wfuel: 0,
     };
     let mut abc = |k: K, a: u8, c: u8, d: u8| {
         o.k = Cell::new(k);
@@ -1668,14 +1686,50 @@ impl Exec<'_> {
                 q.k.get(),
                 K::Branch | K::JumpIf | K::Latch | K::StepBranch
             );
+            let mut chk = false;
             if let Some(j) = prog.get(nx)
                 && matches!(j.k.get(), K::Jump)
                 && (branch || j.to != 0)
             {
-                (nx, f) = (usize::from(j.to), f + j.fuel);
+                (nx, f, chk) = (usize::from(j.to), f + j.fuel, j.to == 0);
             }
             let q = &mut prog[s];
-            (q.mfuel, q.nx) = (f, nx as u8);
+            (q.chk, q.mfuel, q.nx) = (chk, f, nx as u8);
+        }
+        for s in 0..plan.prog.len() {
+            let q = &prog[s];
+            if !matches!(
+                q.k.get(),
+                K::Branch | K::JumpIf | K::Latch | K::StepBranch
+            ) {
+                continue;
+            }
+            let v = &prog[usize::from(q.nx)];
+            if matches!(v.k.get(), K::Mov) && !v.l && !v.m {
+                let (wa, wd, wfuel, nx) = (v.a, v.d, v.mfuel, v.nx);
+                let q = &mut prog[s];
+                (q.nx, q.w, q.wa, q.wd, q.wfuel) = (nx, true, wa, wd, wfuel);
+            }
+        }
+        for s in 1..plan.prog.len().saturating_sub(2) {
+            let (q, t) = (&prog[s], s + 2);
+            if matches!(q.k.get(), K::Resume)
+                && q.m
+                && usize::from(q.nx) == t
+                && matches!(prog[t].k.get(), K::StepBranch)
+                && !targets[s]
+                && !targets[t]
+                && (s < 2 || !prog[s - 2].l)
+            {
+                let (ra, rd, rfuel) = (q.ma, q.md, q.mfuel);
+                for o in &mut prog[..plan.prog.len()] {
+                    if usize::from(o.nx) == s {
+                        o.nx = t as u8;
+                    }
+                }
+                let o = &mut prog[t];
+                (o.ra, o.rd, o.res, o.rfuel) = (ra, rd, true, rfuel);
+            }
         }
         let mut fuel = self.fuel;
         let mut mark = fuel;
@@ -1695,8 +1749,12 @@ impl Exec<'_> {
             macro_rules! fall {
                 () => {{
                     next!();
-                    if k == 0 && fuel <= pass {
+                    if o.chk && fuel <= pass {
                         break 'run 0;
+                    }
+                    if o.w {
+                        r[usize::from(o.wd)] = r[usize::from(o.wa)];
+                        fuel -= o.wfuel as i64;
                     }
                 }};
             }
@@ -1828,6 +1886,11 @@ impl Exec<'_> {
                     }
                 }
                 K::StepBranch => {
+                    if o.res {
+                        mark = fuel;
+                        r[usize::from(o.rd)] = r[usize::from(o.ra)];
+                        fuel -= o.rfuel as i64;
+                    }
                     let Some(i) = r[a]
                         .as_int()
                         .and_then(|i| i.checked_add(i32::from(o.d as i8)))
