@@ -308,7 +308,9 @@ pub fn run_with(clients: ModelClients) -> ExitCode {
                 args.home = args.home.or(cli.session.home);
                 on_worker(list_sessions(args)).await
             }
-            Some(Command::Exec(args)) => on_worker(exec(args.or(cli.session), clients)).await,
+            Some(Command::Exec(args)) => {
+                on_worker(exec(Box::new(args.or(cli.session)), clients)).await
+            }
             Some(Command::Models) => print_models(&clients).await,
             Some(Command::Resume { id }) => {
                 let mut args = cli.session;
@@ -663,7 +665,7 @@ async fn latest_session(host: &Host) -> Result<String> {
         .ok_or_else(|| "no saved session for this workspace".into())
 }
 
-async fn exec(args: SessionArgs, clients: ModelClients) -> Result<()> {
+async fn exec(args: Box<SessionArgs>, clients: ModelClients) -> Result<()> {
     let piped = match clients.answering() {
         Some(_) => None,
         None => piped_prompt().await?,
@@ -680,16 +682,16 @@ async fn exec(args: SessionArgs, clients: ModelClients) -> Result<()> {
     .ok_or("exec requires a prompt, as an argument or on stdin")?;
     if let Some(count) = args.attempts {
         let piped = piped.filter(|piped| !piped.trim().is_empty());
-        return attempts::run(&args, count, piped).await;
+        return Box::pin(attempts::run(&args, count, piped)).await;
     }
-    let prepared = prepare(
+    let prepared = Box::pin(prepare(
         &args,
         clients,
         &mut |message| {
             eprintln!("nanocode: {message}");
         },
         true,
-    )
+    ))
     .await?;
     let mut runner_events = prepared.runner_events;
     nanocode_platform::spawn_task(async move {
@@ -708,12 +710,12 @@ async fn exec(args: SessionArgs, clients: ModelClients) -> Result<()> {
     };
     let resume = match (&args.resume, args.continue_last) {
         (Some(id), _) if !id.is_empty() => Some(id.clone()),
-        (_, true) => Some(latest_session(&host).await?),
+        (_, true) => Some(Box::pin(latest_session(&host)).await?),
         _ => None,
     };
     let (mut agent, events, pending) = match resume.clone() {
         Some(id) => {
-            let ready = app::open_session(
+            let ready = Box::pin(app::open_session(
                 &host,
                 &id,
                 args.thinking
@@ -721,7 +723,7 @@ async fn exec(args: SessionArgs, clients: ModelClients) -> Result<()> {
                     .map(host::parse_thinking)
                     .transpose()?,
                 args.tier.as_deref().map(host::parse_tier).transpose()?,
-            )
+            ))
             .await?;
             let (asked, runs) = (
                 prepared.route.label(&prepared.model),
@@ -737,9 +739,8 @@ async fn exec(args: SessionArgs, clients: ModelClients) -> Result<()> {
             (ready.agent, ready.events, ready.pending)
         }
         None => {
-            let (agent, events) = host
-                .start(&prepared.model, prepared.thinking, prepared.route)
-                .await?;
+            let (agent, events) =
+                Box::pin(host.start(&prepared.model, prepared.thinking, prepared.route)).await?;
             app::apply_tier(&agent, &prepared.model, prepared.tier).await?;
             (agent, events, Vec::new())
         }
@@ -810,7 +811,7 @@ async fn exec(args: SessionArgs, clients: ModelClients) -> Result<()> {
     }
     let flushed = agent.flush().await;
     let unanswered =
-        outcome.is_err() && resume.is_none() && unanswered(&host, agent.session_id()).await;
+        outcome.is_err() && resume.is_none() && Box::pin(unanswered(&host, agent.session_id())).await;
     if unanswered {
         drop(writeln!(
             stderr,
@@ -821,7 +822,7 @@ async fn exec(args: SessionArgs, clients: ModelClients) -> Result<()> {
         drop(writeln!(stderr, "session {}", agent.session_id()));
     }
     let shutdown = host.runtime.shutdown().await;
-    let archived = host::archive(&host.config).await;
+    let archived = Box::pin(host::archive(&host.config)).await;
     outcome?;
     flushed?;
     shutdown?;

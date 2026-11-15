@@ -114,7 +114,7 @@ impl super::backend::AgentFactory for OpenAiAgentFactory {
                     .model(snapshot.model)
                     .thinking(snapshot.thinking)
                     .reasoning_mode(snapshot.reasoning_mode),
-                restore: Some(snapshot),
+                restore: Some(Box::new(snapshot)),
                 host_context,
                 result,
             })

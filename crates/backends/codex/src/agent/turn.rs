@@ -64,7 +64,7 @@ pub(super) enum Command {
         result: oneshot::Sender<Result<ChildState>>,
     },
     Spawn {
-        restore: Option<ChildState>,
+        restore: Option<Box<ChildState>>,
         options: SpawnOptions,
         host_context: Option<Arc<str>>,
         result: oneshot::Sender<Result<(Agent, AgentEvents)>>,

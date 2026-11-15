@@ -236,7 +236,7 @@ pub(super) fn spawn_agent_driver(
     });
 
     tools.start_providers();
-    let driver = AgentDriver {
+    let driver = Box::new(AgentDriver {
         commands: receiver,
         events,
         client: service,
@@ -249,7 +249,7 @@ pub(super) fn spawn_agent_driver(
         checkpoints,
         execution: execution.clone(),
         initial_persisted: Some(initial_persisted),
-    };
+    });
     let driver_task = async move {
         let outcome = driver.run().await;
         let outcome = outcome.and(execution.shutdown().await);

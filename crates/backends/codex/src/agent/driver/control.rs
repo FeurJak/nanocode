@@ -467,7 +467,7 @@ pub(super) fn handle_idle_command(
                 .and_then(|(model, thinking, reasoning_mode)| {
                     if let Some(snapshot) = restore {
                         return spawner.restore_child(
-                            snapshot,
+                            *snapshot,
                             workspace,
                             session_id,
                             host_context,

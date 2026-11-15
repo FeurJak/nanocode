@@ -34,7 +34,7 @@ pub(super) struct AgentDriver {
 
 impl AgentDriver {
     #[allow(clippy::too_many_lines)]
-    pub(super) async fn run(mut self) -> Result<()> {
+    pub(super) async fn run(mut self: Box<Self>) -> Result<()> {
         let session_id = self.events.request_id().to_owned();
         let thread_model = self.spawner.config.model;
         let mut default_thinking = self.spawner.config.thinking;
@@ -57,7 +57,7 @@ impl AgentDriver {
             Arc::clone(&self.spawner.lineage_id),
             self.spawner.shared_prompt_cache.clone(),
         );
-        let mut model = if let Some(initial) = self.initial_model.take() {
+        let mut model = Box::new(if let Some(initial) = self.initial_model.take() {
             ModelRun::from_checkpoint(
                 self.events.clone(),
                 Arc::clone(&self.spawner.config),
@@ -80,7 +80,7 @@ impl AgentDriver {
                 self.spawner.context_source.clone(),
                 self.spawner.host_context.as_ref().map(Arc::clone),
             )
-        };
+        });
         model.set_before_compaction(self.spawner.before_compaction.clone());
         model.set_before_tool_call(self.spawner.before_tool_call.clone());
         model.set_images(self.spawner.images.clone());
@@ -233,9 +233,10 @@ impl AgentDriver {
                                 let persisted = if cancellation_committed {
                                     Ok(())
                                 } else if let Some(operation) = &execution_operation {
-                                    self.execution
-                                        .cancel_operation(operation.id(), &prompt)
-                                        .await
+                                    Box::pin(
+                                        self.execution.cancel_operation(operation.id(), &prompt),
+                                    )
+                                    .await
                                 } else {
                                     Ok(())
                                 };
@@ -356,7 +357,7 @@ impl AgentDriver {
                                     Ok(())
                                 }
                                 Err(error) => {
-                                    model = model_from_checkpoint(
+                                    *model = model_from_checkpoint(
                                         &self.events,
                                         &self.transport_stats,
                                         &self.tools,
@@ -399,14 +400,14 @@ impl AgentDriver {
                         continue;
                     };
                     let mut reopen = false;
-                    let Some(command) = accept_execution_command(
+                    let Some(command) = Box::pin(accept_execution_command(
                         &self.execution,
                         &self.checkpoints,
                         &self.spawner.config,
                         default_thinking,
                         command,
                         &mut reopen,
-                    )
+                    ))
                     .await
                     else {
                         if reopen {
@@ -446,14 +447,14 @@ impl AgentDriver {
             };
             let command = if matches!(command, Command::RoutePrompt { .. }) {
                 let mut reopen = false;
-                let Some(command) = accept_idle_route(
+                let Some(command) = Box::pin(accept_idle_route(
                     &self.execution,
                     &self.checkpoints,
                     &self.spawner.config,
                     default_thinking,
                     command,
                     &mut reopen,
-                )
+                ))
                 .await
                 else {
                     if reopen {
@@ -565,7 +566,7 @@ impl AgentDriver {
                                             Ok(())
                                         }
                                         Err(error) => {
-                                            model = model_from_checkpoint(
+                                            *model = model_from_checkpoint(
                                                 &self.events,
                                                 &self.transport_stats,
                                                 &self.tools,
@@ -779,14 +780,14 @@ impl AgentDriver {
                                 command = self.commands.recv() => {
                                     let mut reopen = false;
                                     let command = match command {
-                                        Some(command) => match accept_execution_command(
+                                        Some(command) => match Box::pin(accept_execution_command(
                                             &self.execution,
                                             &self.checkpoints,
                                             &self.spawner.config,
                                             default_thinking,
                                             command,
                                             &mut reopen,
-                                        ).await {
+                                        )).await {
                                             Some(command) => Some(command),
                                             None if reopen => None,
                                             None => continue,
@@ -845,14 +846,14 @@ impl AgentDriver {
                                                 parent,
                                                 events,
                                                 result,
-                                            }) = accept_idle_route(
+                                            }) = Box::pin(accept_idle_route(
                                                 &self.execution,
                                                 &self.checkpoints,
                                                 &self.spawner.config,
                                                 default_thinking,
                                                 command,
                                                 &mut reopen,
-                                            )
+                                            ))
                                             .await
                                             else {
                                                 if reopen {
@@ -905,12 +906,10 @@ impl AgentDriver {
                                                         .is_some_and(ExecutionOperation::is_recovered);
                                                     let (persisted, committed) = match operation.as_ref() {
                                                         Some(operation) if !recovered => (
-                                                            self.execution
-                                                                .cancel_operation(
+                                                            Box::pin(self.execution.cancel_operation(
                                                                     operation.id(),
                                                                     &prompt,
-                                                                )
-                                                                .await,
+                                                                )).await,
                                                             true,
                                                         ),
 
@@ -1095,11 +1094,12 @@ impl AgentDriver {
                                 } else {
                                     execution_turn
                                 };
-                                let persisted = self
-                                    .execution
-                                    .persist(&checkpoint, execution_turn)
-                                    .instrument(span.clone())
-                                    .await;
+                                let persisted = Box::pin(
+                                    self.execution
+                                        .persist(&checkpoint, execution_turn)
+                                        .instrument(span.clone()),
+                                )
+                                .await;
                                 match persisted {
                                     Ok(()) => {
                                         compact_checkpoint_committed = true;
@@ -1121,20 +1121,21 @@ impl AgentDriver {
                                     self.spawner.config.reasoning_mode,
                                     checkpoint,
                                 ));
-                                let persisted = self
-                                    .execution
-                                    .persist(
-                                        &checkpoint,
-                                        execution_turn.failed(
-                                            error.to_string(),
-                                            matches!(
-                                                error.execution_policy_disposition(),
-                                                Some(crate::ExecutionPolicyDisposition::Retry)
+                                let persisted = Box::pin(
+                                    self.execution
+                                        .persist(
+                                            &checkpoint,
+                                            execution_turn.failed(
+                                                error.to_string(),
+                                                matches!(
+                                                    error.execution_policy_disposition(),
+                                                    Some(crate::ExecutionPolicyDisposition::Retry)
+                                                ),
                                             ),
-                                        ),
-                                    )
-                                    .instrument(span.clone())
-                                    .await;
+                                        )
+                                        .instrument(span.clone()),
+                                )
+                                .await;
                                 match persisted {
                                     Ok(()) => {
                                         if error.execution_policy_disposition()
@@ -1156,7 +1157,7 @@ impl AgentDriver {
                             .await;
                         if !compact_checkpoint_committed && outcome.is_err() {
                             latest_fork_checkpoint = compact_base_checkpoint;
-                            model = model_from_checkpoint(
+                            *model = model_from_checkpoint(
                                 &self.events,
                                 &self.transport_stats,
                                 &self.tools,
@@ -1422,14 +1423,14 @@ impl AgentDriver {
                     command = self.commands.recv() => {
                         let mut reopen = false;
                         let command = match command {
-                            Some(command) => match accept_execution_command(
+                            Some(command) => match Box::pin(accept_execution_command(
                                 &self.execution,
                                 &self.checkpoints,
                                 &self.spawner.config,
                                 default_thinking,
                                 command,
                                 &mut reopen,
-                            ).await {
+                            )).await {
                                 Some(command) => Some(command),
                                 None if reopen => None,
                                 None => continue,
@@ -1612,14 +1613,14 @@ impl AgentDriver {
                                 };
                                 if matches!(outcome, Err(NanocodeError::TurnNotSteerable)) {
                                     let mut reopen = false;
-                                    let routed = accept_idle_route(
+                                    let routed = Box::pin(accept_idle_route(
                                         &self.execution,
                                         &self.checkpoints,
                                         &self.spawner.config,
                                         default_thinking,
                                         Command::RoutePrompt { key: route_key, prompt, request_id, cancel_on_admission, parent, events, turn_result, route_result },
                                         &mut reopen,
-                                    )
+                                    ))
                                     .await;
                                     if let Some(Command::Prompt { key, prompt, execution_operation, cancel_on_admission, parent, events, result, .. }) = routed {
                                         queued_turns.push_back(queued_prompt(
@@ -1679,9 +1680,7 @@ impl AgentDriver {
                                                 .is_some_and(ExecutionOperation::is_recovered);
                                             let (persisted, committed) = match operation.as_ref() {
                                                 Some(operation) if !recovered => (
-                                                    self.execution
-                                                        .cancel_operation(operation.id(), &prompt)
-                                                        .await,
+                                                    Box::pin(self.execution.cancel_operation(operation.id(), &prompt)).await,
                                                     true,
                                                 ),
 
@@ -1912,11 +1911,12 @@ impl AgentDriver {
                     ));
                     let execution_turn =
                         execution_turn.completed(final_message.clone(), usage.clone());
-                    let committed = self
-                        .execution
-                        .persist(&checkpoint, execution_turn)
-                        .instrument(turn_span.clone())
-                        .await;
+                    let committed = Box::pin(
+                        self.execution
+                            .persist(&checkpoint, execution_turn)
+                            .instrument(turn_span.clone()),
+                    )
+                    .await;
                     if committed.is_ok() {
                         terminal_failure_committed = true;
                         latest_fork_checkpoint = Some(Arc::clone(&checkpoint));
@@ -1957,11 +1957,12 @@ impl AgentDriver {
                         checkpoint,
                     ));
                     let execution_turn = execution_turn.interrupted();
-                    let committed = self
-                        .execution
-                        .persist(&checkpoint, execution_turn)
-                        .instrument(turn_span.clone())
-                        .await;
+                    let committed = Box::pin(
+                        self.execution
+                            .persist(&checkpoint, execution_turn)
+                            .instrument(turn_span.clone()),
+                    )
+                    .await;
                     if committed.is_ok() {
                         terminal_failure_committed = true;
                         latest_fork_checkpoint = Some(Arc::clone(&checkpoint));
@@ -2003,11 +2004,12 @@ impl AgentDriver {
                                 );
                             let execution_turn =
                                 execution_turn.failed(error.to_string(), retryable);
-                            let committed = self
-                                .execution
-                                .persist(&checkpoint, execution_turn)
-                                .instrument(turn_span.clone())
-                                .await;
+                            let committed = Box::pin(
+                                self.execution
+                                    .persist(&checkpoint, execution_turn)
+                                    .instrument(turn_span.clone()),
+                            )
+                            .await;
                             if committed.is_ok() && !retryable {
                                 latest_fork_checkpoint = Some(checkpoint);
                                 terminal_failure_committed = true;
@@ -2080,7 +2082,7 @@ impl AgentDriver {
                 && let Some(base_checkpoint) = execution_base_checkpoint
             {
                 latest_fork_checkpoint = base_checkpoint.clone();
-                model = model_from_checkpoint(
+                *model = model_from_checkpoint(
                     &self.events,
                     &self.transport_stats,
                     &self.tools,
