@@ -47,8 +47,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
 
 use super::{
-    CompactionCompleted, CompactionFailed, CompactionStarted, ModelCallCompleted, ModelCallFailed,
-    ModelCallStarted, ModelCallTiming, RunError, RunStarted, RunStats, RunSteered,
+    CompactionCompleted, CompactionFailed, CompactionStarted, ContextNotice, ModelCallCompleted,
+    ModelCallFailed, ModelCallStarted, ModelCallTiming, RunError, RunStarted, RunStats, RunSteered,
     ToolCallArguments, ToolCallEvent, ToolNotificationEvent, ToolResultEvent, WarmupCompleted,
     WarmupFailed, WarmupStarted,
     context::{ContextBaseline, ContextSnapshot, ContextState},

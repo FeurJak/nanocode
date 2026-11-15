@@ -395,6 +395,24 @@ impl ModelRun {
         self.terminated_cell_output.extend(terminated);
     }
 
+    fn append_notice(
+        &self,
+        conversation: &mut ConversationState,
+        call_index: u32,
+        text: &str,
+    ) -> Result<()> {
+        self.events.emit(
+            AgentEventKind::ContextNotice,
+            ContextNotice {
+                after_model_call_index: call_index,
+                role: "user",
+                text,
+            },
+        )?;
+        conversation.append([context_notice(text)]);
+        Ok(())
+    }
+
     pub(crate) fn emit_terminal(&self, status: &'static str) -> Result<()> {
         let usage = self.stats.turn_usage();
         let kind = if status == "completed" {
@@ -1010,44 +1028,49 @@ impl ModelRun {
                     .await?;
                     continue;
                 }
-                if let Some(message) =
-                    final_message.filter(|message| !message.trim().is_empty())
+                let message = final_message.filter(|message| !message.trim().is_empty());
+                if self.config.headless
+                    && !nudged
+                    && message.as_deref().is_some_and(admits_incomplete)
                 {
-                    if self.config.headless && !nudged && admits_incomplete(&message) {
-                        nudged = true;
-                        nanocode_trace::info!(
-                            target: "nanocode",
-                            model_call_index = call_index,
-                            "headless turn ended with a message that admits incomplete work; continuing once"
-                        );
-                        session.conversation.append([persistence_nudge()]);
-                        session.conversation.clear_delta();
-                        continue;
-                    }
-                    if self.config.headless
-                        && self.finish_check
-                        && !finish_checked
-                        && self
-                            .deadline
-                            .as_ref()
-                            .is_some_and(|reminders| !reminders.last_passed())
-                    {
-                        finish_checked = true;
-                        session.conversation.append([context_notice(
-                            nanocode_tool_host::deadline::finish_notice(self.deadline.as_ref()),
-                        )]);
-                        session.conversation.clear_delta();
-                        continue;
-                    }
-                    return Ok(message);
-                }
-                if !reprompted {
-                    reprompted = true;
-                    session.conversation.append([empty_response(&self.tools)]);
+                    nudged = true;
+                    nanocode_trace::info!(
+                        target: "nanocode",
+                        model_call_index = call_index,
+                        "headless turn ended with a message that admits incomplete work; continuing once"
+                    );
+                    self.append_notice(&mut session.conversation, call_index, persistence_nudge())?;
                     session.conversation.clear_delta();
                     continue;
                 }
-                return Err(NanocodeError::MalformedResponse {
+                if message.is_none() && !reprompted {
+                    reprompted = true;
+                    self.append_notice(
+                        &mut session.conversation,
+                        call_index,
+                        empty_response(&self.tools),
+                    )?;
+                    session.conversation.clear_delta();
+                    continue;
+                }
+                if self.config.headless
+                    && self.finish_check
+                    && !finish_checked
+                    && self
+                        .deadline
+                        .as_ref()
+                        .is_some_and(|reminders| !reminders.last_passed())
+                {
+                    finish_checked = true;
+                    self.append_notice(
+                        &mut session.conversation,
+                        call_index,
+                        &nanocode_tool_host::deadline::finish_notice(self.deadline.as_ref()),
+                    )?;
+                    session.conversation.clear_delta();
+                    continue;
+                }
+                return message.ok_or(NanocodeError::MalformedResponse {
                     detail: "model completed without a final message or exec call",
                 });
             }
@@ -1094,7 +1117,7 @@ impl ModelRun {
                 .as_ref()
                 .and_then(nanocode_tool_host::deadline::Reminders::notice)
             {
-                session.conversation.append([context_notice(notice)]);
+                self.append_notice(&mut session.conversation, call_index, &notice)?;
             }
             self.maybe_compact(
                 call_index,

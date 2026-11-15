@@ -180,6 +180,13 @@ pub(super) struct CompactionCompleted<'a> {
 }
 
 #[derive(Serialize)]
+pub(super) struct ContextNotice<'a> {
+    pub(super) after_model_call_index: u32,
+    pub(super) role: &'static str,
+    pub(super) text: &'a str,
+}
+
+#[derive(Serialize)]
 pub(super) struct CompactionFailed<'a> {
     pub(super) after_model_call_index: u32,
     pub(super) duration_ns: u64,

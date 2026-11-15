@@ -57,8 +57,8 @@ pub(in crate::model) fn turn_aborted() -> ResponseItem {
     )
 }
 
-pub(in crate::model) fn empty_response(tools: &Tools) -> ResponseItem {
-    let text = if tools.exposure().is_available_in_code_mode() {
+pub(in crate::model) const fn empty_response(tools: &Tools) -> &'static str {
+    if tools.exposure().is_available_in_code_mode() {
         concat!(
             "<empty_response>\n",
             "Your last response had no message and no exec call, so nothing happened. ",
@@ -72,11 +72,7 @@ pub(in crate::model) fn empty_response(tools: &Tools) -> ResponseItem {
             "Continue the task: call a tool, or reply with your final message.\n",
             "</empty_response>"
         )
-    };
-    ResponseItem::message(
-        MessageRole::User,
-        [ContentItem::InputText { text: text.into() }],
-    )
+    }
 }
 
 const INCOMPLETE_ADMISSIONS: &[&str] = &[
@@ -93,8 +89,12 @@ const INCOMPLETE_ADMISSIONS: &[&str] = &[
     "do not meet",
     "don't meet",
     "not yet complete",
+    "not complete",
     "is incomplete",
+    "still incomplete",
     "remains incomplete",
+    "remains the original",
+    "remains the example",
     "didn't complete",
     "did not complete",
     "didn't finish",
@@ -130,25 +130,19 @@ pub(in crate::model) fn admits_incomplete(message: &str) -> bool {
         .any(|admission| message.contains(admission))
 }
 
-pub(in crate::model) fn context_notice(text: String) -> ResponseItem {
+pub(in crate::model) fn context_notice(text: &str) -> ResponseItem {
     ResponseItem::message(MessageRole::User, [ContentItem::input_text(text)])
 }
 
-pub(in crate::model) fn persistence_nudge() -> ResponseItem {
-    ResponseItem::message(
-        MessageRole::User,
-        [ContentItem::InputText {
-            text: concat!(
-                "<persistence>\n",
-                "Your last message says part of the task is not done or not verified. This ",
-                "session is non-interactive and nobody will reply, so continue now: work on what ",
-                "remains, take a different approach where the last one fell short, and verify the ",
-                "result. If every requirement is in fact met and verified, reply with your final ",
-                "message again.\n",
-                "</persistence>"
-            )
-            .into(),
-        }],
+pub(in crate::model) const fn persistence_nudge() -> &'static str {
+    concat!(
+        "<persistence>\n",
+        "Your last message says part of the task is not done or not verified. This ",
+        "session is non-interactive and nobody will reply, so continue now: work on what ",
+        "remains, take a different approach where the last one fell short, and verify the ",
+        "result. If every requirement is in fact met and verified, reply with your final ",
+        "message again.\n",
+        "</persistence>"
     )
 }
 
