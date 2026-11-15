@@ -257,7 +257,15 @@ struct CellObservationState {
     streamed: usize,
     streamed_bytes: usize,
     content_seen: u64,
-    running: Vec<(String, String)>,
+    running: Vec<RunningCall>,
+    yielded: bool,
+}
+
+struct RunningCall {
+    call_id: String,
+    input: Arc<Value>,
+    name: String,
+    started: Instant,
 }
 
 #[derive(Default)]
@@ -267,6 +275,7 @@ struct ObservationBuffer {
     notifications: Vec<CodeModeNotification>,
     returned: u64,
     failed: u64,
+    statuses: Vec<String>,
     latest: Option<(String, String)>,
     abandoned: Vec<String>,
 }
@@ -285,6 +294,7 @@ enum CellUpdate {
         call_id: String,
         name: String,
         input: Arc<Value>,
+        started: Instant,
         delivered: bool,
         logged: bool,
     },
@@ -1532,6 +1542,7 @@ impl LiveCell {
                 streamed_bytes: 0,
                 content_seen,
                 running: Vec::new(),
+                yielded: false,
             })),
             lifecycle,
             interrupt,
@@ -1734,6 +1745,7 @@ async fn relay_cell_updates(
                 input,
                 delivered,
                 logged,
+                ..
             } => {
                 if *logged {
                     sink.update(CodeModeUpdate::NestedCallStarted {
@@ -1881,7 +1893,8 @@ async fn observe_updates(
         }
         let preempted = preempt_remaining.is_some();
         if preempt_remaining == Some(0) {
-            return yielded_observation(tools, cell.id, started_at, observation, max_output_tokens);
+            return yielded_observation(tools, cell.id, started_at, observation, max_output_tokens)
+                .await;
         }
         let update = if let Some(update) = observation.replay.pop_front() {
             Some(update)
@@ -1960,10 +1973,16 @@ async fn observe_updates(
                 call_id,
                 name,
                 input,
+                started,
                 delivered,
                 logged,
             }) => {
-                observation.running.push((call_id.clone(), name.clone()));
+                observation.running.push(RunningCall {
+                    call_id: call_id.clone(),
+                    input: Arc::clone(&input),
+                    name: name.clone(),
+                    started,
+                });
                 if logged && !delivered {
                     observer.update(CodeModeUpdate::NestedCallStarted {
                         call_id: &call_id,
@@ -1975,7 +1994,7 @@ async fn observe_updates(
             Some(CellUpdate::NestedCall(mut call)) => {
                 observation
                     .running
-                    .retain(|(call_id, _)| *call_id != call.call.call_id);
+                    .retain(|running| running.call_id != call.call.call_id);
                 if call
                     .call
                     .structured_result
@@ -1987,6 +2006,7 @@ async fn observe_updates(
                 }
                 observation.buffered.returned += 1;
                 observation.buffered.failed += u64::from(!call.call.success);
+                observation.buffered.statuses.push(call_status(&call.call));
                 observation.buffered.latest = Some((
                     call.call.name.clone(),
                     output_tail(match &call.call.output {
@@ -2045,9 +2065,27 @@ async fn observe_updates(
                     started_at,
                     observation,
                     max_output_tokens,
-                );
+                )
+                .await;
             }
             Some(CellUpdate::Completed) => {
+                if observation.buffered.content.is_empty() && observation.buffered.returned > 0 {
+                    let text = if observation.yielded {
+                        format!(
+                            "The script printed nothing since the last yield.{}",
+                            returned_summary(&observation.buffered, " since then")
+                        )
+                    } else {
+                        format!(
+                            "The script printed nothing.{}",
+                            returned_summary(&observation.buffered, "")
+                        )
+                    };
+                    observation
+                        .buffered
+                        .content
+                        .push(ToolOutputContent::InputText { text });
+                }
                 let abandoned = abandoned_calls(
                     observation,
                     "the script ended without awaiting them",
@@ -2261,7 +2299,7 @@ fn abandoned_calls(observation: &mut CellObservationState, when: &str, advice: &
         .chain(
             std::mem::take(&mut observation.running)
                 .into_iter()
-                .map(|(_, name)| name),
+                .map(|running| running.name),
         )
     {
         *names.entry(name).or_default() += 1;
@@ -2287,7 +2325,7 @@ fn nothing_to_report(observation: &CellObservationState) -> bool {
         && observation.replay.is_empty()
 }
 
-fn yielded_observation(
+async fn yielded_observation(
     tools: &dyn CodeModeToolset,
     cell_id: u64,
     started_at: Instant,
@@ -2298,27 +2336,17 @@ fn yielded_observation(
     let mut buffered = take_buffered(observation);
     if buffered.content.is_empty() && (buffered.returned > 0 || !running.is_empty()) {
         let mut text = "The script printed nothing since the last yield.".to_owned();
-        if let Some((name, tail)) = &buffered.latest {
-            text.push_str(&format!(
-                " {} nested call(s) returned since then, {} of them failed. The latest, {name}, returned:\n{tail}",
-                buffered.returned, buffered.failed
-            ));
-        }
+        text.push_str(&returned_summary(&buffered, " since then"));
         if !running.is_empty() {
-            let mut names = BTreeMap::<&str, usize>::new();
-            for (_, name) in &running {
-                *names.entry(name.as_str()).or_default() += 1;
+            text.push_str("\nNested calls still running:");
+            for call in &running {
+                text.push_str(&running_status(tools, call).await);
             }
-            let names = names
-                .iter()
-                .map(|(name, count)| format!("{count} {name}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            text.push_str(&format!("\nNested calls still running: {names}."));
         }
         buffered.content.push(ToolOutputContent::InputText { text });
     }
     observation.running = running;
+    observation.yielded = true;
     running_observation(
         tools,
         cell_id,
@@ -2328,6 +2356,60 @@ fn yielded_observation(
         buffered.nested_calls,
         buffered.notifications,
     )
+}
+
+fn call_status(call: &NestedToolCall) -> String {
+    let outcome = match call
+        .structured_result
+        .get("exit_code")
+        .and_then(Value::as_i64)
+    {
+        Some(code) => format!("exit code {code}"),
+        None if call.success => "returned".to_owned(),
+        None => "failed".to_owned(),
+    };
+    format!(
+        "- {} {outcome} after {:.1} s",
+        call.name,
+        Duration::from_nanos(call.duration_ns).as_secs_f64()
+    )
+}
+
+fn returned_summary(buffered: &ObservationBuffer, since: &str) -> String {
+    let Some((name, tail)) = &buffered.latest else {
+        return String::new();
+    };
+    format!(
+        " {} nested call(s) returned{since}, {} of them failed:\n{}\nThe latest, {name}, returned:\n{tail}",
+        buffered.returned,
+        buffered.failed,
+        output_tail(buffered.statuses.join("\n"))
+    )
+}
+
+async fn running_status(tools: &dyn CodeModeToolset, call: &RunningCall) -> String {
+    let mut text = format!("\n- {}", call.name);
+    if let Some(description) = call.input.get("description").and_then(Value::as_str) {
+        text.push_str(&format!(" ({description})"));
+    }
+    text.push_str(&format!(
+        ", running for {:.1} s",
+        nanocode_platform::elapsed(call.started).as_secs_f64()
+    ));
+    match tools
+        .running_output(&call.call_id)
+        .await
+        .as_deref()
+        .map(str::trim_end)
+    {
+        Some("") => text.push_str(", nothing printed yet"),
+        Some(output) => {
+            text.push_str(", its latest output:\n");
+            text.push_str(&output_tail(output.to_owned()));
+        }
+        None => {}
+    }
+    text
 }
 
 fn running_observation(
@@ -2478,6 +2560,7 @@ impl CellCalls<'_, '_> {
             call_id: nested_call_id,
             name: name.clone(),
             input: Arc::clone(&input),
+            started,
             delivered: false,
             logged,
         });
