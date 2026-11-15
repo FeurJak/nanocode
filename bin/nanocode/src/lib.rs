@@ -47,6 +47,11 @@ pub use host::{ModelClients, Panel};
 
 const PIPED_PROMPT_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 const PIPED_PROMPT_LIMIT: usize = 10 * 1024 * 1024;
+const ESCALATION_PROMPT: &str = "Continue.";
+const EDIT_TOOLS: [&str; 5] = ["Edit", "MultiEdit", "NotebookEdit", "Write", "apply_patch"];
+const WRITE_MARKS: [&str; 12] = [
+    "> ", ">>", "<<", "tee ", "sed -i", "apply_patch", "write", "mv ", "cp ", "rm ", "mkdir ", "touch ",
+];
 const TELEMETRY_SHUTDOWN: std::time::Duration = std::time::Duration::from_millis(500);
 
 fn session_gateway(cli: &Cli) -> Option<GatewayArgs> {
@@ -677,12 +682,18 @@ async fn exec(args: SessionArgs, clients: ModelClients) -> Result<()> {
         }
     });
     let host = prepared.host;
+    let escalation = match (&args.escalate_model, args.escalate_after) {
+        (Some(name), Some(after)) => {
+            Some((escalation_model(&host, name, prepared.route, &prepared.model).await?, after))
+        }
+        _ => None,
+    };
     let resume = match (&args.resume, args.continue_last) {
         (Some(id), _) if !id.is_empty() => Some(id.clone()),
         (_, true) => Some(latest_session(&host).await?),
         _ => None,
     };
-    let (agent, events, pending) = match resume.clone() {
+    let (mut agent, events, pending) = match resume.clone() {
         Some(id) => {
             let ready = app::open_session(
                 &host,
@@ -740,10 +751,33 @@ async fn exec(args: SessionArgs, clients: ModelClients) -> Result<()> {
             let turn = agent
                 .prompt(nanocode::PromptRequest::new(pending.prompt).request_id(&pending.id))
                 .await?;
-            stream_turn(turn, std::io::stderr(), std::io::stderr().is_terminal()).await?;
+            stream_turn(turn, std::io::stderr(), std::io::stderr().is_terminal(), None).await?;
         }
         let terminal = std::io::stdout().is_terminal();
-        stream_turn(agent.prompt(prompt.as_str()).await?, std::io::stdout(), terminal).await
+        let stalled = stream_turn(
+            agent.prompt(prompt.as_str()).await?,
+            std::io::stdout(),
+            terminal,
+            escalation.as_ref().map(|(_, after)| *after),
+        )
+        .await?;
+        if let (true, Some((model, after))) = (stalled, &escalation) {
+            let (next, _) = host
+                .runtime
+                .switch(&agent, model.clone(), Some(prepared.thinking))
+                .await?;
+            app::apply_tier(&next, model, prepared.tier).await?;
+            drop(agent.flush().await);
+            drop(agent.shutdown().await);
+            agent = next;
+            eprintln!(
+                "nanocode: {after} tool calls in a row wrote no file; continuing on {}",
+                prepared.route.label(model)
+            );
+            stream_turn(agent.prompt(ESCALATION_PROMPT).await?, std::io::stdout(), terminal, None)
+                .await?;
+        }
+        Ok(())
     }
     .await;
     let mut stderr = std::io::stderr();
@@ -840,25 +874,107 @@ async fn piped_prompt() -> Result<Option<String>> {
     Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
+async fn escalation_model(
+    host: &Host,
+    name: &str,
+    route: host::Route,
+    session: &ModelSelection,
+) -> Result<ModelSelection> {
+    if host.config.clients.resolve(name).is_err() {
+        host.config.clients.listed().await?;
+    }
+    let (escalated, model) = host.config.clients.resolve(name)?;
+    let model = match host::follows_harness(escalated, &model) {
+        true => host::on_harness(&model, &session.family()),
+        false => model,
+    };
+    if escalated != route || model.family() != session.family() {
+        return Err(format!(
+            "--escalate-model {} must share the route and harness of {}",
+            escalated.label(&model),
+            route.label(session)
+        )
+        .into());
+    }
+    Ok(model)
+}
+
+struct Stall {
+    after: u64,
+    idle: u64,
+    cancelled: bool,
+}
+
+impl Stall {
+    fn cancels(&mut self, event: &nanocode::agent::events::AgentEvent) -> bool {
+        use nanocode::agent::events::AgentEventKind;
+        match event.kind {
+            AgentEventKind::ToolCall => {
+                let call = serde_json::from_str::<serde_json::Value>(event.payload.get())
+                    .unwrap_or_default();
+                if call.get("parent_call_id").is_some_and(|parent| !parent.is_null()) {
+                    return false;
+                }
+                let tool = call.get("tool").and_then(serde_json::Value::as_str).unwrap_or_default();
+                let arguments = call.get("arguments").map(ToString::to_string).unwrap_or_default();
+                self.idle = match EDIT_TOOLS.contains(&tool)
+                    || WRITE_MARKS.iter().any(|mark| arguments.contains(mark))
+                {
+                    true => 0,
+                    false => self.idle + 1,
+                };
+                false
+            }
+            AgentEventKind::ModelCallStarted if !self.cancelled && self.idle >= self.after => {
+                self.cancelled = true;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
 async fn stream_turn(
     mut turn: nanocode::agent::Turn,
     answers: impl Write,
     terminal: bool,
-) -> Result<()> {
+    stall: Option<u64>,
+) -> Result<bool> {
     let mut printer = stream::Printer::new(std::io::BufWriter::new(answers), terminal);
+    let control = turn.control();
+    let mut stall = stall.map(|after| Stall {
+        after,
+        idle: 0,
+        cancelled: false,
+    });
     loop {
-        while let Some(event) = turn.events.try_recv_timed() {
-            printer.event(&event.event, event.delta.as_ref().map(SharedTextDelta::borrowed))?;
-        }
-        printer.flush()?;
-        let Some(event) = turn.events.recv_timed().await else {
-            break;
+        let event = match turn.events.try_recv_timed() {
+            Some(event) => event,
+            None => {
+                printer.flush()?;
+                let Some(event) = turn.events.recv_timed().await else {
+                    break;
+                };
+                event
+            }
         };
         printer.event(&event.event, event.delta.as_ref().map(SharedTextDelta::borrowed))?;
+        if stall.as_mut().is_some_and(|stall| stall.cancels(&event.event)) {
+            control.cancel().await?;
+        }
     }
-    let result = turn.await?;
-    printer.finish(result.final_message())?;
-    Ok(())
+    let stalled = stall.is_some_and(|stall| stall.cancelled);
+    match turn.await {
+        Ok(result) => {
+            printer.finish(result.final_message())?;
+            Ok(false)
+        }
+        Err(nanocode::NanocodeError::TurnCancelled) if stalled => {
+            printer.flush()?;
+            Ok(true)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 async fn list_sessions(args: SessionsArgs) -> Result<()> {

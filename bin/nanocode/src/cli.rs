@@ -254,6 +254,21 @@ const ATTEMPTS: Group = Group::named(
     ],
 );
 
+const ESCALATION: Group = Group::named(
+    "EscalationArgs",
+    &[
+        Argument::value("escalate_model", "MODEL", Parser::Text)
+            .long("escalate-model")
+            .requires("escalate_after")
+            .conflicts(&["attempts"])
+            .help("Continue the prompt on MODEL once the session model makes --escalate-after tool calls in a row that write no file"),
+        Argument::value("escalate_after", "N", Parser::U64)
+            .long("escalate-after")
+            .requires("escalate_model")
+            .help("Tool calls in a row without a file write that switch the prompt to --escalate-model"),
+    ],
+);
+
 const GATEWAY: Group = Group::named(
     "GatewayArgs",
     &[
@@ -506,7 +521,7 @@ pub static COMMAND: arguments::Command = arguments::Command::new("nanocode")
             .about(
                 "Run one prompt without the terminal interface, streaming the reply to stdout and reasoning summaries and tool calls to stderr",
             )
-            .groups(&[SESSION, ATTEMPTS, GATEWAY, REMOTE]),
+            .groups(&[SESSION, ATTEMPTS, ESCALATION, GATEWAY, REMOTE]),
         arguments::Command::new("models").about("List models per harness with thinking levels and speed tiers"),
         arguments::Command::new("resume")
             .about("Resume a saved session; without an id, pick one interactively")
@@ -580,6 +595,8 @@ pub struct SessionArgs {
     pub prompt: Option<String>,
     pub attempts: Option<u64>,
     pub attempt_timeout: Option<u64>,
+    pub escalate_after: Option<u64>,
+    pub escalate_model: Option<String>,
     pub model: Option<String>,
     pub harness: Option<HarnessArg>,
     pub thinking: Option<String>,
@@ -629,6 +646,8 @@ impl SessionArgs {
             prompt: matches.text("prompt"),
             attempts: matches.u64("attempts"),
             attempt_timeout: matches.u64("attempt_timeout"),
+            escalate_after: matches.u64("escalate_after"),
+            escalate_model: matches.text("escalate_model"),
             model: matches.text("model"),
             harness: matches
                 .choice("harness")
@@ -665,6 +684,8 @@ impl SessionArgs {
             prompt: self.prompt.or(root.prompt),
             attempts: self.attempts.or(root.attempts),
             attempt_timeout: self.attempt_timeout.or(root.attempt_timeout),
+            escalate_after: self.escalate_after.or(root.escalate_after),
+            escalate_model: self.escalate_model.or(root.escalate_model),
             model: self.model.or(root.model),
             harness: self.harness.or(root.harness),
             thinking: self.thinking.or(root.thinking),
