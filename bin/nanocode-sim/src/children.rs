@@ -34,6 +34,7 @@ pub const CRASHES_MAX: u64 = 4;
 pub const CRASH_HORIZON_MS: u64 = 120_000;
 pub const RECOVERY_DELAY: Duration = Duration::from_secs(5);
 pub const KILL_AFTER_MS_MAX: u64 = 10_000;
+const QUEUED_SPAWNS_PPM: u64 = 500_000;
 const SPAWN_PPM: u64 = 500_000;
 const MESSAGE_PPM: u64 = 500_000;
 const MESSAGE_PEERS: usize = 2;
@@ -46,6 +47,7 @@ pub enum ChildMutation {
     AdoptsTurn,
     ForgetsNotice,
     RegionKeepsStale,
+    RespawnsFresh,
     SettlesLazily,
 }
 
@@ -56,6 +58,7 @@ impl ChildMutation {
             "child-adopts-turn" => Some(Self::AdoptsTurn),
             "child-forgets-notice" => Some(Self::ForgetsNotice),
             "region-keeps-stale" => Some(Self::RegionKeepsStale),
+            "child-respawns-fresh" => Some(Self::RespawnsFresh),
             "child-settles-lazily" => Some(Self::SettlesLazily),
             _ => None,
         }
@@ -68,12 +71,13 @@ impl ChildMutation {
             Self::AdoptsTurn => "child-adopts-turn",
             Self::ForgetsNotice => "child-forgets-notice",
             Self::RegionKeepsStale => "region-keeps-stale",
+            Self::RespawnsFresh => "child-respawns-fresh",
             Self::SettlesLazily => "child-settles-lazily",
         }
     }
 
     pub const NAMES: &'static str =
-        "child-acks-early|child-adopts-turn|child-forgets-notice|child-settles-lazily|region-keeps-stale";
+        "child-acks-early|child-adopts-turn|child-forgets-notice|child-respawns-fresh|child-settles-lazily|region-keeps-stale";
 }
 
 #[derive(Clone, Debug)]
@@ -84,6 +88,7 @@ pub struct ChildFaults {
     pub latency_ms_max: u64,
     pub crashes: Vec<u64>,
     pub kill_after: Duration,
+    pub queued_spawns: bool,
 }
 
 impl ChildFaults {
@@ -96,6 +101,7 @@ impl ChildFaults {
             .map(|_| rng.range(0, CRASH_HORIZON_MS) * 1_000_000)
             .collect();
         crashes.sort_unstable();
+        let queued_spawns = Rng::derive(seed, "child-queued-spawns").chance(QUEUED_SPAWNS_PPM);
         if calm || rng.chance(CALM_PPM) {
             return Self {
                 unsent_ppm: 0,
@@ -104,6 +110,7 @@ impl ChildFaults {
                 latency_ms_max,
                 crashes,
                 kill_after,
+                queued_spawns,
             };
         }
         Self {
@@ -113,6 +120,7 @@ impl ChildFaults {
             latency_ms_max,
             crashes,
             kill_after,
+            queued_spawns,
         }
     }
 
@@ -371,6 +379,10 @@ impl SimChildren {
 
     pub fn run_calls(&self) -> u64 {
         self.live(|live| live.run_calls)
+    }
+
+    pub const fn queued_spawns(&self) -> bool {
+        self.faults.queued_spawns
     }
 
     pub fn lost(&self, completed: &BTreeSet<String>) -> Option<String> {
@@ -840,15 +852,28 @@ impl SimChildren {
     ) -> Reply {
         let seed = self.seed;
         let adopts = self.mutation == ChildMutation::AdoptsTurn;
-        let (reply, start) = self.disk.with(|disk| {
+        let (reply, start, respawned) = self.disk.with(|disk| {
+            let label = word_after(prompt, CHILD_MARK).unwrap_or_default();
+            let respawned = (!label.is_empty() && !disk.children.contains_key(session))
+                .then(|| {
+                    disk.children.iter().find_map(|(previous, child)| {
+                        (child.label == label).then(|| {
+                            let completed = child
+                                .notices
+                                .iter()
+                                .any(|notice| matches!(notice.outcome, Outcome::Completed(_)));
+                            format!(
+                                "remote_child_respawned: {label} ran as remote child {previous} (completed={completed}) and runs again as {session}"
+                            )
+                        })
+                    })
+                })
+                .flatten();
             let child = disk.children.entry(Arc::clone(session)).or_insert_with(|| {
-                let label = word_after(prompt, CHILD_MARK)
-                    .unwrap_or_default()
-                    .to_owned();
                 let depth = number_after(prompt, " depth ").unwrap_or(0);
                 Child {
-                    plan: plan(seed, &label, depth),
-                    label,
+                    plan: plan(seed, label, depth),
+                    label: label.to_owned(),
                     ..Child::default()
                 }
             });
@@ -871,14 +896,18 @@ impl SimChildren {
                 .flatten();
             if let Some(at) = notice.or(adopted) {
                 child.notices[at].delivered = true;
-                return (Reply::Finished(child.notices[at].outcome.clone()), false);
+                return (
+                    Reply::Finished(child.notices[at].outcome.clone()),
+                    false,
+                    respawned,
+                );
             }
             if adopts
                 && !known
                 && let Some(running) = child.running.clone()
             {
                 child.aliases.insert(running, request.to_owned());
-                return (Reply::Pending, true);
+                return (Reply::Pending, true, respawned);
             }
             if !known {
                 child.inputs.push(Input {
@@ -896,8 +925,11 @@ impl SimChildren {
                 }
                 None => child.start(request),
             }
-            (Reply::Pending, true)
+            (Reply::Pending, true, respawned)
         });
+        if let Some(respawned) = respawned {
+            self.world.wrong(respawned);
+        }
         self.world.trace(&format!(
             "child {session} turn {request} -> {} prompt {}",
             match &reply {
@@ -996,6 +1028,14 @@ impl ChildHost for Host {
             "child {} open restored={}",
             child.session_id, child.restored
         ));
+        if child.restored && self.0.mutation == ChildMutation::RespawnsFresh {
+            self.0.disk.with(|disk| {
+                if let Some(orphan) = disk.children.remove(&child.session_id) {
+                    disk.children
+                        .insert(format!("{}-orphan", child.session_id).into(), orphan);
+                }
+            });
+        }
         self.0
             .live(|live| live.open.insert(Arc::clone(&child.session_id)));
         Box::pin(async { Ok(()) })

@@ -249,10 +249,11 @@ impl Shape {
             match self.children {
                 ChildMode::Local => String::new(),
                 ChildMode::Remote => format!(
-                    " child_crashes_ms={:?} kill_after_ms={} calm_children={}",
+                    " child_crashes_ms={:?} kill_after_ms={} calm_children={} queued_spawns={}",
                     self.child_faults.crashes.iter().map(|at| at / 1_000_000).collect::<Vec<_>>(),
                     self.child_faults.kill_after.as_millis(),
-                    self.child_faults.calm()
+                    self.child_faults.calm(),
+                    self.child_faults.queued_spawns
                 ),
             }
         )
@@ -512,6 +513,12 @@ fn runtime(
                 .remote_children()
                 .ok_or_else(|| "a runtime with a child host has no remote children".to_owned())?,
         );
+        if children.queued_spawns() {
+            runtime
+                .subagents()
+                .ok_or_else(|| "a runtime with a child host has no subagents".to_owned())?
+                .set_queued_spawns(true);
+        }
         children.start();
     }
     Ok(runtime)
