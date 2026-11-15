@@ -332,6 +332,7 @@ pub struct timespec {
 pub const EDEADLOCK: c_int = 35;
 pub const EFD_NONBLOCK: c_int = 0x800;
 pub const MAP_ANONYMOUS: c_int = 0x0020;
+pub const M_ARENA_MAX: c_int = -8;
 pub const O_ACCMODE: c_int = 3;
 pub const O_FSYNC: c_int = 0x101000;
 pub const O_LARGEFILE: c_int = 0;
@@ -459,5 +460,6 @@ pub unsafe extern "C" fn CMSG_NXTHDR(mhdr: *const msghdr, cmsg: *const cmsghdr) 
 unsafe extern "C" {
     pub fn getentropy(buf: *mut c_void, buflen: size_t) -> c_int;
     pub fn getrlimit(resource: __rlimit_resource_t, rlim: *mut rlimit) -> c_int;
+    pub fn mallopt(param: c_int, value: c_int) -> c_int;
     pub fn setrlimit(resource: __rlimit_resource_t, rlim: *const rlimit) -> c_int;
 }

@@ -1,7 +1,19 @@
 use std::{
-    io::{self, Read, Write},
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, UdpSocket},
+    future::poll_fn,
+    io,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
+};
+
+use nanocode_io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+use crate::{
+    net::{Source, TcpStream},
+    reactor::Direction,
 };
 
 const ATTEMPTS_DEFAULT: u32 = 2;
@@ -44,19 +56,16 @@ pub struct Config {
     pub timeout: Duration,
 }
 
-pub trait Wire {
-    fn id(&mut self) -> io::Result<u16>;
-    fn open(&mut self, server: SocketAddr, wait: Duration) -> io::Result<()>;
-    fn receive(&mut self, buffer: &mut [u8]) -> io::Result<Option<usize>>;
-    fn send(&mut self, message: &[u8]) -> io::Result<()>;
-    fn stream(&mut self, server: SocketAddr, message: &[u8], wait: Duration)
-    -> io::Result<Vec<u8>>;
+pub struct System {
+    config: Config,
+    covers: u64,
+    hosts: String,
 }
 
 #[derive(Default)]
-pub struct System {
+struct Wire {
     deadline: Option<Instant>,
-    socket: Option<UdpSocket>,
+    socket: Option<Source<UdpSocket>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -191,8 +200,39 @@ impl Config {
     }
 }
 
-impl Wire for System {
-    fn id(&mut self) -> io::Result<u16> {
+static REQUESTED: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    static LOADED: std::cell::Cell<Option<Arc<System>>> = const { std::cell::Cell::new(None) };
+}
+
+impl System {
+    #[must_use]
+    pub fn request() -> u64 {
+        REQUESTED.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    #[must_use]
+    pub fn load(request: u64) -> Arc<Self> {
+        if let Some(loaded) = LOADED.take() {
+            LOADED.set(Some(loaded.clone()));
+            if loaded.covers >= request {
+                return loaded;
+            }
+        }
+        let covers = REQUESTED.load(Ordering::SeqCst);
+        let system = Arc::new(Self {
+            hosts: std::fs::read_to_string(HOSTS_PATH).unwrap_or_default(),
+            config: Config::system(),
+            covers,
+        });
+        LOADED.set(Some(system.clone()));
+        system
+    }
+}
+
+impl Wire {
+    fn id() -> io::Result<u16> {
         let mut bytes = [0; size_of::<u16>()];
         nanocode_sys::fill_random(&mut bytes)?;
         Ok(u16::from_ne_bytes(bytes))
@@ -202,73 +242,65 @@ impl Wire for System {
         self.socket = None;
         let socket = UdpSocket::bind(SocketAddr::new(unspecified(server.ip()), 0))?;
         socket.connect(server)?;
-        self.socket = Some(socket);
+        socket.set_nonblocking(true)?;
+        self.socket = Some(Source::new(socket)?);
         self.deadline = Some(Instant::now() + wait);
         Ok(())
     }
 
-    fn receive(&mut self, buffer: &mut [u8]) -> io::Result<Option<usize>> {
+    async fn receive(&mut self, buffer: &mut [u8]) -> io::Result<Option<usize>> {
         let (Some(socket), Some(deadline)) = (&self.socket, self.deadline) else {
             return Err(not_open());
         };
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Ok(None);
-            }
-            socket.set_read_timeout(Some(left))?;
-            match socket.recv(buffer) {
-                Ok(length) => return Ok(Some(length)),
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::Interrupted
-                            | io::ErrorKind::TimedOut
-                            | io::ErrorKind::WouldBlock
-                    ) => {}
-                Err(error) => return Err(error),
-            }
-        }
+        let received =
+            poll_fn(|context| socket.poll_io(context, Direction::Read, |inner| inner.recv(buffer)));
+        crate::time::timeout_at(deadline, received)
+            .await
+            .map_or(Ok(None), |received| received.map(Some))
     }
 
-    fn send(&mut self, message: &[u8]) -> io::Result<()> {
+    async fn send(&mut self, message: &[u8]) -> io::Result<()> {
         let Some(socket) = &self.socket else {
             return Err(not_open());
         };
-        socket.send(message).map(drop)
+        poll_fn(|context| socket.poll_io(context, Direction::Write, |inner| inner.send(message)))
+            .await
+            .map(drop)
     }
 
-    fn stream(
-        &mut self,
-        server: SocketAddr,
-        message: &[u8],
-        wait: Duration,
-    ) -> io::Result<Vec<u8>> {
-        let mut stream = TcpStream::connect_timeout(&server, wait)?;
-        stream.set_read_timeout(Some(wait))?;
-        stream.set_write_timeout(Some(wait))?;
+    async fn stream(server: SocketAddr, message: &[u8], wait: Duration) -> io::Result<Vec<u8>> {
         let length = u16::try_from(message.len())
             .map_err(|_| invalid("the query does not fit a TCP message"))?;
         let mut framed = Vec::with_capacity(size_of::<u16>() + message.len());
         framed.extend_from_slice(&length.to_be_bytes());
         framed.extend_from_slice(message);
-        stream.write_all(&framed)?;
-        let mut length = [0; size_of::<u16>()];
-        stream.read_exact(&mut length)?;
-        let mut reply = vec![0; usize::from(u16::from_be_bytes(length))];
-        stream.read_exact(&mut reply)?;
-        Ok(reply)
+        let exchanged = async {
+            let mut stream = TcpStream::connect_one(server).await?;
+            stream.write_all(&framed).await?;
+            let mut length = [0; size_of::<u16>()];
+            stream.read_exact(&mut length).await?;
+            let mut reply = vec![0; usize::from(u16::from_be_bytes(length))];
+            stream.read_exact(&mut reply).await?;
+            Ok(reply)
+        };
+        crate::time::timeout(wait, exchanged)
+            .await
+            .unwrap_or_else(|_| {
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "the name server did not answer",
+                ))
+            })
     }
 }
 
-pub fn resolve(name: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+pub async fn resolve(system: &System, name: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
     if let Ok(address) = name.parse::<IpAddr>() {
         return Ok(vec![SocketAddr::new(address, port)]);
     }
-    let hosts = std::fs::read_to_string(HOSTS_PATH).unwrap_or_default();
-    let listed = from_hosts(&hosts, name.strip_suffix('.').unwrap_or(name));
+    let listed = from_hosts(&system.hosts, name.strip_suffix('.').unwrap_or(name));
     let addresses = if listed.is_empty() {
-        lookup(&Config::system(), &hosts, name, &mut System::default())?
+        lookup(&system.config, &system.hosts, name).await?
     } else {
         listed
     };
@@ -295,12 +327,7 @@ pub fn resolve(name: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
     Ok(ordered)
 }
 
-pub fn lookup(
-    config: &Config,
-    hosts: &str,
-    name: &str,
-    wire: &mut impl Wire,
-) -> io::Result<Vec<IpAddr>> {
+pub async fn lookup(config: &Config, hosts: &str, name: &str) -> io::Result<Vec<IpAddr>> {
     let (name, absolute) = name
         .strip_suffix('.')
         .map_or((name, false), |name| (name, true));
@@ -322,8 +349,9 @@ pub fn lookup(
         ]);
     }
     let mut failure = None;
+    let mut wire = Wire::default();
     for candidate in candidates(config, name, absolute) {
-        match query(config, &candidate, wire) {
+        match query(config, &candidate, &mut wire).await {
             Ok(Some(addresses)) => return Ok(addresses),
             Ok(None) => {}
             Err(error) => failure = Some(error),
@@ -370,7 +398,7 @@ pub fn candidates(config: &Config, name: &str, absolute: bool) -> Vec<Vec<u8>> {
     names.iter().filter_map(|name| encode(name)).collect()
 }
 
-fn query(config: &Config, name: &[u8], wire: &mut impl Wire) -> io::Result<Option<Vec<IpAddr>>> {
+async fn query(config: &Config, name: &[u8], wire: &mut Wire) -> io::Result<Option<Vec<IpAddr>>> {
     let kinds: &[u16] = if config.no_aaaa {
         &[TYPE_A]
     } else {
@@ -378,7 +406,7 @@ fn query(config: &Config, name: &[u8], wire: &mut impl Wire) -> io::Result<Optio
     };
     let mut questions = Vec::with_capacity(kinds.len());
     for kind in kinds {
-        let id = wire.id()?;
+        let id = Wire::id()?;
         questions.push(Question {
             answer: None,
             id,
@@ -393,7 +421,9 @@ fn query(config: &Config, name: &[u8], wire: &mut impl Wire) -> io::Result<Optio
                 question.answer = None;
             }
             let wait = config.wait(attempt);
-            if let Err(error) = exchange(config.tcp, *server, wait, name, &mut questions, wire) {
+            if let Err(error) =
+                exchange(config.tcp, *server, wait, name, &mut questions, wire).await
+            {
                 failure = Some(error);
                 continue;
             }
@@ -432,27 +462,27 @@ fn query(config: &Config, name: &[u8], wire: &mut impl Wire) -> io::Result<Optio
     Err(failure.expect("a configuration holds at least one name server and one attempt"))
 }
 
-fn exchange(
+async fn exchange(
     tcp: bool,
     server: SocketAddr,
     wait: Duration,
     name: &[u8],
     questions: &mut [Question],
-    wire: &mut impl Wire,
+    wire: &mut Wire,
 ) -> io::Result<()> {
     if tcp {
         for question in questions {
-            question.answer = Some(streamed(server, wait, name, question, wire)?);
+            question.answer = Some(streamed(server, wait, name, question).await?);
         }
         return Ok(());
     }
     wire.open(server, wait)?;
     for question in questions.iter() {
-        wire.send(&question.message)?;
+        wire.send(&question.message).await?;
     }
     let mut buffer = vec![0; DATAGRAM_BYTES_MAX];
     while questions.iter().any(|question| question.answer.is_none()) {
-        let Some(length) = wire.receive(&mut buffer)? else {
+        let Some(length) = wire.receive(&mut buffer).await? else {
             break;
         };
         let reply = &buffer[..length];
@@ -464,20 +494,19 @@ fn exchange(
         question.answer = match decode(reply, name, question.kind) {
             None => continue,
             Some(Reply::Answer(answer)) => Some(answer),
-            Some(Reply::Truncated) => Some(streamed(server, wait, name, question, wire)?),
+            Some(Reply::Truncated) => Some(streamed(server, wait, name, question).await?),
         };
     }
     Ok(())
 }
 
-fn streamed(
+async fn streamed(
     server: SocketAddr,
     wait: Duration,
     name: &[u8],
     question: &Question,
-    wire: &mut impl Wire,
 ) -> io::Result<Answer> {
-    let reply = wire.stream(server, &question.message, wait)?;
+    let reply = Wire::stream(server, &question.message, wait).await?;
     if reply.get(..2) != Some(&question.id.to_be_bytes()[..]) {
         return Err(invalid("the name server answered another query"));
     }

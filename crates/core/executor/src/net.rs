@@ -8,6 +8,7 @@ use std::{
 };
 
 use nanocode_io::{AsyncRead, AsyncWrite, ReadBuf};
+#[cfg(not(target_os = "linux"))]
 use nanocode_sys::{AtomicBox, AtomicWaker};
 
 use crate::{
@@ -224,11 +225,13 @@ impl<T: ToSocketAddrs + ?Sized> ToSocketAddrs for &T {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 struct Answer<T> {
     value: AtomicBox<io::Result<T>>,
     waker: AtomicWaker,
 }
 
+#[cfg(not(target_os = "linux"))]
 async fn on_thread<T: Send + 'static>(
     name: &str,
     work: impl FnOnce() -> io::Result<T> + Send + 'static,
@@ -263,23 +266,39 @@ async fn resolve(addresses: impl ToSocketAddrs) -> io::Result<Vec<SocketAddr>> {
         Resolve::Failed(error) => return Err(error),
         Resolve::Lookup(host) => host,
     };
-    on_thread(LOOKUP_THREAD, move || lookup(&host)).await
+    lookup(host).await
 }
 
 #[cfg(target_os = "linux")]
-fn lookup(host: &str) -> io::Result<Vec<SocketAddr>> {
+async fn lookup(host: String) -> io::Result<Vec<SocketAddr>> {
+    static WORKER: std::sync::OnceLock<Arc<crate::blocking::Pool>> = std::sync::OnceLock::new();
+
     let (name, port) = host
         .rsplit_once(':')
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid socket address"))?;
     let port = port
         .parse::<u16>()
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid port value"))?;
-    crate::dns::resolve(name, port)
+    let worker = WORKER.get_or_init(|| {
+        Arc::new(crate::blocking::Pool::new(
+            1,
+            crate::blocking::KEEP_ALIVE,
+            Some(LOOKUP_THREAD.to_owned()),
+        ))
+    });
+    let request = crate::dns::System::request();
+    let system = crate::blocking::spawn(None, worker, move || crate::dns::System::load(request))
+        .await
+        .map_err(|_| io::Error::other("the lookup worker failed"))?;
+    crate::dns::resolve(&system, name, port).await
 }
 
 #[cfg(not(target_os = "linux"))]
-fn lookup(host: &str) -> io::Result<Vec<SocketAddr>> {
-    std::net::ToSocketAddrs::to_socket_addrs(host).map(Iterator::collect)
+async fn lookup(host: String) -> io::Result<Vec<SocketAddr>> {
+    on_thread(LOOKUP_THREAD, move || {
+        std::net::ToSocketAddrs::to_socket_addrs(&host).map(Iterator::collect)
+    })
+    .await
 }
 
 pub async fn lookup_host(host: impl ToSocketAddrs) -> io::Result<impl Iterator<Item = SocketAddr>> {
@@ -582,7 +601,7 @@ impl TcpStream {
     }
 
     #[cfg(unix)]
-    async fn connect_one(address: SocketAddr) -> io::Result<Self> {
+    pub(crate) async fn connect_one(address: SocketAddr) -> io::Result<Self> {
         use nanocode_sys::unix::poll as sys;
         let (socket, waiting) = match sys::connect_nonblocking(&address)? {
             sys::Connecting::Connected(socket) => (socket, false),
@@ -606,7 +625,7 @@ impl TcpStream {
     }
 
     #[cfg(windows)]
-    async fn connect_one(address: SocketAddr) -> io::Result<Self> {
+    pub(crate) async fn connect_one(address: SocketAddr) -> io::Result<Self> {
         let stream = on_thread(CONNECT_THREAD, move || {
             std::net::TcpStream::connect(address)
         })

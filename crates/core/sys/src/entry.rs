@@ -45,6 +45,7 @@ pub fn prepare(count: libc::c_int, arguments: *const *const libc::c_char) {
         }
     }
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+    unsafe { libc::mallopt(libc::M_ARENA_MAX, 1) };
 }
 
 pub fn exit(code: ExitCode) -> ! {
