@@ -4,6 +4,7 @@ use nanocode_sync::Atom;
 use serde_json::{Map, Value};
 use std::time::Duration;
 
+const LAST_REMINDER: &str = " Before the time is up, delete files your own test runs wrote where the task's program or its checks write output or wait for it, such as a file in /tmp, and stop processes you started.";
 const REMINDER_PERCENTS: [u128; 3] = [50, 75, 90];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,6 +44,14 @@ impl Deadline {
             .iter()
             .filter(|percent| elapsed * 100 >= limit * **percent)
             .count()
+    }
+
+    fn remain(self, remaining: Duration) -> String {
+        format!(
+            "{} of this task's {} remain.",
+            spoken(remaining),
+            spoken(self.limit)
+        )
     }
 
     pub(crate) fn cap(self, name: &str, input: &Value) -> Cap {
@@ -143,12 +152,20 @@ impl Reminders {
             was
         });
         (passed > announced).then(|| {
+            let last = if passed == REMINDER_PERCENTS.len() {
+                LAST_REMINDER
+            } else {
+                ""
+            };
             format!(
-                "Time limit: {} of this task's {} remain. When the time is up the task stops, and only what is on disk then counts. Make sure every output the task asks for exists in its final location now, before you spend time improving it. Do not start a command or a wait that cannot finish in the time that remains.",
-                spoken(remaining),
-                spoken(self.deadline.limit)
+                "Time limit: {} When the time is up the task stops, and only what is on disk then counts. Make sure every output the task asks for exists in its final location now, before you spend time improving it. Do not start a command or a wait that cannot finish in the time that remains.{last}",
+                self.deadline.remain(remaining)
             )
         })
+    }
+
+    pub(crate) fn remain(&self) -> String {
+        self.deadline.remain(self.deadline.remaining())
     }
 }
 

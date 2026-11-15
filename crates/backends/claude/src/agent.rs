@@ -8808,7 +8808,10 @@ impl State {
                     .is_some_and(crate::deadline::Reminders::last_passed)
             {
                 cursor.finish_checked = true;
-                pending.push(Message::text(Role::User, crate::finish_check::NOTICE).into());
+                pending.push(Message::text(
+                        Role::User,
+                        crate::finish_check::notice(self.deadline.as_ref()),
+                    ).into());
                 conversation.messages = pending.clone();
                 cursor.output_continuations = 0;
                 cursor.index = index + 1;
