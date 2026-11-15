@@ -632,6 +632,20 @@ impl CodeModeHost for RemoteCodeModeHost {
     fn describe(&self) -> Option<HandDescription> {
         self.description.clone()
     }
+    fn working_directory(&self, _session_id: &str) -> Option<String> {
+        self.description.as_ref()?.workspace.clone()
+    }
+    fn shell(&self, _session_id: &str) -> Option<String> {
+        self.description
+            .as_ref()?
+            .environment
+            .as_ref()?
+            .shell
+            .clone()
+    }
+    fn environment(&self, _session_id: &str) -> Option<HandEnvironment> {
+        self.description.as_ref()?.environment.clone()
+    }
     fn runs_cells(&self) -> bool {
         !self
             .description
