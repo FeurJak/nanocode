@@ -22,9 +22,9 @@ pub use branch::{BranchTurn, CheckpointBranch};
 pub use catalog::{BranchBoundary, InitialSettings, SessionRecord};
 pub use catalog::{
     BranchCursor, BranchExport, BranchExportMode, BranchImport, BranchPage, BranchPoint, CancelTo,
-    CancelledPending, IntoSessionStore, LIST_LIMIT, Resumable, SessionPage, SessionQuery,
-    SessionBrief, SessionReader, SessionStore, SessionSummary, StoredSession, StoredTurn, TranscriptItem,
-    TurnStatus,
+    CancelledPending, IntoSessionStore, LIST_LIMIT, Resumable, ResumableSession, SessionBrief,
+    SessionPage, SessionQuery, SessionReader, SessionStore, SessionSummary, StoredSession,
+    StoredTurn, TranscriptItem, TurnStatus,
 };
 pub use child_journal::{JournalClaim, JournalSeed};
 pub use format::{AdmittedTurn, CheckpointFormat, FormatFuture, Hydrated};

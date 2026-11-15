@@ -987,8 +987,25 @@ impl AgentRuntime {
             Opened::Live(agent) => return Ok(attached(agent)),
             Opened::Vacant(opening) => opening,
         };
-        let stored = configured.load(session_id).await.map_err(catalog_error)?;
-        self.open_stored(configured, &stored, Some(opening)).await
+        let resumable = configured
+            .load_resumable(session_id)
+            .await
+            .map_err(catalog_error)?;
+        let thinking = resumable.checkpoint_thinking().map_err(catalog_error)?;
+        let durable_state = configured
+            .prepare_resume_resumable(&resumable)
+            .await
+            .map_err(catalog_error)?;
+        self.open_prepared(
+            Prepared {
+                durable_state,
+                pending: &resumable.pending,
+                record: &resumable.record,
+                thinking,
+            },
+            Some(opening),
+        )
+        .await
     }
 
     pub async fn open_loaded(
@@ -1020,28 +1037,51 @@ impl AgentRuntime {
         stored: &crate::durability::StoredSession,
         opening: Option<SessionOpening>,
     ) -> AgentResult {
-        let model = stored.summary.record.model.clone();
-        let thinking = stored
-            .checkpoint_thinking()
-            .map_err(catalog_error)?
-            .unwrap_or_else(|| {
-                stored
-                    .summary
-                    .record
-                    .initial
-                    .map_or_else(|| model.default_thinking(), |initial| initial.thinking)
-            });
-        self.inner.recipe(model.family())?;
-        let inherited = stored
-            .turns
-            .iter()
-            .all(|turn| turn.status != crate::durability::TurnStatus::Pending)
-            .then(|| stored.summary.record.inherited_transcript.clone())
-            .filter(|transcript| !transcript.is_empty());
+        let thinking = stored.checkpoint_thinking().map_err(catalog_error)?;
         let durable_state = configured
             .prepare_resume_loaded(stored)
             .await
             .map_err(catalog_error)?;
+        let pending: Vec<_> = stored
+            .turns
+            .iter()
+            .filter(|turn| turn.status == crate::durability::TurnStatus::Pending)
+            .cloned()
+            .collect();
+        self.open_prepared(
+            Prepared {
+                durable_state,
+                pending: &pending,
+                record: &stored.summary.record,
+                thinking,
+            },
+            opening,
+        )
+        .await
+    }
+
+    async fn open_prepared(
+        &self,
+        prepared: Prepared<'_>,
+        opening: Option<SessionOpening>,
+    ) -> AgentResult {
+        let Prepared {
+            durable_state,
+            pending,
+            record,
+            thinking,
+        } = prepared;
+        let model = record.model.clone();
+        let thinking = thinking.unwrap_or_else(|| {
+            record
+                .initial
+                .map_or_else(|| model.default_thinking(), |initial| initial.thinking)
+        });
+        self.inner.recipe(model.family())?;
+        let inherited = pending
+            .is_empty()
+            .then(|| record.inherited_transcript.clone())
+            .filter(|transcript| !transcript.is_empty());
         let _preload = CheckpointPreload(durable_state.clone());
         let _journal = match &self.inner.subagents {
             Some(control) => JournalReservation::new(control.registry(), &durable_state)
@@ -1051,7 +1091,7 @@ impl AgentRuntime {
         let mut options = SpawnOptions::new()
             .harness_model(model.clone())
             .thinking(thinking);
-        options.provider.clone_from(&stored.summary.record.provider);
+        options.provider.clone_from(&record.provider);
         let spec = AgentSpec {
             parent: None,
             options,
@@ -1069,10 +1109,8 @@ impl AgentRuntime {
             None => self.inner.recipe(spec.model.family())?(spec).await?,
         };
         let agent = agent.with_interrupted_turns(
-            stored
-                .turns
+            pending
                 .iter()
-                .filter(|turn| turn.status == crate::durability::TurnStatus::Pending)
                 .map(|turn| (turn.id.clone(), turn.input.clone()))
                 .collect(),
         );
@@ -1320,6 +1358,13 @@ impl<B: crate::BackendKind> SpawnBuilder<'_, B> {
 }
 
 struct CheckpointPreload(crate::durability::DurableSession);
+
+struct Prepared<'a> {
+    durable_state: crate::durability::DurableSession,
+    pending: &'a [crate::durability::StoredTurn],
+    record: &'a crate::durability::SessionRecord,
+    thinking: Option<nanocode_agent_core::Thinking>,
+}
 
 struct JournalReservation {
     registry: Arc<nanocode_subagents::Registry>,

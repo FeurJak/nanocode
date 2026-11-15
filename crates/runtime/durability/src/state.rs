@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::{EncodedPayload, Result, SessionRecord, StateReader, StateStore, StoreRecord};
-use nanocode_durability_core::{DurableCheckpoint, JournalState};
+use nanocode_durability_core::{DurableCheckpoint, FirstReceipt, JournalState};
 
 pub use nanocode_durability_core::{
     IdentifiedSteerReceipt, OperationState, OperationStatus, Operations, SteerState, StepState,
@@ -104,13 +104,50 @@ impl DurableState {
         self.journal.seal_receipts()
     }
 
+    pub(crate) const fn receipts_loaded(&self) -> bool {
+        self.journal.receipts_loaded()
+    }
+
+    pub(crate) const fn receipts_indexed(&self) -> bool {
+        self.journal.receipts_indexed()
+    }
+
+    pub(crate) fn receipts_exclude(&self, operation_id: &str) -> bool {
+        self.journal.receipts_exclude(operation_id)
+    }
+
+    pub(crate) async fn first_input(
+        &self,
+        store: &mut dyn StateStore,
+        state_id: &str,
+    ) -> Result<Option<EncodedPayload>> {
+        let Some(mut page) = self.journal.first_receipt_page() else {
+            return Ok(self
+                .operations()
+                .first_accepted()
+                .map(|(_, operation)| operation.input.clone()));
+        };
+        loop {
+            let loaded = page.load(store, state_id).await?;
+            match JournalState::first_in_receipt_page(&loaded)? {
+                FirstReceipt::Page(child) => page = child,
+                FirstReceipt::Operation(_, operation) => return Ok(Some(operation.input)),
+            }
+        }
+    }
+
     pub(crate) async fn hydrate(
         &mut self,
         store: &mut dyn StateStore,
         state_id: &str,
         read: &mut HashSet<String>,
+        receipts: bool,
     ) -> Result<()> {
-        let mut pages = self.journal.receipt_pages();
+        let mut pages = if receipts {
+            self.journal.receipt_pages()
+        } else {
+            Vec::new()
+        };
         while !pages.is_empty() {
             let loaded = EncodedPayload::load_many_noting(&pages, store, state_id, read).await?;
             pages = self.journal.absorb_receipt_pages(loaded)?;

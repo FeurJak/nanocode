@@ -19,8 +19,8 @@ pub use sql::{
 };
 pub use staged::{StagedStore, StagedWrites};
 pub use state::{
-    DurableCheckpoint, IdentifiedSteerReceipt, JournalState, OperationState, OperationStatus,
-    Operations, RetainedCheckpoint, SteerState, StepState, StepStatus, Transition,
+    DurableCheckpoint, FirstReceipt, IdentifiedSteerReceipt, JournalState, OperationState,
+    OperationStatus, Operations, RetainedCheckpoint, SteerState, StepState, StepStatus, Transition,
 };
 pub use store::{
     BriefFilter, BriefState, Colocation, Committed, EventCursor, EventHit, EventHits, EventOrder, EventPage, EventQuery,

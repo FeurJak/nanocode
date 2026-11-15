@@ -36,7 +36,7 @@ pub(super) fn revised_summary<'a>(
     id: &'a str,
 ) -> FormatFuture<'a, Result<Option<(u64, Option<SessionSummary>)>>> {
     Box::pin(async move {
-        let Some(state) = this.peek(id).await? else {
+        let Some(state) = this.peek_head(id).await? else {
             return Ok(None);
         };
         let revision = state.revision();

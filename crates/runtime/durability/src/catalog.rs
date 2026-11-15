@@ -507,21 +507,50 @@ mod store {
         record_inferred: bool,
     }
 
+    pub struct ResumableSession {
+        pub checkpoint: Option<Value>,
+
+        pub pending: Vec<StoredTurn>,
+
+        pub record: SessionRecord,
+
+        formats: Formats,
+
+        loaded: Loaded,
+    }
+
+    impl ResumableSession {
+        pub fn checkpoint_thinking(&self) -> Result<Option<nanocode_agent_core::Thinking>> {
+            checkpoint_thinking(&self.formats, &self.record, self.checkpoint.as_ref())
+        }
+    }
+
+    fn checkpoint_thinking(
+        formats: &Formats,
+        record: &SessionRecord,
+        checkpoint: Option<&Value>,
+    ) -> Result<Option<nanocode_agent_core::Thinking>> {
+        let Some(checkpoint) = checkpoint else {
+            return Ok(None);
+        };
+        if is_portable(checkpoint) {
+            return Ok(Some(
+                session_checkpoint(formats, record, checkpoint)?.thinking(),
+            ));
+        }
+        formats
+            .family(record.family())?
+            .thinking(record, checkpoint)
+            .map(Some)
+    }
+
     impl StoredSession {
         pub fn checkpoint_thinking(&self) -> Result<Option<nanocode_agent_core::Thinking>> {
-            let Some(checkpoint) = &self.checkpoint else {
-                return Ok(None);
-            };
-            if is_portable(checkpoint) {
-                return Ok(self
-                    .session_checkpoint()?
-                    .map(|checkpoint| checkpoint.thinking()));
-            }
-            let record = &self.summary.record;
-            self.formats
-                .family(record.family())?
-                .thinking(record, checkpoint)
-                .map(Some)
+            checkpoint_thinking(
+                &self.formats,
+                &self.summary.record,
+                self.checkpoint.as_ref(),
+            )
         }
 
         pub fn session_checkpoint(&self) -> Result<Option<nanocode_agent_core::SessionCheckpoint>> {
@@ -855,6 +884,10 @@ mod store {
             loading::load(self, id).await
         }
 
+        pub async fn load_resumable(&self, id: &str) -> Result<ResumableSession> {
+            loading::load_resumable(self, id).await
+        }
+
         pub async fn turns(&self, id: &str) -> Result<Vec<StoredTurn>> {
             loading::turns(self, id).await
         }
@@ -931,6 +964,13 @@ mod store {
             stored: &StoredSession,
         ) -> Result<DurableSession> {
             opening::prepare_resume_loaded(self, stored).await
+        }
+
+        pub async fn prepare_resume_resumable(
+            &self,
+            resumable: &ResumableSession,
+        ) -> Result<DurableSession> {
+            opening::prepare_resume_resumable(self, resumable).await
         }
 
         async fn resume_record(
@@ -1198,7 +1238,7 @@ mod store {
                 return Ok(None);
             };
             state
-                .hydrate(&mut self.store.clone(), id, &mut HashSet::new())
+                .hydrate(&mut self.store.clone(), id, &mut HashSet::new(), true)
                 .await?;
             Ok(Some(state))
         }
@@ -1454,10 +1494,10 @@ mod store {
         }
 
         async fn first_prompt(&self, id: &str, state: &DurableState) -> Result<Option<String>> {
-            let Some((_, first)) = state.operations().first_accepted() else {
+            let Some(first) = state.first_input(&mut self.store.clone(), id).await? else {
                 return Ok(None);
             };
-            let input: Value = self.load_payload(id, &first.input).await?.decode()?;
+            let input: Value = self.load_payload(id, &first).await?.decode()?;
             Ok(prompt_text(&input))
         }
     }

@@ -40,6 +40,7 @@ impl<S: StateStore> CheckpointBranch<S> {
                 &mut store,
                 &source_id,
                 &mut std::collections::HashSet::new(),
+                true,
             )
             .await?;
         if !state.pending_operations().is_empty() {

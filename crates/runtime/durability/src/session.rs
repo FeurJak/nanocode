@@ -707,6 +707,21 @@ impl Driver {
             command.reject(error);
             return;
         }
+        if self.needs_receipts(&command)
+            && let Err(error) = self
+                .state
+                .hydrate(
+                    &mut *self.store,
+                    &self.state_id,
+                    &mut self.committed_records,
+                    true,
+                )
+                .await
+        {
+            self.poisoned = true;
+            command.reject(error);
+            return;
+        }
         match command {
             Command::LoadPayloads {
                 caller,
@@ -1323,6 +1338,54 @@ impl Driver {
         }
     }
 
+    fn needs_receipts(&self, command: &Command) -> bool {
+        if self.state.receipts_loaded() {
+            return false;
+        }
+        let operation_id = match command {
+            Command::Acquire { .. }
+            | Command::AcquireAgent { .. }
+            | Command::Append { .. }
+            | Command::CommitCheckpoint { .. }
+            | Command::CurrentOwner { .. }
+            | Command::Describe { .. }
+            | Command::LatestCheckpoint { .. }
+            | Command::LoadPayload { .. }
+            | Command::LoadPayloads { .. }
+            | Command::PendingTurn { .. }
+            | Command::Stage { .. } => return false,
+            Command::Admit { operation_id, .. }
+            | Command::AdmitAutomatic {
+                candidate_operation_id: operation_id,
+                ..
+            }
+            | Command::Advance { operation_id, .. }
+            | Command::AcceptSteer { operation_id, .. }
+            | Command::BeginAttempt { operation_id, .. }
+            | Command::BeginStep { operation_id, .. }
+            | Command::BindSteer { operation_id, .. }
+            | Command::Cancel { operation_id, .. }
+            | Command::CommitWrites { operation_id, .. }
+            | Command::Complete { operation_id, .. }
+            | Command::CompleteStep { operation_id, .. }
+            | Command::Continuation { operation_id, .. }
+            | Command::Fail { operation_id, .. }
+            | Command::FailAttempt { operation_id, .. }
+            | Command::RecoverFailure { operation_id, .. }
+            | Command::Release { operation_id, .. }
+            | Command::RetainedSteers { operation_id, .. }
+            | Command::UnfinishedOperation { operation_id, .. }
+            | Command::WithdrawSteer { operation_id, .. } => operation_id,
+            Command::Abandonable { .. }
+            | Command::DiscardUnused { .. }
+            | Command::IdentifiedSteerAccepted { .. }
+            | Command::PruneReceipts { .. }
+            | Command::State { .. }
+            | Command::SteerReceipt { .. } => return true,
+        };
+        self.state.operation(operation_id).is_none() && !self.state.receipts_exclude(operation_id)
+    }
+
     fn handle_release(&mut self, release: ReleaseSignal) {
         match release {
             ReleaseSignal::Agent(release) => {
@@ -1433,19 +1496,22 @@ impl Driver {
             }
         };
         self.committed_records.clear();
+        self.preview = None;
+        if let Some(format) = self.state_format {
+            state.write_format(format)?;
+        }
+        let receipts = !state.receipts_indexed() || self.terminal_receipt_limit.is_some();
         if let Err(error) = state
             .hydrate(
                 &mut *self.store,
                 &self.state_id,
                 &mut self.committed_records,
+                receipts,
             )
             .await
         {
             self.poisoned = true;
             return Err(error);
-        }
-        if let Some(format) = self.state_format {
-            state.write_format(format)?;
         }
         self.ownership = Ownership::Owned(acquired.owner);
         self.state = state;
@@ -2264,17 +2330,21 @@ impl Driver {
     }
 
     async fn preview(&mut self, state: &DurableState) -> Result<Option<String>> {
-        let Some((_, operation)) = state.operations().first_accepted() else {
+        if !state.receipts_loaded()
+            && let Some((_, preview)) = &self.preview
+        {
+            return Ok(preview.clone());
+        }
+        let Some(input) = state.first_input(&mut *self.store, &self.state_id).await? else {
             return Ok(None);
         };
-        let key = operation.input.key();
+        let key = input.key();
         if let Some((cached, preview)) = &self.preview
             && cached == key
         {
             return Ok(preview.clone());
         }
-        let input: serde_json::Value = operation
-            .input
+        let input: serde_json::Value = input
             .load(&mut *self.store, &self.state_id)
             .await?
             .decode()?;

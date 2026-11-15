@@ -69,6 +69,53 @@ pub(super) fn load<'a>(
 }
 
 #[inline(never)]
+pub(super) fn load_resumable<'a>(
+    this: &'a SessionStore,
+    id: &'a str,
+) -> FormatFuture<'a, Result<ResumableSession>> {
+    Box::pin(async move {
+        let state = this.require_head(id).await?;
+        let (checkpoint, checkpoint_payload, hydrated) =
+            match this.loaded_checkpoint(id, &state).await? {
+                Some((checkpoint, payload, records, hydrated)) => (
+                    Some(checkpoint),
+                    Some((payload, Arc::new(records))),
+                    hydrated,
+                ),
+                None => (None, None, None),
+            };
+        let record = match (state.session(), &checkpoint) {
+            (Some(record), _) => record.clone(),
+            (None, Some(checkpoint)) => this.infer_record(id, checkpoint)?,
+            (None, None) => {
+                return Err(Error::SessionNotFound {
+                    session_id: id.to_owned(),
+                });
+            }
+        };
+        let pending = this
+            .stored_turns(id, state.pending_operations(), true)
+            .await?;
+        Ok(ResumableSession {
+            checkpoint,
+            pending,
+            record,
+            formats: this.formats.clone(),
+            loaded: Loaded {
+                store: this.store.downgrade(),
+                state_id: id.to_owned(),
+                checkpoint_key: state
+                    .latest_checkpoint()
+                    .map(|payload| payload.key().to_owned()),
+                checkpoint_payload,
+                hydrated,
+                record_inferred: state.session().is_none(),
+            },
+        })
+    })
+}
+
+#[inline(never)]
 pub(super) fn turns<'a>(
     this: &'a SessionStore,
     id: &'a str,
@@ -135,7 +182,7 @@ pub(super) fn turn<'a>(
         let mut state = this.require_head(id).await?;
         if state.operation(request_id).is_none() {
             state
-                .hydrate(&mut this.store.clone(), id, &mut HashSet::new())
+                .hydrate(&mut this.store.clone(), id, &mut HashSet::new(), true)
                 .await?;
         }
         let Some(operation) = state.operation(request_id) else {

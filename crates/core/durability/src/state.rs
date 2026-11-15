@@ -3,6 +3,8 @@ use std::{
     sync::Arc,
 };
 
+use nanocode_sys::base64::STANDARD;
+
 use crate::{EncodedPayload, Error, Result, StoreRecord};
 
 const STATE_FORMAT: u8 = 4;
@@ -17,9 +19,15 @@ const RECEIPT_STATE_FORMAT: u8 = 8;
 
 const STEER_STATE_FORMAT: u8 = 9;
 
+const INDEX_STATE_FORMAT: u8 = 10;
+
 const RECEIPT_PAGE: usize = 16;
 
 const RECEIPT_LEAF: usize = 1;
+
+const INDEX_BITS_PER_ID: u64 = 16;
+
+const INDEX_PROBES: u64 = 11;
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -444,11 +452,109 @@ struct SealedReceipts {
     count: u64,
     through: u64,
     levels: Vec<Vec<EncodedPayload>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    index: Option<SealedIndex>,
 }
 
 impl SealedReceipts {
     const fn is_empty(&self) -> bool {
         self.count == 0
+    }
+
+    fn excludes(&self, operation_id: &str) -> bool {
+        self.index
+            .as_ref()
+            .is_some_and(|index| !index.may_hold(operation_id))
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct SealedIndex {
+    filters: Vec<Vec<u8>>,
+}
+
+impl SealedIndex {
+    const fn capacity(filter: usize) -> u64 {
+        (RECEIPT_PAGE as u64) << filter
+    }
+
+    fn filter_bytes(filter: usize) -> usize {
+        usize::try_from(Self::capacity(filter) * INDEX_BITS_PER_ID / 8)
+            .expect("an index filter fits in memory")
+    }
+
+    const fn filter_of(position: u64) -> usize {
+        (position / RECEIPT_PAGE as u64 + 1).ilog2() as usize
+    }
+
+    fn filters_for(count: u64) -> usize {
+        count
+            .checked_sub(1)
+            .map_or(0, |last| Self::filter_of(last) + 1)
+    }
+
+    fn matches(&self, count: u64) -> bool {
+        self.filters.len() == Self::filters_for(count)
+            && self
+                .filters
+                .iter()
+                .enumerate()
+                .all(|(filter, bits)| bits.len() == Self::filter_bytes(filter))
+    }
+
+    fn probes(operation_id: &str) -> impl Iterator<Item = u64> {
+        let hash = nanocode_digest::blake3(operation_id.as_bytes());
+        let (start, rest) = hash.as_bytes().split_at(8);
+        let start = u64::from_le_bytes(start.try_into().expect("a hash holds 8 bytes"));
+        let step = u64::from_le_bytes(rest[..8].try_into().expect("a hash holds 16 bytes")) | 1;
+        (0..INDEX_PROBES).map(move |probe| start.wrapping_add(probe.wrapping_mul(step)))
+    }
+
+    fn may_hold(&self, operation_id: &str) -> bool {
+        self.filters.iter().any(|bits| {
+            let mask = bits.len() as u64 * 8 - 1;
+            Self::probes(operation_id).all(|probe| {
+                let bit = probe & mask;
+                bits[(bit / 8) as usize] & (1 << (bit % 8)) != 0
+            })
+        })
+    }
+
+    fn insert(&mut self, operation_id: &str, position: u64) {
+        let filter = Self::filter_of(position);
+        while self.filters.len() <= filter {
+            self.filters
+                .push(vec![0; Self::filter_bytes(self.filters.len())]);
+        }
+        let bits = &mut self.filters[filter];
+        let mask = bits.len() as u64 * 8 - 1;
+        for probe in Self::probes(operation_id) {
+            let bit = probe & mask;
+            bits[(bit / 8) as usize] |= 1 << (bit % 8);
+        }
+    }
+}
+
+impl serde::Serialize for SealedIndex {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.filters.iter().map(|bits| STANDARD.encode(bits)))
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SealedIndex {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let encoded = Vec::<String>::deserialize(deserializer)?;
+        let filters = encoded
+            .iter()
+            .map(|text| STANDARD.decode(text))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self { filters })
     }
 }
 
@@ -561,6 +667,11 @@ impl<'a> Operations<'a> {
     }
 }
 
+pub enum FirstReceipt {
+    Operation(String, OperationState),
+    Page(EncodedPayload),
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct JournalState {
     revision: u64,
@@ -569,9 +680,11 @@ pub struct JournalState {
     latest_checkpoint: Option<(u64, EncodedPayload)>,
     sealed: SealedReceipts,
     unloaded: u64,
+    resident: u64,
     staged: Vec<StoreRecord>,
     sealing: Vec<OperationState>,
     inline_steers: bool,
+    unindexed: bool,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -644,15 +757,19 @@ struct RetainedCheckpointRef<'a, R> {
 }
 
 impl JournalState {
-    pub const NEWEST_FORMAT: u8 = STEER_STATE_FORMAT;
+    pub const NEWEST_FORMAT: u8 = INDEX_STATE_FORMAT;
 
     pub fn write_format(&mut self, format: u8) -> Result<()> {
-        if !(RECEIPT_STATE_FORMAT..=STEER_STATE_FORMAT).contains(&format) {
+        if !(RECEIPT_STATE_FORMAT..=INDEX_STATE_FORMAT).contains(&format) {
             return Err(Error::InvalidState(format!(
-                "state format {format} is not one this build writes ({RECEIPT_STATE_FORMAT} to {STEER_STATE_FORMAT})"
+                "state format {format} is not one this build writes ({RECEIPT_STATE_FORMAT} to {INDEX_STATE_FORMAT})"
             )));
         }
         self.inline_steers = format < STEER_STATE_FORMAT;
+        self.unindexed = format < INDEX_STATE_FORMAT;
+        if self.unindexed {
+            self.sealed.index = None;
+        }
         Ok(())
     }
 
@@ -702,6 +819,46 @@ impl JournalState {
     }
 
     #[must_use]
+    pub const fn receipts_indexed(&self) -> bool {
+        self.unloaded == 0 || self.sealed.index.is_some()
+    }
+
+    #[must_use]
+    pub fn receipts_exclude(&self, operation_id: &str) -> bool {
+        self.unloaded == 0 || self.sealed.excludes(operation_id)
+    }
+
+    #[must_use]
+    pub fn first_receipt_page(&self) -> Option<EncodedPayload> {
+        if self.unloaded == 0 {
+            return None;
+        }
+        self.sealed
+            .levels
+            .iter()
+            .rev()
+            .find_map(|level| level.first())
+            .cloned()
+    }
+
+    pub fn first_in_receipt_page(page: &EncodedPayload) -> Result<FirstReceipt> {
+        let ReceiptPage { operations, pages } = page.decode()?;
+        if let Some(child) = pages.into_iter().next() {
+            return Ok(FirstReceipt::Page(child));
+        }
+        operations
+            .into_iter()
+            .min_by_key(|(_, operation)| operation.accepted_order)
+            .map(|(operation_id, operation)| FirstReceipt::Operation(operation_id, operation))
+            .ok_or_else(|| {
+                Error::InvalidState(format!(
+                    "sealed receipt page {} must hold either receipts or pages",
+                    page.key()
+                ))
+            })
+    }
+
+    #[must_use]
     pub fn has_operations(&self) -> bool {
         !self.operations.is_empty() || !self.sealed.is_empty()
     }
@@ -736,6 +893,10 @@ impl JournalState {
                         page.key()
                     )));
                 }
+                if self.resident != 0 && self.archive.operations.contains_key(&operation_id) {
+                    self.resident -= 1;
+                    continue;
+                }
                 if self.unloaded == 0 || self.operations().get(&operation_id).is_some() {
                     return Err(Error::InvalidState(format!(
                         "sealed operation `{operation_id}` appears more than once"
@@ -745,10 +906,10 @@ impl JournalState {
                 self.unloaded -= 1;
             }
         }
-        if children.is_empty() && self.unloaded != 0 {
+        if children.is_empty() && self.unloaded + self.resident != 0 {
             return Err(Error::InvalidState(format!(
                 "sealed receipt pages hold {} fewer operations than their head records",
-                self.unloaded
+                self.unloaded + self.resident
             )));
         }
         if children.is_empty() {
@@ -767,10 +928,17 @@ impl JournalState {
     }
 
     pub fn seal_receipts(&mut self) -> Result<()> {
-        if self.unloaded != 0 {
+        if !self.receipts_indexed() {
             return Err(Error::InvalidState(
                 "receipts cannot be sealed before the sealed pages are loaded".to_owned(),
             ));
+        }
+        if self.sealed.index.is_none() && !self.unindexed {
+            let mut index = SealedIndex::default();
+            for (position, operation_id) in (0..).zip(self.archive.operations.keys()) {
+                index.insert(operation_id, position);
+            }
+            self.sealed.index = Some(index);
         }
         let mut head = self
             .operations
@@ -803,9 +971,17 @@ impl JournalState {
             if let Some(operation) = chunk.last().and_then(|id| self.operations.get(id)) {
                 self.sealed.through = operation.accepted_order;
             }
+            if let Some(index) = &mut self.sealed.index {
+                for (position, operation_id) in (self.sealed.count..).zip(chunk) {
+                    index.insert(operation_id, position);
+                }
+            }
             self.sealed.count += chunk.len() as u64;
         }
         if !sealed.is_empty() {
+            if self.unloaded != 0 {
+                self.resident += sealed.len() as u64;
+            }
             let archive = Arc::make_mut(&mut self.archive);
             for operation_id in sealed {
                 if let Some(operation) = self.operations.remove(&operation_id) {
@@ -934,7 +1110,9 @@ impl JournalState {
     pub fn checkpoint_payload<R: serde::Serialize>(&self, session: Option<&R>) -> Result<String> {
         serde_json::to_string(&RetainedCheckpointRef {
             nanocode_durable_state: DurableCheckpointRef {
-                format: if self.seals_steers() {
+                format: if self.sealed.index.is_some() && !self.sealed.is_empty() {
+                    INDEX_STATE_FORMAT
+                } else if self.seals_steers() {
                     STEER_STATE_FORMAT
                 } else if self.inlines_receipts() {
                     RECEIPT_STATE_FORMAT
@@ -1012,7 +1190,8 @@ impl JournalState {
             || checkpoint.format == INLINE_STATE_FORMAT
             || checkpoint.format == HEAD_STATE_FORMAT
             || checkpoint.format == RECEIPT_STATE_FORMAT
-            || checkpoint.format == STEER_STATE_FORMAT)
+            || checkpoint.format == STEER_STATE_FORMAT
+            || checkpoint.format == INDEX_STATE_FORMAT)
         {
             return Err(Error::InvalidState(format!(
                 "unsupported state format {}",
@@ -1022,6 +1201,12 @@ impl JournalState {
         if sealed.through > revision
             || sealed.count > sealed.through
             || sealed.is_empty() != sealed.levels.iter().all(Vec::is_empty)
+            || (checkpoint.format == INDEX_STATE_FORMAT && !sealed.is_empty())
+                != sealed.index.is_some()
+            || sealed
+                .index
+                .as_ref()
+                .is_some_and(|index| !index.matches(sealed.count))
         {
             return Err(Error::InvalidState(
                 "sealed receipts do not match their head".to_owned(),
@@ -1059,10 +1244,12 @@ impl JournalState {
             archive: Arc::default(),
             latest_checkpoint,
             unloaded: sealed.count,
+            resident: 0,
             sealed,
             staged: Vec::new(),
             sealing: Vec::new(),
             inline_steers: false,
+            unindexed: false,
         };
         for (operation_id, operation) in &state.operations {
             if matches!(
@@ -1160,7 +1347,7 @@ impl JournalState {
                 }
             }
             Transition::OperationAccepted { operation_id, .. } => {
-                if self.unloaded != 0 {
+                if !self.receipts_exclude(operation_id) {
                     return Err(Error::InvalidState(format!(
                         "operation `{operation_id}` was accepted before the sealed receipts were loaded"
                     )));

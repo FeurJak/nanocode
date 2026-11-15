@@ -78,20 +78,47 @@ pub(super) fn prepare_resume_loaded<'a>(
     this: &'a SessionStore,
     stored: &'a StoredSession,
 ) -> FormatFuture<'a, Result<DurableSession>> {
+    prepare_loaded(
+        this,
+        &stored.summary.record,
+        stored.checkpoint.as_ref(),
+        &stored.loaded,
+    )
+}
+
+#[inline(never)]
+pub(super) fn prepare_resume_resumable<'a>(
+    this: &'a SessionStore,
+    resumable: &'a ResumableSession,
+) -> FormatFuture<'a, Result<DurableSession>> {
+    prepare_loaded(
+        this,
+        &resumable.record,
+        resumable.checkpoint.as_ref(),
+        &resumable.loaded,
+    )
+}
+
+fn prepare_loaded<'a>(
+    this: &'a SessionStore,
+    record: &'a SessionRecord,
+    checkpoint: Option<&'a Value>,
+    loaded: &'a Loaded,
+) -> FormatFuture<'a, Result<DurableSession>> {
     Box::pin(async move {
-        if !stored.loaded.store.is(&this.store) {
+        if !loaded.store.is(&this.store) {
             return Err(Error::InvalidState(
                 "the stored session was loaded from a different session store".to_owned(),
             ));
         }
-        let id = &stored.summary.record.session_id;
-        if *id != stored.loaded.state_id {
+        let id = &record.session_id;
+        if *id != loaded.state_id {
             return Err(Error::InvalidState(
                 "the stored session identity changed after loading".to_owned(),
             ));
         }
-        let state = if stored.loaded.record_inferred {
-            let inferred = match (&stored.loaded.checkpoint_key, &stored.checkpoint) {
+        let state = if loaded.record_inferred {
+            let inferred = match (&loaded.checkpoint_key, checkpoint) {
                 (Some(key), Some(checkpoint)) => Some((key.as_str(), checkpoint)),
                 _ => None,
             };
@@ -100,12 +127,12 @@ pub(super) fn prepare_resume_loaded<'a>(
             DurableSession::prepare_shared_described(this.store.clone(), id.clone(), None, None)
                 .await?
         };
-        if let (Some(key), Some(checkpoint)) = (&stored.loaded.checkpoint_key, &stored.checkpoint) {
+        if let (Some(key), Some(checkpoint)) = (&loaded.checkpoint_key, checkpoint) {
             state.preload_checkpoint(
                 key.clone(),
                 checkpoint.clone(),
-                stored.loaded.checkpoint_payload.clone(),
-                stored.loaded.hydrated.clone(),
+                loaded.checkpoint_payload.clone(),
+                loaded.hydrated.clone(),
             );
         }
         Ok(state)
