@@ -226,6 +226,31 @@ impl RemoteChildren {
         options: SpawnOptions,
         host_context: Option<Arc<str>>,
     ) -> Result<(Agent, AgentEvents)> {
+        self.open_child(parent, options, host_context, false).await
+    }
+
+    pub(crate) async fn respawn(
+        self: Arc<Self>,
+        parent: AgentHandle,
+        options: SpawnOptions,
+        host_context: Option<Arc<str>>,
+    ) -> Result<(Agent, AgentEvents)> {
+        if options.session_id.is_none() {
+            return Err(NanocodeError::InvalidRequest(
+                "a remote child keeps its session only under the session id it was spawned with"
+                    .into(),
+            ));
+        }
+        self.open_child(parent, options, host_context, true).await
+    }
+
+    async fn open_child(
+        self: Arc<Self>,
+        parent: AgentHandle,
+        options: SpawnOptions,
+        host_context: Option<Arc<str>>,
+        restored: bool,
+    ) -> Result<(Agent, AgentEvents)> {
         let (model, thinking) = parent.settings().await?;
         let options = options.resolve(model, thinking)?;
         let model = options.selected_harness_model().ok_or_else(|| {
@@ -249,7 +274,7 @@ impl RemoteChildren {
             host_context,
             lineage,
             model,
-            restored: false,
+            restored,
             session_id,
             thinking,
             tools: Vec::new(),

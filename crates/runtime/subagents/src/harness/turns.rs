@@ -71,7 +71,7 @@ pub(super) fn accept_delivery<'a>(
             let delegation = this.begin_delegation(command.message.id).await;
             let from_peers = from_peers(std::slice::from_ref(&command.message));
             match this
-                .start_turn(command.message.prompt(), capacity, from_peers)
+                .start_turn(command.message.prompt(), capacity, from_peers, false)
                 .await
             {
                 Ok(Started::Prompt) => {
@@ -113,6 +113,7 @@ pub(super) fn start_turn<'a>(
     prompt: String,
     capacity: TurnCapacity,
     from_peers: bool,
+    initial: bool,
 ) -> RegistryFuture<'a, std::io::Result<Started>> {
     Box::pin(async move {
         if this.active.is_some() {
@@ -142,7 +143,10 @@ pub(super) fn start_turn<'a>(
             None => None,
         };
         let recovering = pending.is_some();
-        let recovery_request_id = pending.as_ref().map(|(id, _)| id.clone());
+        let recovery_request_id = pending
+            .as_ref()
+            .filter(|_| !initial)
+            .map(|(id, _)| id.clone());
         if !recovering {
             let (model, thinking, reasoning_mode) =
                 agent.settings().await.map_err(std::io::Error::other)?;

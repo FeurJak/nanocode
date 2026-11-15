@@ -362,6 +362,15 @@ pub trait AgentFactory: Send + Sync + 'static {
     ) -> BackendFuture<Result<(Agent, AgentEvents)>> {
         unsupported("restore")
     }
+
+    fn respawn(
+        &self,
+        _parent: AgentHandle,
+        _options: SpawnOptions,
+        _host_context: Option<Arc<str>>,
+    ) -> Option<BackendFuture<Result<(Agent, AgentEvents)>>> {
+        None
+    }
 }
 
 pub struct CrossHarnessOnly;

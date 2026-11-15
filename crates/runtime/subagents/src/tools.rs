@@ -1034,9 +1034,30 @@ fn build_unstarted<'a>(
         )?
         .session_id(&child.descriptor.session_id);
         let schema = OutputContract::compile(&child.output_schema)?.into_schema();
-        let (agent, events) = parent
-            .spawn_with_host_context(options, child.host_context.clone())
-            .await?;
+        let respawned = if child.unstarted.restored {
+            parent
+                .respawn_with_host_context(options.clone(), child.host_context.clone())
+                .await
+        } else {
+            None
+        };
+        let (agent, events) = match respawned {
+            Some(respawned) => respawned?,
+            None if child.unstarted.restored => {
+                let issued = registry.reissue_unstarted(root_session_id, id).await?;
+                parent
+                    .spawn_with_host_context(
+                        options.session_id(&issued),
+                        child.host_context.clone(),
+                    )
+                    .await?
+            }
+            None => {
+                parent
+                    .spawn_with_host_context(options, child.host_context.clone())
+                    .await?
+            }
+        };
         let (model, thinking, reasoning_mode) =
             match child_settings(&agent, Some((registry.as_ref(), &policy_parent))).await {
                 Ok(settings) => settings,

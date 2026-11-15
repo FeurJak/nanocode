@@ -5449,7 +5449,43 @@ impl Registry {
         id: AgentId,
     ) -> Option<UnstartedChild> {
         let root = root_session_id.to_owned();
-        let (child, reissued) = self
+        self.state
+            .call(move |state| {
+                let scope = state.scopes.get(&root)?;
+                let session = scope.sessions.get(&id)?;
+                let StoredRuntime::Unstarted(unstarted) = &session.stored_runtime else {
+                    return None;
+                };
+                if !matches!(session.status, AgentStatus::Pending) || session.harness().is_some() {
+                    return None;
+                }
+                let parent_session = session
+                    .descriptor
+                    .parent
+                    .and_then(|parent| scope.sessions.get(&parent))
+                    .map_or_else(
+                        || root.clone(),
+                        |parent| parent.descriptor.session_id.clone(),
+                    );
+                Some(UnstartedChild {
+                    lock: session.residency_lock.clone(),
+                    descriptor: session.descriptor.clone(),
+                    parent_session,
+                    host_context: session.host_context.clone(),
+                    output_schema: session.output_schema.clone(),
+                    unstarted: Arc::clone(unstarted),
+                })
+            })
+            .await
+    }
+
+    pub(super) async fn reissue_unstarted(
+        &self,
+        root_session_id: &str,
+        id: AgentId,
+    ) -> std::io::Result<String> {
+        let root = root_session_id.to_owned();
+        let (previous, issued) = self
             .state
             .call(move |state| {
                 let scope = state.scopes.get_mut(&root)?;
@@ -5460,50 +5496,26 @@ impl Registry {
                 if !matches!(session.status, AgentStatus::Pending) || session.harness().is_some() {
                     return None;
                 }
-                let unstarted = Arc::clone(unstarted);
-                let parent_session = session
-                    .descriptor
-                    .parent
-                    .and_then(|parent| scope.sessions.get(&parent))
-                    .map_or_else(
-                        || root.clone(),
-                        |parent| parent.descriptor.session_id.clone(),
-                    );
-                let reissued = if unstarted.restored {
-                    let previous = session.descriptor.session_id.clone();
-                    let issued = nanocode_platform::uuid_v7().to_string();
-                    scope.topology.rebind(id, &previous, issued.clone());
-                    let session = scope.sessions.get_mut(&id)?;
-                    session.descriptor.session_id.clone_from(&issued);
-                    session.stored_runtime =
-                        StoredRuntime::Unstarted(Arc::new(unstarted.reissued()));
-                    state.root_by_session.remove(&previous);
-                    state.root_by_session.insert(issued.clone(), root.clone());
-                    Some((previous, issued))
-                } else {
-                    None
-                };
-                let session = state.scopes.get(&root)?.sessions.get(&id)?;
-                Some((
-                    UnstartedChild {
-                        lock: session.residency_lock.clone(),
-                        descriptor: session.descriptor.clone(),
-                        parent_session,
-                        host_context: session.host_context.clone(),
-                        output_schema: session.output_schema.clone(),
-                        unstarted,
-                    },
-                    reissued,
-                ))
+                let reissued = Arc::new(unstarted.reissued());
+                let previous = session.descriptor.session_id.clone();
+                let issued = nanocode_platform::uuid_v7().to_string();
+                scope.topology.rebind(id, &previous, issued.clone());
+                let session = scope.sessions.get_mut(&id)?;
+                session.descriptor.session_id.clone_from(&issued);
+                session.stored_runtime = StoredRuntime::Unstarted(reissued);
+                state.root_by_session.remove(&previous);
+                state.root_by_session.insert(issued.clone(), root.clone());
+                Some((previous, issued))
             })
-            .await?;
-        if let Some((previous, issued)) = reissued {
-            self.roots.update(|roots| {
-                roots.remove(&previous);
-                roots.insert(issued.clone(), root_session_id.to_owned());
-            });
-        }
-        Some(child)
+            .await
+            .ok_or_else(|| {
+                std::io::Error::other(format!("subagent {id} was stopped before it started"))
+            })?;
+        self.roots.update(|roots| {
+            roots.remove(&previous);
+            roots.insert(issued.clone(), root_session_id.to_owned());
+        });
+        Ok(issued)
     }
 
     #[allow(clippy::too_many_arguments)]

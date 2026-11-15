@@ -557,7 +557,7 @@ impl Harness {
                 capacity,
                 response,
             } => {
-                let started = self.start_turn(prompt, capacity, false).await;
+                let started = self.start_turn(prompt, capacity, false, true).await;
                 let _ = response.send(started.and_then(|started| match started {
                     Started::Prompt => Ok(()),
                     Started::RecoveryOnly => Err(std::io::Error::other(format!(
@@ -635,7 +635,10 @@ impl Harness {
                 .map(AgentMessage::prompt)
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            match self.start_turn(prompt, capacity, from_peers(&batch)).await {
+            match self
+                .start_turn(prompt, capacity, from_peers(&batch), false)
+                .await
+            {
                 Ok(Started::RecoveryOnly) => {
                     self.rollback_delegation(delegation).await;
                     let (resumed, batch): (Vec<_>, Vec<_>) = batch.into_iter().partition(resumes);
@@ -788,8 +791,9 @@ impl Harness {
         prompt: String,
         capacity: TurnCapacity,
         from_peers: bool,
+        initial: bool,
     ) -> std::io::Result<Started> {
-        turns::start_turn(self, prompt, capacity, from_peers).await
+        turns::start_turn(self, prompt, capacity, from_peers, initial).await
     }
 
     async fn stop_active(&mut self) -> std::io::Result<()> {

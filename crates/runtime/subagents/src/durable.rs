@@ -3074,6 +3074,10 @@ pub(super) fn restored_session(
         (agent.unstarted.clone(), &agent.status)
     {
         unstarted.restored = true;
+        let resume_attempts = agent
+            .resume_attempts
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("subagent recovery attempt counter overflow"))?;
         let mut session = ChildSession::restored(
             agent.descriptor,
             agent.host_context.map(Arc::from),
@@ -3084,6 +3088,7 @@ pub(super) fn restored_session(
             None,
         );
         session.spawned = agent.spawned;
+        session.resume_attempts = resume_attempts;
         return Ok((session, false, false));
     }
     let accepted_revision = agent.accepted_revision;

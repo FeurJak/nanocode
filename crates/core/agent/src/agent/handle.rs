@@ -416,6 +416,19 @@ impl AgentHandle {
         resume::spawn_with_host_context(self, options, host_context).await
     }
 
+    pub async fn respawn_with_host_context(
+        &self,
+        options: SpawnOptions,
+        host_context: Option<Arc<str>>,
+    ) -> Option<Result<(Agent, AgentEvents)>> {
+        let respawn = self.factory.as_ref().unwrap_or(&self.native).respawn(
+            self.clone(),
+            options,
+            host_context,
+        )?;
+        Some(created(respawn.await).await)
+    }
+
     pub async fn spawn_native_with_host_context(
         &self,
         options: SpawnOptions,

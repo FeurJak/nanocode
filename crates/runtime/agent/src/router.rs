@@ -402,6 +402,28 @@ impl AgentFactory for RoutedFactory {
         })
     }
 
+    fn respawn(
+        &self,
+        parent: AgentHandle,
+        options: SpawnOptions,
+        host_context: Option<Arc<str>>,
+    ) -> Option<BackendFuture<AgentResult>> {
+        let remote = self.inner.remote.clone().filter(|_| {
+            options.selected_provider().is_none()
+                && resolve_family(&parent, &options) == parent.harness_family()
+        })?;
+        let inner = Arc::clone(&self.inner);
+        Some(Box::pin(async move {
+            inner
+                .tracked_one(async move {
+                    parent.ensure_available().await?;
+                    options.validate_harness()?;
+                    remote.respawn(parent, options, host_context).await
+                })
+                .await
+        }))
+    }
+
     fn spawn_many(
         &self,
         parent: AgentHandle,
