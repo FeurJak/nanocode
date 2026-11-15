@@ -29,285 +29,122 @@ use crate::rg::flags::{
     Category, Flag, FlagValue,
     lowargs::{
         BinaryMode, BoundaryMode, BufferMode, CaseMode, ColorChoice,
-        ContextMode, EncodingMode, EngineChoice, LoggingMode, LowArgs,
+        ContextMode, EncodingMode, EngineChoice, LoggingMode,
         MmapMode, Mode, PatternSource, SearchMode, SortMode, SortModeKind,
         SpecialMode, TypeChange,
     },
 };
 
-/// A list of all flags in ripgrep via implementations of `Flag`.
+/// A list of all flags in ripgrep.
 ///
 /// The order of these flags matter. It determines the order of the flags in
 /// the generated documentation (`-h`, `--help` and the man page) within each
 /// category. (This is why the deprecated flags are last.)
-pub(super) const FLAGS: &[&dyn Flag] = &[
-    // -e/--regexp and -f/--file should come before anything else in the
-    // same category.
-    &Regexp,
-    &File,
-    &AfterContext,
-    &BeforeContext,
-    &Binary,
-    &BlockBuffered,
-    &ByteOffset,
-    &CaseSensitive,
-    &Color,
-    &Colors,
-    &Column,
-    &Context,
-    &ContextSeparator,
-    &Count,
-    &CountMatches,
-    &Crlf,
-    &Debug,
-    &DfaSizeLimit,
-    &Encoding,
-    &Engine,
-    &FieldContextSeparator,
-    &FieldMatchSeparator,
-    &Files,
-    &FilesWithMatches,
-    &FilesWithoutMatch,
-    &FixedStrings,
-    &Follow,
-    &Glob,
-    &GlobCaseInsensitive,
-    &Heading,
-    &Help,
-    &Hidden,
-    &HostnameBin,
-    &HyperlinkFormat,
-    &IGlob,
-    &IgnoreCase,
-    &IgnoreFile,
-    &IgnoreFileCaseInsensitive,
-    &IncludeZero,
-    &InvertMatch,
-    &JSON,
-    &LineBuffered,
-    &LineNumber,
-    &LineNumberNo,
-    &LineRegexp,
-    &MaxColumns,
-    &MaxColumnsPreview,
-    &MaxCount,
-    &MaxDepth,
-    &MaxFilesize,
-    &Mmap,
-    &Multiline,
-    &MultilineDotall,
-    &NoConfig,
-    &NoIgnore,
-    &NoIgnoreDot,
-    &NoIgnoreExclude,
-    &NoIgnoreFiles,
-    &NoIgnoreGlobal,
-    &NoIgnoreMessages,
-    &NoIgnoreParent,
-    &NoIgnoreVcs,
-    &NoMessages,
-    &NoRequireGit,
-    &NoUnicode,
-    &Null,
-    &NullData,
-    &OneFileSystem,
-    &OnlyMatching,
-    &PathSeparator,
-    &Passthru,
-    &PCRE2,
-    &PCRE2Version,
-    &Pre,
-    &PreGlob,
-    &Pretty,
-    &Quiet,
-    &RegexSizeLimit,
-    &Replace,
-    &SearchZip,
-    &SmartCase,
-    &Sort,
-    &Sortr,
-    &Stats,
-    &StopOnNonmatch,
-    &Text,
-    &Threads,
-    &Trace,
-    &Trim,
-    &Type,
-    &TypeNot,
-    &TypeAdd,
-    &TypeClear,
-    &TypeList,
-    &Unrestricted,
-    &Version,
-    &Vimgrep,
-    &WithFilename,
-    &WithFilenameNo,
-    &WordRegexp,
-    // DEPRECATED (make them show up last in their respective categories)
-    &AutoHybridRegex,
-    &NoPcre2Unicode,
-    &SortFiles,
-];
-
-/// -A/--after-context
-#[derive(Debug)]
-struct AfterContext;
-
-impl Flag for AfterContext {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'A')
-    }
-    fn name_long(&self) -> &'static str {
-        "after-context"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("NUM")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        "Show NUM lines after each match."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+pub(super) const FLAGS: &[Flag] = &[
+    Flag {
+        long: "regexp",
+        short: Some(b'e'),
+        var: Some("PATTERN"),
+        category: Category::Input,
+        doc_short: r"A pattern to search for.",
+        doc_long: r"
+A pattern to search for. This option can be provided multiple times, where
+all patterns given are searched, in addition to any patterns provided by
+\flag{file}. Lines matching at least one of the provided patterns are printed.
+This flag can also be used when searching for patterns that start with a dash.
+.sp
+For example, to search for the literal \fB\-foo\fP:
+.sp
+.EX
+    rg \-e \-foo
+.EE
+.sp
+You can also use the special \fB\-\-\fP delimiter to indicate that no more
+flags will be provided. Namely, the following is equivalent to the above:
+.sp
+.EX
+    rg \-\- \-foo
+.EE
+.sp
+When \flag{file} or \flag{regexp} is used, then ripgrep treats all positional
+arguments as files or directories to search.
+",
+        update: |v, args| {
+            let regexp = convert::string(v.unwrap_value())?;
+            args.patterns.push(PatternSource::Regexp(regexp));
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "file",
+        short: Some(b'f'),
+        var: Some("PATTERNFILE"),
+        category: Category::Input,
+        doc_short: r"Search for patterns from the given file.",
+        doc_long: r"
+Search for patterns from the given file, with one pattern per line. When this
+flag is used multiple times or in combination with the \flag{regexp} flag, then
+all patterns provided are searched. Empty pattern lines will match all input
+lines, and the newline is not counted as part of the pattern.
+.sp
+A line is printed if and only if it matches at least one of the patterns.
+.sp
+When \fIPATTERNFILE\fP is \fB-\fP, then \fBstdin\fP will be read for the
+patterns.
+.sp
+When \flag{file} or \flag{regexp} is used, then ripgrep treats all positional
+arguments as files or directories to search.
+",
+        update: |v, args| {
+            let path = PathBuf::from(v.unwrap_value());
+            args.patterns.push(PatternSource::File(path));
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "after-context",
+        short: Some(b'A'),
+        var: Some("NUM"),
+        category: Category::Output,
+        doc_short: "Show NUM lines after each match.",
+        doc_long: r"
 Show \fINUM\fP lines after each match.
 .sp
 This overrides the \flag{passthru} flag and partially overrides the
 \flag{context} flag.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.context.set_after(convert::usize(&v.unwrap_value())?);
-        Ok(())
-    }
-}
-
-/// --auto-hybrid-regex
-#[derive(Debug)]
-struct AutoHybridRegex;
-
-impl Flag for AutoHybridRegex {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "auto-hybrid-regex"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-auto-hybrid-regex")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Search
-    }
-    fn doc_short(&self) -> &'static str {
-        "(DEPRECATED) Use PCRE2 if appropriate."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
-DEPRECATED. Use \flag{engine} instead.
-.sp
-When this flag is used, ripgrep will dynamically choose between supported regex
-engines depending on the features used in a pattern. When ripgrep chooses a
-regex engine, it applies that choice for every regex provided to ripgrep (e.g.,
-via multiple \flag{regexp} or \flag{file} flags).
-.sp
-As an example of how this flag might behave, ripgrep will attempt to use
-its default finite automata based regex engine whenever the pattern can be
-successfully compiled with that regex engine. If PCRE2 is enabled and if the
-pattern given could not be compiled with the default regex engine, then PCRE2
-will be automatically used for searching. If PCRE2 isn't available, then this
-flag has no effect because there is only one regex engine to choose from.
-.sp
-In the future, ripgrep may adjust its heuristics for how it decides which
-regex engine to use. In general, the heuristics will be limited to a static
-analysis of the patterns, and not to any specific runtime behavior observed
-while searching files.
-.sp
-The primary downside of using this flag is that it may not always be obvious
-which regex engine ripgrep uses, and thus, the match semantics or performance
-profile of ripgrep may subtly and unexpectedly change. However, in many cases,
-all regex engines will agree on what constitutes a match and it can be nice
-to transparently support more advanced regex features like look-around and
-backreferences without explicitly needing to enable them.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        let mode = if v.unwrap_switch() {
-            EngineChoice::Auto
-        } else {
-            EngineChoice::Default
-        };
-        args.engine = mode;
-        Ok(())
-    }
-}
-
-/// -B/--before-context
-#[derive(Debug)]
-struct BeforeContext;
-
-impl Flag for BeforeContext {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'B')
-    }
-    fn name_long(&self) -> &'static str {
-        "before-context"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("NUM")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        "Show NUM lines before each match."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.context.set_after(convert::usize(&v.unwrap_value())?);
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "before-context",
+        short: Some(b'B'),
+        var: Some("NUM"),
+        category: Category::Output,
+        doc_short: "Show NUM lines before each match.",
+        doc_long: r"
 Show \fINUM\fP lines before each match.
 .sp
 This overrides the \flag{passthru} flag and partially overrides the
 \flag{context} flag.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.context.set_before(convert::usize(&v.unwrap_value())?);
-        Ok(())
-    }
-}
-
-/// --binary
-#[derive(Debug)]
-struct Binary;
-
-impl Flag for Binary {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "binary"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-binary")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        "Search binary files."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.context.set_before(convert::usize(&v.unwrap_value())?);
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "binary",
+        negated: Some("no-binary"),
+        category: Category::Filter,
+        doc_short: "Search binary files.",
+        doc_long: r"
 Enabling this flag will cause ripgrep to search binary files. By default,
 ripgrep attempts to automatically skip binary files in order to improve the
 relevance of results and make the search faster.
@@ -339,41 +176,23 @@ When the \flag{unrestricted} flag is provided for a third time, then this flag
 is automatically enabled.
 .sp
 This flag overrides the \flag{text} flag.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.binary = if v.unwrap_switch() {
-            BinaryMode::SearchAndSuppress
-        } else {
-            BinaryMode::Auto
-        };
-        Ok(())
-    }
-}
-
-/// --block-buffered
-#[derive(Debug)]
-struct BlockBuffered;
-
-impl Flag for BlockBuffered {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "block-buffered"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-block-buffered")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        "Force block buffering."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.binary = if v.unwrap_switch() {
+                BinaryMode::SearchAndSuppress
+            } else {
+                BinaryMode::Auto
+            };
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "block-buffered",
+        negated: Some("no-block-buffered"),
+        category: Category::Output,
+        doc_short: "Force block buffering.",
+        doc_long: r"
 When enabled, ripgrep will use block buffering. That is, whenever a matching
 line is found, it will be written to an in-memory buffer and will not be
 written to stdout until the buffer reaches a certain size. This is the default
@@ -382,44 +201,24 @@ stdout is connected to a tty, line buffering will be used by default. Forcing
 block buffering can be useful when dumping a large amount of contents to a tty.
 .sp
 This overrides the \flag{line-buffered} flag.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.buffer = if v.unwrap_switch() {
-            BufferMode::Block
-        } else {
-            BufferMode::Auto
-        };
-        Ok(())
-    }
-}
-
-/// --byte-offset
-#[derive(Debug)]
-struct ByteOffset;
-
-impl Flag for ByteOffset {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'b')
-    }
-    fn name_long(&self) -> &'static str {
-        "byte-offset"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-byte-offset")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        "Print the byte offset for each matching line."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.buffer = if v.unwrap_switch() {
+                BufferMode::Block
+            } else {
+                BufferMode::Auto
+            };
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "byte-offset",
+        short: Some(b'b'),
+        negated: Some("no-byte-offset"),
+        category: Category::Output,
+        doc_short: "Print the byte offset for each matching line.",
+        doc_long: r"
 Print the 0-based byte offset within the input file before each line of output.
 If \flag{only-matching} is specified, print the offset of the matched text
 itself.
@@ -427,37 +226,19 @@ itself.
 If ripgrep does transcoding, then the byte offset is in terms of the result
 of transcoding and not the original data. This applies similarly to other
 transformations on the data, such as decompression or a \flag{pre} filter.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.byte_offset = v.unwrap_switch();
-        Ok(())
-    }
-}
-
-/// -s/--case-sensitive
-#[derive(Debug)]
-struct CaseSensitive;
-
-impl Flag for CaseSensitive {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b's')
-    }
-    fn name_long(&self) -> &'static str {
-        "case-sensitive"
-    }
-    fn doc_category(&self) -> Category {
-        Category::Search
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Search case sensitively (default)."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.byte_offset = v.unwrap_switch();
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "case-sensitive",
+        short: Some(b's'),
+        category: Category::Search,
+        doc_short: r"Search case sensitively (default).",
+        doc_long: r"
 Execute the search case sensitively. This is the default mode.
 .sp
 This is a global option that applies to all patterns given to ripgrep.
@@ -466,38 +247,20 @@ regex flags. For example, \fB(?i)abc\fP will match \fBabc\fP case insensitively
 even when this flag is used.
 .sp
 This flag overrides the \flag{ignore-case} and \flag{smart-case} flags.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "flag has no negation");
-        args.case = CaseMode::Sensitive;
-        Ok(())
-    }
-}
-
-/// --color
-#[derive(Debug)]
-struct Color;
-
-impl Flag for Color {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_long(&self) -> &'static str {
-        "color"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("WHEN")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        "When to use color."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            assert!(v.unwrap_switch(), "flag has no negation");
+            args.case = CaseMode::Sensitive;
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "color",
+        var: Some("WHEN"),
+        category: Category::Output,
+        doc_short: "When to use color.",
+        doc_long: r"
 This flag controls when to use colors. The default setting is \fBauto\fP, which
 means ripgrep will try to guess when to use colors. For example, if ripgrep is
 printing to a tty, then it will use colors, but if it is redirected to a file
@@ -545,43 +308,25 @@ the \flag{colors} flag to manually set all color styles to \fBnone\fP:
     \-\-colors 'highlight:none'
 .EE
 .sp
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.color = match convert::str(&v.unwrap_value())? {
-            "never" => ColorChoice::Never,
-            "auto" => ColorChoice::Auto,
-            "always" => ColorChoice::Always,
-            "ansi" => ColorChoice::Ansi,
-            unk => anyhow::bail!("choice '{unk}' is unrecognized"),
-        };
-        Ok(())
-    }
-}
-
-/// --colors
-#[derive(Debug)]
-struct Colors;
-
-impl Flag for Colors {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_long(&self) -> &'static str {
-        "colors"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("COLOR_SPEC")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        "Configure color settings and styles."
-    }
-    fn doc_long(&self) -> &'static str {
-        r#"
+",
+        update: |v, args| {
+            args.color = match convert::str(&v.unwrap_value())? {
+                "never" => ColorChoice::Never,
+                "auto" => ColorChoice::Auto,
+                "always" => ColorChoice::Always,
+                "ansi" => ColorChoice::Ansi,
+                unk => anyhow::bail!("choice '{unk}' is unrecognized"),
+            };
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "colors",
+        var: Some("COLOR_SPEC"),
+        category: Category::Output,
+        doc_short: "Configure color settings and styles.",
+        doc_long: r#"
 This flag specifies color settings for use in the output. This flag may be
 provided multiple times. Settings are applied iteratively. Pre-existing color
 labels are limited to one of eight choices: \fBred\fP, \fBblue\fP, \fBgreen\fP,
@@ -637,79 +382,41 @@ or, equivalently,
 .sp
 Note that the \fBintense\fP and \fBnointense\fP styles will have no effect when
 used alongside these extended color codes.
-"#
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        let v = v.unwrap_value();
-        let v = convert::str(&v)?;
-        args.colors.push(v.parse()?);
-        Ok(())
-    }
-}
-
-/// --column
-#[derive(Debug)]
-struct Column;
-
-impl Flag for Column {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "column"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-column")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        "Show column numbers."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+"#,
+        update: |v, args| {
+            let v = v.unwrap_value();
+            let v = convert::str(&v)?;
+            args.colors.push(v.parse()?);
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "column",
+        negated: Some("no-column"),
+        category: Category::Output,
+        doc_short: "Show column numbers.",
+        doc_long: r"
 Show column numbers (1-based). This only shows the column numbers for the first
 match on each line. This does not try to account for Unicode. One byte is equal
 to one column. This implies \flag{line-number}.
 .sp
 When \flag{only-matching} is used, then the column numbers written correspond
 to the start of each match.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.column = Some(v.unwrap_switch());
-        Ok(())
-    }
-}
-
-/// -C/--context
-#[derive(Debug)]
-struct Context;
-
-impl Flag for Context {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'C')
-    }
-    fn name_long(&self) -> &'static str {
-        "context"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("NUM")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Show NUM lines before and after each match."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.column = Some(v.unwrap_switch());
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "context",
+        short: Some(b'C'),
+        var: Some("NUM"),
+        category: Category::Output,
+        doc_short: r"Show NUM lines before and after each match.",
+        doc_long: r"
 Show \fINUM\fP lines before and after each match. This is equivalent to
 providing both the \flag{before-context} and \flag{after-context} flags with
 the same value.
@@ -717,40 +424,20 @@ the same value.
 This overrides the \flag{passthru} flag. The \flag{after-context} and
 \flag{before-context} flags both partially override this flag, regardless of
 the order. For example, \fB\-A2 \-C1\fP is equivalent to \fB\-A2 \-B1\fP.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.context.set_both(convert::usize(&v.unwrap_value())?);
-        Ok(())
-    }
-}
-
-/// --context-separator
-#[derive(Debug)]
-struct ContextSeparator;
-
-impl Flag for ContextSeparator {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_long(&self) -> &'static str {
-        "context-separator"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-context-separator")
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("SEPARATOR")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Set the separator for contextual chunks."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.context.set_both(convert::usize(&v.unwrap_value())?);
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "context-separator",
+        negated: Some("no-context-separator"),
+        var: Some("SEPARATOR"),
+        category: Category::Output,
+        doc_short: r"Set the separator for contextual chunks.",
+        doc_long: r"
 The string used to separate non-contiguous context lines in the output. This is
 only used when one of the context flags is used (that is, \flag{after-context},
 \flag{before-context} or \flag{context}). Escape sequences like \fB\\x7F\fP or
@@ -759,45 +446,27 @@ only used when one of the context flags is used (that is, \flag{after-context},
 When the context separator is set to an empty string, then a line break
 is still inserted. To completely disable context separators, use the
 \flag-negate{context-separator} flag.
-"
-    }
+",
+        update: |v, args| {
+            use crate::rg::flags::lowargs::ContextSeparator as Separator;
 
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        use crate::rg::flags::lowargs::ContextSeparator as Separator;
-
-        args.context_separator = match v {
-            FlagValue::Switch(true) => {
-                unreachable!("flag can only be disabled")
-            }
-            FlagValue::Switch(false) => Separator::disabled(),
-            FlagValue::Value(v) => Separator::new(&v)?,
-        };
-        Ok(())
-    }
-}
-
-/// -c/--count
-#[derive(Debug)]
-struct Count;
-
-impl Flag for Count {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'c')
-    }
-    fn name_long(&self) -> &'static str {
-        "count"
-    }
-    fn doc_category(&self) -> Category {
-        Category::OutputModes
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Show count of matching lines for each file."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+            args.context_separator = match v {
+                FlagValue::Switch(true) => {
+                    unreachable!("flag can only be disabled")
+                }
+                FlagValue::Switch(false) => Separator::disabled(),
+                FlagValue::Value(v) => Separator::new(&v)?,
+            };
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "count",
+        short: Some(b'c'),
+        category: Category::OutputModes,
+        doc_short: r"Show count of matching lines for each file.",
+        doc_long: r"
 This flag suppresses normal output and shows the number of lines that match
 the given patterns for each file searched. Each file containing a match has
 its path and count printed on each line. Note that unless \flag{multiline} is
@@ -822,38 +491,20 @@ disabling binary detection, use the \flag{binary} flag.
 This overrides the \flag{count-matches} flag. Note that when \flag{count}
 is combined with \flag{only-matching}, then ripgrep behaves as if
 \flag{count-matches} was given.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--count can only be enabled");
-        args.mode.update(Mode::Search(SearchMode::Count));
-        Ok(())
-    }
-}
-
-/// --count-matches
-#[derive(Debug)]
-struct CountMatches;
-
-impl Flag for CountMatches {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "count-matches"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        None
-    }
-    fn doc_category(&self) -> Category {
-        Category::OutputModes
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Show count of every match for each file."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            assert!(v.unwrap_switch(), "--count can only be enabled");
+            args.mode.update(Mode::Search(SearchMode::Count));
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "count-matches",
+        var: None,
+        category: Category::OutputModes,
+        doc_short: r"Show count of every match for each file.",
+        doc_long: r"
 This flag suppresses normal output and shows the number of individual matches
 of the given patterns for each file searched. Each file containing matches has
 its path and match count printed on each line. Note that this reports the total
@@ -866,38 +517,20 @@ file path in this case.
 This overrides the \flag{count} flag. Note that when \flag{count} is combined
 with \flag{only-matching}, then ripgrep behaves as if \flag{count-matches} was
 given.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--count-matches can only be enabled");
-        args.mode.update(Mode::Search(SearchMode::CountMatches));
-        Ok(())
-    }
-}
-
-/// --crlf
-#[derive(Debug)]
-struct Crlf;
-
-impl Flag for Crlf {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "crlf"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-crlf")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Search
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Use CRLF line terminators (nice for Windows)."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            assert!(v.unwrap_switch(), "--count-matches can only be enabled");
+            args.mode.update(Mode::Search(SearchMode::CountMatches));
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "crlf",
+        negated: Some("no-crlf"),
+        category: Category::Search,
+        doc_short: r"Use CRLF line terminators (nice for Windows).",
+        doc_long: r"
 When enabled, ripgrep will treat CRLF (\fB\\r\\n\fP) as a line terminator
 instead of just \fB\\n\fP.
 .sp
@@ -911,38 +544,22 @@ the pattern with the \fBR\fP flag. For example, \fB(?R:$)\fP will match just
 before either CR or LF, but never between CR and LF.
 .sp
 This flag overrides \flag{null-data}.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.crlf = v.unwrap_switch();
-        args.crlf_explicit = true;
-        if args.crlf {
-            args.null_data = false;
-        }
-        Ok(())
-    }
-}
-
-/// --debug
-#[derive(Debug)]
-struct Debug;
-
-impl Flag for Debug {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "debug"
-    }
-    fn doc_category(&self) -> Category {
-        Category::Logging
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Show debug messages."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.crlf = v.unwrap_switch();
+            args.crlf_explicit = true;
+            if args.crlf {
+                args.null_data = false;
+            }
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "debug",
+        category: Category::Logging,
+        doc_short: r"Show debug messages.",
+        doc_long: r"
 Show debug messages. Please use this when filing a bug report.
 .sp
 The \flag{debug} flag is generally useful for figuring out why ripgrep skipped
@@ -951,38 +568,20 @@ skipped and why they were skipped.
 .sp
 To get even more debug output, use the \flag{trace} flag, which implies
 \flag{debug} along with additional trace data.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--debug can only be enabled");
-        args.logging = Some(LoggingMode::Debug);
-        Ok(())
-    }
-}
-
-/// --dfa-size-limit
-#[derive(Debug)]
-struct DfaSizeLimit;
-
-impl Flag for DfaSizeLimit {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_long(&self) -> &'static str {
-        "dfa-size-limit"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("NUM+SUFFIX?")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Search
-    }
-    fn doc_short(&self) -> &'static str {
-        r"The upper size limit of the regex DFA."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            assert!(v.unwrap_switch(), "--debug can only be enabled");
+            args.logging = Some(LoggingMode::Debug);
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "dfa-size-limit",
+        var: Some("NUM+SUFFIX?"),
+        category: Category::Search,
+        doc_short: r"The upper size limit of the regex DFA.",
+        doc_long: r"
 The upper size limit of the regex DFA. The default limit is something generous
 for any single pattern or for many smallish patterns. This should only be
 changed on very large regex inputs where the (slower) fallback regex engine may
@@ -991,44 +590,22 @@ otherwise be used if the limit is reached.
 The input format accepts suffixes of \fBK\fP, \fBM\fP or \fBG\fP which
 correspond to kilobytes, megabytes and gigabytes, respectively. If no suffix is
 provided the input is treated as bytes.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        let v = v.unwrap_value();
-        args.dfa_size_limit = Some(convert::human_readable_usize(&v)?);
-        Ok(())
-    }
-}
-
-/// -E/--encoding
-#[derive(Debug)]
-struct Encoding;
-
-impl Flag for Encoding {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'E')
-    }
-    fn name_long(&self) -> &'static str {
-        "encoding"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-encoding")
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("ENCODING")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Search
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Specify the text encoding of files to search."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            let v = v.unwrap_value();
+            args.dfa_size_limit = Some(convert::human_readable_usize(&v)?);
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "encoding",
+        short: Some(b'E'),
+        negated: Some("no-encoding"),
+        var: Some("ENCODING"),
+        category: Category::Search,
+        doc_short: r"Specify the text encoding of files to search.",
+        doc_long: r"
 Specify the text encoding that ripgrep will use on all files searched. The
 default value is \fBauto\fP, which will cause ripgrep to do a best effort
 automatic detection of encoding on a per-file basis. Automatic detection in
@@ -1045,52 +622,36 @@ For more details on encoding and how ripgrep deals with it, see \fBGUIDE.md\fP.
 .sp
 The encoding detection that ripgrep uses can be reverted to its automatic mode
 via the \flag-negate{encoding} flag.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        let value = match v {
-            FlagValue::Value(v) => v,
-            FlagValue::Switch(true) => {
-                unreachable!("--encoding must accept a value")
-            }
-            FlagValue::Switch(false) => {
-                args.encoding = EncodingMode::Auto;
-                return Ok(());
-            }
-        };
-        let label = convert::str(&value)?;
-        args.encoding = match label {
-            "auto" => EncodingMode::Auto,
-            "none" => EncodingMode::Disabled,
-            _ => EncodingMode::Some(crate::searcher::Encoding::new(label)?),
-        };
-        Ok(())
-    }
-}
-
-/// --engine
-#[derive(Debug)]
-struct Engine;
-
-impl Flag for Engine {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_long(&self) -> &'static str {
-        "engine"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("ENGINE")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Search
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Specify which regex engine to use."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            let value = match v {
+                FlagValue::Value(v) => v,
+                FlagValue::Switch(true) => {
+                    unreachable!("--encoding must accept a value")
+                }
+                FlagValue::Switch(false) => {
+                    args.encoding = EncodingMode::Auto;
+                    return Ok(());
+                }
+            };
+            let label = convert::str(&value)?;
+            args.encoding = match label {
+                "auto" => EncodingMode::Auto,
+                "none" => EncodingMode::Disabled,
+                _ => {
+                    EncodingMode::Some(crate::searcher::Encoding::new(label)?)
+                }
+            };
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "engine",
+        var: Some("ENGINE"),
+        category: Category::Search,
+        doc_short: r"Specify which regex engine to use.",
+        doc_long: r"
 Specify which regular expression engine to use. When you choose a regex engine,
 it applies that choice for every regex provided to ripgrep (e.g., via multiple
 \flag{regexp} or \flag{file} flags).
@@ -1109,202 +670,85 @@ ripgrep printing an error message and exiting.
 .sp
 This overrides previous uses of the \flag{pcre2} and \flag{auto-hybrid-regex}
 flags.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        let v = v.unwrap_value();
-        let string = convert::str(&v)?;
-        args.engine = match string {
-            "default" => EngineChoice::Default,
-            "pcre2" => EngineChoice::PCRE2,
-            "auto" => EngineChoice::Auto,
-            _ => anyhow::bail!("unrecognized regex engine '{string}'"),
-        };
-        Ok(())
-    }
-}
-
-/// --field-context-separator
-#[derive(Debug)]
-struct FieldContextSeparator;
-
-impl Flag for FieldContextSeparator {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_long(&self) -> &'static str {
-        "field-context-separator"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("SEPARATOR")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Set the field context separator."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            let v = v.unwrap_value();
+            let string = convert::str(&v)?;
+            args.engine = match string {
+                "default" => EngineChoice::Default,
+                "pcre2" => EngineChoice::PCRE2,
+                "auto" => EngineChoice::Auto,
+                _ => anyhow::bail!("unrecognized regex engine '{string}'"),
+            };
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "field-context-separator",
+        var: Some("SEPARATOR"),
+        category: Category::Output,
+        doc_short: r"Set the field context separator.",
+        doc_long: r"
 Set the field context separator. This separator is only used when printing
 contextual lines. It is used to delimit file paths, line numbers, columns and
 the contextual line itself. The separator may be any number of bytes, including
 zero. Escape sequences like \fB\\x7F\fP or \fB\\t\fP may be used.
 .sp
 The \fB-\fP character is the default value.
-"
-    }
+",
+        update: |v, args| {
+            use crate::rg::flags::lowargs::FieldContextSeparator as Separator;
 
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        use crate::rg::flags::lowargs::FieldContextSeparator as Separator;
-
-        args.field_context_separator = Separator::new(&v.unwrap_value())?;
-        Ok(())
-    }
-}
-
-/// --field-match-separator
-#[derive(Debug)]
-struct FieldMatchSeparator;
-
-impl Flag for FieldMatchSeparator {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_long(&self) -> &'static str {
-        "field-match-separator"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("SEPARATOR")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Set the field match separator."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+            args.field_context_separator = Separator::new(&v.unwrap_value())?;
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "field-match-separator",
+        var: Some("SEPARATOR"),
+        category: Category::Output,
+        doc_short: r"Set the field match separator.",
+        doc_long: r"
 Set the field match separator. This separator is only used when printing
 matching lines. It is used to delimit file paths, line numbers, columns and the
 matching line itself. The separator may be any number of bytes, including zero.
 Escape sequences like \fB\\x7F\fP or \fB\\t\fP may be used.
 .sp
 The \fB:\fP character is the default value.
-"
-    }
+",
+        update: |v, args| {
+            use crate::rg::flags::lowargs::FieldMatchSeparator as Separator;
 
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        use crate::rg::flags::lowargs::FieldMatchSeparator as Separator;
-
-        args.field_match_separator = Separator::new(&v.unwrap_value())?;
-        Ok(())
-    }
-}
-
-/// -f/--file
-#[derive(Debug)]
-struct File;
-
-impl Flag for File {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'f')
-    }
-    fn name_long(&self) -> &'static str {
-        "file"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("PATTERNFILE")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Input
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Search for patterns from the given file."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
-Search for patterns from the given file, with one pattern per line. When this
-flag is used multiple times or in combination with the \flag{regexp} flag, then
-all patterns provided are searched. Empty pattern lines will match all input
-lines, and the newline is not counted as part of the pattern.
-.sp
-A line is printed if and only if it matches at least one of the patterns.
-.sp
-When \fIPATTERNFILE\fP is \fB-\fP, then \fBstdin\fP will be read for the
-patterns.
-.sp
-When \flag{file} or \flag{regexp} is used, then ripgrep treats all positional
-arguments as files or directories to search.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        let path = PathBuf::from(v.unwrap_value());
-        args.patterns.push(PatternSource::File(path));
-        Ok(())
-    }
-}
-
-/// --files
-#[derive(Debug)]
-struct Files;
-
-impl Flag for Files {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "files"
-    }
-    fn doc_category(&self) -> Category {
-        Category::OtherBehaviors
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Print each file that would be searched."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+            args.field_match_separator = Separator::new(&v.unwrap_value())?;
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "files",
+        category: Category::OtherBehaviors,
+        doc_short: r"Print each file that would be searched.",
+        doc_long: r"
 Print each file that would be searched without actually performing the search.
 This is useful to determine whether a particular file is being searched or not.
 .sp
 This overrides \flag{type-list}.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch());
-        args.mode.update(Mode::Files);
-        Ok(())
-    }
-}
-
-/// -l/--files-with-matches
-#[derive(Debug)]
-struct FilesWithMatches;
-
-impl Flag for FilesWithMatches {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'l')
-    }
-    fn name_long(&self) -> &'static str {
-        "files-with-matches"
-    }
-    fn doc_category(&self) -> Category {
-        Category::OutputModes
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Print the paths with at least one match."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            assert!(v.unwrap_switch());
+            args.mode.update(Mode::Files);
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "files-with-matches",
+        short: Some(b'l'),
+        category: Category::OutputModes,
+        doc_short: r"Print the paths with at least one match.",
+        doc_long: r"
 Print only the paths with at least one match and suppress match contents.
 .sp
 Note that it is possible for this flag to have results inconsistent with the
@@ -1316,152 +760,79 @@ data that causes it to skip searching that file. To avoid this inconsistency
 without disabling binary detection, use the \flag{binary} flag.
 .sp
 This overrides \flag{files-without-match}.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--files-with-matches can only be enabled");
-        args.mode.update(Mode::Search(SearchMode::FilesWithMatches));
-        Ok(())
-    }
-}
-
-/// -l/--files-without-match
-#[derive(Debug)]
-struct FilesWithoutMatch;
-
-impl Flag for FilesWithoutMatch {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "files-without-match"
-    }
-    fn doc_category(&self) -> Category {
-        Category::OutputModes
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Print the paths that contain zero matches."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            assert!(
+                v.unwrap_switch(),
+                "--files-with-matches can only be enabled"
+            );
+            args.mode.update(Mode::Search(SearchMode::FilesWithMatches));
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "files-without-match",
+        category: Category::OutputModes,
+        doc_short: r"Print the paths that contain zero matches.",
+        doc_long: r"
 Print the paths that contain zero matches and suppress match contents.
 .sp
 This overrides \flag{files-with-matches}.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(
-            v.unwrap_switch(),
-            "--files-without-match can only be enabled"
-        );
-        args.mode.update(Mode::Search(SearchMode::FilesWithoutMatch));
-        Ok(())
-    }
-}
-
-/// -F/--fixed-strings
-#[derive(Debug)]
-struct FixedStrings;
-
-impl Flag for FixedStrings {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'F')
-    }
-    fn name_long(&self) -> &'static str {
-        "fixed-strings"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-fixed-strings")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Search
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Treat all patterns as literals."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            assert!(
+                v.unwrap_switch(),
+                "--files-without-match can only be enabled"
+            );
+            args.mode.update(Mode::Search(SearchMode::FilesWithoutMatch));
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "fixed-strings",
+        short: Some(b'F'),
+        negated: Some("no-fixed-strings"),
+        category: Category::Search,
+        doc_short: r"Treat all patterns as literals.",
+        doc_long: r"
 Treat all patterns as literals instead of as regular expressions. When this
 flag is used, special regular expression meta characters such as \fB.(){}*+\fP
 should not need be escaped.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.fixed_strings = v.unwrap_switch();
-        Ok(())
-    }
-}
-
-/// -L/--follow
-#[derive(Debug)]
-struct Follow;
-
-impl Flag for Follow {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'L')
-    }
-    fn name_long(&self) -> &'static str {
-        "follow"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-follow")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Follow symbolic links."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.fixed_strings = v.unwrap_switch();
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "follow",
+        short: Some(b'L'),
+        negated: Some("no-follow"),
+        category: Category::Filter,
+        doc_short: r"Follow symbolic links.",
+        doc_long: r"
 This flag instructs ripgrep to follow symbolic links while traversing
 directories. This behavior is disabled by default. Note that ripgrep will
 check for symbolic link loops and report errors if it finds one. ripgrep will
 also report errors for broken links. To suppress error messages, use the
 \flag{no-messages} flag.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.follow = v.unwrap_switch();
-        Ok(())
-    }
-}
-
-/// -g/--glob
-#[derive(Debug)]
-struct Glob;
-
-impl Flag for Glob {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'g')
-    }
-    fn name_long(&self) -> &'static str {
-        "glob"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("GLOB")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Include or exclude file paths."
-    }
-    fn doc_long(&self) -> &'static str {
-        r#"
+",
+        update: |v, args| {
+            args.follow = v.unwrap_switch();
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "glob",
+        short: Some(b'g'),
+        var: Some("GLOB"),
+        category: Category::Filter,
+        doc_short: r"Include or exclude file paths.",
+        doc_long: r#"
 Include or exclude files and directories for searching that match the given
 glob. This always overrides any other ignore logic. Multiple glob flags may
 be used. Globbing rules match \fB.gitignore\fP globs. Precede a glob with a
@@ -1486,71 +857,35 @@ a match. For example, if you only want to search in a particular directory
 is incorrect because \fIfoo/bar\fP does not match
 the glob \fIfoo\fP. Instead, you should use
 .BI "\-g '" foo/** '.
-"#
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        let glob = convert::string(v.unwrap_value())?;
-        args.globs.push(glob);
-        Ok(())
-    }
-}
-
-/// --glob-case-insensitive
-#[derive(Debug)]
-struct GlobCaseInsensitive;
-
-impl Flag for GlobCaseInsensitive {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "glob-case-insensitive"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-glob-case-insensitive")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Process all glob patterns case insensitively."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+"#,
+        update: |v, args| {
+            let glob = convert::string(v.unwrap_value())?;
+            args.globs.push(glob);
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "glob-case-insensitive",
+        negated: Some("no-glob-case-insensitive"),
+        category: Category::Filter,
+        doc_short: r"Process all glob patterns case insensitively.",
+        doc_long: r"
 Process all glob patterns given with the \flag{glob} flag case insensitively.
 This effectively treats \flag{glob} as \flag{iglob}.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.glob_case_insensitive = v.unwrap_switch();
-        Ok(())
-    }
-}
-
-/// --heading
-#[derive(Debug)]
-struct Heading;
-
-impl Flag for Heading {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "heading"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-heading")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Print matches grouped by each file."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.glob_case_insensitive = v.unwrap_switch();
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "heading",
+        negated: Some("no-heading"),
+        category: Category::Output,
+        doc_short: r"Print matches grouped by each file.",
+        doc_long: r"
 This flag prints the file path above clusters of matches from each file instead
 of printing the file path as a prefix for each matched line.
 .sp
@@ -1560,37 +895,19 @@ When \fBstdout\fP is not a tty, then ripgrep will default to the standard
 grep-like format. One can force this format in Unix-like environments by
 piping the output of ripgrep to \fBcat\fP. For example, \fBrg\fP \fIfoo\fP \fB|
 cat\fP.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.heading = Some(v.unwrap_switch());
-        Ok(())
-    }
-}
-
-/// -h/--help
-#[derive(Debug)]
-struct Help;
-
-impl Flag for Help {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "help"
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'h')
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Show help output."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.heading = Some(v.unwrap_switch());
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "help",
+        short: Some(b'h'),
+        category: Category::Output,
+        doc_short: r"Show help output.",
+        doc_long: r"
 This flag prints the help output for ripgrep.
 .sp
 Unlike most other flags, the behavior of the short flag, \fB\-h\fP, and the
@@ -1598,43 +915,23 @@ long flag, \fB\-\-help\fP, is different. The short flag will show a condensed
 help output while the long flag will show a verbose help output. The verbose
 help output has complete documentation, where as the condensed help output will
 show only a single line for every flag.
-"
-    }
-
-    fn update(&self, v: FlagValue, _: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--help has no negation");
-        // Since this flag has different semantics for -h and --help and the
-        // Flag trait doesn't support encoding this sort of thing, we handle it
-        // as a special case in the parser.
-        Ok(())
-    }
-}
-
-/// -./--hidden
-#[derive(Debug)]
-struct Hidden;
-
-impl Flag for Hidden {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'.')
-    }
-    fn name_long(&self) -> &'static str {
-        "hidden"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-hidden")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Search hidden files and directories."
-    }
-    fn doc_long(&self) -> &'static str {
-        r#"
+",
+        update: |v, _| {
+            assert!(v.unwrap_switch(), "--help has no negation");
+            // Since this flag has different semantics for -h and --help and the
+            // Flag trait doesn't support encoding this sort of thing, we handle it
+            // as a special case in the parser.
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "hidden",
+        short: Some(b'.'),
+        negated: Some("no-hidden"),
+        category: Category::Filter,
+        doc_short: r"Search hidden files and directories.",
+        doc_long: r#"
 Search hidden files and directories. By default, hidden files and directories
 are skipped. Note that if a hidden file or a directory is whitelisted in
 an ignore file, then it will be searched even if this flag isn't provided.
@@ -1649,37 +946,19 @@ Note that \flag{hidden} will include files and folders like \fB.git\fP
 regardless of \flag{no-ignore-vcs}. To exclude such paths when using
 \flag{hidden}, you must explicitly ignore them using another flag or ignore
 file.
-"#
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.hidden = v.unwrap_switch();
-        Ok(())
-    }
-}
-
-/// --hostname-bin
-#[derive(Debug)]
-struct HostnameBin;
-
-impl Flag for HostnameBin {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_long(&self) -> &'static str {
-        "hostname-bin"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("COMMAND")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Run a program to get this system's hostname."
-    }
-    fn doc_long(&self) -> &'static str {
-        r#"
+"#,
+        update: |v, args| {
+            args.hidden = v.unwrap_switch();
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "hostname-bin",
+        var: Some("COMMAND"),
+        category: Category::Output,
+        doc_short: r"Run a program to get this system's hostname.",
+        doc_long: r#"
 This flag controls how ripgrep determines this system's hostname. The flag's
 value should correspond to an executable (either a path or something that can
 be found via your system's \fBPATH\fP environment variable). When set, ripgrep
@@ -1692,42 +971,25 @@ to calling \fBgethostname\fP. On Windows, this corresponds to calling
 \fBGetComputerNameExW\fP to fetch the system's "physical DNS hostname."
 .sp
 ripgrep uses your system's hostname for producing hyperlinks.
-"#
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        let path = PathBuf::from(v.unwrap_value());
-        args.hostname_bin =
-            if path.as_os_str().is_empty() { None } else { Some(path) };
-        Ok(())
-    }
-}
-
-/// --hyperlink-format
-#[derive(Debug)]
-struct HyperlinkFormat;
-
-impl Flag for HyperlinkFormat {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_long(&self) -> &'static str {
-        "hyperlink-format"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("FORMAT")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Set the format of hyperlinks."
-    }
-    fn doc_long(&self) -> &'static str {
-        static DOC: LazyLock<String> = LazyLock::new(|| {
-            let mut doc = String::new();
-            doc.push_str(
-                r#"
+"#,
+        update: |v, args| {
+            let path = PathBuf::from(v.unwrap_value());
+            args.hostname_bin =
+                if path.as_os_str().is_empty() { None } else { Some(path) };
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "hyperlink-format",
+        var: Some("FORMAT"),
+        category: Category::Output,
+        doc_short: r"Set the format of hyperlinks.",
+        doc_fn: Some(|| {
+            static DOC: LazyLock<String> = LazyLock::new(|| {
+                let mut doc = String::new();
+                doc.push_str(
+            r#"
 Set the format of hyperlinks to use when printing results. Hyperlinks make
 certain elements of ripgrep's output, such as file paths, clickable. This
 generally only works in terminal emulators that support OSC-8 hyperlinks. For
@@ -1736,20 +998,24 @@ To see the format that ripgrep is using, pass the \flag{debug} flag.
 .sp
 Alternatively, a format string may correspond to one of the following aliases:
 "#,
-            );
+        );
 
-            let mut aliases = crate::printer::hyperlink_aliases();
-            crate::order::sort_by_key(&mut aliases, |alias| {
-                alias.display_priority().unwrap_or(i16::MAX)
-            });
-            for (i, alias) in aliases.iter().enumerate() {
-                doc.push_str(r"\fB");
-                doc.push_str(alias.name());
-                doc.push_str(r"\fP");
-                doc.push_str(if i < aliases.len() - 1 { ", " } else { "." });
-            }
-            doc.push_str(
-                r#"
+                let mut aliases = crate::printer::hyperlink_aliases();
+                crate::order::sort_by_key(&mut aliases, |alias| {
+                    alias.display_priority().unwrap_or(i16::MAX)
+                });
+                for (i, alias) in aliases.iter().enumerate() {
+                    doc.push_str(r"\fB");
+                    doc.push_str(alias.name());
+                    doc.push_str(r"\fP");
+                    doc.push_str(if i < aliases.len() - 1 {
+                        ", "
+                    } else {
+                        "."
+                    });
+                }
+                doc.push_str(
+            r#"
 The alias will be replaced with a format string that is intended to work for
 the corresponding application.
 .sp
@@ -1829,81 +1095,46 @@ in the output. To make the path appear, and thus also a hyperlink, use the
 For more information on hyperlinks in terminal emulators, see:
 https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda
 "#,
-            );
-            doc
-        });
-        &DOC
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        let v = v.unwrap_value();
-        let string = convert::str(&v)?;
-        let format = string.parse().context("invalid hyperlink format")?;
-        args.hyperlink_format = format;
-        Ok(())
-    }
-}
-
-/// --iglob
-#[derive(Debug)]
-struct IGlob;
-
-impl Flag for IGlob {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_long(&self) -> &'static str {
-        "iglob"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("GLOB")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Include/exclude paths case insensitively."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+        );
+                doc
+            });
+            &DOC
+        }),
+        update: |v, args| {
+            let v = v.unwrap_value();
+            let string = convert::str(&v)?;
+            let format = string.parse().context("invalid hyperlink format")?;
+            args.hyperlink_format = format;
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "iglob",
+        var: Some("GLOB"),
+        category: Category::Filter,
+        doc_short: r"Include/exclude paths case insensitively.",
+        doc_long: r"
 Include or exclude files and directories for searching that match the given
 glob. This always overrides any other ignore logic. Multiple glob flags may
 be used. Globbing rules match \fB.gitignore\fP globs. Precede a glob with a
 \fB!\fP to exclude it. If multiple globs match a file or directory, the glob
 given later in the command line takes precedence. Globs used via this flag are
 matched case insensitively.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        let glob = convert::string(v.unwrap_value())?;
-        args.iglobs.push(glob);
-        Ok(())
-    }
-}
-
-/// -i/--ignore-case
-#[derive(Debug)]
-struct IgnoreCase;
-
-impl Flag for IgnoreCase {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'i')
-    }
-    fn name_long(&self) -> &'static str {
-        "ignore-case"
-    }
-    fn doc_category(&self) -> Category {
-        Category::Search
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Case insensitive search."
-    }
-    fn doc_long(&self) -> &'static str {
-        r#"
+",
+        update: |v, args| {
+            let glob = convert::string(v.unwrap_value())?;
+            args.iglobs.push(glob);
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "ignore-case",
+        short: Some(b'i'),
+        category: Category::Search,
+        doc_short: r"Case insensitive search.",
+        doc_long: r#"
 When this flag is provided, all patterns will be searched case insensitively.
 The case insensitivity rules used by ripgrep's default regex engine conform to
 Unicode's "simple" case folding rules.
@@ -1914,38 +1145,20 @@ inline regex flags. For example, \fB(?\-i)abc\fP will match \fBabc\fP
 case sensitively even when this flag is used.
 .sp
 This flag overrides \flag{case-sensitive} and \flag{smart-case}.
-"#
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "flag has no negation");
-        args.case = CaseMode::Insensitive;
-        Ok(())
-    }
-}
-
-/// --ignore-file
-#[derive(Debug)]
-struct IgnoreFile;
-
-impl Flag for IgnoreFile {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_long(&self) -> &'static str {
-        "ignore-file"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("PATH")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Specify additional ignore files."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+"#,
+        update: |v, args| {
+            assert!(v.unwrap_switch(), "flag has no negation");
+            args.case = CaseMode::Insensitive;
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "ignore-file",
+        var: Some("PATH"),
+        category: Category::Filter,
+        doc_short: r"Specify additional ignore files.",
+        doc_long: r"
 Specifies a path to one or more \fBgitignore\fP formatted rules files.
 These patterns are applied after the patterns found in \fB.gitignore\fP,
 \fB.rgignore\fP and \fB.ignore\fP are applied and are matched relative to the
@@ -1957,110 +1170,54 @@ later files.
 .sp
 If you are looking for a way to include or exclude files and directories
 directly on the command line, then use \flag{glob} instead.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        let path = PathBuf::from(v.unwrap_value());
-        args.ignore_file.push(path);
-        Ok(())
-    }
-}
-
-/// --ignore-file-case-insensitive
-#[derive(Debug)]
-struct IgnoreFileCaseInsensitive;
-
-impl Flag for IgnoreFileCaseInsensitive {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "ignore-file-case-insensitive"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-ignore-file-case-insensitive")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Process ignore files case insensitively."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            let path = PathBuf::from(v.unwrap_value());
+            args.ignore_file.push(path);
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "ignore-file-case-insensitive",
+        negated: Some("no-ignore-file-case-insensitive"),
+        category: Category::Filter,
+        doc_short: r"Process ignore files case insensitively.",
+        doc_long: r"
 Process ignore files (\fB.gitignore\fP, \fB.ignore\fP, etc.) case
 insensitively. Note that this comes with a performance penalty and is most
 useful on case insensitive file systems (such as Windows).
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.ignore_file_case_insensitive = v.unwrap_switch();
-        Ok(())
-    }
-}
-
-/// --include-zero
-#[derive(Debug)]
-struct IncludeZero;
-
-impl Flag for IncludeZero {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "include-zero"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-include-zero")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Include zero matches in summary output."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.ignore_file_case_insensitive = v.unwrap_switch();
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "include-zero",
+        negated: Some("no-include-zero"),
+        category: Category::Output,
+        doc_short: r"Include zero matches in summary output.",
+        doc_long: r"
 When used with \flag{count} or \flag{count-matches}, this causes ripgrep to
 print the number of matches for each file even if there were zero matches. This
 is disabled by default but can be enabled to make ripgrep behave more like
 grep.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.include_zero = v.unwrap_switch();
-        Ok(())
-    }
-}
-
-/// -v/--invert-match
-#[derive(Debug)]
-struct InvertMatch;
-
-impl Flag for InvertMatch {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'v')
-    }
-    fn name_long(&self) -> &'static str {
-        "invert-match"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-invert-match")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Search
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Invert matching."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.include_zero = v.unwrap_switch();
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "invert-match",
+        short: Some(b'v'),
+        negated: Some("no-invert-match"),
+        category: Category::Search,
+        doc_short: r"Invert matching.",
+        doc_long: r"
 This flag inverts matching. That is, instead of printing lines that match,
 ripgrep will print lines that don't match.
 .sp
@@ -2069,37 +1226,19 @@ flag with \flag{files-with-matches} will emit files that contain any lines
 that do not match the patterns given. That's not the same as, for example,
 \flag{files-without-match}, which will emit files that do not contain any
 matching lines.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.invert_match = v.unwrap_switch();
-        Ok(())
-    }
-}
-
-/// --json
-#[derive(Debug)]
-struct JSON;
-
-impl Flag for JSON {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "json"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-json")
-    }
-    fn doc_category(&self) -> Category {
-        Category::OutputModes
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Show search results in a JSON Lines format."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.invert_match = v.unwrap_switch();
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "json",
+        negated: Some("no-json"),
+        category: Category::OutputModes,
+        doc_short: r"Show search results in a JSON Lines format.",
+        doc_long: r"
 Enable printing results in a JSON Lines format.
 .sp
 When this flag is provided, ripgrep will emit a sequence of messages, each
@@ -2145,43 +1284,25 @@ always implicitly and unconditionally enable \flag{stats}.
 .sp
 A more complete description of the JSON format used can be found here:
 \fIhttps://docs.rs/grep-printer/*/grep_printer/struct.JSON.html\fP.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        if v.unwrap_switch() {
-            args.mode.update(Mode::Search(SearchMode::JSON));
-        } else if matches!(args.mode, Mode::Search(SearchMode::JSON)) {
-            // --no-json only reverts to the default mode if the mode is
-            // JSON, otherwise it's a no-op.
-            args.mode.update(Mode::Search(SearchMode::Standard));
-        }
-        Ok(())
-    }
-}
-
-/// --line-buffered
-#[derive(Debug)]
-struct LineBuffered;
-
-impl Flag for LineBuffered {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "line-buffered"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-line-buffered")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Force line buffering."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            if v.unwrap_switch() {
+                args.mode.update(Mode::Search(SearchMode::JSON));
+            } else if matches!(args.mode, Mode::Search(SearchMode::JSON)) {
+                // --no-json only reverts to the default mode if the mode is
+                // JSON, otherwise it's a no-op.
+                args.mode.update(Mode::Search(SearchMode::Standard));
+            }
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "line-buffered",
+        negated: Some("no-line-buffered"),
+        category: Category::Output,
+        doc_short: r"Force line buffering.",
+        doc_long: r"
 When enabled, ripgrep will always use line buffering. That is, whenever a
 matching line is found, it will be flushed to stdout immediately. This is the
 default when ripgrep's stdout is connected to a tty, but otherwise, ripgrep
@@ -2194,195 +1315,106 @@ typically useful in shell pipelines, for example:
 .EE
 .sp
 This overrides the \flag{block-buffered} flag.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.buffer = if v.unwrap_switch() {
-            BufferMode::Line
-        } else {
-            BufferMode::Auto
-        };
-        Ok(())
-    }
-}
-
-/// -n/--line-number
-#[derive(Debug)]
-struct LineNumber;
-
-impl Flag for LineNumber {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'n')
-    }
-    fn name_long(&self) -> &'static str {
-        "line-number"
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Show line numbers."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.buffer = if v.unwrap_switch() {
+                BufferMode::Line
+            } else {
+                BufferMode::Auto
+            };
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "line-number",
+        short: Some(b'n'),
+        category: Category::Output,
+        doc_short: r"Show line numbers.",
+        doc_long: r"
 Show line numbers (1-based).
 .sp
 This is enabled by default when stdout is connected to a tty.
 .sp
 This flag can be disabled by \flag{no-line-number}.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--line-number has no automatic negation");
-        args.line_number = Some(true);
-        Ok(())
-    }
-}
-
-/// -N/--no-line-number
-#[derive(Debug)]
-struct LineNumberNo;
-
-impl Flag for LineNumberNo {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'N')
-    }
-    fn name_long(&self) -> &'static str {
-        "no-line-number"
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Suppress line numbers."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            assert!(
+                v.unwrap_switch(),
+                "--line-number has no automatic negation"
+            );
+            args.line_number = Some(true);
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "no-line-number",
+        short: Some(b'N'),
+        category: Category::Output,
+        doc_short: r"Suppress line numbers.",
+        doc_long: r"
 Suppress line numbers.
 .sp
 Line numbers are off by default when stdout is not connected to a tty.
 .sp
 Line numbers can be forcefully turned on by \flag{line-number}.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(
-            v.unwrap_switch(),
-            "--no-line-number has no automatic negation"
-        );
-        args.line_number = Some(false);
-        Ok(())
-    }
-}
-
-/// -x/--line-regexp
-#[derive(Debug)]
-struct LineRegexp;
-
-impl Flag for LineRegexp {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'x')
-    }
-    fn name_long(&self) -> &'static str {
-        "line-regexp"
-    }
-    fn doc_category(&self) -> Category {
-        Category::Search
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Show matches surrounded by line boundaries."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            assert!(
+                v.unwrap_switch(),
+                "--no-line-number has no automatic negation"
+            );
+            args.line_number = Some(false);
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "line-regexp",
+        short: Some(b'x'),
+        category: Category::Search,
+        doc_short: r"Show matches surrounded by line boundaries.",
+        doc_long: r"
 When enabled, ripgrep will only show matches surrounded by line boundaries.
 This is equivalent to surrounding every pattern with \fB^\fP and \fB$\fP. In
 other words, this only prints lines where the entire line participates in a
 match.
 .sp
 This overrides the \flag{word-regexp} flag.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--line-regexp has no negation");
-        args.boundary = Some(BoundaryMode::Line);
-        Ok(())
-    }
-}
-
-/// -M/--max-columns
-#[derive(Debug)]
-struct MaxColumns;
-
-impl Flag for MaxColumns {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'M')
-    }
-    fn name_long(&self) -> &'static str {
-        "max-columns"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("NUM")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Omit lines longer than this limit."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            assert!(v.unwrap_switch(), "--line-regexp has no negation");
+            args.boundary = Some(BoundaryMode::Line);
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "max-columns",
+        short: Some(b'M'),
+        var: Some("NUM"),
+        category: Category::Output,
+        doc_short: r"Omit lines longer than this limit.",
+        doc_long: r"
 When given, ripgrep will omit lines longer than this limit in bytes. Instead of
 printing long lines, only the number of matches in that line is printed.
 .sp
 When this flag is omitted or is set to \fB0\fP, then it has no effect.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        let max = convert::u64(&v.unwrap_value())?;
-        args.max_columns = if max == 0 { None } else { Some(max) };
-        Ok(())
-    }
-}
-
-/// --max-columns-preview
-#[derive(Debug)]
-struct MaxColumnsPreview;
-
-impl Flag for MaxColumnsPreview {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "max-columns-preview"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-max-columns-preview")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Show preview for lines exceeding the limit."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            let max = convert::u64(&v.unwrap_value())?;
+            args.max_columns = if max == 0 { None } else { Some(max) };
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "max-columns-preview",
+        negated: Some("no-max-columns-preview"),
+        category: Category::Output,
+        doc_short: r"Show preview for lines exceeding the limit.",
+        doc_long: r"
 Prints a preview for lines exceeding the configured max column limit.
 .sp
 When the \flag{max-columns} flag is used, ripgrep will by default completely
@@ -2392,40 +1424,20 @@ of the line (corresponding to the limit size) is shown instead, where the part
 of the line exceeding the limit is not shown.
 .sp
 If the \flag{max-columns} flag is not set, then this has no effect.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.max_columns_preview = v.unwrap_switch();
-        Ok(())
-    }
-}
-
-/// -m/--max-count
-#[derive(Debug)]
-struct MaxCount;
-
-impl Flag for MaxCount {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'm')
-    }
-    fn name_long(&self) -> &'static str {
-        "max-count"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("NUM")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Search
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Limit the number of matching lines."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.max_columns_preview = v.unwrap_switch();
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "max-count",
+        short: Some(b'm'),
+        var: Some("NUM"),
+        category: Category::Search,
+        doc_short: r"Limit the number of matching lines.",
+        doc_long: r"
 Limit the number of matching lines per file searched to \fINUM\fP.
 .sp
 When \flag{multiline} is used, a single match that spans multiple lines is only
@@ -2438,43 +1450,21 @@ match.
 .sp
 Note that \fB0\fP is a legal value but not likely to be useful. When used,
 ripgrep won't search anything.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.max_count = Some(convert::u64(&v.unwrap_value())?);
-        Ok(())
-    }
-}
-
-/// --max-depth
-#[derive(Debug)]
-struct MaxDepth;
-
-impl Flag for MaxDepth {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'd')
-    }
-    fn name_long(&self) -> &'static str {
-        "max-depth"
-    }
-    fn aliases(&self) -> &'static [&'static str] {
-        &["maxdepth"]
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("NUM")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Descend at most NUM directories."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.max_count = Some(convert::u64(&v.unwrap_value())?);
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "max-depth",
+        short: Some(b'd'),
+        aliases: &["maxdepth"],
+        var: Some("NUM"),
+        category: Category::Filter,
+        doc_short: r"Descend at most NUM directories.",
+        doc_long: r"
 This flag limits the depth of directory traversal to \fINUM\fP levels beyond
 the paths given. A value of \fB0\fP only searches the explicitly given paths
 themselves.
@@ -2484,37 +1474,19 @@ will not be descended into. \fBrg --max-depth 1 \fP\fIdir/\fP will search only
 the direct children of \fIdir\fP.
 .sp
 An alternative spelling for this flag is \fB\-\-maxdepth\fP.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.max_depth = Some(convert::usize(&v.unwrap_value())?);
-        Ok(())
-    }
-}
-
-/// --max-filesize
-#[derive(Debug)]
-struct MaxFilesize;
-
-impl Flag for MaxFilesize {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_long(&self) -> &'static str {
-        "max-filesize"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("NUM+SUFFIX?")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Ignore files larger than NUM in size."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.max_depth = Some(convert::usize(&v.unwrap_value())?);
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "max-filesize",
+        var: Some("NUM+SUFFIX?"),
+        category: Category::Filter,
+        doc_short: r"Ignore files larger than NUM in size.",
+        doc_long: r"
 Ignore files larger than \fINUM\fP in size. This does not apply to directories.
 .sp
 The input format accepts suffixes of \fBK\fP, \fBM\fP or \fBG\fP which
@@ -2522,38 +1494,20 @@ correspond to kilobytes, megabytes and gigabytes, respectively. If no suffix is
 provided the input is treated as bytes.
 .sp
 Examples: \fB\-\-max-filesize 50K\fP or \fB\-\-max\-filesize 80M\fP.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        let v = v.unwrap_value();
-        args.max_filesize = Some(convert::human_readable_u64(&v)?);
-        Ok(())
-    }
-}
-
-/// --mmap
-#[derive(Debug)]
-struct Mmap;
-
-impl Flag for Mmap {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "mmap"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-mmap")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Search
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Search with memory maps when possible."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            let v = v.unwrap_value();
+            args.max_filesize = Some(convert::human_readable_u64(&v)?);
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "mmap",
+        negated: Some("no-mmap"),
+        category: Category::Search,
+        doc_short: r"Search with memory maps when possible.",
+        doc_long: r"
 When enabled, ripgrep will search using memory maps when possible. This is
 enabled by default when ripgrep thinks it will be faster.
 .sp
@@ -2564,44 +1518,24 @@ maps will not be used even when this flag is enabled.
 Note that ripgrep may abort unexpectedly when memory maps are used if it
 searches a file that is simultaneously truncated. Users can opt out of this
 possibility by disabling memory maps.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.mmap = if v.unwrap_switch() {
-            MmapMode::AlwaysTryMmap
-        } else {
-            MmapMode::Never
-        };
-        Ok(())
-    }
-}
-
-/// -U/--multiline
-#[derive(Debug)]
-struct Multiline;
-
-impl Flag for Multiline {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'U')
-    }
-    fn name_long(&self) -> &'static str {
-        "multiline"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-multiline")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Search
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Enable searching across multiple lines."
-    }
-    fn doc_long(&self) -> &'static str {
-        r#"
+",
+        update: |v, args| {
+            args.mmap = if v.unwrap_switch() {
+                MmapMode::AlwaysTryMmap
+            } else {
+                MmapMode::Never
+            };
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "multiline",
+        short: Some(b'U'),
+        negated: Some("no-multiline"),
+        category: Category::Search,
+        doc_short: r"Enable searching across multiple lines.",
+        doc_long: r#"
 This flag enables searching across multiple lines.
 .sp
 When multiline mode is enabled, ripgrep will lift the restriction that a
@@ -2637,40 +1571,22 @@ Nevertheless, if you only care about matches spanning at most one line, then it
 is always better to disable multiline mode.
 .sp
 This overrides the \flag{stop-on-nonmatch} flag.
-"#
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.multiline = v.unwrap_switch();
-        if args.multiline {
-            args.stop_on_nonmatch = false;
-        }
-        Ok(())
-    }
-}
-
-/// --multiline-dotall
-#[derive(Debug)]
-struct MultilineDotall;
-
-impl Flag for MultilineDotall {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "multiline-dotall"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-multiline-dotall")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Search
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Make '.' match line terminators."
-    }
-    fn doc_long(&self) -> &'static str {
-        r#"
+"#,
+        update: |v, args| {
+            args.multiline = v.unwrap_switch();
+            if args.multiline {
+                args.stop_on_nonmatch = false;
+            }
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "multiline-dotall",
+        negated: Some("no-multiline-dotall"),
+        category: Category::Search,
+        doc_short: r"Make '.' match line terminators.",
+        doc_long: r#"
 This flag enables "dot all" mode in all regex patterns. This causes \fB.\fP to
 match line terminators when multiline searching is enabled. This flag has no
 effect if multiline searching isn't enabled with the \flag{multiline} flag.
@@ -2688,72 +1604,38 @@ inline flags in the regex pattern itself, e.g., \fB(?s:.)\fP always enables
 "dot all" whereas \fB(?-s:.)\fP always disables "dot all". Moreover, you
 can use character classes like \fB\\p{any}\fP to match any Unicode codepoint
 regardless of whether "dot all" mode is enabled or not.
-"#
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.multiline_dotall = v.unwrap_switch();
-        Ok(())
-    }
-}
-
-/// --no-config
-#[derive(Debug)]
-struct NoConfig;
-
-impl Flag for NoConfig {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "no-config"
-    }
-    fn doc_category(&self) -> Category {
-        Category::OtherBehaviors
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Never read configuration files."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+"#,
+        update: |v, args| {
+            args.multiline_dotall = v.unwrap_switch();
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "no-config",
+        category: Category::OtherBehaviors,
+        doc_short: r"Never read configuration files.",
+        doc_long: r"
 When set, ripgrep will never read configuration files. When this flag is
 present, ripgrep will not respect the \fBRIPGREP_CONFIG_PATH\fP environment
 variable.
 .sp
 If ripgrep ever grows a feature to automatically read configuration files in
 pre-defined locations, then this flag will also disable that behavior as well.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--no-config has no negation");
-        args.no_config = true;
-        Ok(())
-    }
-}
-
-/// --no-ignore
-#[derive(Debug)]
-struct NoIgnore;
-
-impl Flag for NoIgnore {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "no-ignore"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("ignore")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Don't use ignore files."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            assert!(v.unwrap_switch(), "--no-config has no negation");
+            args.no_config = true;
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "no-ignore",
+        negated: Some("ignore"),
+        category: Category::Filter,
+        doc_short: r"Don't use ignore files.",
+        doc_long: r"
 When set, ignore files such as \fB.gitignore\fP, \fB.ignore\fP and
 \fB.rgignore\fP will not be respected. This implies \flag{no-ignore-dot},
 \flag{no-ignore-exclude}, \flag{no-ignore-global}, \flag{no-ignore-parent} and
@@ -2765,248 +1647,122 @@ specified explicitly as a command line argument.
 When given only once, the \flag{unrestricted} flag is identical in
 behavior to this flag and can be considered an alias. However, subsequent
 \flag{unrestricted} flags have additional effects.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        let yes = v.unwrap_switch();
-        args.no_ignore_dot = yes;
-        args.no_ignore_exclude = yes;
-        args.no_ignore_global = yes;
-        args.no_ignore_parent = yes;
-        args.no_ignore_vcs = yes;
-        Ok(())
-    }
-}
-
-/// --no-ignore-dot
-#[derive(Debug)]
-struct NoIgnoreDot;
-
-impl Flag for NoIgnoreDot {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "no-ignore-dot"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("ignore-dot")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Don't use .ignore or .rgignore files."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            let yes = v.unwrap_switch();
+            args.no_ignore_dot = yes;
+            args.no_ignore_exclude = yes;
+            args.no_ignore_global = yes;
+            args.no_ignore_parent = yes;
+            args.no_ignore_vcs = yes;
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "no-ignore-dot",
+        negated: Some("ignore-dot"),
+        category: Category::Filter,
+        doc_short: r"Don't use .ignore or .rgignore files.",
+        doc_long: r"
 Don't respect filter rules from \fB.ignore\fP or \fB.rgignore\fP files.
 .sp
 This does not impact whether ripgrep will ignore files and directories whose
 names begin with a dot. For that, see the \flag{hidden} flag. This flag also
 does not impact whether filter rules from \fB.gitignore\fP files are respected.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.no_ignore_dot = v.unwrap_switch();
-        Ok(())
-    }
-}
-
-/// --no-ignore-exclude
-#[derive(Debug)]
-struct NoIgnoreExclude;
-
-impl Flag for NoIgnoreExclude {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "no-ignore-exclude"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("ignore-exclude")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Don't use local exclusion files."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.no_ignore_dot = v.unwrap_switch();
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "no-ignore-exclude",
+        negated: Some("ignore-exclude"),
+        category: Category::Filter,
+        doc_short: r"Don't use local exclusion files.",
+        doc_long: r"
 Don't respect filter rules from files that are manually configured for the repository.
 For example, this includes \fBgit\fP's \fB.git/info/exclude\fP.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.no_ignore_exclude = v.unwrap_switch();
-        Ok(())
-    }
-}
-
-/// --no-ignore-files
-#[derive(Debug)]
-struct NoIgnoreFiles;
-
-impl Flag for NoIgnoreFiles {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "no-ignore-files"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("ignore-files")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Don't use --ignore-file arguments."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.no_ignore_exclude = v.unwrap_switch();
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "no-ignore-files",
+        negated: Some("ignore-files"),
+        category: Category::Filter,
+        doc_short: r"Don't use --ignore-file arguments.",
+        doc_long: r"
 When set, any \flag{ignore-file} flags, even ones that come after this flag,
 are ignored.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.no_ignore_files = v.unwrap_switch();
-        Ok(())
-    }
-}
-
-/// --no-ignore-global
-#[derive(Debug)]
-struct NoIgnoreGlobal;
-
-impl Flag for NoIgnoreGlobal {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "no-ignore-global"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("ignore-global")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Don't use global ignore files."
-    }
-    fn doc_long(&self) -> &'static str {
-        r#"
+",
+        update: |v, args| {
+            args.no_ignore_files = v.unwrap_switch();
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "no-ignore-global",
+        negated: Some("ignore-global"),
+        category: Category::Filter,
+        doc_short: r"Don't use global ignore files.",
+        doc_long: r#"
 Don't respect filter rules from ignore files that come from "global" sources
 such as \fBgit\fP's \fBcore.excludesFile\fP configuration option (which
 defaults to \fB$HOME/.config/git/ignore\fP).
-"#
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.no_ignore_global = v.unwrap_switch();
-        Ok(())
-    }
-}
-
-/// --no-ignore-messages
-#[derive(Debug)]
-struct NoIgnoreMessages;
-
-impl Flag for NoIgnoreMessages {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "no-ignore-messages"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("ignore-messages")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Logging
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Suppress gitignore parse error messages."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+"#,
+        update: |v, args| {
+            args.no_ignore_global = v.unwrap_switch();
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "no-ignore-messages",
+        negated: Some("ignore-messages"),
+        category: Category::Logging,
+        doc_short: r"Suppress gitignore parse error messages.",
+        doc_long: r"
 When this flag is enabled, all error messages related to parsing ignore files
 are suppressed. By default, error messages are printed to stderr. In cases
 where these errors are expected, this flag can be used to avoid seeing the
 noise produced by the messages.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.no_ignore_messages = v.unwrap_switch();
-        Ok(())
-    }
-}
-
-/// --no-ignore-parent
-#[derive(Debug)]
-struct NoIgnoreParent;
-
-impl Flag for NoIgnoreParent {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "no-ignore-parent"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("ignore-parent")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Don't use ignore files in parent directories."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.no_ignore_messages = v.unwrap_switch();
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "no-ignore-parent",
+        negated: Some("ignore-parent"),
+        category: Category::Filter,
+        doc_short: r"Don't use ignore files in parent directories.",
+        doc_long: r"
 When this flag is set, filter rules from ignore files found in parent
 directories are not respected. By default, ripgrep will ascend the parent
 directories of the current working directory to look for any applicable ignore
 files that should be applied. In some cases this may not be desirable.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.no_ignore_parent = v.unwrap_switch();
-        Ok(())
-    }
-}
-
-/// --no-ignore-vcs
-#[derive(Debug)]
-struct NoIgnoreVcs;
-
-impl Flag for NoIgnoreVcs {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "no-ignore-vcs"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("ignore-vcs")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Don't use ignore files from source control."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.no_ignore_parent = v.unwrap_switch();
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "no-ignore-vcs",
+        negated: Some("ignore-vcs"),
+        category: Category::Filter,
+        doc_short: r"Don't use ignore files from source control.",
+        doc_long: r"
 When given, filter rules from source control ignore files (e.g.,
 \fB.gitignore\fP) are not respected. By default, ripgrep respects \fBgit\fP's
 ignore rules for automatic filtering. In some cases, it may not be desirable
@@ -3019,105 +1775,35 @@ affected by \flag{hidden} and its related flags instead.
 .sp
 This flag implies \flag{no-ignore-parent} for source control ignore files as
 well.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.no_ignore_vcs = v.unwrap_switch();
-        Ok(())
-    }
-}
-
-/// --no-messages
-#[derive(Debug)]
-struct NoMessages;
-
-impl Flag for NoMessages {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "no-messages"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("messages")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Logging
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Suppress some error messages."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.no_ignore_vcs = v.unwrap_switch();
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "no-messages",
+        negated: Some("messages"),
+        category: Category::Logging,
+        doc_short: r"Suppress some error messages.",
+        doc_long: r"
 This flag suppresses some error messages. Specifically, messages related to
 the failed opening and reading of files. Error messages related to the syntax
 of the pattern are still shown.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.no_messages = v.unwrap_switch();
-        Ok(())
-    }
-}
-
-/// --no-pcre2-unicode
-#[derive(Debug)]
-struct NoPcre2Unicode;
-
-impl Flag for NoPcre2Unicode {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "no-pcre2-unicode"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("pcre2-unicode")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Search
-    }
-    fn doc_short(&self) -> &'static str {
-        r"(DEPRECATED) Disable Unicode mode for PCRE2."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
-DEPRECATED. Use \flag{no-unicode} instead.
-.sp
-Note that Unicode mode is enabled by default.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.no_unicode = v.unwrap_switch();
-        Ok(())
-    }
-}
-
-/// --no-require-git
-#[derive(Debug)]
-struct NoRequireGit;
-
-impl Flag for NoRequireGit {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "no-require-git"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("require-git")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Use .gitignore outside of git repositories."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.no_messages = v.unwrap_switch();
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "no-require-git",
+        negated: Some("require-git"),
+        category: Category::Filter,
+        doc_short: r"Use .gitignore outside of git repositories.",
+        doc_long: r"
 When this flag is given, source control ignore files such as \fB.gitignore\fP
 are respected even if no \fBgit\fP repository is present.
 .sp
@@ -3128,37 +1814,19 @@ repository. For example, when a \fB.git\fP directory is observed.
 This flag relaxes the default restriction. For example, it might be useful when
 the contents of a \fBgit\fP repository are stored or copied somewhere, but
 where the repository state is absent.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.no_require_git = v.unwrap_switch();
-        Ok(())
-    }
-}
-
-/// --no-unicode
-#[derive(Debug)]
-struct NoUnicode;
-
-impl Flag for NoUnicode {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "no-unicode"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("unicode")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Search
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Disable Unicode mode."
-    }
-    fn doc_long(&self) -> &'static str {
-        r#"
+",
+        update: |v, args| {
+            args.no_require_git = v.unwrap_switch();
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "no-unicode",
+        negated: Some("unicode"),
+        category: Category::Search,
+        doc_short: r"Disable Unicode mode.",
+        doc_long: r#"
 This flag disables Unicode mode for all patterns given to ripgrep.
 .sp
 By default, ripgrep will enable "Unicode mode" in all of its regexes. This has
@@ -3188,70 +1856,36 @@ exactly that. For example, Unicode mode can sometimes have a negative impact
 on performance, especially when things like \fB\\w\fP are used frequently
 (including via bounded repetitions like \fB\\w{100}\fP) when only their ASCII
 interpretation is needed.
-"#
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.no_unicode = v.unwrap_switch();
-        Ok(())
-    }
-}
-
-/// -0/--null
-#[derive(Debug)]
-struct Null;
-
-impl Flag for Null {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'0')
-    }
-    fn name_long(&self) -> &'static str {
-        "null"
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Print a NUL byte after file paths."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+"#,
+        update: |v, args| {
+            args.no_unicode = v.unwrap_switch();
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "null",
+        short: Some(b'0'),
+        category: Category::Output,
+        doc_short: r"Print a NUL byte after file paths.",
+        doc_long: r"
 Whenever a file path is printed, follow it with a \fBNUL\fP byte. This includes
 printing file paths before matches, and when printing a list of matching files
 such as with \flag{count}, \flag{files-with-matches} and \flag{files}. This
 option is useful for use with \fBxargs\fP.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--null has no negation");
-        args.null = true;
-        Ok(())
-    }
-}
-
-/// --null-data
-#[derive(Debug)]
-struct NullData;
-
-impl Flag for NullData {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "null-data"
-    }
-    fn doc_category(&self) -> Category {
-        Category::Search
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Use NUL as a line terminator."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            assert!(v.unwrap_switch(), "--null has no negation");
+            args.null = true;
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "null-data",
+        category: Category::Search,
+        doc_short: r"Use NUL as a line terminator.",
+        doc_long: r"
 Enabling this flag causes ripgrep to use \fBNUL\fP as a line terminator instead
 of the default of \fP\\n\fP.
 .sp
@@ -3265,39 +1899,21 @@ This is also useful for processing NUL delimited data, such as that emitted
 when using ripgrep's \flag{null} flag or \fBfind\fP's \fB\-\-print0\fP flag.
 .sp
 Using this flag implies \flag{text}. It also overrides \flag{crlf}.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--null-data has no negation");
-        args.crlf = false;
-        args.null_data = true;
-        Ok(())
-    }
-}
-
-/// --one-file-system
-#[derive(Debug)]
-struct OneFileSystem;
-
-impl Flag for OneFileSystem {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "one-file-system"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-one-file-system")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Skip directories on other file systems."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            assert!(v.unwrap_switch(), "--null-data has no negation");
+            args.crlf = false;
+            args.null_data = true;
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "one-file-system",
+        negated: Some("no-one-file-system"),
+        category: Category::Filter,
+        doc_short: r"Skip directories on other file systems.",
+        doc_long: r"
 When enabled, ripgrep will not cross file system boundaries relative to where
 the search started from.
 .sp
@@ -3313,71 +1929,38 @@ on different file systems, but will not cross a file system boundary when
 traversing each path's directory tree.
 .sp
 This is similar to \fBfind\fP's \fB\-xdev\fP or \fB\-mount\fP flag.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.one_file_system = v.unwrap_switch();
-        Ok(())
-    }
-}
-
-/// -o/--only-matching
-#[derive(Debug)]
-struct OnlyMatching;
-
-impl Flag for OnlyMatching {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'o')
-    }
-    fn name_long(&self) -> &'static str {
-        "only-matching"
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Print only matched parts of a line."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.one_file_system = v.unwrap_switch();
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "only-matching",
+        short: Some(b'o'),
+        category: Category::Output,
+        doc_short: r"Print only matched parts of a line.",
+        doc_long: r"
 Print only the matched (non-empty) parts of a matching line, with each such
 part on a separate output line.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--only-matching does not have a negation");
-        args.only_matching = true;
-        Ok(())
-    }
-}
-
-/// --path-separator
-#[derive(Debug)]
-struct PathSeparator;
-
-impl Flag for PathSeparator {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_long(&self) -> &'static str {
-        "path-separator"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("SEPARATOR")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Set the path separator for printing paths."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            assert!(
+                v.unwrap_switch(),
+                "--only-matching does not have a negation"
+            );
+            args.only_matching = true;
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "path-separator",
+        var: Some("SEPARATOR"),
+        category: Category::Output,
+        doc_short: r"Set the path separator for printing paths.",
+        doc_long: r"
 Set the path separator to use when printing file paths. This defaults to your
 platform's path separator, which is \fB/\fP on Unix and \fB\\\fP on Windows.
 This flag is intended for overriding the default when the environment demands
@@ -3385,52 +1968,34 @@ it (e.g., cygwin). A path separator is limited to a single byte.
 .sp
 Setting this flag to an empty string reverts it to its default behavior. That
 is, the path separator is automatically chosen based on the environment.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        let s = convert::string(v.unwrap_value())?;
-        let raw = crate::rg::bytes::unescape(&s);
-        args.path_separator = if raw.is_empty() {
-            None
-        } else if raw.len() == 1 {
-            Some(raw[0])
-        } else {
-            anyhow::bail!(
-                "A path separator must be exactly one byte, but \
+",
+        update: |v, args| {
+            let s = convert::string(v.unwrap_value())?;
+            let raw = crate::rg::bytes::unescape(&s);
+            args.path_separator = if raw.is_empty() {
+                None
+            } else if raw.len() == 1 {
+                Some(raw[0])
+            } else {
+                anyhow::bail!(
+                    "A path separator must be exactly one byte, but \
                  the given separator is {len} bytes: {sep}\n\
                  In some shells on Windows '/' is automatically \
                  expanded. Use '//' instead.",
-                len = raw.len(),
-                sep = s,
-            )
-        };
-        Ok(())
-    }
-}
-
-/// --passthru
-#[derive(Debug)]
-struct Passthru;
-
-impl Flag for Passthru {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "passthru"
-    }
-    fn aliases(&self) -> &'static [&'static str] {
-        &["passthrough"]
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Print both matching and non-matching lines."
-    }
-    fn doc_long(&self) -> &'static str {
-        r#"
+                    len = raw.len(),
+                    sep = s,
+                )
+            };
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "passthru",
+        aliases: &["passthrough"],
+        category: Category::Output,
+        doc_short: r"Print both matching and non-matching lines.",
+        doc_long: r#"
 Print both matching and non-matching lines.
 .sp
 Another way to achieve a similar effect is by modifying your pattern to match
@@ -3443,41 +2008,21 @@ An alternative spelling for this flag is \fB\-\-passthrough\fP.
 .sp
 This overrides the \flag{context}, \flag{after-context} and
 \flag{before-context} flags.
-"#
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--passthru has no negation");
-        args.context = ContextMode::Passthru;
-        Ok(())
-    }
-}
-
-/// -P/--pcre2
-#[derive(Debug)]
-struct PCRE2;
-
-impl Flag for PCRE2 {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'P')
-    }
-    fn name_long(&self) -> &'static str {
-        "pcre2"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-pcre2")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Search
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Enable PCRE2 matching."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+"#,
+        update: |v, args| {
+            assert!(v.unwrap_switch(), "--passthru has no negation");
+            args.context = ContextMode::Passthru;
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "pcre2",
+        short: Some(b'P'),
+        negated: Some("no-pcre2"),
+        category: Category::Search,
+        doc_short: r"Enable PCRE2 matching.",
+        doc_long: r"
 When this flag is present, ripgrep will use the PCRE2 regex engine instead of
 its default regex engine.
 .sp
@@ -3497,76 +2042,40 @@ regex engine. For example, if you use a \fB\\n\fP in a PCRE2 regex without
 the \flag{multiline} flag, then ripgrep will silently fail to match anything
 instead of reporting an error immediately (like it does with the default regex
 engine).
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.engine = if v.unwrap_switch() {
-            EngineChoice::PCRE2
-        } else {
-            EngineChoice::Default
-        };
-        Ok(())
-    }
-}
-
-/// --pcre2-version
-#[derive(Debug)]
-struct PCRE2Version;
-
-impl Flag for PCRE2Version {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "pcre2-version"
-    }
-    fn doc_category(&self) -> Category {
-        Category::OtherBehaviors
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Print the version of PCRE2 that ripgrep uses."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.engine = if v.unwrap_switch() {
+                EngineChoice::PCRE2
+            } else {
+                EngineChoice::Default
+            };
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "pcre2-version",
+        category: Category::OtherBehaviors,
+        doc_short: r"Print the version of PCRE2 that ripgrep uses.",
+        doc_long: r"
 When this flag is present, ripgrep will print the version of PCRE2 in use,
 along with other information, and then exit. If PCRE2 is not available, then
 ripgrep will print an error message and exit with an error code.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--pcre2-version has no negation");
-        args.special = Some(SpecialMode::VersionPCRE2);
-        Ok(())
-    }
-}
-
-/// --pre
-#[derive(Debug)]
-struct Pre;
-
-impl Flag for Pre {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_long(&self) -> &'static str {
-        "pre"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-pre")
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("COMMAND")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Input
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Search output of COMMAND for each PATH."
-    }
-    fn doc_long(&self) -> &'static str {
-        r#"
+",
+        update: |v, args| {
+            assert!(v.unwrap_switch(), "--pcre2-version has no negation");
+            args.special = Some(SpecialMode::VersionPCRE2);
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "pre",
+        negated: Some("no-pre"),
+        var: Some("COMMAND"),
+        category: Category::Input,
+        doc_short: r"Search output of COMMAND for each PATH.",
+        doc_long: r#"
 For each input \fIPATH\fP, this flag causes ripgrep to search the standard
 output of \fICOMMAND\fP \fIPATH\fP instead of the contents of \fIPATH\fP.
 This option expects the \fICOMMAND\fP program to either be a path or to be
@@ -3615,48 +2124,31 @@ the file based on its contents. If it is a compressed file in the Zstandard
 format, then \fBpzstd\fP is used to decompress the contents to stdout.
 .sp
 This overrides the \flag{search-zip} flag.
-"#
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        let path = match v {
-            FlagValue::Value(v) => PathBuf::from(v),
-            FlagValue::Switch(yes) => {
-                assert!(!yes, "there is no affirmative switch for --pre");
-                args.pre = None;
-                return Ok(());
+"#,
+        update: |v, args| {
+            let path = match v {
+                FlagValue::Value(v) => PathBuf::from(v),
+                FlagValue::Switch(yes) => {
+                    assert!(!yes, "there is no affirmative switch for --pre");
+                    args.pre = None;
+                    return Ok(());
+                }
+            };
+            args.pre =
+                if path.as_os_str().is_empty() { None } else { Some(path) };
+            if args.pre.is_some() {
+                args.search_zip = false;
             }
-        };
-        args.pre = if path.as_os_str().is_empty() { None } else { Some(path) };
-        if args.pre.is_some() {
-            args.search_zip = false;
-        }
-        Ok(())
-    }
-}
-
-/// --pre-glob
-#[derive(Debug)]
-struct PreGlob;
-
-impl Flag for PreGlob {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_long(&self) -> &'static str {
-        "pre-glob"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("GLOB")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Input
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Include or exclude files from a preprocessor."
-    }
-    fn doc_long(&self) -> &'static str {
-        r#"
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "pre-glob",
+        var: Some("GLOB"),
+        category: Category::Input,
+        doc_short: r"Include or exclude files from a preprocessor.",
+        doc_long: r#"
 This flag works in conjunction with the \flag{pre} flag. Namely, when one or
 more \flag{pre-glob} flags are given, then only files that match the given set
 of globs will be handed to the command specified by the \flag{pre} flag. Any
@@ -3680,114 +2172,60 @@ Multiple \flag{pre-glob} flags may be used. Globbing rules match
 \fBgitignore\fP globs. Precede a glob with a \fB!\fP to exclude it.
 .sp
 This flag has no effect if the \flag{pre} flag is not used.
-"#
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        let glob = convert::string(v.unwrap_value())?;
-        args.pre_glob.push(glob);
-        Ok(())
-    }
-}
-
-/// -p/--pretty
-#[derive(Debug)]
-struct Pretty;
-
-impl Flag for Pretty {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'p')
-    }
-    fn name_long(&self) -> &'static str {
-        "pretty"
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Alias for colors, headings and line numbers."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+"#,
+        update: |v, args| {
+            let glob = convert::string(v.unwrap_value())?;
+            args.pre_glob.push(glob);
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "pretty",
+        short: Some(b'p'),
+        category: Category::Output,
+        doc_short: r"Alias for colors, headings and line numbers.",
+        doc_long: r"
 This is a convenience alias for \fB\-\-color=always \-\-heading
 \-\-line\-number\fP. This flag is useful when you still want pretty output even
 if you're piping ripgrep to another program or file. For example: \fBrg -p
 \fP\fIfoo\fP \fB| less -R\fP.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--pretty has no negation");
-        args.color = ColorChoice::Always;
-        args.heading = Some(true);
-        args.line_number = Some(true);
-        Ok(())
-    }
-}
-
-/// -q/--quiet
-#[derive(Debug)]
-struct Quiet;
-
-impl Flag for Quiet {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'q')
-    }
-    fn name_long(&self) -> &'static str {
-        "quiet"
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Do not print anything to stdout."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            assert!(v.unwrap_switch(), "--pretty has no negation");
+            args.color = ColorChoice::Always;
+            args.heading = Some(true);
+            args.line_number = Some(true);
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "quiet",
+        short: Some(b'q'),
+        category: Category::Output,
+        doc_short: r"Do not print anything to stdout.",
+        doc_long: r"
 Do not print anything to stdout. If a match is found in a file, then ripgrep
 will stop searching. This is useful when ripgrep is used only for its exit code
 (which will be an error code if no matches are found).
 .sp
 When \flag{files} is used, ripgrep will stop finding files after finding the
 first file that does not match any ignore rules.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--quiet has no negation");
-        args.quiet = true;
-        Ok(())
-    }
-}
-
-/// --regex-size-limit
-#[derive(Debug)]
-struct RegexSizeLimit;
-
-impl Flag for RegexSizeLimit {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_long(&self) -> &'static str {
-        "regex-size-limit"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("NUM+SUFFIX?")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Search
-    }
-    fn doc_short(&self) -> &'static str {
-        r"The size limit of the compiled regex."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            assert!(v.unwrap_switch(), "--quiet has no negation");
+            args.quiet = true;
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "regex-size-limit",
+        var: Some("NUM+SUFFIX?"),
+        category: Category::Search,
+        doc_short: r"The size limit of the compiled regex.",
+        doc_long: r"
 The size limit of the compiled regex, where the compiled regex generally
 corresponds to a single object in memory that can match all of the patterns
 provided to ripgrep. The default limit is generous enough that most reasonable
@@ -3799,96 +2237,21 @@ much more time and/or memory building a regex matcher.
 The input format accepts suffixes of \fBK\fP, \fBM\fP or \fBG\fP which
 correspond to kilobytes, megabytes and gigabytes, respectively. If no suffix is
 provided the input is treated as bytes.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        let v = v.unwrap_value();
-        args.regex_size_limit = Some(convert::human_readable_usize(&v)?);
-        Ok(())
-    }
-}
-
-/// -e/--regexp
-#[derive(Debug)]
-struct Regexp;
-
-impl Flag for Regexp {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'e')
-    }
-    fn name_long(&self) -> &'static str {
-        "regexp"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("PATTERN")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Input
-    }
-    fn doc_short(&self) -> &'static str {
-        r"A pattern to search for."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
-A pattern to search for. This option can be provided multiple times, where
-all patterns given are searched, in addition to any patterns provided by
-\flag{file}. Lines matching at least one of the provided patterns are printed.
-This flag can also be used when searching for patterns that start with a dash.
-.sp
-For example, to search for the literal \fB\-foo\fP:
-.sp
-.EX
-    rg \-e \-foo
-.EE
-.sp
-You can also use the special \fB\-\-\fP delimiter to indicate that no more
-flags will be provided. Namely, the following is equivalent to the above:
-.sp
-.EX
-    rg \-\- \-foo
-.EE
-.sp
-When \flag{file} or \flag{regexp} is used, then ripgrep treats all positional
-arguments as files or directories to search.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        let regexp = convert::string(v.unwrap_value())?;
-        args.patterns.push(PatternSource::Regexp(regexp));
-        Ok(())
-    }
-}
-
-/// -r/--replace
-#[derive(Debug)]
-struct Replace;
-
-impl Flag for Replace {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'r')
-    }
-    fn name_long(&self) -> &'static str {
-        "replace"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("REPLACEMENT")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Replace matches with the given text."
-    }
-    fn doc_long(&self) -> &'static str {
-        r#"
+",
+        update: |v, args| {
+            let v = v.unwrap_value();
+            args.regex_size_limit = Some(convert::human_readable_usize(&v)?);
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "replace",
+        short: Some(b'r'),
+        var: Some("REPLACEMENT"),
+        category: Category::Output,
+        doc_short: r"Replace matches with the given text.",
+        doc_long: r#"
 Replaces every match with the text given when printing results. Neither this
 flag nor any other ripgrep flag will modify your files.
 .sp
@@ -3920,40 +2283,20 @@ Note that the replacement by default replaces each match, and not the entire
 line. To replace the entire line, you should match the entire line.
 .sp
 This flag can be used with the \flag{only-matching} flag.
-"#
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.replace = Some(convert::string(v.unwrap_value())?.into());
-        Ok(())
-    }
-}
-
-/// -z/--search-zip
-#[derive(Debug)]
-struct SearchZip;
-
-impl Flag for SearchZip {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'z')
-    }
-    fn name_long(&self) -> &'static str {
-        "search-zip"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-search-zip")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Input
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Search in compressed files."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+"#,
+        update: |v, args| {
+            args.replace = Some(convert::string(v.unwrap_value())?.into());
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "search-zip",
+        short: Some(b'z'),
+        negated: Some("no-search-zip"),
+        category: Category::Input,
+        doc_short: r"Search in compressed files.",
+        doc_long: r"
 This flag instructs ripgrep to search in compressed files. Currently gzip,
 bzip2, xz, LZ4, LZMA, Brotli and Zstd files are supported. This option expects
 the decompression binaries (such as \fBgzip\fP) to be available in your
@@ -3966,42 +2309,24 @@ trees. It only makes ripgrep detect compressed files and then decompress them
 before searching their contents as it would any other file.
 .sp
 This overrides the \flag{pre} flag.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.search_zip = if v.unwrap_switch() {
-            args.pre = None;
-            true
-        } else {
-            false
-        };
-        Ok(())
-    }
-}
-
-/// -S/--smart-case
-#[derive(Debug)]
-struct SmartCase;
-
-impl Flag for SmartCase {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'S')
-    }
-    fn name_long(&self) -> &'static str {
-        "smart-case"
-    }
-    fn doc_category(&self) -> Category {
-        Category::Search
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Smart case search."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.search_zip = if v.unwrap_switch() {
+                args.pre = None;
+                true
+            } else {
+                false
+            };
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "smart-case",
+        short: Some(b'S'),
+        category: Category::Search,
+        doc_short: r"Smart case search.",
+        doc_long: r"
 This flag instructs ripgrep to searches case insensitively if the pattern is
 all lowercase. Otherwise, ripgrep will search case sensitively.
 .sp
@@ -4017,80 +2342,20 @@ uppercase according to Unicode. For example, \fBfoo\\pL\fP has no uppercase
 literals but \fBFoo\\pL\fP does.
 .PP
 This overrides the \flag{case-sensitive} and \flag{ignore-case} flags.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--smart-case flag has no negation");
-        args.case = CaseMode::Smart;
-        Ok(())
-    }
-}
-
-/// --sort-files
-#[derive(Debug)]
-struct SortFiles;
-
-impl Flag for SortFiles {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "sort-files"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-sort-files")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"(DEPRECATED) Sort results by file path."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
-DEPRECATED. Use \fB\-\-sort=path\fP instead.
-.sp
-This flag instructs ripgrep to sort search results by file path
-lexicographically in ascending order. Note that this currently disables all
-parallelism and runs search in a single thread.
-.sp
-This flag overrides \flag{sort} and \flag{sortr}.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.sort = if v.unwrap_switch() {
-            Some(SortMode { reverse: false, kind: SortModeKind::Path })
-        } else {
-            None
-        };
-        Ok(())
-    }
-}
-
-/// --sort
-#[derive(Debug)]
-struct Sort;
-
-impl Flag for Sort {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_long(&self) -> &'static str {
-        "sort"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("SORTBY")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Sort results in ascending order."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            assert!(v.unwrap_switch(), "--smart-case flag has no negation");
+            args.case = CaseMode::Smart;
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "sort",
+        var: Some("SORTBY"),
+        category: Category::Output,
+        doc_short: r"Sort results in ascending order.",
+        doc_long: r"
 This flag enables sorting of results in ascending order. The possible values
 for this flag are:
 .sp
@@ -4122,48 +2387,30 @@ Also, this flag overrides \flag{sortr}.
 .sp
 Note that sorting results currently always forces ripgrep to abandon
 parallelism and run in a single thread.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        let kind = match convert::str(&v.unwrap_value())? {
-            "none" => {
-                args.sort = None;
-                return Ok(());
-            }
-            "path" => SortModeKind::Path,
-            "modified" => SortModeKind::LastModified,
-            "accessed" => SortModeKind::LastAccessed,
-            "created" => SortModeKind::Created,
-            unk => anyhow::bail!("choice '{unk}' is unrecognized"),
-        };
-        args.sort = Some(SortMode { reverse: false, kind });
-        Ok(())
-    }
-}
-
-/// --sortr
-#[derive(Debug)]
-struct Sortr;
-
-impl Flag for Sortr {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_long(&self) -> &'static str {
-        "sortr"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("SORTBY")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Sort results in descending order."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            let kind = match convert::str(&v.unwrap_value())? {
+                "none" => {
+                    args.sort = None;
+                    return Ok(());
+                }
+                "path" => SortModeKind::Path,
+                "modified" => SortModeKind::LastModified,
+                "accessed" => SortModeKind::LastAccessed,
+                "created" => SortModeKind::Created,
+                unk => anyhow::bail!("choice '{unk}' is unrecognized"),
+            };
+            args.sort = Some(SortMode { reverse: false, kind });
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "sortr",
+        var: Some("SORTBY"),
+        category: Category::Output,
+        doc_short: r"Sort results in descending order.",
+        doc_long: r"
 This flag enables sorting of results in descending order. The possible values
 for this flag are:
 .sp
@@ -4196,48 +2443,30 @@ overrides \flag{sort}.
 .sp
 Note that sorting results currently always forces ripgrep to abandon
 parallelism and run in a single thread.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        let kind = match convert::str(&v.unwrap_value())? {
-            "none" => {
-                args.sort = None;
-                return Ok(());
-            }
-            "path" => SortModeKind::Path,
-            "modified" => SortModeKind::LastModified,
-            "accessed" => SortModeKind::LastAccessed,
-            "created" => SortModeKind::Created,
-            unk => anyhow::bail!("choice '{unk}' is unrecognized"),
-        };
-        args.sort = Some(SortMode { reverse: true, kind });
-        Ok(())
-    }
-}
-
-/// --stats
-#[derive(Debug)]
-struct Stats;
-
-impl Flag for Stats {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "stats"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-stats")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Logging
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Print statistics about the search."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            let kind = match convert::str(&v.unwrap_value())? {
+                "none" => {
+                    args.sort = None;
+                    return Ok(());
+                }
+                "path" => SortModeKind::Path,
+                "modified" => SortModeKind::LastModified,
+                "accessed" => SortModeKind::LastAccessed,
+                "created" => SortModeKind::Created,
+                unk => anyhow::bail!("choice '{unk}' is unrecognized"),
+            };
+            args.sort = Some(SortMode { reverse: true, kind });
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "stats",
+        negated: Some("no-stats"),
+        category: Category::Logging,
+        doc_short: r"Print statistics about the search.",
+        doc_long: r"
 When enabled, ripgrep will print aggregate statistics about the search. When
 this flag is present, ripgrep will print at least the following stats to
 stdout at the end of the search: number of matched lines, number of files with
@@ -4250,76 +2479,40 @@ This flag is always and implicitly enabled when \flag{json} is used.
 .sp
 Note that this flag has no effect if \flag{files}, \flag{files-with-matches} or
 \flag{files-without-match} is passed.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.stats = v.unwrap_switch();
-        Ok(())
-    }
-}
-
-/// --stop-on-nonmatch
-#[derive(Debug)]
-struct StopOnNonmatch;
-
-impl Flag for StopOnNonmatch {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "stop-on-nonmatch"
-    }
-    fn doc_category(&self) -> Category {
-        Category::Search
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Stop searching after a non-match."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.stats = v.unwrap_switch();
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "stop-on-nonmatch",
+        category: Category::Search,
+        doc_short: r"Stop searching after a non-match.",
+        doc_long: r"
 Enabling this option will cause ripgrep to stop reading a file once it
 encounters a non-matching line after it has encountered a matching line.
 This is useful if it is expected that all matches in a given file will be on
 sequential lines, for example due to the lines being sorted.
 .sp
 This overrides the \flag{multiline} flag.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--stop-on-nonmatch has no negation");
-        args.stop_on_nonmatch = true;
-        args.multiline = false;
-        Ok(())
-    }
-}
-
-/// -a/--text
-#[derive(Debug)]
-struct Text;
-
-impl Flag for Text {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'a')
-    }
-    fn name_long(&self) -> &'static str {
-        "text"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-text")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Search
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Search binary files as if they were text."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            assert!(v.unwrap_switch(), "--stop-on-nonmatch has no negation");
+            args.stop_on_nonmatch = true;
+            args.multiline = false;
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "text",
+        short: Some(b'a'),
+        negated: Some("no-text"),
+        category: Category::Search,
+        doc_short: r"Search binary files as if they were text.",
+        doc_long: r"
 This flag instructs ripgrep to search binary files as if they were text. When
 this flag is present, ripgrep's binary file detection is disabled. This means
 that when a binary file is searched, its contents may be printed if there is
@@ -4334,147 +2527,73 @@ when it sees a \fBNUL\fP byte after it sees a match (or searches the entire
 file).
 .sp
 This flag overrides the \flag{binary} flag.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.binary = if v.unwrap_switch() {
-            BinaryMode::AsText
-        } else {
-            BinaryMode::Auto
-        };
-        Ok(())
-    }
-}
-
-/// -j/--threads
-#[derive(Debug)]
-struct Threads;
-
-impl Flag for Threads {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'j')
-    }
-    fn name_long(&self) -> &'static str {
-        "threads"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("NUM")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Search
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Set the approximate number of threads to use."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.binary = if v.unwrap_switch() {
+                BinaryMode::AsText
+            } else {
+                BinaryMode::Auto
+            };
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "threads",
+        short: Some(b'j'),
+        var: Some("NUM"),
+        category: Category::Search,
+        doc_short: r"Set the approximate number of threads to use.",
+        doc_long: r"
 This flag sets the approximate number of threads to use. A value of \fB0\fP
 (which is the default) causes ripgrep to choose the thread count using
 heuristics.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        let threads = convert::usize(&v.unwrap_value())?;
-        args.threads = if threads == 0 { None } else { Some(threads) };
-        Ok(())
-    }
-}
-
-/// --trace
-#[derive(Debug)]
-struct Trace;
-
-impl Flag for Trace {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "trace"
-    }
-    fn doc_category(&self) -> Category {
-        Category::Logging
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Show trace messages."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            let threads = convert::usize(&v.unwrap_value())?;
+            args.threads = if threads == 0 { None } else { Some(threads) };
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "trace",
+        category: Category::Logging,
+        doc_short: r"Show trace messages.",
+        doc_long: r"
 Show trace messages. This shows even more detail than the \flag{debug}
 flag. Generally, one should only use this if \flag{debug} doesn't emit the
 information you're looking for.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--trace can only be enabled");
-        args.logging = Some(LoggingMode::Trace);
-        Ok(())
-    }
-}
-
-/// --trim
-#[derive(Debug)]
-struct Trim;
-
-impl Flag for Trim {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "trim"
-    }
-    fn name_negated(&self) -> Option<&'static str> {
-        Some("no-trim")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Trim prefix whitespace from matches."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            assert!(v.unwrap_switch(), "--trace can only be enabled");
+            args.logging = Some(LoggingMode::Trace);
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "trim",
+        negated: Some("no-trim"),
+        category: Category::Output,
+        doc_short: r"Trim prefix whitespace from matches.",
+        doc_long: r"
 When set, all ASCII whitespace at the beginning of each line printed will be
 removed.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.trim = v.unwrap_switch();
-        Ok(())
-    }
-}
-
-/// -t/--type
-#[derive(Debug)]
-struct Type;
-
-impl Flag for Type {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b't')
-    }
-    fn name_long(&self) -> &'static str {
-        "type"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("TYPE")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Only search files matching TYPE."
-    }
-    fn doc_long(&self) -> &'static str {
-        r#"
+",
+        update: |v, args| {
+            args.trim = v.unwrap_switch();
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "type",
+        short: Some(b't'),
+        var: Some("TYPE"),
+        category: Category::Filter,
+        doc_short: r"Only search files matching TYPE.",
+        doc_long: r#"
 This flag limits ripgrep to searching files matching \fITYPE\fP. Multiple
 \flag{type} flags may be provided.
 .sp
@@ -4488,39 +2607,47 @@ Note that this flag has lower precedence than both the \flag{glob} flag and
 any rules found in ignore files.
 .sp
 To see the list of available file types, use the \flag{type-list} flag.
-"#
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.type_changes.push(TypeChange::Select {
-            name: convert::string(v.unwrap_value())?,
-        });
-        Ok(())
-    }
-}
-
-/// --type-add
-#[derive(Debug)]
-struct TypeAdd;
-
-impl Flag for TypeAdd {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_long(&self) -> &'static str {
-        "type-add"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("TYPESPEC")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Add a new glob for a file type."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+"#,
+        update: |v, args| {
+            args.type_changes.push(TypeChange::Select {
+                name: convert::string(v.unwrap_value())?,
+            });
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "type-not",
+        short: Some(b'T'),
+        var: Some("TYPE"),
+        category: Category::Filter,
+        doc_short: r"Do not search files matching TYPE.",
+        doc_long: r#"
+Do not search files matching \fITYPE\fP. Multiple \flag{type-not} flags may be
+provided. Use the \flag{type-list} flag to list all available types.
+.sp
+This flag supports the special value \fBall\fP, which will behave
+as if \flag{type-not} was provided for every file type supported by
+ripgrep (including any custom file types). The end result is that
+\fB\-\-type\-not=all\fP causes ripgrep to search in "blacklist" mode, where it
+will only search files that are unrecognized by its type definitions.
+.sp
+To see the list of available file types, use the \flag{type-list} flag.
+"#,
+        update: |v, args| {
+            args.type_changes.push(TypeChange::Negate {
+                name: convert::string(v.unwrap_value())?,
+            });
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "type-add",
+        var: Some("TYPESPEC"),
+        category: Category::Filter,
+        doc_short: r"Add a new glob for a file type.",
+        doc_long: r"
 This flag adds a new glob for a particular file type. Only one glob can be
 added at a time. Multiple \flag{type-add} flags can be provided. Unless
 \flag{type-clear} is used, globs are added to any existing globs defined inside
@@ -4554,156 +2681,59 @@ again:
 .sp
 Note that type names must consist only of Unicode letters or numbers.
 Punctuation characters are not allowed.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.type_changes
-            .push(TypeChange::Add { def: convert::string(v.unwrap_value())? });
-        Ok(())
-    }
-}
-
-/// --type-clear
-#[derive(Debug)]
-struct TypeClear;
-
-impl Flag for TypeClear {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_long(&self) -> &'static str {
-        "type-clear"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("TYPE")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Clear globs for a file type."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.type_changes.push(TypeChange::Add {
+                def: convert::string(v.unwrap_value())?,
+            });
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "type-clear",
+        var: Some("TYPE"),
+        category: Category::Filter,
+        doc_short: r"Clear globs for a file type.",
+        doc_long: r"
 Clear the file type globs previously defined for \fITYPE\fP. This clears any
 previously defined globs for the \fITYPE\fP, but globs can be added after this
 flag.
 .sp
 Note that this must be passed to every invocation of ripgrep. Type settings are
 not persisted. See \fBCONFIGURATION FILES\fP for a workaround.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.type_changes.push(TypeChange::Clear {
-            name: convert::string(v.unwrap_value())?,
-        });
-        Ok(())
-    }
-}
-
-/// --type-not
-#[derive(Debug)]
-struct TypeNot;
-
-impl Flag for TypeNot {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'T')
-    }
-    fn name_long(&self) -> &'static str {
-        "type-not"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("TYPE")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Do not search files matching TYPE."
-    }
-    fn doc_long(&self) -> &'static str {
-        r#"
-Do not search files matching \fITYPE\fP. Multiple \flag{type-not} flags may be
-provided. Use the \flag{type-list} flag to list all available types.
-.sp
-This flag supports the special value \fBall\fP, which will behave
-as if \flag{type-not} was provided for every file type supported by
-ripgrep (including any custom file types). The end result is that
-\fB\-\-type\-not=all\fP causes ripgrep to search in "blacklist" mode, where it
-will only search files that are unrecognized by its type definitions.
-.sp
-To see the list of available file types, use the \flag{type-list} flag.
-"#
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.type_changes.push(TypeChange::Negate {
-            name: convert::string(v.unwrap_value())?,
-        });
-        Ok(())
-    }
-}
-
-/// --type-list
-#[derive(Debug)]
-struct TypeList;
-
-impl Flag for TypeList {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "type-list"
-    }
-    fn doc_category(&self) -> Category {
-        Category::OtherBehaviors
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Show all supported file types."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            args.type_changes.push(TypeChange::Clear {
+                name: convert::string(v.unwrap_value())?,
+            });
+            Ok(())
+        },
+        ..VALUE
+    },
+    Flag {
+        long: "type-list",
+        category: Category::OtherBehaviors,
+        doc_short: r"Show all supported file types.",
+        doc_long: r"
 Show all supported file types and their corresponding globs. This takes any
 \flag{type-add} and \flag{type-clear} flags given into account. Each type is
 printed on its own line, followed by a \fB:\fP and then a comma-delimited list
 of globs for that type on the same line.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--type-list has no negation");
-        args.mode.update(Mode::Types);
-        Ok(())
-    }
-}
-
-/// -u/--unrestricted
-#[derive(Debug)]
-struct Unrestricted;
-
-impl Flag for Unrestricted {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'u')
-    }
-    fn name_long(&self) -> &'static str {
-        "unrestricted"
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        r#"Reduce the level of "smart" filtering."#
-    }
-    fn doc_long(&self) -> &'static str {
-        r#"
+",
+        update: |v, args| {
+            assert!(v.unwrap_switch(), "--type-list has no negation");
+            args.mode.update(Mode::Types);
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "unrestricted",
+        short: Some(b'u'),
+        category: Category::Filter,
+        doc_short: r#"Reduce the level of "smart" filtering."#,
+        doc_long: r#"
 This flag reduces the level of "smart" filtering. Repeated uses (up to 3) reduces
 the filtering even more. When repeated three times, ripgrep will search every
 file in a directory tree.
@@ -4717,84 +2747,50 @@ The only filtering ripgrep still does when \fB-uuu\fP is given is to skip
 symbolic links and to avoid printing matches from binary files. Symbolic links
 can be followed via the \flag{follow} flag, and binary files can be treated as
 text files via the \flag{text} flag.
-"#
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--unrestricted has no negation");
-        args.unrestricted = args.unrestricted.saturating_add(1);
-        anyhow::ensure!(
-            args.unrestricted <= 3,
-            "flag can only be repeated up to 3 times"
-        );
-        if args.unrestricted == 1 {
-            NoIgnore.update(FlagValue::Switch(true), args)?;
-        } else if args.unrestricted == 2 {
-            Hidden.update(FlagValue::Switch(true), args)?;
-        } else {
-            assert_eq!(args.unrestricted, 3);
-            Binary.update(FlagValue::Switch(true), args)?;
-        }
-        Ok(())
-    }
-}
-
-/// --version
-#[derive(Debug)]
-struct Version;
-
-impl Flag for Version {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'V')
-    }
-    fn name_long(&self) -> &'static str {
-        "version"
-    }
-    fn doc_category(&self) -> Category {
-        Category::OtherBehaviors
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Print ripgrep's version."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+"#,
+        update: |v, args| {
+            assert!(v.unwrap_switch(), "--unrestricted has no negation");
+            args.unrestricted = args.unrestricted.saturating_add(1);
+            anyhow::ensure!(
+                args.unrestricted <= 3,
+                "flag can only be repeated up to 3 times"
+            );
+            if args.unrestricted == 1 {
+                (named("no-ignore").update)(FlagValue::Switch(true), args)?;
+            } else if args.unrestricted == 2 {
+                (named("hidden").update)(FlagValue::Switch(true), args)?;
+            } else {
+                assert_eq!(args.unrestricted, 3);
+                (named("binary").update)(FlagValue::Switch(true), args)?;
+            }
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "version",
+        short: Some(b'V'),
+        category: Category::OtherBehaviors,
+        doc_short: r"Print ripgrep's version.",
+        doc_long: r"
 This flag prints ripgrep's version. This also may print other relevant
 information, such as the presence of target specific optimizations and the
 \fBgit\fP revision that this build of ripgrep was compiled from.
-"
-    }
-
-    fn update(&self, v: FlagValue, _: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--version has no negation");
-        // Since this flag has different semantics for -V and --version and the
-        // Flag trait doesn't support encoding this sort of thing, we handle it
-        // as a special case in the parser.
-        Ok(())
-    }
-}
-
-/// --vimgrep
-#[derive(Debug)]
-struct Vimgrep;
-
-impl Flag for Vimgrep {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "vimgrep"
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Print results in a vim compatible format."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, _| {
+            assert!(v.unwrap_switch(), "--version has no negation");
+            // Since this flag has different semantics for -V and --version and the
+            // Flag trait doesn't support encoding this sort of thing, we handle it
+            // as a special case in the parser.
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "vimgrep",
+        category: Category::Output,
+        doc_short: r"Print results in a vim compatible format.",
+        doc_long: r"
 This flag instructs ripgrep to print results with every match on its own line,
 including line numbers and column numbers.
 .sp
@@ -4809,38 +2805,20 @@ One alternative to avoiding exorbitant memory usage is to force ripgrep into
 single threaded mode with the \flag{threads} flag. Note though that this will
 not impact the total size of the output, just the heap memory that ripgrep will
 use.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--vimgrep has no negation");
-        args.vimgrep = true;
-        Ok(())
-    }
-}
-
-/// --with-filename
-#[derive(Debug)]
-struct WithFilename;
-
-impl Flag for WithFilename {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'H')
-    }
-    fn name_long(&self) -> &'static str {
-        "with-filename"
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Print the file path with each matching line."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            assert!(v.unwrap_switch(), "--vimgrep has no negation");
+            args.vimgrep = true;
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "with-filename",
+        short: Some(b'H'),
+        category: Category::Output,
+        doc_short: r"Print the file path with each matching line.",
+        doc_long: r"
 This flag instructs ripgrep to print the file path for each matching line.
 This is the default when more than one file is searched. If \flag{heading} is
 enabled (the default when printing to a tty), the file path will be shown above
@@ -4848,75 +2826,45 @@ clusters of matches from each file; otherwise, the file name will be shown as a
 prefix for each matched line.
 .sp
 This flag overrides \flag{no-filename}.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--with-filename has no defined negation");
-        args.with_filename = Some(true);
-        Ok(())
-    }
-}
-
-/// --no-filename
-#[derive(Debug)]
-struct WithFilenameNo;
-
-impl Flag for WithFilenameNo {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'I')
-    }
-    fn name_long(&self) -> &'static str {
-        "no-filename"
-    }
-    fn doc_category(&self) -> Category {
-        Category::Output
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Never print the path with each matching line."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            assert!(
+                v.unwrap_switch(),
+                "--with-filename has no defined negation"
+            );
+            args.with_filename = Some(true);
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "no-filename",
+        short: Some(b'I'),
+        category: Category::Output,
+        doc_short: r"Never print the path with each matching line.",
+        doc_long: r"
 This flag instructs ripgrep to never print the file path with each matching
 line. This is the default when ripgrep is explicitly instructed to search one
 file or stdin.
 .sp
 This flag overrides \flag{with-filename}.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--no-filename has no defined negation");
-        args.with_filename = Some(false);
-        Ok(())
-    }
-}
-
-/// -w/--word-regexp
-#[derive(Debug)]
-struct WordRegexp;
-
-impl Flag for WordRegexp {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_short(&self) -> Option<u8> {
-        Some(b'w')
-    }
-    fn name_long(&self) -> &'static str {
-        "word-regexp"
-    }
-    fn doc_category(&self) -> Category {
-        Category::Search
-    }
-    fn doc_short(&self) -> &'static str {
-        r"Show matches surrounded by word boundaries."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
+",
+        update: |v, args| {
+            assert!(
+                v.unwrap_switch(),
+                "--no-filename has no defined negation"
+            );
+            args.with_filename = Some(false);
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "word-regexp",
+        short: Some(b'w'),
+        category: Category::Search,
+        doc_short: r"Show matches surrounded by word boundaries.",
+        doc_long: r"
 When enabled, ripgrep will only show matches surrounded by word boundaries.
 This is equivalent to surrounding every pattern with \fB\\b{start-half}\fP and
 \fB\\b{end-half}\fP. These are a custom syntax from ripgrep's default regex
@@ -4926,14 +2874,117 @@ the left and \fB\\b{end-half}\fP corresponds to matching \fB\\W|\\z\fP on the
 right.
 .sp
 This overrides the \flag{line-regexp} flag.
-"
-    }
+",
+        update: |v, args| {
+            assert!(v.unwrap_switch(), "--word-regexp has no negation");
+            args.boundary = Some(BoundaryMode::Word);
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "auto-hybrid-regex",
+        negated: Some("no-auto-hybrid-regex"),
+        category: Category::Search,
+        doc_short: "(DEPRECATED) Use PCRE2 if appropriate.",
+        doc_long: r"
+DEPRECATED. Use \flag{engine} instead.
+.sp
+When this flag is used, ripgrep will dynamically choose between supported regex
+engines depending on the features used in a pattern. When ripgrep chooses a
+regex engine, it applies that choice for every regex provided to ripgrep (e.g.,
+via multiple \flag{regexp} or \flag{file} flags).
+.sp
+As an example of how this flag might behave, ripgrep will attempt to use
+its default finite automata based regex engine whenever the pattern can be
+successfully compiled with that regex engine. If PCRE2 is enabled and if the
+pattern given could not be compiled with the default regex engine, then PCRE2
+will be automatically used for searching. If PCRE2 isn't available, then this
+flag has no effect because there is only one regex engine to choose from.
+.sp
+In the future, ripgrep may adjust its heuristics for how it decides which
+regex engine to use. In general, the heuristics will be limited to a static
+analysis of the patterns, and not to any specific runtime behavior observed
+while searching files.
+.sp
+The primary downside of using this flag is that it may not always be obvious
+which regex engine ripgrep uses, and thus, the match semantics or performance
+profile of ripgrep may subtly and unexpectedly change. However, in many cases,
+all regex engines will agree on what constitutes a match and it can be nice
+to transparently support more advanced regex features like look-around and
+backreferences without explicitly needing to enable them.
+",
+        update: |v, args| {
+            let mode = if v.unwrap_switch() {
+                EngineChoice::Auto
+            } else {
+                EngineChoice::Default
+            };
+            args.engine = mode;
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "no-pcre2-unicode",
+        negated: Some("pcre2-unicode"),
+        category: Category::Search,
+        doc_short: r"(DEPRECATED) Disable Unicode mode for PCRE2.",
+        doc_long: r"
+DEPRECATED. Use \flag{no-unicode} instead.
+.sp
+Note that Unicode mode is enabled by default.
+",
+        update: |v, args| {
+            args.no_unicode = v.unwrap_switch();
+            Ok(())
+        },
+        ..SWITCH
+    },
+    Flag {
+        long: "sort-files",
+        negated: Some("no-sort-files"),
+        category: Category::Output,
+        doc_short: r"(DEPRECATED) Sort results by file path.",
+        doc_long: r"
+DEPRECATED. Use \fB\-\-sort=path\fP instead.
+.sp
+This flag instructs ripgrep to sort search results by file path
+lexicographically in ascending order. Note that this currently disables all
+parallelism and runs search in a single thread.
+.sp
+This flag overrides \flag{sort} and \flag{sortr}.
+",
+        update: |v, args| {
+            args.sort = if v.unwrap_switch() {
+                Some(SortMode { reverse: false, kind: SortModeKind::Path })
+            } else {
+                None
+            };
+            Ok(())
+        },
+        ..SWITCH
+    },
+];
 
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--word-regexp has no negation");
-        args.boundary = Some(BoundaryMode::Word);
-        Ok(())
-    }
+const SWITCH: Flag = Flag {
+    switch: true,
+    short: None,
+    long: "",
+    aliases: &[],
+    negated: None,
+    var: None,
+    category: Category::Input,
+    doc_short: "",
+    doc_long: "",
+    doc_fn: None,
+    update: |_, _| Ok(()),
+};
+
+const VALUE: Flag = Flag { switch: false, ..SWITCH };
+
+fn named(long: &str) -> &'static Flag {
+    FLAGS.iter().find(|f| f.long == long).expect("a defined flag")
 }
 
 mod convert {

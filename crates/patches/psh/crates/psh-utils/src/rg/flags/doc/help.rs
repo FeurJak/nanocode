@@ -30,9 +30,8 @@ pub(crate) fn generate_short() -> String {
     let mut cats: BTreeMap<Category, (Vec<String>, Vec<String>)> =
         BTreeMap::new();
     let (mut maxcol1, mut maxcol2) = (0, 0);
-    for flag in FLAGS.iter().copied() {
-        let columns =
-            cats.entry(flag.doc_category()).or_insert((vec![], vec![]));
+    for flag in FLAGS.iter() {
+        let columns = cats.entry(flag.category).or_insert((vec![], vec![]));
         let (col1, col2) = generate_short_flag(flag);
         maxcol1 = maxcol1.max(col1.len());
         maxcol2 = maxcol2.max(col2.len());
@@ -53,13 +52,13 @@ pub(crate) fn generate_short() -> String {
 ///
 /// The first element corresponds to the flag name while the second element
 /// corresponds to the documentation string.
-fn generate_short_flag(flag: &dyn Flag) -> (String, String) {
+fn generate_short_flag(flag: &Flag) -> (String, String) {
     let (mut col1, mut col2) = (String::new(), String::new());
 
     // Some of the variable names are fine for longer form
     // docs, but they make the succinct short help very noisy.
     // So just shorten some of them.
-    let var = flag.doc_variable().map(|s| {
+    let var = flag.var.map(|s| {
         let mut s = s.to_string();
         s = s.replace("SEPARATOR", "SEP");
         s = s.replace("REPLACEMENT", "TEXT");
@@ -68,18 +67,18 @@ fn generate_short_flag(flag: &dyn Flag) -> (String, String) {
     });
 
     // Generate the first column, the flag name.
-    if let Some(byte) = flag.name_short() {
+    if let Some(byte) = flag.short {
         let name = char::from(byte);
         write!(col1, r"-{name}");
         write!(col1, r", ");
     }
-    write!(col1, r"--{name}", name = flag.name_long());
+    write!(col1, r"--{name}", name = flag.long);
     if let Some(var) = var.as_ref() {
         write!(col1, r"={var}");
     }
 
     // And now the second column, with the description.
-    write!(col2, "{}", flag.doc_short());
+    write!(col2, "{}", flag.doc_short);
 
     (col1, col2)
 }
@@ -115,8 +114,8 @@ fn format_short_columns(
 /// Generate long documentation, i.e., for `--help`.
 pub(crate) fn generate_long() -> String {
     let mut cats = BTreeMap::new();
-    for flag in FLAGS.iter().copied() {
-        let mut cat = cats.entry(flag.doc_category()).or_insert(String::new());
+    for flag in FLAGS.iter() {
+        let mut cat = cats.entry(flag.category).or_insert(String::new());
         if !cat.is_empty() {
             write!(cat, "\n\n");
         }
@@ -133,11 +132,11 @@ pub(crate) fn generate_long() -> String {
 }
 
 /// Write generated documentation for `flag` to `out`.
-fn generate_long_flag(flag: &dyn Flag, out: &mut String) {
-    if let Some(byte) = flag.name_short() {
+fn generate_long_flag(flag: &Flag, out: &mut String) {
+    if let Some(byte) = flag.short {
         let name = char::from(byte);
         write!(out, r"    -{name}");
-        if let Some(var) = flag.doc_variable() {
+        if let Some(var) = flag.var {
             write!(out, r" {var}");
         }
         write!(out, r", ");
@@ -145,22 +144,22 @@ fn generate_long_flag(flag: &dyn Flag, out: &mut String) {
         write!(out, r"    ");
     }
 
-    let name = flag.name_long();
+    let name = flag.long;
     write!(out, r"--{name}");
-    if let Some(var) = flag.doc_variable() {
+    if let Some(var) = flag.var {
         write!(out, r"={var}");
     }
     write!(out, "\n");
 
-    let doc = flag.doc_long().trim();
+    let doc = flag.doc_fn.map_or(flag.doc_long, |f| f()).trim();
     let doc = super::render_custom_markup(doc, "flag", |name, out| {
         let Some(flag) = crate::rg::flags::parse::lookup(name) else {
             unreachable!(r"found unrecognized \flag{{{name}}} in --help docs")
         };
-        if let Some(name) = flag.name_short() {
+        if let Some(name) = flag.short {
             write!(out, r"-{}/", char::from(name));
         }
-        write!(out, r"--{}", flag.name_long());
+        write!(out, r"--{}", flag.long);
     });
     let doc = super::render_custom_markup(&doc, "flag-negate", |name, out| {
         let Some(flag) = crate::rg::flags::parse::lookup(name) else {
@@ -168,8 +167,8 @@ fn generate_long_flag(flag: &dyn Flag, out: &mut String) {
                 r"found unrecognized \flag-negate{{{name}}} in --help docs"
             )
         };
-        let Some(name) = flag.name_negated() else {
-            let long = flag.name_long();
+        let Some(name) = flag.negated else {
+            let long = flag.long;
             unreachable!(
                 "found \\flag-negate{{{long}}} in --help docs but \
                  {long} does not have a negation"
@@ -179,12 +178,12 @@ fn generate_long_flag(flag: &dyn Flag, out: &mut String) {
     });
 
     let mut cleaned = remove_roff(&doc);
-    if let Some(negated) = flag.name_negated() {
+    if let Some(negated) = flag.negated {
         // Flags that can be negated that aren't switches, like
         // --context-separator, are somewhat weird. Because of that, the docs
         // for those flags should discuss the semantics of negation explicitly.
         // But for switches, the behavior is always the same.
-        if flag.is_switch() {
+        if flag.switch {
             write!(cleaned, "\n\nThis flag can be disabled with --{negated}.");
         }
     }

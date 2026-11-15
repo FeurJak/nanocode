@@ -14,11 +14,7 @@ once [`HiArgs`] has been created, it knows how to create a multi threaded
 recursive directory traverser.
 */
 use crate::rg::anyhow;
-use std::{
-    ffi::OsString,
-    fmt::Debug,
-    panic::{RefUnwindSafe, UnwindSafe},
-};
+use std::ffi::OsString;
 
 pub(crate) use crate::rg::flags::config::Source as ConfigSource;
 pub(crate) use crate::rg::flags::{
@@ -47,126 +43,24 @@ mod hiargs;
 mod lowargs;
 mod parse;
 
-/// A trait that encapsulates the definition of an optional flag for ripgrep.
-///
-/// This trait is meant to be used via dynamic dispatch. Namely, the `defs`
-/// module provides a single global slice of `&dyn Flag` values correspondings
-/// to all of the flags in ripgrep.
-///
-/// ripgrep's required positional arguments are handled by the parser and by
-/// the conversion from low-level arguments to high level arguments. Namely,
-/// all of ripgrep's positional arguments are treated as file paths, except
-/// in certain circumstances where the first argument is treated as a regex
-/// pattern.
-///
-/// Note that each implementation of this trait requires a long flag name,
-/// but can also optionally have a short version and even a negation flag.
-/// For example, the `-E/--encoding` flag accepts a value, but it also has a
-/// `--no-encoding` negation flag for reverting back to "automatic" encoding
-/// detection. All three of `-E`, `--encoding` and `--no-encoding` are provided
-/// by a single implementation of this trait.
-///
-/// ripgrep only supports flags that are switches or flags that accept a single
-/// value. Flags that accept multiple values are an unsupported aberration.
-trait Flag: Debug + Send + Sync + UnwindSafe + RefUnwindSafe + 'static {
-    /// Returns true if this flag is a switch. When a flag is a switch, the
-    /// CLI parser will not look for a value after the flag is seen.
-    fn is_switch(&self) -> bool;
-
-    /// A short single byte name for this flag. This returns `None` by default,
-    /// which signifies that the flag has no short name.
-    ///
-    /// The byte returned must be an ASCII codepoint that is a `.` or is
-    /// alpha-numeric.
-    fn name_short(&self) -> Option<u8> {
-        None
-    }
-
-    /// Returns the long name of this flag. All flags must have a "long" name.
-    ///
-    /// The long name must be at least 2 bytes, and all of its bytes must be
-    /// ASCII codepoints that are either `-` or alpha-numeric.
-    fn name_long(&self) -> &'static str;
-
-    /// Returns a list of aliases for this flag.
-    ///
-    /// The aliases must follow the same rules as `Flag::name_long`.
-    ///
-    /// By default, an empty slice is returned.
-    fn aliases(&self) -> &'static [&'static str] {
-        &[]
-    }
-
-    /// Returns a negated name for this flag. The negation of a flag is
-    /// intended to have the opposite meaning of a flag or to otherwise turn
-    /// something "off" or revert it to its default behavior.
-    ///
-    /// Negated flags are not listed in their own section in the `-h/--help`
-    /// output or man page. Instead, they are automatically mentioned at the
-    /// end of the documentation section of the flag they negated.
-    ///
-    /// The aliases must follow the same rules as `Flag::name_long`.
-    ///
-    /// By default, a flag has no negation and this returns `None`.
-    fn name_negated(&self) -> Option<&'static str> {
-        None
-    }
-
-    /// Returns the variable name describing the type of value this flag
-    /// accepts. This should always be set for non-switch flags and never set
-    /// for switch flags.
-    ///
-    /// For example, the `--max-count` flag has its variable name set to `NUM`.
-    ///
-    /// The convention is to capitalize variable names.
-    ///
-    /// By default this returns `None`.
-    fn doc_variable(&self) -> Option<&'static str> {
-        None
-    }
-
-    /// Returns the category of this flag.
-    ///
-    /// Every flag must have a single category. Categories are used to organize
-    /// flags in the generated documentation.
-    fn doc_category(&self) -> Category;
-
-    /// A (very) short documentation string describing what this flag does.
-    ///
-    /// This may sacrifice "proper English" in order to be as terse as
-    /// possible. Generally, we try to ensure that `rg -h` doesn't have any
-    /// lines that exceed 79 columns.
-    fn doc_short(&self) -> &'static str;
-
-    /// A (possibly very) longer documentation string describing in full
-    /// detail what this flag does. This should be in mandoc/mdoc format.
-    fn doc_long(&self) -> &'static str;
-
-    /// Given the parsed value (which might just be a switch), this should
-    /// update the state in `args` based on the value given for this flag.
-    ///
-    /// This may update state for other flags as appropriate.
-    ///
-    /// The `-V/--version` and `-h/--help` flags are treated specially in the
-    /// parser and should do nothing here.
-    ///
-    /// By convention, implementations should generally not try to "do"
-    /// anything other than validate the value given. For example, the
-    /// implementation for `--hostname-bin` should not try to resolve the
-    /// hostname to use by running the binary provided. That should be saved
-    /// for a later step. This convention is used to ensure that getting the
-    /// low-level arguments is as reliable and quick as possible. It also
-    /// ensures that "doing something" occurs a minimal number of times. For
-    /// example, by avoiding trying to find the hostname here, we can do it
-    /// once later no matter how many times `--hostname-bin` is provided.
-    ///
-    /// Implementations should not include the flag name in the error message
-    /// returned. The flag name is included automatically by the parser.
-    fn update(
-        &self,
-        value: FlagValue,
-        args: &mut crate::rg::flags::lowargs::LowArgs,
-    ) -> anyhow::Result<()>;
+/// psh: the definition of one of ripgrep's flags, as data (ripgrep's `Flag` trait
+/// with one unit struct per flag): its long name, an optional short name, aliases
+/// and negation, its documentation and how a value updates `LowArgs`
+/// (`-V/--version` and `-h/--help` are handled by the parser and do nothing there).
+#[derive(Debug)]
+struct Flag {
+    switch: bool,
+    short: Option<u8>,
+    long: &'static str,
+    aliases: &'static [&'static str],
+    negated: Option<&'static str>,
+    var: Option<&'static str>,
+    category: Category,
+    doc_short: &'static str,
+    doc_long: &'static str,
+    /// A long documentation built when asked (`--hyperlink-format`'s).
+    doc_fn: Option<fn() -> &'static str>,
+    update: fn(FlagValue, &mut LowArgs) -> anyhow::Result<()>,
 }
 
 /// The category that a flag belongs to.

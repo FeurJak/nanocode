@@ -103,7 +103,7 @@ fn set_log_levels(low: &LowArgs) {
 }
 
 /// Return the metadata for the flag of the given name.
-pub(super) fn lookup(name: &str) -> Option<&'static dyn Flag> {
+pub(super) fn lookup(name: &str) -> Option<&'static Flag> {
     // N.B. Creating a new parser might look expensive, but it only builds
     // the lookup trie exactly once. That is, we get a `&'static Parser` from
     // `Parser::new()`.
@@ -140,27 +140,27 @@ impl Parser {
         static P: OnceLock<Parser> = OnceLock::new();
         P.get_or_init(|| {
             let mut infos = vec![];
-            for &flag in FLAGS.iter() {
+            for flag in FLAGS.iter() {
                 infos.push(FlagInfo {
                     flag,
-                    name: Ok(flag.name_long()),
+                    name: Ok(flag.long),
                     kind: FlagInfoKind::Standard,
                 });
-                for alias in flag.aliases() {
+                for alias in flag.aliases {
                     infos.push(FlagInfo {
                         flag,
                         name: Ok(alias),
                         kind: FlagInfoKind::Alias,
                     });
                 }
-                if let Some(byte) = flag.name_short() {
+                if let Some(byte) = flag.short {
                     infos.push(FlagInfo {
                         flag,
                         name: Err(byte),
                         kind: FlagInfoKind::Standard,
                     });
                 }
-                if let Some(name) = flag.name_negated() {
+                if let Some(name) = flag.negated {
                     infos.push(FlagInfo {
                         flag,
                         name: Ok(name),
@@ -233,15 +233,14 @@ impl Parser {
                 // flag is not. For example, --context-separator accepts a
                 // value, but --no-context-separator does not.
                 FlagValue::Switch(false)
-            } else if mat.flag.is_switch() {
+            } else if mat.flag.switch {
                 FlagValue::Switch(true)
             } else {
                 FlagValue::Value(p.value().with_context(|| {
                     format!("missing value for flag {mat}")
                 })?)
             };
-            mat.flag
-                .update(value, args)
+            (mat.flag.update)(value, args)
                 .with_context(|| format!("error parsing flag {mat}"))?;
         }
         Ok(())
@@ -285,7 +284,7 @@ enum FlagLookup<'a> {
 #[derive(Debug)]
 struct FlagInfo {
     /// The flag object and its associated metadata.
-    flag: &'static dyn Flag,
+    flag: &'static Flag,
     /// The actual name that is stored in the Aho-Corasick automaton. When this
     /// is a byte, it corresponds to a short single character ASCII flag. The
     /// actual pattern that's in the Aho-Corasick automaton is just the single
@@ -383,19 +382,19 @@ fn find_similar_names(unrecognized: &str) -> Vec<&'static str> {
 
     let mut similar = vec![];
     let bow_given = ngrams(unrecognized);
-    for &flag in FLAGS.iter() {
-        let name = flag.name_long();
+    for flag in FLAGS.iter() {
+        let name = flag.long;
         let bow = ngrams(name);
         if jaccard_index(&bow_given, &bow) >= THRESHOLD {
             similar.push(name);
         }
-        if let Some(name) = flag.name_negated() {
+        if let Some(name) = flag.negated {
             let bow = ngrams(name);
             if jaccard_index(&bow_given, &bow) >= THRESHOLD {
                 similar.push(name);
             }
         }
-        for name in flag.aliases() {
+        for name in flag.aliases {
             let bow = ngrams(name);
             if jaccard_index(&bow_given, &bow) >= THRESHOLD {
                 similar.push(name);
