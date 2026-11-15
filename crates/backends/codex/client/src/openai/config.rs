@@ -230,6 +230,7 @@ impl ModelConfig {
              </runtime_model_identity>",
             self.model.as_str(),
         ));
+        instructions.push_str("\n\nWrite numeric answers in plain decimal (16.35, not 1.635e+01) unless the task asks for another format.");
         instructions
     }
 
