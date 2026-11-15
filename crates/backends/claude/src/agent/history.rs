@@ -29,6 +29,7 @@ struct Entry {
     companions: OnceLock<bool>,
     record: OnceLock<EncodedPayload>,
     results: OnceLock<Box<[(usize, u64)]>>,
+    cleared: OnceLock<HistoryMessage>,
 }
 
 impl Clone for Entry {
@@ -42,6 +43,7 @@ impl Clone for Entry {
             companions: OnceLock::new(),
             record: OnceLock::new(),
             results: OnceLock::new(),
+            cleared: OnceLock::new(),
         }
     }
 }
@@ -57,7 +59,19 @@ impl HistoryMessage {
         entry.companions = OnceLock::new();
         entry.record = OnceLock::new();
         entry.results = OnceLock::new();
+        entry.cleared = OnceLock::new();
         &mut entry.message
+    }
+
+    pub(super) fn cleared(&self, clear: impl FnOnce(&mut Message)) -> Self {
+        self.0
+            .cleared
+            .get_or_init(|| {
+                let mut message = self.0.message.clone();
+                clear(&mut message);
+                Self::from(message)
+            })
+            .clone()
     }
 
     pub(super) fn image_count(&self, count: impl FnOnce(&Self) -> usize) -> usize {
@@ -106,6 +120,7 @@ impl HistoryMessage {
                 companions: OnceLock::new(),
                 record: OnceLock::from(record),
                 results: OnceLock::new(),
+                cleared: OnceLock::new(),
             }),
             wire_id(),
         )
@@ -144,6 +159,7 @@ impl From<Message> for HistoryMessage {
                 companions: OnceLock::new(),
                 record: OnceLock::new(),
                 results: OnceLock::new(),
+                cleared: OnceLock::new(),
             }),
             wire_id(),
         )

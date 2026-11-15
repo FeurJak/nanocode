@@ -53,12 +53,26 @@ pub(super) fn clear_tool_results(messages: &mut [HistoryMessage]) {
     let mut at = 0;
     while at < cleared {
         let message = results[at].0;
-        let content = &mut messages[message].make_mut().content;
-        while at < cleared && results[at].0 == message {
-            if let ContentBlock::ToolResult { content, .. } = &mut content[results[at].1] {
-                *content = ToolResultContent::Text(CLEARED.to_owned());
-            }
-            at += 1;
+        let end = at
+            + results[at..cleared]
+                .iter()
+                .take_while(|result| result.0 == message)
+                .count();
+        let blocks = &results[at..end];
+        if end - at == messages[message].result_tokens(result_tokens).len() {
+            messages[message] =
+                messages[message].cleared(|message| clear(&mut message.content, blocks));
+        } else {
+            clear(&mut messages[message].make_mut().content, blocks);
+        }
+        at = end;
+    }
+}
+
+fn clear(content: &mut [ContentBlock], blocks: &[(usize, usize, u64)]) {
+    for &(_, block, _) in blocks {
+        if let ContentBlock::ToolResult { content, .. } = &mut content[block] {
+            *content = ToolResultContent::Text(CLEARED.to_owned());
         }
     }
 }
