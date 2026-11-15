@@ -733,7 +733,7 @@ impl Exec<'_> {
             }
             None => None,
         };
-        let tracked = cap.is_some_and(|at| at < self.heap.arena().tracked_end());
+        let tracked = cap.is_some_and(|at| at < self.heap.arena().barrier_end());
         let stress = self.opts.gc_stress;
         let reduce = mode == REDUCE;
         let (mut k, mut x, mut acc) = (k0, self.get(base + KVALUE), self.get(base + THIS));
@@ -1262,7 +1262,7 @@ impl Exec<'_> {
             _ => Value::UNDEFINED,
         };
         if let Some(at) = cap {
-            if at < self.heap.arena().tracked_end() {
+            if at < self.heap.arena().barrier_end() {
                 self.heap.arena_mut().wrote(at, 8);
             }
             st(self.heap.arena_mut().hot_bytes(), at, held);

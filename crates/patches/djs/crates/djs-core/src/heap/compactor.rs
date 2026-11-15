@@ -356,6 +356,160 @@ impl Marker<'_> {
         }
     }
 
+    /// The old walk of a minor collection with a card table (D3200): only the cells over
+    /// dirty cards, and of them only the slots in the dirty cards, are roots. Templates over
+    /// dirty cards have their offset caches emptied (`ic_write` dirties the template's
+    /// card) and collections over dirty cards are checked for young keys (an insertion
+    /// writes the collection's `LIVE` slot).
+    fn mark_cards(&mut self) {
+        let old = self.old;
+        let mut cards = core::mem::take(self.arena.cards_mut());
+        let card = 1u32 << super::arena::Cards::SHIFT;
+        let mut at = cards.walked;
+        while at < old {
+            let h: u64 = self.arena.read(at);
+            let next = at + (h >> 32) as u32;
+            if h as u8 == CellKind::EphemeronArray as u8 {
+                cards.ephemerons += 1;
+            } else if h as u8 == CellKind::Object as u8
+                && self.arena.get(at, Object::CLASS) == ObjectClass::Generator as u32
+            {
+                cards.gens.push_out(at);
+            }
+            let mut k = at.div_ceil(card);
+            while k * card < next && (k as usize) < cards.starts.len() {
+                cards.starts[k as usize] = at;
+                k += 1;
+            }
+            at = next;
+        }
+        cards.walked = old;
+        self.old_ephemerons = cards.ephemerons;
+        let gens = core::mem::take(&mut cards.gens);
+        *self.arena.cards_mut() = cards;
+        #[cfg(debug_assertions)]
+        self.check_cards(&gens);
+        for &g in &gens {
+            let saved: Value = self.arena.read(Object::SLOTS.at(g, 1));
+            if let Some(a) = saved.as_internal().filter(|&a| a < old) {
+                let h: u64 = self.arena.read(a);
+                self.scan_old(h as u8, a, (h >> 32) as u32);
+                self.drain();
+            }
+        }
+        self.arena.cards_mut().gens = gens;
+        let n = self.arena.card_count();
+        let mut k = 0;
+        while k < n {
+            if !self.arena.card_dirty(k) {
+                k += 1;
+                continue;
+            }
+            let first = k;
+            while k < n && self.arena.card_dirty(k) {
+                k += 1;
+            }
+            let lo = (first as u32) << super::arena::Cards::SHIFT;
+            let hi = ((k as u32) << super::arena::Cards::SHIFT).min(old);
+            let mut c = self.arena.cards_mut().starts[first];
+            while c < hi {
+                let h: u64 = self.arena.read(c);
+                let (kb, size) = (h as u8, (h >> 32) as u32);
+                if kb != CellKind::EphemeronArray as u8 && !is_leaf(kb) {
+                    let kind =
+                        CellKind::from_u8(kb).unwrap_or_else(|| super::fail::bad_cell_kind(kb, c));
+                    let gc = (h >> 8) as u8;
+                    if kind == CellKind::FuncTemplate {
+                        super::gc::clear_offset_caches(self.arena, c);
+                    } else if kind == CellKind::Object
+                        && gc & gc_bits::REHASH == 0
+                        && is_collection(self.arena, c)
+                        && super::collection::has_young_keys(self.arena, c, old)
+                    {
+                        self.arena.set(c, Header::GC, gc | gc_bits::REHASH);
+                        self.remember(c | REMEMBER_REHASH);
+                    }
+                    self.scan_range(kb, c, size, lo, hi);
+                    self.drain();
+                }
+                c += size;
+            }
+        }
+    }
+
+    /// Checks the card table against a walk over the old region: every young reference
+    /// is in a dirty card, and every collection with young keys is over one.
+    #[cfg(debug_assertions)]
+    fn check_cards(&self, gens: &[u32]) {
+        let old = self.old;
+        let a = &*self.arena;
+        let frames: Vec<u32> = gens
+            .iter()
+            .filter_map(|&g| a.read::<Value>(Object::SLOTS.at(g, 1)).as_internal())
+            .collect();
+        let dirty = |s: u32| a.card_dirty((s >> super::arena::Cards::SHIFT) as usize);
+        let mut c = 0;
+        while c < old {
+            let h: u64 = a.read(c);
+            let (kb, size) = (h as u8, (h >> 32) as u32);
+            if kb != CellKind::EphemeronArray as u8 && !is_leaf(kb) && !frames.contains(&c) {
+                let kind = CellKind::from_u8(kb).unwrap_or_else(|| super::fail::bad_cell_kind(kb, c));
+                walk::for_each_slot(kind, c, size, |slot| {
+                    let (s, t) = match slot {
+                        Slot::Value(s) => (s, a.read::<Value>(s).ref_offset()),
+                        Slot::Ref(s) => (s, a.read::<Ref>(s).get()),
+                    };
+                    if t.is_some_and(|t| t >= old) && !dirty(s) {
+                        panic!("young reference at {s} (cell {c}, {kind:?}) outside a dirty card (D3200)");
+                    }
+                });
+                if kind == CellKind::Object
+                    && is_collection(a, c)
+                    && super::collection::has_young_keys(a, c, old)
+                    && !(c..c + size).step_by(1 << super::arena::Cards::SHIFT).chain([c + size - 1]).any(dirty)
+                {
+                    panic!("collection {c} with young keys over clean cards (D3200)");
+                }
+            }
+            c += size;
+        }
+    }
+
+    /// [`Marker::scan_old`] for the slots of `c` in `[lo, hi)` only.
+    fn scan_range(&mut self, kb: u8, c: u32, size: u32, lo: u32, hi: u32) {
+        let plan = &walk::PLANS[kb as usize];
+        let old = self.old;
+        for i in 0..plan.n_fixed as usize {
+            let off = plan.fixed[i] as u32;
+            if off >= size {
+                break;
+            }
+            let s = c + off;
+            if s >= lo && s < hi {
+                self.old_slot(s, plan.fixed_refs & (1 << i) != 0, old);
+            }
+        }
+        if plan.n_tail == 0 {
+            return;
+        }
+        let (start, elem) = (c + plan.tail_offset as u32, plan.elem_size as u32);
+        let end = c + size;
+        let mut e = if lo > start {
+            start + (lo - start) / elem * elem
+        } else {
+            start
+        };
+        while e < hi && e + elem <= end {
+            for i in 0..plan.n_tail as usize {
+                let s = e + plan.tail[i] as u32;
+                if s >= lo && s < hi {
+                    self.old_slot(s, plan.tail_refs & (1 << i) != 0, old);
+                }
+            }
+            e += elem;
+        }
+    }
+
     /// Marks the young targets of the old cell `c` (kind byte `kb`, not a leaf), from its
     /// precomputed [`walk::SlotPlan`]: a slot costs a load and two compares unless it points
     /// at a young cell (rare), which `old_hit` handles out of line.
@@ -696,6 +850,8 @@ impl Heap {
         };
         if old == 0 {
             m.mark(0);
+        } else if m.arena.card_end() == old {
+            m.mark_cards();
         } else {
             m.mark_old();
         }

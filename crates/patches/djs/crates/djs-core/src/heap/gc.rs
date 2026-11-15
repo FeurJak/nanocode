@@ -244,6 +244,15 @@ impl Heap {
     ///
     /// [`Handle`]: super::Handle
     pub fn collect(&mut self) -> Result<GcStats, HeapError> {
+        let generational = self.old_end() > 0;
+        let stats = self.collect_full()?;
+        if generational {
+            self.promote(0, 0);
+        }
+        Ok(stats)
+    }
+
+    fn collect_full(&mut self) -> Result<GcStats, HeapError> {
         let base = self.base_end();
         let c = self.without_barrier(|h| h.mark_compact(base, true))?;
         let (before, mut after) = (c.before, c.after);
@@ -270,7 +279,7 @@ impl Heap {
     /// state lives on, such as pi's prelude: everything after it is young.
     pub fn seal(&mut self) -> Result<GcStats, HeapError> {
         let stats = self.collect()?;
-        self.set_old_region(stats.after, 0);
+        self.promote(0, 0);
         Ok(stats)
     }
 
@@ -298,9 +307,10 @@ impl Heap {
     /// survive until the next full collection.
     pub fn collect_minor(&mut self) -> Result<GcStats, HeapError> {
         let old = self.old_end();
+        let cards = self.arena.card_end() == old;
         let c = self.without_barrier(|h| h.mark_compact(old, false))?;
         let minors = self.arena.get(0, Roots::MINORS);
-        self.set_old_region(old, minors + 1);
+        self.promote(if cards { old } else { 0 }, minors + 1);
         self.after_collect(c.after, c.cheap);
         Ok(GcStats {
             before: c.before,
@@ -332,6 +342,26 @@ impl Heap {
     /// The end of the old region (`Roots::OLD_END`).
     pub fn old_end(&self) -> u32 {
         self.arena.get(0, Roots::OLD_END)
+    }
+
+    /// Makes every cell old (D3200): the old region ends at the arena's end, so nothing
+    /// references a young cell and the card table starts clean (the cells from `from` on
+    /// are new to it). The value stack and an active stack segment are written without
+    /// the barrier, so their cards stay dirty.
+    fn promote(&mut self, from: u32, minors: u32) {
+        let end = self.arena.len();
+        self.set_old_region(end, minors);
+        self.arena.reset_cards(from, end);
+        let stack = self.arena.get::<Ref>(0, Roots::STACK).get();
+        let segment = self
+            .arena
+            .get::<Ref>(0, Roots::INTERP)
+            .get()
+            .and_then(|i| self.arena.get(i, super::cells::Interp::SEGMENT).as_internal());
+        for c in [stack, segment].into_iter().flatten() {
+            let size = self.arena.get(c, Header::SIZE);
+            self.arena.card(c, size);
+        }
     }
 
     fn set_old_region(&mut self, end: u32, minors: u32) {
@@ -475,7 +505,7 @@ impl Heap {
         // collection after one is full (D2045): a VM made from the base kills some of its
         // cells right away (the atom table grows with the first compiled script), and
         // until a full collection drops them they shift every later threshold.
-        self.set_old_region(after, FULL_EVERY - 1);
+        self.promote(0, FULL_EVERY - 1);
         // The prefix is where it was (a heap without one gets one from
         // `prepare_base_image`).
         self.arena.set(0, Roots::BASE_END, base);

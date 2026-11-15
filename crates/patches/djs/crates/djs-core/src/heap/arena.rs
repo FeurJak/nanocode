@@ -30,6 +30,11 @@ pub struct Arena {
     /// past the roots cell) panics. 0: off. Not part of the image.
     #[cfg(debug_assertions)]
     trap_end: u32,
+    /// The card table of the old region (D3200): not part of the image.
+    cards: Cards,
+    /// Writes below it take [`Arena::noted`]: the larger of the tracked prefix's end and
+    /// the card table's, so a write above both costs one compare.
+    low: u32,
     /// The written pages of a tracked prefix ([`Arena::track`]). Not part of the image.
     #[cfg(feature = "embed")]
     tracked: Tracked,
@@ -65,6 +70,31 @@ struct Tracked {
 
 
 
+/// The card table (D3200): a byte per 512-byte card of the old region `[0, end)`, set by
+/// every write below `end` through the arena's write methods or [`Arena::wrote`], so a
+/// minor collection traces only the dirty cards instead of the whole old region. `end` 0:
+/// no valid table (a fresh or restored arena); the minor collection walks the old region.
+#[derive(Default)]
+pub(crate) struct Cards {
+    end: u32,
+    dirty: Vec<u8>,
+    /// The cell that covers each card's first byte, below `walked`.
+    pub(crate) starts: Vec<u32>,
+    /// Ephemeron tables in the old region below `walked`.
+    pub(crate) ephemerons: u32,
+    /// The Generator objects below `walked`: their saved frames are written without the
+    /// barrier (a stack segment, `run_tier1`), so a minor collection traces them whole.
+    pub(crate) gens: Vec<u32>,
+    /// The end of the cells the minor collection walked for `starts`, `ephemerons` and
+    /// `gens`.
+    pub(crate) walked: u32,
+}
+
+impl Cards {
+    /// Bytes per card: one block of the compactor's forwarding table.
+    pub(crate) const SHIFT: u32 = 9;
+}
+
 /// How far ahead of an allocation the frontier is zeroed: big enough that small cells
 /// rarely touch the Vec, small enough not to matter for memory or the GC.
 const ZERO_AHEAD: u32 = 16 << 10;
@@ -82,6 +112,8 @@ impl Arena {
             target: 0,
             #[cfg(debug_assertions)]
             trap_end: 0,
+            cards: Cards::default(),
+            low: 0,
             #[cfg(feature = "embed")]
             tracked: Tracked::default(),
             #[cfg(feature = "embed")]
@@ -103,6 +135,8 @@ impl Arena {
             target: 0,
             #[cfg(debug_assertions)]
             trap_end: 0,
+            cards: Cards::default(),
+            low: 0,
             #[cfg(feature = "embed")]
             tracked: Tracked::default(),
             #[cfg(feature = "embed")]
@@ -149,6 +183,8 @@ impl Arena {
             target: 0,
             #[cfg(debug_assertions)]
             trap_end: 0,
+            cards: Cards::default(),
+            low: 0,
             #[cfg(feature = "embed")]
             tracked: Tracked::default(),
             #[cfg(feature = "embed")]
@@ -204,6 +240,7 @@ impl Arena {
                 self.note(off, len);
             }
         }
+        self.relow();
     }
 
     /// Writes below it are noted in a tracked prefix (0: not tracking).
@@ -215,6 +252,74 @@ impl Arena {
         }
         #[cfg(not(feature = "embed"))]
         0
+    }
+
+    /// Writes below it go through [`Arena::wrote`]: the tracked prefix and the old region.
+    #[inline(always)]
+    pub(crate) fn barrier_end(&self) -> u32 {
+        self.low
+    }
+
+    pub(crate) fn cards_mut(&mut self) -> &mut Cards {
+        &mut self.cards
+    }
+
+    /// The end of the old region the card table covers (0: no valid table).
+    #[inline(always)]
+    pub(crate) fn card_end(&self) -> u32 {
+        self.cards.end
+    }
+
+    pub(crate) fn card_count(&self) -> usize {
+        self.cards.dirty.len()
+    }
+
+    #[inline]
+    pub(crate) fn card_dirty(&self, k: usize) -> bool {
+        self.cards.dirty[k] != 0
+    }
+
+    /// Marks the cards of `len` bytes at `off` written.
+    #[inline(always)]
+    pub(crate) fn card(&mut self, off: u32, len: u32) {
+        if off < self.cards.end {
+            let first = (off >> Cards::SHIFT) as usize;
+            let last = (off.saturating_add(len.max(1) - 1).min(self.cards.end - 1) >> Cards::SHIFT)
+                as usize;
+            if first == last {
+                self.cards.dirty[first] = 1;
+            } else {
+                self.cards.dirty[first..=last].fill(1);
+            }
+        }
+    }
+
+    /// A clean card table for the old region `[0, end)` (nothing in it references a
+    /// younger cell). The cells below `from` did not move: what the minor collection
+    /// walked below it stays. Without room the table is dropped.
+    pub(crate) fn reset_cards(&mut self, from: u32, end: u32) {
+        let n = end.div_ceil(1 << Cards::SHIFT) as usize;
+        let c = &mut self.cards;
+        if c.end == 0 || from < c.walked {
+            c.walked = 0;
+            c.ephemerons = 0;
+            c.gens.clear();
+            c.starts.clear();
+        }
+        c.end = 0;
+        c.dirty.clear();
+        if c.dirty.try_reserve_exact(n).is_ok()
+            && c.starts.try_reserve_exact(n.saturating_sub(c.starts.len())).is_ok()
+        {
+            c.dirty.resize(n, 0);
+            c.starts.resize(n, 0);
+            c.end = end;
+        }
+        self.relow();
+    }
+
+    fn relow(&mut self) {
+        self.low = self.tracked_end().max(self.cards.end);
     }
 
     #[inline(always)]
@@ -242,6 +347,7 @@ impl Arena {
             self.tracked.image = 0;
             self.tracked.end = 0;
         }
+        self.relow();
     }
 
     /// The written parts of the tracked prefix as byte ranges, ascending: `None` when
@@ -271,6 +377,9 @@ impl Arena {
         if t.image == 0 || t.image as usize != image.len() {
             return false;
         }
+        self.cards.end = 0;
+        self.relow();
+        let t = &mut self.tracked;
         let end = t.end as usize;
         t.stamp += 1;
         for (w, bits) in t.dirty.iter_mut().enumerate() {
@@ -298,6 +407,8 @@ impl Arena {
     #[cfg(feature = "embed")]
     pub(crate) fn take_bytes(&mut self) -> Vec<u8> {
         self.len = 0;
+        self.cards.end = 0;
+        self.relow();
         core::mem::take(&mut self.bytes)
     }
 
@@ -524,11 +635,21 @@ impl Arena {
         if off < self.trap_end && off + len > super::cells::Roots::LAYOUT.min_size {
             prefix_write(off);
         }
+        if off < self.low {
+            self.noted(off, len);
+        }
+    }
+
+    /// A write below [`Arena::low`]: marks its cards and notes its pages in a tracked
+    /// prefix. Out of line: nearly all writes are above it.
+    #[cold]
+    #[inline(never)]
+    fn noted(&mut self, off: u32, len: u32) {
+        self.card(off, len);
         #[cfg(feature = "embed")]
         if off < self.tracked.end {
             self.note(off, len);
         }
-        let _ = (off, len);
     }
 
     /// Notes the pages of a write of `len` bytes below the tracked prefix's `end`. Out
@@ -554,11 +675,9 @@ impl Arena {
     /// Notes a write of `len` bytes at `off` made through [`Arena::hot_bytes`].
     #[inline(always)]
     pub(crate) fn wrote(&mut self, off: u32, len: u32) {
-        #[cfg(feature = "embed")]
-        if off < self.tracked.end {
-            self.note(off, len);
+        if off < self.low {
+            self.noted(off, len);
         }
-        let _ = (off, len);
     }
 
     /// [`Arena::write`] without the tracked prefix's check, for a write that cannot be
@@ -676,6 +795,10 @@ impl Arena {
     /// instead of the append (0224: `JSON.stringify` of 10k objects 1.5x slower).
     pub(crate) fn truncate(&mut self, to: u32) {
         assert!(to <= self.len, "truncate past the end");
+        if to < self.cards.end {
+            self.cards.end = 0;
+            self.relow();
+        }
         #[cfg(feature = "embed")]
         if to < self.tracked.image {
             self.lose_tracked();

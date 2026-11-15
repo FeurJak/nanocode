@@ -308,6 +308,7 @@ impl Exec<'_> {
             let at = U32Array::DATA.at(a, ic * WORDS + k as u32);
             self.heap.arena_mut().write(at, w);
         }
+        self.heap.arena_mut().card(self.template, 1);
     }
 
     /// Fills get slot `ic` for `o[key]` with `words`. A slot that held something already

@@ -935,7 +935,7 @@ impl Exec<'_> {
         let slow_call_flags = self.slow_call_flags;
         // Below it the arena tracks written pages (0: nothing): the one write here that
         // is not to the value stack, a Box's value, notes its page.
-        let tracked = self.heap.arena().tracked_end();
+        let mut tracked: u32;
         // The frame data, re-read after a collection (and kept current by calls and
         // returns here).
         let (mut code, mut end, mut bp, mut lp): (u32, u32, u32, u32);
@@ -946,6 +946,7 @@ impl Exec<'_> {
                 end = code + self.code_len;
                 (bp, lp) = (self.bp, self.lp);
                 vals = ValueArray::VALUES.at(self.stack, 0);
+                tracked = self.heap.arena().barrier_end();
             };
         }
         load_frame!();
