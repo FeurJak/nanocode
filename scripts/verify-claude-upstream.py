@@ -72,10 +72,13 @@ if not args.offline:
         (backend / 'prompts/compact.md').write_text(compact)
     if (backend / 'prompts/compact.md').read_text() != compact:
         raise ValueError('Upstream compaction prompt differs')
+    bypass = literal('`While bypass permissions mode is active:', [''])
     if args.capture:
         installed = Path(args.claude).resolve()
         if sha256(installed.read_bytes()) != manifest['executable_sha256']:
             raise ValueError('Installed Claude differs from the pinned official executable')
+else:
+    bypass = json.loads((backend / 'prompts/bash-first.json').read_text())['bypass']
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -119,10 +122,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
-if args.capture:
+def runs():
     for profile, options in manifest['profiles'].items():
-        folder = output / profile
-        folder.mkdir(exist_ok=True)
+        yield output / profile, manifest['model'], options
+    for model in manifest['bash_first_models']:
+        yield output / 'bash-first' / model, model, ['--dangerously-skip-permissions']
+
+
+if args.capture:
+    for folder, model, options in runs():
+        folder.mkdir(parents=True, exist_ok=True)
         workspace = folder / 'workspace'
         workspace.mkdir(exist_ok=True)
         config = folder / 'config'
@@ -137,7 +146,7 @@ if args.capture:
                    CLAUDE_CONFIG_DIR=str(config), CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1',
                    DISABLE_AUTOUPDATER='1', ENABLE_TOOL_SEARCH='false',
                    CLAUDE_CODE_DISABLE_AUTO_MEMORY='1')
-        command = [str(installed), '-p', 'Return captured.', '--model', manifest['model'],
+        command = [str(installed), '-p', 'Return captured.', '--model', model,
                    '--no-session-persistence', '--output-format', 'json', '--setting-sources', '',
                    '--settings', '{}', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
                    '--no-chrome', '--disable-slash-commands', '--exclude-dynamic-system-prompt-sections']
@@ -151,11 +160,13 @@ if args.capture:
             thread.join()
         (folder / 'requests.json').write_text(json.dumps(server.records, indent=2) + '\n')
 
-profiles = {}
-for profile in manifest['profiles']:
-    records = json.loads((output / profile / 'requests.json').read_text())
-    profiles[profile] = next(record['body'] for record in records
-                             if '/messages' in record['path'] and 'count_tokens' not in record['path'])
+def first_request(folder):
+    records = json.loads((folder / 'requests.json').read_text())
+    return next(record['body'] for record in records
+                if '/messages' in record['path'] and 'count_tokens' not in record['path'])
+
+
+profiles = {profile: first_request(output / profile) for profile in manifest['profiles']}
 blocks = profiles['full']['system'][1:]
 if any(request['system'][1:] != blocks for request in profiles.values()):
     raise ValueError('Core system blocks differ across upstream profiles')
@@ -163,7 +174,28 @@ catalogs = {name: {tool['name']: tool for tool in request['tools']}
             for name, request in profiles.items()}
 tools = [catalogs[manifest['tool_profiles'][name]][name]
          for name in sorted(manifest['tool_profiles'])]
-artifacts = {'prompts/claude-code-system.json': blocks, 'tools/src/tools/upstream.json': tools}
+default_bash = catalogs['full']['Bash']['description'].split('\n')
+dedicated, steers = set(), []
+for model in manifest['bash_first_models']:
+    request = first_request(output / 'bash-first' / model)
+    bash = next(tool for tool in request['tools'] if tool['name'] == 'Bash')['description'].split('\n')
+    removed = [line for line in default_bash if line not in bash]
+    if [line for line in bash if line not in default_bash]:
+        raise ValueError(f'Bypass Bash adds text for {model}')
+    texts = [message['content'] if isinstance(message['content'], str) else block.get('text', '')
+             for message in request['messages']
+             for block in ([None] if isinstance(message['content'], str) else message['content'])]
+    notes = [text for text in texts if bypass in text]
+    if len(notes) > 1 or len(removed) != len(notes):
+        raise ValueError(f'Bypass note and Bash text disagree for {model}')
+    if notes:
+        dedicated.update(removed)
+        steers.append({'model': model, 'steer': notes[0].split(bypass, 1)[1].split('\n\n', 1)[0]})
+if len(dedicated) != 1:
+    raise ValueError('Bypass models remove different Bash text')
+bash_first = {'bypass': bypass, 'dedicated_tools': dedicated.pop(), 'models': steers}
+artifacts = {'prompts/claude-code-system.json': blocks, 'tools/src/tools/upstream.json': tools,
+             'prompts/bash-first.json': bash_first}
 for entry in manifest['artifacts']:
     path = backend / entry['path']
     expected = artifacts[entry['path']]
@@ -177,7 +209,8 @@ for entry in manifest['artifacts']:
 if args.write:
     manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
 report = {'version': manifest['version'], 'system_text_blocks_verified': len(blocks),
-          'tool_definitions_verified': len(tools), 'official_package_verified': not args.offline,
+          'tool_definitions_verified': len(tools), 'bash_first_models': [entry['model'] for entry in steers],
+          'official_package_verified': not args.offline,
           'fresh_capture': args.capture, 'tool_profiles': manifest['tool_profiles']}
 (output / 'verification.json').write_text(json.dumps(report, indent=2) + '\n')
 print(json.dumps(report, indent=2))

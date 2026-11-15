@@ -4,6 +4,16 @@ const OPUS_5_5_PARAGRAPH: &str = "\n\nDo build original games,";
 const SURFACES: &str = " - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).";
 const FAST_MODE: &str = "\n - Fast mode for Claude Code gives faster output on this session's model if it supports fast mode, and otherwise switches the session to Claude Opus. It can be toggled with /fast.";
 
+pub(crate) fn upstream_tool(model: &str, definition: &mut crate::ToolDefinition) {
+    if crate::environment::bypass_note(model).is_none() {
+        return;
+    }
+    let line = format!("\n{}", crate::upstream::bash_first().dedicated_tools);
+    if definition.description.contains(&line) {
+        definition.description = definition.description.replacen(&line, "", 1).into();
+    }
+}
+
 pub(crate) fn default_system_blocks(
     code_only: bool,
     model: &str,
@@ -33,6 +43,9 @@ pub(crate) fn default_system_blocks(
     }
     if code_only {
         blocks.push(serde_json::json!({"type": "text", "text": CODE_MODE}));
+        if let Some(note) = crate::environment::bypass_note(model) {
+            blocks.push(serde_json::json!({"type": "text", "text": note}));
+        }
     }
     std::sync::Arc::new(blocks)
 }

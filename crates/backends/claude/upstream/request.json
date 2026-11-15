@@ -194,7 +194,7 @@
   "claude-opus-5-5: system": {
    "reason": "nanocode runs native Claude models in Code Mode (exec and wait) by design: its Code Mode prompt and environment are system blocks, without Claude Code's git status, attribution and environment messages, and the core block leaves out the /fast line that only the direct Claude Code context adds.",
    "claude": "2",
-   "nanocode": "4"
+   "nanocode": "5"
   },
   "claude-opus-5-5: system:billing-header": {
    "reason": "The billing header attributes a request to a Claude Code build (cc_version, cc_entrypoint); nanocode is not one, so it sends none.",
@@ -212,6 +212,11 @@
    "nanocode": "631cacd98401 (2614 chars)"
   },
   "claude-opus-5-5: system[3]": {
+   "reason": "Claude Code sends its bypass permissions note for Opus 5.5 in its environment message; nanocode's Code Mode sends the same text as a system block after its Code Mode prompt.",
+   "claude": "<absent>",
+   "nanocode": "be3a70c90d49 (493 chars)"
+  },
+  "claude-opus-5-5: system[4]": {
    "reason": "nanocode runs native Claude models in Code Mode (exec and wait) by design: its Code Mode prompt and environment are system blocks, without Claude Code's git status, attribution and environment messages, and the core block leaves out the /fast line that only the direct Claude Code context adds.",
    "claude": "<absent>",
    "nanocode": "055724fe1ba9 (680 chars)"

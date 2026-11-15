@@ -68,8 +68,9 @@ pub(crate) fn upstream_environment(
     } else {
         String::new()
     };
+    let bypass = bypass_note(model).map_or_else(String::new, |note| format!("{note}\n\n"));
     format!(
-        "{}\n\nYou are powered by the model {model}.\n\n{tokens}Today's date is {}.",
+        "{}\n\nYou are powered by the model {model}.\n\n{tokens}{bypass}Today's date is {}.",
         lines.join("\n"),
         current_date()
     )
@@ -113,6 +114,14 @@ fn registry_model<'a>(model: &str, ids: &[&'a str]) -> Option<&'a str> {
 
 pub(crate) fn total_tokens_reminder(model: &str) -> bool {
     registry_model(model, &TOTAL_TOKENS_REMINDER_MODELS).is_some()
+}
+
+pub(crate) fn bypass_note(model: &str) -> Option<String> {
+    let text = crate::upstream::bash_first();
+    text.models.iter().find_map(|entry| {
+        registry_model(model, &[entry.model.as_str()])
+            .map(|_| format!("{}{}", text.bypass, entry.steer))
+    })
 }
 
 pub(crate) fn opus_5_5_prompt(model: &str) -> bool {

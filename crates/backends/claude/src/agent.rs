@@ -1611,7 +1611,8 @@ impl ClaudeBuilder {
         }
         let mut handlers = HashMap::new();
         let mut definitions = Vec::new();
-        for (definition, handler) in self.tools {
+        for (mut definition, handler) in self.tools {
+            crate::instructions::upstream_tool(&self.claude.model, &mut definition);
             if definition.defer_loading
                 && !self.client_tool_search
                 && !self
@@ -1740,9 +1741,11 @@ impl ClaudeBuilder {
                 .into_iter()
                 .map(|factory| {
                     let hooks = self.tool_hooks.clone();
+                    let model = self.claude.model.clone();
                     Arc::new(move || {
                         let mut catalog = factory();
                         for (definition, handler) in &mut catalog.tools {
+                            crate::instructions::upstream_tool(&model, definition);
                             for hook in hooks.iter().rev() {
                                 *handler = hooked_handler(
                                     definition.name.clone(),
@@ -1784,7 +1787,8 @@ impl ClaudeBuilder {
             let adapted = adapter(catalog)?;
             nested_tools = adapted.nested_tools;
             recovery = adapted.recovery;
-            for (definition, handler) in adapted.tools {
+            for (mut definition, handler) in adapted.tools {
+                crate::instructions::upstream_tool(&self.claude.model, &mut definition);
                 if definition.name.is_empty()
                     || !definition.input_schema.is_object()
                     || handlers.insert(definition.name.clone(), handler).is_some()
@@ -6565,7 +6569,8 @@ impl State {
                     && definition.input_schema.is_object()
                     && names.insert(definition.name.clone())
             })
-            .map(|(definition, handler)| {
+            .map(|(mut definition, handler)| {
+                crate::instructions::upstream_tool(&self.model, &mut definition);
                 let mut handler = handler;
                 for hooks in self.tool_hooks.iter().rev() {
                     handler = hooked_handler(definition.name.clone(), handler, hooks.clone());
