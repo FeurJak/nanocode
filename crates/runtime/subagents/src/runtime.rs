@@ -575,12 +575,43 @@ enum RestorationState {
 
 type RestorationOutcome = watch::Receiver<RestorationState>;
 
+type Reply = Box<dyn std::any::Any + Send>;
+type Job = Box<dyn FnOnce(&mut RegistryState) -> Reply + Send>;
+
+#[derive(Clone, Default)]
+struct StateMailbox(nanocode_sync::Mailbox<RegistryState>);
+
+impl StateMailbox {
+    fn send(&self, job: impl FnOnce(&mut RegistryState) + Send + 'static) {
+        self.0.send(job);
+    }
+
+    fn call<R, F>(&self, job: F) -> impl Future<Output = R> + Send + use<R, F>
+    where
+        R: Send + 'static,
+        F: FnOnce(&mut RegistryState) -> R + Send + 'static,
+    {
+        replied(self.ask(Box::new(move |state| -> Reply { Box::new(job(state)) })))
+    }
+
+    fn ask(&self, job: Job) -> impl Future<Output = Reply> + Send + use<> {
+        self.0.call(job)
+    }
+}
+
+async fn replied<R: 'static>(reply: impl Future<Output = Reply>) -> R {
+    match reply.await.downcast::<R>() {
+        Ok(output) => *output,
+        Err(_) => unreachable!("a registry job replies with its own type"),
+    }
+}
+
 pub struct Registry {
     session_handles: Atom<nanocode_sync::Map<String, AgentHandle>>,
     roots: Atom<nanocode_sync::Map<String, String>>,
     spawn_router: Atom<Option<Arc<dyn crate::SpawnRouter>>>,
     id: SubagentRuntimeId,
-    state: nanocode_sync::Mailbox<RegistryState>,
+    state: StateMailbox,
     pub(super) updates: mpsc::UnboundedSender<ScopedAgentUpdate>,
     revision: watch::Sender<u64>,
     capacity: Capacity,
@@ -1231,7 +1262,7 @@ pub(super) struct ScopeLocks {
 }
 
 pub(super) struct Warm {
-    state: nanocode_sync::Mailbox<RegistryState>,
+    state: StateMailbox,
     registry: Weak<Registry>,
     root: String,
     leaves: Vec<u64>,
@@ -1254,7 +1285,7 @@ impl Drop for Warm {
 }
 
 pub(super) struct MessagePause {
-    state: nanocode_sync::Mailbox<RegistryState>,
+    state: StateMailbox,
     root: String,
     registry: Option<Weak<Registry>>,
 }
@@ -2993,7 +3024,7 @@ impl Registry {
         Self {
             id: SubagentRuntimeId::next(),
             spawn_router: Atom::default(),
-            state: nanocode_sync::Mailbox::default(),
+            state: StateMailbox::default(),
             updates,
             revision,
             capacity: Capacity::new(max_concurrency),
