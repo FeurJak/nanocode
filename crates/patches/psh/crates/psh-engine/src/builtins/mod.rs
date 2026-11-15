@@ -849,7 +849,7 @@ async fn let_(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     }
     let mut last = 0;
     for a in &args[1..] {
-        let r = crate::arith::eval(vp, a);
+        let r = crate::arith::expanding!(vp, |vp| crate::arith::eval(vp, a))?;
         crate::arith::notes(vp).await;
         match r {
             Ok(v) => last = v,

@@ -617,7 +617,14 @@ async fn part(
     ctx: Ctx,
     first: bool,
 ) -> Result<(), Unwind> {
-    match expand_part_now(vp, code, part, quoted, f, ctx, first) {
+    let now = match part.kind {
+        Part::Arith(_) => crate::arith::probe(vp, |vp| {
+            expand_part_now(vp, code, part, quoted, f, ctx, first)
+        })
+        .unwrap_or(Now::Later),
+        _ => expand_part_now(vp, code, part, quoted, f, ctx, first),
+    };
+    match now {
         Now::Done => {}
         Now::Arith(msg) => return Err(arith_failed(vp, &msg).await),
         Now::Later => Box::pin(expand_part(vp, code, part, quoted, f, ctx, first)).await?,
@@ -1195,13 +1202,15 @@ async fn expand_part(
         }
         Part::Arith(w) => {
             let value = match crate::arith::literal(code, w) {
-                Some(lit) => crate::arith::eval_literal(vp, &lit),
+                Some(lit) => {
+                    crate::arith::expanding!(vp, |vp| crate::arith::eval_literal(vp, &lit))?
+                }
                 None => {
                     let (text, st) = expand_single(vp, code, w, Ctx::Arith).await?;
                     if st.is_some() {
                         f.subst_status = st;
                     }
-                    crate::arith::eval(vp, &text)
+                    crate::arith::expanding!(vp, |vp| crate::arith::eval(vp, &text))?
                 }
             };
             match value {
@@ -2317,7 +2326,7 @@ pub(crate) fn subscript_ctx(vp: &Vp, name: &str) -> Ctx {
 
 /// `name[sub]` with `sub` expanded: an associative key or an arithmetic index.
 async fn element(vp: &mut Vp, name: &str, sub: &[u8]) -> Result<Val, Unwind> {
-    match vp.get_elem(name, sub) {
+    match crate::arith::expanding!(vp, |vp| vp.get_elem(name, sub))? {
         Ok(v) => Ok(v.map_or(Val::Unset, Val::Str)),
         Err(msg) if msg.ends_with("bad array subscript") => {
             // A reference before the start: an error, but the word goes on empty.
@@ -2410,7 +2419,7 @@ fn quotes_closed(s: &[u8]) -> bool {
 /// An arithmetic word (offsets, lengths): expanded, then evaluated.
 async fn arith_word(vp: &mut Vp, code: &Rc<Code>, w: &Word) -> Result<i64, Unwind> {
     let (text, _) = expand_single(vp, code, w, Ctx::Arith).await?;
-    let r = crate::arith::eval(vp, &text);
+    let r = crate::arith::expanding!(vp, |vp| crate::arith::eval(vp, &text))?;
     crate::arith::notes(vp).await;
     match r {
         Ok(v) => Ok(v),

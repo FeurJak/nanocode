@@ -290,6 +290,12 @@ impl Shell {
             trap_wants: Cell::new(0),
             fg_waits: Cell::new(0),
             caught: Cell::new(u64::MAX),
+            // A value from the environment is a value already.
+            arith_subst_gate: Cell::new(cfg.env.iter().any(|(_, v)| {
+                v.iter()
+                    .position(|&b| b == b'[')
+                    .is_some_and(|i| v[i..].iter().any(|&b| matches!(b, b'$' | b'`')))
+            })),
         });
         let (mut vars, foreign) = initial_vars(&*cfg.host, &cfg.env, &cfg.cwd);
         vars.insert("BASH", Var::scalar(state::bash_path(&core)));
@@ -364,6 +370,7 @@ impl Shell {
             xtrace_level: 1,
             cmd_name: None,
             arith_notes: Vec::new(),
+            arith_subst: Default::default(),
             umask: None,
             dirstack: Vec::new(),
             rlimits: Vec::new(),
@@ -1157,6 +1164,7 @@ async fn run_chunk(
     lines: &Rc<LineIndex>,
     echo: std::ops::Range<usize>,
 ) -> Option<i32> {
+    crate::arith::gate(&vp.core, source.get(echo.clone()).unwrap_or(source));
     // `set -v`: the input is echoed as it is read.
     if vp.opts.get(options::SetOpt::Verbose) {
         let last = echo.end == source.len() && !source.ends_with(b"\n");

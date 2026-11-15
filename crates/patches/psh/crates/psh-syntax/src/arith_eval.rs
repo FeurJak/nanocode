@@ -76,6 +76,14 @@ pub trait ArithEnv {
         index: Option<ArithIndex<'_>>,
         value: i64,
     ) -> Result<(), Self::Error>;
+
+    /// The subscript of an indexed array with its expansions done (`$x`, `$(…)`,
+    /// backquotes), asked only for text that holds a `$` or a backquote: bash expands a
+    /// subscript it reaches inside a variable's value before it evaluates it.
+    /// `Ok(None)` evaluates the text as it is.
+    fn expand_subscript(&mut self, _sub: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
+        Ok(None)
+    }
 }
 
 /// An evaluation failure: an arithmetic error in some text (the expression itself, a
@@ -165,6 +173,10 @@ impl<E: ArithEnv> Evaluator<'_, E> {
         let sub = &text[sub.range()];
         if self.env.is_assoc(&text[lv.name.range()]) {
             Ok(Some(ArithIndex::Key(sub)))
+        } else if sub.iter().any(|&b| matches!(b, b'$' | b'`'))
+            && let Some(expanded) = self.env.expand_subscript(sub).map_err(EvalError::Env)?
+        {
+            Ok(Some(ArithIndex::Num(self.text(&expanded)?)))
         } else {
             Ok(Some(ArithIndex::Num(self.text(sub)?)))
         }

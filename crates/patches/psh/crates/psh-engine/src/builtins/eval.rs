@@ -25,6 +25,7 @@ pub(crate) enum Origin {
 /// `line_base` is added to line numbers. Returns the status of the last command run (0
 /// for none).
 pub(crate) async fn run_text(vp: &mut Vp, text: &[u8], line_base: u32, origin: Origin) -> R {
+    crate::arith::gate(&vp.core, text);
     let lines = Rc::new(LineIndex::from_bytes(text));
     let mut parser = Parser::from_bytes(text, Options::default());
     let mut status = 0;

@@ -123,11 +123,17 @@ fn simple<'a>(
     vp.core.fg_signal.set(None);
     vp.line = exec::simple_line(code, cmd, s);
     let Some(b) = builtin else {
-        for a in &s.assigns {
+        for (i, a) in s.assigns.iter().enumerate() {
             let AssignValue::Scalar(w) = &a.value else {
                 continue;
             };
-            let v = match expand::single_now(vp, code, w) {
+            // Only the first value may hand the command to the slow path: later ones
+            // follow assignments.
+            let v = match i {
+                0 => crate::arith::probe(vp, |vp| expand::single_now(vp, code, w))?,
+                _ => expand::single_now(vp, code, w),
+            };
+            let v = match v {
                 Ok(v) => v,
                 Err(msg) => return Some(arith_failed(vp, msg)),
             };
@@ -154,9 +160,10 @@ fn simple<'a>(
         }
         return Some(finish(vp, code, cmd, 0, check));
     };
-    let argv = match expand::words_now(vp, code, &s.words) {
-        Ok(argv) => argv,
-        Err(msg) => return Some(arith_failed(vp, msg)),
+    let argv = match crate::arith::probe(vp, |vp| expand::words_now(vp, code, &s.words)) {
+        None => return None,
+        Some(Ok(argv)) => argv,
+        Some(Err(msg)) => return Some(arith_failed(vp, msg)),
     };
     let last = argv.last().cloned().unwrap_or_default();
     let mut saved: Vec<(&str, Option<crate::vars::Var>)> = Vec::new();
@@ -228,7 +235,7 @@ fn arith<'a>(
         return None;
     }
     vp.line = code.line(cmd.span.start);
-    match crate::arith::eval_literal(vp, &lit) {
+    match crate::arith::probe(vp, |vp| crate::arith::eval_literal(vp, &lit))? {
         Ok(v) if vp.arith_notes.is_empty() => Some(finish(vp, code, cmd, i32::from(v == 0), check)),
         Ok(v) => Some(Now::Later(Box::pin(async move {
             crate::arith::notes(vp).await;
@@ -255,7 +262,7 @@ pub(crate) fn arith_word(vp: &mut Vp, code: &Code, w: &Word) -> Option<Result<i6
         return None;
     }
     let lit = crate::arith::literal(code, w)?;
-    Some(crate::arith::eval_literal(vp, &lit))
+    crate::arith::probe(vp, |vp| crate::arith::eval_literal(vp, &lit))
 }
 
 fn finish<'a>(

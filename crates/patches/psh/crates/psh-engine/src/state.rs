@@ -55,6 +55,10 @@ pub(crate) struct Core {
     pub fg_waits: Cell<u32>,
     /// What `catch` was last told; all bits until it was told anything.
     pub caught: Cell<u64>,
+    /// Some text the shell parsed could make a value whose subscript arithmetic
+    /// expands (`arith::gate`): until then `arith::expanding` and `arith::probe` only
+    /// evaluate.
+    pub arith_subst_gate: Cell<bool>,
 }
 
 /// Where a vproc's pending signals are (D1411): the shell's mask, which the embedder's
@@ -481,6 +485,8 @@ pub(crate) struct Vp {
     pub xtrace_level: u32,
     pub cmd_name: Option<CmdName>,
     pub arith_notes: Vec<String>,
+    /// Expanding subscripts reached during arithmetic (`arith::expanding`).
+    pub arith_subst: crate::arith::Subst,
 }
 
 #[derive(Clone, Copy)]

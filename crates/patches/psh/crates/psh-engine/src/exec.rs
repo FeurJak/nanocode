@@ -1421,10 +1421,10 @@ async fn arith_command(
         line.extend_from_slice(b" ))");
         builtins::set::xtrace(vp, &line).await;
     }
-    let value = match &lit {
+    let value = crate::arith::expanding!(vp, |vp| match &lit {
         Some(lit) => crate::arith::eval_literal(vp, lit),
         None => crate::arith::eval(vp, text),
-    };
+    })?;
     crate::arith::notes(vp).await;
     match value {
         Ok(v) => Ok(Some(v)),
@@ -1708,7 +1708,7 @@ async fn prefix_assigns(
                     let line = builtins::set::xtrace_assign(lhs.as_bytes(), op, &v);
                     builtins::set::xtrace(vp, &line).await;
                 }
-                vp.assign_elem(name, &sub, v, a.append)
+                crate::arith::expanding!(vp, |vp| vp.assign_elem(name, &sub, v.clone(), a.append))?
             }
             (Some(idx), AssignValue::Array(_)) => Err(format!(
                 "{name}[{}]: cannot assign list to array member",
@@ -3470,6 +3470,7 @@ pub(crate) async fn command_subst_text(
     text: &[u8],
     offset: u32,
 ) -> Result<(Vec<u8>, i32), Unwind> {
+    crate::arith::gate(&vp.core, text);
     let aliases = vp.expand_aliases.then_some(&vp.aliases);
     match psh_syntax::parse_bytes_with_aliases(text, psh_syntax::Options::default(), aliases) {
         Ok(ast) => {

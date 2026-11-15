@@ -157,7 +157,7 @@ async fn binary(
 }
 
 async fn arith(vp: &mut Vp, text: &[u8]) -> Option<i64> {
-    let r = crate::arith::eval(vp, text);
+    let r = crate::arith::expanding!(vp, |vp| crate::arith::eval(vp, text)).ok()?;
     crate::arith::notes(vp).await;
     match r {
         Ok(v) => Some(v),
