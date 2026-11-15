@@ -440,7 +440,11 @@ pub(super) fn persist_durably<'a>(
                 "subagent.journal.persist",
                 session.root_id = root_session_id
             ))
-            .await
+            .await?;
+        match reg.store_for(root_session_id) {
+            Some(store) => store.flush(root_session_id).await,
+            None => Ok(()),
+        }
     })
 }
 

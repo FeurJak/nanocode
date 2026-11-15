@@ -250,6 +250,10 @@ pub trait ChildJournalStore: Send + Sync + 'static {
         Box::pin(async { Ok(()) })
     }
 
+    fn flush(&self) -> BackendFuture<std::io::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn records_children(&self) -> bool {
         true
     }

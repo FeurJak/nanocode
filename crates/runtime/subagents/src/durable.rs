@@ -69,6 +69,13 @@ pub trait SubagentStore: Send + Sync {
         Box::pin(async { Ok(()) })
     }
 
+    fn flush<'a>(
+        &'a self,
+        _root_session_id: &'a str,
+    ) -> SubagentStoreFuture<'a, std::io::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn records_sessions(&self) -> bool {
         true
     }
@@ -2753,6 +2760,13 @@ impl PersistedNative {
 pub(super) struct JournalStore(pub(super) Arc<dyn nanocode_agent_core::backend::ChildJournalStore>);
 
 impl SubagentStore for JournalStore {
+    fn flush<'a>(
+        &'a self,
+        _root_session_id: &'a str,
+    ) -> SubagentStoreFuture<'a, std::io::Result<()>> {
+        self.0.flush()
+    }
+
     fn pending_turn<'a>(
         &'a self,
         session_id: &'a str,

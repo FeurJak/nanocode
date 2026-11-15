@@ -432,6 +432,11 @@ fn writer_stopped() -> std::io::Error {
 }
 
 impl ChildJournalStore for SharedJournal {
+    fn flush(&self) -> BackendFuture<std::io::Result<()>> {
+        let mut store = self.store.clone();
+        Box::pin(async move { store.flush().await.map_err(std::io::Error::other) })
+    }
+
     fn pending_turn(
         &self,
         session_id: String,
