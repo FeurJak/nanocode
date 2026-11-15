@@ -5,5 +5,5 @@ mod request;
 pub(crate) use request::{CreatePolicy, ResponseCreate};
 
 pub use request::{
-    DEFAULT_FUNCTION_NAMESPACE, RequestProfile, ResponseHistory, ResponsesInput, shared_prefix_json,
+    DEFAULT_FUNCTION_NAMESPACE, RequestProfile, ResponseHistory, ResponsesInput, shared_prefix_records,
 };

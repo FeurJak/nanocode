@@ -87,9 +87,24 @@ pub struct EncodedPayload {
 enum Body {
     Reference(Arc<str>),
     Content {
-        json: Arc<str>,
+        json: Text,
         keyed: Arc<OnceLock<Keyed>>,
     },
+}
+
+#[derive(Clone, Debug)]
+enum Text {
+    Json(Arc<str>),
+    Record(Arc<str>),
+}
+
+impl Text {
+    fn json(&self) -> &str {
+        match self {
+            Self::Json(json) => json,
+            Self::Record(record) => &record[1..],
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -232,14 +247,14 @@ impl EncodedPayload {
     fn shared_key(&self) -> &Arc<str> {
         match &self.body {
             Body::Reference(key) => key,
-            Body::Content { json, keyed } => &keyed.get_or_init(|| self::keyed(json)).key,
+            Body::Content { json, keyed } => &keyed.get_or_init(|| self::keyed(json.json())).key,
         }
     }
 
-    const fn content(&self) -> Option<&Arc<str>> {
+    fn content(&self) -> Option<&str> {
         match &self.body {
             Body::Reference(_) => None,
-            Body::Content { json, .. } => Some(json),
+            Body::Content { json, .. } => Some(json.json()),
         }
     }
 
@@ -330,20 +345,35 @@ impl EncodedPayload {
     }
 
     pub fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Self> {
-        let json = serde_json::to_string(value).map_err(Error::InvalidPayload)?;
-        Ok(Self::from_json(json.into()))
+        let mut record = vec![b'='];
+        serde_json::to_writer(&mut record, value).map_err(Error::InvalidPayload)?;
+        let record = String::from_utf8(record)
+            .map_err(|error| Error::InvalidState(format!("encoded payload {error}")))?;
+        Self::from_record(record.into())
     }
 
     pub fn from_json(json: Arc<str>) -> Self {
         Self::of(Body::Content {
-            json,
+            json: Text::Json(json),
             keyed: Arc::default(),
         })
     }
 
+    pub fn from_record(record: Arc<str>) -> Result<Self> {
+        if !record.starts_with('=') {
+            return Err(Error::InvalidState(
+                "an inline payload record must start with =".into(),
+            ));
+        }
+        Ok(Self::of(Body::Content {
+            json: Text::Record(record),
+            keyed: Arc::default(),
+        }))
+    }
+
     pub fn keyed(key: Arc<str>, json: Arc<str>) -> Self {
         Self::of(Body::Content {
-            json,
+            json: Text::Json(json),
             keyed: Arc::new(OnceLock::from(Keyed { key, layout: None })),
         })
     }
@@ -357,7 +387,7 @@ impl EncodedPayload {
     }
 
     pub fn json(&self) -> Result<&str> {
-        self.content().map(|content| &**content).ok_or_else(|| {
+        self.content().ok_or_else(|| {
             Error::InvalidState(
                 "resolve the payload through its durable session before reading it".into(),
             )
@@ -416,20 +446,27 @@ impl EncodedPayload {
         };
         let layout = match keyed.get().and_then(|keyed| keyed.layout.as_ref()) {
             Some(layout) => Arc::clone(layout),
-            None if content.len() >= INLINE_BYTES && self.key().starts_with(KEY_PREFIX) => {
-                Arc::new(Layout::of(content))
+            None if content.json().len() >= INLINE_BYTES && self.key().starts_with(KEY_PREFIX) => {
+                Arc::new(Layout::of(content.json()))
             }
             None => {
-                let mut value = String::with_capacity(1 + content.len());
-                value.push('=');
-                value.push_str(content);
+                let value = match content {
+                    Text::Record(record) => Arc::clone(record),
+                    Text::Json(json) => {
+                        let mut value = String::with_capacity(1 + json.len());
+                        value.push('=');
+                        value.push_str(json);
+                        value.into()
+                    }
+                };
                 records.push(crate::StoreRecord {
                     key: self.key().to_owned(),
-                    value: value.into(),
+                    value,
                 });
                 return;
             }
         };
+        let content = content.json();
         let mut offset = 0;
         for (index, &end) in layout.ends.iter().enumerate() {
             let key = chunk_key(layout.hash(index));
@@ -460,11 +497,12 @@ impl EncodedPayload {
         let Body::Content { json, keyed } = &self.body else {
             return None;
         };
+        let json = json.json();
         (json.len() < limit
             && keyed
                 .get()
                 .is_none_or(|keyed| keyed.layout.is_none() && keyed.key.starts_with(KEY_PREFIX)))
-        .then_some(&**json)
+        .then_some(json)
     }
 
     pub(crate) fn is_step_inline(&self) -> bool {
@@ -780,7 +818,7 @@ impl EncodedPayload {
                 )));
             }
             loaded.push(Self::of(Body::Content {
-                json: content.into(),
+                json: Text::Json(content.into()),
                 keyed: Arc::new(OnceLock::from(Keyed {
                     key: Arc::clone(value.shared_key()),
                     layout: None,
@@ -1092,7 +1130,9 @@ impl PartialEq for EncodedPayload {
                     json: other_json,
                     keyed: other_keyed,
                 },
-            ) if keyed.get().is_none() && other_keyed.get().is_none() => json == other_json,
+            ) if keyed.get().is_none() && other_keyed.get().is_none() => {
+                json.json() == other_json.json()
+            }
             _ => self.key() == other.key(),
         }
     }

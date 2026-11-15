@@ -14,26 +14,28 @@ type PrefixItems = [std::sync::OnceLock<Option<Box<[Arc<str>]>>>; 16];
 
 struct SharedPrefix {
     encoded: PrefixItems,
-    json: Box<[std::sync::OnceLock<Option<Arc<str>>>]>,
     prefix: Arc<[ResponseItem]>,
+    records: Box<[std::sync::OnceLock<Option<Arc<str>>>]>,
+}
+
+fn record<T: Serialize>(value: &T) -> Option<Arc<str>> {
+    let mut record = vec![b'='];
+    serde_json::to_writer(&mut record, value).ok()?;
+    String::from_utf8(record).ok().map(Arc::from)
 }
 
 impl SharedPrefix {
     fn new(prefix: Arc<[ResponseItem]>) -> Arc<Self> {
         Arc::new(Self {
             encoded: std::array::from_fn(|_| std::sync::OnceLock::new()),
-            json: prefix.iter().map(|_| std::sync::OnceLock::new()).collect(),
+            records: prefix.iter().map(|_| std::sync::OnceLock::new()).collect(),
             prefix,
         })
     }
 
-    fn json(&self, index: usize) -> Option<&Arc<str>> {
-        self.json[index]
-            .get_or_init(|| {
-                serde_json::to_string(&self.prefix[index])
-                    .ok()
-                    .map(Arc::from)
-            })
+    fn record(&self, index: usize) -> Option<&Arc<str>> {
+        self.records[index]
+            .get_or_init(|| record(&self.prefix[index]))
             .as_ref()
     }
 }
@@ -58,12 +60,12 @@ fn shared_prefix(prefix: &Arc<[ResponseItem]>) -> Arc<SharedPrefix> {
 
 #[doc(hidden)]
 #[must_use]
-pub fn shared_prefix_json(prefix: &Arc<[ResponseItem]>) -> Option<Box<[Arc<str>]>> {
+pub fn shared_prefix_records(prefix: &Arc<[ResponseItem]>) -> Option<Box<[Arc<str>]>> {
     let shared = LAST_PREFIX
         .load_full()
         .filter(|last| Arc::ptr_eq(&last.prefix, prefix))?;
     (0..prefix.len())
-        .map(|index| shared.json(index).cloned())
+        .map(|index| shared.record(index).cloned())
         .collect()
 }
 
@@ -679,8 +681,8 @@ impl RequestInput<'_> {
             .enumerate()
             .filter(|(_, item)| self.supports(item))
             .map(|(index, item)| match self.element(item).rewritten() {
-                Some(item) => serde_json::to_string(&item).ok().map(Arc::from),
-                None => shared.json(index).cloned(),
+                Some(item) => record(&item),
+                None => shared.record(index).cloned(),
             })
             .collect()
     }
@@ -745,7 +747,7 @@ impl<'a> RequestInput<'a> {
     fn pieces(&self) -> Result<Vec<Cow<'a, str>>, serde_json::Error> {
         let mut pieces = Vec::new();
         match self.prefix {
-            Some(prefix) => pieces.extend(prefix.iter().map(|item| Cow::Borrowed(&**item))),
+            Some(prefix) => pieces.extend(prefix.iter().map(|record| Cow::Borrowed(&record[1..]))),
             None => self.items(&mut pieces, self.input.first)?,
         }
         self.items(&mut pieces, self.input.second)?;
