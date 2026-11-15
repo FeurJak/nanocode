@@ -97,7 +97,8 @@ impl CodexOrchestrationArg {
     const CHOICES: [Choice; 2] = [
         Choice::new("code-mode")
             .help("Codex models call their tools from JavaScript cells (exec and wait)"),
-        Choice::new("direct").help("Codex models call their tools directly, as Codex CLI does"),
+        Choice::new("direct")
+            .help("Codex models call their tools directly, as Codex CLI does (the default)"),
     ];
 }
 
@@ -229,7 +230,7 @@ const SESSION: Group = Group::new(&[
     Argument::value("codex_orchestration", "MODE", Parser::Choice(&CodexOrchestrationArg::CHOICES))
         .long("codex-orchestration")
         .env("NANOCODE_CODEX_ORCHESTRATION")
-        .help("How Codex models call tools: code-mode (the default) or direct"),
+        .help("How Codex models call tools: direct (the default) or code-mode"),
     Argument::flag("no_subagents")
         .long("no-subagents")
         .help("Disable subagent tools"),
