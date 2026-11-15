@@ -579,12 +579,21 @@ impl Heap {
         a: u32,
         b: u32,
     ) -> Result<Option<Str>, HeapError> {
-        if self.arena().get(s.0, Header::KIND) != CellKind::Str8 as u8 {
+        let kind = self.arena().get(s.0, Header::KIND);
+        if kind != CellKind::Str8 as u8 && kind != CellKind::Slice as u8 {
             return Ok(None);
         }
         let dst = self.alloc_flat(b - a, false)?;
-        self.arena_mut()
-            .copy_within(s.0 + Str8::DATA.offset + a, b - a, dst + Str8::DATA.offset);
+        let (cell, from) = if kind == CellKind::Str8 as u8 {
+            (s.0, 0)
+        } else {
+            self.slice_parts(s.0)
+        };
+        self.arena_mut().copy_within(
+            cell + Str8::DATA.offset + from + a,
+            b - a,
+            dst + Str8::DATA.offset,
+        );
         Ok(Some(Str(dst)))
     }
 

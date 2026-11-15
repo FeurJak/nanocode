@@ -320,8 +320,10 @@ fn in_first(code: Prog<'_>, first: usize, c: u32) -> bool {
 
 #[derive(Clone, Copy)]
 pub(crate) struct Simple<'a> {
+    bits: [u32; 8],
     body: Prog<'a>,
     code: Prog<'a>,
+    exact: bool,
     first: usize,
     plus: bool,
 }
@@ -369,9 +371,34 @@ impl<'a> Simple<'a> {
         if code.at(end) != SAVE || code.at(end + 1) != 1 || code.at(end + 2) != MATCH {
             return None;
         }
+        let n = code.at(first) as usize;
+        let map = code.sub(first + 1 + 2 * n, 8);
+        let mut bits = [0u32; 8];
+        for (k, w) in bits.iter_mut().enumerate() {
+            *w = map.at(k);
+        }
+        let body = code.sub(at, len);
+        let mut own = [0u32; 8];
+        let mut fill = |lo: u32, hi: u32| {
+            let hi = hi.min(255);
+            for w in (lo >> 5)..=(hi >> 5) {
+                let a = if w == lo >> 5 { lo & 31 } else { 0 };
+                let b = if w == hi >> 5 { hi & 31 } else { 31 };
+                own[w as usize] |= (u32::MAX >> (31 - b)) & (u32::MAX << a);
+            }
+        };
+        if body.at(0) == CHAR {
+            fill(body.at(1), body.at(1));
+        } else {
+            for i in 0..(len - 2) / 2 {
+                fill(body.at(2 + 2 * i), body.at(3 + 2 * i));
+            }
+        }
         Some(Simple {
-            body: code.sub(at, len),
+            bits,
+            body,
             code,
+            exact: own == bits,
             first,
             plus,
         })
@@ -415,23 +442,18 @@ impl<'a> Simple<'a> {
     }
 
     fn scan_latin1(self, start: usize, b: &[u8]) -> Option<Option<(usize, usize)>> {
-        let n = self.code.at(self.first) as usize;
-        let map = self.code.sub(self.first + 1 + 2 * n, 8);
-        let mut bits = [0u32; 8];
-        for (k, w) in bits.iter_mut().enumerate() {
-            *w = map.at(k);
-        }
+        let bits = self.bits;
         let hit = |c: u8| bits[(c >> 5) as usize] >> (c & 31) & 1 != 0;
         let Some(at) = b[start..].iter().position(|&c| hit(c)).map(|i| start + i) else {
             return Some(None);
         };
-        if !self.matches(u32::from(b[at])) {
+        if !self.exact && !self.matches(u32::from(b[at])) {
             return None;
         }
         let end = if self.plus {
             b[at + 1..]
                 .iter()
-                .position(|&c| !hit(c) || !self.matches(u32::from(c)))
+                .position(|&c| !hit(c) || !self.exact && !self.matches(u32::from(c)))
                 .map_or(b.len(), |i| at + 1 + i)
         } else {
             at + 1
