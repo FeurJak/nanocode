@@ -1001,6 +1001,28 @@ impl HandHost for NativeHost {
     }
 }
 
+fn with_notices(mut output: ToolOutput, notices: Vec<String>) -> ToolOutput {
+    if notices.is_empty() {
+        return output;
+    }
+    let mut content = match std::mem::replace(
+        &mut output.output,
+        crate::contract::ToolOutputBody::Content(Vec::new()),
+    ) {
+        crate::contract::ToolOutputBody::Text(text) => {
+            vec![crate::contract::ToolOutputContent::InputText { text }]
+        }
+        crate::contract::ToolOutputBody::Content(content) => content,
+    };
+    content.extend(
+        notices
+            .into_iter()
+            .map(|text| crate::contract::ToolOutputContent::InputText { text }),
+    );
+    output.output = crate::contract::ToolOutputBody::Content(content);
+    output
+}
+
 struct NativeSession(Arc<ToolRuntime>);
 
 impl HandSession for NativeSession {
@@ -1036,9 +1058,12 @@ impl HandSession for NativeSession {
         context: OwnedToolContext,
     ) -> HostFuture<'a, ToolOutput> {
         Box::pin(async move {
-            self.0
-                .execute_nested_tool(name, input, context.as_context())
-                .await
+            let context = context.as_context();
+            let output = self.0.execute_nested_tool(name, input, context).await;
+            if context.call_id().contains("/code-") {
+                return output;
+            }
+            with_notices(output, self.0.session_notices(context.session_id()))
         })
     }
 

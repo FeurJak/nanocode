@@ -352,6 +352,16 @@ impl ToolRuntime {
             }),
         }
     }
+
+    #[must_use]
+    pub fn session_notices(&self, session_id: &str) -> Vec<String> {
+        match &self.inner {
+            Runtime::Native(runtime) => {
+                nanocode_code_mode::CodeModeToolset::session_notices(&*runtime.registry, session_id)
+            }
+            Runtime::Host(_) => Vec::new(),
+        }
+    }
 }
 
 impl ToolRuntimeControl {

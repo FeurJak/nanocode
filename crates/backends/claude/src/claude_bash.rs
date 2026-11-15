@@ -664,6 +664,14 @@ impl Jobs {
     }
     fn watch(self: &Arc<Self>, job: Arc<Job>) -> Watch {
         let Some(binding) = self.agent.read(Clone::clone) else {
+            let watch = match job
+                .call_id
+                .as_deref()
+                .is_none_or(|call| call.contains("/code-"))
+            {
+                true => Watch::Reported,
+                false => Watch::Notified,
+            };
             let jobs = Arc::downgrade(self);
             let (result, written) = (job.result.clone(), Arc::clone(&job.written));
             let job = Arc::downgrade(&job);
@@ -682,7 +690,7 @@ impl Jobs {
                     jobs.ended.send_modify(|ended| *ended += 1);
                 }
             }));
-            return Watch::Reported;
+            return watch;
         };
         let watch = match binding.delivery {
             Delivery::EndsWithTurn => Watch::EndsWithTurn,
