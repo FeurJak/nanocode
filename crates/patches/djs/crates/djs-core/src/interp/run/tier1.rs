@@ -1428,11 +1428,35 @@ fn local_put(w: u64) -> Option<(u32, bool)> {
 impl Exec<'_> {
     #[inline(never)]
     pub(super) fn run_tier1(&mut self) {
-        if let Some(n) = self.tier1_nudge.take() {
-            self.opts.hot_backedges = n;
+        let nudged = self
+            .tier1_nudge
+            .take()
+            .map(|n| core::mem::replace(&mut self.opts.hot_backedges, n));
+        let start = self.fuel;
+        match self.tier1() {
+            Some(pass) => {
+                if (start - self.fuel) / i64::from(self.opts.hot_backedges) >= pass {
+                    self.tier1_nudge = Some(self.opts.hot_backedges);
+                    self.opts.hot_backedges = 1;
+                }
+            }
+            None => {
+                if let Some(b) = nudged {
+                    if let Some(n) = self.tier1_nudge.take() {
+                        self.opts.hot_backedges = n;
+                    }
+                    if b < self.opts.hot_backedges / 2 {
+                        self.tier1_nudge = Some(self.opts.hot_backedges);
+                        self.opts.hot_backedges = b * 2;
+                    }
+                }
+            }
         }
+    }
+
+    fn tier1(&mut self) -> Option<i64> {
         if self.opts.gc_stress || self.heap.gc_pending() || self.pc >= self.code_len {
-            return;
+            return None;
         }
         let head = self.code + self.pc;
         let vals = ValueArray::VALUES.at(self.stack, 0);
@@ -1444,21 +1468,16 @@ impl Exec<'_> {
                     self.tier1_nudge = Some(self.opts.hot_backedges);
                     self.opts.hot_backedges = 1;
                 }
-                return;
+                return None;
             }
         };
         if self.fuel <= pass {
-            return;
+            return None;
         }
         let locals = self.heap.arena().get(self.template, FuncTemplate::LOCALS) as u32;
-        let Some(depth) = self.sp.checked_sub(self.lp + locals) else {
-            return;
-        };
+        let depth = self.sp.checked_sub(self.lp + locals)?;
         let fused = match site {
-            Some((at, prev)) => match self.gen_site(at, prev) {
-                Some(g) => Some(g),
-                None => return,
-            },
+            Some((at, prev)) => Some(self.gen_site(at, prev)?),
             None => None,
         };
         let b: &mut [u8] = self.heap.arena_mut().hot_bytes();
@@ -1472,24 +1491,22 @@ impl Exec<'_> {
             stop,
             vals,
         };
-        let Some(plan) = translate(b, &f, fused.as_ref()) else {
-            return;
-        };
+        let plan = translate(b, &f, fused.as_ref())?;
         if let Some(g) = &fused
             && plan.writes.iter().any(|w| g.guard.contains(&w.1))
         {
-            return;
+            return None;
         }
         let pass = pass + plan.extra;
         if self.fuel <= pass {
-            return;
+            return None;
         }
         let spare = match plan.result {
             Some(_) => {
                 let proto = realm::intrinsic_obj(self.heap, Intrinsic::ObjectProto);
                 match self.heap.new_iter_result(Some(proto), Value::UNDEFINED, false) {
                     Ok(o) if !self.heap.gc_pending() => Some(o),
-                    _ => return,
+                    _ => return None,
                 }
             }
             None => None,
@@ -1499,7 +1516,7 @@ impl Exec<'_> {
                 let o = self.heap.arena().read::<Value>(slot).as_object();
                 match o.and_then(|o| self.heap.iter_result_fields(o)) {
                     Some((value, done)) if done == Value::FALSE => Some((v.value, value)),
-                    _ => return,
+                    _ => return None,
                 }
             }
             _ => None,
@@ -1933,6 +1950,7 @@ impl Exec<'_> {
         self.pc = e.ip - self.code;
         self.sp = f.sp + e.len;
         self.fuel = if e.rollback { mark } else { fuel };
+        Some(pass)
     }
 
     fn gen_site(&self, at: u32, prev: u32) -> Option<Gen> {
