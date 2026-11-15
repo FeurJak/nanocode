@@ -15,12 +15,18 @@
 //! `gc_pending`, which is re-read with it. The stack cell never moves here (only `ensure`
 //! grows it, in `step`), and no cell moves (no collection).
 //!
-//! It is exactly equivalent to the general path: the same fuel per instruction, a fuel
-//! check at every instruction boundary (it returns with fuel <= 0 and the run loop stops
-//! there), the same arena writes, and the same safepoints (frame entry, return and
-//! backward jumps: with a collection wanted, the instruction completes, then `run_hot`
-//! runs `safepoint()` at that point). So suspension points, collections and heap images
-//! do not change (vm/tests.rs `hot_loop_is_invisible`).
+//! It charges the same fuel per instruction as the general path, makes the same arena
+//! writes and has the same safepoints (frame entry, return and backward jumps: with a
+//! collection wanted, the instruction completes, then `run_hot` runs `safepoint()` at that
+//! point). It checks the fuel only there and before an instruction it leaves to `step`,
+//! not at every instruction: it returns with fuel <= 0 and the run loop stops at the first
+//! such point after the fuel ran out. Bytecode never runs off its end (the stack checker
+//! rejects code that can, `FallsOffEnd`), so the loop does not check `ip` either; a frame
+//! without bytecode (a native caller returned to) leaves the loop. Every loop has a
+//! backward jump and every recursion a frame entry, so a run still stops, at points that
+//! depend only on the program and the fuel; straight-line code past the end of a slice
+//! is the overshoot the next run pays first (D1740). Collections and heap images do not
+//! change.
 
 use super::{Exec, fast};
 use crate::bytecode::decode::arity;
@@ -916,7 +922,7 @@ impl Exec<'_> {
             let mut ip = code + self.pc;
             let mut sp = self.sp;
             let mut fuel = self.fuel;
-            let exit = {
+            let exit = 'run: {
                 let mut collect = self.opts.gc_stress || self.heap.gc_pending();
                 let mut b: &mut [u8] = self.heap.arena_mut().hot_bytes();
                 // Ends the slice for a leaf heap call (`$e`), then takes it back.
@@ -933,10 +939,10 @@ impl Exec<'_> {
                         vals + 8 * ($i)
                     };
                 }
+                if fuel <= 0 || ip >= end {
+                    break 'run Exit::General;
+                }
                 loop {
-                    if fuel <= 0 || ip >= end {
-                        break Exit::General;
-                    }
                     let Some(w) = word(b, ip) else {
                         break Exit::General;
                     };
@@ -1008,6 +1014,9 @@ impl Exec<'_> {
                                 if ip < next {
                                     if collect {
                                         break Exit::Safepoint;
+                                    }
+                                    if fuel <= 0 {
+                                        break Exit::General;
                                     }
                                     budget -= 1;
                                     if budget == 0 {
@@ -1101,7 +1110,6 @@ impl Exec<'_> {
                             self.consts = consts_ref;
                             self.native = 0;
                             code = self.code;
-                            end = code + code_len;
                             (bp, hp, lp) = (base, new_hp, new_lp);
                             consts = consts_ref;
                             sp = new_lp + locals;
@@ -1109,6 +1117,9 @@ impl Exec<'_> {
                             // Frame entry is a safepoint.
                             if collect {
                                 break Exit::Safepoint;
+                            }
+                            if fuel <= 0 {
+                                break Exit::General;
                             }
                         }};
                     }
@@ -1160,6 +1171,9 @@ impl Exec<'_> {
                                     if collect {
                                         break Exit::Safepoint;
                                     }
+                                    if fuel <= 0 {
+                                        break Exit::General;
+                                    }
                                     budget -= 1;
                                     if budget == 0 {
                                         break Exit::Budget;
@@ -1173,13 +1187,15 @@ impl Exec<'_> {
                     macro_rules! switch_frame {
                         ($top:expr) => {{
                             code = self.code;
-                            end = code + self.code_len;
                             (bp, hp, lp) = (self.bp, self.hp, self.lp);
                             consts = self.consts;
                             sp = $top;
                             ip = code + self.pc;
                             if collect {
                                 break Exit::Safepoint;
+                            }
+                            if fuel <= 0 || self.pc >= self.code_len {
+                                break Exit::General;
                             }
                         }};
                     }
@@ -1752,13 +1768,15 @@ impl Exec<'_> {
                                     self.code_len = 0;
                                 }
                                 code = self.code;
-                                end = code + self.code_len;
                                 (bp, hp, lp) = (prev_bp, prev_hp, prev_hp + HEADER);
                                 consts = consts_ref;
                                 ip = code + ret_pc;
                                 // A return is a safepoint.
                                 if collect {
                                     break Exit::Safepoint;
+                                }
+                                if fuel <= 0 || native {
+                                    break Exit::General;
                                 }
                             } else if flags | 8 == EACH_EITHER {
                                 core::hint::cold_path();
@@ -1788,6 +1806,9 @@ impl Exec<'_> {
                                 // Frame entry is a safepoint.
                                 if collect {
                                     break Exit::Safepoint;
+                                }
+                                if fuel <= 0 {
+                                    break Exit::General;
                                 }
                             } else {
                                 break Exit::Decline(op);

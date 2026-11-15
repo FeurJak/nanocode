@@ -4,8 +4,10 @@
 //! `Interp` cell when it stops. It never recurses on the Rust stack: a JS call pushes a
 //! frame record on the arena value stack and continues the loop.
 //!
-//! Fuel: every instruction charges its cost class. `run` stops before the next instruction
-//! once the fuel is used up, so resuming continues exactly there.
+//! Fuel: every instruction charges its cost class. Once the fuel is used up, `run` stops at
+//! the next safepoint (below) or before the next instruction the tier-0 loop leaves to
+//! `step` (with the loop off, before the next instruction), so resuming continues exactly
+//! there.
 //!
 //! Safepoints (back jumps, frame entry, returns, the back-edges of native builtins and the
 //! out-of-memory handler; not the start of `run`, so that collection points depend only
@@ -72,7 +74,8 @@ pub struct ExecOptions {
     /// is made per call: frames already running keep their kind.
     pub native_builtins: bool,
     /// Run the hottest simple instructions in the tier-0 loop (D1930, the default).
-    /// Results, fuel and heap images are identical either way; off is for tests.
+    /// Results and fuel are identical either way; off is for tests, and stops a slice
+    /// before the next instruction instead of at the next safepoint.
     pub hot_loop: bool,
     /// Backward jumps after which the tier-0 loop returns to the run loop
     /// (`hot::HOT_BACKEDGES`; tests lower it to force those exits).
