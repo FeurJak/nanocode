@@ -504,13 +504,11 @@ impl Exec<'_> {
         let a = match mode {
             MAP | FILTER => {
                 let proto = realm::intrinsic_obj(self.heap, Intrinsic::ArrayProto);
+                let reserve = self.heap.element_tail(o).map_or(0, |t| t.1.min(len));
                 let a = if mode == MAP {
-                    self.heap.new_array_with_length_reserved(Some(proto), len)
+                    self.heap.new_array_with_length_reserved(Some(proto), len, reserve)
                 } else {
-                    self.heap.new_array(
-                        Some(proto),
-                        self.heap.element_tail(o).map_or(0, |t| t.1.min(len)),
-                    )
+                    self.heap.new_array(Some(proto), reserve)
                 };
                 match a {
                     Ok(a) => Value::object(a),

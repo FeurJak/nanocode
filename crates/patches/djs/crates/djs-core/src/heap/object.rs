@@ -520,8 +520,9 @@ impl Heap {
         &mut self,
         proto: Option<Obj>,
         len: u32,
+        reserve: u32,
     ) -> Result<Obj, HeapError> {
-        let o = self.new_array(proto, len)?;
+        let o = self.new_array(proto, reserve)?;
         self.set_array_length_raw(o, len);
         Ok(o)
     }
