@@ -979,44 +979,263 @@ impl Exec<'_> {
     }
 
     fn leaf(&self) -> Option<Leaf> {
-        const ARG0: u8 = Op::GetArg0 as u8;
-        const ARG1: u8 = Op::GetArg1 as u8;
-        const CAP: u8 = Op::GetCapChk as u8;
-        const PUT_CAP: u8 = Op::PutCapChk as u8;
-        const PUSH0: u8 = Op::Push0 as u8;
-        const PUSH3: u8 = Op::Push3 as u8;
-        const PUSH_I8: u8 = Op::PushI8 as u8;
-        const PUSH_I32: u8 = Op::PushI32 as u8;
-        const RETURN: u8 = Op::Return as u8;
-        const RETURN_UNDEF: u8 = Op::ReturnUndef as u8;
         let b = self.heap.arena().bytes();
         let c = b.get(self.code as usize..(self.code + self.code_len) as usize)?;
-        let (op, y, cap) = match *c {
-            [ARG0, ARG1, op, RETURN] => (op, None, None),
-            [ARG0, p @ PUSH0..=PUSH3, op, RETURN] => (op, Some(i32::from(p - PUSH0)), None),
-            [ARG0, PUSH_I8, i, op, RETURN] => (op, Some(i32::from(i as i8)), None),
-            [ARG0, PUSH_I32, b0, b1, b2, b3, op, RETURN] => {
-                (op, Some(i32::from_le_bytes([b0, b1, b2, b3])), None)
+        leaf_of(c, self.get(self.bp - STATE + MODE).as_int()?)
+    }
+
+    pub(super) fn each_fused(&mut self) -> bool {
+        let b = self.heap.arena().bytes();
+        let mut at = self.pc + OPS[Op::FClosure as usize].size as u32;
+        let mut fixed = OPS[Op::FClosure as usize].cost.fuel() as i64;
+        let mut init = None;
+        if at >= self.code_len || self.opts.gc_stress {
+            return false;
+        }
+        let op = self.byte(at);
+        if op != super::fast::CALL1 {
+            let (v, size) = match op {
+                _ if (Op::Push0 as u8..=Op::Push3 as u8).contains(&op) => {
+                    (i32::from(op - Op::Push0 as u8), 1)
+                }
+                _ if op == Op::PushI8 as u8 => (i32::from(self.byte(at + 1) as i8), 2),
+                _ if op == Op::PushI32 as u8 => (i32::from_le_bytes([1, 2, 3, 4].map(|i| self.byte(at + i))), 5),
+                _ => return false,
+            };
+            fixed += OPS[op as usize].cost.fuel() as i64;
+            at += size;
+            if at >= self.code_len || self.byte(at) != super::fast::CALL2 {
+                return false;
             }
-            [CAP, c0, c1, ARG0, op, PUT_CAP, d0, d1, RETURN_UNDEF] if [c0, c1] == [d0, d1] => {
-                (op, None, Some(u32::from(u16::from_le_bytes([c0, c1]))))
-            }
-            _ => return None,
+            init = Some(Value::int(v));
+        }
+        let (fv, ov) = (self.get(self.sp - 2), self.get(self.sp - 1));
+        let Some(fo) = fv
+            .as_object()
+            .filter(|&f| self.is_class(f, ObjectClass::Function))
+        else {
+            return false;
         };
-        if !LEAF_OPS.contains(&op) || (cap.is_some() && !matches!(op, ADD | SUB | MUL)) {
-            return None;
+        let ft = self.template_of(fo);
+        if u32::from(self.heap.arena().get::<u16>(ft, FuncTemplate::FLAGS))
+            & self.slow_call_flags
+            & func_flags::FAST
+            == 0
+        {
+            return false;
         }
-        if cap.is_some() && self.get(self.bp - STATE + MODE).as_int() != Some(FOR_EACH) {
-            return None;
+        let Some(mode) =
+            crate::builtins::fast::each_mode(self.heap.arena().get(ft, FuncTemplate::FAST) as usize)
+        else {
+            return false;
+        };
+        let Some(o) = ov
+            .as_object()
+            .filter(|&o| self.is_class(o, ObjectClass::Array))
+        else {
+            return false;
+        };
+        if matches!(mode, MAP | FILTER) && !crate::builtins::fast::plain_species(self.heap, o) {
+            return false;
         }
-        let mut fuel = 0;
-        let mut p = 0;
-        while p < c.len() {
-            let info = &OPS[c[p] as usize];
-            fuel += info.cost.fuel() as i64;
-            p += info.size as usize;
+        let Some(t) = template::child(self.heap, self.template, self.imm_u32(1)) else {
+            return false;
+        };
+        let t = t.0;
+        let th = super::hot::template_head(b, t);
+        if th.flags & self.slow_call_flags != 0 {
+            return false;
         }
-        Some(Leaf { cap, fuel, op, y })
+        let code = FuncTemplate::DATA.at(t, 0) as usize;
+        let Some(leaf) = b
+            .get(code..code + th.code_len as usize)
+            .and_then(|c| leaf_of(c, mode))
+        else {
+            return false;
+        };
+        let cap = match leaf.cap {
+            Some(c) => {
+                let d = template::capture_desc(self.heap, t, c);
+                let bx = if d & 0x8000_0000 != 0 {
+                    self.capture(d & 0xFFFF)
+                } else {
+                    self.get(self.lp + (d & 0xFFFF))
+                };
+                let Some(bx) = bx.as_internal() else {
+                    return false;
+                };
+                Some(bx + crate::heap::cells::BoxCell::VALUE.offset)
+            }
+            None => None,
+        };
+        let len = self.heap.array_length(o);
+        let el = ld32(b, o.offset() + Object::ELEMENTS.offset);
+        if el == 0 || ld32(b, el + ValueArray::LEN.offset) < len {
+            return false;
+        }
+        let reduce = mode == REDUCE;
+        let (k0, mut acc) = match (reduce, init) {
+            (true, None) => (1, ld(b, ValueArray::VALUES.at(el, 0))),
+            (true, Some(v)) => (0, v),
+            _ => (0, Value::UNDEFINED),
+        };
+        if k0 >= len || acc.is_hole() {
+            return false;
+        }
+        let cost = leaf.fuel + super::native::CALL_FUEL;
+        fixed += OPS[Op::Call as usize].cost.fuel() as i64;
+        let budget = self.fuel - fixed - 1;
+        if budget < cost {
+            return false;
+        }
+        let steps = u32::try_from(budget / cost).unwrap_or(u32::MAX);
+        let mut held = match cap {
+            Some(at) => ld(b, at),
+            None => Value::UNDEFINED,
+        };
+        if held.is_uninitialized() {
+            return false;
+        }
+        let a = match mode {
+            MAP | FILTER => {
+                let proto = realm::intrinsic_obj(self.heap, Intrinsic::ArrayProto);
+                let a = if mode == MAP {
+                    self.heap.new_array_with_length_reserved(Some(proto), len, len)
+                } else {
+                    self.heap.new_array(Some(proto), len)
+                };
+                match a {
+                    Ok(a) => Some(a),
+                    Err(_) => return false,
+                }
+            }
+            _ => None,
+        };
+        let (oel, room) = match a.map(|a| self.heap.element_tail(a)) {
+            Some(Some((oel, 0, room))) if room >= len => (oel, room),
+            Some(_) => return false,
+            None => (0, 0),
+        };
+        let y = leaf.y.map(Value::int);
+        let kind = match (mode, cap.is_some(), leaf.op) {
+            (FOR_EACH, true, _) => Some(FOLD),
+            (REDUCE, false, ADD | SUB | MUL) if leaf.y.is_none() => Some(FOLD),
+            (MAP, false, ADD | SUB | MUL) => Some(MAP_TO),
+            (FILTER, false, LT | LE | GT | GE | STRICT_EQ | STRICT_NE) => Some(KEEP),
+            (
+                SOME | EVERY | FIND | FIND_INDEX,
+                false,
+                LT | LE | GT | GE | STRICT_EQ | STRICT_NE,
+            ) => Some(UNTIL),
+            _ => None,
+        };
+        let limit = len.min(k0.saturating_add(steps));
+        let (mut k, mut n, mut found) = (k0, 0u32, None);
+        while k < limit {
+            if let Some(kind) = kind
+                && k + 1 < limit
+                && let Some(h) = match cap {
+                    Some(_) => held.as_int(),
+                    None if reduce => acc.as_int(),
+                    None => Some(0),
+                }
+            {
+                let mut r = Run {
+                    acc: h,
+                    el,
+                    end: limit - 1,
+                    k,
+                    n,
+                    out: ValueArray::VALUES.at(oel, 0),
+                    q: leaf.y,
+                    room,
+                    stop: mode != EVERY,
+                };
+                scan_any(kind, leaf.op, self.heap.arena_mut().hot_bytes(), &mut r);
+                if r.k > k {
+                    if cap.is_some() {
+                        held = Value::int(r.acc);
+                    } else if reduce {
+                        acc = Value::int(r.acc);
+                    }
+                    (k, n) = (r.k, r.n);
+                }
+            }
+            let b = self.heap.arena().bytes();
+            let x = ld(b, ValueArray::VALUES.at(el, k));
+            if x.is_hole() {
+                return false;
+            }
+            let v = match cap {
+                Some(_) => leaf_eval(leaf.op, held, x),
+                None if reduce => leaf_eval(leaf.op, acc, y.unwrap_or(x)),
+                None => leaf_eval(leaf.op, x, y.unwrap_or(Value::int(k as i32))),
+            };
+            let Some(v) = v else {
+                return false;
+            };
+            let put = match (mode, v.as_bool()) {
+                (FOR_EACH, _) => {
+                    held = v;
+                    None
+                }
+                (REDUCE, _) => {
+                    acc = v;
+                    None
+                }
+                (MAP, _) => Some(v),
+                (FILTER, Some(t)) => t.then_some(x),
+                (SOME | FIND | FIND_INDEX, Some(t)) | (EVERY, Some(t @ false)) if t == (mode != EVERY) => {
+                    found = Some(k);
+                    k += 1;
+                    break;
+                }
+                (SOME | FIND | FIND_INDEX | EVERY, Some(_)) => None,
+                _ => return false,
+            };
+            if let Some(v) = put {
+                if n >= room {
+                    return false;
+                }
+                st(self.heap.arena_mut().hot_bytes(), ValueArray::VALUES.at(oel, n), v);
+                n += 1;
+            }
+            k += 1;
+        }
+        if found.is_none() && k < len {
+            return false;
+        }
+        let calls = i64::from(k - k0);
+        let r = match mode {
+            MAP | FILTER => {
+                let a = a.expect("each: a");
+                if n > 0 {
+                    self.heap.arena_mut().wrote(ValueArray::VALUES.at(oel, 0), 8 * n);
+                    self.heap.set_element_count(a, oel, n);
+                }
+                Value::object(a)
+            }
+            SOME => Value::bool(found.is_some()),
+            EVERY => Value::bool(found.is_none()),
+            FIND => found.map_or(Value::UNDEFINED, |j| {
+                ld(self.heap.arena().bytes(), ValueArray::VALUES.at(el, j))
+            }),
+            FIND_INDEX => found.map_or(Value::int(-1), |j| conv::number(f64::from(j))),
+            REDUCE => acc,
+            _ => Value::UNDEFINED,
+        };
+        if let Some(at) = cap {
+            if at < self.heap.arena().tracked_end() {
+                self.heap.arena_mut().wrote(at, 8);
+            }
+            st(self.heap.arena_mut().hot_bytes(), at, held);
+        }
+        self.fuel -= fixed + calls * cost;
+        self.sp -= 2;
+        self.push(r);
+        self.pc = at + 1;
+        self.safepoint();
+        true
     }
 
     /// A failed step, thrown as the builtin's CreateDataPropertyOrThrow at its resume
@@ -1026,6 +1245,45 @@ impl Exec<'_> {
         let exc = self.fault_value(f, Some(pc));
         self.throw_value(exc, self.call_site_key(pc))
     }
+}
+
+fn leaf_of(c: &[u8], mode: i32) -> Option<Leaf> {
+    const ARG0: u8 = Op::GetArg0 as u8;
+    const ARG1: u8 = Op::GetArg1 as u8;
+    const CAP: u8 = Op::GetCapChk as u8;
+    const PUT_CAP: u8 = Op::PutCapChk as u8;
+    const PUSH0: u8 = Op::Push0 as u8;
+    const PUSH3: u8 = Op::Push3 as u8;
+    const PUSH_I8: u8 = Op::PushI8 as u8;
+    const PUSH_I32: u8 = Op::PushI32 as u8;
+    const RETURN: u8 = Op::Return as u8;
+    const RETURN_UNDEF: u8 = Op::ReturnUndef as u8;
+    let (op, y, cap) = match *c {
+        [ARG0, ARG1, op, RETURN] => (op, None, None),
+        [ARG0, p @ PUSH0..=PUSH3, op, RETURN] => (op, Some(i32::from(p - PUSH0)), None),
+        [ARG0, PUSH_I8, i, op, RETURN] => (op, Some(i32::from(i as i8)), None),
+        [ARG0, PUSH_I32, b0, b1, b2, b3, op, RETURN] => {
+            (op, Some(i32::from_le_bytes([b0, b1, b2, b3])), None)
+        }
+        [CAP, c0, c1, ARG0, op, PUT_CAP, d0, d1, RETURN_UNDEF] if [c0, c1] == [d0, d1] => {
+            (op, None, Some(u32::from(u16::from_le_bytes([c0, c1]))))
+        }
+        _ => return None,
+    };
+    if !LEAF_OPS.contains(&op) || (cap.is_some() && !matches!(op, ADD | SUB | MUL)) {
+        return None;
+    }
+    if cap.is_some() && mode != FOR_EACH {
+        return None;
+    }
+    let mut fuel = 0;
+    let mut p = 0;
+    while p < c.len() {
+        let info = &OPS[c[p] as usize];
+        fuel += info.cost.fuel() as i64;
+        p += info.size as usize;
+    }
+    Some(Leaf { cap, fuel, op, y })
 }
 
 struct Leaf {
@@ -1128,50 +1386,183 @@ fn arith<const OP: u8>(p: i32, q: i32) -> Option<i32> {
     }
 }
 
-fn scan<const KIND: u8, const OP: u8>(b: &mut [u8], r: &mut Run) {
-    let el = r.el;
-    let mut x = ld(b, ValueArray::VALUES.at(el, r.k));
-    while r.k < r.end {
-        let Some(p) = x.as_int() else {
+const INT_HI: u64 = Value::int(0).to_bits() >> 32;
+const HOLE_BITS: [u8; 8] = Value::HOLE.to_bits().to_le_bytes();
+const CHUNK: usize = 8;
+
+fn until_run<const OP: u8>(xs: &[[u8; 8]], q: i32, stop: bool) -> usize {
+    const BIAS: u64 = INT_HI << 32 | 0x8000_0000;
+    const INTS: u64 = 1 << 32;
+    let qb = u64::from(q as u32 ^ 0x8000_0000);
+    let (key, lo, hi) = match (OP, stop) {
+        (LT, true) | (GE, false) => (BIAS, qb, INTS),
+        (LE, true) | (GT, false) => (BIAS, qb + 1, INTS),
+        (GT, true) | (LE, false) => (BIAS, 0, qb + 1),
+        (GE, true) | (LT, false) => (BIAS, 0, qb),
+        (STRICT_EQ, true) | (STRICT_NE, false) => (INT_HI << 32 | u64::from(q as u32), 1, INTS),
+        _ => (BIAS, qb, qb + 1),
+    };
+    let c = INTS - hi.saturating_sub(lo);
+    let bad = |x: &[u8; 8]| {
+        let x = (u64::from_le_bytes(*x) ^ key).wrapping_sub(lo);
+        (x | x.wrapping_add(c)) >> 32 != 0
+    };
+    let mut i = 0;
+    for c in xs.chunks_exact(CHUNK) {
+        let m = c.iter().fold(0, |m, x| {
+            let x = (u64::from_le_bytes(*x) ^ key).wrapping_sub(lo);
+            m | x | x.wrapping_add(INTS - hi.saturating_sub(lo))
+        });
+        if m >> 32 != 0 {
             break;
-        };
-        let q = r.q.unwrap_or(r.k as i32);
-        let mut acc = r.acc;
+        }
+        i += CHUNK;
+    }
+    i + xs[i..].iter().position(bad).unwrap_or(xs.len() - i)
+}
+
+fn scan<const KIND: u8, const OP: u8>(b: &mut [u8], r: &mut Run) {
+    if r.end <= r.k {
+        return;
+    }
+    let len = (r.end - r.k) as usize;
+    let src = ValueArray::VALUES.at(r.el, r.k) as usize;
+    let src_end = src + 8 * (len + 1);
+    let room = if matches!(KIND, KEEP | MAP_TO) {
+        8 * (r.room - r.n) as usize
+    } else {
+        0
+    };
+    let dst = (r.out + 8 * r.n) as usize;
+    let (xs, os) = if room == 0 {
+        (b.get(src..src_end), None)
+    } else if dst >= src_end {
+        match b.split_at_mut_checked(dst) {
+            Some((lo, hi)) => (lo.get(src..src_end), hi.get_mut(..room)),
+            None => return,
+        }
+    } else if dst + room <= src {
+        match b.split_at_mut_checked(src) {
+            Some((lo, hi)) => (hi.get(..src_end - src), lo.get_mut(dst..dst + room)),
+            None => return,
+        }
+    } else {
+        return;
+    };
+    let Some(xs) = xs else {
+        return;
+    };
+    let xs = xs.as_chunks::<8>().0;
+    let os = os.map_or(&mut [][..], |o| o.as_chunks_mut::<8>().0);
+    let word = |c: &[u8; 8]| u64::from_le_bytes(*c);
+    let (k0, q0, stop) = (r.k as i32, r.q, r.stop);
+    if KIND == UNTIL
+        && let Some(q) = q0
+    {
+        let mut i = until_run::<OP>(&xs[..len], q, stop);
+        if i > 0 && xs[i] == HOLE_BITS {
+            i -= 1;
+        }
+        r.k += i as u32;
+        return;
+    }
+    let (mut acc, mut i, mut n) = (r.acc, 0usize, 0usize);
+    while i + CHUNK <= len
+        && !(KIND == FOLD && OP == MUL)
+        && (!matches!(KIND, KEEP | MAP_TO) || n + CHUNK <= os.len())
+    {
+        let c = &xs[i..=i + CHUNK];
+        let mut bad = c[CHUNK] == HOLE_BITS;
+        let mut sum = i64::from(acc);
+        let mut keep = 0u32;
+        for (j, x) in c[..CHUNK].iter().enumerate() {
+            let w = word(x);
+            let p = w as i32;
+            let q = q0.unwrap_or(k0 + (i + j) as i32);
+            bad |= w >> 32 != INT_HI;
+            match KIND {
+                UNTIL => bad |= compare::<OP>(p, q) == stop,
+                KEEP => keep |= u32::from(compare::<OP>(p, q)) << j,
+                MAP_TO => bad |= arith::<OP>(p, q).is_none(),
+                _ => {
+                    sum = if OP == ADD {
+                        sum + i64::from(p)
+                    } else {
+                        sum - i64::from(p)
+                    };
+                    bad |= i32::try_from(sum).is_err();
+                }
+            }
+        }
+        if bad {
+            break;
+        }
+        match KIND {
+            KEEP => {
+                for (j, x) in c[..CHUNK].iter().enumerate() {
+                    if keep >> j & 1 != 0 {
+                        os[n] = *x;
+                        n += 1;
+                    }
+                }
+            }
+            MAP_TO => {
+                for (j, (o, x)) in os[n..n + CHUNK].iter_mut().zip(&c[..CHUNK]).enumerate() {
+                    let q = q0.unwrap_or(k0 + (i + j) as i32);
+                    let v = arith::<OP>(word(x) as i32, q).unwrap_or(0);
+                    *o = Value::int(v).to_bits().to_le_bytes();
+                }
+                n += CHUNK;
+            }
+            FOLD => acc = sum as i32,
+            _ => {}
+        }
+        i += CHUNK;
+    }
+    while i < len {
+        let w = word(&xs[i]);
+        if w >> 32 != INT_HI {
+            break;
+        }
+        let p = w as i32;
+        let q = q0.unwrap_or(k0 + i as i32);
+        let mut next = acc;
         let put = match KIND {
             UNTIL => {
-                if compare::<OP>(p, q) == r.stop {
+                if compare::<OP>(p, q) == stop {
                     break;
                 }
                 None
             }
-            KEEP => compare::<OP>(p, q).then_some(x),
+            KEEP => compare::<OP>(p, q).then_some(xs[i]),
             MAP_TO => match arith::<OP>(p, q) {
-                Some(v) => Some(Value::int(v)),
+                Some(v) => Some(Value::int(v).to_bits().to_le_bytes()),
                 None => break,
             },
             _ => match arith::<OP>(acc, p) {
                 Some(v) => {
-                    acc = v;
+                    next = v;
                     None
                 }
                 None => break,
             },
         };
-        let nx = ld(b, ValueArray::VALUES.at(el, r.k + 1));
-        if nx.is_hole() {
+        if xs[i + 1] == HOLE_BITS {
             break;
         }
         if let Some(v) = put {
-            if r.n == r.room {
+            let Some(o) = os.get_mut(n) else {
                 break;
-            }
-            st(b, r.out + 8 * r.n, v);
-            r.n += 1;
+            };
+            *o = v;
+            n += 1;
         }
-        r.acc = acc;
-        r.k += 1;
-        x = nx;
+        acc = next;
+        i += 1;
     }
+    r.acc = acc;
+    r.k += i as u32;
+    r.n += n as u32;
 }
 
 fn scan_test<const KIND: u8>(op: u8, b: &mut [u8], r: &mut Run) {

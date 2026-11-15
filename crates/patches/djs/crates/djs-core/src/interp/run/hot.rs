@@ -650,6 +650,9 @@ impl Exec<'_> {
                 Op::ArrayPush
             }
             FCLOSURE => {
+                if self.each_fused() {
+                    return true;
+                }
                 let Ok(v) = self.closure(self.imm_u32(1)) else {
                     return false;
                 };
