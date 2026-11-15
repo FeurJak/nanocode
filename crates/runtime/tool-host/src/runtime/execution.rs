@@ -362,6 +362,37 @@ impl ToolRuntime {
             Runtime::Host(_) => Vec::new(),
         }
     }
+
+    pub async fn session_notice(&self, session_id: &str) {
+        match &self.inner {
+            Runtime::Native(runtime) => {
+                nanocode_code_mode::CodeModeToolset::session_notice(&*runtime.registry, session_id)
+                    .await;
+            }
+            Runtime::Host(_) => std::future::pending().await,
+        }
+    }
+
+    #[must_use]
+    pub fn session_busy(&self, session_id: &str) -> bool {
+        match &self.inner {
+            Runtime::Native(runtime) => {
+                nanocode_code_mode::CodeModeToolset::session_busy(&*runtime.registry, session_id)
+            }
+            Runtime::Host(_) => false,
+        }
+    }
+
+    pub async fn hand_notices(
+        &self,
+        session_id: &str,
+        wait: std::time::Duration,
+    ) -> Result<crate::embedded::JobNotices, crate::embedded::CodeModeHostError> {
+        match &self.inner {
+            Runtime::Native(_) => Ok(crate::embedded::JobNotices::default()),
+            Runtime::Host(runtime) => runtime.hand_notices(session_id, wait).await,
+        }
+    }
 }
 
 impl ToolRuntimeControl {

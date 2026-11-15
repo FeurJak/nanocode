@@ -923,6 +923,12 @@ impl nanocode_code_mode::CodeModeToolset for ToolRegistry {
             .collect()
     }
 
+    fn session_busy(&self, session_id: &str) -> bool {
+        self.policies
+            .iter()
+            .any(|policy| policy.session_busy(session_id))
+    }
+
     fn running_output<'a>(
         &'a self,
         call_id: &'a str,

@@ -20,6 +20,18 @@ pub const DEFAULT_BACKGROUND_TIMEOUT_MS: u64 = 600_000;
 
 pub const MAX_BACKGROUND_TIMEOUT_MS: u64 = 7_200_000;
 
+#[must_use]
+pub fn direct_run_time(input: &Value) -> std::time::Duration {
+    let milliseconds = match input.get("run_in_background").and_then(Value::as_bool) {
+        Some(true) => 0,
+        _ => input
+            .get("timeout")
+            .and_then(Value::as_u64)
+            .map_or(DEFAULT_TIMEOUT_MS, |timeout| timeout.min(MAX_TIMEOUT_MS)),
+    };
+    std::time::Duration::from_millis(milliseconds)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BashRequest {
     pub command: String,

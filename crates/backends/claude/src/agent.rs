@@ -357,7 +357,7 @@ impl nanocode_tools::ToolCollection for ClaudeTools {
     ) -> Result<Self> {
         if let Some((catalog, workspace, handle)) = self.shared_catalog.take() {
             let catalog = catalog.add_shared_tools(tools)?;
-            let replacement = crate::claude_tools::install(&catalog, workspace, &handle)?;
+            let replacement = crate::claude_tools::install(&catalog, workspace, &handle, false)?;
             let names = replacement
                 .tools
                 .iter()
@@ -441,7 +441,6 @@ impl ClaudeTools {
         self
     }
 
-    #[cfg(not(target_family = "wasm"))]
     pub(crate) fn agent_bound(
         mut self,
         bound: impl Fn(&Agent, &Steer) + Send + Sync + 'static,
@@ -450,7 +449,6 @@ impl ClaudeTools {
         self
     }
 
-    #[cfg(not(target_family = "wasm"))]
     pub(crate) fn turn_hold<F, Fut>(mut self, hold: F) -> Self
     where
         F: Fn() -> Fut + Send + Sync + 'static,
@@ -7223,6 +7221,31 @@ impl State {
         }
     }
 
+    async fn hold_turn(&self, key: &BackendTurnKey, cancel: &Cancellation) -> Result<bool> {
+        let holds = self.turn_hold.iter().map(|hold| hold()).collect::<Vec<_>>();
+        let waiting = |turns: &HashMap<BackendTurnKey, TurnSteering>| {
+            turns.get(key).is_some_and(|turn| turn.pending.is_empty())
+        };
+        if holds.is_empty() || !waiting(&*self.steering.acquire().await) {
+            return Ok(!waiting(&*self.steering.acquire().await));
+        }
+        let left = self.deadline.as_ref().map(crate::deadline::Reminders::left);
+        for hold in holds {
+            let expired = async {
+                match left {
+                    Some(left) => nanocode_platform::sleep(left).await,
+                    None => std::future::pending().await,
+                }
+            };
+            nanocode_sync::select! {
+                () = cancel.cancelled() => return Err(NanocodeError::TurnCancelled),
+                () = hold => {}
+                () = expired => {}
+            }
+        }
+        Ok(!waiting(&*self.steering.acquire().await))
+    }
+
     async fn consume_steering(
         &self,
         request: &BackendPrompt,
@@ -8916,6 +8939,22 @@ impl State {
                     .as_ref()
                     .is_some_and(crate::deadline::Reminders::last_passed)
             {
+                if self.hold_turn(&request.key, cancel).await? {
+                    cursor.index = index + 1;
+                    cursor.output_continuations = 0;
+                    self.consume_steering(request, &mut cursor, &mut pending, false)
+                        .await?;
+                    conversation.messages = pending.clone();
+                    conversation.previous_message_id = previous_message_id.clone();
+                    conversation.summary.clear();
+                    conversation.advance_boundary();
+                    cursor.index = index + 1;
+                    self.retain_pending(&mut cursor, &pending);
+                    cursor.usage = usage.clone();
+                    self.defer_cursor(&mut cursor, conversation, journal)
+                        .await?;
+                    continue;
+                }
                 cursor.finish_checked = true;
                 let notice = crate::finish_check::notice(self.deadline.as_ref());
                 self.emit(
@@ -8991,22 +9030,7 @@ impl State {
                 continue;
             }
 
-            let holds = self.turn_hold.iter().map(|hold| hold()).collect::<Vec<_>>();
-            if !holds.is_empty()
-                && self
-                    .steering
-                    .acquire()
-                    .await
-                    .get(&request.key)
-                    .is_some_and(|turn| turn.pending.is_empty())
-            {
-                for hold in holds {
-                    nanocode_sync::select! {
-                        () = cancel.cancelled() => return Err(NanocodeError::TurnCancelled),
-                        () = hold => {}
-                    }
-                }
-            }
+            self.hold_turn(&request.key, cancel).await?;
             let more_instructions = {
                 let mut turns = self.steering.acquire().await;
                 if let Some(turn) = turns.get_mut(&request.key) {

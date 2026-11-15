@@ -11,7 +11,7 @@ pub use input::{prepare_output_images, prepare_user_input};
 pub(crate) use types::shared_history;
 pub use types::{
     CodeModeCell, CodeModeExecution, CodeModeNotification, CodeModeObserver, CodeModeUpdate,
-    NestedToolCall, OwnedToolContext,
+    JobNotices, NestedToolCall, OwnedToolContext,
 };
 
 #[cfg(not(target_family = "wasm"))]
@@ -319,6 +319,14 @@ pub trait CodeModeHost: Send + Sync + 'static {
         Box::pin(async { Ok(Vec::new()) })
     }
 
+    fn notices<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _wait: std::time::Duration,
+    ) -> HostFuture<'a, Result<JobNotices, CodeModeHostError>> {
+        Box::pin(async { Ok(JobNotices::default()) })
+    }
+
     fn host_info(
         &self,
     ) -> HostFuture<'_, Result<Option<crate::remote::HandHostInfo>, CodeModeHostError>> {
@@ -493,6 +501,13 @@ impl<T: CodeModeHost + ?Sized> CodeModeHost for std::sync::Arc<T> {
         &self,
     ) -> HostFuture<'_, Result<Vec<crate::remote::HandCapability>, CodeModeHostError>> {
         (**self).capabilities()
+    }
+    fn notices<'a>(
+        &'a self,
+        session_id: &'a str,
+        wait: std::time::Duration,
+    ) -> HostFuture<'a, Result<JobNotices, CodeModeHostError>> {
+        (**self).notices(session_id, wait)
     }
     fn host_info(
         &self,

@@ -31,6 +31,8 @@ struct Catalog {
     #[serde(default)]
     caches_local_tools: bool,
     #[serde(default)]
+    job_notices: bool,
+    #[serde(default)]
     environment: Option<HandEnvironment>,
     #[serde(default)]
     capabilities: Vec<HandCapability>,
@@ -153,6 +155,7 @@ fn body<'de, D: Deserializer<'de>>(tag: &str, body: D) -> Result<RemoteFrame, D:
                 tool_selection,
                 cancels_calls,
                 caches_local_tools,
+                job_notices,
                 environment,
                 capabilities,
                 tools_only,
@@ -169,6 +172,7 @@ fn body<'de, D: Deserializer<'de>>(tag: &str, body: D) -> Result<RemoteFrame, D:
                 tool_selection,
                 cancels_calls,
                 caches_local_tools,
+                job_notices,
                 environment,
                 capabilities,
                 tools_only,

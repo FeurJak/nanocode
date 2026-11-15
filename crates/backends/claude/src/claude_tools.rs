@@ -108,13 +108,14 @@ pub fn install_shared_tools(
     handle: &AgentHandle,
     selected: Tools,
 ) -> Result<ClaudeTools> {
-    install(&selected, workspace, handle)
+    install(&selected, workspace, handle, false)
 }
 
 pub(super) fn install(
     tools: &Tools,
     workspace: PathBuf,
     handle: &AgentHandle,
+    headless: bool,
 ) -> Result<ClaudeTools> {
     let tools = tools
         .clone()
@@ -188,8 +189,63 @@ pub(super) fn install(
             })
         });
     }
+    if headless && tools.has_code_mode_host() && handle.root_session_id() == handle.session_id() {
+        native = hold_hand_jobs(
+            native,
+            &runtime,
+            handle.session_id(),
+            cell_yield.unwrap_or(nanocode_tool_host::code_mode_spec::DEFAULT_YIELD),
+        );
+    }
     native.shared_catalog = Some((tools, workspace, handle.clone()));
     Ok(native)
+}
+
+fn hold_hand_jobs(
+    native: ClaudeTools,
+    runtime: &Arc<ToolRuntime>,
+    session_id: &str,
+    wait: std::time::Duration,
+) -> ClaudeTools {
+    let steer: Arc<nanocode_sync::Atom<Option<crate::agent::Steer>>> = Arc::default();
+    let bound = Arc::clone(&steer);
+    let runtime = Arc::clone(runtime);
+    let session_id: Arc<str> = Arc::from(session_id);
+    native
+        .agent_bound(move |_, steer| {
+            bound.set(Some(Arc::clone(steer)));
+        })
+        .turn_hold(move || {
+            let runtime = Arc::clone(&runtime);
+            let session_id = Arc::clone(&session_id);
+            let steer = Option::clone(&steer.get());
+            async move {
+                loop {
+                    let jobs = match runtime.hand_notices(&session_id, wait).await {
+                        Ok(jobs) => jobs,
+                        Err(error) => {
+                            nanocode_trace::warn!(target: "nanocode_claude", %error, "background job notices from the hand are unavailable");
+                            return;
+                        }
+                    };
+                    if !jobs.notices.is_empty() {
+                        let Some(steer) = steer else {
+                            nanocode_trace::warn!(target: "nanocode_claude", "background job notices found no bound agent");
+                            return;
+                        };
+                        for notice in jobs.notices {
+                            if !steer(crate::notification::reminder(&notice)).await {
+                                nanocode_trace::debug!("background job notice found no running turn");
+                            }
+                        }
+                        return;
+                    }
+                    if !jobs.busy {
+                        return;
+                    }
+                }
+            }
+        })
 }
 
 fn catalog(
@@ -338,6 +394,12 @@ impl Call {
                     .await
             }
             Self::Function(name) => {
+                let context = match &*name {
+                    "Bash" => context.with_run_time(Some(
+                        nanocode_backend_claude_tools::tools::bash::direct_run_time(&input),
+                    )),
+                    _ => context,
+                };
                 let raw =
                     serde_json::value::to_raw_value(&input).map_err(|error| error.to_string())?;
                 let output = runtime

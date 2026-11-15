@@ -172,6 +172,10 @@ impl Reminders {
     pub(crate) fn remain(&self) -> String {
         self.deadline.remain(self.deadline.remaining())
     }
+
+    pub(crate) fn left(&self) -> Duration {
+        self.deadline.remaining()
+    }
 }
 
 fn spoken(duration: Duration) -> String {

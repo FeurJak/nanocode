@@ -677,6 +677,7 @@ impl SocketTransport {
             tool_selection: false,
             cancels_calls: false,
             caches_local_tools: false,
+            job_notices: false,
             environment: self.environment.clone(),
             capabilities: self.capabilities.clone(),
             tools_only: self.tools_only,
@@ -703,6 +704,7 @@ impl SocketTransport {
             tool_selection,
             cancels_calls: _,
             caches_local_tools,
+            job_notices: _,
             environment,
             capabilities,
             tools_only,
@@ -1093,6 +1095,30 @@ impl HandSession for NativeSession {
 
     fn running_tasks(&self) -> Vec<RunningTask> {
         self.0.running_tasks()
+    }
+
+    fn notices<'a>(
+        &'a self,
+        session_id: &'a str,
+        wait: Duration,
+    ) -> HostFuture<'a, crate::embedded::JobNotices> {
+        Box::pin(async move {
+            let notices = self.0.session_notices(session_id);
+            if notices.is_empty() && self.0.session_busy(session_id) {
+                nanocode_sync::select! {
+                    () = self.0.session_notice(session_id) => {}
+                    () = nanocode_platform::sleep(wait) => {}
+                }
+                return crate::embedded::JobNotices {
+                    notices: self.0.session_notices(session_id),
+                    busy: self.0.session_busy(session_id),
+                };
+            }
+            crate::embedded::JobNotices {
+                busy: self.0.session_busy(session_id),
+                notices,
+            }
+        })
     }
 
     fn close(&self) -> HostFuture<'_, ()> {

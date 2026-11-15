@@ -62,4 +62,8 @@ pub trait CodeModeToolset: Send + Sync {
     fn session_notice<'a>(&'a self, _session_id: &'a str) -> HostFuture<'a, ()> {
         Box::pin(std::future::pending())
     }
+
+    fn session_busy(&self, _session_id: &str) -> bool {
+        false
+    }
 }

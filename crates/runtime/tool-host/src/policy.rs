@@ -71,6 +71,10 @@ pub trait CodeModeToolPolicy: Send + Sync {
         Box::pin(std::future::pending())
     }
 
+    fn session_busy(&self, _session_id: &str) -> bool {
+        false
+    }
+
     fn running_output<'a>(
         &'a self,
         _call_id: &'a str,

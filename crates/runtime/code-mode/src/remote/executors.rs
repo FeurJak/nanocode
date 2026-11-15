@@ -958,6 +958,21 @@ impl CodeModeExecutors {
 }
 
 impl CodeModeHost for CodeModeExecutors {
+    fn notices<'a>(
+        &'a self,
+        session_id: &'a str,
+        wait: std::time::Duration,
+    ) -> HostFuture<'a, Result<crate::embedded::JobNotices, CodeModeHostError>> {
+        Box::pin(async move {
+            match self.placement(session_id) {
+                Placement::Hand(HandRoute {
+                    host: Some(host), ..
+                }) => host.notices(session_id, wait).await,
+                _ => Ok(crate::embedded::JobNotices::default()),
+            }
+        })
+    }
+
     fn tool_mode(&self) -> EmbeddedToolMode {
         EmbeddedToolMode::CodeOnly
     }

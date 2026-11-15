@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use nanocode_tool_contracts::{SharedHistory, ToolContext, ToolOutputBody};
 use nanocode_types_core::responses::ResponseItem;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
 
 pub struct OwnedToolContext {
@@ -112,6 +112,12 @@ pub struct CodeModeCell {
     pub origin_call_id: String,
 
     pub running: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct JobNotices {
+    pub busy: bool,
+    pub notices: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

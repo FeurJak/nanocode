@@ -437,6 +437,17 @@ impl EmbeddedToolRuntime {
         false
     }
 
+    pub async fn hand_notices(
+        &self,
+        session_id: &str,
+        wait: Duration,
+    ) -> Result<crate::embedded::JobNotices, CodeModeHostError> {
+        match &self.host {
+            Some(host) => host.notices(session_id, wait).await,
+            None => Ok(crate::embedded::JobNotices::default()),
+        }
+    }
+
     #[allow(
         clippy::unused_async,
         reason = "matches the native tool-runtime contract"

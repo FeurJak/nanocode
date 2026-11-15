@@ -210,7 +210,7 @@ pub(crate) fn install_default_tools_with_providers(
     let bound = jobs.clone();
     let reaped = jobs.clone();
     let held = jobs.clone();
-    let tools = crate::claude_tools::install(&selected, workspace, handle)?
+    let tools = crate::claude_tools::install(&selected, workspace, handle, false)?
         .adapter_shutdown(move || {
             let jobs = jobs.clone();
             async move {
@@ -230,7 +230,7 @@ pub(crate) fn install_default_tools_with_providers(
                 merged
                     .round_notices()
                     .iter()
-                    .map(|notice| crate::claude_bash::round_notice(notice))
+                    .map(|notice| crate::notification::round_notice(notice))
                     .collect()
             })
         }

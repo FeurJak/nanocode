@@ -298,6 +298,7 @@ fn greeting(catalog: &RemoteCatalog) -> RemoteFrame {
         tool_selection: catalog.tool_selection,
         cancels_calls: catalog.cancels_calls,
         caches_local_tools: catalog.caches_local_tools,
+        job_notices: catalog.job_notices,
         environment: catalog.environment.clone(),
         capabilities: catalog.capabilities.clone(),
         tools_only: catalog.tools_only,

@@ -400,6 +400,13 @@ fn name_yield(operation: &mut RemoteOperation) {
 }
 
 fn requested_yield(operation: &RemoteOperation) -> Duration {
+    if let RemoteOperation::Call {
+        run_time_ms: Some(run_time),
+        ..
+    } = operation
+    {
+        return Duration::from_millis(*run_time);
+    }
     let requested = match operation {
         RemoteOperation::Execute { source, .. } => source
             .lines()
@@ -408,6 +415,9 @@ fn requested_yield(operation: &RemoteOperation) -> Duration {
             .and_then(|pragma| serde_json::from_str::<Value>(pragma).ok()),
         RemoteOperation::Wait { input, .. } => serde_json::from_str::<Value>(input).ok(),
         RemoteOperation::Call { input, .. } => Some(input.clone()),
+        RemoteOperation::Notices { yield_time_ms, .. } => {
+            return Duration::from_millis(*yield_time_ms);
+        }
         _ => None,
     };
     requested

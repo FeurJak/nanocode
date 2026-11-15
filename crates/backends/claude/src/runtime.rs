@@ -290,6 +290,7 @@ impl RuntimeBackend for ClaudeHarness {
                         selected.map(prepare).transpose()?,
                         additive,
                         direct,
+                        headless,
                     )
                 }
             });
@@ -336,6 +337,7 @@ fn claude_tools(
     selected: Option<nanocode_tool_host::Tools>,
     additive: Vec<Arc<dyn nanocode_tool_contracts::Tool>>,
     direct: bool,
+    headless: bool,
 ) -> Result<crate::ClaudeTools> {
     use nanocode_tool_contracts::ToolCollection as _;
     if let Some(selected) = selected {
@@ -348,7 +350,7 @@ fn claude_tools(
                 .map_err(|error| NanocodeError::InvalidRequest(error.to_string()))?,
             false => selected,
         };
-        return crate::install_shared_tools(workspace, handle, selected);
+        return crate::claude_tools::install(&selected, workspace, handle, headless);
     }
     crate::ClaudeTools::new().add_shared_tools(additive)
 }

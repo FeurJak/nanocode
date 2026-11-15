@@ -23,7 +23,7 @@ use crate::{
     Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput,
     embedded::{
         CodeModeExecution, CodeModeHostError, CodeModeObserver, CodeModeUpdate, HandCalls,
-        HostFuture, OwnedToolContext,
+        HostFuture, JobNotices, OwnedToolContext,
     },
 };
 
@@ -166,6 +166,10 @@ pub trait HandSession: Send + Sync + 'static {
 
     fn running_tasks(&self) -> Vec<RunningTask> {
         Vec::new()
+    }
+
+    fn notices<'a>(&'a self, _session_id: &'a str, _wait: Duration) -> HostFuture<'a, JobNotices> {
+        Box::pin(std::future::ready(JobNotices::default()))
     }
 
     fn close(&self) -> HostFuture<'_, ()>;
@@ -1407,6 +1411,7 @@ impl Pending {
             RemoteOperation::Preempt { session_id } => request("preempt", session_id),
             RemoteOperation::SettlePreempt { session_id } => request("settle preempt", session_id),
             RemoteOperation::EndTurn { session_id, .. } => request("end turn", session_id),
+            RemoteOperation::Notices { session_id, .. } => request("notices", session_id),
             RemoteOperation::Capabilities => request("capabilities", ""),
             RemoteOperation::RequestCapability { name, .. } => request(name, ""),
             RemoteOperation::HostInfo => request("host info", ""),
@@ -1852,6 +1857,7 @@ impl State {
             tool_selection: self.host.selects_tools(),
             cancels_calls: true,
             caches_local_tools: true,
+            job_notices: true,
             environment: self
                 .options
                 .environment
@@ -2604,6 +2610,7 @@ async fn run(
                 }
             }
             RemoteOperation::Execute { .. } | RemoteOperation::Call { .. } => Err(error(NO_CELLS)),
+            RemoteOperation::Notices { .. } => Ok(Some(json!(JobNotices::default()))),
             _ => Ok(None),
         };
     };
@@ -2679,6 +2686,14 @@ async fn run(
                 () = cancelled.cancelled() => Err(error(CALL_CANCELLED)),
             }
         }
+        RemoteOperation::Notices {
+            session_id,
+            yield_time_ms,
+        } => Ok(Some(json!(
+            session
+                .notices(&session_id, Duration::from_millis(yield_time_ms))
+                .await
+        ))),
         RemoteOperation::Cancel { .. } => {
             session.cancel(&mut observer).await;
             catalog.finish_turn(None);

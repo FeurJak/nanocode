@@ -69,6 +69,7 @@ pub struct ToolContext<'a> {
     output_token_budget: usize,
     host_context: Option<&'a str>,
     instruction_revision: Option<u64>,
+    run_time: Option<Duration>,
 }
 
 impl<'a> ToolContext<'a> {
@@ -89,6 +90,7 @@ impl<'a> ToolContext<'a> {
             output_token_budget,
             host_context: None,
             instruction_revision: None,
+            run_time: None,
         }
     }
 
@@ -115,6 +117,17 @@ impl<'a> ToolContext<'a> {
     #[must_use]
     pub const fn instruction_revision(self) -> Option<u64> {
         self.instruction_revision
+    }
+
+    #[must_use]
+    pub const fn with_run_time(mut self, run_time: Option<Duration>) -> Self {
+        self.run_time = run_time;
+        self
+    }
+
+    #[must_use]
+    pub const fn run_time(self) -> Option<Duration> {
+        self.run_time
     }
 
     #[doc(hidden)]

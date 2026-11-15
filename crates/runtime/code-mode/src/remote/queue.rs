@@ -253,6 +253,7 @@ pub async fn serve_queue<Q: CommandQueue>(
                                     name: call.name,
                                     input: Arc::unwrap_or_clone(call.input),
                                     selected_tools: None,
+                                    run_time_ms: None,
                                     context: call.context,
                                 },
                             ));

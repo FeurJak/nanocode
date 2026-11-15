@@ -387,6 +387,8 @@ pub enum RemoteOperation {
         context: RemoteContext,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         selected_tools: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_time_ms: Option<u64>,
     },
     DetachTurn {
         session_id: String,
@@ -416,6 +418,10 @@ pub enum RemoteOperation {
         session_id: String,
         turn_id: String,
         hook_event_name: String,
+    },
+    Notices {
+        session_id: String,
+        yield_time_ms: u64,
     },
     Capabilities,
     RequestCapability {
@@ -465,6 +471,7 @@ pub struct RemoteCodeModeHost {
     selection: Option<Arc<dyn HandToolSelection>>,
     backends: Atom<HashMap<String, String>>,
     description: Option<HandDescription>,
+    job_notices: bool,
 }
 
 impl RemoteCodeModeHost {
@@ -476,11 +483,13 @@ impl RemoteCodeModeHost {
             selection: None,
             backends: Atom::default(),
             description: None,
+            job_notices: false,
         }
     }
 
     #[must_use]
     pub fn described(mut self, catalog: &RemoteCatalog) -> Self {
+        self.job_notices = catalog.job_notices;
         self.description = Some(HandDescription {
             workspace: catalog.workspace.clone(),
             environment: catalog.environment.clone(),
@@ -584,6 +593,26 @@ impl CodeModeHost for RemoteCodeModeHost {
             .description
             .as_ref()
             .is_some_and(|description| description.tools_only)
+    }
+    fn notices<'a>(
+        &'a self,
+        session_id: &'a str,
+        wait: std::time::Duration,
+    ) -> HostFuture<'a, Result<crate::embedded::JobNotices, CodeModeHostError>> {
+        Box::pin(async move {
+            if !self.job_notices {
+                return Ok(crate::embedded::JobNotices::default());
+            }
+            let reply = self
+                .transport
+                .call(RemoteOperation::Notices {
+                    session_id: session_id.into(),
+                    yield_time_ms: u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
+                })
+                .await?;
+            serde_json::from_value(reply)
+                .map_err(|issue| CodeModeHostError::new(format!("hand notices: {issue}")))
+        })
     }
     fn capabilities(&self) -> HostFuture<'_, Result<Vec<HandCapability>, CodeModeHostError>> {
         Box::pin(async move {
@@ -733,6 +762,9 @@ impl CodeModeHost for RemoteCodeModeHost {
             let operation = RemoteOperation::Call {
                 name: name.into(),
                 input,
+                run_time_ms: context
+                    .run_time()
+                    .map(|run_time| u64::try_from(run_time.as_millis()).unwrap_or(u64::MAX)),
                 context: RemoteContext::from_context(context),
                 selected_tools,
             };
@@ -948,6 +980,8 @@ pub enum RemoteFrame {
         cancels_calls: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         caches_local_tools: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        job_notices: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         environment: Option<HandEnvironment>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1094,6 +1128,7 @@ pub struct RemoteCatalog {
     pub tool_selection: bool,
     pub cancels_calls: bool,
     pub caches_local_tools: bool,
+    pub job_notices: bool,
     pub environment: Option<HandEnvironment>,
     pub capabilities: Vec<HandCapability>,
     pub tools_only: bool,
@@ -1139,6 +1174,7 @@ impl TryFrom<RemoteFrame> for RemoteCatalog {
                 tool_selection,
                 cancels_calls,
                 caches_local_tools,
+                job_notices,
                 environment,
                 capabilities,
                 tools_only,
@@ -1154,6 +1190,7 @@ impl TryFrom<RemoteFrame> for RemoteCatalog {
                 tool_selection,
                 cancels_calls,
                 caches_local_tools,
+                job_notices,
                 environment,
                 capabilities,
                 tools_only,

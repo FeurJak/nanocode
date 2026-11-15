@@ -602,6 +602,7 @@ impl World {
             input: json!({}),
             context: context.clone(),
             selected_tools: None,
+            run_time_ms: None,
         };
         let live = |result: Result<Value, CodeModeHostError>| match result {
             Ok(value) => Outcome::Value(value),
