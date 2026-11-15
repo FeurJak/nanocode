@@ -503,6 +503,33 @@ impl Heap {
         Ok(o)
     }
 
+    pub(crate) fn new_array_run(
+        &mut self,
+        proto: Obj,
+        capacity: u32,
+        len: u32,
+    ) -> Result<(Obj, u32), HeapError> {
+        let slots = ObjectClass::Array.slots();
+        let size = Object::SLOTS
+            .cell_size(slots)
+            .ok_or(HeapError::OutOfMemory)?;
+        let values = ValueArray::VALUES
+            .cell_size(capacity)
+            .ok_or(HeapError::OutOfMemory)?;
+        let (o, el) =
+            self.alloc_cell_pair((CellKind::Object, size), (CellKind::ValueArray, values))?;
+        let a = self.arena_mut();
+        a.set_untracked(o, Object::CLASS, ObjectClass::Array as u32);
+        a.set_untracked(o, Object::PROTO, Ref(proto.0));
+        for i in 0..slots {
+            a.write_untracked(Object::SLOTS.at(o, i), Value::UNDEFINED);
+        }
+        a.set_untracked(o, crate::heap::Header::FLAGS, OBJ_EXTENSIBLE);
+        a.set_untracked(o, Object::ELEMENTS, Ref(el));
+        self.set_array_length_raw(Obj(o), len);
+        Ok((Obj(o), el))
+    }
+
     /// ArrayCreate(len) with prototype `proto`: an empty array whose `length` is `len`
     /// (all holes), without ArraySetLength's descriptor checks, which a fresh array always
     /// passes (0162).
@@ -1394,6 +1421,10 @@ impl Heap {
     // Converting to dictionary mode keeps the slots.
 
     #[inline]
+    pub(crate) fn bare(&self, o: Obj, proto: Obj) -> bool {
+        self.props(o) == 0 && self.get_prototype_of(o) == Some(proto)
+    }
+
     fn props(&self, o: Obj) -> u32 {
         self.arena().get(o.0, Object::PROPS).0
     }

@@ -1438,6 +1438,13 @@ fn array_species_create(heap: &mut Heap, _: Value, args: &[Value]) -> Fast {
 /// Whether ArraySpeciesCreate(o, n) is ArrayCreate(n) with %Array.prototype%, found
 /// without running user code: `o` is no Array, or an Array whose `constructor` is the
 /// untouched %Array% with the original @@species getter.
+pub(crate) fn frozen_species(heap: &Heap) -> bool {
+    let array_proto = realm::intrinsic_obj(heap, Intrinsic::ArrayProto);
+    realm::installed_intrinsic(heap, ARRAY_CONSTRUCTOR)
+        .as_object()
+        .is_some_and(|a| heap.frozen(array_proto) && heap.frozen(a))
+}
+
 pub(crate) fn plain_species(heap: &Heap, o: Obj) -> bool {
     if heap.is_proxy(o) {
         return false;
@@ -1450,15 +1457,12 @@ pub(crate) fn plain_species(heap: &Heap, o: Obj) -> bool {
     {
         return false;
     }
-    let array = realm::installed_intrinsic(heap, ARRAY_CONSTRUCTOR);
     // Frozen builtins (D2304): %Array.prototype%.constructor and %Array%[@@species] are
     // as the base made them, which is plain (0162).
-    if let Some(a) = array.as_object()
-        && heap.frozen(array_proto)
-        && heap.frozen(a)
-    {
+    if frozen_species(heap) {
         return true;
     }
+    let array = realm::installed_intrinsic(heap, ARRAY_CONSTRUCTOR);
     let ctor = atoms::CONSTRUCTOR;
     if heap
         .own_entry_index(array_proto, ctor)

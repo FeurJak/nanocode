@@ -1042,6 +1042,7 @@ impl Exec<'_> {
             init,
             mode,
             op: leaf.op,
+            species: crate::builtins::fast::frozen_species(self.heap),
             template: ft,
             y: leaf.y,
         })
@@ -1089,9 +1090,17 @@ impl Exec<'_> {
         else {
             return false;
         };
-        if matches!(mode, MAP | FILTER) && !crate::builtins::fast::plain_species(self.heap, o) {
-            return false;
-        }
+        let proto = if matches!(mode, MAP | FILTER) {
+            let proto = realm::intrinsic_obj(self.heap, Intrinsic::ArrayProto);
+            if !(site.species && self.heap.frozen(proto) && self.heap.bare(o, proto))
+                && !crate::builtins::fast::plain_species(self.heap, o)
+            {
+                return false;
+            }
+            Some(proto)
+        } else {
+            None
+        };
         let cap = match site.cap {
             Some(d) => {
                 let bx = if d & 0x8000_0000 != 0 {
@@ -1133,25 +1142,15 @@ impl Exec<'_> {
         if held.is_uninitialized() {
             return false;
         }
-        let a = match mode {
-            MAP | FILTER => {
-                let proto = realm::intrinsic_obj(self.heap, Intrinsic::ArrayProto);
-                let a = if mode == MAP {
-                    self.heap.new_array_with_length_reserved(Some(proto), len, len)
-                } else {
-                    self.heap.new_array(Some(proto), len)
-                };
-                match a {
-                    Ok(a) => Some(a),
+        let (a, oel, room) = match proto {
+            Some(proto) => {
+                let n = if mode == MAP { len } else { 0 };
+                match self.heap.new_array_run(proto, len, n) {
+                    Ok((a, el)) => (Some(a), el, len),
                     Err(_) => return false,
                 }
             }
-            _ => None,
-        };
-        let (oel, room) = match a.map(|a| self.heap.element_tail(a)) {
-            Some(Some((oel, 0, room))) if room >= len => (oel, room),
-            Some(_) => return false,
-            None => (0, 0),
+            None => (None, 0, 0),
         };
         let y = leaf.y.map(Value::int);
         let kind = match (mode, cap.is_some(), leaf.op) {
@@ -1574,10 +1573,12 @@ fn scan<const KIND: u8, const OP: u8>(b: &mut [u8], r: &mut Run) {
             if m >> 32 != 0 || c8[CHUNK] == HOLE_BITS {
                 break;
             }
+            let (o8, mut j) = (&mut os[n..n + CHUNK], 0);
             for x in &c8[..CHUNK] {
-                os[n] = *x;
-                n += usize::from(compare::<OP>(word(x) as i32, q));
+                o8[j & (CHUNK - 1)] = *x;
+                j += usize::from(compare::<OP>(word(x) as i32, q));
             }
+            n += j;
             i += CHUNK;
         }
     }

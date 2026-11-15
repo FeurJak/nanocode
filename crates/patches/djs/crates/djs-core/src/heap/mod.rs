@@ -190,6 +190,7 @@ pub(crate) struct EachSite {
     pub(crate) init: Option<i32>,
     pub(crate) mode: i32,
     pub(crate) op: u8,
+    pub(crate) species: bool,
     pub(crate) template: u32,
     pub(crate) y: Option<i32>,
 }
@@ -629,6 +630,26 @@ impl Heap {
         self.arena.set_untracked(off, Header::KIND, kind as u8);
         self.arena.set_untracked(off, Header::SIZE, size);
         Ok(off)
+    }
+
+    pub(crate) fn alloc_cell_pair(
+        &mut self,
+        first: (CellKind, u32),
+        second: (CellKind, u32),
+    ) -> Result<(u32, u32), HeapError> {
+        let a = align8(first.1.max(first.0.min_size()));
+        let b = align8(second.1.max(second.0.min_size()));
+        let off = self
+            .arena
+            .alloc(a.checked_add(b).ok_or(HeapError::OutOfMemory)?)?;
+        if self.arena.len() >= self.gc_threshold {
+            self.gc_pending = true;
+        }
+        for (at, kind, size) in [(off, first.0, a), (off + a, second.0, b)] {
+            self.arena.set_untracked(at, Header::KIND, kind as u8);
+            self.arena.set_untracked(at, Header::SIZE, size);
+        }
+        Ok((off, off + a))
     }
 
     /// Like [`Heap::alloc_cell`], with `data` written at offset `at` of the cell instead
