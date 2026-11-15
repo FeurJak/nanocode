@@ -30,6 +30,18 @@ case $1 in
     fi
     if mkdir "$helper.lock" 2>/dev/null; then
       echo $$ > "$helper.lock/pid"
+      if [ "$1" != publish ] && [ -z "$NANOCODE_BUILDCACHE_URL" ] && [ ! -d "$cache/units" ] && [ ! -d "$cache/workspace" ]; then
+        remote=${cache%/*}/remote
+        [ -d "$remote" ] || "$scripts/buildcache-prefetch" > /dev/null 2>&1 || printf %s "$PPID" > "${cache%/*}/remote.failed"
+        for prebuilt in "$remote/workspace/helper-${checksum%% *}-$(uname -sm | tr ' ' -)-"*; do
+          [ -f "$prebuilt" ] || continue
+          [ "$({ sha256sum || shasum -a 256; } < "$prebuilt" 2> /dev/null | cut -c1-64)" = "${prebuilt##*-}" ] || continue
+          cp "$prebuilt" "$helper.$$" && chmod 755 "$helper.$$" || continue
+          "$helper.$$" "$scripts" 2> /dev/null
+          [ $? -eq 2 ] && mv -f "$helper.$$" "$helper" && rm -rf "$helper.lock" && exec "$helper" "$scripts" "$@"
+          rm -f "$helper.$$"
+        done
+      fi
       (
         sh -c 'echo $PPID' > "$helper.lock/pid"
         if env -u CARGO_MAKEFLAGS -u MAKEFLAGS -u MFLAGS "$compiler" --edition 2024 -C opt-level=2 -o "$helper.$$" "$source"; then

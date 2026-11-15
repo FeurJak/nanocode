@@ -94,10 +94,18 @@ pub const REGIONS: &[(&str, Cut)] = &[
 
 /// `src` without comments and without whitespace outside string literals.
 pub fn strip(src: &str) -> String {
+    strip_marked(src).0
+}
+
+fn strip_marked(src: &str) -> (String, Vec<(usize, usize)>) {
     let b = src.as_bytes();
     let mut out = Vec::with_capacity(b.len());
+    let mut lines = Vec::new();
     let mut i = 0;
     while i < b.len() {
+        if i == 0 || b[i - 1] == b'\n' {
+            lines.push((i, out.len()));
+        }
         let c = b[i];
         if c == b'/' && b.get(i + 1) == Some(&b'/') {
             while i < b.len() && b[i] != b'\n' {
@@ -135,7 +143,7 @@ pub fn strip(src: &str) -> String {
             i += 1;
         }
     }
-    String::from_utf8(out).expect("stripping keeps UTF-8")
+    (String::from_utf8(out).expect("stripping keeps UTF-8"), lines)
 }
 
 /// The end of the string literal starting at `b[i] == '"'`.
@@ -262,6 +270,7 @@ pub fn cut(src: &str, cut: Cut) -> Result<String, String> {
         }
         Cut::TopConsts => {
             let mut out = String::new();
+            let (whole, lines) = strip_marked(src);
             let mut at = 0;
             for line in src.split_inclusive('\n') {
                 let rest = ["pub(crate) ", "pub(super) ", "pub ", ""]
@@ -271,7 +280,18 @@ pub fn cut(src: &str, cut: Cut) -> Result<String, String> {
                     && !rest.starts_with("fn ")
                     && !rest.starts_with("_:")
                 {
-                    let s = strip(&src[at..]);
+                    let stripped;
+                    let s = match lines
+                        .binary_search_by_key(&at, |mark| mark.0)
+                        .ok()
+                        .and_then(|k| whole.get(lines[k].1..))
+                    {
+                        Some(s) => s,
+                        None => {
+                            stripped = strip(&src[at..]);
+                            stripped.as_str()
+                        }
+                    };
                     let end = item_end(s.as_bytes(), 0).ok_or("a const without its `;`")?;
                     if !names_an_intrinsic(&s[..end]) {
                         out.push_str(&s[..end]);

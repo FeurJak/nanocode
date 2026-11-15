@@ -1338,7 +1338,28 @@ fn publish(cache: &Path, to: &Path) -> io::Result<()> {
             fs::rename(&staging, &destination)?;
         }
     }
-    Ok(())
+    publish_helper(to)
+}
+
+fn publish_helper(to: &Path) -> io::Result<()> {
+    let helper = env::current_exe()?;
+    let Some(checksum) = helper.file_name().and_then(OsStr::to_str).and_then(|name| name.strip_prefix("buildcache-")) else {
+        return Ok(());
+    };
+    let machine = Command::new("uname").arg("-sm").stdin(Stdio::null()).stderr(Stdio::null()).output()?;
+    if !machine.status.success() {
+        return Ok(());
+    }
+    let machine = String::from_utf8_lossy(&machine.stdout).trim().replace(' ', "-");
+    let data = fs::read(&helper)?;
+    let mut hasher = Sha256::new();
+    hasher.update(&data);
+    let destination = to.join("workspace").join(format!("helper-{checksum}-{machine}-{}", hasher.finish()));
+    fs::create_dir_all(to.join("workspace"))?;
+    let mut staging = destination.clone().into_os_string();
+    staging.push(format!(".{}", std::process::id()));
+    fs::write(&staging, data)?;
+    fs::rename(&staging, &destination)
 }
 
 
