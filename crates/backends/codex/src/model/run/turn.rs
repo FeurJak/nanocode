@@ -878,6 +878,7 @@ impl ModelRun {
         self.prompt_cache.publish_live(None);
         let mut first_batch = true;
         let mut reprompted = false;
+        let mut nudged = false;
         loop {
             let call_index = self.stats.model_calls + 1;
             if !first_batch {
@@ -1011,6 +1012,17 @@ impl ModelRun {
                 if let Some(message) =
                     final_message.filter(|message| !message.trim().is_empty())
                 {
+                    if self.config.headless && !nudged && admits_incomplete(&message) {
+                        nudged = true;
+                        nanocode_trace::info!(
+                            target: "nanocode",
+                            model_call_index = call_index,
+                            "headless turn ended with a message that admits incomplete work; continuing once"
+                        );
+                        session.conversation.append([persistence_nudge()]);
+                        session.conversation.clear_delta();
+                        continue;
+                    }
                     return Ok(message);
                 }
                 if !reprompted {

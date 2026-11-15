@@ -242,6 +242,12 @@ impl<F> CodexBuilder<F> {
     }
 
     #[must_use]
+    pub const fn headless(mut self, headless: bool) -> Self {
+        self.config.headless = headless;
+        self
+    }
+
+    #[must_use]
     pub const fn context_window_tokens(mut self, tokens: u64) -> Self {
         self.config.context_window_tokens = match self.config.model.context_window_limit() {
             Some(maximum) if tokens > maximum => maximum,

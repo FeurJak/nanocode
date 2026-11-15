@@ -55,9 +55,9 @@ use super::{
     context::{ContextBaseline, ContextSnapshot, ContextState},
     display_endpoint, elapsed_ns,
     input::{
-        custom_tool_notification, custom_tool_output, developer_context, empty_response,
-        function_tool_output, host_context, prompt_messages, task_input, tool_search_output,
-        turn_aborted,
+        admits_incomplete, custom_tool_notification, custom_tool_output, developer_context,
+        empty_response, function_tool_output, host_context, persistence_nudge, prompt_messages,
+        task_input, tool_search_output, turn_aborted,
     },
     terminal_payload,
 };
