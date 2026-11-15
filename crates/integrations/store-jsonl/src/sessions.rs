@@ -32,6 +32,7 @@ const EXTENSION: &str = ".jsonl";
 const HOMES: &str = ".homes";
 const COPY: &str = ".listed-";
 const OWNER_EXTENSION: &str = "owner";
+const RESIDENT: &str = ".resident";
 
 pub(super) struct Sessions {
     directory: PathBuf,
@@ -45,6 +46,7 @@ pub(super) struct Sessions {
     touched: HashSet<String>,
     unknown: HashMap<String, Option<Summary>>,
     held: HashMap<String, fs::File>,
+    resident: Option<String>,
     temporaries: Option<PathBuf>,
 }
 
@@ -286,6 +288,14 @@ fn same_file(file: &fs::File, path: &Path) -> std::io::Result<bool> {
     }
 }
 
+fn resident(directory: &Path) -> Result<Option<String>, StoreError> {
+    match fs::read_to_string(directory.join(RESIDENT)) {
+        Ok(key) => Ok(Some(key)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(backend(error)),
+    }
+}
+
 fn names(path: &Path) -> Vec<String> {
     [path.to_owned(), archive::archived(path)]
         .iter()
@@ -354,6 +364,7 @@ impl Sessions {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
             Err(error) => return Err(backend(error)),
         };
+        let resident = resident(&directory)?;
         Ok(Self {
             summaries: Summaries::new(&directory),
             listing: Listing::new(&directory),
@@ -366,6 +377,7 @@ impl Sessions {
             touched: HashSet::new(),
             unknown: HashMap::new(),
             held: HashMap::new(),
+            resident,
             temporaries,
         })
     }
@@ -379,6 +391,10 @@ impl Sessions {
             self.temporaries = None;
         }
         Ok(())
+    }
+
+    fn is_home(&self, key: &str) -> bool {
+        self.homes.values().any(|home| home == key)
     }
 
     fn owner_path(&self, key: &str) -> PathBuf {
@@ -546,7 +562,7 @@ impl Sessions {
             let opened = archive
                 .as_ref()
                 .map_or(path.as_path(), |archive| &archive.copy);
-            let sidecar = self.homes.values().any(|home| home == key);
+            let sidecar = self.is_home(key) || self.resident.as_deref() == Some(key);
             let mut journal = if create && !opened.is_file() {
                 self.listing
                     .change(&names(opened), || Journal::open(opened, sidecar))?
@@ -1290,11 +1306,7 @@ impl Sessions {
 
     pub(super) fn written(&self) -> Vec<String> {
         let touched = |key: &String| {
-            self.touched.contains(key)
-                && self
-                    .journals
-                    .get(key)
-                    .is_some_and(|opened| !opened.journal.sidecar)
+            self.touched.contains(key) && self.journals.contains_key(key) && !self.is_home(key)
         };
         let mut written = self
             .touched
@@ -1317,20 +1329,61 @@ impl Sessions {
         let mut touched = std::mem::take(&mut self.touched)
             .into_iter()
             .collect::<Vec<_>>();
+        let latest = touched
+            .iter()
+            .filter(|key| !self.is_home(key))
+            .filter_map(|key| Some((self.journals.get(key)?.used, key)))
+            .max()
+            .map(|(_, key)| key.clone());
+        let marked = resident(&self.directory)?;
+        if let Some(previous) = marked.clone()
+            && latest.as_ref().is_some_and(|latest| *latest != previous)
+            && !touched.contains(&previous)
+            && self.path(&previous).is_file()
+        {
+            self.hold(&previous);
+            if self.held.contains_key(&previous) && self.journal(&previous, false)?.is_some() {
+                touched.push(previous);
+            }
+        }
         touched.sort_unstable();
         for key in touched {
             let Some(mut opened) = self.journals.remove(&key) else {
                 continue;
             };
-            if opened.journal.sidecar {
+            if self.is_home(&key) {
                 self.journals.insert(key, opened);
                 continue;
             }
             let path = self.path(&key);
+            let index = path.with_added_extension("index");
+            if latest.as_ref() == Some(&key) {
+                let kept = self
+                    .listing
+                    .change(&[names(&path), names(&index)].concat(), || {
+                        opened.journal.sidecar = true;
+                        if opened.journal.superseded() {
+                            opened.journal.compact()?;
+                        }
+                        opened.journal.flush_index();
+                        opened.journal.harden()
+                    });
+                self.journals.insert(key.clone(), opened);
+                kept?;
+                if marked.as_ref() != Some(&key) {
+                    let marker = self.directory.join(RESIDENT);
+                    self.listing
+                        .change(&[], || fs::write(&marker, &key))
+                        .map_err(backend)?;
+                }
+                continue;
+            }
+            opened.journal.sidecar = false;
             let owner_path = self.owner_path(&key);
             let owner = self.held.remove(&key);
             let summaries = &mut self.summaries;
-            let stored = self.listing.change(&names(&path), || {
+            let changed = [names(&path), names(&index)].concat();
+            let stored = self.listing.change(&changed, || {
                 let from = identity(&fs::metadata(&path).map_err(backend)?)?;
                 if opened.journal.superseded() {
                     opened.journal.compact()?;
@@ -1346,6 +1399,11 @@ impl Sessions {
                 }
                 let stored = fs::metadata(archive::archived(&path)).map_err(backend)?;
                 summaries.moved(&from, &identity(&stored)?, stored.len(), None)?;
+                match fs::remove_file(&index) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(backend(error)),
+                }
                 if owner.is_some() {
                     match fs::remove_file(&owner_path) {
                         Ok(()) => {}
