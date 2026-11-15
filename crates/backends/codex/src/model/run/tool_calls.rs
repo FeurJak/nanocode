@@ -399,10 +399,17 @@ fn logged_nested_result(call: &NestedToolCall) -> Option<LoggedResult> {
     })
 }
 
-const fn history_tool_output_tokens(model: Model) -> usize {
+const fn tool_output_tokens(model: Model, custom: Option<usize>) -> usize {
+    match (model, custom) {
+        (Model::Custom(_), Some(tokens)) => tokens,
+        _ => model.tool_output_token_budget(),
+    }
+}
+
+const fn history_tool_output_tokens(model: Model, budget: usize) -> usize {
     use crate::client::session::{TOOL_OUTPUT_TOKEN_LIMIT, with_serialization_allowance};
     if model.truncates_tool_output_by_bytes() {
-        with_serialization_allowance(model.tool_output_token_budget())
+        with_serialization_allowance(budget)
     } else {
         TOOL_OUTPUT_TOKEN_LIMIT
     }
@@ -682,9 +689,10 @@ impl ModelRun {
         let tool_call_indices = self.tool_call_indices.clone();
         let session_id = events.request_id().to_owned();
         let model = self.model;
+        let output_tokens = tool_output_tokens(model, self.config.custom_tool_output_tokens);
         conversation
             .managed
-            .set_tool_output_token_limit(history_tool_output_tokens(model));
+            .set_tool_output_token_limit(history_tool_output_tokens(model, output_tokens));
         let host_context = self.host_context.clone();
         let before_tool_call = self.before_tool_call.clone();
 
@@ -769,6 +777,7 @@ impl ModelRun {
                                     &active.progress,
                                     &active.span,
                                     recover,
+                                    output_tokens,
                                 )
                                 .await
                             };
@@ -797,7 +806,12 @@ impl ModelRun {
                                     (None, _) => {}
                                 }
                             }
-                            Self::emit_completed_tool_result(&events, &completed, model)?;
+                            Self::emit_completed_tool_result(
+                                &events,
+                                &completed,
+                                model,
+                                output_tokens,
+                            )?;
                             drop(active.completion.put(completed));
                             Ok(active)
                         }
@@ -930,8 +944,10 @@ impl ModelRun {
         events: &EventSink,
         completed: &CompletedToolCall,
         model: Model,
+        output_tokens: usize,
     ) -> Result<()> {
-        let logged = logged_top_level_result(completed, history_tool_output_tokens(model));
+        let logged =
+            logged_top_level_result(completed, history_tool_output_tokens(model, output_tokens));
         events.emit(
             AgentEventKind::ToolResult,
             ToolResultEvent {
@@ -1077,6 +1093,7 @@ impl ModelRun {
         progress: &Swap<ActiveToolProgress>,
         tool_span: &nanocode_trace::Span,
         recover: bool,
+        output_tokens: usize,
     ) -> Result<CompletedToolCall> {
         let qualified_name = qualified_tool_name(&call);
         let refused = match (unsupported_tool_message(tools, &call), before_tool_call) {
@@ -1134,7 +1151,7 @@ impl ModelRun {
                 session_id,
                 &call.call_id,
                 &[],
-                model.tool_output_token_budget(),
+                output_tokens,
             )
             .with_instruction_revision(instruction_revision)
             .with_host_context(host_context)

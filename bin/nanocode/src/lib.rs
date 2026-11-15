@@ -477,6 +477,11 @@ async fn prepare(
         compact_instructions: args.compact_instructions,
         codex_direct: args.codex_orchestration != Some(cli::CodexOrchestrationArg::CodeMode),
         no_reasoning_replay: args.no_reasoning_replay,
+        tool_output_token_limit: args
+            .tool_output_token_limit
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|error| format!("--tool-output-token-limit: {error}"))?,
         working_state: working_state_policy(args)?,
         hedge: hedge_policy(args)?,
     };

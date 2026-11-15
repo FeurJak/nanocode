@@ -244,6 +244,12 @@ impl<F> CodexBuilder<F> {
     }
 
     #[must_use]
+    pub const fn custom_tool_output_tokens(mut self, tokens: usize) -> Self {
+        self.config.custom_tool_output_tokens = Some(tokens);
+        self
+    }
+
+    #[must_use]
     pub const fn working_state(
         mut self,
         policy: crate::client::session::working_state::WorkingStatePolicy,
