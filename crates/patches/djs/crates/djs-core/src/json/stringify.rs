@@ -81,38 +81,51 @@ pub fn stringify_fast_at(
     to_json: bool,
     list: Option<&[Atom]>,
 ) -> Result<Option<Str>, StringifyError> {
+    let mut sc = core::mem::take(&mut heap.stringify_scratch);
+    sc.buf.clear();
+    if sc.buf.capacity() == 0 {
+        // (Most results are a few hundred bytes: no growth through 8, 16, ... 128.)
+        sc.buf = crate::buf::vec_with_capacity(256);
+    }
+    sc.pieces.clear();
+    sc.stack.clear();
+    sc.keys.clear();
+    sc.deep.clear();
+    sc.clean_protos.clear();
+    sc.key_cache.clear();
+    sc.key_bytes.clear();
     let mut s = Ser {
         heap,
         out: Out {
-            // (Most results are a few hundred bytes: no growth through 8, 16, ... 128.)
-            buf: Buf::Narrow(crate::buf::vec_with_capacity(256)),
-            pieces: Vec::new(),
+            buf: Buf::Narrow(sc.buf),
+            pieces: sc.pieces,
         },
         gap,
         outer,
         skip_to_json: !to_json,
         list,
-        stack: Vec::new(),
-        keys: Vec::new(),
-        deep: Vec::new(),
-        clean_protos: Vec::new(),
-        // Filled on the first key: most calls on small values need none.
-        key_cache: Vec::new(),
-        key_bytes: Vec::new(),
+        stack: sc.stack,
+        keys: sc.keys,
+        deep: sc.deep,
+        clean_protos: sc.clean_protos,
+        key_cache: sc.key_cache,
+        key_bytes: sc.key_bytes,
     };
-    if !s.run(value)? {
-        return Ok(None);
-    }
-    if s.out.pieces.is_empty() {
-        return Ok(Some(s.out.buf.alloc(s.heap)?));
-    }
-    s.spill()?;
-    // Usually one piece; a rope of them when something else was allocated in between.
-    let mut str = s.out.pieces[0];
-    for &p in &s.out.pieces[1..] {
-        str = s.heap.concat(str, p)?;
-    }
-    Ok(Some(str))
+    let r = s.finish(value);
+    s.release();
+    r
+}
+
+#[derive(Default)]
+pub struct Scratch {
+    buf: Vec<u8>,
+    clean_protos: Vec<Obj>,
+    deep: Vec<u32>,
+    key_bytes: Vec<u8>,
+    key_cache: Vec<(Atom, u32, u32)>,
+    keys: Vec<Atom>,
+    pieces: Vec<Str>,
+    stack: Vec<Frame>,
 }
 
 /// The buffered output, in code units, at which a check point moves it into the heap
@@ -539,6 +552,39 @@ impl Ser<'_, '_> {
     /// Moves the buffer into the heap: appended to the last piece in place when that is
     /// still the arena's last cell and has the buffer's width, else as a new piece.
     #[inline(never)]
+    fn finish(&mut self, value: Value) -> Result<Option<Str>, StringifyError> {
+        if !self.run(value)? {
+            return Ok(None);
+        }
+        if self.out.pieces.is_empty() {
+            return Ok(Some(self.out.buf.alloc(self.heap)?));
+        }
+        self.spill()?;
+        // Usually one piece; a rope of them when something else was allocated in between.
+        let mut str = self.out.pieces[0];
+        for &p in &self.out.pieces[1..] {
+            str = self.heap.concat(str, p)?;
+        }
+        Ok(Some(str))
+    }
+
+    fn release(self) {
+        let buf = match self.out.buf {
+            Buf::Narrow(b) => b,
+            Buf::Wide(_) => Vec::new(),
+        };
+        self.heap.stringify_scratch = Scratch {
+            buf,
+            clean_protos: self.clean_protos,
+            deep: self.deep,
+            key_bytes: self.key_bytes,
+            key_cache: self.key_cache,
+            keys: self.keys,
+            pieces: self.out.pieces,
+            stack: self.stack,
+        };
+    }
+
     fn spill(&mut self) -> Result<(), StringifyError> {
         let appended = match (&self.out.buf, self.out.pieces.last()) {
             (Buf::Narrow(b), Some(&p)) => self.heap.append_last_latin1(p, b)?,
@@ -595,7 +641,7 @@ impl Ser<'_, '_> {
             self.out.byte(b'"');
         } else {
             if self.key_cache.is_empty() {
-                self.key_cache = alloc::vec![(Atom::NULL, 0, 0); KEY_CACHE];
+                self.key_cache.resize(KEY_CACHE, (Atom::NULL, 0, 0));
             }
             let slot = k.id() as usize % KEY_CACHE;
             let (a, at, len) = self.key_cache[slot];

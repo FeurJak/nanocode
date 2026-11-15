@@ -217,6 +217,8 @@ pub struct Heap {
     /// The compiler's buffers, kept between compiles so that each one starts with their
     /// capacity (`resolve::finish`). Not part of the image.
     pub(crate) compile_scratch: crate::compiler::CompileScratch,
+    pub(crate) json_scratch: crate::json::Scratch,
+    pub(crate) stringify_scratch: crate::json::StringifyScratch,
     pub(crate) ident_atoms: crate::compiler::IdentAtoms,
     /// The prefix as it was when the barrier was armed (debug builds, D2065): what
     /// [`Heap::check_prefix`] compares against, for writes that bypass `Arena::write`.
@@ -294,6 +296,8 @@ impl Heap {
             fresh.compositions = core::mem::take(&mut self.compositions);
         }
         core::mem::swap(&mut fresh.compile_scratch, &mut self.compile_scratch);
+        core::mem::swap(&mut fresh.json_scratch, &mut self.json_scratch);
+        core::mem::swap(&mut fresh.stringify_scratch, &mut self.stringify_scratch);
         core::mem::swap(&mut fresh.ident_atoms, &mut self.ident_atoms);
         let stable_below = fresh.atom_count();
         fresh.ident_atoms.restart(stable_below);
@@ -367,6 +371,8 @@ impl Heap {
             frame_scratch: Default::default(),
             atom_memo: Default::default(),
             compile_scratch: Default::default(),
+            json_scratch: Default::default(),
+            stringify_scratch: Default::default(),
             ident_atoms: Default::default(),
             #[cfg(debug_assertions)]
             prefix_copy: None,

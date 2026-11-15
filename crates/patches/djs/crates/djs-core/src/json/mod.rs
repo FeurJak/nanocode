@@ -22,9 +22,9 @@ mod stringify;
 use alloc::string::String;
 use core::fmt;
 
-pub use parse::{ParseOptions, parse, parse_utf8};
+pub use parse::{ParseOptions, Scratch, parse, parse_utf8};
 pub use stringify::{
-    StringifyError, quote, stringify_fast, stringify_fast_at,
+    Scratch as StringifyScratch, StringifyError, quote, stringify_fast, stringify_fast_at,
 };
 
 use crate::heap::HeapError;

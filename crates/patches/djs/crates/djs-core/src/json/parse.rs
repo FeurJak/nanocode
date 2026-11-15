@@ -65,11 +65,13 @@ pub fn parse(heap: &mut Heap, input: Str, opts: &ParseOptions) -> Result<Value, 
     if len >= crate::heap::string::SLICE_PARENT_MIN_LEN {
         p.slices = p.heap.slice_source(flat);
     }
-    if two_byte {
+    let r = if two_byte {
         p.run::<UTF16>()
     } else {
         p.run::<LATIN1>()
-    }
+    };
+    p.release();
+    r
 }
 
 /// Parses JSON text given as UTF-8 bytes (host input), transcoding strings as it goes.
@@ -77,7 +79,9 @@ pub fn parse(heap: &mut Heap, input: Str, opts: &ParseOptions) -> Result<Value, 
 /// any non-ASCII byte is an unexpected character anyway.
 pub fn parse_utf8(heap: &mut Heap, input: &[u8], opts: &ParseOptions) -> Result<Value, ParseError> {
     let mut p = Parser::new(heap, Src::Host(input), opts);
-    p.run::<UTF8>()
+    let r = p.run::<UTF8>();
+    p.release();
+    r
 }
 
 // Input encodings, as const generic parameters.
@@ -748,6 +752,15 @@ struct Frame {
 
 const KEY_CACHE: usize = 64;
 
+#[derive(Default)]
+pub struct Scratch {
+    key_buf: Vec<u16>,
+    keys: Vec<Atom>,
+    shapes: Vec<u32>,
+    stack: Vec<Frame>,
+    values: Vec<Value>,
+}
+
 struct Parser<'a, 'o> {
     heap: &'a mut Heap,
     src: Src<'a>,
@@ -784,19 +797,34 @@ fn cache_slot(raw: &[u8]) -> usize {
 
 impl<'a, 'o> Parser<'a, 'o> {
     fn new(heap: &'a mut Heap, src: Src<'a>, opts: &'o ParseOptions) -> Self {
+        let mut s = core::mem::take(&mut heap.json_scratch);
+        s.keys.clear();
+        s.shapes.clear();
+        s.stack.clear();
+        s.values.clear();
         Parser {
             heap,
             src,
             opts,
             pos: 0,
-            stack: Vec::new(),
-            keys: Vec::new(),
-            values: Vec::new(),
-            key_buf: Vec::new(),
+            stack: s.stack,
+            keys: s.keys,
+            values: s.values,
+            key_buf: s.key_buf,
             key_cache: [(0, 0, Atom::NULL); KEY_CACHE],
             slices: None,
-            shapes: Vec::new(),
+            shapes: s.shapes,
         }
+    }
+
+    fn release(self) {
+        self.heap.json_scratch = Scratch {
+            key_buf: self.key_buf,
+            keys: self.keys,
+            shapes: self.shapes,
+            stack: self.stack,
+            values: self.values,
+        };
     }
 
     #[inline(always)]
