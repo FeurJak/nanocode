@@ -279,9 +279,9 @@ async fn post_idle(
     transport: &dyn HttpTransport,
     request: HttpRequest,
 ) -> Result<HttpResponse, HttpError> {
-    nanocode_platform::timeout(crate::MESSAGES_STREAM_IDLE_TIMEOUT, transport.post(request))
+    nanocode_platform::timeout(crate::MESSAGES_HEAD_TIMEOUT, transport.post(request))
         .await
-        .map_err(|_| host::stalled(crate::MESSAGES_STREAM_IDLE_TIMEOUT))?
+        .map_err(|_| host::stalled(crate::MESSAGES_HEAD_TIMEOUT))?
         .map(|response| response.idle(crate::MESSAGES_STREAM_IDLE_TIMEOUT))
 }
 

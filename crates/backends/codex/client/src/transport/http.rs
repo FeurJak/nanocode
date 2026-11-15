@@ -20,12 +20,6 @@ const TURN_STATE_HEADER: &str = "x-codex-turn-state";
 const ZSTD_LEVEL: i32 = 3;
 use super::idle::STREAM_IDLE_TIMEOUT;
 
-async fn idle<T>(read: impl std::future::Future<Output = T>) -> Result<T, ResponsesError> {
-    nanocode_platform::timeout(STREAM_IDLE_TIMEOUT, read)
-        .await
-        .map_err(|_| stream_stalled())
-}
-
 async fn idle_within<T>(
     timer: &mut super::idle::IdleTimer,
     read: impl std::future::Future<Output = T>,
@@ -223,8 +217,10 @@ impl ResponsesHttp {
         if let Some(layer) = &self.layer {
             return self.send_layered(layer.as_ref(), request).await;
         }
-        let response = idle(self.client.execute(request))
-            .await?
+        let response = self
+            .client
+            .execute(request)
+            .await
             .map(nanocode_http::decode_flate_response)
             .map_err(map_http_error)?;
         let status = response.status();
@@ -276,8 +272,9 @@ impl ResponsesHttp {
                 .unwrap_or_default(),
         };
         let sender = nanocode_http::ClientSender::new(&self.client);
-        let response = idle(layer.send(request, layer::Next::new(&sender)))
-            .await?
+        let response = layer
+            .send(request, layer::Next::new(&sender))
+            .await
             .map_err(map_layer_error)?;
         let (status, headers, body, events) = response.into_parts();
         if !status.is_success() {
@@ -648,8 +645,8 @@ impl ResponsesHttp {
         let endpoint = format!("{}/responses", api_base_url.trim_end_matches('/'));
         let turn_state =
             turn_state.filter(|value| header::HeaderValue::from_bytes(value.as_bytes()).is_ok());
-        let response = idle(
-            host.http(
+        let response = host
+            .http(
                 HostConnectRequest::new_with_thread_id(
                     &endpoint,
                     auth.bearer(),
@@ -665,10 +662,9 @@ impl ResponsesHttp {
                         .map_or(&[][..], super::ResponsesGateway::headers),
                 ),
                 request.json(),
-            ),
-        )
-        .await?
-        .map_err(map_host_error)?;
+            )
+            .await
+            .map_err(map_host_error)?;
         let metadata = HttpMetadata {
             reasoning_included: response.metadata.reasoning_included(),
             turn_state: response.metadata.turn_state().map(str::to_owned),
