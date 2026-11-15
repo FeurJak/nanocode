@@ -4,7 +4,8 @@ use nanocode_sync::Atom;
 use serde_json::{Map, Value};
 use std::time::Duration;
 
-const LAST_REMINDER: &str = " Before the time is up, delete files your own test runs wrote where the task's program or its checks write output or wait for it, such as a file in /tmp, and stop processes you started.";
+const EARLY_REMINDER: &str = "Keep working until then. First put every output the task asks for in its final location, then use the time that remains to improve and test it.";
+const LAST_REMINDER: &str = "Finish now. Make sure every output the task asks for is in its final location, delete files your own test runs wrote where the task's program or its checks write output or wait for it, such as a file in /tmp, and stop processes you started. Do not start a command or a wait that cannot finish in the time that remains.";
 const REMINDER_PERCENTS: [u128; 3] = [50, 75, 90];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -152,13 +153,13 @@ impl Reminders {
             was
         });
         (passed > announced).then(|| {
-            let last = if passed == REMINDER_PERCENTS.len() {
+            let steps = if passed == REMINDER_PERCENTS.len() {
                 LAST_REMINDER
             } else {
-                ""
+                EARLY_REMINDER
             };
             format!(
-                "Time limit: {} When the time is up the task stops, and only what is on disk then counts. Make sure every output the task asks for exists in its final location now, before you spend time improving it. Do not start a command or a wait that cannot finish in the time that remains.{last}",
+                "Time limit: {} When the time is up the task stops, and only what is on disk then counts. {steps}",
                 self.deadline.remain(remaining)
             )
         })
