@@ -13,6 +13,16 @@ env -u CARGO_NET_OFFLINE cargo fetch --locked >&2
 native() {
   if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s\n' "$1"; fi
 }
+offline() {
+  if command -v ip >/dev/null 2>&1 && unshare -rn ip link set lo up 2>/dev/null; then
+    unshare -rn sh -c 'ip link set lo up && user=$0 group=$1 && shift && exec unshare --user --map-user="$user" --map-group="$group" "$@"' "$(id -u)" "$(id -g)" "$@"
+  elif command -v ip >/dev/null 2>&1 && sudo -n unshare --net true 2>/dev/null; then
+    sudo -n unshare --net sh -c 'ip link set lo up && user=$0 group=$1 path=$2 && shift 2 && exec setpriv --reuid="$user" --regid="$group" --clear-groups env PATH="$path" "$@"' "$(id -u)" "$(id -g)" "$PATH" "$@"
+  else
+    echo "build-cli.sh: no network namespace for training (needs iproute2 and unprivileged user namespaces or sudo), training with the network" >&2
+    "$@"
+  fi
+}
 digest() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
@@ -70,17 +80,17 @@ case $target in
     rm -rf "$train"
     mkdir -p "$train"
     "$bolt" "$built" -instrument -instrumentation-file="$train/profile" -instrumentation-file-append-pid -o "$train/instrumented" >&2
-    python3 "$root/scripts/train-cli.py" "$train/instrumented" startup >&2
+    offline python3 "$root/scripts/train-cli.py" "$train/instrumented" startup >&2
     mkdir "$train/startup"
     mv "$train"/profile.*.fdata "$train/startup/"
-    python3 "$root/scripts/train-cli.py" "$train/instrumented" oneshot >&2
+    offline python3 "$root/scripts/train-cli.py" "$train/instrumented" oneshot >&2
     mkdir "$train/oneshot"
     mv "$train"/profile.*.fdata "$train/oneshot/"
-    python3 "$root/scripts/train-cli.py" "$train/instrumented" tools >&2
+    offline python3 "$root/scripts/train-cli.py" "$train/instrumented" tools >&2
     mkdir "$train/tools"
     mv "$train"/profile.*.fdata "$train/tools/"
     python3 "$root/scripts/rodata-cli.py" "$built" "$out/$bin.map" "$out/$bin.link" "$train/linked" "$train/startup" "$train/oneshot" "$train/tools" >&2
-    python3 "$root/scripts/train-cli.py" "$train/instrumented" >&2
+    offline python3 "$root/scripts/train-cli.py" "$train/instrumented" >&2
     "$(dirname "$bolt")/merge-fdata" "$train"/profile.*.fdata "$train"/startup/*.fdata "$train"/oneshot/*.fdata "$train"/tools/*.fdata > "$train/profile.fdata"
     layout="-reorder-blocks=ext-tsp -split-functions -split-all-cold -split-eh -icf=$icf -use-old-text -no-huge-pages"
     "$bolt" "$train/linked" -o "$train/cdsort" -data="$train/profile.fdata" $layout -reorder-functions=cdsort -generate-function-order="$train/cdsort.order" >&2
