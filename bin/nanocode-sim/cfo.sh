@@ -162,6 +162,7 @@ default_table='
 1 canary_agents_shutdown_keeps_harness canary:200 --scenario agents --mutation shutdown_keeps_harness
 1 canary_runtime_kv_power_loss_drops_acked canary:100 --scenario runtime --store kv --mutation power_loss_drops_acked
 1 canary_runtime_kv_record_insert_drops canary:100 --scenario runtime --store kv --mutation record_insert_drops
+1 canary_capture_redact_then_trim canary:4000 --scenario capture --mutation redact_then_trim
 '
 default_known='
 '

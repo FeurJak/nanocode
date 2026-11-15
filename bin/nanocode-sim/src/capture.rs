@@ -10,6 +10,7 @@ const SECRET_LETTERS: u8 = 6;
 const SECRET_BYTES_MIN: u64 = 6;
 const SECRET_BYTES_MAX: u64 = 24;
 const SECRET_PUNCTUATION_PPM: u64 = 150_000;
+const SECRET_TRAILING_BACKSLASHES_PPM: u64 = 500_000;
 const TAKES_MAX: u64 = 3;
 const TAKE_BYTES_MAX: u64 = 3_000;
 const SMALL_TAKE_PPM: u64 = 300_000;
@@ -33,14 +34,16 @@ pub enum CaptureMutation {
     SkipTrim,
     DropChunk,
     SkipRedact,
+    RedactThenTrim,
 }
 
 impl CaptureMutation {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::None,
         Self::SkipTrim,
         Self::DropChunk,
         Self::SkipRedact,
+        Self::RedactThenTrim,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -55,6 +58,7 @@ impl CaptureMutation {
             Self::SkipTrim => "skip_trim",
             Self::DropChunk => "drop_chunk",
             Self::SkipRedact => "skip_redact",
+            Self::RedactThenTrim => "redact_then_trim",
         }
     }
 
@@ -111,9 +115,10 @@ fn narrow(value: u64) -> usize {
 fn secret_of(rng: &mut Rng, index: u8) -> String {
     let first = b'A' + index * SECRET_LETTERS;
     let length = rng.range(SECRET_BYTES_MIN, SECRET_BYTES_MAX);
+    let trailing_backslashes = rng.chance(SECRET_TRAILING_BACKSLASHES_PPM);
     let mut secret = vec![first];
     while wide(secret.len()) < length {
-        let byte = if rng.chance(SECRET_PUNCTUATION_PPM) {
+        let byte = if !trailing_backslashes && rng.chance(SECRET_PUNCTUATION_PPM) {
             PUNCTUATION[rng.pick(PUNCTUATION.len())]
         } else {
             first
@@ -122,6 +127,10 @@ fn secret_of(rng: &mut Rng, index: u8) -> String {
                     .expect("a letter offset fits in a byte")
         };
         secret.push(byte);
+    }
+    if trailing_backslashes {
+        let length = secret.len();
+        secret[length - 2..].copy_from_slice(b"\\\\");
     }
     String::from_utf8(secret).expect("a secret is ASCII")
 }
@@ -248,6 +257,59 @@ fn cuts_a_secret(full: &[u8], limit: usize, forms: &[String]) -> bool {
     })
 }
 
+fn omission_marker(rendered: &str) -> Option<(usize, usize, usize)> {
+    rendered.match_indices(MARKER_OPEN).find_map(|(open, _)| {
+        let after = &rendered[open + MARKER_OPEN.len()..];
+        let close = after.find(MARKER_CLOSE)?;
+        let count = &after[..close];
+        (!count.is_empty() && count.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| count.parse().ok())
+            .flatten()
+            .map(|omitted| (open, close, omitted))
+    })
+}
+
+fn partial_cut(text: &[u8], forms: &[String], at_end: bool) -> usize {
+    forms
+        .iter()
+        .filter_map(|form| {
+            let form = form.as_bytes();
+            (1..=text.len().min(form.len().saturating_sub(1)))
+                .rev()
+                .find(|&length| {
+                    if at_end {
+                        text.ends_with(&form[..length])
+                    } else {
+                        text.starts_with(&form[form.len() - length..])
+                    }
+                })
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+fn redact_then_trim(raw: &[u8], omitted: usize, redactor: &Redactor, forms: &[String]) -> String {
+    let text = String::from_utf8_lossy(raw).into_owned();
+    let marker = format!("{MARKER_OPEN}{omitted}{MARKER_CLOSE}");
+    let open = text
+        .find(&marker)
+        .expect("the raw output holds its omission marker");
+    let mut head = text[..open].to_owned();
+    let mut tail = text[open + marker.len()..].to_owned();
+    redactor.text(&mut head);
+    redactor.text(&mut tail);
+    let head_cut = partial_cut(head.as_bytes(), forms, true);
+    let tail_cut = partial_cut(tail.as_bytes(), forms, false);
+    head.truncate(head.len() - head_cut);
+    tail.drain(..tail_cut);
+    let mut rendered = format!(
+        "{head}{MARKER_OPEN}{}{MARKER_CLOSE}{tail}",
+        omitted + head_cut + tail_cut
+    );
+    redactor.text(&mut rendered);
+    rendered
+}
+
 fn check_take(
     index: usize,
     take: &Take,
@@ -275,24 +337,14 @@ fn check_take(
         }
         return Ok(false);
     }
-    let Some(open) = rendered.find(MARKER_OPEN) else {
+    let Some((open, close, omitted)) = omission_marker(rendered) else {
         return Err(format!(
-            "take {index}: {} bytes over limit {} rendered no omission marker: {rendered:?}",
+            "take {index}: {} bytes over limit {} rendered no omission marker with a count: {rendered:?}",
             full.len(),
             take.limit
         ));
     };
     let after = &rendered[open + MARKER_OPEN.len()..];
-    let Some(close) = after.find(MARKER_CLOSE) else {
-        return Err(format!(
-            "take {index}: an unterminated omission marker in {rendered:?}"
-        ));
-    };
-    let Ok(omitted) = after[..close].parse::<usize>() else {
-        return Err(format!(
-            "take {index}: an omission marker without a count in {rendered:?}"
-        ));
-    };
     let head = &rendered[..open];
     let tail = &after[close + MARKER_CLOSE.len()..];
     if omitted < full.len() - take.limit || omitted > full.len() {
@@ -355,14 +407,25 @@ fn simulate(seed: u64, mutation: CaptureMutation) -> CaptureOutcome {
             captured.push(chunk, take.limit);
         }
         let mut chunk = captured.take();
-        let rendered = if mutation == CaptureMutation::SkipTrim {
-            let mut raw = String::from_utf8_lossy(&chunk.with_omission_marker()).into_owned();
-            redactor.text(&mut raw);
-            raw
-        } else if mutation == CaptureMutation::SkipRedact {
-            String::from_utf8_lossy(&chunk.with_omission_marker()).into_owned()
-        } else {
-            chunk.render(&redactor)
+        let rendered = match mutation {
+            CaptureMutation::SkipTrim => {
+                let mut raw = String::from_utf8_lossy(&chunk.with_omission_marker()).into_owned();
+                redactor.text(&mut raw);
+                raw
+            }
+            CaptureMutation::SkipRedact => {
+                String::from_utf8_lossy(&chunk.with_omission_marker()).into_owned()
+            }
+            CaptureMutation::RedactThenTrim => match chunk
+                .omission_marker()
+                .and_then(|marker| marker.split(' ').nth(1)?.parse().ok())
+            {
+                Some(omitted) if !forms.is_empty() => {
+                    redact_then_trim(&chunk.with_omission_marker(), omitted, &redactor, &forms)
+                }
+                _ => chunk.render(&redactor),
+            },
+            _ => chunk.render(&redactor),
         };
         let total = take.chunks.iter().map(Vec::len).sum::<usize>();
         stats.takes += 1;

@@ -114,7 +114,7 @@ fn usage() -> ExitCode {
        sync: [--mutation {}]
        streams: [--mutation {}]
        hands: [--mutation {}]
-       capture: [--mutation skip_trim|drop_chunk]
+       capture: [--mutation skip_trim|drop_chunk|skip_redact|redact_then_trim]
        executor: [--mutation {}]",
         Mutation::names(),
         TurnMutation::names(),

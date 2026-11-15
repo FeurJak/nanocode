@@ -1012,32 +1012,35 @@ impl CapturedChunk {
         if self.omitted_bytes == 0 || secrets.forms().next().is_none() {
             return;
         }
-        self.head = redact(&self.head, secrets);
-        self.tail = redact(self.tail.make_contiguous(), secrets).into();
-        let head_cut = secrets
+        let mut head_keep = self.head.len();
+        while let Some(cut) = secrets
             .forms()
             .filter_map(|(secret, _)| {
-                (1..=self.head.len().min(secret.len().saturating_sub(1)))
+                let head = &self.head[..head_keep];
+                (1..=head.len().min(secret.len().saturating_sub(1)))
                     .rev()
-                    .find(|&length| self.head.ends_with(&secret.as_bytes()[..length]))
+                    .find(|&length| head.ends_with(&secret.as_bytes()[..length]))
             })
             .max()
-            .unwrap_or(0);
-        let tail_cut = secrets
+        {
+            head_keep -= cut;
+        }
+        let tail = self.tail.make_contiguous();
+        let mut tail_cut = 0;
+        while let Some(cut) = secrets
             .forms()
             .filter_map(|(secret, _)| {
-                (1..=self.tail.len().min(secret.len().saturating_sub(1)))
+                let tail = &tail[tail_cut..];
+                (1..=tail.len().min(secret.len().saturating_sub(1)))
                     .rev()
-                    .find(|&length| {
-                        self.tail
-                            .iter()
-                            .take(length)
-                            .eq(secret.as_bytes()[secret.len() - length..].iter())
-                    })
+                    .find(|&length| tail.starts_with(&secret.as_bytes()[secret.len() - length..]))
             })
             .max()
-            .unwrap_or(0);
-        self.head.truncate(self.head.len() - head_cut);
+        {
+            tail_cut += cut;
+        }
+        let head_cut = self.head.len() - head_keep;
+        self.head.truncate(head_keep);
         drop(self.tail.drain(..tail_cut));
         self.omitted_bytes = self
             .omitted_bytes
