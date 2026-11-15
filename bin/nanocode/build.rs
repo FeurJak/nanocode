@@ -10,6 +10,7 @@ fn main() {
     } else if windows {
         println!("cargo:rustc-link-arg-bins=-Wl,--stack,{MAIN_THREAD_STACK_BYTES}");
     } else if linux && gnu {
+        println!("cargo:rustc-link-arg-bins=-no-pie");
         let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_owned());
         let found = std::process::Command::new(&cc).arg("-print-file-name=libgcc_eh.a").output();
         match found.ok().map(|output| std::path::PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())) {
