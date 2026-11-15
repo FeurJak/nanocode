@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     ops::Bound,
 };
 
@@ -124,7 +124,13 @@ impl Fold {
                 self.seq
             )));
         }
-        crate::record::each(body, |record| self.apply(&record, Some(seq)))?;
+        crate::record::each(body, |record| match record {
+            Record::Stored { key, value } => {
+                self.stored.insert(key, value);
+                Ok(())
+            }
+            record => self.apply(&record, Some(seq)),
+        })?;
         self.seq = seq;
         Ok(())
     }
@@ -241,14 +247,16 @@ impl Fold {
         })
     }
 
-    fn garbage(&self, collectable: impl Fn(&str) -> bool) -> Vec<String> {
-        let mut holders: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
-        for key in self.stored.keys() {
+    fn garbage(&self, collectable: impl Fn(&str) -> bool) -> Option<Vec<bool>> {
+        let mut firsts: HashMap<&str, usize> = HashMap::new();
+        let mut holders = Vec::new();
+        for (position, (key, value)) in self.stored.iter().enumerate() {
             if let Some((state, content)) = key.split_once('\n')
                 && content.starts_with("b3:")
                 && collectable(state)
             {
-                holders.entry(content).or_default().push((state, key));
+                let first = *firsts.entry(content).or_insert(holders.len());
+                holders.push((first, position, state, value.as_str()));
             }
         }
         let mut queue = self
@@ -257,39 +265,35 @@ impl Fold {
             .filter(|(state, _)| collectable(state))
             .flat_map(|(_, checkpoint)| EncodedPayload::references(&checkpoint.payload))
             .collect::<Vec<_>>();
-        let mut visited = BTreeSet::new();
+        let mut visited = vec![false; holders.len()];
         while let Some(content) = queue.pop() {
-            if !visited.insert(content) {
-                continue;
-            }
-            let Some(&(state, key)) = holders.get(content).and_then(|held| held.first()) else {
+            let Some(&first) = firsts.get(content) else {
                 continue;
             };
+            if std::mem::replace(&mut visited[first], true) {
+                continue;
+            }
+            let (_, _, state, value) = holders[first];
             let chunk = |chunk: &str| {
                 self.stored
                     .get(&format!("{state}\n{chunk}"))
                     .map(String::as_str)
             };
-            match self
-                .stored
-                .get(key)
-                .and_then(|value| EncodedPayload::assembled(value, &chunk))
-            {
+            match EncodedPayload::assembled(value, &chunk) {
                 Some(Cow::Borrowed(json)) => queue.extend(EncodedPayload::references(json)),
                 Some(Cow::Owned(json)) => queue.extend(
                     EncodedPayload::references(&json)
-                        .filter_map(|content| holders.get_key_value(content))
+                        .filter_map(|content| firsts.get_key_value(content))
                         .map(|(content, _)| *content),
                 ),
-                None => return Vec::new(),
+                None => return None,
             }
         }
-        holders
-            .into_iter()
-            .filter(|(content, _)| !visited.contains(content))
-            .flat_map(|(_, held)| held)
-            .map(|(_, key)| key.to_owned())
-            .collect()
+        let mut garbage = vec![false; self.stored.len()];
+        for &(first, position, _, _) in &holders {
+            garbage[position] = !visited[first];
+        }
+        Some(garbage)
     }
 
     pub(crate) fn collect(&mut self) -> usize {
@@ -301,11 +305,13 @@ impl Fold {
     }
 
     fn drop_garbage(&mut self, collectable: impl Fn(&str) -> bool) -> usize {
-        let garbage = self.garbage(collectable);
-        for key in &garbage {
-            self.stored.remove(key);
-        }
-        garbage.len()
+        let Some(garbage) = self.garbage(collectable) else {
+            return 0;
+        };
+        let mut garbage = garbage.into_iter();
+        let before = self.stored.len();
+        self.stored.retain(|_, _| garbage.next() == Some(false));
+        before - self.stored.len()
     }
 
     fn drop_turns(&mut self, drop: impl Fn(&Turn) -> bool) {
