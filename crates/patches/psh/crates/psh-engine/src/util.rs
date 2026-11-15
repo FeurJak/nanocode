@@ -127,7 +127,7 @@ pub(crate) async fn lookup(vp: &Vp, name: &[u8]) -> Option<&'static UtilEntry> {
     }
     let found = match crate::builtins::hash::hashed(vp, name).await {
         Some(p) => Some(p),
-        None => crate::builtins::hash::search(vp, name, None).await,
+        None => crate::builtins::hash::search_for_utility(vp, name).await,
     };
     match found {
         Some(_) if fallback => None,

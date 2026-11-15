@@ -96,13 +96,18 @@ pub(crate) async fn remember_utility(vp: &mut Vp, name: &[u8]) {
         return;
     }
     let synced = vp.var("PATH") == Some(vp.hash.path.as_slice());
+    let searched = take_searched(vp, name);
     if synced && vp.hash.get(name).is_some() {
         if let Some(e) = table(vp).entries.iter_mut().find(|e| e.0 == name) {
             e.2 += 1;
         }
         return;
     }
-    if let Some((found, dot)) = search_dot(vp, name, None).await
+    let found = match searched {
+        Some(found) => found,
+        None => search_dot(vp, name, None).await,
+    };
+    if let Some((found, dot)) = found
         && executable(vp, &found).await
     {
         let t = table(vp);
@@ -161,6 +166,34 @@ pub(crate) async fn search(vp: &Vp, name: &[u8], path: Option<&[u8]>) -> Option<
     search_dot(vp, name, path).await.map(|f| f.0)
 }
 
+type Searched = Option<(Vec<u8>, bool)>;
+
+thread_local! {
+    /// The last `PATH` search a utility lookup made: (name, `PATH`, cwd, result). The
+    /// run that follows the lookup takes it to fill the table instead of searching
+    /// again (each miss is a `stat` per `PATH` entry, slow on some file systems).
+    static SEARCHED: std::cell::RefCell<Option<(Vec<u8>, Vec<u8>, Vec<u8>, Searched)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// `search` for a utility lookup, kept for the `remember_utility` of the run that
+/// follows it.
+pub(crate) async fn search_for_utility(vp: &Vp, name: &[u8]) -> Option<Vec<u8>> {
+    let found = search_dot(vp, name, None).await;
+    let shown = found.as_ref().map(|f| f.0.clone());
+    if let Some(path) = vp.var("PATH") {
+        let key = (name.to_vec(), path.to_vec(), vp.cwd.clone(), found);
+        SEARCHED.with(|s| *s.borrow_mut() = Some(key));
+    }
+    shown
+}
+
+/// The search the lookup of `name` just made, if it was under the same `PATH` and cwd.
+fn take_searched(vp: &Vp, name: &[u8]) -> Option<Searched> {
+    let (n, path, cwd, found) = SEARCHED.with(|s| s.borrow_mut().take())?;
+    (n == name && vp.var("PATH") == Some(path.as_slice()) && vp.cwd == cwd).then_some(found)
+}
+
 async fn search_dot(vp: &Vp, name: &[u8], path: Option<&[u8]>) -> Option<(Vec<u8>, bool)> {
     let path = match path {
         Some(p) => p.to_vec(),
@@ -171,6 +204,9 @@ async fn search_dot(vp: &Vp, name: &[u8], path: Option<&[u8]>) -> Option<(Vec<u8
     };
     let mut fallback = None;
     let mut dot = false;
+    // On a host whose resolve looks at the file system itself, a candidate that is not
+    // there is not found either: one `stat` per missing entry, not two.
+    let plain = !cfg!(windows) && vp.host().native_paths().is_some();
     for dir in vp.host().path_entries(&path) {
         let dir: &[u8] = if dir.is_empty() { b"." } else { &dir[..] };
         let relative = vp.abs_path(dir) != dir;
@@ -182,7 +218,15 @@ async fn search_dot(vp: &Vp, name: &[u8], path: Option<&[u8]>) -> Option<(Vec<u8
             shown.extend_from_slice(base);
             shown
         };
-        if let Some(found) = vp.host().resolve(name, dir, &vp.cwd).await {
+        let cand = joined(name);
+        let abs = vp.abs_path(&cand);
+        let meta = if plain || fallback.is_none() {
+            Some(vp.host().stat(&abs, true).await)
+        } else {
+            None
+        };
+        let missing = plain && matches!(meta, Some(Err(_)));
+        if !missing && let Some(found) = vp.host().resolve(name, dir, &vp.cwd).await {
             if !relative {
                 return Some((found, dot));
             }
@@ -193,12 +237,8 @@ async fn search_dot(vp: &Vp, name: &[u8], path: Option<&[u8]>) -> Option<(Vec<u8
         if relative && !dot && same_dir(vp, dir).await {
             dot = true;
         }
-        if fallback.is_none() {
-            let cand = joined(name);
-            let abs = vp.abs_path(&cand);
-            if matches!(vp.host().stat(&abs, true).await, Ok(m) if m.kind != FileKind::Dir) {
-                fallback = Some((if relative { cand } else { abs }, dot));
-            }
+        if fallback.is_none() && matches!(meta, Some(Ok(m)) if m.kind != FileKind::Dir) {
+            fallback = Some((if relative { cand } else { abs }, dot));
         }
     }
     fallback
