@@ -223,6 +223,7 @@ impl State {
                     effect: None,
                     journal: None,
                     threaded: false,
+                    preempt: None,
                 },
             )
             .await

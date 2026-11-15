@@ -45,7 +45,7 @@ use nanocode_tool_host::image::{ImageHistory, ImageWindow};
 use nanocode_platform::Instant;
 use nanocode_platform::sleep;
 use nanocode_sync::{Atom, Owned, Sequencer, Slot};
-use nanocode_sync::{Notify, oneshot};
+use nanocode_sync::{Notify, oneshot, watch};
 use nanocode_trace::Instrument as _;
 use std::{
     collections::{HashMap, HashSet},
@@ -728,6 +728,7 @@ pub struct ClaudeBuilder {
     hedging: Option<Arc<nanocode_agent_core::hedge::Hedging>>,
     message_threads: bool,
     refusal_continuations: u32,
+    steer_preempts_model: bool,
     context_window_tokens: u64,
     auto_compact_window_tokens: Option<u64>,
     images: ImageHistory,
@@ -802,6 +803,7 @@ impl ClaudeBuilder {
             hedging: None,
             message_threads: false,
             refusal_continuations: DEFAULT_REFUSAL_CONTINUATIONS,
+            steer_preempts_model: false,
             context_window_tokens,
             auto_compact_window_tokens: None,
             images: ImageHistory::default(),
@@ -1092,6 +1094,11 @@ impl ClaudeBuilder {
 
     pub const fn refusal_continuations(mut self, continuations: u32) -> Self {
         self.refusal_continuations = continuations;
+        self
+    }
+
+    pub const fn steer_preempts_model(mut self, preempts: bool) -> Self {
+        self.steer_preempts_model = preempts;
         self
     }
 
@@ -1877,6 +1884,7 @@ impl ClaudeBuilder {
             hedging: self.hedging,
             message_thread: self.message_threads.then(Atom::default),
             refusal_continuations: self.refusal_continuations,
+            steer_preempts_model: self.steer_preempts_model,
             wire_cache: crate::WireCache::default(),
             context_window_tokens: self.context_window_tokens,
             auto_compact_window_tokens: self.auto_compact_window_tokens,
@@ -3477,6 +3485,7 @@ struct TurnSteering {
     next_index: u32,
     revision: Option<u64>,
     accepting: bool,
+    preempt: watch::Sender<u64>,
 
     images: crate::prompt::ImageResolution,
     events: AgentEventPublisher,
@@ -3552,6 +3561,7 @@ struct State {
     hedging: Option<Arc<nanocode_agent_core::hedge::Hedging>>,
     message_thread: Option<Atom<crate::MessageThread>>,
     refusal_continuations: u32,
+    steer_preempts_model: bool,
     wire_cache: crate::WireCache,
     context_window_tokens: u64,
     auto_compact_window_tokens: Option<u64>,
@@ -3929,6 +3939,7 @@ async fn start_turn(
             next_index: 0,
             revision: request.prompt.instruction_revision(),
             accepting: true,
+            preempt: watch::Sender::new(0),
             images: resolution,
             events: request.events.clone(),
         },
@@ -4427,6 +4438,23 @@ struct ResponseFailure {
     error: NanocodeError,
     recovery: Option<ServerRecovery>,
 }
+
+fn preemptible(recovery: Option<&ServerRecovery>) -> bool {
+    recovery.is_none_or(|recovery| {
+        recovery.calls.is_empty()
+            && recovery.container.is_none()
+            && recovery.retirement_notice.is_none()
+    })
+}
+
+async fn steered(preempt: Option<&mut watch::Receiver<u64>>) {
+    if let Some(receiver) = preempt
+        && receiver.changed().await.is_ok()
+    {
+        return;
+    }
+    std::future::pending::<()>().await;
+}
 impl From<NanocodeError> for ResponseFailure {
     fn from(error: NanocodeError) -> Self {
         Self {
@@ -4454,6 +4482,7 @@ struct ResponseContext<'a> {
     effect: Option<Effect<'a>>,
     journal: Option<&'a mut Journal>,
     threaded: bool,
+    preempt: Option<&'a mut watch::Receiver<u64>>,
 }
 const DEVELOPER_NOTICE_OPEN: &str = "<system-reminder>\n";
 const ATTRIBUTION: &str = "<system-reminder>\nAttribution for git commits and pull requests you create from here on (this replaces Claude Code's own earlier attribution guidance, such as a previous copy of this reminder; the user's own instructions about these lines, such as a CLAUDE.md or memory rule, take precedence over this reminder, but do not add attribution lines this reminder leaves out):\n- End git commit messages with:\nCo-Authored-By: Claude Code <noreply@anthropic.com>\n- End pull request descriptions with:\n\u{1f916} Generated with [Claude Code](https://claude.com/claude-code)\n</system-reminder>\n";
@@ -5562,6 +5591,7 @@ impl State {
         let needs_upgrade = self.code_only && !durable::is_code_only_catalog(&request.tools);
 
         let mut journal = context.journal;
+        let mut preempt = context.preempt;
         let admitted = match &context.effect {
             Some(effect) => {
                 let writes = journal
@@ -5810,6 +5840,10 @@ impl State {
                     telemetry::cancel_attempt(&attempt_span);
                     return Err(ResponseFailure { error: NanocodeError::TurnCancelled, recovery });
                 }
+                () = steered(preempt.as_deref_mut().filter(|_| preemptible(recovery.as_ref()))) => {
+                    telemetry::cancel_attempt(&attempt_span);
+                    return Err(ResponseFailure { error: NanocodeError::TurnCancelled, recovery: None });
+                }
                 result = opening.instrument(attempt_span.clone()) => result,
             };
             telemetry::record_hedge(&attempt_span, hedge);
@@ -5844,6 +5878,10 @@ impl State {
                             () = &mut cancelled => {
                                 telemetry::cancel_attempt(&attempt_span);
                                 return Err(ResponseFailure { error: NanocodeError::TurnCancelled, recovery });
+                            }
+                            () = steered(preempt.as_deref_mut().filter(|_| preemptible(recovery.as_ref()))) => {
+                                telemetry::cancel_attempt(&attempt_span);
+                                return Err(ResponseFailure { error: NanocodeError::TurnCancelled, recovery: None });
                             }
                             event = stream.next().instrument(attempt_span.clone()) => event,
                         };
@@ -6658,6 +6696,7 @@ impl State {
                                     },
                                     journal: None,
                                     threaded: false,
+                                    preempt: None,
                                 },
                             )
                             .await;
@@ -6811,6 +6850,7 @@ impl State {
                     effect: cursor.effect(self, &step),
                     journal: None,
                     threaded: false,
+                    preempt: None,
                 },
             )
             .await;
@@ -6977,6 +7017,8 @@ impl State {
             boundary: None,
             durable,
         });
+        turn.preempt
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
         for preempt in &self.code_turn_preempt {
             preempt().await;
         }
@@ -7709,8 +7751,16 @@ impl State {
                 .map(str::to_owned)
                 .collect::<HashSet<_>>();
             self.discovered.set(discovered.clone());
+            let mut preempt = None;
             if let Some(turn) = self.steering.acquire().await.get_mut(&request.key) {
                 turn.model_call_index = index.saturating_add(cursor.model_step_offset).max(1);
+                if self.steer_preempts_model && !replaying_boundary {
+                    let mut receiver = turn.preempt.subscribe();
+                    if turn.pending.iter().any(|steer| steer.boundary.is_none()) {
+                        receiver.mark_changed();
+                    }
+                    preempt = Some(receiver);
+                }
             }
             self.publish_side_view(Some(pending.as_slice().into()));
             self.publish_side_request(&cursor.template, cursor.wire_profile.as_ref());
@@ -7754,6 +7804,7 @@ impl State {
                             },
                             journal: Some(&mut *journal),
                             threaded: true,
+                            preempt: preempt.as_mut(),
                         },
                     )
                     .await;
@@ -7881,6 +7932,30 @@ impl State {
             };
             let response = match response {
                 Ok(response) => response,
+                Err(failure)
+                    if preempt.is_some()
+                        && failure.recovery.is_none()
+                        && matches!(failure.error, NanocodeError::TurnCancelled)
+                        && !cancel.is_cancelled() =>
+                {
+                    nanocode_trace::debug!(
+                        target: "nanocode_claude",
+                        session_id = %self.session_id,
+                        model_call_index = index.saturating_add(1),
+                        "a steer preempted the model call; sending the request again with the steer"
+                    );
+                    if cursor.model_step_offset == 0 {
+                        cursor.model_step_offset = 1;
+                        cursor.model_receipt_start = Some(index.saturating_add(2));
+                    }
+                    conversation.messages = pending.clone();
+                    cursor.index = index + 1;
+                    self.retain_pending(&mut cursor, &pending);
+                    cursor.usage = usage.clone();
+                    self.defer_cursor(&mut cursor, conversation, journal)
+                        .await?;
+                    continue;
+                }
                 Err(failure) => {
                     if let Some(recovery) = failure.recovery {
                         self.recover_server_turn(conversation, &mut pending).await;
