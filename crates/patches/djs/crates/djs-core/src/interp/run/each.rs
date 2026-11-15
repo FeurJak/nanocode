@@ -1565,6 +1565,22 @@ fn scan<const KIND: u8, const OP: u8>(b: &mut [u8], r: &mut Run) {
             i += CHUNK;
         }
     }
+    if KIND == KEEP
+        && let Some(q) = q0
+    {
+        while i + CHUNK <= len && n + CHUNK <= os.len() {
+            let c8 = &xs[i..=i + CHUNK];
+            let m = c8[..CHUNK].iter().fold(0, |m, x| m | (word(x) ^ BIAS));
+            if m >> 32 != 0 || c8[CHUNK] == HOLE_BITS {
+                break;
+            }
+            for x in &c8[..CHUNK] {
+                os[n] = *x;
+                n += usize::from(compare::<OP>(word(x) as i32, q));
+            }
+            i += CHUNK;
+        }
+    }
     if KIND == FOLD && OP != MUL {
         const KEY: u64 = INT_HI << 32 | 0x8000_0000;
         while i + CHUNK <= len {
