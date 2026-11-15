@@ -279,12 +279,14 @@ pub struct MovedCells {
 #[derive(Clone, Default)]
 pub struct CellJournals(Arc<Journals>);
 
+type RestoreGate = (watch::Receiver<bool>, Arc<AtomicUsize>);
+
 #[derive(Default)]
 struct Journals {
     cells: Atom<Vec<Weak<CellRecord>>>,
     held: Atom<Set<String>>,
     restored: Atom<HashMap<String, Arc<Restored>>>,
-    pending: Atom<HashMap<String, (watch::Receiver<bool>, Arc<AtomicUsize>)>>,
+    pending: Atom<HashMap<String, RestoreGate>>,
     finished: Atom<Vec<Arc<CellRecord>>>,
     dormant: Atom<Vec<(Arc<CellJournal>, Arc<Restored>)>>,
     loaded: Atom<Set<String>>,
