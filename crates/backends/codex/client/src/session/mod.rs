@@ -7,6 +7,7 @@ mod builder;
 mod response;
 #[doc(hidden)]
 pub(crate) mod state;
+pub mod working_state;
 
 pub use builder::{ResponseTurn, Session, SessionBuildError, SessionBuilder};
 pub use compaction::truncate_middle_with_token_budget;

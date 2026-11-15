@@ -68,6 +68,8 @@ pub struct ModelConfig {
 
     pub max_output_tokens: Option<u64>,
 
+    pub working_state: Option<crate::session::working_state::WorkingStatePolicy>,
+
     pub compaction_thinking: Option<Thinking>,
 
     pub responses_transport: ResponsesTransport,
@@ -268,6 +270,7 @@ impl ModelConfig {
             context_window_tokens: CONTEXT_WINDOW_TOKENS,
             auto_compact_token_limit: None,
             max_output_tokens: None,
+            working_state: None,
             compaction_thinking: None,
             responses_transport: ResponsesTransport::default(),
             websocket_warmup: false,

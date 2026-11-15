@@ -219,6 +219,15 @@ impl<F> OpenAiBuilder<F> {
     }
 
     #[must_use]
+    pub const fn working_state(
+        mut self,
+        policy: crate::client::session::working_state::WorkingStatePolicy,
+    ) -> Self {
+        self.config.working_state = Some(policy);
+        self
+    }
+
+    #[must_use]
     pub const fn context_window_tokens(mut self, tokens: u64) -> Self {
         self.config.context_window_tokens = match self.config.model.context_window_limit() {
             Some(maximum) if tokens > maximum => maximum,
