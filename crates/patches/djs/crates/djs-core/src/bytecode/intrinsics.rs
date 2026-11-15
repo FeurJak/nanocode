@@ -384,6 +384,7 @@ pub const INTRINSICS: &[IntrinsicInfo] = &[
     i("MarkFast", L, 1, false),
     i("NsOp", L, 4, false),
     i("ArraySpeciesCreate", B, 2, false),
+    i("EachRest", B, 7, false),
     i("ArrayConstructor", B, 0, true),
     i("ArraySpecies", B, 0, false),
     i("FindViaPredicate", B, 6, false),

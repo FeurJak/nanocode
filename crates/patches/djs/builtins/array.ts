@@ -30,8 +30,68 @@ function ArraySpeciesCreate(original: Obj, length: f64): Obj {
 }
 
 /**
+ * The rest of a callback loop the interpreter entered at the builtin's call
+ * (interp/run/each.rs `each_call`) once the dense store no longer serves it at k: the
+ * builtin's own loop from k for `mode` (%EachDense's), and its result. `this` is the
+ * builtin (the frame stack traces show), `thisArg` reduce's accumulator, `a` map's or
+ * filter's result.
+ * @intrinsic
+ */
+function EachRest(mode: i32, o: Obj, k: f64, len: f64, f: Value, thisArg: Value, a: Value): Value {
+  if (mode === 7) {
+    let accumulator: Value = thisArg;
+    for (; k < len; k++) {
+      if (HasProperty(o, k)) {
+        accumulator = Call(f, undefined, accumulator, Get(o, k), k, o);
+      }
+    }
+    return accumulator;
+  }
+  if (mode === 5 || mode === 6) {
+    for (; k < len; k++) {
+      const kValue: Value = Get(o, k);
+      if (ToBoolean(Call(f, thisArg, kValue, k, o))) {
+        return mode === 6 ? k : kValue;
+      }
+    }
+    if (mode === 6) {
+      return -1;
+    }
+    return undefined;
+  }
+  let to: f64 = mode === 2 ? LengthOfArrayLike(AsObj(a)) : 0;
+  for (; k < len; k++) {
+    if (HasProperty(o, k)) {
+      const kValue: Value = Get(o, k);
+      const r: Value = Call(f, thisArg, kValue, k, o);
+      if (mode === 1) {
+        CreateDataPropertyOrThrow(AsObj(a), k, r);
+      } else if (mode === 2) {
+        if (ToBoolean(r)) {
+          CreateDataPropertyOrThrow(AsObj(a), to, kValue);
+          to++;
+        }
+      } else if (mode === 3 || mode === 4) {
+        const b: boolean = ToBoolean(r);
+        if (b !== (mode === 4)) {
+          return b;
+        }
+      }
+    }
+  }
+  if (mode === 1 || mode === 2) {
+    return a;
+  }
+  if (mode === 3 || mode === 4) {
+    return mode === 4;
+  }
+  return undefined;
+}
+
+/**
  * Array.prototype.forEach ( callbackfn [ , thisArg ] ), 23.1.3.15.
  * @builtin Array.prototype.forEach
+ * @fast
  */
 function ArrayPrototypeForEach(this: Value, callbackfn: Value, thisArg?: Value): void {
   const o: Obj = ToObject(this);
@@ -51,6 +111,7 @@ function ArrayPrototypeForEach(this: Value, callbackfn: Value, thisArg?: Value):
 /**
  * Array.prototype.map ( callbackfn [ , thisArg ] ), 23.1.3.21.
  * @builtin Array.prototype.map
+ * @fast
  */
 function ArrayPrototypeMap(this: Value, callbackfn: Value, thisArg?: Value): Obj {
   const o: Obj = ToObject(this);
@@ -454,6 +515,7 @@ function FindViaPredicate(o: Obj, len: f64, fromEnd: boolean, predicate: Value, 
 /**
  * Array.prototype.find ( predicate [ , thisArg ] ), 23.1.3.9.
  * @builtin Array.prototype.find
+ * @fast
  */
 function ArrayPrototypeFind(this: Value, predicate: Value, thisArg?: Value): Value {
   const o: Obj = ToObject(this);
@@ -463,6 +525,7 @@ function ArrayPrototypeFind(this: Value, predicate: Value, thisArg?: Value): Val
 /**
  * Array.prototype.findIndex ( predicate [ , thisArg ] ), 23.1.3.10.
  * @builtin Array.prototype.findIndex
+ * @fast
  */
 function ArrayPrototypeFindIndex(this: Value, predicate: Value, thisArg?: Value): Value {
   const o: Obj = ToObject(this);
@@ -515,6 +578,7 @@ function EveryOrSome(o: Obj, callbackfn: Value, thisArg: Value, wantAll: boolean
 /**
  * Array.prototype.every ( callbackfn [ , thisArg ] ), 23.1.3.6.
  * @builtin Array.prototype.every
+ * @fast
  */
 function ArrayPrototypeEvery(this: Value, callbackfn: Value, thisArg?: Value): boolean {
   return EveryOrSome(ToObject(this), callbackfn, thisArg, true);
@@ -523,6 +587,7 @@ function ArrayPrototypeEvery(this: Value, callbackfn: Value, thisArg?: Value): b
 /**
  * Array.prototype.some ( callbackfn [ , thisArg ] ), 23.1.3.29.
  * @builtin Array.prototype.some
+ * @fast
  */
 function ArrayPrototypeSome(this: Value, callbackfn: Value, thisArg?: Value): boolean {
   return EveryOrSome(ToObject(this), callbackfn, thisArg, false);
@@ -531,6 +596,7 @@ function ArrayPrototypeSome(this: Value, callbackfn: Value, thisArg?: Value): bo
 /**
  * Array.prototype.filter ( callbackfn [ , thisArg ] ), 23.1.3.8.
  * @builtin Array.prototype.filter
+ * @fast
  */
 function ArrayPrototypeFilter(this: Value, callbackfn: Value, thisArg?: Value): Obj {
   const o: Obj = ToObject(this);
@@ -559,6 +625,7 @@ function ArrayPrototypeFilter(this: Value, callbackfn: Value, thisArg?: Value): 
  * array: initialValue by ArgumentCount (0162).
  * @builtin Array.prototype.reduce
  * @length 1
+ * @fast
  */
 function ArrayPrototypeReduce(this: Value, callbackfn: Value, initialValue?: Value): Value {
   const o: Obj = ToObject(this);

@@ -72,7 +72,9 @@ const ARRAY_FROM_INLINE: usize = 16;
 
 /// The flags word of a `PushResult` frame (`fast_return`'s condition).
 const PUSH_RESULT: i32 = Continuation::PushResult.to_flags();
-const EACH: i32 = Continuation::Each.to_flags();
+/// The flags word of an `Each` or `EachNative` frame, one with bit 3 added.
+const EACH_EITHER: i32 = Continuation::EachNative.to_flags();
+const _: () = assert!(Continuation::Each.to_flags() | 8 == EACH_EITHER);
 
 /// The intrinsics `Exec::pure_leaf` runs, by name. The hot loop calls it only for these,
 /// so the others decline without a call (a test checks the list against `pure_leaf`).
@@ -1694,77 +1696,101 @@ impl Exec<'_> {
                         fast::RETURN | fast::RETURN_UNDEF => {
                             // `fast_return`: into a PushResult frame of a bytecode caller.
                             let flags = ld(b, slot!(hp + frame::FLAGS)).as_int().unwrap_or(0);
-                            if flags != PUSH_RESULT {
-                                if flags != EACH {
-                                    break Exit::Decline(op);
+                            if flags == PUSH_RESULT {
+                                let int = |v: Value| v.as_int().unwrap_or(0) as u32;
+                                let h: [u8; 48] = window(b, slot!(hp));
+                                let hv = |k: u32| {
+                                    let k = 8 * k as usize;
+                                    Value::from_raw(u64::from_le_bytes(
+                                        h[k..k + 8].try_into().unwrap(),
+                                    ))
+                                };
+                                let (prev_bp, prev_hp, ret_pc) = (
+                                    int(hv(frame::PREV_BP)),
+                                    int(hv(frame::PREV_HP)),
+                                    int(hv(frame::RET_PC)),
+                                );
+                                // A native caller (D1631) is entered as `load_frame` enters it
+                                // (`code_len` 0, so the next round goes to `native_step`).
+                                let native = int(ld(b, slot!(prev_hp + frame::FLAGS))) as i32
+                                    & frame::FLAG_NATIVE
+                                    != 0;
+                                let f = ld(b, slot!(prev_bp)).as_object().expect("frame callee");
+                                let t = ld32(b, f.offset() + Object::ELEMENTS.offset);
+                                let code_len = ld32(b, t + FuncTemplate::CODE_LEN.offset);
+                                let consts_ref = ld32(b, t + FuncTemplate::CONSTS.offset);
+                                let v = if op == fast::RETURN {
+                                    top!(0)
+                                } else {
+                                    Value::UNDEFINED
+                                };
+                                let o = if op == fast::RETURN {
+                                    Op::Return
+                                } else {
+                                    Op::ReturnUndef
+                                };
+                                fuel -= OPS[o as usize].cost.fuel() as i64;
+                                // pop_frame, push the result.
+                                st(b, slot!(bp), v);
+                                sp = bp + 1;
+                                self.bp = prev_bp;
+                                self.hp = prev_hp;
+                                self.lp = prev_hp + HEADER;
+                                self.template = t;
+                                self.code = FuncTemplate::DATA.at(t, 0);
+                                self.code_len = code_len;
+                                self.consts = consts_ref;
+                                self.native = 0;
+                                if native {
+                                    // FLAGS, NATIVE and FAST in one word (D2448).
+                                    const _: () = assert!(
+                                        FuncTemplate::NATIVE.offset
+                                            == FuncTemplate::FLAGS.offset + 2
+                                    );
+                                    self.native =
+                                        (ld32(b, t + FuncTemplate::FLAGS.offset) >> 16 & 0xFF) + 1;
+                                    self.code_len = 0;
                                 }
+                                code = self.code;
+                                end = code + self.code_len;
+                                (bp, hp, lp) = (prev_bp, prev_hp, prev_hp + HEADER);
+                                consts = consts_ref;
+                                ip = code + ret_pc;
+                                // A return is a safepoint.
+                                if collect {
+                                    break Exit::Safepoint;
+                                }
+                            } else if flags | 8 == EACH_EITHER {
+                                core::hint::cold_path();
                                 let (v, o) = if op == fast::RETURN {
                                     (top!(0), Op::Return)
                                 } else {
                                     (Value::UNDEFINED, Op::ReturnUndef)
                                 };
                                 fuel -= OPS[o as usize].cost.fuel() as i64;
-                                break Exit::Each(v);
-                            }
-                            let int = |v: Value| v.as_int().unwrap_or(0) as u32;
-                            let h: [u8; 48] = window(b, slot!(hp));
-                            let hv = |k: u32| {
-                                let k = 8 * k as usize;
-                                Value::from_raw(u64::from_le_bytes(h[k..k + 8].try_into().unwrap()))
-                            };
-                            let (prev_bp, prev_hp, ret_pc) = (
-                                int(hv(frame::PREV_BP)),
-                                int(hv(frame::PREV_HP)),
-                                int(hv(frame::RET_PC)),
-                            );
-                            // A native caller (D1631) is entered as `load_frame` enters it
-                            // (`code_len` 0, so the next round goes to `native_step`).
-                            let native = int(ld(b, slot!(prev_hp + frame::FLAGS))) as i32
-                                & frame::FLAG_NATIVE
-                                != 0;
-                            let f = ld(b, slot!(prev_bp)).as_object().expect("frame callee");
-                            let t = ld32(b, f.offset() + Object::ELEMENTS.offset);
-                            let code_len = ld32(b, t + FuncTemplate::CODE_LEN.offset);
-                            let consts_ref = ld32(b, t + FuncTemplate::CONSTS.offset);
-                            let v = if op == fast::RETURN {
-                                top!(0)
+                                // The next element in the same frame (each.rs), else
+                                // `each_return`.
+                                let Some(n) = super::each::hot_step(b, vals, bp, v) else {
+                                    break Exit::Each(v);
+                                };
+                                if let Some((a, i, sv)) = n.store
+                                    && !heap_call!(self.each_store(a, i, sv))
+                                {
+                                    break Exit::Each(v);
+                                }
+                                let locals = u16::from_le_bytes(window(
+                                    b,
+                                    self.template + FuncTemplate::LOCALS.offset,
+                                )) as u32;
+                                sp = super::each::hot_enter(b, vals, (bp, hp, lp, locals), &n);
+                                fuel -= super::native::CALL_FUEL;
+                                ip = code;
+                                // Frame entry is a safepoint.
+                                if collect {
+                                    break Exit::Safepoint;
+                                }
                             } else {
-                                Value::UNDEFINED
-                            };
-                            let o = if op == fast::RETURN {
-                                Op::Return
-                            } else {
-                                Op::ReturnUndef
-                            };
-                            fuel -= OPS[o as usize].cost.fuel() as i64;
-                            // pop_frame, push the result.
-                            st(b, slot!(bp), v);
-                            sp = bp + 1;
-                            self.bp = prev_bp;
-                            self.hp = prev_hp;
-                            self.lp = prev_hp + HEADER;
-                            self.template = t;
-                            self.code = FuncTemplate::DATA.at(t, 0);
-                            self.code_len = code_len;
-                            self.consts = consts_ref;
-                            self.native = 0;
-                            if native {
-                                // FLAGS, NATIVE and FAST in one word (D2448).
-                                const _: () = assert!(
-                                    FuncTemplate::NATIVE.offset == FuncTemplate::FLAGS.offset + 2
-                                );
-                                self.native =
-                                    (ld32(b, t + FuncTemplate::FLAGS.offset) >> 16 & 0xFF) + 1;
-                                self.code_len = 0;
-                            }
-                            code = self.code;
-                            end = code + self.code_len;
-                            (bp, hp, lp) = (prev_bp, prev_hp, prev_hp + HEADER);
-                            consts = consts_ref;
-                            ip = code + ret_pc;
-                            // A return is a safepoint.
-                            if collect {
-                                break Exit::Safepoint;
+                                break Exit::Decline(op);
                             }
                         }
                         // The short forms (D2443), after the others and one arm

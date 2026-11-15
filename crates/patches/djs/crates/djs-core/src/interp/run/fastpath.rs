@@ -56,6 +56,15 @@ impl Exec<'_> {
             self.fuel -= info.cost.fuel() as i64;
             return true;
         }
+        // A callback loop over an Array (forEach, map, ...): straight into the loop
+        // (each.rs), without the builtin's frames.
+        if let Some(mode) =
+            crate::builtins::fast::each_mode(self.heap.arena().get(t, FuncTemplate::FAST) as usize)
+            && self.each_call(base, argc, mode, next)
+        {
+            self.fuel -= info.cost.fuel() as i64;
+            return true;
+        }
         // `arr.push(x)`, the commonest @fast call, straight to the heap's append (0231):
         // what `try_fast_call` and its `array_push` entry do, without the generic steps.
         if argc == 1

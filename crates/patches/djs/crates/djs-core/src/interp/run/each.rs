@@ -17,6 +17,7 @@ use crate::heap::cells::{Object, ValueArray};
 
 const EACH_DENSE: u16 = super::intrinsics::id("EachDense");
 const REGEXP_CREATE: u16 = super::intrinsics::id("RegExpCreate");
+pub(super) const EACH_REST: u16 = super::intrinsics::id("EachRest");
 
 /// The loop state below the callback's frame.
 const STATE: u32 = 8;
@@ -55,7 +56,7 @@ impl Exec<'_> {
         {
             self.ensure(base + STATE)?;
             self.sp = base + STATE;
-            return self.each_enter(base, k, x, next);
+            return self.each_enter(base, k, x, next, Continuation::Each);
         }
         self.sp = base;
         self.push(k);
@@ -272,8 +273,9 @@ impl Exec<'_> {
     }
 
     /// Enters the callback's frame for element `k` (`x`), with the current frame (the
-    /// builtin's) as its caller resuming at `ret_pc`. `sp` is `base + STATE`.
-    fn each_enter(&mut self, base: u32, k: u32, x: Value, ret_pc: u32) -> Step {
+    /// builtin's, or for `EachNative` the builtin's caller) as its caller resuming at
+    /// `ret_pc`. `sp` is `base + STATE`.
+    fn each_enter(&mut self, base: u32, k: u32, x: Value, ret_pc: u32, cont: Continuation) -> Step {
         let kv = conv::number(f64::from(k));
         self.set(base + K, kv);
         self.set(base + KVALUE, x);
@@ -292,17 +294,24 @@ impl Exec<'_> {
             self.set(cb + 2 + i, args[i as usize]);
         }
         self.sp = cb + 2 + argc;
-        self.call(cb, argc, Continuation::Each, ret_pc)
+        self.call(cb, argc, cont, ret_pc)
     }
 
     /// With the callback's frame popped (the builtin's current at its return pc): enters
-    /// it for element `next`, or gives the builtin `next`, where its own loop goes on.
-    fn each_next(&mut self, base: u32, next: u32) -> Option<Status> {
+    /// it for element `next`, or gives the builtin `next`, where its own loop goes on
+    /// (for `EachNative`, the call its result at the end, else `each_rest`).
+    fn each_next(&mut self, base: u32, next: u32, cont: Continuation) -> Option<Status> {
         if let Some(x) = self.each_element(base, next) {
-            return match self.each_enter(base, next, x, self.pc) {
+            return match self.each_enter(base, next, x, self.pc, cont) {
                 Ok(st) => st,
                 Err(f) => self.each_throw(f),
             };
+        }
+        if cont == Continuation::EachNative {
+            if f64::from(next) >= self.get(base + LEN).as_number().unwrap_or(0.0) {
+                return self.each_done(base, None);
+            }
+            return self.each_rest(base, next);
         }
         self.each_finish(base, f64::from(next));
         None
@@ -337,6 +346,7 @@ impl Exec<'_> {
     #[inline(never)]
     fn each_leave(&mut self, v: Value) -> Option<Status> {
         let base = self.bp - STATE;
+        let cont = Continuation::from_flags(self.header_int(frame::FLAGS) as i32);
         let mode = self.get(base + MODE).as_int().unwrap_or(FOR_EACH);
         let k = self.each_k(base);
         let stop = if mode == FOR_EACH {
@@ -350,6 +360,7 @@ impl Exec<'_> {
                 self.pop_frame();
                 return match r {
                     Err(f) => self.each_throw(f),
+                    _ if cont == Continuation::EachNative => self.each_done(base, Some(k)),
                     _ => {
                         self.each_finish(base, -1.0 - f64::from(k));
                         None
@@ -362,7 +373,7 @@ impl Exec<'_> {
         let x = self.each_element(base, next);
         let (Some(x), true) = (x, self.get(self.bp) == self.get(base + F)) else {
             self.pop_frame();
-            return self.each_next(base, next);
+            return self.each_next(base, next, cont);
         };
         let kv = i32::try_from(next).map_or_else(|_| conv::number(f64::from(next)), Value::int);
         self.set(base + K, kv);
@@ -397,75 +408,211 @@ impl Exec<'_> {
         None
     }
 
+    /// `hot_step` and `hot_enter` for `each_return`, with the store through the heap.
     #[inline(never)]
     pub(super) fn each_again(&mut self, v: Value) -> Option<u32> {
         let (bp, hp, lp) = (self.bp, self.hp, self.lp);
-        let base = bp - STATE;
         let vals = ValueArray::VALUES.at(self.stack, 0);
-        let slot = |i: u32| vals + 8 * i;
-        let b = self.heap.arena().bytes();
-        let w: [u8; 8 * (STATE as usize + 1)] = window(b, slot(base));
-        let get = |i: u32| {
-            let i = 8 * i as usize;
-            Value::from_raw(u64::from_le_bytes(w[i..i + 8].try_into().unwrap()))
-        };
-        if get(STATE) != get(F) {
+        let n = hot_step(self.heap.arena().bytes(), vals, bp, v)?;
+        if let Some((a, i, sv)) = n.store
+            && !self.each_store(a, i, sv)
+        {
             return None;
-        }
-        let mode = get(MODE).as_int()?;
-        let k = get(K).as_int()?;
-        let store = match mode {
-            FOR_EACH | REDUCE => None,
-            MAP => Some(v),
-            _ => match (mode, v.as_bool()?) {
-                (SOME | FIND_INDEX | FIND, false) | (EVERY, true) | (FILTER, false) => None,
-                (FILTER, true) => Some(get(KVALUE)),
-                _ => return None,
-            },
-        };
-        let next = k.checked_add(1)?;
-        let len = get(LEN);
-        if !len.as_int().map_or_else(
-            || len.as_number().is_some_and(|n| f64::from(next) < n),
-            |n| next < n,
-        ) {
-            return None;
-        }
-        let o = get(O);
-        let el = ld32(b, o.as_object()?.offset() + Object::ELEMENTS.offset);
-        let next = next as u32;
-        if el == 0 || next >= ld32(b, el + ValueArray::LEN.offset) {
-            return None;
-        }
-        let x = ld(b, ValueArray::VALUES.at(el, next));
-        if x.is_hole() {
-            return None;
-        }
-        if let Some(sv) = store {
-            let a = get(A).as_object()?;
-            let i = match mode {
-                MAP => k as u32,
-                _ => self.heap.array_length(a),
-            };
-            if !matches!(self.heap.create_element_fast(a, i, sv), Ok(true)) {
-                return None;
-            }
         }
         let locals = self.locals();
-        let b = self.heap.arena_mut().hot_bytes();
-        let kv = Value::int(next as i32);
-        st(b, slot(base + K), kv);
-        st(b, slot(base + KVALUE), x);
-        if mode == REDUCE {
-            st(b, slot(base + THIS), v);
-            write_values(b, slot(bp + 2), &[v, x, kv, o]);
+        Some(hot_enter(
+            self.heap.arena_mut().hot_bytes(),
+            vals,
+            (bp, hp, lp, locals),
+            &n,
+        ))
+    }
+
+    /// The store of a step `hot_step` found (map at k, filter at the length of `a`,
+    /// `u32::MAX`): false, with nothing changed, when it needs the general path.
+    #[inline(never)]
+    pub(super) fn each_store(&mut self, a: Obj, i: u32, v: Value) -> bool {
+        let i = if i == u32::MAX {
+            self.heap.array_length(a)
         } else {
-            write_values(b, slot(bp + 2), &[x, kv, o]);
+            i
+        };
+        matches!(self.heap.create_element_fast(a, i, v), Ok(true))
+    }
+
+    /// A call at `base` (`F this a1 .. an`, `argc` arguments) of forEach, map, filter,
+    /// some, every, find, findIndex or reduce (`mode`, from F's `@fast` entry) that the
+    /// interpreter runs itself: over an Array, with a callback `each_ok` takes and the
+    /// first element in the dense store, the loop state goes above F in place of the
+    /// arguments (`[F, mode, o, k, len, f, thisArg, a, kValue]`), without the builtin's
+    /// frames or a box, and the callback's frame (continuation `EachNative`) above it, as
+    /// `each_dense` makes it. True when entered; false, with nothing changed, for anything
+    /// the builtin does (the call then runs it).
+    pub(super) fn each_call(&mut self, base: u32, argc: u32, mode: i32, next: u32) -> bool {
+        let Some(o) = self
+            .get(base + 1)
+            .as_object()
+            .filter(|&o| self.is_class(o, ObjectClass::Array))
+        else {
+            return false;
+        };
+        let f = if argc >= 1 {
+            self.get(base + 2)
+        } else {
+            Value::UNDEFINED
+        };
+        let Some(fo) = f
+            .as_object()
+            .filter(|&fo| self.is_class(fo, ObjectClass::Function))
+        else {
+            return false;
+        };
+        let t = self.template_of(fo);
+        let th = super::hot::template_head(self.heap.arena().bytes(), t);
+        if th.flags & self.slow_call_flags != 0 {
+            return false;
         }
-        let argc = if mode == REDUCE { 4 } else { 3 };
-        fill(b, slot(bp + 2 + argc), hp - bp - 2 - argc, Value::UNDEFINED);
-        fill(b, slot(lp), locals, Value::UNDEFINED);
-        Some(lp + locals)
+        let arg1 = if argc >= 2 {
+            self.get(base + 3)
+        } else {
+            Value::UNDEFINED
+        };
+        let len = self.heap.array_length(o);
+        // Reduce without an initial value starts from element 0 (present: HasProperty
+        // and Get of it observe nothing).
+        let (k, this) = match (mode, argc) {
+            (REDUCE, 0 | 1) => match self.heap.get_element_fast(o, 0) {
+                Some(x) => (1, x),
+                None => return false,
+            },
+            _ => (0, arg1),
+        };
+        if k >= len
+            || ((mode == MAP || mode == FILTER)
+                && !crate::builtins::fast::plain_species(self.heap, o))
+        {
+            return false;
+        }
+        let Some(x) = self.heap.get_element_fast(o, k) else {
+            return false;
+        };
+        let state = base + 1;
+        let top = state + STATE + 2 + th.params.max(4) + HEADER + th.locals + th.stack;
+        if self.ensure(top).is_err() {
+            return false;
+        }
+        let a = match mode {
+            MAP | FILTER => {
+                let n = if mode == MAP { len } else { 0 };
+                let proto = realm::intrinsic_obj(self.heap, Intrinsic::ArrayProto);
+                match self.heap.new_array_with_length(Some(proto), n) {
+                    Ok(a) => Value::object(a),
+                    Err(e) => {
+                        if matches!(e, HeapError::HostOutOfMemory) {
+                            self.host_out_of_memory();
+                        }
+                        return false;
+                    }
+                }
+            }
+            _ => Value::UNDEFINED,
+        };
+        // The state and the callback's call (`each_enter`, with the frame pushed as
+        // `call` pushes a plain closure's) in one block.
+        let kv = Value::int(k as i32);
+        let (o, len) = (Value::object(o), conv::number(f64::from(len)));
+        let mut values = [Value::UNDEFINED; STATE as usize + 6];
+        values[..STATE as usize].copy_from_slice(&[Value::int(mode), o, kv, len, f, this, a, x]);
+        let argc = if mode == REDUCE {
+            values[STATE as usize..].copy_from_slice(&[f, Value::UNDEFINED, this, x, kv, o]);
+            4
+        } else {
+            values[STATE as usize..STATE as usize + 5].copy_from_slice(&[f, this, x, kv, o]);
+            3
+        };
+        let n = STATE + 2 + argc;
+        let vals = ValueArray::VALUES.at(self.stack, 0);
+        write_values(
+            self.heap.arena_mut().hot_bytes(),
+            vals + 8 * state,
+            &values[..n as usize],
+        );
+        self.fuel -= super::native::CALL_FUEL;
+        self.sp = state + n;
+        self.push_frame_head(
+            t,
+            &th,
+            state + STATE,
+            argc,
+            Continuation::EachNative,
+            next,
+            None,
+        );
+        true
+    }
+
+    /// The end of a loop entered at the call (`EachNative`, the callback's frame
+    /// popped): the call's result in place of F, from the state at `base` and the k
+    /// whose callback's result decided the search (`None`: all elements went by).
+    fn each_done(&mut self, base: u32, decided: Option<u32>) -> Option<Status> {
+        let r = match self.get(base + MODE).as_int() {
+            Some(MAP | FILTER) => self.get(base + A),
+            Some(SOME) => Value::bool(decided.is_some()),
+            Some(EVERY) => Value::bool(decided.is_none()),
+            Some(FIND) if decided.is_some() => self.get(base + KVALUE),
+            Some(FIND_INDEX) => decided.map_or(Value::int(-1), |k| conv::number(f64::from(k))),
+            Some(REDUCE) => self.get(base + THIS),
+            _ => Value::UNDEFINED,
+        };
+        self.sp = base - 1;
+        self.push(r);
+        // A return is a safepoint (as in `do_return`).
+        self.safepoint();
+        None
+    }
+
+    /// A loop entered at the call (`EachNative`) that the dense store no longer serves
+    /// at k (a hole, a shorter or non-dense array): the builtin's own loop from k, as
+    /// %EachRest(mode, o, k, len, f, thisArg, a) with `this` F (the stack trace's frame
+    /// of the builtin), called from the caller in place of the call.
+    fn each_rest(&mut self, base: u32, k: u32) -> Option<Status> {
+        let f = self.get(base - 1);
+        let rest = realm::installed_intrinsic(self.heap, EACH_REST);
+        let state: [Value; 7] = core::array::from_fn(|i| self.get(base + i as u32));
+        self.set(base - 1, rest);
+        self.set(base, f);
+        for (i, v) in state.into_iter().enumerate() {
+            let v = if i as u32 == K {
+                conv::number(f64::from(k))
+            } else {
+                v
+            };
+            self.set(base + 1 + i as u32, v);
+        }
+        self.sp = base + 8;
+        match self.call(base - 1, 7, Continuation::PushResult, self.pc) {
+            Ok(st) => st,
+            Err(f) => self.each_throw(f),
+        }
+    }
+
+    /// The builtin whose loop the frame at `bp` (callee `f`, continuation `cont`) runs
+    /// without a frame of the builtin's: an `EachNative` callback's, or %EachRest's (in
+    /// the prelude) `this`.
+    pub(super) fn each_builtin(
+        &self,
+        f: Obj,
+        cont: Continuation,
+        bp: u32,
+        in_prelude: bool,
+    ) -> Option<Obj> {
+        if cont == Continuation::EachNative {
+            return self.get(bp - STATE - 1).as_object();
+        }
+        if in_prelude && Value::object(f) == realm::installed_intrinsic(self.heap, EACH_REST) {
+            return self.get(bp + 1).as_object();
+        }
+        None
     }
 
     /// The loop's current k.
@@ -506,7 +653,9 @@ impl Exec<'_> {
             FIND => (truthy, truthy),
             _ => (false, false),
         };
-        if !store {
+        // A loop entered at the call (`each_call`) keeps find's element and reduce's
+        // accumulator in its state, without a box.
+        if !store || (matches!(mode, FIND | REDUCE) && self.get(base + A).as_object().is_none()) {
             return Ok(stop);
         }
         let put = |ex: &mut Self| {
@@ -546,4 +695,102 @@ impl Exec<'_> {
         let exc = self.fault_value(f, Some(pc));
         self.throw_value(exc, self.call_site_key(pc))
     }
+}
+
+/// A step of the loop that its own frame takes (`each_again`, and run_hot's `return`
+/// arm): the callback of the frame at `bp` returned a result that did not decide the
+/// search, and the next element is present in the dense store.
+pub(super) struct HotStep {
+    k: u32,
+    x: Value,
+    o: Value,
+    /// Reduce's new accumulator (the callback's result).
+    acc: Option<Value>,
+    /// What the step stores in `a` (`each_store`).
+    pub(super) store: Option<(Obj, u32, Value)>,
+}
+
+/// The step of the callback of the frame at `bp` returning `v`, from the loop state
+/// below the frame, or `None` for anything `each_leave` does. Reads only.
+#[inline(always)]
+pub(super) fn hot_step(b: &[u8], vals: u32, bp: u32, v: Value) -> Option<HotStep> {
+    let w: [u8; 8 * (STATE as usize + 1)] = window(b, vals + 8 * (bp - STATE));
+    let get = |i: u32| {
+        let i = 8 * i as usize;
+        Value::from_raw(u64::from_le_bytes(w[i..i + 8].try_into().unwrap()))
+    };
+    // Only the callback's own frame is reused: an async callback's return replaces it
+    // by a builtin's (`tail_call_builtin`).
+    if get(STATE) != get(F) {
+        return None;
+    }
+    let mode = get(MODE).as_int()?;
+    let k = get(K).as_int()?;
+    let (store, acc) = match mode {
+        FOR_EACH => (None, None),
+        REDUCE => (None, Some(v)),
+        MAP => (Some((k as u32, v)), None),
+        _ => match (mode, v.as_bool()?) {
+            (SOME | FIND_INDEX | FIND, false) | (EVERY, true) | (FILTER, false) => (None, None),
+            (FILTER, true) => (Some((u32::MAX, get(KVALUE))), None),
+            _ => return None,
+        },
+    };
+    let next = k.checked_add(1)?;
+    let len = get(LEN);
+    if !len.as_int().map_or_else(
+        || len.as_number().is_some_and(|n| f64::from(next) < n),
+        |n| next < n,
+    ) {
+        return None;
+    }
+    let o = get(O);
+    let el = ld32(b, o.as_object()?.offset() + Object::ELEMENTS.offset);
+    let next = next as u32;
+    if el == 0 || next >= ld32(b, el + ValueArray::LEN.offset) {
+        return None;
+    }
+    let x = ld(b, ValueArray::VALUES.at(el, next));
+    if x.is_hole() {
+        return None;
+    }
+    let store = match store {
+        Some((i, sv)) => Some((get(A).as_object()?, i, sv)),
+        None => None,
+    };
+    Some(HotStep {
+        k: next,
+        x,
+        o,
+        acc,
+        store,
+    })
+}
+
+/// Writes the step into the frame at `bp` as `call` writes a new one (the arguments
+/// padded with undefined, undefined locals; the callee, `this` and the header stay)
+/// and into the loop state (k, KVALUE, reduce's accumulator). The frame's new `sp`.
+#[inline(always)]
+pub(super) fn hot_enter(
+    b: &mut [u8],
+    vals: u32,
+    (bp, hp, lp, locals): (u32, u32, u32, u32),
+    n: &HotStep,
+) -> u32 {
+    let slot = |i: u32| vals + 8 * i;
+    let base = bp - STATE;
+    let kv = Value::int(n.k as i32);
+    st(b, slot(base + K), kv);
+    st(b, slot(base + KVALUE), n.x);
+    let argc = if let Some(acc) = n.acc {
+        st(b, slot(base + THIS), acc);
+        write_values(b, slot(bp + 2), &[acc, n.x, kv, n.o]);
+        4
+    } else {
+        write_values(b, slot(bp + 2), &[n.x, kv, n.o]);
+        3
+    };
+    fill(b, slot(bp + 2 + argc), hp - bp - 2 - argc, Value::UNDEFINED);
+    fill(b, slot(lp), locals, Value::UNDEFINED);
+    lp + locals
 }

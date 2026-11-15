@@ -698,7 +698,10 @@ impl<'h> Exec<'h> {
             Continuation::DiscardResult => {}
             Continuation::Replace(slot) | Continuation::Retry(slot) => self.set(slot, p),
             // (`%EachDense` calls plain closures only.)
-            Continuation::Each | Continuation::GenStep | Continuation::GenNext => unreachable!(),
+            Continuation::Each
+            | Continuation::EachNative
+            | Continuation::GenStep
+            | Continuation::GenNext => unreachable!(),
             // `Vm::call` of an async host function: done at once (it must not run jobs,
             // which could collect); the next `run` drains the queue.
             Continuation::Entry => {
@@ -743,7 +746,7 @@ impl<'h> Exec<'h> {
         if cont.is_bottom() {
             return Ok(self.bottom_done(cont, Ok(v)));
         }
-        if cont == Continuation::Each {
+        if matches!(cont, Continuation::Each | Continuation::EachNative) {
             return Ok(self.each_return(v));
         }
         self.pop_frame();
@@ -763,6 +766,7 @@ impl<'h> Exec<'h> {
             Continuation::Entry
             | Continuation::Job
             | Continuation::Each
+            | Continuation::EachNative
             | Continuation::GenStep
             | Continuation::GenNext => {
                 unreachable!()

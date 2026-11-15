@@ -62,6 +62,10 @@ pub enum Continuation {
     /// state is in the intrinsic's arguments right below the frame, then the frame is
     /// entered again for the next element, or the loop's k goes to the caller.
     Each,
+    /// `Each` for a loop the interpreter entered at the builtin's call (`each_call`):
+    /// the builtin has no frame, its function is in the slot below the loop state, and
+    /// the loop's end gives the call its result.
+    EachNative,
     GenStep,
     /// A plain generator's frame entered by `g.next(v)` in place of %GeneratorPrototype%.next:
     /// the caller's `next this` stay below the frame, and a yield or return pushes the
@@ -85,6 +89,7 @@ impl Continuation {
             7 => Continuation::Each,
             8 => Continuation::GenStep,
             9 => Continuation::GenNext,
+            15 => Continuation::EachNative,
             _ => Continuation::Entry,
         }
     }
@@ -103,6 +108,8 @@ impl Continuation {
             Continuation::Each => 7,
             Continuation::GenStep => 8,
             Continuation::GenNext => 9,
+            // `Each` with bit 3 (run_hot's `return` arm checks both at once).
+            Continuation::EachNative => 15,
         }
     }
 

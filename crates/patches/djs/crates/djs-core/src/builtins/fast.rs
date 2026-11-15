@@ -108,6 +108,18 @@ const fn ctor(
 /// (interp/run/fastpath.rs, 0231; a test checks the index).
 pub(crate) const ARRAY_PUSH: usize = 21;
 pub(crate) const ARRAY_POP: usize = ARRAY_PUSH + 1;
+/// The entries of the callback loops the interpreter enters at the call (interp/run/
+/// each.rs `each_call`), in the order of their modes (`%EachDense`'s, builtins/
+/// intrinsics.d.ts): forEach, map, filter, some, every, find, findIndex, reduce.
+const EACH_FIRST: usize = ARRAY_POP + 1;
+const EACH_MODES: usize = 8;
+
+/// The `%EachDense` mode of the callback loop builtin with fast entry `i`.
+pub(crate) fn each_mode(i: usize) -> Option<i32> {
+    (EACH_FIRST..EACH_FIRST + EACH_MODES)
+        .contains(&i)
+        .then(|| (i - EACH_FIRST) as i32)
+}
 
 /// The entries that pay their bytes (D2310: the rule and the measurements of every twin).
 pub(crate) static FAST: &[FastFn] = &[
@@ -142,6 +154,15 @@ pub(crate) static FAST: &[FastFn] = &[
     // (Its index is ARRAY_PUSH: entries added above it move it.)
     f("ArrayPrototypePush", array_push),
     f("ArrayPrototypePop", array_pop),
+    // ---- callback loops: the interpreter runs them (EACH_FIRST, interp/run/each.rs) ----
+    f("ArrayPrototypeForEach", no_call),
+    f("ArrayPrototypeMap", no_call),
+    f("ArrayPrototypeFilter", no_call),
+    f("ArrayPrototypeSome", no_call),
+    f("ArrayPrototypeEvery", no_call),
+    f("ArrayPrototypeFind", no_call),
+    f("ArrayPrototypeFindIndex", no_call),
+    f("ArrayPrototypeReduce", no_call),
     f("ArrayPrototypeIndexOf", array_index_of),
     f("ArrayPrototypeIncludes", array_includes),
     f("ArrayPrototypeSlice", array_slice),
@@ -260,15 +281,27 @@ pub(crate) static FAST: &[FastFn] = &[
     // ---- generators: the interpreter enters the frame itself (interp/run/suspend.rs) ----
     f("GeneratorPrototypeNext", no_call),
     // ---- Error constructors: the interpreter records the stack (interp/run/fastpath.rs) ----
-    ctor("ErrorConstructor", no_call, |h, a| error_new(h, a, Intrinsic::ErrorProto)),
-    ctor("EvalErrorConstructor", no_call, |h, a| error_new(h, a, Intrinsic::EvalErrorProto)),
-    ctor("RangeErrorConstructor", no_call, |h, a| error_new(h, a, Intrinsic::RangeErrorProto)),
+    ctor("ErrorConstructor", no_call, |h, a| {
+        error_new(h, a, Intrinsic::ErrorProto)
+    }),
+    ctor("EvalErrorConstructor", no_call, |h, a| {
+        error_new(h, a, Intrinsic::EvalErrorProto)
+    }),
+    ctor("RangeErrorConstructor", no_call, |h, a| {
+        error_new(h, a, Intrinsic::RangeErrorProto)
+    }),
     ctor("ReferenceErrorConstructor", no_call, |h, a| {
         error_new(h, a, Intrinsic::ReferenceErrorProto)
     }),
-    ctor("SyntaxErrorConstructor", no_call, |h, a| error_new(h, a, Intrinsic::SyntaxErrorProto)),
-    ctor("TypeErrorConstructor", no_call, |h, a| error_new(h, a, Intrinsic::TypeErrorProto)),
-    ctor("URIErrorConstructor", no_call, |h, a| error_new(h, a, Intrinsic::UriErrorProto)),
+    ctor("SyntaxErrorConstructor", no_call, |h, a| {
+        error_new(h, a, Intrinsic::SyntaxErrorProto)
+    }),
+    ctor("TypeErrorConstructor", no_call, |h, a| {
+        error_new(h, a, Intrinsic::TypeErrorProto)
+    }),
+    ctor("URIErrorConstructor", no_call, |h, a| {
+        error_new(h, a, Intrinsic::UriErrorProto)
+    }),
     ctor("InternalErrorConstructor", no_call, |h, a| {
         error_new(h, a, Intrinsic::InternalErrorProto)
     }),

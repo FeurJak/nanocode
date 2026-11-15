@@ -167,6 +167,21 @@ impl Exec<'_> {
                 out.push_out((f, pc, flags & frame::FLAG_CONSTRUCT != 0));
             }
             let cont = Continuation::from_flags(flags);
+            // A callback loop the interpreter entered at the builtin's call (each.rs) has
+            // no frame of the builtin: the callback's frame and %EachRest's (whose `this`
+            // it is) show it, as its own frame would.
+            if (in_prelude || cont == Continuation::EachNative)
+                && let Some(builtin) = self.each_builtin(f, cont, bp, in_prelude)
+                && (out.len() as u32) < limit
+            {
+                let skipping = below.is_some();
+                if below == Some(builtin) {
+                    below = None;
+                }
+                if !skip_prelude && !skipping {
+                    out.push_out((builtin, 0, false));
+                }
+            }
             if cont == Continuation::GenNext
                 && below.is_none()
                 && (out.len() as u32) < limit
