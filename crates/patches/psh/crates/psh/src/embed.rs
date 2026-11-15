@@ -12,7 +12,8 @@
 use std::cell::RefCell;
 use std::io;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::task::{Context, Poll};
 
 use psh_classify::Category;
@@ -152,9 +153,10 @@ impl HostFile for SinkFile {
     }
 }
 
-/// Runs `command` as `psh -c SCRIPT` would, with the null device as stdin, on a new engine
-/// thread. `ended` is called on that thread with the status once the shell and what it
-/// held are gone, or with the panic that ended the thread.
+/// Runs `command` as `psh -c SCRIPT` would, with the null device as stdin, on the
+/// engine thread the runs share, or on a new one while that thread is busy. `ended` is
+/// called on that thread with the status once the shell and what it held are gone, or
+/// with the panic that ended the run.
 pub fn start(
     command: Command,
     ended: impl FnOnce(std::thread::Result<i32>) + Send + 'static,
@@ -162,8 +164,8 @@ pub fn start(
     let stdin = std::fs::File::open("/dev/null")?;
     let running = Running(Arc::default());
     let shared = running.clone();
-    engine_thread(move || {
-        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+    let run: Run = Box::new(move || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             let host = UnixHost::new(UnixConfig {
                 pid: Some(NO_PID),
                 ..UnixConfig::default()
@@ -203,8 +205,44 @@ pub fn start(
             let status = drive(&mut shell);
             shared.state().shell = None;
             status
-        }));
-        ended(run);
-    })?;
+        }))
+    });
+    let ended: Ended = Box::new(ended);
+    if ENGINE_BUSY.swap(true, Ordering::Acquire) {
+        engine_thread(move || ended(run()))?;
+        return Ok(running);
+    }
+    let sent = match ENGINE.get() {
+        Some(engine) => engine.send((run, ended)).map_err(|error| error.0),
+        None => {
+            let (sender, jobs) = mpsc::channel::<(Run, Ended)>();
+            if let Err(error) = engine_thread(move || serve(&jobs)) {
+                ENGINE_BUSY.store(false, Ordering::Release);
+                return Err(error);
+            }
+            ENGINE
+                .get_or_init(|| sender)
+                .send((run, ended))
+                .map_err(|error| error.0)
+        }
+    };
+    if let Err((run, ended)) = sent {
+        ENGINE_BUSY.store(false, Ordering::Release);
+        engine_thread(move || ended(run()))?;
+    }
     Ok(running)
+}
+
+type Run = Box<dyn FnOnce() -> std::thread::Result<i32> + Send>;
+type Ended = Box<dyn FnOnce(std::thread::Result<i32>) + Send>;
+
+static ENGINE: OnceLock<mpsc::Sender<(Run, Ended)>> = OnceLock::new();
+static ENGINE_BUSY: AtomicBool = AtomicBool::new(false);
+
+fn serve(jobs: &mpsc::Receiver<(Run, Ended)>) {
+    while let Ok((run, ended)) = jobs.recv() {
+        let status = run();
+        ENGINE_BUSY.store(false, Ordering::Release);
+        ended(status);
+    }
 }

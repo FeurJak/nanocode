@@ -118,6 +118,20 @@ impl Connection {
         self.io.write_all(bytes).await
     }
 
+    pub async fn write_all_vectored(
+        &mut self,
+        mut slices: &mut [io::IoSlice<'_>],
+    ) -> io::Result<()> {
+        while !slices.is_empty() {
+            let written = self.io.write_vectored(slices).await?;
+            if written == 0 {
+                return Err(io::ErrorKind::WriteZero.into());
+            }
+            io::IoSlice::advance_slices(&mut slices, written);
+        }
+        Ok(())
+    }
+
     pub async fn flush(&mut self) -> io::Result<()> {
         self.io.flush().await
     }

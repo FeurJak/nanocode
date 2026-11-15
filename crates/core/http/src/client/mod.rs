@@ -696,10 +696,12 @@ impl Payload {
                 if self.declared != Some(bytes.len() as u64) {
                     return Err(Error::body("body length differs from content-length"));
                 }
-                let mut message = Vec::with_capacity(head.len() + bytes.len());
-                message.extend_from_slice(head);
-                message.extend_from_slice(bytes);
-                connection.write_all(&message).await
+                connection
+                    .write_all_vectored(&mut [
+                        std::io::IoSlice::new(head),
+                        std::io::IoSlice::new(bytes),
+                    ])
+                    .await
             }
             (Ok(bytes), Encoding::Chunked) => {
                 let mut message = head.to_vec();

@@ -80,16 +80,16 @@ pub(crate) async fn run(
             let hedged = hedging
                 .race_when(
                     request.model().as_str(),
-                    open(
+                    Box::pin(open(
                         service,
                         request,
                         &encoded,
                         &mut connection.credentials,
                         turn_state.as_deref(),
                         true,
-                    ),
+                    )),
                     || {
-                        Some(async {
+                        Some(Box::pin(async {
                             let encoded = service.encode_request(
                                 None,
                                 generation,
@@ -106,7 +106,7 @@ pub(crate) async fn run(
                                 true,
                             )
                             .await
-                        })
+                        }))
                     },
                 )
                 .await;
@@ -115,14 +115,14 @@ pub(crate) async fn run(
         }
         _ => (
             HedgeOutcome::Unneeded,
-            open(
+            Box::pin(open(
                 service,
                 request,
                 &encoded,
                 &mut connection.credentials,
                 turn_state.as_deref(),
                 false,
-            )
+            ))
             .await?,
         ),
     };

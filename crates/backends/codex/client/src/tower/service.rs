@@ -343,8 +343,7 @@ impl ResponsesService {
         let mut active_request = Cow::Borrowed(request);
         let mut guard = AttemptGuard::new(connection, request, transport, started_at);
         let result = if matches!(transport, ResponsesTransport::WebSocket) {
-            self.run_websocket(&mut guard, &mut active_request, started_at)
-                .await
+            Box::pin(self.run_websocket(&mut guard, &mut active_request, started_at)).await
         } else {
             https::run(self, &mut guard, request, started_at).await
         }
@@ -615,7 +614,9 @@ impl ResponsesService {
             })
         };
         let hedged = hedging
-            .race_when(request.model().as_str(), primary, hedge)
+            .race_when(request.model().as_str(), Box::pin(primary), || {
+                hedge().map(Box::pin)
+            })
             .await;
         let unused = prepared.try_recv();
         match hedged.result? {
@@ -1266,7 +1267,7 @@ impl ResponsesService {
                     }
                     if matches!(transport, ResponsesTransport::WebSocket)
                         && connection.socket.is_none()
-                        && let Err(error) = service.connect(connection, &request).await
+                        && let Err(error) = Box::pin(service.connect(connection, &request)).await
                     {
                         if matches!(
                             error.responses_error(),

@@ -1,16 +1,26 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::value::RawValue;
 
 use super::ResponsesError;
 
-pub struct EncodedRequest(String);
+pub struct EncodedRequest(Arc<String>);
+
+#[cfg(not(target_family = "wasm"))]
+struct Shared(Arc<String>);
+
+#[cfg(not(target_family = "wasm"))]
+impl AsRef<[u8]> for Shared {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
 
 impl EncodedRequest {
     pub fn new<T: Serialize + ?Sized>(request: &T) -> Result<Self, ResponsesError> {
         serde_json::to_string(request)
-            .map(Self)
+            .map(|json| Self(Arc::new(json)))
             .map_err(ResponsesError::EncodeRequest)
     }
 
@@ -19,7 +29,7 @@ impl EncodedRequest {
     ) -> Result<Self, ResponsesError> {
         request
             .encode()
-            .map(Self)
+            .map(|json| Self(Arc::new(json)))
             .map_err(ResponsesError::EncodeRequest)
     }
 
@@ -28,9 +38,14 @@ impl EncodedRequest {
         &self.0
     }
 
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn body(&self) -> nanocode_bytes::Bytes {
+        nanocode_bytes::Bytes::from_owner(Shared(Arc::clone(&self.0)))
+    }
+
     #[must_use]
     pub fn into_string(self) -> String {
-        self.0
+        Arc::unwrap_or_clone(self.0)
     }
 }
 

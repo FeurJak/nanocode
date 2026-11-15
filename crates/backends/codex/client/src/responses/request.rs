@@ -957,29 +957,50 @@ pub(crate) struct ResponseCreate<'a> {
     provider_options: Option<crate::client::transport::gateway::VercelProviderOptions<'a>>,
 }
 
+struct FrameLength(usize);
+
+impl std::io::Write for FrameLength {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 impl<'a> ResponseCreate<'a> {
     pub(crate) fn encode(&self) -> Result<String, serde_json::Error> {
-        const INPUT: &str = "\"input\":[";
-        let frame = serde_json::to_string(self)?;
-        let at = frame
-            .find(INPUT)
+        const INPUT: &[u8] = b"\"input\":[";
+        let pieces = self.input.pieces()?;
+        let inserted = pieces
+            .iter()
+            .map(|piece| piece.len() + 1)
+            .sum::<usize>()
+            .saturating_sub(1);
+        let mut frame = FrameLength(0);
+        serde_json::to_writer(&mut frame, self)?;
+        let mut json = Vec::with_capacity(frame.0 + inserted);
+        serde_json::to_writer(&mut json, self)?;
+        let at = memchr::memmem::find(&json, INPUT)
             .map(|at| at + INPUT.len())
             .ok_or_else(|| {
                 <serde_json::Error as serde::ser::Error>::custom("a Responses request has no input")
             })?;
-        let pieces = self.input.pieces()?;
-        let mut json = String::with_capacity(
-            frame.len() + pieces.iter().map(|piece| piece.len() + 1).sum::<usize>(),
-        );
-        json.push_str(&frame[..at]);
+        let end = json.len();
+        json.resize(end + inserted, 0);
+        json.copy_within(at..end, at + inserted);
+        let mut cursor = at;
         for (index, piece) in pieces.iter().enumerate() {
             if index > 0 {
-                json.push(',');
+                json[cursor] = b',';
+                cursor += 1;
             }
-            json.push_str(piece);
+            json[cursor..cursor + piece.len()].copy_from_slice(piece.as_bytes());
+            cursor += piece.len();
         }
-        json.push_str(&frame[at..]);
-        Ok(json)
+        String::from_utf8(json).map_err(<serde_json::Error as serde::ser::Error>::custom)
     }
 
     #[must_use]

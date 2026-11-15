@@ -31,6 +31,7 @@ nanocode-digest.workspace = true
 nanocode-trace.workspace = true
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
+nanocode-bytes.workspace = true
 nanocode-io.workspace = true
 nanocode-tls.workspace = true
 nanocode-executor.workspace = true
