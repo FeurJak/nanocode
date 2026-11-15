@@ -42,6 +42,13 @@ pub struct Page {
     pub class: Cell<usize>,
     pub next: Cell<*mut Self>,
     pub prev: Cell<*mut Self>,
+    pub zero: Cell<bool>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Fill {
+    Any,
+    Zero(usize),
 }
 
 #[repr(C)]
@@ -127,6 +134,19 @@ impl Page {
             return bump as *mut u8;
         }
         null_mut()
+    }
+
+    #[inline]
+    pub fn take_filled(&self, fill: Fill) -> *mut u8 {
+        let zero = self.free.get().is_null() && self.zero.get();
+        let block = self.take();
+        if let Fill::Zero(bytes) = fill
+            && !zero
+            && !block.is_null()
+        {
+            unsafe { block.write_bytes(0, bytes) };
+        }
+        block
     }
 
     #[inline]

@@ -12,6 +12,8 @@ const PURGE_ADVICE: libc::c_int = libc::MADV_FREE_REUSABLE;
 #[cfg(not(target_vendor = "apple"))]
 const PURGE_ADVICE: libc::c_int = libc::MADV_DONTNEED;
 
+pub const PURGE_ZEROES: bool = cfg!(not(target_vendor = "apple"));
+
 #[cold]
 pub fn broken(what: &str) -> ! {
     let prefix = b"nanocode allocator invariant broken: ";

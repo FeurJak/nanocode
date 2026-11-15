@@ -7,8 +7,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use super::class::{BLOCK_ALIGN_BYTES, CLASS_BYTES, CLASS_SLICES, CLASSES, class_for, small_bytes};
 use super::os::{self, check};
 use super::segment::{
-    self, ABANDONED, Block, HEADER_SLICES, KIND_LARGE, OWNER_ABANDONED, Page, SLICE_BYTES, SLICES,
-    SLICES_FREE_ALL, Segment, find_run, page_of, segment_of, span_mask,
+    self, ABANDONED, Block, Fill, HEADER_SLICES, KIND_LARGE, OWNER_ABANDONED, Page, SLICE_BYTES,
+    SLICES, SLICES_FREE_ALL, Segment, find_run, page_of, segment_of, span_mask,
 };
 
 const PAGE_SCAN_MAX: usize = 8;
@@ -84,24 +84,29 @@ impl State {
                 return block;
             }
         }
-        unsafe { self.allocate_slow(class, exit) }
+        unsafe { self.allocate_slow(class, Fill::Any, exit) }
     }
 
     #[inline]
     pub unsafe fn allocate_zeroed(&self, layout: Layout, exit: Exit) -> *mut u8 {
-        if small_bytes(layout.size(), layout.align()).is_none() {
+        let Some(bytes) = small_bytes(layout.size(), layout.align()) else {
             let (pointer, contents) =
                 unsafe { segment::large_allocate_with(layout.size(), layout.align()) };
             if !pointer.is_null() && contents == segment::Contents::Dirty {
                 unsafe { pointer.write_bytes(0, layout.size()) };
             }
             return pointer;
+        };
+        let class = class_for(bytes);
+        let fill = Fill::Zero(layout.size());
+        let page = self.heads[class].get();
+        if !page.is_null() {
+            let block = unsafe { (*page).take_filled(fill) };
+            if !block.is_null() {
+                return block;
+            }
         }
-        let pointer = unsafe { self.allocate(layout, exit) };
-        if !pointer.is_null() {
-            unsafe { pointer.write_bytes(0, layout.size()) };
-        }
-        pointer
+        unsafe { self.allocate_slow(class, fill, exit) }
     }
 
     #[inline]
@@ -164,7 +169,7 @@ impl State {
     }
 
     #[cold]
-    unsafe fn allocate_slow(&self, class: usize, exit: Exit) -> *mut u8 {
+    unsafe fn allocate_slow(&self, class: usize, fill: Fill, exit: Exit) -> *mut u8 {
         if self.id.get() == 0 {
             self.start(exit);
         }
@@ -180,7 +185,7 @@ impl State {
             }
             unsafe {
                 (*page).collect();
-                let block = (*page).take();
+                let block = (*page).take_filled(fill);
                 if !block.is_null() {
                     return block;
                 }
@@ -197,7 +202,7 @@ impl State {
         }
         unsafe {
             self.push_front(page);
-            (*page).take()
+            (*page).take_filled(fill)
         }
     }
 
@@ -273,6 +278,7 @@ impl State {
             page.class.set(class);
             page.next.set(null_mut());
             page.prev.set(null_mut());
+            page.zero.set(os::PURGE_ZEROES && dirty & mask == 0);
             self.pages_live.set(self.pages_live.get() + 1);
             if seg.free_slices.get() == 0 {
                 self.unlink_segment(segment);

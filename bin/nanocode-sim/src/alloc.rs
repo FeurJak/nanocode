@@ -34,16 +34,18 @@ pub enum AllocMutation {
     Scribble,
     DropAlign,
     OversizeRequest,
+    DropZero,
 }
 
 impl AllocMutation {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::None,
         Self::OverstateSize,
         Self::ForgetFree,
         Self::Scribble,
         Self::DropAlign,
         Self::OversizeRequest,
+        Self::DropZero,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -60,6 +62,7 @@ impl AllocMutation {
             Self::Scribble => "scribble",
             Self::DropAlign => "drop_align",
             Self::OversizeRequest => "oversize_request",
+            Self::DropZero => "drop_zero",
         }
     }
 
@@ -297,13 +300,29 @@ impl World {
         } else {
             layout
         };
-        let Some(allocation) = self.locals[thread].allocate(requested) else {
+        let zeroed = self.rng.draw().is_multiple_of(2);
+        let allocated = if zeroed && self.mutation != AllocMutation::DropZero {
+            self.locals[thread].allocate_zeroed(requested)
+        } else {
+            self.locals[thread].allocate(requested)
+        };
+        let Some(allocation) = allocated else {
             return Err(format!(
                 "the allocator refused {} bytes aligned to {}",
                 requested.size(),
                 requested.align()
             ));
         };
+        if zeroed {
+            let bytes = allocation.bytes();
+            if let Some(at) = positions(bytes.len(), bytes.len()).find(|at| bytes[*at] != 0) {
+                let size = bytes.len();
+                self.rejected.push(allocation);
+                return Err(format!(
+                    "a zeroed allocation of {size} bytes holds a nonzero byte at {at}"
+                ));
+            }
+        }
         self.claim(allocation, thread, layout.align())
     }
 

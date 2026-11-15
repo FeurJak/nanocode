@@ -82,6 +82,11 @@ impl Local {
         NonNull::new(pointer).map(|pointer| Allocation { pointer, layout })
     }
 
+    pub fn allocate_zeroed(&self, layout: Layout) -> Option<Allocation> {
+        let pointer = unsafe { self.state.allocate_zeroed(layout, local::Exit::Unwatched) };
+        NonNull::new(pointer).map(|pointer| Allocation { pointer, layout })
+    }
+
     pub fn deallocate(&self, allocation: Allocation) {
         unsafe { self.state.deallocate(allocation.pointer.as_ptr()) }
     }
