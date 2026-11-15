@@ -423,7 +423,11 @@ impl Builder {
         // Everything the setup left is old from now on: collections during calls leave it
         // alone.
         vm.seal().map_err(oom)?;
-        Ok(vm.image().to_vec())
+        if cfg!(target_arch = "wasm32") {
+            return Ok(vm.image().to_vec());
+        }
+        vm.image();
+        Ok(vm.take_heap())
     }
 }
 
