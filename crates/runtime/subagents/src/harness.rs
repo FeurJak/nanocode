@@ -13,6 +13,7 @@ use super::{
 use nanocode_agent_core::input::Prompt;
 use nanocode_agent_core::{
     Agent, NanocodeError, Result as AgentResult, SessionCheckpoint, TurnControl, TurnResult,
+    TurnUsage,
 };
 use nanocode_sync::{mpsc, oneshot};
 use nanocode_trace::Instrument;
@@ -1035,10 +1036,49 @@ impl Harness {
     }
 
     async fn turn_finished(&mut self, result: Result<AgentResult<TurnResult>, TaskError>) {
-        self.active = None;
+        let active = self.active.take();
+        if let (Some(active), Ok(Ok(finished))) = (active, &result)
+            && self.remind(active, finished.usage.clone()).await
+        {
+            return;
+        }
         self.publish_turn_result(result).await;
 
         self.start_pending(None).await;
+    }
+
+    async fn remind(&mut self, active: ActiveTurn, usage: Option<TurnUsage>) -> bool {
+        let (Some(registry), Some(agent)) = (self.registry.upgrade(), self.agent.as_ref()) else {
+            return false;
+        };
+        let Some(revision) = registry
+            .remind_resumed_turn(&self.root_session_id, self.id, usage)
+            .await
+        else {
+            return false;
+        };
+        let prompt = Prompt::new(completion_reminder()).with_instruction_revision(revision);
+        let prompt = match &self.context {
+            Some(context) => context.prompt(prompt),
+            None => prompt,
+        };
+        match agent
+            .prompt(nanocode_agent_core::PromptRequest::new(prompt))
+            .await
+        {
+            Ok(turn) => {
+                self.active = Some(ActiveTurn {
+                    control: turn.control(),
+                    result: platform::spawn(turn.result()),
+                    _capacity: active._capacity,
+                });
+                true
+            }
+            Err(error) => {
+                nanocode_trace::warn!(id = %self.id, %error, "a resumed subagent turn could not be reminded to submit its result");
+                false
+            }
+        }
     }
 
     async fn publish_turn_result(&self, result: Result<AgentResult<TurnResult>, TaskError>) {

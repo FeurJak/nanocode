@@ -17,7 +17,7 @@ use nanocode_agent_core::usage::{UsdAmount, usd_number};
 use nanocode_agent_core::{
     Agent, AgentEvents, AgentHandle, AgentUsage, ExecutionPolicyDisposition, ModelSelection,
     NanocodeError, PromptRoute, ReasoningMode, Result as AgentResult, SessionCheckpoint,
-    SteerReceiptStatus, Thinking, TurnResult, WeakAgent,
+    SteerReceiptStatus, Thinking, TurnResult, TurnUsage, WeakAgent,
     events::{AgentEventKind, RunStatus},
 };
 use nanocode_durability_core::StoreError;
@@ -234,6 +234,7 @@ pub(super) struct ActiveTurn {
     pub(super) revision: u64,
     pub(super) stage: TurnStage,
     pub(super) interrupted: bool,
+    pub(super) resumed: bool,
 }
 
 pub(super) enum TurnStage {
@@ -6387,6 +6388,7 @@ impl Registry {
                         revision,
                         stage: TurnStage::Working,
                         interrupted: false,
+                        resumed: session.resume_attempts > 0,
                     });
                     session.last_used = last_used;
                     session.status = AgentStatus::Running;
@@ -6453,6 +6455,35 @@ impl Registry {
         self.changed();
     }
 
+    pub(super) async fn remind_resumed_turn(
+        &self,
+        root_session_id: &str,
+        id: AgentId,
+        usage: Option<TurnUsage>,
+    ) -> Option<u64> {
+        let root = root_session_id.to_owned();
+        self.state
+            .call(move |state| {
+                let session = state.scopes.get_mut(&root)?.sessions.get_mut(&id)?;
+                if matches!(session.status, AgentStatus::Closing | AgentStatus::Closed)
+                    || session.follow_up_output.is_some()
+                {
+                    return None;
+                }
+                let turn = session
+                    .turn
+                    .as_mut()
+                    .filter(|turn| turn.resumed && matches!(turn.stage, TurnStage::Working))?;
+                turn.resumed = false;
+                let revision = turn.revision;
+                if let Some(usage) = &usage {
+                    session.usage.record(usage);
+                }
+                Some(revision)
+            })
+            .await
+    }
+
     pub(super) async fn harness_turn_finished(
         self: &Arc<Self>,
         root_session_id: &str,
@@ -6511,8 +6542,11 @@ impl Registry {
                         Err(NanocodeError::TurnCancelled | NanocodeError::TurnStopped) => {
                             AgentStatus::Interrupted
                         }
-                        Err(error) => AgentStatus::Failed {
-                            error: error.to_string(),
+                        Err(error) => match submitted_output {
+                            Some(output) => complete_session(session, Some(output)),
+                            None => AgentStatus::Failed {
+                                error: error.to_string(),
+                            },
                         },
                     }
                 }
