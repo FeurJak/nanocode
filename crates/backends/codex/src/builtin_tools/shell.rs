@@ -67,14 +67,19 @@ impl Tool for ExecCommandHandler {
     {
         Box::pin(async move {
             let output: ToolResult = {
-                let arguments = input.decode_json::<ExecCommandArguments>()?;
-                if let Some((patch, directory)) = heredoc(&arguments.cmd) {
+                let mut arguments = input.decode_json::<ExecCommandArguments>()?;
+                let mut summary = String::new();
+                if let Some((patch, cd, rest)) = heredoc(&arguments.cmd) {
                     let base = self
                         .workspace
                         .join(arguments.workdir.as_deref().unwrap_or_default());
-                    let directory = base.join(directory.unwrap_or_default());
-                    return Ok(match self.patches.apply(patch, directory).await {
-                        Ok(summary) => shell_execution(&ExecCommandResult {
+                    let directory = base.join(cd.as_deref().unwrap_or_default());
+                    summary = match self.patches.apply(patch, directory.clone()).await {
+                        Ok(summary) => summary,
+                        Err(error) => return Ok(ToolOutput::error(error)),
+                    };
+                    if rest.is_empty() {
+                        return Ok(shell_execution(&ExecCommandResult {
                             chunk_id: None,
                             error: None,
                             exit_code: None,
@@ -84,9 +89,12 @@ impl Tool for ExecCommandHandler {
                             ),
                             session_id: None,
                             wall_time_seconds: 0.0,
-                        }),
-                        Err(error) => ToolOutput::error(error),
-                    });
+                        }));
+                    }
+                    if cd.is_some() {
+                        arguments.workdir = Some(directory.to_string_lossy().into_owned());
+                    }
+                    arguments.cmd = rest;
                 }
                 let (max_output_tokens, output_unit) =
                     output_limit(arguments.max_output_tokens, context);
@@ -101,7 +109,8 @@ impl Tool for ExecCommandHandler {
                 )
                 .with_output_unit(output_unit)
                 .from_caller(context.session_id());
-                let result = self.sessions.execute(command, &self.workspace).await;
+                let mut result = self.sessions.execute(command, &self.workspace).await;
+                result.output.insert_str(0, &summary);
                 Ok(shell_execution(&result))
             };
             output

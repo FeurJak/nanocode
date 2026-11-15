@@ -175,7 +175,7 @@ impl Patches {
     }
 }
 
-pub(crate) fn heredoc(script: &str) -> Option<(String, Option<String>)> {
+pub(crate) fn heredoc(script: &str) -> Option<(String, Option<String>, String)> {
     let script = script.trim_start();
     let (directory, invocation) = match cd_prefix(script) {
         Some((directory, rest)) => (Some(directory), rest),
@@ -198,12 +198,11 @@ pub(crate) fn heredoc(script: &str) -> Option<(String, Option<String>)> {
         }
         patch.push(line);
     }
-    lines.all(|line| line.trim().is_empty()).then(|| {
-        (
-            patch.join("\n").trim_end_matches('\n').to_owned(),
-            directory,
-        )
-    })
+    Some((
+        patch.join("\n").trim_end_matches('\n').to_owned(),
+        directory,
+        lines.collect::<Vec<_>>().join("\n").trim().to_owned(),
+    ))
 }
 
 fn cd_prefix(script: &str) -> Option<(String, &str)> {
