@@ -484,7 +484,6 @@ pub fn assign_missing_response_item_id(item: &mut ResponseItem) {
 
 struct RequestPrefix {
     cache_lineage: Box<str>,
-    instructions: Box<str>,
     items: std::sync::Arc<[ResponseItem]>,
 }
 
@@ -505,7 +504,11 @@ pub fn shared_request_prefix(
         nanocode_sync::SwapOption::const_empty();
     if let Some(last) = LAST.load().as_deref()
         && *last.cache_lineage == *cache_lineage
-        && *last.instructions == *instructions
+        && matches!(
+            last.items.get(1),
+            Some(ResponseItem::Message { content, .. })
+                if matches!(&content[..], [crate::client::ContentItem::InputText { text }] if **text == *instructions)
+        )
         && matches!(
             last.items.first(),
             Some(ResponseItem::AdditionalTools { tools: previous, .. }) if *previous == tools
@@ -520,7 +523,6 @@ pub fn shared_request_prefix(
     )?);
     LAST.store(Some(std::sync::Arc::new(RequestPrefix {
         cache_lineage: cache_lineage.into(),
-        instructions: instructions.into(),
         items: std::sync::Arc::clone(&items),
     })));
     Ok(items)

@@ -10,31 +10,61 @@ pub const DEFAULT_FUNCTION_NAMESPACE: &str = "functions";
 
 type EncodedItems = [std::sync::OnceLock<Option<Box<[Box<RawValue>]>>>; 16];
 
-type EncodedPrefix = Arc<EncodedItems>;
-
-fn encoded_prefix() -> EncodedPrefix {
-    Arc::new(std::array::from_fn(|_| std::sync::OnceLock::new()))
-}
+type PrefixItems = [std::sync::OnceLock<Option<Box<[Arc<str>]>>>; 16];
 
 struct SharedPrefix {
+    encoded: PrefixItems,
+    json: Box<[std::sync::OnceLock<Option<Arc<str>>>]>,
     prefix: Arc<[ResponseItem]>,
-    encoded: EncodedPrefix,
 }
 
+impl SharedPrefix {
+    fn new(prefix: Arc<[ResponseItem]>) -> Arc<Self> {
+        Arc::new(Self {
+            encoded: std::array::from_fn(|_| std::sync::OnceLock::new()),
+            json: prefix.iter().map(|_| std::sync::OnceLock::new()).collect(),
+            prefix,
+        })
+    }
+
+    fn json(&self, index: usize) -> Option<&Arc<str>> {
+        self.json[index]
+            .get_or_init(|| {
+                serde_json::to_string(&self.prefix[index])
+                    .ok()
+                    .map(Arc::from)
+            })
+            .as_ref()
+    }
+}
+
+static LAST_PREFIX: nanocode_sync::SwapOption<SharedPrefix> =
+    nanocode_sync::SwapOption::const_empty();
+
 fn shared_prefix(prefix: &Arc<[ResponseItem]>) -> Arc<SharedPrefix> {
-    static LAST: nanocode_sync::SwapOption<SharedPrefix> = nanocode_sync::SwapOption::const_empty();
-    if let Some(last) = LAST
+    if prefix.is_empty() {
+        return SharedPrefix::new(Arc::clone(prefix));
+    }
+    if let Some(last) = LAST_PREFIX
         .load_full()
         .filter(|last| Arc::ptr_eq(&last.prefix, prefix))
     {
         return last;
     }
-    let shared = Arc::new(SharedPrefix {
-        prefix: Arc::clone(prefix),
-        encoded: encoded_prefix(),
-    });
-    LAST.store(Some(Arc::clone(&shared)));
+    let shared = SharedPrefix::new(Arc::clone(prefix));
+    LAST_PREFIX.store(Some(Arc::clone(&shared)));
     shared
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn shared_prefix_json(prefix: &Arc<[ResponseItem]>) -> Option<Box<[Arc<str>]>> {
+    let shared = LAST_PREFIX
+        .load_full()
+        .filter(|last| Arc::ptr_eq(&last.prefix, prefix))?;
+    (0..prefix.len())
+        .map(|index| shared.json(index).cloned())
+        .collect()
 }
 
 #[derive(Clone)]
@@ -43,7 +73,7 @@ pub struct RequestProfile {
     thread_id: String,
     prompt_cache_key: String,
     prefix: Arc<[ResponseItem]>,
-    encoded_prefix: EncodedPrefix,
+    shared: Arc<SharedPrefix>,
     logical_turn: u64,
     retained_config: Option<RetainedRequestConfig>,
 }
@@ -65,11 +95,11 @@ impl RequestProfile {
         let session_id = session_id.into();
         let shared = shared_prefix(&prefix);
         Self {
+            shared,
             thread_id: session_id.clone(),
             session_id,
             prompt_cache_key: prompt_cache_key.into(),
             prefix,
-            encoded_prefix: Arc::clone(&shared.encoded),
             logical_turn: 0,
             retained_config: None,
         }
@@ -117,12 +147,12 @@ impl RequestProfile {
         Arc::clone(&self.prefix)
     }
 
-    fn encoded_prefix(&self, input: &RequestInput<'_>) -> Option<&[Box<RawValue>]> {
-        if !std::ptr::eq(input.input.first, &*self.prefix) {
+    fn encoded_prefix(&self, input: &RequestInput<'_>) -> Option<&[Arc<str>]> {
+        if !std::ptr::eq(input.input.first, &*self.shared.prefix) {
             return None;
         }
-        self.encoded_prefix[input.flags()]
-            .get_or_init(|| input.encode(&self.prefix))
+        self.shared.encoded[input.flags()]
+            .get_or_init(|| input.encode_prefix(&self.shared))
             .as_deref()
     }
 
@@ -135,8 +165,8 @@ impl RequestProfile {
         store_responses: bool,
     ) -> Self {
         self.prompt_cache_key = prompt_cache_key;
+        self.shared = SharedPrefix::new(Arc::clone(&prefix));
         self.prefix = prefix;
-        self.encoded_prefix = encoded_prefix();
         self.retained_config = Some(RetainedRequestConfig {
             model_id_prefix,
             reasoning_mode,
@@ -144,7 +174,6 @@ impl RequestProfile {
         });
         self
     }
-
 }
 
 #[derive(Clone, Default)]
@@ -619,7 +648,7 @@ struct RequestInput<'a> {
     reasoning_effort_updates: bool,
     custom_tools_as_functions: bool,
     top_level_tools: bool,
-    prefix: Option<&'a [Box<RawValue>]>,
+    prefix: Option<&'a [Arc<str>]>,
 }
 
 impl RequestInput<'_> {
@@ -640,6 +669,19 @@ impl RequestInput<'_> {
             .iter()
             .filter(|item| self.supports(item))
             .map(|item| to_raw_value(&self.element(item)).ok())
+            .collect()
+    }
+
+    fn encode_prefix(&self, shared: &SharedPrefix) -> Option<Box<[Arc<str>]>> {
+        shared
+            .prefix
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| self.supports(item))
+            .map(|(index, item)| match self.element(item).rewritten() {
+                Some(item) => serde_json::to_string(&item).ok().map(Arc::from),
+                None => shared.json(index).cloned(),
+            })
             .collect()
     }
 
@@ -703,7 +745,7 @@ impl<'a> RequestInput<'a> {
     fn pieces(&self) -> Result<Vec<Cow<'a, str>>, serde_json::Error> {
         let mut pieces = Vec::new();
         match self.prefix {
-            Some(prefix) => pieces.extend(prefix.iter().map(|item| Cow::Borrowed(item.get()))),
+            Some(prefix) => pieces.extend(prefix.iter().map(|item| Cow::Borrowed(&**item))),
             None => self.items(&mut pieces, self.input.first)?,
         }
         self.items(&mut pieces, self.input.second)?;
@@ -732,11 +774,8 @@ struct RequestResponseItem<'a> {
     custom_tools_as_functions: bool,
 }
 
-impl Serialize for RequestResponseItem<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
+impl RequestResponseItem<'_> {
+    fn rewritten(&self) -> Option<ResponseItem> {
         let function = self
             .custom_tools_as_functions
             .then(|| crate::client::transport::freeform::function_item(self.item))
@@ -753,9 +792,21 @@ impl Serialize for RequestResponseItem<'_> {
             if strip_image_detail {
                 item.strip_image_details();
             }
-            item.serialize(serializer)
+            Some(item)
         } else {
-            source.serialize(serializer)
+            function
+        }
+    }
+}
+
+impl Serialize for RequestResponseItem<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.rewritten() {
+            Some(item) => item.serialize(serializer),
+            None => self.item.serialize(serializer),
         }
     }
 }

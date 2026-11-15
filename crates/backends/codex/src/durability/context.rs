@@ -219,9 +219,14 @@ impl ContinuationCache {
         static LAST: nanocode_sync::SwapOption<(Arc<[ResponseItem]>, Vec<EncodedPayload>)> =
             nanocode_sync::SwapOption::const_empty();
         if !Arc::ptr_eq(&self.prefix, prefix) || self.prefix_log.len() != prefix.len() {
-            let encoded = match LAST.load_full().filter(|last| Arc::ptr_eq(&last.0, prefix)) {
-                Some(last) => last.1.clone(),
-                None => {
+            let shared = crate::client::responses::shared_prefix_json(prefix);
+            let encoded = match (
+                shared,
+                LAST.load_full().filter(|last| Arc::ptr_eq(&last.0, prefix)),
+            ) {
+                (Some(json), _) => json.into_iter().map(EncodedPayload::from_json).collect(),
+                (None, Some(last)) => last.1.clone(),
+                (None, None) => {
                     let encoded = prefix
                         .iter()
                         .map(EncodedPayload::encode)

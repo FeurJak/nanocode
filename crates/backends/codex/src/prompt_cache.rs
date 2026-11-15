@@ -119,15 +119,16 @@ fn prefix_key(model: Model, tools: &[ToolDefinition], instructions: &str) -> Res
 struct PrefixDigest {
     model: Model,
     tools: Vec<ToolDefinition>,
-    instructions: Box<str>,
+    instructions: [u8; 32],
     hex: Arc<str>,
 }
 
 fn prefix_digest(model: Model, tools: &[ToolDefinition], instructions: &str) -> Result<Arc<str>> {
     static LAST: SwapOption<PrefixDigest> = SwapOption::const_empty();
+    let instructions_digest = Sha256::digest(instructions.as_bytes());
     if let Some(last) = LAST.load().as_deref()
         && last.model == model
-        && *last.instructions == *instructions
+        && last.instructions == instructions_digest
         && last.tools == tools
     {
         return Ok(Arc::clone(&last.hex));
@@ -143,7 +144,7 @@ fn prefix_digest(model: Model, tools: &[ToolDefinition], instructions: &str) -> 
     LAST.store(Some(Arc::new(PrefixDigest {
         model,
         tools: tools.to_vec(),
-        instructions: instructions.into(),
+        instructions: instructions_digest,
         hex: Arc::clone(&hex),
     })));
     Ok(hex)
