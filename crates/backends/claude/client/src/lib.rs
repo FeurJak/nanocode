@@ -54,6 +54,8 @@ pub const MESSAGES_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub const MESSAGES_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
+pub const MESSAGES_HEAD_TIMEOUT: Duration = Duration::from_secs(600);
+
 const FAST_MODE_BETA: &str = "fast-mode-2026-02-01";
 const THINKING_BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
 const EFFORT_UPDATES_BETA: &str = "mid-conversation-output-config-2026-07-01";
@@ -1769,6 +1771,7 @@ impl ClaudeClient {
         nanocode_http::Client::builder()
             .connect_timeout(MESSAGES_CONNECT_TIMEOUT)
             .read_timeout(MESSAGES_STREAM_IDLE_TIMEOUT)
+            .head_timeout(MESSAGES_HEAD_TIMEOUT)
             .default_headers(nanocode_http::accept_encoding(
                 nanocode_http::header::HeaderMap::new(),
             ))
@@ -2313,7 +2316,10 @@ impl ClaudeClient {
                         subscription_wire::CLAUDE_CODE_SDK_VERSION.into(),
                     ),
                     ("x-stainless-retry-count", "0".into()),
-                    ("x-stainless-timeout", "600".into()),
+                    (
+                        "x-stainless-timeout",
+                        MESSAGES_HEAD_TIMEOUT.as_secs().to_string(),
+                    ),
                     ("x-stainless-os", identity.os()),
                     ("x-stainless-arch", identity.arch()),
                     (

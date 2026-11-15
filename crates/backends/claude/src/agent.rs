@@ -6163,14 +6163,15 @@ impl State {
                 max_attempts
             };
 
-            let stall = matches!(
-                &error,
-                ClaudeError::Transport(crate::transport::HttpError::Transport {
-                    timeout: true,
-                    unsent: false,
-                    ..
-                })
-            );
+            let stall = accepted
+                && matches!(
+                    &error,
+                    ClaudeError::Transport(crate::transport::HttpError::Transport {
+                        timeout: true,
+                        unsent: false,
+                        ..
+                    })
+                );
             let stalled_again = stall && stalled;
             stalled |= stall;
             let exhausted = if patient {

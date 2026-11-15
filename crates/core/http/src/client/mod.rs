@@ -74,6 +74,7 @@ struct Inner {
     timeout: Option<Duration>,
     connect_timeout: Option<Duration>,
     read_timeout: Option<Duration>,
+    head_timeout: Option<Duration>,
     proxies: bool,
     https_only: bool,
     resolved: Vec<(String, Vec<SocketAddr>)>,
@@ -89,6 +90,7 @@ pub struct ClientBuilder {
     timeout: Option<Duration>,
     connect_timeout: Option<Duration>,
     read_timeout: Option<Duration>,
+    head_timeout: Option<Duration>,
     proxies: bool,
     https_only: bool,
     resolved: Vec<(String, Vec<SocketAddr>)>,
@@ -118,6 +120,7 @@ impl ClientBuilder {
             timeout: None,
             connect_timeout: None,
             read_timeout: None,
+            head_timeout: None,
             proxies: true,
             https_only: false,
             resolved: Vec::new(),
@@ -140,6 +143,7 @@ impl ClientBuilder {
                 timeout: self.timeout,
                 connect_timeout: self.connect_timeout,
                 read_timeout: self.read_timeout,
+                head_timeout: self.head_timeout,
                 proxies: self.proxies,
                 https_only: self.https_only,
                 resolved: self.resolved,
@@ -182,6 +186,11 @@ impl ClientBuilder {
 
     pub const fn read_timeout(mut self, timeout: Duration) -> Self {
         self.read_timeout = Some(timeout);
+        self
+    }
+
+    pub const fn head_timeout(mut self, timeout: Duration) -> Self {
+        self.head_timeout = Some(timeout);
         self
     }
 
@@ -599,7 +608,7 @@ impl Client {
     ) -> std::result::Result<wire::ResponseHead, WireError> {
         loop {
             let read = connection.response_head();
-            let head = match self.inner.read_timeout {
+            let head = match self.inner.head_timeout.or(self.inner.read_timeout) {
                 Some(limit) => {
                     let limit = now() + limit;
                     let limit = deadline.map_or(limit, |deadline| deadline.min(limit));
