@@ -1190,6 +1190,7 @@ impl NativeToolRuntimeControl {
             .try_update(Ordering::AcqRel, Ordering::Acquire, |turn| {
                 Some(turn.saturating_add(1))
             });
+        self.code_mode.begin_turn();
         for (session, host) in self.remote() {
             host.begin_turn(&session);
         }

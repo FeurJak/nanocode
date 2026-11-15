@@ -218,6 +218,7 @@ async fn spawn_host() -> Result<EmbeddedHost, String> {
 struct CellRegistry {
     next_cell_id: u64,
     live_cells: BTreeMap<u64, Arc<LiveCell>>,
+    finished: BTreeMap<String, CellJournals>,
 }
 
 struct LiveCell {
@@ -563,6 +564,7 @@ impl CodeModeRuntime {
             cells: Arc::new(Atom::new(CellRegistry {
                 next_cell_id: 1,
                 live_cells: BTreeMap::new(),
+                finished: BTreeMap::new(),
             })),
             stored: Arc::default(),
             host: Arc::default(),
@@ -1226,11 +1228,23 @@ impl CodeModeRuntime {
     }
 
     async fn remove_and_join(&self, cell: &Arc<LiveCell>) {
-        match (&self.journals, &cell.record) {
-            (Some(journals), Some(record)) => journals.finished(record).await,
-            _ => cell.retire(),
-        }
+        let journals = match (&self.journals, &cell.record) {
+            (Some(journals), Some(record)) => {
+                journals.finished(record).await;
+                Some(journals)
+            }
+            _ => {
+                cell.retire();
+                None
+            }
+        };
         self.cells.update(|registry| {
+            if let Some(journals) = journals {
+                registry
+                    .finished
+                    .entry(cell.session_id.clone())
+                    .or_insert_with(|| journals.clone());
+            }
             if registry
                 .live_cells
                 .get(&cell.id)
@@ -1285,6 +1299,15 @@ impl CodeModeControl {
     pub fn settle_preempt(&self) {
         self.preempt_consumed
             .store(self.preempt.borrow().1, Ordering::Release);
+    }
+
+    pub fn begin_turn(&self) {
+        let finished = self
+            .cells
+            .update(|registry| std::mem::take(&mut registry.finished));
+        for (session_id, journals) in finished {
+            spawn(async move { journals.forget_finished(&session_id).await });
+        }
     }
 
     pub async fn detach_turn(
