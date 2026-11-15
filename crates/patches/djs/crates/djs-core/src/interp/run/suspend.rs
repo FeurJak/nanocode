@@ -264,9 +264,6 @@ impl Exec<'_> {
     /// a plain generator at its start or a yield: enters the saved frame with `GenNext`
     /// as %GeneratorResume would from the builtin, leaving `next this` below it.
     pub(super) fn gen_next_hit(&mut self, f: Obj, base: u32, argc: u32, next: u32) -> bool {
-        if Value::object(f) != realm::installed_intrinsic(self.heap, GENERATOR_NEXT) {
-            return false;
-        }
         let Some(g) = self
             .get(base + 1)
             .as_object()
@@ -274,16 +271,33 @@ impl Exec<'_> {
         else {
             return false;
         };
+        let value = if argc == 1 {
+            self.get(base + 2)
+        } else {
+            Value::UNDEFINED
+        };
+        let call = OPS[Op::Call as usize].cost.fuel() as i64;
+        let cap = self.heap.value_array_capacity(self.stack);
+        if let Some((top, cost)) = self.gen_enter_hot(
+            (base + 2, cap, value),
+            g,
+            Value::object(f),
+            (next, Continuation::GenNext),
+            (call, self.fuel),
+        ) {
+            self.sp = top;
+            self.fuel -= cost - call;
+            self.safepoint();
+            return true;
+        }
+        if Value::object(f) != realm::installed_intrinsic(self.heap, GENERATOR_NEXT) {
+            return false;
+        }
         let [state, saved, pc, hp_off, _, kind] = self.heap.object_slots(g, STATE);
         let (Some(GENERATOR), Some(state @ (START | SUSPENDED)), Some(arr)) =
             (kind.as_int(), state.as_int(), saved.as_internal())
         else {
             return false;
-        };
-        let value = if argc == 1 {
-            self.get(base + 2)
-        } else {
-            Value::UNDEFINED
         };
         let pc = pc.as_int().unwrap_or(0) as u32;
         let hp_off = hp_off.as_int().unwrap_or(0) as u32;
@@ -428,6 +442,19 @@ impl Exec<'_> {
         f: Value,
         fuel: i64,
     ) -> Option<(u32, i64)> {
+        let cost = OPS[Op::IterNextLoc as usize].cost.fuel() as i64;
+        self.gen_enter_hot((sp, cap, Value::UNDEFINED), g, f, (at, Continuation::GenStep), (cost, fuel))
+    }
+
+    #[inline(always)]
+    fn gen_enter_hot(
+        &mut self,
+        (sp, cap, value): (u32, u32, Value),
+        g: Obj,
+        f: Value,
+        (ret_pc, cont): (u32, Continuation),
+        (mut cost, fuel): (i64, i64),
+    ) -> Option<(u32, i64)> {
         let [state, saved, pc, hp_off, _, kind] = self.heap.object_slots(g, STATE);
         let (Some(GENERATOR), Some(state @ (START | SUSPENDED)), Some(arr)) =
             (kind.as_int(), state.as_int(), saved.as_internal())
@@ -454,16 +481,12 @@ impl Exec<'_> {
         let new_hp = sp + hp_off;
         st(b, slot(new_hp + frame::PREV_BP), Value::int(bp as i32));
         st(b, slot(new_hp + frame::PREV_HP), Value::int(hp as i32));
-        st(b, slot(new_hp + frame::RET_PC), Value::int(at as i32));
-        st(
-            b,
-            slot(new_hp + frame::FLAGS),
-            Value::int(Continuation::GenStep.to_flags()),
-        );
-        let mut cost = OPS[Op::IterNextLoc as usize].cost.fuel() as i64 + (len / 8) as i64;
+        st(b, slot(new_hp + frame::RET_PC), Value::int(ret_pc as i32));
+        st(b, slot(new_hp + frame::FLAGS), Value::int(cont.to_flags()));
+        cost += (len / 8) as i64;
         let mut top = sp + len;
         if state != START {
-            st(b, slot(top), Value::UNDEFINED);
+            st(b, slot(top), value);
             st(b, slot(top + 1), Value::FALSE);
             top += 2;
             let code = FuncTemplate::DATA.at(t, 0);
@@ -490,7 +513,9 @@ impl Exec<'_> {
                 }
             }
         }
-        self.heap.set_object_slot(g, STATE, Value::int(EXECUTING));
+        let at_state = Object::SLOTS.at(g.0, STATE);
+        st(b, at_state, Value::int(EXECUTING));
+        self.heap.arena_mut().wrote(at_state, 8);
         self.bp = sp;
         self.hp = new_hp;
         self.pc = pc;
