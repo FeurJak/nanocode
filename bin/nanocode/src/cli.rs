@@ -273,6 +273,10 @@ const SESSION: Group = Group::new(&[
         .long("subagents")
         .conflicts(&["no_subagents"])
         .help("Offer subagent tools to models that get the harness tools directly too (off for them by default)"),
+    Argument::flag("lenient_patches")
+        .long("lenient-patches")
+        .env("NANOCODE_LENIENT_PATCHES")
+        .help("Codex harness: apply_patch also matches hunks out of file order and lines that differ only in whitespace runs, and accepts a deleted file added again; Codex CLI rejects these (off by default)"),
 ]);
 
 const ATTEMPTS: Group = Group::named(
@@ -662,6 +666,7 @@ pub struct SessionArgs {
     pub codex_orchestration: Option<CodexOrchestrationArg>,
     pub no_subagents: bool,
     pub subagents: bool,
+    pub lenient_patches: bool,
     pub gateway: GatewayArgs,
     pub remote: RemoteArgs,
 }
@@ -726,6 +731,7 @@ impl SessionArgs {
                 .map(|index| CodexOrchestrationArg::ALL[index]),
             no_subagents: matches.flag("no_subagents"),
             subagents: matches.flag("subagents"),
+            lenient_patches: matches.flag("lenient_patches"),
             gateway: GatewayArgs::from_matches(matches),
             remote: RemoteArgs::from_matches(matches),
         }
@@ -763,6 +769,7 @@ impl SessionArgs {
             codex_orchestration: self.codex_orchestration.or(root.codex_orchestration),
             no_subagents: self.no_subagents || root.no_subagents,
             subagents: self.subagents || root.subagents,
+            lenient_patches: self.lenient_patches || root.lenient_patches,
             gateway: GatewayArgs {
                 gateway: self.gateway.gateway.or(root.gateway.gateway),
                 cloudflare_account: self

@@ -445,6 +445,7 @@ async fn prepare(
         let (store, archiver) = host::open_store(&home).await?;
         (Some(store), Some(archiver))
     };
+    nanocode::codex_tools::apply_patch::set_lenient_matching(args.lenient_patches);
     let runner_configs = host::runner_configs(&args.remote)?;
     let config = HostConfig {
         workspace,

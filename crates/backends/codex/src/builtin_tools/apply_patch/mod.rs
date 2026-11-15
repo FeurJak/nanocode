@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use nanocode_process_contracts::FileHost;
@@ -14,6 +15,12 @@ mod seek_sequence;
 mod streaming_parser;
 
 use parser::{Hunk, UpdateFileChunk, parse_patch};
+
+static LENIENT_MATCHING: AtomicBool = AtomicBool::new(false);
+
+pub fn set_lenient_matching(enabled: bool) {
+    LENIENT_MATCHING.store(enabled, Ordering::Relaxed);
+}
 
 #[cfg(not(target_family = "wasm"))]
 pub(crate) struct ApplyPatchHandler {
@@ -454,6 +461,7 @@ fn validate_unique_targets(
     mut resolve: impl FnMut(&Path) -> PathBuf,
 ) -> Result<(), String> {
     let mut targets = HashSet::new();
+    let mut deleted = HashSet::new();
     for hunk in hunks {
         let (source, destination) = match hunk {
             Hunk::AddFile { path, .. } | Hunk::DeleteFile { path } => (path, None),
@@ -462,8 +470,17 @@ fn validate_unique_targets(
             } => (path, move_path.as_deref()),
         };
 
+        if let Hunk::AddFile { .. } = hunk
+            && LENIENT_MATCHING.load(Ordering::Relaxed)
+            && deleted.remove(&resolve(source))
+        {
+            continue;
+        }
         for path in std::iter::once(source.as_path()).chain(destination) {
             let target = resolve(path);
+            if matches!(hunk, Hunk::DeleteFile { .. }) {
+                deleted.insert(target.clone());
+            }
             if !targets.insert(target.clone()) {
                 return Err(format!("multiple operations target {}", target.display()));
             }
@@ -525,19 +542,31 @@ fn apply_chunks(original: &str, chunks: &[UpdateFileChunk], path: &Path) -> Resu
         original_lines.pop();
     }
 
+    let lenient = LENIENT_MATCHING.load(Ordering::Relaxed);
+    let mut lenient_error = None;
     let mut replacements = Vec::new();
     let mut line_index = 0;
     for chunk in chunks {
         if let Some(context) = &chunk.change_context {
             let context = [context.clone()];
-            let found = seek_sequence::seek_sequence(&original_lines, &context, line_index, false)
-                .ok_or_else(|| {
-                    format!(
-                        "Failed to find context '{}' in {}",
-                        context[0],
-                        path.display()
-                    )
-                })?;
+            let error = || {
+                format!(
+                    "Failed to find context '{}' in {}",
+                    context[0],
+                    path.display()
+                )
+            };
+            let found =
+                match seek_sequence::seek_sequence(&original_lines, &context, line_index, false) {
+                    Some(found) => found,
+                    None if lenient => {
+                        let found = seek_lenient(&original_lines, &context, line_index, false)
+                            .ok_or_else(error)?;
+                        lenient_error.get_or_insert_with(error);
+                        found
+                    }
+                    None => return Err(error()),
+                };
             line_index = found + 1;
         }
 
@@ -551,38 +580,40 @@ fn apply_chunks(original: &str, chunks: &[UpdateFileChunk], path: &Path) -> Resu
             continue;
         }
 
-        let mut old_lines = chunk.old_lines.as_slice();
-        let mut new_lines = chunk.new_lines.as_slice();
-        let mut found = seek_sequence::seek_sequence(
-            &original_lines,
-            old_lines,
-            line_index,
-            chunk.is_end_of_file,
-        );
-        if found.is_none() && old_lines.last().is_some_and(String::is_empty) {
-            old_lines = &old_lines[..old_lines.len() - 1];
-            if new_lines.last().is_some_and(String::is_empty) {
-                new_lines = &new_lines[..new_lines.len() - 1];
-            }
-            found = seek_sequence::seek_sequence(
-                &original_lines,
-                old_lines,
-                line_index,
-                chunk.is_end_of_file,
-            );
-        }
-        let found = found.ok_or_else(|| {
+        let error = || {
             format!(
                 "Failed to find expected lines in {}:\n{}",
                 path.display(),
                 chunk.old_lines.join("\n")
             )
-        })?;
+        };
+        let (found, old_lines, new_lines) = match locate(
+            &original_lines,
+            chunk,
+            line_index,
+            seek_sequence::seek_sequence,
+        ) {
+            Some(located) => located,
+            None if lenient => {
+                let located =
+                    locate(&original_lines, chunk, line_index, seek_lenient).ok_or_else(error)?;
+                lenient_error.get_or_insert_with(error);
+                located
+            }
+            None => return Err(error()),
+        };
         replacements.push((found, old_lines.len(), new_lines.to_vec()));
         line_index = found + old_lines.len();
     }
 
     replacements.sort_by_key(|(start, _, _)| *start);
+    if let Some(error) = lenient_error
+        && replacements
+            .windows(2)
+            .any(|pair| pair[0].0 + pair[0].1 > pair[1].0)
+    {
+        return Err(error);
+    }
     for (start, old_len, new_lines) in replacements.into_iter().rev() {
         original_lines.splice(start..start + old_len, new_lines);
     }
@@ -590,6 +621,36 @@ fn apply_chunks(original: &str, chunks: &[UpdateFileChunk], path: &Path) -> Resu
         original_lines.push(String::new());
     }
     Ok(original_lines.join("\n"))
+}
+
+type Seek = fn(&[String], &[String], usize, bool) -> Option<usize>;
+
+fn locate<'a>(
+    lines: &[String],
+    chunk: &'a UpdateFileChunk,
+    start: usize,
+    seek: Seek,
+) -> Option<(usize, &'a [String], &'a [String])> {
+    let old_lines = chunk.old_lines.as_slice();
+    let new_lines = chunk.new_lines.as_slice();
+    if let Some(found) = seek(lines, old_lines, start, chunk.is_end_of_file) {
+        return Some((found, old_lines, new_lines));
+    }
+    if !old_lines.last().is_some_and(String::is_empty) {
+        return None;
+    }
+    let old_lines = &old_lines[..old_lines.len() - 1];
+    let new_lines = match new_lines.split_last() {
+        Some((last, rest)) if last.is_empty() => rest,
+        _ => new_lines,
+    };
+    seek(lines, old_lines, start, chunk.is_end_of_file).map(|found| (found, old_lines, new_lines))
+}
+
+fn seek_lenient(lines: &[String], pattern: &[String], start: usize, eof: bool) -> Option<usize> {
+    seek_sequence::seek_sequence(lines, pattern, 0, eof)
+        .or_else(|| seek_sequence::seek_whitespace(lines, pattern, start, eof))
+        .or_else(|| seek_sequence::seek_whitespace(lines, pattern, 0, eof))
 }
 
 fn resolve(workspace: &Path, path: &Path) -> PathBuf {

@@ -14,7 +14,7 @@ pub(crate) fn seek_sequence(
         return None;
     }
     let search_start = if eof && lines.len() >= pattern.len() {
-        lines.len() - pattern.len()
+        (lines.len() - pattern.len()).max(start)
     } else {
         start
     };
@@ -84,4 +84,29 @@ pub(crate) fn seek_sequence(
     }
 
     None
+}
+
+pub(crate) fn seek_whitespace(
+    lines: &[String],
+    pattern: &[String],
+    start: usize,
+    eof: bool,
+) -> Option<usize> {
+    if pattern.is_empty() {
+        return Some(start);
+    }
+    if pattern.len() > lines.len() {
+        return None;
+    }
+    let search_start = if eof {
+        (lines.len() - pattern.len()).max(start)
+    } else {
+        start
+    };
+    (search_start..=lines.len() - pattern.len()).find(|&i| {
+        lines[i..i + pattern.len()]
+            .iter()
+            .zip(pattern)
+            .all(|(line, pat)| line.split_whitespace().eq(pat.split_whitespace()))
+    })
 }
