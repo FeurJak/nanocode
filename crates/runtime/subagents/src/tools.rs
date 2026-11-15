@@ -1240,6 +1240,7 @@ impl SpawnAgent {
             .registry
             .upgrade()
             .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
+        registry.load_providers().await;
         let policy = registry.spawn_policy();
         let (task, options, budget) = input
             .decode_json::<SpawnAgentTask>()?
@@ -1780,6 +1781,7 @@ impl Tool for ListModels {
                     .registry
                     .upgrade()
                     .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
+                registry.load_providers().await;
                 let policy = registry.spawn_policy();
                 json_output(&ModelCatalog {
                     providers: policy

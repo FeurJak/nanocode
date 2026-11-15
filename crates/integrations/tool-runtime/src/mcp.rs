@@ -32,6 +32,11 @@ impl Mcp {
 
 impl McpBuilder {
     #[must_use]
+    pub fn on_demand(self) -> Self {
+        Self(self.0.on_demand())
+    }
+
+    #[must_use]
     pub fn oauth_store(self, store: Arc<dyn McpOAuthStore>) -> Self {
         Self(self.0.oauth_store(store))
     }

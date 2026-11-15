@@ -45,6 +45,8 @@ pub(crate) type RegistryFuture<'a, T> = nanocode_sync::future::BoxFuture<'a, T>;
 #[cfg(target_family = "wasm")]
 pub(crate) type RegistryFuture<'a, T> = nanocode_sync::future::LocalBoxFuture<'a, T>;
 
+pub type ProvidersLoader = Arc<dyn Fn() -> RegistryFuture<'static, ()> + Send + Sync>;
+
 mod activity;
 mod completion;
 mod delivery;
@@ -621,6 +623,7 @@ pub struct Registry {
     session_handles: Atom<nanocode_sync::Map<String, AgentHandle>>,
     roots: Atom<nanocode_sync::Map<String, String>>,
     spawn_router: Atom<Option<Arc<dyn crate::SpawnRouter>>>,
+    providers_loader: Atom<Option<ProvidersLoader>>,
     id: SubagentRuntimeId,
     state: StateMailbox,
     pub(super) updates: mpsc::UnboundedSender<ScopedAgentUpdate>,
@@ -3102,6 +3105,7 @@ impl Registry {
         Self {
             id: SubagentRuntimeId::next(),
             spawn_router: Atom::default(),
+            providers_loader: Atom::default(),
             state: StateMailbox::default(),
             updates,
             revision,
@@ -4455,6 +4459,16 @@ impl Registry {
 
     pub(super) fn spawn_router(&self) -> Option<Arc<dyn crate::SpawnRouter>> {
         Option::clone(&self.spawn_router.get())
+    }
+
+    pub fn set_providers_loader(&self, loader: ProvidersLoader) {
+        self.providers_loader.set(Some(loader));
+    }
+
+    pub(super) async fn load_providers(&self) {
+        if let Some(loader) = Option::clone(&self.providers_loader.get()) {
+            loader().await;
+        }
     }
 
     pub fn set_max_concurrency(&self, limit: usize) {

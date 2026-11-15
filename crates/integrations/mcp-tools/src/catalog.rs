@@ -67,6 +67,7 @@ pub(crate) struct ProviderState {
     catalog: Atom<Catalog>,
     remaining: watch::Sender<usize>,
     discovery_timeout: Duration,
+    launcher: std::sync::OnceLock<std::sync::Weak<super::Launcher>>,
 }
 
 #[derive(Serialize)]
@@ -146,6 +147,7 @@ impl ProviderState {
             }),
             remaining,
             discovery_timeout,
+            launcher: std::sync::OnceLock::new(),
         }
     }
 
@@ -465,7 +467,14 @@ impl ProviderState {
             .collect())
     }
 
+    pub(crate) fn set_launcher(&self, launcher: std::sync::Weak<super::Launcher>) {
+        let _ = self.launcher.set(launcher);
+    }
+
     pub(crate) async fn wait_for_startup(&self) {
+        if let Some(launcher) = self.launcher.get().and_then(std::sync::Weak::upgrade) {
+            launcher.start();
+        }
         if self.catalog.read(|catalog| catalog.search_index.is_some()) {
             return;
         }

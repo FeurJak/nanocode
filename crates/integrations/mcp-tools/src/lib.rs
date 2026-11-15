@@ -73,8 +73,22 @@ pub struct Mcp {
 
     #[cfg(not(target_family = "wasm"))]
     session: Arc<OnceLock<SessionEnvironment>>,
-    started: AtomicBool,
+    launcher: Arc<Launcher>,
+    on_demand: bool,
+}
 
+pub(crate) struct Launcher {
+    servers: Arc<[NamedServer]>,
+    state: Arc<ProviderState>,
+    #[cfg(not(target_family = "wasm"))]
+    oauth_store: Option<Arc<dyn McpOAuthStore>>,
+    #[cfg(not(target_family = "wasm"))]
+    oauth_metadata: Arc<nanocode_mcp_http::oauth::OAuthMetadataCache>,
+    #[cfg(target_family = "wasm")]
+    http_sender: Option<Arc<dyn nanocode_http::layer::Sender>>,
+    #[cfg(not(target_family = "wasm"))]
+    session: Arc<OnceLock<SessionEnvironment>>,
+    started: AtomicBool,
     #[cfg(not(target_family = "wasm"))]
     startup_tasks: OnceLock<nanocode_executor::JoinSet<()>>,
 }
@@ -99,6 +113,7 @@ pub struct McpBuilder {
     http_sender: Option<Arc<dyn nanocode_http::layer::Sender>>,
     duplicate: Option<String>,
     discovery_timeout: Option<Duration>,
+    on_demand: bool,
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -553,6 +568,12 @@ impl McpBuilder {
     }
 
     #[must_use]
+    pub const fn on_demand(mut self) -> Self {
+        self.on_demand = true;
+        self
+    }
+
+    #[must_use]
     pub fn server(mut self, name: impl Into<String>, server: McpServer) -> Self {
         let name = name.into();
         match self.servers.entry(name) {
@@ -600,6 +621,26 @@ impl McpBuilder {
             state: Arc::clone(&state),
             description: search_description(&servers),
         });
+        #[cfg(not(target_family = "wasm"))]
+        let oauth_metadata = Arc::new(nanocode_mcp_http::oauth::OAuthMetadataCache::default());
+        #[cfg(not(target_family = "wasm"))]
+        let session = Arc::new(OnceLock::new());
+        let launcher = Arc::new(Launcher {
+            servers: Arc::clone(&servers),
+            state: Arc::clone(&state),
+            #[cfg(not(target_family = "wasm"))]
+            oauth_store: self.oauth_store.clone(),
+            #[cfg(not(target_family = "wasm"))]
+            oauth_metadata: Arc::clone(&oauth_metadata),
+            #[cfg(target_family = "wasm")]
+            http_sender: self.http_sender.clone(),
+            #[cfg(not(target_family = "wasm"))]
+            session: Arc::clone(&session),
+            started: AtomicBool::new(false),
+            #[cfg(not(target_family = "wasm"))]
+            startup_tasks: OnceLock::new(),
+        });
+        state.set_launcher(Arc::downgrade(&launcher));
         Ok(Mcp {
             servers,
             state,
@@ -607,14 +648,13 @@ impl McpBuilder {
             #[cfg(not(target_family = "wasm"))]
             oauth_store: self.oauth_store,
             #[cfg(not(target_family = "wasm"))]
-            oauth_metadata: Arc::new(nanocode_mcp_http::oauth::OAuthMetadataCache::default()),
+            oauth_metadata,
             #[cfg(target_family = "wasm")]
             http_sender: self.http_sender,
             #[cfg(not(target_family = "wasm"))]
-            session: Arc::new(OnceLock::new()),
-            started: AtomicBool::new(false),
-            #[cfg(not(target_family = "wasm"))]
-            startup_tasks: OnceLock::new(),
+            session,
+            launcher,
+            on_demand: self.on_demand,
         })
     }
 }
@@ -825,6 +865,12 @@ impl McpLogin {
 
 impl Mcp {
     fn start_servers(&self) {
+        self.launcher.start();
+    }
+}
+
+impl Launcher {
+    pub(crate) fn start(&self) {
         if self.started.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -913,7 +959,9 @@ impl DynamicToolProvider for Mcp {
     }
 
     fn start(&self) {
-        self.start_servers();
+        if !self.on_demand {
+            self.start_servers();
+        }
     }
 
     fn direct_tools(&self) -> Vec<Arc<dyn Tool>> {

@@ -871,7 +871,10 @@ impl Host {
                 .mcp_servers
                 .iter()
                 .fold(
-                    nanocode::tools::mcp::Mcp::builder(),
+                    match config.headless {
+                        true => nanocode::tools::mcp::Mcp::builder().on_demand(),
+                        false => nanocode::tools::mcp::Mcp::builder(),
+                    },
                     |mcp, (name, server)| mcp.server(name, server.clone()),
                 )
                 .build()?;
