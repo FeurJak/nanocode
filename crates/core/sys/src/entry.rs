@@ -46,7 +46,10 @@ pub fn prepare(count: libc::c_int, arguments: *const *const libc::c_char) {
     }
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
     unsafe { libc::mallopt(libc::M_ARENA_MAX, 1) };
+    unsafe { libc::dl_iterate_phdr(Some(split_object), std::ptr::null_mut()) };
 }
+
+const SPLIT_PAGES: usize = 3;
 
 const FAULT_AROUND_BYTES: usize = 65536;
 
@@ -91,10 +94,42 @@ unsafe extern "C" fn release_object(
     _: libc::size_t,
     _: *mut libc::c_void,
 ) -> libc::c_int {
+    unsafe {
+        each_read_only_range(info, |first, end, page| {
+            split_mapped_windows(first, end, page);
+            libc::madvise(first as *mut libc::c_void, end - first, libc::MADV_DONTNEED);
+        })
+    };
+    0
+}
+
+unsafe extern "C" fn split_object(
+    info: *mut libc::dl_phdr_info,
+    _: libc::size_t,
+    _: *mut libc::c_void,
+) -> libc::c_int {
+    unsafe {
+        each_read_only_range(info, |first, end, page| {
+            for at in (first..end).step_by(2 * SPLIT_PAGES * page) {
+                libc::madvise(
+                    at as *mut libc::c_void,
+                    (SPLIT_PAGES * page).min(end - at),
+                    libc::MADV_RANDOM,
+                );
+            }
+        })
+    };
+    0
+}
+
+unsafe fn each_read_only_range(
+    info: *mut libc::dl_phdr_info,
+    mut apply: impl FnMut(usize, usize, usize),
+) {
     let info = unsafe { &*info };
     let vdso = unsafe { libc::getauxval(libc::AT_SYSINFO_EHDR) };
     if vdso != 0 && info.dlpi_addr == vdso {
-        return 0;
+        return;
     }
     let headers =
         unsafe { std::slice::from_raw_parts(info.dlpi_phdr, usize::from(info.dlpi_phnum)) };
@@ -104,7 +139,7 @@ unsafe extern "C" fn release_object(
                 relocates_text((info.dlpi_addr + header.p_vaddr) as *const libc::Elf64_Dyn)
             }
     }) {
-        return 0;
+        return;
     }
     let page = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) })
         .expect("the page size is positive");
@@ -116,11 +151,9 @@ unsafe extern "C" fn release_object(
         let first = start.next_multiple_of(page);
         let end = (start + header.p_filesz as usize) / page * page;
         if end > first {
-            split_mapped_windows(first, end, page);
-            unsafe { libc::madvise(first as *mut libc::c_void, end - first, libc::MADV_DONTNEED) };
+            apply(first, end, page);
         }
     }
-    0
 }
 
 const unsafe fn relocates_text(mut entry: *const libc::Elf64_Dyn) -> bool {
