@@ -1,7 +1,7 @@
 use std::{ops::Range, process::ExitCode};
 
 use nanocode_process::CapturedOutput;
-use nanocode_process_contracts::Redactor;
+use nanocode_process_contracts::{OutputUnit, Redactor};
 
 use crate::rng::{FNV_OFFSET, Rng, fnv};
 
@@ -23,6 +23,12 @@ const TINY_CHUNK_BYTES_MAX: u64 = 3;
 const SECRET_PPM_MAX: u64 = 60_000;
 const ESCAPED_PPM: u64 = 400_000;
 const NEWLINE_PPM: u64 = 50_000;
+const SUMMARY_BYTES_MAX: u64 = 8_000;
+const SUMMARY_WINDOW_MAX: u64 = 3_000;
+const SUMMARY_BOUND_MAX: u64 = 800;
+const SUMMARY_WIDE_PPM_MAX: u64 = 20_000;
+const SUMMARY_INVALID_PPM: u64 = 300_000;
+const WIDE: [&str; 4] = ["\u{e9}", "\u{20ac}", "\u{1f600}", "\u{fffd}"];
 const FILLER: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789 .,:;-_/=+()";
 const PUNCTUATION: &[u8] = b"\"\\";
 const MARKER_OPEN: &str = "\n... ";
@@ -35,15 +41,17 @@ pub enum CaptureMutation {
     DropChunk,
     SkipRedact,
     RedactThenTrim,
+    NarrowKeep,
 }
 
 impl CaptureMutation {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::None,
         Self::SkipTrim,
         Self::DropChunk,
         Self::SkipRedact,
         Self::RedactThenTrim,
+        Self::NarrowKeep,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -59,6 +67,7 @@ impl CaptureMutation {
             Self::DropChunk => "drop_chunk",
             Self::SkipRedact => "skip_redact",
             Self::RedactThenTrim => "redact_then_trim",
+            Self::NarrowKeep => "narrow_keep",
         }
     }
 
@@ -173,18 +182,7 @@ impl Script {
                         stream.push(FILLER[rng.pick(FILLER.len())]);
                     }
                 }
-                let mut chunks = Vec::new();
-                let mut at = 0;
-                while at < stream.len() {
-                    let size = if rng.chance(TINY_CHUNK_PPM) {
-                        rng.range(1, TINY_CHUNK_BYTES_MAX)
-                    } else {
-                        rng.range(1, CHUNK_BYTES_MAX)
-                    };
-                    let end = (at + narrow(size)).min(stream.len());
-                    chunks.push(stream[at..end].to_vec());
-                    at = end;
-                }
+                let chunks = chunked(&mut rng, &stream);
                 Take {
                     limit: narrow(limit),
                     chunks,
@@ -384,6 +382,80 @@ pub struct CaptureOutcome {
     pub shape: String,
 }
 
+fn chunked(rng: &mut Rng, stream: &[u8]) -> Vec<Vec<u8>> {
+    let mut chunks = Vec::new();
+    let mut at = 0;
+    while at < stream.len() {
+        let size = if rng.chance(TINY_CHUNK_PPM) {
+            rng.range(1, TINY_CHUNK_BYTES_MAX)
+        } else {
+            rng.range(1, CHUNK_BYTES_MAX)
+        };
+        let end = (at + narrow(size)).min(stream.len());
+        chunks.push(stream[at..end].to_vec());
+        at = end;
+    }
+    chunks
+}
+
+fn summarized(seed: u64, mutation: CaptureMutation) -> Option<String> {
+    let mut rng = Rng::derive(seed, "capture-summary");
+    let bound = narrow(rng.below(SUMMARY_BOUND_MAX + 1));
+    let window = narrow(rng.below(SUMMARY_WINDOW_MAX + 1));
+    let wide_ppm = rng.below(SUMMARY_WIDE_PPM_MAX + 1);
+    let redactor = Redactor::new(narrow(SECRET_BYTES_MIN));
+    let kept = match mutation {
+        CaptureMutation::NarrowKeep => bound / 4,
+        _ => bound,
+    };
+    let mut full = CapturedOutput::default();
+    let mut summary = CapturedOutput::new(kept);
+    for round in 0..rng.range(1, TAKES_MAX) {
+        let bytes = rng.below(SUMMARY_BYTES_MAX + 1);
+        let mut stream = Vec::new();
+        while wide(stream.len()) < bytes {
+            if !rng.chance(wide_ppm) {
+                let filler = match rng.chance(NEWLINE_PPM) {
+                    true => b'\n',
+                    false => FILLER[rng.pick(FILLER.len())],
+                };
+                stream.push(filler);
+            } else if rng.chance(SUMMARY_INVALID_PPM) {
+                stream.push(0x80 | u8::try_from(rng.below(0x80)).expect("a byte"));
+            } else {
+                stream.extend_from_slice(WIDE[rng.pick(WIDE.len())].as_bytes());
+            }
+        }
+        for chunk in chunked(&mut rng, &stream) {
+            full.push(&chunk, window);
+            summary.push(&chunk, window);
+        }
+        let (mut full, mut summary) = (full.take(), summary.take());
+        if full.total_bytes() != summary.total_bytes() {
+            return Some(format!(
+                "summary round {round}: captured {} bytes, the full capture {}",
+                summary.total_bytes(),
+                full.total_bytes()
+            ));
+        }
+        let original = full.total_bytes().saturating_add(3) / 4;
+        for limit in [bound, narrow(rng.below(wide(bound) + 1))] {
+            for unit in [OutputUnit::Tokens, OutputUnit::Chars] {
+                let expected = full.limit(&redactor, limit, unit, original);
+                let actual = summary.limit(&redactor, limit, unit, original);
+                if expected != actual {
+                    return Some(format!(
+                        "summary round {round}: limit {limit} {unit:?} bound {bound} window {window} returned {} bytes, the full capture {}",
+                        actual.len(),
+                        expected.len()
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
 fn simulate(seed: u64, mutation: CaptureMutation) -> CaptureOutcome {
     let script = Script::of(seed);
     let shape = script.describe();
@@ -446,6 +518,9 @@ fn simulate(seed: u64, mutation: CaptureMutation) -> CaptureOutcome {
                 break;
             }
         }
+    }
+    if wrong.is_none() {
+        wrong = summarized(seed, mutation);
     }
     CaptureOutcome {
         digest,

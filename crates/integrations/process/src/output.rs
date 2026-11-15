@@ -17,9 +17,9 @@ pub(super) struct Capture {
 }
 
 impl Capture {
-    pub(super) fn new(limit: usize) -> std::io::Result<Self> {
+    pub(super) fn new(limit: usize, take_limit: usize) -> std::io::Result<Self> {
         Ok(Self {
-            owner: Actor::spawn(super::CapturedOutput::default())?,
+            owner: Actor::spawn(super::CapturedOutput::new(take_limit))?,
             limit,
         })
     }

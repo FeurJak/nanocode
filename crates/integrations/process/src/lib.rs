@@ -500,6 +500,7 @@ impl ShellSessions {
                 launch,
                 &self.sessions.exits,
                 self.output_limit,
+                command.output_token_budget,
             ) {
                 Ok(session) => session,
                 Err(error) => {
@@ -748,6 +749,7 @@ struct SessionState {
     process_group: process::SharedProcessGroup,
     drains: Option<Vec<JoinHandle<()>>>,
     output: output::Capture,
+    output_bound: usize,
     secrets: nanocode_process_contracts::Redactor,
 }
 
@@ -759,9 +761,14 @@ impl Session {
         launch: Launch,
         exits: &Arc<Notify>,
         output_limit: usize,
+        output_token_budget: Option<usize>,
     ) -> std::io::Result<Arc<Self>> {
         let tty = matches!(spawned.stdin.as_ref(), Some(process::ProcessStdin::Pty(_)));
-        let output = output::Capture::new(output_limit)?;
+        let output_bound = match secrets.forms().next() {
+            Some(_) => usize::MAX,
+            None => output::effective_token_limit(output_token_budget),
+        };
+        let output = output::Capture::new(output_limit, output_bound)?;
         let chunks = output::Sender::Captured(output.clone());
         let activity = Arc::new(LastActivity::new());
         let exited = spawned.child.exited();
@@ -820,6 +827,7 @@ impl Session {
             process_group: process_group.clone(),
             drains: Some(drains),
             output,
+            output_bound,
             secrets,
         })?;
         Ok(Arc::new(Self {
@@ -934,21 +942,97 @@ impl SessionState {
         output_unit: OutputUnit,
     ) -> Result<(String, Option<usize>), nanocode_sync::Stopped> {
         let mut captured = self.output.take().await?;
-        let limit = output::effective_token_limit(max_output_tokens);
+        let limit = output::effective_token_limit(max_output_tokens).min(self.output_bound);
         let original_token_count = captured.total_bytes.saturating_add(3) / 4;
         let output = captured.limit(&self.secrets, limit, output_unit, original_token_count);
         Ok((output, Some(original_token_count)))
     }
 }
 
-#[derive(Default)]
 pub struct CapturedOutput {
     head: Vec<u8>,
-    tail: VecDeque<u8>,
+    head_len: usize,
+    head_recent: VecDeque<u8>,
+    head_rest: VecDeque<Piece>,
+    keep: usize,
     omitted_bytes: usize,
+    settled: VecDeque<Piece>,
+    settled_len: usize,
+    tail: VecDeque<u8>,
+}
+
+enum Piece {
+    Ascii { len: usize, newlines: usize },
+    Raw(Vec<u8>),
+}
+
+impl Piece {
+    const fn len(&self) -> usize {
+        match self {
+            Self::Ascii { len, .. } => *len,
+            Self::Raw(bytes) => bytes.len(),
+        }
+    }
+
+    fn drop_front(&mut self, count: usize) {
+        match self {
+            Self::Ascii { len, .. } => *len -= count,
+            Self::Raw(bytes) => drop(bytes.drain(..count)),
+        }
+    }
+}
+
+fn push_piece(pieces: &mut VecDeque<Piece>, bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    if bytes.is_ascii() {
+        let count = bytes.iter().filter(|&&byte| byte == b'\n').count();
+        if let Some(Piece::Ascii { len, newlines }) = pieces.back_mut() {
+            *len += bytes.len();
+            *newlines += count;
+        } else {
+            pieces.push_back(Piece::Ascii {
+                len: bytes.len(),
+                newlines: count,
+            });
+        }
+    } else if let Some(Piece::Raw(raw)) = pieces.back_mut() {
+        raw.extend_from_slice(bytes);
+    } else {
+        pieces.push_back(Piece::Raw(bytes.to_vec()));
+    }
+}
+
+impl Default for CapturedOutput {
+    fn default() -> Self {
+        Self::new(usize::MAX)
+    }
+}
+
+fn settle(pieces: &mut VecDeque<Piece>, recent: &mut VecDeque<u8>, count: usize) {
+    let (front, back) = recent.as_slices();
+    let from_front = count.min(front.len());
+    push_piece(pieces, &front[..from_front]);
+    push_piece(pieces, &back[..count - from_front]);
+    drop(recent.drain(..count));
 }
 
 impl CapturedOutput {
+    pub const fn new(take_limit: usize) -> Self {
+        Self {
+            head: Vec::new(),
+            head_len: 0,
+            head_recent: VecDeque::new(),
+            head_rest: VecDeque::new(),
+            keep: (take_limit / 2).saturating_add(char::MAX_LEN_UTF8),
+            omitted_bytes: 0,
+            settled: VecDeque::new(),
+            settled_len: 0,
+            tail: VecDeque::new(),
+        }
+    }
+
     pub fn push(&mut self, bytes: &[u8], limit: usize) {
         if bytes.is_empty() {
             return;
@@ -960,41 +1044,76 @@ impl CapturedOutput {
 
         let head_budget = limit / 2;
         let tail_budget = limit.saturating_sub(head_budget);
-        let head_len = head_budget.saturating_sub(self.head.len()).min(bytes.len());
-        self.head.extend_from_slice(&bytes[..head_len]);
-        let tail_bytes = &bytes[head_len..];
+        let head_len = head_budget.saturating_sub(self.head_len).min(bytes.len());
+        let (head, tail_bytes) = bytes.split_at(head_len);
+        let raw = self.keep.saturating_sub(self.head.len()).min(head.len());
+        self.head.extend_from_slice(&head[..raw]);
+        self.head_recent.extend(&head[raw..]);
+        self.head_len += head_len;
         if tail_bytes.len() >= tail_budget {
             let kept_from = tail_bytes.len().saturating_sub(tail_budget);
             self.omitted_bytes = self
                 .omitted_bytes
+                .saturating_add(self.settled_len)
                 .saturating_add(self.tail.len())
                 .saturating_add(kept_from);
+            self.settled.clear();
+            self.settled_len = 0;
             self.tail.clear();
             self.tail.extend(&tail_bytes[kept_from..]);
         } else {
-            let excess = self
-                .tail
-                .len()
+            let mut excess = self
+                .settled_len
+                .saturating_add(self.tail.len())
                 .saturating_add(tail_bytes.len())
                 .saturating_sub(tail_budget);
-            if excess > 0 {
-                drop(self.tail.drain(..excess));
-                self.omitted_bytes = self.omitted_bytes.saturating_add(excess);
+            self.omitted_bytes = self.omitted_bytes.saturating_add(excess);
+            while excess > 0 {
+                let Some(piece) = self.settled.front_mut() else {
+                    drop(self.tail.drain(..excess));
+                    break;
+                };
+                let evicted = piece.len().min(excess);
+                piece.drop_front(evicted);
+                if piece.len() == 0 {
+                    self.settled.pop_front();
+                }
+                self.settled_len -= evicted;
+                excess -= evicted;
             }
             self.tail.extend(tail_bytes);
         }
+        let after = self.settled_len.saturating_add(self.tail.len());
+        let head_settle = self
+            .head_recent
+            .len()
+            .saturating_add(after)
+            .saturating_sub(self.keep)
+            .min(self.head_recent.len());
+        settle(&mut self.head_rest, &mut self.head_recent, head_settle);
+        let tail_settle = self.tail.len().saturating_sub(self.keep);
+        settle(&mut self.settled, &mut self.tail, tail_settle);
+        self.settled_len += tail_settle;
     }
 
     pub fn take(&mut self) -> CapturedChunk {
         let head = std::mem::take(&mut self.head);
+        let head_recent = std::mem::take(&mut self.head_recent);
+        let head_rest = std::mem::take(&mut self.head_rest);
+        let head_len = std::mem::take(&mut self.head_len);
+        let settled = std::mem::take(&mut self.settled);
+        let settled_len = std::mem::take(&mut self.settled_len);
         let tail = std::mem::take(&mut self.tail);
         let omitted_bytes = std::mem::take(&mut self.omitted_bytes);
         CapturedChunk {
-            total_bytes: head
-                .len()
+            total_bytes: head_len
+                .saturating_add(settled_len)
                 .saturating_add(tail.len())
                 .saturating_add(omitted_bytes),
             head,
+            head_recent,
+            head_rest,
+            settled,
             tail,
             omitted_bytes,
         }
@@ -1003,6 +1122,9 @@ impl CapturedOutput {
 
 pub struct CapturedChunk {
     head: Vec<u8>,
+    head_recent: VecDeque<u8>,
+    head_rest: VecDeque<Piece>,
+    settled: VecDeque<Piece>,
     tail: VecDeque<u8>,
     omitted_bytes: usize,
     total_bytes: usize,
@@ -1020,11 +1142,18 @@ impl CapturedChunk {
         let marker = self.omission_marker();
         let mut redaction = Redaction::new(secrets, limit);
         redaction.push(&self.head);
+        self.head_rest
+            .iter()
+            .for_each(|piece| redaction.piece(piece));
+        let (front, back) = self.head_recent.as_slices();
+        redaction.push(front);
+        redaction.push(back);
         if let Some(marker) = &marker {
             redaction.push(b"\n");
             redaction.push(marker.as_bytes());
             redaction.push(b"\n");
         }
+        self.settled.iter().for_each(|piece| redaction.piece(piece));
         let (front, back) = self.tail.as_slices();
         redaction.push(front);
         redaction.push(back);
@@ -1161,6 +1290,19 @@ impl<'a> Redaction<'a> {
                     replace_forms(&mut self.stages, &mut self.cut, "\u{FFFD}");
                 }
             }
+        }
+    }
+
+    fn piece(&mut self, piece: &Piece) {
+        match piece {
+            Piece::Ascii { len, newlines } => {
+                if !self.carry.is_empty() {
+                    self.carry.clear();
+                    replace_forms(&mut self.stages, &mut self.cut, "\u{FFFD}");
+                }
+                self.cut.skip_ascii(*len, *newlines);
+            }
+            Piece::Raw(bytes) => self.push(bytes),
         }
     }
 

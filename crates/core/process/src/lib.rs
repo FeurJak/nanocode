@@ -24,6 +24,7 @@ pub struct ExecCommand {
     pub max_output_tokens: Option<usize>,
     pub output_unit: OutputUnit,
     pub caller: Option<String>,
+    pub output_token_budget: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -53,12 +54,19 @@ impl ExecCommand {
             max_output_tokens,
             output_unit: OutputUnit::Tokens,
             caller: None,
+            output_token_budget: None,
         }
     }
 
     #[must_use]
     pub const fn with_output_unit(mut self, output_unit: OutputUnit) -> Self {
         self.output_unit = output_unit;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_output_token_budget(mut self, tokens: usize) -> Self {
+        self.output_token_budget = Some(tokens);
         self
     }
 
@@ -401,6 +409,14 @@ impl OutputCut {
                 self.trimmed = true;
             }
         }
+    }
+
+    pub fn skip_ascii(&mut self, len: usize, newlines: usize) {
+        self.len += len;
+        self.chars += len;
+        self.newlines += newlines;
+        self.last.clear();
+        self.trimmed = true;
     }
 
     pub fn limit_in(self, unit: OutputUnit) -> (String, bool) {

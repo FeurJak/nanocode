@@ -108,6 +108,7 @@ impl Tool for ExecCommandHandler {
                     Some(max_output_tokens),
                 )
                 .with_output_unit(output_unit)
+                .with_output_token_budget(context.output_token_budget())
                 .from_caller(context.session_id());
                 let mut result = self.sessions.execute(command, &self.workspace).await;
                 result.output.insert_str(0, &summary);

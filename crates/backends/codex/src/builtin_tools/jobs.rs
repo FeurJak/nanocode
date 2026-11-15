@@ -157,6 +157,7 @@ impl JobHandler {
                     Some(max_output_tokens),
                 )
                 .with_output_unit(output_unit)
+                .with_output_token_budget(context.output_token_budget())
                 .from_caller(context.session_id());
                 let result = self.sessions.execute(command, &self.workspace).await;
                 Ok(self.report(&result, max_output_tokens, None, Started::Now(&arguments.cmd)))
