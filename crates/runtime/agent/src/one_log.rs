@@ -316,9 +316,7 @@ impl OneLog {
     }
 
     pub async fn journals(self: &Arc<Self>) -> Result<CellJournals, StoreError> {
-        let journals = CellJournals::with_sink(self.sink());
-        journals.restore_sessions(self.cells(None).await?);
-        Ok(journals)
+        Ok(CellJournals::with_sink(self.sink()))
     }
 
     async fn cells(
