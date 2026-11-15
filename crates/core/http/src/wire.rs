@@ -282,10 +282,17 @@ pub enum Framing {
 fn chunked(headers: &HeaderMap) -> Option<bool> {
     let mut last = None;
     for value in headers.get_all(header::TRANSFER_ENCODING) {
-        let value = value.to_str().unwrap_or_default();
-        if let Some(coding) = value.rsplit(',').next() {
-            last = Some(coding.trim().eq_ignore_ascii_case("chunked"));
-        }
+        let Ok(value) = value.to_str() else {
+            last = Some(false);
+            continue;
+        };
+        let coding = value
+            .rsplit(',')
+            .map(str::trim)
+            .find(|coding| !coding.is_empty());
+        last = coding.map_or(last.or(Some(false)), |coding| {
+            Some(coding.eq_ignore_ascii_case("chunked"))
+        });
     }
     last
 }
