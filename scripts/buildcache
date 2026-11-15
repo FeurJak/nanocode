@@ -1,13 +1,27 @@
 #!/bin/sh
+scripts=${0%/*}
 cache=${XDG_CACHE_HOME:-$HOME/.cache}/nanocode/build
-source=${0%/*}/buildcache.rs
-checksum=$(cksum < "$source") || exec "$@"
+source=$scripts/buildcache.rs
+run() {
+  case $1 in
+    *rustc)
+      for arg; do
+        case $arg in
+          /*) ;;
+          *.rs) exec "$scripts/rustc-parallel-frontend" "$@" ;;
+        esac
+      done
+      ;;
+  esac
+  exec "$@"
+}
+checksum=$(cksum < "$source") || run "$@"
 helper=$cache/bin/buildcache-${checksum%% *}
-[ -x "$helper" ] && exec "$helper" "$@"
-[ -f "$helper.failed" ] && exec "$@"
+[ -x "$helper" ] && exec "$helper" "$scripts" "$@"
+[ -f "$helper.failed" ] && run "$@"
 case $1 in
   *rustc)
-    mkdir -p "$cache/bin" || exec "$@"
+    mkdir -p "$cache/bin" || run "$@"
     if [ -d "$helper.lock" ]; then
       { read -r builder < "$helper.lock/pid"; } 2>/dev/null
       kill -0 "${builder:-0}" 2>/dev/null || rm -rf "$helper.lock"
@@ -27,4 +41,4 @@ case $1 in
     fi
     ;;
 esac
-exec "$@"
+run "$@"

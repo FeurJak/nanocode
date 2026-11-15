@@ -15,8 +15,8 @@ use std::{
     time::SystemTime,
 };
 
-const RUST_KEY: &str = "nanocode-rustc-cache-5";
-const WORKSPACE_KEY: &str = "nanocode-workspace-cache-1";
+const RUST_KEY: &str = "nanocode-rustc-cache-6";
+const WORKSPACE_KEY: &str = "nanocode-workspace-cache-2";
 const C_KEY: &str = "nanocode-c-cache-3 -ffile-prefix-map=<out>=. -MD";
 const MEMO: &str = ".nanocode-sha256";
 
@@ -29,16 +29,18 @@ enum Kind {
 }
 
 fn main() -> ExitCode {
-    let args: Vec<OsString> = env::args_os().skip(1).collect();
+    let mut args = env::args_os().skip(1);
+    let scripts = PathBuf::from(args.next().unwrap_or_default());
+    let args: Vec<OsString> = args.collect();
     let Some(tool) = args.first() else {
         return ExitCode::from(2);
     };
     let cache = cache_dir();
     let environment: Environment = env::vars_os().collect();
     if is_rustc(tool) {
-        rust(&cache, args, environment, 1)
+        rust(&cache, &scripts, args, environment, 1)
     } else if args.get(1).is_some_and(|compiler| is_rustc(compiler)) {
-        rust(&cache, args, environment, 2)
+        rust(&cache, &scripts, args, environment, 2)
     } else if environment.contains_key(OsStr::new("OUT_DIR")) {
         c(&cache, &args, environment)
     } else {
@@ -71,7 +73,7 @@ fn exit_code(status: std::process::ExitStatus) -> ExitCode {
     ExitCode::from(status.code().map_or(1, |code| code as u8))
 }
 
-fn rust(cache: &Path, mut args: Vec<OsString>, mut environment: Environment, compiler: usize) -> ExitCode {
+fn rust(cache: &Path, scripts: &Path, mut args: Vec<OsString>, mut environment: Environment, mut compiler: usize) -> ExitCode {
     for name in ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"] {
         environment.remove(OsStr::new(name));
     }
@@ -81,7 +83,7 @@ fn rust(cache: &Path, mut args: Vec<OsString>, mut environment: Environment, com
     {
         environment.insert("OUT_DIR".into(), stable.into_os_string());
     }
-    let registry = PathBuf::from(
+    let cargo_home = PathBuf::from(
         environment
             .get(OsStr::new("CARGO_HOME"))
             .cloned()
@@ -90,8 +92,8 @@ fn rust(cache: &Path, mut args: Vec<OsString>, mut environment: Environment, com
                     .join(".cargo")
                     .into_os_string()
             }),
-    )
-    .join("registry/src/");
+    );
+    let registry = cargo_home.join("registry/src/");
     let Ok(cwd) = env::current_dir() else {
         return exec(&args, &environment);
     };
@@ -164,12 +166,37 @@ fn rust(cache: &Path, mut args: Vec<OsString>, mut environment: Environment, com
         }
         keyed.push(key);
     }
+    if compiler == 1 && kind == Some(Kind::Workspace) {
+        args.insert(0, scripts.join("rustc-parallel-frontend").into_os_string());
+        compiler = 2;
+    }
     let (Some(out_dir), Some(suffix), Some(kind), true) = (out_dir, suffix, kind, eligible) else {
         return exec(&args, &environment);
     };
     let Some(version) = rustc_version(cache, Path::new(&args[compiler - 1])) else {
         return exec(&args, &environment);
     };
+    let mut remaps = vec![
+        (cache.as_os_str().as_bytes(), b"\x01cache\x01" as &[u8], b"/nanocode-build" as &[u8]),
+        (cargo_home.as_os_str().as_bytes(), b"\x01cargo\x01", b"/cargo"),
+    ];
+    if kind == Kind::Workspace {
+        remaps.push((cwd.as_os_str().as_bytes(), b"\x01workspace\x01", b"."));
+    }
+    let mut roots = Roots(remaps.iter().map(|(path, name, _)| (path.to_vec(), *name)).collect());
+    roots.0.push((out_dir.as_os_str().as_bytes().to_vec(), b"\x01out\x01"));
+    roots.0.sort_by_key(|(path, _)| std::cmp::Reverse(path.len()));
+    remaps.sort_by_key(|(path, _, _)| path.len());
+    let remaps: Vec<OsString> = remaps
+        .iter()
+        .map(|(path, _, to)| {
+            let mut flag = b"--remap-path-prefix=".to_vec();
+            flag.extend_from_slice(path);
+            flag.push(b'=');
+            flag.extend_from_slice(to);
+            OsString::from_vec(flag)
+        })
+        .collect();
     let mut hasher = Sha256::new();
     hasher.update(if kind == Kind::Registry { RUST_KEY } else { WORKSPACE_KEY }.as_bytes());
     hasher.update(b"\n");
@@ -186,12 +213,8 @@ fn rust(cache: &Path, mut args: Vec<OsString>, mut environment: Environment, com
         hasher.update(digest.as_bytes());
         hasher.update(b"\n");
     }
-    if kind == Kind::Workspace {
-        hasher.update(&workspace_root);
-        hasher.update(b"\n");
-    }
     for key in &keyed {
-        hasher.update(key);
+        hasher.update(&roots.hide(key));
         hasher.update(b"\n");
     }
     if kind == Kind::Registry {
@@ -208,7 +231,7 @@ fn rust(cache: &Path, mut args: Vec<OsString>, mut environment: Environment, com
         if relevant {
             hasher.update(name);
             hasher.update(b"=");
-            hasher.update(value.as_bytes());
+            hasher.update(&roots.hide(value.as_bytes()));
             hasher.update(b"\n");
         }
     }
@@ -231,7 +254,7 @@ fn rust(cache: &Path, mut args: Vec<OsString>, mut environment: Environment, com
                 };
                 inputs.extend_from_slice(digest.as_bytes());
                 inputs.push(b' ');
-                inputs.extend_from_slice(path.as_os_str().as_bytes());
+                inputs.extend_from_slice(&roots.hide(path.as_os_str().as_bytes()));
                 inputs.push(b'\n');
             }
             inputs
@@ -241,9 +264,10 @@ fn rust(cache: &Path, mut args: Vec<OsString>, mut environment: Environment, com
         Kind::Registry => cache.join("units").join(&key),
         Kind::Workspace => cache.join("workspace").join(&key),
     };
-    if restore(&entry, &out_dir, &environment, kind, &inputs).is_ok() {
+    if restore(&entry, &out_dir, &environment, kind, &inputs, &roots).is_ok() {
         return ExitCode::SUCCESS;
     }
+    args.splice(compiler..compiler, remaps);
     let started = SystemTime::now();
     let mut child = match Command::new(&args[0])
         .args(&args[1..])
@@ -349,7 +373,7 @@ fn rust(cache: &Path, mut args: Vec<OsString>, mut environment: Environment, com
                 };
                 sources.extend_from_slice(digest.as_bytes());
                 sources.push(b' ');
-                sources.extend_from_slice(path);
+                sources.extend_from_slice(&roots.hide(path));
                 sources.push(b'\n');
             }
             let mut hasher = Sha256::new();
@@ -361,11 +385,15 @@ fn rust(cache: &Path, mut args: Vec<OsString>, mut environment: Environment, com
             (hasher.finish(), sources)
         }
     };
-    let Some(recorded) = recorded_environment(&names, &environment) else {
+    let Some(recorded) = recorded_environment(&names, &environment, &roots) else {
         return ExitCode::SUCCESS;
     };
+    let pinned = outputs.iter().any(|output| {
+        output.extension() != Some(OsStr::new("d")) && fs::read(output).map_or(true, |data| roots.mentioned(&data))
+    });
     let unit = Unit {
-        out_dir: &out_dir,
+        roots: &roots,
+        pinned,
         outputs: &outputs,
         captured: &captured,
         recorded: &recorded,
@@ -382,7 +410,8 @@ fn rust(cache: &Path, mut args: Vec<OsString>, mut environment: Environment, com
 }
 
 struct Unit<'a> {
-    out_dir: &'a Path,
+    roots: &'a Roots,
+    pinned: bool,
     outputs: &'a [PathBuf],
     captured: &'a [u8],
     recorded: &'a [u8],
@@ -491,7 +520,7 @@ fn dependencies(depinfo: &[u8]) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
     (paths, names)
 }
 
-fn recorded_environment(names: &[Vec<u8>], environment: &Environment) -> Option<Vec<u8>> {
+fn recorded_environment(names: &[Vec<u8>], environment: &Environment, roots: &Roots) -> Option<Vec<u8>> {
     let mut recorded = Vec::new();
     for name in names {
         recorded.extend_from_slice(name);
@@ -500,7 +529,7 @@ fn recorded_environment(names: &[Vec<u8>], environment: &Environment) -> Option<
                 return None;
             }
             recorded.push(b'=');
-            recorded.extend_from_slice(value.as_bytes());
+            recorded.extend_from_slice(&roots.hide(value.as_bytes()));
         }
         recorded.push(b'\n');
     }
@@ -675,7 +704,7 @@ fn stable(cache: &Path, directory: &Path) -> Option<PathBuf> {
             }
             Ok(())
         })();
-        if copied.is_err() || symlink(&staging, &stable).is_err() {
+        if copied.is_err() || staging.file_name().is_none_or(|name| symlink(name, &stable).is_err()) {
             let _ = fs::remove_dir_all(&staging);
         }
     }
@@ -780,6 +809,67 @@ fn touch(path: &Path) -> io::Result<()> {
     fs::File::options().write(true).open(path)?.set_modified(SystemTime::now())
 }
 
+struct Roots(Vec<(Vec<u8>, &'static [u8])>);
+
+impl Roots {
+    fn at(text: &[u8], from: &[u8]) -> bool {
+        text.starts_with(from)
+            && text.get(from.len()).is_none_or(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')))
+    }
+
+    fn swap(&self, text: &[u8], show: bool) -> Vec<u8> {
+        let mut result = Vec::with_capacity(text.len());
+        let mut index = 0;
+        while index < text.len() {
+            let found = self.0.iter().find_map(|(path, name)| {
+                let (from, to) = if show { (*name, path.as_slice()) } else { (path.as_slice(), *name) };
+                Self::at(&text[index..], from).then_some((from.len(), to))
+            });
+            match found {
+                Some((length, to)) => {
+                    result.extend_from_slice(to);
+                    index += length;
+                }
+                None => {
+                    result.push(text[index]);
+                    index += 1;
+                }
+            }
+        }
+        result
+    }
+
+    fn hide(&self, text: &[u8]) -> Vec<u8> {
+        self.swap(text, false)
+    }
+
+    fn show(&self, text: &[u8]) -> Vec<u8> {
+        self.swap(text, true)
+    }
+
+    fn mentioned(&self, data: &[u8]) -> bool {
+        let mut index = 0;
+        while let Some(at) = data[index..].iter().position(|byte| *byte == b'/') {
+            index += at;
+            if self.0.iter().any(|(path, _)| Self::at(&data[index..], path)) {
+                return true;
+            }
+            index += 1;
+        }
+        false
+    }
+
+    fn list(&self) -> Vec<u8> {
+        let mut list = Vec::new();
+        for (path, name) in &self.0 {
+            list.extend_from_slice(name);
+            list.extend_from_slice(path);
+            list.push(b'\n');
+        }
+        list
+    }
+}
+
 fn relocate(text: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
     if from.is_empty() {
         return text.to_vec();
@@ -798,7 +888,7 @@ fn relocate(text: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
     result
 }
 
-fn same_environment(entry: &Path, environment: &Environment) -> bool {
+fn same_environment(entry: &Path, environment: &Environment, roots: &Roots) -> bool {
     let Ok(recorded) = fs::read(entry.join("env")) else {
         return true;
     };
@@ -806,16 +896,16 @@ fn same_environment(entry: &Path, environment: &Environment) -> bool {
         match line.iter().position(|byte| *byte == b'=') {
             Some(at) => environment
                 .get(OsStr::from_bytes(&line[..at]))
-                .is_some_and(|value| value.as_bytes() == &line[at + 1..]),
+                .is_some_and(|value| roots.hide(value.as_bytes()) == &line[at + 1..]),
             None => !environment.contains_key(OsStr::from_bytes(line)),
         }
     })
 }
 
-fn sources_match(sources: &[u8]) -> bool {
+fn sources_match(sources: &[u8], roots: &Roots) -> bool {
     sources.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()).all(|line| {
         line.iter().position(|byte| *byte == b' ').is_some_and(|at| {
-            digest_file(Path::new(OsStr::from_bytes(&line[at + 1..])))
+            digest_file(Path::new(OsStr::from_bytes(&roots.show(&line[at + 1..]))))
                 .is_ok_and(|digest| digest.as_bytes() == &line[..at])
         })
     })
@@ -827,26 +917,27 @@ fn restore(
     environment: &Environment,
     kind: Kind,
     inputs: &[u8],
+    roots: &Roots,
 ) -> io::Result<()> {
-    let cached_out = fs::read(entry.join("out-dir"))?;
-    let cached_out = cached_out.strip_suffix(b"\n").unwrap_or(&cached_out).to_vec();
     if kind == Kind::Workspace
-        && (fs::read(entry.join("inputs"))? != inputs || !sources_match(&fs::read(entry.join("sources"))?))
+        && (fs::read(entry.join("inputs"))? != inputs || !sources_match(&fs::read(entry.join("sources"))?, roots))
     {
         return Err(io::Error::other("inputs changed"));
     }
+    if fs::read(entry.join("roots")).is_ok_and(|pinned| pinned != roots.list()) {
+        return Err(io::Error::other("roots changed"));
+    }
     let identities = fs::read(entry.join("identities"))?;
-    if !same_environment(entry, environment) {
+    if !same_environment(entry, environment, roots) {
         return Err(io::Error::other("environment changed"));
     }
-    let current = out_dir.as_os_str().as_bytes();
     let mut files: Vec<_> = fs::read_dir(entry.join("files"))?.collect::<io::Result<_>>()?;
     files.sort_by_key(fs::DirEntry::file_name);
     for file in &files {
         let name = file.file_name();
         let destination = out_dir.join(&name);
         if name.as_bytes().ends_with(b".d") {
-            fs::write(&destination, relocate(&fs::read(file.path())?, &cached_out, current))?;
+            fs::write(&destination, roots.show(&fs::read(file.path())?))?;
         } else {
             clone(&file.path(), &destination)?;
             touch(&destination)?;
@@ -859,7 +950,7 @@ fn restore(
     }
     let stderr = fs::read(entry.join("stderr"))?;
     let mut output = io::stderr();
-    output.write_all(&relocate(&stderr, &cached_out, current))?;
+    output.write_all(&roots.show(&stderr))?;
     output.flush()
 }
 
@@ -870,17 +961,21 @@ fn stage(cache: &Path, directory: &str, unit: &Unit<'_>) -> io::Result<PathBuf> 
         fs::create_dir_all(staging.join("files"))?;
         for output in unit.outputs {
             if let Some(name) = output.file_name() {
-                clone(output, &staging.join("files").join(name))?;
+                if output.extension() == Some(OsStr::new("d")) {
+                    fs::write(staging.join("files").join(name), unit.roots.hide(&fs::read(output)?))?;
+                } else {
+                    clone(output, &staging.join("files").join(name))?;
+                }
             }
         }
+        if unit.pinned {
+            fs::write(staging.join("roots"), unit.roots.list())?;
+        }
         fs::write(staging.join("env"), unit.recorded)?;
-        fs::write(staging.join("stderr"), unit.captured)?;
+        fs::write(staging.join("stderr"), unit.roots.hide(unit.captured))?;
         fs::write(staging.join("inputs"), unit.inputs)?;
         fs::write(staging.join("sources"), unit.sources)?;
-        fs::write(staging.join("identities"), unit.identities)?;
-        let mut out = unit.out_dir.as_os_str().as_bytes().to_vec();
-        out.push(b'\n');
-        fs::write(staging.join("out-dir"), out)
+        fs::write(staging.join("identities"), unit.identities)
     })();
     match result {
         Ok(()) => Ok(staging),
@@ -893,7 +988,7 @@ fn stage(cache: &Path, directory: &str, unit: &Unit<'_>) -> io::Result<PathBuf> 
 
 fn store(cache: &Path, entry: &Path, unit: &Unit<'_>) -> io::Result<()> {
     let staging = stage(cache, "units", unit)?;
-    symlink(&staging, entry).inspect_err(|_| {
+    symlink(staging.file_name().unwrap_or_default(), entry).inspect_err(|_| {
         let _ = fs::remove_dir_all(&staging);
     })
 }
@@ -914,7 +1009,7 @@ fn store_workspace(cache: &Path, entry: &Path, unit: &Unit<'_>) -> io::Result<()
         }
     }
     let link = directory.join(format!(".link.{}.{}", std::process::id(), unique()));
-    symlink(&version, &link)?;
+    symlink(version.file_name().unwrap_or_default(), &link)?;
     if let Err(error) = fs::rename(&link, entry) {
         let _ = fs::remove_file(&link);
         return Err(error);
@@ -922,7 +1017,7 @@ fn store_workspace(cache: &Path, entry: &Path, unit: &Unit<'_>) -> io::Result<()
     let current = fs::read_link(entry).ok();
     for sibling in fs::read_dir(directory)?.flatten() {
         let path = sibling.path();
-        if sibling.file_name().as_bytes().starts_with(&prefix) && current.as_deref() != Some(path.as_path()) {
+        if sibling.file_name().as_bytes().starts_with(&prefix) && current.as_deref() != Some(Path::new(&sibling.file_name())) {
             let _ = fs::remove_dir_all(&path);
         }
     }
@@ -1116,7 +1211,7 @@ fn store_object(cache: &Path, entry: &Path, object: &Path, manifest: &[u8], erro
         if fs::symlink_metadata(entry).is_ok() {
             fs::remove_file(entry)?;
         }
-        symlink(&staging, entry)
+        symlink(staging.file_name().unwrap_or_default(), entry)
     })();
     if result.is_err() {
         let _ = fs::remove_dir_all(&staging);
