@@ -9,8 +9,12 @@ use std::{
 };
 
 use nanocode_executor::process::{Child, Command};
+use nanocode_sync::{StreamExt, unbounded, watch};
 
-use crate::{cli::SessionArgs, host::Result};
+use crate::{
+    cli::{AttemptPickArg, SessionArgs},
+    host::Result,
+};
 
 type Entries = BTreeMap<PathBuf, Entry>;
 
@@ -24,6 +28,7 @@ enum Entry {
 enum Exit {
     Exited(ExitStatus),
     Stopped(Duration),
+    Cancelled(String),
 }
 
 struct Finished {
@@ -32,10 +37,18 @@ struct Finished {
     exit: Exit,
 }
 
+#[derive(Clone, Copy)]
+struct SelfCheck {
+    passed: u64,
+    total: u64,
+}
+
 struct Changes {
     removed: Vec<PathBuf>,
     written: Vec<PathBuf>,
 }
+
+const SELF_CHECK: &str = "Before you end, find the checks this task gives or implies (its tests, a checker or an example with expected output, each requirement it states), run them in the copy and fix what fails. End the reply with one line of the form `self-check: <passed>/<total>` counting those checks.";
 
 pub async fn run(args: &SessionArgs, count: u64, piped: Option<String>) -> Result<()> {
     if count < 2 {
@@ -44,6 +57,7 @@ pub async fn run(args: &SessionArgs, count: u64, piped: Option<String>) -> Resul
     if args.resume.is_some() || args.continue_last {
         return Err("--attempts starts new sessions and cannot resume one".into());
     }
+    let pick = args.attempt_pick.unwrap_or(AttemptPickArg::Verifier);
     let original = match &args.workspace {
         Some(path) => fs::canonicalize(path)?,
         None => std::env::current_dir()?,
@@ -59,11 +73,15 @@ pub async fn run(args: &SessionArgs, count: u64, piped: Option<String>) -> Resul
         .iter()
         .map(|label| {
             let copy = root.join(label);
-            let note = format!(
+            let mut note = format!(
                 "The working directory {copy} is a private copy of {original} for this attempt. Make every change in the copy: where the task names a path under {original}, use the same path under {copy}.",
                 copy = copy.display(),
                 original = original.display(),
             );
+            if pick == AttemptPickArg::SelfCheck {
+                note.push(' ');
+                note.push_str(SELF_CHECK);
+            }
             (label.clone(), joined(piped.as_deref(), &note))
         })
         .collect();
@@ -89,82 +107,80 @@ pub async fn run(args: &SessionArgs, count: u64, piped: Option<String>) -> Resul
     );
     let deadline = args.attempt_timeout.map(Duration::from_secs);
     let started = Instant::now();
-    let runs: Vec<_> = labels
-        .iter()
-        .map(|label| {
-            nanocode_platform::spawn_task(attempt(
-                root.clone(),
-                root.join(label),
-                label.clone(),
-                deadline,
-            ))
-        })
-        .collect();
-    let mut finished = Vec::new();
-    for (label, run) in labels.iter().zip(runs) {
-        let done = run.await??;
+    let (stop, stopping) = watch::channel(None);
+    let (sender, mut arrivals) = unbounded::channel();
+    for (index, label) in labels.iter().enumerate() {
+        let sender = sender.clone();
+        let run = attempt(
+            root.clone(),
+            root.join(label),
+            label.clone(),
+            deadline,
+            stopping.clone(),
+        );
+        nanocode_platform::spawn_task(async move { drop(sender.send((index, run.await))) });
+    }
+    drop(sender);
+    let mut arrived: Vec<Option<Finished>> = labels.iter().map(|_| None).collect();
+    let mut order = Vec::new();
+    let mut passed = None;
+    while let Some((index, done)) = arrivals.next().await {
+        let done: Finished = done?;
+        let reported = match self_check(&done.answer) {
+            Some(check) => format!(", reporting self-check {}/{}", check.passed, check.total),
+            None => String::new(),
+        };
         eprintln!(
-            "nanocode: attempt {label} {} after {:.1?}",
+            "nanocode: attempt {} {} after {:.1?}{reported}",
+            labels[index],
             done.exit.describe(),
             done.elapsed
         );
-        finished.push(done);
+        if pick == AttemptPickArg::SelfCheck && passed.is_none() && done.passes() {
+            passed = Some(index);
+            drop(stop.send(Some(labels[index].clone())));
+        }
+        order.push(index);
+        arrived[index] = Some(done);
     }
+    let mut finished = arrived
+        .into_iter()
+        .map(|done| done.ok_or("an attempt ended without reporting how it finished"))
+        .collect::<std::result::Result<Vec<Finished>, _>>()?;
     eprintln!(
         "nanocode: {count} attempts finished in {:.1?}",
         started.elapsed()
     );
-    let mut report = format!(
-        "The task above ran as {count} independent attempts, each in its own copy of {original}. In the current directory {root}, base holds the copy taken before the attempts started and the directories 1 to {count} hold each attempt's result; {original} itself is unchanged. Below are each attempt's exit, final answer and diff against base, and <number>.err holds its log. Check the attempts by running commands in their directories, such as the task's tests, without changing what they hold. Then pick the attempt that best completes the task: its changes are applied to {original}. End the reply with one line of the form `chosen: <number>`.\n",
-        original = original.display(),
-        root = root.display(),
-    );
-    for (label, done) in labels.iter().zip(&finished) {
-        let diff = diff(&root, label).await?;
-        report.push_str(&format!(
-            "\n## Attempt {label}\n\n{} after {:.1?}.\n\n### Final answer\n\n{}\n\n### Diff against base\n\n```diff\n{diff}```\n",
-            done.exit.describe(),
-            done.elapsed,
-            done.answer.trim_end(),
-        ));
-    }
-    blocking({
-        let (input, report) = (root.join("verifier.in"), joined(piped.as_deref(), &report));
-        move || fs::write(input, report)
-    })
-    .await?;
-    let verdict = attempt(root.clone(), root.clone(), "verifier".to_owned(), deadline).await?;
     let kept = format!(
         "nothing was applied; the attempts stay in {}",
         root.display()
     );
-    match verdict.exit {
-        Exit::Exited(status) if status.success() => {}
-        exit => {
-            return Err(format!(
-                "the verifier {} ({}/verifier.err); {kept}",
-                exit.describe(),
-                root.display()
+    let chosen = match pick {
+        AttemptPickArg::Verifier => {
+            verify(
+                &original,
+                &root,
+                &labels,
+                &finished,
+                piped.as_deref(),
+                deadline,
+                &kept,
             )
-            .into());
+            .await?
         }
-    }
-    let chosen = verdict
-        .answer
-        .lines()
-        .rev()
-        .find_map(|line| line.trim().trim_matches('`').strip_prefix("chosen:"))
-        .and_then(|number| number.trim().parse::<u64>().ok())
-        .filter(|number| (1..=count).contains(number))
-        .ok_or_else(|| {
-            format!(
-                "the verifier's reply ends with no chosen attempt between 1 and {count}; {kept}"
-            )
-        })?;
-    eprintln!(
-        "nanocode: the verifier chose attempt {chosen} after {:.1?}",
-        verdict.elapsed
-    );
+        AttemptPickArg::SelfCheck => {
+            let chosen = picked(&finished, &order, passed, &kept)?;
+            eprintln!(
+                "nanocode: self-check picked attempt {chosen}{}",
+                if passed.is_some() {
+                    ", which passed every check it ran"
+                } else {
+                    ", as no attempt passed every check it ran"
+                }
+            );
+            chosen
+        }
+    };
     let changes = blocking({
         let (original, root) = (original.clone(), root.clone());
         move || {
@@ -197,12 +213,143 @@ pub async fn run(args: &SessionArgs, count: u64, piped: Option<String>) -> Resul
     Ok(())
 }
 
+async fn verify(
+    original: &Path,
+    root: &Path,
+    labels: &[String],
+    finished: &[Finished],
+    piped: Option<&str>,
+    deadline: Option<Duration>,
+    kept: &str,
+) -> Result<u64> {
+    let count = labels.len();
+    let mut report = format!(
+        "The task above ran as {count} independent attempts, each in its own copy of {original}. In the current directory {root}, base holds the copy taken before the attempts started and the directories 1 to {count} hold each attempt's result; {original} itself is unchanged. Below are each attempt's exit, final answer and diff against base, and <number>.err holds its log. Check the attempts by running commands in their directories, such as the task's tests, without changing what they hold. Then pick the attempt that best completes the task: its changes are applied to {original}. End the reply with one line of the form `chosen: <number>`.\n",
+        original = original.display(),
+        root = root.display(),
+    );
+    for (label, done) in labels.iter().zip(finished) {
+        let diff = diff(root, label).await?;
+        report.push_str(&format!(
+            "\n## Attempt {label}\n\n{} after {:.1?}.\n\n### Final answer\n\n{}\n\n### Diff against base\n\n```diff\n{diff}```\n",
+            done.exit.describe(),
+            done.elapsed,
+            done.answer.trim_end(),
+        ));
+    }
+    blocking({
+        let (input, report) = (root.join("verifier.in"), joined(piped, &report));
+        move || fs::write(input, report)
+    })
+    .await?;
+    let (_stop, stopping) = watch::channel(None);
+    let verdict = attempt(
+        root.to_owned(),
+        root.to_owned(),
+        "verifier".to_owned(),
+        deadline,
+        stopping,
+    )
+    .await?;
+    match verdict.exit {
+        Exit::Exited(status) if status.success() => {}
+        exit => {
+            return Err(format!(
+                "the verifier {} ({}/verifier.err); {kept}",
+                exit.describe(),
+                root.display()
+            )
+            .into());
+        }
+    }
+    let chosen = verdict
+        .answer
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().trim_matches('`').strip_prefix("chosen:"))
+        .and_then(|number| number.trim().parse::<usize>().ok())
+        .filter(|number| (1..=count).contains(number))
+        .ok_or_else(|| {
+            format!(
+                "the verifier's reply ends with no chosen attempt between 1 and {count}; {kept}"
+            )
+        })?;
+    eprintln!(
+        "nanocode: the verifier chose attempt {chosen} after {:.1?}",
+        verdict.elapsed
+    );
+    Ok(u64::try_from(chosen)?)
+}
+
+fn picked(
+    finished: &[Finished],
+    order: &[usize],
+    passed: Option<usize>,
+    kept: &str,
+) -> Result<u64> {
+    let index = match passed {
+        Some(index) => index,
+        None => order
+            .iter()
+            .rev()
+            .copied()
+            .filter(|index| finished[*index].candidate())
+            .max_by_key(|index| {
+                let done = &finished[*index];
+                (
+                    self_check(&done.answer).map(|check| check.passed),
+                    done.exit.succeeded(),
+                )
+            })
+            .ok_or_else(|| {
+                format!("every attempt failed without reporting a self-check; {kept}")
+            })?,
+    };
+    Ok(u64::try_from(index + 1)?)
+}
+
+fn self_check(answer: &str) -> Option<SelfCheck> {
+    answer
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().trim_matches('`').strip_prefix("self-check:"))
+        .and_then(|counts| counts.trim().split_once('/'))
+        .and_then(|(passed, total)| {
+            Some(SelfCheck {
+                passed: passed.trim().parse().ok()?,
+                total: total.trim().parse().ok()?,
+            })
+        })
+        .filter(|check| check.passed <= check.total)
+}
+
+impl Finished {
+    fn candidate(&self) -> bool {
+        self.exit.succeeded()
+            || matches!(self.exit, Exit::Stopped(_))
+            || self_check(&self.answer).is_some()
+    }
+
+    fn passes(&self) -> bool {
+        self.exit.succeeded()
+            && self_check(&self.answer)
+                .is_some_and(|check| check.total > 0 && check.passed == check.total)
+    }
+}
+
 impl Exit {
     fn describe(&self) -> String {
         match self {
             Self::Exited(status) => format!("ended with {status}"),
             Self::Stopped(limit) => format!("stopped at the {limit:?} --attempt-timeout"),
+            Self::Cancelled(winner) => {
+                format!("stopped once attempt {winner} passed its self-check")
+            }
         }
+    }
+
+    fn succeeded(&self) -> bool {
+        matches!(self, Self::Exited(status) if status.success())
     }
 }
 
@@ -224,13 +371,27 @@ fn forwarded() -> Vec<OsString> {
     let mut kept = Vec::new();
     while let Some(argument) = given.next() {
         let text = argument.to_string_lossy();
-        if ["--attempts", "--attempt-timeout", "--cd", "-C"].contains(&text.as_ref()) {
+        if [
+            "--attempts",
+            "--attempt-timeout",
+            "--attempt-pick",
+            "--cd",
+            "-C",
+        ]
+        .contains(&text.as_ref())
+        {
             given.next();
             continue;
         }
-        if ["--attempts=", "--attempt-timeout=", "--cd=", "-C"]
-            .iter()
-            .any(|prefix| text.starts_with(prefix))
+        if [
+            "--attempts=",
+            "--attempt-timeout=",
+            "--attempt-pick=",
+            "--cd=",
+            "-C",
+        ]
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
         {
             continue;
         }
@@ -250,6 +411,7 @@ async fn attempt(
     directory: PathBuf,
     label: String,
     deadline: Option<Duration>,
+    stopping: watch::Receiver<Option<String>>,
 ) -> Result<Finished> {
     let output = root.join(format!("{label}.out"));
     let (stdin, stdout, stderr) = blocking({
@@ -277,20 +439,16 @@ async fn attempt(
         .stdout(stdout)
         .stderr(stderr)
         .spawn()?;
-    let exited = match deadline {
-        Some(limit) => nanocode_sync::select! {
-            status = child.wait() => Some(status),
-            () = nanocode_platform::sleep(limit) => None,
-        },
-        None => Some(child.wait().await),
+    let ended = nanocode_sync::select! {
+        status = child.wait() => Ok(status),
+        exit = halted(deadline, stopping) => Err(exit),
     };
-    let exit = match (exited, deadline) {
-        (Some(status), _) => Exit::Exited(status?),
-        (None, Some(limit)) => {
+    let exit = match ended {
+        Ok(status) => Exit::Exited(status?),
+        Err(exit) => {
             stop(&mut child).await?;
-            Exit::Stopped(limit)
+            exit
         }
-        (None, None) => unreachable!("an attempt without a deadline ends only by exiting"),
     };
     let elapsed = started.elapsed();
     let answer = blocking(move || fs::read_to_string(output)).await?;
@@ -385,6 +543,32 @@ fn kill_spawned(id: i32) -> io::Result<()> {
             }
         }
         result => result,
+    }
+}
+
+async fn halted(deadline: Option<Duration>, mut stopping: watch::Receiver<Option<String>>) -> Exit {
+    let limit = async {
+        match deadline {
+            Some(limit) => {
+                nanocode_platform::sleep(limit).await;
+                limit
+            }
+            None => std::future::pending().await,
+        }
+    };
+    let winner = async {
+        if let Ok(Some(winner)) = stopping
+            .wait_for(Option::is_some)
+            .await
+            .map(|winner| winner.clone())
+        {
+            return winner;
+        }
+        std::future::pending().await
+    };
+    nanocode_sync::select! {
+        limit = limit => Exit::Stopped(limit),
+        winner = winner => Exit::Cancelled(winner),
     }
 }
 

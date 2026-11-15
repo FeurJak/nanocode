@@ -103,6 +103,22 @@ impl CodexOrchestrationArg {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttemptPickArg {
+    Verifier,
+    SelfCheck,
+}
+
+impl AttemptPickArg {
+    const ALL: [Self; 2] = [Self::Verifier, Self::SelfCheck];
+    const CHOICES: [Choice; 2] = [
+        Choice::new("verifier").help("A verifier turn checks every finished attempt and picks one"),
+        Choice::new("self-check").help(
+            "Each attempt runs the task's own checks and reports them; the first to pass them all wins and the rest stop, else the one with the most passing checks",
+        ),
+    ];
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GatewayArg {
     Openrouter,
     Vercel,
@@ -262,6 +278,10 @@ const ATTEMPTS: Group = Group::named(
             .long("attempt-timeout")
             .requires("attempts")
             .help("Stop each attempt and the verifier after this many seconds; a stopped attempt's copy stays a candidate"),
+        Argument::value("attempt_pick", "PICK", Parser::Choice(&AttemptPickArg::CHOICES))
+            .long("attempt-pick")
+            .requires("attempts")
+            .help("How the attempt whose changes are applied is picked (default: verifier)"),
     ],
 );
 
@@ -608,6 +628,7 @@ pub struct SessionArgs {
     pub attempt_timeout: Option<u64>,
     pub escalate_after: Option<u64>,
     pub escalate_model: Option<String>,
+    pub attempt_pick: Option<AttemptPickArg>,
     pub model: Option<String>,
     pub harness: Option<HarnessArg>,
     pub thinking: Option<String>,
@@ -661,6 +682,9 @@ impl SessionArgs {
             attempt_timeout: matches.u64("attempt_timeout"),
             escalate_after: matches.u64("escalate_after"),
             escalate_model: matches.text("escalate_model"),
+            attempt_pick: matches
+                .choice("attempt_pick")
+                .map(|index| AttemptPickArg::ALL[index]),
             model: matches.text("model"),
             harness: matches
                 .choice("harness")
@@ -701,6 +725,7 @@ impl SessionArgs {
             attempt_timeout: self.attempt_timeout.or(root.attempt_timeout),
             escalate_after: self.escalate_after.or(root.escalate_after),
             escalate_model: self.escalate_model.or(root.escalate_model),
+            attempt_pick: self.attempt_pick.or(root.attempt_pick),
             model: self.model.or(root.model),
             harness: self.harness.or(root.harness),
             thinking: self.thinking.or(root.thinking),
