@@ -481,7 +481,11 @@ pub(super) fn build(mut builder: ClaudeBuilder) -> Result<(Agent, AgentEvents)> 
         code_quiet,
         turn_hold,
         round_notices,
-        deadline: builder.deadline.map(crate::deadline::Reminders::new),
+        deadline: builder.deadline.map(if builder.stop_at_target {
+            crate::deadline::Reminders::stopping_at_target
+        } else {
+            crate::deadline::Reminders::new
+        }),
         headless: builder.headless,
         brief_final: builder.brief_final,
         brief_finish: builder.brief_finish,
@@ -492,6 +496,7 @@ pub(super) fn build(mut builder: ClaudeBuilder) -> Result<(Agent, AgentEvents)> 
         persist_finish: builder.persist_finish,
         skip_finish_check: builder.skip_finish_check,
         result_effort: builder.result_effort,
+        stop_at_target: builder.stop_at_target,
         tool_result_tokens: builder.tool_result_tokens,
         working_directory: working_directory.map(crate::environment::WorkingDirectory::new),
         nested_tools,

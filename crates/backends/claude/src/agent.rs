@@ -824,6 +824,7 @@ pub struct ClaudeBuilder {
     persist_finish: bool,
     skip_finish_check: bool,
     result_effort: Option<crate::Effort>,
+    stop_at_target: bool,
     tool_result_tokens: Option<std::num::NonZeroU64>,
     spawn_factory: Option<Arc<dyn AgentFactory>>,
     child_journal: Option<nanocode_agent_core::backend::ChildJournal>,
@@ -914,6 +915,7 @@ impl ClaudeBuilder {
             persist_finish: false,
             skip_finish_check: false,
             result_effort: None,
+            stop_at_target: false,
             tool_result_tokens: None,
             spawn_factory: None,
             child_journal: None,
@@ -1361,6 +1363,11 @@ impl ClaudeBuilder {
 
     pub const fn result_effort(mut self, effort: crate::Effort) -> Self {
         self.result_effort = Some(effort);
+        self
+    }
+
+    pub const fn stop_at_target(mut self, stop: bool) -> Self {
+        self.stop_at_target = stop;
         self
     }
 
@@ -3114,6 +3121,7 @@ struct State {
     persist_finish: bool,
     skip_finish_check: bool,
     result_effort: Option<crate::Effort>,
+    stop_at_target: bool,
     tool_result_tokens: Option<std::num::NonZeroU64>,
     working_directory: Option<crate::environment::WorkingDirectory>,
     lifecycle_opened: Atom<Option<String>>,
@@ -4602,6 +4610,12 @@ impl State {
     }
     fn model(&self) -> String {
         self.model.clone()
+    }
+    const fn finish_checks(&self) -> nanocode_tool_host::deadline::FinishChecks {
+        nanocode_tool_host::deadline::FinishChecks {
+            persist: self.persist_finish,
+            stop_at_target: self.stop_at_target,
+        }
     }
     fn effort(&self) -> Option<crate::Effort> {
         *self.effort.get()

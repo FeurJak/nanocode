@@ -243,11 +243,9 @@ pub(super) fn run_rounds<'a>(
                 && state.lineage.root_session_id == state.session_id
                 && let Some(message) = prompt.last_mut()
             {
-                message.content.push(ContentBlock::text(if state.persist_finish {
-                    nanocode_tool_host::deadline::persisting_folded_finish_notice()
-                } else {
-                    nanocode_tool_host::deadline::folded_finish_notice()
-                }));
+                message.content.push(ContentBlock::text(
+                    nanocode_tool_host::deadline::folded_finish_notice_with(state.finish_checks()),
+                ));
             }
             if state.brief_final
                 && state.headless
@@ -258,14 +256,23 @@ pub(super) fn run_rounds<'a>(
                     nanocode_tool_host::deadline::BRIEF_FINAL,
                 ));
             }
-            if state.lean_cells
+            if state.stop_at_target
                 && state.headless
                 && state.lineage.root_session_id == state.session_id
                 && let Some(message) = prompt.last_mut()
             {
                 message.content.push(ContentBlock::text(
-                    nanocode_tool_host::deadline::LEAN_CELLS,
+                    nanocode_tool_host::deadline::STOP_AT_TARGET,
                 ));
+            }
+            if state.lean_cells
+                && state.headless
+                && state.lineage.root_session_id == state.session_id
+                && let Some(message) = prompt.last_mut()
+            {
+                message
+                    .content
+                    .push(ContentBlock::text(nanocode_tool_host::deadline::LEAN_CELLS));
             }
             pending.extend(prompt.into_iter().map(HistoryMessage::from));
             if first {
@@ -1395,17 +1402,11 @@ pub(super) fn run_rounds<'a>(
                 }
                 if !state.skip_finish_check {
                     cursor.finish_checked = true;
-                    let notice = if state.persist_finish {
-                        nanocode_tool_host::deadline::persisting_finish_notice(
-                            state.deadline.as_ref(),
-                            state.brief_finish,
-                        )
-                    } else {
-                        nanocode_tool_host::deadline::finish_notice(
-                            state.deadline.as_ref(),
-                            state.brief_finish,
-                        )
-                    };
+                    let notice = nanocode_tool_host::deadline::finish_notice_with(
+                        state.deadline.as_ref(),
+                        state.brief_finish,
+                        state.finish_checks(),
+                    );
                     state.emit(
                         &request.events,
                         AgentEventKind::ContextNotice,

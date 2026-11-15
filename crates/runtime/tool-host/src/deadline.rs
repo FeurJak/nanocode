@@ -4,13 +4,18 @@ use serde_json::Value;
 use std::time::Duration;
 
 const EARLY_REMINDER: &str = "Keep working until then. First put every output the task asks for in its final location, then use the time that remains to improve and test it. Test it on an input you made that differs from the given example, because the task's checks use inputs you have not seen.";
+const EARLY_TARGET_REMINDER: &str = "First put every output the task asks for in its final location. If it already meets every target the task states, with a margin across repeated runs of the task's own check, finish now instead of improving it further; otherwise use the time that remains to reach them. Test it on an input you made that differs from the given example, because the task's checks use inputs you have not seen.";
 const LAST_REMINDER: &str = "Finish now. Make sure every output the task asks for is in its final location. Delete only the scratch files and test output you made where the task's program or its checks write, read or wait for files, such as a file in /tmp. Keep what the task's program built or set up: caches and compiled artifacts (such as a compiled model or a build directory), installed packages, and the state the task asked for (repositories and their branches, served files, databases, services). Never reset or empty that state to make it clean. Stop background processes you started, unless the task asked to keep them running. Do not start a command or a wait that cannot finish in the time that remains.";
 const FINISH_OPEN: &str =
     "<system-reminder>\nThis session is non-interactive and nobody will reply.";
 const FINISH_CHECK: &str = " Before you finish, check the work:\n";
-const FINISH_CHECKLIST: &str = "- Every output the task names exists at that exact path, with a relative path resolved against the working directory.\n- The task's own check, or a direct test of the result, passes when you run it again now.\n- If the task states a speed, size or score goal, the result was compared with at least one structurally different approach under repeated measurements, and the best one is kept. Beating the given baseline is not by itself the goal.\n- The task's checks use inputs you have not seen (other files, data, sizes or seeds) and run the program as a script does: stdout piped, not a terminal, and signals such as SIGINT. The result holds on at least one input you made that differs from the given example, including the case the task names, and with stdout piped when output matters.\n- The scratch files and test output you made where the task's program or its checks write, read or wait for files, such as a file in /tmp, are deleted, and nothing else is.\n- What the task's program built or set up is kept: caches and compiled artifacts (such as a compiled model or a build directory), installed packages, and the state the task asked for (repositories and their branches, served files, databases, services). None of that state is reset or emptied to make it clean.\n- Background processes you started are stopped, unless the task asked to keep them running.\n- Any choice left open is made, and its result is written.\n";
+const FINISH_HEAD: &str = "- Every output the task names exists at that exact path, with a relative path resolved against the working directory.\n- The task's own check, or a direct test of the result, passes when you run it again now.\n";
+const SCORE_CHECK: &str = "- If the task states a speed, size or score goal, the result was compared with at least one structurally different approach under repeated measurements, and the best one is kept. Beating the given baseline is not by itself the goal.\n";
+const TARGET_CHECK: &str = "- If the task states a target you can check yourself (a score, win rate, accuracy, speed or size to reach on given inputs or against given opponents), the result meets it with a margin across repeated runs of that check, and meeting it is done: do not keep improving it. If the goal is measured against something you cannot see, such as a hidden reference time, the result was compared with at least one structurally different approach under repeated measurements, and the best one is kept.\n";
+const FINISH_TAIL: &str = "- The task's checks use inputs you have not seen (other files, data, sizes or seeds) and run the program as a script does: stdout piped, not a terminal, and signals such as SIGINT. The result holds on at least one input you made that differs from the given example, including the case the task names, and with stdout piped when output matters.\n- The scratch files and test output you made where the task's program or its checks write, read or wait for files, such as a file in /tmp, are deleted, and nothing else is.\n- What the task's program built or set up is kept: caches and compiled artifacts (such as a compiled model or a build directory), installed packages, and the state the task asked for (repositories and their branches, served files, databases, services). None of that state is reset or emptied to make it clean.\n- Background processes you started are stopped, unless the task asked to keep them running.\n- Any choice left open is made, and its result is written.\n";
 const PERSIST_CHECK: &str = "- Every requirement and target the task states is met, and you checked it by running the result. One that is not met, or that you would report as unmet or unverified, is not done: while time remains, keep working on it with a different approach instead of reporting the gap.\n";
 pub const BRIEF_FINAL: &str = "<system-reminder>\nKeep your final message to at most three lines: the result and where it is.\n</system-reminder>";
+pub const STOP_AT_TARGET: &str = "<system-reminder>\nWhen the task states a target you can check yourself, such as a score, win rate, accuracy, speed or size to reach on given inputs or against given opponents, the task is done once the result meets it with a margin across repeated runs of the task's own check: put it in its final location, run the check once more and finish, instead of improving it further. When you compare many variants, generate and run them from one script or loop, not one written-out call per variant.\n</system-reminder>";
 pub const LEAN_CELLS: &str = "<system-reminder>\nKeep each code cell to the commands the step needs, without comments or progress prints. Print only the lines you need from a file or a command, with head, tail, grep or a line range, not whole files or logs. Do not read a file again unless it changed since you read it.\n</system-reminder>";
 const TIME_LIMIT: &str = "Time limit: ";
 const TIME_UP: &str = " When the time is up the task stops, and only what is on disk then counts.";
@@ -31,6 +36,13 @@ pub enum Cap<T> {
 pub struct Reminders {
     announced: Atom<usize>,
     deadline: Deadline,
+    early: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FinishChecks {
+    pub persist: bool,
+    pub stop_at_target: bool,
 }
 
 impl Deadline {
@@ -133,6 +145,15 @@ impl Reminders {
         Self {
             announced: Atom::new(0),
             deadline,
+            early: EARLY_REMINDER,
+        }
+    }
+
+    #[must_use]
+    pub fn stopping_at_target(deadline: Deadline) -> Self {
+        Self {
+            early: EARLY_TARGET_REMINDER,
+            ..Self::new(deadline)
         }
     }
 
@@ -170,7 +191,7 @@ impl Reminders {
         let steps = if passed == REMINDER_PERCENTS.len() {
             LAST_REMINDER
         } else {
-            EARLY_REMINDER
+            self.early
         };
         Some(format!("{TIME_LIMIT}{remain}{TIME_UP} {steps}"))
     }
@@ -188,40 +209,70 @@ impl Reminders {
 
 #[must_use]
 pub fn finish_notice(deadline: Option<&Reminders>, brief: bool) -> String {
-    checked_finish_notice(deadline, brief, "")
+    finish_notice_with(deadline, brief, FinishChecks::default())
 }
 
 #[must_use]
 pub fn persisting_finish_notice(deadline: Option<&Reminders>, brief: bool) -> String {
-    checked_finish_notice(deadline, brief, PERSIST_CHECK)
+    finish_notice_with(
+        deadline,
+        brief,
+        FinishChecks {
+            persist: true,
+            stop_at_target: false,
+        },
+    )
 }
 
-fn checked_finish_notice(deadline: Option<&Reminders>, brief: bool, persist: &str) -> String {
+#[must_use]
+pub fn finish_notice_with(
+    deadline: Option<&Reminders>,
+    brief: bool,
+    checks: FinishChecks,
+) -> String {
     let time = deadline.map_or_else(String::new, |reminders| format!(" {}", reminders.remain()));
     let reply = if brief {
         "reply with one line that says the task is done"
     } else {
         "reply with your final message"
     };
+    let checklist = checks.checklist();
     format!(
-        "{FINISH_OPEN}{time}{FINISH_CHECK}{FINISH_CHECKLIST}{persist}Fix what falls short. When everything holds, {reply}.\n</system-reminder>"
+        "{FINISH_OPEN}{time}{FINISH_CHECK}{checklist}Fix what falls short. When everything holds, {reply}.\n</system-reminder>"
     )
 }
 
 #[must_use]
 pub fn folded_finish_notice() -> String {
-    checked_folded_finish_notice("")
+    folded_finish_notice_with(FinishChecks::default())
 }
 
 #[must_use]
 pub fn persisting_folded_finish_notice() -> String {
-    checked_folded_finish_notice(PERSIST_CHECK)
+    folded_finish_notice_with(FinishChecks {
+        persist: true,
+        stop_at_target: false,
+    })
 }
 
-fn checked_folded_finish_notice(persist: &str) -> String {
+#[must_use]
+pub fn folded_finish_notice_with(checks: FinishChecks) -> String {
+    let checklist = checks.checklist();
     format!(
-        "{FINISH_OPEN} Before your final message, check the work:\n{FINISH_CHECKLIST}{persist}Fix what falls short before you reply with your final message.\n</system-reminder>"
+        "{FINISH_OPEN} Before your final message, check the work:\n{checklist}Fix what falls short before you reply with your final message.\n</system-reminder>"
     )
+}
+
+impl FinishChecks {
+    fn checklist(self) -> String {
+        let score = if self.stop_at_target {
+            TARGET_CHECK
+        } else {
+            SCORE_CHECK
+        };
+        let persist = if self.persist { PERSIST_CHECK } else { "" };
+        format!("{FINISH_HEAD}{score}{FINISH_TAIL}{persist}")
+    }
 }
 
 #[must_use]
