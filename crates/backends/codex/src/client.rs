@@ -213,6 +213,12 @@ impl<F> OpenAiBuilder<F> {
     }
 
     #[must_use]
+    pub const fn max_output_tokens(mut self, tokens: u64) -> Self {
+        self.config.max_output_tokens = Some(tokens);
+        self
+    }
+
+    #[must_use]
     pub const fn context_window_tokens(mut self, tokens: u64) -> Self {
         self.config.context_window_tokens = match self.config.model.context_window_limit() {
             Some(maximum) if tokens > maximum => maximum,

@@ -66,6 +66,8 @@ pub struct ModelConfig {
 
     pub auto_compact_token_limit: Option<u64>,
 
+    pub max_output_tokens: Option<u64>,
+
     pub compaction_thinking: Option<Thinking>,
 
     pub responses_transport: ResponsesTransport,
@@ -265,6 +267,7 @@ impl ModelConfig {
             cyber_access_program: None,
             context_window_tokens: CONTEXT_WINDOW_TOKENS,
             auto_compact_token_limit: None,
+            max_output_tokens: None,
             compaction_thinking: None,
             responses_transport: ResponsesTransport::default(),
             websocket_warmup: false,

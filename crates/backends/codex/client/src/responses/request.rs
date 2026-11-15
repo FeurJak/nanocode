@@ -1018,6 +1018,8 @@ pub(crate) struct ResponseCreate<'a> {
     store: bool,
     stream: bool,
     include: [&'static str; 1],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u64>,
     prompt_cache_key: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<TextControls<'a>>,
@@ -1179,6 +1181,7 @@ impl<'a> ResponseCreate<'a> {
             store: store_responses,
             stream: true,
             include: ["reasoning.encrypted_content"],
+            max_output_tokens: config.max_output_tokens,
             prompt_cache_key: profile.prompt_cache_key(),
             text: TextControls {
                 verbosity: policy.model.supports_verbosity().then_some("low"),

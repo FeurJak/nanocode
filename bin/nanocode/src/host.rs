@@ -784,6 +784,12 @@ impl Host {
                     Some(tokens) => builder.context_window_tokens(tokens),
                     None => builder,
                 };
+                let builder = match max_output {
+                    Some(tokens) if !Model::ALL.contains(&builder.selected_model()) => {
+                        builder.max_output_tokens(u64::from(tokens))
+                    }
+                    _ => builder,
+                };
                 Ok(match &*described.get() {
                     Some(hand) => builder.execution_environment(codex_environment(hand)),
                     None => builder,
