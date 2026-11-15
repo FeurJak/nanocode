@@ -7790,6 +7790,7 @@ impl State {
             let mut plain_summary = false;
             let mut fresh_tools = false;
             let mut compacted = false;
+            let mut attempted_scope = String::new();
             let response = loop {
                 let effect = cursor.effect(self, &step);
                 let scope = [
@@ -7803,6 +7804,7 @@ impl State {
                 .map(|(_, name)| *name)
                 .collect::<Vec<_>>()
                 .join("-");
+                attempted_scope.clone_from(&scope);
                 let response = self
                     .response(
                         &pending,
@@ -7965,6 +7967,16 @@ impl State {
                         model_call_index = index.saturating_add(1),
                         "a steer preempted the model call; sending the request again with the steer"
                     );
+                    if let Some(effect) = cursor.effect(self, &step) {
+                        let effect = if attempted_scope.is_empty() {
+                            effect
+                        } else {
+                            effect.scoped(&attempted_scope)
+                        };
+                        journal.complete(effect.completion(
+                            &serde_json::json!({"refused": "a steer preempted this model call"}),
+                        )?);
+                    }
                     if cursor.model_step_offset == 0 {
                         cursor.model_step_offset = 1;
                         cursor.model_receipt_start = Some(index.saturating_add(2));
