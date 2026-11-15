@@ -1,5 +1,5 @@
 {
- "version": "2.1.318",
+ "version": "2.1.325",
  "models": {
   "glm-5.2": {
    "steps": true,
@@ -113,7 +113,7 @@
   },
   "claude-opus-5-5: header:user-agent": {
    "reason": "With an API key nanocode identifies as its own client, not as Claude Code on the Node SDK: no claude-cli user agent, x-app or x-stainless headers, and only the betas its body uses (context management, thinking block binding). Its subscription-compatible mode sends Claude Code's beta set (client subscription_compatibility).",
-   "claude": "claude-cli/2.1.318 (external, sdk-cli)",
+   "claude": "claude-cli/2.1.325 (external, sdk-cli)",
    "nanocode": "<absent>"
   },
   "claude-opus-5-5: header:x-app": {
@@ -198,13 +198,13 @@
   },
   "claude-opus-5-5: system:billing-header": {
    "reason": "The billing header attributes a request to a Claude Code build (cc_version, cc_entrypoint); nanocode is not one, so it sends none.",
-   "claude": "x-anthropic-billing-header: cc_version=2.1.318.<hash>; cc_entrypoint=sdk-cli;",
+   "claude": "x-anthropic-billing-header: cc_version=2.1.325.<hash>; cc_entrypoint=sdk-cli;",
    "nanocode": "<absent>"
   },
   "claude-opus-5-5: system[1]": {
    "reason": "nanocode runs native Claude models in Code Mode (exec and wait) by design: its Code Mode prompt and environment are system blocks, without Claude Code's git status, attribution and environment messages, and the core block leaves out the /fast line that only the direct Claude Code context adds.",
-   "claude": "42adef46e947 (3519 chars)",
-   "nanocode": "8bdc66da7837 (3380 chars)"
+   "claude": "b8e24eb0f093 (3560 chars)",
+   "nanocode": "47e987d354f7 (3380 chars)"
   },
   "claude-opus-5-5: system[2]": {
    "reason": "nanocode runs native Claude models in Code Mode (exec and wait) by design: its Code Mode prompt and environment are system blocks, without Claude Code's git status, attribution and environment messages, and the core block leaves out the /fast line that only the direct Claude Code context adds.",
@@ -238,7 +238,7 @@
   },
   "glm-5.2: header:user-agent": {
    "reason": "With an API key nanocode identifies as its own client, not as Claude Code on the Node SDK: no claude-cli user agent, x-app or x-stainless headers, and only the betas its body uses (context management, thinking block binding). Its subscription-compatible mode sends Claude Code's beta set (client subscription_compatibility).",
-   "claude": "claude-cli/2.1.318 (external, sdk-cli)",
+   "claude": "claude-cli/2.1.325 (external, sdk-cli)",
    "nanocode": "<absent>"
   },
   "glm-5.2: header:x-app": {
@@ -323,12 +323,12 @@
   },
   "glm-5.2: side0.system:billing-header": {
    "reason": "The billing header attributes a request to a Claude Code build (cc_version, cc_entrypoint); nanocode is not one, so it sends none.",
-   "claude": "x-anthropic-billing-header: cc_version=2.1.318.<hash>; cc_entrypoint=sdk-cli;",
+   "claude": "x-anthropic-billing-header: cc_version=2.1.325.<hash>; cc_entrypoint=sdk-cli;",
    "nanocode": "<absent>"
   },
   "glm-5.2: system:billing-header": {
    "reason": "The billing header attributes a request to a Claude Code build (cc_version, cc_entrypoint); nanocode is not one, so it sends none.",
-   "claude": "x-anthropic-billing-header: cc_version=2.1.318.<hash>; cc_entrypoint=sdk-cli;",
+   "claude": "x-anthropic-billing-header: cc_version=2.1.325.<hash>; cc_entrypoint=sdk-cli;",
    "nanocode": "<absent>"
   },
   "glm-5.2: tool:DeferredToolPlaceholder": {
@@ -351,7 +351,7 @@
      "headers": {
       "accept": "application/json",
       "content-type": "application/json",
-      "user-agent": "claude-cli/2.1.318 (external, sdk-cli)",
+      "user-agent": "claude-cli/2.1.325 (external, sdk-cli)",
       "x-claude-code-session-id": "<uuid>",
       "x-stainless-arch": "x64",
       "x-stainless-lang": "js",
@@ -366,9 +366,9 @@
       "anthropic-version": "2023-06-01",
       "x-app": "cli",
       "connection": "keep-alive",
-      "host": "127.0.0.1:37385",
+      "host": "127.0.0.1:42947",
       "accept-encoding": "gzip, deflate, br, zstd",
-      "content-length": "16373"
+      "content-length": "16414"
      },
      "body": {
       "model": "glm-5.2",
@@ -406,7 +406,7 @@
       "system": [
        {
         "type": "text",
-        "text": "x-anthropic-billing-header: cc_version=2.1.318.f32; cc_entrypoint=sdk-cli;"
+        "text": "x-anthropic-billing-header: cc_version=2.1.325.1e1; cc_entrypoint=sdk-cli;"
        },
        {
         "type": "text",
@@ -417,7 +417,7 @@
        },
        {
         "type": "text",
-        "text": "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.\n\nWhen you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Environment\n - The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.1: 'claude-fable-5-1', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.\n\nWhen you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey",
+        "text": "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.\n\nWhen you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Environment\n - The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.2: 'claude-fable-5-2', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code gives faster output on this session's model if it supports fast mode, and otherwise switches the session to Claude Opus. It can be toggled with /fast.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.\n\nWhen you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey",
         "cache_control": {
          "type": "ephemeral"
         }
@@ -645,7 +645,7 @@
        }
       ],
       "metadata": {
-       "user_id": "{\"device_id\":\"6b84568e5f4b99afc2c761b30a056d46d7c6c158a266cd1192d7ba0b405f91cc\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
+       "user_id": "{\"device_id\":\"d5fa0e3ada71aa87ee88d63d1f503f04fbe953a0896cf58eefe28a08042500e4\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
       },
       "max_tokens": 32000,
       "thinking": {
@@ -672,7 +672,7 @@
      "headers": {
       "accept": "application/json",
       "content-type": "application/json",
-      "user-agent": "claude-cli/2.1.318 (external, sdk-cli)",
+      "user-agent": "claude-cli/2.1.325 (external, sdk-cli)",
       "x-claude-code-session-id": "<uuid>",
       "x-stainless-arch": "x64",
       "x-stainless-lang": "js",
@@ -687,9 +687,9 @@
       "anthropic-version": "2023-06-01",
       "x-app": "cli",
       "connection": "keep-alive",
-      "host": "127.0.0.1:37385",
+      "host": "127.0.0.1:42947",
       "accept-encoding": "gzip, deflate, br, zstd",
-      "content-length": "16594"
+      "content-length": "16635"
      },
      "body": {
       "model": "glm-5.2",
@@ -747,7 +747,7 @@
       "system": [
        {
         "type": "text",
-        "text": "x-anthropic-billing-header: cc_version=2.1.318.f32; cc_entrypoint=sdk-cli;"
+        "text": "x-anthropic-billing-header: cc_version=2.1.325.1e1; cc_entrypoint=sdk-cli;"
        },
        {
         "type": "text",
@@ -758,7 +758,7 @@
        },
        {
         "type": "text",
-        "text": "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.\n\nWhen you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Environment\n - The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.1: 'claude-fable-5-1', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.\n\nWhen you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey",
+        "text": "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.\n\nWhen you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Environment\n - The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.2: 'claude-fable-5-2', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code gives faster output on this session's model if it supports fast mode, and otherwise switches the session to Claude Opus. It can be toggled with /fast.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.\n\nWhen you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey",
         "cache_control": {
          "type": "ephemeral"
         }
@@ -986,7 +986,7 @@
        }
       ],
       "metadata": {
-       "user_id": "{\"device_id\":\"6b84568e5f4b99afc2c761b30a056d46d7c6c158a266cd1192d7ba0b405f91cc\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
+       "user_id": "{\"device_id\":\"d5fa0e3ada71aa87ee88d63d1f503f04fbe953a0896cf58eefe28a08042500e4\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
       },
       "max_tokens": 32000,
       "thinking": {
@@ -1013,7 +1013,7 @@
      "headers": {
       "accept": "application/json",
       "content-type": "application/json",
-      "user-agent": "claude-cli/2.1.318 (external, sdk-cli)",
+      "user-agent": "claude-cli/2.1.325 (external, sdk-cli)",
       "x-claude-code-session-id": "<uuid>",
       "x-stainless-arch": "x64",
       "x-stainless-lang": "js",
@@ -1028,9 +1028,9 @@
       "anthropic-version": "2023-06-01",
       "x-app": "cli",
       "connection": "keep-alive",
-      "host": "127.0.0.1:37385",
+      "host": "127.0.0.1:42947",
       "accept-encoding": "gzip, deflate, br, zstd",
-      "content-length": "16864"
+      "content-length": "16905"
      },
      "body": {
       "model": "glm-5.2",
@@ -1112,7 +1112,7 @@
       "system": [
        {
         "type": "text",
-        "text": "x-anthropic-billing-header: cc_version=2.1.318.f32; cc_entrypoint=sdk-cli;"
+        "text": "x-anthropic-billing-header: cc_version=2.1.325.1e1; cc_entrypoint=sdk-cli;"
        },
        {
         "type": "text",
@@ -1123,7 +1123,7 @@
        },
        {
         "type": "text",
-        "text": "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.\n\nWhen you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Environment\n - The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.1: 'claude-fable-5-1', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.\n\nWhen you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey",
+        "text": "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.\n\nWhen you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Environment\n - The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.2: 'claude-fable-5-2', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code gives faster output on this session's model if it supports fast mode, and otherwise switches the session to Claude Opus. It can be toggled with /fast.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.\n\nWhen you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey",
         "cache_control": {
          "type": "ephemeral"
         }
@@ -1351,7 +1351,7 @@
        }
       ],
       "metadata": {
-       "user_id": "{\"device_id\":\"6b84568e5f4b99afc2c761b30a056d46d7c6c158a266cd1192d7ba0b405f91cc\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
+       "user_id": "{\"device_id\":\"d5fa0e3ada71aa87ee88d63d1f503f04fbe953a0896cf58eefe28a08042500e4\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
       },
       "max_tokens": 32000,
       "thinking": {
@@ -1378,7 +1378,7 @@
      "headers": {
       "accept": "application/json",
       "content-type": "application/json",
-      "user-agent": "claude-cli/2.1.318 (external, sdk-cli)",
+      "user-agent": "claude-cli/2.1.325 (external, sdk-cli)",
       "x-claude-code-session-id": "<uuid>",
       "x-stainless-arch": "x64",
       "x-stainless-lang": "js",
@@ -1393,9 +1393,9 @@
       "anthropic-version": "2023-06-01",
       "x-app": "cli",
       "connection": "keep-alive",
-      "host": "127.0.0.1:37385",
+      "host": "127.0.0.1:42947",
       "accept-encoding": "gzip, deflate, br, zstd",
-      "content-length": "17108"
+      "content-length": "17149"
      },
      "body": {
       "model": "glm-5.2",
@@ -1500,7 +1500,7 @@
       "system": [
        {
         "type": "text",
-        "text": "x-anthropic-billing-header: cc_version=2.1.318.f32; cc_entrypoint=sdk-cli;"
+        "text": "x-anthropic-billing-header: cc_version=2.1.325.1e1; cc_entrypoint=sdk-cli;"
        },
        {
         "type": "text",
@@ -1511,7 +1511,7 @@
        },
        {
         "type": "text",
-        "text": "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.\n\nWhen you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Environment\n - The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.1: 'claude-fable-5-1', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.\n\nWhen you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey",
+        "text": "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.\n\nWhen you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Environment\n - The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.2: 'claude-fable-5-2', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code gives faster output on this session's model if it supports fast mode, and otherwise switches the session to Claude Opus. It can be toggled with /fast.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.\n\nWhen you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey",
         "cache_control": {
          "type": "ephemeral"
         }
@@ -1739,7 +1739,7 @@
        }
       ],
       "metadata": {
-       "user_id": "{\"device_id\":\"6b84568e5f4b99afc2c761b30a056d46d7c6c158a266cd1192d7ba0b405f91cc\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
+       "user_id": "{\"device_id\":\"d5fa0e3ada71aa87ee88d63d1f503f04fbe953a0896cf58eefe28a08042500e4\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
       },
       "max_tokens": 32000,
       "thinking": {
@@ -1766,7 +1766,7 @@
      "headers": {
       "accept": "application/json",
       "content-type": "application/json",
-      "user-agent": "claude-cli/2.1.318 (external, sdk-cli)",
+      "user-agent": "claude-cli/2.1.325 (external, sdk-cli)",
       "x-claude-code-session-id": "<uuid>",
       "x-stainless-arch": "x64",
       "x-stainless-lang": "js",
@@ -1781,9 +1781,9 @@
       "anthropic-version": "2023-06-01",
       "x-app": "cli",
       "connection": "keep-alive",
-      "host": "127.0.0.1:37385",
+      "host": "127.0.0.1:42947",
       "accept-encoding": "gzip, deflate, br, zstd",
-      "content-length": "17541"
+      "content-length": "17582"
      },
      "body": {
       "model": "glm-5.2",
@@ -1914,7 +1914,7 @@
       "system": [
        {
         "type": "text",
-        "text": "x-anthropic-billing-header: cc_version=2.1.318.f32; cc_entrypoint=sdk-cli;"
+        "text": "x-anthropic-billing-header: cc_version=2.1.325.1e1; cc_entrypoint=sdk-cli;"
        },
        {
         "type": "text",
@@ -1925,7 +1925,7 @@
        },
        {
         "type": "text",
-        "text": "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.\n\nWhen you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Environment\n - The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.1: 'claude-fable-5-1', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.\n\nWhen you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey",
+        "text": "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.\n\nWhen you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Environment\n - The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.2: 'claude-fable-5-2', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code gives faster output on this session's model if it supports fast mode, and otherwise switches the session to Claude Opus. It can be toggled with /fast.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.\n\nWhen you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey",
         "cache_control": {
          "type": "ephemeral"
         }
@@ -2153,7 +2153,7 @@
        }
       ],
       "metadata": {
-       "user_id": "{\"device_id\":\"6b84568e5f4b99afc2c761b30a056d46d7c6c158a266cd1192d7ba0b405f91cc\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
+       "user_id": "{\"device_id\":\"d5fa0e3ada71aa87ee88d63d1f503f04fbe953a0896cf58eefe28a08042500e4\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
       },
       "max_tokens": 32000,
       "thinking": {
@@ -2180,7 +2180,7 @@
      "headers": {
       "accept": "application/json",
       "content-type": "application/json",
-      "user-agent": "claude-cli/2.1.318 (external, sdk-cli)",
+      "user-agent": "claude-cli/2.1.325 (external, sdk-cli)",
       "x-claude-code-session-id": "<uuid>",
       "x-stainless-arch": "x64",
       "x-stainless-lang": "js",
@@ -2195,9 +2195,9 @@
       "anthropic-version": "2023-06-01",
       "x-app": "cli",
       "connection": "keep-alive",
-      "host": "127.0.0.1:37385",
+      "host": "127.0.0.1:42947",
       "accept-encoding": "gzip, deflate, br, zstd",
-      "content-length": "17900"
+      "content-length": "17941"
      },
      "body": {
       "model": "glm-5.2",
@@ -2354,7 +2354,7 @@
       "system": [
        {
         "type": "text",
-        "text": "x-anthropic-billing-header: cc_version=2.1.318.f32; cc_entrypoint=sdk-cli;"
+        "text": "x-anthropic-billing-header: cc_version=2.1.325.1e1; cc_entrypoint=sdk-cli;"
        },
        {
         "type": "text",
@@ -2365,7 +2365,7 @@
        },
        {
         "type": "text",
-        "text": "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.\n\nWhen you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Environment\n - The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.1: 'claude-fable-5-1', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.\n\nWhen you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey",
+        "text": "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.\n\nWhen you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Environment\n - The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.2: 'claude-fable-5-2', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code gives faster output on this session's model if it supports fast mode, and otherwise switches the session to Claude Opus. It can be toggled with /fast.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.\n\nWhen you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey",
         "cache_control": {
          "type": "ephemeral"
         }
@@ -2593,7 +2593,7 @@
        }
       ],
       "metadata": {
-       "user_id": "{\"device_id\":\"6b84568e5f4b99afc2c761b30a056d46d7c6c158a266cd1192d7ba0b405f91cc\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
+       "user_id": "{\"device_id\":\"d5fa0e3ada71aa87ee88d63d1f503f04fbe953a0896cf58eefe28a08042500e4\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
       },
       "max_tokens": 32000,
       "thinking": {
@@ -2620,7 +2620,7 @@
      "headers": {
       "accept": "application/json",
       "content-type": "application/json",
-      "user-agent": "claude-cli/2.1.318 (external, sdk-cli)",
+      "user-agent": "claude-cli/2.1.325 (external, sdk-cli)",
       "x-claude-code-session-id": "<uuid>",
       "x-stainless-arch": "x64",
       "x-stainless-lang": "js",
@@ -2635,9 +2635,9 @@
       "anthropic-version": "2023-06-01",
       "x-app": "cli",
       "connection": "keep-alive",
-      "host": "127.0.0.1:37385",
+      "host": "127.0.0.1:42947",
       "accept-encoding": "gzip, deflate, br, zstd",
-      "content-length": "18358"
+      "content-length": "18399"
      },
      "body": {
       "model": "glm-5.2",
@@ -2828,7 +2828,7 @@
       "system": [
        {
         "type": "text",
-        "text": "x-anthropic-billing-header: cc_version=2.1.318.f32; cc_entrypoint=sdk-cli;"
+        "text": "x-anthropic-billing-header: cc_version=2.1.325.1e1; cc_entrypoint=sdk-cli;"
        },
        {
         "type": "text",
@@ -2839,7 +2839,7 @@
        },
        {
         "type": "text",
-        "text": "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.\n\nWhen you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Environment\n - The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.1: 'claude-fable-5-1', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.\n\nWhen you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey",
+        "text": "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.\n\nWhen you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Environment\n - The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.2: 'claude-fable-5-2', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code gives faster output on this session's model if it supports fast mode, and otherwise switches the session to Claude Opus. It can be toggled with /fast.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.\n\nWhen you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey",
         "cache_control": {
          "type": "ephemeral"
         }
@@ -3067,7 +3067,7 @@
        }
       ],
       "metadata": {
-       "user_id": "{\"device_id\":\"6b84568e5f4b99afc2c761b30a056d46d7c6c158a266cd1192d7ba0b405f91cc\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
+       "user_id": "{\"device_id\":\"d5fa0e3ada71aa87ee88d63d1f503f04fbe953a0896cf58eefe28a08042500e4\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
       },
       "max_tokens": 32000,
       "thinking": {
@@ -3094,7 +3094,7 @@
      "headers": {
       "accept": "application/json",
       "content-type": "application/json",
-      "user-agent": "claude-cli/2.1.318 (external, sdk-cli)",
+      "user-agent": "claude-cli/2.1.325 (external, sdk-cli)",
       "x-claude-code-session-id": "<uuid>",
       "x-stainless-arch": "x64",
       "x-stainless-lang": "js",
@@ -3109,9 +3109,9 @@
       "anthropic-version": "2023-06-01",
       "x-app": "cli",
       "connection": "keep-alive",
-      "host": "127.0.0.1:37385",
+      "host": "127.0.0.1:42947",
       "accept-encoding": "gzip, deflate, br, zstd",
-      "content-length": "18611"
+      "content-length": "18652"
      },
      "body": {
       "model": "glm-5.2",
@@ -3322,7 +3322,7 @@
       "system": [
        {
         "type": "text",
-        "text": "x-anthropic-billing-header: cc_version=2.1.318.f32; cc_entrypoint=sdk-cli;"
+        "text": "x-anthropic-billing-header: cc_version=2.1.325.1e1; cc_entrypoint=sdk-cli;"
        },
        {
         "type": "text",
@@ -3333,7 +3333,7 @@
        },
        {
         "type": "text",
-        "text": "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.\n\nWhen you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Environment\n - The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.1: 'claude-fable-5-1', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.\n\nWhen you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey",
+        "text": "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.\n\nWhen you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Environment\n - The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.2: 'claude-fable-5-2', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code gives faster output on this session's model if it supports fast mode, and otherwise switches the session to Claude Opus. It can be toggled with /fast.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.\n\nWhen you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey",
         "cache_control": {
          "type": "ephemeral"
         }
@@ -3561,7 +3561,7 @@
        }
       ],
       "metadata": {
-       "user_id": "{\"device_id\":\"6b84568e5f4b99afc2c761b30a056d46d7c6c158a266cd1192d7ba0b405f91cc\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
+       "user_id": "{\"device_id\":\"d5fa0e3ada71aa87ee88d63d1f503f04fbe953a0896cf58eefe28a08042500e4\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
       },
       "max_tokens": 32000,
       "thinking": {
@@ -3588,7 +3588,7 @@
      "headers": {
       "accept": "application/json",
       "content-type": "application/json",
-      "user-agent": "claude-cli/2.1.318 (external, sdk-cli)",
+      "user-agent": "claude-cli/2.1.325 (external, sdk-cli)",
       "x-claude-code-session-id": "<uuid>",
       "x-stainless-arch": "x64",
       "x-stainless-lang": "js",
@@ -3603,9 +3603,9 @@
       "anthropic-version": "2023-06-01",
       "x-app": "cli",
       "connection": "keep-alive",
-      "host": "127.0.0.1:37385",
+      "host": "127.0.0.1:42947",
       "accept-encoding": "gzip, deflate, br, zstd",
-      "content-length": "19101"
+      "content-length": "19142"
      },
      "body": {
       "model": "glm-5.2",
@@ -3850,7 +3850,7 @@
       "system": [
        {
         "type": "text",
-        "text": "x-anthropic-billing-header: cc_version=2.1.318.f32; cc_entrypoint=sdk-cli;"
+        "text": "x-anthropic-billing-header: cc_version=2.1.325.1e1; cc_entrypoint=sdk-cli;"
        },
        {
         "type": "text",
@@ -3861,7 +3861,7 @@
        },
        {
         "type": "text",
-        "text": "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.\n\nWhen you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Environment\n - The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.1: 'claude-fable-5-1', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.\n\nWhen you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey",
+        "text": "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.\n\nWhen you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Environment\n - The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.2: 'claude-fable-5-2', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code gives faster output on this session's model if it supports fast mode, and otherwise switches the session to Claude Opus. It can be toggled with /fast.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.\n\nWhen you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey",
         "cache_control": {
          "type": "ephemeral"
         }
@@ -4089,7 +4089,7 @@
        }
       ],
       "metadata": {
-       "user_id": "{\"device_id\":\"6b84568e5f4b99afc2c761b30a056d46d7c6c158a266cd1192d7ba0b405f91cc\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
+       "user_id": "{\"device_id\":\"d5fa0e3ada71aa87ee88d63d1f503f04fbe953a0896cf58eefe28a08042500e4\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
       },
       "max_tokens": 32000,
       "thinking": {
@@ -4116,7 +4116,7 @@
      "headers": {
       "accept": "application/json",
       "content-type": "application/json",
-      "user-agent": "claude-cli/2.1.318 (external, sdk-cli)",
+      "user-agent": "claude-cli/2.1.325 (external, sdk-cli)",
       "x-claude-code-session-id": "<uuid>",
       "x-stainless-arch": "x64",
       "x-stainless-lang": "js",
@@ -4131,9 +4131,9 @@
       "anthropic-version": "2023-06-01",
       "x-app": "cli",
       "connection": "keep-alive",
-      "host": "127.0.0.1:37385",
+      "host": "127.0.0.1:42947",
       "accept-encoding": "gzip, deflate, br, zstd",
-      "content-length": "19325"
+      "content-length": "19366"
      },
      "body": {
       "model": "glm-5.2",
@@ -4398,7 +4398,7 @@
       "system": [
        {
         "type": "text",
-        "text": "x-anthropic-billing-header: cc_version=2.1.318.f32; cc_entrypoint=sdk-cli;"
+        "text": "x-anthropic-billing-header: cc_version=2.1.325.1e1; cc_entrypoint=sdk-cli;"
        },
        {
         "type": "text",
@@ -4409,7 +4409,7 @@
        },
        {
         "type": "text",
-        "text": "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.\n\nWhen you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Environment\n - The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.1: 'claude-fable-5-1', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.\n\nWhen you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey",
+        "text": "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.\n\nWhen you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Environment\n - The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.2: 'claude-fable-5-2', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code gives faster output on this session's model if it supports fast mode, and otherwise switches the session to Claude Opus. It can be toggled with /fast.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.\n\nWhen you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey",
         "cache_control": {
          "type": "ephemeral"
         }
@@ -4637,7 +4637,7 @@
        }
       ],
       "metadata": {
-       "user_id": "{\"device_id\":\"6b84568e5f4b99afc2c761b30a056d46d7c6c158a266cd1192d7ba0b405f91cc\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
+       "user_id": "{\"device_id\":\"d5fa0e3ada71aa87ee88d63d1f503f04fbe953a0896cf58eefe28a08042500e4\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
       },
       "max_tokens": 32000,
       "thinking": {
@@ -4664,7 +4664,7 @@
      "headers": {
       "accept": "application/json",
       "content-type": "application/json",
-      "user-agent": "claude-cli/2.1.318 (external, sdk-cli)",
+      "user-agent": "claude-cli/2.1.325 (external, sdk-cli)",
       "x-claude-code-session-id": "<uuid>",
       "x-stainless-arch": "x64",
       "x-stainless-lang": "js",
@@ -4679,9 +4679,9 @@
       "anthropic-version": "2023-06-01",
       "x-app": "cli",
       "connection": "keep-alive",
-      "host": "127.0.0.1:37385",
+      "host": "127.0.0.1:42947",
       "accept-encoding": "gzip, deflate, br, zstd",
-      "content-length": "19707"
+      "content-length": "19748"
      },
      "body": {
       "model": "glm-5.2",
@@ -4970,7 +4970,7 @@
       "system": [
        {
         "type": "text",
-        "text": "x-anthropic-billing-header: cc_version=2.1.318.f32; cc_entrypoint=sdk-cli;"
+        "text": "x-anthropic-billing-header: cc_version=2.1.325.1e1; cc_entrypoint=sdk-cli;"
        },
        {
         "type": "text",
@@ -4981,7 +4981,7 @@
        },
        {
         "type": "text",
-        "text": "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.\n\nWhen you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Environment\n - The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.1: 'claude-fable-5-1', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.\n\nWhen you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey",
+        "text": "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.\n\nWhen you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Environment\n - The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.2: 'claude-fable-5-2', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code gives faster output on this session's model if it supports fast mode, and otherwise switches the session to Claude Opus. It can be toggled with /fast.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.\n\nWhen you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey",
         "cache_control": {
          "type": "ephemeral"
         }
@@ -5209,7 +5209,7 @@
        }
       ],
       "metadata": {
-       "user_id": "{\"device_id\":\"6b84568e5f4b99afc2c761b30a056d46d7c6c158a266cd1192d7ba0b405f91cc\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
+       "user_id": "{\"device_id\":\"d5fa0e3ada71aa87ee88d63d1f503f04fbe953a0896cf58eefe28a08042500e4\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
       },
       "max_tokens": 32000,
       "thinking": {
@@ -5250,7 +5250,7 @@
       "system": [
        {
         "type": "text",
-        "text": "x-anthropic-billing-header: cc_version=2.1.318.4d4; cc_entrypoint=sdk-cli;"
+        "text": "x-anthropic-billing-header: cc_version=2.1.325.38b; cc_entrypoint=sdk-cli;"
        },
        {
         "type": "text",
@@ -5259,7 +5259,7 @@
       ],
       "tools": [],
       "metadata": {
-       "user_id": "{\"device_id\":\"6b84568e5f4b99afc2c761b30a056d46d7c6c158a266cd1192d7ba0b405f91cc\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
+       "user_id": "{\"device_id\":\"d5fa0e3ada71aa87ee88d63d1f503f04fbe953a0896cf58eefe28a08042500e4\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
       },
       "max_tokens": 32000,
       "output_config": {
@@ -5278,7 +5278,7 @@
      "headers": {
       "accept": "application/json",
       "content-type": "application/json",
-      "user-agent": "claude-cli/2.1.318 (external, sdk-cli)",
+      "user-agent": "claude-cli/2.1.325 (external, sdk-cli)",
       "x-claude-code-session-id": "<uuid>",
       "x-stainless-arch": "x64",
       "x-stainless-lang": "js",
@@ -5293,9 +5293,9 @@
       "anthropic-version": "2023-06-01",
       "x-app": "cli",
       "connection": "keep-alive",
-      "host": "127.0.0.1:33597",
+      "host": "127.0.0.1:46315",
       "accept-encoding": "gzip, deflate, br, zstd",
-      "content-length": "16968"
+      "content-length": "17009"
      },
      "body": {
       "model": "claude-opus-5-5",
@@ -5336,7 +5336,7 @@
       "system": [
        {
         "type": "text",
-        "text": "x-anthropic-billing-header: cc_version=2.1.318.f32; cc_entrypoint=sdk-cli;"
+        "text": "x-anthropic-billing-header: cc_version=2.1.325.1e1; cc_entrypoint=sdk-cli;"
        },
        {
         "type": "text",
@@ -5347,7 +5347,7 @@
        },
        {
         "type": "text",
-        "text": "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.\n\nWhen you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Environment\n - The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.1: 'claude-fable-5-1', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.\n\nWhen you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey\n\nDo build original games, games in a genre or with similar mechanics, and games from the user's own designs and assets. Don't build a recreation of a specific existing game (its name, characters, art, music, levels or look), even if it is renamed or called original.",
+        "text": "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.\n\nWhen you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.\n\n# Environment\n - The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.2: 'claude-fable-5-2', Opus 5.5: 'claude-opus-5-5', Sonnet 5.5: 'claude-sonnet-5-5', Haiku 5.5: 'claude-haiku-5-5'. When building AI applications, default to the latest and most capable Claude models.\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).\n - Fast mode for Claude Code gives faster output on this session's model if it supports fast mode, and otherwise switches the session to Claude Opus. It can be toggled with /fast.\n\n# Context management\nWhen the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.\n\nWhen you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey\n\nDo build original games, games in a genre or with similar mechanics, and games from the user's own designs and assets. Don't build a recreation of a specific existing game (its name, characters, art, music, levels or look), even if it is renamed or called original.",
         "cache_control": {
          "type": "ephemeral"
         }
@@ -5575,7 +5575,7 @@
        }
       ],
       "metadata": {
-       "user_id": "{\"device_id\":\"ea0548f6ad317c990fb6793948740c6e388f8456287eee48fc53d1d173c6fdf6\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
+       "user_id": "{\"device_id\":\"c4a4b02e5318af677bad235c1089f56a44ae72a40daf76a9cff07c6d0b5cd761\",\"account_uuid\":\"\",\"session_id\":\"<uuid>\"}"
       },
       "max_tokens": 128000,
       "thinking": {

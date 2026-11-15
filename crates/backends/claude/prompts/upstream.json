@@ -1,10 +1,10 @@
 {
   "package": "@anthropic-ai/claude-code",
-  "version": "2.1.318",
+  "version": "2.1.325",
   "platform_package": "@anthropic-ai/claude-code-linux-x64",
-  "platform_tarball": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.318.tgz",
-  "platform_integrity": "sha512-GX+7CUng2R5f7SsA2w0LaXlH2f62fRCFD/Z2SUexoeH3B0KfulKQt5DtY9NeD2Yp3VEBz6/k/xWSbGPUi6NV2A==",
-  "executable_sha256": "708c77b204db30086ff6f1ed34577bda03e1be74ced80557cbf7b54249ebf0bd",
+  "platform_tarball": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.325.tgz",
+  "platform_integrity": "sha512-BqZzMvP/zgLLL34S+7OzbG+cyoFp7gwWHU5koVwsyMlTAz+0zZAmbY+UkzvtN2RXxp6AcMenbYIjQJxoXfUY3w==",
+  "executable_sha256": "0dc4f4a9a165fc60746d7ae8489712e5fc352f1e7ad4eb22e7141bd0812eb0cf",
   "model": "claude-opus-5-5",
   "capture_flags": [
     "-p",
@@ -42,7 +42,7 @@
   "artifacts": [
     {
       "path": "prompts/claude-code-system.json",
-      "sha256": "c5795edd1e6be154df99d00c24e9ef9de0da06cb305cfb7dffe713db54b07418"
+      "sha256": "606e37082ef2219206ebdcd84587e151dc1a87d1a8b554fdf36117656c5a3224"
     },
     {
       "path": "tools/src/tools/upstream.json",

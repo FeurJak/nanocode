@@ -50,19 +50,20 @@ if not args.offline:
         raise ValueError('Official executable digest differs')
     source = executable.decode('utf-8', 'replace')
 
-    def literal(start, values):
-        at = source.index(start)
-        text = source[at + 1:source.index(start[0], at + 1)].replace('\\u2014', '\u2014')
+    def literal(start, values, at=None):
+        at = source.index(start) if at is None else at
+        text = source[at + 1:source.index(source[at], at + 1)].replace('\\u2014', '\u2014')
         for value in values:
             head, _, tail = text.partition('${')
             text = head + value + tail.partition('}')[2]
         return text
 
     shape = literal('"an <analysis> block followed by a <summary> block"', [])
+    critical = literal('"CRITICAL: Respond with TEXT ONLY"', [])
     constraints = literal('"Note any security-relevant instructions or constraints the user stated', [])
     voices = literal("' Only messages that actually came from the user (user-role turns)", [])
     analysis = literal('`Before providing your final summary, wrap your analysis', [constraints])
-    compact = (literal('`CRITICAL: Respond with TEXT ONLY.', [shape])
+    compact = (literal('', [critical, shape], source.rindex('`', 0, source.index('. Do NOT call any tools.\n\n- Do NOT use Read')))
                + literal('`Your task is to create a detailed summary of the conversation so far,',
                          [analysis, voices])
                + literal('`\n\nREMINDER: Do NOT call any tools.', [])

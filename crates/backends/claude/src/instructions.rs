@@ -2,7 +2,7 @@ const CODE_MODE: &str = include_str!("../prompts/code_mode.md");
 
 const OPUS_5_5_PARAGRAPH: &str = "\n\nDo build original games,";
 const SURFACES: &str = " - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).";
-const FAST_MODE: &str = "\n - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast.";
+const FAST_MODE: &str = "\n - Fast mode for Claude Code gives faster output on this session's model if it supports fast mode, and otherwise switches the session to Claude Opus. It can be toggled with /fast.";
 
 pub(crate) fn default_system_blocks(
     code_only: bool,
