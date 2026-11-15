@@ -3,7 +3,8 @@ spans=
 case "$NANOCODE_INCREMENTAL_SPANS $*" in
   "off "*" -C incremental="*) spans=-Zincremental-ignore-spans=yes ;;
 esac
-case " $* " in
+case "$NANOCODE_SHARE_GENERICS $* " in
+  "lib "*" --crate-type bin "*) ;;
   *" embed-bitcode=no "*) RUSTC_BOOTSTRAP=1 exec "$@" -Zthreads=0 -Zshare-generics=y $spans ;;
 esac
 RUSTC_BOOTSTRAP=1 exec "$@" -Zthreads=0 $spans

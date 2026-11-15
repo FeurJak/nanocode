@@ -205,7 +205,7 @@ fetch_and_build() {
   local started log
   started=$(now)
   log=$root/build.log
-  if ! (cd "$root/nanocode" && CARGO_TARGET_DIR=$root/target CARGO_BUILD_JOBS=$build_jobs \
+  if ! (cd "$root/nanocode" && CARGO_TARGET_DIR=$root/target CARGO_BUILD_JOBS=$build_jobs NANOCODE_SHARE_GENERICS=lib \
     taskset -c "$build_cpus" cargo build --locked --release -p nanocode-sim) >"$log" 2>&1; then
     record "{\"time\":$started,\"commit\":\"$sha\",\"scenario\":\"build\",\"ok\":false,\"wall_secs\":$(( $(now) - started )),\"message\":\"$(json_text "$(tail -20 "$log")")\"}"
     return 1
