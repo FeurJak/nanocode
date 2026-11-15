@@ -17,7 +17,7 @@ SYMBOL = struct.Struct("<IBBHQQ")
 UNWIND_STARTS = ("__restore_rt", "_dl_tlsdesc_undefweak")
 DYNAMIC_ONLY = ("-Wl,-Bdynamic", "-Wl,-Bstatic", "-lgcc_s", "-lgcc_eh", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl")
 
-link, layout, order, output = sys.argv[1:]
+link, layout, order, output, *reserve = sys.argv[1:]
 
 
 def compiler_file(name):
@@ -49,6 +49,12 @@ with open(script, "w") as out:
     out.write(text[: -len(tail)] + "".join("  *%s:*(.rodata .rodata.*)\n" % archive for archive in ("libc.a", "libgcc_eh.a", "libgcc.a")) + tail)
 start = [compiler_file(name) for name in ("crt1.o", "crti.o", "crtbegin.o")]
 end = [compiler_file(name) for name in ("crtend.o", "crtn.o")]
+if reserve:
+    source = output + ".reserve.s"
+    with open(source, "w") as out:
+        out.write('.section .text.reserve,"axR",@progbits\n.fill %d,1,0x%x\n' % (int(reserve[0]), NOP))
+    subprocess.run(["cc", "-c", "-o", output + ".reserve.o", source], check=True)
+    end.insert(0, output + ".reserve.o")
 subprocess.run([linked[0], "-nostartfiles", *start, *linked[1:], *end, "-Wl,-T," + script, "-Wl,--symbol-ordering-file=" + order, "-Wl,--no-warn-symbol-ordering"], env=env, check=True)
 
 data = bytearray(open(output, "rb").read())

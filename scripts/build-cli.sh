@@ -109,6 +109,12 @@ case $target in
     fi
     "$bolt" "$input" -o "$train/optimized" -data="$train/profile.fdata" $layout -reorder-functions=user -function-order="$order" > "$train/optimized.log" 2>&1
     cat "$train/optimized.log" >&2
+    if [ "$input" = "$train/static" ] && grep -q 'original .text too small' "$train/optimized.log"; then
+      reserve=$(sed -n 's/.*using 0x\([0-9a-f]*\) alignment\. \([0-9]*\) bytes needed, have \([0-9]*\) bytes available.*/\1 \2 \3/p' "$train/optimized.log" | head -n 1 | { read -r align needed have; align=$((0x$align)); echo $(( (needed - have + align - 1) / align * align )); })
+      python3 "$root/scripts/static-cli.py" "$out/$bin.link" "$train/linked.ld" "$root/scripts/cli-libc.order" "$train/static" "$reserve" >&2
+      "$bolt" "$input" -o "$train/optimized" -data="$train/profile.fdata" $layout -reorder-functions=user -function-order="$order" > "$train/optimized.log" 2>&1
+      cat "$train/optimized.log" >&2
+    fi
     if grep -q 'original .text too small' "$train/optimized.log"; then
       "$bolt" "$input" -o "$train/optimized" -data="$train/profile.fdata" $layout -lite -reorder-functions=user -function-order="$order" >&2
     fi
