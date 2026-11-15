@@ -707,6 +707,13 @@ pub const DEFAULT_COMPACTION_RESERVED_TOKENS: u64 = 20_000 + 13_000;
 
 pub const DEFAULT_REFUSAL_CONTINUATIONS: u32 = 1;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RefusalFallbackScope {
+    ReturnOnce,
+    #[default]
+    Session,
+}
+
 const STANDARD_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 
 fn request_images(model: &str, context_window_tokens: u64) -> ImageWindow {
@@ -753,6 +760,7 @@ pub struct ClaudeBuilder {
     message_threads: bool,
     omit_custom_model_thinking: bool,
     refusal_continuations: u32,
+    refusal_fallback_scope: RefusalFallbackScope,
     steer_preempts_model: bool,
     context_window_tokens: u64,
     auto_compact_window_tokens: Option<u64>,
@@ -832,6 +840,7 @@ impl ClaudeBuilder {
             message_threads: false,
             omit_custom_model_thinking: false,
             refusal_continuations: DEFAULT_REFUSAL_CONTINUATIONS,
+            refusal_fallback_scope: RefusalFallbackScope::Session,
             steer_preempts_model: false,
             context_window_tokens,
             auto_compact_window_tokens: None,
@@ -1131,6 +1140,11 @@ impl ClaudeBuilder {
 
     pub const fn refusal_continuations(mut self, continuations: u32) -> Self {
         self.refusal_continuations = continuations;
+        self
+    }
+
+    pub const fn refusal_fallback_scope(mut self, scope: RefusalFallbackScope) -> Self {
+        self.refusal_fallback_scope = scope;
         self
     }
 
@@ -1959,6 +1973,7 @@ impl ClaudeBuilder {
             message_thread: self.message_threads.then(Atom::default),
             omit_custom_model_thinking: self.omit_custom_model_thinking,
             refusal_continuations: self.refusal_continuations,
+            refusal_fallback_scope: self.refusal_fallback_scope,
             steer_preempts_model: self.steer_preempts_model,
             wire_cache: crate::WireCache::default(),
             context_window_tokens: self.context_window_tokens,
@@ -2896,12 +2911,78 @@ impl EffortPin {
 }
 
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FallbackLatch {
+    Latched(String),
+    #[default]
+    Main,
+    Returned,
+    Serving {
+        fallback: String,
+        main: String,
+    },
+}
+
+impl FallbackLatch {
+    const fn is_main(&self) -> bool {
+        matches!(self, Self::Main)
+    }
+
+    fn model(&self) -> Option<&str> {
+        match self {
+            Self::Latched(model)
+            | Self::Serving {
+                fallback: model, ..
+            } => Some(model),
+            Self::Main | Self::Returned => None,
+        }
+    }
+
+    fn refused(&mut self, options: Refused<'_>) {
+        *self = match (options.scope, std::mem::take(self)) {
+            (RefusalFallbackScope::ReturnOnce, Self::Main) => Self::Serving {
+                fallback: options.fallback.to_owned(),
+                main: options.refusing.to_owned(),
+            },
+            (RefusalFallbackScope::ReturnOnce, Self::Serving { main, .. }) => Self::Serving {
+                fallback: options.fallback.to_owned(),
+                main,
+            },
+            (RefusalFallbackScope::ReturnOnce, Self::Latched(_) | Self::Returned)
+            | (RefusalFallbackScope::Session, _) => Self::Latched(options.fallback.to_owned()),
+        };
+    }
+
+    fn served(&mut self) -> Option<String> {
+        match std::mem::take(self) {
+            Self::Serving { main, .. } => {
+                *self = Self::Returned;
+                Some(main)
+            }
+            latch => {
+                *self = latch;
+                None
+            }
+        }
+    }
+}
+
+struct Refused<'a> {
+    fallback: &'a str,
+    refusing: &'a str,
+    scope: RefusalFallbackScope,
+}
+
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 struct Conversation {
     #[serde(default)]
     lifecycle_started: bool,
 
     #[serde(default, skip_serializing_if = "EffortPin::is_unpinned")]
     effort_pin: EffortPin,
+
+    #[serde(default, skip_serializing_if = "FallbackLatch::is_main")]
+    fallback_latch: FallbackLatch,
 
     admitted_tool_ids: history::AdmittedIds,
     #[serde(default)]
@@ -3340,6 +3421,7 @@ impl AgentFactory for ClaudeNativeFactory {
             snapshot.conversation.previous_message_id = None;
             snapshot.conversation.container = None;
             snapshot.conversation.lifecycle_started = false;
+            snapshot.conversation.fallback_latch = FallbackLatch::Main;
             if origin == Origin::SideConversation {
                 snapshot.conversation.auto_compaction_suppressed = true;
             }
@@ -3643,6 +3725,7 @@ struct State {
     message_thread: Option<Atom<crate::MessageThread>>,
     omit_custom_model_thinking: bool,
     refusal_continuations: u32,
+    refusal_fallback_scope: RefusalFallbackScope,
     steer_preempts_model: bool,
     wire_cache: crate::WireCache,
     context_window_tokens: u64,
@@ -8160,6 +8243,11 @@ impl State {
                 if let Some(refreshed) = self.refreshed.update(Option::take) {
                     add_usage(usage, &refreshed);
                 }
+                conversation.fallback_latch.refused(Refused {
+                    fallback,
+                    refusing: &cursor.template.model,
+                    scope: self.refusal_fallback_scope,
+                });
                 cursor.template.model = fallback.to_owned();
                 conversation.messages = pending.clone();
                 cursor.index = index + 1;
@@ -8237,6 +8325,17 @@ impl State {
                 self.defer_cursor(&mut cursor, conversation, journal)
                     .await?;
                 continue;
+            }
+            if let Some(main) = conversation.fallback_latch.served() {
+                nanocode_trace::info!(
+                    target: "nanocode_claude",
+                    session_id = %self.session_id,
+                    model_call_index = index.saturating_add(1),
+                    fallback_model = %cursor.template.model,
+                    main_model = %main,
+                    "the refusal fallback model served the refused request; the next request returns to the main model"
+                );
+                cursor.template.model = main;
             }
             previous_message_id = Some(response.id.clone());
             add_usage(usage, &response.usage);

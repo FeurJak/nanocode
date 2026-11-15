@@ -538,7 +538,13 @@ impl State {
         }
         drop(update);
         self.outlived_cache();
-        let template = self.request_template(speed, conversation.effort_pin);
+        let mut template = self.request_template(speed, conversation.effort_pin);
+        if self.lineage.depth > 0 {
+            conversation.fallback_latch = FallbackLatch::Main;
+        }
+        if let Some(model) = conversation.fallback_latch.model() {
+            model.clone_into(&mut template.model);
+        }
         let kept = self.kept_prefix.get();
         let static_names = self
             .tools
@@ -1669,6 +1675,7 @@ pub fn rewind_checkpoint(
         selected.conversation.recovery_notices.push(notice);
     }
     selected.conversation.lifecycle_started = false;
+    selected.conversation.fallback_latch = FallbackLatch::Main;
     selected.conversation.container = None;
     selected.conversation.previous_message_id = None;
 
