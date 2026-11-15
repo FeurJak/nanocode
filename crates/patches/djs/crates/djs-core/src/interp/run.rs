@@ -235,6 +235,8 @@ mod fast {
     pub const JUMP8: u8 = Op::Jump8 as u8;
     pub const JUMP_IF_FALSE8: u8 = Op::JumpIfFalse8 as u8;
     pub const JUMP_IF_TRUE8: u8 = Op::JumpIfTrue8 as u8;
+    pub const ADD_LOC8: u8 = Op::AddLoc8 as u8;
+    pub const INC_LT: u8 = Op::IncLt as u8;
 
     /// A `call` in any form.
     pub const fn is_call(op: u8) -> bool {
@@ -1636,7 +1638,7 @@ impl<'h> Exec<'h> {
             Op::SetLocUninit => {
                 self.set(self.lp + self.imm_u16(1), Value::UNINITIALIZED);
             }
-            Op::IncLoc | Op::DecLoc => {
+            Op::IncLoc | Op::DecLoc | Op::IncLt => {
                 let slot = self.lp + self.imm_u16(1);
                 let a = self.get(slot);
                 if a.as_object().is_some() {
@@ -1645,7 +1647,7 @@ impl<'h> Exec<'h> {
                     // local in between, and a throw leaves it unchanged.
                     return self.call_converter(intrinsics::TO_NUMERIC, slot);
                 }
-                let d = if op == Op::IncLoc { 1 } else { -1 };
+                let d = if op == Op::DecLoc { -1 } else { 1 };
                 let v = match a.as_int().and_then(|i| i.checked_add(d)) {
                     Some(i) => Value::int(i),
                     None if a.as_bigint().is_some() => self.bigint_add_small(a, d)?,
@@ -2264,6 +2266,7 @@ impl<'h> Exec<'h> {
             | Op::GetArg8
             | Op::PushConst8
             | Op::GetBuiltinCallee8
+            | Op::AddLoc8
             | Op::Jump8 => return self.exec_short(op, next),
             Op::RequireObjectCoercible => {
                 if self.top(0).is_nullish() {

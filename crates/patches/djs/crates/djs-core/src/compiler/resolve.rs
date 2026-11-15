@@ -21,7 +21,7 @@ use super::ts_decl::{DeclKind, EnumVal, TsDecl};
 use super::{CompileOptions, PErr, PResult};
 use crate::bytecode::global_decls::GlobalDecls;
 use crate::bytecode::{
-    CodeBuf, Label, LineTableBuilder, Op, TemplateError, TemplateParts, alloc_script,
+    CodeBuf, Insn, Label, LineTableBuilder, Op, TemplateError, TemplateParts, alloc_script,
     alloc_template_in, capture_desc, func_flags, special,
 };
 use crate::heap::cells::FuncTemplate;
@@ -828,6 +828,28 @@ fn emit_function(
                     i += 2;
                     continue;
                 }
+                if insn.op == Op::NameGet
+                    && let [get, add, put, ..] = all[i..]
+                    && get.op == Op::NameGet
+                    && add.op == Op::Add
+                    && put.op == Op::NamePut
+                    && let Some(a) = unchecked_local(storage, resolved[r]).filter(|&s| s < 256)
+                    && let Some(b) =
+                        unchecked_local(storage, resolved[get.imm(0) as usize]).filter(|&s| s < 256)
+                    && let Some(c) =
+                        unchecked_local(storage, resolved[put.imm(0) as usize]).filter(|&s| s < 256)
+                    && !resolved[put.imm(0) as usize].immutable
+                {
+                    out.exact(Op::AddLoc8, a as u32);
+                    flush(&out, &mut li, &mut lines, get.pc);
+                    out.exact(Op::GetLoc8, b as u32);
+                    flush(&out, &mut li, &mut lines, add.pc);
+                    out.add();
+                    flush(&out, &mut li, &mut lines, put.pc);
+                    out.exact(Op::PutLoc8, c as u32);
+                    i += 3;
+                    continue;
+                }
                 // `i++;` / `++i;` on an unchecked local: `get_loc; inc; put_loc` in place.
                 if insn.op == Op::NameGet
                     && let [upd, put, ..] = all[i..]
@@ -839,6 +861,28 @@ fn emit_function(
                 {
                     // Errors point at the update (the operator), as for `inc`.
                     flush(&out, &mut li, &mut lines, upd.pc);
+                    if upd.op == Op::Inc
+                        && put.op == Op::NamePut
+                        && let Some((k, v)) = loop_test(&all[i + 2..], storage, resolved, s)
+                    {
+                        out.exact(Op::IncLt, s as u32);
+                        for l in &all[i + 2..i + 2 + k] {
+                            flush(&out, &mut li, &mut lines, l.pc);
+                            out.place_label(Label(l.imm(0)));
+                        }
+                        let at = i + 2 + k;
+                        let (get, bound, lt, jump) = (all[at], all[at + 1], all[at + 2], all[at + 3]);
+                        flush(&out, &mut li, &mut lines, get.pc);
+                        out.exact(Op::GetLoc8, s as u32);
+                        flush(&out, &mut li, &mut lines, bound.pc);
+                        out.exact(Op::PushI32, v);
+                        flush(&out, &mut li, &mut lines, lt.pc);
+                        out.lt();
+                        flush(&out, &mut li, &mut lines, jump.pc);
+                        out.emit_insn(&jump);
+                        i = at + 4;
+                        continue;
+                    }
                     if upd.op == Op::Inc {
                         out.inc_loc(s);
                     } else {
@@ -1317,6 +1361,32 @@ fn unchecked_local(storage: &[Storage], res: Resolved) -> Option<u16> {
         },
         _ => None,
     }
+}
+
+fn loop_test(
+    all: &[Insn],
+    storage: &[Storage],
+    resolved: &[Resolved],
+    s: u16,
+) -> Option<(usize, u32)> {
+    let k = all.iter().take_while(|l| l.op == Op::Label).count();
+    let [get, bound, lt, jump, ..] = all[k..] else {
+        return None;
+    };
+    if s >= 256
+        || get.op != Op::NameGet
+        || unchecked_local(storage, resolved[get.imm(0) as usize]) != Some(s)
+        || lt.op != Op::Lt
+        || jump.op != Op::JumpIfTrue
+    {
+        return None;
+    }
+    let v = match bound.op {
+        Op::PushI8 => bound.imm(0) as u8 as i8 as i32 as u32,
+        Op::PushI32 => bound.imm(0),
+        _ => return None,
+    };
+    Some((k, v))
 }
 
 /// Pushes a number constant (small integers inline).

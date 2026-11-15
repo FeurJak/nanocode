@@ -334,7 +334,6 @@ impl<M: LabelMode> CodeBuf<M> {
             });
             return;
         }
-        let start = self.code.len() as u32;
         // Short forms (D2443): jumps are emitted wide and shortened by `finish`;
         // `get_builtin idx; undefined` becomes one instruction.
         let mut op = op.wide();
@@ -350,6 +349,12 @@ impl<M: LabelMode> CodeBuf<M> {
             self.code.truncate(prev as usize + 2);
             return;
         }
+        self.put(op, a, b);
+    }
+
+    #[inline(always)]
+    fn put(&mut self, op: Op, a: u32, b: u32) {
+        let start = self.code.len() as u32;
         self.last = Some(start);
         // The instruction in a local buffer, then one append.
         let mut bytes = [0u8; 9];
@@ -396,6 +401,11 @@ impl CodeBuf<Final> {
         self.fixups.clear();
         self.last = None;
         self.error = None;
+    }
+
+    #[inline(never)]
+    pub fn exact(&mut self, op: Op, a: u32) {
+        self.put(op, a, 0);
     }
 
     /// Resolves the jump targets, shortens the jumps whose offset fits a byte

@@ -76,6 +76,20 @@ const NEG: u8 = Op::Neg as u8;
 const CONCAT: u8 = Op::Concat as u8;
 const ARRAY_FROM_INLINE: usize = 16;
 
+const fn group(ops: &[Op]) -> (i64, u32) {
+    let (mut fuel, mut size, mut k) = (0, 0, 0);
+    while k < ops.len() {
+        fuel += OPS[ops[k] as usize].cost.fuel() as i64;
+        size += OPS[ops[k] as usize].size as u32;
+        k += 1;
+    }
+    (fuel, size)
+}
+
+const G_ADD_LOC: (i64, u32) = group(&[Op::AddLoc8, Op::GetLoc8, Op::Add, Op::PutLoc8]);
+const G_INC_LT: (i64, u32) =
+    group(&[Op::IncLt, Op::GetLoc8, Op::PushI32, Op::Lt, Op::JumpIfTrue8]);
+
 /// The flags word of a `PushResult` frame (`fast_return`'s condition).
 const PUSH_RESULT: i32 = Continuation::PushResult.to_flags();
 /// The flags word of an `Each` or `EachNative` frame, one with bit 3 added.
@@ -1874,6 +1888,60 @@ impl Exec<'_> {
                             push!(ld(b, ValueArray::VALUES.at(t, i)));
                             push!(Value::UNDEFINED);
                             next!(Op::GetBuiltinCallee8);
+                        }
+                        fast::ADD_LOC8 => {
+                            let x = ld(b, slot!(lp + (imm16!() & 0xFF)));
+                            let y = ld(b, slot!(lp + ((w >> 24) as u8 as u32)));
+                            let v = match (x.as_int(), y.as_int()) {
+                                (Some(p), Some(q)) => p.checked_add(q).map(Value::int),
+                                _ => None,
+                            };
+                            let v = match v {
+                                Some(v) => Some(v),
+                                None => match (x.as_number(), y.as_number()) {
+                                    (Some(p), Some(q)) => Some(conv::number(p + q)),
+                                    _ => None,
+                                },
+                            };
+                            match v {
+                                Some(v) => {
+                                    st(b, slot!(lp + ((w >> 48) as u8 as u32)), v);
+                                    fuel -= G_ADD_LOC.0;
+                                    ip += G_ADD_LOC.1;
+                                }
+                                None => get_loc!(imm16!() & 0xFF, Op::AddLoc8),
+                            }
+                        }
+                        fast::INC_LT => {
+                            let at = slot!(lp + imm16!());
+                            let Some(i) = ld(b, at).as_int().and_then(|i| i.checked_add(1)) else {
+                                break Exit::Decline(op);
+                            };
+                            st(b, at, Value::int(i));
+                            let t = word(b, ip + 5).unwrap_or(0);
+                            match t >> 48 {
+                                tail if tail as u8 == fast::JUMP_IF_TRUE8 => {
+                                    fuel -= G_INC_LT.0;
+                                    let next = ip + G_INC_LT.1;
+                                    ip = next;
+                                    if i < (t >> 8) as u32 as i32 {
+                                        ip = (next as i64 + (tail >> 8) as u8 as i8 as i64) as u32;
+                                        if ip < next {
+                                            if collect {
+                                                break Exit::Safepoint;
+                                            }
+                                            if fuel <= 0 {
+                                                break Exit::General;
+                                            }
+                                            budget -= 1;
+                                            if budget == 0 {
+                                                break Exit::Budget;
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => next!(Op::IncLt),
+                            }
                         }
                         _ => break Exit::Decline(op),
                     }

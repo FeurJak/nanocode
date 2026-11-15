@@ -820,6 +820,9 @@ ops! {
     /// The whole code of a lazy template (D2990): compiles the function at its first
     /// call and continues in the compiled template, in the same frame.
     Lazy lazy() pop 0 push 0 cost Alloc flags THROWS | ALLOC | TERM;
+
+    AddLoc8 add_loc8(loc: Loc8) pop 0 push 1 cost Basic;
+    IncLt inc_lt(loc: Loc) pop 0 push 0 cost Basic flags THROWS | CALLS;
 }
 
 impl Op {
@@ -838,6 +841,8 @@ impl Op {
             Op::Jump8 => Op::Jump,
             Op::JumpIfFalse8 => Op::JumpIfFalse,
             Op::JumpIfTrue8 => Op::JumpIfTrue,
+            Op::AddLoc8 => Op::GetLoc,
+            Op::IncLt => Op::IncLoc,
             op => op,
         }
     }
