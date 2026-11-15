@@ -1391,37 +1391,39 @@ pub(super) fn run_rounds<'a>(
                         .await?;
                     continue;
                 }
-                cursor.finish_checked = true;
-                let notice = if state.persist_finish {
-                    nanocode_tool_host::deadline::persisting_finish_notice(
-                        state.deadline.as_ref(),
-                        state.brief_finish,
-                    )
-                } else {
-                    nanocode_tool_host::deadline::finish_notice(
-                        state.deadline.as_ref(),
-                        state.brief_finish,
-                    )
-                };
-                state.emit(
-                    &request.events,
-                    AgentEventKind::ContextNotice,
-                    json!({
-                        "after_model_call_index": index.saturating_add(1),
-                        "role": Role::User,
-                        "text": &notice,
-                    }),
-                );
-                pending.push(Message::text(Role::User, notice).into());
-                conversation.messages = pending.clone();
-                cursor.output_continuations = 0;
-                cursor.index = index + 1;
-                state.retain_pending(&mut cursor, &pending);
-                cursor.usage = usage.clone();
-                state
-                    .defer_cursor(&mut cursor, conversation, journal)
-                    .await?;
-                continue;
+                if !state.skip_finish_check {
+                    cursor.finish_checked = true;
+                    let notice = if state.persist_finish {
+                        nanocode_tool_host::deadline::persisting_finish_notice(
+                            state.deadline.as_ref(),
+                            state.brief_finish,
+                        )
+                    } else {
+                        nanocode_tool_host::deadline::finish_notice(
+                            state.deadline.as_ref(),
+                            state.brief_finish,
+                        )
+                    };
+                    state.emit(
+                        &request.events,
+                        AgentEventKind::ContextNotice,
+                        json!({
+                            "after_model_call_index": index.saturating_add(1),
+                            "role": Role::User,
+                            "text": &notice,
+                        }),
+                    );
+                    pending.push(Message::text(Role::User, notice).into());
+                    conversation.messages = pending.clone();
+                    cursor.output_continuations = 0;
+                    cursor.index = index + 1;
+                    state.retain_pending(&mut cursor, &pending);
+                    cursor.usage = usage.clone();
+                    state
+                        .defer_cursor(&mut cursor, conversation, journal)
+                        .await?;
+                    continue;
+                }
             }
 
             conversation.messages = pending.clone();
