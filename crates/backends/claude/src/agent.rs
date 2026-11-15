@@ -789,6 +789,7 @@ pub struct ClaudeBuilder {
     brief_final: bool,
     brief_finish: bool,
     fold_finish: bool,
+    lean_cells: bool,
     low_effort_rounds: bool,
     spawn_factory: Option<Arc<dyn AgentFactory>>,
     child_journal: Option<nanocode_agent_core::backend::ChildJournal>,
@@ -873,6 +874,7 @@ impl ClaudeBuilder {
             brief_final: false,
             brief_finish: false,
             fold_finish: false,
+            lean_cells: false,
             low_effort_rounds: false,
             spawn_factory: None,
             child_journal: None,
@@ -1290,6 +1292,11 @@ impl ClaudeBuilder {
 
     pub const fn fold_finish(mut self, fold: bool) -> Self {
         self.fold_finish = fold;
+        self
+    }
+
+    pub const fn lean_cells(mut self, lean: bool) -> Self {
+        self.lean_cells = lean;
         self
     }
 
@@ -3028,6 +3035,7 @@ struct State {
     brief_final: bool,
     brief_finish: bool,
     fold_finish: bool,
+    lean_cells: bool,
     low_effort_rounds: bool,
     working_directory: Option<crate::environment::WorkingDirectory>,
     lifecycle_opened: Atom<Option<String>>,

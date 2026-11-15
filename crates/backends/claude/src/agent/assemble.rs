@@ -486,6 +486,7 @@ pub(super) fn build(mut builder: ClaudeBuilder) -> Result<(Agent, AgentEvents)> 
         brief_final: builder.brief_final,
         brief_finish: builder.brief_finish,
         fold_finish: builder.fold_finish,
+        lean_cells: builder.lean_cells,
         low_effort_rounds: builder.low_effort_rounds,
         working_directory: working_directory.map(crate::environment::WorkingDirectory::new),
         nested_tools,
