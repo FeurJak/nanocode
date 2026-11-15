@@ -141,6 +141,8 @@ pub struct HandEnvironment {
     pub os_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_repository: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

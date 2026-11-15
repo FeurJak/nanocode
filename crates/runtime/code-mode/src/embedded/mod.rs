@@ -300,6 +300,11 @@ pub trait CodeModeHost: Send + Sync + 'static {
             .and_then(|environment| environment.shell)
     }
 
+    fn environment(&self, _session_id: &str) -> Option<crate::remote::HandEnvironment> {
+        self.describe()
+            .and_then(|description| description.environment)
+    }
+
     fn runs_cells(&self) -> bool {
         true
     }
@@ -477,6 +482,9 @@ impl<T: CodeModeHost + ?Sized> CodeModeHost for std::sync::Arc<T> {
     }
     fn shell(&self, session_id: &str) -> Option<String> {
         (**self).shell(session_id)
+    }
+    fn environment(&self, session_id: &str) -> Option<crate::remote::HandEnvironment> {
+        (**self).environment(session_id)
     }
     fn runs_cells(&self) -> bool {
         (**self).runs_cells()

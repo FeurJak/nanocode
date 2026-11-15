@@ -451,6 +451,14 @@ impl Tools {
     }
 
     #[must_use]
+    pub fn hand_environment(
+        &self,
+        session_id: &str,
+    ) -> Option<nanocode_code_mode::remote::HandEnvironment> {
+        self.embedded_host.as_ref()?.environment(session_id)
+    }
+
+    #[must_use]
     pub const fn cell_yield(&self) -> Option<std::time::Duration> {
         self.cell_yield
     }

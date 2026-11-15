@@ -4,13 +4,13 @@ pub(crate) fn environment_section(workspace: &str) -> String {
         "You have been invoked in the following environment: ".to_owned(),
     ];
     if !workspace.is_empty() {
-        lines.push(format!("Primary working directory: {workspace}"));
+        lines.push(format!(" - Primary working directory: {workspace}"));
         lines.push(format!(
-            "Is a git repository: {}",
+            " - Is a git repository: {}",
             is_git_repository(workspace)
         ));
     }
-    lines.extend(host_lines());
+    lines.extend(host_lines().into_iter().map(|line| format!(" - {line}")));
     lines.push(format!(" - {UNTRUSTED}"));
     lines.push(format!("{DATE}{}", current_date()));
     lines.join("\n")
@@ -42,14 +42,26 @@ impl WorkingDirectory {
     }
 }
 
-pub(crate) fn upstream_environment(workspace: &str, model: &str) -> String {
+pub(crate) fn upstream_environment(
+    workspace: &str,
+    model: &str,
+    hand: Option<ClaudeEnvironment>,
+) -> String {
     let mut lines = vec![
         "# Environment".to_owned(),
         "You have been invoked in the following environment: ".to_owned(),
-        format!(" - Primary working directory: {workspace}"),
-        format!(" - Is a git repository: {}", is_git_repository(workspace)),
     ];
-    lines.extend(upstream_host_lines());
+    match hand {
+        Some(hand) => lines.extend(hand.facts()),
+        None => {
+            lines.push(format!(" - Primary working directory: {workspace}"));
+            lines.push(format!(
+                " - Is a git repository: {}",
+                is_git_repository(workspace)
+            ));
+            lines.extend(upstream_host_lines());
+        }
+    }
     lines.push(format!(" - {UNTRUSTED}"));
     let tokens = if total_tokens_reminder(model) {
         format!("<total_tokens>{TOKEN_BUDGET} tokens left</total_tokens>\n\n")
@@ -273,26 +285,63 @@ impl ClaudeEnvironment {
         self.date.is_some()
     }
 
+    pub(crate) fn of_hand(
+        directory: String,
+        facts: Option<nanocode_code_mode::remote::HandEnvironment>,
+    ) -> Self {
+        let facts = facts.unwrap_or_default();
+        Self {
+            working_directory: Some(directory),
+            git_repository: facts.git_repository,
+            platform: facts.platform,
+            shell: facts.shell,
+            os_version: facts.os_version,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn on_hand(self, hand: Option<Self>) -> Self {
+        match hand {
+            Some(hand) => Self {
+                working_directory: hand.working_directory,
+                git_repository: hand.git_repository,
+                platform: hand.platform,
+                shell: hand.shell,
+                os_version: hand.os_version,
+                ..self
+            },
+            None => self,
+        }
+    }
+
+    fn facts(&self) -> Vec<String> {
+        [
+            self.working_directory
+                .as_ref()
+                .map(|directory| format!(" - Primary working directory: {directory}")),
+            self.git_repository
+                .map(|repository| format!(" - Is a git repository: {repository}")),
+            self.platform
+                .as_ref()
+                .map(|platform| format!(" - Platform: {platform}")),
+            self.shell
+                .as_ref()
+                .map(|shell| format!(" - Shell: {shell}")),
+            self.os_version
+                .as_ref()
+                .map(|version| format!(" - OS Version: {version}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
     pub(crate) fn render(self) -> (String, Option<String>) {
         let mut lines = vec![
             "# Environment".to_owned(),
             "You have been invoked in the following environment: ".to_owned(),
         ];
-        if let Some(directory) = &self.working_directory {
-            lines.push(format!("Primary working directory: {directory}"));
-        }
-        if let Some(repository) = self.git_repository {
-            lines.push(format!("Is a git repository: {repository}"));
-        }
-        if let Some(platform) = &self.platform {
-            lines.push(format!("Platform: {platform}"));
-        }
-        if let Some(shell) = &self.shell {
-            lines.push(format!("Shell: {shell}"));
-        }
-        if let Some(version) = &self.os_version {
-            lines.push(format!("OS Version: {version}"));
-        }
+        lines.extend(self.facts());
         lines.push(format!(" - {UNTRUSTED}"));
         lines.push(format!("{DATE}{}", self.date.unwrap_or_else(current_date)));
         let instructions = self.project_instructions.map(|text| {

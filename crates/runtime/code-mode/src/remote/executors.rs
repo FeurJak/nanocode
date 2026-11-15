@@ -980,6 +980,15 @@ impl CodeModeHost for CodeModeExecutors {
         }
     }
 
+    fn environment(&self, session_id: &str) -> Option<super::HandEnvironment> {
+        match self.read(session_id, |state| state.placement(session_id)) {
+            Placement::Hand(HandRoute {
+                host: Some(host), ..
+            }) => host.environment(session_id),
+            Placement::Hand(_) | Placement::Local => None,
+        }
+    }
+
     fn supports_cells(&self) -> bool {
         true
     }

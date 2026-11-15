@@ -729,6 +729,7 @@ pub fn default_context_window_tokens(model: &str) -> u64 {
 }
 
 type WorkspaceResolver = Arc<dyn Fn(&str) -> String + Send + Sync>;
+type HandEnvironmentResolver = Arc<dyn Fn(&str) -> Option<crate::ClaudeEnvironment> + Send + Sync>;
 type SubagentTypeResolver = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 type ChildWorkspaceInit = Arc<dyn Fn(&str, &str) -> Result<()> + Send + Sync>;
 
@@ -760,6 +761,7 @@ pub struct ClaudeBuilder {
     model_systems: Vec<(String, Arc<str>)>,
     workspace: String,
     workspace_resolver: Option<WorkspaceResolver>,
+    hand_environment: Option<HandEnvironmentResolver>,
     child_workspace_init: Option<ChildWorkspaceInit>,
     system_resolver: Option<WorkspaceResolver>,
     tools: Vec<(ToolDefinition, Handler)>,
@@ -836,6 +838,7 @@ impl ClaudeBuilder {
             model_systems: Vec::new(),
             workspace: String::new(),
             workspace_resolver: None,
+            hand_environment: None,
             child_workspace_init: None,
             system_resolver: None,
             tools: Vec::new(),
@@ -1171,6 +1174,14 @@ impl ClaudeBuilder {
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
         self.workspace_resolver = Some(Arc::new(resolver));
+        self
+    }
+
+    pub(crate) fn hand_environment<F>(mut self, resolver: F) -> Self
+    where
+        F: Fn(&str) -> Option<crate::ClaudeEnvironment> + Send + Sync + 'static,
+    {
+        self.hand_environment = Some(Arc::new(resolver));
         self
     }
 
@@ -1904,9 +1915,7 @@ impl ClaudeBuilder {
             .environment
             .as_ref()
             .is_some_and(crate::ClaudeEnvironment::fixes_date);
-        let given_context = self
-            .system_context
-            .or_else(|| self.environment.map(crate::ClaudeEnvironment::render));
+        let given_context = self.system_context;
         let kept_context = restored.context.clone();
         let requested_at = kept_context.as_ref().map_or(0, |context| context.requested);
         let state = Arc::new(State {
@@ -1942,6 +1951,7 @@ impl ClaudeBuilder {
             conversation_id,
             workspace: self.workspace,
             workspace_resolver: self.workspace_resolver,
+            hand_environment: self.hand_environment,
             child_workspace_init: self.child_workspace_init,
             system_resolver: self.system_resolver,
             host_context: self.host_context,
@@ -1987,6 +1997,7 @@ impl ClaudeBuilder {
             this: std::sync::OnceLock::new(),
             context: std::sync::OnceLock::new(),
             given_context,
+            environment: self.environment,
             fixed_date,
             kept_context,
             kept_prefix: Atom::new(kept_prefix),
@@ -3618,6 +3629,7 @@ struct State {
     images: ImageHistory,
     workspace: String,
     workspace_resolver: Option<WorkspaceResolver>,
+    hand_environment: Option<HandEnvironmentResolver>,
     child_workspace_init: Option<ChildWorkspaceInit>,
     system_resolver: Option<WorkspaceResolver>,
     host_context: Option<Arc<str>>,
@@ -3658,6 +3670,7 @@ struct State {
 
     context: std::sync::OnceLock<SystemText>,
     given_context: Option<(String, Option<String>)>,
+    environment: Option<crate::ClaudeEnvironment>,
     fixed_date: bool,
     kept_context: Option<durable::SystemContext>,
     kept_prefix: Atom<Option<Arc<crate::durability::Prefix>>>,
@@ -4802,14 +4815,26 @@ impl State {
         let context = self.context.get_or_init(|| self.resolve_context());
         (&context.environment, context.instructions.as_deref())
     }
+    fn hand(&self) -> Option<crate::ClaudeEnvironment> {
+        self.hand_environment
+            .as_ref()
+            .and_then(|resolve| resolve(&self.session_id))
+    }
     fn resolve_context(&self) -> SystemText {
-        let (environment, instructions) = self.given_context.clone().unwrap_or_else(|| {
-            let workspace = self.workspace();
-            (
-                crate::environment::environment_section(&workspace),
-                crate::environment::project_instructions(&workspace),
-            )
-        });
+        let (environment, instructions) = match (&self.given_context, &self.environment) {
+            (Some(context), _) => context.clone(),
+            (None, Some(environment)) => environment.clone().on_hand(self.hand()).render(),
+            (None, None) => {
+                let workspace = self.workspace();
+                (
+                    self.hand().map_or_else(
+                        || crate::environment::environment_section(&workspace),
+                        |hand| hand.render().0,
+                    ),
+                    crate::environment::project_instructions(&workspace),
+                )
+            }
+        };
         let key = durable::instructions_key(instructions.as_deref());
         let instructions = instructions.map(Arc::<str>::from);
         let current = SystemText {
@@ -7737,7 +7762,11 @@ impl State {
                 pending.push(
                     Message::text(
                         Role::System,
-                        crate::environment::upstream_environment(&self.workspace(), &self.model()),
+                        crate::environment::upstream_environment(
+                            &self.workspace(),
+                            &self.model(),
+                            self.hand(),
+                        ),
                     )
                     .into(),
                 );

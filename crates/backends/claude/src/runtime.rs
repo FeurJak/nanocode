@@ -212,6 +212,17 @@ impl RuntimeBackend for ClaudeHarness {
                 builder = builder.upstream_web().upstream_context();
             }
             if remote && let Some(AgentTools::Shared(hand)) = settings.tools.clone() {
+                let described = hand.clone();
+                builder = builder.hand_environment(move |session_id| {
+                    described
+                        .hand_working_directory(session_id)
+                        .map(|directory| {
+                            crate::ClaudeEnvironment::of_hand(
+                                directory,
+                                described.hand_environment(session_id),
+                            )
+                        })
+                });
                 let fallback = workspace.to_string_lossy().into_owned();
                 builder = builder.workspace_resolver(move |session_id| {
                     hand.hand_working_directory(session_id)

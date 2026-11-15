@@ -106,6 +106,7 @@ pub fn local_environment() -> HandEnvironment {
                     .map(|name| name.to_string_lossy().into_owned())
             })
             .or_else(|| Some(nanocode_home::shell::default_shell_name().to_owned())),
+        git_repository: None,
     }
 }
 
@@ -944,7 +945,14 @@ impl HandHost for NativeHost {
     }
 
     fn environment(&self) -> Option<HandEnvironment> {
-        Some(local_environment())
+        Some(HandEnvironment {
+            git_repository: Some(
+                self.workspace
+                    .ancestors()
+                    .any(|directory| directory.join(".git").exists()),
+            ),
+            ..local_environment()
+        })
     }
 
     fn selects_tools(&self) -> bool {
