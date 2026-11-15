@@ -104,8 +104,14 @@ case $target in
     if grep -q 'original .text too small' "$train/optimized.log"; then
       "$bolt" "$train/linked" -o "$train/optimized" -data="$train/profile.fdata" $layout -lite -reorder-functions=user -function-order="$train/startup.order" >&2
     fi
-    "$(dirname "$bolt")/llvm-strip" --remove-section=.note.bolt_info -o "$out/$bin" "$train/optimized"
-    python3 "$root/scripts/trim-cli.py" "$out/$bin"
+    agent="$bin"
+    if [ "$package" = nanocode-cli ] && [ "$target" = x86_64-unknown-linux-gnu ]; then agent=nanocode-agent; fi
+    "$(dirname "$bolt")/llvm-strip" --remove-section=.note.bolt_info -o "$out/$agent" "$train/optimized"
+    python3 "$root/scripts/trim-cli.py" "$out/$agent"
+    if [ "$agent" != "$bin" ]; then
+      cargo build --locked --offline --release --target "$target" --manifest-path bin/nanocode-front/Cargo.toml >&2
+      cp "$dir/$target/release/nanocode-front" "$out/$bin"
+    fi
     ;;
   *)
     if [ "$package" = nanocode-cli ]; then

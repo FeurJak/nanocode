@@ -855,6 +855,14 @@ async fn piped_prompt() -> Result<Option<String>> {
     if std::io::stdin().is_terminal() {
         return Ok(None);
     }
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsFd;
+        let stdin = std::io::stdin();
+        if nanocode_sys::unix::readable_now(stdin.as_fd())? && stdin.lock().fill_buf()?.is_empty() {
+            return Ok(Some(String::new()));
+        }
+    }
     let (chunks, mut received) = nanocode_sync::mpsc::unbounded_channel();
     std::thread::Builder::new()
         .name("nanocode-stdin".to_owned())
