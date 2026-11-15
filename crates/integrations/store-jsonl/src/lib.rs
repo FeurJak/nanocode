@@ -589,6 +589,44 @@ fn scan(
     Ok(())
 }
 
+fn sync_loop(
+    unsynced: std::sync::mpsc::Receiver<(Vec<Arc<File>>, Vec<Settled>)>,
+    hardened: Arc<OnceLock<StoreError>>,
+) {
+    while let Ok(first) = unsynced.recv() {
+        let mut files = Vec::<Arc<File>>::new();
+        let mut written = Vec::new();
+        for (unsynced, replies) in std::iter::once(first).chain(unsynced.try_iter()) {
+            for file in unsynced {
+                if !files.iter().any(|known| Arc::ptr_eq(known, &file)) {
+                    files.push(file);
+                }
+            }
+            written.extend(replies);
+        }
+        let settled = match hardened.get() {
+            Some(error) => Err(error.clone()),
+            None => {
+                let _span = nanocode_trace::info_span!(
+                    "durability.jsonl.sync",
+                    reply.count = written.len()
+                )
+                .entered();
+                files
+                    .iter()
+                    .try_for_each(|file| sync_journal(file))
+                    .map_err(backend)
+            }
+        };
+        if let Err(error) = &settled {
+            drop(hardened.set(error.clone()));
+        }
+        for reply in written {
+            reply(settled.clone());
+        }
+    }
+}
+
 fn cores() -> usize {
     static CORES: OnceLock<usize> = OnceLock::new();
     *CORES.get_or_init(|| thread::available_parallelism().map_or(1, std::num::NonZero::get))
@@ -2789,51 +2827,7 @@ impl JsonlStore {
                     }
                 };
                 drop(ready.send(Ok(())));
-                let (syncs, unsynced) =
-                    std::sync::mpsc::channel::<(Vec<Arc<File>>, Vec<Settled>)>();
-                let hardened = Arc::clone(&failure);
-                let syncer = thread::Builder::new()
-                    .name("nanocode-jsonl-sync".into())
-                    .spawn(move || {
-                        while let Ok(first) = unsynced.recv() {
-                            let mut files = Vec::<Arc<File>>::new();
-                            let mut written = Vec::new();
-                            for (unsynced, replies) in
-                                std::iter::once(first).chain(unsynced.try_iter())
-                            {
-                                for file in unsynced {
-                                    if !files.iter().any(|known| Arc::ptr_eq(known, &file)) {
-                                        files.push(file);
-                                    }
-                                }
-                                written.extend(replies);
-                            }
-                            let settled = match hardened.get() {
-                                Some(error) => Err(error.clone()),
-                                None => {
-                                    let _span = nanocode_trace::info_span!(
-                                        "durability.jsonl.sync",
-                                        reply.count = written.len()
-                                    )
-                                    .entered();
-                                    files
-                                        .iter()
-                                        .try_for_each(|file| sync_journal(file))
-                                        .map_err(backend)
-                                }
-                            };
-                            if let Err(error) = &settled {
-                                drop(hardened.set(error.clone()));
-                            }
-                            for reply in written {
-                                reply(settled.clone());
-                            }
-                        }
-                    });
-                let syncer = match syncer {
-                    Ok(syncer) => syncer,
-                    Err(error) => return drop(failure.set(backend(error))),
-                };
+                let mut syncer = None;
                 while let Some(first) = receiver.blocking_recv() {
                     if failure.get().is_some() {
                         break;
@@ -2853,14 +2847,38 @@ impl JsonlStore {
                         }
                     }
                     let unsynced = sessions.unsynced();
-                    if (!written.is_empty() || !unsynced.is_empty())
-                        && syncs.send((unsynced, written)).is_err()
-                    {
+                    if written.is_empty() && unsynced.is_empty() {
+                        continue;
+                    }
+                    if syncer.is_none() && unsynced.is_empty() {
+                        let settled = failure.get().map_or(Ok(()), |error| Err(error.clone()));
+                        for reply in written {
+                            reply(settled.clone());
+                        }
+                        continue;
+                    }
+                    let (syncs, _) = match syncer {
+                        Some(ref started) => started,
+                        None => {
+                            let (syncs, unsynced) = std::sync::mpsc::channel();
+                            let hardened = Arc::clone(&failure);
+                            match thread::Builder::new()
+                                .name("nanocode-jsonl-sync".into())
+                                .spawn(move || sync_loop(unsynced, hardened))
+                            {
+                                Ok(handle) => syncer.insert((syncs, handle)),
+                                Err(error) => return drop(failure.set(backend(error))),
+                            }
+                        }
+                    };
+                    if syncs.send((unsynced, written)).is_err() {
                         break;
                     }
                 }
-                drop(syncs);
-                drop(syncer.join());
+                if let Some((syncs, handle)) = syncer {
+                    drop(syncs);
+                    drop(handle.join());
+                }
                 if let Err(error) = sessions.clear() {
                     return drop(failure.set(error));
                 }
