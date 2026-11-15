@@ -99,10 +99,18 @@ case $target in
     "$bolt" "$train/linked" -o "$train/cdsort" -data="$train/profile.fdata" $layout -reorder-functions=cdsort -generate-function-order="$train/cdsort.order" >&2
     rm "$train/cdsort"
     python3 "$root/scripts/order-cli.py" "$train/cdsort.order" "$train/startup" "$train/oneshot" "$train/tools" "$train/codemode" > "$train/startup.order"
-    "$bolt" "$train/linked" -o "$train/optimized" -data="$train/profile.fdata" $layout -reorder-functions=user -function-order="$train/startup.order" > "$train/optimized.log" 2>&1
+    input="$train/linked"
+    order="$train/startup.order"
+    if [ "$package" = nanocode-cli ] && [ "$target" = x86_64-unknown-linux-gnu ]; then
+      python3 "$root/scripts/static-cli.py" "$out/$bin.link" "$train/linked.ld" "$root/scripts/cli-libc.order" "$train/static" >&2
+      cat "$root/scripts/cli-libc.order" "$train/startup.order" > "$train/static.order"
+      input="$train/static"
+      order="$train/static.order"
+    fi
+    "$bolt" "$input" -o "$train/optimized" -data="$train/profile.fdata" $layout -reorder-functions=user -function-order="$order" > "$train/optimized.log" 2>&1
     cat "$train/optimized.log" >&2
     if grep -q 'original .text too small' "$train/optimized.log"; then
-      "$bolt" "$train/linked" -o "$train/optimized" -data="$train/profile.fdata" $layout -lite -reorder-functions=user -function-order="$train/startup.order" >&2
+      "$bolt" "$input" -o "$train/optimized" -data="$train/profile.fdata" $layout -lite -reorder-functions=user -function-order="$order" >&2
     fi
     agent="$bin"
     if [ "$package" = nanocode-cli ] && [ "$target" = x86_64-unknown-linux-gnu ]; then agent=nanocode-agent; fi
