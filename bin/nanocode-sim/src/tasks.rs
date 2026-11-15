@@ -411,7 +411,7 @@ fn check(script: &Script, notes: &[Note], joined: &[(usize, Joined)]) -> Result<
                 && *other == index
             {
                 awaited -= 1;
-                let sent = notes.iter().any(|note| *note == Note::Finished(*from));
+                let sent = notes.contains(&Note::Finished(*from));
                 if *delivered && !sent {
                     return Err(format!(
                         "task {index} heard from task {from}, which never finished"
@@ -424,7 +424,7 @@ fn check(script: &Script, notes: &[Note], joined: &[(usize, Joined)]) -> Result<
                 }
             }
         }
-        if notes.iter().any(|note| *note == Note::Finished(index)) && awaited != 0 {
+        if notes.contains(&Note::Finished(index)) && awaited != 0 {
             return Err(format!("task {index} finished with {awaited} waits unheard"));
         }
     }

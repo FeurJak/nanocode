@@ -111,7 +111,7 @@ fn positions(size: usize, upto: usize) -> impl Iterator<Item = usize> {
 }
 
 impl Block {
-    fn small(&self) -> bool {
+    const fn small(&self) -> bool {
         is_small(self.allocation.layout())
     }
 
@@ -220,7 +220,7 @@ impl World {
     }
 
     fn placed(&self, address: usize, bytes: usize, align: usize) -> Result<(), String> {
-        if address % align != 0 {
+        if !address.is_multiple_of(align) {
             return Err(format!(
                 "alignment: a block aligned to {align} starts {} bytes past it",
                 address % align
