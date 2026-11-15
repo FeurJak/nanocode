@@ -396,6 +396,7 @@ pub struct TurnLogPolicy {
     logs: BTreeMap<String, TurnLog>,
     ratio: usize,
     protections: Protections,
+    read_unloaded: bool,
     restarting: BTreeMap<String, String>,
     retain: Option<usize>,
     retention: Option<usize>,
@@ -431,6 +432,7 @@ impl TurnLogPolicy {
             logs: BTreeMap::new(),
             ratio,
             protections,
+            read_unloaded: false,
             restarting: BTreeMap::new(),
             retain,
             retention,
@@ -463,6 +465,11 @@ impl TurnLogPolicy {
 
     pub const fn collect_live(mut self, live: bool) -> Self {
         self.collect_live = live;
+        self
+    }
+
+    pub const fn read_unloaded(mut self, unloaded: bool) -> Self {
+        self.read_unloaded = unloaded;
         self
     }
 
@@ -822,6 +829,22 @@ impl TurnDurability for TurnLogPolicy {
         };
         let live = self.rows.map(|_| attempts(lease.fold()));
         drop(lease);
+        let part = format!("{scope}:part");
+        let read = |fold: &Fold| {
+            fold.checkpoint(&part)
+                .map(|checkpoint| checkpoint.payload.clone())
+        };
+        let written = if self.read_unloaded {
+            ready(log.read(read))
+        } else {
+            refused(ready(log.read_owner(&part, read)))
+        };
+        let expected = part_revision(revision + 1);
+        assert!(
+            written == expected.map(|expected| part_value(scope, expected)),
+            "{part} reads {written:?} after commit {seq} at revision {}, which committed revision {expected:?}",
+            revision + 1
+        );
         if let Some(live) = live {
             let reads = self.disk.with(|rows| rows.reads);
             let reopened = refused(ready(TurnLog::open(Arc::clone(&self.host), scope)));

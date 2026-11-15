@@ -66,6 +66,7 @@ pub enum TurnMutation {
     GateReleasesEarly,
     IdempotentReportedUnknown,
     OpenDropsJournals,
+    PartReadUnloaded,
     RecoverySkipsClientless,
     ResumeRedispatchesRunning,
     RetireSkipped,
@@ -78,7 +79,7 @@ pub enum TurnMutation {
 }
 
 impl TurnMutation {
-    const ALL: [Self; 21] = [
+    const ALL: [Self; 22] = [
         Self::None,
         Self::AckBufferedAdmission,
         Self::AckBufferedResult,
@@ -91,6 +92,7 @@ impl TurnMutation {
         Self::GateReleasesEarly,
         Self::IdempotentReportedUnknown,
         Self::OpenDropsJournals,
+        Self::PartReadUnloaded,
         Self::RecoverySkipsClientless,
         Self::ResumeRedispatchesRunning,
         Self::RetireSkipped,
@@ -122,6 +124,7 @@ impl TurnMutation {
             Self::GateReleasesEarly => "gate_releases_early",
             Self::IdempotentReportedUnknown => "idempotent_reported_unknown",
             Self::OpenDropsJournals => "open_drops_journals",
+            Self::PartReadUnloaded => "part_read_unloaded",
             Self::RecoverySkipsClientless => "recovery_skips_clientless",
             Self::ResumeRedispatchesRunning => "resume_redispatches_running",
             Self::RetireSkipped => "retire_skipped",
@@ -1230,7 +1233,8 @@ impl Sim {
                     self.options.mutation == TurnMutation::SectionsPruned,
                 )
                 .single_snapshot(self.options.reopen_row_limit.is_none())
-                .collect_live(self.options.mutation == TurnMutation::ContentCollectedLive),
+                .collect_live(self.options.mutation == TurnMutation::ContentCollectedLive)
+                .read_unloaded(self.options.mutation == TurnMutation::PartReadUnloaded),
             ),
         };
         let mut object = Object {
