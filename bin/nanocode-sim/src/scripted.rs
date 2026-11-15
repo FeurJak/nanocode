@@ -24,6 +24,7 @@ use nanocode_sync::{Atom, Signal, Slot};
 use serde_json::{Value, value::RawValue};
 
 use crate::{
+    agents::{AgentsMutation, RUNTIME_STOP_TIMEOUT},
     executor::Clock,
     rng::{FNV_OFFSET, Rng, fnv},
 };
@@ -40,6 +41,7 @@ pub struct Script {
     pub step_latency_ms_max: u64,
     pub restore_latency_ms_max: u64,
     pub shutdown_latency_ms_max: u64,
+    pub mutation: AgentsMutation,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -197,7 +199,9 @@ struct TurnRunning(Arc<Ledger>);
 
 impl Drop for TurnRunning {
     fn drop(&mut self) {
-        self.0.running_turns.fetch_sub(1, Ordering::SeqCst);
+        if self.0.script.mutation != AgentsMutation::TurnLeaks {
+            self.0.running_turns.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -379,6 +383,9 @@ impl ScriptedBackend {
     }
 
     fn cancel_turn(&self) -> BackendFuture<Result<()>> {
+        if self.inner.ledger.script.mutation == AgentsMutation::CancelIgnored {
+            return done();
+        }
         if let Some(cancel) = Option::clone(&self.inner.cancel.get()) {
             cancel.fire();
         }
@@ -475,9 +482,15 @@ impl LifecycleBackend for ScriptedBackend {
             return done();
         }
         let ledger = &inner.ledger;
-        ledger.open_agents.fetch_sub(1, Ordering::SeqCst);
+        if ledger.script.mutation != AgentsMutation::ShutdownKeepsHarness {
+            ledger.open_agents.fetch_sub(1, Ordering::SeqCst);
+        }
         ledger.trace(&format!("shutdown {}", inner.session_id));
-        let latency = Duration::from_millis(ledger.range(0, ledger.script.shutdown_latency_ms_max));
+        let latency = if ledger.script.mutation == AgentsMutation::ShutdownHangs {
+            RUNTIME_STOP_TIMEOUT
+        } else {
+            Duration::from_millis(ledger.range(0, ledger.script.shutdown_latency_ms_max))
+        };
         Box::pin(async move {
             nanocode_platform::sleep(latency).await;
             Ok(())

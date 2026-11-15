@@ -130,6 +130,7 @@ pub struct WholeOptions {
     pub mutation: WireMutation,
     pub children: ChildMode,
     pub child_mutation: ChildMutation,
+    pub store_mutation: Mutation,
 }
 
 impl Default for WholeOptions {
@@ -142,6 +143,7 @@ impl Default for WholeOptions {
             mutation: WireMutation::None,
             children: ChildMode::Local,
             child_mutation: ChildMutation::None,
+            store_mutation: Mutation::None,
         }
     }
 }
@@ -940,7 +942,13 @@ pub fn simulate(seed: u64, options: WholeOptions) -> WholeOutcome {
             profile.torn_ppm = 0;
             profile.read_ppm = 0;
             profile.durability = crate::faults::Durability::OnAck;
-            SimKv::new(seed, profile, Mutation::None, false, Arc::clone(&clock))
+            SimKv::new(
+                seed,
+                profile,
+                options.store_mutation,
+                false,
+                Arc::clone(&clock),
+            )
         }),
     };
     let client = Client {

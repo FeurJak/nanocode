@@ -510,6 +510,15 @@ impl Cells {
             });
             let rows = self.host.rows.read(BTreeMap::len);
             self.trace(&format!("open rows={rows}"));
+            if self.options.mutation == TurnMutation::OpenDropsJournals {
+                let live = self
+                    .live
+                    .as_mut()
+                    .expect("the live log was opened just above");
+                for journal in refused(ready(live.sink.load(SESSION))) {
+                    ready(live.sink.forget(SESSION, journal.cell_id));
+                }
+            }
         }
         self.live
             .as_mut()
@@ -533,8 +542,15 @@ impl Cells {
     fn ask_fresh(&mut self, turn: &Turn) -> Vec<Op> {
         let cell = self.next_cell;
         self.next_cell += 1;
-        let mut ops = vec![Op::Ask { cell, step: 1 }];
-        ops.extend(self.fresh(turn, cell));
+        let mut ops = self.fresh(turn, cell);
+        let at = if self.options.mutation == TurnMutation::CellBeforeCheckpoint {
+            ops.iter()
+                .position(|op| matches!(op, Op::Fire | Op::Call))
+                .unwrap_or(1)
+        } else {
+            0
+        };
+        ops.insert(at, Op::Ask { cell, step: 1 });
         ops
     }
 
@@ -583,7 +599,7 @@ impl Cells {
         [Op::Ask { cell, step: 2 }, Op::Forget(cell), Op::Finish]
     }
 
-    fn resume(turn: &Turn, cell: u64, journal: &CellJournal, saved: u64) -> Vec<Op> {
+    fn resume(&self, turn: &Turn, cell: u64, journal: &CellJournal, saved: u64) -> Vec<Op> {
         let mut writer = Writer {
             cell,
             entries: journal.entries.len(),
@@ -614,7 +630,10 @@ impl Cells {
                     let running = journal.unknown_calls().next().is_some();
                     if has(|entry| matches!(entry, JournalEntry::Result { .. })) {
                         ops.push(writer.save(None, Vec::new(), Vec::new(), true));
-                    } else if running && turn.kind == Kind::External {
+                    } else if running
+                        && turn.kind == Kind::External
+                        && self.options.mutation != TurnMutation::ResumeRedispatchesRunning
+                    {
                         let (entry, done) = completed(turn, cell, "\"unknown\"");
                         ops.push(Op::Unknown(writer.update(
                             None,
@@ -744,7 +763,7 @@ impl Cells {
                     journal.calls.len(),
                     journal.finished
                 ));
-                ops.extend(Self::resume(turn, cell, &journal, saved));
+                ops.extend(self.resume(turn, cell, &journal, saved));
             }
             Some((_, cell)) => {
                 if self.journal(cell).is_some() {
@@ -835,14 +854,15 @@ impl Cells {
                     metadata: to_raw_value(&Value::Null).expect("null encodes as JSON"),
                 };
                 let buffered = turn.buffered;
+                let mutation = self.options.mutation;
                 let live = self.live();
-                let result = if buffered {
+                let result = if buffered && mutation != TurnMutation::BufferedAdmissionWritten {
                     ready(live.log.submit_buffered(&submission))
                 } else {
                     ready(live.log.submit(&submission))
                 };
                 if self.settled(result).is_some()
-                    && (!buffered || self.options.mutation == TurnMutation::AckBufferedAdmission)
+                    && (!buffered || mutation == TurnMutation::AckBufferedAdmission)
                 {
                     self.acknowledged.insert(turn.id.clone());
                 }

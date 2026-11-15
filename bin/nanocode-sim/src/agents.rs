@@ -26,6 +26,45 @@ pub const RUNTIME_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 const ROOT_SESSION: &str = "root";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentsMutation {
+    None,
+    CancelIgnored,
+    ShutdownHangs,
+    ShutdownKeepsHarness,
+    TurnLeaks,
+}
+
+impl AgentsMutation {
+    const ALL: [Self; 5] = [
+        Self::None,
+        Self::CancelIgnored,
+        Self::ShutdownHangs,
+        Self::ShutdownKeepsHarness,
+        Self::TurnLeaks,
+    ];
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|mutation| mutation.name() == name)
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::CancelIgnored => "cancel_ignored",
+            Self::ShutdownHangs => "shutdown_hangs",
+            Self::ShutdownKeepsHarness => "shutdown_keeps_harness",
+            Self::TurnLeaks => "turn_leaks",
+        }
+    }
+
+    pub fn names() -> String {
+        Self::ALL.map(Self::name).join("|")
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stop {
     Close,
     Cancel,
@@ -40,7 +79,7 @@ struct Shape {
 }
 
 impl Shape {
-    fn of(seed: u64) -> Self {
+    fn of(seed: u64, mutation: AgentsMutation) -> Self {
         let mut rng = Rng::derive(seed, "agents-shape");
         let children = rng.range(CHILDREN_MIN, CHILDREN_MAX);
         let resident_max = rng.range(0, RESIDENT_MAX);
@@ -55,6 +94,7 @@ impl Shape {
             step_latency_ms_max: rng.range(STEP_LATENCY_MS_MIN, STEP_LATENCY_MS_MAX),
             restore_latency_ms_max: rng.range(0, RESTORE_LATENCY_MS_MAX),
             shutdown_latency_ms_max: rng.range(0, SHUTDOWN_LATENCY_MS_MAX),
+            mutation,
         };
         let turn_ms_max = script.steps_max * script.step_latency_ms_max;
         let stop_after = Duration::from_millis(rng.range(0, turn_ms_max));
@@ -263,8 +303,8 @@ async fn drive(shape: &Shape, ledger: &Arc<Ledger>, clock: &Clock) -> Result<u64
     Ok(took_ms)
 }
 
-pub fn simulate(seed: u64) -> AgentOutcome {
-    let shape = Shape::of(seed);
+pub fn simulate(seed: u64, mutation: AgentsMutation) -> AgentOutcome {
+    let shape = Shape::of(seed, mutation);
     let clock = Clock::new();
     crate::host::enter(seed, &clock);
     let ledger = Ledger::new(seed, shape.script, Arc::clone(&clock));
@@ -289,8 +329,8 @@ pub fn simulate(seed: u64) -> AgentOutcome {
     }
 }
 
-pub fn run_seed(seed: u64) -> AgentOutcome {
-    std::panic::catch_unwind(|| simulate(seed)).unwrap_or_else(|panic| {
+pub fn run_seed(seed: u64, mutation: AgentsMutation) -> AgentOutcome {
+    std::panic::catch_unwind(|| simulate(seed, mutation)).unwrap_or_else(|panic| {
         let message = panic
             .downcast_ref::<String>()
             .cloned()

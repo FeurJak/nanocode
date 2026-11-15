@@ -56,10 +56,15 @@ pub enum SyncMutation {
     WatchRewind,
     BroadcastExtra,
     RingOffByOne,
+    AddPermitsTwice,
+    BroadcastResends,
+    CloseEarly,
+    NotifyOneForWaiters,
+    WatchResendsStale,
 }
 
 impl SyncMutation {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 14] = [
         Self::None,
         Self::SkipNotify,
         Self::LeakPermit,
@@ -69,6 +74,11 @@ impl SyncMutation {
         Self::WatchRewind,
         Self::BroadcastExtra,
         Self::RingOffByOne,
+        Self::AddPermitsTwice,
+        Self::BroadcastResends,
+        Self::CloseEarly,
+        Self::NotifyOneForWaiters,
+        Self::WatchResendsStale,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -86,6 +96,11 @@ impl SyncMutation {
             Self::WatchRewind => "watch_rewind",
             Self::BroadcastExtra => "broadcast_extra",
             Self::RingOffByOne => "ring_off_by_one",
+            Self::AddPermitsTwice => "add_permits_twice",
+            Self::BroadcastResends => "broadcast_resends",
+            Self::CloseEarly => "close_early",
+            Self::NotifyOneForWaiters => "notify_one_for_waiters",
+            Self::WatchResendsStale => "watch_resends_stale",
         }
     }
 
@@ -358,7 +373,11 @@ async fn notify_scenario(world: &World, script: &Script, seed: u64) {
             world.fail("notify_waiters: the waiters never got ready".to_owned());
             return;
         }
-        everyone.notify_waiters();
+        if world.mutation == SyncMutation::NotifyOneForWaiters {
+            everyone.notify_one();
+        } else {
+            everyone.notify_waiters();
+        }
         if !world.until(|| woke.get() == waiters).await {
             world.fail(format!(
                 "notify_waiters: {} of {waiters} enabled waiters woke",
@@ -591,6 +610,12 @@ async fn semaphore_scenario(world: &World, script: &Script, seed: u64) {
             world.pause(&mut rng).await;
             ledger.total.set(ledger.total.get() + added);
             semaphore.add_permits(count(*added));
+            if world.mutation == SyncMutation::AddPermitsTwice {
+                semaphore.add_permits(count(*added));
+            }
+        }
+        if world.mutation == SyncMutation::CloseEarly {
+            semaphore.close();
         }
     }));
     join_all(jobs, world, "semaphore").await;
@@ -790,6 +815,9 @@ async fn watch_scenario(world: &World, script: &Script, seed: u64) {
                 1 => {
                     sender.send_replace(value);
                 }
+                _ if world.mutation == SyncMutation::WatchResendsStale => {
+                    sender.send_modify(|current| *current = value - 1);
+                }
                 _ => sender.send_modify(|current| *current = value),
             }
         }
@@ -873,6 +901,9 @@ async fn broadcast_scenario(world: &World, script: &Script, seed: u64) {
         for value in 1..=values + extra {
             world.pause(&mut rng).await;
             if sender.send(value).is_err() {
+                world.fail(format!("broadcast: send of {value} refused"));
+            }
+            if world.mutation == SyncMutation::BroadcastResends && sender.send(value).is_err() {
                 world.fail(format!("broadcast: send of {value} refused"));
             }
             sent_ref.set(value);

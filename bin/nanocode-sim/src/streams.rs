@@ -70,16 +70,22 @@ pub enum StreamsMutation {
     SkipWake,
     DropSpawned,
     CorruptTlsByte,
+    DetachOnDrop,
+    HalfTimeout,
+    JoinRepeats,
 }
 
 impl StreamsMutation {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 9] = [
         Self::None,
         Self::DropPipeByte,
         Self::EarlyEof,
         Self::SkipWake,
         Self::DropSpawned,
         Self::CorruptTlsByte,
+        Self::DetachOnDrop,
+        Self::HalfTimeout,
+        Self::JoinRepeats,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -96,6 +102,9 @@ impl StreamsMutation {
             Self::SkipWake => "skip_wake",
             Self::DropSpawned => "drop_spawned",
             Self::CorruptTlsByte => "corrupt_tls_byte",
+            Self::DetachOnDrop => "detach_on_drop",
+            Self::HalfTimeout => "half_timeout",
+            Self::JoinRepeats => "join_repeats",
         }
     }
 
@@ -917,22 +926,38 @@ fn value_of(index: usize) -> u64 {
     (count(index) + 1) * VALUE_STRIDE + 7
 }
 
-fn job(index: usize, plan: TaskPlan, notes: Arc<Notes>) -> impl Future<Output = u64> + Send {
+fn job(
+    index: usize,
+    plan: TaskPlan,
+    notes: Arc<Notes>,
+    mutation: StreamsMutation,
+) -> impl Future<Output = u64> + Send {
     let guard = Guard {
         index,
         notes: Arc::clone(&notes),
         settled: false,
     };
-    run_job(index, plan, notes, guard)
+    run_job(index, plan, notes, guard, mutation)
 }
 
-async fn run_job(index: usize, plan: TaskPlan, notes: Arc<Notes>, mut guard: Guard) -> u64 {
+async fn run_job(
+    index: usize,
+    plan: TaskPlan,
+    notes: Arc<Notes>,
+    mut guard: Guard,
+    mutation: StreamsMutation,
+) -> u64 {
     for hop in plan.hops.iter().take(plan.hop_count) {
         nanocode_platform::sleep(Duration::from_millis(*hop)).await;
     }
     if let Some((limit, inner)) = plan.timeout {
+        let deadline = if mutation == StreamsMutation::HalfTimeout {
+            limit / 2
+        } else {
+            limit
+        };
         let timed = nanocode_platform::timeout(
-            Duration::from_millis(limit),
+            Duration::from_millis(deadline),
             nanocode_platform::sleep(Duration::from_millis(inner)),
         )
         .await;
@@ -974,7 +999,7 @@ fn spawn_jobs(
     let mut set = JoinSet::new();
     let mut handles = Vec::new();
     for (index, task) in plan.tasks.iter().enumerate() {
-        let future = job(index, *task, Arc::clone(notes));
+        let future = job(index, *task, Arc::clone(notes), mutation);
         let handle = if mutation == StreamsMutation::DropSpawned && rng.chance(DROP_SPAWNED_PPM) {
             set.push(nanocode_executor::spawn_with(future, drop))
         } else if rng.chance(SPAWN_JOINED_PPM) {
@@ -1003,10 +1028,14 @@ async fn join_jobs(
     plan: &JoinPlan,
     notes: &Arc<Notes>,
     results: &RefCell<Results>,
+    mutation: StreamsMutation,
 ) {
     let mut joined = 0;
     loop {
         if plan.drop_after == Some(joined) {
+            if mutation == StreamsMutation::DetachOnDrop {
+                set.detach_all();
+            }
             drop(set);
             notes.push(Note::SetDropped);
             nanocode_platform::sleep(SETTLE).await;
@@ -1030,7 +1059,11 @@ async fn join_jobs(
             Err(error) => (error.id(), Err(error)),
         };
         let index = ids.get(&id).copied().unwrap_or(usize::MAX);
-        results.borrow_mut().join.push((index, joined_of(outcome)));
+        let outcome = joined_of(outcome);
+        if mutation == StreamsMutation::JoinRepeats && joined == 1 {
+            results.borrow_mut().join.push((index, outcome.clone()));
+        }
+        results.borrow_mut().join.push((index, outcome));
     }
 }
 
@@ -1408,7 +1441,9 @@ fn plain_run(
             .await;
             results_ref.borrow_mut().proxy_server = Some(sides);
         }),
-        Box::pin(async move { join_jobs(set, ids, &plan.join, &join_notes, results_ref).await }),
+        Box::pin(async move {
+            join_jobs(set, ids, &plan.join, &join_notes, results_ref, mutation).await
+        }),
         Box::pin(async move { abort_jobs(&plan.join, handles, &abort_notes).await }),
     ];
     let ended = Executor::new(Arc::clone(clock), Rng::derive(seed, "scheduler")).run(tasks, None);

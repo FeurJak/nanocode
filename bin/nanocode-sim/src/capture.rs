@@ -32,10 +32,16 @@ pub enum CaptureMutation {
     None,
     SkipTrim,
     DropChunk,
+    SkipRedact,
 }
 
 impl CaptureMutation {
-    const ALL: [Self; 3] = [Self::None, Self::SkipTrim, Self::DropChunk];
+    const ALL: [Self; 4] = [
+        Self::None,
+        Self::SkipTrim,
+        Self::DropChunk,
+        Self::SkipRedact,
+    ];
 
     pub fn parse(name: &str) -> Option<Self> {
         Self::ALL
@@ -48,6 +54,7 @@ impl CaptureMutation {
             Self::None => "none",
             Self::SkipTrim => "skip_trim",
             Self::DropChunk => "drop_chunk",
+            Self::SkipRedact => "skip_redact",
         }
     }
 
@@ -352,6 +359,8 @@ fn simulate(seed: u64, mutation: CaptureMutation) -> CaptureOutcome {
             let mut raw = String::from_utf8_lossy(&chunk.with_omission_marker()).into_owned();
             redactor.text(&mut raw);
             raw
+        } else if mutation == CaptureMutation::SkipRedact {
+            String::from_utf8_lossy(&chunk.with_omission_marker()).into_owned()
         } else {
             chunk.render(&redactor)
         };

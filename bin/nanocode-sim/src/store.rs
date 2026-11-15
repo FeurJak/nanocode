@@ -21,6 +21,8 @@ use crate::{
 
 const ACKED_WRITES_DROPPED_MAX: u64 = 3;
 const CAS_IGNORES_EXPECTED_PPM: u64 = 500_000;
+const KV_LIES_PPM: u64 = 250_000;
+const PHANTOM_KEY: &str = "phantom";
 const RECORD_INSERT_DROPS_PPM: u64 = 250_000;
 const RECORD_INSERT_OVERWRITES_PPM: u64 = 500_000;
 const RECORD_PREFIX: &str = "record/";
@@ -34,10 +36,15 @@ pub enum Mutation {
     RecordInsertOverwrites,
     CacheKeepsBlank,
     StagedRefusesRewrite,
+    CasAcksUnwritten,
+    CasReportsConflict,
+    GetCorruptsValue,
+    ListPhantomKey,
+    ListSkipsKey,
 }
 
 impl Mutation {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 12] = [
         Self::None,
         Self::CasIgnoresExpected,
         Self::RecordInsertDrops,
@@ -45,6 +52,11 @@ impl Mutation {
         Self::RecordInsertOverwrites,
         Self::CacheKeepsBlank,
         Self::StagedRefusesRewrite,
+        Self::CasAcksUnwritten,
+        Self::CasReportsConflict,
+        Self::GetCorruptsValue,
+        Self::ListPhantomKey,
+        Self::ListSkipsKey,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -62,6 +74,11 @@ impl Mutation {
             Self::RecordInsertOverwrites => "record_insert_overwrites",
             Self::CacheKeepsBlank => "cache_keeps_blank",
             Self::StagedRefusesRewrite => "staged_refuses_rewrite",
+            Self::CasAcksUnwritten => "cas_acks_unwritten",
+            Self::CasReportsConflict => "cas_reports_conflict",
+            Self::GetCorruptsValue => "get_corrupts_value",
+            Self::ListPhantomKey => "list_phantom_key",
+            Self::ListSkipsKey => "list_skips_key",
         }
     }
 
@@ -273,9 +290,14 @@ impl Kv {
         if self.fault(op, self.profile.read_ppm, "get") {
             return Err(injected("get", "before read"));
         }
+        let corrupt = self.mutation == Mutation::GetCorruptsValue && self.rng.chance(KV_LIES_PPM);
         Ok(self.pending.get(key).map(|entry| Versioned {
             version: entry.version.clone(),
-            value: entry.value.clone(),
+            value: if corrupt {
+                format!("{}{PHANTOM_KEY}", entry.value)
+            } else {
+                entry.value.clone()
+            },
         }))
     }
 
@@ -335,9 +357,13 @@ impl Kv {
         let swapped =
             prev.as_deref() == expected_version || self.mutated_swap(key, expected_version);
         let (new, value) = (entry.version.clone(), entry.value.clone());
-        if swapped && !self.drops_insert(key, expected_version) {
+        let unwritten = self.mutation == Mutation::CasAcksUnwritten && self.rng.chance(KV_LIES_PPM);
+        if swapped && !unwritten && !self.drops_insert(key, expected_version) {
             self.write(key, entry);
         }
+        let conflict = swapped
+            && self.mutation == Mutation::CasReportsConflict
+            && self.rng.chance(KV_LIES_PPM);
         let after_fault = self.fault(op, self.profile.after_ppm, "cas after apply");
         let event = CasEvent {
             key: key.to_owned(),
@@ -353,7 +379,7 @@ impl Kv {
         if after_fault {
             return Err(injected("compare_and_swap", "after apply"));
         }
-        Ok(swapped)
+        Ok(swapped && !conflict)
     }
 
     fn drops_insert(&mut self, key: &str, expected_version: Option<&str>) -> bool {
@@ -385,12 +411,20 @@ impl Kv {
         if self.fault(op, self.profile.read_ppm, "list_keys") {
             return Err(injected("list_keys", "before read"));
         }
-        Ok(self
+        let mut keys: Vec<String> = self
             .pending
             .range(prefix.to_owned()..)
             .take_while(|(key, _)| key.starts_with(prefix))
             .map(|(key, _)| key.clone())
-            .collect())
+            .collect();
+        match self.mutation {
+            Mutation::ListSkipsKey => {
+                keys.pop();
+            }
+            Mutation::ListPhantomKey => keys.push(format!("{prefix}{PHANTOM_KEY}")),
+            _ => {}
+        }
+        Ok(keys)
     }
 }
 

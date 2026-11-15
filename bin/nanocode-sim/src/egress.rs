@@ -110,15 +110,27 @@ pub enum EgressMutation {
     CorruptTunnelByte,
     RebindOnConnect,
     TrustPrivate,
+    ConnectTwice,
+    ForwardsExtraByte,
+    ForwardsHopHeader,
+    ForwardsHttp10,
+    ForwardsWithoutHost,
+    TunnelDropsByte,
 }
 
 impl EgressMutation {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 11] = [
         Self::None,
         Self::WidenAllowlist,
         Self::CorruptTunnelByte,
         Self::RebindOnConnect,
         Self::TrustPrivate,
+        Self::ConnectTwice,
+        Self::ForwardsExtraByte,
+        Self::ForwardsHopHeader,
+        Self::ForwardsHttp10,
+        Self::ForwardsWithoutHost,
+        Self::TunnelDropsByte,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -134,6 +146,12 @@ impl EgressMutation {
             Self::CorruptTunnelByte => "corrupt_tunnel_byte",
             Self::RebindOnConnect => "rebind_on_connect",
             Self::TrustPrivate => "trust_private",
+            Self::ConnectTwice => "connect_twice",
+            Self::ForwardsExtraByte => "forwards_extra_byte",
+            Self::ForwardsHopHeader => "forwards_hop_header",
+            Self::ForwardsHttp10 => "forwards_http10",
+            Self::ForwardsWithoutHost => "forwards_without_host",
+            Self::TunnelDropsByte => "tunnel_drops_byte",
         }
     }
 
@@ -816,6 +834,15 @@ impl Dial for SimDial {
             });
             dialed.len() - 1
         });
+        if self.mutation == EgressMutation::ConnectTwice {
+            self.dialed.update(|dialed| {
+                dialed.push(Dialed {
+                    key: key.clone(),
+                    address: address.ip(),
+                    received: Vec::new(),
+                });
+            });
+        }
         let upstream = UpstreamTask {
             server,
             index,
@@ -826,6 +853,7 @@ impl Dial for SimDial {
             clock: Arc::clone(&self.clock),
             latency_ms: self.latency_ms,
             corrupt: self.mutation == EgressMutation::CorruptTunnelByte,
+            mutation: self.mutation,
         };
         nanocode_platform::spawn(upstream.run());
         Box::pin(async move { Ok(Box::new(client) as Upstream) })
@@ -842,6 +870,7 @@ struct UpstreamTask {
     clock: Arc<Clock>,
     latency_ms: u64,
     corrupt: bool,
+    mutation: EgressMutation,
 }
 
 impl UpstreamTask {
@@ -849,6 +878,37 @@ impl UpstreamTask {
         let index = self.index;
         self.dialed
             .update(|dialed| dialed[index].received.extend_from_slice(bytes));
+    }
+
+    fn forward_mutated(&self) {
+        let index = self.index;
+        let mutation = self.mutation;
+        self.dialed.update(|dialed| {
+            let received = &mut dialed[index].received;
+            let line_end = received
+                .windows(2)
+                .position(|window| window == b"\r\n")
+                .unwrap_or(received.len());
+            match mutation {
+                EgressMutation::ForwardsExtraByte => received.push(b'\n'),
+                EgressMutation::ForwardsHopHeader => {
+                    let header = format!("\r\n{HOP_HEADER}: keep-alive");
+                    received.splice(line_end..line_end, header.into_bytes());
+                }
+                EgressMutation::ForwardsHttp10 => {
+                    if let Some(at) = received[..line_end].iter().rposition(|byte| *byte == b'1') {
+                        received[at] = b'0';
+                    }
+                }
+                EgressMutation::ForwardsWithoutHost => {
+                    let lower = received.to_ascii_lowercase();
+                    if let Some(at) = lower.windows(7).position(|window| window == b"\r\nhost:") {
+                        received[at + 3] = b'x';
+                    }
+                }
+                _ => {}
+            }
+        });
     }
 
     async fn run(self) {
@@ -862,11 +922,14 @@ impl UpstreamTask {
     async fn echo(self) {
         let mut chunk = [0_u8; READ_BYTES];
         let mut corrupted = !self.corrupt;
+        let mut dropped = self.mutation != EgressMutation::TunnelDropsByte;
         loop {
             match self.server.read(&mut chunk).await {
                 Ok(0) | Err(_) => break,
                 Ok(read) => {
-                    self.record(&chunk[..read]);
+                    let from = usize::from(!dropped);
+                    dropped = true;
+                    self.record(&chunk[from..read]);
                     if !corrupted {
                         chunk[0] ^= CORRUPT_BITS;
                         corrupted = true;
@@ -898,6 +961,7 @@ impl UpstreamTask {
             }
         };
         if complete {
+            self.forward_mutated();
             self.clock
                 .sleep(Duration::from_millis(self.latency_ms))
                 .await;

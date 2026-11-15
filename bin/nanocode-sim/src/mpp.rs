@@ -54,10 +54,30 @@ pub enum MppMutation {
     None,
     DropAbandon,
     ReceiptOnRefusal,
+    ExchangeReplays,
+    PayRecordsTwice,
+    PaysUnoffered,
+    RetryBudgetOffByOne,
+    RetryDropsBody,
+    SettlesStale,
+    StatusRewritten,
+    SupportsAny,
 }
 
 impl MppMutation {
-    const ALL: [Self; 3] = [Self::None, Self::DropAbandon, Self::ReceiptOnRefusal];
+    const ALL: [Self; 11] = [
+        Self::None,
+        Self::DropAbandon,
+        Self::ReceiptOnRefusal,
+        Self::ExchangeReplays,
+        Self::PayRecordsTwice,
+        Self::PaysUnoffered,
+        Self::RetryBudgetOffByOne,
+        Self::RetryDropsBody,
+        Self::SettlesStale,
+        Self::StatusRewritten,
+        Self::SupportsAny,
+    ];
 
     pub fn parse(name: &str) -> Option<Self> {
         Self::ALL
@@ -70,6 +90,14 @@ impl MppMutation {
             Self::None => "none",
             Self::DropAbandon => "drop_abandon",
             Self::ReceiptOnRefusal => "receipt_on_refusal",
+            Self::ExchangeReplays => "exchange_replays",
+            Self::PayRecordsTwice => "pay_records_twice",
+            Self::PaysUnoffered => "pays_unoffered",
+            Self::RetryBudgetOffByOne => "retry_budget_off_by_one",
+            Self::RetryDropsBody => "retry_drops_body",
+            Self::SettlesStale => "settles_stale",
+            Self::StatusRewritten => "status_rewritten",
+            Self::SupportsAny => "supports_any",
         }
     }
 
@@ -294,6 +322,7 @@ struct SimProvider {
     pays: Arc<Atom<usize>>,
     pay_fails: Option<usize>,
     drop_abandon: bool,
+    mutation: MppMutation,
 }
 
 fn credential_id(credential: &Credential) -> String {
@@ -322,7 +351,7 @@ impl SimProvider {
 
 impl PaymentProvider for SimProvider {
     fn supports(&self, method: &str, intent: &str) -> bool {
-        method == METHOD && intent == INTENT
+        self.mutation == MppMutation::SupportsAny || (method == METHOD && intent == INTENT)
     }
 
     fn select_challenge<'a>(&self, challenges: &[&'a Challenge]) -> Option<&'a Challenge> {
@@ -341,7 +370,11 @@ impl PaymentProvider for SimProvider {
         if self.pay_fails == Some(attempt) {
             return Err(Fault::InsufficientBalance(None));
         }
-        let id = nonce(challenge);
+        let id = if self.mutation == MppMutation::PaysUnoffered {
+            format!("{}-unoffered", nonce(challenge))
+        } else {
+            nonce(challenge)
+        };
         let offer_json = json!({
             "challenge": {
                 "id": id,
@@ -354,8 +387,15 @@ impl PaymentProvider for SimProvider {
         });
         let credential: Credential = serde_json::from_value(offer_json)
             .map_err(|error| Fault::Config(format!("sim credential: {error}")))?;
-        self.ledger
-            .update(|ledger| ledger.push(Entry::Paid(id.clone())));
+        let records = if self.mutation == MppMutation::PayRecordsTwice {
+            2
+        } else {
+            1
+        };
+        for _ in 0..records {
+            self.ledger
+                .update(|ledger| ledger.push(Entry::Paid(id.clone())));
+        }
         Ok(credential)
     }
 
@@ -376,6 +416,11 @@ impl PaymentProvider for SimProvider {
         credential: &Credential,
     ) -> Result<(), Fault> {
         self.settle(credential, Settled::Commit);
+        if self.mutation == MppMutation::SettlesStale {
+            let stale = format!("{}-stale", credential_id(credential));
+            self.ledger
+                .update(|ledger| ledger.push(Entry::Settled(stale.clone(), Settled::Commit)));
+        }
         Ok(())
     }
 
@@ -450,6 +495,7 @@ struct SimExchange<'a> {
     sent: Vec<Sent>,
     paid: usize,
     receipt_on_refusal: bool,
+    mutation: MppMutation,
 }
 
 fn receipt(id: &str) -> String {
@@ -520,7 +566,15 @@ impl Exchange for SimExchange<'_> {
                 let with = |receipt: bool| receipt.then_some(id.as_str());
                 match fate {
                     Fate::Took { status, receipt } => {
-                        (Some(status), Ok(response(&url, status, &[], with(receipt))))
+                        let returned = if self.mutation == MppMutation::StatusRewritten {
+                            200
+                        } else {
+                            status
+                        };
+                        (
+                            Some(status),
+                            Ok(response(&url, returned, &[], with(receipt))),
+                        )
                     }
                     Fate::Again { receipt, offers } => (
                         Some(PAYMENT_REQUIRED),
@@ -540,11 +594,20 @@ impl Exchange for SimExchange<'_> {
                 }
             }
         };
-        self.sent.push(Sent {
+        let body = if credential.is_some() && self.mutation == MppMutation::RetryDropsBody {
+            Vec::new()
+        } else {
+            body
+        };
+        let sent = Sent {
             credential,
             body,
             answered,
-        });
+        };
+        if sent.credential.is_some() && self.mutation == MppMutation::ExchangeReplays {
+            self.sent.push(sent.clone());
+        }
+        self.sent.push(sent);
         reply
     }
 }
@@ -698,12 +761,14 @@ fn simulate(seed: u64, mutation: MppMutation) -> MppOutcome {
         pays: Arc::new(Atom::new(0)),
         pay_fails: script.pay_fails,
         drop_abandon: mutation == MppMutation::DropAbandon,
+        mutation,
     };
     let mut exchange = SimExchange {
         script: &script,
         sent: Vec::new(),
         paid: 0,
         receipt_on_refusal: mutation == MppMutation::ReceiptOnRefusal,
+        mutation,
     };
     let url = Url::parse(URL).expect("the simulated URL parses");
     let method = if script.post {
@@ -724,7 +789,11 @@ fn simulate(seed: u64, mutation: MppMutation) -> MppOutcome {
             &provider,
             &Policy::Always,
             &events,
-            script.retries,
+            if mutation == MppMutation::RetryBudgetOffByOne {
+                script.retries + 1
+            } else {
+                script.retries
+            },
         )
         .await;
         outcome.set(Some(match result {

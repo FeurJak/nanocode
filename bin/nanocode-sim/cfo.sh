@@ -153,6 +153,15 @@ default_table='
 1 canary_executor_leak_cancelled canary --scenario executor --mutation leak_cancelled
 1 canary_capture_skip_trim canary --scenario capture --mutation skip_trim
 1 canary_capture_drop_chunk canary --scenario capture --mutation drop_chunk
+1 canary_buffered_admission_written canary --scenario turns --policy turnlog --mutation buffered_admission_written
+1 canary_cell_before_checkpoint canary --scenario turns --policy turnlog --mutation cell_before_checkpoint
+1 canary_open_drops_journals canary --scenario turns --policy turnlog --mutation open_drops_journals
+1 canary_resume_redispatches_running canary --scenario turns --policy turnlog --mutation resume_redispatches_running
+1 canary_agents_cancel_ignored canary:200 --scenario agents --mutation cancel_ignored
+1 canary_agents_shutdown_hangs canary:200 --scenario agents --mutation shutdown_hangs
+1 canary_agents_shutdown_keeps_harness canary:200 --scenario agents --mutation shutdown_keeps_harness
+1 canary_runtime_kv_power_loss_drops_acked canary:100 --scenario runtime --store kv --mutation power_loss_drops_acked
+1 canary_runtime_kv_record_insert_drops canary:100 --scenario runtime --store kv --mutation record_insert_drops
 '
 default_known='
 '

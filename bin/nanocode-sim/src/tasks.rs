@@ -21,10 +21,26 @@ pub enum TasksMutation {
     None,
     SkipAbort,
     LeakCancelled,
+    AbortsWrongTask,
+    JoinsTwice,
+    PanicAsCancelled,
+    SignalDropped,
+    SignalEarly,
+    SkipAwait,
 }
 
 impl TasksMutation {
-    const ALL: [Self; 3] = [Self::None, Self::SkipAbort, Self::LeakCancelled];
+    const ALL: [Self; 9] = [
+        Self::None,
+        Self::SkipAbort,
+        Self::LeakCancelled,
+        Self::AbortsWrongTask,
+        Self::JoinsTwice,
+        Self::PanicAsCancelled,
+        Self::SignalDropped,
+        Self::SignalEarly,
+        Self::SkipAwait,
+    ];
 
     pub fn parse(name: &str) -> Option<Self> {
         Self::ALL
@@ -37,6 +53,12 @@ impl TasksMutation {
             Self::None => "none",
             Self::SkipAbort => "skip_abort",
             Self::LeakCancelled => "leak_cancelled",
+            Self::AbortsWrongTask => "aborts_wrong_task",
+            Self::JoinsTwice => "joins_twice",
+            Self::PanicAsCancelled => "panic_as_cancelled",
+            Self::SignalDropped => "signal_dropped",
+            Self::SignalEarly => "signal_early",
+            Self::SkipAwait => "skip_await",
         }
     }
 
@@ -231,15 +253,22 @@ async fn task(
     hops: Vec<Hop>,
     panics: bool,
     mut waits: Vec<oneshot::Receiver<()>>,
-    signals: Vec<oneshot::Sender<()>>,
+    mut signals: Vec<oneshot::Sender<()>>,
     mut guard: Guard,
+    mutation: TasksMutation,
 ) -> u64 {
     let notes = Arc::clone(&guard.notes);
+    if mutation == TasksMutation::SignalEarly {
+        for signal in std::mem::take(&mut signals) {
+            signal.send(()).ok();
+        }
+    }
     for (at, hop) in hops.iter().enumerate() {
         notes.push(Note::Hop(index, at));
         match hop {
             Hop::Yield => yield_now().await,
             Hop::Budget => consume_budget().await,
+            Hop::Await(_) if mutation == TasksMutation::SkipAwait => drop(waits.remove(0)),
             Hop::Await(other) => {
                 let wait = waits.remove(0);
                 let delivered = wait.await.is_ok();
@@ -251,8 +280,12 @@ async fn task(
         notes.push(Note::Panicked(index));
         std::panic::resume_unwind(Box::new(index));
     }
-    for signal in signals {
-        signal.send(()).ok();
+    if mutation == TasksMutation::SignalDropped {
+        drop(signals);
+    } else {
+        for signal in signals {
+            signal.send(()).ok();
+        }
     }
     guard.completed = true;
     notes.push(Note::Finished(index));
@@ -266,10 +299,12 @@ enum Joined {
     Panic(Option<usize>),
 }
 
-fn joined_of(outcome: Result<u64, JoinError>) -> Joined {
+fn joined_of(outcome: Result<u64, JoinError>, mutation: TasksMutation) -> Joined {
     match outcome {
         Ok(value) => Joined::Value(value),
-        Err(error) if error.is_cancelled() => Joined::Cancelled,
+        Err(error) if error.is_cancelled() || mutation == TasksMutation::PanicAsCancelled => {
+            Joined::Cancelled
+        }
         Err(error) => Joined::Panic(
             error
                 .into_panic()
@@ -314,6 +349,7 @@ async fn control(
             std::mem::take(&mut receivers[index]),
             std::mem::take(&mut senders[index]),
             guard,
+            mutation,
         );
         if plan.in_set {
             let abort = set.spawn(future);
@@ -339,8 +375,10 @@ async fn control(
                     matches!(note, Note::Finished(done) | Note::Panicked(done) if *done == index)
                 });
                 notes.push(Note::Aborted(index, finished));
-                if mutation != TasksMutation::SkipAbort {
-                    aborts[index].abort();
+                match mutation {
+                    TasksMutation::SkipAbort => {}
+                    TasksMutation::AbortsWrongTask => aborts[(index + 1) % aborts.len()].abort(),
+                    _ => aborts[index].abort(),
                 }
             }
             Action::Detach(index) => {
@@ -353,7 +391,7 @@ async fn control(
     let mut joined = Vec::new();
     for (index, handle) in handles.into_iter().enumerate() {
         if let Some(handle) = handle {
-            joined.push((index, joined_of(handle.await)));
+            joined.push((index, joined_of(handle.await, mutation)));
         }
     }
     while let Some(outcome) = set.join_next_with_id().await {
@@ -362,7 +400,11 @@ async fn control(
             Err(error) => (error.id(), Err(error)),
         };
         let index = members[&id];
-        joined.push((index, joined_of(result)));
+        let outcome = joined_of(result, mutation);
+        if mutation == TasksMutation::JoinsTwice {
+            joined.push((index, outcome));
+        }
+        joined.push((index, outcome));
     }
     (joined, detached)
 }

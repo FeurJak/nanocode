@@ -62,16 +62,26 @@ const CHUNK_JUNK_BODY: &[u8] = b"5x\r\nhello\r\n0\r\n\r\n";
 const BROKEN_TARGET: &str = "/broken";
 const CRLF: &[u8] = b"\r\n";
 const HEX_RADIX: u32 = 16;
+const STATUS_LINE_PREFIX: &[u8] = b"HTTP/1.1 ";
+const STATUS_DIGIT_BITS: u8 = 0x01;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HttpServerMutation {
     None,
     CorruptResponseByte,
     DropRequestByte,
+    CorruptStatus,
+    DropFirstResponse,
 }
 
 impl HttpServerMutation {
-    const ALL: [Self; 3] = [Self::None, Self::CorruptResponseByte, Self::DropRequestByte];
+    const ALL: [Self; 5] = [
+        Self::None,
+        Self::CorruptResponseByte,
+        Self::DropRequestByte,
+        Self::CorruptStatus,
+        Self::DropFirstResponse,
+    ];
 
     pub fn parse(name: &str) -> Option<Self> {
         Self::ALL
@@ -84,6 +94,8 @@ impl HttpServerMutation {
             Self::None => "none",
             Self::CorruptResponseByte => "corrupt_response_byte",
             Self::DropRequestByte => "drop_request_byte",
+            Self::CorruptStatus => "corrupt_status",
+            Self::DropFirstResponse => "drop_first_response",
         }
     }
 
@@ -807,6 +819,8 @@ struct Reader {
     eof: bool,
     read: u64,
     corrupt_at: Option<u64>,
+    corrupt_bits: u8,
+    skip_first: bool,
 }
 
 impl Reader {
@@ -839,7 +853,7 @@ impl Reader {
                     if let Some(at) = self.corrupt_at
                         && (from..self.read).contains(&at)
                     {
-                        chunk[size(at - from)] ^= CORRUPT_BITS;
+                        chunk[size(at - from)] ^= self.corrupt_bits;
                     }
                     self.buffer.extend_from_slice(&chunk[..read]);
                 }
@@ -868,6 +882,10 @@ async fn read_responses(
                     response.body.len(),
                     response.truncated
                 ));
+                if reader.skip_first {
+                    reader.skip_first = false;
+                    continue;
+                }
                 log.borrow_mut().responses.push(response);
             }
             Some(Err(error)) => {
@@ -889,13 +907,22 @@ async fn client(
     seed: u64,
 ) {
     let mut rng = Rng::derive(seed, "http-server-client");
-    let corrupt_at = (mutation == HttpServerMutation::CorruptResponseByte)
-        .then(|| rng.range(0, CORRUPT_OFFSET_MAX));
+    let corrupt_at = match mutation {
+        HttpServerMutation::CorruptResponseByte => Some(rng.range(0, CORRUPT_OFFSET_MAX)),
+        HttpServerMutation::CorruptStatus => Some(count(STATUS_LINE_PREFIX.len())),
+        _ => None,
+    };
     let mut reader = Reader {
         buffer: Vec::new(),
         eof: false,
         read: 0,
         corrupt_at,
+        corrupt_bits: if mutation == HttpServerMutation::CorruptStatus {
+            STATUS_DIGIT_BITS
+        } else {
+            CORRUPT_BITS
+        },
+        skip_first: mutation == HttpServerMutation::DropFirstResponse,
     };
     let limit = script.cut.map_or(script.stream.len(), |(at, _)| at);
     let mut written = 0;

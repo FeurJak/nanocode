@@ -11,6 +11,7 @@ use crate::{
 pub const ROOT_MARK: &str = "SIMROOT";
 pub const CHILD_MARK: &str = "SIMCHILD";
 pub const EFFECT_TOOL: &str = "sim_effect";
+const REWRITTEN_TEXT: &str = "rewritten";
 const RUNNING_MARK: &str = "Script running with cell ID ";
 pub const EFFECTS_MAX: u64 = 2;
 pub const CHILDREN_MAX: u64 = 3;
@@ -306,6 +307,38 @@ fn of_type<'a>(blocks: &'a [Value], kind: &'a str, key: &'a str) -> impl Iterato
         .filter_map(move |block| block.get(key).and_then(Value::as_str))
 }
 
+fn drop_first_tool_result(messages: &mut [Value]) {
+    for message in messages {
+        let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        if let Some(at) = blocks
+            .iter()
+            .position(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+        {
+            blocks.remove(at);
+            return;
+        }
+    }
+}
+
+fn rewrite_first_assistant(messages: &mut [Value]) {
+    if let Some(blocks) = messages
+        .iter_mut()
+        .find(|message| role(message) == Some("assistant"))
+        .and_then(|message| message.get_mut("content").and_then(Value::as_array_mut))
+    {
+        blocks.push(json!({"type": "text", "text": REWRITTEN_TEXT}));
+    }
+}
+
+fn answers_only(message: &Value) -> bool {
+    role(message) == Some("assistant")
+        && blocks(message)
+            .iter()
+            .all(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+}
+
 fn duplicate_first_tool_result(messages: &mut [Value]) {
     for message in messages {
         let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) else {
@@ -448,8 +481,12 @@ impl ModelServer {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        if self.mutation == WireMutation::ToolResultTwice {
-            duplicate_first_tool_result(&mut messages);
+        match self.mutation {
+            WireMutation::ToolResultTwice => duplicate_first_tool_result(&mut messages),
+            WireMutation::DropToolResult => drop_first_tool_result(&mut messages),
+            WireMutation::RewriteAssistant => rewrite_first_assistant(&mut messages),
+            WireMutation::DropAckedAnswer => messages.retain(|message| !answers_only(message)),
+            _ => {}
         }
         let Some(conversation) = read(&messages) else {
             return Err("a request with no simulated agent in it".to_owned());

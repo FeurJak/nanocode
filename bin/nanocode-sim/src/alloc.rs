@@ -32,14 +32,18 @@ pub enum AllocMutation {
     OverstateSize,
     ForgetFree,
     Scribble,
+    DropAlign,
+    OversizeRequest,
 }
 
 impl AllocMutation {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 6] = [
         Self::None,
         Self::OverstateSize,
         Self::ForgetFree,
         Self::Scribble,
+        Self::DropAlign,
+        Self::OversizeRequest,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -54,6 +58,8 @@ impl AllocMutation {
             Self::OverstateSize => "overstate_size",
             Self::ForgetFree => "forget_free",
             Self::Scribble => "scribble",
+            Self::DropAlign => "drop_align",
+            Self::OversizeRequest => "oversize_request",
         }
     }
 
@@ -245,9 +251,9 @@ impl World {
         Ok(())
     }
 
-    fn claim(&mut self, allocation: Allocation, thread: usize) -> Result<(), String> {
+    fn claim(&mut self, allocation: Allocation, thread: usize, align: usize) -> Result<(), String> {
         let layout = allocation.layout();
-        if let Err(message) = self.placed(allocation.address(), layout.size(), layout.align()) {
+        if let Err(message) = self.placed(allocation.address(), layout.size(), align) {
             self.rejected.push(allocation);
             return Err(message);
         }
@@ -283,14 +289,22 @@ impl World {
     fn allocate(&mut self, thread: usize) -> Result<(), String> {
         let layout = self.layout();
         self.stats.allocations += 1;
-        let Some(allocation) = self.locals[thread].allocate(layout) else {
+        let requested = if self.mutation == AllocMutation::DropAlign {
+            Layout::from_size_align(layout.size(), 1).expect("a smaller alignment stays valid")
+        } else if self.mutation_due(AllocMutation::OversizeRequest) {
+            Layout::from_size_align(isize::MAX.unsigned_abs() / 2, layout.align())
+                .expect("half the address space is a valid layout")
+        } else {
+            layout
+        };
+        let Some(allocation) = self.locals[thread].allocate(requested) else {
             return Err(format!(
                 "the allocator refused {} bytes aligned to {}",
-                layout.size(),
-                layout.align()
+                requested.size(),
+                requested.align()
             ));
         };
-        self.claim(allocation, thread)
+        self.claim(allocation, thread, layout.align())
     }
 
     fn free(&mut self, thread: usize, index: usize) -> Result<(), String> {
@@ -340,7 +354,8 @@ impl World {
             self.rejected.push(moved.allocation);
             return Err(message);
         }
-        self.claim(moved.allocation, thread)
+        let align = moved.allocation.layout().align();
+        self.claim(moved.allocation, thread, align)
     }
 
     fn checkpoint(&mut self, thread: usize) -> Result<(), String> {

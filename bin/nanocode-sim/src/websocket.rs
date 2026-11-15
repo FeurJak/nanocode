@@ -44,14 +44,20 @@ pub enum WebSocketMutation {
     CorruptPayload,
     DropClientByte,
     HoldEof,
+    CorruptClientClose,
+    CorruptClientMessage,
+    CorruptClientPong,
 }
 
 impl WebSocketMutation {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 7] = [
         Self::None,
         Self::CorruptPayload,
         Self::DropClientByte,
         Self::HoldEof,
+        Self::CorruptClientClose,
+        Self::CorruptClientMessage,
+        Self::CorruptClientPong,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -66,6 +72,9 @@ impl WebSocketMutation {
             Self::CorruptPayload => "corrupt_payload",
             Self::DropClientByte => "drop_client_byte",
             Self::HoldEof => "hold_eof",
+            Self::CorruptClientClose => "corrupt_client_close",
+            Self::CorruptClientMessage => "corrupt_client_message",
+            Self::CorruptClientPong => "corrupt_client_pong",
         }
     }
 
@@ -417,11 +426,25 @@ fn parse_request(head: &[u8]) -> Result<String, String> {
     Ok(key.to_owned())
 }
 
-fn take_frames(buffer: &mut Vec<u8>, log: &RefCell<ServerLog>, trace: &Trace) -> bool {
+fn take_frames(
+    buffer: &mut Vec<u8>,
+    log: &RefCell<ServerLog>,
+    trace: &Trace,
+    mutation: WebSocketMutation,
+) -> bool {
     loop {
         match decode_client(buffer) {
             Ok(None) => return true,
-            Ok(Some((frame, used))) => {
+            Ok(Some((mut frame, used))) => {
+                let corrupt = match frame.opcode {
+                    OPCODE_PONG => mutation == WebSocketMutation::CorruptClientPong,
+                    OPCODE_CLOSE => mutation == WebSocketMutation::CorruptClientClose,
+                    OPCODE_PING => false,
+                    _ => mutation == WebSocketMutation::CorruptClientMessage,
+                };
+                if corrupt {
+                    frame.payload.push(CORRUPT_BITS);
+                }
                 buffer.drain(..used);
                 trace.line(&format!(
                     "server read opcode {:#x} {}",
@@ -512,7 +535,7 @@ async fn listen(
             dropped = true;
         }
         if parsing {
-            parsing = take_frames(&mut buffer, log, trace);
+            parsing = take_frames(&mut buffer, log, trace, mutation);
         }
         log.borrow_mut().wake();
     }

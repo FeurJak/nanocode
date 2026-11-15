@@ -80,6 +80,9 @@ pub enum WireMutation {
     DropCancelledPrompt,
     HedgeUnmarked,
     RealElapsed,
+    DropAckedAnswer,
+    DropToolResult,
+    RewriteAssistant,
 }
 
 impl WireMutation {
@@ -91,6 +94,9 @@ impl WireMutation {
             "drop-cancelled-prompt" => Some(Self::DropCancelledPrompt),
             "hedge-unmarked" => Some(Self::HedgeUnmarked),
             "http-real-elapsed" => Some(Self::RealElapsed),
+            "drop-acked-answer" => Some(Self::DropAckedAnswer),
+            "drop-tool-result" => Some(Self::DropToolResult),
+            "rewrite-assistant" => Some(Self::RewriteAssistant),
             _ => None,
         }
     }
@@ -104,11 +110,14 @@ impl WireMutation {
             Self::DropCancelledPrompt => "drop-cancelled-prompt",
             Self::HedgeUnmarked => "hedge-unmarked",
             Self::RealElapsed => "http-real-elapsed",
+            Self::DropAckedAnswer => "drop-acked-answer",
+            Self::DropToolResult => "drop-tool-result",
+            Self::RewriteAssistant => "rewrite-assistant",
         }
     }
 
     pub const NAMES: &'static str =
-        "http-reuse-dirty|http-no-read-timeout|tool-result-twice|drop-cancelled-prompt|hedge-unmarked|http-real-elapsed";
+        "http-reuse-dirty|http-no-read-timeout|tool-result-twice|drop-cancelled-prompt|hedge-unmarked|http-real-elapsed|drop-acked-answer|drop-tool-result|rewrite-assistant";
 }
 
 #[derive(Clone, Copy, Debug)]
