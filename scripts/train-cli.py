@@ -8,6 +8,7 @@ import re
 import select
 import shutil
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -72,6 +73,9 @@ def next_action(body):
 
 
 class Responses(http.server.BaseHTTPRequestHandler):
+    # HTTP/1.1 with chunked bodies on a kept-alive connection, as provider APIs and the benchmark's server answer:
+    # an HTTP/1.0 close-delimited reply leaves the chunked and keep-alive paths untrained and in .text.cold.
+    protocol_version = "HTTP/1.1"
     count = 0
 
     def log_message(self, *args):
@@ -90,10 +94,13 @@ class Responses(http.server.BaseHTTPRequestHandler):
         usage = {"input_tokens": 10, "input_tokens_details": {"cached_tokens": 0}, "output_tokens": 1, "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 11}
         self.send_response(200)
         self.send_header("content-type", "text/event-stream")
+        self.send_header("transfer-encoding", "chunked")
+        self.send_header("connection", "keep-alive")
         self.end_headers()
 
         def send(event):
-            self.wfile.write(("event: %s\ndata: %s\n\n" % (event["type"], json.dumps(event))).encode())
+            frame = ("event: %s\ndata: %s\n\n" % (event["type"], json.dumps(event))).encode()
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(frame), frame))
             self.wfile.flush()
 
         send({"type": "response.created", "response": {"id": rid, "status": "in_progress", "output": []}})
@@ -115,6 +122,8 @@ class Responses(http.server.BaseHTTPRequestHandler):
             send({"type": delta, "item_id": item["id"], "output_index": 0, "delta": payload})
         send({"type": "response.output_item.done", "output_index": 0, "item": item})
         send({"type": "response.completed", "response": {"id": rid, "status": "completed", "output": [item], "usage": usage}})
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
 
 
 def flavor(binary):
@@ -186,8 +195,30 @@ def interactive(command, env, cwd, prompt, keys, leave):
     sys.exit("%s did not exit on its quit keys" % command[0])
 
 
+def offline():
+    # Train with only loopback reachable, as the benchmark runs: the Tempo MCP servers a session connects to at
+    # startup then fail at once on every host, so the profile no longer depends on whether the build host reaches
+    # them, and the paths a session runs when they fail are trained instead of left in .text.cold. An unprivileged
+    # user and network namespace that keeps our uid; where the kernel refuses one, train online as before.
+    uid, gid = os.getuid(), os.getgid()
+    try:
+        os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNET)
+    except (AttributeError, OSError) as error:
+        print("training online: no network namespace (%s)" % error, file=sys.stderr)
+        return
+    for name, value in (("setgroups", "deny"), ("uid_map", "%d %d 1" % (uid, uid)), ("gid_map", "%d %d 1" % (gid, gid))):
+        with open("/proc/self/" + name, "w") as f:
+            f.write(value)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        request = struct.pack("16sH14x", b"lo", 0)
+        flags = struct.unpack("16sH14x", fcntl.ioctl(s, 0x8913, request))[1]  # SIOCGIFFLAGS
+        fcntl.ioctl(s, 0x8914, struct.pack("16sH14x", b"lo", flags | 1))  # SIOCSIFFLAGS, IFF_UP
+
+
 def main():
     binary = os.path.abspath(sys.argv[1])
+    if sys.platform.startswith("linux"):
+        offline()
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Responses)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = "http://127.0.0.1:%d/v1" % server.server_address[1]
@@ -222,7 +253,9 @@ def main():
         print("trained %s with a one-shot prompt" % binary)
         return
     if sys.argv[2:] == ["tools"]:
-        subprocess.run([binary, "exec", *session, "--ephemeral", "List the files steps=3"], env=env, cwd=work, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, check=True)
+        # The bench's ten steps, three times: whether the store groups a step's writes depends on timing.
+        for _ in range(3):
+            subprocess.run([binary, "exec", *session, "--ephemeral", "List the files steps=10"], env=env, cwd=work, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, check=True)
         server.shutdown()
         shutil.rmtree(scratch)
         print("trained %s with a tool turn" % binary)

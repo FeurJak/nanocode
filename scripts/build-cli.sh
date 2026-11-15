@@ -92,7 +92,7 @@ case $target in
     python3 "$root/scripts/rodata-cli.py" "$built" "$out/$bin.map" "$out/$bin.link" "$train/linked" "$train/startup" "$train/oneshot" "$train/tools" >&2
     offline python3 "$root/scripts/train-cli.py" "$train/instrumented" >&2
     "$(dirname "$bolt")/merge-fdata" "$train"/profile.*.fdata "$train"/startup/*.fdata "$train"/oneshot/*.fdata "$train"/tools/*.fdata > "$train/profile.fdata"
-    layout="-reorder-blocks=ext-tsp -split-functions -split-all-cold -split-eh -icf=$icf -use-old-text -no-huge-pages"
+    layout="-reorder-blocks=ext-tsp -split-functions -split-all-cold -split-threshold=256 -split-eh -icf=$icf -use-old-text -no-huge-pages"
     "$bolt" "$train/linked" -o "$train/cdsort" -data="$train/profile.fdata" $layout -reorder-functions=cdsort -generate-function-order="$train/cdsort.order" >&2
     rm "$train/cdsort"
     python3 "$root/scripts/order-cli.py" "$train/cdsort.order" "$train/startup" "$train/oneshot" "$train/tools" > "$train/startup.order"
