@@ -133,6 +133,17 @@ fn order(a: Value, c: Value) -> Option<u32> {
     Some(order_float(a.as_number()?, c.as_number()?))
 }
 
+fn range(mask: u8, n: i32) -> Option<(i32, u32)> {
+    let (lo, hi) = match mask & 0b111 {
+        0b001 => (i32::MIN, n.checked_sub(1)?),
+        0b011 => (i32::MIN, n),
+        0b100 => (n.checked_add(1)?, i32::MAX),
+        0b110 => (n, i32::MAX),
+        _ => return None,
+    };
+    Some((lo, hi.wrapping_sub(lo) as u32))
+}
+
 #[derive(Clone, Copy)]
 #[repr(u8)]
 enum I {
@@ -197,8 +208,8 @@ enum I {
     },
     Latch {
         delta: i32,
-        mask: u8,
-        n: i32,
+        lo: i32,
+        span: u32,
         to: u16,
         x: u8,
     },
@@ -350,8 +361,13 @@ struct Op {
     exit: u16,
     fuel: u32,
     k: K,
+    l: bool,
+    lc: u8,
+    lfuel: u32,
+    lx: u8,
     mask: u8,
     n: i32,
+    span: u32,
     to: u16,
 }
 
@@ -364,8 +380,13 @@ fn lower(ins: &Ins) -> Op {
         exit: ins.exit,
         fuel: ins.fuel,
         k: K::Nop,
+        l: false,
+        lc: 0,
+        lfuel: 0,
+        lx: 0,
         mask: 0,
         n: 0,
+        span: 0,
         to: 0,
     };
     let mut abc = |k: K, a: u8, c: u8, d: u8| {
@@ -416,13 +437,13 @@ fn lower(ins: &Ins) -> Op {
         }
         I::Latch {
             delta,
-            mask,
-            n,
+            lo,
+            span,
             to,
             x,
         } => {
             abc(K::Latch, x, delta as i8 as u8, 0);
-            (o.mask, o.n, o.to) = (mask, n, to);
+            (o.n, o.span, o.to) = (lo, span, to);
         }
         I::Leave { exit } => {
             abc(K::Leave, 0, 0, 0);
@@ -706,15 +727,15 @@ impl Plan {
                             )) if s >= self.barrier && sa == sd && sd == a => {
                                 let br = self.prog.pop()?;
                                 let bound = match self.init[usize::from(c)] {
-                                    Src::Value(v) => v.as_int(),
+                                    Src::Value(v) => v.as_int().and_then(|n| range(mask, n)),
                                     Src::Slot(_) => None,
                                 };
                                 let step = &mut self.prog[s];
                                 step.i = match bound {
-                                    Some(n) => I::Latch {
+                                    Some((lo, span)) => I::Latch {
                                         delta,
-                                        mask,
-                                        n,
+                                        lo,
+                                        span,
                                         to: 0,
                                         x: a,
                                     },
@@ -802,7 +823,7 @@ fn translate(b: &[u8], f: &Frame) -> Option<Plan> {
         let w = word(b, ip);
         let op = w as u8;
         let info = &OPS[op as usize];
-        let cost = info.cost.fuel() as u32;
+        let cost = info.cost.fuel();
         let next = ip + info.size as u32;
         let imm16 = (w >> 8) as u16 as u32;
         let imm32 = (w >> 8) as u32;
@@ -965,24 +986,24 @@ fn translate(b: &[u8], f: &Frame) -> Option<Plan> {
         let to = p.labels.iter().find(|l| l.0 == ip)?.2?;
         *p.prog[at].i.target()? = to;
     }
-    u16::try_from(p.prog.len()).ok()?;
+    u8::try_from(p.prog.len() - 1).ok()?;
     Some(p)
 }
 
 impl Exec<'_> {
     #[inline(never)]
-    pub(super) fn run_tier1(&mut self) -> bool {
+    pub(super) fn run_tier1(&mut self) {
         if self.opts.gc_stress || self.heap.gc_pending() || self.pc >= self.code_len {
-            return false;
+            return;
         }
         let head = self.code + self.pc;
         let vals = ValueArray::VALUES.at(self.stack, 0);
         let b: &mut [u8] = self.heap.arena_mut().hot_bytes();
         let Some((stop, pass)) = body(b, head, self.code + self.code_len) else {
-            return false;
+            return;
         };
         if self.fuel <= pass {
-            return false;
+            return;
         }
         let f = Frame {
             bp: self.bp,
@@ -993,7 +1014,7 @@ impl Exec<'_> {
             stop,
         };
         let Some(plan) = translate(b, &f) else {
-            return false;
+            return;
         };
         let mut r = [Value::UNDEFINED; 256];
         for (k, s) in plan.init.iter().enumerate() {
@@ -1002,12 +1023,46 @@ impl Exec<'_> {
                 Src::Value(v) => v,
             };
         }
-        let prog: Vec<Op> = plan.prog.iter().map(lower).collect();
-        let mut budget = self.opts.hot_backedges;
+        let mut prog = [lower(&Ins {
+            exit: 0,
+            fuel: 0,
+            i: I::Nop,
+        }); 256];
+        for (o, ins) in prog.iter_mut().zip(&plan.prog) {
+            *o = lower(ins);
+        }
+        for s in 1..plan.prog.len() {
+            let (o, p) = (prog[s], &plan.prog[s]);
+            let suffix = matches!(
+                prog[s - 1].k,
+                K::Add
+                    | K::BAnd
+                    | K::BOr
+                    | K::BXor
+                    | K::Div
+                    | K::GetElem
+                    | K::IsNullish
+                    | K::IsUndefined
+                    | K::Mod
+                    | K::Mov
+                    | K::Mul
+                    | K::Not
+                    | K::Sar
+                    | K::Shl
+                    | K::Step
+                    | K::Sub
+            );
+            let label = plan.labels.iter().any(|l| l.2 == Some(s as u16));
+            if matches!(o.k, K::Latch) && o.to == 0 && suffix && !label {
+                let q = &mut prog[s - 1];
+                (q.l, q.lc, q.lfuel, q.lx) = (true, o.c, p.fuel, o.a);
+                (q.aux, q.n, q.span) = (o.exit, o.n, o.span);
+            }
+        }
         let mut fuel = self.fuel;
-        let mut k = 0usize;
-        let (exit, again) = loop {
-            let o = prog[k];
+        let mut k = 0u8;
+        let exit = loop {
+            let o = &prog[usize::from(k)];
             let (a, c, d) = (o.a as usize, o.c as usize, o.d as usize);
             macro_rules! next {
                 () => {{
@@ -1015,19 +1070,39 @@ impl Exec<'_> {
                     k += 1;
                 }};
             }
+            macro_rules! latch {
+                () => {{
+                    fuel -= o.fuel as i64;
+                    if o.l {
+                        let x = o.lx as usize;
+                        let Some(i) = r[x].as_int().and_then(|i| i.checked_add(i32::from(o.lc as i8)))
+                        else {
+                            break o.aux;
+                        };
+                        r[x] = Value::int(i);
+                        fuel -= o.lfuel as i64;
+                        if i.wrapping_sub(o.n) as u32 <= o.span {
+                            if fuel <= pass {
+                                break 0;
+                            }
+                            k = 0;
+                        } else {
+                            k += 2;
+                        }
+                    } else {
+                        k += 1;
+                    }
+                }};
+            }
             macro_rules! goto {
                 () => {{
                     fuel -= o.fuel as i64;
                     if o.to == 0 {
                         if fuel <= pass {
-                            break (0, false);
-                        }
-                        budget -= 1;
-                        if budget == 0 {
-                            break (0, true);
+                            break 0;
                         }
                     }
-                    k = o.to as usize;
+                    k = o.to as u8;
                 }};
             }
             macro_rules! arith {
@@ -1042,13 +1117,13 @@ impl Exec<'_> {
                         None => match (p.as_number(), q.as_number()) {
                             (Some(x), Some(y)) => match ($float)(x, y) {
                                 Some(v) => v,
-                                None => break (o.exit, false),
+                                None => break o.exit,
                             },
-                            _ => break (o.exit, false),
+                            _ => break o.exit,
                         },
                     };
                     r[d] = v;
-                    next!();
+                    latch!();
                 }};
             }
             macro_rules! no_float {
@@ -1066,21 +1141,21 @@ impl Exec<'_> {
                         },
                         _ => match (p.as_number(), q.as_number()) {
                             (Some(x), Some(y)) => number(x + y),
-                            _ => break (o.exit, false),
+                            _ => break o.exit,
                         },
                     };
                     r[d] = v;
-                    next!();
+                    latch!();
                 }
                 K::Latch => {
                     let Some(i) = r[a]
                         .as_int()
                         .and_then(|i| i.checked_add(i32::from(o.c as i8)))
                     else {
-                        break (o.exit, false);
+                        break o.exit;
                     };
                     r[a] = Value::int(i);
-                    if o.mask >> order_int(i, o.n) & 1 != 0 {
+                    if i.wrapping_sub(o.n) as u32 <= o.span {
                         goto!()
                     } else {
                         next!()
@@ -1091,7 +1166,7 @@ impl Exec<'_> {
                         .as_int()
                         .and_then(|i| i.checked_add(i32::from(o.d as i8)))
                     else {
-                        break (o.exit, false);
+                        break o.exit;
                     };
                     r[a] = Value::int(i);
                     let n = r[c];
@@ -1101,7 +1176,7 @@ impl Exec<'_> {
                             Some(n) => order_float(f64::from(i), n),
                             None => {
                                 fuel -= o.n as i64;
-                                break (o.aux, false);
+                                break o.aux;
                             }
                         },
                     };
@@ -1113,7 +1188,7 @@ impl Exec<'_> {
                 }
                 K::Branch => {
                     let Some(t) = order(r[a], r[c]) else {
-                        break (o.exit, false);
+                        break o.exit;
                     };
                     if o.mask >> t & 1 != 0 {
                         goto!()
@@ -1123,7 +1198,7 @@ impl Exec<'_> {
                 }
                 K::Compare => {
                     let Some(t) = order(r[a], r[c]) else {
-                        break (o.exit, false);
+                        break o.exit;
                     };
                     r[d] = Value::bool(o.mask >> t & 1 != 0);
                     next!();
@@ -1133,43 +1208,43 @@ impl Exec<'_> {
                         r[a].as_object(),
                         r[c].as_int().and_then(|i| u32::try_from(i).ok()),
                     ) else {
-                        break (o.exit, false);
+                        break o.exit;
                     };
                     let Some(v) = self.heap.get_element_fast(obj, i) else {
-                        break (o.exit, false);
+                        break o.exit;
                     };
                     r[d] = v;
-                    next!();
+                    latch!();
                 }
                 K::PutElem => {
                     let (Some(obj), Some(i)) = (
                         r[a].as_object(),
                         r[c].as_int().and_then(|i| u32::try_from(i).ok()),
                     ) else {
-                        break (o.exit, false);
+                        break o.exit;
                     };
                     if !matches!(self.heap.set_element_fast(obj, i, r[d]), Ok(true)) {
-                        break (o.exit, false);
+                        break o.exit;
                     }
                     if self.heap.gc_pending() {
                         fuel -= o.fuel as i64;
-                        break (o.aux, false);
+                        break o.aux;
                     }
                     next!();
                 }
                 K::Mov => {
                     r[d] = r[a];
-                    next!();
+                    latch!();
                 }
                 K::Step => {
                     let Some(i) = r[a]
                         .as_int()
                         .and_then(|i| i.checked_add(i32::from(o.c as i8)))
                     else {
-                        break (o.exit, false);
+                        break o.exit;
                     };
                     r[d] = Value::int(i);
-                    next!();
+                    latch!();
                 }
                 K::Sub => arith!(
                     |x: i32, y: i32| x.checked_sub(y).map(Value::int),
@@ -1203,7 +1278,7 @@ impl Exec<'_> {
                         _ if (p.as_string().is_some() && q.as_string().is_some())
                             || (p.as_bigint().is_some() && q.as_bigint().is_some()) =>
                         {
-                            break (o.exit, false);
+                            break o.exit;
                         }
                         _ => false,
                     };
@@ -1221,22 +1296,22 @@ impl Exec<'_> {
                     } else if v.as_object().is_some() {
                         true
                     } else {
-                        break (o.exit, false);
+                        break o.exit;
                     };
                     r[d] = Value::bool(!truthy);
-                    next!();
+                    latch!();
                 }
                 K::IsUndefined => {
                     r[d] = Value::bool(r[a].is_undefined());
-                    next!();
+                    latch!();
                 }
                 K::IsNullish => {
                     r[d] = Value::bool(r[a].is_nullish());
-                    next!();
+                    latch!();
                 }
                 K::JumpIf => {
                     let Some(t) = r[a].as_bool() else {
-                        break (o.exit, false);
+                        break o.exit;
                     };
                     if t == (o.mask != 0) { goto!() } else { next!() }
                 }
@@ -1244,7 +1319,7 @@ impl Exec<'_> {
                 K::Nop => next!(),
                 K::Leave => {
                     fuel -= o.fuel as i64;
-                    break (o.to, false);
+                    break o.to;
                 }
             }
         };
@@ -1260,6 +1335,5 @@ impl Exec<'_> {
         self.pc = e.ip - self.code;
         self.sp = f.sp + e.len;
         self.fuel = fuel;
-        again
     }
 }

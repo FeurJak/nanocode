@@ -1161,7 +1161,9 @@ impl<'h> Exec<'h> {
                 if let Some(st) = self.run_hot() {
                     return st;
                 }
-                while self.fuel > 0 && self.run_tier1() {}
+                if self.fuel > 0 {
+                    self.run_tier1();
+                }
                 continue;
             }
             // Tests only: the fast paths before the tier-0 loop, the reference it must
