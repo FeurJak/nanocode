@@ -1155,9 +1155,24 @@ async fn run_for(vp: &mut Vp, code: &Rc<Code>, cmd: &Command, f: &psh_syntax::Fo
         None => vp.args.clone(),
     };
     vp.loops += 1;
-    let r = run_for_items(vp, code, &name, items, f.body, cmd).await;
+    let r = match crate::flat::compiled(code, cmd) {
+        Some(prog) => crate::flat::run_for(vp, code, &prog, &name, items).await,
+        None => run_for_items(vp, code, &name, items, f.body, cmd).await,
+    };
     vp.loops -= 1;
     r
+}
+
+/// What run_for_items does for each word before the assignment: the DEBUG trap (true:
+/// skip the word) and set -x (for compiled loops, flat).
+pub(crate) async fn for_hooks(vp: &mut Vp, code: &Rc<Code>, cmd: &Command) -> Result<bool, Unwind> {
+    if !vp.traps.map.is_empty() && Box::pin(debug_trap(vp, code, cmd)).await? {
+        return Ok(true);
+    }
+    if vp.opts.get(SetOpt::Xtrace) {
+        builtins::set::xtrace(vp, &command_text(code, cmd)).await;
+    }
+    Ok(false)
 }
 
 async fn run_for_items(

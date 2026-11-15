@@ -298,6 +298,12 @@ fn brace_expand<'a>(code: &'a Code, parts: &'a [WordPart]) -> Vec<Vec<Piece<'a>>
                         }
                     }
                 };
+                // A brace first in its word ({1..20000}): the alternatives are the
+                // results, without a copy of each.
+                if results.len() == 1 && results[0].is_empty() {
+                    results = alts;
+                    continue;
+                }
                 let mut next = Vec::with_capacity(results.len() * alts.len());
                 for prefix in &results {
                     for alt in &alts {

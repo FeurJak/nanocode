@@ -96,6 +96,8 @@ enum Ins {
     BodyDone(u16),
     /// The loop ends with the status in its register.
     LoopExit(u16),
+    /// The next word of for name in words into name, or the end of the loop.
+    ForItem { cmd: CmdId },
     /// A clause of for ((init; cond; step)).
     ForClause {
         lp: u16,
@@ -122,6 +124,8 @@ enum Op {
     /// [[ a OP b ]].
     Cond { op: Cmp, a: Opnd, b: Opnd },
     Const { status: i32, under: Span },
+    /// echo with literal words and integer variables.
+    Echo { args: Box<[EArg]>, newline: bool, under: Under },
     Break(u32, Span),
     Continue(u32, Span),
     Slow,
@@ -150,6 +154,12 @@ enum Opnd {
 enum Under {
     Span(Span),
     Slot,
+}
+
+#[derive(Clone, Copy)]
+enum EArg {
+    Lit(Span),
+    Slot(u16),
 }
 
 enum Val {
@@ -210,12 +220,10 @@ impl<'c> Compiler<'c> {
         }
     }
 
+    /// The loop's own redirections are applied by the caller (with_redirects).
     fn top(mut self, cmd: &Command) -> Option<Prog> {
-        if !cmd.redirects.is_empty() {
-            return None;
-        }
         match &cmd.kind {
-            CommandKind::While(_) | CommandKind::ArithFor(_) => {}
+            CommandKind::While(_) | CommandKind::ArithFor(_) | CommandKind::For(_) => {}
             _ => return None,
         }
         self.compile_loop(cmd, true)?;
@@ -339,6 +347,19 @@ impl<'c> Compiler<'c> {
                 });
                 self.ins.push(Ins::Jmp(head));
             }
+            // for name in words: only as the compiled loop itself, whose caller expands
+            // the words (run_for).
+            CommandKind::For(f) if top => {
+                let id = self.cmd_id(cmd)?;
+                let head = self.pc();
+                self.loops[lp as usize].cont = head;
+                self.ins.push(Ins::LoopHead);
+                exits.push(self.pc());
+                self.ins.push(Ins::ForItem { cmd: id });
+                self.list(f.body)?;
+                self.ins.push(Ins::BodyDone(lp));
+                self.ins.push(Ins::Jmp(head));
+            }
             _ => return None,
         }
         let exit = self.pc();
@@ -362,6 +383,7 @@ impl<'c> Compiler<'c> {
     fn patch(&mut self, at: u32, to: u32) {
         match &mut self.ins[at as usize] {
             Ins::Jz(t) | Ins::Jnz(t) | Ins::Jmp(t) => *t = to,
+            Ins::ForItem { .. } => {}
             _ => unreachable!(),
         }
     }
@@ -414,6 +436,8 @@ impl<'c> Compiler<'c> {
                 AndOrOp::And => Ins::Jnz(0),
                 AndOrOp::Or => Ins::Jz(0),
             });
+            // $? between pipelines is the last one's status (run_andor).
+            self.ins.push(Ins::Item);
             let last = k + 1 == n;
             if !last {
                 self.ins.push(Ins::NoErrSave(r));
@@ -506,13 +530,12 @@ impl<'c> Compiler<'c> {
             CommandKind::If(c) => {
                 let mut ends = Vec::new();
                 for br in &c.branches {
+                    // An if condition is not the loop's own: continue there goes on
+                    // with the loop.
                     let r = self.reg();
-                    let cond = self.in_cond;
-                    self.in_cond = true;
                     self.ins.push(Ins::NoErrSave(r));
                     self.list(br.cond)?;
                     self.ins.push(Ins::NoErrRestore(r));
-                    self.in_cond = cond;
                     let skip = self.pc();
                     self.ins.push(Ins::Jnz(0));
                     self.list(br.body)?;
@@ -628,6 +651,46 @@ impl<'c> Compiler<'c> {
                             self.name(b"continue");
                             Some(Op::Continue(n, last))
                         }
+                    }
+                    ("echo", _) => {
+                        let mut words = &s.words[1..];
+                        let mut newline = true;
+                        if let Some(w) = words.first()
+                            && lit(w) == Some("-n")
+                        {
+                            newline = false;
+                            words = &words[1..];
+                        }
+                        let mut args = Vec::new();
+                        for (k, w) in words.iter().enumerate() {
+                            if let Some(t) = lit(w) {
+                                // Glob characters, a tilde or (first) an option need the
+                                // interpreter.
+                                if t.bytes().any(|b| matches!(b, b'*' | b'?' | b'[' | b'~'))
+                                    || (k == 0 && t.starts_with('-'))
+                                {
+                                    return None;
+                                }
+                                args.push(EArg::Lit(w.parts[0].span));
+                            } else {
+                                let slot = self.param(w)?;
+                                if k == 0 {
+                                    // A negative number would be read as an option only if
+                                    // it were -n, -e or -E: digits never are.
+                                }
+                                args.push(EArg::Slot(slot));
+                            }
+                        }
+                        let under = match args.last() {
+                            Some(EArg::Slot(_)) => Under::Slot,
+                            _ => Under::Span(last),
+                        };
+                        self.name(b"echo");
+                        Some(Op::Echo {
+                            args: args.into_boxed_slice(),
+                            newline,
+                            under,
+                        })
                     }
                     ("[", 5) | ("test", 4) => {
                         let args = &s.words[1..];
@@ -842,9 +905,39 @@ struct Ex<'p> {
     pipe: Option<i32>,
     line: Option<u32>,
     simple: bool,
+    buf: Vec<u8>,
+    echo_last: Option<i64>,
+    /// for name in words: the name, the words and the next one.
+    items: Option<(&'p str, Vec<Vec<u8>>, usize)>,
 }
 
 impl Ex<'_> {
+    /// The line echo writes, into buf; None if a variable is not an integer.
+    fn echo_line(&mut self, code: &Code, args: &[EArg], newline: bool) -> Option<()> {
+        self.buf.clear();
+        let mut lastv = None;
+        for (k, a) in args.iter().enumerate() {
+            if k > 0 {
+                self.buf.push(b' ');
+            }
+            match a {
+                EArg::Lit(sp) => self.buf.extend_from_slice(code.ast.bytes(*sp)),
+                EArg::Slot(s) => {
+                    let SV::Int(n) = self.slots[*s as usize].0 else {
+                        return None;
+                    };
+                    let _ = std::io::Write::write_fmt(&mut self.buf, format_args!("{n}"));
+                    lastv = Some(n);
+                }
+            }
+        }
+        if newline {
+            self.buf.push(b'\n');
+        }
+        self.echo_last = lastv;
+        Some(())
+    }
+
     fn reload(&mut self, vp: &Vp) {
         for (i, name) in self.prog.slots.iter().enumerate() {
             let v = match vp.vars.get(name) {
@@ -1062,7 +1155,7 @@ impl Ex<'_> {
                 self.simple = true;
                 Some(*status)
             }
-            Op::Break(..) | Op::Continue(..) | Op::Slow => None,
+            Op::Break(..) | Op::Continue(..) | Op::Echo { .. } | Op::Slow => None,
         }
     }
 }
@@ -1149,6 +1242,27 @@ enum Landing {
 
 /// Runs a compiled loop (the caller counts it in vp.loops).
 pub(crate) async fn run(vp: &mut Vp, code: &Rc<Code>, prog: &Prog) -> R {
+    run_with(vp, code, prog, None).await
+}
+
+/// Runs a compiled for name in words loop over its expanded words (the caller counts
+/// it in vp.loops).
+pub(crate) async fn run_for(
+    vp: &mut Vp,
+    code: &Rc<Code>,
+    prog: &Prog,
+    name: &str,
+    items: Vec<Vec<u8>>,
+) -> R {
+    run_with(vp, code, prog, Some((name, items, 0))).await
+}
+
+async fn run_with<'p>(
+    vp: &mut Vp,
+    code: &Rc<Code>,
+    prog: &'p Prog,
+    items: Option<(&'p str, Vec<Vec<u8>>, usize)>,
+) -> R {
     let mut ex = Ex {
         prog,
         slots: vec![(SV::Other, false); prog.slots.len()],
@@ -1159,6 +1273,9 @@ pub(crate) async fn run(vp: &mut Vp, code: &Rc<Code>, prog: &Prog) -> R {
         pipe: None,
         line: None,
         simple: false,
+        buf: Vec::new(),
+        echo_last: None,
+        items,
     };
     ex.reload(vp);
     let mut native = native_ok(vp, prog);
@@ -1208,7 +1325,41 @@ pub(crate) async fn run(vp: &mut Vp, code: &Rc<Code>, prog: &Prog) -> R {
                             }
                         }
                     }
-                    if let Some(s) = ex.native(op) {
+                    let mut done = ex.native(op).map(Ok);
+                    if let Op::Echo {
+                        args,
+                        newline,
+                        under,
+                    } = op
+                        && !vp.opts.shopt(crate::options::Shopt::XpgEcho)
+                        && ex.echo_line(code, args, *newline).is_some()
+                    {
+                        vp.line = *line;
+                        let r = crate::builtins::write_fd(vp, 1, "echo", &ex.buf).await;
+                        ex.under = match under {
+                            Under::Span(sp) => PendUnder::Span(*sp),
+                            Under::Slot => PendUnder::Int(ex.echo_last.unwrap_or(0)),
+                        };
+                        ex.simple = true;
+                        done = Some(r.map(|ok| {
+                            let st = i32::from(!ok);
+                            ex.pipe = Some(st);
+                            st
+                        }));
+                    }
+                    if let Some(Err(u)) = done {
+                        match land(vp, &mut ex, *lp, *in_cond, u) {
+                            Landing::Jump(to) => {
+                                pc = to;
+                                continue;
+                            }
+                            Landing::Return(r) => {
+                                ex.flush(vp, code);
+                                return r;
+                            }
+                        }
+                    }
+                    if let Some(Ok(s)) = done {
                         st = s;
                         ex.line = Some(*line);
                         if s != 0
@@ -1309,6 +1460,61 @@ pub(crate) async fn run(vp: &mut Vp, code: &Rc<Code>, prog: &Prog) -> R {
                     }
                     ex.reload(vp);
                     native = native_ok(vp, prog);
+                }
+                pc += 1;
+            }
+            Ins::ForItem { cmd } => {
+                let exit = prog.loops[0].exit;
+                let Some((name, words, next)) = &mut ex.items else {
+                    unreachable!()
+                };
+                let Some(item) = words.get_mut(*next) else {
+                    pc = exit;
+                    continue;
+                };
+                *next += 1;
+                let item = std::mem::take(item);
+                let name: &str = name;
+                if !native {
+                    ex.flush(vp, code);
+                    let c = code.ast.cmd(*cmd);
+                    match exec::for_hooks(vp, code, c).await {
+                        Ok(true) => {
+                            ex.reload(vp);
+                            native = native_ok(vp, prog);
+                            pc = prog.loops[0].cont;
+                            continue;
+                        }
+                        Ok(false) => {}
+                        Err(u) => {
+                            vp.no_errexit = ex.regs[top.ne as usize] != 0;
+                            return Err(u);
+                        }
+                    }
+                }
+                let r = if vp.vars.get(name).is_some_and(|v| v.nameref) {
+                    vp.vars.entry(name).set(item);
+                    Ok(())
+                } else {
+                    vp.assign(name, item)
+                };
+                if let Err(msg) = r {
+                    ex.flush(vp, code);
+                    vp.error(&msg).await;
+                    return Ok(1);
+                }
+                // The loop variable's slot, if native operations use it.
+                if let Some(i) = prog.slots.iter().position(|s| &**s == name) {
+                    let v = match vp.vars.get(name) {
+                        Some(v) if !v.nameref && !v.readonly && v.dynamic.is_none() => {
+                            match &v.value {
+                                Value::Str(s) => plain_decimal(s).map_or(SV::Other, SV::Int),
+                                _ => SV::Other,
+                            }
+                        }
+                        _ => SV::Other,
+                    };
+                    ex.slots[i] = (v, false);
                 }
                 pc += 1;
             }
