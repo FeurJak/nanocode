@@ -823,6 +823,7 @@ pub struct ClaudeBuilder {
     low_effort_rounds: bool,
     persist_finish: bool,
     skip_finish_check: bool,
+    result_effort: Option<crate::Effort>,
     tool_result_tokens: Option<std::num::NonZeroU64>,
     spawn_factory: Option<Arc<dyn AgentFactory>>,
     child_journal: Option<nanocode_agent_core::backend::ChildJournal>,
@@ -912,6 +913,7 @@ impl ClaudeBuilder {
             low_effort_rounds: false,
             persist_finish: false,
             skip_finish_check: false,
+            result_effort: None,
             tool_result_tokens: None,
             spawn_factory: None,
             child_journal: None,
@@ -1354,6 +1356,11 @@ impl ClaudeBuilder {
 
     pub const fn skip_finish_check(mut self, skip: bool) -> Self {
         self.skip_finish_check = skip;
+        self
+    }
+
+    pub const fn result_effort(mut self, effort: crate::Effort) -> Self {
+        self.result_effort = Some(effort);
         self
     }
 
@@ -3106,6 +3113,7 @@ struct State {
     low_effort_rounds: bool,
     persist_finish: bool,
     skip_finish_check: bool,
+    result_effort: Option<crate::Effort>,
     tool_result_tokens: Option<std::num::NonZeroU64>,
     working_directory: Option<crate::environment::WorkingDirectory>,
     lifecycle_opened: Atom<Option<String>>,

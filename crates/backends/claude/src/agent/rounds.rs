@@ -346,7 +346,9 @@ pub(super) fn run_rounds<'a>(
                     .await?;
             }
 
-            if state.low_effort_rounds && cursor.template.effort_updates {
+            if (state.low_effort_rounds || state.result_effort.is_some())
+                && cursor.template.effort_updates
+            {
                 round_effort(state, &mut pending, &cursor.template);
             }
             let discovered = client_discovered_tools(&pending)
@@ -1541,12 +1543,14 @@ fn round_effort(state: &State, pending: &mut Vec<HistoryMessage>, template: &Mes
     let Some(configured) = state.effort() else {
         return;
     };
-    let wanted = if quiet_round(pending) {
+    let wanted = if state.low_effort_rounds && quiet_round(pending) {
         claude_selection(&state.model())
             .capabilities(ModelTransport::Native)
             .thinking()
             .find_map(thinking_effort)
             .unwrap_or(configured)
+    } else if let Some(effort) = state.result_effort.filter(|_| result_round(pending)) {
+        effort
     } else {
         configured
     };
@@ -1561,13 +1565,10 @@ fn round_effort(state: &State, pending: &mut Vec<HistoryMessage>, template: &Mes
     }
 }
 
-fn quiet_round(pending: &[HistoryMessage]) -> bool {
-    let Some(at) = pending
+fn round_input(pending: &[HistoryMessage]) -> Option<usize> {
+    let at = pending
         .iter()
-        .rposition(|message| message.role != Role::System)
-    else {
-        return false;
-    };
+        .rposition(|message| message.role != Role::System)?;
     let quiet_notices = pending[at + 1..].iter().all(|message| {
         message.is_effort_update()
             || matches!(
@@ -1575,9 +1576,56 @@ fn quiet_round(pending: &[HistoryMessage]) -> bool {
                 [ContentBlock::Text { text, .. }] if nanocode_tool_host::deadline::is_time_left(text)
             )
     });
-    if !quiet_notices || pending[at].role != Role::User {
+    (quiet_notices && pending[at].role == Role::User).then_some(at)
+}
+
+fn result_round(pending: &[HistoryMessage]) -> bool {
+    let Some(at) = round_input(pending) else {
         return false;
-    }
+    };
+    let blocks = pending[at].content.as_slice();
+    !blocks.is_empty()
+        && blocks.iter().all(|block| {
+            let ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+                ..
+            } = block
+            else {
+                return false;
+            };
+            is_error != &Some(true)
+                && code_call(tool_use_id, &pending[..at])
+                && result_text(content).is_some_and(|text| {
+                    [
+                        nanocode_code_mode::code_mode_spec::COMPLETED_STATUS,
+                        nanocode_code_mode::code_mode_spec::RUNNING_STATUS,
+                    ]
+                    .iter()
+                    .any(|status| text.starts_with(status))
+                })
+        })
+}
+
+fn code_call(tool_use_id: &str, before: &[HistoryMessage]) -> bool {
+    before
+        .iter()
+        .rev()
+        .flat_map(|message| &message.content)
+        .any(|block| {
+            matches!(
+                block,
+                ContentBlock::ToolUse { id, name, .. }
+                    if id == tool_use_id && matches!(name.as_str(), "exec" | "wait")
+            )
+        })
+}
+
+fn quiet_round(pending: &[HistoryMessage]) -> bool {
+    let Some(at) = round_input(pending) else {
+        return false;
+    };
     match pending[at].content.as_slice() {
         [ContentBlock::Text { text, .. }] => nanocode_tool_host::deadline::is_finish_notice(text),
         [] => false,
@@ -1596,23 +1644,13 @@ fn quiet_result(block: &ContentBlock, before: &[HistoryMessage]) -> bool {
     else {
         return false;
     };
-    let code = before
-        .iter()
-        .rev()
-        .flat_map(|message| &message.content)
-        .any(|block| {
-            matches!(
-                block,
-                ContentBlock::ToolUse { id, name, .. }
-                    if id == tool_use_id && matches!(name.as_str(), "exec" | "wait")
+    code_call(tool_use_id, before)
+        && result_text(content).is_some_and(|text| {
+            nanocode_code_mode::code_mode_spec::unchanged_yield(
+                &text,
+                earlier_yield(&text, before).as_deref(),
             )
-        });
-    code && result_text(content).is_some_and(|text| {
-        nanocode_code_mode::code_mode_spec::unchanged_yield(
-            &text,
-            earlier_yield(&text, before).as_deref(),
-        )
-    })
+        })
 }
 
 fn result_text(content: &ToolResultContent) -> Option<String> {

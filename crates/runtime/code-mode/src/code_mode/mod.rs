@@ -93,7 +93,7 @@ const DEFAULT_WAIT_YIELD: Duration = spec::DEFAULT_YIELD;
 const OBSERVER_YIELD_GRACE: Duration = Duration::from_secs(1);
 const MIN_YIELD_FOR_OBSERVER_GRACE: Duration = Duration::from_secs(10);
 use spec::{
-    EXEC_PRAGMA_PREFIX, NOTHING_YET, RUNNING_FOR, RUNNING_OUTPUT, RUNNING_STATUS,
+    COMPLETED_STATUS, EXEC_PRAGMA_PREFIX, NOTHING_YET, RUNNING_FOR, RUNNING_OUTPUT, RUNNING_STATUS,
     SILENT_SINCE_YIELD, STILL_RUNNING,
 };
 const CELL_RUNNING: u8 = 0;
@@ -2142,7 +2142,7 @@ async fn observe_updates(
                 return (
                     observed_execution(
                         tools,
-                        "Script completed",
+                        COMPLETED_STATUS,
                         true,
                         started_at,
                         buffered.content,

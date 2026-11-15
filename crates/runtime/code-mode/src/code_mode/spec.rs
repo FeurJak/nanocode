@@ -177,6 +177,7 @@ pub fn exec_spec_yielding(spec: ToolDefinition, after: std::time::Duration) -> T
 
 pub const EXEC_PRAGMA_PREFIX: &str = "// @exec:";
 pub const RUNNING_STATUS: &str = "Script running with cell ID ";
+pub const COMPLETED_STATUS: &str = "Script completed";
 pub const SILENT_SINCE_YIELD: &str = "The script printed nothing since the last yield.";
 pub const STILL_RUNNING: &str = "\nNested calls still running:";
 pub const RUNNING_FOR: &str = ", running for ";

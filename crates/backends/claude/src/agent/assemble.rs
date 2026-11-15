@@ -491,6 +491,7 @@ pub(super) fn build(mut builder: ClaudeBuilder) -> Result<(Agent, AgentEvents)> 
         low_effort_rounds: builder.low_effort_rounds,
         persist_finish: builder.persist_finish,
         skip_finish_check: builder.skip_finish_check,
+        result_effort: builder.result_effort,
         tool_result_tokens: builder.tool_result_tokens,
         working_directory: working_directory.map(crate::environment::WorkingDirectory::new),
         nested_tools,
