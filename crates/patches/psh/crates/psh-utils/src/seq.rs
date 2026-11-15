@@ -303,6 +303,18 @@ fn fmt_g(v: f64, prec: usize, alt: bool) -> String {
     out
 }
 
+/// Appends `n` in decimal, without a call to copy a few bytes per number.
+fn push_u64(out: &mut Vec<u8>, mut n: u64) {
+    let len = out.len();
+    let digits = n.checked_ilog10().map_or(1, |l| l as usize + 1);
+    out.extend_from_slice(&[b'0'; 20]);
+    for d in out[len..len + digits].iter_mut().rev() {
+        *d = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    out.truncate(len + digits);
+}
+
 fn int_text(buf: &mut [u8; 48], v: i128, width: usize) -> &[u8] {
     let mut i = buf.len();
     let mut n = v.unsigned_abs();
@@ -404,15 +416,10 @@ pub async fn run(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
         let s = common::quote(ctx, &ops[1]);
         return common::usage(ctx, &format!("invalid Zero increment value: {s}")).await;
     }
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(32 * 1024 + 64);
     let mut count = 0u64;
-    macro_rules! emit {
-        ($s:expr) => {{
-            if count > 0 {
-                out.extend_from_slice(&sep);
-            }
-            out.extend_from_slice(AsRef::<[u8]>::as_ref(&$s));
-            count += 1;
+    macro_rules! flush_full {
+        () => {{
             if out.len() >= 32 * 1024 {
                 if let Err(e) = ctx.write(&out).await {
                     return common::write_failed(ctx, &e).await;
@@ -420,6 +427,16 @@ pub async fn run(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
                 out.clear();
                 ctx.check().await;
             }
+        }};
+    }
+    macro_rules! emit {
+        ($s:expr) => {{
+            if count > 0 {
+                out.extend_from_slice(&sep);
+            }
+            out.extend_from_slice(AsRef::<[u8]>::as_ref(&$s));
+            count += 1;
+            flush_full!();
         }};
     }
     if let (None, Some(f), Some(s), Some(l)) = (&format, first.int, step.int, last.int) {
@@ -430,9 +447,19 @@ pub async fn run(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
             0
         };
         let mut v = f;
+        let plain = width == 0 && sep.len() == 1;
         while (s > 0 && v <= l) || (s < 0 && v >= l) {
-            let mut buf = [0u8; 48];
-            emit!(int_text(&mut buf, v, width));
+            if plain && let Ok(n) = u64::try_from(v) {
+                if count > 0 {
+                    out.push(sep[0]);
+                }
+                push_u64(&mut out, n);
+                count += 1;
+                flush_full!();
+            } else {
+                let mut buf = [0u8; 48];
+                emit!(int_text(&mut buf, v, width));
+            }
             match v.checked_add(s) {
                 Some(n) => v = n,
                 None => break,
