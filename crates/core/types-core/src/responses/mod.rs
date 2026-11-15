@@ -19,4 +19,7 @@ pub use event::{
 };
 pub use format::StrictJsonSchema;
 pub use item::{ConfigurationUpdateReasoning, ResponseItem, ResponseItemId};
-pub use tool::{CustomToolFormat, JsonSchema, JsonValue, ToolDefinition};
+pub use tool::{
+    CustomToolFormat, JsonSchema, JsonValue, StaticSchema, ToolDefinition, compact_json,
+    compact_json_length,
+};

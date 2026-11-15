@@ -34,7 +34,7 @@ impl JobTool {
             Self::Start => ToolDefinition::function(
                 self.name(),
                 "Starts a shell command as a background job and returns at once with its session_id. Use it for anything that can run longer than a few seconds: builds and compiles (make, cargo, R package installs), test suites, training or benchmark runs, downloads, video or OCR passes, servers. The job keeps running while you do other work; nothing stops it when your call returns. Check it with job_wait, which waits for the job to exit and returns only the last lines of its output, and stop it with job_kill. Prefer one job_wait with a long yield_time_ms over many short polls, and never restart a job that is still running.",
-                json!({
+                nanocode_tools::json_schema!({
                     "type": "object",
                     "properties": {
                         "cmd": { "type": "string", "description": "Shell command to run." },
@@ -67,7 +67,7 @@ impl JobTool {
                 format!(
                     "Stops a background job by interrupting its process group, waits up to {MIN_POLL_YIELD_MS} ms for it to exit, and returns its status with the last lines of its output."
                 ),
-                json!({
+                nanocode_tools::json_schema!({
                     "type": "object",
                     "properties": {
                         "session_id": { "type": "number", "description": "The job's session_id." }

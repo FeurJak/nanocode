@@ -1249,7 +1249,7 @@ impl Tool for McpSearch {
         ToolDefinition::tool_search(
             "client",
             self.description.clone(),
-            json!({
+            nanocode_tools::json_schema!({
                 "type": "object",
                 "properties": {
                     "query": {

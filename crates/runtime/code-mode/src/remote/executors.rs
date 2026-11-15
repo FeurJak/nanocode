@@ -270,7 +270,7 @@ impl Tool for HandsTool {
             ToolDefinition::function(
                 "hands",
                 HANDS_DESCRIPTION,
-                json!({
+                nanocode_tools::json_schema!({
                     "type": "object",
                     "properties": {
                         "request": {

@@ -46,7 +46,7 @@ impl Tool for RunnerManagement {
         ToolDefinition::function(
             "runners",
             "Manage hands, whole machines shared by all agents; legacy tool runners mount at /name instead. action=list shows hands, listeners and where this session's exec cells run. action=connect requires url and token and connects a hand; inside exec, any tool call runs there when its arguments include hand: \"<name>\", so one script can reach several hands, for example with Promise.all. mode=replace also runs the exec cells of every session without its own selection on that hand. action=listen requires address, accepts hands that dial in, and returns an endpoint and credential to give them; call it only when the user requests a listener. action=disconnect requires name; later calls to that hand fail without running, and sessions whose exec cells ran there return to this machine. action=stop_listening stops all listeners. Hands are announced in conversation messages; tool definitions stay unchanged. Credentials are excluded from list/connect outputs. call_timeout_ms is an optional caller deadline policy, in positive whole milliseconds.",
-            json!({
+            nanocode_tools::json_schema!({
                 "type":"object",
                 "properties":{
                     "action":{"type":"string","enum":["list","connect","listen","disconnect","stop_listening"]},

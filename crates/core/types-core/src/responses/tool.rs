@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -265,31 +265,285 @@ impl CustomToolFormat {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(transparent)]
-pub struct JsonSchema(std::sync::Arc<Value>);
+#[derive(Clone)]
+pub struct JsonSchema(Schema);
+
+#[derive(Clone)]
+enum Schema {
+    Static(&'static StaticSchema),
+    Value(std::sync::Arc<Value>),
+}
+
+pub struct StaticSchema {
+    json: &'static str,
+    value: std::sync::OnceLock<std::sync::Arc<Value>>,
+}
+
+impl StaticSchema {
+    #[must_use]
+    pub const fn new(json: &'static [u8]) -> Self {
+        let Ok(json) = core::str::from_utf8(json) else {
+            panic!("a static schema is UTF-8")
+        };
+        Self {
+            json,
+            value: std::sync::OnceLock::new(),
+        }
+    }
+
+    fn value(&self) -> &std::sync::Arc<Value> {
+        self.value.get_or_init(|| {
+            std::sync::Arc::new(
+                serde_json::from_str(self.json).unwrap_or_else(|error| panic!("{error}")),
+            )
+        })
+    }
+}
+
+#[macro_export]
+macro_rules! json_schema {
+    ($($json:tt)+) => {{
+        const LENGTH: usize = $crate::responses::compact_json_length(stringify!($($json)+));
+        const JSON: [u8; LENGTH] = $crate::responses::compact_json::<LENGTH>(stringify!($($json)+));
+        static SCHEMA: $crate::responses::StaticSchema = $crate::responses::StaticSchema::new(&JSON);
+        $crate::responses::JsonSchema::from_static(&SCHEMA)
+    }};
+}
+
+const fn compact(source: &[u8], json: &mut [u8]) -> usize {
+    let mut index = 0;
+    let mut length = 0;
+    let mut string = false;
+    let mut escaped = false;
+    while index < source.len() {
+        let byte = source[index];
+        index += 1;
+        if !string && byte.is_ascii_whitespace() {
+            continue;
+        }
+        if length < json.len() {
+            json[length] = byte;
+        }
+        length += 1;
+        if escaped {
+            escaped = false;
+        } else if string && byte == b'\\' {
+            escaped = true;
+        } else if byte == b'"' {
+            string = !string;
+        }
+    }
+    length
+}
+
+#[doc(hidden)]
+#[must_use]
+pub const fn compact_json_length(source: &str) -> usize {
+    compact(source.as_bytes(), &mut [])
+}
+
+#[doc(hidden)]
+#[must_use]
+pub const fn compact_json<const LENGTH: usize>(source: &str) -> [u8; LENGTH] {
+    let mut json = [0; LENGTH];
+    assert!(compact(source.as_bytes(), &mut json) == LENGTH);
+    assert!(
+        json_value(&json, 0) == LENGTH,
+        "a static schema is one JSON value"
+    );
+    json
+}
+
+const fn json_value(json: &[u8], index: usize) -> usize {
+    assert!(index < json.len(), "a static schema ends early");
+    match json[index] {
+        b'{' => json_members(json, index + 1, b'}'),
+        b'[' => json_members(json, index + 1, b']'),
+        b'"' => json_string(json, index + 1),
+        b't' => json_word(json, index, b"true"),
+        b'f' => json_word(json, index, b"false"),
+        b'n' => json_word(json, index, b"null"),
+        _ => json_number(json, index),
+    }
+}
+
+const fn json_members(json: &[u8], mut index: usize, close: u8) -> usize {
+    if index < json.len() && json[index] == close {
+        return index + 1;
+    }
+    loop {
+        if close == b'}' {
+            assert!(
+                index < json.len() && json[index] == b'"',
+                "a static schema object key is a string"
+            );
+            index = json_string(json, index + 1);
+            assert!(
+                index < json.len() && json[index] == b':',
+                "a static schema object key precedes a colon"
+            );
+            index += 1;
+        }
+        index = json_value(json, index);
+        assert!(index < json.len(), "a static schema ends early");
+        if json[index] == close {
+            return index + 1;
+        }
+        assert!(
+            json[index] == b',',
+            "a static schema separates members with commas"
+        );
+        index += 1;
+    }
+}
+
+const fn json_string(json: &[u8], mut index: usize) -> usize {
+    while index < json.len() {
+        match json[index] {
+            b'"' => return index + 1,
+            b'\\' => {
+                assert!(index + 1 < json.len(), "a static schema ends early");
+                match json[index + 1] {
+                    b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => index += 2,
+                    b'u' => {
+                        let mut digit = index + 2;
+                        while digit < index + 6 {
+                            assert!(
+                                digit < json.len() && json[digit].is_ascii_hexdigit(),
+                                "a static schema unicode escape has four hex digits"
+                            );
+                            digit += 1;
+                        }
+                        index += 6;
+                    }
+                    _ => panic!("a static schema string has a JSON escape"),
+                }
+            }
+            byte => {
+                assert!(byte >= 0x20, "a static schema string has no control bytes");
+                index += 1;
+            }
+        }
+    }
+    panic!("a static schema string is closed")
+}
+
+const fn json_word(json: &[u8], index: usize, word: &[u8]) -> usize {
+    let mut offset = 0;
+    while offset < word.len() {
+        assert!(
+            index + offset < json.len() && json[index + offset] == word[offset],
+            "a static schema literal is true, false or null"
+        );
+        offset += 1;
+    }
+    index + word.len()
+}
+
+const fn json_digits(json: &[u8], mut index: usize) -> usize {
+    let start = index;
+    while index < json.len() && json[index].is_ascii_digit() {
+        index += 1;
+    }
+    assert!(index > start, "a static schema number has digits");
+    index
+}
+
+const fn json_number(json: &[u8], mut index: usize) -> usize {
+    if json[index] == b'-' {
+        index += 1;
+    }
+    if index < json.len() && json[index] == b'0' {
+        index += 1;
+    } else {
+        index = json_digits(json, index);
+    }
+    if index < json.len() && json[index] == b'.' {
+        index = json_digits(json, index + 1);
+    }
+    if index < json.len() && (json[index] == b'e' || json[index] == b'E') {
+        index += 1;
+        if index < json.len() && (json[index] == b'+' || json[index] == b'-') {
+            index += 1;
+        }
+        index = json_digits(json, index);
+    }
+    index
+}
 
 impl JsonSchema {
     #[must_use]
+    pub const fn from_static(schema: &'static StaticSchema) -> Self {
+        Self(Schema::Static(schema))
+    }
+
+    #[must_use]
     pub fn as_value(&self) -> &Value {
-        &self.0
+        match &self.0 {
+            Schema::Static(schema) => schema.value(),
+            Schema::Value(value) => value,
+        }
     }
 
     #[must_use]
     pub fn shared(&self) -> std::sync::Arc<Value> {
-        std::sync::Arc::clone(&self.0)
+        match &self.0 {
+            Schema::Static(schema) => std::sync::Arc::clone(schema.value()),
+            Schema::Value(value) => std::sync::Arc::clone(value),
+        }
+    }
+}
+
+impl std::fmt::Debug for JsonSchema {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Schema::Static(schema) => formatter
+                .debug_tuple("JsonSchema")
+                .field(&schema.json)
+                .finish(),
+            Schema::Value(value) => formatter.debug_tuple("JsonSchema").field(value).finish(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for JsonSchema {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Value::deserialize(deserializer).map(Self::from)
     }
 }
 
 impl From<Value> for JsonSchema {
     fn from(value: Value) -> Self {
-        Self(std::sync::Arc::new(value))
+        Self(Schema::Value(std::sync::Arc::new(value)))
     }
 }
 
 impl PartialEq for JsonSchema {
     fn eq(&self, other: &Self) -> bool {
-        std::sync::Arc::ptr_eq(&self.0, &other.0) || self.0 == other.0
+        match (&self.0, &other.0) {
+            (Schema::Static(left), Schema::Static(right)) if std::ptr::eq(*left, *right) => true,
+            (Schema::Value(left), Schema::Value(right)) if std::sync::Arc::ptr_eq(left, right) => {
+                true
+            }
+            _ => self.as_value() == other.as_value(),
+        }
+    }
+}
+
+impl Serialize for JsonSchema {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match &self.0 {
+            Schema::Static(schema) => serde_json::from_str::<&serde_json::value::RawValue>(schema.json)
+                .map_err(serde::ser::Error::custom)?
+                .serialize(serializer),
+            Schema::Value(value) => value.serialize(serializer),
+        }
     }
 }
 

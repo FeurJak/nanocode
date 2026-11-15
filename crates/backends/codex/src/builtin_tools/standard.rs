@@ -1,7 +1,6 @@
 use nanocode_tools::ToolDefinition;
 use nanocode_types::responses::CustomToolFormat;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 pub use super::plan::UpdatePlanTool;
 
@@ -61,7 +60,7 @@ fn exec_command_definition(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(
         name,
         "Runs a command in a PTY, returning output or a session ID for ongoing interaction.",
-        json!({
+        nanocode_tools::json_schema!({
             "type": "object",
             "properties": {
                 "cmd": { "type": "string", "description": "Shell command to execute." },
@@ -115,7 +114,7 @@ fn write_stdin_definition(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(
         name,
         "Writes characters to an existing unified exec session and returns recent output.",
-        json!({
+        nanocode_tools::json_schema!({
             "type": "object",
             "properties": {
                 "session_id": {
@@ -146,7 +145,7 @@ fn update_plan_definition(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(
         name,
         "Updates the task plan.\nProvide an optional explanation and a list of plan items, each with a step and status.\nAt most one step can be in_progress at a time.\n",
-        json!({
+        nanocode_tools::json_schema!({
             "type": "object",
             "properties": {
                 "explanation": {
@@ -181,7 +180,7 @@ fn view_image_definition(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(
         name,
         "View a local image file from the filesystem when visual inspection is needed. Use this for images already available on disk.",
-        json!({
+        nanocode_tools::json_schema!({
             "type": "object",
             "properties": {
                 "path": {
@@ -198,7 +197,7 @@ fn view_image_definition(name: &'static str) -> ToolDefinition {
             "additionalProperties": false
         }),
     )
-    .with_output_schema(json!({
+    .with_output_schema(nanocode_tools::json_schema!({
         "type": "object",
         "properties": {
             "image_url": {
@@ -216,8 +215,8 @@ fn view_image_definition(name: &'static str) -> ToolDefinition {
     }))
 }
 
-fn unified_exec_output_schema() -> serde_json::Value {
-    json!({
+fn unified_exec_output_schema() -> nanocode_types::responses::JsonSchema {
+    nanocode_tools::json_schema!({
         "type": "object",
         "properties": {
             "chunk_id": {
