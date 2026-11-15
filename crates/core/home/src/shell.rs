@@ -26,6 +26,10 @@ impl Shell {
         &self.program
     }
 
+    pub fn arguments(&self) -> &[String] {
+        &self.arguments
+    }
+
     pub fn warm_args(&self, login: bool) -> Vec<String> {
         let mut args = self.arguments.clone();
         args.push("--warm".to_owned());

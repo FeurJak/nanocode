@@ -239,6 +239,21 @@ const SESSION: Group = Group::new(&[
         .help("Offer subagent tools to models that get the harness tools directly too (off for them by default)"),
 ]);
 
+const ATTEMPTS: Group = Group::named(
+    "AttemptsArgs",
+    &[
+        Argument::value("attempts", "N", Parser::U64)
+            .long("attempts")
+            .help(
+                "Run the prompt as N independent attempts at once, each in its own copy of the workspace in a directory beside it, then a verifier turn that checks the attempts and picks one, whose changes are applied to the workspace",
+            ),
+        Argument::value("attempt_timeout", "SECONDS", Parser::U64)
+            .long("attempt-timeout")
+            .requires("attempts")
+            .help("Stop each attempt and the verifier after this many seconds; a stopped attempt's copy stays a candidate"),
+    ],
+);
+
 const GATEWAY: Group = Group::named(
     "GatewayArgs",
     &[
@@ -489,7 +504,7 @@ pub static COMMAND: arguments::Command = arguments::Command::new("nanocode")
             .about(
                 "Run one prompt without the terminal interface, streaming the reply to stdout and reasoning summaries and tool calls to stderr",
             )
-            .groups(&[SESSION, GATEWAY, REMOTE]),
+            .groups(&[SESSION, ATTEMPTS, GATEWAY, REMOTE]),
         arguments::Command::new("models").about("List models per harness with thinking levels and speed tiers"),
         arguments::Command::new("resume")
             .about("Resume a saved session; without an id, pick one interactively")
@@ -561,6 +576,8 @@ impl CuaArgs {
 #[derive(Clone, Debug)]
 pub struct SessionArgs {
     pub prompt: Option<String>,
+    pub attempts: Option<u64>,
+    pub attempt_timeout: Option<u64>,
     pub model: Option<String>,
     pub harness: Option<HarnessArg>,
     pub thinking: Option<String>,
@@ -608,6 +625,8 @@ impl SessionArgs {
     fn from_matches(matches: &Matches) -> Self {
         Self {
             prompt: matches.text("prompt"),
+            attempts: matches.u64("attempts"),
+            attempt_timeout: matches.u64("attempt_timeout"),
             model: matches.text("model"),
             harness: matches
                 .choice("harness")
@@ -642,6 +661,8 @@ impl SessionArgs {
     pub fn or(self, root: Self) -> Self {
         Self {
             prompt: self.prompt.or(root.prompt),
+            attempts: self.attempts.or(root.attempts),
+            attempt_timeout: self.attempt_timeout.or(root.attempt_timeout),
             model: self.model.or(root.model),
             harness: self.harness.or(root.harness),
             thinking: self.thinking.or(root.thinking),

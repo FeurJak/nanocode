@@ -4,6 +4,7 @@ mod actions;
 mod app;
 #[cfg(target_os = "linux")]
 mod arguments;
+mod attempts;
 mod cells;
 mod cli;
 mod commands;
@@ -648,12 +649,16 @@ async fn exec(args: SessionArgs, clients: ModelClients) -> Result<()> {
         args.prompt
             .clone()
             .filter(|prompt| !prompt.trim().is_empty()),
-        piped.filter(|piped| !piped.trim().is_empty()),
+        piped.clone().filter(|piped| !piped.trim().is_empty()),
     ]
     .into_iter()
     .flatten()
     .reduce(|prompt, piped| format!("{prompt}\n{piped}"))
     .ok_or("exec requires a prompt, as an argument or on stdin")?;
+    if let Some(count) = args.attempts {
+        let piped = piped.filter(|piped| !piped.trim().is_empty());
+        return attempts::run(&args, count, piped).await;
+    }
     let prepared = prepare(
         &args,
         clients,
