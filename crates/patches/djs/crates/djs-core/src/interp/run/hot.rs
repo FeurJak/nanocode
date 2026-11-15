@@ -905,16 +905,14 @@ impl Exec<'_> {
         let tracked = self.heap.arena().tracked_end();
         // The frame data, re-read after a collection (and kept current by calls and
         // returns here).
-        let (mut code, mut end, mut bp, mut hp, mut lp): (u32, u32, u32, u32, u32);
-        let (mut vals, mut consts, mut cap): (u32, u32, u32);
+        let (mut code, mut end, mut bp, mut lp): (u32, u32, u32, u32);
+        let mut vals: u32;
         macro_rules! load_frame {
             () => {
                 code = self.code;
                 end = code + self.code_len;
-                (bp, hp, lp) = (self.bp, self.hp, self.lp);
+                (bp, lp) = (self.bp, self.lp);
                 vals = ValueArray::VALUES.at(self.stack, 0);
-                consts = self.consts;
-                cap = self.heap.value_array_capacity(self.stack);
             };
         }
         load_frame!();
@@ -1082,7 +1080,11 @@ impl Exec<'_> {
                             let n = argc.max(params);
                             let new_hp = base + 2 + n;
                             let new_lp = new_hp + HEADER;
-                            if flags & slow_call_flags != 0 || new_lp + locals + stack > cap {
+                            // The frame must fit in the stack cell (its size in bytes).
+                            let stack_end = self.stack + ld32(b, self.stack + Header::SIZE.offset);
+                            if flags & slow_call_flags != 0
+                                || slot!(new_lp + locals + stack) > stack_end
+                            {
                                 break Exit::Decline(op);
                             }
                             let info = &OPS[$op as usize];
@@ -1094,7 +1096,7 @@ impl Exec<'_> {
                                 (base, argc, n, new_hp, locals),
                                 [
                                     Value::int(bp as i32),
-                                    Value::int(hp as i32),
+                                    Value::int((lp - HEADER) as i32),
                                     Value::int(ret_pc as i32),
                                     Value::int(argc as i32),
                                     Value::int(PUSH_RESULT),
@@ -1110,8 +1112,7 @@ impl Exec<'_> {
                             self.consts = consts_ref;
                             self.native = 0;
                             code = self.code;
-                            (bp, hp, lp) = (base, new_hp, new_lp);
-                            consts = consts_ref;
+                            (bp, lp) = (base, new_lp);
                             sp = new_lp + locals;
                             ip = code;
                             // Frame entry is a safepoint.
@@ -1187,8 +1188,7 @@ impl Exec<'_> {
                     macro_rules! switch_frame {
                         ($top:expr) => {{
                             code = self.code;
-                            (bp, hp, lp) = (self.bp, self.hp, self.lp);
-                            consts = self.consts;
+                            (bp, lp) = (self.bp, self.lp);
                             sp = $top;
                             ip = code + self.pc;
                             if collect {
@@ -1315,8 +1315,8 @@ impl Exec<'_> {
                             next!(Op::PushI32);
                         }
                         fast::PUSH_CONST => {
-                            assert!(consts != 0, "no constant pool");
-                            push!(ld(b, ValueArray::VALUES.at(consts, imm32!())));
+                            assert!(self.consts != 0, "no constant pool");
+                            push!(ld(b, ValueArray::VALUES.at(self.consts, imm32!())));
                             next!(Op::PushConst);
                         }
                         fast::UNDEFINED => {
@@ -1623,7 +1623,7 @@ impl Exec<'_> {
                                         == ObjectClass::Generator as u32
                                 }) {
                                     generator = heap_call_op!(self.gen_resume_hot(
-                                        (ip - code, sp, cap),
+                                        (ip - code, sp, self.heap.value_array_capacity(self.stack)),
                                         g,
                                         f,
                                         fuel
@@ -1711,10 +1711,12 @@ impl Exec<'_> {
                         }
                         fast::RETURN | fast::RETURN_UNDEF => {
                             // `fast_return`: into a PushResult frame of a bytecode caller.
-                            let flags = ld(b, slot!(hp + frame::FLAGS)).as_int().unwrap_or(0);
+                            let flags = ld(b, slot!(lp - HEADER + frame::FLAGS))
+                                .as_int()
+                                .unwrap_or(0);
                             if flags == PUSH_RESULT {
                                 let int = |v: Value| v.as_int().unwrap_or(0) as u32;
-                                let h: [u8; 48] = window(b, slot!(hp));
+                                let h: [u8; 48] = window(b, slot!(lp - HEADER));
                                 let hv = |k: u32| {
                                     let k = 8 * k as usize;
                                     Value::from_raw(u64::from_le_bytes(
@@ -1768,8 +1770,7 @@ impl Exec<'_> {
                                     self.code_len = 0;
                                 }
                                 code = self.code;
-                                (bp, hp, lp) = (prev_bp, prev_hp, prev_hp + HEADER);
-                                consts = consts_ref;
+                                (bp, lp) = (prev_bp, prev_hp + HEADER);
                                 ip = code + ret_pc;
                                 // A return is a safepoint.
                                 if collect {
@@ -1800,7 +1801,12 @@ impl Exec<'_> {
                                     b,
                                     self.template + FuncTemplate::LOCALS.offset,
                                 )) as u32;
-                                sp = super::each::hot_enter(b, vals, (bp, hp, lp, locals), &n);
+                                sp = super::each::hot_enter(
+                                    b,
+                                    vals,
+                                    (bp, lp - HEADER, lp, locals),
+                                    &n,
+                                );
                                 fuel -= super::native::CALL_FUEL;
                                 ip = code;
                                 // Frame entry is a safepoint.
@@ -1837,8 +1843,8 @@ impl Exec<'_> {
                             push_int!((op - fast::PUSH0) as i32, Op::Push0)
                         }
                         fast::PUSH_CONST8 => {
-                            assert!(consts != 0, "no constant pool");
-                            push!(ld(b, ValueArray::VALUES.at(consts, imm16!() & 0xFF)));
+                            assert!(self.consts != 0, "no constant pool");
+                            push!(ld(b, ValueArray::VALUES.at(self.consts, imm16!() & 0xFF)));
                             next!(Op::PushConst8);
                         }
                         fast::JUMP8 => jump8!(Op::Jump8, true),
