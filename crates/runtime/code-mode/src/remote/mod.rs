@@ -1184,6 +1184,7 @@ pub fn local_tools_key(definitions: &[ToolDefinition]) -> Option<String> {
     Some(nanocode_digest::blake3(&encoded).to_hex().to_string())
 }
 
+#[derive(PartialEq)]
 pub struct RemoteCatalog {
     pub definitions: Vec<ToolDefinition>,
     pub name: Option<String>,

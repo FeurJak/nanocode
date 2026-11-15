@@ -280,6 +280,7 @@ pub struct Acceptor {
     pub(super) admit: Admit,
     requests: Arc<dyn HandRequests>,
     runtimes: Atom<HashMap<String, Runtime>>,
+    encoded: Atom<HashMap<String, (Arc<RemoteCatalog>, Arc<str>)>>,
     sockets: AtomicU64,
     changes: Arc<Changes>,
     attached: mpsc::Sender<String>,
@@ -360,6 +361,7 @@ impl Acceptor {
             admit: Box::new(admit),
             requests,
             runtimes: Atom::default(),
+            encoded: Atom::default(),
             sockets: AtomicU64::new(0),
             changes,
             attached,
@@ -384,6 +386,36 @@ impl Acceptor {
     #[must_use]
     pub fn catalog(&self, key: &str) -> Option<Arc<RemoteCatalog>> {
         self.live(key).map(|(_, catalog)| catalog)
+    }
+
+    pub fn encoded_catalog(
+        &self,
+        key: &str,
+        max_frame_bytes: usize,
+    ) -> Option<Result<Arc<str>, CodeModeHostError>> {
+        let catalog = self.catalog(key)?;
+        let kept = self.encoded.read(|encoded| {
+            encoded
+                .get(key)
+                .filter(|(kept, text)| {
+                    text.len() <= max_frame_bytes
+                        && (Arc::ptr_eq(kept, &catalog) || **kept == *catalog)
+                })
+                .map(|(_, text)| Arc::clone(text))
+        });
+        if let Some(text) = kept {
+            return Some(Ok(text));
+        }
+        let text: Arc<str> = match greeting(&catalog).encode(max_frame_bytes) {
+            Ok(text) => text.into(),
+            Err(error) => return Some(Err(error)),
+        };
+        self.encoded.update(|encoded| {
+            self.runtimes
+                .read(|runtimes| encoded.retain(|key, _| runtimes.contains_key(key)));
+            encoded.insert(key.to_owned(), (Arc::clone(&catalog), Arc::clone(&text)));
+        });
+        Some(Ok(text))
     }
 
     #[must_use]
