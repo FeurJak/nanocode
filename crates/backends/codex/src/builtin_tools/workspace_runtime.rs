@@ -103,11 +103,10 @@ impl WorkspaceToolFactory for ConfiguredWorkspaceFactory {
         environment: Vec<(OsString, OsString)>,
         max_wire_bytes: Option<u64>,
     ) -> Arc<dyn WorkspaceExecutor> {
-        Arc::new(WorkspaceToolRuntime::with_executor(
-            root,
-            max_wire_bytes,
-            self.0.shell(environment),
-        ))
+        Arc::new(
+            WorkspaceToolRuntime::with_executor(root, max_wire_bytes, self.0.shell(environment))
+                .with_job_tools(),
+        )
     }
 
     fn code_mode_policy(&self) -> Option<Arc<dyn nanocode_tool_host::CodeModeToolPolicy>> {
