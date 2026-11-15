@@ -173,7 +173,33 @@ pub(super) fn install(
             guard.control.begin_turn();
         })
     }));
-    for definition in flatten(runtime.model_specs(handle.session_id())) {
+    let cell_yield = tools.cell_yield();
+    if tools.exposure() != nanocode_tool_host::ToolExposure::DirectOnly
+        || !tools.has_code_mode_host()
+    {
+        native = catalog(native, &runtime, handle.session_id(), cell_yield, false)?;
+    } else {
+        let dynamic = Arc::clone(&runtime);
+        let session_id = handle.session_id().to_owned();
+        native = native.dynamic_tools(move || {
+            catalog(ClaudeTools::new(), &dynamic, &session_id, cell_yield, true).unwrap_or_else(|error| {
+                nanocode_trace::warn!(target: "nanocode_claude", %error, "direct hand tools are unavailable");
+                ClaudeTools::new()
+            })
+        });
+    }
+    native.shared_catalog = Some((tools, workspace, handle.clone()));
+    Ok(native)
+}
+
+fn catalog(
+    mut native: ClaudeTools,
+    runtime: &Arc<ToolRuntime>,
+    session_id: &str,
+    cell_yield: Option<std::time::Duration>,
+    direct: bool,
+) -> Result<ClaudeTools> {
+    for definition in flatten(runtime.model_specs(session_id)) {
         let strict = match &definition {
             RuntimeDefinition::Function {
                 strict: true,
@@ -188,7 +214,7 @@ pub(super) fn install(
             } if &*name == "exec" => (
                 name,
                 exec_description(&description),
-                exec_schema(tools.cell_yield()),
+                exec_schema(cell_yield),
                 Call::Exec,
             ),
             RuntimeDefinition::Function {
@@ -204,6 +230,15 @@ pub(super) fn install(
                 ..
             } => {
                 let call = Call::Function(Arc::from(name.as_ref()));
+                let description = match direct && &*name == "Bash" {
+                    true => {
+                        nanocode_backend_claude_tools::upstream::tool_value("Bash")["description"]
+                            .as_str()
+                            .expect("upstream Bash description")
+                            .into()
+                    }
+                    false => description,
+                };
                 (name, description, parameters.shared(), call)
             }
             RuntimeDefinition::ToolSearch {
@@ -233,14 +268,13 @@ pub(super) fn install(
             defer_loading: false,
             cache_control: None,
         };
-        let runtime = Arc::clone(&runtime);
+        let runtime = Arc::clone(runtime);
         native = native.tool_with_context(definition, move |input, invocation| {
             let runtime = Arc::clone(&runtime);
             let call = call.clone();
             async move { call.run(&runtime, input, &invocation).await }
         });
     }
-    native.shared_catalog = Some((tools, workspace, handle.clone()));
     Ok(native)
 }
 

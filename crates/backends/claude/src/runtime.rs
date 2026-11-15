@@ -171,6 +171,7 @@ impl RuntimeBackend for ClaudeHarness {
                 .is_some_and(AgentTools::has_code_mode_host);
             let subagents = subagents
                 .filter(|_| !direct || remote || direct_subagents || spec.parent.is_some());
+            let direct = direct && (cfg!(target_family = "wasm") || !remote);
             let fold_notice = !remote
                 && configure.is_none()
                 && spec.checkpoint.is_none()
@@ -208,7 +209,7 @@ impl RuntimeBackend for ClaudeHarness {
                 builder = builder.deadline(deadline);
             }
             #[cfg(not(target_family = "wasm"))]
-            if direct && !remote {
+            if direct {
                 builder = builder.upstream_web().upstream_context();
             }
             if remote && let Some(AgentTools::Shared(hand)) = settings.tools.clone() {
@@ -258,7 +259,7 @@ impl RuntimeBackend for ClaudeHarness {
                 };
                 if let Some(subagents) = &subagents {
                     let authority = nanocode_agent_config::configuration::DelegationAuthority::Turn;
-                    additive.extend(match direct && !remote {
+                    additive.extend(match direct {
                         true => subagents.direct_tools(handle.clone(), authority),
                         false => subagents.tools(handle.clone(), authority),
                     });
@@ -278,7 +279,7 @@ impl RuntimeBackend for ClaudeHarness {
                         services.process_executors().foreground(),
                         &providers,
                         headless,
-                        direct && !remote,
+                        direct,
                     )
                 }
                 #[cfg(target_family = "wasm")]
@@ -288,10 +289,11 @@ impl RuntimeBackend for ClaudeHarness {
                         &handle,
                         selected.map(prepare).transpose()?,
                         additive,
+                        direct,
                     )
                 }
             });
-            builder = builder.code_only((cfg!(not(target_family = "wasm")) && !direct) || remote);
+            builder = builder.code_only(!direct && (cfg!(not(target_family = "wasm")) || remote));
             if let Some(checkpoint) = spec.checkpoint {
                 builder = builder.resume(checkpoint)?;
             }
@@ -333,10 +335,19 @@ fn claude_tools(
     handle: &AgentHandle,
     selected: Option<nanocode_tool_host::Tools>,
     additive: Vec<Arc<dyn nanocode_tool_contracts::Tool>>,
+    direct: bool,
 ) -> Result<crate::ClaudeTools> {
     use nanocode_tool_contracts::ToolCollection as _;
     if let Some(selected) = selected {
         let selected = selected.add_shared_tools(additive)?;
+        let selected = match direct {
+            true => selected
+                .into_builder()
+                .exposure(nanocode_tool_host::ToolExposure::DirectOnly)
+                .build()
+                .map_err(|error| NanocodeError::InvalidRequest(error.to_string()))?,
+            false => selected,
+        };
         return crate::install_shared_tools(workspace, handle, selected);
     }
     crate::ClaudeTools::new().add_shared_tools(additive)
