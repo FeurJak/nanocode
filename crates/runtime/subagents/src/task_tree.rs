@@ -27,6 +27,10 @@ impl TaskTree {
         Ok(AgentId::next(&mut self.next_id))
     }
 
+    pub(super) const fn reserved_any(&self) -> bool {
+        self.next_id > 0
+    }
+
     pub(super) fn insert(
         &mut self,
         id: AgentId,

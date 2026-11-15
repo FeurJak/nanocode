@@ -9177,9 +9177,24 @@ impl Registry {
     }
 
     async fn release_all(&self) {
+        let journaled = self.store.read(Option::is_some)
+            || self.journals.read(|journals| !journals.is_empty())
+            || self.claims.read(|claims| !claims.reserved.is_empty());
         let mut roots = self
             .state
-            .call(|state| state.scopes.keys().cloned().collect::<Vec<_>>())
+            .call(move |state| {
+                state
+                    .scopes
+                    .iter_mut()
+                    .filter_map(|(root, scope)| {
+                        if journaled || scope.topology.reserved_any() {
+                            return Some(root.clone());
+                        }
+                        scope.life = ScopeLife::Released;
+                        None
+                    })
+                    .collect::<Vec<_>>()
+            })
             .await;
         roots.sort_unstable();
         let released =
