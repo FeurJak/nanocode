@@ -322,6 +322,13 @@ pub(super) fn build(mut builder: ClaudeBuilder) -> Result<(Agent, AgentEvents)> 
             *handler = deadline_handler(name.clone(), handler.clone(), deadline);
         }
     }
+    if let Some(floor) = builder.yield_floor {
+        for (name, handler) in &mut handlers {
+            if matches!(name.as_str(), "exec" | "wait") {
+                *handler = yield_floor_handler(name.clone(), handler.clone(), floor);
+            }
+        }
+    }
     let mut names = handlers.keys().map(String::as_str).collect::<HashSet<_>>();
     for tool in &builder.server_tools {
         if tool.kind.is_empty() || tool.name.is_empty() || !names.insert(&tool.name) {

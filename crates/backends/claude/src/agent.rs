@@ -629,6 +629,13 @@ fn hooked_handler(
     })
 }
 
+fn yield_floor_handler(name: String, handler: Handler, floor: std::time::Duration) -> Handler {
+    Arc::new(move |input, invocation| {
+        let input = crate::deadline::floor(floor, &name, &input).unwrap_or(input);
+        handler(input, invocation)
+    })
+}
+
 fn deadline_handler(name: String, handler: Handler, deadline: crate::Deadline) -> Handler {
     Arc::new(move |input, invocation| {
         let cap = crate::deadline::cap(deadline, &name, &input);
@@ -814,6 +821,7 @@ pub struct ClaudeBuilder {
     dynamic_tools: Vec<DynamicToolsFactory>,
     tool_hooks: Vec<Arc<dyn crate::ClaudeToolHooks>>,
     deadline: Option<crate::Deadline>,
+    yield_floor: Option<std::time::Duration>,
     headless: bool,
     brief_final: bool,
     brief_finish: bool,
@@ -905,6 +913,7 @@ impl ClaudeBuilder {
             dynamic_tools: Vec::new(),
             tool_hooks: Vec::new(),
             deadline: None,
+            yield_floor: None,
             headless: false,
             brief_final: false,
             brief_finish: false,
@@ -1313,6 +1322,11 @@ impl ClaudeBuilder {
 
     pub const fn deadline(mut self, deadline: crate::Deadline) -> Self {
         self.deadline = Some(deadline);
+        self
+    }
+
+    pub const fn yield_floor(mut self, floor: std::time::Duration) -> Self {
+        self.yield_floor = Some(floor);
         self
     }
 
