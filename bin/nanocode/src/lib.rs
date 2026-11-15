@@ -243,12 +243,19 @@ pub fn run_with(clients: ModelClients) -> ExitCode {
         main_to_span.duration_ms = entered.elapsed().as_secs_f64() * 1_000.0,
         runtime.duration_ms = nanocode_trace::field::Empty
     );
+    let one_shot = matches!(cli.command, Some(Command::Exec(_)));
     let runtime_started = std::time::Instant::now();
     let runtime = match startup.in_scope(|| {
-        nanocode_executor::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
+        if one_shot {
+            nanocode_executor::Builder::new_current_thread()
+                .enable_all()
+                .build()
+        } else {
+            nanocode_executor::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+        }
     }) {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -267,7 +274,6 @@ pub fn run_with(clients: ModelClients) -> ExitCode {
     )
     .then(|| clients.warming())
     .flatten();
-    let one_shot = matches!(cli.command, Some(Command::Exec(_)));
     if one_shot {
         drop(nanocode::durability::drive_on(runtime.handle().clone()));
     }
