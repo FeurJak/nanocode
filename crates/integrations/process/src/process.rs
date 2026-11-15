@@ -59,6 +59,7 @@ pub(super) struct ProcessChild {
     reaping: Reaping,
     process_group: SharedProcessGroup,
     exited: Arc<Exit>,
+    group: Option<u32>,
 }
 
 #[derive(Default)]
@@ -176,6 +177,7 @@ impl ProcessChild {
             reaping: Reaping::Waiting(wait),
             process_group,
             exited,
+            group: Some(pid),
         }
     }
 
@@ -212,7 +214,12 @@ impl ProcessChild {
             reaping: Reaping::Waiting(wait),
             process_group,
             exited,
+            group: None,
         }
+    }
+
+    pub(super) const fn group(&self) -> Option<u32> {
+        self.group
     }
 
     #[cfg(unix)]

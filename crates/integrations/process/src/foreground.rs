@@ -1,8 +1,19 @@
 use super::{process, selection};
 use nanocode_io::{AsyncRead, AsyncReadExt};
-use std::{ffi::OsString, path::Path, time::Duration};
+use std::{
+    ffi::OsString,
+    path::Path,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 pub use nanocode_process_contracts::{ForegroundOutput, OutputSink};
+
+pub(crate) const MARK_VARIABLE: &str = "NANOCODE_COMMAND_ID";
+const SHELL_JOB: &str = "psh, running part of the command";
+const SURVIVORS_NOTE: &str = "The command exited, and these processes it started are still running in the background. Nothing reports when they end:";
+
+static COMMANDS: AtomicU64 = AtomicU64::new(0);
 
 pub fn run_bash<'call>(
     workspace: &'call Path,
@@ -41,6 +52,11 @@ pub(crate) fn run_bash_with_environment<'call>(
     Box<dyn std::future::Future<Output = Result<ForegroundOutput, String>> + Send + 'call>,
 > {
     Box::pin(async move {
+        let mark = format!(
+            "{}-{}",
+            std::process::id(),
+            COMMANDS.fetch_add(1, Ordering::Relaxed)
+        );
         let overrides: Vec<_> = environment
             .iter()
             .cloned()
@@ -49,6 +65,7 @@ pub(crate) fn run_bash_with_environment<'call>(
                     .map(crate::SessionEnvironment::os_variables)
                     .unwrap_or_default(),
             )
+            .chain([(OsString::from(MARK_VARIABLE), OsString::from(&mark))])
             .collect();
         let (mut environment, secrets) = process::sanitized_environment(&overrides, &[]);
         let bash = OsString::from(selection::default_shell_path());
@@ -74,6 +91,7 @@ pub(crate) fn run_bash_with_environment<'call>(
             None => process::spawn(command, workspace, &shell, false, false, &environment)
                 .map_err(|error| error.to_string())?,
         };
+        let group = spawned.child.group();
         struct Cleanup(process::SharedProcessGroup);
         impl Drop for Cleanup {
             fn drop(&mut self) {
@@ -104,13 +122,74 @@ pub(crate) fn run_bash_with_environment<'call>(
         .await;
         drop(cleanup);
         match outcome {
-            Ok(result) => result.map_err(|error| error.to_string()),
+            Ok(Ok(mut output)) => {
+                let found = nanocode_platform::spawn_blocking(move || {
+                    nanocode_executor::process::survivors(group, (MARK_VARIABLE, &mark))
+                })
+                .await;
+                match found
+                    .map_err(|error| error.to_string())
+                    .and_then(|found| found.map_err(|error| error.to_string()))
+                {
+                    Ok(survivors) if survivors.is_empty() => {}
+                    Ok(survivors) => noted(&mut output, &survivors, (shell.path(), max_stderr)),
+                    Err(error) => {
+                        nanocode_trace::debug!(%error, "the processes a command left running were not listed");
+                    }
+                }
+                Ok(output)
+            }
+            Ok(Err(error)) => Err(error.to_string()),
             Err(_) => {
                 let _ = spawned.child.wait().await;
                 Err("Bash command timed out".into())
             }
         }
     })
+}
+
+fn noted(
+    output: &mut ForegroundOutput,
+    survivors: &[(u32, String)],
+    (shell, limit): (&Path, usize),
+) {
+    let shell = shell.to_string_lossy();
+    let mut note = SURVIVORS_NOTE.to_owned();
+    let tail = format!("\nand {} more", survivors.len()).len();
+    let mut listed = 0;
+    for (id, command) in survivors {
+        let command = match command.strip_prefix(shell.as_ref()) {
+            Some(rest) if rest.is_empty() || rest.starts_with(' ') => SHELL_JOB,
+            _ => command,
+        };
+        let reserved = if listed + 1 == survivors.len() {
+            0
+        } else {
+            tail
+        };
+        let Some(line) = [format!("\nPID {id} ({command})"), format!("\nPID {id}")]
+            .into_iter()
+            .find(|line| note.len() + line.len() + reserved <= limit)
+        else {
+            break;
+        };
+        note.push_str(&line);
+        listed += 1;
+    }
+    if listed < survivors.len() {
+        note.push_str(&format!("\nand {} more", survivors.len() - listed));
+    }
+    let room = limit.saturating_sub(note.len() + 1);
+    if output.stderr.len() > room {
+        output
+            .stderr
+            .truncate(output.stderr.floor_char_boundary(room));
+        output.truncated = true;
+    }
+    if !output.stderr.is_empty() && !output.stderr.ends_with('\n') {
+        output.stderr.push('\n');
+    }
+    output.stderr.push_str(&note);
 }
 
 async fn collect<O: Pipe, E: Pipe>(

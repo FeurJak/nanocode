@@ -437,6 +437,7 @@ unsafe extern "C" {
         buflen: size_t,
         result: *mut *mut passwd,
     ) -> c_int;
+    pub fn getpgid(pid: pid_t) -> pid_t;
     pub fn getpwuid_r(
         uid: uid_t,
         pwd: *mut passwd,

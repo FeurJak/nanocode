@@ -31,6 +31,137 @@ fn reap_orphans() {
     }
 }
 
+#[cfg(any(target_os = "android", target_os = "linux"))]
+pub fn survivors(group: Option<u32>, mark: (&str, &str)) -> io::Result<Vec<(u32, String)>> {
+    let needle = [mark.0.as_bytes(), b"=", mark.1.as_bytes()].concat();
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir("/proc")? {
+        let Some(id) = entry?
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{id}/stat")) else {
+            continue;
+        };
+        let Some((name, fields)) = stat
+            .split_once(" (")
+            .and_then(|(_, rest)| rest.rsplit_once(") "))
+        else {
+            continue;
+        };
+        let fields: Vec<&str> = fields.split_whitespace().take(4).collect();
+        let [state, _, of, session] = fields[..] else {
+            continue;
+        };
+        if state == "Z" {
+            continue;
+        }
+        let grouped = group.is_some_and(|group| of.parse::<u32>().ok() == Some(group));
+        let marked = || {
+            session.parse::<u32>().ok() == Some(id)
+                && std::fs::read(format!("/proc/{id}/environ")).is_ok_and(|environment| {
+                    environment
+                        .split(|&byte| byte == 0)
+                        .any(|variable| variable == needle)
+                })
+        };
+        if !grouped && !marked() {
+            continue;
+        }
+        let line = std::fs::read(format!("/proc/{id}/cmdline")).unwrap_or_default();
+        let command = String::from_utf8_lossy(&line)
+            .split('\0')
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        found.push((
+            id,
+            if command.is_empty() {
+                name.to_owned()
+            } else {
+                command
+            },
+        ));
+    }
+    found.sort_unstable_by_key(|(id, _)| *id);
+    Ok(found)
+}
+
+#[cfg(target_os = "macos")]
+pub fn survivors(group: Option<u32>, mark: (&str, &str)) -> io::Result<Vec<(u32, String)>> {
+    use nanocode_sys::unix as host;
+
+    fn arguments(buffer: &[u8]) -> Option<(Vec<&[u8]>, &[u8])> {
+        let (count, rest) = buffer.split_first_chunk::<4>()?;
+        let count = usize::try_from(i32::from_ne_bytes(*count)).ok()?;
+        let path = rest.iter().position(|&byte| byte == 0)?;
+        let mut rest = &rest[path..];
+        rest = &rest[rest.iter().position(|&byte| byte != 0)?..];
+        let mut words = Vec::with_capacity(count);
+        for _ in 0..count {
+            let end = rest.iter().position(|&byte| byte == 0)?;
+            words.push(&rest[..end]);
+            rest = &rest[end + 1..];
+        }
+        Some((words, rest))
+    }
+
+    let needle = [mark.0.as_bytes(), b"=", mark.1.as_bytes()].concat();
+    let mut buffer = vec![0_u8; host::argument_bytes_limit()?];
+    let mut found = Vec::new();
+    for id in host::process_ids()? {
+        let Ok(number) = u32::try_from(id) else {
+            continue;
+        };
+        let grouped = group.is_some_and(|group| {
+            host::process_group_of(id)
+                .ok()
+                .and_then(|of| u32::try_from(of).ok())
+                == Some(group)
+        });
+        if !grouped && host::session_of(id).ok() != Some(id) {
+            continue;
+        }
+        let Ok(size) = host::process_arguments(id, &mut buffer) else {
+            continue;
+        };
+        let Some((words, environment)) = arguments(&buffer[..size]) else {
+            continue;
+        };
+        if !grouped
+            && !environment
+                .split(|&byte| byte == 0)
+                .any(|variable| variable == needle)
+        {
+            continue;
+        }
+        let command = words
+            .iter()
+            .map(|word| String::from_utf8_lossy(word))
+            .collect::<Vec<_>>()
+            .join(" ");
+        found.push((number, command));
+    }
+    found.sort_unstable_by_key(|(id, _)| *id);
+    Ok(found)
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "android", target_os = "linux", target_os = "macos"))
+))]
+pub fn survivors(_group: Option<u32>, _mark: (&str, &str)) -> io::Result<Vec<(u32, String)>> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
+#[cfg(not(unix))]
+pub fn survivors(_group: Option<u32>, _mark: (&str, &str)) -> io::Result<Vec<(u32, String)>> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
 pub struct Command {
     std: std::process::Command,
     kill_on_drop: bool,

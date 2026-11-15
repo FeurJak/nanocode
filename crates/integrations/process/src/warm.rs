@@ -28,10 +28,9 @@ pub(super) async fn spawn(
     if script.contains('\0') {
         return None;
     }
-    let (moved, base): (Vec<_>, Vec<_>) = environment
-        .iter()
-        .cloned()
-        .partition(|(name, _)| SessionEnvironment::controls(name));
+    let (moved, base): (Vec<_>, Vec<_>) = environment.iter().cloned().partition(|(name, _)| {
+        SessionEnvironment::controls(name) || name == super::foreground::MARK_VARIABLE
+    });
     let mut input = Vec::with_capacity(script.len() + 128);
     for (name, value) in &moved {
         input.extend_from_slice(name.as_bytes());

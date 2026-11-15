@@ -15,6 +15,9 @@ impl ::core::default::Default for proc_fdinfo {
         }
     }
 }
+pub const CTL_KERN: c_int = 1;
+pub const KERN_ARGMAX: c_int = 8;
+pub const KERN_PROCARGS2: c_int = 49;
 pub const PROC_PIDLISTFDS: c_int = 1;
 unsafe extern "C" {
     pub fn clock_settime(clock_id: clockid_t, tp: *const timespec) -> c_int;
@@ -31,5 +34,13 @@ unsafe extern "C" {
         buffersize: c_int,
     ) -> c_int;
     pub fn proc_pidpath(pid: c_int, buffer: *mut c_void, buffersize: u32) -> c_int;
+    pub fn sysctl(
+        name: *mut c_int,
+        namelen: c_uint,
+        oldp: *mut c_void,
+        oldlenp: *mut size_t,
+        newp: *mut c_void,
+        newlen: size_t,
+    ) -> c_int;
     pub fn system(s: *const c_char) -> c_int;
 }

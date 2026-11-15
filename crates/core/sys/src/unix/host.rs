@@ -198,6 +198,71 @@ pub fn probe_process(process_id: i32) -> io::Result<()> {
     checked(unsafe { libc::kill(process_id, 0) })
 }
 
+pub fn process_group_of(process_id: i32) -> io::Result<i32> {
+    let group = unsafe { libc::getpgid(process_id) };
+    checked(group)?;
+    Ok(group)
+}
+
+pub fn session_of(process_id: i32) -> io::Result<i32> {
+    let session = unsafe { libc::getsid(process_id) };
+    checked(session)?;
+    Ok(session)
+}
+
+#[cfg(target_os = "macos")]
+pub fn process_ids() -> io::Result<Vec<i32>> {
+    loop {
+        let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+        checked(count)?;
+        let mut ids = vec![0; usize::try_from(count).map_err(io::Error::other)? + 1];
+        let bytes = libc::c_int::try_from(std::mem::size_of_val(ids.as_slice()))
+            .map_err(io::Error::other)?;
+        let listed = unsafe { libc::proc_listallpids(ids.as_mut_ptr().cast(), bytes) };
+        checked(listed)?;
+        let listed = usize::try_from(listed).map_err(io::Error::other)?;
+        if listed < ids.len() {
+            ids.truncate(listed);
+            return Ok(ids);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn argument_bytes_limit() -> io::Result<usize> {
+    let mut name = [libc::CTL_KERN, libc::KERN_ARGMAX];
+    let mut limit: libc::c_int = 0;
+    let mut size = size_of::<libc::c_int>();
+    checked(unsafe {
+        libc::sysctl(
+            name.as_mut_ptr(),
+            2,
+            (&raw mut limit).cast(),
+            &raw mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    })?;
+    usize::try_from(limit).map_err(io::Error::other)
+}
+
+#[cfg(target_os = "macos")]
+pub fn process_arguments(process_id: i32, buffer: &mut [u8]) -> io::Result<usize> {
+    let mut name = [libc::CTL_KERN, libc::KERN_PROCARGS2, process_id];
+    let mut size = buffer.len();
+    checked(unsafe {
+        libc::sysctl(
+            name.as_mut_ptr(),
+            3,
+            buffer.as_mut_ptr().cast(),
+            &raw mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    })?;
+    Ok(size)
+}
+
 pub fn signal_group(group_id: i32, signal: i32) -> io::Result<()> {
     checked(unsafe { libc::killpg(group_id, signal) })
 }
