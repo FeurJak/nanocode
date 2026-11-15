@@ -19,6 +19,7 @@ use crate::{
     coop::Budget,
     queue::Shared as Queue,
     reactor::{self, Reactor},
+    sim::{self, Mutation},
     task::{JoinHandle, Runnable, Task},
 };
 
@@ -171,6 +172,9 @@ impl Shared {
 
     fn run_queue(&self, mut held: Option<&mut Consumer>, ticks: &mut u32) -> bool {
         let mut ran = false;
+        if sim::mutated(Mutation::UncountedPolls) {
+            *ticks = 0;
+        }
         while *ticks < EVENT_INTERVAL {
             if self.is_shutdown() {
                 return true;
@@ -215,9 +219,12 @@ impl Shared {
             slot.state.store(RUNNING, Ordering::SeqCst);
             return;
         }
-        if self.reactor.try_turn(None, pending, || {
-            slot.state.store(RUNNING, Ordering::SeqCst)
-        }) {
+        sim::pause();
+        let ready = || !sim::mutated(Mutation::UncheckedDrive) && pending();
+        if self
+            .reactor
+            .try_turn(None, ready, || slot.state.store(RUNNING, Ordering::SeqCst))
+        {
             slot.state.store(RUNNING, Ordering::SeqCst);
             return;
         }

@@ -8,6 +8,7 @@ mod children;
 mod disk;
 #[cfg(unix)]
 mod egress;
+mod drive;
 mod executor;
 mod faults;
 mod hands;

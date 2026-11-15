@@ -156,6 +156,8 @@ default_table='
 1 canary_hands_mangle_runtime canary:200 --scenario hands --mutation mangle_runtime
 1 canary_executor_skip_abort canary --scenario executor --mutation skip_abort
 1 canary_executor_leak_cancelled canary --scenario executor --mutation leak_cancelled
+1 canary_executor_uncounted_polls canary:100 --scenario executor --mutation uncounted_polls
+1 canary_executor_unchecked_drive canary:40 --scenario executor --mutation unchecked_drive
 1 canary_capture_skip_trim canary --scenario capture --mutation skip_trim
 1 canary_capture_drop_chunk canary --scenario capture --mutation drop_chunk
 1 canary_buffered_admission_written canary --scenario turns --policy turnlog --mutation buffered_admission_written

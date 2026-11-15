@@ -11,6 +11,8 @@ mod reactor;
 mod remote;
 mod runtime;
 pub mod signal;
+#[doc(hidden)]
+pub mod sim;
 mod sys;
 mod task;
 mod time;

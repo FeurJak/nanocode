@@ -1,9 +1,14 @@
 use std::{collections::BTreeMap, ops::Range, process::ExitCode, sync::Arc};
 
-use nanocode_executor::{Builder, JoinError, JoinHandle, JoinSet, coop::consume_budget, yield_now};
+use nanocode_executor::{
+    Builder, JoinError, JoinHandle, JoinSet, coop::consume_budget, sim, yield_now,
+};
 use nanocode_sync::{Slot, oneshot};
 
-use crate::rng::{FNV_OFFSET, Rng, fnv};
+use crate::{
+    drive::{self, Busy, Threads},
+    rng::{FNV_OFFSET, Rng, fnv},
+};
 
 const TASKS_MAX: u64 = 16;
 const HOPS_MAX: u64 = 6;
@@ -27,10 +32,12 @@ pub enum TasksMutation {
     SignalDropped,
     SignalEarly,
     SkipAwait,
+    UncountedPolls,
+    UncheckedDrive,
 }
 
 impl TasksMutation {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 11] = [
         Self::None,
         Self::SkipAbort,
         Self::LeakCancelled,
@@ -40,6 +47,8 @@ impl TasksMutation {
         Self::SignalDropped,
         Self::SignalEarly,
         Self::SkipAwait,
+        Self::UncountedPolls,
+        Self::UncheckedDrive,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -59,6 +68,16 @@ impl TasksMutation {
             Self::SignalDropped => "signal_dropped",
             Self::SignalEarly => "signal_early",
             Self::SkipAwait => "skip_await",
+            Self::UncountedPolls => "uncounted_polls",
+            Self::UncheckedDrive => "unchecked_drive",
+        }
+    }
+
+    const fn executor(self) -> sim::Mutation {
+        match self {
+            Self::UncountedPolls => sim::Mutation::UncountedPolls,
+            Self::UncheckedDrive => sim::Mutation::UncheckedDrive,
+            _ => sim::Mutation::None,
         }
     }
 
@@ -78,8 +97,11 @@ pub struct TasksStats {
     pub tasks: u64,
     pub finished: u64,
     pub cancelled: u64,
-    pub panicked: u64,
+    pub unwound: u64,
     pub detached: u64,
+    pub busy: u64,
+    pub threaded: u64,
+    pub messages: u64,
 }
 
 impl TasksStats {
@@ -88,8 +110,11 @@ impl TasksStats {
         self.tasks += other.tasks;
         self.finished += other.finished;
         self.cancelled += other.cancelled;
-        self.panicked += other.panicked;
+        self.unwound += other.unwound;
         self.detached += other.detached;
+        self.busy += other.busy;
+        self.threaded += other.threaded;
+        self.messages += other.messages;
     }
 }
 
@@ -116,6 +141,8 @@ enum Action {
 struct Script {
     tasks: Vec<TaskPlan>,
     actions: Vec<Action>,
+    busy: Option<Busy>,
+    threads: Option<Threads>,
 }
 
 fn wide(value: usize) -> u64 {
@@ -155,7 +182,13 @@ impl Script {
                 actions.push(Action::Detach(index));
             }
         }
-        Self { tasks, actions }
+        let mut drives = Rng::derive(seed, "drive");
+        Self {
+            tasks,
+            actions,
+            busy: drive::busy_of(&mut drives),
+            threads: drive::threads_of(&mut drives),
+        }
     }
 
     fn describe(&self) -> String {
@@ -188,11 +221,22 @@ impl Script {
                 Action::Detach(index) => Some(format!("detach{index}")),
             })
             .collect();
-        format!(
+        let mut shape = format!(
             "scenario=executor tasks=[{}] actions=[{}]",
             tasks.join(" "),
             actions.join(" ")
-        )
+        );
+        for extra in [
+            self.busy.map(Busy::describe),
+            self.threads.map(Threads::describe),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            shape.push(' ');
+            shape.push_str(&extra);
+        }
+        shape
     }
 }
 
@@ -210,10 +254,9 @@ struct Notes(Slot<Vec<Note>>);
 
 impl Notes {
     fn change<R>(&self, change: impl FnOnce(&mut Vec<Note>) -> R) -> R {
-        let mut notes = self
-            .0
-            .take()
-            .expect("a current-thread runtime polls one task at a time, so the notes are never taken twice");
+        let mut notes = self.0.take().expect(
+            "a current-thread runtime polls one task at a time, so the notes are never taken twice",
+        );
         let result = change(&mut notes);
         assert!(self.0.put(notes).is_none(), "the notes have one home");
         result
@@ -320,8 +363,10 @@ async fn control(
     notes: &Arc<Notes>,
     mutation: TasksMutation,
 ) -> (Vec<(usize, Joined)>, u64) {
-    let mut senders: Vec<Vec<oneshot::Sender<()>>> = script.tasks.iter().map(|_| Vec::new()).collect();
-    let mut receivers: Vec<Vec<oneshot::Receiver<()>>> = script.tasks.iter().map(|_| Vec::new()).collect();
+    let mut senders: Vec<Vec<oneshot::Sender<()>>> =
+        script.tasks.iter().map(|_| Vec::new()).collect();
+    let mut receivers: Vec<Vec<oneshot::Receiver<()>>> =
+        script.tasks.iter().map(|_| Vec::new()).collect();
     for (index, plan) in script.tasks.iter().enumerate() {
         for hop in &plan.hops {
             if let Hop::Await(other) = hop {
@@ -447,7 +492,11 @@ fn check(script: &Script, notes: &[Note], joined: &[(usize, Joined)]) -> Result<
         {
             return Err(format!("task {index} ran ({late:?}) after it was aborted unfinished"));
         }
-        let mut awaited = plan.hops.iter().filter(|hop| matches!(hop, Hop::Await(_))).count();
+        let mut awaited = plan
+            .hops
+            .iter()
+            .filter(|hop| matches!(hop, Hop::Await(_)))
+            .count();
         for note in notes {
             if let Note::Woke(other, from, delivered) = note
                 && *other == index
@@ -467,7 +516,9 @@ fn check(script: &Script, notes: &[Note], joined: &[(usize, Joined)]) -> Result<
             }
         }
         if notes.contains(&Note::Finished(index)) && awaited != 0 {
-            return Err(format!("task {index} finished with {awaited} waits unheard"));
+            return Err(format!(
+                "task {index} finished with {awaited} waits unheard"
+            ));
         }
     }
     let mut seen = vec![0_u32; script.tasks.len()];
@@ -475,7 +526,9 @@ fn check(script: &Script, notes: &[Note], joined: &[(usize, Joined)]) -> Result<
         seen[*index] += 1;
         let want = expected(*index, &script.tasks[*index], notes)?;
         if *outcome != want {
-            return Err(format!("task {index} joined as {outcome:?}, expected {want:?}"));
+            return Err(format!(
+                "task {index} joined as {outcome:?}, expected {want:?}"
+            ));
         }
     }
     if let Some(twice) = seen.iter().position(|count| *count > 1) {
@@ -498,8 +551,17 @@ fn simulate(seed: u64, mutation: TasksMutation) -> TasksOutcome {
         .build()
         .expect("a current-thread runtime builds");
     let notes = Arc::new(Notes(Slot::new(Some(Vec::new()))));
+    sim::mutate(mutation.executor());
     let (joined, detached) = runtime.block_on(control(&script, &notes, mutation));
     drop(runtime);
+    let busy = script.busy.map_or(Ok(()), |plan| {
+        Builder::new_current_thread()
+            .build()
+            .expect("a current-thread runtime builds")
+            .block_on(drive::busy(plan))
+    });
+    let threaded = script.threads.map(drive::threads);
+    sim::mutate(sim::Mutation::None);
     let notes = notes.read();
     let mut digest = fnv(FNV_OFFSET, shape.as_bytes());
     for note in &notes {
@@ -508,17 +570,34 @@ fn simulate(seed: u64, mutation: TasksMutation) -> TasksOutcome {
     for outcome in &joined {
         digest = fnv(digest, format!("{outcome:?}").as_bytes());
     }
-    let count = |test: fn(&(usize, Joined)) -> bool| wide(joined.iter().filter(|item| test(item)).count());
+    digest = fnv(digest, format!("{busy:?}").as_bytes());
+    if let Some(threaded) = &threaded {
+        digest = fnv(digest, &threaded.received.to_le_bytes());
+    }
+    let wrong = check(&script, &notes, &joined).and(busy).and_then(|()| {
+        match threaded
+            .as_ref()
+            .and_then(|threaded| threaded.stalled.clone())
+        {
+            Some(stalled) => Err(stalled),
+            None => Ok(()),
+        }
+    });
+    let count =
+        |test: fn(&(usize, Joined)) -> bool| wide(joined.iter().filter(|item| test(item)).count());
     TasksOutcome {
         digest,
-        wrong: check(&script, &notes, &joined).err(),
+        wrong: wrong.err(),
         stats: TasksStats {
             seeds: 1,
             tasks: wide(script.tasks.len()),
             finished: count(|(_, outcome)| matches!(outcome, Joined::Value(_))),
             cancelled: count(|(_, outcome)| *outcome == Joined::Cancelled),
-            panicked: count(|(_, outcome)| matches!(outcome, Joined::Panic(_))),
+            unwound: count(|(_, outcome)| matches!(outcome, Joined::Panic(_))),
             detached,
+            busy: u64::from(script.busy.is_some()),
+            threaded: u64::from(threaded.is_some()),
+            messages: threaded.as_ref().map_or(0, |threaded| threaded.received),
         },
         shape,
     }
@@ -526,6 +605,8 @@ fn simulate(seed: u64, mutation: TasksMutation) -> TasksOutcome {
 
 pub fn run_seed(seed: u64, mutation: TasksMutation) -> TasksOutcome {
     std::panic::catch_unwind(|| simulate(seed, mutation)).unwrap_or_else(|panic| {
+        sim::mutate(sim::Mutation::None);
+        sim::pause_before_drive(std::time::Duration::ZERO);
         let message = panic
             .downcast_ref::<String>()
             .cloned()
