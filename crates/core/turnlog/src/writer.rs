@@ -469,7 +469,6 @@ impl TurnLog {
             history.extend(row.plain.as_bytes());
             Ok(true)
         })?;
-        let collected = fold.collect() as u64;
         fold.reopen(EVENT_GAP);
         let floor = Some(fold.last_event());
         Ok(Self {
@@ -490,10 +489,7 @@ impl TurnLog {
                 previous,
                 snapshot,
                 state,
-                stats: Stats {
-                    collected,
-                    ..Stats::default()
-                },
+                stats: Stats::default(),
                 stream: None,
                 tail,
                 tail_row,
@@ -678,6 +674,8 @@ impl Lease<'_> {
 
     pub async fn commit(&mut self, point: Point) -> Result<u64, StoreError> {
         let writer = &mut *self.writer;
+        let revived = writer.fold.revive(&writer.buffer);
+        writer.buffer.extend(revived);
         let seq = writer.next;
         let previous = writer.fold.seq();
         let recovered = writer
@@ -717,9 +715,7 @@ impl Lease<'_> {
         let mut snapshot = None;
         let due = self.rows.is_some_and(|rows| writer.tail_rows >= rows);
         if due || writer.tail + body.len() >= writer.check {
-            if !writer.collectable.is_empty() {
-                writer.stats.collected += writer.fold.collect_in(&writer.collectable) as u64;
-            }
+            writer.stats.collected += writer.fold.collect(&writer.collectable) as u64;
             for turn in &recovered {
                 writer.fold.recovered_at(turn, seq);
             }

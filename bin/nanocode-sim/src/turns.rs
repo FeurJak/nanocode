@@ -60,6 +60,7 @@ pub enum TurnMutation {
     ArchiveDropsEvents,
     BufferedAdmissionWritten,
     CellBeforeCheckpoint,
+    ContentCollectedLive,
     DurableSeqBeforeCommit,
     FinishBeforeRow,
     GateReleasesEarly,
@@ -76,13 +77,14 @@ pub enum TurnMutation {
 }
 
 impl TurnMutation {
-    const ALL: [Self; 19] = [
+    const ALL: [Self; 20] = [
         Self::None,
         Self::AckBufferedAdmission,
         Self::AckBufferedResult,
         Self::ArchiveDropsEvents,
         Self::BufferedAdmissionWritten,
         Self::CellBeforeCheckpoint,
+        Self::ContentCollectedLive,
         Self::DurableSeqBeforeCommit,
         Self::FinishBeforeRow,
         Self::GateReleasesEarly,
@@ -112,6 +114,7 @@ impl TurnMutation {
             Self::ArchiveDropsEvents => "archive_drops_events",
             Self::BufferedAdmissionWritten => "buffered_admission_written",
             Self::CellBeforeCheckpoint => "cell_before_checkpoint",
+            Self::ContentCollectedLive => "content_collected_live",
             Self::DurableSeqBeforeCommit => "durable_seq_before_commit",
             Self::FinishBeforeRow => "finish_before_row",
             Self::GateReleasesEarly => "gate_releases_early",
@@ -1222,7 +1225,8 @@ impl Sim {
                     self.options.mutation == TurnMutation::ArchiveDropsEvents,
                     self.options.mutation != TurnMutation::TailRowsAppended,
                 )
-                .single_snapshot(self.options.reopen_row_limit.is_none()),
+                .single_snapshot(self.options.reopen_row_limit.is_none())
+                .collect_live(self.options.mutation == TurnMutation::ContentCollectedLive),
             ),
         };
         let mut object = Object {

@@ -87,6 +87,7 @@ pub struct Fold {
     calls: BTreeMap<String, OpenCall>,
     cells: BTreeMap<(String, u64), Vec<Box<RawValue>>>,
     checkpoints: BTreeMap<String, Checkpoint>,
+    dead: BTreeMap<String, String>,
     ends: u64,
     events: Vec<Event>,
     hot_bytes: usize,
@@ -126,6 +127,7 @@ impl Fold {
         }
         crate::record::each(body, |record| match record {
             Record::Stored { key, value } => {
+                self.dead.remove(&key);
                 self.stored.insert(key, value);
                 Ok(())
             }
@@ -296,22 +298,90 @@ impl Fold {
         Some(garbage)
     }
 
-    pub(crate) fn collect(&mut self) -> usize {
-        self.drop_garbage(|_| true)
-    }
-
-    pub(crate) fn collect_in(&mut self, states: &BTreeSet<String>) -> usize {
-        self.drop_garbage(|state| states.contains(state))
-    }
-
-    fn drop_garbage(&mut self, collectable: impl Fn(&str) -> bool) -> usize {
-        let Some(garbage) = self.garbage(collectable) else {
-            return 0;
+    pub(crate) fn collect(&mut self, collectable: &BTreeSet<String>) -> usize {
+        let in_collectable = |key: &str| {
+            key.split_once('\n')
+                .is_some_and(|(state, _)| collectable.contains(state))
+        };
+        let before = self.dead.len();
+        self.dead.retain(|key, _| !in_collectable(key));
+        let mut collected = before - self.dead.len();
+        let Some(garbage) = self.garbage(|_| true) else {
+            return collected;
         };
         let mut garbage = garbage.into_iter();
-        let before = self.stored.len();
-        self.stored.retain(|_, _| garbage.next() == Some(false));
-        before - self.stored.len()
+        let unreached = self
+            .stored
+            .extract_if(.., |_, _| garbage.next() == Some(true))
+            .collect::<Vec<_>>();
+        collected += unreached.len();
+        self.dead.extend(
+            unreached
+                .into_iter()
+                .filter(|(key, _)| !in_collectable(key)),
+        );
+        collected
+    }
+
+    fn references_of(&self, state: &str, value: &str) -> Option<Vec<String>> {
+        let chunk = |chunk: &str| {
+            self.stored
+                .get(&format!("{state}\n{chunk}"))
+                .map(String::as_str)
+        };
+        EncodedPayload::assembled(value, &chunk).map(|json| {
+            EncodedPayload::references(&json)
+                .map(|content| format!("{state}\n{content}"))
+                .collect()
+        })
+    }
+
+    fn holds_dead(&self, state: &str) -> bool {
+        let prefix = format!("{state}\n");
+        self.dead
+            .range::<str, _>((Bound::Included(prefix.as_str()), Bound::Unbounded))
+            .next()
+            .is_some_and(|(key, _)| key.starts_with(&prefix))
+    }
+
+    pub(crate) fn revive(&mut self, pushed: &[Record]) -> Vec<Record> {
+        if self.dead.is_empty() {
+            return Vec::new();
+        }
+        let mut queue = Vec::new();
+        for record in pushed {
+            match record {
+                Record::Checkpoint { payload, state, .. } if self.holds_dead(state) => queue
+                    .extend(
+                        EncodedPayload::references(payload)
+                            .map(|content| format!("{state}\n{content}")),
+                    ),
+                Record::Stored { key, value } => {
+                    if let Some((state, content)) = key.split_once('\n')
+                        && content.starts_with("b3:")
+                        && self.holds_dead(state)
+                    {
+                        queue.extend(self.references_of(state, value).into_iter().flatten());
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut revived = Vec::new();
+        while let Some(key) = queue.pop() {
+            let Some((key, value)) = self.dead.remove_entry(&key) else {
+                continue;
+            };
+            if let Some((state, _)) = key.split_once('\n') {
+                queue.extend(self.references_of(state, &value).into_iter().flatten());
+            }
+            revived.push(Record::Stored {
+                key: key.clone(),
+                value: value.clone(),
+            });
+            self.stored.insert(key, value);
+        }
+        revived
     }
 
     fn drop_turns(&mut self, drop: impl Fn(&Turn) -> bool) {
@@ -384,7 +454,10 @@ impl Fold {
 
     #[must_use]
     pub fn stored(&self, key: &str) -> Option<&str> {
-        self.stored.get(key).map(String::as_str)
+        self.stored
+            .get(key)
+            .or_else(|| self.dead.get(key))
+            .map(String::as_str)
     }
 
     #[must_use]
@@ -605,6 +678,7 @@ impl Fold {
             }
             Record::Status { status, turn } => self.status(turn, status)?,
             Record::Stored { key, value } => {
+                self.dead.remove(key);
                 self.stored.insert(key.clone(), value.clone());
             }
         }

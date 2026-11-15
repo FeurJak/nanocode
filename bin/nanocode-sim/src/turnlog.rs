@@ -9,8 +9,8 @@ use nanocode_durability_core::{StoreError, StoreFuture};
 use nanocode_sync::FutureExt;
 use nanocode_sys::base64::STANDARD_NO_PAD;
 use nanocode_turnlog::{
-    Compaction, EffectClass, Extension, LogHost, Outcome as LogOutcome, Phase, Point as LogPoint,
-    Record as LogRecord, Status as LogStatus, TurnLog,
+    Compaction, EffectClass, Extension, Fold, LogHost, Outcome as LogOutcome, Phase,
+    Point as LogPoint, Record as LogRecord, Status as LogStatus, TurnLog,
 };
 use serde_json::value::{RawValue, to_raw_value};
 
@@ -279,6 +279,44 @@ fn refused<T>(result: Result<T, StoreError>) -> T {
     result.unwrap_or_else(|error| panic!("nanocode-turnlog refused: {error}"))
 }
 
+fn content(id: u64) -> String {
+    format!("b3:{id:064x}")
+}
+
+fn chain(top: u64) -> Vec<u64> {
+    std::iter::successors(Some(top), |id| Some(id / 2).filter(|id| *id > 0)).collect()
+}
+
+fn content_value(scope: &str, id: u64) -> String {
+    match id / 2 {
+        0 => format!("={scope} content {id}"),
+        next => format!("={scope} content {id} {}", content(next)),
+    }
+}
+
+fn contents_kept(fold: &Fold, scope: &str, when: &str) -> Vec<u64> {
+    let state = format!("{scope}:gc");
+    let Some(checkpoint) = fold.checkpoint(&state) else {
+        return Vec::new();
+    };
+    let top = serde_json::from_str::<Vec<String>>(&checkpoint.payload)
+        .ok()
+        .and_then(|keys| keys.into_iter().next())
+        .and_then(|key| u64::from_str_radix(key.strip_prefix("b3:")?, 16).ok())
+        .unwrap_or_else(|| panic!("{state} checkpoint {} names no content", checkpoint.payload));
+    let ids = chain(top);
+    for &id in &ids {
+        let key = format!("{state}\n{}", content(id));
+        assert!(
+            fold.stored(&key) == Some(content_value(scope, id).as_str()),
+            "{state} content {id} reached from revision {} reads back as {:?} {when}",
+            checkpoint.revision,
+            fold.stored(&key)
+        );
+    }
+    ids
+}
+
 fn raw(text: &str) -> Box<RawValue> {
     to_raw_value(text).expect("a string encodes as JSON")
 }
@@ -289,6 +327,8 @@ pub fn text(value: &RawValue) -> String {
 
 pub struct TurnLogPolicy {
     bound: Option<usize>,
+    cached: BTreeMap<String, BTreeSet<u64>>,
+    collect_live: bool,
     disk: Arc<Disk>,
     host: Arc<dyn LogHost>,
     limit: Option<usize>,
@@ -315,6 +355,8 @@ impl TurnLogPolicy {
     ) -> Self {
         Self {
             bound: None,
+            cached: BTreeMap::new(),
+            collect_live: false,
             disk: Arc::clone(&disk),
             host: Arc::new(SimHost {
                 disk,
@@ -352,6 +394,11 @@ impl TurnLogPolicy {
             limit: self.limit,
             short,
         });
+        self
+    }
+
+    pub const fn collect_live(mut self, live: bool) -> Self {
+        self.collect_live = live;
         self
     }
 
@@ -553,6 +600,9 @@ impl TurnDurability for TurnLogPolicy {
         })));
         let mut state = state;
         state.events = events;
+        let kept = ready(log.read(|fold| contents_kept(fold, scope, "after a restart")));
+        self.cached
+            .insert(scope.to_owned(), kept.into_iter().collect());
         self.logs.insert(scope.to_owned(), log);
         state
     }
@@ -594,8 +644,36 @@ impl TurnDurability for TurnLogPolicy {
             revision: revision + 1,
             state: scope.to_owned(),
         }));
+        let contents = format!("{scope}:gc");
+        let next = lease
+            .fold()
+            .checkpoint(&contents)
+            .map_or(0, |checkpoint| checkpoint.revision)
+            + 1;
+        let top = next * 5 % 13 + 1;
+        let cached = self.cached.entry(scope.to_owned()).or_default();
+        for id in chain(top) {
+            if cached.insert(id) {
+                refused(lease.push(LogRecord::Stored {
+                    key: format!("{contents}\n{}", content(id)),
+                    value: content_value(scope, id),
+                }));
+            }
+        }
+        if self.collect_live {
+            lease.collect_unreachable(&contents);
+        }
+        refused(
+            lease.push(LogRecord::Checkpoint {
+                payload: serde_json::to_string(&[content(top)])
+                    .unwrap_or_else(|error| panic!("a content list does not encode: {error}")),
+                revision: next,
+                state: contents,
+            }),
+        );
         let viewed = self.rows.map(|_| self.disk.with(|rows| rows.view(scope)));
         let seq = refused(ready(lease.commit(log_point)));
+        contents_kept(lease.fold(), scope, &format!("after commit {seq}"));
         if let Some(viewed) = viewed {
             let stored = self.disk.with(|rows| rows.view(scope));
             if let ([.., (row, previous)], [.., (_, written)]) =
