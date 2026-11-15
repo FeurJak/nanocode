@@ -341,6 +341,11 @@ pub fn response_framing(
 
 pub fn request_framing(headers: &HeaderMap) -> Result<Framing, WireError> {
     match chunked(headers) {
+        Some(_) if headers.contains_key(header::CONTENT_LENGTH) => {
+            return Err(WireError::Parse(
+                "transfer-encoding with content-length".to_owned(),
+            ));
+        }
         Some(true) => return Ok(Framing::Chunked),
         Some(false) => {
             return Err(WireError::Parse(
