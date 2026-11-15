@@ -933,15 +933,9 @@ impl SessionState {
         output_unit: OutputUnit,
     ) -> Result<(String, Option<usize>), nanocode_sync::Stopped> {
         let mut captured = self.output.take().await?;
-        let raw = captured.render(&self.secrets);
         let limit = output::effective_token_limit(max_output_tokens);
         let original_token_count = captured.total_bytes.saturating_add(3) / 4;
-        let (output, _) = match captured.omission_marker() {
-            Some(marker) => {
-                output::limit_omitted_in(raw, limit, output_unit, &marker, original_token_count)
-            }
-            None => output::redact_and_limit_in(raw, &[], limit, output_unit),
-        };
+        let output = captured.limit(&self.secrets, limit, output_unit, original_token_count);
         Ok((output, Some(original_token_count)))
     }
 }
@@ -1014,6 +1008,33 @@ pub struct CapturedChunk {
 }
 
 impl CapturedChunk {
+    pub fn limit(
+        &mut self,
+        secrets: &nanocode_process_contracts::Redactor,
+        limit: usize,
+        unit: OutputUnit,
+        original_token_count: usize,
+    ) -> String {
+        self.trim_truncated_secrets(secrets);
+        let marker = self.omission_marker();
+        let mut redaction = Redaction::new(secrets, limit);
+        redaction.push(&self.head);
+        if let Some(marker) = &marker {
+            redaction.push(b"\n");
+            redaction.push(marker.as_bytes());
+            redaction.push(b"\n");
+        }
+        let (front, back) = self.tail.as_slices();
+        redaction.push(front);
+        redaction.push(back);
+        let cut = redaction.finish();
+        let (output, _) = match marker {
+            Some(marker) => cut.limit_omitted_in(unit, &marker, original_token_count),
+            None => cut.limit_in(unit),
+        };
+        output
+    }
+
     pub fn render(&mut self, secrets: &nanocode_process_contracts::Redactor) -> String {
         self.trim_truncated_secrets(secrets);
         let mut raw = String::from_utf8_lossy(&self.with_omission_marker()).into_owned();
@@ -1087,6 +1108,100 @@ impl CapturedChunk {
         output.extend(self.tail.iter().copied());
         output
     }
+}
+
+struct Redaction<'a> {
+    buffer: Vec<u8>,
+    carry: Vec<u8>,
+    cut: nanocode_process_contracts::OutputCut,
+    stages: Vec<Replacement<'a>>,
+}
+
+struct Replacement<'a> {
+    form: &'a str,
+    pending: String,
+    placeholder: &'a str,
+}
+
+impl<'a> Redaction<'a> {
+    fn new(secrets: &'a nanocode_process_contracts::Redactor, limit: usize) -> Self {
+        Self {
+            buffer: Vec::new(),
+            carry: Vec::new(),
+            cut: nanocode_process_contracts::OutputCut::new(limit),
+            stages: secrets
+                .forms()
+                .map(|(form, placeholder)| Replacement {
+                    form,
+                    pending: String::new(),
+                    placeholder,
+                })
+                .collect(),
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        for piece in bytes.chunks(output::READ_BUFFER_LENGTH) {
+            self.buffer.clear();
+            self.buffer.append(&mut self.carry);
+            self.buffer.extend_from_slice(piece);
+            let mut chunks = self.buffer.utf8_chunks().peekable();
+            while let Some(chunk) = chunks.next() {
+                replace_forms(&mut self.stages, &mut self.cut, chunk.valid());
+                let invalid = chunk.invalid();
+                if invalid.is_empty() {
+                    continue;
+                }
+                if chunks.peek().is_none()
+                    && std::str::from_utf8(invalid).is_err_and(|error| error.error_len().is_none())
+                {
+                    self.carry.extend_from_slice(invalid);
+                } else {
+                    replace_forms(&mut self.stages, &mut self.cut, "\u{FFFD}");
+                }
+            }
+        }
+    }
+
+    fn finish(mut self) -> nanocode_process_contracts::OutputCut {
+        if !self.carry.is_empty() {
+            replace_forms(&mut self.stages, &mut self.cut, "\u{FFFD}");
+        }
+        let mut stages = &mut self.stages[..];
+        while let Some((stage, rest)) = stages.split_first_mut() {
+            let pending = std::mem::take(&mut stage.pending);
+            replace_forms(&mut *rest, &mut self.cut, &pending);
+            stages = rest;
+        }
+        self.cut
+    }
+}
+
+fn replace_forms(
+    stages: &mut [Replacement<'_>],
+    cut: &mut nanocode_process_contracts::OutputCut,
+    text: &str,
+) {
+    let Some((stage, rest)) = stages.split_first_mut() else {
+        cut.write(text);
+        return;
+    };
+    stage.pending.push_str(text);
+    let mut start = 0;
+    while let Some(found) = stage.pending[start..].find(stage.form) {
+        replace_forms(rest, cut, &stage.pending[start..start + found]);
+        replace_forms(rest, cut, stage.placeholder);
+        start += found + stage.form.len();
+    }
+    let held = stage.pending.floor_char_boundary(
+        stage
+            .pending
+            .len()
+            .saturating_sub(stage.form.len() - 1)
+            .max(start),
+    );
+    replace_forms(rest, cut, &stage.pending[start..held]);
+    drop(stage.pending.drain(..held));
 }
 
 fn create_process_failed(started_at: Instant, error: &std::io::Error) -> ExecCommandResult {

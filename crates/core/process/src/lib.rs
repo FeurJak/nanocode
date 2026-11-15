@@ -355,6 +355,123 @@ fn cut_middle(output: &str, limit: usize, unit: OutputUnit) -> String {
     )
 }
 
+pub struct OutputCut {
+    chars: usize,
+    first: String,
+    last: String,
+    left: usize,
+    len: usize,
+    limit: usize,
+    newline_last: bool,
+    newlines: usize,
+    trimmed: bool,
+}
+
+impl OutputCut {
+    pub const fn new(limit: usize) -> Self {
+        Self {
+            chars: 0,
+            first: String::new(),
+            last: String::new(),
+            left: limit / 2,
+            len: 0,
+            limit,
+            newline_last: false,
+            newlines: 0,
+            trimmed: false,
+        }
+    }
+
+    pub fn write(&mut self, text: &str) {
+        self.len += text.len();
+        self.chars += text.chars().count();
+        self.newlines += text.bytes().filter(|&byte| byte == b'\n').count();
+        if let Some(last) = text.bytes().last() {
+            self.newline_last = last == b'\n';
+        }
+        let wanted = (self.left + 1).saturating_sub(self.first.len());
+        let (first, rest) = text.split_at(text.ceil_char_boundary(wanted.min(text.len())));
+        self.first.push_str(first);
+        self.last.push_str(rest);
+        let right = self.limit - self.left;
+        if self.last.len() > right {
+            let cut = self.last.floor_char_boundary(self.last.len() - right);
+            if cut > 0 {
+                drop(self.last.drain(..cut));
+                self.trimmed = true;
+            }
+        }
+    }
+
+    pub fn limit_in(self, unit: OutputUnit) -> (String, bool) {
+        if !self.trimmed {
+            return redact_and_limit_in(self.first + &self.last, &[], self.limit, unit);
+        }
+        let original_token_count = self.len.saturating_add(3) / BYTES_PER_TOKEN;
+        let total_lines = self.newlines + usize::from(!self.newline_last);
+        let cut = self.cut(unit);
+        (
+            format!(
+                "Warning: truncated output (original token count: {original_token_count})\nTotal output lines: {total_lines}\n\n{cut}"
+            ),
+            true,
+        )
+    }
+
+    pub fn limit_omitted_in(
+        self,
+        unit: OutputUnit,
+        marker: &str,
+        original_token_count: usize,
+    ) -> (String, bool) {
+        if !self.trimmed {
+            return limit_omitted_in(
+                self.first + &self.last,
+                self.limit,
+                unit,
+                marker,
+                original_token_count,
+            );
+        }
+        let kept = self.cut(unit);
+        let notice = if kept.contains(marker) {
+            String::new()
+        } else {
+            format!("{marker}\n")
+        };
+        (
+            format!(
+                "Warning: truncated output (original token count: {original_token_count})\n{notice}\n{kept}"
+            ),
+            true,
+        )
+    }
+
+    fn cut(&self, unit: OutputUnit) -> String {
+        let prefix_end = self.first.floor_char_boundary(self.left);
+        let right = self.limit - self.left;
+        let start = self.len - self.last.len();
+        let suffix_start = self.last.ceil_char_boundary(self.len - right - start);
+        let removed = match unit {
+            OutputUnit::Tokens => format!(
+                "{} tokens",
+                self.len.saturating_sub(self.limit).saturating_add(3) / BYTES_PER_TOKEN
+            ),
+            OutputUnit::Chars => format!(
+                "{} chars",
+                self.chars
+                    - self.first[..prefix_end].chars().count()
+                    - self.last[suffix_start..].chars().count()
+            ),
+        };
+        format!(
+            "{}…{removed} truncated…{}",
+            &self.first[..prefix_end],
+            &self.last[suffix_start..],
+        )
+    }
+}
+
 pub const REDACTED: &str = "[REDACTED]";
 
 #[derive(Clone, Debug, Default)]
