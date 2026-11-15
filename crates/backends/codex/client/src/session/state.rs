@@ -398,6 +398,16 @@ impl ManagedSessionState {
         self.history_revision = self.history_revision.saturating_add(1);
     }
 
+    pub fn apply_working_state(
+        &mut self,
+        policy: super::working_state::WorkingStatePolicy,
+    ) -> Option<super::working_state::WorkingStateReport> {
+        let (history, report) =
+            super::working_state::apply(&self.context.flattened_items(), policy)?;
+        self.replace_prepared_history(history);
+        Some(report)
+    }
+
     #[must_use]
     pub const fn history_revision(&self) -> u64 {
         self.history_revision

@@ -185,6 +185,16 @@ const SESSION: Group = Group::new(&[
         .help(
             "Longest reply in tokens the Claude harness asks for (max_tokens); Codex requests carry no reply limit, as Codex's do not",
         ),
+    Argument::value("working_state_budget", "TOKENS", Parser::U64)
+        .long("working-state-budget")
+        .env("NANOCODE_WORKING_STATE_BUDGET")
+        .help(
+            "Codex harness: once a session's tool results pass this many tokens, elide the oldest ones and large tool inputs into a compact working state block (files patched, commands and exit codes) until --working-state-retain tokens of results remain; off unless set",
+        ),
+    Argument::value("working_state_retain", "TOKENS", Parser::U64)
+        .long("working-state-retain")
+        .env("NANOCODE_WORKING_STATE_RETAIN")
+        .help("Tokens of the newest tool results the working state keeps verbatim (defaults to half of --working-state-budget)"),
     Argument::value("hedge_floor_ms", "MS", Parser::U64)
         .long("hedge-floor-ms")
         .env("NANOCODE_HEDGE_FLOOR_MS")
@@ -604,6 +614,8 @@ pub struct SessionArgs {
     pub tier: Option<String>,
     pub context_window: Option<u64>,
     pub max_output_tokens: Option<u64>,
+    pub working_state_budget: Option<u64>,
+    pub working_state_retain: Option<u64>,
     pub hedge_floor_ms: Option<u64>,
     pub hedge_cap_percent: Option<u64>,
     pub hedge_window: Option<u64>,
@@ -657,6 +669,8 @@ impl SessionArgs {
             tier: matches.text("tier"),
             context_window: matches.u64("context_window"),
             max_output_tokens: matches.u64("max_output_tokens"),
+            working_state_budget: matches.u64("working_state_budget"),
+            working_state_retain: matches.u64("working_state_retain"),
             hedge_floor_ms: matches.u64("hedge_floor_ms"),
             hedge_cap_percent: matches.u64("hedge_cap_percent"),
             hedge_window: matches.u64("hedge_window"),
@@ -693,6 +707,8 @@ impl SessionArgs {
             tier: self.tier.or(root.tier),
             context_window: self.context_window.or(root.context_window),
             max_output_tokens: self.max_output_tokens.or(root.max_output_tokens),
+            working_state_budget: self.working_state_budget.or(root.working_state_budget),
+            working_state_retain: self.working_state_retain.or(root.working_state_retain),
             hedge_floor_ms: self.hedge_floor_ms.or(root.hedge_floor_ms),
             hedge_cap_percent: self.hedge_cap_percent.or(root.hedge_cap_percent),
             hedge_window: self.hedge_window.or(root.hedge_window),

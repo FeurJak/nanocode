@@ -492,6 +492,7 @@ pub struct HostConfig {
     pub context_window: Option<u64>,
     pub max_output_tokens: Option<u32>,
     pub codex_direct: bool,
+    pub working_state: Option<nanocode::oai::session::working_state::WorkingStatePolicy>,
     pub hedge: nanocode::hedge::HedgePolicy,
 }
 
@@ -755,6 +756,7 @@ impl Host {
         let context_window = config.context_window;
         let listed = config.clients.listing_windows();
         let max_output = config.max_output_tokens;
+        let working_state = config.working_state;
         if let (Some(tokens), Some(maximum)) = (
             context_window,
             model.as_codex().and_then(|model| model.context_window_limit()),
@@ -789,6 +791,10 @@ impl Host {
                         builder.max_output_tokens(u64::from(tokens))
                     }
                     _ => builder,
+                };
+                let builder = match working_state {
+                    Some(policy) => builder.working_state(policy),
+                    None => builder,
                 };
                 Ok(match &*described.get() {
                     Some(hand) => builder.execution_environment(codex_environment(hand)),

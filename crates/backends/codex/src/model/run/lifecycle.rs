@@ -141,6 +141,9 @@ impl ModelRun {
         context: CompactionContext<'_>,
     ) -> Result<bool> {
         let CompactionContext { snapshot, phase } = context;
+        if let Some(policy) = self.config.working_state {
+            conversation.managed.apply_working_state(policy);
+        }
         let Some(auto_compact_token_limit) = self.auto_compact_token_limit() else {
             return Ok(false);
         };

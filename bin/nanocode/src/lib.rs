@@ -469,6 +469,7 @@ async fn prepare(
             .transpose()
             .map_err(|error| format!("--max-output-tokens: {error}"))?,
         codex_direct: args.codex_orchestration != Some(cli::CodexOrchestrationArg::CodeMode),
+        working_state: working_state_policy(args)?,
         hedge: hedge_policy(args)?,
     };
     let host = nanocode_trace::Instrument::instrument(
@@ -507,6 +508,21 @@ async fn prepare(
         home,
         runner_events,
     })
+}
+
+fn working_state_policy(
+    args: &SessionArgs,
+) -> Result<Option<nanocode::oai::session::working_state::WorkingStatePolicy>> {
+    let Some(budget) = args.working_state_budget else {
+        return match args.working_state_retain {
+            Some(_) => Err("--working-state-retain needs --working-state-budget".into()),
+            None => Ok(None),
+        };
+    };
+    let retain = args.working_state_retain.unwrap_or(budget / 2);
+    nanocode::oai::session::working_state::WorkingStatePolicy::new(budget, retain)
+        .map(Some)
+        .map_err(|error| format!("--working-state-budget: {error}").into())
 }
 
 fn hedge_policy(args: &SessionArgs) -> Result<nanocode::hedge::HedgePolicy> {
