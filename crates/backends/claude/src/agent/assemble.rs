@@ -322,6 +322,13 @@ pub(super) fn build(mut builder: ClaudeBuilder) -> Result<(Agent, AgentEvents)> 
             *handler = deadline_handler(name.clone(), handler.clone(), deadline);
         }
     }
+    if let (Some(deadline), Some(percent)) = (builder.deadline, builder.yield_share) {
+        for (name, handler) in &mut handlers {
+            if matches!(name.as_str(), "exec" | "wait") {
+                *handler = yield_share_handler(name.clone(), handler.clone(), deadline, percent);
+            }
+        }
+    }
     if let Some(floor) = builder.yield_floor {
         for (name, handler) in &mut handlers {
             if matches!(name.as_str(), "exec" | "wait") {
@@ -502,6 +509,7 @@ pub(super) fn build(mut builder: ClaudeBuilder) -> Result<(Agent, AgentEvents)> 
         low_effort_rounds: builder.low_effort_rounds,
         persist_finish: builder.persist_finish,
         skip_finish_check: builder.skip_finish_check,
+        late_finish_check: builder.late_finish_check,
         result_effort: builder.result_effort,
         stop_at_target: builder.stop_at_target,
         tool_result_tokens: builder.tool_result_tokens,

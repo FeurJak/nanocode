@@ -637,8 +637,28 @@ fn yield_floor_handler(name: String, handler: Handler, floor: std::time::Duratio
 }
 
 fn deadline_handler(name: String, handler: Handler, deadline: crate::Deadline) -> Handler {
+    capped_handler(handler, move |input| {
+        crate::deadline::cap(deadline, &name, input)
+    })
+}
+
+fn yield_share_handler(
+    name: String,
+    handler: Handler,
+    deadline: crate::Deadline,
+    percent: std::num::NonZeroU8,
+) -> Handler {
+    capped_handler(handler, move |input| {
+        crate::deadline::share(deadline, percent.get(), &name, input)
+    })
+}
+
+fn capped_handler(
+    handler: Handler,
+    cap: impl Fn(&Value) -> crate::deadline::Cap<Value> + Send + Sync + 'static,
+) -> Handler {
     Arc::new(move |input, invocation| {
-        let cap = crate::deadline::cap(deadline, &name, &input);
+        let cap = cap(&input);
         let handler = handler.clone();
         Box::pin(async move {
             match cap {
@@ -822,6 +842,7 @@ pub struct ClaudeBuilder {
     tool_hooks: Vec<Arc<dyn crate::ClaudeToolHooks>>,
     deadline: Option<crate::Deadline>,
     yield_floor: Option<std::time::Duration>,
+    yield_share: Option<std::num::NonZeroU8>,
     headless: bool,
     brief_final: bool,
     brief_finish: bool,
@@ -831,6 +852,7 @@ pub struct ClaudeBuilder {
     low_effort_rounds: bool,
     persist_finish: bool,
     skip_finish_check: bool,
+    late_finish_check: Option<std::time::Duration>,
     result_effort: Option<crate::Effort>,
     stop_at_target: bool,
     tool_result_tokens: Option<std::num::NonZeroU64>,
@@ -914,6 +936,7 @@ impl ClaudeBuilder {
             tool_hooks: Vec::new(),
             deadline: None,
             yield_floor: None,
+            yield_share: None,
             headless: false,
             brief_final: false,
             brief_finish: false,
@@ -923,6 +946,7 @@ impl ClaudeBuilder {
             low_effort_rounds: false,
             persist_finish: false,
             skip_finish_check: false,
+            late_finish_check: None,
             result_effort: None,
             stop_at_target: false,
             tool_result_tokens: None,
@@ -1330,6 +1354,11 @@ impl ClaudeBuilder {
         self
     }
 
+    pub const fn yield_share(mut self, percent: std::num::NonZeroU8) -> Self {
+        self.yield_share = Some(percent);
+        self
+    }
+
     pub const fn headless(mut self, headless: bool) -> Self {
         self.headless = headless;
         self
@@ -1372,6 +1401,11 @@ impl ClaudeBuilder {
 
     pub const fn skip_finish_check(mut self, skip: bool) -> Self {
         self.skip_finish_check = skip;
+        self
+    }
+
+    pub const fn late_finish_check(mut self, min_left: std::time::Duration) -> Self {
+        self.late_finish_check = Some(min_left);
         self
     }
 
@@ -3134,6 +3168,7 @@ struct State {
     low_effort_rounds: bool,
     persist_finish: bool,
     skip_finish_check: bool,
+    late_finish_check: Option<std::time::Duration>,
     result_effort: Option<crate::Effort>,
     stop_at_target: bool,
     tool_result_tokens: Option<std::num::NonZeroU64>,

@@ -39,6 +39,38 @@ pub(crate) fn cap(deadline: Deadline, name: &str, input: &Value) -> Cap<Value> {
     }
 }
 
+pub(crate) fn share(deadline: Deadline, percent: u8, name: &str, input: &Value) -> Cap<Value> {
+    match name {
+        "wait" => deadline.cap_share(percent, "yield_time_ms", input),
+        "exec" if input.get("yield_time_ms").and_then(Value::as_f64).is_some() => {
+            deadline.cap_share(percent, "yield_time_ms", input)
+        }
+        "exec" => {
+            let (Some(object), Some(code)) =
+                (input.as_object(), input.get("code").and_then(Value::as_str))
+            else {
+                return Cap::Unchanged;
+            };
+            match deadline.cap_source_share(percent, code) {
+                Cap::Capped {
+                    input: code,
+                    notice,
+                } => {
+                    let mut object = object.clone();
+                    object.insert("code".into(), code.into());
+                    Cap::Capped {
+                        input: Value::Object(object),
+                        notice,
+                    }
+                }
+                Cap::Expired(text) => Cap::Expired(text),
+                Cap::Unchanged => Cap::Unchanged,
+            }
+        }
+        _ => Cap::Unchanged,
+    }
+}
+
 pub(crate) fn append(content: &mut ToolResultContent, notice: &str) {
     match content {
         ToolResultContent::Text(text) => {

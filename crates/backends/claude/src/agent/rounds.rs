@@ -1372,15 +1372,21 @@ pub(super) fn run_rounds<'a>(
             if state.headless
                 && !cursor.finish_checked
                 && state.lineage.root_session_id == state.session_id
-                && !state
+                && ((!state
                     .deadline
                     .as_ref()
                     .is_some_and(crate::deadline::Reminders::last_passed)
-                && (!state.fold_finish
-                    || state
-                        .deadline
-                        .as_ref()
-                        .is_some_and(|deadline| !deadline.first_passed()))
+                    && (!state.fold_finish
+                        || state
+                            .deadline
+                            .as_ref()
+                            .is_some_and(|deadline| !deadline.first_passed())))
+                    || state.late_finish_check.is_some_and(|min_left| {
+                        state
+                            .deadline
+                            .as_ref()
+                            .is_some_and(|deadline| deadline.left() >= min_left)
+                    }))
             {
                 if state.hold_turn(&request.key, cancel).await? {
                     cursor.index = index + 1;

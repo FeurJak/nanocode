@@ -96,6 +96,50 @@ impl Deadline {
     }
 
     #[must_use]
+    pub fn cap_share(self, percent: u8, field: &str, input: &Value) -> Cap<Value> {
+        let Some(mut object) = input.as_object().cloned() else {
+            return Cap::Unchanged;
+        };
+        let Some(requested) = object.get(field).and_then(Value::as_f64) else {
+            return Cap::Unchanged;
+        };
+        let allowed = self.share(percent);
+        if allowed == 0 || requested <= allowed as f64 {
+            return Cap::Unchanged;
+        }
+        object.insert(field.into(), allowed.into());
+        Cap::Capped {
+            input: Value::Object(object),
+            notice: self.shared(percent, (field, requested, allowed)),
+        }
+    }
+
+    #[must_use]
+    pub fn cap_source_share(self, percent: u8, code: &str) -> Cap<String> {
+        let allowed = self.share(percent);
+        if allowed == 0 {
+            return Cap::Unchanged;
+        }
+        pragma_cap(code, allowed).map_or(Cap::Unchanged, |(code, requested)| Cap::Capped {
+            input: code,
+            notice: self.shared(percent, ("yield_time_ms", requested, allowed)),
+        })
+    }
+
+    fn share(self, percent: u8) -> u64 {
+        self.allowed().saturating_mul(u64::from(percent.min(100))) / 100
+    }
+
+    fn shared(self, percent: u8, request: (&str, f64, u64)) -> String {
+        let (field, requested, allowed) = request;
+        format!(
+            "{field} {requested} ms is more than {percent}% of the {} left before this task's {} time limit, so this call ran with {field} {allowed} ms. Work it started keeps running.",
+            spoken(self.remaining()),
+            spoken(self.limit)
+        )
+    }
+
+    #[must_use]
     pub fn cap_source(self, code: &str) -> Cap<String> {
         let allowed = self.allowed();
         pragma_cap(code, allowed).map_or(Cap::Unchanged, |(code, requested)| {
