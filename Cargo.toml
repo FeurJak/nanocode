@@ -265,6 +265,111 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 
+[profile.dist.package.nanocode-agent]
+opt-level = "s"
+
+[profile.dist.package.nanocode-agent-config]
+opt-level = "s"
+
+[profile.dist.package.nanocode-agent-core]
+opt-level = "s"
+
+[profile.dist.package.nanocode-agent-host]
+opt-level = "s"
+
+[profile.dist.package.nanocode-arguments]
+opt-level = "s"
+
+[profile.dist.package.nanocode-audio]
+opt-level = "s"
+
+[profile.dist.package.nanocode-backend-claude]
+opt-level = "s"
+
+[profile.dist.package.nanocode-backend-claude-client]
+opt-level = "s"
+
+[profile.dist.package.nanocode-backend-claude-tools]
+opt-level = "s"
+
+[profile.dist.package.nanocode-backend-codex]
+opt-level = "s"
+
+[profile.dist.package.nanocode-cli]
+opt-level = "s"
+
+[profile.dist.package.nanocode-computer-repl]
+opt-level = "s"
+
+[profile.dist.package.nanocode-durability]
+opt-level = "s"
+
+[profile.dist.package.nanocode-durability-core]
+opt-level = "s"
+
+[profile.dist.package.nanocode-gif]
+opt-level = "s"
+
+[profile.dist.package.nanocode-home]
+opt-level = "s"
+
+[profile.dist.package.nanocode-image]
+opt-level = "s"
+
+[profile.dist.package.nanocode-jpeg]
+opt-level = "s"
+
+[profile.dist.package.nanocode-mcp]
+opt-level = "s"
+
+[profile.dist.package.nanocode-mcp-http]
+opt-level = "s"
+
+[profile.dist.package.nanocode-mcp-tools]
+opt-level = "s"
+
+[profile.dist.package.nanocode-mpp]
+opt-level = "s"
+
+[profile.dist.package.nanocode-observability]
+opt-level = "s"
+
+[profile.dist.package.nanocode-png]
+opt-level = "s"
+
+[profile.dist.package.nanocode-schema]
+opt-level = "s"
+
+[profile.dist.package.nanocode-store-jsonl]
+opt-level = "s"
+
+[profile.dist.package.nanocode-subagents]
+opt-level = "s"
+
+[profile.dist.package.nanocode-tempo]
+opt-level = "s"
+
+[profile.dist.package.nanocode-tool-host]
+opt-level = "s"
+
+[profile.dist.package.nanocode-tool-provider]
+opt-level = "s"
+
+[profile.dist.package.nanocode-tool-runtime]
+opt-level = "s"
+
+[profile.dist.package.nanocode-tools]
+opt-level = "s"
+
+[profile.dist.package.nanocode-turnlog]
+opt-level = "s"
+
+[profile.dist.package.nanocode-webp]
+opt-level = "s"
+
+[profile.dist.package.psh-utils]
+opt-level = "s"
+
 [profile.dist.package.rustpython-codegen]
 opt-level = "s"
 
@@ -317,6 +422,9 @@ opt-level = "s"
 opt-level = "s"
 
 [profile.dist.package.rustpython-doc]
+opt-level = "s"
+
+[profile.dist.package.unicode-normalization]
 opt-level = "s"
 
 [profile.lite]
