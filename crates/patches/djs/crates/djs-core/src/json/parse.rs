@@ -220,7 +220,7 @@ fn fail<T>(msg: Msg, pos: usize) -> Result<T, Fail> {
 }
 
 #[inline(always)]
-fn lex<const E: u8>(b: &[u8], pos: &mut usize) -> Result<Token, Fail> {
+fn lex<const E: u8>(b: &[u8], pos: &mut usize, dec: &mut Vec<u8>) -> Result<Token, Fail> {
     let n = units_len::<E>(b);
     let mut p = *pos;
     while p < n && matches!(peek::<E>(b, p), 0x20 | 0x09 | 0x0A | 0x0D) {
@@ -245,7 +245,7 @@ fn lex<const E: u8>(b: &[u8], pos: &mut usize) -> Result<Token, Fail> {
         0x3A => Tok::Colon,
         0x2C => Tok::Comma,
         0x22 => {
-            let (s, end) = scan_string::<E>(b, p, start)?;
+            let (s, end) = scan_string::<E>(b, p, start, dec)?;
             p = end;
             Tok::Str(s)
         }
@@ -297,10 +297,15 @@ fn word(b: &[u8], e: u8, start: usize, end: usize) -> Option<Tok> {
 
 /// Scans a string body starting after the opening quote at `quote`.
 #[inline(always)]
-fn scan_string<const E: u8>(b: &[u8], mut p: usize, quote: usize) -> Result<(StrTok, usize), Fail> {
+fn scan_string<const E: u8>(
+    b: &[u8],
+    mut p: usize,
+    quote: usize,
+    dec: &mut Vec<u8>,
+) -> Result<(StrTok, usize), Fail> {
     // (Two-byte input is rare: its strings take the one general loop, a smaller module.)
     if E == UTF16 {
-        return scan_rest::<E>(b, p, quote, p, 0, false, false);
+        return scan_rest::<E>(b, p, quote, p, 0, false);
     }
     let n = units_len::<E>(b);
     let start = p;
@@ -317,10 +322,8 @@ fn scan_string<const E: u8>(b: &[u8], mut p: usize, quote: usize) -> Result<(Str
             0x00..=0x1F => return fail(Msg::BadControl, p - 1),
             // The first escape or (UTF-8) multi-byte sequence: the rest of the string
             // out of line (0129), so that this loop stays as short strings want it.
-            0x5C => return scan_rest::<LATIN1>(b, p - 1, quote, start, len, two_byte, E == UTF8),
-            _ if E == UTF8 && c >= 0x80 => {
-                return scan_rest::<LATIN1>(b, p - 1, quote, start, len, two_byte, true);
-            }
+            0x5C => return scan_one(b, p - 1, quote, start, E == UTF8, dec),
+            _ if E == UTF8 && c >= 0x80 => return scan_one(b, p - 1, quote, start, true, dec),
             _ => {
                 two_byte |= c > 0xFF;
                 len += 1;
@@ -340,10 +343,8 @@ fn scan_string<const E: u8>(b: &[u8], mut p: usize, quote: usize) -> Result<(Str
     Ok((tok, p))
 }
 
-/// `scan_string` from `p` on, `start` .. `p` scanned already (`len` units, `two_byte`):
-/// from the first escape or multi-byte sequence at `p` (or, two-byte input, from the
-/// start). One-byte input is `LATIN1` with `utf8` telling UTF-8 apart: one instance for
-/// both (a smaller module).
+/// `scan_string` of two-byte input from `p` on, `start` .. `p` scanned already (`len`
+/// units, `two_byte`).
 #[inline(never)]
 fn scan_rest<const E: u8>(
     b: &[u8],
@@ -352,7 +353,6 @@ fn scan_rest<const E: u8>(
     start: usize,
     mut len: u64,
     mut two_byte: bool,
-    utf8: bool,
 ) -> Result<(StrTok, usize), Fail> {
     let n = units_len::<E>(b);
     let mut escaped = false;
@@ -388,23 +388,6 @@ fn scan_rest<const E: u8>(
                     _ => return fail(Msg::BadEscape, p - 1),
                 }
                 len += 1;
-                // A string with escapes is likely a long text: its plain bytes up to the
-                // next one this loop must see, 8 at a time (0129). Out of line, and only
-                // here: the loop itself stays as short strings (keys) want it (0116).
-                if E != UTF16 {
-                    let k = plain_run(b, p, utf8);
-                    p += k;
-                    len += k as u64;
-                }
-            }
-            _ if utf8 && c >= 0x80 => {
-                let Some((cp, l)) = utf8_char(b, p - 1) else {
-                    return fail(Msg::BadUtf8, p - 1);
-                };
-                escaped = true;
-                p += l - 1;
-                two_byte |= cp > 0xFF;
-                len += if cp > 0xFFFF { 2 } else { 1 };
             }
             _ => {
                 two_byte |= c > 0xFF;
@@ -425,21 +408,115 @@ fn scan_rest<const E: u8>(
     Ok((tok, p))
 }
 
-/// The number of bytes from `p` before the first one `scan_string` must look at (a
-/// control, `"`, `\\`, or in UTF-8 any non-ASCII byte), counted 8 at a time: only whole
-/// words, so it may stop a few plain bytes early.
+/// `scan_string` of one-byte input (`utf8` tells UTF-8 apart) from the first escape or
+/// multi-byte sequence at `p` on, `start` .. `p` plain: scans the rest and decodes it into
+/// `dec` in the same pass, plain bytes 8 at a time. `dec` holds the whole decoded string
+/// unless a unit is above 0xFF (`two_byte`).
 #[inline(never)]
-fn plain_run(b: &[u8], p: usize, utf8: bool) -> usize {
-    let mut at = p;
-    while let Some(w) = b.get(at..at + 8) {
-        let w = u64::from_le_bytes(w.try_into().unwrap());
-        let m = super::escape_mask8(w) | if utf8 { w & 0x8080_8080_8080_8080 } else { 0 };
-        if m != 0 {
-            return at - p + (m.trailing_zeros() / 8) as usize;
+fn scan_one(
+    b: &[u8],
+    mut p: usize,
+    quote: usize,
+    start: usize,
+    utf8: bool,
+    dec: &mut Vec<u8>,
+) -> Result<(StrTok, usize), Fail> {
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    let n = b.len();
+    let mut len = (p - start) as u64;
+    let mut two_byte = false;
+    dec.clear();
+    dec.extend_from_slice(&b[start..p]);
+    loop {
+        while let Some(w) = b.get(p..p + 8) {
+            let w = u64::from_le_bytes(w.try_into().unwrap());
+            let m = super::escape_mask8(w) | if utf8 { w & HIGH } else { 0 };
+            if m != 0 {
+                let k = (m.trailing_zeros() / 8) as usize;
+                if !two_byte {
+                    dec.extend_from_slice(&w.to_le_bytes());
+                    dec.truncate(dec.len() - 8 + k);
+                }
+                p += k;
+                len += k as u64;
+                break;
+            }
+            if !two_byte {
+                dec.extend_from_slice(&w.to_le_bytes());
+            }
+            p += 8;
+            len += 8;
         }
-        at += 8;
+        if p >= n {
+            return fail(Msg::EndOfInput, quote);
+        }
+        let c = b[p];
+        p += 1;
+        match c {
+            b'"' => break,
+            0x00..=0x1F => return fail(Msg::BadControl, p - 1),
+            b'\\' => {
+                if p >= n {
+                    return fail(Msg::EndOfInput, quote);
+                }
+                let e = b[p];
+                p += 1;
+                let u = match e {
+                    b'b' => 0x08,
+                    b'f' => 0x0C,
+                    b'n' => 0x0A,
+                    b'r' => 0x0D,
+                    b't' => 0x09,
+                    b'\\' | b'/' | b'"' => e as u32,
+                    b'u' => {
+                        let mut u = 0;
+                        for _ in 0..4 {
+                            let Some(h) = hex(peek::<LATIN1>(b, p)) else {
+                                return fail(Msg::BadUnicode, p);
+                            };
+                            u = (u << 4) | h;
+                            p += 1;
+                        }
+                        u
+                    }
+                    _ => return fail(Msg::BadEscape, p - 1),
+                };
+                two_byte |= u > 0xFF;
+                if !two_byte {
+                    dec.push(u as u8);
+                }
+                len += 1;
+            }
+            _ if utf8 && c >= 0x80 => {
+                let Some((cp, l)) = utf8_char(b, p - 1) else {
+                    return fail(Msg::BadUtf8, p - 1);
+                };
+                p += l - 1;
+                two_byte |= cp > 0xFF;
+                if !two_byte {
+                    dec.push(cp as u8);
+                }
+                len += if cp > 0xFFFF { 2 } else { 1 };
+            }
+            _ => {
+                if !two_byte {
+                    dec.push(c);
+                }
+                len += 1;
+            }
+        }
     }
-    at - p
+    if len > MAX_LEN as u64 {
+        return Err(Fail::Heap(HeapError::StringTooLong));
+    }
+    let tok = StrTok {
+        start,
+        end: p - 1,
+        len: len as u32,
+        two_byte,
+        escaped: true,
+    };
+    Ok((tok, p))
 }
 
 /// Calls `f` with every decoded code unit of a (validated) string token.
@@ -485,61 +562,6 @@ fn decode_units<const E: u8>(b: &[u8], s: &StrTok, mut f: impl FnMut(u16)) {
     }
 }
 
-/// `write_string` of an escaped one-byte string from one-byte input: the runs between
-/// escapes are copied whole (0116: a long text has an escaped newline every line or so).
-/// Out of line, so that `write_string` stays small for the common unescaped strings.
-#[inline(never)]
-fn write_escaped_latin1(b: &[u8], s: &StrTok, dst: &mut [u8]) -> usize {
-    const ONES: u64 = 0x0101_0101_0101_0101;
-    let mut k = 0;
-    let mut i = s.start;
-    while i < s.end {
-        while i + 8 <= s.end && k + 8 <= dst.len() {
-            let w = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
-            dst[k..k + 8].copy_from_slice(&w.to_le_bytes());
-            let x = w ^ (ONES * 0x5C);
-            let z = x.wrapping_sub(ONES) & !x & (ONES << 7);
-            if z != 0 {
-                let n = (z.trailing_zeros() / 8) as usize;
-                k += n;
-                i += n;
-                break;
-            }
-            k += 8;
-            i += 8;
-        }
-        if i == s.end {
-            break;
-        }
-        if b[i] != b'\\' {
-            dst[k] = b[i];
-            k += 1;
-            i += 1;
-        } else {
-            // An escape (validated by the scan), decoded in place.
-            let (u, len) = match b[i + 1] {
-                b'b' => (0x08, 2),
-                b'f' => (0x0C, 2),
-                b'n' => (0x0A, 2),
-                b'r' => (0x0D, 2),
-                b't' => (0x09, 2),
-                b'u' => {
-                    let mut u = 0;
-                    for &h in &b[i + 2..i + 6] {
-                        u = (u << 4) | hex(h as u32).unwrap_or(0);
-                    }
-                    (u, 6)
-                }
-                other => (other as u32, 2),
-            };
-            dst[k] = u as u8;
-            k += 1;
-            i += len;
-        }
-    }
-    k
-}
-
 /// Writes the decoded token into the data of a flat string (`dst`, exactly sized).
 fn write_string<const E: u8>(b: &[u8], s: &StrTok, dst: &mut [u8], two_byte: bool) {
     if !s.escaped {
@@ -566,9 +588,7 @@ fn write_string<const E: u8>(b: &[u8], s: &StrTok, dst: &mut [u8], two_byte: boo
         }
     }
     let mut k = 0;
-    if E == LATIN1 && !two_byte {
-        k = write_escaped_latin1(b, s, dst);
-    } else if two_byte {
+    if two_byte {
         decode_units::<E>(b, s, |u| {
             dst[k..k + 2].copy_from_slice(&u.to_le_bytes());
             k += 2;
@@ -772,6 +792,7 @@ const KEY_CACHE: usize = 64;
 
 #[derive(Default)]
 pub struct Scratch {
+    dec: Vec<u8>,
     key_buf: Vec<u16>,
     keys: Vec<Atom>,
     shapes: Vec<u32>,
@@ -784,6 +805,7 @@ struct Parser<'a, 'o> {
     src: Src<'a>,
     opts: &'o ParseOptions,
     pos: usize,
+    dec: Vec<u8>,
     stack: Vec<Frame>,
     keys: Vec<Atom>,
     values: Vec<Value>,
@@ -825,6 +847,7 @@ impl<'a, 'o> Parser<'a, 'o> {
             src,
             opts,
             pos: 0,
+            dec: s.dec,
             stack: s.stack,
             keys: s.keys,
             values: s.values,
@@ -837,6 +860,7 @@ impl<'a, 'o> Parser<'a, 'o> {
 
     fn release(self) {
         self.heap.json_scratch = Scratch {
+            dec: self.dec,
             key_buf: self.key_buf,
             keys: self.keys,
             shapes: self.shapes,
@@ -848,7 +872,7 @@ impl<'a, 'o> Parser<'a, 'o> {
     #[inline(always)]
     fn next<const E: u8>(&mut self) -> Result<Token, Fail> {
         let b = src_bytes(self.heap, &self.src);
-        lex::<E>(b, &mut self.pos)
+        lex::<E>(b, &mut self.pos, &mut self.dec)
     }
 
     fn run<const E: u8>(&mut self) -> Result<Value, ParseError> {
@@ -1059,7 +1083,11 @@ impl<'a, 'o> Parser<'a, 'o> {
             Src::Host(h) => h,
         };
         let at = (data - dst.offset()) as usize;
-        write_string::<E>(b, s, &mut newer[at..at + nbytes], s.two_byte);
+        if E != UTF16 && s.escaped && !s.two_byte {
+            newer[at..at + nbytes].copy_from_slice(&self.dec);
+        } else {
+            write_string::<E>(b, s, &mut newer[at..at + nbytes], s.two_byte);
+        }
         Ok(Value::string(dst))
     }
 }
