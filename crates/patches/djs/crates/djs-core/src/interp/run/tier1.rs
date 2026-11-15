@@ -1060,7 +1060,31 @@ impl Plan {
                 self.prog[k].i = I::Branch { a, c, mask, to: 0 };
                 self.prog[k].fuel += cost;
                 self.fuse = None;
-                k
+                match k.checked_sub(1).map(|s| (s, self.prog[s].i)) {
+                    Some((
+                        s,
+                        I::Step {
+                            a: sa,
+                            d: sd,
+                            delta,
+                        },
+                    )) if s >= self.barrier && sa == sd && sd == a => {
+                        let br = self.prog.pop()?;
+                        let step = &mut self.prog[s];
+                        step.i = I::StepBranch {
+                            c,
+                            delta,
+                            exit: br.exit,
+                            fuel: step.fuel,
+                            mask,
+                            to: 0,
+                            x: a,
+                        };
+                        step.fuel += br.fuel;
+                        s
+                    }
+                    _ => k,
+                }
             }
             _ => {
                 self.mark(ip)?;
