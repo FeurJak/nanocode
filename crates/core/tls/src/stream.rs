@@ -293,7 +293,7 @@ where
                     Poll::Pending => write_blocked = true,
                 }
             }
-            while !self.eof && self.session.wants_read() {
+            while !self.eof && (self.session.wants_read() || write_blocked) {
                 match self.read_io(cx) {
                     Poll::Ready(Ok(0)) => self.eof = true,
                     Poll::Ready(Ok(count)) => read += count,
