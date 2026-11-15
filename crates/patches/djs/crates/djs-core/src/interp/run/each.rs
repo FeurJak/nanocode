@@ -1426,6 +1426,7 @@ fn arith<const OP: u8>(p: i32, q: i32) -> Option<i32> {
 const INT_HI: u64 = Value::int(0).to_bits() >> 32;
 const HOLE_BITS: [u8; 8] = Value::HOLE.to_bits().to_le_bytes();
 const CHUNK: usize = 8;
+const UNTIL_CHUNK: usize = 16;
 
 const BIAS: u64 = INT_HI << 32 | 0x8000_0000;
 const INTS: u64 = 1 << 32;
@@ -1453,7 +1454,24 @@ fn until_run<const OP: u8>(xs: &[[u8; 8]], q: i32, stop: bool) -> usize {
         (x | x.wrapping_add(c)) >> 32 != 0
     };
     let mut i = 0;
-    for chunk in xs.as_chunks::<CHUNK>().0 {
+    if OP == STRICT_EQ && stop {
+        let (tl, th) = (q as u32, INT_HI as u32);
+        for chunk in xs.as_chunks::<UNTIL_CHUNK>().0 {
+            let (mut any, mut all) = (0u32, u32::MAX);
+            for x in chunk {
+                let l = u32::from_le_bytes([x[0], x[1], x[2], x[3]]);
+                let h = u32::from_le_bytes([x[4], x[5], x[6], x[7]]);
+                any |= u32::from(l == tl).wrapping_neg();
+                all &= u32::from(h == th).wrapping_neg();
+            }
+            if any != 0 || all != u32::MAX {
+                break;
+            }
+            i += UNTIL_CHUNK;
+        }
+        return i + xs[i..].iter().position(bad).unwrap_or(xs.len() - i);
+    }
+    for chunk in xs.as_chunks::<UNTIL_CHUNK>().0 {
         let m = chunk.iter().fold(0, |m, x| {
             let x = (u64::from_le_bytes(*x) ^ key).wrapping_sub(lo);
             m | x | x.wrapping_add(c)
@@ -1461,7 +1479,7 @@ fn until_run<const OP: u8>(xs: &[[u8; 8]], q: i32, stop: bool) -> usize {
         if m >> 32 != 0 {
             break;
         }
-        i += CHUNK;
+        i += UNTIL_CHUNK;
     }
     i + xs[i..].iter().position(bad).unwrap_or(xs.len() - i)
 }
