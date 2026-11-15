@@ -2731,7 +2731,7 @@ impl JsonlStore {
 
     pub async fn open_home_async(home: &Path) -> Result<Self, StoreError> {
         let home = home.to_owned();
-        Self::opened(Self::start(move || Sessions::open_home(&home, false))?).await
+        Self::opened(Self::start(move || Sessions::open_home(&home, true))?).await
     }
 
     pub fn open_home_in_background(home: &Path) -> Result<Self, StoreError> {
