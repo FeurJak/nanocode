@@ -18,6 +18,8 @@ use super::{
 };
 use nanocode_durability_core::OwnerId;
 
+const RECORD_FRAME: &str = r#"{"key":"","value":},"#;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CompactionStats {
     pub before_bytes: u64,
@@ -198,6 +200,32 @@ impl Journal {
             self.restore_index();
         }
         Ok(())
+    }
+
+    pub(super) fn superseded(&self) -> bool {
+        let mut entries = HashSet::new();
+        let mut live = 0_u64;
+        for state in self.index.states.values() {
+            let entry = state.location;
+            if entries.insert(entry.position) {
+                live += entry.length as u64;
+            }
+            let within = entry.position..entry.position + entry.length as u64;
+            for (key, record) in state.records.sized() {
+                match *record {
+                    Record::Entry(location) => {
+                        if entries.insert(location.position) {
+                            live += location.length as u64;
+                        }
+                    }
+                    Record::Value { location, .. } if !within.contains(&location.position) => {
+                        live += (RECORD_FRAME.len() + key + location.length) as u64;
+                    }
+                    Record::Value { .. } => {}
+                }
+            }
+        }
+        self.index.offset.saturating_sub(live) > live
     }
 
     pub(super) fn compact(&mut self) -> Result<CompactionStats, StoreError> {

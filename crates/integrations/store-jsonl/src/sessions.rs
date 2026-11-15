@@ -1332,7 +1332,9 @@ impl Sessions {
             let summaries = &mut self.summaries;
             let stored = self.listing.change(&names(&path), || {
                 let from = identity(&fs::metadata(&path).map_err(backend)?)?;
-                opened.journal.compact()?;
+                if opened.journal.superseded() {
+                    opened.journal.compact()?;
+                }
                 opened.journal.harden()?;
                 drop(opened);
                 let compacted = identity(&fs::metadata(&path).map_err(backend)?)?;

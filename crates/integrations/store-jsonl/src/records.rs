@@ -113,6 +113,17 @@ impl RecordMap {
         self.0.values()
     }
 
+    pub(super) fn sized(&self) -> impl Iterator<Item = (usize, &Record)> {
+        self.0.iter().map(|(key, record)| {
+            let length = match key {
+                RecordKey::Blake(_) => BLAKE.len() + DIGEST_HEX,
+                RecordKey::Chunk(_) => CHUNK.len() + DIGEST_HEX,
+                RecordKey::Text(text) => text.len(),
+            };
+            (length, record)
+        })
+    }
+
     pub(super) fn iter(&self) -> impl Iterator<Item = (String, &Record)> {
         self.0.iter().map(|(key, record)| (key.text(), record))
     }
