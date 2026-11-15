@@ -18,7 +18,7 @@ default = ["raw", "full", "unicode", "embed"]
 full = ["djs-core/full"]
 # djs-core's `embed` (D3175): the base image has the builtins only Rust hosts get.
 embed = ["djs-core/embed"]
-unicode = ["regexp-unicode-props", "unicode-normalization"]
+unicode = ["djs-core/unicode", "regexp-unicode-props", "unicode-normalization"]
 regexp-unicode-props = ["djs-core/regexp-unicode-props"]
 unicode-normalization = ["djs-core/unicode-normalization"]
 # `BASE`, the image as it is: native builds (copied per VM with no decode).

@@ -254,9 +254,29 @@ strip = "symbols"
 panic = "unwind"
 codegen-units = 16
 
+# djs-core and djs-libm build once in a native build, not twice: djs-prelude's
+# build script makes the base image with djs-core as a build-dependency, which
+# build-override would compile at opt-level 0 with 256 codegen units next to the library's
+# opt-level 3 build. With the release values set on the packages, which take precedence over
+# build-override, and djs-prelude's features matching djs-embed's, cargo shares one unit.
+# Every profile that inherits release and changes these two keys repeats them here.
+[profile.release.package.djs-core]
+opt-level = 3
+codegen-units = 16
+
+[profile.release.package.djs-libm]
+opt-level = 3
+codegen-units = 16
+
 [profile.fast]
 inherits = "release"
 incremental = true
+codegen-units = 256
+
+[profile.fast.package.djs-core]
+codegen-units = 256
+
+[profile.fast.package.djs-libm]
 codegen-units = 256
 
 [profile.dist]
@@ -264,6 +284,12 @@ inherits = "release"
 lto = "fat"
 codegen-units = 1
 panic = "abort"
+
+[profile.dist.package.djs-core]
+codegen-units = 1
+
+[profile.dist.package.djs-libm]
+codegen-units = 1
 
 [profile.dist.package.rustpython-codegen]
 opt-level = "s"
@@ -323,6 +349,12 @@ opt-level = "s"
 inherits = "dist"
 opt-level = "z"
 
+[profile.lite.package.djs-core]
+opt-level = "z"
+
+[profile.lite.package.djs-libm]
+opt-level = "z"
+
 [profile.profiling]
 inherits = "release"
 debug = "full"
@@ -337,3 +369,9 @@ lto = "off"
 opt-level = "z"
 panic = "abort"
 strip = "symbols"
+
+[profile.wasm.package.djs-core]
+opt-level = "z"
+
+[profile.wasm.package.djs-libm]
+opt-level = "z"
