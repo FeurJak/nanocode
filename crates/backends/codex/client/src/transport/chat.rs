@@ -25,6 +25,8 @@ use super::{
     http::{HttpMetadata, ResponsesHttpStream, SseDecoder, map_host_error},
 };
 
+mod repair;
+
 pub const OPENROUTER_API_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const WORKERS_AI_API_BASE_URL: &str = "https://api.cloudflare.com/client/v4/accounts";
 const WORKERS_AI_MODEL_PREFIX: &str = "@cf/";
@@ -682,68 +684,45 @@ impl Registry {
         matches.next().is_none().then_some(first)
     }
 
-    fn alias_failure(&self, returned: &str) -> &'static str {
-        let declared: Vec<&ToolEntry> =
-            self.entries.iter().filter(|entry| entry.declared).collect();
-        let original = |entry: &ToolEntry| {
-            entry
-                .namespace
-                .as_deref()
-                .map_or_else(|| entry.name.clone(), |ns| format!("{ns}.{}", entry.name))
+    fn repair(&self, returned: &str) -> Option<&ToolEntry> {
+        let name = repair::name(returned);
+        if let Some(entry) = self.resolve(name) {
+            return Some(entry);
+        }
+        let spellings = |entry: &ToolEntry| {
+            let mut spellings = vec![entry.alias.clone(), entry.name.clone()];
+            if let Some(ns) = &entry.namespace {
+                spellings.extend([
+                    format!("{ns}.{}", entry.name),
+                    format!("{ns}.{}", entry.alias),
+                    format!("{ns}_{}", entry.name),
+                    format!("{ns}__{}", entry.name),
+                ]);
+            }
+            spellings
         };
-        if returned.len() > 512 {
-            return "normalize_tool_alias";
-        }
-        if declared
-            .iter()
-            .filter(|entry| returned == entry.name || returned == original(entry))
-            .count()
-            > 1
-        {
-            return "normalize_tool_alias_ambiguous";
-        }
-        let namespaced = |entry: &&&ToolEntry, name: &str, separators: &[&str]| {
-            entry.namespace.as_deref().is_some_and(|ns| {
-                separators
-                    .iter()
-                    .any(|separator| returned == format!("{ns}{separator}{name}"))
+        let unique = |matches: &dyn Fn(&str) -> bool| {
+            let mut found = self.entries.iter().filter(|entry| {
+                entry.declared && spellings(entry).iter().any(|spelling| matches(spelling))
+            });
+            let first = found.next()?;
+            found.next().is_none().then_some(first)
+        };
+        unique(&|spelling| name.eq_ignore_ascii_case(spelling)).or_else(|| {
+            unique(&|spelling| {
+                !spelling.is_empty()
+                    && name.len() > spelling.len()
+                    && name.len().is_multiple_of(spelling.len())
+                    && name.eq_ignore_ascii_case(&spelling.repeat(name.len() / spelling.len()))
             })
-        };
-        if declared
+        })
+    }
+
+    fn parameters(&self, alias: &str) -> Option<&Value> {
+        self.definitions
             .iter()
-            .any(|entry| namespaced(&entry, &entry.alias, &["."]))
-        {
-            return "normalize_tool_alias_namespace_wire";
-        }
-        if declared
-            .iter()
-            .any(|entry| namespaced(&entry, &entry.name, &["_", "__"]))
-        {
-            return "normalize_tool_alias_namespace_flat";
-        }
-        let repeated = |name: &str| {
-            !name.is_empty()
-                && returned.len() > name.len()
-                && returned.len().is_multiple_of(name.len())
-                && returned == name.repeat(returned.len() / name.len())
-        };
-        if declared.iter().any(|entry| {
-            repeated(&entry.alias) || repeated(&entry.name) || repeated(&original(entry))
-        }) {
-            return "normalize_tool_alias_repeated";
-        }
-        if returned.strip_prefix("tool_").is_some_and(|index| {
-            !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
-        }) {
-            return "normalize_tool_alias_unregistered_wire";
-        }
-        if returned == "multi_tool_use.parallel" {
-            return "normalize_tool_alias_parallel_wrapper";
-        }
-        if returned.is_empty() {
-            return "normalize_tool_alias_empty";
-        }
-        "normalize_tool_alias"
+            .find(|definition| definition["function"]["name"] == alias)
+            .map(|definition| &definition["function"]["parameters"])
     }
 
     fn by_identity(&self, namespace: Option<&str>, name: &str) -> Option<&ToolEntry> {
@@ -1005,7 +984,7 @@ fn translate(body: &Value, model: Model) -> Result<Translation, ResponsesError> 
                     json!({ "input": item.get("input").and_then(Value::as_str).unwrap_or_default() })
                         .to_string()
                 } else {
-                    json_text(item.get("arguments").unwrap_or(&Value::Null))
+                    replayable(json_text(item.get("arguments").unwrap_or(&Value::Null)))
                 };
                 let call = json!({
                     "id": call_id,
@@ -1207,6 +1186,34 @@ fn translate(body: &Value, model: Model) -> Result<Translation, ResponsesError> 
         tool_choice,
         compact,
     })
+}
+
+fn replayable(arguments: String) -> String {
+    if serde_json::from_str::<Value>(&arguments).is_ok_and(|value| value.is_object()) {
+        return arguments;
+    }
+    match repair::arguments(&arguments).map(repair::decoded) {
+        Some(object @ Value::Object(_)) => object.to_string(),
+        _ => json!({ "unparsed_arguments": arguments }).to_string(),
+    }
+}
+
+fn custom_input(text: &str) -> String {
+    let trimmed = text.trim_start();
+    if trimmed.is_empty() || !trimmed.starts_with(['{', '[', '"']) {
+        return text.to_owned();
+    }
+    match repair::arguments(text) {
+        Some(Value::String(input)) => input,
+        Some(Value::Object(arguments)) => match arguments.get("input") {
+            Some(Value::String(input)) => input.clone(),
+            _ => match (arguments.len(), arguments.values().next()) {
+                (1, Some(Value::String(input))) => input.clone(),
+                _ => text.to_owned(),
+            },
+        },
+        _ => text.to_owned(),
+    }
 }
 
 fn json_text(value: &Value) -> String {
@@ -1712,13 +1719,9 @@ impl ChatStream {
             .clone()
             .ok_or_else(|| invalid("terminal_missing"))?;
         let mut tool_calls = Vec::with_capacity(self.calls.len());
-        for (position, (index, call)) in std::mem::take(&mut self.calls).into_iter().enumerate() {
-            if index != position {
-                return Err(invalid("tool_terminal_index"));
-            }
-            let id = call.id.ok_or_else(|| invalid("tool_terminal_id_missing"))?;
+        for call in std::mem::take(&mut self.calls).into_values() {
             tool_calls.push(json!({
-                "id": id,
+                "id": call.id,
                 "type": "function",
                 "function": { "name": call.name, "arguments": call.arguments },
             }));
@@ -1975,15 +1978,16 @@ fn normalize(
             .unwrap_or_default();
         let entry = registry
             .resolve(returned)
-            .ok_or_else(|| invalid(registry.alias_failure(returned)))?;
+            .or_else(|| registry.repair(returned));
         if let Some(forced) = forced {
             let name = forced
                 .get("name")
                 .and_then(Value::as_str)
                 .unwrap_or("tool_search");
-            if entry.name != name
-                || entry.namespace.as_deref() != forced.get("namespace").and_then(Value::as_str)
-            {
+            if entry.is_none_or(|entry| {
+                entry.name != name
+                    || entry.namespace.as_deref() != forced.get("namespace").and_then(Value::as_str)
+            }) {
                 return Err(invalid("normalize_forced_tool"));
             }
         }
@@ -1992,23 +1996,6 @@ fn normalize(
                 .and_then(|function| function.get("arguments"))
                 .unwrap_or(&Value::Null),
         );
-        let arguments: Value = match serde_json::from_str(&arguments_text) {
-            Ok(arguments) => arguments,
-            Err(_) => {
-                let trimmed = arguments_text.trim_start();
-                if entry.kind == ToolKind::Custom
-                    && !trimmed.is_empty()
-                    && !trimmed.starts_with(['{', '[', '"'])
-                {
-                    json!({ "input": arguments_text })
-                } else {
-                    return Err(invalid("normalize_tool_json"));
-                }
-            }
-        };
-        if !arguments.is_object() {
-            return Err(invalid("normalize_tool_arguments"));
-        }
         let call_id = match call.get("id") {
             None | Some(Value::Null) => new_id("call"),
             Some(Value::String(id)) if !id.is_empty() => id.clone(),
@@ -2018,28 +2005,56 @@ fn normalize(
             return Err(invalid("normalize_tool_duplicate_id"));
         }
         let mut item = json!({ "id": new_id("tool"), "call_id": call_id, "status": "completed" });
+        let Some(entry) = entry else {
+            item["type"] = json!("function_call");
+            item["name"] = json!(returned);
+            item["arguments"] = json!(arguments_text);
+            output.push(item);
+            continue;
+        };
+        if entry.kind != ToolKind::ToolSearch
+            && let Some(namespace) = &entry.namespace
+        {
+            item["namespace"] = json!(namespace);
+        }
         match entry.kind {
             ToolKind::ToolSearch => {
+                let arguments = repair::arguments(&arguments_text)
+                    .map(repair::decoded)
+                    .filter(Value::is_object)
+                    .ok_or_else(|| invalid("normalize_tool_json"))?;
                 item["type"] = json!("tool_search_call");
                 item["execution"] = json!("client");
                 item["arguments"] = arguments;
             }
-            kind => {
+            ToolKind::Custom => {
+                item["type"] = json!("custom_tool_call");
                 item["name"] = json!(entry.name);
-                if let Some(namespace) = &entry.namespace {
-                    item["namespace"] = json!(namespace);
-                }
-                if kind == ToolKind::Custom {
-                    let input = arguments
-                        .get("input")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| invalid("normalize_custom_input"))?;
-                    item["type"] = json!("custom_tool_call");
-                    item["input"] = json!(input);
-                } else {
-                    item["type"] = json!("function_call");
-                    item["arguments"] = json!(arguments_text);
-                }
+                item["input"] = json!(custom_input(&arguments_text));
+            }
+            ToolKind::Function => {
+                let exact = serde_json::from_str::<Value>(&arguments_text)
+                    .ok()
+                    .filter(Value::is_object);
+                let unchanged = exact.is_some();
+                let arguments = match exact
+                    .or_else(|| repair::arguments(&arguments_text).map(repair::decoded))
+                {
+                    Some(Value::Object(mut arguments)) => {
+                        let conformed = registry
+                            .parameters(&entry.alias)
+                            .is_some_and(|parameters| repair::conform(&mut arguments, parameters));
+                        if unchanged && !conformed {
+                            arguments_text
+                        } else {
+                            Value::Object(arguments).to_string()
+                        }
+                    }
+                    _ => arguments_text,
+                };
+                item["type"] = json!("function_call");
+                item["name"] = json!(entry.name);
+                item["arguments"] = json!(arguments);
             }
         }
         output.push(item);
