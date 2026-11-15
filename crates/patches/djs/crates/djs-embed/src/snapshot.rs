@@ -1,11 +1,12 @@
 //! [`Snapshot`]: a VM image after the host's setup, compiled once and shared.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use djs_core::compiler::CompileOptions;
 use djs_core::heap::Heap;
 use djs_core::value::Value as Raw;
-use djs_core::vm::{ExecOptions, IMPORT_FN_ID, Status, Vm, VmOptions};
+use djs_core::vm::{ExecOptions, IMAGE_DEPS, IMPORT_FN_ID, ImageDeps, Status, Vm, VmOptions};
 
 use crate::instance::{answer_imports, exception, guard_vm};
 use crate::module::{Adapter, Export, SharedLoader};
@@ -227,7 +228,7 @@ impl Builder {
         let mut vm = guard_vm(|| djs_prelude::new_vm(opts))?.map_err(|_| Error::OutOfMemory)?;
         let image = guard_vm(|| self.setup(&mut vm))??;
         Ok(Snapshot(Arc::new(Inner {
-            image,
+            image: Cow::Owned(image),
             setup: self.setup_hash(),
             fingerprint: Default::default(),
             frozen_builtins: self.frozen_builtins,
@@ -498,6 +499,31 @@ impl SetupHash {
 /// The first bytes of [`Snapshot::to_bytes`].
 const MAGIC: &[u8; 8] = b"djssnap1";
 
+fn not_this_setup(why: &str) -> Error {
+    Error::Usage(format!("not a snapshot of this setup: {why}"))
+}
+
+/// The setup hash, the stored fingerprint and the image of [`Snapshot::to_bytes`] for
+/// `builder`.
+fn framed<'a>(builder: &Builder, bytes: &'a [u8]) -> Result<(u64, u64, &'a [u8]), Error> {
+    let word = |at: usize| -> Option<u64> {
+        Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
+    };
+    let head = MAGIC.len();
+    if bytes.get(..head) != Some(MAGIC) {
+        return Err(not_this_setup("not snapshot bytes"));
+    }
+    let setup = builder.setup_hash();
+    if word(head) != Some(setup) {
+        return Err(not_this_setup("another setup"));
+    }
+    let fingerprint = word(head + 8).ok_or_else(|| not_this_setup("truncated"))?;
+    let image = bytes
+        .get(head + 16..)
+        .ok_or_else(|| not_this_setup("truncated"))?;
+    Ok((setup, fingerprint, image))
+}
+
 /// A compiled setup: the image of a VM after the host's host functions, globals and setup
 /// sources, from which [`Instance`]s start. Cheap to clone (shared), `Send` and `Sync`.
 /// A host that starts often (a wasm instance per request) stores the image
@@ -507,7 +533,7 @@ const MAGIC: &[u8; 8] = b"djssnap1";
 pub struct Snapshot(Arc<Inner>);
 
 struct Inner {
-    image: Vec<u8>,
+    image: Cow<'static, [u8]>,
     /// [`Builder::setup_hash`] of the builder it comes from.
     setup: u64,
     fingerprint: crate::park::Fingerprint,
@@ -557,22 +583,10 @@ impl Snapshot {
     /// compared with its fingerprint and verified cell by cell, since it comes from
     /// storage; the host then builds the snapshot.
     pub fn from_bytes(builder: Builder, bytes: &[u8]) -> Result<Snapshot, Error> {
-        let bad = |why: &str| Error::Usage(format!("not a snapshot of this setup: {why}"));
-        let word = |at: usize| -> Option<u64> {
-            Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
-        };
-        let head = MAGIC.len();
-        if bytes.get(..head) != Some(MAGIC) {
-            return Err(bad("not snapshot bytes"));
-        }
-        let setup = builder.setup_hash();
-        if word(head) != Some(setup) {
-            return Err(bad("another setup"));
-        }
-        let image = bytes.get(head + 16..).ok_or_else(|| bad("truncated"))?;
+        let (setup, stored, image) = framed(&builder, bytes)?;
         let fingerprint = crate::park::image_fingerprint(image);
-        if word(head + 8) != Some(fingerprint) {
-            return Err(bad("the image is damaged"));
+        if stored != fingerprint {
+            return Err(not_this_setup("the image is damaged"));
         }
         let opts = vm_options(builder.memory, builder.frozen_builtins);
         let copy = image.to_vec();
@@ -581,13 +595,74 @@ impl Snapshot {
             e => Error::Usage(format!("cannot load the snapshot: {e:?}")),
         })?;
         Ok(Snapshot(Arc::new(Inner {
-            image: image.to_vec(),
+            image: Cow::Owned(image.to_vec()),
             setup,
             fingerprint: fingerprint.into(),
             frozen_builtins: builder.frozen_builtins,
             host_fns: builder.host_fns,
             modules: builder.modules,
             loader: builder.loader,
+        })))
+    }
+
+    /// [`Snapshot::from_bytes`] for bytes this build of djs made at build time and embeds
+    /// (`include_bytes!` of a build script's output): the image is borrowed, not copied, and
+    /// only its frame, the setup's hash and the image's dependency descriptor are checked,
+    /// as for djs-prelude's base image. The stored fingerprint is taken as it is.
+    pub fn from_static(builder: Builder, bytes: &'static [u8]) -> Result<Snapshot, Error> {
+        let (setup, fingerprint, image) = framed(&builder, bytes)?;
+        let deps = ImageDeps::of(image).ok_or_else(|| not_this_setup("not a heap image"))?;
+        if let Some((dep, found, expected)) = deps.first_difference(&IMAGE_DEPS) {
+            return Err(not_this_setup(&format!(
+                "the image is from a djs with another {} (image: {}; this build: {})",
+                dep.name(),
+                dep.show(found),
+                dep.show(expected)
+            )));
+        }
+        Ok(Snapshot(Arc::new(Inner {
+            image: Cow::Borrowed(image),
+            setup,
+            fingerprint: fingerprint.into(),
+            frozen_builtins: builder.frozen_builtins,
+            host_fns: builder.host_fns,
+            modules: builder.modules,
+            loader: builder.loader,
+        })))
+    }
+
+    /// The snapshot of an instance of this one after `prepare` ran on it, collected and
+    /// sealed as [`Builder::build`] leaves an image, with `key` added to the setup's hash:
+    /// for a host whose setup has a part of its own per use (globals for one tool set) on
+    /// top of a shared image, so that the part runs once and not in every call.
+    pub fn derive(
+        &self,
+        key: &[u8],
+        limits: Limits,
+        prepare: impl FnOnce(&mut Instance) -> Result<(), Error>,
+    ) -> Result<Snapshot, Error> {
+        let mut instance = self.instantiate(limits)?;
+        prepare(&mut instance)?;
+        instance.clear_call()?;
+        let image = instance.guard(|vm| -> Result<Vec<u8>, Error> {
+            vm.move_interp_to_end().map_err(|_| Error::OutOfMemory)?;
+            vm.seal().map_err(|_| Error::OutOfMemory)?;
+            if cfg!(target_arch = "wasm32") {
+                return Ok(vm.image().to_vec());
+            }
+            vm.image();
+            Ok(vm.take_heap())
+        })??;
+        let mut setup = SetupHash(self.0.setup);
+        setup.bytes(key);
+        Ok(Snapshot(Arc::new(Inner {
+            image: Cow::Owned(image),
+            setup: setup.0,
+            fingerprint: Default::default(),
+            frozen_builtins: self.0.frozen_builtins,
+            host_fns: self.0.host_fns.clone(),
+            modules: self.0.modules.clone(),
+            loader: self.0.loader.clone(),
         })))
     }
 

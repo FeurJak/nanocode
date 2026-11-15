@@ -4,6 +4,7 @@ mod cell;
 mod host;
 mod journal;
 mod memory;
+mod setup;
 
 pub use cell::{
     CellTools, RuntimeEvent, SnapshotStore, cell_memory, set_cell_memory, set_snapshot_store,

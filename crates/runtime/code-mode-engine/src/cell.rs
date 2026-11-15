@@ -9,7 +9,7 @@ use std::{
 };
 
 use djs_embed::{
-    Builder, CallId, Data, HostCall, HostFn, Instance, Limits, Snapshot, Source, Throw,
+    Builder, CallId, HostCall, HostFn, Instance, Limits, Snapshot, Source, Throw, Value as JsValue,
 };
 use nanocode_platform::Instant;
 use nanocode_sync::{Atom, Slot};
@@ -19,6 +19,11 @@ use serde_json::{Value, value::RawValue};
 use nanocode_tool_contracts::ToolOutputContent;
 
 use crate::journal::{CellJournaling, JournalEntry, JournalWriter};
+pub(crate) use crate::setup::{BOOTSTRAP_MODULE, NEXT, RUN_CELL};
+use crate::setup::{
+    CATALOG, CLEAR_TIMEOUT, CONTENT, Definitions, EXIT, LOAD, NOTIFY, PREPARE_CELL, SET_TIMEOUT,
+    SETTLE, SETTLED, STORE, TEXT, TOOL, VALUE, YIELD,
+};
 
 pub enum RuntimeEvent {
     ToolCall {
@@ -80,47 +85,9 @@ impl RuntimeEvent {
     }
 }
 
-const BOOTSTRAP: &str = include_str!("bootstrap.js");
-const CODE_TOOLS: &str = include_str!("code-tools.mjs");
-const CODE_VALUES: &str = include_str!("code-values.mjs");
+static PER_CELL_IMAGE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/code-mode.snap"));
 
-pub(crate) const BOOTSTRAP_MODULE: &str = "nanocode:bootstrap";
-pub(crate) const RUN_CELL: &str = "runCell";
 const PRELUDE_SCRIPT: &str = "nanocode:prelude";
-
-const TOOL: u32 = 1;
-const CONTENT: u32 = 2;
-const TEXT: u32 = 3;
-const LOAD: u32 = 4;
-const NOTIFY: u32 = 5;
-const YIELD: u32 = 6;
-const SET_TIMEOUT: u32 = 7;
-const CLEAR_TIMEOUT: u32 = 8;
-const VALUE: u32 = 9;
-const SETTLED: u32 = 10;
-pub(crate) const NEXT: u32 = 11;
-const CATALOG: u32 = 12;
-const QUIET: u32 = 13;
-const EXIT: u32 = 14;
-const STORE: u32 = 15;
-const SETTLE: u32 = 16;
-
-const HOST_FNS: [(u32, &str); 14] = [
-    (TOOL, "__nanocodeTool"),
-    (CONTENT, "__nanocodeContent"),
-    (TEXT, "__nanocodeText"),
-    (LOAD, "__nanocodeLoad"),
-    (STORE, "__nanocodeStore"),
-    (NOTIFY, "__nanocodeNotify"),
-    (YIELD, "__nanocodeYield"),
-    (SET_TIMEOUT, "__nanocodeSetTimeout"),
-    (CLEAR_TIMEOUT, "__nanocodeClearTimeout"),
-    (VALUE, "__nanocodeValue"),
-    (SETTLED, "__nanocodeSettled"),
-    (CATALOG, "__nanocodeCatalog"),
-    (EXIT, "__nanocodeExit"),
-    (SETTLE, "__nanocodeSettle"),
-];
 
 #[derive(Clone)]
 pub(crate) enum Unprepared {
@@ -139,41 +106,59 @@ fn build(
     prelude: Option<&str>,
     runs: PreludeRuns,
 ) -> Result<Snapshot, Unprepared> {
-    let values = CODE_VALUES
-        .split_once("export const")
-        .ok_or_else(|| {
-            Unprepared::Bootstrap("shared value helper export marker is missing".to_owned())
-        })?
-        .0;
-    let mut builder = Snapshot::builder()
-        .frozen_builtins(false)
-        .global(
-            "__nanocodeDefinitions",
-            Data::from(tools.definitions.as_str()),
-        )
-        .global(
-            "__nanocodePreludeAtSetup",
-            Data::Bool(runs == PreludeRuns::AtSetup),
-        )
-        .host_fn(HostFn::asynchronous(NEXT, "__nanocodeNext"))
-        .setup_probe(HostFn::sync(QUIET, "__nanocodeQuiet"));
-    for (id, name) in HOST_FNS {
+    let Some(source) = prelude else {
+        let builder = crate::setup::per_cell().map_err(bootstrap_error)?;
+        let shared = match Snapshot::from_static(builder.clone(), PER_CELL_IMAGE) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                nanocode_trace::warn!(%error, "the build-time Code Mode snapshot did not load; building it");
+                stored(builder)?
+            }
+        };
+        let limits = Limits {
+            memory: CELL_MEMORY.load(Ordering::Relaxed),
+            fuel: u64::MAX,
+            ..Limits::default()
+        };
+        return shared
+            .derive(tools.definitions.as_bytes(), limits, |instance| {
+                instance
+                    .call_export(
+                        BOOTSTRAP_MODULE,
+                        PREPARE_CELL,
+                        &[JsValue::Str(&tools.definitions)],
+                        |call| {
+                            Err(djs_embed::Error::Usage(format!(
+                                "host function {} was called while the tool definitions were set up",
+                                call.fn_id()
+                            )))
+                        },
+                    )
+                    .map(drop)
+            })
+            .map_err(|error| bootstrap_error(error.to_string()));
+    };
+    let definitions = Definitions::AtSetup(&tools.definitions);
+    let mut builder = crate::setup::builder(&definitions, runs == PreludeRuns::AtSetup);
+    for (id, name) in crate::bytes::HOST_FNS {
         builder = builder.host_fn(HostFn::sync(id, name));
     }
-    if let Some(source) = prelude {
-        for (id, name) in crate::bytes::HOST_FNS {
-            builder = builder.host_fn(HostFn::sync(id, name));
-        }
-        builder = builder.source(Source::script(
+    let builder = builder
+        .source(Source::script(
             PRELUDE_SCRIPT,
             format!("globalThis.__nanocodePrelude = function (tools, call) {{\n{source}\n}};\n"),
-        ));
-    }
-    let bootstrap = format!(
-        "{CODE_TOOLS}\n{values}\nexport const {RUN_CELL} = {}(createCodeTools, createValueHelpers());\n",
-        BOOTSTRAP.trim_end()
-    );
-    let builder = builder.source(Source::module(BOOTSTRAP_MODULE, bootstrap));
+        ))
+        .source(crate::setup::bootstrap(&definitions).map_err(bootstrap_error)?);
+    stored(builder)
+}
+
+fn bootstrap_error(message: String) -> Unprepared {
+    Unprepared::Bootstrap(format!(
+        "failed to compile the embedded Code Mode bootstrap: {message}"
+    ))
+}
+
+fn stored(builder: Builder) -> Result<Snapshot, Unprepared> {
     let Some(store) = SNAPSHOT_STORE.read(Clone::clone) else {
         return compile(builder);
     };

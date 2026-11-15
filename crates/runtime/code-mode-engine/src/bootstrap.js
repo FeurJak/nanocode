@@ -449,7 +449,7 @@
     }
   }
 
-  const prepareCell = function () {
+  const prepareCell = function (definitionsJson) {
     const definitions = jsonParse(definitionsJson);
     let descriptions;
     let schemas;
@@ -615,5 +615,5 @@
       }
     };
   };
-  return prepareCell();
+  return definitionsJson === undefined ? prepareCell : prepareCell(definitionsJson);
 })

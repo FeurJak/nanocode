@@ -293,7 +293,7 @@ impl Instance {
     }
 
     /// Drops the handles of the previous call.
-    fn clear_call(&mut self) -> Result<(), Error> {
+    pub(crate) fn clear_call(&mut self) -> Result<(), Error> {
         if let Some(c) = self.call.take() {
             self.guard(|vm| {
                 for h in [c.entry, c.result].into_iter().flatten() {

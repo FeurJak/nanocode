@@ -21,6 +21,9 @@ serde_json.workspace = true
 nanocode-digest.workspace = true
 nanocode-trace.workspace = true
 
+[build-dependencies]
+djs-embed.workspace = true
+
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 nanocode-executor.workspace = true
 
