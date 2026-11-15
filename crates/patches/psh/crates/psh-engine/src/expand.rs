@@ -1473,6 +1473,7 @@ pub(crate) async fn expand_sub_text(vp: &mut Vp, sub: &[u8]) -> Result<Vec<u8>, 
         ast: std::sync::Arc::new(ast),
         line_base: vp.line.saturating_sub(1),
         arith: Default::default(),
+        flat: Default::default(),
     });
     let mut out = Vec::new();
     let mut end = None;

@@ -589,6 +589,7 @@ async fn reparse_compound(
         ast: std::sync::Arc::new(ast),
         line_base: vp.line.saturating_sub(1),
         arith: Default::default(),
+        flat: Default::default(),
     });
     let (items, _) = crate::expand::expand_array_lit(vp, &code, &lit)
         .await

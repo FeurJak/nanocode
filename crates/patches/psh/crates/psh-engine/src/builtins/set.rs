@@ -365,6 +365,7 @@ async fn expand_quoted(vp: &mut Vp, raw: Vec<u8>) -> Vec<u8> {
                     ast: std::sync::Arc::new(ast),
                     line_base: 0,
                     arith: Default::default(),
+                    flat: Default::default(),
                 });
                 let line = vp.line;
                 vp.opts.set(SetOpt::Xtrace, false);

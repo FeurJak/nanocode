@@ -274,6 +274,8 @@ pub(crate) struct Code {
     /// The arithmetic words of this chunk that are literal text, parsed
     /// (`arith::literal`), by the word's span.
     pub arith: RefCell<crate::vars::NameMap<(u32, u32), Rc<crate::arith::Literal>>>,
+    /// The loops of this chunk compiled to flat code (`flat::compiled`), by span.
+    pub flat: RefCell<crate::vars::NameMap<(u32, u32), Option<Rc<crate::flat::Prog>>>>,
 }
 
 impl Code {

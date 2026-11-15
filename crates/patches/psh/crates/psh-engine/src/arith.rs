@@ -345,6 +345,7 @@ async fn expand_subscript(vp: &mut Vp, text: &[u8]) -> Result<Vec<u8>, crate::st
         ast: std::sync::Arc::new(ast),
         line_base: vp.line.saturating_sub(1),
         arith: Default::default(),
+        flat: Default::default(),
     });
     let (value, _) = Box::pin(crate::expand::expand_single(
         vp,
@@ -506,6 +507,13 @@ pub(crate) fn literal(code: &Code, word: &Word) -> Option<Rc<Literal>> {
     let lit = Rc::new(Literal { text, expr });
     code.arith.borrow_mut().insert(key, lit.clone());
     Some(lit)
+}
+
+impl Literal {
+    /// The parsed expression (`None` for blank text).
+    pub(crate) fn expr(&self) -> Option<&ArithExpr> {
+        self.expr.as_ref()
+    }
 }
 
 /// Evaluates a [`Literal`], as [`eval`] evaluates its text.

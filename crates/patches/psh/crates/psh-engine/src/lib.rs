@@ -31,6 +31,7 @@ mod escape;
 mod exec;
 mod expand;
 mod fd;
+mod flat;
 pub mod host;
 pub mod invocation;
 mod jobs;
@@ -895,6 +896,7 @@ async fn import_functions(vp: &mut Vp) {
             lines: Rc::new(LineIndex::from_bytes(&text)),
             line_base: 0,
             arith: Default::default(),
+            flat: Default::default(),
         });
         if matches!(exec::run_list(vp, &code, root).await, Ok(0)) {
             imported.push(i);
@@ -1191,6 +1193,7 @@ async fn run_chunk(
                 lines: lines.clone(),
                 line_base: 0,
                 arith: Default::default(),
+                flat: Default::default(),
             });
             match exec::run_list(vp, &code, root).await {
                 Ok(s) => {

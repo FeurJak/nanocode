@@ -368,7 +368,7 @@ async fn run_andor(vp: &mut Vp, code: &Rc<Code>, ao: &AndOr) -> R {
     Ok(status)
 }
 
-async fn andor_pipeline(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
+pub(crate) async fn andor_pipeline(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
     if p.stages.len() == 1
         && !p.negated()
         && p.time.is_none()
@@ -945,7 +945,10 @@ fn run_compound<'a>(vp: &'a mut Vp, code: &'a Rc<Code>, cmd: &'a Command) -> Loc
         CommandKind::If(c) => Box::pin(run_if(vp, code, c)),
         CommandKind::While(w) => Box::pin(async move {
             vp.loops += 1;
-            let r = run_while(vp, code, w).await;
+            let r = match crate::flat::compiled(code, cmd) {
+                Some(prog) => crate::flat::run(vp, code, &prog).await,
+                None => run_while(vp, code, w).await,
+            };
             vp.loops -= 1;
             r
         }),
@@ -954,7 +957,10 @@ fn run_compound<'a>(vp: &'a mut Vp, code: &'a Rc<Code>, cmd: &'a Command) -> Loc
         CommandKind::ArithFor(f) => Box::pin(async move {
             vp.line = code.line(cmd.span.start);
             vp.loops += 1;
-            let r = run_arith_for(vp, code, f).await;
+            let r = match crate::flat::compiled(code, cmd) {
+                Some(prog) => crate::flat::run(vp, code, &prog).await,
+                None => run_arith_for(vp, code, f).await,
+            };
             vp.loops -= 1;
             r
         }),
@@ -1090,7 +1096,7 @@ async fn define_function(
 }
 
 /// What a loop does with an unwind from its body: `Some(r)` ends the loop with `r`.
-fn loop_unwind(u: Unwind, status: i32) -> Option<R> {
+pub(crate) fn loop_unwind(u: Unwind, status: i32) -> Option<R> {
     match u {
         Unwind::Break(n) if n > 1 => Some(Err(Unwind::Break(n - 1))),
         Unwind::Break(_) => Some(Ok(status)),
@@ -1390,6 +1396,57 @@ async fn run_arith_for(vp: &mut Vp, code: &Rc<Code>, f: &psh_syntax::ArithForCom
             return Ok(1);
         }
     }
+}
+
+/// A clause of `for ((…))` the way `run_arith_for` evaluates it, for compiled loops
+/// (`flat`): the DEBUG trap, then the clause; an error gives `None`.
+pub(crate) async fn arith_clause(
+    vp: &mut Vp,
+    code: &Rc<Code>,
+    w: &psh_syntax::Word,
+) -> Result<Option<i64>, Unwind> {
+    let line = vp.line;
+    arith_for_debug(vp, code, w).await?;
+    vp.line = line;
+    match crate::now::arith_word(vp, code, w) {
+        Some(Ok(v)) => {
+            if !vp.arith_notes.is_empty() {
+                crate::arith::notes(vp).await;
+            }
+            Ok(Some(v))
+        }
+        Some(Err(msg)) => arith_error(vp, msg, "((: ").await,
+        None => arith_command(vp, code, w, "((: ", true).await,
+    }
+}
+
+/// Item `i` of a list, as `run_list` runs it (for compiled loops, `flat`).
+pub(crate) fn run_item<'a>(
+    vp: &'a mut Vp,
+    code: &'a Rc<Code>,
+    id: ListId,
+    i: usize,
+) -> LocalBoxFuture<'a, R> {
+    Box::pin(async move {
+        let item = &code.ast.list(id).items[i];
+        let p = &item.first;
+        if item.background {
+            background(vp, code, id, i).await
+        } else if item.rest.is_empty() && p.stages.len() == 1 && !p.negated() && p.time.is_none()
+        {
+            let cmd = p.stages[0].cmd;
+            if let Some(now) = crate::now::command(vp, code, cmd, true) {
+                match now {
+                    Now::Done(r) => r,
+                    Now::Later(f) => f.await,
+                }
+            } else {
+                run_command(vp, code, cmd).await
+            }
+        } else {
+            andor(vp, code, item).await
+        }
+    })
 }
 
 /// Expands and evaluates an arithmetic word for a command (`((…))`, `for ((…))`):
@@ -3482,6 +3539,7 @@ pub(crate) async fn command_subst_text(
                 ast: Arc::new(ast),
                 line_base: code.line(offset) - 1,
                 arith: Default::default(),
+                flat: Default::default(),
             });
             warn(vp, inner.ast.warnings(), |o| inner.line(o)).await;
             subst(vp, inner, root).await

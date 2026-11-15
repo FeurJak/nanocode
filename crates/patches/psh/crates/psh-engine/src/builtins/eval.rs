@@ -56,6 +56,7 @@ pub(crate) async fn run_text(vp: &mut Vp, text: &[u8], line_base: u32, origin: O
                     lines: lines.clone(),
                     line_base,
                     arith: Default::default(),
+                    flat: Default::default(),
                 });
                 status = match exec::run_list(vp, &code, root).await {
                     Err(Unwind::Abort(st)) if vp.top => st,
