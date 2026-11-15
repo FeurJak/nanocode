@@ -5772,13 +5772,16 @@ impl Registry {
                         .scopes
                         .get(&lookup.0)
                         .and_then(|scope| scope.sessions.get(&lookup.1))
-                        .filter(|session| {
-                            session.completion.awaits(revision) && session.status.wakes_parent()
+                        .filter(|session| session.status.wakes_parent())
+                        .and_then(|session| {
+                            let pending = session.completion.revision()?;
+                            (pending >= revision).then(|| {
+                                (session.status.clone(), Arc::clone(&session.marks), pending)
+                            })
                         })
-                        .map(|session| (session.status.clone(), Arc::clone(&session.marks)))
                 })
                 .await;
-            if let Some((status, lane)) = status {
+            if let Some((status, lane, revision)) = status {
                 registry.enqueue_status(
                     &key.0,
                     key.1,
