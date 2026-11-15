@@ -62,10 +62,9 @@ if not args.offline:
     constraints = literal('"Note any security-relevant instructions or constraints the user stated', [])
     voices = literal("' Only messages that actually came from the user (user-role turns)", [])
     analysis = literal('`Before providing your final summary, wrap your analysis', [constraints])
-    scratchpad = literal('`<analysis>\n[Your thought process', [])
     compact = (literal('`CRITICAL: Respond with TEXT ONLY.', [shape])
                + literal('`Your task is to create a detailed summary of the conversation so far,',
-                         ['', '', analysis, voices, scratchpad])
+                         [analysis, voices])
                + literal('`\n\nREMINDER: Do NOT call any tools.', [])
                + literal('`${e}. Tool calls will be rejected and you will fail the task.', [shape]))
     if args.write:
@@ -135,7 +134,8 @@ if args.capture:
         env.update(ANTHROPIC_API_KEY='local-capture-fixture',
                    ANTHROPIC_BASE_URL=f'http://127.0.0.1:{server.server_port}',
                    CLAUDE_CONFIG_DIR=str(config), CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1',
-                   DISABLE_AUTOUPDATER='1', ENABLE_TOOL_SEARCH='false')
+                   DISABLE_AUTOUPDATER='1', ENABLE_TOOL_SEARCH='false',
+                   CLAUDE_CODE_DISABLE_AUTO_MEMORY='1')
         command = [str(installed), '-p', 'Return captured.', '--model', manifest['model'],
                    '--no-session-persistence', '--output-format', 'json', '--setting-sources', '',
                    '--settings', '{}', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',

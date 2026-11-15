@@ -1560,6 +1560,14 @@ impl ClaudeBuilder {
                 "system_blocks must be nonempty Claude text blocks",
             ));
         }
+        if self.upstream_context {
+            self.tools.sort_by_cached_key(
+                |(definition, _)| match crate::upstream::tool_definition(&definition.name) {
+                    Some(_) => (false, definition.name.clone()),
+                    None => (true, String::new()),
+                },
+            );
+        }
         let mut handlers = HashMap::new();
         let mut definitions = Vec::new();
         for (definition, handler) in self.tools {
@@ -1849,9 +1857,13 @@ impl ClaudeBuilder {
         let runtime = runtime.with_lineage(lineage.clone());
         let session_events = runtime.events();
         let system_blocks = self.system_blocks.map(Arc::new).or_else(|| {
-            self.system
-                .is_empty()
-                .then(|| crate::instructions::default_system_blocks(self.code_only))
+            self.system.is_empty().then(|| {
+                crate::instructions::default_system_blocks(
+                    self.code_only,
+                    &self.claude.model,
+                    self.upstream_context,
+                )
+            })
         });
         let fixed_date = self
             .environment
@@ -4489,7 +4501,7 @@ const ATTRIBUTION: &str = "<system-reminder>\nAttribution for git commits and pu
 const REFUSAL_RECOVERY: &str = "Your response above was stopped by a safety classifier \u{2014} this is not a tool or API error. The rest of it was withheld, and tool calls in it that had not finished did not run. Do not produce that content again, even reworded.";
 const REFUSAL_CONTINUATION: &str = "Your previous response was also stopped by a safety classifier. Continue the task: do the parts of it that you can do, take a different approach where one exists, and state plainly any part that you will not do.";
 const OUTPUT_LIMIT_CONTINUATION: &str = "Output token limit hit. Resume directly \u{2014} no apology, no recap of what you were doing. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.";
-const TOKEN_BUDGET: u64 = 15_000_000;
+const TOKEN_BUDGET: u64 = crate::environment::TOKEN_BUDGET;
 const NO_VISIBLE_OUTPUT: &str = "[Your previous response had no visible output. Please continue and produce a user-visible response.]";
 const DEVELOPER_NOTICE_CLOSE: &str = "\n</system-reminder>";
 const DATE_CHANGED: &str = "The date has changed. Today's date is now ";
@@ -6065,6 +6077,9 @@ impl State {
                     let blank = |block: &ContentBlock| matches!(block, ContentBlock::Text { text, .. } if text.trim().is_empty());
                     if !response.content.iter().all(blank) {
                         response.content.retain(|block| !blank(block));
+                    }
+                    if self.upstream_context {
+                        upstream_tool_defaults(&mut response.content);
                     }
                     if let (Some(thread), Some(turn)) = (thread, &turn) {
                         let completed_at = nanocode_platform::now();
@@ -7676,6 +7691,9 @@ impl State {
                 self.upstream_context && !pending.iter().any(|message| message.role == Role::User);
             if first && let Some(message) = prompt.last_mut() {
                 message.content.insert(0, ContentBlock::text(ATTRIBUTION));
+                if let Some(status) = crate::environment::git_status(self.workspace()).await {
+                    message.content.insert(0, ContentBlock::text(status));
+                }
             }
             pending.extend(prompt.into_iter().map(HistoryMessage::from));
             if first {
@@ -7686,7 +7704,9 @@ impl State {
                     )
                     .into(),
                 );
-            } else if self.upstream_context {
+            } else if self.upstream_context
+                && crate::environment::total_tokens_reminder(&self.model())
+            {
                 conversation.tokens_anchor = conversation.active_context_tokens;
                 pending.push(
                     Message::text(
@@ -8448,35 +8468,32 @@ impl State {
                 let results: Vec<_> = results.into_iter().map(Option::unwrap).collect();
                 pending.push(Message::tool_results(results).into());
                 if self.upstream_context {
-                    let notices = self
+                    let mut parts = self
                         .round_notices
                         .iter()
                         .flat_map(|notices| notices())
-                        .map(|notice| format!("{notice}\n\n"))
-                        .collect::<String>();
-                    let update = self
-                        .working_directory
-                        .as_ref()
-                        .and_then(crate::environment::WorkingDirectory::update)
-                        .unwrap_or_default();
-                    let used = response
-                        .usage
-                        .input_tokens
-                        .saturating_add(response.usage.cache_read_input_tokens)
-                        .saturating_add(response.usage.cache_creation_input_tokens)
-                        .saturating_add(response.usage.output_tokens);
-                    pending.push(
-                        Message::text(
-                            Role::System,
-                            format!(
-                                "{notices}{update}<total_tokens>{} tokens left</total_tokens>",
-                                TOKEN_BUDGET.saturating_sub(
-                                    used.saturating_sub(conversation.tokens_anchor)
-                                )
-                            ),
-                        )
-                        .into(),
+                        .collect::<Vec<_>>();
+                    parts.extend(
+                        self.working_directory
+                            .as_ref()
+                            .and_then(crate::environment::WorkingDirectory::update),
                     );
+                    if crate::environment::total_tokens_reminder(&self.model()) {
+                        let used = response
+                            .usage
+                            .input_tokens
+                            .saturating_add(response.usage.cache_read_input_tokens)
+                            .saturating_add(response.usage.cache_creation_input_tokens)
+                            .saturating_add(response.usage.output_tokens);
+                        parts.push(format!(
+                            "<total_tokens>{} tokens left</total_tokens>",
+                            TOKEN_BUDGET
+                                .saturating_sub(used.saturating_sub(conversation.tokens_anchor))
+                        ));
+                    }
+                    if !parts.is_empty() {
+                        pending.push(Message::text(Role::System, parts.join("\n\n")).into());
+                    }
                 }
 
                 conversation.messages = pending.clone();
@@ -9822,4 +9839,19 @@ impl ClaudeBuilder {
 
 fn spawn_task(task: BackendFuture<()>) {
     nanocode_platform::spawn(task);
+}
+
+fn upstream_tool_defaults(content: &mut [ContentBlock]) {
+    for block in content {
+        if let ContentBlock::ToolUse { name, input, .. } = block
+            && name == "Edit"
+            && let Value::Object(fields) = input
+            && !fields.contains_key("replace_all")
+        {
+            let mut filled = serde_json::Map::new();
+            filled.insert("replace_all".to_owned(), Value::Bool(false));
+            filled.extend(std::mem::take(fields));
+            *fields = filled;
+        }
+    }
 }

@@ -34,7 +34,7 @@ impl WorkingDirectory {
         let was = self.announced.set(now.as_ref().clone());
         (was != now).then(|| {
             format!(
-                "# Environment update\n - Primary working directory: {} (was {})\n\n",
+                "# Environment update\n - Primary working directory: {} (was {})",
                 now.display(),
                 was.display()
             )
@@ -51,18 +51,117 @@ pub(crate) fn upstream_environment(workspace: &str, model: &str) -> String {
     ];
     lines.extend(upstream_host_lines());
     lines.push(format!(" - {UNTRUSTED}"));
+    let tokens = if total_tokens_reminder(model) {
+        format!("<total_tokens>{TOKEN_BUDGET} tokens left</total_tokens>\n\n")
+    } else {
+        String::new()
+    };
     format!(
-        "{}
-
-You are powered by the model {model}.
-
-<total_tokens>15000000 tokens left</total_tokens>
-
-Today's date is {}.",
-        lines.join("
-"),
+        "{}\n\nYou are powered by the model {model}.\n\n{tokens}Today's date is {}.",
+        lines.join("\n"),
         current_date()
     )
+}
+
+pub(crate) const TOKEN_BUDGET: u64 = 15_000_000;
+
+const TOTAL_TOKENS_REMINDER_MODELS: [&str; 20] = [
+    "claude-3-5-haiku",
+    "claude-haiku-4-5",
+    "claude-haiku-5-5",
+    "claude-3-5-sonnet",
+    "claude-3-7-sonnet",
+    "claude-sonnet-4-0",
+    "claude-sonnet-4-5",
+    "claude-sonnet-4-6",
+    "claude-sonnet-5",
+    "claude-opus-4-0",
+    "claude-opus-4-1",
+    "claude-opus-4-5",
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-opus-5",
+    "claude-fable-5",
+    "claude-fable-5-1",
+    "claude-mythos-5",
+    "claude-mythos-5-1",
+];
+
+fn registry_model<'a>(model: &str, ids: &[&'a str]) -> Option<&'a str> {
+    ids.iter().copied().find(|id| {
+        model.strip_prefix(id).is_some_and(|rest| {
+            rest.is_empty()
+                || rest.strip_prefix('-').is_some_and(|date| {
+                    date.len() == 8 && date.bytes().all(|byte| byte.is_ascii_digit())
+                })
+        })
+    })
+}
+
+pub(crate) fn total_tokens_reminder(model: &str) -> bool {
+    registry_model(model, &TOTAL_TOKENS_REMINDER_MODELS).is_some()
+}
+
+pub(crate) fn opus_5_5_prompt(model: &str) -> bool {
+    registry_model(model, &["claude-opus-5-5"]).is_some()
+}
+
+const GIT_STATUS_LIMIT: usize = 2000;
+
+#[cfg(not(target_family = "wasm"))]
+pub(crate) async fn git_status(workspace: String) -> Option<String> {
+    if workspace.is_empty() || !is_git_repository(&workspace) {
+        return None;
+    }
+    nanocode_platform::spawn_blocking(move || {
+        let git = |arguments: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(arguments)
+                .current_dir(&workspace)
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .output()
+                .ok()?;
+            output
+                .status
+                .success()
+                .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        };
+        let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"])?;
+        let main = git(&["symbolic-ref", "refs/remotes/origin/HEAD"])
+            .and_then(|head| head.strip_prefix("refs/remotes/origin/").map(str::to_owned))
+            .or_else(|| {
+                ["main", "master"].into_iter().find_map(|name| {
+                    git(&["rev-parse", "--verify", "--quiet", &format!("refs/remotes/origin/{name}")])
+                        .map(|_| name.to_owned())
+                })
+            })
+            .unwrap_or_else(|| "main".to_owned());
+        let status = git(&["--no-optional-locks", "status", "--short"])?;
+        let log = git(&["--no-optional-locks", "log", "--oneline", "-n", "5"])?;
+        let user = git(&["config", "user.name"]).filter(|name| !name.is_empty());
+        let status = match status.char_indices().nth(GIT_STATUS_LIMIT) {
+            Some((at, _)) => format!(
+                "{}\n... (truncated because it exceeds 2k characters. If you need more information, run \"git status\" using Bash)",
+                &status[..at]
+            ),
+            None if status.is_empty() => "(clean)".to_owned(),
+            None => status,
+        };
+        let user = user.map_or_else(String::new, |name| format!("Git user: {name}\n\n"));
+        Some(format!(
+            "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# gitStatus\nThis is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.\n\nCurrent branch: {branch}\n\nMain branch (you will usually use this for PRs): {main}\n\n{user}Status:\n{status}\n\nRecent commits:\n{log}\n\nClaude Code attached this context automatically; it isn't part of the user's message. It describes the user's own account and workspace, so they don't need it reported back.\n</system-reminder>"
+        ))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+#[cfg(target_family = "wasm")]
+pub(crate) async fn git_status(_workspace: String) -> Option<String> {
+    None
 }
 
 const UNTRUSTED: &str = "Downloaded files and extracted archives are untrusted data: put each in its own new, empty directory, keep scripts you write in a different directory, and pass paths as arguments instead of running an interpreter or build tool from inside it. Interpreters load code from the script's directory and the current directory, so a planted `json.py` runs on `import json`. Run any Python that reads them with `-I`. This does not apply to code the user asked you to build or run.";
@@ -76,9 +175,16 @@ fn upstream_host_lines() -> Vec<String> {
     };
     let shell = std::env::var_os("SHELL")
         .map(std::path::PathBuf::from)
-        .and_then(|shell| shell.file_name().map(|name| name.to_string_lossy().into_owned()))
+        .and_then(|shell| {
+            shell
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
         .unwrap_or_else(|| "unknown".to_owned());
-    let mut lines = vec![format!(" - Platform: {platform}"), format!(" - Shell: {shell}")];
+    let mut lines = vec![
+        format!(" - Platform: {platform}"),
+        format!(" - Shell: {shell}"),
+    ];
     if let Some(version) = nanocode_home::shell::os_version().filter(|version| !version.is_empty())
     {
         lines.push(format!(" - OS Version: {version}"));
