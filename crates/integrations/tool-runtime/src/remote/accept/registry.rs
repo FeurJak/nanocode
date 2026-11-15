@@ -44,6 +44,8 @@ pub struct Refusal {
 
 type Authorize = Box<dyn Fn(&str, &HeaderMap) -> Result<Binding, Refusal> + Send + Sync>;
 
+type Admit = Box<dyn Fn(&str, &RemoteCatalog) -> Result<(), String> + Send + Sync>;
+
 pub type ResolveKey = Arc<dyn Fn() -> HostFuture<'static, Option<String>> + Send + Sync>;
 
 pub const NOT_CONNECTED: &str =
@@ -256,6 +258,7 @@ struct Runtime {
 pub struct Acceptor {
     pub(super) options: AcceptorOptions,
     pub(super) authorize: Authorize,
+    pub(super) admit: Admit,
     requests: Arc<dyn HandRequests>,
     runtimes: Atom<HashMap<String, Runtime>>,
     sockets: AtomicU64,
@@ -317,6 +320,15 @@ impl Acceptor {
         requests: Arc<dyn HandRequests>,
         authorize: impl Fn(&str, &HeaderMap) -> Result<Binding, Refusal> + Send + Sync + 'static,
     ) -> (Arc<Self>, mpsc::Receiver<String>) {
+        Self::admitting(options, requests, authorize, |_, _| Ok(()))
+    }
+
+    pub fn admitting(
+        options: AcceptorOptions,
+        requests: Arc<dyn HandRequests>,
+        authorize: impl Fn(&str, &HeaderMap) -> Result<Binding, Refusal> + Send + Sync + 'static,
+        admit: impl Fn(&str, &RemoteCatalog) -> Result<(), String> + Send + Sync + 'static,
+    ) -> (Arc<Self>, mpsc::Receiver<String>) {
         let (attached, attaches) = mpsc::channel(options.attaches_queued_max);
         let changes = Arc::new(Changes {
             count: AtomicU64::new(0),
@@ -325,6 +337,7 @@ impl Acceptor {
         let acceptor = Self {
             options,
             authorize: Box::new(authorize),
+            admit: Box::new(admit),
             requests,
             runtimes: Atom::default(),
             sockets: AtomicU64::new(0),

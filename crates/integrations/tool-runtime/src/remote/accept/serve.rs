@@ -7,7 +7,9 @@ use nanocode_http::server::{Options, Reply, Request, serve};
 use nanocode_http::wire;
 use nanocode_io::{AsyncRead, AsyncWrite, ReadBuf};
 use nanocode_sync::{Duplex, SinkExt, StreamExt};
-use nanocode_websocket::{Message, WebSocketConfig, accept_hdr_async_with_config, server};
+use nanocode_websocket::{
+    CloseCode, CloseFrame, Message, WebSocketConfig, accept_hdr_async_with_config, server,
+};
 
 use super::registry::{Acceptor, Binding};
 use crate::remote::{MessageWriter, SocketMessage, read_catalog, websocket};
@@ -142,7 +144,7 @@ impl Acceptor {
         let key = bound
             .ok_or("a handshake that passed names its binding")?
             .key;
-        let (sink, stream) = socket.split();
+        let (mut sink, stream) = socket.split();
         let mut stream = stream.map(|message| message.map(Frame));
         let first = async {
             match stream.next().await {
@@ -154,6 +156,14 @@ impl Acceptor {
         let catalog = read_catalog(first, self.options.catalog_timeout, limit)
             .await
             .map_err(|error| format!("hand {key}: {error}"))?;
+        if let Err(reason) = (self.admit)(&key, &catalog) {
+            let close = CloseFrame {
+                code: CloseCode::Policy,
+                reason: reason.as_str().into(),
+            };
+            drop(sink.send(Message::Close(Some(close))).await);
+            return Err(format!("hand {key} refused: {reason}"));
+        }
         let sink = sink
             .with(|frame: Frame| std::future::ready(Ok::<_, nanocode_websocket::Error>(frame.0)));
         let (writer, writing) = MessageWriter::new(sink);
