@@ -887,7 +887,7 @@ impl Parser<'_, '_> {
                     false,
                     (is_async, is_gen),
                 )?;
-                self.declare_function(hidden, child, tok.start)?;
+                self.declare_function(hidden, child, tok.start, false)?;
                 local(self, hidden, tok.start);
                 return Ok(());
             }

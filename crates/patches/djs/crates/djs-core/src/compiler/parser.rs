@@ -530,7 +530,20 @@ impl<'a, 'h> Parser<'a, 'h> {
                 || (crate::MODULES && self.f.kind == FuncKind::Module)
                 || self.strip,
         );
+        let mut directives = true;
         while self.tok.kind != TokenKind::Eof {
+            if directives {
+                directives = self.is(TokenKind::String);
+                if directives {
+                    let tok = self.tok;
+                    let next = self.peek();
+                    let ends = matches!(next.kind, TokenKind::Semicolon | TokenKind::Eof)
+                        || next.newline_before();
+                    self.f.use_strict |=
+                        ends && !tok.has_escape() && self.lx.string_content(&tok) == b"use strict";
+                    directives = ends;
+                }
+            }
             self.parse_statement_list_item()?;
         }
         self.end_using_list(using);
@@ -559,6 +572,7 @@ impl<'a, 'h> Parser<'a, 'h> {
     pub(super) fn finish_unit_with(
         mut self,
     ) -> PResult<(Ref, Option<Erased>, Option<Vec<crate::heap::Atom>>)> {
+        self.settle_annexb();
         self.end_async_region();
         let top = core::mem::replace(&mut self.f, FuncState::vacant());
         self.done[0] = Some(top);
@@ -612,6 +626,7 @@ impl<'a, 'h> Parser<'a, 'h> {
     /// [`Parser::end_function`] into a child index reserved earlier with
     /// [`Parser::reserve_child`] (a class constructor, whose `fclosure` comes first).
     pub fn end_function_at(&mut self, reserved: Option<u32>) -> PResult<u32> {
+        self.settle_annexb();
         self.end_async_region();
         let s = self
             .stack
@@ -1217,7 +1232,13 @@ impl<'a, 'h> Parser<'a, 'h> {
 
     /// Declares a function declaration's name in the current scope (hoisted to the
     /// scope's entry, docs/compiler.md 5.5) and registers the child that initializes it.
-    pub fn declare_function(&mut self, name: Atom, child: u32, pos: u32) -> PResult<()> {
+    pub fn declare_function(
+        &mut self,
+        name: Atom,
+        child: u32,
+        pos: u32,
+        annexb: bool,
+    ) -> PResult<()> {
         let scope = self.scope;
         let v = if scope == self.f.var_scope {
             // Like `var` at the function level: it may share a binding with a `var`,
@@ -1234,8 +1255,8 @@ impl<'a, 'h> Parser<'a, 'h> {
                 }
             }
         } else {
-            // In a block: lexical (strict mode, no Annex B).
-            if self.f.find_in_scope(scope, name).is_some()
+            let found = self.f.find_in_scope(scope, name);
+            if found.is_some_and(|v| !annexb || self.f.vars[v as usize].kind != VarKind::Func)
                 || self.catch_param(name).is_some()
                 || self
                     .f
@@ -1245,7 +1266,16 @@ impl<'a, 'h> Parser<'a, 'h> {
             {
                 return syntax(pos, "invalid redefinition of lexical identifier");
             }
-            self.f.add_var(name, VarKind::Func, scope)
+            let v = found.unwrap_or_else(|| self.f.add_var(name, VarKind::Func, scope));
+            if annexb {
+                let pos = self.prev_end;
+                let get = self.name_ref(name, pos);
+                self.code().name_get(get);
+                let put = self.name_ref(name, pos);
+                self.code().name_put(put);
+                self.f.annexb.push_out((v, put));
+            }
+            v
         };
         let var = &mut self.f.vars[v as usize];
         if var.kind == VarKind::Var {
@@ -1260,6 +1290,59 @@ impl<'a, 'h> Parser<'a, 'h> {
             self.note_export(name, pos);
         }
         Ok(())
+    }
+
+    pub fn sloppy(&self) -> bool {
+        !(self.f.use_strict
+            || self.class_depth > 0
+            || (crate::MODULES && self.f.kind == FuncKind::Module)
+            || self.stack.iter().any(|s| s.f.use_strict))
+    }
+
+    pub fn settle_annexb(&mut self) {
+        let f = &mut self.f;
+        let vs = f.var_scope;
+        for i in 0..f.annexb.len() {
+            let (v, put) = f.annexb[i];
+            let name = f.vars[v as usize].name;
+            let mut s = f.scopes[f.vars[v as usize].scope as usize].parent;
+            let mut ok = true;
+            while let Some(sc) = s {
+                if let Some(w) = f.find_in_scope(sc, name) {
+                    let k = f.vars[w as usize].kind;
+                    if k.is_lexical()
+                        || (k == VarKind::Func && sc != vs)
+                        || k == VarKind::Param
+                        || (k == VarKind::CatchParam
+                            && f.scopes.iter().any(|b| {
+                                b.kind == ScopeKind::CatchBody && b.parent == Some(sc)
+                            }))
+                    {
+                        ok = false;
+                        break;
+                    }
+                }
+                if sc == vs {
+                    break;
+                }
+                s = f.scopes[sc as usize].parent;
+            }
+            if ok
+                && vs != BODY_SCOPE
+                && f.find_in_scope(BODY_SCOPE, name)
+                    .is_some_and(|w| f.vars[w as usize].kind == VarKind::Param)
+            {
+                ok = false;
+            }
+            if !ok {
+                continue;
+            }
+            if f.find_in_scope(vs, name).is_none() {
+                let w = f.add_var(name, VarKind::Var, vs);
+                f.vars[w as usize].global = f.kind == FuncKind::Script;
+            }
+            f.refs[put as usize].scope = vs;
+        }
     }
 
     /// The innermost function with its own `this`/`arguments`/`new.target` (not an

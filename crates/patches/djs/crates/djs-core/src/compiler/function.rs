@@ -34,7 +34,8 @@ impl Parser<'_, '_> {
         self.next()?;
         let flavor = (is_async, is_gen);
         let child = self.parse_function_rest(FuncKind::Normal, name, start, false, flavor)?;
-        self.declare_function(name, child, pos)
+        let annexb = !is_async && !is_gen && self.sloppy();
+        self.declare_function(name, child, pos, annexb)
     }
 
     /// A function expression in primary position, with the current token at

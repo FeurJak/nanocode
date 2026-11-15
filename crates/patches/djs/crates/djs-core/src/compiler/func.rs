@@ -335,6 +335,7 @@ pub(super) struct FuncState {
     /// The construct temporaries (`VarKind::Temp`, compiler/temps.rs): the binding, the
     /// construct and its source offset, which name its slot (D2721, D2732).
     pub temps: Vec<(VarId, &'static str, u32)>,
+    pub annexb: Vec<(VarId, u32)>,
     scope_pool: Vec<Scope>,
 }
 
@@ -425,6 +426,7 @@ pub(super) struct Spare {
     param_props: Vec<Atom>,
     index: VarIndex,
     temps: Vec<(VarId, &'static str, u32)>,
+    annexb: Vec<(VarId, u32)>,
     scope_pool: Vec<Scope>,
 }
 
@@ -465,6 +467,7 @@ impl FuncState {
             param_props,
             index,
             temps,
+            annexb,
             mut scope_pool,
         } = spare;
         if open {
@@ -525,6 +528,7 @@ impl FuncState {
             var_scope: BODY_SCOPE,
             index,
             temps,
+            annexb,
             scope_pool,
         }
     }
@@ -546,6 +550,7 @@ impl FuncState {
             mut param_props,
             mut index,
             mut temps,
+            mut annexb,
             mut scope_pool,
             ..
         } = self;
@@ -568,6 +573,7 @@ impl FuncState {
         param_props.clear();
         index.clear();
         temps.clear();
+        annexb.clear();
         Spare {
             children,
             code,
@@ -584,6 +590,7 @@ impl FuncState {
             param_props,
             index,
             temps,
+            annexb,
             scope_pool,
         }
     }

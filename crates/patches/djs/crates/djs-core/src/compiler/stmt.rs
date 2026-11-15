@@ -383,7 +383,7 @@ impl Parser<'_, '_> {
         let l_else = self.new_label();
         self.code().jump_if_false(l_else);
         let then = self.tok.start;
-        self.parse_statement()?;
+        self.parse_if_body()?;
         self.syn_part(Role::Then, then, self.prev_end);
         if self.eat(TokenKind::Else)? {
             let l_end = self.new_label();
@@ -394,7 +394,7 @@ impl Parser<'_, '_> {
             if self.is(TokenKind::If) {
                 self.parse_if_chain(l_end)?;
             } else {
-                self.parse_statement()?;
+                self.parse_if_body()?;
             }
             self.syn_part(Role::Else, other, self.prev_end);
             self.place(l_end);
@@ -403,6 +403,16 @@ impl Parser<'_, '_> {
         }
         self.syn_close();
         Ok(())
+    }
+
+    fn parse_if_body(&mut self) -> PResult<()> {
+        if self.is(TokenKind::Function) && self.peek().kind != TokenKind::Star && self.sloppy() {
+            self.push_scope(ScopeKind::Block)?;
+            self.parse_function_declaration(self.tok.start, false)?;
+            self.pop_scope();
+            return Ok(());
+        }
+        self.parse_statement()
     }
 
     /// The `if` of an `else if`, sharing the chain's end label.
@@ -419,7 +429,7 @@ impl Parser<'_, '_> {
             let l_else = self.new_label();
             self.code().jump_if_false(l_else);
             let then = self.tok.start;
-            self.parse_statement()?;
+            self.parse_if_body()?;
             self.syn_part(Role::Then, then, self.prev_end);
             if !self.eat(TokenKind::Else)? {
                 self.place(l_else);
@@ -429,7 +439,7 @@ impl Parser<'_, '_> {
             self.place(l_else);
             if !self.is(TokenKind::If) {
                 let other = self.tok.start;
-                self.parse_statement()?;
+                self.parse_if_body()?;
                 self.syn_part(Role::Else, other, self.prev_end);
                 break;
             }
