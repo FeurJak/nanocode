@@ -22,6 +22,7 @@ pub use nanocode_agent_core::ClaudeModel;
 
 mod deadline;
 pub use deadline::Deadline;
+mod finish_check;
 
 mod agent;
 pub use agent::{

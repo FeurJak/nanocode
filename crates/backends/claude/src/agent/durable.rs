@@ -146,6 +146,8 @@ pub(super) struct Cursor {
     #[serde(default)]
     pub(super) stop_hook_active: bool,
     #[serde(default)]
+    pub(super) finish_checked: bool,
+    #[serde(default)]
     pub(super) instruction_revision: Option<u64>,
 
     #[serde(default)]
@@ -567,6 +569,7 @@ impl State {
             recovered_code_index: None,
             lifecycle_turn_id: candidate_id("lifecycle"),
             stop_hook_active: false,
+            finish_checked: false,
             instruction_revision: None,
             snapshot: Snapshot::default(),
             template,

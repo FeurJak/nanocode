@@ -162,7 +162,6 @@ impl RuntimeBackend for ClaudeHarness {
             .is_some_and(|direct_tools_for| direct_tools_for(&spec));
         let direct_subagents = self.direct_subagents;
         let deadline = self.deadline;
-        #[cfg(not(target_family = "wasm"))]
         let headless = self.headless;
         Box::pin(async move {
             let remote = settings
@@ -208,6 +207,7 @@ impl RuntimeBackend for ClaudeHarness {
             if let Some(deadline) = deadline {
                 builder = builder.deadline(deadline);
             }
+            builder = builder.headless(headless);
             #[cfg(not(target_family = "wasm"))]
             if direct {
                 builder = builder.upstream_web().upstream_context();

@@ -770,6 +770,7 @@ pub struct ClaudeBuilder {
     dynamic_tools: Vec<DynamicToolsFactory>,
     tool_hooks: Vec<Arc<dyn crate::ClaudeToolHooks>>,
     deadline: Option<crate::Deadline>,
+    headless: bool,
     spawn_factory: Option<Arc<dyn AgentFactory>>,
     child_journal: Option<nanocode_agent_core::backend::ChildJournal>,
     host_context: Option<Arc<str>>,
@@ -847,6 +848,7 @@ impl ClaudeBuilder {
             dynamic_tools: Vec::new(),
             tool_hooks: Vec::new(),
             deadline: None,
+            headless: false,
             spawn_factory: None,
             child_journal: None,
             host_context: None,
@@ -1233,6 +1235,11 @@ impl ClaudeBuilder {
 
     pub const fn deadline(mut self, deadline: crate::Deadline) -> Self {
         self.deadline = Some(deadline);
+        self
+    }
+
+    pub const fn headless(mut self, headless: bool) -> Self {
+        self.headless = headless;
         self
     }
 
@@ -1972,6 +1979,7 @@ impl ClaudeBuilder {
             turn_hold,
             round_notices,
             deadline: self.deadline.map(crate::deadline::Reminders::new),
+            headless: self.headless,
             working_directory: working_directory.map(crate::environment::WorkingDirectory::new),
             nested_tools,
             recovery,
@@ -3599,6 +3607,7 @@ struct State {
     turn_hold: Vec<ToolCleanup>,
     round_notices: Vec<RoundNotices>,
     deadline: Option<crate::deadline::Reminders>,
+    headless: bool,
     working_directory: Option<crate::environment::WorkingDirectory>,
     lifecycle_opened: Atom<Option<String>>,
     subagent_type: Option<String>,
@@ -8772,6 +8781,25 @@ impl State {
             }
             if cancel.is_cancelled() {
                 return Err(NanocodeError::TurnCancelled);
+            }
+            if self.headless
+                && !cursor.finish_checked
+                && self.lineage.root_session_id == self.session_id
+                && !self
+                    .deadline
+                    .as_ref()
+                    .is_some_and(crate::deadline::Reminders::last_passed)
+            {
+                cursor.finish_checked = true;
+                pending.push(Message::text(Role::User, crate::finish_check::NOTICE).into());
+                conversation.messages = pending.clone();
+                cursor.output_continuations = 0;
+                cursor.index = index + 1;
+                self.retain_pending(&mut cursor, &pending);
+                cursor.usage = usage.clone();
+                self.defer_cursor(&mut cursor, conversation, journal)
+                    .await?;
+                continue;
             }
 
             conversation.messages = pending.clone();

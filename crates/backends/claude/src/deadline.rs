@@ -130,6 +130,10 @@ impl Reminders {
         }
     }
 
+    pub(crate) fn last_passed(&self) -> bool {
+        self.deadline.passed(self.deadline.remaining()) == REMINDER_PERCENTS.len()
+    }
+
     pub(crate) fn notice(&self) -> Option<String> {
         let remaining = self.deadline.remaining();
         let passed = self.deadline.passed(remaining);
