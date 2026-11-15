@@ -268,6 +268,9 @@ pub fn run_with(clients: ModelClients) -> ExitCode {
     .then(|| clients.warming())
     .flatten();
     let one_shot = matches!(cli.command, Some(Command::Exec(_)));
+    if one_shot {
+        drop(nanocode::durability::drive_on(runtime.handle().clone()));
+    }
     let paying = match closing.as_mut().and_then(tempo::Closing::take_start) {
         #[cfg(unix)]
         Some(start) if one_shot => {

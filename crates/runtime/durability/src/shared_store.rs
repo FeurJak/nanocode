@@ -1990,13 +1990,21 @@ fn stopped() -> StoreError {
 }
 
 #[cfg(not(target_family = "wasm"))]
+static RUNTIME: std::sync::OnceLock<Option<nanocode_executor::Handle>> = std::sync::OnceLock::new();
+
+#[cfg(not(target_family = "wasm"))]
+pub fn drive_on(runtime: nanocode_executor::Handle) -> Result<(), nanocode_executor::Handle> {
+    RUNTIME
+        .set(Some(runtime))
+        .map_err(|runtime| runtime.expect("drive_on sets a runtime"))
+}
+
+#[cfg(not(target_family = "wasm"))]
 pub(crate) fn spawn_driver(driver: impl Future<Output = ()> + Send + 'static) -> crate::Result<()> {
     if let Some(host) = nanocode_platform::host() {
         host.spawn(Box::pin(driver));
         return Ok(());
     }
-    static RUNTIME: std::sync::OnceLock<Option<nanocode_executor::Handle>> =
-        std::sync::OnceLock::new();
     let runtime = RUNTIME
         .get_or_init(|| {
             let runtime = nanocode_executor::Builder::new_current_thread()

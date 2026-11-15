@@ -49,6 +49,8 @@ pub use session::{
     StepRecovery, StoredSteer, TitleChange, WeakDurableSession, WriteOutcome,
 };
 pub use shared_store::SharedStore;
+#[cfg(not(target_family = "wasm"))]
+pub use shared_store::drive_on;
 pub use state::{
     DurableState, IdentifiedSteerReceipt, OperationState, OperationStatus, SteerState, StepState,
     StepStatus, Transition,
