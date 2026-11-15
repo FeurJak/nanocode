@@ -81,13 +81,30 @@ pub enum Record {
         cell: u64,
         session: String,
     },
+    Groups {
+        groups: Vec<(u64, u64, u64)>,
+    },
     Host {
         key: String,
         value: Box<RawValue>,
     },
+    Index {
+        first: String,
+        row: u64,
+        rows: u64,
+    },
     Model {
         response: Box<RawValue>,
         turn: String,
+    },
+    Owner {
+        checkpoint: bool,
+        full: u64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        legacy: bool,
+        owner: String,
+        sections: Vec<(u64, u64)>,
+        written: u64,
     },
     Recovery {
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -396,10 +396,10 @@ impl LogHost for MemoryLog {
         to: u64,
     ) -> StoreFuture<'a, Result<Vec<(u64, String)>, StoreError>> {
         let rows = self.memory.read(|memory| {
+            let scope: Arc<str> = Arc::from(scope);
             memory
                 .rows
-                .iter()
-                .filter(|((owner, seq), _)| **owner == *scope && (from..to).contains(seq))
+                .range((Arc::clone(&scope), from)..(scope, to))
                 .map(|((_, seq), body)| (*seq, body.to_string()))
                 .collect()
         });

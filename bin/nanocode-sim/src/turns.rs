@@ -71,6 +71,7 @@ pub enum TurnMutation {
     ResumeRedispatchesRunning,
     RetireSkipped,
     SealSkipped,
+    SectionsKept,
     SectionsPruned,
     SnapshotKept,
     SnapshotRowsIgnored,
@@ -79,7 +80,7 @@ pub enum TurnMutation {
 }
 
 impl TurnMutation {
-    const ALL: [Self; 22] = [
+    const ALL: [Self; 23] = [
         Self::None,
         Self::AckBufferedAdmission,
         Self::AckBufferedResult,
@@ -97,6 +98,7 @@ impl TurnMutation {
         Self::ResumeRedispatchesRunning,
         Self::RetireSkipped,
         Self::SealSkipped,
+        Self::SectionsKept,
         Self::SectionsPruned,
         Self::SnapshotKept,
         Self::SnapshotRowsIgnored,
@@ -129,6 +131,7 @@ impl TurnMutation {
             Self::ResumeRedispatchesRunning => "resume_redispatches_running",
             Self::RetireSkipped => "retire_skipped",
             Self::SealSkipped => "seal_skipped",
+            Self::SectionsKept => "sections_kept",
             Self::SectionsPruned => "sections_pruned",
             Self::SnapshotKept => "snapshot_kept",
             Self::SnapshotRowsIgnored => "snapshot_rows_ignored",
@@ -186,6 +189,7 @@ pub struct TurnOptions {
     pub calm: bool,
     pub event_bytes: Option<usize>,
     pub long: Option<u64>,
+    pub owners: Option<u64>,
     pub retain: Option<usize>,
     pub snapshot_ratio: usize,
     pub snapshot_rows: Option<usize>,
@@ -1231,7 +1235,9 @@ impl Sim {
                     self.options.mutation == TurnMutation::ArchiveDropsEvents,
                     self.options.mutation != TurnMutation::TailRowsAppended,
                     self.options.mutation == TurnMutation::SectionsPruned,
+                    self.options.mutation == TurnMutation::SectionsKept,
                 )
+                .owners(self.options.owners)
                 .single_snapshot(self.options.reopen_row_limit.is_none())
                 .collect_live(self.options.mutation == TurnMutation::ContentCollectedLive)
                 .read_unloaded(self.options.mutation == TurnMutation::PartReadUnloaded),

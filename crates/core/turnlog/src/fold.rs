@@ -69,26 +69,68 @@ pub(crate) struct Section {
     pub(crate) rows: u64,
 }
 
-#[derive(Clone, Debug)]
-enum Owner {
-    Cold {
-        checkpoint: bool,
-        pending: Vec<Record>,
-        sections: Vec<Section>,
-    },
-    Dirty {
-        sections: Vec<Section>,
-    },
-    Grown {
-        fresh: BTreeSet<String>,
-        sections: Vec<Section>,
-    },
-    Warm {
-        sections: Vec<Section>,
-    },
+pub(crate) type Indexed<'a> = Option<(&'a BTreeMap<String, Page>, &'a BTreeMap<u64, (u64, u64)>)>;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Entry {
+    pub(crate) checkpoint: bool,
+    pub(crate) full: u64,
+    pub(crate) legacy: bool,
+    pub(crate) sections: Vec<Section>,
+    pub(crate) written: u64,
 }
 
-pub(crate) type Group = (Section, Vec<(String, bool)>);
+#[derive(Clone, Debug, Default)]
+struct Delta {
+    cells: Vec<Record>,
+    checkpoint: bool,
+    keys: BTreeSet<String>,
+}
+
+impl Delta {
+    fn note(&mut self, record: &Record) {
+        match record {
+            Record::Cell { .. } | Record::Forget { .. } => self.cells.push(record.clone()),
+            Record::Checkpoint { .. } => self.checkpoint = true,
+            Record::Stored { key, .. } if !self.keys.contains(key) => {
+                self.keys.insert(key.clone());
+            }
+            _ => {}
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.cells.is_empty() && !self.checkpoint && self.keys.is_empty()
+    }
+}
+
+#[derive(Clone, Debug)]
+enum Owner {
+    Cold { entry: Entry, pending: Vec<Record> },
+    Waiting { pending: Vec<Record> },
+    Warm { delta: Delta, entry: Entry },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Page {
+    Cold(Section),
+    Loaded(Section),
+}
+
+impl Page {
+    const fn section(self) -> Section {
+        match self {
+            Self::Cold(section) | Self::Loaded(section) => section,
+        }
+    }
+}
+
+pub(crate) struct Plan {
+    pub(crate) groups: BTreeMap<u64, (u64, u64)>,
+    pub(crate) kept: BTreeMap<String, Page>,
+    pub(crate) pages: Vec<(String, Vec<Record>)>,
+    pub(crate) superseded: Vec<std::ops::Range<u64>>,
+}
 
 #[derive(Clone, Debug)]
 struct Links {
@@ -123,6 +165,7 @@ pub struct Fold {
     dead: BTreeMap<String, String>,
     ends: u64,
     events: Vec<Event>,
+    groups: BTreeMap<u64, (u64, u64)>,
     hot_bytes: usize,
     hosts: BTreeMap<String, Box<RawValue>>,
     index: BTreeMap<String, usize>,
@@ -132,6 +175,7 @@ pub struct Fold {
     marks: BTreeMap<String, Vec<String>>,
     models: BTreeMap<String, Vec<Box<RawValue>>>,
     owners: BTreeMap<String, Owner>,
+    pages: BTreeMap<String, Page>,
     read: BTreeSet<String>,
     segment_row: u64,
     segments: Vec<Segment>,
@@ -158,6 +202,13 @@ fn owner_of(record: &Record) -> Option<&str> {
     match record {
         Record::Cell { session, .. } | Record::Forget { session, .. } => Some(session),
         Record::Checkpoint { state, .. } => Some(state),
+        Record::Stored { key, .. } => key.contains('\n').then_some(key.as_str()),
+        _ => None,
+    }
+}
+
+fn legacy_owner_of(record: &Record) -> Option<&str> {
+    match record {
         Record::Stored { key, .. } => key.split_once('\n').map(|(state, content)| {
             if content.starts_with("b3:") {
                 &key[..=state.len()]
@@ -165,12 +216,25 @@ fn owner_of(record: &Record) -> Option<&str> {
                 state
             }
         }),
-        _ => None,
+        record => owner_of(record),
     }
 }
 
-pub(crate) fn appended(owner: &str) -> bool {
-    owner.ends_with('\n')
+pub(crate) fn legacy_name(key: &str) -> Option<String> {
+    let record = Record::Stored {
+        key: key.to_owned(),
+        value: String::new(),
+    };
+    legacy_owner_of(&record)
+        .filter(|owner| *owner != key)
+        .map(str::to_owned)
+}
+
+fn wait(pending: &mut Vec<Record>, record: Record) {
+    if matches!(record, Record::Checkpoint { .. }) {
+        pending.retain(|waiting| !matches!(waiting, Record::Checkpoint { .. }));
+    }
+    pending.push(record);
 }
 
 impl Fold {
@@ -183,7 +247,7 @@ impl Fold {
         }
         crate::record::each(body, |record| {
             if let Some(pending) = self.defer(&record) {
-                pending.push(record);
+                wait(pending, record);
                 return Ok(());
             }
             self.take(record, Some(seq))
@@ -203,59 +267,145 @@ impl Fold {
         }
     }
 
+    fn page_of(&self, owner: &str) -> Option<(&String, &Page)> {
+        self.pages
+            .range::<str, _>((Bound::Unbounded, Bound::Included(owner)))
+            .next_back()
+    }
+
+    fn page_end(&self, first: &str) -> Option<&String> {
+        self.pages
+            .range::<str, _>((Bound::Excluded(first), Bound::Unbounded))
+            .next()
+            .map(|(next, _)| next)
+    }
+
     fn defer(&mut self, record: &Record) -> Option<&mut Vec<Record>> {
         let owner = owner_of(record)?;
-        let cold = match self.owners.get_mut(owner) {
-            Some(state) => match state {
-                Owner::Cold { .. } => true,
-                Owner::Warm { sections } => {
-                    let sections = std::mem::take(sections);
-                    *state = if appended(owner) {
-                        Owner::Grown {
-                            fresh: BTreeSet::new(),
-                            sections,
-                        }
-                    } else {
-                        Owner::Dirty { sections }
-                    };
-                    false
+        if !self.owners.contains_key(owner) {
+            let state = if matches!(self.page_of(owner), Some((_, Page::Cold(_)))) {
+                Owner::Waiting {
+                    pending: Vec::new(),
                 }
-                Owner::Dirty { .. } | Owner::Grown { .. } => false,
-            },
-            None => {
-                self.owners.insert(
-                    owner.to_owned(),
-                    if appended(owner) {
-                        Owner::Grown {
-                            fresh: BTreeSet::new(),
-                            sections: Vec::new(),
-                        }
-                    } else {
-                        Owner::Dirty {
-                            sections: Vec::new(),
-                        }
-                    },
-                );
-                false
-            }
-        };
-        if cold {
-            return match self.owners.get_mut(owner) {
-                Some(Owner::Cold { pending, .. }) => Some(pending),
-                _ => None,
+            } else {
+                Owner::Warm {
+                    delta: Delta::default(),
+                    entry: Entry::default(),
+                }
             };
+            self.owners.insert(owner.to_owned(), state);
         }
-        if let (Record::Stored { key, .. }, Some(Owner::Grown { fresh, .. })) =
-            (record, self.owners.get_mut(owner))
-        {
-            fresh.insert(key.clone());
+        match self.owners.get_mut(owner) {
+            Some(Owner::Cold { pending, .. } | Owner::Waiting { pending }) => Some(pending),
+            Some(Owner::Warm { delta, .. }) => {
+                delta.note(record);
+                None
+            }
+            None => None,
         }
-        None
+    }
+
+    pub(crate) fn unpaged(&self, owner: &str) -> Option<(String, Section)> {
+        match self.page_of(owner) {
+            Some((first, Page::Cold(section))) => Some((first.clone(), *section)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn group_pages(&self, records: &[Record]) -> Vec<(String, Section)> {
+        let mut pages = BTreeMap::new();
+        for owner in records.iter().filter_map(owner_of) {
+            if matches!(self.owners.get(owner), None | Some(Owner::Waiting { .. }))
+                && let Some((first, Page::Cold(section))) = self.page_of(owner)
+            {
+                pages.insert(first, *section);
+            }
+        }
+        pages
+            .into_iter()
+            .map(|(first, section)| (first.clone(), section))
+            .collect()
+    }
+
+    pub(crate) fn cold_pages(&self) -> Vec<(String, Section)> {
+        self.pages
+            .iter()
+            .filter_map(|(first, page)| match page {
+                Page::Cold(section) => Some((first.clone(), *section)),
+                Page::Loaded(_) => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn paged(&mut self, first: &str, records: Vec<Record>) -> Result<(), StoreError> {
+        let Some(page) = self.pages.get_mut(first) else {
+            return Ok(());
+        };
+        let Page::Cold(section) = *page else {
+            return Ok(());
+        };
+        *page = Page::Loaded(section);
+        let end = self.page_end(first).cloned();
+        for record in records {
+            let Record::Owner {
+                checkpoint,
+                full,
+                legacy,
+                owner,
+                sections,
+                written,
+            } = record
+            else {
+                return Err(invalid("an index page holds a record that is not an owner"));
+            };
+            if owner.as_str() < first || end.as_ref().is_some_and(|end| owner >= *end) {
+                return Err(invalid(format!(
+                    "index page {first} holds owner {owner} outside its range"
+                )));
+            }
+            let entry = Entry {
+                checkpoint,
+                full,
+                legacy,
+                sections: sections
+                    .into_iter()
+                    .map(|(row, rows)| Section { row, rows })
+                    .collect(),
+                written,
+            };
+            let pending = match self.owners.remove(&owner) {
+                None => Vec::new(),
+                Some(Owner::Waiting { pending }) => pending,
+                Some(_) => {
+                    return Err(invalid(format!(
+                        "owner {owner} was loaded before its index page"
+                    )));
+                }
+            };
+            self.owners.insert(owner, Owner::Cold { entry, pending });
+        }
+        let fresh = self
+            .owners
+            .range::<str, _>((
+                Bound::Included(first),
+                end.as_deref().map_or(Bound::Unbounded, Bound::Excluded),
+            ))
+            .filter(|(_, state)| matches!(state, Owner::Waiting { .. }))
+            .map(|(owner, _)| owner.clone())
+            .collect::<Vec<_>>();
+        for owner in fresh {
+            if let Some(Owner::Waiting { pending }) = self.owners.remove(&owner) {
+                for record in &pending {
+                    self.apply(record, None)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn cold(&self, owner: &str) -> Option<&[Section]> {
         match self.owners.get(owner) {
-            Some(Owner::Cold { sections, .. }) => Some(sections),
+            Some(Owner::Cold { entry, .. }) => Some(&entry.sections),
             _ => None,
         }
     }
@@ -265,19 +415,49 @@ impl Fold {
         owner: &str,
         groups: Vec<(Section, Vec<Record>)>,
     ) -> Result<(), StoreError> {
-        let Some(sections) = self.cold(owner).map(<[Section]>::to_vec) else {
+        let mut pendings = Vec::new();
+        let Some(Owner::Cold { entry, pending }) = self.owners.remove(owner) else {
             return Ok(());
         };
-        let mut pendings = Vec::new();
-        if let Some(Owner::Cold { pending, .. }) = self
-            .owners
-            .insert(owner.to_owned(), Owner::Warm { sections })
-        {
-            pendings.push(pending);
-        }
+        pendings.push(pending);
+        let legacy = entry.legacy;
+        self.owners.insert(
+            owner.to_owned(),
+            Owner::Warm {
+                delta: Delta {
+                    checkpoint: legacy,
+                    ..Delta::default()
+                },
+                entry,
+            },
+        );
         let mut joined: BTreeMap<String, Section> = BTreeMap::new();
         for (section, records) in groups {
             for record in records {
+                if legacy {
+                    if legacy_owner_of(&record) != Some(owner) {
+                        continue;
+                    }
+                    if let Record::Stored { key, .. } = &record
+                        && key != owner
+                    {
+                        if self.owners.contains_key(key) {
+                            continue;
+                        }
+                        self.owners.insert(
+                            key.clone(),
+                            Owner::Warm {
+                                delta: Delta {
+                                    keys: BTreeSet::from([key.clone()]),
+                                    ..Delta::default()
+                                },
+                                entry: Entry::default(),
+                            },
+                        );
+                    }
+                    self.take(record, None)?;
+                    continue;
+                }
                 let Some(other) = owner_of(&record) else {
                     continue;
                 };
@@ -285,20 +465,17 @@ impl Fold {
                     true
                 } else if let Some(at) = joined.get(other) {
                     *at == section
-                } else if matches!(self.owners.get(other), Some(Owner::Cold { sections: cold, .. }) if cold.as_slice() == [section])
-                    && !(appended(other)
-                        && matches!(
-                            self.owners.get(&other[..other.len() - 1]),
-                            Some(Owner::Cold { .. })
-                        ))
+                } else if matches!(self.owners.get(other), Some(Owner::Cold { entry, .. }) if entry.sections.as_slice() == [section] && !entry.legacy)
                 {
-                    if let Some(Owner::Cold { pending, .. }) = self.owners.insert(
-                        other.to_owned(),
-                        Owner::Warm {
-                            sections: vec![section],
-                        },
-                    ) {
+                    if let Some(Owner::Cold { entry, pending }) = self.owners.remove(other) {
                         pendings.push(pending);
+                        self.owners.insert(
+                            other.to_owned(),
+                            Owner::Warm {
+                                delta: Delta::default(),
+                                entry,
+                            },
+                        );
                     }
                     joined.insert(other.to_owned(), section);
                     true
@@ -318,55 +495,36 @@ impl Fold {
         Ok(())
     }
 
-    pub(crate) fn touch(&mut self, owner: &str) {
-        if self.owners.contains_key(owner) && !self.read.contains(owner) {
-            self.read.insert(owner.to_owned());
+    pub(crate) fn touch(&mut self, state: &str) {
+        let known = self.owners.range::<str, _>((Bound::Included(state), Bound::Unbounded)).next().is_some_and(|(owner, _)| {
+            owner.strip_prefix(state).is_some_and(|rest| rest.is_empty() || rest.starts_with('\n'))
+        });
+        if known && !self.read.contains(state) {
+            self.read.insert(state.to_owned());
         }
     }
 
     pub(crate) fn evict(&mut self) {
         let read = std::mem::take(&mut self.read);
-        let idle = |owner: &str| {
-            !read.contains(owner) && matches!(self.owners.get(owner), Some(Owner::Warm { .. }))
-        };
         let evicted = self
             .owners
-            .keys()
-            .filter(|owner| {
-                idle(owner)
-                    && (appended(owner) || {
-                        let content = format!("{owner}\n");
-                        idle(&content)
-                            || matches!(self.owners.get(&content), None | Some(Owner::Cold { .. }))
-                    })
+            .iter()
+            .filter(|(owner, state)| {
+                matches!(state, Owner::Warm { delta, entry } if delta.is_empty() && !entry.legacy)
+                    && !read.contains(owner.split_once('\n').map_or(owner.as_str(), |(state, _)| state))
             })
-            .cloned()
+            .map(|(owner, _)| owner.clone())
             .collect::<Vec<_>>();
         for owner in evicted {
-            let Some(Owner::Warm { sections }) = self.owners.remove(&owner) else {
+            let Some(Owner::Warm { entry, .. }) = self.owners.remove(&owner) else {
                 continue;
             };
-            let content = appended(&owner);
-            let prefix = if content {
-                owner.clone()
+            if owner.contains('\n') {
+                self.stored.remove(&owner);
             } else {
-                format!("{owner}\n")
-            };
-            let keys = self
-                .stored
-                .range::<str, _>((Bound::Included(prefix.as_str()), Bound::Unbounded))
-                .take_while(|(key, _)| key.starts_with(&prefix))
-                .filter(|(key, _)| key[prefix.len()..].starts_with("b3:") == content)
-                .map(|(key, _)| key.clone())
-                .collect::<Vec<_>>();
-            for key in keys {
-                self.stored.remove(&key);
-            }
-            let checkpoint = !content && self.checkpoints.remove(&owner).is_some();
-            if checkpoint {
-                self.marks.remove(&owner);
-            }
-            if !content {
+                if self.checkpoints.remove(&owner).is_some() {
+                    self.marks.remove(&owner);
+                }
                 let cells = self
                     .cells
                     .range((owner.clone(), 0)..=(owner.clone(), u64::MAX))
@@ -379,21 +537,57 @@ impl Fold {
             self.owners.insert(
                 owner,
                 Owner::Cold {
-                    checkpoint,
+                    entry,
                     pending: Vec::new(),
-                    sections,
                 },
             );
         }
     }
 
-    pub(crate) fn unloaded(&self) -> Vec<String> {
+    pub(crate) fn is_legacy(&self, owner: &str) -> bool {
+        matches!(self.owners.get(owner), Some(Owner::Cold { entry, .. }) if entry.legacy)
+    }
+
+    pub(crate) fn cold_keys(&self, state: &str) -> Vec<String> {
+        let (low, high) = (format!("{state}\n"), format!("{state}\u{b}"));
+        self.owners
+            .range::<str, _>((
+                Bound::Included(low.as_str()),
+                Bound::Excluded(high.as_str()),
+            ))
+            .filter(|(_, owner)| !matches!(owner, Owner::Warm { .. }))
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+
+    pub(crate) fn key_pages(&self, state: &str) -> Vec<(String, Section)> {
+        let (low, high) = (format!("{state}\n"), format!("{state}\u{b}"));
+        self.page_of(&low)
+            .into_iter()
+            .chain(self.pages.range::<str, _>((
+                Bound::Excluded(low.as_str()),
+                Bound::Excluded(high.as_str()),
+            )))
+            .filter_map(|(first, page)| match page {
+                Page::Cold(section) => Some((first.clone(), *section)),
+                Page::Loaded(_) => None,
+            })
+            .collect()
+    }
+
+    fn complete(&self, state: &str) -> bool {
+        !matches!(
+            self.owners.get(state),
+            Some(Owner::Cold { .. } | Owner::Waiting { .. })
+        ) && !matches!(self.page_of(state), Some((_, Page::Cold(_))))
+            && self.key_pages(state).is_empty()
+            && self.cold_keys(state).is_empty()
+    }
+
+    pub(crate) fn waiting(&self) -> Vec<String> {
         self.owners
             .iter()
-            .filter(|(owner, state)| {
-                !appended(owner)
-                    && matches!(state, Owner::Cold { pending, .. } if !pending.is_empty())
-            })
+            .filter(|(_, state)| matches!(state, Owner::Waiting { .. }))
             .map(|(owner, _)| owner.clone())
             .collect()
     }
@@ -402,7 +596,7 @@ impl Fold {
         self.owners
             .iter()
             .filter(|(_, state)| {
-                matches!(state, Owner::Cold { pending, .. } if pending.iter().any(|record| matches!(record, Record::Forget { .. })))
+                matches!(state, Owner::Cold { pending, .. } | Owner::Waiting { pending } if pending.iter().any(|record| matches!(record, Record::Forget { .. })))
             })
             .map(|(owner, _)| owner.clone())
             .collect()
@@ -411,101 +605,184 @@ impl Fold {
     pub(crate) fn writes(&self) -> Vec<&str> {
         self.owners
             .iter()
-            .filter(|(owner, state)| match state {
-                Owner::Cold { pending, .. } => appended(owner) && !pending.is_empty(),
-                Owner::Dirty { .. } | Owner::Grown { .. } => true,
-                Owner::Warm { .. } => false,
+            .filter(|(_, state)| match state {
+                Owner::Cold { pending, .. } | Owner::Waiting { pending } => !pending.is_empty(),
+                Owner::Warm { delta, .. } => !delta.is_empty(),
             })
             .map(|(owner, _)| owner.as_str())
             .collect()
     }
 
-    pub(crate) fn kept_groups(&self) -> BTreeMap<u64, Group> {
-        let mut groups: BTreeMap<u64, Group> = BTreeMap::new();
-        for (owner, state) in &self.owners {
-            let (sections, checkpoint) = match state {
-                Owner::Cold {
-                    checkpoint,
-                    sections,
-                    ..
-                } => (sections, *checkpoint),
-                Owner::Grown { sections, .. } | Owner::Warm { sections } => {
-                    (sections, self.checkpoints.contains_key(owner))
-                }
-                Owner::Dirty { .. } => continue,
+    pub(crate) fn entry(&self, owner: &str) -> Option<&Entry> {
+        match self.owners.get(owner) {
+            Some(Owner::Cold { entry, .. } | Owner::Warm { entry, .. }) => Some(entry),
+            Some(Owner::Waiting { .. }) | None => None,
+        }
+    }
+
+    pub(crate) fn loaded(&self, owner: &str) -> bool {
+        matches!(self.owners.get(owner), Some(Owner::Warm { .. }))
+    }
+
+    pub(crate) fn plan(
+        &self,
+        written: &BTreeMap<String, Option<Entry>>,
+        groups: &[(Section, u64)],
+    ) -> Result<Plan, StoreError> {
+        let mut refs = self.groups.clone();
+        for (owner, entry) in written {
+            let Some(old) = self.entry(owner) else {
+                continue;
             };
-            for section in sections {
-                groups
-                    .entry(section.row)
-                    .or_insert_with(|| (*section, Vec::new()))
-                    .1
-                    .push((owner.clone(), checkpoint));
+            if entry
+                .as_ref()
+                .is_some_and(|entry| entry.sections.starts_with(&old.sections))
+            {
+                continue;
+            }
+            for section in &old.sections {
+                let Some((_, count)) = refs.get_mut(&section.row) else {
+                    return Err(invalid(format!(
+                        "owner {owner} holds section {} that no group counts",
+                        section.row
+                    )));
+                };
+                *count = count.checked_sub(1).ok_or_else(|| {
+                    invalid(format!("section {} is counted below zero", section.row))
+                })?;
             }
         }
-        groups
-    }
-
-    pub(crate) fn superseded(&self, kept: &BTreeMap<u64, Group>) -> Vec<std::ops::Range<u64>> {
-        self.owners
-            .values()
-            .filter_map(|state| match state {
-                Owner::Dirty { sections } => Some(sections),
-                _ => None,
-            })
-            .flatten()
-            .filter(|section| !kept.contains_key(&section.row))
-            .map(|section| (section.row, section.rows))
-            .collect::<BTreeMap<_, _>>()
-            .into_iter()
-            .map(|(row, rows)| row..row + rows)
-            .collect()
-    }
-
-    pub(crate) fn sectioned(&mut self, written: &[Group]) {
-        let fresh = written
-            .iter()
-            .flat_map(|(section, owners)| owners.iter().map(move |(owner, _)| (owner.clone(), *section)))
-            .collect::<BTreeMap<_, _>>();
-        let owners = std::mem::take(&mut self.owners);
-        self.owners = owners
-            .into_iter()
-            .filter_map(|(owner, state)| {
-                let new = fresh.get(&owner).copied();
-                let state = match state {
-                    Owner::Dirty { .. } => Owner::Warm {
-                        sections: vec![new?],
-                    },
-                    Owner::Grown { mut sections, .. } => {
-                        sections.extend(new);
-                        Owner::Warm { sections }
+        for (section, count) in groups {
+            refs.insert(section.row, (section.rows, *count));
+        }
+        let mut superseded = Vec::new();
+        refs.retain(|row, (rows, count)| {
+            if *count == 0 {
+                superseded.push(*row..*row + *rows);
+            }
+            *count > 0
+        });
+        let touched = if self.pages.is_empty() {
+            if self.owners.is_empty() && written.is_empty() {
+                BTreeSet::new()
+            } else {
+                BTreeSet::from([String::new()])
+            }
+        } else {
+            written
+                .iter()
+                .filter(|(owner, entry)| entry.as_ref() != self.entry(owner))
+                .filter_map(|(owner, _)| self.page_of(owner).map(|(first, _)| first.clone()))
+                .collect()
+        };
+        let mut kept = self.pages.clone();
+        let mut pages = Vec::new();
+        for first in touched {
+            let end = self.page_end(&first).cloned();
+            match kept.remove(&first) {
+                Some(Page::Cold(_)) => {
+                    return Err(invalid(format!(
+                        "a snapshot rewrites index page {first} before it is loaded"
+                    )));
+                }
+                Some(Page::Loaded(section)) => {
+                    superseded.push(section.row..section.row + section.rows);
+                }
+                None => {}
+            }
+            let mut records = Vec::new();
+            for (owner, state) in self.owners.range::<str, _>((
+                Bound::Included(first.as_str()),
+                end.as_deref().map_or(Bound::Unbounded, Bound::Excluded),
+            )) {
+                let entry = match (written.get(owner), state) {
+                    (Some(entry), _) => entry.as_ref(),
+                    (None, Owner::Cold { entry, .. } | Owner::Warm { entry, .. }) => Some(entry),
+                    (None, Owner::Waiting { .. }) => {
+                        return Err(invalid(format!(
+                            "owner {owner} waits for index page {first}, which a snapshot rewrites"
+                        )));
                     }
-                    Owner::Cold {
-                        checkpoint,
-                        pending,
-                        mut sections,
-                    } if appended(&owner) && !pending.is_empty() => {
-                        sections.extend(new);
-                        Owner::Cold {
-                            checkpoint,
-                            pending: Vec::new(),
-                            sections,
-                        }
-                    }
-                    state => state,
                 };
-                Some((owner, state))
-            })
-            .collect();
+                let Some(entry) = entry.filter(|entry| !entry.sections.is_empty()) else {
+                    continue;
+                };
+                records.push(Record::Owner {
+                    checkpoint: entry.checkpoint,
+                    full: entry.full,
+                    legacy: entry.legacy,
+                    owner: owner.clone(),
+                    sections: entry
+                        .sections
+                        .iter()
+                        .map(|section| (section.row, section.rows))
+                        .collect(),
+                    written: entry.written,
+                });
+            }
+            pages.push((first, records));
+        }
+        superseded.sort_by_key(|range| range.start);
+        Ok(Plan {
+            groups: refs,
+            kept,
+            pages,
+            superseded,
+        })
     }
 
-    pub(crate) fn owner_records(
+    pub(crate) fn sectioned(
+        &mut self,
+        written: BTreeMap<String, Option<Entry>>,
+        pages: BTreeMap<String, Page>,
+        groups: BTreeMap<u64, (u64, u64)>,
+    ) {
+        for (owner, entry) in written {
+            let state = match (self.owners.remove(&owner), entry) {
+                (Some(Owner::Warm { .. }), Some(entry)) => Owner::Warm {
+                    delta: Delta::default(),
+                    entry,
+                },
+                (Some(Owner::Cold { .. } | Owner::Waiting { .. }), Some(entry)) => Owner::Cold {
+                    entry,
+                    pending: Vec::new(),
+                },
+                (_, None) | (None, _) => continue,
+            };
+            self.owners.insert(owner, state);
+        }
+        self.pages = pages;
+        self.groups = groups;
+    }
+
+    pub(crate) fn delta_records(
         &self,
         owner: &str,
         mut take: impl FnMut(Record) -> Result<(), StoreError>,
     ) -> Result<bool, StoreError> {
         match self.owners.get(owner) {
-            Some(Owner::Grown { fresh, .. }) => {
-                for key in fresh {
+            Some(Owner::Cold { pending, .. } | Owner::Waiting { pending }) => {
+                let mut last = BTreeMap::new();
+                for (position, record) in pending.iter().enumerate() {
+                    if let Record::Stored { key, .. } = record {
+                        last.insert(key.as_str(), position);
+                    }
+                }
+                let mut checkpoint = false;
+                for (position, record) in pending.iter().enumerate() {
+                    match record {
+                        Record::Stored { key, .. } if last.get(key.as_str()) != Some(&position) => {
+                        }
+                        record => {
+                            checkpoint |= matches!(record, Record::Checkpoint { .. });
+                            take(record.clone())?;
+                        }
+                    }
+                }
+                Ok(checkpoint)
+            }
+            Some(Owner::Warm { delta, .. }) => {
+                for key in &delta.keys {
                     if let Some(value) = self.stored.get(key) {
                         take(Record::Stored {
                             key: key.clone(),
@@ -513,27 +790,36 @@ impl Fold {
                         })?;
                     }
                 }
-                return Ok(false);
-            }
-            Some(Owner::Cold { pending, .. }) => {
-                for record in pending {
+                let checkpoint = self.checkpoints.get(owner).filter(|_| delta.checkpoint);
+                if let Some(checkpoint) = checkpoint {
+                    take(Record::Checkpoint {
+                        payload: checkpoint.payload.clone(),
+                        revision: checkpoint.revision,
+                        state: owner.to_owned(),
+                    })?;
+                }
+                for record in &delta.cells {
                     take(record.clone())?;
                 }
-                return Ok(false);
+                Ok(checkpoint.is_some())
             }
-            _ => {}
+            None => Ok(false),
         }
-        let prefix = format!("{owner}\n");
-        for (key, value) in self
-            .stored
-            .range::<str, _>((Bound::Included(prefix.as_str()), Bound::Unbounded))
-            .take_while(|(key, _)| key.starts_with(&prefix))
-            .filter(|(key, _)| !key[prefix.len()..].starts_with("b3:"))
-        {
-            take(Record::Stored {
-                key: key.clone(),
-                value: value.clone(),
-            })?;
+    }
+
+    pub(crate) fn owner_records(
+        &self,
+        owner: &str,
+        mut take: impl FnMut(Record) -> Result<(), StoreError>,
+    ) -> Result<bool, StoreError> {
+        if owner.contains('\n') {
+            if let Some(value) = self.stored.get(owner) {
+                take(Record::Stored {
+                    key: owner.to_owned(),
+                    value: value.clone(),
+                })?;
+            }
+            return Ok(false);
         }
         let checkpoint = self.checkpoints.get(owner);
         if let Some(checkpoint) = checkpoint {
@@ -567,16 +853,19 @@ impl Fold {
             .map(String::as_str)
             .collect::<BTreeSet<_>>();
         for (owner, state) in &self.owners {
-            if let Owner::Cold {
-                checkpoint,
-                pending,
-                ..
-            } = state
-                && (*checkpoint
-                    || pending
-                        .iter()
-                        .any(|record| matches!(record, Record::Checkpoint { .. })))
-            {
+            let listed = match state {
+                Owner::Cold { entry, pending } => {
+                    entry.checkpoint
+                        || pending
+                            .iter()
+                            .any(|record| matches!(record, Record::Checkpoint { .. }))
+                }
+                Owner::Waiting { pending } => pending
+                    .iter()
+                    .any(|record| matches!(record, Record::Checkpoint { .. })),
+                Owner::Warm { .. } => false,
+            };
+            if listed {
                 states.insert(owner.as_str());
             }
         }
@@ -699,12 +988,14 @@ impl Fold {
         &self,
         links: &mut HashMap<String, Links>,
         marks: &mut BTreeMap<String, Vec<String>>,
+        collectable: impl Fn(&str) -> bool,
     ) -> Option<Vec<bool>> {
         let mut firsts: HashMap<&str, usize> = HashMap::new();
         let mut holders = Vec::new();
         for (position, (key, value)) in self.stored.iter().enumerate() {
             if let Some((state, content)) = key.split_once('\n')
                 && content.starts_with("b3:")
+                && collectable(state)
             {
                 let first = *firsts.entry(content).or_insert(holders.len());
                 holders.push((first, position, state, value.as_str()));
@@ -712,7 +1003,11 @@ impl Fold {
         }
         marks.retain(|state, _| self.checkpoints.contains_key(state));
         let mut queue = Vec::new();
-        for (state, checkpoint) in &self.checkpoints {
+        for (state, checkpoint) in self
+            .checkpoints
+            .iter()
+            .filter(|(state, _)| collectable(state))
+        {
             let references = marks.entry(state.clone()).or_insert_with(|| {
                 EncodedPayload::references(&checkpoint.payload)
                     .map(str::to_owned)
@@ -788,9 +1083,19 @@ impl Fold {
         let before = self.dead.len();
         self.dead.retain(|key, _| !in_collectable(key));
         let mut collected = before - self.dead.len();
+        let states = self
+            .stored
+            .keys()
+            .filter_map(|key| key.split_once('\n').map(|(state, _)| state))
+            .collect::<BTreeSet<_>>();
+        let complete = states
+            .into_iter()
+            .filter(|state| self.complete(state))
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
         let mut links = std::mem::take(&mut self.links);
         let mut marks = std::mem::take(&mut self.marks);
-        let garbage = self.garbage(&mut links, &mut marks);
+        let garbage = self.garbage(&mut links, &mut marks, |state| complete.contains(state));
         self.links = links;
         self.marks = marks;
         let Some(garbage) = garbage else {
@@ -867,7 +1172,7 @@ impl Fold {
                 value: value.clone(),
             };
             match self.defer(&record) {
-                Some(pending) => pending.push(record.clone()),
+                Some(pending) => wait(pending, record.clone()),
                 None => {
                     self.stored.insert(key, value);
                 }
@@ -916,7 +1221,9 @@ impl Fold {
         }
         finished.sort_unstable();
         let cutoff = finished[excess - 1];
-        self.drop_turns(|turn| matches!(turn.phase, Phase::Finished { last, .. } if last <= cutoff));
+        self.drop_turns(
+            |turn| matches!(turn.phase, Phase::Finished { last, .. } if last <= cutoff),
+        );
         excess
     }
 
@@ -1020,7 +1327,7 @@ impl Fold {
 
     pub fn apply(&mut self, record: &Record, row: Option<u64>) -> Result<(), StoreError> {
         if let Some(pending) = self.defer(record) {
-            pending.push(record.clone());
+            wait(pending, record.clone());
             return Ok(());
         }
         self.fold_in(record, row)
@@ -1170,27 +1477,46 @@ impl Fold {
             Record::Result { call_id, .. } => {
                 self.calls.remove(call_id);
             }
+            Record::Groups { groups } => {
+                self.groups = groups
+                    .iter()
+                    .map(|&(row, rows, count)| (row, (rows, count)))
+                    .collect();
+            }
+            Record::Index { first, row, rows } => {
+                self.pages.insert(
+                    first.clone(),
+                    Page::Cold(Section {
+                        row: *row,
+                        rows: *rows,
+                    }),
+                );
+            }
+            Record::Owner { owner, .. } => {
+                return Err(invalid(format!(
+                    "owner {owner} is listed outside an index page"
+                )));
+            }
             Record::Section { owners, row, rows } => {
                 let section = Section {
                     row: *row,
                     rows: *rows,
                 };
+                self.groups.entry(*row).or_insert((*rows, 0)).1 += owners.len() as u64;
                 for (owner, checkpoint) in owners {
-                    if let Owner::Cold {
-                        checkpoint: kept,
-                        sections,
-                        ..
-                    } = self
+                    if let Owner::Cold { entry, .. } = self
                         .owners
                         .entry(owner.clone())
                         .or_insert_with(|| Owner::Cold {
-                            checkpoint: false,
+                            entry: Entry {
+                                legacy: true,
+                                ..Entry::default()
+                            },
                             pending: Vec::new(),
-                            sections: Vec::new(),
                         })
                     {
-                        *kept |= *checkpoint;
-                        sections.push(section);
+                        entry.checkpoint |= *checkpoint;
+                        entry.sections.push(section);
                     }
                 }
             }
@@ -1303,15 +1629,26 @@ impl Fold {
     pub(crate) fn head_records(
         &self,
         keep: u64,
-        groups: &[Group],
+        index: Indexed<'_>,
         mut take: impl FnMut(Record) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
-        for (section, owners) in groups {
-            take(Record::Section {
-                owners: owners.clone(),
-                row: section.row,
-                rows: section.rows,
-            })?;
+        if let Some((pages, groups)) = index {
+            for (first, page) in pages {
+                let section = page.section();
+                take(Record::Index {
+                    first: first.clone(),
+                    row: section.row,
+                    rows: section.rows,
+                })?;
+            }
+            if !groups.is_empty() {
+                take(Record::Groups {
+                    groups: groups
+                        .iter()
+                        .map(|(&row, &(rows, count))| (row, rows, count))
+                        .collect(),
+                })?;
+            }
         }
         self.records(keep, false, take)
     }

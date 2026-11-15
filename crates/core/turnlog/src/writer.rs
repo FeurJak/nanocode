@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     ops::Range,
     sync::Arc,
 };
@@ -13,7 +13,7 @@ use crate::{
     codec::{
         self, ARCHIVE, BOUNDARY, History, PART, RECORDS, SEAL, SECTION, SNAPSHOT, Stream, WINDOW,
     },
-    fold::{Group, Section, appended},
+    fold::{Entry, Indexed, Page, Section, legacy_name},
 };
 
 pub const EVENT_GAP: u64 = 1 << 14;
@@ -38,6 +38,7 @@ pub struct Stats {
     pub collected: u64,
     pub finishes: u64,
     pub floors: u64,
+    pub index_loads: u64,
     pub page_rows: u64,
     pub pages: u64,
     pub parts: u64,
@@ -102,18 +103,49 @@ impl Snapshot {
 
 struct Partitioned {
     head: Snapshot,
+    index: Index,
     sections: Sections,
     seq: u64,
-    superseded: Vec<Range<u64>>,
 }
 
 struct Sections {
     bytes: usize,
-    groups: Vec<Group>,
+    entries: BTreeMap<String, Option<Entry>>,
+    groups: Vec<(Section, u64)>,
     next: u64,
-    plain: usize,
-    rewritten: usize,
     rows: Vec<(u64, String)>,
+}
+
+struct Index {
+    bytes: usize,
+    groups: BTreeMap<u64, (u64, u64)>,
+    next: u64,
+    pages: BTreeMap<String, Page>,
+    rows: Vec<(u64, String)>,
+    superseded: Vec<Range<u64>>,
+}
+
+impl Index {
+    fn seal(
+        &mut self,
+        spare: &mut codec::Spare,
+        first: String,
+        packer: codec::Packer,
+        limit: Option<usize>,
+    ) -> Result<(), StoreError> {
+        let rows = stored(self.next, packer.finish(SECTION, spare)?.packed, limit)?;
+        self.bytes += rows.iter().map(|(_, body)| body.len()).sum::<usize>();
+        self.pages.insert(
+            first,
+            Page::Loaded(Section {
+                row: self.next,
+                rows: rows.len() as u64,
+            }),
+        );
+        self.next += rows.len() as u64;
+        self.rows.extend(rows);
+        Ok(())
+    }
 }
 
 impl Sections {
@@ -121,28 +153,31 @@ impl Sections {
         &mut self,
         spare: &mut codec::Spare,
         packer: codec::Packer,
-        owners: Vec<(String, bool)>,
+        owners: Vec<(String, Entry)>,
         limit: Option<usize>,
     ) -> Result<(), StoreError> {
         let rows = stored(self.next, packer.finish(SECTION, spare)?.packed, limit)?;
         self.bytes += rows.iter().map(|(_, body)| body.len()).sum::<usize>();
-        self.groups.push((
-            Section {
-                row: self.next,
-                rows: rows.len() as u64,
-            },
-            owners,
-        ));
+        let section = Section {
+            row: self.next,
+            rows: rows.len() as u64,
+        };
+        self.groups.push((section, owners.len() as u64));
+        for (owner, mut entry) in owners {
+            entry.sections.push(section);
+            self.entries.insert(owner, Some(entry));
+        }
         self.next += rows.len() as u64;
         self.rows.extend(rows);
         Ok(())
     }
+}
 
-    fn rewrite(&self) -> usize {
-        (self.bytes as u128 * self.rewritten as u128)
-            .checked_div(self.plain as u128)
-            .map_or(0, |rewrite| usize::try_from(rewrite).unwrap_or(usize::MAX))
+fn line(lines: &mut Vec<u8>, record: &Record) -> Result<(), StoreError> {
+    if !lines.is_empty() {
+        lines.push(b'\n');
     }
+    crate::record::write(record, lines)
 }
 
 fn sections(
@@ -151,105 +186,244 @@ fn sections(
     from: u64,
     level: i32,
     limit: Option<usize>,
+    ratio: usize,
 ) -> Result<Sections, StoreError> {
     let mut sections = Sections {
         bytes: 0,
+        entries: BTreeMap::new(),
         groups: Vec::new(),
         next: from,
-        plain: 0,
-        rewritten: 0,
         rows: Vec::new(),
     };
-    let mut open: Option<(codec::Packer, Vec<(String, bool)>)> = None;
-    let mut line = Vec::new();
+    let mut open: Option<(codec::Packer, Vec<(String, Entry)>)> = None;
+    let mut lines = Vec::new();
     for owner in fold.writes() {
+        lines.clear();
+        let changed = fold.delta_records(owner, |record| line(&mut lines, &record))?;
+        let base = fold.entry(owner).cloned().unwrap_or_default();
+        let full = fold.loaded(owner)
+            && (base.sections.is_empty()
+                || base.written + lines.len() as u64 >= ratio as u64 * base.full);
+        let checkpoint = if full {
+            lines.clear();
+            fold.owner_records(owner, |record| line(&mut lines, &record))?
+        } else {
+            base.checkpoint || changed
+        };
+        let bytes = lines.len() as u64;
+        if lines.is_empty() {
+            sections
+                .entries
+                .insert(owner.to_owned(), (!full).then_some(base));
+            continue;
+        }
+        let entry = if full {
+            Entry {
+                checkpoint,
+                full: bytes,
+                legacy: false,
+                sections: Vec::new(),
+                written: bytes,
+            }
+        } else {
+            Entry {
+                checkpoint,
+                full: base.full,
+                legacy: base.legacy,
+                sections: base.sections,
+                written: base.written + bytes,
+            }
+        };
         let (packer, owners) = match &mut open {
             Some(open) => open,
             None => open.insert((codec::Packer::new(spare, level, &[])?, Vec::new())),
         };
-        let mut written = false;
-        let before = packer.plain();
-        let checkpoint = fold.owner_records(owner, |record| {
-            if packer.plain() > 0 {
-                line.push(b'\n');
-            }
-            crate::record::write(&record, &mut line)?;
-            packer.write(&line)?;
-            line.clear();
-            written = true;
-            Ok(())
-        })?;
-        if written {
-            owners.push((owner.to_owned(), checkpoint));
+        if packer.plain() > 0 {
+            packer.write(b"\n")?;
         }
-        let added = packer.plain() - before;
-        sections.plain += added;
-        if !appended(owner) {
-            sections.rewritten += added;
-        }
+        packer.write(&lines)?;
+        owners.push((owner.to_owned(), entry));
         if packer.plain() >= WINDOW
             && let Some((packer, owners)) = open.take()
         {
             sections.seal(spare, packer, owners, limit)?;
         }
     }
-    if let Some((packer, owners)) = open.take()
-        && !owners.is_empty()
-    {
+    if let Some((packer, owners)) = open.take() {
         sections.seal(spare, packer, owners, limit)?;
     }
     Ok(sections)
+}
+
+fn index(
+    spare: &mut codec::Spare,
+    fold: &Fold,
+    sections: &Sections,
+    level: i32,
+    limit: Option<usize>,
+) -> Result<Index, StoreError> {
+    let plan = fold.plan(&sections.entries, &sections.groups)?;
+    let mut index = Index {
+        bytes: 0,
+        groups: plan.groups,
+        next: sections.next,
+        pages: plan.kept,
+        rows: Vec::new(),
+        superseded: plan.superseded,
+    };
+    let mut lines = Vec::new();
+    for (first, records) in plan.pages {
+        let mut fence = Some(first);
+        let mut open: Option<(String, codec::Packer)> = None;
+        for record in records {
+            let Record::Owner { owner, .. } = &record else {
+                continue;
+            };
+            let (_, packer) = match &mut open {
+                Some(open) => open,
+                None => open.insert((
+                    fence.take().unwrap_or_else(|| owner.clone()),
+                    codec::Packer::new(spare, level, &[])?,
+                )),
+            };
+            lines.clear();
+            line(&mut lines, &record)?;
+            if packer.plain() > 0 {
+                packer.write(b"\n")?;
+            }
+            packer.write(&lines)?;
+            if packer.plain() >= WINDOW
+                && let Some((first, packer)) = open.take()
+            {
+                index.seal(spare, first, packer, limit)?;
+            }
+        }
+        if let Some((first, packer)) = open.take() {
+            index.seal(spare, first, packer, limit)?;
+        }
+    }
+    if let Some((first, _)) = index.pages.first_key_value()
+        && !first.is_empty()
+        && let Some((_, page)) = index.pages.pop_first()
+    {
+        index.pages.insert(String::new(), page);
+    }
+    Ok(index)
+}
+
+async fn section_records(
+    host: &dyn LogHost,
+    scope: &str,
+    owner: &str,
+    section: Section,
+) -> Result<Vec<Record>, StoreError> {
+    let end = section.row + section.rows;
+    let stored = host.scan(scope, section.row, end).await?;
+    if stored.first().map(|(seq, _)| *seq) != Some(section.row)
+        || stored.len() as u64 != section.rows
+        || !stored[0].1.starts_with(SECTION)
+    {
+        return Err(StoreError::Backend(format!(
+            "turn log section of {owner} at rows {}..{end} reads {} rows",
+            section.row,
+            stored.len()
+        )));
+    }
+    let mut records = Vec::new();
+    each_row(stored, |row| {
+        crate::record::each(&row.plain, |record| {
+            records.push(record);
+            Ok(())
+        })?;
+        Ok(true)
+    })?;
+    Ok(records)
+}
+
+async fn page(
+    host: &dyn LogHost,
+    scope: &str,
+    fold: &mut Fold,
+    stats: &mut Stats,
+    owner: &str,
+) -> Result<(), StoreError> {
+    if let Some((first, section)) = fold.unpaged(owner) {
+        let records = section_records(host, scope, &first, section).await?;
+        fold.paged(&first, records)?;
+        stats.index_loads += 1;
+    }
+    Ok(())
 }
 
 async fn warm(
     host: &dyn LogHost,
     scope: &str,
     fold: &mut Fold,
+    stats: &mut Stats,
     owner: &str,
-) -> Result<u64, StoreError> {
+) -> Result<(), StoreError> {
+    if let Some(legacy) = legacy_name(owner) {
+        page(host, scope, fold, stats, &legacy).await?;
+        if fold.is_legacy(&legacy) {
+            load(host, scope, fold, stats, &legacy).await?;
+        }
+    }
+    load(host, scope, fold, stats, owner).await
+}
+
+async fn load(
+    host: &dyn LogHost,
+    scope: &str,
+    fold: &mut Fold,
+    stats: &mut Stats,
+    owner: &str,
+) -> Result<(), StoreError> {
+    page(host, scope, fold, stats, owner).await?;
+    if fold.is_legacy(owner) {
+        for (first, section) in fold.key_pages(owner.trim_end_matches('\n')) {
+            let records = section_records(host, scope, &first, section).await?;
+            fold.paged(&first, records)?;
+            stats.index_loads += 1;
+        }
+    }
     let Some(sections) = fold.cold(owner).map(<[Section]>::to_vec) else {
-        return Ok(0);
+        return Ok(());
     };
+    let legacy = fold.is_legacy(owner);
     let mut groups = Vec::with_capacity(sections.len());
     for section in sections {
-        let end = section.row + section.rows;
-        let stored = host.scan(scope, section.row, end).await?;
-        if stored.first().map(|(seq, _)| *seq) != Some(section.row)
-            || stored.len() as u64 != section.rows
-            || !stored[0].1.starts_with(SECTION)
-        {
-            return Err(StoreError::Backend(format!(
-                "turn log section of {owner} at rows {}..{end} reads {} rows",
-                section.row,
-                stored.len()
-            )));
+        let records = section_records(host, scope, owner, section).await?;
+        if !legacy {
+            for (first, page) in fold.group_pages(&records) {
+                let listed = section_records(host, scope, &first, page).await?;
+                fold.paged(&first, listed)?;
+                stats.index_loads += 1;
+            }
         }
-        let mut records = Vec::new();
-        each_row(stored, |row| {
-            crate::record::each(&row.plain, |record| {
-                records.push(record);
-                Ok(())
-            })?;
-            Ok(true)
-        })?;
         groups.push((section, records));
     }
-    let loads = groups.len() as u64;
-    fold.warm(owner, groups)?;
-    Ok(loads)
+    stats.section_loads += groups.len() as u64;
+    fold.warm(owner, groups)
 }
 
 async fn warm_state(
     host: &dyn LogHost,
     scope: &str,
     fold: &mut Fold,
+    stats: &mut Stats,
     state: &str,
-) -> Result<u64, StoreError> {
-    let content = format!("{state}\n");
-    let loads = warm(host, scope, fold, state).await? + warm(host, scope, fold, &content).await?;
+) -> Result<(), StoreError> {
+    warm(host, scope, fold, stats, state).await?;
+    for (first, section) in fold.key_pages(state) {
+        let records = section_records(host, scope, &first, section).await?;
+        fold.paged(&first, records)?;
+        stats.index_loads += 1;
+    }
+    for key in fold.cold_keys(state) {
+        warm(host, scope, fold, stats, &key).await?;
+    }
     fold.touch(state);
-    fold.touch(&content);
-    Ok(loads)
+    Ok(())
 }
 
 fn packed(
@@ -257,14 +431,14 @@ fn packed(
     fold: &Fold,
     keep: u64,
     level: i32,
-    groups: &[Group],
+    index: Indexed<'_>,
 ) -> Result<Snapshot, StoreError> {
     let mut packer = codec::Packer::new(spare, level, &[])?;
     let mut line = Vec::new();
     let mut base = 0;
     let mut starts = VecDeque::new();
     let mut tail = Vec::new();
-    fold.head_records(keep, groups, |record| {
+    fold.head_records(keep, index, |record| {
         if packer.plain() > 0 {
             line.push(b'\n');
         }
@@ -303,7 +477,7 @@ fn packed(
 fn measured(fold: &Fold, keep: u64) -> Result<usize, StoreError> {
     let mut bytes = 0;
     let mut line = Vec::new();
-    fold.head_records(keep, &[], |record| {
+    fold.head_records(keep, None, |record| {
         crate::record::write(&record, &mut line)?;
         bytes += line.len() + usize::from(bytes > 0);
         line.clear();
@@ -642,7 +816,7 @@ impl TurnLog {
         })?;
         let mut stats = Stats::default();
         for owner in fold.forgetting() {
-            stats.section_loads += warm(&*host, &scope, &mut fold, &owner).await?;
+            warm(&*host, &scope, &mut fold, &mut stats, &owner).await?;
         }
         fold.reopen(EVENT_GAP);
         let floor = Some(fold.last_event());
@@ -724,9 +898,45 @@ impl TurnLog {
     pub async fn load_owner(&self, owner: &str) -> Result<(), StoreError> {
         let mut writer = self.writer.acquire().await;
         let writer = &mut *writer;
-        writer.stats.section_loads +=
-            warm_state(&*self.host, &self.scope, &mut writer.fold, owner).await?;
+        warm_state(
+            &*self.host,
+            &self.scope,
+            &mut writer.fold,
+            &mut writer.stats,
+            owner,
+        )
+        .await
+    }
+
+    pub async fn load_index(&self) -> Result<(), StoreError> {
+        let mut writer = self.writer.acquire().await;
+        let writer = &mut *writer;
+        for (first, section) in writer.fold.cold_pages() {
+            let records = section_records(&*self.host, &self.scope, &first, section).await?;
+            writer.fold.paged(&first, records)?;
+            writer.stats.index_loads += 1;
+        }
         Ok(())
+    }
+
+    pub async fn read_owners<R>(
+        &self,
+        owners: &[String],
+        read: impl FnOnce(&Fold) -> R,
+    ) -> Result<R, StoreError> {
+        let mut writer = self.writer.acquire().await;
+        let writer = &mut *writer;
+        for owner in owners {
+            warm(
+                &*self.host,
+                &self.scope,
+                &mut writer.fold,
+                &mut writer.stats,
+                owner,
+            )
+            .await?;
+        }
+        Ok(read(&writer.fold))
     }
 
     pub async fn read_owner<R>(
@@ -736,8 +946,14 @@ impl TurnLog {
     ) -> Result<R, StoreError> {
         let mut writer = self.writer.acquire().await;
         let writer = &mut *writer;
-        writer.stats.section_loads +=
-            warm_state(&*self.host, &self.scope, &mut writer.fold, owner).await?;
+        warm_state(
+            &*self.host,
+            &self.scope,
+            &mut writer.fold,
+            &mut writer.stats,
+            owner,
+        )
+        .await?;
         Ok(read(&writer.fold))
     }
 
@@ -820,11 +1036,31 @@ impl Lease<'_> {
         &self.writer.fold
     }
 
+    pub async fn load_owners(&mut self, owners: &[String]) -> Result<(), StoreError> {
+        let writer = &mut *self.writer;
+        for owner in owners {
+            warm(
+                self.host,
+                self.scope,
+                &mut writer.fold,
+                &mut writer.stats,
+                owner,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     pub async fn load_owner(&mut self, owner: &str) -> Result<(), StoreError> {
         let writer = &mut *self.writer;
-        writer.stats.section_loads +=
-            warm_state(self.host, self.scope, &mut writer.fold, owner).await?;
-        Ok(())
+        warm_state(
+            self.host,
+            self.scope,
+            &mut writer.fold,
+            &mut writer.stats,
+            owner,
+        )
+        .await
     }
 
     #[must_use]
@@ -936,9 +1172,25 @@ impl Lease<'_> {
         let mut snapshot = None;
         let due = self.rows.is_some_and(|rows| writer.tail_rows >= rows);
         if due || writer.tail + body.len() >= writer.check {
-            for owner in writer.fold.unloaded() {
-                writer.stats.section_loads +=
-                    warm(self.host, self.scope, &mut writer.fold, &owner).await?;
+            for owner in writer.fold.forgetting() {
+                warm(
+                    self.host,
+                    self.scope,
+                    &mut writer.fold,
+                    &mut writer.stats,
+                    &owner,
+                )
+                .await?;
+            }
+            for owner in writer.fold.waiting() {
+                page(
+                    self.host,
+                    self.scope,
+                    &mut writer.fold,
+                    &mut writer.stats,
+                    &owner,
+                )
+                .await?;
             }
             writer.stats.collected += writer.fold.collect(&writer.collectable) as u64;
             let level = if due {
@@ -946,34 +1198,39 @@ impl Lease<'_> {
             } else {
                 codec::DEFAULT_LEVEL
             };
-            let sections = sections(&mut writer.spare, &writer.fold, seq, level, self.limit)?;
-            let head = sections.next;
-            let mut groups = writer.fold.kept_groups();
-            let superseded = writer.fold.superseded(&groups);
-            groups.extend(
-                sections
-                    .groups
-                    .iter()
-                    .map(|group| (group.0.row, group.clone())),
-            );
-            let groups = groups.into_values().collect::<Vec<_>>();
+            let sections = sections(
+                &mut writer.spare,
+                &writer.fold,
+                seq,
+                level,
+                self.limit,
+                self.ratio,
+            )?;
+            let index = index(&mut writer.spare, &writer.fold, &sections, level, self.limit)?;
+            let head = index.next;
             for turn in &recovered {
                 writer.fold.recovered_at(turn, head);
             }
             writer.fold.committed(head);
-            let packed = packed(&mut writer.spare, &writer.fold, keep, level, &groups);
+            let packed = packed(
+                &mut writer.spare,
+                &writer.fold,
+                keep,
+                level,
+                Some((&index.pages, &index.groups)),
+            );
             writer.fold.committed(previous);
             let packed = packed?;
             writer.state = packed.plain;
-            let size = packed.packed.len();
-            let rewrite = sections.rewrite();
+            let rewrite = sections.bytes + index.bytes;
+            let size = packed.packed.len() + rewrite;
             let tail = writer.tail + body.len();
-            if due || (writer.snapshot + tail > self.ratio * size && self.ratio * tail >= rewrite) {
+            if due || (writer.snapshot + tail > self.ratio * size && tail >= self.ratio * rewrite) {
                 snapshot = Some(Partitioned {
                     head: packed,
+                    index,
                     sections,
                     seq: head,
-                    superseded,
                 });
             } else {
                 let packed = size;
@@ -998,7 +1255,7 @@ impl Lease<'_> {
                     .snapshot
                     .max(due)
                     .max(projected)
-                    .max(rewrite.div_ceil(self.ratio));
+                    .max(self.ratio * rewrite);
             }
         }
         let mut boundary = None;
@@ -1047,10 +1304,11 @@ impl Lease<'_> {
         };
         let (extension, merged) = extension.unzip();
         let (sectioned, superseded) = match &mut snapshot {
-            Some(part) => (
-                std::mem::take(&mut part.sections.rows),
-                std::mem::take(&mut part.superseded),
-            ),
+            Some(part) => {
+                let mut rows = std::mem::take(&mut part.sections.rows);
+                rows.append(&mut part.index.rows);
+                (rows, std::mem::take(&mut part.index.superseded))
+            }
             None => (Vec::new(), Vec::new()),
         };
         let sectioned_rows = sectioned.len() as u64;
@@ -1140,10 +1398,13 @@ impl Lease<'_> {
         match snapshot {
             Some(part) => {
                 let packed = part.head;
-                writer.fold.sectioned(&part.sections.groups);
+                let rewritten = part.sections.bytes + part.index.bytes;
+                writer
+                    .fold
+                    .sectioned(part.sections.entries, part.index.pages, part.index.groups);
                 writer.fold.evict();
                 writer.stats.sections += sectioned_rows;
-                writer.stats.snapshot_bytes += part.sections.bytes as u64;
+                writer.stats.snapshot_bytes += rewritten as u64;
                 writer.fold.seal(seq, keep);
                 writer.history.clear();
                 writer.history.extend(packed.suffix());
@@ -1154,8 +1415,8 @@ impl Lease<'_> {
                     suffix: String::from_utf8(packed.suffix().to_vec())
                         .expect("turn log records encode as UTF-8"),
                 });
-                writer.snapshot = bytes;
-                writer.check = bytes;
+                writer.snapshot = bytes + rewritten;
+                writer.check = bytes + rewritten;
                 writer.tail = 0;
                 writer.tail_rows = stored.len() - 1;
                 writer.tried = None;

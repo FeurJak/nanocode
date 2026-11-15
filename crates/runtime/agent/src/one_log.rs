@@ -235,6 +235,12 @@ fn logged(seq: u64, request_id: Option<&str>, at: u64, event: Box<RawValue>) -> 
     }
 }
 
+fn owned(state: &str, records: &[StoreRecord]) -> Vec<String> {
+    std::iter::once(state.to_owned())
+        .chain(records.iter().map(|record| stored_key(state, &record.key)))
+        .collect()
+}
+
 fn stored_key(state: &str, key: &str) -> String {
     format!("{state}\n{key}")
 }
@@ -1382,7 +1388,7 @@ impl CellJournalSink for OneLogJournals {
             .update(|live| live.remove(&(session.clone(), cell_id)));
         Box::pin(async move {
             let mut lease = log.log.lease().await;
-            if let Err(error) = lease.load_owner(&session).await {
+            if let Err(error) = lease.load_owners(std::slice::from_ref(&session)).await {
                 nanocode_trace::warn!(%error, "turn log could not load a cell journal to forget");
                 return;
             }
@@ -1432,18 +1438,21 @@ impl CellJournalSink for OneLogJournals {
         let log = Arc::clone(&self.0);
         let key = stored_key(session_id, STORED_MARK);
         let legacy = stored_key(STORED_MARK, session_id);
-        let session = session_id.to_owned();
         Box::pin(async move {
             let stored = log
                 .log
-                .read_owner(&session, |fold| fold.stored(&key).map(str::to_owned))
+                .read_owners(std::slice::from_ref(&key), |fold| {
+                    fold.stored(&key).map(str::to_owned)
+                })
                 .await
                 .map_err(|error| error.to_string())?;
             match stored {
                 Some(stored) => Ok(Some(stored)),
                 None => log
                     .log
-                    .read_owner(STORED_MARK, |fold| fold.stored(&legacy).map(str::to_owned))
+                    .read_owners(std::slice::from_ref(&legacy), |fold| {
+                        fold.stored(&legacy).map(str::to_owned)
+                    })
                     .await
                     .map_err(|error| error.to_string()),
             }
@@ -1513,10 +1522,11 @@ impl StateStore for OneLogStore {
         key: &'a str,
     ) -> StoreFuture<'a, Result<Option<String>, StoreError>> {
         Box::pin(async move {
+            let owned = stored_key(state_id, key);
             self.0
                 .log
-                .read_owner(state_id, |fold| {
-                    fold.stored(&stored_key(state_id, key)).map(str::to_owned)
+                .read_owners(std::slice::from_ref(&owned), |fold| {
+                    fold.stored(&owned).map(str::to_owned)
                 })
                 .await
         })
@@ -1528,11 +1538,16 @@ impl StateStore for OneLogStore {
         keys: &'a [String],
     ) -> StoreFuture<'a, Result<Vec<Option<String>>, StoreError>> {
         Box::pin(async move {
+            let owned = keys
+                .iter()
+                .map(|key| stored_key(state_id, key))
+                .collect::<Vec<_>>();
             self.0
                 .log
-                .read_owner(state_id, |fold| {
-                    keys.iter()
-                        .map(|key| fold.stored(&stored_key(state_id, key)).map(str::to_owned))
+                .read_owners(&owned, |fold| {
+                    owned
+                        .iter()
+                        .map(|key| fold.stored(key).map(str::to_owned))
                         .collect()
                 })
                 .await
@@ -1546,7 +1561,9 @@ impl StateStore for OneLogStore {
         Box::pin(async move {
             self.0
                 .log
-                .read_owner(state_id, |fold| Self::stored_state(fold, state_id))
+                .read_owners(&[state_id.to_owned()], |fold| {
+                    Self::stored_state(fold, state_id)
+                })
                 .await
         })
     }
@@ -1556,6 +1573,7 @@ impl StateStore for OneLogStore {
         limit: usize,
     ) -> StoreFuture<'a, Result<Vec<String>, StoreError>> {
         Box::pin(async move {
+            self.0.log.load_index().await?;
             Ok(self
                 .0
                 .log
@@ -1585,7 +1603,7 @@ impl StateStore for OneLogStore {
     ) -> StoreFuture<'a, Result<OwnedState, StoreError>> {
         Box::pin(async move {
             let mut lease = self.0.log.lease().await;
-            lease.load_owner(state_id).await?;
+            lease.load_owners(&[state_id.to_owned()]).await?;
             let owner = self.0.owners.update(|owners| {
                 let fence = owners.get(state_id).map_or(0, OwnerToken::fence) + 1;
                 let token = OwnerToken::new(owner_id.clone(), fence);
@@ -1609,7 +1627,7 @@ impl StateStore for OneLogStore {
     ) -> StoreFuture<'a, Result<u64, StoreError>> {
         Box::pin(async move {
             let mut lease = self.0.log.lease().await;
-            lease.load_owner(state_id).await?;
+            lease.load_owners(&owned(state_id, records)).await?;
             let revision = self.replaced(
                 &mut lease,
                 state_id,
@@ -1639,7 +1657,7 @@ impl StateStore for OneLogStore {
                 ));
             }
             let mut lease = self.0.log.lease().await;
-            lease.load_owner(state_id).await?;
+            lease.load_owners(&owned(state_id, commit.records)).await?;
             let revision = self.replaced(
                 &mut lease,
                 state_id,
@@ -1690,7 +1708,7 @@ impl StateStore for OneLogStore {
     ) -> StoreFuture<'a, Result<bool, StoreError>> {
         Box::pin(async move {
             let mut lease = self.0.log.lease().await;
-            lease.load_owner(state_id).await?;
+            lease.load_owners(&owned(state_id, records)).await?;
             for record in records {
                 let key = stored_key(state_id, &record.key);
                 if lease.fold().stored(&key) != Some(&*record.value) {

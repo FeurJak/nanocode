@@ -25,6 +25,7 @@ use crate::{
 const WINDOW: usize = 1 << 15;
 const SEAL: usize = 3;
 const PART_EVERY: u64 = 3;
+const OWNERS_PER_COMMIT: u64 = 16;
 
 pub struct SimHost {
     disk: Arc<Disk>,
@@ -32,6 +33,7 @@ pub struct SimHost {
     kept: bool,
     limit: Option<usize>,
     pruned: bool,
+    sections_kept: bool,
     short: bool,
 }
 
@@ -114,6 +116,7 @@ impl SimHost {
             kept: false,
             limit: None,
             pruned: false,
+            sections_kept: false,
             short: false,
         }
     }
@@ -222,6 +225,11 @@ impl LogHost for SimHost {
             };
         }
         let pruned = self.pruned;
+        let superseded = if self.sections_kept {
+            &[][..]
+        } else {
+            compaction.superseded
+        };
         let inserted = self.disk.with(|disk| {
             let inserted = disk.insert(scope, rows);
             if inserted && !kept {
@@ -231,19 +239,13 @@ impl LogHost for SimHost {
                     compaction.dropped,
                 ));
                 disk.tcompactions.extend(
-                    compaction
-                        .superseded
+                    superseded
                         .iter()
                         .map(|range| (scope.to_owned(), Vec::new(), range.clone())),
                 );
             }
             if inserted && pruned {
-                prune(
-                    disk,
-                    scope,
-                    rows,
-                    if kept { &[] } else { compaction.superseded },
-                );
+                prune(disk, scope, rows, if kept { &[] } else { superseded });
             }
             inserted
         });
@@ -345,6 +347,21 @@ fn content_value(scope: &str, id: u64) -> String {
     }
 }
 
+fn content_keys(fold: &Fold, scope: &str) -> Vec<String> {
+    let state = format!("{scope}:gc");
+    fold.checkpoint(&state)
+        .and_then(|checkpoint| serde_json::from_str::<Vec<String>>(&checkpoint.payload).ok())
+        .and_then(|keys| keys.into_iter().next())
+        .and_then(|key| u64::from_str_radix(key.strip_prefix("b3:")?, 16).ok())
+        .map(|top| {
+            chain(top)
+                .into_iter()
+                .map(|id| format!("{state}\n{}", content(id)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn contents_kept(fold: &Fold, scope: &str, when: &str) -> Vec<u64> {
     let state = format!("{scope}:gc");
     let Some(checkpoint) = fold.checkpoint(&state) else {
@@ -366,6 +383,43 @@ fn contents_kept(fold: &Fold, scope: &str, when: &str) -> Vec<u64> {
         );
     }
     ids
+}
+
+fn owners_written(revision: u64, owners: u64) -> impl Iterator<Item = u64> {
+    (0..OWNERS_PER_COMMIT.min(owners))
+        .map(move |offset| (revision * OWNERS_PER_COMMIT + offset) % owners)
+}
+
+fn owner_value(scope: &str, revision: u64) -> String {
+    format!("{scope} owner {revision}")
+}
+
+fn referenced(stored: &[(u64, String)]) -> Vec<std::ops::Range<u64>> {
+    let Some(start) = stored.iter().rposition(|(_, body)| body.starts_with('s')) else {
+        return Vec::new();
+    };
+    let end = stored[start + 1..]
+        .iter()
+        .take_while(|(_, body)| body.starts_with('+'))
+        .count()
+        + start
+        + 1;
+    nanocode_turnlog::rows(&stored[start..end])
+        .unwrap_or_else(|error| panic!("a turn log head does not decode: {error}"))
+        .iter()
+        .flat_map(|row| {
+            row.records()
+                .unwrap_or_else(|error| panic!("a turn log head does not decode: {error}"))
+        })
+        .flat_map(|record| match record {
+            LogRecord::Index { row, rows, .. } => std::iter::once(row..row + rows).collect(),
+            LogRecord::Groups { groups } => groups
+                .into_iter()
+                .map(|(row, rows, _)| row..row + rows)
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect()
 }
 
 fn part_value(scope: &str, revision: u64) -> String {
@@ -394,6 +448,7 @@ pub struct TurnLogPolicy {
     host: Arc<dyn LogHost>,
     limit: Option<usize>,
     logs: BTreeMap<String, TurnLog>,
+    owners: Option<u64>,
     ratio: usize,
     protections: Protections,
     read_unloaded: bool,
@@ -426,10 +481,12 @@ impl TurnLogPolicy {
                 kept: false,
                 limit,
                 pruned: false,
+                sections_kept: false,
                 short: false,
             }),
             limit,
             logs: BTreeMap::new(),
+            owners: None,
             ratio,
             protections,
             read_unloaded: false,
@@ -450,6 +507,7 @@ impl TurnLogPolicy {
         short: bool,
         extending: bool,
         pruned: bool,
+        sections_kept: bool,
     ) -> Self {
         self.state = bytes;
         self.host = Arc::new(SimHost {
@@ -458,8 +516,14 @@ impl TurnLogPolicy {
             kept,
             limit: self.limit,
             pruned,
+            sections_kept,
             short,
         });
+        self
+    }
+
+    pub const fn owners(mut self, owners: Option<u64>) -> Self {
+        self.owners = owners;
         self
     }
 
@@ -679,6 +743,26 @@ impl TurnDurability for TurnLogPolicy {
             written == expected.map(|expected| part_value(scope, expected)),
             "{part} reads {written:?} after a restart at revision {revision}, which committed revision {expected:?}"
         );
+        if let Some(owners) = self.owners {
+            for owner in 0..owners {
+                let name = format!("{scope}:o{owner}");
+                let read = refused(ready(log.read_owner(&name, |fold| {
+                    (
+                        fold.checkpoint(&name)
+                            .map(|checkpoint| checkpoint.payload.clone()),
+                        fold.stored(&format!("{name}\nlast")).map(str::to_owned),
+                    )
+                })));
+                let expected = (1..=revision)
+                    .rev()
+                    .find(|written| owners_written(*written, owners).any(|other| other == owner))
+                    .map(|written| owner_value(scope, written));
+                assert!(
+                    read == (expected.clone(), expected.clone()),
+                    "{name} reads {read:?} after a restart at revision {revision}, which committed {expected:?}"
+                );
+            }
+        }
         let mut events = Vec::new();
         refused(ready(log.history(0, |event| {
             events.push((Some((0, event.seq)), text(&event.event)));
@@ -704,8 +788,10 @@ impl TurnDurability for TurnLogPolicy {
         state: &mut ScopeState,
     ) -> Option<Appended> {
         let log = self.log(scope);
-        refused(ready(log.load_owner(scope)));
-        refused(ready(log.load_owner(&format!("{scope}:gc"))));
+        refused(ready(log.read_owners(
+            &[scope.to_owned(), format!("{scope}:gc")],
+            |_| (),
+        )));
         let (recovering, floor, revision) = {
             let lease = ready(log.lease());
             let fold = lease.fold();
@@ -744,6 +830,21 @@ impl TurnDurability for TurnLogPolicy {
                 state: part,
             }));
         }
+        if let Some(owners) = self.owners {
+            for owner in owners_written(revision + 1, owners) {
+                let name = format!("{scope}:o{owner}");
+                let value = owner_value(scope, revision + 1);
+                refused(lease.push(LogRecord::Stored {
+                    key: format!("{name}\nlast"),
+                    value: value.clone(),
+                }));
+                refused(lease.push(LogRecord::Checkpoint {
+                    payload: value,
+                    revision: revision + 1,
+                    state: name,
+                }));
+            }
+        }
         let contents = format!("{scope}:gc");
         let next = lease
             .fold()
@@ -773,6 +874,8 @@ impl TurnDurability for TurnLogPolicy {
         );
         let viewed = self.rows.map(|_| self.disk.with(|rows| rows.view(scope)));
         let seq = refused(ready(lease.commit(log_point)));
+        let keys = content_keys(lease.fold(), scope);
+        refused(ready(lease.load_owners(&keys)));
         contents_kept(lease.fold(), scope, &format!("after commit {seq}"));
         if let Some(viewed) = viewed {
             let stored = self.disk.with(|rows| rows.view(scope));
@@ -881,6 +984,16 @@ impl TurnDurability for TurnLogPolicy {
                 loaded as u64 <= bound as u64 + parts + 1,
                 "a cold open of {scope} reads {loaded} rows past a snapshot row bound of {bound}"
             );
+        }
+        if after.snapshots > before.snapshots {
+            let stored = self.disk.with(|rows| rows.view(scope));
+            let referenced = referenced(&stored);
+            for (row, body) in &stored {
+                assert!(
+                    !body.starts_with('p') || referenced.iter().any(|range| range.contains(row)),
+                    "{scope} keeps section row {row} after commit {seq}, which its head does not reference"
+                );
+            }
         }
         if self.state.is_some() && self.single {
             let snapshots = self.disk.with(|rows| {
