@@ -310,6 +310,7 @@ pub const INLCR: tcflag_t = 0x00000040;
 pub const IPPROTO_TCP: c_int = 6;
 pub const ISTRIP: tcflag_t = 0x00000020;
 pub const MADV_DONTNEED: c_int = 4;
+pub const MADV_RANDOM: c_int = 1;
 pub const MAP_FAILED: *mut c_void = !0 as *mut c_void;
 pub const MAP_PRIVATE: c_int = 0x0002;
 pub const OPOST: tcflag_t = 0x1;

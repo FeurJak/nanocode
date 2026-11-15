@@ -48,8 +48,42 @@ pub fn prepare(count: libc::c_int, arguments: *const *const libc::c_char) {
     unsafe { libc::mallopt(libc::M_ARENA_MAX, 1) };
 }
 
+const FAULT_AROUND_BYTES: usize = 65536;
+
 pub fn release_file_pages() {
     unsafe { libc::dl_iterate_phdr(Some(release_object), std::ptr::null_mut()) };
+}
+
+fn split_mapped_windows(first: usize, end: usize, page: usize) {
+    use std::os::unix::fs::FileExt;
+    let Ok(pagemap) = std::fs::File::open("/proc/self/pagemap") else {
+        return;
+    };
+    let start = first / page;
+    let pages = (end - first) / page;
+    let mut entries = vec![0u8; pages * 8];
+    if pagemap
+        .read_exact_at(&mut entries, (start * 8) as u64)
+        .is_err()
+    {
+        return;
+    }
+    let window = FAULT_AROUND_BYTES / page;
+    let mut base = start / window * window;
+    while base < start + pages {
+        let pages_in_window = base.max(start)..(base + window).min(start + pages);
+        if pages_in_window
+            .clone()
+            .any(|index| entries[(index - start) * 8 + 7] & 0x80 != 0)
+        {
+            for index in pages_in_window.filter(|index| index % 2 == 0) {
+                unsafe {
+                    libc::madvise((index * page) as *mut libc::c_void, page, libc::MADV_RANDOM)
+                };
+            }
+        }
+        base += window;
+    }
 }
 
 unsafe extern "C" fn release_object(
@@ -82,6 +116,7 @@ unsafe extern "C" fn release_object(
         let first = start.next_multiple_of(page);
         let end = (start + header.p_filesz as usize) / page * page;
         if end > first {
+            split_mapped_windows(first, end, page);
             unsafe { libc::madvise(first as *mut libc::c_void, end - first, libc::MADV_DONTNEED) };
         }
     }
