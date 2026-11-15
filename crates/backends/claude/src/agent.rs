@@ -786,6 +786,8 @@ pub struct ClaudeBuilder {
     deadline: Option<crate::Deadline>,
     headless: bool,
     brief_finish: bool,
+    fold_finish: bool,
+    low_effort_rounds: bool,
     spawn_factory: Option<Arc<dyn AgentFactory>>,
     child_journal: Option<nanocode_agent_core::backend::ChildJournal>,
     host_context: Option<Arc<str>>,
@@ -867,6 +869,8 @@ impl ClaudeBuilder {
             deadline: None,
             headless: false,
             brief_finish: false,
+            fold_finish: false,
+            low_effort_rounds: false,
             spawn_factory: None,
             child_journal: None,
             host_context: None,
@@ -1273,6 +1277,16 @@ impl ClaudeBuilder {
 
     pub const fn brief_finish(mut self, brief: bool) -> Self {
         self.brief_finish = brief;
+        self
+    }
+
+    pub const fn fold_finish(mut self, fold: bool) -> Self {
+        self.fold_finish = fold;
+        self
+    }
+
+    pub const fn low_effort_rounds(mut self, low: bool) -> Self {
+        self.low_effort_rounds = low;
         self
     }
 
@@ -3003,6 +3017,8 @@ struct State {
     deadline: Option<crate::deadline::Reminders>,
     headless: bool,
     brief_finish: bool,
+    fold_finish: bool,
+    low_effort_rounds: bool,
     working_directory: Option<crate::environment::WorkingDirectory>,
     lifecycle_opened: Atom<Option<String>>,
     subagent_type: Option<String>,

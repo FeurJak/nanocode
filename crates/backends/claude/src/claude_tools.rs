@@ -707,7 +707,7 @@ fn catalog(
         native.shared_tool_names.insert(tool_name.clone());
         let definition = ToolDefinition {
             description,
-            name: tool_name.clone(),
+            name: tool_name,
             input_schema,
             strict,
             defer_loading: false,

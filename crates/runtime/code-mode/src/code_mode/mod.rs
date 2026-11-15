@@ -92,7 +92,10 @@ const INITIAL_YIELD: Duration = spec::DEFAULT_YIELD;
 const DEFAULT_WAIT_YIELD: Duration = spec::DEFAULT_YIELD;
 const OBSERVER_YIELD_GRACE: Duration = Duration::from_secs(1);
 const MIN_YIELD_FOR_OBSERVER_GRACE: Duration = Duration::from_secs(10);
-use spec::EXEC_PRAGMA_PREFIX;
+use spec::{
+    EXEC_PRAGMA_PREFIX, NOTHING_YET, RUNNING_FOR, RUNNING_OUTPUT, RUNNING_STATUS,
+    SILENT_SINCE_YIELD, STILL_RUNNING,
+};
 const CELL_RUNNING: u8 = 0;
 const CELL_TERMINATING: u8 = 1;
 const CELL_COMPLETION_CLAIMED: u8 = 2;
@@ -2095,7 +2098,7 @@ async fn observe_updates(
                 if observation.buffered.content.is_empty() && observation.buffered.returned > 0 {
                     let text = if observation.yielded {
                         format!(
-                            "The script printed nothing since the last yield.{}",
+                            "{SILENT_SINCE_YIELD}{}",
                             returned_summary(&observation.buffered, " since then")
                         )
                     } else {
@@ -2358,10 +2361,10 @@ async fn yielded_observation(
     let running = std::mem::take(&mut observation.running);
     let mut buffered = take_buffered(observation);
     if buffered.content.is_empty() && (buffered.returned > 0 || !running.is_empty()) {
-        let mut text = "The script printed nothing since the last yield.".to_owned();
+        let mut text = SILENT_SINCE_YIELD.to_owned();
         text.push_str(&returned_summary(&buffered, " since then"));
         if !running.is_empty() {
-            text.push_str("\nNested calls still running:");
+            text.push_str(STILL_RUNNING);
             for call in &running {
                 text.push_str(&running_status(tools, call).await);
             }
@@ -2416,7 +2419,7 @@ async fn running_status(tools: &dyn CodeModeToolset, call: &RunningCall) -> Stri
         text.push_str(&format!(" ({description})"));
     }
     text.push_str(&format!(
-        ", running for {:.1} s",
+        "{RUNNING_FOR}{:.1} s",
         nanocode_platform::elapsed(call.started).as_secs_f64()
     ));
     match tools
@@ -2425,9 +2428,9 @@ async fn running_status(tools: &dyn CodeModeToolset, call: &RunningCall) -> Stri
         .as_deref()
         .map(str::trim_end)
     {
-        Some("") => text.push_str(", nothing printed yet"),
+        Some("") => text.push_str(NOTHING_YET),
         Some(output) => {
-            text.push_str(", its latest output:\n");
+            text.push_str(RUNNING_OUTPUT);
             text.push_str(&output_tail(output.to_owned()));
         }
         None => {}
@@ -2447,7 +2450,7 @@ fn running_observation(
     (
         observed_execution(
             tools,
-            &format!("Script running with cell ID {cell_id}"),
+            &format!("{RUNNING_STATUS}{cell_id}"),
             true,
             started_at,
             content,

@@ -484,6 +484,8 @@ pub(super) fn build(mut builder: ClaudeBuilder) -> Result<(Agent, AgentEvents)> 
         deadline: builder.deadline.map(crate::deadline::Reminders::new),
         headless: builder.headless,
         brief_finish: builder.brief_finish,
+        fold_finish: builder.fold_finish,
+        low_effort_rounds: builder.low_effort_rounds,
         working_directory: working_directory.map(crate::environment::WorkingDirectory::new),
         nested_tools,
         recovery,

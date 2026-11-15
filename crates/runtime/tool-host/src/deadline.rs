@@ -5,6 +5,12 @@ use std::time::Duration;
 
 const EARLY_REMINDER: &str = "Keep working until then. First put every output the task asks for in its final location, then use the time that remains to improve and test it. Test it on an input you made that differs from the given example, because the task's checks use inputs you have not seen.";
 const LAST_REMINDER: &str = "Finish now. Make sure every output the task asks for is in its final location. Delete only the scratch files and test output you made where the task's program or its checks write, read or wait for files, such as a file in /tmp. Keep what the task's program built or set up: caches and compiled artifacts (such as a compiled model or a build directory), installed packages, and the state the task asked for (repositories and their branches, served files, databases, services). Never reset or empty that state to make it clean. Stop background processes you started, unless the task asked to keep them running. Do not start a command or a wait that cannot finish in the time that remains.";
+const FINISH_OPEN: &str =
+    "<system-reminder>\nThis session is non-interactive and nobody will reply.";
+const FINISH_CHECK: &str = " Before you finish, check the work:\n";
+const FINISH_CHECKLIST: &str = "- Every output the task names exists at that exact path, with a relative path resolved against the working directory.\n- The task's own check, or a direct test of the result, passes when you run it again now.\n- The task's checks use inputs you have not seen (other files, data, sizes or seeds) and run the program as a script does: stdout piped, not a terminal, and signals such as SIGINT. The result holds on at least one input you made that differs from the given example, including the case the task names, and with stdout piped when output matters.\n- The scratch files and test output you made where the task's program or its checks write, read or wait for files, such as a file in /tmp, are deleted, and nothing else is.\n- What the task's program built or set up is kept: caches and compiled artifacts (such as a compiled model or a build directory), installed packages, and the state the task asked for (repositories and their branches, served files, databases, services). None of that state is reset or emptied to make it clean.\n- Background processes you started are stopped, unless the task asked to keep them running.\n- Any choice left open is made, and its result is written.\n";
+const TIME_LIMIT: &str = "Time limit: ";
+const TIME_UP: &str = " When the time is up the task stops, and only what is on disk then counts.";
 const REMINDER_PERCENTS: [u128; 3] = [50, 75, 90];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -133,6 +139,11 @@ impl Reminders {
     }
 
     #[must_use]
+    pub fn first_passed(&self) -> bool {
+        self.deadline.passed(self.deadline.remaining()) > 0
+    }
+
+    #[must_use]
     pub fn last_passed(&self) -> bool {
         self.deadline.passed(self.deadline.remaining()) == REMINDER_PERCENTS.len()
     }
@@ -151,16 +162,14 @@ impl Reminders {
         }
         let remain = self.deadline.remain(remaining);
         if passed <= announced {
-            return Some(format!("Time limit: {remain}"));
+            return Some(format!("{TIME_LIMIT}{remain}"));
         }
         let steps = if passed == REMINDER_PERCENTS.len() {
             LAST_REMINDER
         } else {
             EARLY_REMINDER
         };
-        Some(format!(
-            "Time limit: {remain} When the time is up the task stops, and only what is on disk then counts. {steps}"
-        ))
+        Some(format!("{TIME_LIMIT}{remain}{TIME_UP} {steps}"))
     }
 
     #[must_use]
@@ -183,8 +192,25 @@ pub fn finish_notice(deadline: Option<&Reminders>, brief: bool) -> String {
         "reply with your final message"
     };
     format!(
-        "<system-reminder>\nThis session is non-interactive and nobody will reply.{time} Before you finish, check the work:\n- Every output the task names exists at that exact path, with a relative path resolved against the working directory.\n- The task's own check, or a direct test of the result, passes when you run it again now.\n- The task's checks use inputs you have not seen (other files, data, sizes or seeds) and run the program as a script does: stdout piped, not a terminal, and signals such as SIGINT. The result holds on at least one input you made that differs from the given example, including the case the task names, and with stdout piped when output matters.\n- The scratch files and test output you made where the task's program or its checks write, read or wait for files, such as a file in /tmp, are deleted, and nothing else is.\n- What the task's program built or set up is kept: caches and compiled artifacts (such as a compiled model or a build directory), installed packages, and the state the task asked for (repositories and their branches, served files, databases, services). None of that state is reset or emptied to make it clean.\n- Background processes you started are stopped, unless the task asked to keep them running.\n- Any choice left open is made, and its result is written.\nFix what falls short. When everything holds, {reply}.\n</system-reminder>"
+        "{FINISH_OPEN}{time}{FINISH_CHECK}{FINISH_CHECKLIST}Fix what falls short. When everything holds, {reply}.\n</system-reminder>"
     )
+}
+
+#[must_use]
+pub fn folded_finish_notice() -> String {
+    format!(
+        "{FINISH_OPEN} Before your final message, check the work:\n{FINISH_CHECKLIST}Fix what falls short before you reply with your final message.\n</system-reminder>"
+    )
+}
+
+#[must_use]
+pub fn is_finish_notice(text: &str) -> bool {
+    text.starts_with(FINISH_OPEN) && text.contains(FINISH_CHECK)
+}
+
+#[must_use]
+pub fn is_time_left(text: &str) -> bool {
+    text.starts_with(TIME_LIMIT) && !text.contains(TIME_UP)
 }
 
 fn spoken(duration: Duration) -> String {

@@ -176,6 +176,63 @@ pub fn exec_spec_yielding(spec: ToolDefinition, after: std::time::Duration) -> T
 }
 
 pub const EXEC_PRAGMA_PREFIX: &str = "// @exec:";
+pub const RUNNING_STATUS: &str = "Script running with cell ID ";
+pub const SILENT_SINCE_YIELD: &str = "The script printed nothing since the last yield.";
+pub const STILL_RUNNING: &str = "\nNested calls still running:";
+pub const RUNNING_FOR: &str = ", running for ";
+pub const NOTHING_YET: &str = ", nothing printed yet";
+pub const RUNNING_OUTPUT: &str = ", its latest output:\n";
+
+#[must_use]
+pub fn unchanged_yield(text: &str, previous: Option<&str>) -> bool {
+    let Some(body) = yield_body(text) else {
+        return false;
+    };
+    if body.is_empty() {
+        return true;
+    }
+    let Some(running) = still_running(body) else {
+        return false;
+    };
+    if !running.contains(RUNNING_OUTPUT)
+        && running.lines().skip(1).all(|line| line.starts_with("- "))
+    {
+        return true;
+    }
+    previous
+        .and_then(yield_body)
+        .and_then(still_running)
+        .is_some_and(|before| steady(before) == steady(running))
+}
+
+fn yield_body(text: &str) -> Option<&str> {
+    let (_, rest) = text.strip_prefix(RUNNING_STATUS)?.split_once('\n')?;
+    let (wall, rest) = rest.split_once('\n')?;
+    wall.starts_with("Wall time ")
+        .then_some(rest)?
+        .strip_prefix("Output:\n")
+}
+
+fn still_running(body: &str) -> Option<&str> {
+    body.strip_prefix(SILENT_SINCE_YIELD)?
+        .strip_prefix(STILL_RUNNING)
+}
+
+fn steady(listing: &str) -> Vec<String> {
+    listing
+        .lines()
+        .map(|line| {
+            let Some(at) = line.find(RUNNING_FOR).filter(|_| line.starts_with("- ")) else {
+                return line.to_owned();
+            };
+            let rest = &line[at + RUNNING_FOR.len()..];
+            rest.find(" s").map_or_else(
+                || line.to_owned(),
+                |end| format!("{}{}", &line[..at], &rest[end + 2..]),
+            )
+        })
+        .collect()
+}
 pub(crate) const MAX_JS_SAFE_INTEGER: u64 = (1_u64 << 53) - 1;
 
 pub(crate) fn integer_value(value: &Value) -> Result<u64, String> {

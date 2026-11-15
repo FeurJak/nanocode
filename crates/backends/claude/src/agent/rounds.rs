@@ -238,6 +238,15 @@ pub(super) fn run_rounds<'a>(
                     message.content.insert(0, ContentBlock::text(status));
                 }
             }
+            if state.fold_finish
+                && state.headless
+                && state.lineage.root_session_id == state.session_id
+                && let Some(message) = prompt.last_mut()
+            {
+                message.content.push(ContentBlock::text(
+                    nanocode_tool_host::deadline::folded_finish_notice(),
+                ));
+            }
             pending.extend(prompt.into_iter().map(HistoryMessage::from));
             if first {
                 pending.push(
@@ -317,6 +326,9 @@ pub(super) fn run_rounds<'a>(
                     .await?;
             }
 
+            if state.low_effort_rounds && cursor.template.effort_updates {
+                round_effort(state, &mut pending, &cursor.template);
+            }
             let discovered = client_discovered_tools(&pending)
                 .into_iter()
                 .map(str::to_owned)
@@ -1301,6 +1313,11 @@ pub(super) fn run_rounds<'a>(
                     .deadline
                     .as_ref()
                     .is_some_and(crate::deadline::Reminders::last_passed)
+                && (!state.fold_finish
+                    || state
+                        .deadline
+                        .as_ref()
+                        .is_some_and(|deadline| !deadline.first_passed()))
             {
                 if state.hold_turn(&request.key, cancel).await? {
                     cursor.index = index + 1;
@@ -1455,4 +1472,110 @@ pub(super) fn run_rounds<'a>(
         }
         Err(provider_error("Claude model-call ordinal exhausted"))
     })
+}
+
+fn round_effort(state: &State, pending: &mut Vec<HistoryMessage>, template: &MessagesRequest) {
+    let Some(configured) = state.effort() else {
+        return;
+    };
+    let wanted = if quiet_round(pending) {
+        claude_selection(&state.model())
+            .capabilities(ModelTransport::Native)
+            .thinking()
+            .find_map(thinking_effort)
+            .unwrap_or(configured)
+    } else {
+        configured
+    };
+    let in_effect = pending
+        .iter()
+        .rev()
+        .find_map(|message| message.output_config.as_ref())
+        .or(template.output_config.as_ref())
+        .map(|config| config.effort);
+    if in_effect != Some(wanted) {
+        pending.push(Message::effort(wanted).into());
+    }
+}
+
+fn quiet_round(pending: &[HistoryMessage]) -> bool {
+    let Some(at) = pending
+        .iter()
+        .rposition(|message| message.role != Role::System)
+    else {
+        return false;
+    };
+    let quiet_notices = pending[at + 1..].iter().all(|message| {
+        message.is_effort_update()
+            || matches!(
+                message.content.as_slice(),
+                [ContentBlock::Text { text, .. }] if nanocode_tool_host::deadline::is_time_left(text)
+            )
+    });
+    if !quiet_notices || pending[at].role != Role::User {
+        return false;
+    }
+    match pending[at].content.as_slice() {
+        [ContentBlock::Text { text, .. }] => nanocode_tool_host::deadline::is_finish_notice(text),
+        [] => false,
+        blocks => blocks
+            .iter()
+            .all(|block| quiet_result(block, &pending[..at])),
+    }
+}
+
+fn quiet_result(block: &ContentBlock, before: &[HistoryMessage]) -> bool {
+    let ContentBlock::ToolResult {
+        tool_use_id,
+        content,
+        ..
+    } = block
+    else {
+        return false;
+    };
+    let code = before
+        .iter()
+        .rev()
+        .flat_map(|message| &message.content)
+        .any(|block| {
+            matches!(
+                block,
+                ContentBlock::ToolUse { id, name, .. }
+                    if id == tool_use_id && matches!(name.as_str(), "exec" | "wait")
+            )
+        });
+    code && result_text(content).is_some_and(|text| {
+        nanocode_code_mode::code_mode_spec::unchanged_yield(
+            &text,
+            earlier_yield(&text, before).as_deref(),
+        )
+    })
+}
+
+fn result_text(content: &ToolResultContent) -> Option<String> {
+    match content {
+        ToolResultContent::Text(text) => Some(text.clone()),
+        ToolResultContent::Blocks(blocks) => blocks
+            .iter()
+            .map(|block| {
+                (block.get("type").and_then(Value::as_str) == Some("text"))
+                    .then(|| block.get("text").and_then(Value::as_str))
+                    .flatten()
+            })
+            .collect(),
+    }
+}
+
+fn earlier_yield(text: &str, before: &[HistoryMessage]) -> Option<String> {
+    let status = text.lines().next()?;
+    before
+        .iter()
+        .rev()
+        .flat_map(|message| message.content.iter().rev())
+        .find_map(|block| match block {
+            ContentBlock::ToolResult { content, .. } => {
+                result_text(content).filter(|earlier| earlier.lines().next() == Some(status))
+            }
+            _ => None,
+        })
 }
