@@ -2,7 +2,9 @@
 //! zone for the Unix host (D1150).
 
 use nanocode_sys::libc;
-use std::ffi::{CStr, CString};
+#[cfg(not(target_os = "linux"))]
+use std::ffi::CStr;
+use std::ffi::CString;
 use std::io;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
@@ -110,17 +112,39 @@ pub fn set_times(p: &[u8], atime: Option<i64>, mtime: Option<i64>, follow: bool)
     }
 }
 
+#[cfg(target_os = "linux")]
+pub fn user_name(uid: u32) -> Option<Vec<u8>> {
+    nanocode_sys::unix::user_entry(uid).ok().flatten().map(|user| user.name.into_bytes())
+}
+
+#[cfg(target_os = "linux")]
+pub fn user_shell(uid: u32) -> Option<Vec<u8>> {
+    nanocode_sys::unix::user_entry(uid)
+        .ok()
+        .flatten()
+        .map(|user| user.shell.into_os_string().into_vec())
+}
+
+#[cfg(target_os = "linux")]
+pub fn group_name(gid: u32) -> Option<Vec<u8>> {
+    nanocode_sys::unix::group_name(gid).ok().flatten()
+}
+
 /// A buffer size for the `get*_r` calls, grown on `ERANGE`.
+#[cfg(not(target_os = "linux"))]
 const NAME_BUF: usize = 1024;
 
+#[cfg(not(target_os = "linux"))]
 pub fn user_name(uid: u32) -> Option<Vec<u8>> {
     passwd_field(uid, |pw| pw.pw_name)
 }
 
+#[cfg(not(target_os = "linux"))]
 pub fn user_shell(uid: u32) -> Option<Vec<u8>> {
     passwd_field(uid, |pw| pw.pw_shell)
 }
 
+#[cfg(not(target_os = "linux"))]
 fn passwd_field(uid: u32, field: fn(&libc::passwd) -> *mut libc::c_char) -> Option<Vec<u8>> {
     let mut buf = vec![0u8; NAME_BUF];
     loop {
@@ -144,6 +168,7 @@ fn passwd_field(uid: u32, field: fn(&libc::passwd) -> *mut libc::c_char) -> Opti
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 pub fn group_name(gid: u32) -> Option<Vec<u8>> {
     let mut buf = vec![0u8; NAME_BUF];
     loop {

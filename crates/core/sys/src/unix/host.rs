@@ -1,6 +1,6 @@
 use crate::libc;
 use std::{
-    ffi::{CStr, CString, OsString},
+    ffi::{CString, OsString},
     fs::File,
     io,
     os::{
@@ -11,7 +11,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(not(target_os = "linux"))]
 const USER_ENTRY_BUFFER_BYTES_DEFAULT: usize = 16_384;
+#[cfg(not(target_os = "linux"))]
 const USER_ENTRY_BUFFER_BYTES_MAX: usize = 1_048_576;
 const HOST_NAME_BUFFER_BYTES: usize = 256;
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
@@ -46,13 +48,70 @@ pub fn process_group() -> i32 {
     unsafe { libc::getpgrp() }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn c_bytes(pointer: *const libc::c_char) -> Vec<u8> {
     if pointer.is_null() {
         return Vec::new();
     }
-    unsafe { CStr::from_ptr(pointer) }.to_bytes().to_vec()
+    unsafe { std::ffi::CStr::from_ptr(pointer) }
+        .to_bytes()
+        .to_vec()
 }
 
+#[cfg(target_os = "linux")]
+const PASSWD_PATH: &str = "/etc/passwd";
+#[cfg(target_os = "linux")]
+const GROUP_PATH: &str = "/etc/group";
+
+#[cfg(target_os = "linux")]
+fn database(path: &str) -> io::Result<Vec<u8>> {
+    match std::fs::read(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        read => read,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn passwd_entry(found: impl Fn(&[u8], &[u8]) -> bool) -> io::Result<Option<UserEntry>> {
+    Ok(database(PASSWD_PATH)?
+        .split(|byte| *byte == b'\n')
+        .find_map(|line| {
+            let fields: Vec<&[u8]> = line.split(|byte| *byte == b':').collect();
+            let [name, _, id, _, _, home, shell] = fields[..] else {
+                return None;
+            };
+            found(name, id).then(|| UserEntry {
+                name: String::from_utf8_lossy(name).into_owned(),
+                home: PathBuf::from(OsString::from_vec(home.to_vec())),
+                shell: PathBuf::from(OsString::from_vec(shell.to_vec())),
+            })
+        }))
+}
+
+#[cfg(target_os = "linux")]
+pub fn user_entry(user_id: u32) -> io::Result<Option<UserEntry>> {
+    let id = user_id.to_string();
+    passwd_entry(|_, entry| entry == id.as_bytes())
+}
+
+#[cfg(target_os = "linux")]
+pub fn user_entry_named(name: &[u8]) -> io::Result<Option<UserEntry>> {
+    passwd_entry(|entry, _| entry == name)
+}
+
+#[cfg(target_os = "linux")]
+pub fn group_name(group_id: u32) -> io::Result<Option<Vec<u8>>> {
+    let id = group_id.to_string();
+    Ok(database(GROUP_PATH)?
+        .split(|byte| *byte == b'\n')
+        .find_map(|line| {
+            let mut fields = line.split(|byte| *byte == b':');
+            let name = fields.next()?;
+            (fields.nth(1)? == id.as_bytes()).then(|| name.to_vec())
+        }))
+}
+
+#[cfg(not(target_os = "linux"))]
 fn user_entry_buffer_bytes() -> usize {
     let configured = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
     usize::try_from(configured)
@@ -61,6 +120,7 @@ fn user_entry_buffer_bytes() -> usize {
         .unwrap_or(USER_ENTRY_BUFFER_BYTES_DEFAULT)
 }
 
+#[cfg(not(target_os = "linux"))]
 pub fn user_entry(user_id: u32) -> io::Result<Option<UserEntry>> {
     let mut buffer: Vec<libc::c_char> = Vec::with_capacity(user_entry_buffer_bytes());
     loop {

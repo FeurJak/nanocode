@@ -263,10 +263,23 @@ async fn resolve(addresses: impl ToSocketAddrs) -> io::Result<Vec<SocketAddr>> {
         Resolve::Failed(error) => return Err(error),
         Resolve::Lookup(host) => host,
     };
-    on_thread(LOOKUP_THREAD, move || {
-        std::net::ToSocketAddrs::to_socket_addrs(&host).map(Iterator::collect)
-    })
-    .await
+    on_thread(LOOKUP_THREAD, move || lookup(&host)).await
+}
+
+#[cfg(target_os = "linux")]
+fn lookup(host: &str) -> io::Result<Vec<SocketAddr>> {
+    let (name, port) = host
+        .rsplit_once(':')
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid socket address"))?;
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid port value"))?;
+    crate::dns::resolve(name, port)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn lookup(host: &str) -> io::Result<Vec<SocketAddr>> {
+    std::net::ToSocketAddrs::to_socket_addrs(host).map(Iterator::collect)
 }
 
 pub async fn lookup_host(host: impl ToSocketAddrs) -> io::Result<impl Iterator<Item = SocketAddr>> {

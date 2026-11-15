@@ -516,11 +516,29 @@ impl TryFrom<PersistedPrimitiveSignature> for PrimitiveSignature {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn process_home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            nanocode_platform::unix::user_entry(nanocode_platform::unix::user_id())
+                .ok()
+                .flatten()
+                .map(|user| user.home)
+        })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_home() -> Option<PathBuf> {
+    std::env::home_dir()
+}
+
 pub(crate) fn default_store_path() -> Result<PathBuf, AccountsError> {
     if let Some(directory) = std::env::var_os(TEMPO_HOME).filter(|path| !path.is_empty()) {
         return Ok(PathBuf::from(directory).join(STORE));
     }
-    std::env::home_dir()
+    process_home()
         .map(|directory| directory.join(DEFAULT_STORE))
         .ok_or(AccountsError::HomeUnavailable)
 }

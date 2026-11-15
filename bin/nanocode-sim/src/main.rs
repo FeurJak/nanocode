@@ -6,6 +6,8 @@ mod capture;
 mod cells;
 mod children;
 mod disk;
+#[cfg(target_os = "linux")]
+mod dns;
 #[cfg(unix)]
 mod egress;
 mod drive;
@@ -77,6 +79,7 @@ enum Scenario {
     Hands,
     Capture,
     Executor,
+    Dns,
 }
 
 struct Args {
@@ -100,13 +103,15 @@ struct Args {
     egress: egress::EgressMutation,
     #[cfg(unix)]
     capture: capture::CaptureMutation,
+    #[cfg(target_os = "linux")]
+    dns: dns::DnsMutation,
 }
 
 type Caught = BTreeMap<Invariant, (u64, u64, (u64, u64))>;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|capture|executor] [--ops N] [--twice] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--retain TURNS] [--state-bytes N] [--event-bytes N]\n       runtime: [--store memory|kv|log] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
+        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|capture|executor|dns] [--ops N] [--twice] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--retain TURNS] [--state-bytes N] [--event-bytes N]\n       runtime: [--store memory|kv|log] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
        websocket: [--mutation {}]
        http_server: [--mutation {}]
        alloc: [--mutation overstate_size|forget_free|scribble]
@@ -116,7 +121,8 @@ fn usage() -> ExitCode {
        streams: [--mutation {}]
        hands: [--mutation {}]
        capture: [--mutation skip_trim|drop_chunk|skip_redact|redact_then_trim]
-       executor: [--mutation {}]",
+       executor: [--mutation {}]
+       dns: [--mutation cut_answer|drop_search]",
         Mutation::names(),
         TurnMutation::names(),
         onelog::PROTECTIONS.join("|"),
@@ -179,6 +185,8 @@ fn parse_args(args: &[String]) -> Option<Args> {
     let mut tasks = TasksMutation::None;
     #[cfg(unix)]
     let mut capture = capture::CaptureMutation::None;
+    #[cfg(target_os = "linux")]
+    let mut dns = dns::DnsMutation::None;
     #[cfg(unix)]
     let mut alloc = alloc::AllocMutation::None;
     #[cfg(unix)]
@@ -220,6 +228,8 @@ fn parse_args(args: &[String]) -> Option<Args> {
                     "executor" => Scenario::Executor,
                     #[cfg(unix)]
                     "capture" => Scenario::Capture,
+                    #[cfg(target_os = "linux")]
+                    "dns" => Scenario::Dns,
                     #[cfg(unix)]
                     "alloc" => Scenario::Alloc,
                     #[cfg(unix)]
@@ -260,6 +270,10 @@ fn parse_args(args: &[String]) -> Option<Args> {
         (Scenario::Capture, Some(name)) => capture = capture::CaptureMutation::parse(name)?,
         #[cfg(not(unix))]
         (Scenario::Capture, Some(_)) => return None,
+        #[cfg(target_os = "linux")]
+        (Scenario::Dns, Some(name)) => dns = dns::DnsMutation::parse(name)?,
+        #[cfg(not(target_os = "linux"))]
+        (Scenario::Dns, Some(_)) => return None,
         #[cfg(unix)]
         (Scenario::Alloc, Some(name)) => alloc = alloc::AllocMutation::parse(name)?,
         #[cfg(unix)]
@@ -297,6 +311,8 @@ fn parse_args(args: &[String]) -> Option<Args> {
         egress,
         #[cfg(unix)]
         capture,
+        #[cfg(target_os = "linux")]
+        dns,
     })
 }
 
@@ -334,6 +350,10 @@ fn replay(seed: u64, args: &Args) -> String {
     #[cfg(unix)]
     if args.scenario == Scenario::Capture {
         return capture::replay(seed, args.capture);
+    }
+    #[cfg(target_os = "linux")]
+    if args.scenario == Scenario::Dns {
+        return dns::replay(seed, args.dns);
     }
     #[cfg(unix)]
     if args.scenario == Scenario::Alloc {
@@ -629,6 +649,8 @@ fn mutations() -> ExitCode {
         add("egress", egress::EgressMutation::names());
         add("capture", capture::CaptureMutation::names());
     }
+    #[cfg(target_os = "linux")]
+    add("dns", dns::DnsMutation::names());
     for line in lines {
         println!("{line}");
     }
@@ -701,6 +723,8 @@ fn main() -> ExitCode {
     let mut tasks_totals = TasksStats::default();
     #[cfg(unix)]
     let mut capture_totals = capture::CaptureStats::default();
+    #[cfg(target_os = "linux")]
+    let mut dns_totals = dns::DnsStats::default();
     #[cfg(unix)]
     let mut alloc_totals = alloc::AllocStats::default();
     #[cfg(unix)]
@@ -771,6 +795,16 @@ fn main() -> ExitCode {
             ),
             #[cfg(not(unix))]
             Scenario::Capture => unreachable!("the capture scenario parses only on unix"),
+            #[cfg(target_os = "linux")]
+            Scenario::Dns => dns::judge(
+                seed,
+                args.dns,
+                args.twice,
+                args.options.verbose,
+                &mut dns_totals,
+            ),
+            #[cfg(not(target_os = "linux"))]
+            Scenario::Dns => unreachable!("the dns scenario parses only on linux"),
             #[cfg(unix)]
             Scenario::Alloc => alloc::judge(
                 seed,
@@ -833,6 +867,10 @@ fn main() -> ExitCode {
     }
     if args.scenario == Scenario::Executor {
         return tasks::report(&args.seeds, passed, failed, args.twice, args.tasks, &tasks_totals);
+    }
+    #[cfg(target_os = "linux")]
+    if args.scenario == Scenario::Dns {
+        return dns::report(&args.seeds, passed, failed, args.twice, args.dns, &dns_totals);
     }
     #[cfg(unix)]
     if args.scenario == Scenario::Capture {

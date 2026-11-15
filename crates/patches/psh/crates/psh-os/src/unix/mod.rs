@@ -724,30 +724,43 @@ impl Host for UnixHost {
     }
 
     fn home_dir(&self, user: &[u8]) -> Option<Vec<u8>> {
-        let name = CString::new(user).ok()?;
-        let mut buf = vec![0u8; 16 * 1024];
-        // SAFETY: an all-zero `passwd` is a valid value of the plain C struct.
-        let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
-        let mut found: *mut libc::passwd = std::ptr::null_mut();
-        // SAFETY: `name` is NUL-terminated; `pwd`, `buf` and `found` are valid for the
-        // call and `buf.len()` is the buffer's size.
-        let rc = unsafe {
-            libc::getpwnam_r(
-                name.as_ptr(),
-                &mut pwd,
-                buf.as_mut_ptr().cast(),
-                buf.len(),
-                &mut found,
-            )
-        };
-        if rc != 0 || found.is_null() || pwd.pw_dir.is_null() {
-            return None;
-        }
-        // SAFETY: on success `pw_dir` points to a NUL-terminated string inside `buf`,
-        // which is alive here.
-        let dir = unsafe { std::ffi::CStr::from_ptr(pwd.pw_dir) };
-        Some(dir.to_bytes().to_vec())
+        home_dir(user)
     }
+}
+
+#[cfg(target_os = "linux")]
+fn home_dir(user: &[u8]) -> Option<Vec<u8>> {
+    nanocode_sys::unix::user_entry_named(user)
+        .ok()
+        .flatten()
+        .map(|entry| entry.home.into_os_string().into_vec())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn home_dir(user: &[u8]) -> Option<Vec<u8>> {
+    let name = CString::new(user).ok()?;
+    let mut buf = vec![0u8; 16 * 1024];
+    // SAFETY: an all-zero `passwd` is a valid value of the plain C struct.
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut found: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: `name` is NUL-terminated; `pwd`, `buf` and `found` are valid for the
+    // call and `buf.len()` is the buffer's size.
+    let rc = unsafe {
+        libc::getpwnam_r(
+            name.as_ptr(),
+            &mut pwd,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            &mut found,
+        )
+    };
+    if rc != 0 || found.is_null() || pwd.pw_dir.is_null() {
+        return None;
+    }
+    // SAFETY: on success `pw_dir` points to a NUL-terminated string inside `buf`,
+    // which is alive here.
+    let dir = unsafe { std::ffi::CStr::from_ptr(pwd.pw_dir) };
+    Some(dir.to_bytes().to_vec())
 }
 
 /// The process and machine facts (D1301). Embedded (`fake_pid`), the shell's parent is

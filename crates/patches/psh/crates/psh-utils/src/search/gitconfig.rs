@@ -78,13 +78,13 @@ pub(super) fn native_excludes_path() -> Option<PathBuf> {
     let config_home = || {
         nonempty("XDG_CONFIG_HOME")
             .map(PathBuf::from)
-            .or_else(|| std::env::home_dir().map(|home| home.join(".config")))
+            .or_else(|| process_home().map(|home| home.join(".config")))
     };
     nonempty("GIT_CONFIG_GLOBAL")
         .and_then(|path| read(PathBuf::from(path)))
         .and_then(parse)
         .or_else(|| {
-            std::env::home_dir()
+            process_home()
                 .and_then(|home| read(home.join(".gitconfig")))
                 .and_then(parse)
         })
@@ -100,8 +100,26 @@ pub(super) fn native_excludes_path() -> Option<PathBuf> {
         .or_else(|| config_home().map(|base| base.join("git/ignore")))
 }
 
+#[cfg(target_os = "linux")]
+fn process_home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            nanocode_sys::unix::user_entry(nanocode_sys::unix::user_id())
+                .ok()
+                .flatten()
+                .map(|user| user.home)
+        })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_home() -> Option<PathBuf> {
+    std::env::home_dir()
+}
+
 fn expand_tilde(path: &str) -> String {
-    match std::env::home_dir() {
+    match process_home() {
         Some(home) => path.replace('~', &home.to_string_lossy()),
         None => path.to_string(),
     }

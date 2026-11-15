@@ -2,6 +2,8 @@
 
 mod blocking;
 pub mod coop;
+#[cfg(target_os = "linux")]
+pub mod dns;
 pub mod fs;
 mod join_set;
 pub mod net;
