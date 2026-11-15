@@ -301,6 +301,8 @@ impl OneLog {
         let mut lease = self.log.lease().await;
         if *self.owed.get() && lease.buffered() > 0 {
             lease.commit(Point::Progress).await?;
+        } else {
+            lease.unride();
         }
         self.owed.set(false);
         Ok(())
@@ -1243,6 +1245,11 @@ impl RemoteBarrier for OneLog {
                 .await
                 .map_err(|error| error.to_string())
         })
+    }
+
+    fn ride(&self, carried: Carried) -> HostFuture<'static, bool> {
+        let rode = self.log.ride(carried.host, carried.statements);
+        Box::pin(async move { rode.await.unwrap_or(false) })
     }
 }
 

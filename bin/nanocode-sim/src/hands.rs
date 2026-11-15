@@ -38,7 +38,9 @@ const SESSION: &str = "session";
 const TURN: &str = "turn";
 const SCOPE: &str = "hands";
 const SENT: &str = "hand_request_sent";
+const REPLIED: &str = "hand_request_replied";
 const ADMITTED: &str = "admitted";
+const ANSWERED: &str = "answered";
 const SNAPSHOT_RATIO: usize = 2;
 const CALLS_MAX: u64 = 5;
 const START_MS_MAX: u64 = 300;
@@ -69,10 +71,11 @@ pub enum HandsMutation {
     CarryDropsLog,
     CarryDropsRequest,
     DispatchUnsettled,
+    RideDropsReply,
 }
 
 impl HandsMutation {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::None,
         Self::AckBeforeStore,
         Self::SkipRecord,
@@ -82,6 +85,7 @@ impl HandsMutation {
         Self::CarryDropsLog,
         Self::CarryDropsRequest,
         Self::DispatchUnsettled,
+        Self::RideDropsReply,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -101,6 +105,7 @@ impl HandsMutation {
             Self::CarryDropsLog => "carry_drops_log",
             Self::CarryDropsRequest => "carry_drops_request",
             Self::DispatchUnsettled => "dispatch_unsettled",
+            Self::RideDropsReply => "ride_drops_reply",
         }
     }
 
@@ -123,6 +128,7 @@ pub struct HandsStats {
     pub recovered: u64,
     pub unknown: u64,
     pub folded: u64,
+    pub rode: u64,
     pub replayed: u64,
 }
 
@@ -136,6 +142,7 @@ impl HandsStats {
         self.recovered += other.recovered;
         self.unknown += other.unknown;
         self.folded += other.folded;
+        self.rode += other.rode;
         self.replayed += other.replayed;
     }
 }
@@ -245,6 +252,23 @@ impl Store {
             .read(|rows| rows.contains_key(&(session_id.to_owned(), call_id.to_owned())))
     }
 
+    fn answer(&self, key: &str, runtime: &str, id: u64, reply: &RemoteReply) {
+        let cross = self.mutation == HandsMutation::CrossReplies;
+        let runtime = if self.mutation == HandsMutation::MangleRuntime {
+            ""
+        } else {
+            runtime
+        };
+        self.rows.update(|rows| {
+            for row in rows.values_mut() {
+                let same = row.key == key && row.runtime == runtime;
+                if same && (row.id == id || (cross && row.reply.is_none())) {
+                    row.reply = Some(reply.clone());
+                }
+            }
+        });
+    }
+
     fn unanswered(&self, id: u64) -> bool {
         self.rows
             .read(|rows| rows.values().any(|row| row.id == id && row.reply.is_none()))
@@ -299,21 +323,22 @@ impl HandRequests for Store {
                 return Ok(());
             }
             self.write().await;
-            let cross = self.mutation == HandsMutation::CrossReplies;
-            let runtime = if self.mutation == HandsMutation::MangleRuntime {
-                ""
-            } else {
-                runtime
-            };
-            self.rows.update(|rows| {
-                for row in rows.values_mut() {
-                    let same = row.key == key && row.runtime == runtime;
-                    if same && (row.id == id || (cross && row.reply.is_none())) {
-                        row.reply = Some(reply.clone());
-                    }
-                }
-            });
+            self.answer(key, runtime, id, reply);
             Ok(())
+        })
+    }
+
+    fn rider(&self, key: &str, runtime: &str, id: u64, reply: &RemoteReply) -> Option<Carried> {
+        if self.mutation == HandsMutation::AckBeforeStore {
+            return None;
+        }
+        let reply = serde_json::to_string(reply).ok()?;
+        Some(Carried {
+            host: std::ptr::from_ref(self) as usize,
+            statements: vec![(
+                REPLIED,
+                vec![key.to_owned(), runtime.to_owned(), id.to_string(), reply],
+            )],
         })
     }
 
@@ -372,6 +397,7 @@ struct StepHost {
     rows: Atom<BTreeMap<u64, String>>,
     store: Arc<Store>,
     folded: AtomicU64,
+    rode: AtomicU64,
 }
 
 impl StepHost {
@@ -388,6 +414,18 @@ impl StepHost {
 
     fn carried(&self, statements: &[nanocode_durability_core::SqlStatement<'_>]) {
         for statement in statements {
+            if statement.sql == REPLIED {
+                let [key, runtime, id, reply] = statement.params[..] else {
+                    panic!("the simulated replied statement has four parameters");
+                };
+                self.rode.fetch_add(1, Ordering::Relaxed);
+                if self.store.mutation != HandsMutation::RideDropsReply {
+                    let reply = serde_json::from_str(reply).expect("the reply is JSON");
+                    let id = id.parse().expect("request ids are numbers");
+                    self.store.answer(key, runtime, id, &reply);
+                }
+                continue;
+            }
             let [session_id, call_id, id, key, runtime, turn] = statement.params[..] else {
                 panic!("the simulated ledger statement has six parameters");
             };
@@ -521,7 +559,7 @@ fn durable_step(host: &Arc<StepHost>, index: usize) -> bool {
             .await
             .expect("the simulated turn log reads")
             .payload
-            .is_some_and(|payload| payload == ADMITTED)
+            .is_some_and(|payload| payload == ADMITTED || payload == ANSWERED)
     };
     read.now_or_never()
         .expect("the simulated turn log answers at once")
@@ -825,12 +863,16 @@ impl World {
     }
 
     async fn admit(&self, log: &Arc<OneLog>, index: usize) -> bool {
+        self.step(log, index, ADMITTED).await
+    }
+
+    async fn step(&self, log: &Arc<OneLog>, index: usize, payload: &str) -> bool {
         let mut store = log.store();
         let step = step(index);
         let result = async {
             let owned = store.acquire(&step, OwnerId::new()).await?;
             let commit = StateCommit {
-                payload: ADMITTED,
+                payload,
                 records: &[],
                 events: &[],
                 summary: &SummaryUpdate::Unchanged,
@@ -838,7 +880,11 @@ impl World {
             };
             store
                 .commit(&step, &owned.owner, owned.state.revision, commit)
-                .await
+                .await?;
+            if payload == ANSWERED {
+                store.flush().await?;
+            }
+            Ok::<_, StoreError>(())
         };
         match result.await {
             Ok(_) => true,
@@ -908,6 +954,9 @@ impl World {
         self.clock
             .sleep(Duration::from_nanos(self.script.commits[index]))
             .await;
+        if !self.step(log, index, ANSWERED).await {
+            return;
+        }
         self.note(format!("call {index} commits {outcome:?}"));
         self.calls.borrow_mut()[index].state = CallState::Committed(outcome);
     }
@@ -1029,6 +1078,7 @@ fn simulate(seed: u64, mutation: HandsMutation) -> HandsOutcome {
             rows: Atom::default(),
             store: Arc::clone(&store),
             folded: AtomicU64::new(0),
+            rode: AtomicU64::new(0),
         }),
         store,
         hand: RefCell::new(Hand::default()),
@@ -1077,6 +1127,7 @@ fn simulate(seed: u64, mutation: HandsMutation) -> HandsOutcome {
     }
     world.check();
     world.stats.borrow_mut().folded = world.log.folded.load(Ordering::Relaxed);
+    world.stats.borrow_mut().rode = world.log.rode.load(Ordering::Relaxed);
     let trace = world.trace.borrow();
     let mut digest = fnv(FNV_OFFSET, shape.as_bytes());
     for line in trace.iter() {

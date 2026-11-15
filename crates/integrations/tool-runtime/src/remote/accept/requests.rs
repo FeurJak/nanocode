@@ -34,6 +34,9 @@ pub trait HandRequests: Send + Sync + 'static {
         id: u64,
         reply: &'a RemoteReply,
     ) -> HostFuture<'a, Result<(), String>>;
+    fn rider(&self, _key: &str, _runtime: &str, _id: u64, _reply: &RemoteReply) -> Option<Carried> {
+        None
+    }
     fn pending<'a>(
         &'a self,
         key: &'a str,
@@ -187,6 +190,17 @@ impl HandRequests for SqlRequests {
             self.run("hand_request_replied", &REPLIED, params)
                 .await
                 .map(drop)
+        })
+    }
+
+    fn rider(&self, key: &str, runtime: &str, id: u64, reply: &RemoteReply) -> Option<Carried> {
+        let reply = serde_json::to_string(reply).ok()?;
+        Some(Carried {
+            host: Arc::as_ptr(&self.host).cast::<()>() as usize,
+            statements: vec![(
+                self.host.dialect().pick(&REPLIED),
+                vec![key.to_owned(), runtime.to_owned(), id.to_string(), reply],
+            )],
         })
     }
 

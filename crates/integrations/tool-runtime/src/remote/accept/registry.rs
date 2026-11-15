@@ -14,9 +14,9 @@ use crate::embedded::{
     CodeModeExecution, CodeModeHostError, CodeModeObserver, HandCalls, HostFuture,
 };
 use crate::remote::{
-    HAND_RESTARTED, NOT_RECEIVED, PEER_CLOSED, REQUEST_IN_USE, RemoteBarrier, RemoteCatalog,
-    RemoteClient, RemoteContext, RemoteDelivery, RemoteFrame, RemoteLedger, RemoteLink,
-    RemoteOperation, RemoteReply, RemoteRequest, RemoteTransport,
+    Carried, HAND_RESTARTED, NOT_RECEIVED, PEER_CLOSED, REQUEST_IN_USE, RemoteBarrier,
+    RemoteCatalog, RemoteClient, RemoteContext, RemoteDelivery, RemoteFrame, RemoteLedger,
+    RemoteLink, RemoteOperation, RemoteReply, RemoteRequest, RemoteTransport,
 };
 
 #[derive(Clone, Debug)]
@@ -260,6 +260,14 @@ impl RemoteLedger for Ledger {
             self.changes.bump();
             Ok(())
         })
+    }
+
+    fn rider(&self, id: u64, reply: &RemoteReply) -> Option<Carried> {
+        self.requests.rider(&self.key, &self.runtime, id, reply)
+    }
+
+    fn rode(&self) {
+        self.changes.bump();
     }
 }
 

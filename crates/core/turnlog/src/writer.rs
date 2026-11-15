@@ -5,8 +5,8 @@ use std::{
     sync::Arc,
 };
 
-use nanocode_durability_core::StoreError;
-use nanocode_sync::{Held, Owned};
+use nanocode_durability_core::{SqlStatement, StoreError};
+use nanocode_sync::{Held, Owned, mpsc, oneshot};
 
 use crate::{
     Compaction, Event, Extension, Fold, LogHost, Record, Rider, Segment, Write,
@@ -687,6 +687,12 @@ struct TailRow {
     seq: u64,
 }
 
+struct Riding {
+    host: usize,
+    statements: Vec<(&'static str, Vec<String>)>,
+    rode: oneshot::Sender<bool>,
+}
+
 struct Writer {
     buffer: Vec<Record>,
     check: usize,
@@ -696,6 +702,7 @@ struct Writer {
     history: History,
     next: u64,
     previous: Option<Previous>,
+    riders: mpsc::UnboundedReceiver<Riding>,
     snapshot: usize,
     spare: codec::Spare,
     state: usize,
@@ -713,6 +720,7 @@ pub struct TurnLog {
     limit: Option<usize>,
     ratio: usize,
     retain: Option<usize>,
+    riding: mpsc::UnboundedSender<Riding>,
     rows: Option<usize>,
     scope: Arc<str>,
     writer: Owned<Writer>,
@@ -820,11 +828,13 @@ impl TurnLog {
         }
         fold.reopen(EVENT_GAP);
         let floor = Some(fold.last_event());
+        let (riding, riders) = mpsc::unbounded_channel();
         Ok(Self {
             host,
             limit: None,
             ratio: 2,
             retain: None,
+            riding,
             rows: None,
             scope,
             writer: Owned::new(Writer {
@@ -836,6 +846,7 @@ impl TurnLog {
                 history,
                 next,
                 previous,
+                riders,
                 snapshot,
                 spare: codec::Spare::default(),
                 state,
@@ -877,6 +888,22 @@ impl TurnLog {
     #[must_use]
     pub fn scope(&self) -> &str {
         &self.scope
+    }
+
+    pub fn ride(
+        &self,
+        host: usize,
+        statements: Vec<(&'static str, Vec<String>)>,
+    ) -> oneshot::Receiver<bool> {
+        let (rode, receiver) = oneshot::channel();
+        if let Err(error) = self.riding.send(Riding {
+            host,
+            statements,
+            rode,
+        }) {
+            let _ = error.0.rode.send(false);
+        }
+        receiver
     }
 
     pub async fn lease(&self) -> Lease<'_> {
@@ -1066,6 +1093,12 @@ impl Lease<'_> {
     #[must_use]
     pub fn buffered(&self) -> usize {
         self.writer.buffer.len()
+    }
+
+    pub fn unride(&mut self) {
+        while let Ok(riding) = self.writer.riders.try_recv() {
+            let _ = riding.rode.send(false);
+        }
     }
 
     pub fn next_event(&mut self) -> u64 {
@@ -1334,6 +1367,37 @@ impl Lease<'_> {
             dropped,
             superseded: &superseded,
         };
+        let mut riding = Vec::new();
+        while let Ok(ride) = self.writer.riders.try_recv() {
+            riding.push(ride);
+        }
+        let host = rider
+            .map(|rider| rider.host)
+            .or_else(|| riding.first().map(|ride| ride.host));
+        let (riding, apart): (Vec<_>, Vec<_>) =
+            riding.into_iter().partition(|ride| Some(ride.host) == host);
+        for ride in apart {
+            let _ = ride.rode.send(false);
+        }
+        let (held, rodes): (Vec<_>, Vec<_>) = riding
+            .into_iter()
+            .map(|ride| (ride.statements, ride.rode))
+            .unzip();
+        let mut statements = rider.map_or_else(Vec::new, |rider| rider.statements.to_vec());
+        statements.extend(held.iter().flatten().map(|(sql, params)| SqlStatement {
+            sql,
+            params: params.iter().map(String::as_str).collect(),
+        }));
+        let explicit = rider.is_some();
+        let rider = host.map(|host| Rider {
+            host,
+            statements: &statements,
+        });
+        let answer = |rodes: Vec<oneshot::Sender<bool>>, rode: bool| {
+            for sender in rodes {
+                let _ = sender.send(rode);
+            }
+        };
         let (carried, extended) = {
             let carrying = rider.and_then(|rider| {
                 let write = match extension {
@@ -1348,10 +1412,13 @@ impl Lease<'_> {
             let carried = carrying.is_some();
             let extended = match carrying {
                 Some(carrying) => {
-                    carrying.await?;
+                    let done = carrying.await;
+                    answer(rodes, done.is_ok());
+                    done?;
                     extension.and(merged)
                 }
                 None => {
+                    answer(rodes, false);
                     let extending =
                         extension.and_then(|extension| self.host.extend(self.scope, extension));
                     let extended = extending.is_some().then_some(merged).flatten();
@@ -1370,6 +1437,8 @@ impl Lease<'_> {
             (carried, extended)
         };
         drop(appended);
+        drop(statements);
+        drop(held);
         let added = if extended.is_some() {
             body_len - 1 - SEAL
         } else {
@@ -1451,6 +1520,6 @@ impl Lease<'_> {
             Point::Progress => writer.stats.progress += 1,
             Point::Recovery => writer.stats.recoveries += 1,
         }
-        Ok((seq, carried))
+        Ok((seq, carried && explicit))
     }
 }

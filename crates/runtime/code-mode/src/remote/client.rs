@@ -62,6 +62,9 @@ pub struct Carried {
 pub trait RemoteBarrier: Send + Sync + 'static {
     fn settle(&self) -> HostFuture<'_, Result<(), String>>;
     fn carry(&self, carried: Carried) -> HostFuture<'_, Result<bool, String>>;
+    fn ride(&self, _carried: Carried) -> HostFuture<'static, bool> {
+        Box::pin(async { false })
+    }
 }
 
 pub trait RemoteLedger: Send + Sync + 'static {
@@ -78,6 +81,10 @@ pub trait RemoteLedger: Send + Sync + 'static {
     }
     fn replied<'a>(&'a self, id: u64, reply: &'a RemoteReply)
     -> HostFuture<'a, Result<(), String>>;
+    fn rider(&self, _id: u64, _reply: &RemoteReply) -> Option<Carried> {
+        None
+    }
+    fn rode(&self) {}
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -341,7 +348,7 @@ fn resumed(
                         other => other,
                     };
                     if from_hand && let Some(client) = client.upgrade() {
-                        client.settle_reply_behind(id, &result);
+                        client.settle_reply_behind(id, &result, None);
                     }
                     return result.map_err(replied);
                 }
@@ -616,7 +623,7 @@ impl RemoteClient {
         let mut waiters = Vec::new();
         let mut replies = Vec::new();
         for (id, operation) in calls {
-            match prepare_call(&self.client, id, operation) {
+            match prepare_call(&self.client, id, operation, None) {
                 Ok((frame, waiter, reply)) => {
                     frames.push(frame);
                     waiters.push(waiter);
@@ -657,6 +664,7 @@ fn prepare_call(
     client: &Arc<Client>,
     id: u64,
     operation: RemoteOperation,
+    barrier: Option<Arc<dyn RemoteBarrier>>,
 ) -> Result<(Encoded, (u64, Waiter), CallReply), CodeModeHostError> {
     client.not_dispatched()?;
     let requested = requested_yield(&operation);
@@ -679,7 +687,9 @@ fn prepare_call(
                 match frame {
                     Frame::Reply { result, .. } => {
                         if from_hand {
-                            guard.client.settle_reply_behind(id, &result);
+                            guard
+                                .client
+                                .settle_reply_behind(id, &result, barrier.as_deref());
                         }
                         return result
                             .map_err(replied)?
@@ -752,20 +762,42 @@ impl Client {
         })
     }
 
-    fn settle_reply_behind(self: &Arc<Self>, id: u64, reply: &RemoteReply) {
-        if self.ledger.is_none() {
-            return;
-        }
-        let client = Arc::clone(self);
-        let reply = reply.clone();
-        nanocode_platform::spawn(async move { client.settle_reply(id, &reply).await });
-    }
-
-    async fn settle_reply(&self, id: u64, reply: &RemoteReply) {
+    fn settle_reply_behind(
+        self: &Arc<Self>,
+        id: u64,
+        reply: &RemoteReply,
+        barrier: Option<&dyn RemoteBarrier>,
+    ) {
         let Some(ledger) = &self.ledger else {
             return;
         };
-        match ledger.replied(id, reply).await {
+        let ride = barrier
+            .and_then(|barrier| ledger.rider(id, reply).map(|carried| barrier.ride(carried)));
+        let client = Arc::clone(self);
+        let reply = reply.clone();
+        nanocode_platform::spawn(async move { client.settle_reply(id, &reply, ride).await });
+    }
+
+    async fn settle_reply(
+        &self,
+        id: u64,
+        reply: &RemoteReply,
+        ride: Option<HostFuture<'static, bool>>,
+    ) {
+        let Some(ledger) = &self.ledger else {
+            return;
+        };
+        let rode = match ride {
+            Some(ride) => ride.await,
+            None => false,
+        };
+        let recorded = if rode {
+            ledger.rode();
+            Ok(())
+        } else {
+            ledger.replied(id, reply).await
+        };
+        match recorded {
             Ok(()) if self.resumes.is_some() => {
                 let _ = self.outgoing.send(Outgoing::frames(
                     vec![Frame::Ack { ids: vec![id] }],
@@ -1634,7 +1666,7 @@ impl RemoteClient {
                             other => other,
                         };
                         if from_hand {
-                            client.settle_reply_behind(guard.id, &result);
+                            client.settle_reply_behind(guard.id, &result, barrier);
                         }
                         let result = result.map_err(replied)?;
                         if let Some(issue) = undelivered {
@@ -1706,13 +1738,15 @@ impl RemoteClient {
     async fn called(
         &self,
         operation: RemoteOperation,
-        barrier: Option<&dyn RemoteBarrier>,
+        barrier: Option<Arc<dyn RemoteBarrier>>,
     ) -> Result<Value, CodeModeHostError> {
         let client = &self.client;
         let id = client.next.fetch_add(1, Ordering::Relaxed);
         let recorded = recorded(&operation);
-        let (frame, registered, reply) = prepare_call(client, id, operation)?;
-        client.record(id, recorded.as_ref(), barrier).await?;
+        let (frame, registered, reply) = prepare_call(client, id, operation, barrier.clone())?;
+        client
+            .record(id, recorded.as_ref(), barrier.as_deref())
+            .await?;
         client
             .dispatch(frame, RemoteDelivery::Immediate, Some(registered))
             .map_err(|_| error("remote connection closed; the operation was not dispatched"))?;
@@ -1780,7 +1814,7 @@ impl RemoteTransport for RemoteClient {
         operation: RemoteOperation,
         barrier: Arc<dyn RemoteBarrier>,
     ) -> HostFuture<'_, Result<Value, CodeModeHostError>> {
-        Box::pin(async move { self.called(operation, Some(&*barrier)).await })
+        Box::pin(async move { self.called(operation, Some(barrier)).await })
     }
 
     fn route_hands(&self, hands: Arc<dyn HandCalls>) {
