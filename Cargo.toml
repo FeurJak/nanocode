@@ -254,6 +254,168 @@ strip = "symbols"
 panic = "unwind"
 codegen-units = 16
 
+[profile.release.package.nanocode-agent]
+opt-level = "s"
+
+[profile.release.package.nanocode-agent-config]
+opt-level = "s"
+
+[profile.release.package.nanocode-agent-core]
+opt-level = "s"
+
+[profile.release.package.nanocode-agent-host]
+opt-level = "s"
+
+[profile.release.package.nanocode-arguments]
+opt-level = "s"
+
+[profile.release.package.nanocode-audio]
+opt-level = "s"
+
+[profile.release.package.nanocode-backend-claude]
+opt-level = "s"
+
+[profile.release.package.nanocode-backend-claude-client]
+opt-level = "s"
+
+[profile.release.package.nanocode-backend-claude-tools]
+opt-level = "s"
+
+[profile.release.package.nanocode-backend-codex]
+opt-level = "s"
+
+[profile.release.package.nanocode-cli]
+opt-level = "s"
+
+[profile.release.package.nanocode-computer-repl]
+opt-level = "s"
+
+[profile.release.package.nanocode-durability]
+opt-level = "s"
+
+[profile.release.package.nanocode-durability-core]
+opt-level = "s"
+
+[profile.release.package.nanocode-gif]
+opt-level = "s"
+
+[profile.release.package.nanocode-home]
+opt-level = "s"
+
+[profile.release.package.nanocode-image]
+opt-level = "s"
+
+[profile.release.package.nanocode-jpeg]
+opt-level = "s"
+
+[profile.release.package.nanocode-mcp]
+opt-level = "s"
+
+[profile.release.package.nanocode-mcp-http]
+opt-level = "s"
+
+[profile.release.package.nanocode-mcp-tools]
+opt-level = "s"
+
+[profile.release.package.nanocode-mpp]
+opt-level = "s"
+
+[profile.release.package.nanocode-observability]
+opt-level = "s"
+
+[profile.release.package.nanocode-png]
+opt-level = "s"
+
+[profile.release.package.nanocode-schema]
+opt-level = "s"
+
+[profile.release.package.nanocode-store-jsonl]
+opt-level = "s"
+
+[profile.release.package.nanocode-subagents]
+opt-level = "s"
+
+[profile.release.package.nanocode-tempo]
+opt-level = "s"
+
+[profile.release.package.nanocode-tool-host]
+opt-level = "s"
+
+[profile.release.package.nanocode-tool-provider]
+opt-level = "s"
+
+[profile.release.package.nanocode-tool-runtime]
+opt-level = "s"
+
+[profile.release.package.nanocode-tools]
+opt-level = "s"
+
+[profile.release.package.nanocode-turnlog]
+opt-level = "s"
+
+[profile.release.package.nanocode-webp]
+opt-level = "s"
+
+[profile.release.package.psh-utils]
+opt-level = "s"
+
+[profile.release.package.rustpython-codegen]
+opt-level = "s"
+
+[profile.release.package.rustpython-common]
+opt-level = "s"
+
+[profile.release.package.rustpython-compiler]
+opt-level = "s"
+
+[profile.release.package.rustpython-compiler-core]
+opt-level = "s"
+
+[profile.release.package.rustpython-literal]
+opt-level = "s"
+
+[profile.release.package.rustpython-pylib]
+opt-level = "s"
+
+[profile.release.package.rustpython-ruff_python_ast]
+opt-level = "s"
+
+[profile.release.package.rustpython-ruff_python_parser]
+opt-level = "s"
+
+[profile.release.package.rustpython-ruff_python_trivia]
+opt-level = "s"
+
+[profile.release.package.rustpython-ruff_source_file]
+opt-level = "s"
+
+[profile.release.package.rustpython-ruff_text_size]
+opt-level = "s"
+
+[profile.release.package.rustpython-sre_engine]
+opt-level = "s"
+
+[profile.release.package.rustpython-stdlib]
+opt-level = "s"
+
+[profile.release.package.rustpython-unicode]
+opt-level = "s"
+
+[profile.release.package.rustpython-vm]
+opt-level = "s"
+
+[profile.release.package.rustpython-wtf8]
+opt-level = "s"
+
+[profile.release.package.rustpython-host_env]
+opt-level = "s"
+
+[profile.release.package.rustpython-doc]
+opt-level = "s"
+
+[profile.release.package.unicode-normalization]
+opt-level = "s"
+
 [profile.fast]
 inherits = "release"
 incremental = true
