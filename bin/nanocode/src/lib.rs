@@ -448,6 +448,9 @@ async fn prepare(
         (Some(store), Some(archiver))
     };
     nanocode::codex_tools::apply_patch::set_lenient_matching(args.lenient_patches);
+    if let Some(min_wait_ms) = args.min_wait_ms {
+        nanocode_process::set_min_wait_ms(min_wait_ms);
+    }
     let runner_configs = host::runner_configs(&args.remote)?;
     let config = HostConfig {
         workspace,

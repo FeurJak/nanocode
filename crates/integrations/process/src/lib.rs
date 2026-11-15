@@ -60,6 +60,16 @@ pub fn set_command_environment(environment: Vec<(OsString, OsString)>) {
     COMMAND_ENVIRONMENT.set(environment);
 }
 
+static MIN_WAIT_MS: AtomicU64 = AtomicU64::new(0);
+
+pub fn set_min_wait_ms(value: u64) {
+    MIN_WAIT_MS.store(value, Ordering::Relaxed);
+}
+
+fn waited(yield_time: Duration) -> Duration {
+    yield_time.max(Duration::from_millis(MIN_WAIT_MS.load(Ordering::Relaxed)))
+}
+
 type Prepare = std::sync::LazyLock<(), Box<dyn FnOnce() + Send>>;
 
 static PREPARE: std::sync::OnceLock<Prepare> = std::sync::OnceLock::new();
@@ -507,7 +517,7 @@ impl ShellSessions {
             let busy = Busy::new(&session);
             let initial = session.owner.run(move |state| {
                 Box::pin(state.wait_for_output(
-                    yield_time,
+                    waited(yield_time),
                     max_output_tokens,
                     output_unit,
                     started_at,
@@ -578,6 +588,11 @@ impl ShellSessions {
                 (DEFAULT_WRITE_YIELD_MS, 250, MAX_EXEC_YIELD_MS)
             };
             let yield_time = duration_ms(request.yield_time_ms, default, minimum, maximum);
+            let yield_time = if request.chars.is_empty() {
+                waited(yield_time)
+            } else {
+                yield_time
+            };
             let (max_output_tokens, output_unit) = (request.max_output_tokens, request.output_unit);
             let chars = request.chars;
             if !chars.is_empty() {

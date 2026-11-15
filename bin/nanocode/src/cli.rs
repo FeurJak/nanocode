@@ -277,6 +277,10 @@ const SESSION: Group = Group::new(&[
         .long("lenient-patches")
         .env("NANOCODE_LENIENT_PATCHES")
         .help("Codex harness: apply_patch also matches hunks out of file order and lines that differ only in whitespace runs, and accepts a deleted file added again; Codex CLI rejects these (off by default)"),
+    Argument::value("min_wait_ms", "MS", Parser::U64)
+        .long("min-wait-ms")
+        .env("NANOCODE_MIN_WAIT_MS")
+        .help("Codex harness: exec_command and empty write_stdin polls wait up to this long for the process to exit before they return, at least their requested wait; Codex CLI caps exec_command at 30000 ms (off by default)"),
 ]);
 
 const ATTEMPTS: Group = Group::named(
@@ -667,6 +671,7 @@ pub struct SessionArgs {
     pub no_subagents: bool,
     pub subagents: bool,
     pub lenient_patches: bool,
+    pub min_wait_ms: Option<u64>,
     pub gateway: GatewayArgs,
     pub remote: RemoteArgs,
 }
@@ -732,6 +737,7 @@ impl SessionArgs {
             no_subagents: matches.flag("no_subagents"),
             subagents: matches.flag("subagents"),
             lenient_patches: matches.flag("lenient_patches"),
+            min_wait_ms: matches.u64("min_wait_ms"),
             gateway: GatewayArgs::from_matches(matches),
             remote: RemoteArgs::from_matches(matches),
         }
@@ -770,6 +776,7 @@ impl SessionArgs {
             no_subagents: self.no_subagents || root.no_subagents,
             subagents: self.subagents || root.subagents,
             lenient_patches: self.lenient_patches || root.lenient_patches,
+            min_wait_ms: self.min_wait_ms.or(root.min_wait_ms),
             gateway: GatewayArgs {
                 gateway: self.gateway.gateway.or(root.gateway.gateway),
                 cloudflare_account: self
