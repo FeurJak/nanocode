@@ -993,12 +993,12 @@ fn post<S>(room: &Arc<Mailroom<S>>, letter: Letter<S>, hand_off: HandOff<S>) {
         .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
         == 0
     {
-        deliver(room, hand_off);
+        deliver(room, hand_off, 1);
     }
 }
 
-fn deliver<S>(room: &Arc<Mailroom<S>>, hand_off: HandOff<S>) {
-    let mut budget = MAILBOX_BUDGET;
+fn deliver<S>(room: &Arc<Mailroom<S>>, hand_off: HandOff<S>, inline: usize) {
+    let mut budget = inline;
     loop {
         let Some(mut desk) = room.desk.take() else {
             return;
@@ -1033,14 +1033,14 @@ fn hand_off<S: Send + 'static>(room: &Arc<Mailroom<S>>) -> bool {
         return false;
     };
     let room = Arc::clone(room);
-    runtime.spawn(async move { deliver(&room, hand_off::<S>) });
+    runtime.spawn(async move { deliver(&room, hand_off::<S>, MAILBOX_BUDGET) });
     true
 }
 
 #[cfg(target_family = "wasm")]
 fn hand_off<S: Send + 'static>(room: &Arc<Mailroom<S>>) -> bool {
     let room = Arc::clone(room);
-    nanocode_platform::spawn_local(async move { deliver(&room, hand_off::<S>) });
+    nanocode_platform::spawn_local(async move { deliver(&room, hand_off::<S>, MAILBOX_BUDGET) });
     true
 }
 
