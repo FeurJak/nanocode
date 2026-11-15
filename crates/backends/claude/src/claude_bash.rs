@@ -2,7 +2,7 @@ use crate::{
     agent::Steer,
     tools::{
         BashExecution, BashExecutor, BashRequest, BashResult, ClaudeBash,
-        bash::{DEFAULT_BACKGROUND_TIMEOUT_MS, MAX_TIMEOUT_MS},
+        bash::{DEFAULT_BACKGROUND_TIMEOUT_MS, MAX_BACKGROUND_TIMEOUT_MS, MAX_TIMEOUT_MS},
     },
 };
 use nanocode_agent_core::{Agent, PromptRequest, WeakAgent};
@@ -40,7 +40,7 @@ const TIMED_OUT_STATUS: i32 = SHELL_SIGNAL_STATUS + 15;
 const ERROR_CHARS: usize = 10_000;
 const ERROR_CHARS_SLACK: usize = 1_024;
 const UPSTREAM_TIMEOUT: &str = "max 600000 for a foreground command.";
-const NESTED_TIMEOUT: &str = " A call from an exec cell without `timeout` waits the maximum instead, because the cell yields on its own clock; a command that reaches its `timeout` moves to the background and keeps running, and a `timeout` above the maximum counts as the maximum.";
+const NESTED_TIMEOUT: &str = " A call from an exec cell without `timeout` waits that maximum instead, because the cell yields on its own clock; a foreground command that reaches its `timeout` moves to the background and keeps running, and a foreground `timeout` above that maximum counts as that maximum. With `run_in_background`, `timeout` goes up to the background maximum below instead, and a command without one is stopped at the background default, so give a long build or job a `timeout` that covers all of it.";
 const UPSTREAM_BACKGROUND: &str = "No `&` needed.";
 const NESTED_BACKGROUND: &str = " From an exec cell, the end of such a command, or of one moved to the background at its `timeout`, makes the exec or wait call that is waiting return at once, even one whose script sleeps on a timer. A command you put in the background yourself with `&` or `nohup` is not followed: nothing reports its end, so waiting for it is a guess.";
 
@@ -471,7 +471,20 @@ enum Watch {
     EndsWithTurn,
     Reported,
 }
-fn started(id: &str, output: Option<&Path>, timed_out: Option<Duration>, watch: Watch) -> String {
+fn background_limit(milliseconds: u64) -> String {
+    if milliseconds.is_multiple_of(60_000) {
+        whole_duration(milliseconds)
+    } else {
+        format!("{milliseconds} ms")
+    }
+}
+fn started(
+    id: &str,
+    output: Option<&Path>,
+    timed_out: Option<Duration>,
+    limit: u64,
+    watch: Watch,
+) -> String {
     let written = output.map_or_else(String::new, |path| {
         format!(" Output is being written to: {}.", path.display())
     });
@@ -490,18 +503,24 @@ fn started(id: &str, output: Option<&Path>, timed_out: Option<Duration>, watch: 
         }
         .to_owned(),
     );
-    if timed_out.is_some() {
-        match watch {
-            Watch::Notified => parts.push(format!(
-                "If it is still running after {} in the background, it will be stopped and you will be notified.",
-                whole_duration(DEFAULT_BACKGROUND_TIMEOUT_MS)
-            )),
-            Watch::Reported => parts.push(format!(
+    match watch {
+        Watch::Notified if timed_out.is_some() => parts.push(format!(
+            "If it is still running after {} in the background, it will be stopped and you will be notified.",
+            whole_duration(limit)
+        )),
+        Watch::Reported => {
+            parts.push(format!(
                 "If it is still running after {} in the background, it will be stopped, which is reported the same way.",
-                whole_duration(DEFAULT_BACKGROUND_TIMEOUT_MS)
-            )),
-            Watch::EndsWithTurn => {}
+                background_limit(limit)
+            ));
+            if limit < MAX_BACKGROUND_TIMEOUT_MS {
+                parts.push(format!(
+                    "A command that needs longer must be started with `run_in_background` and a `timeout` of up to {MAX_BACKGROUND_TIMEOUT_MS} ms ({}).",
+                    whole_duration(MAX_BACKGROUND_TIMEOUT_MS)
+                ));
+            }
         }
+        Watch::Notified | Watch::EndsWithTurn => {}
     }
     if output.is_some() {
         parts.push("To check interim output, use Read on that file path.".to_owned());
@@ -823,7 +842,8 @@ impl BashExecutor for LocalBash {
         request: BashRequest,
         background: bool,
     ) -> Result<BashExecution, String> {
-        let timeout = Duration::from_millis(request.timeout_ms);
+        let timeout_ms = request.timeout_ms;
+        let timeout = Duration::from_millis(timeout_ms);
         let max_stderr = request.max_stderr_bytes;
         let max_stdout = request.max_stdout_bytes;
         let session = request
@@ -972,9 +992,9 @@ impl BashExecutor for LocalBash {
             }
         }
         let mut admission = Admission(Some(job.abort.clone()));
-        let timed_out = if background {
+        let (timed_out, limit) = if background {
             let _ = arm.send(timeout);
-            None
+            (None, timeout_ms)
         } else {
             match nanocode_platform::timeout(timeout, completion(&job)).await {
                 Ok(mut result) => {
@@ -1027,7 +1047,7 @@ impl BashExecutor for LocalBash {
                 }
                 Err(_) => {
                     let _ = arm.send(Duration::from_millis(DEFAULT_BACKGROUND_TIMEOUT_MS));
-                    Some(timeout)
+                    (Some(timeout), DEFAULT_BACKGROUND_TIMEOUT_MS)
                 }
             }
         };
@@ -1036,7 +1056,7 @@ impl BashExecutor for LocalBash {
         let output_file = job.output.clone();
         let watch = self.jobs.watch(job);
         Ok(BashExecution::Background {
-            message: started(&id, output_file.as_deref(), timed_out, watch),
+            message: started(&id, output_file.as_deref(), timed_out, limit, watch),
             output_file: output_file.map(|path| path.display().to_string()),
             task_id: id,
         })

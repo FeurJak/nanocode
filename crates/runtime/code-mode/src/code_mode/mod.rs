@@ -1826,12 +1826,14 @@ async fn observe_updates(
         ObservationMode::Terminate => (None, None, true, None, false),
     };
     let mut notice = (!terminating).then(|| tools.session_notice(&cell.session_id));
+    let mut preempt_remaining = None;
     if started
         && notice
             .as_mut()
             .is_some_and(|notice| notice.as_mut().now_or_never().is_some())
     {
         notice = None;
+        preempt_remaining = Some(observation.updates.len() + observation.replay.len());
     }
     let mut yield_deadline =
         yield_after.and_then(|yield_after| nanocode_platform::now().checked_add(yield_after));
@@ -1840,7 +1842,6 @@ async fn observe_updates(
         .filter(|quiet_deadline| yield_deadline.is_some_and(|deadline| *quiet_deadline > deadline));
     let mut yield_timer =
         yield_after.map(|yield_after| Box::pin(nanocode_platform::sleep(yield_after)));
-    let mut preempt_remaining = None;
     let mut yield_fired = false;
     let mut replaying = cell.record.as_ref().is_some_and(|record| {
         record.status(|status| {
