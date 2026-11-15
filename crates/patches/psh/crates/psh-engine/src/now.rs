@@ -39,7 +39,7 @@ pub(crate) fn command<'a>(
 ) -> Option<Now<'a>> {
     let cmd = code.ast.cmd(id);
     if !cmd.redirects.is_empty()
-        || !vp.traps.map.is_empty()
+        || vp.traps.live()
         || vp.opts.get(SetOpt::Xtrace)
         || vp.opts.get(SetOpt::Posix)
         || (vp.top && vp.sigs.peek(&vp.core) != 0)

@@ -463,6 +463,52 @@ fn seq(start: &str, end: &str, step: Option<&str>) -> Option<Vec<Vec<u8>>> {
     None
 }
 
+/// A for loop's word list when it is one brace sequence of plain integers
+/// ({1..20000}, {10..1..2}; no zero padding, no letters) that expands to at most the
+/// million words seq allows: its items unexpanded, for flat::run_for_range. The words
+/// are what seq makes, and further expansion, splitting and globbing leave such words
+/// as they are.
+pub(crate) fn lazy_seq(code: &Code, words: &[Word]) -> Option<crate::flat::ForSrc> {
+    let [w] = words else { return None };
+    let [part] = &w.parts[..] else { return None };
+    let Part::Brace(b) = &part.kind else {
+        return None;
+    };
+    let Brace::Seq { start, end, step } = &**b else {
+        return None;
+    };
+    let (s, e) = (code.ast.text(*start), code.ast.text(*end));
+    let plain = |t: &str| {
+        let d = t.strip_prefix('-').unwrap_or(t);
+        !d.is_empty()
+            && d.bytes().all(|c| c.is_ascii_digit())
+            && (d.len() == 1 || !d.starts_with('0'))
+    };
+    if !plain(s) || !plain(e) {
+        return None;
+    }
+    let a = i128::from(s.parse::<i64>().ok()?);
+    let z = i128::from(e.parse::<i64>().ok()?);
+    let step_n: i128 = match step {
+        Some(sp) => {
+            let n = code.ast.text(*sp).parse::<i64>().ok();
+            n.filter(|&n| n != i64::MIN)?.into()
+        }
+        None => 1,
+    };
+    let step_abs = step_n.abs().max(1);
+    let count = (a - z).abs() / step_abs + 1;
+    if count > 1_000_000 {
+        return None;
+    }
+    let step = if a <= z { step_abs } else { -step_abs };
+    Some(crate::flat::ForSrc::Range {
+        next: a as i64,
+        left: count as u64,
+        step: step as i64,
+    })
+}
+
 /// Expands command words: brace expansion, all expansions, splitting, globbing.
 pub(crate) async fn expand_words(
     vp: &mut Vp,

@@ -105,6 +105,15 @@ pub(crate) struct Traps {
 }
 
 impl Traps {
+    /// Whether any trap runs something or hooks commands: a signal that is only ignored
+    /// (`trap '' SIG`, or ignored when the shell started, as SIGXFSZ is under any Python
+    /// parent) runs nothing, so it keeps the fast paths (compiled loops, `now`) on.
+    pub(crate) fn live(&self) -> bool {
+        self.map
+            .iter()
+            .any(|(k, t)| !(matches!(k, TrapKey::Signal(_)) && t.action.is_empty()))
+    }
+
     pub(crate) fn ignored_at_start(sigs: &[i32]) -> Traps {
         let mut t = Traps::default();
         for &sig in sigs.iter().filter(|s| (1..64).contains(*s)) {

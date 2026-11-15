@@ -439,6 +439,12 @@ impl Sched {
         true
     }
 
+    /// Gives back the unit the last `pass` took, for a command that will take it again.
+    pub(crate) fn refund(&self) {
+        self.budget.set(self.budget.get() + 1);
+        self.spent.set(self.spent.get() - 1);
+    }
+
     fn take_budget(&self, counted: bool) -> bool {
         let b = self.budget.get();
         if b == 0 {

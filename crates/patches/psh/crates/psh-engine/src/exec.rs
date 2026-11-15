@@ -418,7 +418,7 @@ pub(crate) fn set_pipestatus(vp: &mut Vp, statuses: &[i32]) {
 /// commands (D1281).
 pub(crate) async fn check_failure(vp: &mut Vp, status: i32) -> R {
     if status != 0 && !vp.no_errexit {
-        if !vp.traps.map.is_empty() {
+        if vp.traps.live() {
             Box::pin(trap::err_trap(vp, status)).await?;
         }
         if vp.opts.get(SetOpt::Errexit) {
@@ -476,7 +476,7 @@ async fn debug_trap(vp: &mut Vp, code: &Rc<Code>, cmd: &Command) -> Result<bool,
 }
 
 async fn arith_for_debug(vp: &mut Vp, code: &Rc<Code>, w: &psh_syntax::Word) -> Result<(), Unwind> {
-    if vp.traps.map.is_empty() || vp.in_debug_trap {
+    if !vp.traps.live() || vp.in_debug_trap {
         return Ok(());
     }
     if vp.in_trap.is_none() {
@@ -585,7 +585,7 @@ async fn run_pipeline_stages(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
             break;
         }
         let cmd = code.ast.cmd(stage.cmd);
-        if !vp.traps.map.is_empty()
+        if vp.traps.live()
             && !vp.opts.get(SetOpt::Functrace)
             && !vp.opts.shopt(Shopt::Extdebug)
             && matches!(
@@ -811,7 +811,7 @@ fn before_command<'a>(
     cmd: &'a Command,
 ) -> Option<LocalBoxFuture<'a, Result<bool, Unwind>>> {
     let signals = (vp.top && vp.sigs.peek(&vp.core) != 0) || vp.own_sigs.get() != 0;
-    let debug = !vp.traps.map.is_empty()
+    let debug = vp.traps.live()
         && matches!(
             cmd.kind,
             CommandKind::Simple(_)
@@ -1145,6 +1145,15 @@ async fn run_for(vp: &mut Vp, code: &Rc<Code>, cmd: &Command, f: &psh_syntax::Fo
         .await;
         return Ok(1);
     };
+    if let Some(words) = &f.words
+        && let Some(range) = expand::lazy_seq(code, words)
+        && let Some(prog) = crate::flat::compiled(code, cmd)
+    {
+        vp.loops += 1;
+        let r = crate::flat::run_for_range(vp, code, &prog, &name, range).await;
+        vp.loops -= 1;
+        return r;
+    }
     let items: Vec<Vec<u8>> = match &f.words {
         Some(words) => Box::pin(expand::expand_words(vp, code, words))
             .await?
@@ -1166,7 +1175,7 @@ async fn run_for(vp: &mut Vp, code: &Rc<Code>, cmd: &Command, f: &psh_syntax::Fo
 /// What run_for_items does for each word before the assignment: the DEBUG trap (true:
 /// skip the word) and set -x (for compiled loops, flat).
 pub(crate) async fn for_hooks(vp: &mut Vp, code: &Rc<Code>, cmd: &Command) -> Result<bool, Unwind> {
-    if !vp.traps.map.is_empty() && Box::pin(debug_trap(vp, code, cmd)).await? {
+    if vp.traps.live() && Box::pin(debug_trap(vp, code, cmd)).await? {
         return Ok(true);
     }
     if vp.opts.get(SetOpt::Xtrace) {
@@ -1187,7 +1196,7 @@ async fn run_for_items(
     for item in items {
         safepoint(&vp.core.sched).await;
         // The DEBUG trap and `set -x` see the loop header on every iteration.
-        if !vp.traps.map.is_empty() && Box::pin(debug_trap(vp, code, cmd)).await? {
+        if vp.traps.live() && Box::pin(debug_trap(vp, code, cmd)).await? {
             continue;
         }
         if vp.opts.get(SetOpt::Xtrace) {
@@ -1616,7 +1625,7 @@ pub(crate) async fn call_function(
         .traced_funcs
         .iter()
         .any(|n| n.as_bytes() == argv0.as_slice());
-    let err_before = !vp.traps.map.is_empty() && vp.traps.action(TrapKey::Err).is_some();
+    let err_before = vp.traps.live() && vp.traps.action(TrapKey::Err).is_some();
     let hidden = trap::enter_function(vp, traced);
     let entered = match vp.traps.action(TrapKey::Debug) {
         Some(a) if !a.is_empty() && !vp.in_debug_trap => {
@@ -1675,7 +1684,7 @@ fn function_return<'a>(
     r: &R,
     hidden: Option<trap::Hidden>,
 ) -> Option<LocalBoxFuture<'a, Result<(), Unwind>>> {
-    if vp.traps.map.is_empty() && hidden.is_none() {
+    if !vp.traps.live() && hidden.is_none() {
         return None;
     }
     if let Ok(s) = *r {

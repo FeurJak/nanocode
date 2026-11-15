@@ -47,6 +47,17 @@ pub(crate) struct Prog {
     /// The commands the native operations stand for: a function of that name makes
     /// them interpreted.
     names: Vec<&'static [u8]>,
+    /// for name in words: name's slot, so that an integer item is assigned to the slot.
+    for_slot: u16,
+}
+
+/// The items of a compiled for loop.
+pub(crate) enum ForSrc {
+    /// The expanded words and the next one.
+    Words(Vec<Vec<u8>>, usize),
+    /// A brace sequence {a..b[..step]} of plain integers, not expanded into words:
+    /// the next value, how many are left, and the signed step.
+    Range { next: i64, left: u64, step: i64 },
 }
 
 struct LoopInfo {
@@ -202,6 +213,7 @@ struct Compiler<'c> {
     /// The innermost loop being compiled, and whether in its condition.
     lp: u16,
     in_cond: bool,
+    for_slot: u16,
 }
 
 impl<'c> Compiler<'c> {
@@ -217,6 +229,7 @@ impl<'c> Compiler<'c> {
             names: Vec::new(),
             lp: NONE,
             in_cond: false,
+            for_slot: NONE,
         }
     }
 
@@ -237,6 +250,7 @@ impl<'c> Compiler<'c> {
             loops: self.loops,
             nregs: self.nregs,
             names: self.names,
+            for_slot: self.for_slot,
         })
     }
 
@@ -351,6 +365,11 @@ impl<'c> Compiler<'c> {
             // the words (run_for).
             CommandKind::For(f) if top => {
                 let id = self.cmd_id(cmd)?;
+                if let Some(name) = psh_syntax::literal_text(&self.code.ast, &f.var)
+                    && crate::state::is_name(name.as_bytes())
+                {
+                    self.for_slot = self.slot(&name);
+                }
                 let head = self.pc();
                 self.loops[lp as usize].cont = head;
                 self.ins.push(Ins::LoopHead);
@@ -908,10 +927,34 @@ struct Ex<'p> {
     buf: Vec<u8>,
     echo_last: Option<i64>,
     /// for name in words: the name, the words and the next one.
-    items: Option<(&'p str, Vec<Vec<u8>>, usize)>,
+    items: Option<(&'p str, ForSrc)>,
 }
 
 impl Ex<'_> {
+    /// The next item of a brace sequence straight into the loop variable's slot, while
+    /// native operations run and the variable holds a plain integer or is unset (what
+    /// reload found, so no nameref, readonly or other attribute stands in the way):
+    /// Some(true) when assigned, Some(false) at the end, None for run_with's own way.
+    fn for_fast(&mut self) -> Option<bool> {
+        let slot = self.prog.for_slot;
+        let Some((_, ForSrc::Range { next, left, step })) = &mut self.items else {
+            return None;
+        };
+        if *left == 0 {
+            return Some(false);
+        }
+        if slot == NONE || !matches!(self.slots[slot as usize].0, SV::Int(_) | SV::Unset) {
+            return None;
+        }
+        *left -= 1;
+        let n = *next;
+        if *left > 0 {
+            *next += *step;
+        }
+        self.slots[slot as usize] = (SV::Int(n), true);
+        Some(true)
+    }
+
     /// The line echo writes, into buf; None if a variable is not an integer.
     fn echo_line(&mut self, code: &Code, args: &[EArg], newline: bool) -> Option<()> {
         self.buf.clear();
@@ -1073,6 +1116,55 @@ impl Ex<'_> {
         })
     }
 
+    /// A number or a variable that holds one.
+    #[inline]
+    fn leaf(&self, e: u32) -> Option<i64> {
+        match self.prog.exprs[e as usize] {
+            AExpr::Num(n) => Some(n),
+            AExpr::Load(s) => self.get(s),
+            _ => None,
+        }
+    }
+
+    /// The shapes counting loops are made of, without eval's recursion and undo log:
+    /// `a OP b` over numbers and integer variables, `i++`/`--i`, and `i = b`/`i += b` on
+    /// an integer variable. None: not one of them, or one that would fail (eval then
+    /// does it, and fails as before); nothing is written then.
+    #[inline]
+    fn quick(&mut self, e: u32) -> Option<i64> {
+        match self.prog.exprs[e as usize] {
+            AExpr::Binary(op, a, b)
+                if !matches!(op, BinOp::And | BinOp::Or | BinOp::Comma) =>
+            {
+                let (x, y) = (self.leaf(a)?, self.leaf(b)?);
+                binary(op, x, y)
+            }
+            AExpr::IncDec { slot, inc, post } => {
+                let SV::Int(old) = self.slots[slot as usize].0 else {
+                    return None;
+                };
+                let new = if inc { old.wrapping_add(1) } else { old.wrapping_sub(1) };
+                self.slots[slot as usize] = (SV::Int(new), true);
+                Some(if post { old } else { new })
+            }
+            AExpr::Assign { slot, op, value } => {
+                let SV::Int(old) = self.slots[slot as usize].0 else {
+                    return None;
+                };
+                let v = self.leaf(value)?;
+                let new = match op {
+                    Some(op) => binary(op, old, v)?,
+                    None => v,
+                };
+                self.slots[slot as usize] = (SV::Int(new), true);
+                Some(new)
+            }
+            AExpr::Num(n) => Some(n),
+            AExpr::Load(s) => self.get(s),
+            _ => None,
+        }
+    }
+
     /// Evaluates an expression; on failure nothing it wrote stays.
     fn arith(&mut self, e: u32) -> Option<i64> {
         let mark = self.undo.len();
@@ -1101,8 +1193,13 @@ impl Ex<'_> {
     fn native(&mut self, op: &Op) -> Option<i32> {
         match op {
             Op::Arith(e) => {
-                self.undo.clear();
-                let v = self.arith(*e)?;
+                let v = match self.quick(*e) {
+                    Some(v) => v,
+                    None => {
+                        self.undo.clear();
+                        self.arith(*e)?
+                    }
+                };
                 let st = i32::from(v == 0);
                 self.pipe = Some(st);
                 Some(st)
@@ -1116,7 +1213,17 @@ impl Ex<'_> {
                             SV::Int(n) => Some(n),
                             _ => None,
                         },
-                        Val::Arith(e) => self.arith(*e),
+                        // Only a shape that writes nothing: a later failing item undoes
+                        // this list's writes from the undo log.
+                        Val::Arith(e) => match self.prog.exprs[*e as usize] {
+                            AExpr::Binary(..) | AExpr::Num(_) | AExpr::Load(_) => {
+                                match self.quick(*e) {
+                                    Some(v) => Some(v),
+                                    None => self.arith(*e),
+                                }
+                            }
+                            _ => self.arith(*e),
+                        },
                     };
                     if n.and_then(|n| self.put(*slot, n)).is_none() {
                         while let Some((s, v, dirty)) = self.undo.pop() {
@@ -1208,7 +1315,7 @@ fn binary(op: BinOp, a: i64, b: i64) -> Option<i64> {
 
 /// Whether native operations may run: nothing that changes what a command does is on.
 fn native_ok(vp: &Vp, prog: &Prog) -> bool {
-    if !vp.traps.map.is_empty()
+    if vp.traps.live()
         || vp.opts.get(SetOpt::Xtrace)
         || vp.opts.get(SetOpt::Posix)
         || vp.opts.get(SetOpt::Allexport)
@@ -1254,14 +1361,26 @@ pub(crate) async fn run_for(
     name: &str,
     items: Vec<Vec<u8>>,
 ) -> R {
-    run_with(vp, code, prog, Some((name, items, 0))).await
+    run_with(vp, code, prog, Some((name, ForSrc::Words(items, 0)))).await
+}
+
+/// Runs a compiled for loop over a brace sequence of integers without expanding it
+/// (exec::run_for checks that it is one; the caller counts it in vp.loops).
+pub(crate) async fn run_for_range(
+    vp: &mut Vp,
+    code: &Rc<Code>,
+    prog: &Prog,
+    name: &str,
+    range: ForSrc,
+) -> R {
+    run_with(vp, code, prog, Some((name, range))).await
 }
 
 async fn run_with<'p>(
     vp: &mut Vp,
     code: &Rc<Code>,
     prog: &'p Prog,
-    items: Option<(&'p str, Vec<Vec<u8>>, usize)>,
+    items: Option<(&'p str, ForSrc)>,
 ) -> R {
     let mut ex = Ex {
         prog,
@@ -1287,6 +1406,10 @@ async fn run_with<'p>(
     // The budget was taken for the instruction at pc already (after a yield).
     let mut passed = false;
     loop {
+        // Native stretches run synchronously, outside this future (spin).
+        if native && !passed && !vp.opts.get(SetOpt::Errexit) {
+            pc = spin(vp, &mut ex, pc, &mut st);
+        }
         match &prog.code[pc as usize] {
             Ins::Stmt {
                 op,
@@ -1465,15 +1588,44 @@ async fn run_with<'p>(
             }
             Ins::ForItem { cmd } => {
                 let exit = prog.loops[0].exit;
-                let Some((name, words, next)) = &mut ex.items else {
+                if native {
+                    match ex.for_fast() {
+                        Some(true) => {
+                            pc += 1;
+                            continue;
+                        }
+                        Some(false) => {
+                            pc = exit;
+                            continue;
+                        }
+                        None => {}
+                    }
+                }
+                let Some((name, src)) = &mut ex.items else {
                     unreachable!()
                 };
-                let Some(item) = words.get_mut(*next) else {
-                    pc = exit;
-                    continue;
+                let item = match src {
+                    ForSrc::Words(words, next) => {
+                        let Some(item) = words.get_mut(*next) else {
+                            pc = exit;
+                            continue;
+                        };
+                        *next += 1;
+                        std::mem::take(item)
+                    }
+                    ForSrc::Range { next, left, step } => {
+                        if *left == 0 {
+                            pc = exit;
+                            continue;
+                        }
+                        *left -= 1;
+                        let n = *next;
+                        if *left > 0 {
+                            *next += *step;
+                        }
+                        n.to_string().into_bytes()
+                    }
                 };
-                *next += 1;
-                let item = std::mem::take(item);
                 let name: &str = name;
                 if !native {
                     ex.flush(vp, code);
@@ -1589,6 +1741,115 @@ async fn run_with<'p>(
                     Some(_) => pc += 1,
                 }
             }
+        }
+    }
+}
+
+/// Runs native operations and control flow from pc synchronously, as run_with would,
+/// while nothing needs the interpreter, an await, an unwind or errexit (the caller
+/// checks that errexit is off; nothing here can turn it on). Returns the pc of the
+/// first instruction it leaves to run_with, which runs it as before: a command to
+/// interpret or a native one that declined, break or continue, echo, the next word of a
+/// for loop, the top loop's end, a spent scheduling budget or a pending signal (both
+/// seen at the same checks run_with makes, before anything at that pc ran).
+fn spin(vp: &mut Vp, ex: &mut Ex<'_>, mut pc: u32, st: &mut i32) -> u32 {
+    let prog = ex.prog;
+    loop {
+        match &prog.code[pc as usize] {
+            Ins::Stmt { op, line, .. } => {
+                if matches!(op, Op::Break(..) | Op::Continue(..) | Op::Echo { .. } | Op::Slow) {
+                    return pc;
+                }
+                if !vp.core.sched.pass() {
+                    return pc;
+                }
+                let Some(s) = ex.native(op) else {
+                    // run_with interprets it; the budget for it was taken here.
+                    vp.core.sched.refund();
+                    return pc;
+                };
+                *st = s;
+                ex.line = Some(*line);
+                pc += 1;
+            }
+            Ins::Item => {
+                vp.status = *st;
+                pc += 1;
+            }
+            Ins::SetSt(s) => {
+                *st = *s;
+                pc += 1;
+            }
+            Ins::NoErrSave(r) => {
+                ex.regs[*r as usize] = i32::from(vp.no_errexit);
+                vp.no_errexit = true;
+                pc += 1;
+            }
+            Ins::NoErrRestore(r) => {
+                vp.no_errexit = ex.regs[*r as usize] != 0;
+                pc += 1;
+            }
+            Ins::Jz(t) => pc = if *st == 0 { *t } else { pc + 1 },
+            Ins::Jnz(t) => pc = if *st != 0 { *t } else { pc + 1 },
+            Ins::Jmp(t) => pc = *t,
+            Ins::LoopEnter(lp) => {
+                let l = &prog.loops[*lp as usize];
+                vp.loops += 1;
+                ex.regs[l.reg as usize] = 0;
+                ex.regs[l.ne as usize] = i32::from(vp.no_errexit);
+                pc += 1;
+            }
+            Ins::LoopHead => {
+                if !vp.core.sched.pass() {
+                    return pc;
+                }
+                if vp.job.as_ref().is_some_and(|j| j.killed().is_some())
+                    || (vp.top && vp.sigs.peek(&vp.core) != 0)
+                    || vp.own_sigs.get() != 0
+                {
+                    vp.core.sched.refund();
+                    return pc;
+                }
+                pc += 1;
+            }
+            Ins::BodyDone(lp) => {
+                ex.regs[prog.loops[*lp as usize].reg as usize] = *st;
+                pc += 1;
+            }
+            Ins::LoopExit(lp) => {
+                if *lp == 0 {
+                    return pc;
+                }
+                *st = ex.regs[prog.loops[*lp as usize].reg as usize];
+                vp.loops -= 1;
+                pc += 1;
+            }
+            Ins::ForClause {
+                lp,
+                which,
+                expr: Some(e),
+                line,
+                blank,
+                ..
+            } => {
+                ex.undo.clear();
+                let Some(v) = ex.arith(*e) else {
+                    return pc;
+                };
+                ex.line = Some(*line);
+                let l = &prog.loops[*lp as usize];
+                if v == 0 && *which == Clause::Cond && !*blank {
+                    pc = l.exit;
+                } else {
+                    pc += 1;
+                }
+            }
+            Ins::ForItem { .. } => match ex.for_fast() {
+                Some(true) => pc += 1,
+                Some(false) => pc = prog.loops[0].exit,
+                None => return pc,
+            },
+            Ins::ForClause { .. } => return pc,
         }
     }
 }

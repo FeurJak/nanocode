@@ -230,7 +230,7 @@ pub(super) async fn source(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     };
     // The RETURN trap runs when a sourced file finishes (D1283).
     if let Ok(st) = r
-        && !vp.traps.map.is_empty()
+        && vp.traps.live()
     {
         vp.status = st;
         Box::pin(super::trap::run_trap(vp, super::trap::TrapKey::Return)).await?;

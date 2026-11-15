@@ -157,7 +157,55 @@ pub(crate) enum Shopt {
 }
 
 impl Shopt {
-    fn name(self) -> &'static str {
+    const ALL: [Shopt; 14] = [
+        Shopt::Dotglob,
+        Shopt::ExpandAliases,
+        Shopt::Extdebug,
+        Shopt::Extglob,
+        Shopt::Failglob,
+        Shopt::Globskipdots,
+        Shopt::Globstar,
+        Shopt::InheritErrexit,
+        Shopt::Lastpipe,
+        Shopt::Nocaseglob,
+        Shopt::Nocasematch,
+        Shopt::Nullglob,
+        Shopt::PatsubReplacement,
+        Shopt::XpgEcho,
+    ];
+
+    /// Each option's bit in `Options::shopt` (its place in SHOPTS), found once at compile
+    /// time: a lookup by name was ~800 instructions per word expanded.
+    const INDEX: [u8; 14] = {
+        let mut out = [0u8; 14];
+        let mut k = 0;
+        while k < 14 {
+            let name = Shopt::ALL[k].name().as_bytes();
+            let mut i = 0;
+            let mut found = false;
+            while i < SHOPTS.len() {
+                let n = SHOPTS[i].0.as_bytes();
+                if n.len() == name.len() {
+                    let mut j = 0;
+                    while j < n.len() && n[j] == name[j] {
+                        j += 1;
+                    }
+                    if j == n.len() {
+                        found = true;
+                        break;
+                    }
+                }
+                i += 1;
+            }
+            assert!(found && i < 64, "known shopt");
+            assert!(Shopt::ALL[k] as usize == k);
+            out[k] = i as u8;
+            k += 1;
+        }
+        out
+    };
+
+    const fn name(self) -> &'static str {
         match self {
             Shopt::Dotglob => "dotglob",
             Shopt::ExpandAliases => "expand_aliases",
@@ -247,7 +295,7 @@ impl Options {
     }
 
     pub(crate) fn shopt(&self, opt: Shopt) -> bool {
-        self.shopt_at(shopt_index(opt.name()).expect("known shopt"))
+        self.shopt_at(Shopt::INDEX[opt as usize] as usize)
     }
 
     pub(crate) fn shopt_at(&self, i: usize) -> bool {
