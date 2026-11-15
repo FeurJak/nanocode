@@ -5,9 +5,10 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     io::{self, Read, Write},
+    net::TcpStream,
     os::unix::{
         ffi::{OsStrExt, OsStringExt},
-        fs::symlink,
+        fs::{PermissionsExt, symlink},
         process::CommandExt,
     },
     path::{Path, PathBuf},
@@ -37,6 +38,16 @@ fn main() -> ExitCode {
     };
     let cache = cache_dir();
     let environment: Environment = env::vars_os().collect();
+    if tool == "publish" {
+        return match args.get(1).map(|to| publish(&cache, Path::new(to))) {
+            Some(Ok(())) => ExitCode::SUCCESS,
+            Some(Err(error)) => {
+                eprintln!("buildcache: could not publish: {error}");
+                ExitCode::from(1)
+            }
+            None => ExitCode::from(2),
+        };
+    }
     if is_rustc(tool) {
         rust(&cache, &scripts, args, environment, 1)
     } else if args.get(1).is_some_and(|compiler| is_rustc(compiler)) {
@@ -265,6 +276,12 @@ fn rust(cache: &Path, scripts: &Path, mut args: Vec<OsString>, mut environment: 
         Kind::Workspace => cache.join("workspace").join(&key),
     };
     if restore(&entry, &out_dir, &environment, kind, &inputs, &roots).is_ok() {
+        return ExitCode::SUCCESS;
+    }
+    if let Some(remote) = environment.get(OsStr::new("NANOCODE_BUILDCACHE_URL")).filter(|remote| !remote.is_empty())
+        && fetch(cache, remote, kind, &key, &entry).is_ok()
+        && restore(&entry, &out_dir, &environment, kind, &inputs, &roots).is_ok()
+    {
         return ExitCode::SUCCESS;
     }
     args.splice(compiler..compiler, remaps);
@@ -1008,6 +1025,10 @@ fn store_workspace(cache: &Path, entry: &Path, unit: &Unit<'_>) -> io::Result<()
             let _ = fs::remove_dir_all(&staging);
         }
     }
+    point(directory, entry, &version, &prefix)
+}
+
+fn point(directory: &Path, entry: &Path, version: &Path, prefix: &[u8]) -> io::Result<()> {
     let link = directory.join(format!(".link.{}.{}", std::process::id(), unique()));
     symlink(version.file_name().unwrap_or_default(), &link)?;
     if let Err(error) = fs::rename(&link, entry) {
@@ -1017,12 +1038,216 @@ fn store_workspace(cache: &Path, entry: &Path, unit: &Unit<'_>) -> io::Result<()
     let current = fs::read_link(entry).ok();
     for sibling in fs::read_dir(directory)?.flatten() {
         let path = sibling.path();
-        if sibling.file_name().as_bytes().starts_with(&prefix) && current.as_deref() != Some(Path::new(&sibling.file_name())) {
+        if sibling.file_name().as_bytes().starts_with(prefix) && current.as_deref() != Some(Path::new(&sibling.file_name())) {
             let _ = fs::remove_dir_all(&path);
         }
     }
     Ok(())
 }
+
+fn directory_of(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Registry => "units",
+        Kind::Workspace => "workspace",
+    }
+}
+
+fn fetch(cache: &Path, remote: &OsStr, kind: Kind, key: &str, entry: &Path) -> io::Result<()> {
+    let directory = directory_of(kind);
+    let mut url = remote.as_bytes().to_vec();
+    while url.last() == Some(&b'/') {
+        url.pop();
+    }
+    url.extend_from_slice(format!("/{directory}/{key}").as_bytes());
+    let packed = download(&url)?;
+    fs::create_dir_all(cache.join(directory))?;
+    let staging = cache.join(directory).join(format!(".data.{}.{}", std::process::id(), unique()));
+    let placed = unpack(&packed, &staging).and_then(|()| match kind {
+        Kind::Registry => symlink(staging.file_name().unwrap_or_default(), entry),
+        Kind::Workspace => {
+            let (Some(parent), Some(slot)) = (entry.parent(), entry.file_name()) else {
+                return Err(io::Error::other("no slot"));
+            };
+            let mut hasher = Sha256::new();
+            hasher.update(key.as_bytes());
+            hasher.update(b"\n");
+            hasher.update(&fs::read(staging.join("inputs"))?);
+            hasher.update(b"\n");
+            hasher.update(&fs::read(staging.join("sources"))?);
+            let mut prefix = slot.as_bytes().to_vec();
+            prefix.push(b'.');
+            let mut version = prefix.clone();
+            version.extend_from_slice(hasher.finish().as_bytes());
+            let version = parent.join(OsStr::from_bytes(&version));
+            if fs::rename(&staging, &version).is_err() && !version.exists() {
+                return Err(io::Error::other("could not place"));
+            }
+            point(parent, entry, &version, &prefix)
+        }
+    });
+    if staging.exists() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    placed
+}
+
+fn download(url: &[u8]) -> io::Result<Vec<u8>> {
+    if let Some(rest) = url.strip_prefix(b"http://") {
+        return http_get(rest);
+    }
+    if let Some(path) = url.strip_prefix(b"file://") {
+        return fs::read(OsStr::from_bytes(path));
+    }
+    if url.starts_with(b"/") {
+        return fs::read(OsStr::from_bytes(url));
+    }
+    let output = Command::new("curl")
+        .args(["-fsSL", "--"])
+        .arg(OsStr::from_bytes(url))
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other("curl failed"));
+    }
+    Ok(output.stdout)
+}
+
+fn http_get(rest: &[u8]) -> io::Result<Vec<u8>> {
+    let slash = rest.iter().position(|byte| *byte == b'/').unwrap_or(rest.len());
+    let authority = std::str::from_utf8(&rest[..slash]).map_err(io::Error::other)?;
+    let path = if slash == rest.len() { b"/" as &[u8] } else { &rest[slash..] };
+    let address = if authority.rsplit(':').next().is_some_and(|port| port.parse::<u16>().is_ok()) && !authority.ends_with(']') {
+        authority.to_owned()
+    } else {
+        format!("{authority}:80")
+    };
+    let mut stream = TcpStream::connect(address.as_str())?;
+    let mut request = b"GET ".to_vec();
+    request.extend_from_slice(path);
+    request.extend_from_slice(format!(" HTTP/1.1\r\nHost: {authority}\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n").as_bytes());
+    stream.write_all(&request)?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    let end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| io::Error::other("no header end"))?;
+    let head = String::from_utf8_lossy(&response[..end]).to_ascii_lowercase();
+    let mut lines = head.split("\r\n");
+    if lines.next().and_then(|status| status.split(' ').nth(1)) != Some("200") {
+        return Err(io::Error::other("not found"));
+    }
+    let (mut length, mut chunked) = (None, false);
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':') {
+            match name.trim() {
+                "content-length" => length = Some(value.trim().parse::<usize>().map_err(io::Error::other)?),
+                "transfer-encoding" => chunked = value.trim() == "chunked",
+                _ => {}
+            }
+        }
+    }
+    let body = response.split_off(end + 4);
+    if chunked {
+        return dechunk(&body);
+    }
+    match length {
+        Some(length) if length != body.len() => Err(io::Error::other("short body")),
+        _ => Ok(body),
+    }
+}
+
+fn dechunk(mut body: &[u8]) -> io::Result<Vec<u8>> {
+    let mut data = Vec::new();
+    loop {
+        let line = body
+            .windows(2)
+            .position(|window| window == b"\r\n")
+            .ok_or_else(|| io::Error::other("bad chunk"))?;
+        let size = std::str::from_utf8(&body[..line]).map_err(io::Error::other)?;
+        let size = usize::from_str_radix(size.split(';').next().unwrap_or_default().trim(), 16).map_err(io::Error::other)?;
+        body = &body[line + 2..];
+        if size == 0 {
+            return Ok(data);
+        }
+        if body.len() < size + 2 {
+            return Err(io::Error::other("short chunk"));
+        }
+        data.extend_from_slice(&body[..size]);
+        body = &body[size + 2..];
+    }
+}
+
+fn pack(root: &Path) -> io::Result<Vec<u8>> {
+    let mut entries = Vec::new();
+    walk(root, Path::new(""), &mut entries)?;
+    entries.sort();
+    let mut packed = Vec::new();
+    for (relative, is_file) in entries {
+        if !is_file {
+            continue;
+        }
+        let path = root.join(&relative);
+        let mode = fs::metadata(&path)?.permissions().mode() & 0o777;
+        let data = fs::read(&path)?;
+        packed.extend_from_slice(relative.as_os_str().as_bytes());
+        packed.extend_from_slice(format!("\n{} {mode:o}\n", data.len()).as_bytes());
+        packed.extend_from_slice(&data);
+    }
+    Ok(packed)
+}
+
+fn unpack(mut packed: &[u8], staging: &Path) -> io::Result<()> {
+    let bad = || io::Error::other("bad pack");
+    fs::create_dir_all(staging.join("files"))?;
+    while !packed.is_empty() {
+        let name_end = packed.iter().position(|byte| *byte == b'\n').ok_or_else(bad)?;
+        let name = Path::new(OsStr::from_bytes(&packed[..name_end]));
+        packed = &packed[name_end + 1..];
+        let size_end = packed.iter().position(|byte| *byte == b'\n').ok_or_else(bad)?;
+        let (size, mode) = std::str::from_utf8(&packed[..size_end]).map_err(io::Error::other)?.split_once(' ').ok_or_else(bad)?;
+        let size: usize = size.parse().map_err(io::Error::other)?;
+        let mode = u32::from_str_radix(mode, 8).map_err(io::Error::other)?;
+        packed = &packed[size_end + 1..];
+        if packed.len() < size || !name.components().all(|part| matches!(part, std::path::Component::Normal(_))) {
+            return Err(bad());
+        }
+        let destination = staging.join(name);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&destination, &packed[..size])?;
+        fs::set_permissions(&destination, fs::Permissions::from_mode(mode))?;
+        packed = &packed[size..];
+    }
+    Ok(())
+}
+
+fn publish(cache: &Path, to: &Path) -> io::Result<()> {
+    for directory in ["units", "workspace"] {
+        let Ok(entries) = fs::read_dir(cache.join(directory)) else {
+            continue;
+        };
+        fs::create_dir_all(to.join(directory))?;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.len() != 64 || !entry.file_type().is_ok_and(|kind| kind.is_symlink()) {
+                continue;
+            }
+            let Ok(packed) = pack(&entry.path()) else {
+                continue;
+            };
+            let destination = to.join(directory).join(&name);
+            let mut staging = destination.clone().into_os_string();
+            staging.push(format!(".{}", std::process::id()));
+            fs::write(&staging, &packed)?;
+            fs::rename(&staging, &destination)?;
+        }
+    }
+    Ok(())
+}
+
 
 fn c(cache: &Path, args: &[OsString], environment: Environment) -> ExitCode {
     let (mut object, mut source, mut compile) = (None, None, false);

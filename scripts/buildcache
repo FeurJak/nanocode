@@ -20,7 +20,9 @@ helper=$cache/bin/buildcache-${checksum%% *}
 [ -x "$helper" ] && exec "$helper" "$scripts" "$@"
 [ -f "$helper.failed" ] && run "$@"
 case $1 in
-  *rustc)
+  *rustc|publish)
+    compiler=$1
+    [ "$1" = publish ] && compiler=rustc
     mkdir -p "$cache/bin" || run "$@"
     if [ -d "$helper.lock" ]; then
       { read -r builder < "$helper.lock/pid"; } 2>/dev/null
@@ -30,7 +32,7 @@ case $1 in
       echo $$ > "$helper.lock/pid"
       (
         sh -c 'echo $PPID' > "$helper.lock/pid"
-        if env -u CARGO_MAKEFLAGS -u MAKEFLAGS -u MFLAGS "$1" --edition 2024 -C opt-level=2 -o "$helper.$$" "$source"; then
+        if env -u CARGO_MAKEFLAGS -u MAKEFLAGS -u MFLAGS "$compiler" --edition 2024 -C opt-level=2 -o "$helper.$$" "$source"; then
           mv -f "$helper.$$" "$helper"
         else
           touch "$helper.failed"
@@ -38,6 +40,10 @@ case $1 in
         rm -f "$helper.$$"
         rm -rf "$helper.lock"
       ) < /dev/null > /dev/null 2>&1 &
+      if [ -n "$NANOCODE_BUILDCACHE_URL" ] || [ "$1" = publish ]; then
+        wait $!
+        [ -x "$helper" ] && exec "$helper" "$scripts" "$@"
+      fi
     fi
     ;;
 esac
