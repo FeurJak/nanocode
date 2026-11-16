@@ -36,6 +36,9 @@ fn main() -> ExitCode {
     let Some(tool) = args.first() else {
         return ExitCode::from(2);
     };
+    if let Some(stale) = stale_pointer(&scripts, &args) {
+        return stale;
+    }
     let cache = cache_dir();
     let environment: Environment = env::vars_os().collect();
     if tool == "publish" {
@@ -1194,6 +1197,37 @@ fn eager_pack(cache: &Path, directory: &str, key: &str, source: &[u8]) -> io::Re
     Ok(data)
 }
 
+fn stale_pointer(scripts: &Path, args: &[OsString]) -> Option<ExitCode> {
+    let helper = env::current_exe().ok()?;
+    let checksum: u32 = helper.file_name()?.to_str()?.strip_prefix("buildcache-")?.parse().ok()?;
+    let source = fs::read(scripts.join("buildcache.rs")).ok()?;
+    let pointer = scripts.join(".buildcache");
+    if cksum(&source) == checksum {
+        if fs::metadata(&pointer).is_err() {
+            let staging = scripts.join(format!(".buildcache.{}.{}", std::process::id(), unique()));
+            if symlink(&helper, &staging).is_ok() && fs::rename(&staging, &pointer).is_err() {
+                let _ = fs::remove_file(&staging);
+            }
+        }
+        return None;
+    }
+    if fs::read_link(&pointer).is_ok_and(|target| target == helper) {
+        let _ = fs::remove_file(&pointer);
+    }
+    let error = Command::new(scripts.join("buildcache")).args(args).exec();
+    eprintln!("buildcache: could not run {}: {error}", scripts.join("buildcache").display());
+    Some(ExitCode::from(1))
+}
+
+fn cksum(data: &[u8]) -> u32 {
+    let step = |crc: u32, byte: u8| {
+        (0..8).fold(crc ^ (u32::from(byte) << 24), |crc, _| if crc & 0x8000_0000 == 0 { crc << 1 } else { (crc << 1) ^ 0x04c1_1db7 })
+    };
+    let length = data.len().to_le_bytes();
+    let significant = length.iter().rposition(|byte| *byte != 0).map_or(0, |at| at + 1);
+    !data.iter().chain(&length[..significant]).fold(0, |crc, byte| step(crc, *byte))
+}
+
 fn start_pending(directory: &Path, scripts: &Path) {
     let pending = directory.join("pending");
     if !pending.exists() {
@@ -1276,7 +1310,7 @@ impl Read for Following {
 }
 
 fn bundled(cache: &Path, pending: &[(&str, &str)], bundle: &mut io::BufReader<Following>) {
-    let mut held: Vec<(Vec<u8>, PathBuf, fs::File)> = pending
+    let mut held: Vec<(Vec<u8>, PathBuf, fs::File, Option<(OsString, fs::File, u64)>)> = pending
         .iter()
         .filter_map(|(directory, key)| {
             let path = pack_path(cache, directory, key).filter(|path| path.parent().is_some_and(Path::is_dir))?;
@@ -1284,31 +1318,54 @@ fn bundled(cache: &Path, pending: &[(&str, &str)], bundle: &mut io::BufReader<Fo
             name.push(".lock");
             let lock = fs::OpenOptions::new().create(true).truncate(false).write(true).open(&name).ok()?;
             lock.try_lock().ok()?;
-            (!path.exists()).then(|| (format!("{directory}-{key}").into_bytes(), path, lock))
+            (!path.exists()).then(|| (format!("{directory}-{key}").into_bytes(), path, lock, None))
         })
         .collect();
     while !held.is_empty() {
         let (mut name, mut size) = (Vec::new(), Vec::new());
         if bundle.read_until(b'\n', &mut name).unwrap_or(0) == 0 || bundle.read_until(b'\n', &mut size).unwrap_or(0) == 0 {
-            return;
+            break;
         }
-        let Some(size) = std::str::from_utf8(size.trim_ascii()).ok().and_then(|size| size.parse::<u64>().ok()) else {
-            return;
+        let Some((length, total)) = std::str::from_utf8(size.trim_ascii()).ok().and_then(|size| {
+            let (length, total) = size.split_once(' ').unwrap_or((size, size));
+            Some((length.parse::<u64>().ok()?, total.parse::<u64>().ok()?))
+        }) else {
+            break;
         };
-        let mut entry = (&mut *bundle).take(size);
+        let mut entry = (&mut *bundle).take(length);
         let Some(at) = held.iter().position(|(held, ..)| held.as_slice() == name.trim_ascii()) else {
-            if io::copy(&mut entry, &mut io::sink()).ok() != Some(size) {
-                return;
+            if io::copy(&mut entry, &mut io::sink()).ok() != Some(length) {
+                break;
             }
             continue;
         };
-        let (_, path, _lock) = held.swap_remove(at);
-        let mut staging = path.clone().into_os_string();
-        staging.push(format!(".{}.{}", std::process::id(), unique()));
-        let written = fs::File::create(&staging).and_then(|mut file| io::copy(&mut entry, &mut file));
-        if written.ok() != Some(size) || fs::rename(&staging, &path).is_err() {
-            let _ = fs::remove_file(&staging);
-            return;
+        let (_, path, _, partial) = &mut held[at];
+        if partial.is_none() {
+            let mut staging = path.clone().into_os_string();
+            staging.push(format!(".{}.{}", std::process::id(), unique()));
+            let Ok(file) = fs::File::create(&staging) else {
+                break;
+            };
+            *partial = Some((staging, file, 0));
+        }
+        let Some((staging, file, written)) = partial.as_mut() else {
+            break;
+        };
+        if io::copy(&mut entry, file).ok() != Some(length) {
+            break;
+        }
+        *written += length;
+        if *written < total {
+            continue;
+        }
+        if *written > total || fs::rename(&*staging, &*path).is_err() {
+            break;
+        }
+        held.swap_remove(at);
+    }
+    for (.., partial) in held {
+        if let Some((staging, ..)) = partial {
+            let _ = fs::remove_file(staging);
         }
     }
 }
@@ -1774,7 +1831,7 @@ fn unpack(mut packed: &[u8], staging: &Path) -> io::Result<()> {
 fn publish(cache: &Path, to: &Path) -> io::Result<()> {
     let mut index = Vec::new();
     let mut eager = b"workspace-index\n".to_vec();
-    let mut bundle: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut bundle: Vec<(String, Vec<u8>)> = Vec::new();
     for directory in ["units", "workspace"] {
         let Ok(entries) = fs::read_dir(cache.join(directory)) else {
             continue;
@@ -1818,7 +1875,7 @@ fn publish(cache: &Path, to: &Path) -> io::Result<()> {
                 eager.extend_from_slice(format!("{directory}-").as_bytes());
                 eager.extend_from_slice(name.as_bytes());
                 eager.push(b'\n');
-                bundle.push((format!("{directory}-{}\n{}\n", name.to_string_lossy(), packed.len()).into_bytes(), packed.clone()));
+                bundle.push((format!("{directory}-{}", name.to_string_lossy()), packed.clone()));
             }
             index.extend_from_slice(format!("{directory}/").as_bytes());
             index.extend_from_slice(name.as_bytes());
@@ -1838,18 +1895,37 @@ fn publish(cache: &Path, to: &Path) -> io::Result<()> {
     fs::write(&staging, compressed(index))?;
     fs::rename(&staging, &destination)?;
     bundle.sort_by_key(|(_, packed)| packed.len());
-    let bundle: Vec<u8> = bundle.into_iter().flat_map(|(header, packed)| header.into_iter().chain(packed)).collect();
-    let destination = to.join("workspace/eager-packs");
-    let dictionary = format!("--lzma2=dict={}", bundle.len());
-    match filter(Command::new("xz").args(["-q", "-c", &dictionary]), &bundle) {
-        Ok(packed) => {
-            let mut staging = destination.clone().into_os_string();
-            staging.push(format!(".{}", std::process::id()));
-            fs::write(&staging, packed)?;
-            fs::rename(&staging, &destination)?;
+    let chunk = 1 << 20;
+    let mut blocks = Vec::new();
+    let mut offset = 0;
+    while offset == 0 || bundle.iter().any(|(_, packed)| packed.len() > offset) {
+        for (name, packed) in &bundle {
+            if offset > 0 && packed.len() <= offset {
+                continue;
+            }
+            let part = &packed[offset.min(packed.len())..packed.len().min(offset + chunk)];
+            blocks.extend_from_slice(format!("{name}\n{} {}\n", part.len(), packed.len()).as_bytes());
+            blocks.extend_from_slice(part);
         }
-        Err(_) => {
-            let _ = fs::remove_file(&destination);
+        offset += chunk;
+    }
+    let packs: Vec<u8> = bundle.into_iter().flat_map(|(name, packed)| format!("{name}\n{}\n", packed.len()).into_bytes().into_iter().chain(packed)).collect();
+    let dictionary = format!("--lzma2=dict={}", packs.len());
+    for (name, data, args) in [
+        ("eager-packs", packs, &["-q", "-c", &dictionary][..]),
+        ("eager-blocks", blocks, &["-q", "-c", "-6e", "-T0", "--block-size=16MiB"][..]),
+    ] {
+        let destination = to.join("workspace").join(name);
+        match filter(Command::new("xz").args(args), &data) {
+            Ok(packed) => {
+                let mut staging = destination.clone().into_os_string();
+                staging.push(format!(".{}", std::process::id()));
+                fs::write(&staging, packed)?;
+                fs::rename(&staging, &destination)?;
+            }
+            Err(_) => {
+                let _ = fs::remove_file(&destination);
+            }
         }
     }
     if let Some(helper) = publish_helper(to)? {

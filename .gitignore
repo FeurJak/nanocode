@@ -9,6 +9,7 @@ node_modules/
 .nanocode/
 .venv/
 target/
+/scripts/.buildcache
 py/bindings/.venv/
 py/bindings/dist/
 py/bindings/python/nanocode/*.so
