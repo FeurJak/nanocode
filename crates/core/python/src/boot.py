@@ -461,7 +461,7 @@ def _start(argv, first):
         environ._data.update(fresh)
     sys.argv = argv
     sys.executable = sys._base_executable = ''
-    sys.path[:] = [posix._abs(first).decode('utf-8', 'surrogateescape') if first else '']
+    sys.path[:] = [posix._abs(first).decode('utf-8', 'surrogateescape') if first else '', sys.prefix + '/lib/python%d.%d/site-packages' % sys.version_info[:2]]
     sys.stdin = sys.__stdin__ = _stdio(0, '<stdin>')
     sys.stdout = sys.__stdout__ = _stdio(1, '<stdout>')
     sys.stderr = sys.__stderr__ = _stdio(2, '<stderr>')
