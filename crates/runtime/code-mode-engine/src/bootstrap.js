@@ -6,6 +6,7 @@
     return value;
   };
   const nativeTool = native("__nanocodeTool");
+  const nativeSyncTool = native("__nanocodeSyncTool");
   const nativeContent = native("__nanocodeContent");
   const nativeText = native("__nanocodeText");
   const nativeLoad = native("__nanocodeLoad");
@@ -482,6 +483,14 @@
       const encodedInput = input === undefined ? "null" : jsonStringify(input);
       return nativeTool(name, encodedInput, host);
     };
+    const invokeToolSync = (name, input, host) => {
+      const reply = nativeSyncTool(name, input === undefined ? "null" : jsonStringify(input), host);
+      const value = jsonParse(reply.value);
+      if (!reply.ok) throw toolFailure(name, value);
+      return value;
+    };
+    const callHost = (name, input) => invokeTool(name, input, true);
+    const callHostSync = (name, input) => invokeToolSync(name, input, true);
     for (const definition of definitions) {
       declaredTools[definition.name] = (input) => invokeTool(
         definition.tool_name,
@@ -594,14 +603,14 @@
     };
     defineGlobals(cellGlobals);
     if (preludeSource && preludeAtSetup) {
-      defineGlobals(preludeSource(tools, (name, input) => invokeTool(name, input, true)) ?? {});
+      defineGlobals(preludeSource(tools, callHost, callHostSync) ?? {});
       if (!nativeQuiet()) throw new Error("the prelude left work queued");
     }
     return async function runCell(source) {
       pump();
       try {
         if (preludeSource && !preludeAtSetup) {
-          defineGlobals(preludeSource(tools, (name, input) => invokeTool(name, input, true)) ?? {});
+          defineGlobals(preludeSource(tools, callHost, callHostSync) ?? {});
         }
         const script = new AsyncFunction(source);
         await finish(script());

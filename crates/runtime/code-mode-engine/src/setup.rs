@@ -24,9 +24,11 @@ pub(crate) const QUIET: u32 = 13;
 pub(crate) const EXIT: u32 = 14;
 pub(crate) const STORE: u32 = 15;
 pub(crate) const SETTLE: u32 = 16;
+pub(crate) const SYNC_TOOL: u32 = 17;
 
-const HOST_FNS: [(u32, &str); 14] = [
+const HOST_FNS: [(u32, &str); 15] = [
     (TOOL, "__nanocodeTool"),
+    (SYNC_TOOL, "__nanocodeSyncTool"),
     (CONTENT, "__nanocodeContent"),
     (TEXT, "__nanocodeText"),
     (LOAD, "__nanocodeLoad"),

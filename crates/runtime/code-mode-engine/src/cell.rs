@@ -22,7 +22,7 @@ use crate::journal::{CellJournaling, JournalEntry, JournalWriter};
 pub(crate) use crate::setup::{BOOTSTRAP_MODULE, NEXT, RUN_CELL};
 use crate::setup::{
     CATALOG, CLEAR_TIMEOUT, CONTENT, Definitions, EXIT, LOAD, NOTIFY, PREPARE_CELL, SET_TIMEOUT,
-    SETTLE, SETTLED, STORE, TEXT, TOOL, VALUE, YIELD,
+    SETTLE, SETTLED, STORE, SYNC_TOOL, TEXT, TOOL, VALUE, YIELD,
 };
 
 pub enum RuntimeEvent {
@@ -146,7 +146,7 @@ fn build(
     let builder = builder
         .source(Source::script(
             PRELUDE_SCRIPT,
-            format!("globalThis.__nanocodePrelude = function (tools, call) {{\n{source}\n}};\n"),
+            format!("globalThis.__nanocodePrelude = function (tools, call, callSync) {{\n{source}\n}};\n"),
         ))
         .source(crate::setup::bootstrap(&definitions).map_err(bootstrap_error)?);
     stored(builder)
@@ -320,6 +320,7 @@ pub(crate) enum Reply<'a> {
     Lossy(Vec<u8>),
     Bytes(Vec<u8>),
     Promise(u64),
+    Block(u64),
     Settle {
         call: CallId,
         fulfilled: bool,
@@ -608,6 +609,12 @@ impl ExecutionState {
                 let input_json = text(call, 1)?;
                 let host = call.arg(2).as_bool().unwrap_or(false);
                 self.tool(name, &input_json, host).map(Reply::Promise)
+            }
+            SYNC_TOOL => {
+                let name = text(call, 0)?;
+                let input_json = text(call, 1)?;
+                let host = call.arg(2).as_bool().unwrap_or(false);
+                self.tool(name, &input_json, host).map(Reply::Block)
             }
             CONTENT => self.content(&text(call, 0)?).map(|()| Reply::Nothing),
             TEXT => {

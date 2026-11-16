@@ -82,6 +82,7 @@ struct Machine {
     phase: Phase,
     results: VecDeque<(u64, String, bool)>,
     held: bool,
+    blocked: Option<u64>,
     settled: Option<Settled>,
     slices: u64,
 }
@@ -113,6 +114,13 @@ impl Machine {
                 Step::HostCall(id) => {
                     let mut call = instance.host_call(id).map_err(failure)?;
                     let reply = state.host_call(&call);
+                    if let Ok(Reply::Block(tool)) = reply {
+                        state.bind_tool(tool, call.id());
+                        state.flush_text();
+                        self.blocked = Some(tool);
+                        self.phase = Phase::Idle(nanocode_platform::now());
+                        return Ok(Ran::Idle);
+                    }
                     if let Ok(Reply::Promise(tool)) = reply {
                         let promise = call.reply_promise().map_err(failure)?;
                         state.bind_tool(tool, promise);
@@ -127,9 +135,12 @@ impl Machine {
                                 .map_err(failure)?;
                         }
                         let reply = match &reply {
-                            Ok(Reply::Nothing | Reply::Promise(_) | Reply::Settle { .. }) => {
-                                Ok(Value::Undefined)
-                            }
+                            Ok(
+                                Reply::Nothing
+                                | Reply::Promise(_)
+                                | Reply::Block(_)
+                                | Reply::Settle { .. },
+                            ) => Ok(Value::Undefined),
                             Ok(Reply::Number(number)) => Ok(Value::Number(*number)),
                             Ok(Reply::Text(text)) => Ok(Value::Str(text)),
                             Ok(Reply::Lossy(bytes)) => Ok(Value::Utf8(bytes)),
@@ -211,6 +222,25 @@ impl Machine {
         let call = tool
             .call
             .ok_or_else(|| format!("embedded Code Mode has no promise for tool call {id}"))?;
+        if self.blocked == Some(id) {
+            let Body::Awake(instance) = &mut self.body else {
+                return Err(parked());
+            };
+            instance
+                .resolve(
+                    call,
+                    Ok(Value::Object(&[
+                        ("ok", Value::Bool(success)),
+                        ("value", Value::Str(encoded)),
+                    ])),
+                )
+                .map_err(failure)?;
+            self.blocked = None;
+            self.phase = Phase::Running;
+            self.settled = Some(Settled::Waiting);
+            self.slices = 0;
+            return Ok(Idle::Busy);
+        }
         if success {
             let Body::Awake(instance) = &mut self.body else {
                 return Err(parked());
@@ -294,7 +324,15 @@ impl Machine {
                 }
             });
         }
-        if let Some((id, encoded, success)) = self.results.pop_front() {
+        let next = match self.blocked {
+            Some(blocked) => self
+                .results
+                .iter()
+                .position(|(id, ..)| *id == blocked)
+                .and_then(|at| self.results.remove(at)),
+            None => self.results.pop_front(),
+        };
+        if let Some((id, encoded, success)) = next {
             return self.deliver_result(state, id, &encoded, success);
         }
         match self.settled.take() {
@@ -304,6 +342,12 @@ impl Machine {
         }
         if !state.events.is_empty() {
             return Ok(Idle::Busy);
+        }
+        if self.blocked.is_some() {
+            return Ok(Idle::Quiet {
+                timer: None,
+                park: None,
+            });
         }
         let timer = state.next_timeout_wait();
         if parks && !state.awaits_tools() && timer.is_none_or(|timer| timer >= PARK_AFTER) {
@@ -319,11 +363,11 @@ impl Machine {
 
     fn parks(&self) -> bool {
         match &self.body {
-            Body::Awake(instance) => {
+            Body::Awake(instance) if self.blocked.is_none() => {
                 let image = instance.snapshot().image_len();
                 instance.heap_used().saturating_sub(image) < image
             }
-            Body::Parked(_) => false,
+            Body::Awake(_) | Body::Parked(_) => false,
         }
     }
 
@@ -429,6 +473,7 @@ impl EmbeddedHost {
             phase: Phase::Running,
             results: VecDeque::new(),
             held: false,
+            blocked: None,
             settled: Some(Settled::Checkpoint),
             slices: 0,
         });
