@@ -17,6 +17,7 @@ use crate::{
 };
 
 pub const EVENT_GAP: u64 = 1 << 14;
+const CLAIM: &str = "writer";
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Point {
@@ -397,7 +398,7 @@ async fn section_records(
         )));
     }
     let mut records = Vec::new();
-    each_row(stored, |row| {
+    each_row(stored, &mut History::default(), |row| {
         crate::record::each(&row.plain, |record| {
             records.push(record);
             Ok(())
@@ -570,7 +571,7 @@ fn measured(fold: &Fold, keep: u64) -> Result<usize, StoreError> {
 
 pub fn rows(stored: &[(u64, String)]) -> Result<Vec<Row>, StoreError> {
     let mut decoded = Vec::new();
-    each_row(stored.to_vec(), |row| {
+    each_row(stored.to_vec(), &mut History::default(), |row| {
         decoded.push(row);
         Ok(true)
     })?;
@@ -586,9 +587,9 @@ struct Logical {
 
 fn each_row(
     stored: Vec<(u64, String)>,
+    history: &mut History,
     mut take: impl FnMut(Row) -> Result<bool, StoreError>,
 ) -> Result<bool, StoreError> {
-    let mut history = History::default();
     let mut pending: Option<Logical> = None;
     for (seq, body) in stored {
         let mut chars = body.chars();
@@ -606,7 +607,7 @@ fn each_row(
             },
             Some(tag @ (ARCHIVE | BOUNDARY | RECORDS | SECTION | SNAPSHOT)) => {
                 if let Some(logical) = pending.take()
-                    && !take(decode_row(logical, &mut history)?)?
+                    && !take(decode_row(logical, history)?)?
                 {
                     return Ok(false);
                 }
@@ -625,7 +626,7 @@ fn each_row(
         }
     }
     match pending {
-        Some(logical) => take(decode_row(logical, &mut history)?),
+        Some(logical) => take(decode_row(logical, history)?),
         None => Ok(true),
     }
 }
@@ -691,7 +692,7 @@ async fn scan(
     let stored = host.scan(scope, segment.row, end).await?;
     stats.pages += 1;
     stats.page_rows += stored.len() as u64;
-    each_row(stored, |row| {
+    each_row(stored, &mut History::default(), |row| {
         for record in row.records()? {
             if let Record::Event {
                 at,
@@ -769,6 +770,222 @@ struct TailRow {
     seq: u64,
 }
 
+pub struct Follower {
+    decoded: History,
+    first: Option<u64>,
+    fold: Fold,
+    held: Vec<(u64, String)>,
+    history: History,
+    host: Arc<dyn LogHost>,
+    next: u64,
+    previous: Option<Previous>,
+    scope: Arc<str>,
+    snapshot: usize,
+    snapshot_row: Option<u64>,
+    state: usize,
+    tail: usize,
+}
+
+impl Follower {
+    pub async fn advance(&mut self) -> Result<usize, StoreError> {
+        let from = self.held.first().map_or(self.next, |(seq, _)| *seq);
+        let stored = self
+            .host
+            .scan(&self.scope, from, i64::MAX.unsigned_abs())
+            .await?;
+        self.take(stored)
+    }
+
+    pub async fn claim(mut self) -> Result<TurnLog, StoreError> {
+        self.advance().await?;
+        let log = self.finish().await?;
+        let mut lease = log.lease().await;
+        let next = lease.writer.next;
+        lease.push(Record::Host {
+            key: CLAIM.to_owned(),
+            value: serde_json::value::to_raw_value(&next)
+                .map_err(|error| StoreError::Backend(format!("turn log claim: {error}")))?,
+        })?;
+        let check = std::mem::replace(&mut lease.writer.check, usize::MAX);
+        let claimed = lease.commit(Point::Recovery).await;
+        lease.writer.check = check;
+        claimed?;
+        drop(lease);
+        Ok(log)
+    }
+
+    #[must_use]
+    pub const fn next(&self) -> u64 {
+        self.next
+    }
+
+    fn take(&mut self, stored: Vec<(u64, String)>) -> Result<usize, StoreError> {
+        let (Some(&(first, _)), Some(&(last, _))) = (stored.first(), stored.last()) else {
+            return Ok(0);
+        };
+        if self.first.is_none() {
+            self.first = Some(first);
+            self.fold.start_segment(first);
+        }
+        self.next = last + 1;
+        let mut section = false;
+        let mut stored: Vec<(u64, String)> = stored
+            .into_iter()
+            .filter(|(_, body)| {
+                if !body.starts_with(PART) {
+                    section = body.starts_with(SECTION);
+                }
+                !section
+            })
+            .collect();
+        if stored.is_empty() {
+            self.held = Vec::new();
+            return Ok(0);
+        }
+        let start = stored
+            .iter()
+            .rposition(|(_, body)| !body.starts_with(PART))
+            .ok_or_else(|| {
+                StoreError::Backend(format!("turn log row {} continues no row", stored[0].0))
+            })?;
+        self.held = stored.split_off(start);
+        let taken = stored.len();
+        self.fold_rows(stored, None)?;
+        Ok(taken)
+    }
+
+    fn fold_rows(
+        &mut self,
+        stored: Vec<(u64, String)>,
+        extensible: Option<TailRow>,
+    ) -> Result<Option<TailRow>, StoreError> {
+        let mut extensible = extensible;
+        let mut tail_row = None;
+        let last = stored
+            .iter()
+            .rposition(|(_, body)| body.starts_with(SNAPSHOT))
+            .map(|index| {
+                let parts = stored[index + 1..]
+                    .iter()
+                    .take_while(|(_, body)| body.starts_with(PART))
+                    .count();
+                (stored[index].0, parts + 1)
+            });
+        each_row(stored, &mut self.decoded, |row| {
+            if row.snapshot {
+                self.fold = Fold::default();
+                self.fold.start_segment(row.seq);
+                self.history.clear();
+                self.snapshot = row.bytes;
+                self.snapshot_row = Some(row.seq);
+                self.state = row.plain.len();
+                self.tail = 0;
+            } else {
+                if row.boundary {
+                    let keep = row
+                        .records()?
+                        .iter()
+                        .find_map(|record| match record {
+                            Record::Event { seq, .. } => Some(*seq),
+                            _ => None,
+                        })
+                        .unwrap_or(u64::MAX);
+                    self.fold.seal(row.seq, keep);
+                    self.history.clear();
+                }
+                self.tail += row.bytes;
+            }
+            if extensible
+                .as_ref()
+                .is_some_and(|candidate| candidate.seq == row.seq)
+                && !row
+                    .records()?
+                    .iter()
+                    .any(|record| matches!(record, Record::Recovery { .. }))
+            {
+                tail_row = extensible.take();
+            }
+            self.fold.load(row.seq, &row.plain)?;
+            if let Some((seq, parts)) = last
+                && row.seq == seq
+            {
+                self.previous =
+                    Previous::of(seq, parts, row.bytes, &row.plain, self.fold.events().len());
+            }
+            self.fold.release();
+            self.history.extend(row.plain.as_bytes());
+            Ok(true)
+        })?;
+        Ok(tail_row)
+    }
+
+    async fn finish(mut self) -> Result<TurnLog, StoreError> {
+        let held = std::mem::take(&mut self.held);
+        let extensible = held
+            .last()
+            .filter(|(_, body)| codec::extensible(body))
+            .map(|(seq, body)| TailRow {
+                bytes: body.len(),
+                seq: *seq,
+            });
+        let tail_row = self.fold_rows(held, extensible)?;
+        let next = self.next;
+        let tail_rows = usize::try_from(match (self.snapshot_row, self.first) {
+            (Some(row), _) => next - 1 - row,
+            (None, first) => first.map_or(0, |first| next - first),
+        })
+        .map_err(|error| StoreError::Backend(format!("turn log tail row count: {error}")))?;
+        let Self {
+            mut fold,
+            history,
+            host,
+            previous,
+            scope,
+            snapshot,
+            state,
+            tail,
+            ..
+        } = self;
+        let mut stats = Stats::default();
+        for owner in fold.forgetting() {
+            warm(&*host, &scope, &mut fold, &mut stats, &owner).await?;
+        }
+        fold.reopen(EVENT_GAP);
+        let floor = Some(fold.last_event());
+        let (riding, riders) = mpsc::unbounded_channel();
+        Ok(TurnLog {
+            host,
+            limit: None,
+            ratio: 2,
+            retain: None,
+            riding,
+            rows: None,
+            scope,
+            writer: Owned::new(Writer {
+                buffer: Vec::new(),
+                check: snapshot,
+                collectable: BTreeSet::new(),
+                floor,
+                fold,
+                history,
+                next,
+                previous,
+                riders,
+                snapshot,
+                spare: codec::Spare::default(),
+                state,
+                stale: false,
+                stats,
+                stream: None,
+                tail,
+                tail_row,
+                tail_rows,
+                tried: None,
+            }),
+        })
+    }
+}
+
 struct Riding {
     host: usize,
     statements: Vec<(&'static str, Vec<String>)>,
@@ -823,124 +1040,32 @@ impl TurnLog {
         host: Arc<dyn LogHost>,
         scope: impl Into<Arc<str>>,
     ) -> Result<Self, StoreError> {
+        Self::follow(host, scope).await?.finish().await
+    }
+
+    pub async fn follow(
+        host: Arc<dyn LogHost>,
+        scope: impl Into<Arc<str>>,
+    ) -> Result<Follower, StoreError> {
         let scope = scope.into();
         let stored = host.load(&scope).await?;
-        let next = stored.last().map_or(1, |(seq, _)| seq + 1);
-        let tail_rows = usize::try_from(
-            match stored
-                .iter()
-                .rposition(|(_, body)| body.starts_with(SNAPSHOT))
-            {
-                Some(index) => next - 1 - stored[index].0,
-                None => stored.first().map_or(0, |(first, _)| next - first),
-            },
-        )
-        .map_err(|error| StoreError::Backend(format!("turn log tail row count: {error}")))?;
-        let mut extensible = stored
-            .last()
-            .filter(|(_, body)| codec::extensible(body))
-            .map(|(seq, body)| TailRow {
-                bytes: body.len(),
-                seq: *seq,
-            });
-        let mut tail_row = None;
-        let mut fold = Fold::default();
-        let mut history = History::default();
-        let (mut snapshot, mut state, mut tail) = (0, 0, 0);
-        let mut previous = None;
-        let last = stored
-            .iter()
-            .rposition(|(_, body)| body.starts_with(SNAPSHOT))
-            .map(|index| {
-                let parts = stored[index + 1..]
-                    .iter()
-                    .take_while(|(_, body)| body.starts_with(PART))
-                    .count();
-                (stored[index].0, parts + 1)
-            });
-        if let Some((first, _)) = stored.first() {
-            fold.start_segment(*first);
-        }
-        each_row(stored, |row| {
-            if row.snapshot {
-                fold = Fold::default();
-                fold.start_segment(row.seq);
-                history.clear();
-                snapshot = row.bytes;
-                state = row.plain.len();
-                tail = 0;
-            } else {
-                if row.boundary {
-                    let keep = row
-                        .records()?
-                        .iter()
-                        .find_map(|record| match record {
-                            Record::Event { seq, .. } => Some(*seq),
-                            _ => None,
-                        })
-                        .unwrap_or(u64::MAX);
-                    fold.seal(row.seq, keep);
-                    history.clear();
-                }
-                tail += row.bytes;
-            }
-            if extensible
-                .as_ref()
-                .is_some_and(|candidate| candidate.seq == row.seq)
-                && !row
-                    .records()?
-                    .iter()
-                    .any(|record| matches!(record, Record::Recovery { .. }))
-            {
-                tail_row = extensible.take();
-            }
-            fold.load(row.seq, &row.plain)?;
-            if let Some((seq, parts)) = last
-                && row.seq == seq
-            {
-                previous = Previous::of(seq, parts, row.bytes, &row.plain, fold.events().len());
-            }
-            fold.release();
-            history.extend(row.plain.as_bytes());
-            Ok(true)
-        })?;
-        let mut stats = Stats::default();
-        for owner in fold.forgetting() {
-            warm(&*host, &scope, &mut fold, &mut stats, &owner).await?;
-        }
-        fold.reopen(EVENT_GAP);
-        let floor = Some(fold.last_event());
-        let (riding, riders) = mpsc::unbounded_channel();
-        Ok(Self {
+        let mut follower = Follower {
+            decoded: History::default(),
+            first: None,
+            fold: Fold::default(),
+            held: Vec::new(),
+            history: History::default(),
             host,
-            limit: None,
-            ratio: 2,
-            retain: None,
-            riding,
-            rows: None,
+            next: 1,
+            previous: None,
             scope,
-            writer: Owned::new(Writer {
-                buffer: Vec::new(),
-                check: snapshot,
-                collectable: BTreeSet::new(),
-                floor,
-                fold,
-                history,
-                next,
-                previous,
-                riders,
-                snapshot,
-                spare: codec::Spare::default(),
-                state,
-                stale: false,
-                stats,
-                stream: None,
-                tail,
-                tail_row,
-                tail_rows,
-                tried: None,
-            }),
-        })
+            snapshot: 0,
+            snapshot_row: None,
+            state: 0,
+            tail: 0,
+        };
+        follower.take(stored)?;
+        Ok(follower)
     }
 
     #[must_use]

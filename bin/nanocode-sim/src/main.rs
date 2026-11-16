@@ -115,7 +115,7 @@ type Caught = BTreeMap<Invariant, (u64, u64, (u64, u64))>;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|capture|executor|dns] [--ops N] [--twice] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
+        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|capture|executor|dns] [--ops N] [--twice] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
        websocket: [--mutation {}]
        http_server: [--mutation {}]
        alloc: [--mutation overstate_size|forget_free|scribble]
@@ -173,6 +173,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         retain: None,
         snapshot_ratio: 2,
         snapshot_rows: None,
+        takeover: false,
         state_bytes: None,
         mutation: TurnMutation::None,
         policy: PolicyKind::Reference,
@@ -214,6 +215,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
             "--long" => turns.long = Some(rest.next()?.parse().ok()?),
             "--snapshot-ratio" => turns.snapshot_ratio = rest.next()?.parse().ok()?,
             "--snapshot-rows" => turns.snapshot_rows = Some(rest.next()?.parse().ok()?),
+            "--takeover" => turns.takeover = true,
             "--retain" => turns.retain = Some(rest.next()?.parse().ok()?),
             "--state-bytes" => turns.state_bytes = Some(rest.next()?.parse().ok()?),
             "--event-bytes" => turns.event_bytes = Some(rest.next()?.parse().ok()?),
@@ -432,6 +434,9 @@ fn replay(seed: u64, args: &Args) -> String {
         }
         if let Some(rows) = args.turns.snapshot_rows {
             command.push_str(&format!(" --snapshot-rows {rows}"));
+        }
+        if args.turns.takeover {
+            command.push_str(" --takeover");
         }
         if let Some(keep) = args.turns.retain {
             command.push_str(&format!(" --retain {keep}"));

@@ -251,8 +251,21 @@ impl OneLog {
         scope: impl Into<Arc<str>>,
         policy: Policy,
     ) -> Result<Arc<Self>, StoreError> {
-        let log = nanocode_turnlog::TurnLog::open(host, scope)
-            .await?
+        Self::opened(nanocode_turnlog::TurnLog::open(host, scope).await?, policy).await
+    }
+
+    pub async fn claim(
+        follower: nanocode_turnlog::Follower,
+        policy: Policy,
+    ) -> Result<Arc<Self>, StoreError> {
+        Self::opened(follower.claim().await?, policy).await
+    }
+
+    async fn opened(
+        log: nanocode_turnlog::TurnLog,
+        policy: Policy,
+    ) -> Result<Arc<Self>, StoreError> {
+        let log = log
             .retain_finished(policy.retain_finished)
             .row_limit(policy.max_row_bytes)
             .snapshot_ratio(policy.snapshot_ratio)

@@ -11,4 +11,4 @@ pub use host::{
     Compaction, Extension, LogHost, MemoryLog, MemoryWrites, Rider, SqlLog, Write, host_id,
 };
 pub use record::{Outcome, Record, Status, decode, encode};
-pub use writer::{EVENT_GAP, Lease, Point, Row, Stats, TurnLog, rows};
+pub use writer::{EVENT_GAP, Follower, Lease, Point, Row, Stats, TurnLog, rows};

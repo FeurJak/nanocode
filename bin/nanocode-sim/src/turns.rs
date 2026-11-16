@@ -78,11 +78,12 @@ pub enum TurnMutation {
     SnapshotRatioIgnored,
     SnapshotRowsIgnored,
     TailRowsAppended,
+    TakeoverOpens,
     TickNotAtomic,
 }
 
 impl TurnMutation {
-    const ALL: [Self; 25] = [
+    const ALL: [Self; 26] = [
         Self::None,
         Self::AckBufferedAdmission,
         Self::AckBufferedResult,
@@ -107,6 +108,7 @@ impl TurnMutation {
         Self::SnapshotRatioIgnored,
         Self::SnapshotRowsIgnored,
         Self::TailRowsAppended,
+        Self::TakeoverOpens,
         Self::TickNotAtomic,
     ];
 
@@ -142,6 +144,7 @@ impl TurnMutation {
             Self::SnapshotRatioIgnored => "snapshot_ratio_ignored",
             Self::SnapshotRowsIgnored => "snapshot_rows_ignored",
             Self::TailRowsAppended => "tail_rows_appended",
+            Self::TakeoverOpens => "takeover_opens",
             Self::TickNotAtomic => "tick_not_atomic",
         }
     }
@@ -199,6 +202,7 @@ pub struct TurnOptions {
     pub retain: Option<usize>,
     pub snapshot_ratio: usize,
     pub snapshot_rows: Option<usize>,
+    pub takeover: bool,
     pub state_bytes: Option<usize>,
     pub mutation: TurnMutation,
     pub policy: PolicyKind,
@@ -1248,7 +1252,11 @@ impl Sim {
                 .collect_live(self.options.mutation == TurnMutation::ContentCollectedLive)
                 .read_unloaded(self.options.mutation == TurnMutation::PartReadUnloaded)
                 .rewrite_stale(self.options.mutation == TurnMutation::ContentRewrittenStale)
-                .ratio_ignored(self.options.mutation == TurnMutation::SnapshotRatioIgnored),
+                .ratio_ignored(self.options.mutation == TurnMutation::SnapshotRatioIgnored)
+                .takeover(
+                    self.options.takeover,
+                    self.options.mutation == TurnMutation::TakeoverOpens,
+                ),
             ),
         };
         let mut object = Object {

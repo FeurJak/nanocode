@@ -9,7 +9,7 @@ use nanocode_durability_core::{StoreError, StoreFuture};
 use nanocode_sync::FutureExt;
 use nanocode_sys::base64::STANDARD_NO_PAD;
 use nanocode_turnlog::{
-    Compaction, EffectClass, Extension, Fold, LogHost, Outcome as LogOutcome, Phase,
+    Compaction, EffectClass, Extension, Fold, Follower, LogHost, Outcome as LogOutcome, Phase,
     Point as LogPoint, Record as LogRecord, Status as LogStatus, TurnLog,
 };
 use serde_json::value::{RawValue, to_raw_value};
@@ -467,6 +467,7 @@ pub struct TurnLogPolicy {
     cached: BTreeMap<String, BTreeSet<u64>>,
     collect_live: bool,
     disk: Arc<Disk>,
+    followers: BTreeMap<String, Follower>,
     host: Arc<dyn LogHost>,
     limit: Option<usize>,
     logs: BTreeMap<String, TurnLog>,
@@ -482,6 +483,7 @@ pub struct TurnLogPolicy {
     rows: Option<usize>,
     single: bool,
     state: Option<usize>,
+    takeover: Option<bool>,
     unsealed: BTreeSet<String>,
 }
 
@@ -499,6 +501,7 @@ impl TurnLogPolicy {
             cached: BTreeMap::new(),
             collect_live: false,
             disk: Arc::clone(&disk),
+            followers: BTreeMap::new(),
             host: Arc::new(SimHost {
                 disk,
                 extending: true,
@@ -522,6 +525,7 @@ impl TurnLogPolicy {
             rows: None,
             single: true,
             state: None,
+            takeover: None,
             unsealed: BTreeSet::new(),
         }
     }
@@ -576,6 +580,83 @@ impl TurnLogPolicy {
     pub const fn single_snapshot(mut self, single: bool) -> Self {
         self.single = single;
         self
+    }
+
+    pub const fn takeover(mut self, takeover: bool, opens: bool) -> Self {
+        self.takeover = if takeover { Some(opens) } else { None };
+        self
+    }
+
+    fn take_over(&mut self, scope: &str, seq: u64) {
+        let Some(opens) = self.takeover else {
+            return;
+        };
+        if !self.followers.contains_key(scope) {
+            let follower = refused(ready(TurnLog::follow(Arc::clone(&self.host), scope)));
+            self.followers.insert(scope.to_owned(), follower);
+        }
+        let follower = self
+            .followers
+            .get_mut(scope)
+            .expect("a follower was inserted above");
+        refused(ready(follower.advance()));
+        if follower.next() <= seq {
+            return;
+        }
+        let follower = self
+            .followers
+            .remove(scope)
+            .expect("a follower was read above");
+        let claimed = if opens {
+            refused(ready(TurnLog::open(Arc::clone(&self.host), scope)))
+        } else {
+            refused(ready(follower.claim()))
+        }
+        .retain_finished(self.retain)
+        .row_limit(self.limit)
+        .snapshot_ratio(if self.ratio_ignored {
+            u32::MAX as usize
+        } else {
+            self.ratio
+        })
+        .snapshot_rows(self.rows);
+        let stale = self
+            .logs
+            .remove(scope)
+            .expect("a takeover follows a commit of an open log");
+        let acknowledged = ready(stale.read(|fold| {
+            (fold.last_event(), fold.events().len(), fold.recovering())
+        }));
+        let mut lease = ready(stale.lease());
+        refused(lease.push(LogRecord::Host {
+            key: format!("{scope}:stale"),
+            value: raw("true"),
+        }));
+        let fenced = ready(lease.commit(LogPoint::Recovery));
+        drop(lease);
+        assert!(
+            matches!(fenced, Err(StoreError::Fenced)),
+            "{scope} accepts a commit from its stale writer after a takeover at commit {seq}: {fenced:?}"
+        );
+        let cold = refused(ready(TurnLog::open(Arc::clone(&self.host), scope)));
+        let read = |fold: &Fold| {
+            (
+                fold.last_event(),
+                fold.events().len(),
+                fold.recovering(),
+                fold.host(&format!("{scope}:stale")).is_some(),
+            )
+        };
+        let taken = ready(claimed.read(read));
+        let reopened = ready(cold.read(read));
+        assert!(
+            (taken.1, taken.2, taken.3) == (reopened.1, reopened.2, reopened.3)
+                && taken.1 == acknowledged.1
+                && taken.0 > acknowledged.0
+                && !taken.3,
+            "{scope} takes over at commit {seq} with last event, events, recovery and stale write {taken:?}, but a cold open reads {reopened:?} and the stale writer acknowledged {acknowledged:?}"
+        );
+        self.logs.insert(scope.to_owned(), claimed);
     }
 
     pub const fn snapshot_rows(mut self, rows: Option<usize>, bound: Option<usize>) -> Self {
@@ -1101,6 +1182,11 @@ impl TurnDurability for TurnLogPolicy {
                 snapshots <= 1,
                 "{scope} stores {snapshots} snapshot rows, so a superseded snapshot was not archived"
             );
+        }
+        if after.snapshots > before.snapshots {
+            self.take_over(scope, seq);
+        } else if let Some(follower) = self.followers.get_mut(scope) {
+            refused(ready(follower.advance()));
         }
         Some(Appended {
             events: Vec::new(),

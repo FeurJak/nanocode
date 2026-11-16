@@ -128,6 +128,7 @@ default_table='
 4 turns_turnlog_events pass --scenario turns --policy turnlog --event-bytes 32768
 4 turns_turnlog_snapshots pass --scenario turns --policy turnlog --snapshot-rows 4 --state-bytes 131072
 2 turns_turnlog_retain pass --scenario turns --policy turnlog --retain 1
+4 turns_turnlog_takeover pass --scenario turns --policy turnlog --snapshot-rows 4 --state-bytes 131072 --takeover
 4 runtime_kv_remote pass --scenario runtime --store kv --children remote
 1 runtime_kv_remote_twice pass --scenario runtime --store kv --children remote --twice
 8 hands pass --scenario hands
@@ -143,6 +144,7 @@ default_table='
 1 canary_snapshot_rows_ignored canary --scenario turns --policy turnlog --snapshot-rows 4 --mutation snapshot_rows_ignored
 1 canary_tail_rows_appended canary --scenario turns --policy turnlog --snapshot-rows 4 --mutation tail_rows_appended
 1 canary_retire_skipped canary --scenario turns --policy turnlog --retain 1 --mutation retire_skipped
+1 canary_takeover_opens canary --scenario turns --policy turnlog --snapshot-rows 4 --takeover --mutation takeover_opens
 1 canary_hedge_unmarked canary:200 --scenario runtime --mutation hedge-unmarked
 1 canary_http_real_elapsed canary:40 --scenario runtime --store kv --wire http --twice --mutation http-real-elapsed
 1 canary_child_acks_early canary:1000 --scenario runtime --children remote --mutation child-acks-early

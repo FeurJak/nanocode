@@ -147,7 +147,19 @@ pub async fn turnlog(
     scope: &str,
     policy: turnlog::Policy,
 ) -> durability::Result<turnlog::Parts> {
-    let log = turnlog::OneLog::open(host, scope, policy).await?;
+    parts(turnlog::OneLog::open(host, scope, policy).await?).await
+}
+
+pub async fn turnlog_claim(
+    follower: turnlog::Follower,
+    policy: turnlog::Policy,
+) -> durability::Result<turnlog::Parts> {
+    parts(turnlog::OneLog::claim(follower, policy).await?).await
+}
+
+async fn parts(
+    log: std::sync::Arc<turnlog::OneLog>,
+) -> durability::Result<turnlog::Parts> {
     let store = session_store(log.store())?.with_logged_prompts();
     let journals = log.journals().await?;
     Ok(turnlog::Parts {
