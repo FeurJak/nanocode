@@ -803,6 +803,7 @@ dependencies = [
  "nanocode-agent-core",
  "nanocode-bytes",
  "nanocode-code-mode",
+ "nanocode-code-mode-engine",
  "nanocode-compression",
  "nanocode-digest",
  "nanocode-durability",
