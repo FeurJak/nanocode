@@ -6,10 +6,73 @@ typedef struct _FILE FILE;
 typedef long long fpos_t;
 #define EOF (-1)
 #define BUFSIZ 1024
-int snprintf(char *, size_t, const char *, ...);
-int vsnprintf(char *, size_t, const char *, va_list);
-int sprintf(char *, const char *, ...);
+#define FILENAME_MAX 4096
+#define FOPEN_MAX 1000
+#define L_tmpnam 20
+#define TMP_MAX 10000
+#define _IOFBF 0
+#define _IOLBF 1
+#define _IONBF 2
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern FILE *const stdin;
+extern FILE *const stdout;
+extern FILE *const stderr;
+#define stdin (stdin)
+#define stdout (stdout)
+#define stderr (stderr)
+FILE *fopen(const char *, const char *);
+FILE *freopen(const char *, const char *, FILE *);
+FILE *fdopen(int, const char *);
+FILE *tmpfile(void);
+int fclose(FILE *);
+int fflush(FILE *);
+int fileno(FILE *);
+void setbuf(FILE *, char *);
+int setvbuf(FILE *, char *, int, size_t);
 size_t fread(void *, size_t, size_t, FILE *);
 size_t fwrite(const void *, size_t, size_t, FILE *);
+int fgetc(FILE *);
+int getc(FILE *);
+int getchar(void);
+int ungetc(int, FILE *);
+char *fgets(char *, int, FILE *);
+int fputc(int, FILE *);
+int putc(int, FILE *);
+int putchar(int);
+int fputs(const char *, FILE *);
+int puts(const char *);
+int fseek(FILE *, long, int);
+long ftell(FILE *);
+void rewind(FILE *);
+int fgetpos(FILE *, fpos_t *);
+int fsetpos(FILE *, const fpos_t *);
+int feof(FILE *);
 int ferror(FILE *);
+void clearerr(FILE *);
+void perror(const char *);
+int remove(const char *);
+int rename(const char *, const char *);
+char *tmpnam(char *);
+int printf(const char *, ...);
+int fprintf(FILE *, const char *, ...);
+int sprintf(char *, const char *, ...);
+int snprintf(char *, size_t, const char *, ...);
+int vprintf(const char *, va_list);
+int vfprintf(FILE *, const char *, va_list);
+int vsprintf(char *, const char *, va_list);
+int vsnprintf(char *, size_t, const char *, va_list);
+int scanf(const char *, ...);
+int fscanf(FILE *, const char *, ...);
+int sscanf(const char *, const char *, ...);
+int vscanf(const char *, va_list);
+int vfscanf(FILE *, const char *, va_list);
+int vsscanf(const char *, const char *, va_list);
+#ifdef __cplusplus
+}
+#endif
 #endif
