@@ -64,6 +64,7 @@ pub enum TurnMutation {
     ContentRewrittenStale,
     DurableSeqBeforeCommit,
     FinishBeforeRow,
+    ForgetsOtherCell,
     GateReleasesEarly,
     IdempotentReportedUnknown,
     OpenDropsJournals,
@@ -83,7 +84,7 @@ pub enum TurnMutation {
 }
 
 impl TurnMutation {
-    const ALL: [Self; 26] = [
+    const ALL: [Self; 27] = [
         Self::None,
         Self::AckBufferedAdmission,
         Self::AckBufferedResult,
@@ -94,6 +95,7 @@ impl TurnMutation {
         Self::ContentRewrittenStale,
         Self::DurableSeqBeforeCommit,
         Self::FinishBeforeRow,
+        Self::ForgetsOtherCell,
         Self::GateReleasesEarly,
         Self::IdempotentReportedUnknown,
         Self::OpenDropsJournals,
@@ -130,6 +132,7 @@ impl TurnMutation {
             Self::ContentRewrittenStale => "content_rewritten_stale",
             Self::DurableSeqBeforeCommit => "durable_seq_before_commit",
             Self::FinishBeforeRow => "finish_before_row",
+            Self::ForgetsOtherCell => "forgets_other_cell",
             Self::GateReleasesEarly => "gate_releases_early",
             Self::IdempotentReportedUnknown => "idempotent_reported_unknown",
             Self::OpenDropsJournals => "open_drops_journals",
@@ -157,6 +160,7 @@ impl TurnMutation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Invariant {
     AdmissionKept,
+    CellCallsForgotten,
     CellExternalOnce,
     CellLost,
     CellModelOnce,
@@ -176,6 +180,7 @@ impl Invariant {
     pub const fn name(self) -> &'static str {
         match self {
             Self::AdmissionKept => "admission_kept",
+            Self::CellCallsForgotten => "cell_calls_forgotten",
             Self::CellExternalOnce => "cell_external_once",
             Self::CellLost => "cell_lost",
             Self::CellModelOnce => "cell_model_once",

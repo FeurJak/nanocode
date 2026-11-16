@@ -407,6 +407,14 @@ fn refused<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|error| panic!("the one log refused a live host: {error}"))
 }
 
+fn open_calls(log: &OneLog) -> BTreeSet<String> {
+    ready(log.read(|fold| {
+        fold.open_calls()
+            .map(|(id, _)| id.to_owned())
+            .collect::<BTreeSet<_>>()
+    }))
+}
+
 fn origin(turn: &Turn, cell: u64) -> String {
     format!("{}/cell-{cell}", turn.id)
 }
@@ -899,8 +907,39 @@ impl Cells {
                 }
             }
             Op::Forget(cell) => {
+                let forgotten = if self.options.mutation == TurnMutation::ForgetsOtherCell {
+                    *cell + 1
+                } else {
+                    *cell
+                };
+                let prefix = format!("{}/", origin(turn, *cell));
                 let live = self.live();
-                ready(live.sink.forget(SESSION, *cell));
+                let before = open_calls(&live.log);
+                ready(live.sink.forget(SESSION, forgotten));
+                let after = open_calls(&live.log);
+                let journaled = ready(live.log.read(|fold| {
+                    fold.cells()
+                        .any(|(session, id, _)| session == SESSION && id == *cell)
+                }));
+                let kept = before
+                    .iter()
+                    .filter(|id| !id.starts_with(&prefix))
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                self.trace(&format!(
+                    "forget cell={cell} open={} kept={}",
+                    before.len(),
+                    after.len()
+                ));
+                if journaled || after != kept {
+                    self.wrong(
+                        Invariant::CellCallsForgotten,
+                        format!(
+                            "turn {} forgot cell {cell} and kept its journal={journaled} and open calls {after:?}, not {kept:?}",
+                            turn.id
+                        ),
+                    );
+                }
             }
             Op::Finish => {
                 let live = self.live();
