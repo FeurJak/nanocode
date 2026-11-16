@@ -75,75 +75,8 @@ pub(in crate::model) const fn empty_response(tools: &Tools) -> &'static str {
     }
 }
 
-const INCOMPLETE_ADMISSIONS: &[&str] = &[
-    "couldn't",
-    "could not",
-    "wasn't able",
-    "was not able",
-    "weren't able",
-    "unable to",
-    "not able to",
-    "does not meet",
-    "doesn't meet",
-    "does **not**",
-    "do not meet",
-    "don't meet",
-    "not yet complete",
-    "not complete",
-    "is incomplete",
-    "still incomplete",
-    "remains incomplete",
-    "remains the original",
-    "remains the example",
-    "didn't complete",
-    "did not complete",
-    "didn't finish",
-    "did not finish",
-    "haven't completed",
-    "have not completed",
-    "haven't finished",
-    "have not finished",
-    "haven't verified",
-    "have not verified",
-    "short of",
-    "below the required",
-    "does not satisfy",
-    "doesn't satisfy",
-    "won't satisfy",
-    "will not satisfy",
-    "fails to meet",
-    "misses the",
-    "not met",
-    "unconfirmed",
-    "i haven't",
-    "i have not",
-    "i did not",
-    "i didn't",
-];
-
-pub(in crate::model) fn admits_incomplete(message: &str) -> bool {
-    let message = message
-        .replace(['\u{2018}', '\u{2019}'], "'")
-        .to_lowercase();
-    INCOMPLETE_ADMISSIONS
-        .iter()
-        .any(|admission| message.contains(admission))
-}
-
 pub(in crate::model) fn context_notice(text: &str) -> ResponseItem {
     ResponseItem::message(MessageRole::User, [ContentItem::input_text(text)])
-}
-
-pub(in crate::model) const fn persistence_nudge() -> &'static str {
-    concat!(
-        "<persistence>\n",
-        "Your last message says part of the task is not done or not verified. This ",
-        "session is non-interactive and nobody will reply, so continue now: work on what ",
-        "remains, take a different approach where the last one fell short, and verify the ",
-        "result. If every requirement is in fact met and verified, reply with your final ",
-        "message again.\n",
-        "</persistence>"
-    )
 }
 
 pub(in crate::model) fn developer_context(config: &ModelConfig) -> ResponseItem {

@@ -150,6 +150,8 @@ pub(super) struct Cursor {
     #[serde(default)]
     pub(super) fresh_attempts: u32,
     #[serde(default)]
+    pub(super) persistence_nudged: bool,
+    #[serde(default)]
     pub(super) instruction_revision: Option<u64>,
 
     #[serde(default)]
@@ -584,6 +586,7 @@ impl State {
             stop_hook_active: false,
             finish_checked: false,
             fresh_attempts: 0,
+            persistence_nudged: false,
             instruction_revision: None,
             snapshot: Snapshot::default(),
             template,

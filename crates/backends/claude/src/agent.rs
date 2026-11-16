@@ -851,6 +851,7 @@ pub struct ClaudeBuilder {
     lean_cells: bool,
     low_effort_rounds: bool,
     persist_finish: bool,
+    persistence_nudge: bool,
     skip_finish_check: bool,
     finish_ambiguity: bool,
     finish_check: bool,
@@ -951,6 +952,7 @@ impl ClaudeBuilder {
             lean_cells: false,
             low_effort_rounds: false,
             persist_finish: false,
+            persistence_nudge: false,
             skip_finish_check: false,
             finish_ambiguity: false,
             finish_check: false,
@@ -1408,6 +1410,11 @@ impl ClaudeBuilder {
 
     pub const fn persist_finish(mut self, persist: bool) -> Self {
         self.persist_finish = persist;
+        self
+    }
+
+    pub const fn persistence_nudge(mut self, nudge: bool) -> Self {
+        self.persistence_nudge = nudge;
         self
     }
 
@@ -3209,6 +3216,7 @@ struct State {
     lean_cells: bool,
     low_effort_rounds: bool,
     persist_finish: bool,
+    persistence_nudge: bool,
     finish_ambiguity: bool,
     finish_check: bool,
     late_finish_check: Option<std::time::Duration>,

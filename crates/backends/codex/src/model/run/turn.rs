@@ -1031,7 +1031,9 @@ impl ModelRun {
                 let message = final_message.filter(|message| !message.trim().is_empty());
                 if self.config.headless
                     && !nudged
-                    && message.as_deref().is_some_and(admits_incomplete)
+                    && message
+                        .as_deref()
+                        .is_some_and(nanocode_tool_host::deadline::admits_incomplete)
                 {
                     nudged = true;
                     nanocode_trace::info!(
@@ -1039,7 +1041,11 @@ impl ModelRun {
                         model_call_index = call_index,
                         "headless turn ended with a message that admits incomplete work; continuing once"
                     );
-                    self.append_notice(&mut session.conversation, call_index, persistence_nudge())?;
+                    self.append_notice(
+                        &mut session.conversation,
+                        call_index,
+                        nanocode_tool_host::deadline::PERSISTENCE_NUDGE,
+                    )?;
                     session.conversation.clear_delta();
                     continue;
                 }

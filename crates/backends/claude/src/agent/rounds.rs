@@ -1506,6 +1506,34 @@ pub(super) fn run_rounds<'a>(
                     continue;
                 }
             }
+            if state.persistence_nudge
+                && state.headless
+                && !cursor.persistence_nudged
+                && state.lineage.root_session_id == state.session_id
+                && nanocode_tool_host::deadline::admits_incomplete(&text)
+            {
+                cursor.persistence_nudged = true;
+                let notice = nanocode_tool_host::deadline::PERSISTENCE_NUDGE;
+                state.emit(
+                    &request.events,
+                    AgentEventKind::ContextNotice,
+                    json!({
+                        "after_model_call_index": index.saturating_add(1),
+                        "role": Role::User,
+                        "text": notice,
+                    }),
+                );
+                pending.push(Message::text(Role::User, notice).into());
+                conversation.messages = pending.clone();
+                cursor.output_continuations = 0;
+                cursor.index = index + 1;
+                state.retain_pending(&mut cursor, &pending);
+                cursor.usage = usage.clone();
+                state
+                    .defer_cursor(&mut cursor, conversation, journal)
+                    .await?;
+                continue;
+            }
 
             conversation.messages = pending.clone();
             conversation.previous_message_id = previous_message_id.clone();
