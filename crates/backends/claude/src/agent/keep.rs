@@ -21,6 +21,18 @@ pub(super) struct KeptRequest {
 }
 
 impl State {
+    pub(super) fn spent_aside(&self) -> Option<crate::Usage> {
+        let refreshed = self.refreshed.update(Option::take);
+        let side = super::SPENT_ASIDE.update(|spent| spent.remove(self.session_id.as_str()));
+        match (refreshed, side) {
+            (Some(mut total), Some(side)) => {
+                add_usage(&mut total, &side);
+                Some(total)
+            }
+            (refreshed, side) => refreshed.or(side),
+        }
+    }
+
     pub(super) fn keep(&self, kept: KeptRequest) {
         self.kept.set(Some(Arc::new(kept)));
         self.refreshes.store(0, Ordering::SeqCst);

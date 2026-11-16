@@ -30,6 +30,7 @@ pub(super) struct Side {
 impl Side {
     fn ask<'a>(
         &'a self,
+        session_id: &'a str,
         system: Value,
         messages: Vec<Message>,
         tools: Vec<ClaudeToolSpec>,
@@ -66,15 +67,18 @@ impl Side {
                 .await
                 .ok_or("empty response")?
                 .map_err(|error| error.to_string())?;
-            collect_stream(first, stream)
+            let response = collect_stream(first, stream)
                 .await
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?;
+            super::spend_aside(session_id, &self.model, &response.usage);
+            Ok(response)
         })
     }
 
     pub(super) fn search<'a>(
         &'a self,
         input: Value,
+        session_id: &'a str,
     ) -> super::AgentFuture<'a, Result<String, String>> {
         Box::pin(async move {
             let fields = input
@@ -108,6 +112,7 @@ impl Side {
             loop {
                 let response = self
                     .ask(
+                        session_id,
                         system.clone(),
                         messages.clone(),
                         vec![ClaudeToolSpec::Server(tool.clone())],
@@ -175,6 +180,7 @@ impl Side {
     pub(super) fn fetch<'a>(
         &'a self,
         input: Value,
+        session_id: &'a str,
     ) -> super::AgentFuture<'a, Result<String, String>> {
         Box::pin(async move {
             let fields = input
@@ -301,6 +307,7 @@ impl Side {
                 format!("\nWeb page content:\n---\n{content}\n---\n\n{prompt}\n\n{FETCH_RULES}");
             let response = self
                 .ask(
+                    session_id,
                     json!([{"type": "text", "text": AGENT_SDK}]),
                     vec![Message::text(Role::User, request)],
                     Vec::new(),

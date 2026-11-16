@@ -194,6 +194,23 @@ fn add_usage(total: &mut Usage, usage: &Usage) {
         .saturating_add(usage.hedge_input_tokens);
 }
 
+static SPENT_ASIDE: std::sync::LazyLock<nanocode_sync::AtomMap<String, Usage>> =
+    std::sync::LazyLock::new(nanocode_sync::AtomMap::default);
+
+fn spend_aside(session_id: &str, model: &str, usage: &Usage) {
+    let mut usage = usage.clone();
+    usage.estimated_cost = model
+        .parse::<nanocode_agent_core::ClaudeModel>()
+        .ok()
+        .and_then(|model| model.estimate_cost(usage.tokens(None), false));
+    SPENT_ASIDE.update(|spent| match spent.get_mut(session_id) {
+        Some(total) => add_usage(total, &usage),
+        None => {
+            spent.insert(session_id.to_owned(), usage.clone());
+        }
+    });
+}
+
 fn reported_cost(usd: UsdAmount) -> EstimatedUsdCost {
     ReportedCost {
         usd,
@@ -1689,13 +1706,14 @@ impl ClaudeBuilder {
                 cache_control: None,
             };
             let side = side.clone();
-            self = self.tool(definition, move |input| {
+            self = self.tool_with_context(definition, move |input, invocation| {
                 let side = side.clone();
                 async move {
                     match name {
-                        "WebSearch" => side.search(input).await,
-                        _ => side.fetch(input).await,
+                        "WebSearch" => side.search(input, &invocation.session_id).await,
+                        _ => side.fetch(input, &invocation.session_id).await,
                     }
+                    .map(|text| ClaudeToolReply::success(ToolResultContent::Text(text)))
                 }
             });
         }
@@ -1719,10 +1737,14 @@ impl ClaudeBuilder {
             defer_loading: deferred,
             cache_control: None,
         };
-        self = self.tool(definition, move |input| {
+        self = self.tool_with_context(definition, move |input, invocation| {
             let client = client.clone();
             let model = model.clone();
-            async move { nested_web_search(&client, &model, max_tokens, input).await }
+            async move {
+                nested_web_search(&client, &model, max_tokens, &invocation.session_id, input)
+                    .await
+                    .map(|text| ClaudeToolReply::success(ToolResultContent::Text(text)))
+            }
         });
         self
     }
@@ -1863,8 +1885,9 @@ pub fn web_search_tool(
         ) -> nanocode_tool_host::embedded::HostFuture<'a, std::result::Result<Value, String>>
         {
             let model = context.model().to_owned();
+            let session_id = context.session_id().to_owned();
             Box::pin(async move {
-                nested_web_search(&self.client, &model, self.max_tokens, input)
+                nested_web_search(&self.client, &model, self.max_tokens, &session_id, input)
                     .await
                     .map(Value::String)
             })
@@ -1885,6 +1908,7 @@ async fn nested_web_search(
     client: &ClaudeClient,
     model: &str,
     max_tokens: Option<u32>,
+    session_id: &str,
     input: Value,
 ) -> std::result::Result<String, String> {
     fn add_source(
@@ -1982,6 +2006,7 @@ async fn nested_web_search(
         let response = collect_stream(first, stream)
             .await
             .map_err(|_| "nested search stream failed")?;
+        spend_aside(session_id, model, &response.usage);
         if response.role != Role::Assistant {
             return Err("nested search response is not assistant".into());
         }

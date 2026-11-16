@@ -654,7 +654,7 @@ pub(super) fn run_rounds<'a>(
                     "Claude's safety classifier stopped the response; sending the request again to the model Claude Code falls back to for its category"
                 );
                 add_usage(usage, &response.usage);
-                if let Some(refreshed) = state.refreshed.update(Option::take) {
+                if let Some(refreshed) = state.spent_aside() {
                     add_usage(usage, &refreshed);
                 }
                 conversation.fallback_latch.refused(Refused {
@@ -700,7 +700,7 @@ pub(super) fn run_rounds<'a>(
                     cursor.refusal_recovered = true;
                 }
                 add_usage(usage, &response.usage);
-                if let Some(refreshed) = state.refreshed.update(Option::take) {
+                if let Some(refreshed) = state.spent_aside() {
                     add_usage(usage, &refreshed);
                 }
                 let kept = assistant
@@ -755,7 +755,7 @@ pub(super) fn run_rounds<'a>(
             }
             previous_message_id = Some(response.id.clone());
             add_usage(usage, &response.usage);
-            if let Some(refreshed) = state.refreshed.update(Option::take) {
+            if let Some(refreshed) = state.spent_aside() {
                 add_usage(usage, &refreshed);
             }
             let has_server_effects = assistant.content.iter().any(|block| {
