@@ -339,11 +339,17 @@ impl EmbeddedToolRuntime {
                     let names = deferred
                         .iter()
                         .map(|definition| {
-                            crate::code_mode_description::normalize_identifier(definition.name())
+                            let name = crate::code_mode_description::normalize_identifier(
+                                definition.name(),
+                            );
+                            match arguments(definition) {
+                                arguments if arguments.is_empty() => format!("{name}()"),
+                                arguments => format!("{name}({{ {arguments} }})"),
+                            }
                         })
                         .collect::<Vec<_>>()
                         .join(", ");
-                    *description = format!("{description}\nDeferred nested tools: {names}.").into();
+                    *description = format!("{description}\nDeferred nested tools, with their argument names (`toolSchema(name)` returns a tool's input schema): {names}.").into();
                 }
                 if mode == EmbeddedToolMode::CodeOnly {
                     *description = description
@@ -800,11 +806,18 @@ fn summary(definition: &ToolDefinition) -> (String, String) {
         .split_once(". ")
         .map_or(description, |(sentence, _)| sentence)
         .trim_end_matches('.');
+    (
+        crate::code_mode_description::normalize_identifier(definition.name()),
+        format!("{first}. Arguments: {{ {} }}.", arguments(definition)),
+    )
+}
+
+fn arguments(definition: &ToolDefinition) -> String {
     let schema = definition.parameters().map(|schema| schema.as_value());
     let required = schema
         .and_then(|schema| schema.get("required"))
         .and_then(serde_json::Value::as_array);
-    let arguments = schema
+    schema
         .and_then(|schema| schema.get("properties"))
         .and_then(serde_json::Value::as_object)
         .map(|properties| {
@@ -823,9 +836,5 @@ fn summary(definition: &ToolDefinition) -> (String, String) {
                 .collect::<Vec<_>>()
                 .join(", ")
         })
-        .unwrap_or_default();
-    (
-        crate::code_mode_description::normalize_identifier(definition.name()),
-        format!("{first}. Arguments: {{ {arguments} }}."),
-    )
+        .unwrap_or_default()
 }
