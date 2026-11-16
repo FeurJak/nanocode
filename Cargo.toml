@@ -254,6 +254,26 @@ strip = "symbols"
 panic = "unwind"
 codegen-units = 16
 
+[profile.release.package.djs-core]
+opt-level = 3
+codegen-units = 16
+
+[profile.release.package.djs-embed]
+opt-level = 3
+codegen-units = 16
+
+[profile.release.package.djs-libm]
+opt-level = 3
+codegen-units = 16
+
+[profile.release.package.djs-prelude]
+opt-level = 3
+codegen-units = 16
+
+[profile.release.package.nanocode-code-mode-engine]
+opt-level = 3
+codegen-units = 16
+
 [profile.release.package.nanocode-agent]
 opt-level = "s"
 

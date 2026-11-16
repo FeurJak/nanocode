@@ -697,16 +697,9 @@ fn write_memo(path: &Path, digest: &str) {
 }
 
 fn digest_file(path: &Path) -> io::Result<String> {
-    let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
-    let mut buffer = vec![0; 1 << 20];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            return Ok(hasher.finish());
-        }
-        hasher.update(&buffer[..read]);
-    }
+    hasher.update(&fs::read(path)?);
+    Ok(hasher.finish())
 }
 
 fn tool_digest(cache: &Path, tool: &Path) -> Option<String> {
@@ -2311,6 +2304,11 @@ impl Sha256 {
             unsafe { compress_sha2(&mut self.state, data) };
             return;
         }
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("sha") && std::arch::is_x86_feature_detected!("sse4.1") {
+            unsafe { compress_sha_ni(&mut self.state, data) };
+            return;
+        }
         for block in data.chunks_exact(64) {
             self.compress(block.try_into().expect("64-byte block"));
         }
@@ -2366,6 +2364,49 @@ impl Sha256 {
         self.update(&padding);
         self.length = length;
         self.state.iter().map(|word| format!("{word:08x}")).collect()
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sha,sse2,ssse3,sse4.1")]
+unsafe fn compress_sha_ni(state: &mut [u32; 8], data: &[u8]) {
+    use std::arch::x86_64::{
+        __m128i, _mm_add_epi32, _mm_alignr_epi8, _mm_blend_epi16, _mm_loadu_si128, _mm_set_epi64x, _mm_sha256msg1_epu32,
+        _mm_sha256msg2_epu32, _mm_sha256rnds2_epu32, _mm_shuffle_epi8, _mm_shuffle_epi32, _mm_storeu_si128,
+    };
+    unsafe {
+        let order = _mm_set_epi64x(0x0c0d_0e0f_0809_0a0b, 0x0405_0607_0001_0203);
+        let dcba = _mm_loadu_si128(state.as_ptr().cast::<__m128i>());
+        let hgfe = _mm_loadu_si128(state.as_ptr().add(4).cast::<__m128i>());
+        let cdab = _mm_shuffle_epi32(dcba, 0xb1);
+        let efgh = _mm_shuffle_epi32(hgfe, 0x1b);
+        let mut abef = _mm_alignr_epi8(cdab, efgh, 8);
+        let mut cdgh = _mm_blend_epi16(efgh, cdab, 0xf0);
+        for block in data.chunks_exact(64) {
+            let (saved_abef, saved_cdgh) = (abef, cdgh);
+            let mut schedule = [
+                _mm_shuffle_epi8(_mm_loadu_si128(block.as_ptr().cast::<__m128i>()), order),
+                _mm_shuffle_epi8(_mm_loadu_si128(block.as_ptr().add(16).cast::<__m128i>()), order),
+                _mm_shuffle_epi8(_mm_loadu_si128(block.as_ptr().add(32).cast::<__m128i>()), order),
+                _mm_shuffle_epi8(_mm_loadu_si128(block.as_ptr().add(48).cast::<__m128i>()), order),
+            ];
+            for group in 0..16 {
+                let words = _mm_add_epi32(schedule[0], _mm_loadu_si128(ROUND.as_ptr().add(group * 4).cast::<__m128i>()));
+                cdgh = _mm_sha256rnds2_epu32(cdgh, abef, words);
+                abef = _mm_sha256rnds2_epu32(abef, cdgh, _mm_shuffle_epi32(words, 0x0e));
+                let next = _mm_sha256msg2_epu32(
+                    _mm_add_epi32(_mm_sha256msg1_epu32(schedule[0], schedule[1]), _mm_alignr_epi8(schedule[3], schedule[2], 4)),
+                    schedule[3],
+                );
+                schedule = [schedule[1], schedule[2], schedule[3], next];
+            }
+            abef = _mm_add_epi32(abef, saved_abef);
+            cdgh = _mm_add_epi32(cdgh, saved_cdgh);
+        }
+        let feba = _mm_shuffle_epi32(abef, 0x1b);
+        let dchg = _mm_shuffle_epi32(cdgh, 0xb1);
+        _mm_storeu_si128(state.as_mut_ptr().cast::<__m128i>(), _mm_blend_epi16(feba, dchg, 0xf0));
+        _mm_storeu_si128(state.as_mut_ptr().add(4).cast::<__m128i>(), _mm_alignr_epi8(dchg, feba, 8));
     }
 }
 
