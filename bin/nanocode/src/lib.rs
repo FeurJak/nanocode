@@ -601,6 +601,22 @@ fn model_call_started() {
     }
 }
 
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+static NESTED_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn tool_call_started(event: &nanocode::agent::events::AgentEvent) {
+    #[derive(serde::Deserialize)]
+    struct Call {
+        parent_call_id: Option<serde::de::IgnoredAny>,
+    }
+    if serde_json::from_str::<Call>(event.payload.get()).is_ok_and(|call| call.parent_call_id.is_some())
+        && (NESTED_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1).is_power_of_two()
+    {
+        nanocode_sys::entry::release_file_pages();
+    }
+}
+
 async fn stream_turn(
     mut turn: nanocode::agent::Turn,
     answers: impl Write,
@@ -626,8 +642,10 @@ async fn stream_turn(
             }
         };
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        if event.event.kind == nanocode::agent::events::AgentEventKind::ModelCallStarted {
-            model_call_started();
+        match event.event.kind {
+            nanocode::agent::events::AgentEventKind::ModelCallStarted => model_call_started(),
+            nanocode::agent::events::AgentEventKind::ToolCall => tool_call_started(&event.event),
+            _ => {}
         }
         printer.event(&event.event, event.delta.as_ref().map(SharedTextDelta::borrowed))?;
         if stall.as_mut().is_some_and(|stall| stall.cancels(&event.event)) {
