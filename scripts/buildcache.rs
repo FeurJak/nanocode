@@ -48,6 +48,12 @@ fn main() -> ExitCode {
             None => ExitCode::from(2),
         };
     }
+    if let Some(root) = cache.parent() {
+        start_pending(&root.join("remote"), &scripts);
+    }
+    if tool == "fetch-pending" {
+        return fetch_pending(&cache, Path::new(args.get(1).map_or(OsStr::new(""), OsString::as_os_str)));
+    }
     if is_rustc(tool) {
         rust(&cache, &scripts, args, environment, 1)
     } else if args.get(1).is_some_and(|compiler| is_rustc(compiler)) {
@@ -71,6 +77,7 @@ fn cache_dir() -> PathBuf {
 }
 
 fn exec(args: &[OsString], environment: &Environment) -> ExitCode {
+    materialize(&cache_dir(), args);
     let error = Command::new(&args[0])
         .args(&args[1..])
         .env_clear()
@@ -184,7 +191,13 @@ fn rust(cache: &Path, scripts: &Path, mut args: Vec<OsString>, mut environment: 
     let (Some(out_dir), Some(suffix), Some(kind), true) = (out_dir, suffix, kind, eligible) else {
         return exec(&args, &environment);
     };
-    let Some(version) = rustc_version(cache, Path::new(&args[compiler - 1])) else {
+    let toolchain = match (environment.get(OsStr::new("RUSTUP_HOME")), environment.get(OsStr::new("RUSTUP_TOOLCHAIN"))) {
+        (Some(home), Some(name)) if !args[compiler - 1].as_bytes().contains(&b'/') => {
+            Some(Path::new(home).join("toolchains").join(name).join("bin").join(&args[compiler - 1])).filter(|path| path.is_file())
+        }
+        _ => None,
+    };
+    let Some(version) = rustc_version(cache, toolchain.as_deref().unwrap_or(Path::new(&args[compiler - 1]))) else {
         return exec(&args, &environment);
     };
     let mut remaps = vec![
@@ -281,15 +294,36 @@ fn rust(cache: &Path, scripts: &Path, mut args: Vec<OsString>, mut environment: 
         Kind::Registry => cache.join("units").join(&key),
         Kind::Workspace => cache.join("workspace").join(&key),
     };
-    if restore(&entry, &out_dir, &environment, kind, &inputs, &roots).is_ok() {
+    let mut command = cwd.as_os_str().as_bytes().to_vec();
+    for arg in args[..compiler].iter().chain(&remaps).chain(&args[compiler..]) {
+        command.push(0);
+        command.extend_from_slice(arg.as_bytes());
+    }
+    command.push(0);
+    for (name, value) in &environment {
+        if !matches!(name.as_bytes(), b"CARGO_MAKEFLAGS" | b"MAKEFLAGS" | b"MFLAGS") {
+            command.push(0);
+            command.extend_from_slice(name.as_bytes());
+            command.push(b'=');
+            command.extend_from_slice(value.as_bytes());
+        }
+    }
+    if restore(&entry, &out_dir, &environment, kind, &inputs, &roots, &command).is_ok() {
         return ExitCode::SUCCESS;
     }
     if let Some(remote) = remote(cache, scripts, &environment)
         && fetch(cache, &remote, kind, &key, &entry).is_ok()
-        && restore(&entry, &out_dir, &environment, kind, &inputs, &roots).is_ok()
+        && restore(&entry, &out_dir, &environment, kind, &inputs, &roots, &command).is_ok()
     {
         return ExitCode::SUCCESS;
     }
+    for output in outputs(&out_dir, &suffix) {
+        if let Some(file) = output.as_os_str().as_bytes().strip_suffix(b".nanocode-lazy") {
+            let _ = fs::remove_file(OsStr::from_bytes(file));
+            let _ = fs::remove_file(&output);
+        }
+    }
+    materialize(cache, &args[compiler..]);
     args.splice(compiler..compiler, remaps);
     let started = SystemTime::now();
     let mut child = match Command::new(&args[0])
@@ -941,6 +975,7 @@ fn restore(
     kind: Kind,
     inputs: &[u8],
     roots: &Roots,
+    command: &[u8],
 ) -> io::Result<()> {
     if kind == Kind::Workspace
         && (fs::read(entry.join("inputs"))? != inputs || !sources_match(&fs::read(entry.join("sources"))?, roots))
@@ -956,15 +991,44 @@ fn restore(
     }
     let mut files: Vec<_> = fs::read_dir(entry.join("files"))?.collect::<io::Result<_>>()?;
     files.sort_by_key(fs::DirEntry::file_name);
+    let lazy = fs::read(entry.join("lazy")).unwrap_or_default();
+    let lazy: Vec<&[u8]> = lazy
+        .split(|byte| *byte == b'\n')
+        .filter(|name| !name.is_empty() && !entry.join("files").join(OsStr::from_bytes(name)).exists())
+        .collect();
+    let source = if lazy.is_empty() || entry.parent().and_then(Path::parent).is_some_and(|cache| cache.join("lazy.failed").exists()) {
+        None
+    } else {
+        Some(fs::read(entry.join("source"))?)
+    };
+    if !lazy.is_empty() && (source.is_none() || !lazy.iter().all(|name| is_library(name))) {
+        return Err(io::Error::other("not fetched"));
+    }
     for file in &files {
         let name = file.file_name();
         let destination = out_dir.join(&name);
         if name.as_bytes().ends_with(b".d") {
             fs::write(&destination, roots.show(&fs::read(file.path())?))?;
         } else {
-            clone(&file.path(), &destination)?;
+            if fs::symlink_metadata(&destination).is_ok() {
+                fs::remove_file(&destination)?;
+            }
+            if fs::hard_link(file.path(), &destination).is_err() {
+                fs::copy(file.path(), &destination)?;
+            }
             touch(&destination)?;
         }
+    }
+    for name in &lazy {
+        let destination = out_dir.join(OsStr::from_bytes(name));
+        if fs::symlink_metadata(&destination).is_ok() {
+            fs::remove_file(&destination)?;
+        }
+        fs::write(&destination, b"")?;
+        let mut sidecar = source.clone().unwrap_or_default();
+        sidecar.push(b'\n');
+        sidecar.extend_from_slice(command);
+        fs::write(lazy_path(&destination), sidecar)?;
     }
     for line in identities.split(|byte| *byte == b'\n') {
         if let Some(at) = line.iter().position(|byte| *byte == b' ') {
@@ -1058,20 +1122,141 @@ fn directory_of(kind: Kind) -> &'static str {
     }
 }
 
-fn fetch(cache: &Path, remote: &OsStr, kind: Kind, key: &str, entry: &Path) -> io::Result<()> {
-    let directory = directory_of(kind);
-    let template = String::from_utf8_lossy(remote.as_bytes());
-    let url = if template.contains("{key}") {
+fn is_library(name: &[u8]) -> bool {
+    name.ends_with(b".rlib") || name.ends_with(b".rmeta")
+}
+
+fn lazy_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".nanocode-lazy");
+    PathBuf::from(name)
+}
+
+fn url_of(template: &[u8], directory: &str, key: &str) -> Vec<u8> {
+    let template = String::from_utf8_lossy(template);
+    if template.contains("{key}") {
         template.replace("{dir}", directory).replace("{key}", key).into_bytes()
     } else {
         let mut url = template.trim_end_matches('/').as_bytes().to_vec();
         url.extend_from_slice(format!("/{directory}/{key}").as_bytes());
         url
+    }
+}
+
+fn indexed(cache: &Path, directory: &str, key: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+    let root = cache.parent()?;
+    if root.join("build/lazy.failed").exists() {
+        return None;
+    }
+    let source = url_of(fs::read(root.join("remote/url")).ok()?.trim_ascii(), directory, key);
+    let index = fs::read(root.join("remote/workspace/index")).ok()?;
+    let prefix = format!("{directory}/{key}/");
+    let mut rest = index.as_slice();
+    let mut packed = Vec::new();
+    while !rest.is_empty() {
+        let name_end = rest.iter().position(|byte| *byte == b'\n')?;
+        let name = &rest[..name_end];
+        let header = &rest[name_end + 1..];
+        let size_end = header.iter().position(|byte| *byte == b'\n')?;
+        let size: usize = std::str::from_utf8(header[..size_end].split(|byte| *byte == b' ').next()?).ok()?.parse().ok()?;
+        let end = name_end + 1 + size_end + 1 + size;
+        if let Some(relative) = name.strip_prefix(prefix.as_bytes()) {
+            packed.extend_from_slice(relative);
+            packed.extend_from_slice(&rest[name_end..end]);
+        }
+        rest = rest.get(end..)?;
+    }
+    (!packed.is_empty()).then_some((packed, source))
+}
+
+fn pack_path(cache: &Path, directory: &str, key: &str) -> Option<PathBuf> {
+    Some(cache.parent()?.join("remote").join(directory).join(key))
+}
+
+fn eager_pack(cache: &Path, directory: &str, key: &str, source: &[u8]) -> io::Result<Vec<u8>> {
+    let Some(path) = pack_path(cache, directory, key).filter(|path| path.parent().is_some_and(Path::is_dir)) else {
+        return unpacked(download(source)?);
     };
-    let packed = unpacked(download(&url)?)?;
+    let mut name = path.clone().into_os_string();
+    name.push(".lock");
+    let lock = fs::OpenOptions::new().create(true).truncate(false).write(true).open(&name)?;
+    lock.lock()?;
+    if let Ok(data) = fs::read(&path) {
+        return unpacked(data);
+    }
+    let data = unpacked(download(source)?)?;
+    let mut staging = path.clone().into_os_string();
+    staging.push(format!(".{}.{}", std::process::id(), unique()));
+    if fs::write(&staging, &data).and_then(|()| fs::rename(&staging, &path)).is_err() {
+        let _ = fs::remove_file(&staging);
+    }
+    Ok(data)
+}
+
+fn start_pending(directory: &Path, scripts: &Path) {
+    let pending = directory.join("pending");
+    if !pending.exists() {
+        return;
+    }
+    let claimed = directory.join(format!("pending.{}.{}", std::process::id(), unique()));
+    if fs::rename(&pending, &claimed).is_err() {
+        return;
+    }
+    let started = env::current_exe().and_then(|helper| {
+        Command::new(helper)
+            .arg(scripts)
+            .arg("fetch-pending")
+            .arg(&claimed)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+    });
+    if started.is_err() {
+        let _ = fs::remove_file(&claimed);
+    }
+}
+
+fn fetch_pending(cache: &Path, list: &Path) -> ExitCode {
+    let names = fs::read(list).unwrap_or_default();
+    let _ = fs::remove_file(list);
+    let Some(template) = cache.parent().and_then(|root| fs::read(root.join("remote/url")).ok()) else {
+        return ExitCode::from(1);
+    };
+    let template = template.trim_ascii();
+    std::thread::scope(|scope| {
+        for name in names.split(|byte| *byte == b'\n') {
+            let Some(at) = name.iter().position(|byte| *byte == b'-') else {
+                continue;
+            };
+            let (Ok(directory), Ok(key)) = (std::str::from_utf8(&name[..at]), std::str::from_utf8(&name[at + 1..])) else {
+                continue;
+            };
+            scope.spawn(move || eager_pack(cache, directory, key, &url_of(template, directory, key)));
+        }
+    });
+    ExitCode::SUCCESS
+}
+
+fn fetch(cache: &Path, remote: &OsStr, kind: Kind, key: &str, entry: &Path) -> io::Result<()> {
+    let directory = directory_of(kind);
+    let (packed, source) = match download(&url_of(remote.as_bytes(), directory, key)) {
+        Ok(data) => (unpacked(data)?, None),
+        Err(error) => indexed(cache, directory, key).map(|(packed, source)| (packed, Some(source))).ok_or(error)?,
+    };
     fs::create_dir_all(cache.join(directory))?;
     let staging = cache.join(directory).join(format!(".data.{}.{}", std::process::id(), unique()));
-    let placed = unpack(&packed, &staging).and_then(|()| match kind {
+    let placed = unpack(&packed, &staging).and_then(|()| {
+        let Some(source) = source else {
+            return Ok(());
+        };
+        let lazy = fs::read(staging.join("lazy"))?;
+        if lazy.split(|byte| *byte == b'\n').all(|name| name.is_empty() || is_library(name)) {
+            return fs::write(staging.join("source"), source);
+        }
+        unpack(&eager_pack(cache, directory, key, &source)?, &staging)
+    });
+    let placed = placed.and_then(|()| match kind {
         Kind::Registry => symlink(staging.file_name().unwrap_or_default(), entry),
         Kind::Workspace => {
             let (Some(parent), Some(slot)) = (entry.parent(), entry.file_name()) else {
@@ -1118,6 +1303,7 @@ fn prefetched(cache: &Path, scripts: &Path, environment: &Environment) -> Option
         Some(template)
     };
     if directory.is_dir() {
+        start_pending(&directory, scripts);
         return template();
     }
     let cold = ["units", "workspace"]
@@ -1145,10 +1331,203 @@ fn prefetched(cache: &Path, scripts: &Path, environment: &Environment) -> Option
         .status()
         .is_ok_and(|status| status.success());
     if fetched && directory.is_dir() {
+        start_pending(&directory, scripts);
         return template();
     }
     let _ = fs::write(&failed, build);
     None
+}
+
+struct Placeholder {
+    file: PathBuf,
+    source: Vec<u8>,
+    command: Vec<u8>,
+}
+
+fn placeholders(directories: &[PathBuf]) -> Vec<Placeholder> {
+    let mut found = Vec::new();
+    for directory in directories {
+        for entry in fs::read_dir(directory).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let Some(file) = path.as_os_str().as_bytes().strip_suffix(b".nanocode-lazy") else {
+                continue;
+            };
+            if !fs::metadata(OsStr::from_bytes(file)).is_ok_and(|data| data.len() == 0) {
+                let _ = fs::remove_file(&path);
+                continue;
+            }
+            if let Ok(sidecar) = fs::read(&path) {
+                let at = sidecar.iter().position(|byte| *byte == b'\n').unwrap_or(sidecar.len());
+                found.push(Placeholder {
+                    file: PathBuf::from(OsStr::from_bytes(file)),
+                    source: sidecar[..at].to_vec(),
+                    command: sidecar.get(at + 1..).unwrap_or_default().to_vec(),
+                });
+            }
+        }
+    }
+    found.sort_by(|left, right| left.file.cmp(&right.file));
+    found
+}
+
+fn library_directories(args: &[OsString]) -> Vec<PathBuf> {
+    let mut directories: Vec<PathBuf> = Vec::new();
+    for pair in args.windows(2) {
+        let (flag, value) = (pair[0].as_bytes(), pair[1].as_bytes());
+        let directory = match flag {
+            b"-L" => value.strip_prefix(b"dependency=").map(|path| PathBuf::from(OsStr::from_bytes(path))),
+            b"--extern" => value
+                .iter()
+                .position(|byte| *byte == b'=')
+                .and_then(|at| Path::new(OsStr::from_bytes(&value[at + 1..])).parent().map(Path::to_path_buf)),
+            _ => None,
+        };
+        if let Some(directory) = directory
+            && !directories.contains(&directory)
+        {
+            directories.push(directory);
+        }
+    }
+    directories
+}
+
+fn materialize(cache: &Path, args: &[OsString]) {
+    let directories = library_directories(args);
+    if placeholders(&directories).is_empty() {
+        return;
+    }
+    let Ok(lock) = fs::OpenOptions::new().create(true).truncate(false).write(true).open(cache.join("lazy.lock")) else {
+        return;
+    };
+    if lock.lock().is_err() {
+        return;
+    }
+    let found = placeholders(&directories);
+    let mut sources: Vec<&[u8]> = found.iter().map(|placeholder| placeholder.source.as_slice()).collect();
+    sources.sort();
+    sources.dedup();
+    let staging = cache.join(format!(".lazy.{}.{}", std::process::id(), unique()));
+    let mut config = Vec::new();
+    for (index, source) in sources.iter().enumerate() {
+        config.extend_from_slice(b"url = \"");
+        config.extend_from_slice(source);
+        config.extend_from_slice(format!("\"\noutput = \"{}/{index}\"\n", staging.display()).as_bytes());
+    }
+    if fs::create_dir_all(&staging).is_ok() && fs::write(staging.join("config"), &config).is_ok() {
+        let _ = Command::new("curl")
+            .args(["-sfL", "-Z", "-K"])
+            .arg(staging.join("config"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let mut missed: Vec<&Placeholder> = Vec::new();
+    for (index, source) in sources.iter().enumerate() {
+        let unit = staging.join(format!("{index}.d"));
+        let placed = fs::read(staging.join(index.to_string()))
+            .and_then(unpacked)
+            .and_then(|packed| unpack(&packed, &unit))
+            .is_ok();
+        for placeholder in found.iter().filter(|placeholder| placeholder.source.as_slice() == *source) {
+            let file = &placeholder.file;
+            let Some(name) = file.file_name() else {
+                continue;
+            };
+            let next = unit.join("files").join(name);
+            let done = placed
+                && modified(file).is_some_and(|time| {
+                    fs::File::options().write(true).open(&next).and_then(|data| data.set_modified(time)).is_ok()
+                })
+                && fs::rename(&next, file).is_ok();
+            if done {
+                let _ = fs::remove_file(lazy_path(file));
+            } else {
+                missed.push(placeholder);
+            }
+        }
+    }
+    let _ = fs::remove_dir_all(&staging);
+    if missed.is_empty() {
+        return;
+    }
+    let _ = fs::write(cache.join("lazy.failed"), b"");
+    eprintln!("buildcache: could not fetch {} cached dependencies; compiling them", missed.len());
+    let mut commands: Vec<&[u8]> = missed.iter().map(|placeholder| placeholder.command.as_slice()).collect();
+    commands.sort();
+    commands.dedup();
+    while !commands.is_empty() {
+        let lazy = placeholders(&directories);
+        let (ready, waiting): (Vec<&[u8]>, Vec<&[u8]>) = commands.iter().partition(|command| {
+            !command_args(command).1.windows(2).any(|pair| {
+                pair[0] == "--extern"
+                    && pair[1].as_bytes().iter().position(|byte| *byte == b'=').is_some_and(|at| {
+                        let path = Path::new(OsStr::from_bytes(&pair[1].as_bytes()[at + 1..]));
+                        lazy.iter().any(|placeholder| placeholder.file == path && placeholder.command != **command)
+                    })
+            })
+        });
+        let (ready, stuck) = if ready.is_empty() { (Vec::new(), waiting.clone()) } else { (ready, Vec::new()) };
+        let width = std::thread::available_parallelism().map_or(1, usize::from);
+        let built: Vec<bool> = ready
+            .chunks(width)
+            .flat_map(|batch| {
+                std::thread::scope(|scope| {
+                    let running: Vec<_> = batch.iter().map(|command| scope.spawn(|| rebuild(command, &missed))).collect();
+                    running.into_iter().map(|run| run.join().unwrap_or(false)).collect::<Vec<bool>>()
+                })
+            })
+            .collect();
+        let settled = ready.iter().zip(built).chain(stuck.iter().map(|command| (command, false)));
+        for (command, built) in settled {
+            for placeholder in missed.iter().filter(|placeholder| placeholder.command.as_slice() == *command) {
+                let _ = fs::remove_file(lazy_path(&placeholder.file));
+                if !built {
+                    let _ = fs::remove_file(&placeholder.file);
+                }
+            }
+        }
+        commands = if stuck.is_empty() { waiting } else { Vec::new() };
+    }
+}
+
+fn command_args(command: &[u8]) -> (PathBuf, Vec<OsString>, Environment) {
+    let mut fields = command.split(|byte| *byte == 0);
+    let cwd = PathBuf::from(OsStr::from_bytes(fields.next().unwrap_or_default()));
+    let args: Vec<OsString> = fields.by_ref().take_while(|field| !field.is_empty()).map(|field| OsStr::from_bytes(field).to_os_string()).collect();
+    let environment = fields
+        .filter_map(|field| {
+            let at = field.iter().position(|byte| *byte == b'=')?;
+            Some((OsStr::from_bytes(&field[..at]).to_os_string(), OsStr::from_bytes(&field[at + 1..]).to_os_string()))
+        })
+        .collect();
+    (cwd, args, environment)
+}
+
+fn rebuild(command: &[u8], missed: &[&Placeholder]) -> bool {
+    let (cwd, args, environment) = command_args(command);
+    let Some(program) = args.first() else {
+        return false;
+    };
+    let outputs: Vec<(&Path, Option<SystemTime>)> = missed
+        .iter()
+        .filter(|placeholder| placeholder.command == command)
+        .map(|placeholder| (placeholder.file.as_path(), modified(&placeholder.file)))
+        .collect();
+    let built = Command::new(program)
+        .args(&args[1..])
+        .current_dir(cwd)
+        .env_clear()
+        .envs(&environment)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    built
+        && outputs.iter().all(|(file, time)| {
+            time.is_some_and(|time| fs::File::options().write(true).open(file).and_then(|data| data.set_modified(time)).is_ok())
+        })
 }
 
 fn filter(command: &mut Command, input: &[u8]) -> io::Result<Vec<u8>> {
@@ -1318,6 +1697,8 @@ fn unpack(mut packed: &[u8], staging: &Path) -> io::Result<()> {
 }
 
 fn publish(cache: &Path, to: &Path) -> io::Result<()> {
+    let mut index = Vec::new();
+    let mut eager = b"workspace-index\n".to_vec();
     for directory in ["units", "workspace"] {
         let Ok(entries) = fs::read_dir(cache.join(directory)) else {
             continue;
@@ -1325,12 +1706,47 @@ fn publish(cache: &Path, to: &Path) -> io::Result<()> {
         fs::create_dir_all(to.join(directory))?;
         for entry in entries.flatten() {
             let name = entry.file_name();
-            if name.len() != 64 || !entry.file_type().is_ok_and(|kind| kind.is_symlink()) {
+            if name.len() != 64 || !entry.file_type().is_ok_and(|kind| kind.is_symlink()) || entry.path().join("lazy").exists() {
                 continue;
             }
             let Ok(packed) = pack(&entry.path()) else {
                 continue;
             };
+            let mut lazy = Vec::new();
+            let mut rest = packed.as_slice();
+            while let Some(name_end) = rest.iter().position(|byte| *byte == b'\n') {
+                let (relative, header) = (&rest[..name_end], &rest[name_end + 1..]);
+                let Some(size_end) = header.iter().position(|byte| *byte == b'\n') else {
+                    break;
+                };
+                let size: usize = std::str::from_utf8(header[..size_end].split(|byte| *byte == b' ').next().unwrap_or_default())
+                    .ok()
+                    .and_then(|size| size.parse().ok())
+                    .unwrap_or_default();
+                let end = (name_end + 1 + size_end + 1 + size).min(rest.len());
+                match relative.strip_prefix(b"files/") {
+                    Some(file) if !file.ends_with(b".d") => {
+                        lazy.extend_from_slice(file);
+                        lazy.push(b'\n');
+                    }
+                    _ => {
+                        index.extend_from_slice(format!("{directory}/").as_bytes());
+                        index.extend_from_slice(name.as_bytes());
+                        index.push(b'/');
+                        index.extend_from_slice(&rest[..end]);
+                    }
+                }
+                rest = &rest[end..];
+            }
+            if !lazy.split(|byte| *byte == b'\n').all(|file| file.is_empty() || is_library(file)) {
+                eager.extend_from_slice(format!("{directory}-").as_bytes());
+                eager.extend_from_slice(name.as_bytes());
+                eager.push(b'\n');
+            }
+            index.extend_from_slice(format!("{directory}/").as_bytes());
+            index.extend_from_slice(name.as_bytes());
+            index.extend_from_slice(format!("/lazy\n{} 644\n", lazy.len()).as_bytes());
+            index.extend_from_slice(&lazy);
             let destination = to.join(directory).join(&name);
             let mut staging = destination.clone().into_os_string();
             staging.push(format!(".{}", std::process::id()));
@@ -1338,28 +1754,46 @@ fn publish(cache: &Path, to: &Path) -> io::Result<()> {
             fs::rename(&staging, &destination)?;
         }
     }
-    publish_helper(to)
+    fs::create_dir_all(to.join("workspace"))?;
+    let destination = to.join("workspace/index");
+    let mut staging = destination.clone().into_os_string();
+    staging.push(format!(".{}", std::process::id()));
+    fs::write(&staging, compressed(index))?;
+    fs::rename(&staging, &destination)?;
+    if let Some(helper) = publish_helper(to)? {
+        eager.extend_from_slice(format!("workspace-{helper}\n").as_bytes());
+    }
+    let destination = to.join("workspace/eager");
+    let mut staging = destination.clone().into_os_string();
+    staging.push(format!(".{}", std::process::id()));
+    fs::write(&staging, eager)?;
+    fs::rename(&staging, &destination)
 }
 
-fn publish_helper(to: &Path) -> io::Result<()> {
+fn publish_helper(to: &Path) -> io::Result<Option<String>> {
     let helper = env::current_exe()?;
     let Some(checksum) = helper.file_name().and_then(OsStr::to_str).and_then(|name| name.strip_prefix("buildcache-")) else {
-        return Ok(());
+        return Ok(None);
     };
     let machine = Command::new("uname").arg("-sm").stdin(Stdio::null()).stderr(Stdio::null()).output()?;
     if !machine.status.success() {
-        return Ok(());
+        return Ok(None);
     }
     let machine = String::from_utf8_lossy(&machine.stdout).trim().replace(' ', "-");
     let data = fs::read(&helper)?;
     let mut hasher = Sha256::new();
     hasher.update(&data);
-    let destination = to.join("workspace").join(format!("helper-{checksum}-{machine}-{}", hasher.finish()));
+    let name = format!("helper-{checksum}-{machine}-{}", hasher.finish());
+    let destination = to.join("workspace").join(&name);
     fs::create_dir_all(to.join("workspace"))?;
     let mut staging = destination.clone().into_os_string();
     staging.push(format!(".{}", std::process::id()));
+    fs::write(&staging, &data)?;
+    fs::rename(&staging, &destination)?;
+    let alias = to.join("workspace").join(format!("helper-{checksum}-{machine}"));
     fs::write(&staging, data)?;
-    fs::rename(&staging, &destination)
+    fs::rename(&staging, &alias)?;
+    Ok(Some(name))
 }
 
 
