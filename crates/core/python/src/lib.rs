@@ -2,6 +2,7 @@ mod capi;
 mod host;
 mod imports;
 mod kiwisolver;
+mod matplotlib;
 mod psh;
 mod shell;
 mod tree;
@@ -278,11 +279,13 @@ impl Python {
         let host = host::module_def(&builder.ctx);
         let extensions = capi::module_defs(&builder.ctx);
         let kiwisolver = kiwisolver::module_def(&builder.ctx);
+        let matplotlib = matplotlib::module_def(&builder.ctx);
         let interpreter = builder
             .add_native_modules(&defs)
             .add_native_modules(&extensions)
             .add_native_module(host)
             .add_native_module(kiwisolver)
+            .add_native_module(matplotlib)
             .add_frozen_modules(rustpython_pylib::FROZEN_STDLIB)
             .add_frozen_modules(rustpython_vm::py_freeze!(dir = "../site"))
             .build();
