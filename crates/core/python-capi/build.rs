@@ -304,6 +304,14 @@ fn main() {
                 .iter()
                 .map(|include| format!("-I{}", include.display())),
         );
+        if let Ok(includes) = fs::read_to_string(dir.join("includes")) {
+            defines.extend(
+                includes
+                    .lines()
+                    .filter(|line| !line.is_empty())
+                    .map(|line| format!("-I{}", dir.join(line).display())),
+            );
+        }
         if let Ok(macros) = fs::read_to_string(dir.join("defines")) {
             defines.extend(
                 macros
