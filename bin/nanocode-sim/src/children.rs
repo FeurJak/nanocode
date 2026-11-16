@@ -45,6 +45,7 @@ pub enum ChildMutation {
     AcksEarly,
     AdoptsTurn,
     ForgetsNotice,
+    RegionKeepsStale,
     SettlesLazily,
 }
 
@@ -54,6 +55,7 @@ impl ChildMutation {
             "child-acks-early" => Some(Self::AcksEarly),
             "child-adopts-turn" => Some(Self::AdoptsTurn),
             "child-forgets-notice" => Some(Self::ForgetsNotice),
+            "region-keeps-stale" => Some(Self::RegionKeepsStale),
             "child-settles-lazily" => Some(Self::SettlesLazily),
             _ => None,
         }
@@ -65,12 +67,13 @@ impl ChildMutation {
             Self::AcksEarly => "child-acks-early",
             Self::AdoptsTurn => "child-adopts-turn",
             Self::ForgetsNotice => "child-forgets-notice",
+            Self::RegionKeepsStale => "region-keeps-stale",
             Self::SettlesLazily => "child-settles-lazily",
         }
     }
 
     pub const NAMES: &'static str =
-        "child-acks-early|child-adopts-turn|child-forgets-notice|child-settles-lazily";
+        "child-acks-early|child-adopts-turn|child-forgets-notice|child-settles-lazily|region-keeps-stale";
 }
 
 #[derive(Clone, Debug)]

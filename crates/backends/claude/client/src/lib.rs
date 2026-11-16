@@ -18,6 +18,7 @@ mod claude_code;
 mod federation;
 #[cfg(not(target_family = "wasm"))]
 mod home;
+mod root_region;
 mod subscription_identity;
 #[doc(hidden)]
 pub mod subscription_wire;
@@ -34,6 +35,7 @@ pub use auth::{
 pub use federation::{ClaudeIdentityTokenSource, ClaudeTokenCache, ClaudeWorkloadIdentity};
 #[cfg(not(target_family = "wasm"))]
 pub use home::ClaudeHomeLogin;
+pub use root_region::{RegionError, RootRegion};
 pub use thread::{
     CreateReason, MESSAGE_THREADS_BETA, MessageThread, THREAD_IDLE_EXPIRY, ThreadErrorCode,
     ThreadMode, ThreadParam, ThreadRecovery, ThreadTurn,
@@ -1746,6 +1748,38 @@ pub struct ClaudeClient {
     subscription_cache_tail: bool,
     gzip_rejected: Arc<std::sync::atomic::AtomicBool>,
     http_layer: Option<Arc<dyn transport::Layer>>,
+    root: Option<Arc<Root>>,
+}
+
+struct Root {
+    prefetch: nanocode_sync::Slot<Prefetch>,
+    session: String,
+    sink: Arc<dyn RootRegion>,
+}
+
+type Buffered = Result<
+    (
+        nanocode_http::types::StatusCode,
+        nanocode_http::types::header::HeaderMap,
+        Result<Vec<u8>, HttpError>,
+    ),
+    HttpError,
+>;
+
+struct Prefetch {
+    #[expect(dead_code, reason = "dropping the handle aborts the prefetch")]
+    abort: Abort,
+    body: u64,
+    claim: nanocode_sync::oneshot::Sender<()>,
+    response: nanocode_sync::oneshot::Receiver<Buffered>,
+}
+
+struct Abort(nanocode_sync::future::AbortHandle);
+
+impl Drop for Abort {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl ClaudeClient {
@@ -1761,6 +1795,7 @@ impl ClaudeClient {
             subscription_cache_tail: true,
             gzip_rejected: Arc::default(),
             http_layer: None,
+            root: None,
         }
     }
 
@@ -1814,6 +1849,7 @@ impl ClaudeClient {
             subscription_cache_tail: true,
             gzip_rejected: Arc::default(),
             http_layer: None,
+            root: None,
         }
     }
 
@@ -1833,6 +1869,7 @@ impl ClaudeClient {
             subscription_cache_tail: true,
             gzip_rejected: Arc::default(),
             http_layer: None,
+            root: None,
         }
     }
 
@@ -1846,6 +1883,154 @@ impl ClaudeClient {
     pub fn with_http_layer(mut self, layer: impl transport::Layer) -> Self {
         self.http_layer = Some(Arc::new(layer));
         self
+    }
+
+    #[must_use]
+    pub fn with_root_region(mut self, session: impl Into<String>, sink: impl RootRegion) -> Self {
+        self.root = Some(Arc::new(Root {
+            prefetch: nanocode_sync::Slot::default(),
+            session: session.into(),
+            sink: Arc::new(sink),
+        }));
+        self
+    }
+
+    #[must_use]
+    pub fn for_session(mut self, session: &str) -> Self {
+        if self
+            .root
+            .as_ref()
+            .is_some_and(|root| root.session != session)
+        {
+            self.root = None;
+        }
+        self
+    }
+
+    pub fn clear_root_region(&self) {
+        if let Some(root) = &self.root {
+            root.sink.store(None);
+        }
+    }
+
+    pub async fn prefetch_root_region(&self, region: &[u8]) -> Result<(), ClaudeError> {
+        let Some(root) = self.root.clone() else {
+            return Ok(());
+        };
+        let region = root_region::decode(region)
+            .map_err(|error| ClaudeError::Protocol(error.to_string()))?;
+        let mut headers = self.auth_headers().await?;
+        for name in region.headers.keys() {
+            headers.remove(name);
+        }
+        for (name, value) in &region.headers {
+            headers.append(name, value.clone());
+        }
+
+        let (sender, response) = nanocode_sync::oneshot::channel();
+        let (claim, claimed) = nanocode_sync::oneshot::channel::<()>();
+        let body = nanocode_digest::xxh64(region.body.as_bytes(), 0);
+        let mut client = self.clone();
+        client.root = None;
+        let (posting, abort) = nanocode_sync::future::abortable(async move {
+            let layer = client.http_layer.as_deref();
+            let posted = match &client.http {
+                HttpConnection::Client(http) => {
+                    transport::post(
+                        http,
+                        &region.endpoint,
+                        headers,
+                        Arc::new(region.body),
+                        false,
+                        layer,
+                    )
+                    .await
+                }
+                HttpConnection::Transport(transport) => {
+                    transport::post_with(
+                        transport.as_ref(),
+                        &region.endpoint,
+                        headers,
+                        region.body,
+                        layer,
+                    )
+                    .await
+                }
+            };
+            let buffered = match posted {
+                Ok(response) => {
+                    let status = response.status();
+                    let headers = response.headers().clone();
+                    let mut body = response.bytes_stream();
+                    let mut bytes = Ok(Vec::new());
+                    while let Some(chunk) = body.next().await {
+                        match (chunk, &mut bytes) {
+                            (Ok(chunk), Ok(bytes)) => bytes.extend(chunk),
+                            (Err(error), _) => {
+                                bytes = Err(error);
+                                break;
+                            }
+                            (Ok(_), Err(_)) => break,
+                        }
+                    }
+                    Ok((status, headers, bytes))
+                }
+                Err(error) => Err(error),
+            };
+            if claimed.await.is_ok() {
+                drop(sender.send(buffered));
+            }
+        });
+        root.prefetch.put(Prefetch {
+            abort: Abort(abort),
+            body,
+            claim,
+            response,
+        });
+        nanocode_platform::spawn(async move {
+            let _aborted = posting.await;
+        });
+        Ok(())
+    }
+
+    async fn adopt_root_region(&self, body: &str) -> Option<Result<HttpResponse, HttpError>> {
+        let root = self.root.as_ref()?;
+        let prefetch = root.prefetch.take()?;
+        let fresh = prefetch.body == nanocode_digest::xxh64(body.as_bytes(), 0);
+        root.sink.adopted(fresh);
+        if !fresh {
+            nanocode_trace::warn!("mapped root request stale");
+            return None;
+        }
+        let _claimed = prefetch.claim.send(());
+        match prefetch.response.await {
+            Ok(buffered) => Some(buffered.map(|(status, headers, bytes)| {
+                HttpResponse::new(status, headers, Box::pin(stream::iter([bytes])))
+            })),
+            Err(_) => {
+                nanocode_trace::warn!("mapped root request dropped before its response");
+                None
+            }
+        }
+    }
+
+    async fn auth_headers(&self) -> Result<nanocode_http::types::HeaderMap, ClaudeError> {
+        Ok(match &self.auth {
+            ClientAuth::ApiKey(key) => {
+                let mut headers = nanocode_http::types::header::HeaderMap::new();
+                let mut value =
+                    nanocode_http::types::header::HeaderValue::from_str(key).map_err(|_| {
+                        ClaudeAuthUnavailable::new(
+                            "the Claude API key is not a valid HTTP header value",
+                        )
+                    })?;
+                value.set_sensitive(true);
+                headers.insert("x-api-key", value);
+                headers
+            }
+            ClientAuth::Headers(headers) => headers.clone(),
+            ClientAuth::Provider(provider) => provider.headers().await?,
+        })
     }
 
     pub fn official(http: HttpClient, api_key: impl Into<String>) -> Self {
@@ -2376,22 +2561,53 @@ impl ClaudeClient {
                 }
             }
             let body = wire.sent_shared();
+            let adopted = if hedge || retried {
+                None
+            } else {
+                self.adopt_root_region(&body).await
+            };
+            if let Some(root) = self
+                .root
+                .as_ref()
+                .filter(|_| wire.agent && !hedge && adopted.is_none())
+            {
+                let mut kept = headers.clone();
+                for name in [
+                    nanocode_http::types::header::AUTHORIZATION.as_str(),
+                    "x-api-key",
+                ] {
+                    kept.remove(name);
+                }
+                let sensitive = kept
+                    .iter()
+                    .filter(|(_, value)| value.is_sensitive())
+                    .map(|(name, _)| name.clone())
+                    .collect::<Vec<_>>();
+                for name in sensitive {
+                    kept.remove(name);
+                }
+                root.sink
+                    .store(Some(root_region::encode(&self.endpoint, &kept, &body)));
+            }
             let gzip = self.gzip_request_body(body.len());
             let layer = self.http_layer.as_deref();
-            let response = match &self.http {
-                HttpConnection::Client(client) => {
-                    transport::post(client, &self.endpoint, headers, body, gzip, layer).await?
-                }
-                HttpConnection::Transport(transport) => {
-                    transport::post_with(
-                        transport.as_ref(),
-                        &self.endpoint,
-                        headers,
-                        body.to_string(),
-                        layer,
-                    )
-                    .await?
-                }
+            let response = match adopted {
+                Some(response) => response?,
+                None => match &self.http {
+                    HttpConnection::Client(client) => {
+                        transport::post(client, &self.endpoint, headers, body, gzip, layer).await?
+                    }
+                    HttpConnection::Transport(transport) => {
+                        transport::post_with(
+                            transport.as_ref(),
+                            &self.endpoint,
+                            headers,
+                            body.to_string(),
+                            layer,
+                        )
+                        .await?
+                    }
+                },
             };
 
             if response.status() == nanocode_http::types::StatusCode::UNAUTHORIZED

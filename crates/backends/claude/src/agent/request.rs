@@ -78,7 +78,10 @@ pub(super) fn request_response<'a>(
                 },
             );
         };
-        let client = state.client.restore_wire_profile(context.wire_profile);
+        let client = state
+            .client
+            .restore_wire_profile(context.wire_profile)
+            .for_session(&state.session_id);
         let mut request = context
             .template
             .cloned()
@@ -646,6 +649,11 @@ pub(super) fn request_response<'a>(
                             None => state.policy_writes(effect, vec![completion]).await?,
                         }
                     }
+                    state
+                        .client
+                        .clone()
+                        .for_session(&state.session_id)
+                        .clear_root_region();
                     completed(
                         &response,
                         attempt,

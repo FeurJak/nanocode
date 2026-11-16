@@ -341,8 +341,31 @@ struct Durable {
     kind: StoreKind,
     kv: Option<SimKv>,
     disk: Arc<Disk>,
+    folded: Arc<nanocode_sync::Atom<Option<Vec<u8>>>>,
+    keeps_stale: bool,
+    region: Arc<nanocode_sync::Atom<Option<Vec<u8>>>>,
     settle_durably: bool,
     world: Arc<World>,
+}
+
+struct SimRegion {
+    folded: Arc<nanocode_sync::Atom<Option<Vec<u8>>>>,
+    keeps_stale: bool,
+    region: Arc<nanocode_sync::Atom<Option<Vec<u8>>>>,
+    world: Arc<World>,
+}
+
+impl nanocode::claude::RootRegion for SimRegion {
+    fn adopted(&self, fresh: bool) {
+        self.world.trace(&format!("adopted the mapped root request fresh={fresh}"));
+    }
+
+    fn store(&self, region: Option<Vec<u8>>) {
+        self.folded.set(region.clone());
+        if !(self.keeps_stale && self.region.get().is_some()) {
+            self.region.set(region);
+        }
+    }
 }
 
 impl Durable {
@@ -462,11 +485,10 @@ fn claude(wire: &Wire) -> Result<ClaudeClient, String> {
 fn runtime(
     store: SessionStore,
     parts: Option<&nanocode::turnlog::Parts>,
-    wire: &Wire,
+    claude: ClaudeClient,
     world: &Arc<World>,
     children: Option<&Arc<SimChildren>>,
 ) -> Result<Nanocode, String> {
-    let claude = claude(wire)?;
     let hedging = Arc::new(nanocode::hedge::Hedging::new(nanocode::hedge::HedgePolicy::DEFAULT));
     let claude = nanocode::ClaudeHarness::new(claude)
         .configure(move |builder| Ok(builder.hedging(Arc::clone(&hedging))));
@@ -868,7 +890,7 @@ async fn verify(
     nanocode::claude::durability::forget_templates();
     let (store, parts) = durable.session_store().await?;
     let children = remote.map(|remote| remote.children(number, world));
-    let runtime = runtime(store.clone(), parts.as_ref(), wire, world, children.as_ref())?;
+    let runtime = runtime(store.clone(), parts.as_ref(), claude(wire)?, world, children.as_ref())?;
     let mut agents = Vec::new();
     for root in 0..shape.roots {
         agents.push(open_root(&runtime, root, number, world).await?);
@@ -917,7 +939,26 @@ async fn epoch(
     nanocode::claude::durability::forget_templates();
     let (store, parts) = durable.session_store().await?;
     let children = remote.map(|remote| remote.children(epoch, world));
-    let runtime = runtime(store.clone(), parts.as_ref(), wire, world, children.as_ref())?;
+    let model = claude(wire)?.with_root_region(
+        session_of(0),
+        SimRegion {
+            folded: Arc::clone(&durable.folded),
+            keeps_stale: durable.keeps_stale,
+            region: Arc::clone(&durable.region),
+            world: Arc::clone(world),
+        },
+    );
+    if durable.region.get() != durable.folded.get() {
+        world.wrong("the mapped root region differs from the folded root state".to_owned());
+    }
+    if let Some(region) = durable.region.get().as_deref() {
+        model
+            .prefetch_root_region(region)
+            .await
+            .map_err(|error| format!("mapped_root_region_invalid: {error}"))?;
+        world.trace("prefetched the mapped root request");
+    }
+    let runtime = runtime(store.clone(), parts.as_ref(), model, world, children.as_ref())?;
     if let (Some(control), Some(resident_max)) = (runtime.subagents(), shape.hibernation) {
         control.set_hibernation(true);
         control.set_max_resident(resident_max);
@@ -984,6 +1025,9 @@ pub fn simulate(seed: u64, options: WholeOptions) -> WholeOutcome {
         mutation: options.child_mutation,
     });
     let durable = Durable {
+        folded: Arc::new(nanocode_sync::Atom::new(None)),
+        keeps_stale: options.child_mutation == ChildMutation::RegionKeepsStale,
+        region: Arc::new(nanocode_sync::Atom::new(None)),
         world: Arc::clone(&world),
         disk: Disk::new(),
         settle_durably: remote.is_some() && options.child_mutation != ChildMutation::SettlesLazily,
