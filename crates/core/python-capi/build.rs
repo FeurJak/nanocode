@@ -222,6 +222,11 @@ fn address_taken(object: &Path) -> Vec<(String, usize)> {
         .collect()
 }
 
+fn is_cxx(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension == "cpp" || extension == "cc" || extension == "cxx")
+}
+
 fn main() {
     let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
@@ -257,6 +262,8 @@ fn main() {
         .and_then(|jobs| jobs.parse().ok())
         .unwrap_or(1)
         .max(1);
+    let runtime = root.join("cxx");
+    println!("cargo:rerun-if-changed=cxx");
     let compile = |source: &Path, object: &Path, defines: &[String]| {
         let mut command = Command::new(&compiler);
         if target != host {
@@ -265,13 +272,28 @@ fn main() {
                 target.replace("riscv64gc-", "riscv64-")
             ));
         }
+        let cxx = is_cxx(source);
         if wasm {
-            command
-                .args(["-ffreestanding", "-nostdlibinc"])
-                .arg("-I")
-                .arg(include.join("libc"));
-        } else if !windows {
-            command.arg("-fPIC");
+            command.args(["-ffreestanding", "-nostdlibinc"]);
+            if cxx {
+                command
+                    .args(["-std=c++17", "-fwasm-exceptions", "-nostdinc++", "-isystem"])
+                    .arg(include.join("c++").join("v1"))
+                    .arg("-isystem")
+                    .arg(include.join("libc"));
+            } else {
+                command
+                    .args(["-fwasm-exceptions", "-mllvm", "-wasm-enable-sjlj"])
+                    .arg("-I")
+                    .arg(include.join("libc"));
+            }
+        } else {
+            if cxx {
+                command.arg("-std=c++17");
+            }
+            if !windows {
+                command.arg("-fPIC");
+            }
         }
         command
             .args([
@@ -294,6 +316,7 @@ fn main() {
             .unwrap_or_else(|error| panic!("{}: {error}", compiler.to_string_lossy()));
         assert!(status.success(), "compiling {} failed", source.display());
     };
+    let mut cxx_runtime = false;
     for source in sorted(&root.join("c"), |path| {
         path.extension().is_some_and(|extension| extension == "c")
     }) {
@@ -378,6 +401,14 @@ fn main() {
                     .map(|line| format!("-D{line}")),
             );
         }
+        if let Ok(flags) = fs::read_to_string(dir.join("flags")) {
+            defines.extend(
+                flags
+                    .lines()
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_owned),
+            );
+        }
         let sources = match fs::read_to_string(dir.join("sources")) {
             Ok(list) => list
                 .lines()
@@ -385,11 +416,12 @@ fn main() {
                 .map(|line| dir.join(line))
                 .collect(),
             Err(_) => sorted(&dir, |path| {
-                path.extension().is_some_and(|extension| extension == "c")
+                path.extension().is_some_and(|extension| extension == "c") || is_cxx(path)
             }),
         };
+        cxx_runtime |= sources.iter().any(|source| is_cxx(source));
         let first = objects.len();
-        let mut built: Vec<(usize, PathBuf)> = thread::scope(|scope| {
+        let mut built: Vec<(usize, PathBuf, bool)> = thread::scope(|scope| {
             let workers: Vec<_> = (0..jobs.min(sources.len()))
                 .map(|worker| {
                     let (sources, defines, compile, out) = (&sources, &defines, &compile, &out);
@@ -401,27 +433,48 @@ fn main() {
                             let index = first + offset;
                             let object = out.join(format!("{index}.o"));
                             compile(source, &object, defines);
+                            let mut table = false;
                             if wasm {
+                                let cxx = is_cxx(source);
                                 let functions = address_taken(&object);
-                                let mut wrapper = format!(
-                                    "#include {:?}\n__attribute__((used)) const void *const nanocode_arity_{index}[] = {{\n",
-                                    source.display().to_string()
-                                );
-                                for (function, params) in &functions {
+                                let mut wrapper =
+                                    format!("#include {:?}\n", source.display().to_string());
+                                if cxx {
                                     wrapper.push_str(&format!(
-                                        "    (const void *){function}, (const void *){params},\n"
+                                        "__asm__(\".section .rodata.nanocode_arity_{index},\\\"\\\",@\\n.globl nanocode_arity_{index}\\n.p2align 2\\nnanocode_arity_{index}:\\n\"\n"
                                     ));
+                                    for (function, params) in &functions {
+                                        wrapper.push_str(&format!(
+                                            "\".int32 \\\"{function}\\\"\\n.int32 {params}\\n\"\n"
+                                        ));
+                                    }
+                                    wrapper.push_str(&format!(
+                                        "\".int32 0\\n.int32 0\\n.size nanocode_arity_{index}, {}\\n.text\\n\");\n",
+                                        8 * (functions.len() + 1)
+                                    ));
+                                } else {
+                                    wrapper.push_str(&format!(
+                                        "__attribute__((used)) const void *const nanocode_arity_{index}[] = {{\n"
+                                    ));
+                                    for (function, params) in &functions {
+                                        wrapper.push_str(&format!(
+                                            "    (const void *){function}, (const void *){params},\n"
+                                        ));
+                                    }
+                                    wrapper.push_str("    0, 0\n};\n");
                                 }
-                                wrapper.push_str("    0, 0\n};\n");
                                 let extension = source
                                     .extension()
                                     .and_then(|extension| extension.to_str())
                                     .unwrap_or("c");
-                                let path = out.join(format!("{index}.{extension}"));
-                                fs::write(&path, wrapper).expect("the arity wrapper");
-                                compile(&path, &object, defines);
+                                if !functions.is_empty() {
+                                    let path = out.join(format!("{index}.{extension}"));
+                                    fs::write(&path, wrapper).expect("the arity wrapper");
+                                    compile(&path, &object, defines);
+                                    table = true;
+                                }
                             }
-                            done.push((index, object));
+                            done.push((index, object, table));
                         }
                         done
                     })
@@ -432,9 +485,9 @@ fn main() {
                 .flat_map(|worker| worker.join().expect("a compile worker"))
                 .collect()
         });
-        built.sort_by_key(|(index, _)| *index);
-        for (index, object) in built {
-            if wasm {
+        built.sort_by_key(|(index, _, _)| *index);
+        for (index, object, table) in built {
+            if table {
                 arities.push_str(&format!("    static nanocode_arity_{index}: [usize; 0];\n"));
                 tables.push_str(&format!(
                     "        &raw const nanocode_arity_{index} as *const usize,\n"
@@ -447,6 +500,55 @@ fn main() {
             "    Extension {{ name: {name:?}, init: {symbol} }},\n"
         ));
     }
+    if cxx_runtime && wasm {
+        let list = fs::read_to_string(runtime.join("sources")).expect("the C++ runtime source list");
+        let sources: Vec<PathBuf> = list
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| runtime.join(line))
+            .chain([runtime.join("runtime.c")])
+            .collect();
+        let flags = [
+            "-D_LIBUNWIND_HIDE_SYMBOLS".to_owned(),
+            "-D_LIBCPP_BUILDING_LIBRARY".to_owned(),
+            "-D_LIBCPP_HAS_NO_PRAGMA_SYSTEM_HEADER".to_owned(),
+            "-DLIBCXX_BUILDING_LIBCXXABI".to_owned(),
+            "-D_LIBCXXABI_BUILDING_LIBRARY".to_owned(),
+            "-D_LIBCXXABI_HAS_NO_THREADS".to_owned(),
+            "-std=c++23".to_owned(),
+            format!("-I{}", runtime.join("libcxx").join("src").display()),
+            format!("-I{}", runtime.join("libcxxabi").join("include").display()),
+            format!("-I{}", runtime.join("libunwind").join("include").display()),
+        ];
+        let first = objects.len();
+        let mut built: Vec<(usize, PathBuf)> = thread::scope(|scope| {
+            let workers: Vec<_> = (0..jobs.min(sources.len()))
+                .map(|worker| {
+                    let (sources, flags, compile, out) = (&sources, &flags, &compile, &out);
+                    scope.spawn(move || {
+                        let mut done = Vec::new();
+                        for (offset, source) in
+                            sources.iter().enumerate().skip(worker).step_by(jobs)
+                        {
+                            let index = first + offset;
+                            let object = out.join(format!("{index}.o"));
+                            let unwind = [flags[0].clone(), flags[flags.len() - 1].clone()];
+                            let flags = if is_cxx(source) { &flags[..] } else { &unwind[..] };
+                            compile(source, &object, flags);
+                            done.push((index, object));
+                        }
+                        done
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|worker| worker.join().expect("a compile worker"))
+                .collect()
+        });
+        built.sort_by_key(|(index, _)| *index);
+        objects.extend(built.into_iter().map(|(_, object)| object));
+    }
     fs::write(out.join("libnanocode_python_capi_ext.a"), archive(&objects)).expect("the archive");
     fs::write(
         out.join("extensions.rs"),
@@ -455,6 +557,13 @@ fn main() {
     .expect("the extension table");
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=nanocode_python_capi_ext");
+    if cxx_runtime && !wasm {
+        if env::var("CARGO_CFG_TARGET_VENDOR").is_ok_and(|vendor| vendor == "apple") {
+            println!("cargo:rustc-link-lib=c++");
+        } else if !windows {
+            println!("cargo:rustc-link-lib=stdc++");
+        }
+    }
     if env::var("CARGO_CFG_TARGET_ENV").is_ok_and(|target_env| target_env == "msvc") {
         println!("cargo:rustc-link-lib=oldnames");
     }

@@ -1,6 +1,7 @@
 #ifndef _UNISTD_H
 #define _UNISTD_H
 #include <sys/types.h>
+#define _POSIX_TIMERS 200809L
 #define SEEK_SET 0
 #define SEEK_CUR 1
 #define SEEK_END 2

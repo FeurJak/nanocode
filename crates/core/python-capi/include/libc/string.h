@@ -1,6 +1,7 @@
 #ifndef _STRING_H
 #define _STRING_H
 #include <stddef.h>
+struct __locale_struct;
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -25,8 +26,11 @@ char *strstr(const char *, const char *);
 char *strpbrk(const char *, const char *);
 size_t strspn(const char *, const char *);
 size_t strcspn(const char *, const char *);
+int strcoll_l(const char *, const char *, struct __locale_struct *);
+size_t strxfrm_l(char *, const char *, size_t, struct __locale_struct *);
 char *strtok(char *, const char *);
 char *strerror(int);
+int strerror_r(int, char *, size_t);
 char *strdup(const char *);
 char *strndup(const char *, size_t);
 #ifdef __cplusplus

@@ -215,3 +215,25 @@ thread_local! {
 pub extern "C" fn __errno_location() -> *mut c_int {
     ERRNO.with(Cell::as_ptr)
 }
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memchr(data: *const c_void, wanted: c_int, length: usize) -> *mut c_void {
+    let bytes = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), length) };
+    bytes
+        .iter()
+        .position(|&byte| byte == wanted as u8)
+        .map_or(null_mut(), |at| unsafe { data.cast::<u8>().add(at) }.cast_mut().cast())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn abort() -> ! {
+    panic!("abort() called from C or C++ code")
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn aligned_alloc(alignment: usize, size: usize) -> *mut c_void {
+    if alignment > crate::heap::ALIGN {
+        return null_mut();
+    }
+    malloc(size)
+}

@@ -8,6 +8,7 @@
 typedef struct { int quot, rem; } div_t;
 typedef struct { long quot, rem; } ldiv_t;
 typedef struct { long long quot, rem; } lldiv_t;
+struct __locale_struct;
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -34,6 +35,11 @@ unsigned long long strtoull(const char *, char **, int);
 float strtof(const char *, char **);
 double strtod(const char *, char **);
 long double strtold(const char *, char **);
+float strtof_l(const char *, char **, struct __locale_struct *);
+double strtod_l(const char *, char **, struct __locale_struct *);
+long double strtold_l(const char *, char **, struct __locale_struct *);
+long long strtoll_l(const char *, char **, int, struct __locale_struct *);
+unsigned long long strtoull_l(const char *, char **, int, struct __locale_struct *);
 int rand(void);
 void srand(unsigned);
 void qsort(void *, size_t, size_t, int (*)(const void *, const void *));

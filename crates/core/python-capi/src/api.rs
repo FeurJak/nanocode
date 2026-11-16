@@ -3464,3 +3464,32 @@ pub extern "C" fn PyMethod_New(function: *mut Object, zelf: *mut Object) -> *mut
             .call((arg(vm, function)?, arg(vm, zelf)?), vm)
     })
 }
+
+
+#[unsafe(no_mangle)]
+pub extern "C" fn PyCapsule_SetDestructor(pointer: *mut Object, _destructor: *mut c_void) -> c_int {
+    status(|vm| {
+        capsule(vm, pointer)?;
+        Ok(())
+    })
+}
+
+
+#[unsafe(no_mangle)]
+pub extern "C" fn PyDict_SetDefault(
+    pointer: *mut Object,
+    key: *mut Object,
+    default: *mut Object,
+) -> *mut Object {
+    guard(null_mut(), |vm| {
+        let target = dict(vm, pointer)?;
+        let key = arg(vm, key)?;
+        if let Some(found) = target.get_item_opt(&*key, vm)? {
+            return Ok(borrowed(vm, &found));
+        }
+        let value = arg(vm, default)?;
+        target.set_item(&*key, value.clone(), vm)?;
+        dict_changed(pointer, &target);
+        Ok(borrowed(vm, &value))
+    })
+}

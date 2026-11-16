@@ -126,6 +126,7 @@ static_types! {
     PyCFunction_Type = c"builtin_function_or_method", Object, 0, builtin_function_or_method_type;
     PyMethod_Type = c"method", Object, 0, bound_method_type;
     PyMethodDescr_Type = c"method_descriptor", Object, 0, method_descriptor_type;
+    PyGen_Type = c"generator", Object, 0, generator_type;
     PyStaticMethod_Type = c"staticmethod", Object, TPFLAGS_BASETYPE, staticmethod_type;
     PyClassMethod_Type = c"classmethod", Object, TPFLAGS_BASETYPE, classmethod_type;
     _PyNone_Type = c"NoneType", Object, 0, none_type;

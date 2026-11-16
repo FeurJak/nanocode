@@ -66,6 +66,8 @@ int vprintf(const char *, va_list);
 int vfprintf(FILE *, const char *, va_list);
 int vsprintf(char *, const char *, va_list);
 int vsnprintf(char *, size_t, const char *, va_list);
+int asprintf(char **, const char *, ...);
+int vasprintf(char **, const char *, va_list);
 int scanf(const char *, ...);
 int fscanf(FILE *, const char *, ...);
 int sscanf(const char *, const char *, ...);

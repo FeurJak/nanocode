@@ -26,7 +26,7 @@ pub struct Header {
     pub link: Cell<*const PyObject>,
 }
 
-pub const ALIGN: usize = 2 * size_of::<usize>();
+pub const ALIGN: usize = 16;
 const HEADER: usize = size_of::<Header>().next_multiple_of(ALIGN);
 
 fn layout(size: usize) -> Option<Layout> {

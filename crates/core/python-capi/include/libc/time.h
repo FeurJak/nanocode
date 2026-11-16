@@ -4,6 +4,10 @@
 typedef long long clock_t;
 #define CLOCKS_PER_SEC 1000000
 #define TIME_UTC 1
+typedef int clockid_t;
+#define CLOCK_REALTIME 0
+#define CLOCK_MONOTONIC 1
+#define TIME_MONOTONIC 2
 struct tm {
     int tm_sec;
     int tm_min;
@@ -21,6 +25,7 @@ struct timespec {
     time_t tv_sec;
     long tv_nsec;
 };
+struct __locale_struct;
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -35,7 +40,11 @@ struct tm *localtime_r(const time_t *, struct tm *);
 char *asctime(const struct tm *);
 char *ctime(const time_t *);
 size_t strftime(char *, size_t, const char *, const struct tm *);
+size_t strftime_l(char *, size_t, const char *, const struct tm *, struct __locale_struct *);
 int timespec_get(struct timespec *, int);
+int clock_gettime(clockid_t, struct timespec *);
+int clock_getres(clockid_t, struct timespec *);
+int nanosleep(const struct timespec *, struct timespec *);
 #ifdef __cplusplus
 }
 #endif
