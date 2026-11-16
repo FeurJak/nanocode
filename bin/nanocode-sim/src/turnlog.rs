@@ -149,6 +149,15 @@ impl LogHost for SimHost {
         let pruned = self.pruned;
         let inserted = self.disk.with(|disk| {
             let inserted = disk.insert(scope, rows);
+            if inserted {
+                disk.tops.push(crate::disk::FileOp::Append {
+                    archived: Vec::new(),
+                    dropped: 0..0,
+                    rows: rows.to_vec(),
+                    scope: scope.to_owned(),
+                    superseded: Vec::new(),
+                });
+            }
             if inserted && pruned {
                 prune(disk, scope, rows, &[]);
             }
@@ -232,6 +241,27 @@ impl LogHost for SimHost {
         };
         let inserted = self.disk.with(|disk| {
             let inserted = disk.insert(scope, rows);
+            if inserted {
+                disk.tops.push(crate::disk::FileOp::Append {
+                    archived: if kept {
+                        Vec::new()
+                    } else {
+                        compaction.archived.to_vec()
+                    },
+                    dropped: if kept {
+                        0..0
+                    } else {
+                        compaction.dropped.clone()
+                    },
+                    rows: rows.to_vec(),
+                    scope: scope.to_owned(),
+                    superseded: if kept {
+                        Vec::new()
+                    } else {
+                        superseded.to_vec()
+                    },
+                });
+            }
             if inserted && !kept {
                 disk.tcompactions.push((
                     scope.to_owned(),
@@ -288,6 +318,13 @@ impl LogHost for SimHost {
                     Vec::new(),
                     extension.row..extension.row + 1,
                 ));
+                disk.tops.push(crate::disk::FileOp::Extend {
+                    cut: extension.cut,
+                    row: extension.row,
+                    scope: scope.to_owned(),
+                    seq: extension.seq,
+                    tail: extension.tail.to_owned(),
+                });
             }
             inserted
         });

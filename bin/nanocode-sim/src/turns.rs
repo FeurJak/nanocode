@@ -76,6 +76,7 @@ pub enum TurnMutation {
     SectionsKept,
     SectionsPruned,
     SnapshotKept,
+    SnapshotPointerStale,
     SnapshotRatioIgnored,
     SnapshotRowsIgnored,
     TailRowsAppended,
@@ -84,7 +85,7 @@ pub enum TurnMutation {
 }
 
 impl TurnMutation {
-    const ALL: [Self; 27] = [
+    const ALL: [Self; 28] = [
         Self::None,
         Self::AckBufferedAdmission,
         Self::AckBufferedResult,
@@ -107,6 +108,7 @@ impl TurnMutation {
         Self::SectionsKept,
         Self::SectionsPruned,
         Self::SnapshotKept,
+        Self::SnapshotPointerStale,
         Self::SnapshotRatioIgnored,
         Self::SnapshotRowsIgnored,
         Self::TailRowsAppended,
@@ -144,6 +146,7 @@ impl TurnMutation {
             Self::SectionsKept => "sections_kept",
             Self::SectionsPruned => "sections_pruned",
             Self::SnapshotKept => "snapshot_kept",
+            Self::SnapshotPointerStale => "snapshot_pointer_stale",
             Self::SnapshotRatioIgnored => "snapshot_ratio_ignored",
             Self::SnapshotRowsIgnored => "snapshot_rows_ignored",
             Self::TailRowsAppended => "tail_rows_appended",
@@ -174,6 +177,7 @@ pub enum Invariant {
     Liveness,
     Panic,
     SeqUnique,
+    TailReplay,
 }
 
 impl Invariant {
@@ -194,6 +198,7 @@ impl Invariant {
             Self::Liveness => "liveness",
             Self::Panic => "panic",
             Self::SeqUnique => "seq_unique",
+            Self::TailReplay => "tail_replay",
         }
     }
 }
@@ -1332,7 +1337,12 @@ impl Sim {
             rows.staged.clear();
             rows.tappends.clear();
             rows.tcompactions.clear();
+            rows.tops.clear();
         });
+        let stale = self.options.mutation == TurnMutation::SnapshotPointerStale;
+        if let Err(message) = self.disk.with(|rows| rows.reopen_files(stale)) {
+            self.wrong(Invariant::TailReplay, message);
+        }
         self.stats.crashes += 1;
         self.trace(&format!("down: {cause}"));
         let waiting: Vec<usize> = self
@@ -1623,12 +1633,13 @@ impl Sim {
             return false;
         };
         let tick = std::mem::take(&mut object.tick);
-        let (appends, staged, tappends, compactions) = self.disk.with(|rows| {
+        let (appends, staged, tappends, compactions, ops) = self.disk.with(|rows| {
             (
                 std::mem::take(&mut rows.appends),
                 std::mem::take(&mut rows.staged),
                 std::mem::take(&mut rows.tappends),
                 std::mem::take(&mut rows.tcompactions),
+                std::mem::take(&mut rows.tops),
             )
         });
         if !tick.writes() && appends.is_empty() && staged.is_empty() && tappends.is_empty() {
@@ -1645,6 +1656,9 @@ impl Sim {
             return false;
         }
         self.apply(&tick, &appends, &staged, &tappends, &compactions);
+        if let Err(message) = self.disk.with(|rows| rows.write_files(ops)) {
+            self.wrong(Invariant::TailReplay, message);
+        }
         let after = if self.rng.crash.chance(self.shape.crash_after_ppm) {
             Some("crash after commit")
         } else if self.rng.faults.chance(self.profile.after_ppm) {

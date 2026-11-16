@@ -5,8 +5,26 @@ use std::{
 };
 
 use nanocode_sync::Slot;
+use nanocode_turnlog::{Compaction, Extension, Header, Image, ImageOptions, Medium};
 
 pub type Compacted = (String, Vec<(u64, String)>, Range<u64>);
+
+pub enum FileOp {
+    Append {
+        archived: Vec<(u64, String)>,
+        dropped: Range<u64>,
+        rows: Vec<(u64, String)>,
+        scope: String,
+        superseded: Vec<Range<u64>>,
+    },
+    Extend {
+        cut: usize,
+        row: u64,
+        scope: String,
+        seq: u64,
+        tail: String,
+    },
+}
 
 #[derive(Default)]
 pub struct Rows {
@@ -18,7 +36,10 @@ pub struct Rows {
     pub staged: Vec<(String, u64, String)>,
     pub tappends: Vec<(String, u64, String)>,
     pub tcompactions: Vec<Compacted>,
+    pub tfiles: BTreeMap<String, Image<Vec<u8>>>,
     pub tlog: BTreeMap<(String, u64), String>,
+    pub tops: Vec<FileOp>,
+    pub tprior: BTreeMap<String, Header>,
 }
 
 pub fn compact(rows: &mut BTreeMap<u64, String>, archived: &[(u64, String)], dropped: &Range<u64>) {
@@ -41,6 +62,99 @@ fn count(len: usize) -> u64 {
 }
 
 impl Rows {
+    pub fn write_files(&mut self, ops: Vec<FileOp>) -> Result<(), String> {
+        for op in ops {
+            let scope = match &op {
+                FileOp::Append { scope, .. } | FileOp::Extend { scope, .. } => scope.clone(),
+            };
+            let image = match self.tfiles.entry(scope.clone()) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => entry.insert(
+                    Image::open(Vec::new(), Vec::new(), ImageOptions::default())
+                        .map_err(|error| format!("turn log file {scope} does not open: {error}"))?,
+                ),
+            };
+            let before = image.header();
+            match &op {
+                FileOp::Append {
+                    archived,
+                    dropped,
+                    rows,
+                    superseded,
+                    ..
+                } => image.append(
+                    rows,
+                    &Compaction {
+                        archived,
+                        dropped: dropped.clone(),
+                        superseded,
+                    },
+                ),
+                FileOp::Extend {
+                    cut,
+                    row,
+                    seq,
+                    tail,
+                    ..
+                } => image.extend(&Extension {
+                    cut: *cut,
+                    row: *row,
+                    seq: *seq,
+                    tail,
+                }),
+            }
+            .map_err(|error| format!("turn log file {scope} rejects a committed write: {error}"))?;
+            if image.header().snapshot != before.snapshot {
+                self.tprior.insert(scope, before);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn reopen_files(&mut self, stale: bool) -> Result<(), String> {
+        let scopes: Vec<String> = self.tfiles.keys().cloned().collect();
+        for scope in scopes {
+            let Some(image) = self.tfiles.get(&scope) else {
+                continue;
+            };
+            let mut data = image.data().clone();
+            let header = image.header();
+            if stale && let Some(prior) = self.tprior.get(&scope) {
+                let pointer = Header {
+                    snapshot: prior.snapshot,
+                    tail: prior.tail,
+                    ..header
+                };
+                data.write_at(pointer.offset(), &pointer.encode())
+                    .map_err(|error| format!("turn log file {scope} header write: {error}"))?;
+            }
+            let mut reopened = Image::open(data, image.index().clone(), ImageOptions::default())
+                .map_err(|error| format!("turn log file {scope} does not reopen: {error}"))?;
+            let full = reopened
+                .replay()
+                .map_err(|error| format!("turn log file {scope} full replay: {error}"))?;
+            let tail = reopened.load().map_err(|error| {
+                format!("turn log file {scope} header and tail replay: {error}")
+            })?;
+            let mut stored = self.committed(&scope);
+            let start = stored
+                .iter()
+                .rposition(|(_, body)| body.starts_with('s'))
+                .unwrap_or(0);
+            let stored = stored.split_off(start);
+            if tail != full || tail != stored {
+                return Err(format!(
+                    "turn log file {scope} header and tail replay holds rows {:?}, full replay {:?}, store {:?}",
+                    tail.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
+                    full.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
+                    stored.iter().map(|(seq, _)| *seq).collect::<Vec<_>>()
+                ));
+            }
+            self.tfiles.insert(scope, reopened);
+        }
+        Ok(())
+    }
+
     pub fn append(&mut self, scope: &str, body: String) -> u64 {
         let committed = self.log.keys().next_back().copied().unwrap_or(0);
         let pending = self.appends.last().map_or(0, |(seq, ..)| *seq);
