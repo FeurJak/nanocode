@@ -861,6 +861,7 @@ pub struct ClaudeBuilder {
     stop_at_target: bool,
     tool_result_tokens: Option<std::num::NonZeroU64>,
     tool_result_clearing: Option<(usize, u64)>,
+    clearing_cache_floors: bool,
     spawn_factory: Option<Arc<dyn AgentFactory>>,
     child_journal: Option<nanocode_agent_core::backend::ChildJournal>,
     host_context: Option<Arc<str>>,
@@ -960,6 +961,7 @@ impl ClaudeBuilder {
             stop_at_target: false,
             tool_result_tokens: None,
             tool_result_clearing: None,
+            clearing_cache_floors: false,
             spawn_factory: None,
             child_journal: None,
             host_context: None,
@@ -1456,6 +1458,11 @@ impl ClaudeBuilder {
 
     pub const fn tool_result_clearing(mut self, keep: usize, at_least_tokens: u64) -> Self {
         self.tool_result_clearing = Some((keep, at_least_tokens));
+        self
+    }
+
+    pub const fn clearing_cache_floors(mut self) -> Self {
+        self.clearing_cache_floors = true;
         self
     }
 
@@ -3211,6 +3218,7 @@ struct State {
     stop_at_target: bool,
     tool_result_tokens: Option<std::num::NonZeroU64>,
     tool_result_clearing: Option<(usize, u64)>,
+    clearing_cache_floors: bool,
     working_directory: Option<crate::environment::WorkingDirectory>,
     lifecycle_opened: Atom<Option<String>>,
     subagent_type: Option<String>,
@@ -4946,9 +4954,16 @@ impl State {
                 .parse::<nanocode_agent_core::ClaudeModel>()
                 .is_ok_and(nanocode_agent_core::ClaudeModel::supports_effort_updates)
     }
-    fn cleared(&self, mut messages: Vec<HistoryMessage>) -> Vec<HistoryMessage> {
+    fn cleared(
+        &self,
+        mut messages: Vec<HistoryMessage>,
+    ) -> (Vec<HistoryMessage>, [Option<usize>; 2]) {
+        let mut floors = [None; 2];
         if self.message_thread.is_none() {
-            clearing::clear_tool_results(&mut messages, self.tool_result_clearing);
+            let boundaries = clearing::clear_tool_results(&mut messages, self.tool_result_clearing);
+            if self.clearing_cache_floors {
+                floors = boundaries;
+            }
         }
         if self.omit_custom_model_thinking
             && self
@@ -4958,7 +4973,7 @@ impl State {
         {
             history::strip_thinking(&mut messages);
         }
-        messages
+        (messages, floors)
     }
     fn request_template(&self, speed: Option<crate::Speed>, pin: EffortPin) -> MessagesRequest {
         let effort_updates = self.effort_updates_active();

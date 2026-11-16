@@ -29,7 +29,10 @@ pub(super) fn result_tokens(block: &ContentBlock) -> Option<u64> {
     (chars >= MIN_CLEARABLE_CHARS).then_some(tokens)
 }
 
-pub(super) fn clear_tool_results(messages: &mut [HistoryMessage], policy: Option<(usize, u64)>) {
+pub(super) fn clear_tool_results(
+    messages: &mut [HistoryMessage],
+    policy: Option<(usize, u64)>,
+) -> [Option<usize>; 2] {
     let (keep, at_least_tokens) = policy.unwrap_or((KEEP_TOOL_RESULTS, CLEAR_AT_LEAST_TOKENS));
     let results: Vec<(usize, usize, u64)> = messages
         .iter()
@@ -43,10 +46,12 @@ pub(super) fn clear_tool_results(messages: &mut [HistoryMessage], policy: Option
         })
         .collect();
     let mut cleared = 0;
+    let mut previous = None;
     let mut pending = 0;
     for seen in keep + 1..=results.len() {
         pending += results[seen - keep - 1].2;
         if pending >= at_least_tokens {
+            previous = Some(cleared);
             cleared = seen - keep;
             pending = 0;
         }
@@ -68,6 +73,10 @@ pub(super) fn clear_tool_results(messages: &mut [HistoryMessage], policy: Option
         }
         at = end;
     }
+    [
+        previous.map(|at| results[at].0),
+        results.get(cleared).map(|result| result.0),
+    ]
 }
 
 fn clear(content: &mut [ContentBlock], blocks: &[(usize, usize, u64)]) {

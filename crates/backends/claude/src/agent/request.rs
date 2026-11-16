@@ -100,10 +100,17 @@ pub(super) fn request_response<'a>(
         }
         request.tool_choice = context.force_text.then(|| json!({"type":"none"}));
 
+        let (cleared, floors) =
+            state.cleared(wire_messages(messages, &suffix, request.effort_updates));
         let (mut sent, kept) = images::evict_images(
             request_images(&state.model, state.context_window_tokens),
-            state.cleared(wire_messages(messages, &suffix, request.effort_updates)),
+            cleared,
         );
+        let kept = if kept.iter().any(Option::is_some) {
+            kept
+        } else {
+            floors
+        };
         request
             .cache_floors_with(
                 state.wire_cache.layout(&sent),
@@ -217,11 +224,18 @@ pub(super) fn request_response<'a>(
         if let Some(upgrade) = &upgrade {
             request.tools = upgrade.code_only_tools.clone();
             suffix.push(Message::text(Role::User, &upgrade.notice).into());
+            let (cleared, floors) =
+                state.cleared(wire_messages(messages, &suffix, request.effort_updates));
             let kept;
             (sent, kept) = images::evict_images(
                 request_images(&state.model, state.context_window_tokens),
-                state.cleared(wire_messages(messages, &suffix, request.effort_updates)),
+                cleared,
             );
+            let kept = if kept.iter().any(Option::is_some) {
+                kept
+            } else {
+                floors
+            };
             request
                 .cache_floors_with(
                     state.wire_cache.layout(&sent),
