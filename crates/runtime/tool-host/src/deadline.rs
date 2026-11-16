@@ -307,6 +307,33 @@ pub fn folded_finish_notice_with(checks: FinishChecks) -> String {
     )
 }
 
+pub const FRESH_ATTEMPT_MARK: &str = "[fresh attempt]";
+
+#[must_use]
+pub fn fresh_finish_notice_with(
+    deadline: Option<&Reminders>,
+    brief: bool,
+    checks: FinishChecks,
+) -> String {
+    let time = deadline.map_or_else(String::new, |reminders| format!(" {}", reminders.remain()));
+    let reply = if brief {
+        "reply with one line that says the task is done"
+    } else {
+        "reply with your final message"
+    };
+    let checklist = checks.checklist();
+    format!(
+        "{FINISH_OPEN}{time}{FINISH_CHECK}{checklist}Fix a gap that does not change the result, such as a scratch file or a background process. If the task's own check or a test of the result fails, do not fix it here: reply with one message that starts with {FRESH_ATTEMPT_MARK} and names each check that failed (its command and its error), the approach you used, and each file you changed. A fresh attempt then starts from the files as they are now, with the task and that message. When everything holds, {reply}.\n</system-reminder>"
+    )
+}
+
+#[must_use]
+pub fn fresh_attempt_brief(report: &str) -> String {
+    format!(
+        "<system-reminder>\nAn earlier attempt at this task ran in this environment, and its check failed. Its files and installed packages are still in place. Its report:\n{report}\nStart from the current files. Do not trust the report until you check it, find the cause of the failure, and complete the task.\n</system-reminder>"
+    )
+}
+
 impl FinishChecks {
     fn checklist(self) -> String {
         let score = if self.stop_at_target {

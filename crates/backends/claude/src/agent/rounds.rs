@@ -1369,6 +1369,66 @@ pub(super) fn run_rounds<'a>(
             if cancel.is_cancelled() {
                 return Err(NanocodeError::TurnCancelled);
             }
+            let fresh_attempt_left = state
+                .finish_retries
+                .is_some_and(|retries| cursor.fresh_attempts < retries.get());
+            if state.headless
+                && cursor.finish_checked
+                && fresh_attempt_left
+                && state.lineage.root_session_id == state.session_id
+                && let Some(report) = text
+                    .trim_start()
+                    .strip_prefix(nanocode_tool_host::deadline::FRESH_ATTEMPT_MARK)
+            {
+                let notice = nanocode_tool_host::deadline::fresh_attempt_brief(report.trim());
+                state.emit(
+                    &request.events,
+                    AgentEventKind::ContextNotice,
+                    json!({
+                        "after_model_call_index": index.saturating_add(1),
+                        "role": Role::User,
+                        "text": &notice,
+                    }),
+                );
+                let mut brief = prompt_messages(&request.prompt)?;
+                if let Some(message) = brief.last_mut() {
+                    if let Some(status) = crate::environment::git_status(state.workspace()).await {
+                        message.content.insert(0, ContentBlock::text(status));
+                    }
+                    message.content.push(ContentBlock::text(notice));
+                }
+                conversation.compacted.extend(
+                    std::mem::take(&mut pending)
+                        .into_iter()
+                        .filter(|message| !summary_message(message)),
+                );
+                pending.extend(brief.into_iter().map(HistoryMessage::from));
+                pending.extend(state.tool_changes(&pending));
+                if cursor.tool_search {
+                    let references = client_discovered_tools(&pending);
+                    state.discovered.update(|discovered| {
+                        discovered.retain(|name| references.contains(name.as_str()));
+                    });
+                }
+                conversation.messages = pending.clone();
+                conversation.summary.clear();
+                conversation.previous_message_id = None;
+                previous_message_id = None;
+                conversation.active_context_tokens = estimate_text_tokens(
+                    &json!({"system": cursor.template.system, "tools": state.available_tools(), "messages": pending})
+                        .to_string(),
+                );
+                cursor.fresh_attempts = cursor.fresh_attempts.saturating_add(1);
+                cursor.finish_checked = false;
+                cursor.output_continuations = 0;
+                cursor.index = index + 1;
+                state.retain_pending(&mut cursor, &pending);
+                cursor.usage = usage.clone();
+                state
+                    .defer_cursor(&mut cursor, conversation, journal)
+                    .await?;
+                continue;
+            }
             if state.headless
                 && !cursor.finish_checked
                 && state.lineage.root_session_id == state.session_id
@@ -1412,11 +1472,19 @@ pub(super) fn run_rounds<'a>(
                         .is_none_or(|min| index.saturating_add(1) >= min.get())
                 {
                     cursor.finish_checked = true;
-                    let notice = nanocode_tool_host::deadline::finish_notice_with(
-                        state.deadline.as_ref(),
-                        state.brief_finish,
-                        state.finish_checks(),
-                    );
+                    let notice = if fresh_attempt_left {
+                        nanocode_tool_host::deadline::fresh_finish_notice_with(
+                            state.deadline.as_ref(),
+                            state.brief_finish,
+                            state.finish_checks(),
+                        )
+                    } else {
+                        nanocode_tool_host::deadline::finish_notice_with(
+                            state.deadline.as_ref(),
+                            state.brief_finish,
+                            state.finish_checks(),
+                        )
+                    };
                     state.emit(
                         &request.events,
                         AgentEventKind::ContextNotice,

@@ -511,6 +511,7 @@ pub(super) fn build(mut builder: ClaudeBuilder) -> Result<(Agent, AgentEvents)> 
         skip_finish_check: builder.skip_finish_check,
         late_finish_check: builder.late_finish_check,
         finish_check_min_requests: builder.finish_check_min_requests,
+        finish_retries: builder.finish_retries,
         result_effort: builder.result_effort,
         stop_at_target: builder.stop_at_target,
         tool_result_tokens: builder.tool_result_tokens,
