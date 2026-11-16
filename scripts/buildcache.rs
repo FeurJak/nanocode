@@ -4,7 +4,7 @@ use std::{
     env,
     ffi::{OsStr, OsString},
     fs,
-    io::{self, Read, Write},
+    io::{self, BufRead, Read, Write},
     net::TcpStream,
     os::unix::{
         ffi::{OsStrExt, OsStringExt},
@@ -52,7 +52,7 @@ fn main() -> ExitCode {
         start_pending(&root.join("remote"), &scripts);
     }
     if tool == "fetch-pending" {
-        return fetch_pending(&cache, Path::new(args.get(1).map_or(OsStr::new(""), OsString::as_os_str)));
+        return fetch_pending(&cache, Path::new(args.get(1).map_or(OsStr::new(""), OsString::as_os_str)), args.get(2).map(Path::new));
     }
     if is_rustc(tool) {
         rust(&cache, &scripts, args, environment, 1)
@@ -188,6 +188,7 @@ fn rust(cache: &Path, scripts: &Path, mut args: Vec<OsString>, mut environment: 
         args.insert(0, scripts.join("rustc-parallel-frontend").into_os_string());
         compiler = 2;
     }
+    let suffix = suffix.or_else(|| out_dir.as_ref().filter(|dir| is_build_out(dir.as_os_str().as_bytes())).map(|_| Vec::new()));
     let (Some(out_dir), Some(suffix), Some(kind), true) = (out_dir, suffix, kind, eligible) else {
         return exec(&args, &environment);
     };
@@ -550,7 +551,7 @@ fn outputs(out_dir: &Path, suffix: &[u8]) -> Vec<PathBuf> {
         .filter(|entry| {
             let name = entry.file_name();
             let name = name.as_bytes();
-            name.windows(suffix.len()).any(|window| window == suffix)
+            (suffix.is_empty() || name.windows(suffix.len()).any(|window| window == suffix))
                 && !name.windows(MEMO.len()).any(|window| window == MEMO.as_bytes())
                 && entry.file_type().is_ok_and(|kind| kind.is_file())
         })
@@ -1217,25 +1218,99 @@ fn start_pending(directory: &Path, scripts: &Path) {
     }
 }
 
-fn fetch_pending(cache: &Path, list: &Path) -> ExitCode {
+fn fetch_pending(cache: &Path, list: &Path, bundle: Option<&Path>) -> ExitCode {
     let names = fs::read(list).unwrap_or_default();
     let _ = fs::remove_file(list);
     let Some(template) = cache.parent().and_then(|root| fs::read(root.join("remote/url")).ok()) else {
         return ExitCode::from(1);
     };
     let template = template.trim_ascii();
+    let pending: Vec<(&str, &str)> = names
+        .split(|byte| *byte == b'\n')
+        .filter_map(|name| {
+            let at = name.iter().position(|byte| *byte == b'-')?;
+            Some((std::str::from_utf8(&name[..at]).ok()?, std::str::from_utf8(&name[at + 1..]).ok()?))
+        })
+        .collect();
+    let mut following = bundle.and_then(|bundle| {
+        Some(io::BufReader::new(Following { packs: fs::File::open(bundle.join("packs")).ok()?, done: Some(bundle.join("done")) }))
+    });
+    if let Some(following) = following.as_mut() {
+        bundled(cache, &pending, following);
+    }
     std::thread::scope(|scope| {
-        for name in names.split(|byte| *byte == b'\n') {
-            let Some(at) = name.iter().position(|byte| *byte == b'-') else {
+        for (directory, key) in pending {
+            if pack_path(cache, directory, key).is_some_and(|path| path.exists()) {
                 continue;
-            };
-            let (Ok(directory), Ok(key)) = (std::str::from_utf8(&name[..at]), std::str::from_utf8(&name[at + 1..])) else {
-                continue;
-            };
+            }
             scope.spawn(move || eager_pack(cache, directory, key, &url_of(template, directory, key)));
         }
     });
+    if let Some(done) = following.and_then(|following| following.into_inner().done) {
+        let _ = fs::File::open(done);
+    }
+    if let Some(bundle) = bundle {
+        let _ = fs::remove_dir_all(bundle);
+    }
     ExitCode::SUCCESS
+}
+
+struct Following {
+    packs: fs::File,
+    done: Option<PathBuf>,
+}
+
+impl Read for Following {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        loop {
+            let read = self.packs.read(buffer)?;
+            if read > 0 || buffer.is_empty() {
+                return Ok(read);
+            }
+            let Some(done) = self.done.take() else {
+                return Ok(0);
+            };
+            fs::File::open(done)?;
+        }
+    }
+}
+
+fn bundled(cache: &Path, pending: &[(&str, &str)], bundle: &mut io::BufReader<Following>) {
+    let mut held: Vec<(Vec<u8>, PathBuf, fs::File)> = pending
+        .iter()
+        .filter_map(|(directory, key)| {
+            let path = pack_path(cache, directory, key).filter(|path| path.parent().is_some_and(Path::is_dir))?;
+            let mut name = path.clone().into_os_string();
+            name.push(".lock");
+            let lock = fs::OpenOptions::new().create(true).truncate(false).write(true).open(&name).ok()?;
+            lock.try_lock().ok()?;
+            (!path.exists()).then(|| (format!("{directory}-{key}").into_bytes(), path, lock))
+        })
+        .collect();
+    while !held.is_empty() {
+        let (mut name, mut size) = (Vec::new(), Vec::new());
+        if bundle.read_until(b'\n', &mut name).unwrap_or(0) == 0 || bundle.read_until(b'\n', &mut size).unwrap_or(0) == 0 {
+            return;
+        }
+        let Some(size) = std::str::from_utf8(size.trim_ascii()).ok().and_then(|size| size.parse::<u64>().ok()) else {
+            return;
+        };
+        let mut entry = (&mut *bundle).take(size);
+        let Some(at) = held.iter().position(|(held, ..)| held.as_slice() == name.trim_ascii()) else {
+            if io::copy(&mut entry, &mut io::sink()).ok() != Some(size) {
+                return;
+            }
+            continue;
+        };
+        let (_, path, _lock) = held.swap_remove(at);
+        let mut staging = path.clone().into_os_string();
+        staging.push(format!(".{}.{}", std::process::id(), unique()));
+        let written = fs::File::create(&staging).and_then(|mut file| io::copy(&mut entry, &mut file));
+        if written.ok() != Some(size) || fs::rename(&staging, &path).is_err() {
+            let _ = fs::remove_file(&staging);
+            return;
+        }
+    }
 }
 
 fn fetch(cache: &Path, remote: &OsStr, kind: Kind, key: &str, entry: &Path) -> io::Result<()> {
@@ -1699,6 +1774,7 @@ fn unpack(mut packed: &[u8], staging: &Path) -> io::Result<()> {
 fn publish(cache: &Path, to: &Path) -> io::Result<()> {
     let mut index = Vec::new();
     let mut eager = b"workspace-index\n".to_vec();
+    let mut bundle: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     for directory in ["units", "workspace"] {
         let Ok(entries) = fs::read_dir(cache.join(directory)) else {
             continue;
@@ -1742,6 +1818,7 @@ fn publish(cache: &Path, to: &Path) -> io::Result<()> {
                 eager.extend_from_slice(format!("{directory}-").as_bytes());
                 eager.extend_from_slice(name.as_bytes());
                 eager.push(b'\n');
+                bundle.push((format!("{directory}-{}\n{}\n", name.to_string_lossy(), packed.len()).into_bytes(), packed.clone()));
             }
             index.extend_from_slice(format!("{directory}/").as_bytes());
             index.extend_from_slice(name.as_bytes());
@@ -1760,6 +1837,21 @@ fn publish(cache: &Path, to: &Path) -> io::Result<()> {
     staging.push(format!(".{}", std::process::id()));
     fs::write(&staging, compressed(index))?;
     fs::rename(&staging, &destination)?;
+    bundle.sort_by_key(|(_, packed)| packed.len());
+    let bundle: Vec<u8> = bundle.into_iter().flat_map(|(header, packed)| header.into_iter().chain(packed)).collect();
+    let destination = to.join("workspace/eager-packs");
+    let dictionary = format!("--lzma2=dict={}", bundle.len());
+    match filter(Command::new("xz").args(["-q", "-c", &dictionary]), &bundle) {
+        Ok(packed) => {
+            let mut staging = destination.clone().into_os_string();
+            staging.push(format!(".{}", std::process::id()));
+            fs::write(&staging, packed)?;
+            fs::rename(&staging, &destination)?;
+        }
+        Err(_) => {
+            let _ = fs::remove_file(&destination);
+        }
+    }
     if let Some(helper) = publish_helper(to)? {
         eager.extend_from_slice(format!("workspace-{helper}\n").as_bytes());
     }

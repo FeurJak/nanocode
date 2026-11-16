@@ -7,13 +7,21 @@ rm -rf "$dir.next"
 mkdir -p "$dir.next/units" "$dir.next/workspace"
 base=$(printf %s "$release" | sed -n 's,^https://api.github.com/repos/\([^/]*/[^/]*\)/releases/tags/\([^/]*\)$,https://github.com/\1/releases/download/\2,p')
 helper=helper-$(cksum < "${0%/*}/buildcache.rs" | cut -d' ' -f1)-$(uname -sm | tr ' ' -)
+bundle=
+rm -rf "$dir.bundle"
+if [ -n "$base" ] && command -v xz > /dev/null && mkdir "$dir.bundle" && mkfifo "$dir.bundle/done"; then
+  { curl -sfL "$base/workspace-eager-packs" | xz -dcq > "$dir.bundle/packs"; : > "$dir.bundle/done"; } < /dev/null > /dev/null 2>&1 &
+  bundle=$!
+  trap 'if [ -n "$bundle" ]; then kill "$bundle" 2> /dev/null; rm -rf "$dir.bundle"; fi' EXIT
+fi
+prebuilt=
 if [ -n "$base" ]; then
   curl -sfL -Z -o "$dir.next/eager" "$base/workspace-eager" -o "$dir.next/index" "$base/workspace-index" -o "$dir.next/helper" "$base/workspace-$helper" || true
 fi
 if [ -s "$dir.next/eager" ] && [ -s "$dir.next/index" ]; then
   echo "$base/{dir}-{key}" > "$dir.next/url"
   name=$(grep "^workspace-$helper-[0-9a-f]*$" "$dir.next/eager" || true)
-  [ -s "$dir.next/helper" ] && [ -n "$name" ] && mv "$dir.next/helper" "$dir.next/workspace/${name#workspace-}"
+  [ -s "$dir.next/helper" ] && [ -n "$name" ] && mv "$dir.next/helper" "$dir.next/workspace/${name#workspace-}" && prebuilt=$dir/workspace/${name#workspace-}
   gzip -dc < "$dir.next/index" > "$dir.next/workspace/index" 2> /dev/null || zstd -dcq < "$dir.next/index" > "$dir.next/workspace/index"
   grep -E '^(units|workspace)-[0-9a-f]{64}$' "$dir.next/eager" > "$dir.next/pending" || rm -f "$dir.next/pending"
 else
@@ -26,4 +34,8 @@ fi
 rm -f "$dir.next/config" "$dir.next/eager" "$dir.next/index" "$dir.next/helper"
 rm -rf "$dir"
 mv "$dir.next" "$dir"
+if [ -n "$bundle" ] && [ -n "$prebuilt" ] && [ -f "$dir/pending" ] && chmod 755 "$prebuilt" && mv "$dir/pending" "$dir/pending.$$"; then
+  "$prebuilt" "${0%/*}" fetch-pending "$dir/pending.$$" "$dir.bundle" < /dev/null > /dev/null 2>&1 &
+  bundle=
+fi
 echo "file://$dir/{dir}/{key}"
