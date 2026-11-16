@@ -1,5 +1,5 @@
 use std::{
-    cell::OnceCell,
+    cell::{Cell, OnceCell},
     ffi::{CStr, c_char, c_int, c_void},
     ptr::null_mut,
 };
@@ -205,4 +205,13 @@ pub extern "C" fn fwrite(
 #[unsafe(no_mangle)]
 pub extern "C" fn ferror(_file: *mut c_void) -> c_int {
     1
+}
+
+thread_local! {
+    static ERRNO: Cell<c_int> = const { Cell::new(0) };
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn __errno_location() -> *mut c_int {
+    ERRNO.with(Cell::as_ptr)
 }
