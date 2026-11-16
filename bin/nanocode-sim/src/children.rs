@@ -46,6 +46,7 @@ pub enum ChildMutation {
     AcksEarly,
     AdoptsTurn,
     ForgetsNotice,
+    ForgetsSpawns,
     RegionKeepsStale,
     RegionSkipsClear,
     RespawnsFresh,
@@ -58,6 +59,7 @@ impl ChildMutation {
             "child-acks-early" => Some(Self::AcksEarly),
             "child-adopts-turn" => Some(Self::AdoptsTurn),
             "child-forgets-notice" => Some(Self::ForgetsNotice),
+            "coordinator-forgets-spawns" => Some(Self::ForgetsSpawns),
             "region-keeps-stale" => Some(Self::RegionKeepsStale),
             "region-skips-clear" => Some(Self::RegionSkipsClear),
             "child-respawns-fresh" => Some(Self::RespawnsFresh),
@@ -72,6 +74,7 @@ impl ChildMutation {
             Self::AcksEarly => "child-acks-early",
             Self::AdoptsTurn => "child-adopts-turn",
             Self::ForgetsNotice => "child-forgets-notice",
+            Self::ForgetsSpawns => "coordinator-forgets-spawns",
             Self::RegionKeepsStale => "region-keeps-stale",
             Self::RegionSkipsClear => "region-skips-clear",
             Self::RespawnsFresh => "child-respawns-fresh",
@@ -80,7 +83,7 @@ impl ChildMutation {
     }
 
     pub const NAMES: &'static str =
-        "child-acks-early|child-adopts-turn|child-forgets-notice|child-respawns-fresh|child-settles-lazily|region-keeps-stale|region-skips-clear";
+        "child-acks-early|child-adopts-turn|child-forgets-notice|child-respawns-fresh|child-settles-lazily|coordinator-forgets-spawns|region-keeps-stale|region-skips-clear";
 }
 
 #[derive(Clone, Debug)]
@@ -646,7 +649,20 @@ impl SimChildren {
                 self.notify(&session);
                 continue;
             };
-            if recovering {
+            if recovering
+                && self.mutation == ChildMutation::ForgetsSpawns
+                && matches!(step, Step::Spawn(_))
+            {
+                self.perform(
+                    &session,
+                    &format!("{label}.forgotten"),
+                    &request,
+                    revision,
+                    index,
+                    step,
+                )
+                .await;
+            } else if recovering {
                 self.world.trace(&format!(
                     "child {label} step {index} outcome unknown after a crash"
                 ));
@@ -865,8 +881,13 @@ impl SimChildren {
                                 .notices
                                 .iter()
                                 .any(|notice| matches!(notice.outcome, Outcome::Completed(_)));
-                            format!(
-                                "remote_child_respawned: {label} ran as remote child {previous} (completed={completed}) and runs again as {session}"
+                            label.rsplit_once(".c").map_or_else(
+                                || format!(
+                                    "remote_child_respawned: {label} ran as remote child {previous} (completed={completed}) and runs again as {session}"
+                                ),
+                                |(coordinator, _)| format!(
+                                    "coordinator_leaf_rerun: {label} of coordinator {coordinator} ran as remote child {previous} (completed={completed}) and runs again as {session}"
+                                ),
                             )
                         })
                     })
