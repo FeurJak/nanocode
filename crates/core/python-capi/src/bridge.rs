@@ -118,6 +118,7 @@ static_types! {
     PyFrozenSet_Type = c"frozenset", Object, TPFLAGS_BASETYPE, frozenset_type;
     PySlice_Type = c"slice", SliceObject, 0, slice_type;
     PyRange_Type = c"range", Object, 0, range_type;
+    PyTraceBack_Type = c"traceback", Object, 0, traceback_type;
     PyModule_Type = c"module", Object, TPFLAGS_BASETYPE, module_type;
     PyProperty_Type = c"property", Object, TPFLAGS_BASETYPE, property_type;
     PyCapsule_Type = c"PyCapsule", Object, 0, capsule_type;

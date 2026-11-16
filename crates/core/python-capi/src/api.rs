@@ -463,6 +463,11 @@ pub extern "C" fn PyObject_SetAttr(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn PyObject_DelAttr(pointer: *mut Object, attribute: *mut Object) -> c_int {
+    PyObject_SetAttr(pointer, attribute, null_mut())
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn PyObject_GenericSetAttr(
     pointer: *mut Object,
     attribute: *mut Object,
@@ -1783,6 +1788,41 @@ pub extern "C" fn PyList_Sort(pointer: *mut Object) -> c_int {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn PyList_SetSlice(
+    pointer: *mut Object,
+    low: isize,
+    high: isize,
+    items: *mut Object,
+) -> c_int {
+    list_method(pointer, |vm, list| {
+        let length = unsafe { (*pointer.cast::<List>()).base.size };
+        let low = low.clamp(0, length);
+        let high = high.clamp(low, length);
+        let slice = vm.ctx.types.slice_type.as_object().call((low, high), vm)?;
+        if items.is_null() {
+            vm.call_method(list, "__delitem__", (slice,)).map(drop)
+        } else {
+            vm.call_method(list, "__setitem__", (slice, arg(vm, items)?))
+                .map(drop)
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _Py_FatalErrorFunc(function: *const c_char, message: *const c_char) -> ! {
+    let text = |pointer: *const c_char| {
+        if pointer.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(pointer) }
+                .to_string_lossy()
+                .into_owned()
+        }
+    };
+    panic!("Fatal Python error: {}: {}", text(function), text(message))
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn PyList_AsTuple(pointer: *mut Object) -> *mut Object {
     object(|vm| {
         list_pointer(vm, pointer)?;
@@ -2650,6 +2690,10 @@ binary_numbers! {
     PyNumber_InPlaceAdd => _iadd,
     PyNumber_InPlaceSubtract => _isub,
     PyNumber_InPlaceMultiply => _imul,
+    PyNumber_MatrixMultiply => _matmul,
+    PyNumber_InPlaceTrueDivide => _itruediv,
+    PyNumber_InPlaceFloorDivide => _ifloordiv,
+    PyNumber_InPlaceRshift => _irshift,
     PyUnicode_Format => _mod,
 }
 
