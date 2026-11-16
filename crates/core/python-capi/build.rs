@@ -2,6 +2,7 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Command,
+    thread,
 };
 
 fn sorted(dir: &Path, keep: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
@@ -240,6 +241,11 @@ fn main() {
     let mut arities = String::new();
     let mut tables = String::new();
     println!("cargo:rerun-if-changed=c");
+    let jobs: usize = env::var("NUM_JOBS")
+        .ok()
+        .and_then(|jobs| jobs.parse().ok())
+        .unwrap_or(1)
+        .max(1);
     let compile = |source: &Path, object: &Path, defines: &[String]| {
         let mut command = Command::new(&compiler);
         if target != host {
@@ -289,46 +295,84 @@ fn main() {
             .to_owned();
         let symbol = format!("PyInit_{}", name.replace('.', "_"));
         let last = name.rsplit('.').next().unwrap_or(&name);
-        for source in sorted(&dir, |path| {
-            path.extension().is_some_and(|extension| extension == "c")
-        }) {
-            let mut defines = vec![
-                format!("-DPyInit_{last}={symbol}"),
-                format!("-I{}", dir.display()),
-            ];
+        let mut defines = vec![
+            format!("-DPyInit_{last}={symbol}"),
+            format!("-I{}", dir.display()),
+        ];
+        defines.extend(
+            sorted(&dir, |path| path.is_dir())
+                .iter()
+                .map(|include| format!("-I{}", include.display())),
+        );
+        if let Ok(macros) = fs::read_to_string(dir.join("defines")) {
             defines.extend(
-                sorted(&dir, |path| path.is_dir())
-                    .iter()
-                    .map(|include| format!("-I{}", include.display())),
+                macros
+                    .lines()
+                    .filter(|line| !line.is_empty())
+                    .map(|line| format!("-D{line}")),
             );
-            if let Ok(macros) = fs::read_to_string(dir.join("defines")) {
-                defines.extend(
-                    macros
-                        .lines()
-                        .filter(|line| !line.is_empty())
-                        .map(|line| format!("-D{line}")),
-                );
-            }
-            let object = out.join(format!("{}.o", objects.len()));
-            compile(&source, &object, &defines);
+        }
+        let sources = match fs::read_to_string(dir.join("sources")) {
+            Ok(list) => list
+                .lines()
+                .filter(|line| !line.is_empty())
+                .map(|line| dir.join(line))
+                .collect(),
+            Err(_) => sorted(&dir, |path| {
+                path.extension().is_some_and(|extension| extension == "c")
+            }),
+        };
+        let first = objects.len();
+        let mut built: Vec<(usize, PathBuf)> = thread::scope(|scope| {
+            let workers: Vec<_> = (0..jobs.min(sources.len()))
+                .map(|worker| {
+                    let (sources, defines, compile, out) = (&sources, &defines, &compile, &out);
+                    scope.spawn(move || {
+                        let mut done = Vec::new();
+                        for (offset, source) in
+                            sources.iter().enumerate().skip(worker).step_by(jobs)
+                        {
+                            let index = first + offset;
+                            let object = out.join(format!("{index}.o"));
+                            compile(source, &object, defines);
+                            if wasm {
+                                let functions = address_taken(&object);
+                                let mut wrapper = format!(
+                                    "#include {:?}\n__attribute__((used)) const void *const nanocode_arity_{index}[] = {{\n",
+                                    source.display().to_string()
+                                );
+                                for (function, params) in &functions {
+                                    wrapper.push_str(&format!(
+                                        "    (const void *){function}, (const void *){params},\n"
+                                    ));
+                                }
+                                wrapper.push_str("    0, 0\n};\n");
+                                let extension = source
+                                    .extension()
+                                    .and_then(|extension| extension.to_str())
+                                    .unwrap_or("c");
+                                let path = out.join(format!("{index}.{extension}"));
+                                fs::write(&path, wrapper).expect("the arity wrapper");
+                                compile(&path, &object, defines);
+                            }
+                            done.push((index, object));
+                        }
+                        done
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|worker| worker.join().expect("a compile worker"))
+                .collect()
+        });
+        built.sort_by_key(|(index, _)| *index);
+        for (index, object) in built {
             if wasm {
-                let functions = address_taken(&object);
-                let table = format!("nanocode_arity_{}", objects.len());
-                let mut wrapper = format!(
-                    "#include {:?}\n__attribute__((used)) const void *const {table}[] = {{\n",
-                    source.display().to_string()
-                );
-                for (function, params) in &functions {
-                    wrapper.push_str(&format!(
-                        "    (const void *){function}, (const void *){params},\n"
-                    ));
-                }
-                wrapper.push_str("    0, 0\n};\n");
-                let path = out.join(format!("{}.c", objects.len()));
-                fs::write(&path, wrapper).expect("the arity wrapper");
-                compile(&path, &object, &defines);
-                arities.push_str(&format!("    static {table}: [usize; 0];\n"));
-                tables.push_str(&format!("        &raw const {table} as *const usize,\n"));
+                arities.push_str(&format!("    static nanocode_arity_{index}: [usize; 0];\n"));
+                tables.push_str(&format!(
+                    "        &raw const nanocode_arity_{index} as *const usize,\n"
+                ));
             }
             objects.push(object);
         }
