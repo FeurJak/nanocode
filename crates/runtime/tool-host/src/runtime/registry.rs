@@ -937,6 +937,12 @@ impl nanocode_code_mode::CodeModeToolset for ToolRegistry {
         })
     }
 
+    fn returns_within(&self, name: &str, input: &Value) -> Option<std::time::Duration> {
+        self.policies
+            .iter()
+            .find_map(|policy| policy.returns_within(name, input))
+    }
+
     fn session_notice<'a>(&'a self, session_id: &'a str) -> crate::embedded::HostFuture<'a, ()> {
         let waits: Vec<_> = self
             .policies

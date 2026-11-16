@@ -59,6 +59,10 @@ pub trait CodeModeToolset: Send + Sync {
         Box::pin(std::future::ready(None))
     }
 
+    fn returns_within(&self, _name: &str, _input: &Value) -> Option<std::time::Duration> {
+        None
+    }
+
     fn session_notice<'a>(&'a self, _session_id: &'a str) -> HostFuture<'a, ()> {
         Box::pin(std::future::pending())
     }

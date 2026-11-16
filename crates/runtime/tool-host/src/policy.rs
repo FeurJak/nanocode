@@ -81,4 +81,12 @@ pub trait CodeModeToolPolicy: Send + Sync {
     ) -> crate::embedded::HostFuture<'a, Option<String>> {
         Box::pin(std::future::ready(None))
     }
+
+    fn returns_within(
+        &self,
+        _name: &str,
+        _input: &serde_json::Value,
+    ) -> Option<std::time::Duration> {
+        None
+    }
 }

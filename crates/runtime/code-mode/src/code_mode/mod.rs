@@ -880,7 +880,7 @@ impl CodeModeRuntime {
             &cell,
             observation,
             started_at,
-            ObservationMode::YieldAfter(yield_after, yield_after, preempt),
+            ObservationMode::YieldAfter(yield_after, yield_after, preempt, YieldChoice::Named),
             record.max_output_tokens,
             Some(call_id),
             observer,
@@ -1069,6 +1069,10 @@ impl CodeModeRuntime {
         };
         drop(admission);
         let observation = Arc::clone(&cell.observation).acquire_owned().await;
+        let choice = match source.yield_time_ms {
+            Some(_) => YieldChoice::Named,
+            None => YieldChoice::Default,
+        };
         let yield_after = source
             .yield_time_ms
             .map_or(self.yields.exec, Duration::from_millis);
@@ -1077,7 +1081,7 @@ impl CodeModeRuntime {
             &cell,
             observation,
             started_at,
-            ObservationMode::Started(yield_after, preempt),
+            ObservationMode::Started(yield_after, preempt, choice),
             Some(output_token_budget),
             Some(&cell.origin_call_id),
             observer,
@@ -1157,9 +1161,11 @@ impl CodeModeRuntime {
         let span = nanocode_trace::Span::current();
         span.record("cell.id", cell_id);
         span.record("wait.terminate", arguments.terminate);
-        let yield_time_ms = arguments
-            .yield_time_ms
-            .unwrap_or(millis(self.yields.wait));
+        let choice = match arguments.yield_time_ms {
+            Some(_) => YieldChoice::Named,
+            None => YieldChoice::Default,
+        };
+        let yield_time_ms = arguments.yield_time_ms.unwrap_or(millis(self.yields.wait));
         span.record("wait.yield_time_ms", yield_time_ms);
         let Some(cell) = self
             .cells
@@ -1223,7 +1229,7 @@ impl CodeModeRuntime {
             &cell,
             observation,
             started_at,
-            ObservationMode::YieldAfter(yield_time, quiet_until, Some(preempt)),
+            ObservationMode::YieldAfter(yield_time, quiet_until, Some(preempt), choice),
             output_token_budget,
             Some(call_id),
             observer,
@@ -1751,9 +1757,15 @@ impl Preemption {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum YieldChoice {
+    Named,
+    Default,
+}
+
 enum ObservationMode {
-    Started(Duration, Preemption),
-    YieldAfter(Duration, Duration, Option<Preemption>),
+    Started(Duration, Preemption, YieldChoice),
+    YieldAfter(Duration, Duration, Option<Preemption>, YieldChoice),
     Terminate,
 }
 
@@ -1868,15 +1880,22 @@ async fn observe_updates(
     observer: &mut dyn CodeModeObserver,
 ) -> (CodeModeExecution, bool) {
     let tools = cell.tools.as_ref();
-    let (yield_after, quiet_until, terminating, mut preempt, started) = match mode {
-        ObservationMode::Started(yield_after, preempt) => {
-            (Some(yield_after), None, false, Some(preempt), true)
+    let (yield_after, quiet_until, terminating, mut preempt, started, choice) = match mode {
+        ObservationMode::Started(yield_after, preempt, choice) => {
+            (Some(yield_after), None, false, Some(preempt), true, choice)
         }
-        ObservationMode::YieldAfter(yield_after, quiet_until, preempt) => {
-            (Some(yield_after), Some(quiet_until), false, preempt, false)
-        }
-        ObservationMode::Terminate => (None, None, true, None, false),
+        ObservationMode::YieldAfter(yield_after, quiet_until, preempt, choice) => (
+            Some(yield_after),
+            Some(quiet_until),
+            false,
+            preempt,
+            false,
+            choice,
+        ),
+        ObservationMode::Terminate => (None, None, true, None, false, YieldChoice::Named),
     };
+    let mut awaits_commands = choice == YieldChoice::Default;
+    let mut awaited = Vec::new();
     let mut notice = (!terminating).then(|| tools.session_notice(&cell.session_id));
     let mut preempt_remaining = None;
     if started
@@ -1910,10 +1929,38 @@ async fn observe_updates(
     let mut stream_open = false;
     let mut stream_timer = Box::pin(nanocode_platform::sleep(STREAM_OUTPUT_AFTER));
     loop {
+        if !awaited.is_empty()
+            && !observation
+                .running
+                .iter()
+                .any(|call| awaited.contains(&call.call_id))
+            && let Some(after) = yield_after
+        {
+            awaited.clear();
+            yield_deadline = nanocode_platform::now().checked_add(after);
+            yield_timer = Some(Box::pin(nanocode_platform::sleep(after)));
+            yield_fired = false;
+        }
         let mut yield_deadline_elapsed = !replaying
             && (yield_fired
                 || yield_deadline
                     .is_some_and(|yield_deadline| yield_deadline <= nanocode_platform::now()));
+        if yield_deadline_elapsed
+            && preempt_remaining.is_none()
+            && std::mem::take(&mut awaits_commands)
+            && let Some(until) = commands_return_by(tools, &observation.running)
+            && let Some(remaining) = until.checked_duration_since(nanocode_platform::now())
+        {
+            awaited = observation
+                .running
+                .iter()
+                .map(|call| call.call_id.clone())
+                .collect();
+            yield_deadline = Some(until);
+            yield_timer = Some(Box::pin(nanocode_platform::sleep(remaining)));
+            yield_fired = false;
+            yield_deadline_elapsed = false;
+        }
         if yield_deadline_elapsed
             && preempt_remaining.is_none()
             && nothing_to_report(observation)
@@ -2355,6 +2402,18 @@ fn abandoned_calls(observation: &mut CellObservationState, when: &str, advice: &
     format!(
         "\n\nNested calls that had not returned when {when} were abandoned: {names}. Whether each took effect is unknown. {advice}"
     )
+}
+
+fn commands_return_by(tools: &dyn CodeModeToolset, running: &[RunningCall]) -> Option<Instant> {
+    running
+        .iter()
+        .try_fold(None, |latest: Option<Instant>, call| {
+            let until = call
+                .started
+                .checked_add(tools.returns_within(&call.name, &call.input)?)?;
+            Some(Some(latest.map_or(until, |latest| latest.max(until))))
+        })
+        .flatten()
 }
 
 fn nothing_to_report(observation: &CellObservationState) -> bool {
