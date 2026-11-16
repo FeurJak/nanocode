@@ -95,6 +95,7 @@ macro_rules! static_types {
         fn register_types(vm: &VirtualMachine) {
             $(
                 register_type($name.get(), vm.ctx.types.$field);
+                forward_slots($name.get(), vm.ctx.types.$field, vm);
             )*
         }
     };
@@ -130,6 +131,9 @@ static_types! {
     _PyNone_Type = c"NoneType", Object, 0, none_type;
     PyEllipsis_Type = c"ellipsis", Object, 0, ellipsis_type;
     _PyNotImplemented_Type = c"NotImplementedType", Object, 0, not_implemented_type;
+    PyDictProxy_Type = c"mappingproxy", Object, 0, mappingproxy_type;
+    PyGetSetDescr_Type = c"getset_descriptor", Object, 0, getset_type;
+    PyMemberDescr_Type = c"member_descriptor", Object, 0, member_descriptor_type;
 }
 
 #[unsafe(no_mangle)]
@@ -263,6 +267,37 @@ thread_local! {
     static C_TYPES: RefCell<crate::address::AddressMap<usize>> = const { RefCell::new(crate::address::map()) };
     static PROXY_TYPES: RefCell<crate::address::AddressSet> = const { RefCell::new(crate::address::set()) };
     static QUEUE: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    static PARKED: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    static PARKED_SCAN: Cell<usize> = const { Cell::new(1) };
+}
+
+fn forward_slots(pointer: *mut Type, class: &Py<PyType>, vm: &VirtualMachine) {
+    let has = |name: &'static str| class.get_attr(vm.ctx.intern_str(name)).is_some();
+    unsafe {
+        if (*pointer).iter.is_none() && has("__iter__") {
+            (*pointer).iter = Some(crate::extra::forward_iter);
+        }
+        if (*pointer).iternext.is_none() && has("__next__") {
+            (*pointer).iternext = Some(crate::extra::forward_iternext);
+        }
+    }
+    let types = &vm.ctx.types;
+    let new: Constructor = [
+        (types.str_type, Some(crate::extra::new_str as _)),
+        (types.bytes_type, Some(crate::extra::new_bytes as _)),
+        (types.float_type, Some(crate::extra::new_float as _)),
+        (types.int_type, Some(crate::extra::new_int as _)),
+        (types.complex_type, Some(crate::extra::new_complex as _)),
+        (types.tuple_type, Some(crate::extra::new_tuple as _)),
+    ]
+    .into_iter()
+    .find_map(|(builtin, new)| class.is(builtin).then_some(new))
+    .flatten();
+    unsafe {
+        if (*pointer).new.is_none() {
+            (*pointer).new = new;
+        }
+    }
 }
 
 fn register_type(pointer: *mut Type, class: &'static Py<PyType>) {
@@ -339,12 +374,8 @@ fn ready(vm: &VirtualMachine) {
                     return Ok(vm.ctx.new_int(size).into());
                 }
             }
-            vm.call_get_descriptor_specific(
-                &original,
-                Some(&class),
-                Some(type_type.as_object()),
-            )
-            .unwrap_or_else(|| Ok(original.clone()))
+            vm.call_get_descriptor_specific(&original, Some(&class), Some(type_type.as_object()))
+                .unwrap_or_else(|| Ok(original.clone()))
         });
         if let Ok(property) = vm
             .ctx
@@ -546,11 +577,26 @@ fn instance(vm: &VirtualMachine, pointer: *mut Object) -> PyResult<PyObjectRef> 
         return Ok(strong(header.link.get()));
     }
     let class = crate::types::c_type(vm, unsafe { (*pointer).ty })?;
-    let dict = class
-        .slots
-        .flags
-        .has_feature(PyTypeFlags::HAS_DICT)
-        .then(|| vm.ctx.new_dict());
+    let offset = unsafe { (*(*pointer).ty).dictoffset };
+    let stored = if offset > 0 {
+        let slot = unsafe { *pointer.cast::<u8>().offset(offset).cast::<*mut Object>() };
+        if slot.is_null() {
+            None
+        } else {
+            Some(arg(vm, slot)?.downcast::<PyDict>().map_err(|_| {
+                vm.new_type_error("the instance dict slot does not hold a dict".to_owned())
+            })?)
+        }
+    } else {
+        None
+    };
+    let dict = stored.or_else(|| {
+        class
+            .slots
+            .flags
+            .has_feature(PyTypeFlags::HAS_DICT)
+            .then(|| vm.ctx.new_dict())
+    });
     let wrapper = PyRef::new_ref(
         CObject {
             pointer: AtomicPtr::new(pointer),
@@ -911,7 +957,42 @@ fn proxy(vm: &VirtualMachine, object: &PyObject) -> *mut Object {
     if let Some(pointer) = datetime_object(vm, object, ty) {
         return pointer;
     }
+    let types = &vm.ctx.types;
+    let class = object.class();
+    let slot = if class.is(types.builtin_function_or_method_type) {
+        Some(0)
+    } else if class.is(types.method_descriptor_type)
+        || class.is(types.getset_type)
+        || class.is(types.member_descriptor_type)
+    {
+        Some(3)
+    } else {
+        None
+    };
+    if let Some(slot) = slot {
+        return described(vm, object, ty, slot);
+    }
     allocate_object(size_of::<Object>(), ty, 0)
+}
+
+fn described(vm: &VirtualMachine, object: &PyObject, ty: *mut Type, slot: usize) -> *mut Object {
+    let words = size_of::<MemberDef>()
+        .max(size_of::<GetSetDef>())
+        .max(size_of::<MethodDef>());
+    let definition = heap::allocate(words, true).cast::<*const c_char>();
+    let name = object
+        .get_attr("__name__", vm)
+        .ok()
+        .and_then(|name| name.downcast::<PyStr>().ok())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let name = std::ffi::CString::new(name).unwrap_or_default();
+    unsafe { *definition = name.into_raw() };
+    let pointer = allocate_object(size_of::<Object>() + 5 * size_of::<usize>(), ty, 0);
+    unsafe {
+        *pointer.add(1).cast::<*mut std::ffi::c_void>().add(slot) = definition.cast();
+    }
+    pointer
 }
 
 unsafe extern "C" {
@@ -1147,6 +1228,9 @@ pub fn type_pointer(vm: &VirtualMachine, class: &Py<PyType>) -> *mut Type {
     template.name = name;
     template.base_type = base;
     unsafe { pointer.write(template) };
+    if !derived {
+        forward_slots(pointer, class, vm);
+    }
     if derived {
         STATIC_TYPES.with_borrow_mut(|types| types.insert(pointer as usize, class.to_owned()));
     }
@@ -1208,7 +1292,30 @@ unsafe fn destroy(pointer: *mut Object) {
 
 fn sweep() {
     loop {
-        let batch = QUEUE.with_borrow_mut(std::mem::take);
+        let mut batch = QUEUE.with_borrow_mut(std::mem::take);
+        if PARKED.with_borrow(Vec::len) >= PARKED_SCAN.get() {
+            let parked = PARKED.with_borrow_mut(std::mem::take);
+            let mut kept = Vec::new();
+            for address in parked {
+                let header = unsafe { heap::header(address as *mut Object) };
+                let link = header.link.get();
+                let live = unsafe { (*(address as *mut Object)).refcnt } != 0
+                    || header.kind.get() != Kind::Proxy
+                    || link.is_null();
+                if live {
+                    header.parked.set(false);
+                } else if unsafe { &*link }.strong_count() > 1 {
+                    kept.push(address);
+                } else {
+                    header.parked.set(false);
+                    if !header.queued.replace(true) {
+                        batch.push(address);
+                    }
+                }
+            }
+            PARKED_SCAN.set((2 * kept.len()).max(1));
+            PARKED.with_borrow_mut(|parked| parked.extend(kept));
+        }
         if batch.is_empty() {
             return;
         }
@@ -1218,6 +1325,12 @@ fn sweep() {
             let header = unsafe { heap::header(pointer) };
             header.queued.set(false);
             if unsafe { (*pointer).refcnt } != 0 || header.kind.get() != Kind::Proxy {
+                continue;
+            }
+            if unsafe { &*header.link.get() }.strong_count() > 1 {
+                if !header.parked.replace(true) {
+                    PARKED.with_borrow_mut(|parked| parked.push(pointer as usize));
+                }
                 continue;
             }
             dead.push((pointer, header.link.replace(null())));

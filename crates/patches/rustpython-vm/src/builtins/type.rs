@@ -802,6 +802,33 @@ impl PyType {
         )
     }
 
+    pub fn new_heap_with_base(
+        name: &str,
+        module: &str,
+        base: PyRef<Self>,
+        bases: Vec<PyRef<Self>>,
+        slots: PyTypeSlots,
+        metaclass: PyRef<Self>,
+        ctx: &Context,
+    ) -> Result<PyRef<Self>, String> {
+        let slots = slots;
+        slots.flags.insert(PyTypeFlags::HEAPTYPE);
+        let mut attrs = PyAttributes::default();
+        attrs.insert(identifier!(ctx, __module__), ctx.new_str(module).into());
+        let name_utf8 = ctx.new_utf8_str(name);
+        let qualname = name_utf8.clone().into_wtf8();
+        let heaptype_ext = HeapTypeExt {
+            name: PyRwLock::new(name_utf8),
+            qualname: PyRwLock::new(qualname),
+            slots: None,
+            type_data: PyRwLock::new(None),
+            specialization_cache: TypeSpecializationCache::new(),
+            interpreter_id: HeapTypeExt::creating_interpreter_id(),
+        };
+        let bases = PyTuple::new_ref_typed(bases, ctx);
+        Self::new_heap_inner(base, bases, attrs, slots, heaptype_ext, metaclass, ctx, false)
+    }
+
     /// Equivalent to CPython's PyType_Check macro
     /// Checks if obj is an instance of type (or its subclass)
     pub(crate) fn check(obj: &PyObject) -> Option<&Py<Self>> {

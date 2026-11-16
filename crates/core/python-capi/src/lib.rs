@@ -13,6 +13,7 @@ mod bridge;
 mod buffer;
 mod cast;
 mod dconv;
+pub(crate) mod extra;
 mod heap;
 #[cfg(target_family = "wasm")]
 mod libc;

@@ -1,6 +1,7 @@
 use std::{
     alloc::{Layout, alloc, alloc_zeroed, dealloc, realloc},
-    cell::Cell,
+    cell::{Cell, RefCell},
+    collections::HashMap,
     ffi::c_void,
     mem::size_of,
     ptr::null_mut,
@@ -21,6 +22,7 @@ pub struct Header {
     size: usize,
     pub kind: Cell<Kind>,
     pub queued: Cell<bool>,
+    pub parked: Cell<bool>,
     pub link: Cell<*const PyObject>,
 }
 
@@ -50,13 +52,65 @@ pub fn allocate(size: usize, zeroed: bool) -> *mut c_void {
             size,
             kind: Cell::new(Kind::Plain),
             queued: Cell::new(false),
+            parked: Cell::new(false),
             link: Cell::new(std::ptr::null()),
         });
         base.add(HEADER).cast()
     }
 }
 
+#[cfg(target_family = "wasm")]
+fn image() -> (usize, usize) {
+    unsafe extern "C" {
+        static __heap_base: u8;
+    }
+    (0, &raw const __heap_base as usize)
+}
+
+#[cfg(all(not(target_family = "wasm"), not(target_vendor = "apple")))]
+fn image() -> (usize, usize) {
+    unsafe extern "C" {
+        static __executable_start: u8;
+        static _end: u8;
+    }
+    (
+        &raw const __executable_start as usize,
+        &raw const _end as usize,
+    )
+}
+
+#[cfg(target_vendor = "apple")]
+fn image() -> (usize, usize) {
+    unsafe extern "C" {
+        static _mh_execute_header: u8;
+        fn get_end() -> usize;
+    }
+    (&raw const _mh_execute_header as usize, unsafe { get_end() })
+}
+
+pub fn is_static<T>(pointer: *mut T) -> bool {
+    let (start, end) = image();
+    (start..end).contains(&(pointer as usize))
+}
+
+thread_local! {
+    static STATIC_HEADERS: RefCell<HashMap<usize, &'static Header>> = RefCell::new(HashMap::new());
+}
+
 pub unsafe fn header<'a, T>(pointer: *mut T) -> &'a Header {
+    if is_static(pointer) {
+        return STATIC_HEADERS.with_borrow_mut(|headers| {
+            *headers.entry(pointer as usize).or_insert_with(|| {
+                Box::leak(Box::new(Header {
+                    size: 0,
+                    kind: Cell::new(Kind::Plain),
+                    queued: Cell::new(false),
+                    parked: Cell::new(false),
+                    link: Cell::new(std::ptr::null()),
+                }))
+            })
+        });
+    }
     unsafe { &*pointer.cast::<u8>().sub(HEADER).cast::<Header>() }
 }
 

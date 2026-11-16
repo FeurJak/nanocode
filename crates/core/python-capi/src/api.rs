@@ -1855,7 +1855,7 @@ fn dict(vm: &VirtualMachine, pointer: *mut Object) -> PyResult<PyRef<PyDict>> {
     })
 }
 
-fn dict_changed(pointer: *mut Object, dict: &PyDict) {
+pub(crate) fn dict_changed(pointer: *mut Object, dict: &PyDict) {
     if unsafe { bridge::flags(pointer) } & TPFLAGS_DICT_SUBCLASS != 0
         && unsafe { heap::header(pointer) }.kind.get() == Kind::Proxy
     {
@@ -2652,7 +2652,15 @@ pub extern "C" fn PyObject_GenericGetDict(
     pointer: *mut Object,
     _context: *mut c_void,
 ) -> *mut Object {
-    object(|vm| arg(vm, pointer)?.get_attr("__dict__", vm))
+    object(|vm| {
+        let target = arg(vm, pointer)?;
+        target.dict().map(Into::into).ok_or_else(|| {
+            vm.new_attribute_error(format!(
+                "This object has no __dict__: {}",
+                target.class().name()
+            ))
+        })
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -2661,7 +2669,15 @@ pub extern "C" fn PyObject_GenericSetDict(
     value: *mut Object,
     _context: *mut c_void,
 ) -> c_int {
-    status(|vm| arg(vm, pointer)?.set_attr("__dict__", arg(vm, value)?, vm))
+    status(|vm| {
+        let target = arg(vm, pointer)?;
+        let value = arg(vm, value)?
+            .downcast::<PyDict>()
+            .map_err(|_| vm.new_type_error("__dict__ must be set to a dictionary".to_owned()))?;
+        target
+            .set_dict(Some(value))
+            .map_err(|_| vm.new_attribute_error("This object has no __dict__".to_owned()))
+    })
 }
 
 macro_rules! binary_numbers {

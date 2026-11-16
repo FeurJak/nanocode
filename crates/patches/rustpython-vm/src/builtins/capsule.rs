@@ -13,7 +13,7 @@ use core::sync::atomic::AtomicPtr;
 pub struct PyCapsule {
     ptr: AtomicPtr<c_void>,
     context: AtomicPtr<c_void>,
-    name: Option<&'static CStr>,
+    name: AtomicPtr<core::ffi::c_char>,
     destructor: Option<unsafe extern "C" fn(_: *mut PyObject)>,
 }
 
@@ -34,7 +34,7 @@ impl PyCapsule {
         Self {
             ptr: ptr.into(),
             context: core::ptr::null_mut::<c_void>().into(),
-            name,
+            name: AtomicPtr::new(name.map_or(core::ptr::null_mut(), |name| name.as_ptr().cast_mut())),
             destructor,
         }
     }
@@ -58,7 +58,15 @@ impl PyCapsule {
     }
 
     pub fn name(&self) -> Option<&CStr> {
-        self.name
+        let name = self.name.load(core::sync::atomic::Ordering::Relaxed);
+        (!name.is_null()).then(|| unsafe { CStr::from_ptr(name) })
+    }
+
+    pub fn set_name(&self, name: Option<&CStr>) {
+        self.name.store(
+            name.map_or(core::ptr::null_mut(), |name| name.as_ptr().cast_mut()),
+            core::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     fn destructor(&self) -> Option<unsafe extern "C" fn(_: *mut PyObject)> {

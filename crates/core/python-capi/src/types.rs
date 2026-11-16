@@ -6,7 +6,7 @@ use std::{
 
 use rustpython_vm::{
     AsObject, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
-    builtins::{PyType, PyTypeRef},
+    builtins::{PyTuple, PyType, PyTypeRef},
     function::{Callee, FuncArgs, ItemDoc, PyMethodDef, PyMethodFlags},
     types::{PyTypeFlags, PyTypeSlots},
 };
@@ -208,15 +208,16 @@ pub fn invoke(
 }
 
 fn pointer_of(vm: &VirtualMachine, object: &PyObject) -> PyResult<*mut Object> {
-    object
-        .downcast_ref::<CObject>()
-        .map(|wrapper| wrapper.pointer())
-        .ok_or_else(|| {
-            vm.new_type_error(format!(
-                "expected a C extension object, got '{}'",
-                object.class().name()
-            ))
-        })
+    if let Some(wrapper) = object.downcast_ref::<CObject>() {
+        return Ok(wrapper.pointer());
+    }
+    if object.downcast_ref::<PyType>().is_some() {
+        return Ok(bridge::borrowed(vm, object));
+    }
+    Err(vm.new_type_error(format!(
+        "expected a C extension object, got '{}'",
+        object.class().name()
+    )))
 }
 
 fn first(vm: &VirtualMachine, args: &mut FuncArgs) -> PyResult<PyObjectRef> {
@@ -844,6 +845,9 @@ pub fn ready_type(ty: *mut Type) {
         if t.base_type.is_null() && ty != bridge::PyBaseObject_Type.get() {
             t.base_type = bridge::PyBaseObject_Type.get();
         }
+        if !t.base_type.is_null() {
+            t.flags |= (*t.base_type).flags & TPFLAGS_TYPE_SUBCLASS;
+        }
         if t.alloc.is_none() {
             t.alloc = Some(PyType_GenericAlloc);
         }
@@ -868,34 +872,82 @@ pub fn c_type(vm: &VirtualMachine, ty: *mut Type) -> PyResult<PyTypeRef> {
     let full = text(unsafe { (*ty).name }).unwrap_or("?");
     let (module, name) = full.rsplit_once('.').unwrap_or(("builtins", full));
     let base_type = unsafe { (*ty).base_type };
-    if base_type == bridge::PyType_Type.get() {
-        let class = vm.ctx.types.type_type.to_owned();
-        bridge::register_c_type(ty, &class);
-        return Ok(class);
+    let declared = unsafe { (*ty).bases };
+    let mut listed = Vec::new();
+    if !declared.is_null() {
+        let declared = bridge::arg(vm, declared)?;
+        let declared = declared
+            .downcast_ref::<PyTuple>()
+            .ok_or_else(|| vm.new_type_error(format!("{full}: tp_bases must be a tuple")))?;
+        for entry in declared.iter() {
+            listed.push(
+                entry
+                    .clone()
+                    .downcast::<PyType>()
+                    .map_err(|_| vm.new_type_error(format!("{full}: tp_bases must hold types")))?,
+            );
+        }
     }
-    let base = if base_type.is_null() || base_type == bridge::PyBaseObject_Type.get() {
+    let primary = if base_type.is_null() || base_type == bridge::PyBaseObject_Type.get() {
         CObject::class(&vm.ctx).to_owned()
     } else {
-        let base = c_type(vm, base_type)?;
-        if !base.fast_issubclass(CObject::class(&vm.ctx)) {
-            return Err(vm.new_system_error(format!(
-                "{full}: a C type based on {} is not supported yet",
-                base.name()
-            )));
-        }
-        base
+        c_type(vm, base_type)?
     };
-    let class = vm.ctx.new_class(Some(module), name, base, {
+    let base = if primary.fast_issubclass(CObject::class(&vm.ctx))
+        || primary.fast_issubclass(vm.ctx.types.type_type)
+    {
+        primary
+    } else if let Some(found) = listed
+        .iter()
+        .find(|entry| entry.fast_issubclass(CObject::class(&vm.ctx)))
+    {
+        found.clone()
+    } else {
+        return Err(vm.new_system_error(format!(
+            "{full}: a C type based on {} is not supported yet",
+            primary.name()
+        )));
+    };
+    let extra = listed.iter().any(|entry| !base.fast_issubclass(entry));
+    let declared_meta = unsafe { (*ty).base.base.ty };
+    let metaclass = if declared_meta.is_null() || declared_meta == bridge::PyType_Type.get() {
+        vm.ctx.types.type_type.to_owned()
+    } else {
+        c_type(vm, declared_meta)?
+    };
+    let extra = extra || !metaclass.is(vm.ctx.types.type_type);
+    let layout = {
         let mut slots = PyTypeSlots::heap_default();
         if unsafe { (*ty).flags } & TPFLAGS_BASETYPE != 0 {
             slots.flags |= PyTypeFlags::from_slice(&[PyTypeFlags::BASETYPE]);
+        }
+        if unsafe { (*ty).dictoffset } != 0 {
+            slots.flags |= PyTypeFlags::from_slice(&[PyTypeFlags::HAS_DICT]);
         }
         if unsafe { (*ty).weaklistoffset } != 0 {
             slots.flags |=
                 PyTypeFlags::from_slice(&[PyTypeFlags::HAS_WEAKREF, PyTypeFlags::MANAGED_WEAKREF]);
         }
         slots
-    });
+    };
+    let class = if !extra {
+        vm.ctx.new_class(Some(module), name, base, layout)
+    } else {
+        PyType::new_heap_with_base(
+            name,
+            module,
+            base.clone(),
+            if listed.is_empty() {
+                vec![base]
+            } else {
+                listed
+            },
+            layout,
+            metaclass,
+            &vm.ctx,
+        )
+        .map_err(|error| vm.new_type_error(format!("{full}: {error}")))?
+    };
     bridge::register_c_type(ty, &class);
     if crate::buffer::procs(ty).is_some() {
         class.slots.as_buffer.store(Some(crate::buffer::export));

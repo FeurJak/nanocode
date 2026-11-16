@@ -226,4 +226,7 @@ long double nanl(const char *);
 #define sqrt __builtin_sqrt
 #define trunc __builtin_trunc
 #endif
+double lgamma_r(double, int *);
+float lgammaf_r(float, int *);
+long double lgammal_r(long double, int *);
 #endif
