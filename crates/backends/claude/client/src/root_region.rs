@@ -58,6 +58,18 @@ pub(crate) fn encode(endpoint: &str, headers: &HeaderMap, body: &str) -> Vec<u8>
     region
 }
 
+pub fn checksum(region: &[u8]) -> Result<u64, RegionError> {
+    if region.get(..MAGIC.len()) != Some(MAGIC) {
+        return Err(RegionError::Magic);
+    }
+
+    region
+        .get(FIELDS - size_of::<u64>()..FIELDS)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u64::from_le_bytes)
+        .ok_or(RegionError::Torn)
+}
+
 pub(crate) fn decode(region: &[u8]) -> Result<Region, RegionError> {
     let word = |at: usize| {
         region

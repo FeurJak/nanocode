@@ -647,6 +647,11 @@ pub(super) fn request_response<'a>(
                         response.id = shown;
                     }
                     let mut recorded = None;
+                    state
+                        .client
+                        .clone()
+                        .for_session(&state.session_id)
+                        .clear_root_region();
                     if let Some(effect) = active_effect {
                         let completion;
                         (completion, recorded) =
@@ -656,11 +661,6 @@ pub(super) fn request_response<'a>(
                             None => state.policy_writes(effect, vec![completion]).await?,
                         }
                     }
-                    state
-                        .client
-                        .clone()
-                        .for_session(&state.session_id)
-                        .clear_root_region();
                     completed(
                         &response,
                         attempt,

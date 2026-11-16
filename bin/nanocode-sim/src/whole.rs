@@ -346,22 +346,29 @@ struct Durable {
     keeps_stale: bool,
     region: Arc<nanocode_sync::Atom<Option<Vec<u8>>>>,
     settle_durably: bool,
+    skips_clear: bool,
     world: Arc<World>,
 }
 
 struct SimRegion {
     folded: Arc<nanocode_sync::Atom<Option<Vec<u8>>>>,
     keeps_stale: bool,
+    pending: Arc<nanocode_sync::Atom<bool>>,
     region: Arc<nanocode_sync::Atom<Option<Vec<u8>>>>,
+    skips_clear: bool,
     world: Arc<World>,
 }
 
 impl nanocode::claude::RootRegion for SimRegion {
     fn adopted(&self, fresh: bool) {
         self.world.trace(&format!("adopted the mapped root request fresh={fresh}"));
+        self.pending.set(false);
     }
 
     fn store(&self, region: Option<Vec<u8>>) {
+        if self.skips_clear && region.is_none() {
+            return;
+        }
         self.folded.set(region.clone());
         if !(self.keeps_stale && self.region.get().is_some()) {
             self.region.set(region);
@@ -946,12 +953,15 @@ async fn epoch(
     nanocode::claude::durability::forget_templates();
     let (store, parts) = durable.session_store().await?;
     let children = remote.map(|remote| remote.children(epoch, world));
+    let pending = Arc::new(nanocode_sync::Atom::new(false));
     let model = claude(wire)?.with_root_region(
         session_of(0),
         SimRegion {
             folded: Arc::clone(&durable.folded),
             keeps_stale: durable.keeps_stale,
+            pending: Arc::clone(&pending),
             region: Arc::clone(&durable.region),
+            skips_clear: durable.skips_clear,
             world: Arc::clone(world),
         },
     );
@@ -963,6 +973,7 @@ async fn epoch(
             .prefetch_root_region(region)
             .await
             .map_err(|error| format!("mapped_root_region_invalid: {error}"))?;
+        pending.set(true);
         world.trace("prefetched the mapped root request");
     }
     let runtime = runtime(store.clone(), parts.as_ref(), model, world, children.as_ref())?;
@@ -983,6 +994,9 @@ async fn epoch(
     stopped?;
     settle(&runtime, &store, shape, world).await?;
     settled(&runtime, shape, world).await?;
+    if shape.stop == Stop::Never && shape.cancel_turn.is_none() && *pending.get() {
+        world.wrong("the restored root never made the call its mapped root image made".to_owned());
+    }
     if children.is_some() && durable.kind != StoreKind::Memory {
         let (before, _) = listing(&runtime, shape).await?;
         nanocode_platform::sleep(shape.child_faults.kill_after).await;
@@ -1038,6 +1052,7 @@ pub fn simulate(seed: u64, options: WholeOptions) -> WholeOutcome {
         world: Arc::clone(&world),
         disk: Disk::new(),
         settle_durably: remote.is_some() && options.child_mutation != ChildMutation::SettlesLazily,
+        skips_clear: options.child_mutation == ChildMutation::RegionSkipsClear,
         kind: shape.store,
         kv: (shape.store == StoreKind::Kv).then(|| {
             let mut profile = Profile::of(seed);

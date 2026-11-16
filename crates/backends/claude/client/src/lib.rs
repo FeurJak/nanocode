@@ -3,7 +3,14 @@ compile_error!(
     "nanocode-backend-claude-client supports native targets and hosted wasm*-unknown-unknown targets; WASI is not yet supported"
 );
 
-use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Waker},
+    time::Duration,
+};
 
 use nanocode_agent_types::{ClaudeTokens, EstimatedUsdCost, UsdAmount};
 use nanocode_sync::{Stream, StreamExt, stream};
@@ -35,7 +42,7 @@ pub use auth::{
 pub use federation::{ClaudeIdentityTokenSource, ClaudeTokenCache, ClaudeWorkloadIdentity};
 #[cfg(not(target_family = "wasm"))]
 pub use home::ClaudeHomeLogin;
-pub use root_region::{RegionError, RootRegion};
+pub use root_region::{RegionError, RootRegion, checksum as root_region_checksum};
 pub use thread::{
     CreateReason, MESSAGE_THREADS_BETA, MessageThread, THREAD_IDLE_EXPIRY, ThreadErrorCode,
     ThreadMode, ThreadParam, ThreadRecovery, ThreadTurn,
@@ -1774,6 +1781,15 @@ struct Prefetch {
     response: nanocode_sync::oneshot::Receiver<Buffered>,
 }
 
+pub struct ArmedRoot {
+    body: u64,
+    checksum: u64,
+    client: ClaudeClient,
+    headers: nanocode_http::types::header::HeaderMap,
+    region: root_region::Region,
+    root: Arc<Root>,
+}
+
 struct Abort(nanocode_sync::future::AbortHandle);
 
 impl Drop for Abort {
@@ -1914,9 +1930,21 @@ impl ClaudeClient {
     }
 
     pub async fn prefetch_root_region(&self, region: &[u8]) -> Result<(), ClaudeError> {
+        match self.arm_root_region(region).await? {
+            Some(armed) => {
+                armed.fire();
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+
+    pub async fn arm_root_region(&self, region: &[u8]) -> Result<Option<ArmedRoot>, ClaudeError> {
         let Some(root) = self.root.clone() else {
-            return Ok(());
+            return Ok(None);
         };
+        let checksum = root_region::checksum(region)
+            .map_err(|error| ClaudeError::Protocol(error.to_string()))?;
         let region = root_region::decode(region)
             .map_err(|error| ClaudeError::Protocol(error.to_string()))?;
         let mut headers = self.auth_headers().await?;
@@ -1927,70 +1955,16 @@ impl ClaudeClient {
             headers.append(name, value.clone());
         }
 
-        let (sender, response) = nanocode_sync::oneshot::channel();
-        let (claim, claimed) = nanocode_sync::oneshot::channel::<()>();
-        let body = nanocode_digest::xxh64(region.body.as_bytes(), 0);
         let mut client = self.clone();
         client.root = None;
-        let (posting, abort) = nanocode_sync::future::abortable(async move {
-            let layer = client.http_layer.as_deref();
-            let posted = match &client.http {
-                HttpConnection::Client(http) => {
-                    transport::post(
-                        http,
-                        &region.endpoint,
-                        headers,
-                        Arc::new(region.body),
-                        false,
-                        layer,
-                    )
-                    .await
-                }
-                HttpConnection::Transport(transport) => {
-                    transport::post_with(
-                        transport.as_ref(),
-                        &region.endpoint,
-                        headers,
-                        region.body,
-                        layer,
-                    )
-                    .await
-                }
-            };
-            let buffered = match posted {
-                Ok(response) => {
-                    let status = response.status();
-                    let headers = response.headers().clone();
-                    let mut body = response.bytes_stream();
-                    let mut bytes = Ok(Vec::new());
-                    while let Some(chunk) = body.next().await {
-                        match (chunk, &mut bytes) {
-                            (Ok(chunk), Ok(bytes)) => bytes.extend(chunk),
-                            (Err(error), _) => {
-                                bytes = Err(error);
-                                break;
-                            }
-                            (Ok(_), Err(_)) => break,
-                        }
-                    }
-                    Ok((status, headers, bytes))
-                }
-                Err(error) => Err(error),
-            };
-            if claimed.await.is_ok() {
-                drop(sender.send(buffered));
-            }
-        });
-        root.prefetch.put(Prefetch {
-            abort: Abort(abort),
-            body,
-            claim,
-            response,
-        });
-        nanocode_platform::spawn(async move {
-            let _aborted = posting.await;
-        });
-        Ok(())
+        Ok(Some(ArmedRoot {
+            body: nanocode_digest::xxh64(region.body.as_bytes(), 0),
+            checksum,
+            client,
+            headers,
+            region,
+            root,
+        }))
     }
 
     async fn adopt_root_region(&self, body: &str) -> Option<Result<HttpResponse, HttpError>> {
@@ -2805,6 +2779,91 @@ impl ClaudeClient {
                 }
             },
         )))
+    }
+}
+
+impl ArmedRoot {
+    #[must_use]
+    pub const fn checksum(&self) -> u64 {
+        self.checksum
+    }
+
+    pub fn fire(self) {
+        let Self {
+            body,
+            checksum: _,
+            client,
+            headers,
+            region,
+            root,
+        } = self;
+        let (sender, response) = nanocode_sync::oneshot::channel();
+        let (claim, claimed) = nanocode_sync::oneshot::channel::<()>();
+        let (posting, abort) = nanocode_sync::future::abortable(async move {
+            let layer = client.http_layer.as_deref();
+            let posted = match &client.http {
+                HttpConnection::Client(http) => {
+                    transport::post(
+                        http,
+                        &region.endpoint,
+                        headers,
+                        Arc::new(region.body),
+                        false,
+                        layer,
+                    )
+                    .await
+                }
+                HttpConnection::Transport(transport) => {
+                    transport::post_with(
+                        transport.as_ref(),
+                        &region.endpoint,
+                        headers,
+                        region.body,
+                        layer,
+                    )
+                    .await
+                }
+            };
+            let buffered = match posted {
+                Ok(response) => {
+                    let status = response.status();
+                    let headers = response.headers().clone();
+                    let mut body = response.bytes_stream();
+                    let mut bytes = Ok(Vec::new());
+                    while let Some(chunk) = body.next().await {
+                        match (chunk, &mut bytes) {
+                            (Ok(chunk), Ok(bytes)) => bytes.extend(chunk),
+                            (Err(error), _) => {
+                                bytes = Err(error);
+                                break;
+                            }
+                            (Ok(_), Err(_)) => break,
+                        }
+                    }
+                    Ok((status, headers, bytes))
+                }
+                Err(error) => Err(error),
+            };
+            if claimed.await.is_ok() {
+                drop(sender.send(buffered));
+            }
+        });
+        root.prefetch.put(Prefetch {
+            abort: Abort(abort),
+            body,
+            claim,
+            response,
+        });
+        let mut posting = Box::pin(posting);
+        if posting
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+        {
+            nanocode_platform::spawn(async move {
+                let _aborted = posting.await;
+            });
+        }
     }
 }
 

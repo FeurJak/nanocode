@@ -669,9 +669,9 @@ impl TurnLogPolicy {
         self
     }
 
-    fn whole(&mut self) -> bool {
+    const fn whole(&mut self) -> bool {
         self.opens += 1;
-        self.opens % 2 == 0
+        self.opens.is_multiple_of(2)
     }
 
     fn log(&mut self, scope: &str) -> &TurnLog {
