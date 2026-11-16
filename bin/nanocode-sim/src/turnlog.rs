@@ -602,6 +602,25 @@ impl TurnLogPolicy {
             .followers
             .get_mut(scope)
             .expect("a follower was inserted above");
+        let view = |fold: &Fold| {
+            (
+                fold.events().len(),
+                fold.turns()
+                    .iter()
+                    .map(|turn| turn.id.clone())
+                    .collect::<Vec<_>>(),
+                fold.open_calls()
+                    .map(|(id, _)| id.to_owned())
+                    .collect::<Vec<_>>(),
+                fold.states()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>(),
+                fold.cells()
+                    .map(|(cell, count, _)| (cell.to_owned(), count))
+                    .collect::<Vec<_>>(),
+            )
+        };
         refused(ready(follower.advance()));
         if follower.next() <= seq {
             return;
@@ -653,6 +672,12 @@ impl TurnLogPolicy {
         };
         let taken = ready(claimed.read(read));
         let reopened = ready(cold.read(read));
+        let claimed_view = ready(claimed.read(view));
+        let cold_view = ready(cold.read(view));
+        assert!(
+            claimed_view == cold_view,
+            "{scope} takes over at commit {seq} with turns, open calls, states and cells {claimed_view:?}, but a cold open reads {cold_view:?}"
+        );
         assert!(
             (taken.1, taken.2, taken.3) == (reopened.1, reopened.2, reopened.3)
                 && taken.1 == acknowledged.1

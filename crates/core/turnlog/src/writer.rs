@@ -783,6 +783,7 @@ pub struct Follower {
     snapshot: usize,
     snapshot_row: Option<u64>,
     state: usize,
+    stats: Stats,
     tail: usize,
 }
 
@@ -793,7 +794,18 @@ impl Follower {
             .host
             .scan(&self.scope, from, i64::MAX.unsigned_abs())
             .await?;
-        self.take(stored)
+        let taken = self.take(stored)?;
+        for owner in self.fold.take_forgets() {
+            warm(
+                &*self.host,
+                &self.scope,
+                &mut self.fold,
+                &mut self.stats,
+                &owner,
+            )
+            .await?;
+        }
+        Ok(taken)
     }
 
     pub async fn claim(mut self) -> Result<TurnLog, StoreError> {
@@ -943,10 +955,10 @@ impl Follower {
             scope,
             snapshot,
             state,
+            mut stats,
             tail,
             ..
         } = self;
-        let mut stats = Stats::default();
         for owner in fold.forgetting() {
             warm(&*host, &scope, &mut fold, &mut stats, &owner).await?;
         }
@@ -1069,6 +1081,7 @@ impl TurnLog {
             snapshot: 0,
             snapshot_row: None,
             state: 0,
+            stats: Stats::default(),
             tail: 0,
         };
         follower.take(stored)?;

@@ -165,6 +165,7 @@ pub struct Fold {
     ends: u64,
     events: Vec<Event>,
     filters: BTreeMap<u64, Box<[u64]>>,
+    forgets: BTreeSet<String>,
     groups: BTreeMap<u64, (u64, u64)>,
     hot_bytes: usize,
     hosts: BTreeMap<String, Box<RawValue>>,
@@ -285,8 +286,16 @@ impl Fold {
             )));
         }
         crate::record::each(body, |record| {
+            let forget = match &record {
+                Record::Forget { session, .. } => Some(session.clone()),
+                _ => None,
+            };
             if let Some(pending) = self.defer(&record) {
-                return wait(pending, record);
+                wait(pending, record)?;
+                if let Some(session) = forget {
+                    self.forgets.insert(session);
+                }
+                return Ok(());
             }
             self.take(record, Some(seq))
         })?;
@@ -769,6 +778,10 @@ impl Fold {
             })
             .map(|(owner, _)| owner.clone())
             .collect()
+    }
+
+    pub(crate) fn take_forgets(&mut self) -> BTreeSet<String> {
+        std::mem::take(&mut self.forgets)
     }
 
     pub(crate) fn writes(&self) -> Vec<&str> {
