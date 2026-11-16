@@ -1598,7 +1598,16 @@ impl Fold {
                             .map(|header| format!("{}/", header.origin_call_id))
                     });
                 if let Some(origin) = origin {
-                    self.calls.retain(|id, _| !id.starts_with(&origin));
+                    let forgotten = self
+                        .calls
+                        .range(origin.clone()..)
+                        .map(|(id, _)| id)
+                        .take_while(|id| id.starts_with(&origin))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    for id in forgotten {
+                        self.calls.remove(&id);
+                    }
                 }
             }
             Record::Host { key, value } => {
