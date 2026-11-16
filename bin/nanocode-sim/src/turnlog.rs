@@ -404,14 +404,36 @@ fn referenced(stored: &[(u64, String)]) -> Vec<std::ops::Range<u64>> {
         .count()
         + start
         + 1;
-    nanocode_turnlog::rows(&stored[start..end])
-        .unwrap_or_else(|error| panic!("a turn log head does not decode: {error}"))
-        .iter()
-        .flat_map(|row| {
-            row.records()
-                .unwrap_or_else(|error| panic!("a turn log head does not decode: {error}"))
-        })
+    let records = |rows: &[(u64, String)]| {
+        nanocode_turnlog::rows(rows)
+            .unwrap_or_else(|error| panic!("a turn log head does not decode: {error}"))
+            .iter()
+            .flat_map(|row| {
+                row.records()
+                    .unwrap_or_else(|error| panic!("a turn log head does not decode: {error}"))
+            })
+            .collect::<Vec<_>>()
+    };
+    records(&stored[start..end])
+        .into_iter()
         .flat_map(|record| match record {
+            LogRecord::Root { row, rows } => {
+                let root = stored
+                    .iter()
+                    .filter(|(seq, _)| (row..row + rows).contains(seq))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                std::iter::once(row..row + rows)
+                    .chain(records(&root).into_iter().flat_map(|record| match record {
+                        LogRecord::Index { row, rows, .. } => std::iter::once(row..row + rows).collect(),
+                        LogRecord::Groups { groups } => groups
+                            .into_iter()
+                            .map(|(row, rows, _)| row..row + rows)
+                            .collect(),
+                        _ => Vec::new(),
+                    }))
+                    .collect()
+            }
             LogRecord::Index { row, rows, .. } => std::iter::once(row..row + rows).collect(),
             LogRecord::Groups { groups } => groups
                 .into_iter()
@@ -450,6 +472,7 @@ pub struct TurnLogPolicy {
     logs: BTreeMap<String, TurnLog>,
     owners: Option<u64>,
     ratio: usize,
+    ratio_ignored: bool,
     protections: Protections,
     read_unloaded: bool,
     restarting: BTreeMap<String, String>,
@@ -489,6 +512,7 @@ impl TurnLogPolicy {
             logs: BTreeMap::new(),
             owners: None,
             ratio,
+            ratio_ignored: false,
             protections,
             read_unloaded: false,
             restarting: BTreeMap::new(),
@@ -544,6 +568,11 @@ impl TurnLogPolicy {
         self
     }
 
+    pub const fn ratio_ignored(mut self, ignored: bool) -> Self {
+        self.ratio_ignored = ignored;
+        self
+    }
+
     pub const fn single_snapshot(mut self, single: bool) -> Self {
         self.single = single;
         self
@@ -560,7 +589,11 @@ impl TurnLogPolicy {
             let log = refused(ready(TurnLog::open(Arc::clone(&self.host), scope)))
                 .retain_finished(self.retain)
                 .row_limit(self.limit)
-                .snapshot_ratio(self.ratio)
+                .snapshot_ratio(if self.ratio_ignored {
+                    u32::MAX as usize
+                } else {
+                    self.ratio
+                })
                 .snapshot_rows(self.rows);
             self.logs.insert(scope.to_owned(), log);
         }
@@ -727,7 +760,11 @@ impl TurnDurability for TurnLogPolicy {
         let log = refused(ready(TurnLog::open(Arc::clone(&self.host), scope)))
             .retain_finished(self.retain)
             .row_limit(self.limit)
-            .snapshot_ratio(self.ratio)
+            .snapshot_ratio(if self.ratio_ignored {
+                u32::MAX as usize
+            } else {
+                self.ratio
+            })
             .snapshot_rows(self.rows);
         let (state, revision) = refused(ready(log.read_owner(scope, |fold| {
             fold.checkpoint(scope).map_or_else(
@@ -1006,6 +1043,41 @@ impl TurnDurability for TurnLogPolicy {
             assert!(
                 loaded as u64 <= bound as u64 + parts + 1,
                 "a cold open of {scope} reads {loaded} rows past a snapshot row bound of {bound}"
+            );
+        }
+        let stored = self.disk.with(|rows| rows.view(scope));
+        if !stored.iter().any(|(_, body)| body.starts_with('s')) {
+            let scratch = Disk::new();
+            scratch.with(|rows| rows.insert(scope, &stored));
+            let host: Arc<dyn LogHost> = Arc::new(SimHost::new(Arc::clone(&scratch)));
+            let forced = refused(ready(TurnLog::open(host, scope)))
+                .retain_finished(self.retain)
+                .row_limit(self.limit)
+                .snapshot_ratio(self.ratio)
+                .snapshot_rows(Some(0));
+            let mut lease = ready(forced.lease());
+            refused(lease.push(LogRecord::Host {
+                key: "forced".to_owned(),
+                value: raw("0"),
+            }));
+            refused(ready(lease.commit(log_point)));
+            drop(lease);
+            let forced = scratch.with(|rows| rows.view(scope));
+            let end = stored.last().map_or(0, |(seq, _)| *seq);
+            let written = forced
+                .iter()
+                .filter(|(seq, _)| *seq > end)
+                .map(|(_, body)| body.len())
+                .sum::<usize>();
+            let tail = stored.iter().map(|(_, body)| body.len()).sum::<usize>();
+            let last = stored
+                .iter()
+                .rposition(|(_, body)| !body.starts_with('+'))
+                .map_or(0, |start| stored[start..].iter().map(|(_, body)| body.len()).sum::<usize>());
+            assert!(
+                tail - last <= self.ratio * written,
+                "{scope} replays {tail} bytes after commit {seq} without a snapshot row, {last} of them in its last row, past {} times the {written} bytes a snapshot writes",
+                self.ratio
             );
         }
         if after.snapshots > before.snapshots {

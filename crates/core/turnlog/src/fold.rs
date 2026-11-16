@@ -70,8 +70,6 @@ pub(crate) struct Section {
     pub(crate) rows: u64,
 }
 
-pub(crate) type Indexed<'a> = Option<(&'a BTreeMap<String, Page>, &'a BTreeMap<u64, (u64, u64)>)>;
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Entry {
     pub(crate) checkpoint: bool,
@@ -119,7 +117,7 @@ pub(crate) enum Page {
 }
 
 impl Page {
-    const fn section(self) -> Section {
+    pub(crate) const fn section(self) -> Section {
         match self {
             Self::Cold(section) | Self::Loaded(section) => section,
         }
@@ -179,6 +177,7 @@ pub struct Fold {
     owners: BTreeMap<String, Owner>,
     pages: BTreeMap<String, Page>,
     read: BTreeSet<String>,
+    root: Option<Page>,
     segment_row: u64,
     segments: Vec<Segment>,
     seq: u64,
@@ -303,16 +302,17 @@ impl Fold {
     fn defer(&mut self, record: &Record) -> Option<&mut Vec<Record>> {
         let owner = owner_of(record)?;
         if !self.owners.contains_key(owner) {
-            let state = if self.cold_page(owner).is_some() {
-                Owner::Waiting {
-                    pending: Vec::new(),
-                }
-            } else {
-                Owner::Warm {
-                    delta: Delta::default(),
-                    entry: Entry::default(),
-                }
-            };
+            let state =
+                if matches!(self.root, Some(Page::Cold(_))) || self.cold_page(owner).is_some() {
+                    Owner::Waiting {
+                        pending: Vec::new(),
+                    }
+                } else {
+                    Owner::Warm {
+                        delta: Delta::default(),
+                        entry: Entry::default(),
+                    }
+                };
             self.owners.insert(owner.to_owned(), state);
         }
         match self.owners.get_mut(owner) {
@@ -343,6 +343,63 @@ impl Fold {
             .into_iter()
             .map(|(first, section)| (first.clone(), section))
             .collect()
+    }
+
+    pub(crate) const fn cold_root(&self) -> Option<Section> {
+        match self.root {
+            Some(Page::Cold(section)) => Some(section),
+            Some(Page::Loaded(_)) | None => None,
+        }
+    }
+
+    pub(crate) fn rooted(&mut self, records: Vec<Record>) -> Result<(), StoreError> {
+        let Some(Page::Cold(section)) = self.root else {
+            return Ok(());
+        };
+        for record in records {
+            match record {
+                Record::Groups { groups } => {
+                    self.groups = groups
+                        .into_iter()
+                        .map(|(row, rows, count)| (row, (rows, count)))
+                        .collect();
+                }
+                Record::Index { first, row, rows } => {
+                    self.pages.insert(first, Page::Cold(Section { row, rows }));
+                }
+                _ => {
+                    return Err(invalid(
+                        "an index root holds a record that is not an index page or a group",
+                    ));
+                }
+            }
+        }
+        self.root = Some(Page::Loaded(section));
+        Ok(())
+    }
+
+    pub(crate) fn indexed(
+        &self,
+        pages: &BTreeMap<String, Page>,
+        groups: &BTreeMap<u64, (u64, u64)>,
+    ) -> Option<Section> {
+        let Some(Page::Loaded(section)) = self.root else {
+            return None;
+        };
+        (self.groups == *groups
+            && self.pages.len() == pages.len()
+            && self
+                .pages
+                .iter()
+                .zip(pages)
+                .all(|((first, page), (other, kept))| {
+                    first == other && page.section() == kept.section()
+                }))
+        .then_some(section)
+    }
+
+    pub(crate) fn root_section(&self) -> Option<Section> {
+        self.root.map(Page::section)
     }
 
     pub(crate) fn cold_pages(&self) -> Vec<(String, Section)> {
@@ -527,9 +584,15 @@ impl Fold {
     }
 
     pub(crate) fn touch(&mut self, state: &str) {
-        let known = self.owners.range::<str, _>((Bound::Included(state), Bound::Unbounded)).next().is_some_and(|(owner, _)| {
-            owner.strip_prefix(state).is_some_and(|rest| rest.is_empty() || rest.starts_with('\n'))
-        });
+        let known = self
+            .owners
+            .range::<str, _>((Bound::Included(state), Bound::Unbounded))
+            .next()
+            .is_some_and(|(owner, _)| {
+                owner
+                    .strip_prefix(state)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('\n'))
+            });
         if known && !self.read.contains(state) {
             self.read.insert(state.to_owned());
         }
@@ -542,7 +605,11 @@ impl Fold {
             .iter()
             .filter(|(owner, state)| {
                 matches!(state, Owner::Warm { delta, entry } if delta.is_empty() && !entry.legacy)
-                    && !read.contains(owner.split_once('\n').map_or(owner.as_str(), |(state, _)| state))
+                    && !read.contains(
+                        owner
+                            .split_once('\n')
+                            .map_or(owner.as_str(), |(state, _)| state),
+                    )
             })
             .map(|(owner, _)| owner.clone())
             .collect::<Vec<_>>();
@@ -698,6 +765,12 @@ impl Fold {
         written: &BTreeMap<String, Option<Entry>>,
         groups: &[(Section, u64)],
     ) -> Result<Plan, StoreError> {
+        if let Some(section) = self.cold_root() {
+            return Err(invalid(format!(
+                "a snapshot rewrites the index before its root at row {} is loaded",
+                section.row
+            )));
+        }
         let mut refs = self.groups.clone();
         for (owner, entry) in written {
             let Some(old) = self.entry(owner) else {
@@ -805,6 +878,7 @@ impl Fold {
         written: BTreeMap<String, Option<Entry>>,
         pages: BTreeMap<String, Page>,
         groups: BTreeMap<u64, (u64, u64)>,
+        root: Option<Section>,
     ) {
         for (owner, entry) in written {
             let state = match (self.owners.remove(&owner), entry) {
@@ -831,6 +905,7 @@ impl Fold {
             .collect::<BTreeSet<_>>();
         self.filters.retain(|row, _| cold.contains(row));
         self.groups = groups;
+        self.root = root.map(Page::Loaded);
     }
 
     pub(crate) fn delta_records(
@@ -1570,6 +1645,12 @@ impl Fold {
                     }),
                 );
             }
+            Record::Root { row, rows } => {
+                self.root = Some(Page::Cold(Section {
+                    row: *row,
+                    rows: *rows,
+                }));
+            }
             Record::Owner { owner, .. } => {
                 return Err(invalid(format!(
                     "owner {owner} is listed outside an index page"
@@ -1707,26 +1788,14 @@ impl Fold {
     pub(crate) fn head_records(
         &self,
         keep: u64,
-        index: Indexed<'_>,
+        index: Option<Section>,
         mut take: impl FnMut(Record) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
-        if let Some((pages, groups)) = index {
-            for (first, page) in pages {
-                let section = page.section();
-                take(Record::Index {
-                    first: first.clone(),
-                    row: section.row,
-                    rows: section.rows,
-                })?;
-            }
-            if !groups.is_empty() {
-                take(Record::Groups {
-                    groups: groups
-                        .iter()
-                        .map(|(&row, &(rows, count))| (row, rows, count))
-                        .collect(),
-                })?;
-            }
+        if let Some(section) = index {
+            take(Record::Root {
+                row: section.row,
+                rows: section.rows,
+            })?;
         }
         self.records(keep, false, take)
     }

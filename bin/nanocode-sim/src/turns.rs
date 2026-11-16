@@ -75,13 +75,14 @@ pub enum TurnMutation {
     SectionsKept,
     SectionsPruned,
     SnapshotKept,
+    SnapshotRatioIgnored,
     SnapshotRowsIgnored,
     TailRowsAppended,
     TickNotAtomic,
 }
 
 impl TurnMutation {
-    const ALL: [Self; 24] = [
+    const ALL: [Self; 25] = [
         Self::None,
         Self::AckBufferedAdmission,
         Self::AckBufferedResult,
@@ -103,6 +104,7 @@ impl TurnMutation {
         Self::SectionsKept,
         Self::SectionsPruned,
         Self::SnapshotKept,
+        Self::SnapshotRatioIgnored,
         Self::SnapshotRowsIgnored,
         Self::TailRowsAppended,
         Self::TickNotAtomic,
@@ -137,6 +139,7 @@ impl TurnMutation {
             Self::SectionsKept => "sections_kept",
             Self::SectionsPruned => "sections_pruned",
             Self::SnapshotKept => "snapshot_kept",
+            Self::SnapshotRatioIgnored => "snapshot_ratio_ignored",
             Self::SnapshotRowsIgnored => "snapshot_rows_ignored",
             Self::TailRowsAppended => "tail_rows_appended",
             Self::TickNotAtomic => "tick_not_atomic",
@@ -1244,7 +1247,8 @@ impl Sim {
                 .single_snapshot(self.options.reopen_row_limit.is_none())
                 .collect_live(self.options.mutation == TurnMutation::ContentCollectedLive)
                 .read_unloaded(self.options.mutation == TurnMutation::PartReadUnloaded)
-                .rewrite_stale(self.options.mutation == TurnMutation::ContentRewrittenStale),
+                .rewrite_stale(self.options.mutation == TurnMutation::ContentRewrittenStale)
+                .ratio_ignored(self.options.mutation == TurnMutation::SnapshotRatioIgnored),
             ),
         };
         let mut object = Object {

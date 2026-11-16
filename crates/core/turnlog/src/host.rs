@@ -411,19 +411,20 @@ impl LogHost for MemoryLog {
         scope: &'a str,
     ) -> StoreFuture<'a, Result<Vec<(u64, String)>, StoreError>> {
         let rows = self.memory.read(|memory| {
-            let owned = memory
+            let scope: Arc<str> = Arc::from(scope);
+            let mut rows = Vec::new();
+            for ((_, seq), body) in memory
                 .rows
-                .iter()
-                .filter(|((owner, _), _)| **owner == *scope)
-                .collect::<Vec<_>>();
-            let start = owned
-                .iter()
-                .rposition(|(_, body)| body.starts_with('s'))
-                .unwrap_or(0);
-            owned[start..]
-                .iter()
-                .map(|((_, seq), body)| (*seq, body.to_string()))
-                .collect()
+                .range((Arc::clone(&scope), 0)..=(scope, u64::MAX))
+                .rev()
+            {
+                rows.push((*seq, body.to_string()));
+                if body.starts_with('s') {
+                    break;
+                }
+            }
+            rows.reverse();
+            rows
         });
         Box::pin(async move { Ok(rows) })
     }

@@ -117,6 +117,10 @@ pub enum Record {
         call_id: String,
         output: Box<RawValue>,
     },
+    Root {
+        row: u64,
+        rows: u64,
+    },
     Section {
         owners: Vec<(String, bool)>,
         row: u64,
