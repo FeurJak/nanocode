@@ -298,6 +298,32 @@ fn forward_slots(pointer: *mut Type, class: &Py<PyType>, vm: &VirtualMachine) {
             (*pointer).new = new;
         }
     }
+    let unary: Option<(Unary, Unary)> = if class.is(types.str_type) {
+        Some((Some(crate::extra::repr_str), Some(crate::extra::str_str)))
+    } else if class.is(types.bytes_type) {
+        Some((
+            Some(crate::extra::repr_bytes),
+            Some(crate::extra::str_bytes),
+        ))
+    } else {
+        None
+    };
+    unsafe {
+        if let Some((repr, text)) = unary {
+            if (*pointer).repr.is_none() {
+                (*pointer).repr = repr;
+            }
+            if (*pointer).str.is_none() {
+                (*pointer).str = text;
+            }
+            if (*pointer).dealloc.is_none() {
+                (*pointer).dealloc = Some(crate::extra::dealloc_free);
+            }
+        }
+        if class.is(types.object_type) && (*pointer).hash.is_none() {
+            (*pointer).hash = Some(crate::extra::hash_identity);
+        }
+    }
 }
 
 fn register_type(pointer: *mut Type, class: &'static Py<PyType>) {
@@ -753,18 +779,46 @@ pub fn unicode_kind(max: u32) -> (usize, bool) {
 
 pub fn new_unicode(ty: *mut Type, length: usize, max: u32, refcnt: isize) -> *mut Object {
     let (kind, ascii) = unicode_kind(max);
-    let pointer = allocate_object(unicode_header(ascii) + (length + 1) * kind, ty, refcnt);
+    let ascii_flag = if ascii { ASCII } else { 0 };
+    let basicsize = if ty.is_null() {
+        0
+    } else {
+        unsafe { (*ty).basicsize }.unsigned_abs()
+    };
+    let legacy = basicsize > size_of::<Compact>();
+    let pointer = if legacy {
+        let pointer = allocate_object(basicsize, ty, refcnt);
+        let data = heap::allocate((length + 1) * kind, true);
+        unsafe {
+            *pointer
+                .cast::<u8>()
+                .add(size_of::<Compact>())
+                .cast::<*mut u8>() = data.cast();
+        }
+        pointer
+    } else {
+        allocate_object(unicode_header(ascii) + (length + 1) * kind, ty, refcnt)
+    };
     unsafe {
         let head = pointer.cast::<Ascii>();
         (*head).length = length as isize;
         (*head).hash = -1;
-        (*head).state = ((kind as u32) << KIND_SHIFT) | COMPACT | if ascii { ASCII } else { 0 };
+        (*head).state =
+            ((kind as u32) << KIND_SHIFT) | if legacy { 0 } else { COMPACT } | ascii_flag;
     }
     pointer
 }
 
 pub fn unicode_data(pointer: *mut Object) -> *mut u8 {
     let state = unsafe { (*pointer.cast::<Ascii>()).state };
+    if state & COMPACT == 0 {
+        return unsafe {
+            *pointer
+                .cast::<u8>()
+                .add(size_of::<Compact>())
+                .cast::<*mut u8>()
+        };
+    }
     unsafe { pointer.cast::<u8>().add(unicode_header(state & ASCII != 0)) }
 }
 
@@ -1279,6 +1333,9 @@ unsafe fn destroy(pointer: *mut Object) {
             let state = (*pointer.cast::<Ascii>()).state;
             if state & ASCII == 0 {
                 heap::release((*pointer.cast::<Compact>()).utf8.cast());
+            }
+            if state & COMPACT == 0 {
+                heap::release(unicode_data(pointer).cast());
             }
         } else if (*pointer).ty == PySlice_Type.get() {
             let target = pointer.cast::<SliceObject>();

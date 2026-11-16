@@ -1037,7 +1037,13 @@ pub extern "C" fn PyNumber_Long(pointer: *mut Object) -> *mut Object {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn PyNumber_Float(pointer: *mut Object) -> *mut Object {
-    object(|vm| Ok(arg(vm, pointer)?.try_float(vm)?.into()))
+    object(|vm| {
+        let value = arg(vm, pointer)?;
+        if value.class().is(vm.ctx.types.float_type) {
+            return Ok(value);
+        }
+        vm.ctx.types.float_type.as_object().call((value,), vm)
+    })
 }
 
 #[unsafe(no_mangle)]

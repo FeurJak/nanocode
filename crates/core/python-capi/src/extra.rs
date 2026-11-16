@@ -895,3 +895,46 @@ constructors! {
     new_complex => complex_type,
     new_tuple => tuple_type,
 }
+
+fn unbound(
+    pick: fn(&VirtualMachine) -> &'static rustpython_vm::Py<rustpython_vm::builtins::PyType>,
+    name: &'static str,
+    pointer: *mut Object,
+) -> *mut Object {
+    object(|vm| {
+        let method = pick(vm).as_object().get_attr(name, vm)?;
+        method.call((arg(vm, pointer)?,), vm)
+    })
+}
+
+macro_rules! unbound_slots {
+    ($($name:ident => $field:ident . $method:literal),* $(,)?) => {
+        $(
+            pub unsafe extern "C" fn $name(pointer: *mut Object) -> *mut Object {
+                unbound(|vm| vm.ctx.types.$field, $method, pointer)
+            }
+        )*
+    };
+}
+
+unbound_slots! {
+    repr_str => str_type."__repr__",
+    str_str => str_type."__str__",
+    repr_bytes => bytes_type."__repr__",
+    str_bytes => bytes_type."__str__",
+}
+
+pub unsafe extern "C" fn hash_identity(pointer: *mut Object) -> isize {
+    let address = pointer as usize;
+    (address >> 4 | address << (usize::BITS - 4)) as isize
+}
+
+pub unsafe extern "C" fn dealloc_free(pointer: *mut Object) {
+    unsafe {
+        let ty = (*pointer).ty;
+        match (*ty).free {
+            Some(free) => free(pointer.cast()),
+            None => crate::heap::PyObject_Free(pointer.cast()),
+        }
+    }
+}

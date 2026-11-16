@@ -211,13 +211,7 @@ fn pointer_of(vm: &VirtualMachine, object: &PyObject) -> PyResult<*mut Object> {
     if let Some(wrapper) = object.downcast_ref::<CObject>() {
         return Ok(wrapper.pointer());
     }
-    if object.downcast_ref::<PyType>().is_some() {
-        return Ok(bridge::borrowed(vm, object));
-    }
-    Err(vm.new_type_error(format!(
-        "expected a C extension object, got '{}'",
-        object.class().name()
-    )))
+    Ok(bridge::borrowed(vm, object))
 }
 
 fn first(vm: &VirtualMachine, args: &mut FuncArgs) -> PyResult<PyObjectRef> {
@@ -893,7 +887,10 @@ pub fn c_type(vm: &VirtualMachine, ty: *mut Type) -> PyResult<PyTypeRef> {
     } else {
         c_type(vm, base_type)?
     };
-    let base = if primary.fast_issubclass(CObject::class(&vm.ctx))
+    let string = vm.ctx.types.str_type;
+    let base = if primary.fast_issubclass(string) || listed.iter().any(|entry| entry.is(string)) {
+        string.to_owned()
+    } else if primary.fast_issubclass(CObject::class(&vm.ctx))
         || primary.fast_issubclass(vm.ctx.types.type_type)
     {
         primary
@@ -948,6 +945,24 @@ pub fn c_type(vm: &VirtualMachine, ty: *mut Type) -> PyResult<PyTypeRef> {
         )
         .map_err(|error| vm.new_type_error(format!("{full}: {error}")))?
     };
+    let types = &vm.ctx.types;
+    let inherited = [
+        (types.int_type, TPFLAGS_LONG_SUBCLASS),
+        (types.list_type, TPFLAGS_LIST_SUBCLASS),
+        (types.tuple_type, TPFLAGS_TUPLE_SUBCLASS),
+        (types.bytes_type, TPFLAGS_BYTES_SUBCLASS),
+        (types.str_type, TPFLAGS_UNICODE_SUBCLASS),
+        (types.dict_type, TPFLAGS_DICT_SUBCLASS),
+        (
+            vm.ctx.exceptions.base_exception_type,
+            TPFLAGS_BASE_EXC_SUBCLASS,
+        ),
+        (types.type_type, TPFLAGS_TYPE_SUBCLASS),
+    ]
+    .into_iter()
+    .filter(|(builtin, _)| class.fast_issubclass(*builtin))
+    .fold(0, |flags, (_, flag)| flags | flag);
+    unsafe { (*ty).flags |= inherited };
     bridge::register_c_type(ty, &class);
     if crate::buffer::procs(ty).is_some() {
         class.slots.as_buffer.store(Some(crate::buffer::export));
