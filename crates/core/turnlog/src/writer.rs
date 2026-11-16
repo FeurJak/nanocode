@@ -1302,6 +1302,9 @@ impl Lease<'_> {
                 owner,
             )
             .await?;
+            writer
+                .fold
+                .touch(owner.split_once('\n').map_or(owner.as_str(), |(state, _)| state));
         }
         Ok(())
     }
