@@ -57,6 +57,11 @@ fn main() -> ExitCode {
     if tool == "fetch-pending" {
         return fetch_pending(&cache, Path::new(args.get(1).map_or(OsStr::new(""), OsString::as_os_str)), args.get(2).map(Path::new));
     }
+    if is_rustc(tool)
+        && let Some(answered) = probe(&cache, &args, &environment)
+    {
+        return answered;
+    }
     if is_rustc(tool) {
         rust(&cache, &scripts, args, environment, 1)
     } else if args.get(1).is_some_and(|compiler| is_rustc(compiler)) {
@@ -88,6 +93,60 @@ fn exec(args: &[OsString], environment: &Environment) -> ExitCode {
         .exec();
     eprintln!("buildcache: could not run {}: {error}", args[0].to_string_lossy());
     ExitCode::from(1)
+}
+
+fn probe(cache: &Path, args: &[OsString], environment: &Environment) -> Option<ExitCode> {
+    let flags = &args[1..];
+    let asks = (flags.len() == 1 && flags[0] == "-vV")
+        || (flags.first().is_some_and(|first| first == "-")
+            && flags.windows(2).any(|pair| pair[0] == "--crate-name" && pair[1] == "___"));
+    if !asks || flags.iter().any(|flag| flag.as_bytes().windows(5).any(|window| window == b".json")) {
+        return None;
+    }
+    let rustc = match (environment.get(OsStr::new("RUSTUP_HOME")), environment.get(OsStr::new("RUSTUP_TOOLCHAIN"))) {
+        (Some(home), Some(name)) if !args[0].as_bytes().contains(&b'/') => {
+            Path::new(home).join("toolchains").join(name).join("bin").join(&args[0])
+        }
+        _ => PathBuf::from(&args[0]),
+    };
+    if !rustc.as_os_str().as_bytes().windows(12).any(|window| window == b"/toolchains/") {
+        return None;
+    }
+    let version = rustc_version(cache, &rustc)?;
+    let mut hasher = Sha256::new();
+    hasher.update(version.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(rustc.as_os_str().as_bytes());
+    for flag in flags {
+        hasher.update(b"\n");
+        hasher.update(flag.as_bytes());
+    }
+    for (name, value) in environment {
+        let name = name.as_bytes();
+        if name.starts_with(b"RUST") || name.ends_with(b"_DEPLOYMENT_TARGET") || name == b"SDKROOT" {
+            hasher.update(b"\n");
+            hasher.update(name);
+            hasher.update(b"=");
+            hasher.update(value.as_bytes());
+        }
+    }
+    let memo = cache.join("rustc").join(format!("probe-{}", hasher.finish()));
+    if let Ok(answer) = fs::read(&memo) {
+        let mut stdout = io::stdout();
+        return Some(if stdout.write_all(&answer).and_then(|()| stdout.flush()).is_ok() { ExitCode::SUCCESS } else { ExitCode::from(1) });
+    }
+    let output = Command::new(&args[0]).args(flags).stdin(Stdio::inherit()).output().ok()?;
+    let mut stdout = io::stdout();
+    let _ = stdout.write_all(&output.stdout).and_then(|()| stdout.flush());
+    let _ = io::stderr().write_all(&output.stderr);
+    if output.status.success() && output.stderr.is_empty() && fs::create_dir_all(cache.join("rustc")).is_ok() {
+        let mut staging = memo.clone().into_os_string();
+        staging.push(format!(".{}.{}", std::process::id(), unique()));
+        if fs::write(&staging, &output.stdout).is_ok() && fs::rename(&staging, &memo).is_err() {
+            let _ = fs::remove_file(&staging);
+        }
+    }
+    Some(exit_code(output.status))
 }
 
 fn exit_code(status: std::process::ExitStatus) -> ExitCode {
