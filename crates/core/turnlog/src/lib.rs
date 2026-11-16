@@ -2,6 +2,7 @@ mod codec;
 mod effect;
 mod fold;
 mod host;
+mod patch;
 mod record;
 mod writer;
 

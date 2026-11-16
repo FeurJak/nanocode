@@ -90,7 +90,7 @@ impl Delta {
     fn note(&mut self, record: &Record) {
         match record {
             Record::Cell { .. } | Record::Forget { .. } => self.cells.push(record.clone()),
-            Record::Checkpoint { .. } => self.checkpoint = true,
+            Record::Checkpoint { .. } | Record::Patched { .. } => self.checkpoint = true,
             Record::Stored { key, .. } if !self.keys.contains(key) => {
                 self.keys.insert(key.clone());
             }
@@ -202,7 +202,7 @@ fn invalid(detail: impl std::fmt::Display) -> StoreError {
 fn owner_of(record: &Record) -> Option<&str> {
     match record {
         Record::Cell { session, .. } | Record::Forget { session, .. } => Some(session),
-        Record::Checkpoint { state, .. } => Some(state),
+        Record::Checkpoint { state, .. } | Record::Patched { state, .. } => Some(state),
         Record::Stored { key, .. } => key.contains('\n').then_some(key.as_str()),
         _ => None,
     }
@@ -235,11 +235,45 @@ fn key_hash(owner: &str) -> u64 {
     BuildHasherDefault::<DefaultHasher>::default().hash_one(owner)
 }
 
-fn wait(pending: &mut Vec<Record>, record: Record) {
+fn unheld(state: &str, base: u64) -> StoreError {
+    invalid(format!(
+        "checkpoint {state} patches revision {base}, which the log does not hold"
+    ))
+}
+
+fn wait(pending: &mut Vec<Record>, record: Record) -> Result<(), StoreError> {
+    let record = match record {
+        Record::Patched {
+            base,
+            edits,
+            revision,
+            state,
+        } => {
+            let payload = pending
+                .iter()
+                .rev()
+                .find_map(|waiting| match waiting {
+                    Record::Checkpoint {
+                        payload, revision, ..
+                    } => Some((payload, *revision)),
+                    _ => None,
+                })
+                .filter(|(_, held)| *held == base)
+                .map(|(payload, _)| crate::patch::apply(payload, &edits))
+                .ok_or_else(|| unheld(&state, base))??;
+            Record::Checkpoint {
+                payload,
+                revision,
+                state,
+            }
+        }
+        record => record,
+    };
     if matches!(record, Record::Checkpoint { .. }) {
         pending.retain(|waiting| !matches!(waiting, Record::Checkpoint { .. }));
     }
     pending.push(record);
+    Ok(())
 }
 
 impl Fold {
@@ -252,8 +286,7 @@ impl Fold {
         }
         crate::record::each(body, |record| {
             if let Some(pending) = self.defer(&record) {
-                wait(pending, record);
-                return Ok(());
+                return wait(pending, record);
             }
             self.take(record, Some(seq))
         })?;
@@ -1325,7 +1358,7 @@ impl Fold {
                 value: value.clone(),
             };
             match self.defer(&record) {
-                Some(pending) => wait(pending, record.clone()),
+                Some(pending) => pending.push(record.clone()),
                 None => {
                     self.stored.insert(key, value);
                 }
@@ -1480,8 +1513,7 @@ impl Fold {
 
     pub fn apply(&mut self, record: &Record, row: Option<u64>) -> Result<(), StoreError> {
         if let Some(pending) = self.defer(record) {
-            wait(pending, record.clone());
-            return Ok(());
+            return wait(pending, record.clone());
         }
         self.fold_in(record, row)
     }
@@ -1543,6 +1575,27 @@ impl Fold {
                     updates.clear();
                 }
                 updates.push(update.clone());
+            }
+            Record::Patched {
+                base,
+                edits,
+                revision,
+                state,
+            } => {
+                let payload = self
+                    .checkpoints
+                    .get(state)
+                    .filter(|held| held.revision == *base)
+                    .map(|held| crate::patch::apply(&held.payload, edits))
+                    .ok_or_else(|| unheld(state, *base))??;
+                return self.fold_in(
+                    &Record::Checkpoint {
+                        payload,
+                        revision: *revision,
+                        state: state.clone(),
+                    },
+                    row,
+                );
             }
             Record::Checkpoint {
                 payload,

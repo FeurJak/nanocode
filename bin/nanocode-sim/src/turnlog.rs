@@ -471,6 +471,7 @@ pub struct TurnLogPolicy {
     host: Arc<dyn LogHost>,
     limit: Option<usize>,
     logs: BTreeMap<String, TurnLog>,
+    opens: u64,
     owners: Option<u64>,
     ratio: usize,
     ratio_ignored: bool,
@@ -513,6 +514,7 @@ impl TurnLogPolicy {
             }),
             limit,
             logs: BTreeMap::new(),
+            opens: 0,
             owners: None,
             ratio,
             ratio_ignored: false,
@@ -591,6 +593,7 @@ impl TurnLogPolicy {
         let Some(opens) = self.takeover else {
             return;
         };
+        let whole = self.whole();
         if !self.followers.contains_key(scope) {
             let follower = refused(ready(TurnLog::follow(Arc::clone(&self.host), scope)));
             self.followers.insert(scope.to_owned(), follower);
@@ -619,7 +622,8 @@ impl TurnLogPolicy {
         } else {
             self.ratio
         })
-        .snapshot_rows(self.rows);
+        .snapshot_rows(self.rows)
+        .whole_checkpoints(whole);
         let stale = self
             .logs
             .remove(scope)
@@ -665,8 +669,14 @@ impl TurnLogPolicy {
         self
     }
 
+    fn whole(&mut self) -> bool {
+        self.opens += 1;
+        self.opens % 2 == 0
+    }
+
     fn log(&mut self, scope: &str) -> &TurnLog {
         if !self.logs.contains_key(scope) {
+            let whole = self.whole();
             let log = refused(ready(TurnLog::open(Arc::clone(&self.host), scope)))
                 .retain_finished(self.retain)
                 .row_limit(self.limit)
@@ -675,7 +685,8 @@ impl TurnLogPolicy {
                 } else {
                     self.ratio
                 })
-                .snapshot_rows(self.rows);
+                .snapshot_rows(self.rows)
+                .whole_checkpoints(whole);
             self.logs.insert(scope.to_owned(), log);
         }
         &self.logs[scope]
@@ -838,6 +849,7 @@ impl TurnDurability for TurnLogPolicy {
     }
 
     fn load(&mut self, _log: &mut dyn Log, scope: &str) -> ScopeState {
+        let whole = self.whole();
         let log = refused(ready(TurnLog::open(Arc::clone(&self.host), scope)))
             .retain_finished(self.retain)
             .row_limit(self.limit)
@@ -846,7 +858,8 @@ impl TurnDurability for TurnLogPolicy {
             } else {
                 self.ratio
             })
-            .snapshot_rows(self.rows);
+            .snapshot_rows(self.rows)
+            .whole_checkpoints(whole);
         let (state, revision) = refused(ready(log.read_owner(scope, |fold| {
             fold.checkpoint(scope).map_or_else(
                 || (ScopeState::default(), 0),

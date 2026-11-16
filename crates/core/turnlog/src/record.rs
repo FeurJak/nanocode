@@ -106,6 +106,12 @@ pub enum Record {
         sections: Vec<(u64, u64)>,
         written: u64,
     },
+    Patched {
+        base: u64,
+        edits: Box<RawValue>,
+        revision: u64,
+        state: String,
+    },
     Recovery {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         at: Option<u64>,

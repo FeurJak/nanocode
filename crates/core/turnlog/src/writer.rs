@@ -9,7 +9,7 @@ use nanocode_durability_core::{SqlStatement, StoreError};
 use nanocode_sync::{Held, Owned, mpsc, oneshot};
 
 use crate::{
-    Compaction, Event, Extension, Fold, LogHost, Record, Rider, Segment, Write,
+    Checkpoint, Compaction, Event, Extension, Fold, LogHost, Record, Rider, Segment, Write,
     codec::{
         self, ARCHIVE, BOUNDARY, History, PART, RECORDS, SEAL, SECTION, SNAPSHOT, Stream, WINDOW,
     },
@@ -961,7 +961,9 @@ impl Follower {
             riding,
             rows: None,
             scope,
+            whole: false,
             writer: Owned::new(Writer {
+                bases: BTreeMap::new(),
                 buffer: Vec::new(),
                 check: snapshot,
                 collectable: BTreeSet::new(),
@@ -980,6 +982,7 @@ impl Follower {
                 tail,
                 tail_row,
                 tail_rows,
+                tails: BTreeMap::new(),
                 tried: None,
             }),
         })
@@ -993,6 +996,7 @@ struct Riding {
 }
 
 struct Writer {
+    bases: BTreeMap<String, Option<Checkpoint>>,
     buffer: Vec<Record>,
     check: usize,
     collectable: BTreeSet<String>,
@@ -1011,6 +1015,7 @@ struct Writer {
     tail: usize,
     tail_row: Option<TailRow>,
     tail_rows: usize,
+    tails: BTreeMap<String, u64>,
     tried: Option<(usize, usize)>,
 }
 
@@ -1022,6 +1027,7 @@ pub struct TurnLog {
     riding: mpsc::UnboundedSender<Riding>,
     rows: Option<usize>,
     scope: Arc<str>,
+    whole: bool,
     writer: Owned<Writer>,
 }
 
@@ -1032,6 +1038,7 @@ pub struct Lease<'a> {
     retain: Option<usize>,
     rows: Option<usize>,
     scope: &'a str,
+    whole: bool,
     writer: Held<'a, Writer>,
 }
 
@@ -1093,6 +1100,12 @@ impl TurnLog {
     }
 
     #[must_use]
+    pub const fn whole_checkpoints(mut self, whole: bool) -> Self {
+        self.whole = whole;
+        self
+    }
+
+    #[must_use]
     pub fn scope(&self) -> &str {
         &self.scope
     }
@@ -1121,6 +1134,7 @@ impl TurnLog {
             retain: self.retain,
             rows: self.rows,
             scope: &self.scope,
+            whole: self.whole,
             writer: self.writer.acquire().await,
         }
     }
@@ -1327,6 +1341,17 @@ impl Lease<'_> {
 
     pub fn push(&mut self, record: Record) -> Result<(), StoreError> {
         let writer = &mut *self.writer;
+        if let Record::Checkpoint { state, .. } = &record
+            && !self.whole
+            && !writer.bases.contains_key(state)
+        {
+            let base = writer
+                .fold
+                .checkpoint(state)
+                .filter(|held| writer.tails.get(state) == Some(&held.revision))
+                .cloned();
+            writer.bases.insert(state.clone(), base);
+        }
         writer.fold.apply(&record, None)?;
         if let Record::Checkpoint { state, .. } = &record {
             writer.buffer.retain(
@@ -1390,7 +1415,33 @@ impl Lease<'_> {
             })
             .collect::<Vec<_>>();
         let floor = writer.floor.map(|seq| Record::Floor { seq });
-        let plain = crate::record::encode_all(floor.iter().chain(&writer.buffer))?;
+        let plain = {
+            let mut written = Vec::with_capacity(writer.buffer.len());
+            for record in &writer.buffer {
+                written.push(match record {
+                    Record::Checkpoint {
+                        payload,
+                        revision,
+                        state,
+                    } => match writer.bases.get(state) {
+                        Some(Some(base)) => crate::patch::diff(&base.payload, payload)?.map_or(
+                            Cow::Borrowed(record),
+                            |edits| {
+                                Cow::Owned(Record::Patched {
+                                    base: base.revision,
+                                    edits,
+                                    revision: *revision,
+                                    state: state.clone(),
+                                })
+                            },
+                        ),
+                        _ => Cow::Borrowed(record),
+                    },
+                    record => Cow::Borrowed(record),
+                });
+            }
+            crate::record::encode_all(floor.iter().chain(written.iter().map(|record| &**record)))?
+        };
         let mut stream = match writer.stream.take() {
             Some(stream) if writer.stale => stream.restart(writer.history.bytes())?,
             Some(stream) => stream,
@@ -1692,6 +1743,19 @@ impl Lease<'_> {
         for turn in &recovered {
             writer.fold.recovered_at(turn, seq);
         }
+        if snapshot.is_some() {
+            writer.tails.clear();
+        } else {
+            for record in &writer.buffer {
+                if let Record::Checkpoint {
+                    revision, state, ..
+                } = record
+                {
+                    writer.tails.insert(state.clone(), *revision);
+                }
+            }
+        }
+        writer.bases.clear();
         writer.buffer.clear();
         writer.floor = None;
         if let Some(keep) = self.retain {
