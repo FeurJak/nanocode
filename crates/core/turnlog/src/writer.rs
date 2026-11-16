@@ -1225,6 +1225,11 @@ impl Lease<'_> {
                 )
                 .await?;
             }
+            for (first, section) in writer.fold.unlisted() {
+                let records = section_records(self.host, self.scope, &first, section).await?;
+                writer.fold.paged(&first, records)?;
+                writer.stats.index_loads += 1;
+            }
             writer.stats.collected += writer.fold.collect(&writer.collectable) as u64;
             let level = if due {
                 codec::FAST_LEVEL

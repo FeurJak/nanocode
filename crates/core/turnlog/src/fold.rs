@@ -1,6 +1,7 @@
 use std::{
     cell::Cell,
     collections::{BTreeMap, BTreeSet, HashMap},
+    hash::{BuildHasher, BuildHasherDefault, DefaultHasher},
     ops::Bound,
 };
 
@@ -165,6 +166,7 @@ pub struct Fold {
     dead: BTreeMap<String, String>,
     ends: u64,
     events: Vec<Event>,
+    filters: BTreeMap<u64, Box<[u64]>>,
     groups: BTreeMap<u64, (u64, u64)>,
     hot_bytes: usize,
     hosts: BTreeMap<String, Box<RawValue>>,
@@ -230,6 +232,10 @@ pub(crate) fn legacy_name(key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn key_hash(owner: &str) -> u64 {
+    BuildHasherDefault::<DefaultHasher>::default().hash_one(owner)
+}
+
 fn wait(pending: &mut Vec<Record>, record: Record) {
     if matches!(record, Record::Checkpoint { .. }) {
         pending.retain(|waiting| !matches!(waiting, Record::Checkpoint { .. }));
@@ -273,6 +279,20 @@ impl Fold {
             .next_back()
     }
 
+    fn cold_page(&self, owner: &str) -> Option<(&String, Section)> {
+        match self.page_of(owner) {
+            Some((first, Page::Cold(section)))
+                if self
+                    .filters
+                    .get(&section.row)
+                    .is_none_or(|filter| filter.binary_search(&key_hash(owner)).is_ok()) =>
+            {
+                Some((first, *section))
+            }
+            _ => None,
+        }
+    }
+
     fn page_end(&self, first: &str) -> Option<&String> {
         self.pages
             .range::<str, _>((Bound::Excluded(first), Bound::Unbounded))
@@ -283,7 +303,7 @@ impl Fold {
     fn defer(&mut self, record: &Record) -> Option<&mut Vec<Record>> {
         let owner = owner_of(record)?;
         if !self.owners.contains_key(owner) {
-            let state = if matches!(self.page_of(owner), Some((_, Page::Cold(_)))) {
+            let state = if self.cold_page(owner).is_some() {
                 Owner::Waiting {
                     pending: Vec::new(),
                 }
@@ -306,19 +326,17 @@ impl Fold {
     }
 
     pub(crate) fn unpaged(&self, owner: &str) -> Option<(String, Section)> {
-        match self.page_of(owner) {
-            Some((first, Page::Cold(section))) => Some((first.clone(), *section)),
-            _ => None,
-        }
+        self.cold_page(owner)
+            .map(|(first, section)| (first.clone(), section))
     }
 
     pub(crate) fn group_pages(&self, records: &[Record]) -> Vec<(String, Section)> {
         let mut pages = BTreeMap::new();
         for owner in records.iter().filter_map(owner_of) {
             if matches!(self.owners.get(owner), None | Some(Owner::Waiting { .. }))
-                && let Some((first, Page::Cold(section))) = self.page_of(owner)
+                && let Some((first, section)) = self.cold_page(owner)
             {
-                pages.insert(first, *section);
+                pages.insert(first, section);
             }
         }
         pages
@@ -337,6 +355,18 @@ impl Fold {
             .collect()
     }
 
+    pub(crate) fn unlisted(&self) -> Vec<(String, Section)> {
+        let mut pages = BTreeMap::new();
+        for (owner, state) in &self.owners {
+            if matches!(state, Owner::Warm { delta, .. } if !delta.is_empty())
+                && let Some((first, Page::Cold(section))) = self.page_of(owner)
+            {
+                pages.insert(first.clone(), *section);
+            }
+        }
+        pages.into_iter().collect()
+    }
+
     pub(crate) fn paged(&mut self, first: &str, records: Vec<Record>) -> Result<(), StoreError> {
         let Some(page) = self.pages.get_mut(first) else {
             return Ok(());
@@ -345,6 +375,7 @@ impl Fold {
             return Ok(());
         };
         *page = Page::Loaded(section);
+        self.filters.remove(&section.row);
         let end = self.page_end(first).cloned();
         for record in records {
             let Record::Owner {
@@ -561,9 +592,15 @@ impl Fold {
                 .page_owners(&first)
                 .map(|(owner, _)| owner.clone())
                 .collect::<Vec<_>>();
+            let mut filter = owners
+                .iter()
+                .map(|owner| key_hash(owner))
+                .collect::<Vec<_>>();
+            filter.sort_unstable();
             for owner in owners {
                 self.owners.remove(&owner);
             }
+            self.filters.insert(section.row, filter.into_boxed_slice());
             self.pages.insert(first, Page::Cold(section));
         }
     }
@@ -611,7 +648,7 @@ impl Fold {
         !matches!(
             self.owners.get(state),
             Some(Owner::Cold { .. } | Owner::Waiting { .. })
-        ) && !matches!(self.page_of(state), Some((_, Page::Cold(_))))
+        ) && self.cold_page(state).is_none()
             && self.key_pages(state).is_empty()
             && self.cold_keys(state).is_empty()
     }
@@ -784,6 +821,15 @@ impl Fold {
             self.owners.insert(owner, state);
         }
         self.pages = pages;
+        let cold = self
+            .pages
+            .values()
+            .filter_map(|page| match page {
+                Page::Cold(section) => Some(section.row),
+                Page::Loaded(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+        self.filters.retain(|row, _| cold.contains(row));
         self.groups = groups;
     }
 

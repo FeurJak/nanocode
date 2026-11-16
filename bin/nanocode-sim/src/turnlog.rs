@@ -454,6 +454,7 @@ pub struct TurnLogPolicy {
     read_unloaded: bool,
     restarting: BTreeMap<String, String>,
     retain: Option<usize>,
+    rewrite_stale: bool,
     retention: Option<usize>,
     rows: Option<usize>,
     single: bool,
@@ -492,6 +493,7 @@ impl TurnLogPolicy {
             read_unloaded: false,
             restarting: BTreeMap::new(),
             retain,
+            rewrite_stale: false,
             retention,
             rows: None,
             single: true,
@@ -529,6 +531,11 @@ impl TurnLogPolicy {
 
     pub const fn collect_live(mut self, live: bool) -> Self {
         self.collect_live = live;
+        self
+    }
+
+    pub const fn rewrite_stale(mut self, stale: bool) -> Self {
+        self.rewrite_stale = stale;
         self
     }
 
@@ -853,13 +860,29 @@ impl TurnDurability for TurnLogPolicy {
             + 1;
         let top = next * 5 % 13 + 1;
         let cached = self.cached.entry(scope.to_owned()).or_default();
-        for id in chain(top) {
+        let ids = chain(top);
+        let again = ids
+            .iter()
+            .copied()
+            .find(|id| !self.collect_live && cached.contains(id));
+        for id in ids {
             if cached.insert(id) {
                 refused(lease.push(LogRecord::Stored {
                     key: format!("{contents}\n{}", content(id)),
                     value: content_value(scope, id),
                 }));
             }
+        }
+        if let Some(id) = again {
+            let value = content_value(scope, id);
+            refused(lease.push(LogRecord::Stored {
+                key: format!("{contents}\n{}", content(id)),
+                value: if self.rewrite_stale {
+                    value.replacen("content", "stale content", 1)
+                } else {
+                    value
+                },
+            }));
         }
         if self.collect_live {
             lease.collect_unreachable(&contents);

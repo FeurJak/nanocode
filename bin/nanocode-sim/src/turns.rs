@@ -61,6 +61,7 @@ pub enum TurnMutation {
     BufferedAdmissionWritten,
     CellBeforeCheckpoint,
     ContentCollectedLive,
+    ContentRewrittenStale,
     DurableSeqBeforeCommit,
     FinishBeforeRow,
     GateReleasesEarly,
@@ -80,7 +81,7 @@ pub enum TurnMutation {
 }
 
 impl TurnMutation {
-    const ALL: [Self; 23] = [
+    const ALL: [Self; 24] = [
         Self::None,
         Self::AckBufferedAdmission,
         Self::AckBufferedResult,
@@ -88,6 +89,7 @@ impl TurnMutation {
         Self::BufferedAdmissionWritten,
         Self::CellBeforeCheckpoint,
         Self::ContentCollectedLive,
+        Self::ContentRewrittenStale,
         Self::DurableSeqBeforeCommit,
         Self::FinishBeforeRow,
         Self::GateReleasesEarly,
@@ -121,6 +123,7 @@ impl TurnMutation {
             Self::BufferedAdmissionWritten => "buffered_admission_written",
             Self::CellBeforeCheckpoint => "cell_before_checkpoint",
             Self::ContentCollectedLive => "content_collected_live",
+            Self::ContentRewrittenStale => "content_rewritten_stale",
             Self::DurableSeqBeforeCommit => "durable_seq_before_commit",
             Self::FinishBeforeRow => "finish_before_row",
             Self::GateReleasesEarly => "gate_releases_early",
@@ -1240,7 +1243,8 @@ impl Sim {
                 .owners(self.options.owners)
                 .single_snapshot(self.options.reopen_row_limit.is_none())
                 .collect_live(self.options.mutation == TurnMutation::ContentCollectedLive)
-                .read_unloaded(self.options.mutation == TurnMutation::PartReadUnloaded),
+                .read_unloaded(self.options.mutation == TurnMutation::PartReadUnloaded)
+                .rewrite_stale(self.options.mutation == TurnMutation::ContentRewrittenStale),
             ),
         };
         let mut object = Object {
