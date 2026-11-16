@@ -2903,15 +2903,9 @@ fn api_body<M: WireMessage>(
         compaction: Option<&'a Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
         diagnostics: Option<&'a Value>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        system: Option<&'a serde_json::value::RawValue>,
     }
     #[derive(Serialize)]
     struct Tail<'a> {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        container: Option<&'a str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        tools: Option<&'a serde_json::value::RawValue>,
         metadata: &'a Value,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread: Option<&'a ThreadParam>,
@@ -2944,7 +2938,7 @@ fn api_body<M: WireMessage>(
         .map(|encoded| &*encoded.raw)
         .or(owned_tools.as_deref());
     let encode = |message: &Message| serde_json::to_string(message).map_err(ClaudeError::from);
-    let head = serde_json::to_string(&Head {
+    let fields = serde_json::to_string(&Head {
         model,
         max_tokens: *max_tokens,
         cache_control: cache_control.as_ref(),
@@ -2955,22 +2949,49 @@ fn api_body<M: WireMessage>(
         context_management: context_management.as_ref(),
         compaction: compaction.as_ref(),
         diagnostics: diagnostics.as_ref(),
-        system: system_raw,
     })?;
-    let tail = serde_json::to_string(&Tail {
-        container: container.as_deref(),
-        tools: tools_raw,
+    let rest = serde_json::to_string(&Tail {
         metadata,
         thread,
         stream: streaming,
     })?;
+    let container = container
+        .as_deref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    const SYSTEM: &str = ",\"system\":";
+    const CONTAINER: &str = "\"container\":";
+    const TOOLS: &str = "\"tools\":";
     const OPEN: &str = ",\"messages\":[";
-    let opening = &head[..head.len() - 1];
-    let start = opening.len() + OPEN.len();
+    let fields = &fields[..fields.len() - 1];
+    let opening = [
+        fields,
+        system_raw.map_or("", |_| SYSTEM),
+        system_raw.map_or("", serde_json::value::RawValue::get),
+    ];
+    let start = opening.iter().map(|part| part.len()).sum::<usize>() + OPEN.len();
+    let opens = |body: &str| {
+        let mut remaining = body.as_bytes();
+        opening.iter().all(|part| {
+            remaining
+                .strip_prefix(part.as_bytes())
+                .map(|after| remaining = after)
+                .is_some()
+        })
+    };
+    let tail = [
+        container.as_ref().map_or("", |_| CONTAINER),
+        container.as_deref().unwrap_or(""),
+        container.as_ref().map_or("", |_| ","),
+        tools_raw.map_or("", |_| TOOLS),
+        tools_raw.map_or("", serde_json::value::RawValue::get),
+        tools_raw.map_or("", |_| ","),
+        &rest[1..],
+    ];
     let cache = cache.filter(|_| streaming && thread.is_none());
     let kept = cache
         .and_then(WireCache::assembled)
-        .filter(|kept| kept.start == start && kept.body.starts_with(opening))
+        .filter(|kept| kept.start == start && opens(&kept.body))
         .and_then(|kept| Some((Arc::try_unwrap(kept.body).ok()?, kept.ends)));
     let previous = cache.and_then(WireCache::hashed).unwrap_or_default();
     let known = previous.known(messages);
@@ -2984,7 +3005,7 @@ fn api_body<M: WireMessage>(
         .iter()
         .map(|message| message.encoded(false, &encode))
         .collect::<Result<Vec<_>, _>>()?;
-    let added = tail.len()
+    let added = tail.iter().map(|part| part.len()).sum::<usize>()
         + "],".len()
         + encoded
             .iter()
@@ -2999,7 +3020,7 @@ fn api_body<M: WireMessage>(
         }
         None => {
             let mut body = String::with_capacity(start + added);
-            body.push_str(opening);
+            opening.iter().for_each(|part| body.push_str(part));
             body.push_str(OPEN);
             (body, Vec::with_capacity(messages.len()))
         }
@@ -3019,22 +3040,18 @@ fn api_body<M: WireMessage>(
     }
     let end = body.len();
     body.push_str("],");
-    let base = body.len() - 1;
-    body.push_str(&tail[1..]);
+    let at = body.len() + tail[..4].iter().map(|part| part.len()).sum::<usize>();
+    tail.iter().for_each(|part| body.push_str(part));
     let system = system_raw.map(|raw| {
-        let at = head.len() - 1 - raw.get().len();
+        let at = fields.len() + SYSTEM.len();
         Encoding {
             range: at..at + raw.get().len(),
             digest: cached_system.as_ref().map(|encoded| encoded.digest),
         }
     });
-    let tools = tools_raw.and_then(|raw| {
-        const KEY: &str = "\"tools\":";
-        let at = base + tail.find(KEY)? + KEY.len();
-        Some(Encoding {
-            range: at..at + raw.get().len(),
-            digest: cached_tools.as_ref().map(|encoded| encoded.digest),
-        })
+    let tools = tools_raw.map(|raw| Encoding {
+        range: at..at + raw.get().len(),
+        digest: cached_tools.as_ref().map(|encoded| encoded.digest),
     });
     let conversation = (hashed.read.finalize(), hashed.sent.finalize());
     drop(encoded);
