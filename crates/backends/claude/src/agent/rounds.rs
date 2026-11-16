@@ -1466,7 +1466,7 @@ pub(super) fn run_rounds<'a>(
                         .await?;
                     continue;
                 }
-                if !state.skip_finish_check
+                if state.finish_check
                     && state
                         .finish_check_min_requests
                         .is_none_or(|min| index.saturating_add(1) >= min.get())

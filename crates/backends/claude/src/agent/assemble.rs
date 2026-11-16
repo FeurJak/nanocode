@@ -444,6 +444,12 @@ pub(super) fn build(mut builder: ClaudeBuilder) -> Result<(Agent, AgentEvents)> 
     let given_context = builder.system_context;
     let kept_context = restored.context.clone();
     let requested_at = kept_context.as_ref().map_or(0, |context| context.requested);
+    let finish_check = builder.finish_check
+        || builder.finish_retries.is_some()
+        || !(builder.skip_finish_check
+            || (builder.claude.model.starts_with("claude-opus-")
+                && builder.late_finish_check.is_none()
+                && builder.finish_check_min_requests.is_none()));
     let state = Arc::new(State {
         session_events,
         subagent_type: builder.subagent_type,
@@ -508,7 +514,7 @@ pub(super) fn build(mut builder: ClaudeBuilder) -> Result<(Agent, AgentEvents)> 
         lean_cells: builder.lean_cells,
         low_effort_rounds: builder.low_effort_rounds,
         persist_finish: builder.persist_finish,
-        skip_finish_check: builder.skip_finish_check,
+        finish_check,
         late_finish_check: builder.late_finish_check,
         finish_check_min_requests: builder.finish_check_min_requests,
         finish_retries: builder.finish_retries,

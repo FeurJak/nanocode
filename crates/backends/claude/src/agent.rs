@@ -852,6 +852,7 @@ pub struct ClaudeBuilder {
     low_effort_rounds: bool,
     persist_finish: bool,
     skip_finish_check: bool,
+    finish_check: bool,
     late_finish_check: Option<std::time::Duration>,
     finish_check_min_requests: Option<std::num::NonZeroU32>,
     finish_retries: Option<std::num::NonZeroU32>,
@@ -948,6 +949,7 @@ impl ClaudeBuilder {
             low_effort_rounds: false,
             persist_finish: false,
             skip_finish_check: false,
+            finish_check: false,
             late_finish_check: None,
             finish_check_min_requests: None,
             finish_retries: None,
@@ -1405,6 +1407,11 @@ impl ClaudeBuilder {
 
     pub const fn skip_finish_check(mut self, skip: bool) -> Self {
         self.skip_finish_check = skip;
+        self
+    }
+
+    pub const fn finish_check(mut self, check: bool) -> Self {
+        self.finish_check = check;
         self
     }
 
@@ -3181,7 +3188,7 @@ struct State {
     lean_cells: bool,
     low_effort_rounds: bool,
     persist_finish: bool,
-    skip_finish_check: bool,
+    finish_check: bool,
     late_finish_check: Option<std::time::Duration>,
     finish_check_min_requests: Option<std::num::NonZeroU32>,
     finish_retries: Option<std::num::NonZeroU32>,
