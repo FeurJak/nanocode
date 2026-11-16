@@ -182,17 +182,13 @@ pub fn exec_description_with(
         description.push_str("\n- `ALL_TOOLS` is the catalog of callable nested tools for this execution. A tool exposed separately by the host is not necessarily callable through `tools`; use its direct tool entry when it is absent from this catalog.");
     }
     description.push_str("\n- Nanocode extension: a call to a name missing from `ALL_TOOLS` is still a nested call the host answers: it runs that hand's tool of that name when its input names a `hand` (such as one only a phone offers) or a tool the host found since the cell started, and otherwise rejects with `TOOL_NOT_AVAILABLE`. An unfinished nested call may have executed even when its cell ends; an `outcome: unknown` receipt is not permission to retry it.");
-    let reader = definitions
-        .iter()
-        .find_map(|definition| match definition.name() {
-            "Read" => Some("await tools.Read({ file_path })"),
-            "view_image" => Some("await tools.view_image({ path })"),
-            _ => None,
-        });
-    if let Some(read) = reader {
+    let reader = definitions.iter().find_map(|definition| {
+        image_reader(definition.name()).map(|field| (definition.name(), field))
+    });
+    if let Some((name, field)) = reader {
         let _ = write!(
             description,
-            "\n- Nanocode extension: `image` also takes an array of image items, or a tool result whose `content` is one. To show an image file, such as a chart a script saved, pass what reading it returns: `image({read})`. Do not base64-encode it through a shell, whose output is cut off."
+            "\n- Nanocode extension: `image` also takes an array of image items, or a tool result whose `content` is one. To show an image file, such as a chart a script saved, pass what reading it returns: `image(await tools.{name}({{ {field} }}))`. Do not base64-encode it through a shell, whose output is cut off."
         );
     }
     if !provider_summaries.is_empty() {
@@ -350,6 +346,15 @@ fn mcp_structured_content_schema(output_schema: &Value) -> Option<&Value> {
             .get("structuredContent")
             .unwrap_or(&Value::Bool(true)),
     )
+}
+
+#[must_use]
+pub fn image_reader(name: &str) -> Option<&'static str> {
+    match name {
+        "Read" => Some("file_path"),
+        "view_image" => Some("path"),
+        _ => None,
+    }
 }
 
 pub fn normalize_identifier(name: &str) -> String {

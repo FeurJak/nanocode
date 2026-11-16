@@ -1,4 +1,5 @@
 mod audio;
+mod images;
 mod local;
 mod output;
 mod replay;
@@ -142,6 +143,7 @@ pub struct CodeModeRuntime {
 
     cells: Arc<Atom<CellRegistry>>,
     stored: Arc<Atom<HashMap<String, Arc<RawValue>>>>,
+    images: Arc<Atom<Vec<String>>>,
     host: Arc<Slot<EmbeddedHost>>,
     current_turn: Arc<AtomicU64>,
     preempt: watch::Sender<(u64, u64)>,
@@ -570,6 +572,7 @@ impl CodeModeRuntime {
                 finished: BTreeMap::new(),
             })),
             stored: Arc::default(),
+            images: Arc::default(),
             host: Arc::default(),
             current_turn,
             preempt: watch::channel((0, 0)).0,
@@ -787,6 +790,7 @@ impl CodeModeRuntime {
             cell_context,
             stored,
             Arc::clone(&self.stored),
+            Arc::clone(&self.images),
             Arc::clone(&self.host),
             self.prelude.clone(),
             self.limits,
@@ -1057,6 +1061,7 @@ impl CodeModeRuntime {
                 context,
                 stored,
                 Arc::clone(&self.stored),
+                Arc::clone(&self.images),
                 Arc::clone(&self.host),
                 self.prelude.clone(),
                 self.limits,
@@ -1513,6 +1518,7 @@ impl LiveCell {
         context: OwnedToolContext,
         stored: HashMap<String, Arc<RawValue>>,
         shared_stored: Arc<Atom<HashMap<String, Arc<RawValue>>>>,
+        images: Arc<Atom<Vec<String>>>,
         host: Arc<Slot<EmbeddedHost>>,
         prelude: Option<Arc<str>>,
         limits: Limits,
@@ -1564,6 +1570,7 @@ impl LiveCell {
                 context,
                 stored,
                 shared_stored,
+                images,
                 updates_tx,
                 terminate_rx,
                 interrupt.clone(),
@@ -2800,6 +2807,7 @@ impl EmbeddedHost {
         mut plan: Option<ReplayPlan>,
         mut hold: Option<watch::Receiver<bool>>,
         limits: Limits,
+        pending_images: &Atom<Vec<String>>,
     ) -> Result<CellTerminal, HostFailure> {
         let mut pending_calls: InOrder<CallFuture<'_>> = InOrder::new();
         let unstarted = Arc::new(AtomicUsize::new(0));
@@ -2814,6 +2822,11 @@ impl EmbeddedHost {
             updates: updates.clone(),
         };
         let mut watch = CellWatch::new(limits.guard);
+        let mut images = images::ImageFiles::new(
+            &tools.shared_nested_tool_metadata(),
+            limits.guard,
+            pending_images.get().as_ref(),
+        );
         let mut event_count = 0_u64;
         let mut replaying = plan.is_some();
         let mut suppressed = plan.as_ref().map_or(0, |plan| plan.content_returned);
@@ -2965,6 +2978,9 @@ impl EmbeddedHost {
                         RuntimeEvent::ToolCall {
                             id, name, input, host, ..
                         } => {
+                            if !replaying {
+                                images.before(&name, &input, tools, context).await;
+                            }
                             if held {
                                 calls.queue(id, name, input, host);
                             } else {
@@ -2980,6 +2996,7 @@ impl EmbeddedHost {
                             }
                         }
                         RuntimeEvent::Content { content, .. } => {
+                            images.shown(&content);
                             if suppressed > 0 {
                                 suppressed -= 1;
                             } else {
@@ -3037,6 +3054,9 @@ impl EmbeddedHost {
                         } => {
                             nanocode_trace::Span::current().record("runtime.event_count", event_count);
                             start_journaled_calls(calls.pending_calls, &unstarted, &mut flushing).await;
+                            for image in images.changed(tools, context, pending_images).await {
+                                let _ = updates.send(CellUpdate::Content(image));
+                            }
                             return Ok(CellTerminal::Completed { stored });
                         }
                         RuntimeEvent::Error {
@@ -3046,6 +3066,9 @@ impl EmbeddedHost {
                         } => {
                             nanocode_trace::Span::current().record("runtime.event_count", event_count);
                             start_journaled_calls(calls.pending_calls, &unstarted, &mut flushing).await;
+                            for image in images.changed(tools, context, pending_images).await {
+                                let _ = updates.send(CellUpdate::Content(image));
+                            }
                             return Ok(CellTerminal::ScriptFailed {
                                 message,
                                 stored,
@@ -3142,6 +3165,7 @@ async fn run_cell_actor(
     context: OwnedToolContext,
     stored: HashMap<String, Arc<RawValue>>,
     shared_stored: Arc<Atom<HashMap<String, Arc<RawValue>>>>,
+    images: Arc<Atom<Vec<String>>>,
     updates: mpsc::UnboundedSender<CellUpdate>,
     mut terminate: oneshot::Receiver<()>,
     interrupt: Interrupt,
@@ -3219,6 +3243,7 @@ async fn run_cell_actor(
             plan,
             hold,
             limits,
+            &images,
         )
         .await
     };
