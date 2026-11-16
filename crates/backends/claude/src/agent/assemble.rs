@@ -523,6 +523,7 @@ pub(super) fn build(mut builder: ClaudeBuilder) -> Result<(Agent, AgentEvents)> 
         result_effort: builder.result_effort,
         stop_at_target: builder.stop_at_target,
         tool_result_tokens: builder.tool_result_tokens,
+        tool_result_clearing: builder.tool_result_clearing,
         working_directory: working_directory.map(crate::environment::WorkingDirectory::new),
         nested_tools,
         recovery,

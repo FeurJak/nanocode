@@ -860,6 +860,7 @@ pub struct ClaudeBuilder {
     result_effort: Option<crate::Effort>,
     stop_at_target: bool,
     tool_result_tokens: Option<std::num::NonZeroU64>,
+    tool_result_clearing: Option<(usize, u64)>,
     spawn_factory: Option<Arc<dyn AgentFactory>>,
     child_journal: Option<nanocode_agent_core::backend::ChildJournal>,
     host_context: Option<Arc<str>>,
@@ -958,6 +959,7 @@ impl ClaudeBuilder {
             result_effort: None,
             stop_at_target: false,
             tool_result_tokens: None,
+            tool_result_clearing: None,
             spawn_factory: None,
             child_journal: None,
             host_context: None,
@@ -1449,6 +1451,11 @@ impl ClaudeBuilder {
 
     pub const fn tool_result_tokens(mut self, limit: std::num::NonZeroU64) -> Self {
         self.tool_result_tokens = Some(limit);
+        self
+    }
+
+    pub const fn tool_result_clearing(mut self, keep: usize, at_least_tokens: u64) -> Self {
+        self.tool_result_clearing = Some((keep, at_least_tokens));
         self
     }
 
@@ -3203,6 +3210,7 @@ struct State {
     result_effort: Option<crate::Effort>,
     stop_at_target: bool,
     tool_result_tokens: Option<std::num::NonZeroU64>,
+    tool_result_clearing: Option<(usize, u64)>,
     working_directory: Option<crate::environment::WorkingDirectory>,
     lifecycle_opened: Atom<Option<String>>,
     subagent_type: Option<String>,
@@ -4940,7 +4948,7 @@ impl State {
     }
     fn cleared(&self, mut messages: Vec<HistoryMessage>) -> Vec<HistoryMessage> {
         if self.message_thread.is_none() {
-            clearing::clear_tool_results(&mut messages);
+            clearing::clear_tool_results(&mut messages, self.tool_result_clearing);
         }
         if self.omit_custom_model_thinking
             && self
