@@ -615,9 +615,7 @@ pub(super) fn build(mut builder: ClaudeBuilder) -> Result<(Agent, AgentEvents)> 
             let Ok(preempts) = accepted else {
                 return false;
             };
-            for preempt in preempts {
-                preempt.await;
-            }
+            State::finish_code_preempt(preempts);
             true
         })
     });

@@ -450,9 +450,7 @@ pub(super) fn route(
         };
         match accepted {
             Some(preempts) => {
-                for preempt in preempts {
-                    preempt.await;
-                }
+                State::finish_code_preempt(preempts);
                 Ok(BackendPromptRoute::Steered)
             }
             None => start.await.map(BackendPromptRoute::Started),

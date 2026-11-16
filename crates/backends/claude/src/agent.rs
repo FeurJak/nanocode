@@ -5805,6 +5805,16 @@ impl State {
         started
     }
 
+    fn finish_code_preempt(preempts: Vec<BackendFuture<()>>) {
+        if !preempts.is_empty() {
+            nanocode_platform::spawn(async move {
+                for preempt in preempts {
+                    preempt.await;
+                }
+            });
+        }
+    }
+
     async fn settle_code_preempt(&self) {
         for settle in &self.code_turn_settle {
             settle().await;
@@ -6114,9 +6124,7 @@ impl Driver {
                     Vec::new()
                 }
             };
-            for preempt in preempts {
-                preempt.await;
-            }
+            State::finish_code_preempt(preempts);
             Ok(())
         })
     }
