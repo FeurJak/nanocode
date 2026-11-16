@@ -676,6 +676,11 @@ impl NativeToolRuntime {
                     None => executors.clone(),
                 });
         if let Some(journals) = &tools.cell_journals {
+            if let Some(session) = tools.session()
+                && session.session_id() == session.root_session_id()
+            {
+                journals.preempt_recovery(session.session_id());
+            }
             self.code_mode.set_journals(journals.clone());
         }
         if let Some(limit) = tools.nested_call_limit {

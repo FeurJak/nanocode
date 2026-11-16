@@ -6,7 +6,9 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
+use nanocode_code_mode::code_mode::CellJournals;
 use nanocode_code_mode_engine::{CellTools, EmbeddedHost, Interrupt, RuntimeEvent};
+use nanocode_tool_runtime::{SessionEnvironment, Tools, runtime::ToolRuntime};
 use serde_json::{Value, json};
 
 use crate::{
@@ -23,10 +25,11 @@ const PAD_MAX: u64 = 64;
 pub enum CellCallsMutation {
     None,
     CrossResults,
+    RootRecoveryUnbound,
 }
 
 impl CellCallsMutation {
-    const ALL: [Self; 2] = [Self::None, Self::CrossResults];
+    const ALL: [Self; 3] = [Self::None, Self::CrossResults, Self::RootRecoveryUnbound];
 
     pub fn parse(name: &str) -> Option<Self> {
         Self::ALL
@@ -38,6 +41,7 @@ impl CellCallsMutation {
         match self {
             Self::None => "none",
             Self::CrossResults => "cross_results",
+            Self::RootRecoveryUnbound => "root_recovery_unbound",
         }
     }
 
@@ -151,6 +155,38 @@ fn drive(
     }
 }
 
+fn root_recovery(seed: u64, mutation: CellCallsMutation) -> Result<(), String> {
+    let root = format!("cell-calls-{seed}");
+    let child = format!("{root}.child");
+
+    for session in [&root, &child] {
+        let journals = CellJournals::new();
+        let tools = Tools::builder()
+            .without_defaults()
+            .cell_journals(journals.clone())
+            .build()
+            .map_err(|error| format!("tools: {error}"))?;
+        let tools = if mutation == CellCallsMutation::RootRecoveryUnbound {
+            tools
+        } else {
+            tools.for_session(&SessionEnvironment::new(session, &root))
+        };
+        drop(ToolRuntime::new_with_tools(
+            std::env::temp_dir(),
+            Vec::new(),
+            &tools,
+        ));
+
+        let preempts = journals.preempts_recovery(session);
+        if preempts != (*session == root) {
+            return Err(format!(
+                "root_recovery_preemptible: session {session} of root {root} lets a steer cut its recovered observation short: {preempts}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn simulate(seed: u64, mutation: CellCallsMutation) -> CellCallsOutcome {
     let mut rng = Rng::derive(seed, "cell_calls");
     let calls = rng.range(CALLS_MIN, CALLS_MAX);
@@ -167,17 +203,19 @@ fn simulate(seed: u64, mutation: CellCallsMutation) -> CellCallsOutcome {
     let mut host = EmbeddedHost::spawn().expect("the embedded host starts");
     let mut digest = fnv(FNV_OFFSET, shape.as_bytes());
 
-    let wrong = host
-        .start_cell(
-            1,
-            &code,
-            HashMap::new(),
-            Arc::new(tools),
-            None,
-            None,
-            Interrupt::new(),
-        )
-        .map_err(|error| format!("start_cell: {error}"))
+    let wrong = root_recovery(seed, mutation)
+        .and_then(|()| {
+            host.start_cell(
+                1,
+                &code,
+                HashMap::new(),
+                Arc::new(tools),
+                None,
+                None,
+                Interrupt::new(),
+            )
+            .map_err(|error| format!("start_cell: {error}"))
+        })
         .and_then(|()| drive(&mut host, calls, &pad, mutation, &mut digest))
         .err();
 
