@@ -3465,7 +3465,6 @@ pub extern "C" fn PyMethod_New(function: *mut Object, zelf: *mut Object) -> *mut
     })
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn PyCapsule_SetDestructor(pointer: *mut Object, _destructor: *mut c_void) -> c_int {
     status(|vm| {
@@ -3473,7 +3472,6 @@ pub extern "C" fn PyCapsule_SetDestructor(pointer: *mut Object, _destructor: *mu
         Ok(())
     })
 }
-
 
 #[unsafe(no_mangle)]
 pub extern "C" fn PyDict_SetDefault(

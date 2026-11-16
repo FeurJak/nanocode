@@ -119,17 +119,6 @@ const char *Py_GetVersion(void) {
     return PY_VERSION " (nanocode)";
 }
 
-int PyDict_GetItemStringRef(PyObject *dict, const char *key, PyObject **result) {
-    PyObject *name = PyUnicode_FromString(key);
-    if (name == NULL) {
-        *result = NULL;
-        return -1;
-    }
-    int found = PyDict_GetItemRef(dict, name, result);
-    Py_DECREF(name);
-    return found;
-}
-
 PyObject **_PyObject_GetDictPtr(PyObject *object) {
     Py_ssize_t offset = Py_TYPE(object)->tp_dictoffset;
     if (offset <= 0) {
@@ -217,6 +206,93 @@ PyObject *PyInstanceMethod_Function(PyObject *method) {
     return ((PyInstanceMethodObject *)method)->func;
 }
 
-PyInterpreterState *PyInterpreterState_Main(void) {
-    return PyInterpreterState_Get();
+static PyObject *builtin_method(PyTypeObject *type, const char *name) {
+    return PyObject_GetAttrString((PyObject *)type, name);
+}
+
+static PyObject *type_getattro(PyObject *object, PyObject *name) {
+    PyObject *method = builtin_method(&PyType_Type, "__getattribute__");
+    if (method == NULL) {
+        return NULL;
+    }
+    PyObject *result = PyObject_CallFunctionObjArgs(method, object, name, NULL);
+    Py_DECREF(method);
+    return result;
+}
+
+static int type_setattro(PyObject *object, PyObject *name, PyObject *value) {
+    PyObject *method = builtin_method(&PyType_Type, value == NULL ? "__delattr__" : "__setattr__");
+    if (method == NULL) {
+        return -1;
+    }
+    PyObject *result = value == NULL ? PyObject_CallFunctionObjArgs(method, object, name, NULL)
+                                     : PyObject_CallFunctionObjArgs(method, object, name, value, NULL);
+    Py_DECREF(method);
+    if (result == NULL) {
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
+static PyObject *type_call(PyObject *type, PyObject *args, PyObject *kwargs) {
+    PyObject *method = builtin_method(&PyType_Type, "__call__");
+    if (method == NULL) {
+        return NULL;
+    }
+    Py_ssize_t count = PyTuple_Size(args);
+    PyObject *full = PyTuple_New(count + 1);
+    if (full == NULL) {
+        Py_DECREF(method);
+        return NULL;
+    }
+    PyTuple_SetItem(full, 0, Py_NewRef(type));
+    for (Py_ssize_t index = 0; index < count; index++) {
+        PyTuple_SetItem(full, index + 1, Py_NewRef(PyTuple_GetItem(args, index)));
+    }
+    PyObject *result = PyObject_Call(method, full, kwargs);
+    Py_DECREF(full);
+    Py_DECREF(method);
+    return result;
+}
+
+static void type_dealloc(PyObject *type) {
+    (void)type;
+}
+
+static PyObject *property_get(PyObject *self, PyObject *object, PyObject *type) {
+    PyObject *method = builtin_method(&PyProperty_Type, "__get__");
+    if (method == NULL) {
+        return NULL;
+    }
+    PyObject *result = PyObject_CallFunctionObjArgs(method, self, object == NULL ? Py_None : object,
+                                                    type == NULL ? Py_None : type, NULL);
+    Py_DECREF(method);
+    return result;
+}
+
+static int property_set(PyObject *self, PyObject *object, PyObject *value) {
+    PyObject *method = builtin_method(&PyProperty_Type, value == NULL ? "__delete__" : "__set__");
+    if (method == NULL) {
+        return -1;
+    }
+    PyObject *result = value == NULL ? PyObject_CallFunctionObjArgs(method, self, object, NULL)
+                                     : PyObject_CallFunctionObjArgs(method, self, object, value, NULL);
+    Py_DECREF(method);
+    if (result == NULL) {
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
+void nanocode_builtin_slots(void) {
+    PyType_Type.tp_basicsize = sizeof(PyHeapTypeObject);
+    PyType_Type.tp_alloc = PyType_GenericAlloc;
+    PyType_Type.tp_getattro = type_getattro;
+    PyType_Type.tp_setattro = type_setattro;
+    PyType_Type.tp_call = type_call;
+    PyType_Type.tp_dealloc = type_dealloc;
+    PyProperty_Type.tp_descr_get = property_get;
+    PyProperty_Type.tp_descr_set = property_set;
 }

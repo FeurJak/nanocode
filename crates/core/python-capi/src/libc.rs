@@ -222,7 +222,9 @@ pub unsafe extern "C" fn memchr(data: *const c_void, wanted: c_int, length: usiz
     bytes
         .iter()
         .position(|&byte| byte == wanted as u8)
-        .map_or(null_mut(), |at| unsafe { data.cast::<u8>().add(at) }.cast_mut().cast())
+        .map_or(null_mut(), |at| {
+            unsafe { data.cast::<u8>().add(at) }.cast_mut().cast()
+        })
 }
 
 #[unsafe(no_mangle)]

@@ -260,11 +260,6 @@ pub extern "C" fn PyInterpreterState_Main() -> *mut c_void {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn PyThreadState_Get() -> *mut c_void {
-    crate::api::PyInterpreterState_Get()
-}
-
-#[unsafe(no_mangle)]
 pub extern "C" fn PyLong_FromVoidPtr(pointer: *mut c_void) -> *mut Object {
     object(|vm| Ok(vm.ctx.new_int(pointer as usize).into()))
 }

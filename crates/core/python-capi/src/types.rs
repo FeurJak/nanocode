@@ -787,6 +787,94 @@ fn slots(
             }),
         ));
     }
+    if !t.descr_set.is_null() {
+        let f = unsafe {
+            transmute::<
+                *const c_void,
+                unsafe extern "C" fn(*mut Object, *mut Object, *mut Object) -> c_int,
+            >(t.descr_set)
+        };
+        out.push((
+            "__set__",
+            method(vm, class, "__set__", move |vm, zelf, args| {
+                let (Some(instance), Some(value)) = (args.args.first(), args.args.get(1)) else {
+                    return Err(
+                        vm.new_type_error("__set__ expects an instance and a value".to_owned())
+                    );
+                };
+                enter(vm, || {
+                    check(vm, unsafe {
+                        call3(
+                            f,
+                            borrowed(vm, &zelf),
+                            borrowed(vm, instance),
+                            borrowed(vm, value),
+                        )
+                    } as isize)
+                    .map(|_| vm.ctx.none())
+                })
+            }),
+        ));
+        out.push((
+            "__delete__",
+            method(vm, class, "__delete__", move |vm, zelf, args| {
+                let instance = one(vm, &args)?;
+                enter(vm, || {
+                    check(vm, unsafe {
+                        call3(f, borrowed(vm, &zelf), borrowed(vm, &instance), null_mut())
+                    } as isize)
+                    .map(|_| vm.ctx.none())
+                })
+            }),
+        ));
+    }
+    if let Some(f) = t.getattro
+        && f as usize != crate::api::PyObject_GenericGetAttr as *const () as usize
+    {
+        out.push((
+            "__getattribute__",
+            method(vm, class, "__getattribute__", move |vm, zelf, args| {
+                binary(vm, &zelf, &one(vm, &args)?, f)
+            }),
+        ));
+    }
+    if let Some(f) = t.setattro
+        && f as usize != crate::api::PyObject_GenericSetAttr as *const () as usize
+    {
+        out.push((
+            "__setattr__",
+            method(vm, class, "__setattr__", move |vm, zelf, args| {
+                let (Some(name), Some(value)) = (args.args.first(), args.args.get(1)) else {
+                    return Err(
+                        vm.new_type_error("__setattr__ expects a name and a value".to_owned())
+                    );
+                };
+                enter(vm, || {
+                    check(vm, unsafe {
+                        call3(
+                            f,
+                            borrowed(vm, &zelf),
+                            borrowed(vm, name),
+                            borrowed(vm, value),
+                        )
+                    } as isize)
+                    .map(|_| vm.ctx.none())
+                })
+            }),
+        ));
+        out.push((
+            "__delattr__",
+            method(vm, class, "__delattr__", move |vm, zelf, args| {
+                let name = one(vm, &args)?;
+                enter(vm, || {
+                    check(vm, unsafe {
+                        call3(f, borrowed(vm, &zelf), borrowed(vm, &name), null_mut())
+                    } as isize)
+                    .map(|_| vm.ctx.none())
+                })
+            }),
+        ));
+    }
     if let Some(f) = t.init {
         out.push((
             "__init__",
@@ -841,6 +929,10 @@ pub fn ready_type(ty: *mut Type) {
         }
         if !t.base_type.is_null() {
             t.flags |= (*t.base_type).flags & TPFLAGS_TYPE_SUBCLASS;
+            if t.basicsize == 0 {
+                t.basicsize = (*t.base_type).basicsize;
+                t.itemsize = (*t.base_type).itemsize;
+            }
         }
         if t.alloc.is_none() {
             t.alloc = Some(PyType_GenericAlloc);
@@ -899,6 +991,8 @@ pub fn c_type(vm: &VirtualMachine, ty: *mut Type) -> PyResult<PyTypeRef> {
         .find(|entry| entry.fast_issubclass(CObject::class(&vm.ctx)))
     {
         found.clone()
+    } else if primary.slots.flags.has_feature(PyTypeFlags::BASETYPE) {
+        primary
     } else {
         return Err(vm.new_system_error(format!(
             "{full}: a C type based on {} is not supported yet",
@@ -918,7 +1012,7 @@ pub fn c_type(vm: &VirtualMachine, ty: *mut Type) -> PyResult<PyTypeRef> {
         if unsafe { (*ty).flags } & TPFLAGS_BASETYPE != 0 {
             slots.flags |= PyTypeFlags::from_slice(&[PyTypeFlags::BASETYPE]);
         }
-        if unsafe { (*ty).dictoffset } != 0 {
+        if unsafe { (*ty).dictoffset } != 0 || unsafe { (*ty).flags } & TPFLAGS_MANAGED_DICT != 0 {
             slots.flags |= PyTypeFlags::from_slice(&[PyTypeFlags::HAS_DICT]);
         }
         if unsafe { (*ty).weaklistoffset } != 0 {

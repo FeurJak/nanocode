@@ -121,6 +121,9 @@ fn multi_phase(vm: &VirtualMachine, def: *mut ModuleDef, name: &str, spec: &PyOb
         None => new_module(vm, def, name)?,
     };
     let module = arg(vm, pointer)?;
+    if !vm.is_none(spec) {
+        module.set_attr("__spec__", spec.to_owned(), vm)?;
+    }
     let mut slot = unsafe { (*def).slots };
     while !slot.is_null() && unsafe { (*slot).slot } != 0 {
         if unsafe { (*slot).slot } == MOD_EXEC {

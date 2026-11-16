@@ -68,4 +68,3 @@ pub extern "C" fn PyUnicode_DecodeUTF32(
         )
     })
 }
-

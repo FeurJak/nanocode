@@ -348,6 +348,10 @@ pub fn static_type(pointer: *mut Type) -> Option<PyTypeRef> {
     STATIC_TYPES.with_borrow(|types| types.get(&(pointer as usize)).cloned())
 }
 
+unsafe extern "C" {
+    fn nanocode_builtin_slots();
+}
+
 fn ready(vm: &VirtualMachine) {
     if READY.replace(true) {
         return;
@@ -355,6 +359,7 @@ fn ready(vm: &VirtualMachine) {
     let _ = CObject::make_static_type();
     let _ = crate::buffer::CBuffer::make_static_type();
     register_types(vm);
+    unsafe { nanocode_builtin_slots() };
     let dict_offset = crate::types::function(vm, "__dictoffset__", |vm, args| {
         let class = args
             .args

@@ -501,7 +501,8 @@ fn main() {
         ));
     }
     if cxx_runtime && wasm {
-        let list = fs::read_to_string(runtime.join("sources")).expect("the C++ runtime source list");
+        let list =
+            fs::read_to_string(runtime.join("sources")).expect("the C++ runtime source list");
         let sources: Vec<PathBuf> = list
             .lines()
             .filter(|line| !line.is_empty())
@@ -533,7 +534,11 @@ fn main() {
                             let index = first + offset;
                             let object = out.join(format!("{index}.o"));
                             let unwind = [flags[0].clone(), flags[flags.len() - 1].clone()];
-                            let flags = if is_cxx(source) { &flags[..] } else { &unwind[..] };
+                            let flags = if is_cxx(source) {
+                                &flags[..]
+                            } else {
+                                &unwind[..]
+                            };
                             compile(source, &object, flags);
                             done.push((index, object));
                         }
