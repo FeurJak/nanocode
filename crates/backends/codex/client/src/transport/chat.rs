@@ -1570,9 +1570,18 @@ impl ChatStream {
         if value.get("error").is_some_and(|error| !error.is_null()) {
             return Err(invalid("chat_provider_error"));
         }
-        let choices = value
-            .get("choices")
-            .and_then(Value::as_array)
+        let Some(choices) = value.get("choices") else {
+            let usage = value.get("usage").filter(|usage| usage.is_object());
+            return match (&self.finish_reason, value.get("response"), usage) {
+                (Some(_), Some(response), Some(usage)) if response == "" => {
+                    self.usage = Some(usage.clone());
+                    Ok(())
+                }
+                _ => Err(invalid("chat_envelope")),
+            };
+        };
+        let choices = choices
+            .as_array()
             .filter(|choices| choices.len() <= 1)
             .ok_or_else(|| invalid("chat_envelope"))?;
         if let Some(usage) = value.get("usage").filter(|usage| !usage.is_null()) {
