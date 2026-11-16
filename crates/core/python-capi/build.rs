@@ -15,6 +15,16 @@ fn sorted(dir: &Path, keep: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
     paths
 }
 
+fn listed(dir: &Path, file: &str) -> impl Iterator<Item = String> {
+    fs::read_to_string(dir.join(file))
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>()
+        .into_iter()
+}
+
 fn archive(objects: &[PathBuf]) -> Vec<u8> {
     let mut out = b"!<arch>\n".to_vec();
     for (index, object) in objects.iter().enumerate() {
@@ -225,6 +235,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed={variable}");
     println!("cargo:rerun-if-changed=include");
     println!("cargo:rerun-if-changed=ext");
+    println!("cargo:rerun-if-changed=lib");
     let compiler = env::var_os("NANOCODE_CC")
         .or_else(|| env::var_os(&variable))
         .unwrap_or_else(|| {
@@ -286,6 +297,50 @@ fn main() {
         let object = out.join(format!("{}.o", objects.len()));
         compile(&source, &object, &[]);
         objects.push(object);
+    }
+    for dir in sorted(&root.join("lib"), |path| path.is_dir()) {
+        let mut flags = vec![format!("-I{}", dir.display())];
+        if wasm {
+            flags.extend(["-mllvm".to_owned(), "-wasm-enable-sjlj".to_owned()]);
+        }
+        flags
+            .extend(listed(&dir, "includes").map(|line| format!("-I{}", dir.join(line).display())));
+        flags.extend(listed(&dir, "defines").map(|line| format!("-D{line}")));
+        flags.extend(listed(&dir, "flags"));
+        let sources: Vec<PathBuf> = if dir.join("sources").exists() {
+            listed(&dir, "sources").map(|line| dir.join(line)).collect()
+        } else {
+            sorted(&dir, |path| {
+                path.extension().is_some_and(|extension| extension == "c")
+            })
+        };
+        let first = objects.len();
+        let mut built: Vec<(usize, PathBuf)> = thread::scope(|scope| {
+            let workers: Vec<_> = (0..jobs.min(sources.len()))
+                .map(|worker| {
+                    let (sources, flags, compile, out) = (&sources, &flags, &compile, &out);
+                    scope.spawn(move || {
+                        sources
+                            .iter()
+                            .enumerate()
+                            .skip(worker)
+                            .step_by(jobs)
+                            .map(|(offset, source)| {
+                                let object = out.join(format!("{}.o", first + offset));
+                                compile(source, &object, flags);
+                                (first + offset, object)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|worker| worker.join().expect("a compile worker"))
+                .collect()
+        });
+        built.sort_by_key(|(index, _)| *index);
+        objects.extend(built.into_iter().map(|(_, object)| object));
     }
     for dir in sorted(&root.join("ext"), |path| path.is_dir()) {
         let name = dir
