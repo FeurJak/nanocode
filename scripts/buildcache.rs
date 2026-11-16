@@ -1892,7 +1892,7 @@ fn publish(cache: &Path, to: &Path) -> io::Result<()> {
     let destination = to.join("workspace/index");
     let mut staging = destination.clone().into_os_string();
     staging.push(format!(".{}", std::process::id()));
-    fs::write(&staging, compressed(index))?;
+    fs::write(&staging, compressed(index.clone()))?;
     fs::rename(&staging, &destination)?;
     bundle.sort_by_key(|(_, packed)| packed.len());
     let chunk = 1 << 20;
@@ -1930,11 +1930,45 @@ fn publish(cache: &Path, to: &Path) -> io::Result<()> {
     }
     if let Some(helper) = publish_helper(to)? {
         eager.extend_from_slice(format!("workspace-{helper}\n").as_bytes());
+        if let Some((name, _)) = helper.strip_prefix("helper-").and_then(|name| name.rsplit_once('-')) {
+            publish_head(to, &format!("head-{name}"), &helper, &eager, &index)?;
+        }
     }
     let destination = to.join("workspace/eager");
     let mut staging = destination.clone().into_os_string();
     staging.push(format!(".{}", std::process::id()));
     fs::write(&staging, eager)?;
+    fs::rename(&staging, &destination)
+}
+
+fn publish_head(to: &Path, name: &str, helper: &str, eager: &[u8], index: &[u8]) -> io::Result<()> {
+    let directory = to.join("workspace");
+    let staging = directory.join(format!(".{name}.{}", std::process::id()));
+    fs::create_dir_all(&staging)?;
+    let archive = fs::write(staging.join("eager"), eager)
+        .and_then(|()| fs::write(staging.join("index"), index))
+        .and_then(|()| fs::copy(directory.join(helper), staging.join("helper")))
+        .and_then(|_| {
+            Command::new("tar")
+                .arg("-cf")
+                .arg("-")
+                .arg("-C")
+                .arg(&staging)
+                .args(["eager", "index", "helper"])
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+        });
+    fs::remove_dir_all(&staging)?;
+    let destination = directory.join(name);
+    let archive = archive?;
+    if !archive.status.success() {
+        let _ = fs::remove_file(&destination);
+        return Ok(());
+    }
+    let mut staging = destination.clone().into_os_string();
+    staging.push(format!(".{}", std::process::id()));
+    fs::write(&staging, compressed(archive.stdout))?;
     fs::rename(&staging, &destination)
 }
 
