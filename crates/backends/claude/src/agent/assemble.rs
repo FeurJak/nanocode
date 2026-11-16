@@ -445,6 +445,7 @@ pub(super) fn build(mut builder: ClaudeBuilder) -> Result<(Agent, AgentEvents)> 
     let kept_context = restored.context.clone();
     let requested_at = kept_context.as_ref().map_or(0, |context| context.requested);
     let finish_check = builder.finish_check
+        || builder.finish_ambiguity
         || builder.finish_retries.is_some()
         || !(builder.skip_finish_check
             || (builder.claude.model.starts_with("claude-opus-")
@@ -514,6 +515,7 @@ pub(super) fn build(mut builder: ClaudeBuilder) -> Result<(Agent, AgentEvents)> 
         lean_cells: builder.lean_cells,
         low_effort_rounds: builder.low_effort_rounds,
         persist_finish: builder.persist_finish,
+        finish_ambiguity: builder.finish_ambiguity,
         finish_check,
         late_finish_check: builder.late_finish_check,
         finish_check_min_requests: builder.finish_check_min_requests,

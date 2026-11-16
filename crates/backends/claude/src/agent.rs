@@ -852,6 +852,7 @@ pub struct ClaudeBuilder {
     low_effort_rounds: bool,
     persist_finish: bool,
     skip_finish_check: bool,
+    finish_ambiguity: bool,
     finish_check: bool,
     late_finish_check: Option<std::time::Duration>,
     finish_check_min_requests: Option<std::num::NonZeroU32>,
@@ -949,6 +950,7 @@ impl ClaudeBuilder {
             low_effort_rounds: false,
             persist_finish: false,
             skip_finish_check: false,
+            finish_ambiguity: false,
             finish_check: false,
             late_finish_check: None,
             finish_check_min_requests: None,
@@ -1412,6 +1414,11 @@ impl ClaudeBuilder {
 
     pub const fn finish_check(mut self, check: bool) -> Self {
         self.finish_check = check;
+        self
+    }
+
+    pub const fn finish_ambiguity(mut self, ambiguity: bool) -> Self {
+        self.finish_ambiguity = ambiguity;
         self
     }
 
@@ -3188,6 +3195,7 @@ struct State {
     lean_cells: bool,
     low_effort_rounds: bool,
     persist_finish: bool,
+    finish_ambiguity: bool,
     finish_check: bool,
     late_finish_check: Option<std::time::Duration>,
     finish_check_min_requests: Option<std::num::NonZeroU32>,
@@ -4683,8 +4691,13 @@ impl State {
     fn model(&self) -> String {
         self.model.clone()
     }
-    const fn finish_checks(&self) -> nanocode_tool_host::deadline::FinishChecks {
+    fn finish_checks(&self) -> nanocode_tool_host::deadline::FinishChecks {
         nanocode_tool_host::deadline::FinishChecks {
+            ambiguity: self.finish_ambiguity
+                && self
+                    .deadline
+                    .as_ref()
+                    .is_none_or(|deadline| !deadline.first_passed()),
             persist: self.persist_finish,
             stop_at_target: self.stop_at_target,
         }
