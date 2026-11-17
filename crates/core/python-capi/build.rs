@@ -232,8 +232,9 @@ fn main() {
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
     let target = env::var("TARGET").expect("TARGET");
     let host = env::var("HOST").expect("HOST");
-    let wasm = env::var("CARGO_CFG_TARGET_FAMILY")
-        .is_ok_and(|families| families.split(',').any(|family| family == "wasm"));
+    let families = env::var("CARGO_CFG_TARGET_FAMILY").unwrap_or_default();
+    let families: Vec<&str> = families.split(',').collect();
+    let wasm = families.contains(&"wasm");
     let windows = env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "windows");
     let variable = format!("CC_{}", target.replace('-', "_"));
     println!("cargo:rerun-if-env-changed=NANOCODE_CC");
@@ -325,6 +326,14 @@ fn main() {
         objects.push(object);
     }
     for dir in sorted(&root.join("lib"), |path| path.is_dir()) {
+        let only: Vec<String> = listed(&dir, "families").collect();
+        if !only.is_empty()
+            && !only
+                .iter()
+                .any(|family| families.contains(&family.as_str()))
+        {
+            continue;
+        }
         let mut flags = vec![format!("-I{}", dir.display())];
         if wasm {
             flags.extend(["-mllvm".to_owned(), "-wasm-enable-sjlj".to_owned()]);

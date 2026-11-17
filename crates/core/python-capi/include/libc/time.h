@@ -45,6 +45,9 @@ int timespec_get(struct timespec *, int);
 int clock_gettime(clockid_t, struct timespec *);
 int clock_getres(clockid_t, struct timespec *);
 int nanosleep(const struct timespec *, struct timespec *);
+time_t timegm(struct tm *);
+char *asctime_r(const struct tm *, char *);
+char *ctime_r(const time_t *, char *);
 #ifdef __cplusplus
 }
 #endif

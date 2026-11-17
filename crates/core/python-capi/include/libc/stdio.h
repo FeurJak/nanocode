@@ -2,6 +2,7 @@
 #define _STDIO_H
 #include <stddef.h>
 #include <stdarg.h>
+#include <sys/types.h>
 typedef struct _FILE FILE;
 typedef long long fpos_t;
 #define EOF (-1)
@@ -74,6 +75,13 @@ int sscanf(const char *, const char *, ...);
 int vscanf(const char *, va_list);
 int vfscanf(FILE *, const char *, va_list);
 int vsscanf(const char *, const char *, va_list);
+int asprintf(char **, const char *, ...);
+int vasprintf(char **, const char *, va_list);
+ssize_t getline(char **, size_t *, FILE *);
+ssize_t getdelim(char **, size_t *, int, FILE *);
+int fseeko(FILE *, off_t, int);
+off_t ftello(FILE *);
+int fwide(FILE *, int);
 #ifdef __cplusplus
 }
 #endif

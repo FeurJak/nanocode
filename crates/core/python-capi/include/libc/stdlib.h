@@ -55,6 +55,7 @@ size_t wcstombs(char *, const wchar_t *, size_t);
 static inline int abs(int value) { return value < 0 ? -value : value; }
 static inline long labs(long value) { return value < 0 ? -value : value; }
 static inline long long llabs(long long value) { return value < 0 ? -value : value; }
+void qsort_r(void *, size_t, size_t, int (*)(const void *, const void *, void *), void *);
 #ifdef __cplusplus
 }
 #endif

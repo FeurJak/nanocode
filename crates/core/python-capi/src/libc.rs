@@ -90,6 +90,33 @@ pub extern "C" fn clock() -> i64 {
     })
 }
 
+#[repr(C)]
+pub struct Timespec {
+    seconds: i64,
+    nanoseconds: std::ffi::c_long,
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clock_gettime(clock: c_int, out: *mut Timespec) -> c_int {
+    let elapsed = match clock {
+        0 => nanocode_platform::system_time()
+            .duration_since(nanocode_platform::UNIX_EPOCH)
+            .unwrap_or_default(),
+        1 => START.with(|start| start.get_or_init(Instant::now).elapsed()),
+        _ => {
+            ERRNO.set(28);
+            return -1;
+        }
+    };
+    unsafe {
+        *out = Timespec {
+            seconds: i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX),
+            nanoseconds: std::ffi::c_long::try_from(elapsed.subsec_nanos()).unwrap_or(0),
+        };
+    }
+    0
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strcmp(left: *const c_char, right: *const c_char) -> c_int {
     unsafe { strncmp(left, right, usize::MAX) }
@@ -181,32 +208,6 @@ pub unsafe extern "C" fn strdup(text: *const c_char) -> *mut c_char {
     }
     copy
 }
-
-#[unsafe(no_mangle)]
-pub extern "C" fn fread(
-    _data: *mut c_void,
-    _size: usize,
-    _count: usize,
-    _file: *mut c_void,
-) -> usize {
-    0
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn fwrite(
-    _data: *const c_void,
-    _size: usize,
-    _count: usize,
-    _file: *mut c_void,
-) -> usize {
-    0
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn ferror(_file: *mut c_void) -> c_int {
-    1
-}
-
 thread_local! {
     static ERRNO: Cell<c_int> = const { Cell::new(0) };
 }

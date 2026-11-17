@@ -219,12 +219,12 @@ long double nanl(const char *);
 #ifdef __cplusplus
 }
 #else
-#define copysign __builtin_copysign
-#define fabs __builtin_fabs
-#define floor __builtin_floor
-#define ceil __builtin_ceil
-#define sqrt __builtin_sqrt
-#define trunc __builtin_trunc
+#define copysign(...) __builtin_copysign(__VA_ARGS__)
+#define fabs(...) __builtin_fabs(__VA_ARGS__)
+#define floor(...) __builtin_floor(__VA_ARGS__)
+#define ceil(...) __builtin_ceil(__VA_ARGS__)
+#define sqrt(...) __builtin_sqrt(__VA_ARGS__)
+#define trunc(...) __builtin_trunc(__VA_ARGS__)
 #endif
 double lgamma_r(double, int *);
 float lgammaf_r(float, int *);

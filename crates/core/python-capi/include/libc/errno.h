@@ -1,9 +1,12 @@
 #ifndef _ERRNO_H
 #define _ERRNO_H
 #ifdef __cplusplus
-extern "C"
+extern "C" {
 #endif
 int *__errno_location(void);
+#ifdef __cplusplus
+}
+#endif
 #define errno (*__errno_location())
 #define E2BIG 1
 #define EACCES 2

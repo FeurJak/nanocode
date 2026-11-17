@@ -7,4 +7,12 @@
 #define PRId64 "lld"
 #define PRIu64 "llu"
 #define PRIx64 "llx"
+#ifdef __cplusplus
+extern "C" {
+#endif
+intmax_t strtoimax(const char *, char **, int);
+uintmax_t strtoumax(const char *, char **, int);
+#ifdef __cplusplus
+}
+#endif
 #endif

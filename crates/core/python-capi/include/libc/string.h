@@ -2,6 +2,7 @@
 #define _STRING_H
 #include <stddef.h>
 struct __locale_struct;
+#include <strings.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -33,6 +34,14 @@ char *strerror(int);
 int strerror_r(int, char *, size_t);
 char *strdup(const char *);
 char *strndup(const char *, size_t);
+char *stpcpy(char *, const char *);
+char *stpncpy(char *, const char *, size_t);
+char *strtok_r(char *, const char *, char **);
+char *strsep(char **, const char *);
+void *memrchr(const void *, int, size_t);
+void *memmem(const void *, size_t, const void *, size_t);
+char *strchrnul(const char *, int);
+int strerror_r(int, char *, size_t);
 #ifdef __cplusplus
 }
 #else
