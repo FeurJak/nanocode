@@ -2225,11 +2225,7 @@ pub extern "C" fn PySequence_Check(pointer: *mut Object) -> c_int {
     guard(0, |vm| {
         let value = arg(vm, pointer)?;
         Ok(c_int::from(
-            value.downcast_ref::<PyDict>().is_none()
-                && value
-                    .class()
-                    .get_attr(vm.ctx.intern_str("__getitem__"))
-                    .is_some(),
+            value.downcast_ref::<PyDict>().is_none() && value.sequence_unchecked().check(),
         ))
     })
 }
