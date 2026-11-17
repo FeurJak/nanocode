@@ -227,9 +227,15 @@ class _Namespace:
         pass
 
 
+_stdlib = set(sys.stdlib_module_names)
+_stdlib.update(('_ast_unparse', '_hmac', '_py_warnings', '_remote_debugging', '_types', '_zstd', 'annotationlib', 'compression'))
+
+
 class _Finder:
     @staticmethod
     def find_spec(name, path=None, target=None):
+        if path is None and name in _stdlib:
+            return None
         tail = name.rpartition('.')[2]
         portions = []
         for base in sys.path if path is None else path:
@@ -288,6 +294,46 @@ class _Shim:
 
 
 sys.meta_path.insert(0, _Shim)
+
+
+class _Resume:
+    def __init__(self, module, loader):
+        self.module = module
+        self.loader = loader
+
+    def create_module(self, spec):
+        return self.module
+
+    def exec_module(self, module):
+        try:
+            self.loader.exec_module(module)
+        finally:
+            module.__spec__.loader = self.loader
+
+    def __getattr__(self, name):
+        return getattr(self.loader, name)
+
+
+class _Resumer:
+    @staticmethod
+    def find_spec(name, path=None, target=None):
+        entry = _resumed.pop(name, None)
+        if entry is None:
+            return None
+        module, spec = entry
+        if not isinstance(spec.loader, _Resume):
+            spec.loader = _Resume(module, spec.loader)
+        else:
+            spec.loader.module = module
+        return spec
+
+    @staticmethod
+    def invalidate_caches():
+        pass
+
+
+_resumed = {}
+sys.meta_path.insert(0, _Resumer)
 
 
 def _stdio(fd, name):
@@ -449,8 +495,11 @@ def _start(argv, first):
     posix._reset()
     if _unfinished:
         for name, module in list(sys.modules.items()):
-            if getattr(getattr(module, '__spec__', None), '_initializing', False):
+            spec = getattr(module, '__spec__', None)
+            if getattr(spec, '_initializing', False):
                 del sys.modules[name]
+                if name not in _loaded:
+                    _resumed[name] = module, spec
     _unfinished = True
     while _loaded:
         sys.modules.pop(_loaded.pop(), None)
@@ -469,7 +518,7 @@ def _start(argv, first):
 
 def _standard(top):
     import _imp
-    return top in sys.stdlib_module_names or _imp.is_builtin(top) or _imp.is_frozen(top)
+    return top in _stdlib or _imp.is_builtin(top) or _imp.is_frozen(top)
 
 
 def _missing(names):
