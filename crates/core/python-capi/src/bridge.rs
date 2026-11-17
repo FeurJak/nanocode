@@ -270,7 +270,10 @@ thread_local! {
     static QUEUE: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static PARKED: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static PARKED_SCAN: Cell<usize> = const { Cell::new(1) };
+    static PARKED_HELD: Cell<isize> = const { Cell::new(0) };
 }
+
+const PARKED_HELD_STEP: isize = 1 << 20;
 
 fn forward_slots(pointer: *mut Type, class: &Py<PyType>, vm: &VirtualMachine) {
     let has = |name: &'static str| class.get_attr(vm.ctx.intern_str(name)).is_some();
@@ -1463,9 +1466,22 @@ unsafe fn destroy(pointer: *mut Object) {
 }
 
 fn sweep() {
+    let mut rescan = false;
     loop {
         let mut batch = QUEUE.with_borrow_mut(std::mem::take);
-        if PARKED.with_borrow(Vec::len) >= PARKED_SCAN.get() {
+        let held = rustpython_vm::vm::limit::held();
+        if let Some(held) = held
+            && held < PARKED_HELD.get()
+        {
+            PARKED_HELD.set(held);
+        }
+        let grown = held.is_some_and(|held| held >= PARKED_HELD.get() + PARKED_HELD_STEP);
+        let parked_len = PARKED.with_borrow(Vec::len);
+        if parked_len > 0 && (rescan || grown || parked_len >= PARKED_SCAN.get()) {
+            rescan = false;
+            if let Some(held) = held {
+                PARKED_HELD.set(held);
+            }
             let parked = PARKED.with_borrow_mut(std::mem::take);
             let mut kept = Vec::new();
             for address in parked {
@@ -1482,6 +1498,7 @@ fn sweep() {
                     header.parked.set(false);
                     if !header.queued.replace(true) {
                         batch.push(address);
+                        rescan = true;
                     }
                 }
             }
