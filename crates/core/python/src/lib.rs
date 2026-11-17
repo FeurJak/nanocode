@@ -26,6 +26,8 @@ pub use psh::UTILITY;
 pub use psh::serve;
 pub use rustpython_vm;
 pub use rustpython_vm::vm::limit::Metered;
+pub use rustpython_vm::vm::region;
+pub use rustpython_vm::vm::region::{Kept, Regions};
 pub use shell::{Budget, Command};
 pub use tree::{Delta, Entry, Tree};
 
@@ -189,6 +191,7 @@ pub struct Ran {
     pub changes: Changes,
     pub steps: u64,
     pub held: Held,
+    pub kept: Kept,
 }
 
 enum Program {
@@ -323,6 +326,7 @@ impl Python {
             changes: Changes::default(),
             steps: 0,
             held: Held::default(),
+            kept: Kept::default(),
         };
         if !run.cwd.starts_with(b"/") {
             return refused("the working directory is not an absolute path".to_owned());
@@ -352,6 +356,7 @@ impl Python {
                 vm.set_limiter(None);
                 (ended, left)
             });
+        let kept = region::leave();
         let state = entered.leave();
         let steps = state.spent(left);
         Ran {
@@ -365,6 +370,7 @@ impl Python {
             changes: state.changes,
             steps,
             held: state.held_at_refusal,
+            kept,
         }
     }
 
@@ -379,6 +385,7 @@ impl Python {
                 return Ended::Exited(1);
             }
         };
+        region::enter(cfg!(debug_assertions));
         let (source, name) = match prepared {
             Prepared::Source(source, name) => (source, name),
             Prepared::Module(module) => {

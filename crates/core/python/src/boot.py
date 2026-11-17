@@ -273,6 +273,19 @@ class _Finder:
 sys.meta_path.append(_Finder)
 
 
+def _load_unlocked(spec, load=_frozen_importlib._load_unlocked):
+    if isinstance(spec.loader, _Loader):
+        return load(spec)
+    was = _host.region(False)
+    try:
+        return load(spec)
+    finally:
+        _host.region(was)
+
+
+_frozen_importlib._load_unlocked = _load_unlocked
+
+
 class _Shim:
     @staticmethod
     def find_spec(name, path=None, target=None):

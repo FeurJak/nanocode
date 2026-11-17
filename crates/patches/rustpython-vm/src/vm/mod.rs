@@ -12,6 +12,7 @@ mod context;
 pub mod crossinterp;
 mod interpreter;
 pub mod limit;
+pub mod region;
 mod method;
 #[cfg(feature = "rustpython-compiler")]
 mod python_run;

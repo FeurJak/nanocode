@@ -416,6 +416,11 @@ mod _host {
     }
 
     #[pyfunction]
+    fn region(on: bool) -> bool {
+        rustpython_vm::vm::region::set(on)
+    }
+
+    #[pyfunction]
     fn file_limit(vm: &VirtualMachine) -> PyResult<u64> {
         state(vm, |state| Ok(state.limits.file))
     }

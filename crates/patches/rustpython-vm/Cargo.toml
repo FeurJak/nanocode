@@ -133,6 +133,9 @@ path = "../../core/platform"
 [target.'cfg(not(any(unix, windows)))'.dependencies.nanocode-platform]
 path = "../../core/platform"
 
+[target.'cfg(target_arch = "wasm32")'.dependencies.dlmalloc]
+version = "0.2.14"
+
 [lints.clippy]
 alloc_instead_of_core = "warn"
 assigning_clones = "warn"
