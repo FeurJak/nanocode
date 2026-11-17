@@ -1453,6 +1453,15 @@ impl PyType {
         None
     }
 
+    pub fn call_tp_new(&self, subtype: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+        match self.slots.new.load() {
+            Some(new) => new(subtype, args, vm),
+            None => {
+                Err(vm.new_type_error(format!("cannot create '{}' instances", self.slot_name())))
+            }
+        }
+    }
+
     /// _PyType_LookupRef: look up a name through the MRO without setting an exception.
     pub fn lookup_ref(&self, name: &Py<PyStr>, vm: &VirtualMachine) -> Option<PyObjectRef> {
         let interned_name = vm.ctx.interned_str(name)?;

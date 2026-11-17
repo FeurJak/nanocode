@@ -2327,3 +2327,6 @@ Measured against a local mock on 2026-11-17 with `nanocode exec -m gpt-6.2-sol -
 
 Checked: `cargo build --locked -p nanocode-cli --bin nanocode`, `cargo check --locked --lib -p nanocode-backend-codex -p nanocode-backend-claude --target wasm32-unknown-unknown`. Not checked: any live model run; Terminal-Bench with Code Mode on Sol 6.2 and on open models.
 
+## Python: the builtin tp_new trampolines call the builtin's slot directly (2026-11-17)
+
+A C extension type that subclasses float or bytes gets `tp_new` trampolines (`new_float`, `new_bytes` and the rest) that ran `float.__new__(subtype, ...)` through Python. That goes through the "is not safe" check, which rejects the call because the C subtype's own `tp_new` differs from float's, so `numpy.float64()` raised `float.__new__(float64) is not safe, use floating.__new__()`. pandas takes `arr.dtype.type()` as the fill value for float64 arrays, so `DataFrame.pivot` and every take without fill failed. In C, `PyFloat_Type.tp_new(subtype, args, kwds)` is a plain function call with no such check, so the trampolines now call the builtin's slot directly through `PyType::call_tp_new`. A Python-level `float.__new__(subtype)` keeps the check.

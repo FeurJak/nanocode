@@ -886,7 +886,7 @@ fn call_new(
 ) -> rustpython_vm::PyResult {
     {
         let subtype = crate::types::c_type(vm, subtype)?;
-        let mut positional = vec![subtype.into()];
+        let mut positional: Vec<PyObjectRef> = Vec::new();
         if !args.is_null() {
             positional.extend(
                 arg(vm, args)?
@@ -908,16 +908,17 @@ fn call_new(
                 .into_iter()
                 .collect();
         }
-        let new = if class
-            .downcast_ref::<rustpython_vm::builtins::PyType>()
-            .is_some()
-        {
-            class.get_attr("__new__", vm)?
-        } else {
-            class
-                .get_attr("__func__", vm)
-                .unwrap_or_else(|_| class.to_owned())
-        };
+        if let Some(class) = class.downcast_ref::<rustpython_vm::builtins::PyType>() {
+            return class.call_tp_new(
+                subtype,
+                rustpython_vm::function::FuncArgs::new(positional, keywords),
+                vm,
+            );
+        }
+        positional.insert(0, subtype.into());
+        let new = class
+            .get_attr("__func__", vm)
+            .unwrap_or_else(|_| class.to_owned());
         new.call(
             rustpython_vm::function::FuncArgs::new(positional, keywords),
             vm,
