@@ -2720,6 +2720,7 @@ binary_numbers! {
     PyNumber_InPlaceTrueDivide => _itruediv,
     PyNumber_InPlaceFloorDivide => _ifloordiv,
     PyNumber_InPlaceRshift => _irshift,
+    PyNumber_InPlaceLshift => _ilshift,
     PyUnicode_Format => _mod,
 }
 

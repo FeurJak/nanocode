@@ -408,7 +408,6 @@ impl Python {
             let modules = vm.sys_module.get_attr("modules", vm)?;
             let posix = vm.new_module("posix", vm.ctx.new_dict(), None);
             modules.set_item("posix", posix.clone().into(), vm)?;
-            #[cfg(target_family = "wasm")]
             modules.set_item("_datetime", vm.ctx.none(), vm)?;
             let code = rustpython_vm::py_compile!(file = "posix.py", module_name = "posix");
             let scope = Scope::with_builtins(None, posix.dict(), vm);

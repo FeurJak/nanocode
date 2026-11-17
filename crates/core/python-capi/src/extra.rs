@@ -6,7 +6,7 @@ use std::{
 
 use nanocode_numeric::Complex64;
 use rustpython_vm::{
-    AsObject, PyObjectRef, PyPayload, VirtualMachine,
+    AsObject, PyObject, PyObjectRef, PyPayload, VirtualMachine,
     builtins::{PyCapsule, PyDict, PySequenceIterator, PyStr},
     common::hash::hash_float,
 };
@@ -851,8 +851,40 @@ fn construct(
     args: *mut Object,
     kwargs: *mut Object,
 ) -> *mut Object {
-    object(|vm| {
-        let class = pick(vm);
+    object(|vm| call_new(vm, pick(vm).as_object(), subtype, args, kwargs))
+}
+
+pub unsafe extern "C" fn new_datetime(
+    subtype: *mut Type,
+    args: *mut Object,
+    kwargs: *mut Object,
+) -> *mut Object {
+    guard(null_mut(), |vm| {
+        let class = crate::types::c_type(vm, subtype)?;
+        let base = class
+            .mro_map_collect(|base| base.to_owned())
+            .into_iter()
+            .find(|base| crate::bridge::datetime_base(vm, base))
+            .ok_or_else(|| vm.new_type_error("no datetime base for tp_new".to_owned()))?;
+        let new = base
+            .get_direct_attr(vm.ctx.intern_str("__new__"))
+            .ok_or_else(|| vm.new_type_error("datetime base without __new__".to_owned()))?;
+        let instance = call_new(vm, &new, subtype, args, kwargs)?;
+        if !instance.class().is(&class) {
+            return Ok(new_ref(vm, &instance));
+        }
+        crate::bridge::datetime_instance(vm, &instance, subtype)
+    })
+}
+
+fn call_new(
+    vm: &VirtualMachine,
+    class: &PyObject,
+    subtype: *mut Type,
+    args: *mut Object,
+    kwargs: *mut Object,
+) -> rustpython_vm::PyResult {
+    {
         let subtype = crate::types::c_type(vm, subtype)?;
         let mut positional = vec![subtype.into()];
         if !args.is_null() {
@@ -876,12 +908,21 @@ fn construct(
                 .into_iter()
                 .collect();
         }
-        let new = class.as_object().get_attr("__new__", vm)?;
+        let new = if class
+            .downcast_ref::<rustpython_vm::builtins::PyType>()
+            .is_some()
+        {
+            class.get_attr("__new__", vm)?
+        } else {
+            class
+                .get_attr("__func__", vm)
+                .unwrap_or_else(|_| class.to_owned())
+        };
         new.call(
             rustpython_vm::function::FuncArgs::new(positional, keywords),
             vm,
         )
-    })
+    }
 }
 
 macro_rules! constructors {
@@ -1033,4 +1074,162 @@ pub unsafe extern "C" fn PyOS_double_to_string(
         }
         Ok(buffer.cast())
     })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn PySequence_DelItem(pointer: *mut Object, at: isize) -> c_int {
+    status(|vm| arg(vm, pointer)?.del_item(vm.ctx.new_int(at).as_object(), vm))
+}
+
+fn new_set(vm: &VirtualMachine, ty: &PyObject, iterable: *mut Object) -> rustpython_vm::PyResult {
+    if iterable.is_null() {
+        ty.call((), vm)
+    } else {
+        ty.call((arg(vm, iterable)?,), vm)
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn PySet_New(iterable: *mut Object) -> *mut Object {
+    object(|vm| new_set(vm, vm.ctx.types.set_type.as_object(), iterable))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn PyFrozenSet_New(iterable: *mut Object) -> *mut Object {
+    object(|vm| new_set(vm, vm.ctx.types.frozenset_type.as_object(), iterable))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn PySet_Add(set: *mut Object, key: *mut Object) -> c_int {
+    status(|vm| {
+        let set = arg(vm, set)?;
+        let key = arg(vm, key)?;
+        match set.downcast_ref::<rustpython_vm::builtins::PyFrozenSet>() {
+            Some(frozen) => frozen.add_unshared(&key, vm),
+            None => vm.call_method(&set, "add", (key,)).map(drop),
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn PySet_Contains(set: *mut Object, key: *mut Object) -> c_int {
+    truth(|vm| {
+        vm.call_method(&*arg(vm, set)?, "__contains__", (arg(vm, key)?,))?
+            .is_true(vm)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn PySet_Discard(set: *mut Object, key: *mut Object) -> c_int {
+    truth(|vm| {
+        let set = arg(vm, set)?;
+        let key = arg(vm, key)?;
+        let found = vm
+            .call_method(&set, "__contains__", (key.clone(),))?
+            .is_true(vm)?;
+        if found {
+            vm.call_method(&set, "discard", (key,))?;
+        }
+        Ok(found)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn PySet_Pop(set: *mut Object) -> *mut Object {
+    object(|vm| vm.call_method(&*arg(vm, set)?, "pop", ()))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn PySet_Size(set: *mut Object) -> isize {
+    crate::bridge::size(|vm| arg(vm, set)?.length(vm))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn PyWeakref_GetRef(reference: *mut Object, out: *mut *mut Object) -> c_int {
+    guard(-1, |vm| {
+        let target = arg(vm, reference)?.call((), vm)?;
+        let alive = !vm.is_none(&target);
+        unsafe {
+            *out = if alive {
+                new_ref(vm, &target)
+            } else {
+                null_mut()
+            }
+        };
+        Ok(c_int::from(alive))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn PyUnicode_Find(
+    text: *mut Object,
+    needle: *mut Object,
+    start: isize,
+    end: isize,
+    direction: c_int,
+) -> isize {
+    guard(-2, |vm| {
+        let method = if direction > 0 { "find" } else { "rfind" };
+        let found = vm.call_method(&*arg(vm, text)?, method, (arg(vm, needle)?, start, end))?;
+        found.try_to_value::<isize>(vm)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn PyUnicode_Split(
+    text: *mut Object,
+    separator: *mut Object,
+    limit: isize,
+) -> *mut Object {
+    object(|vm| {
+        let separator = if separator.is_null() {
+            vm.ctx.none()
+        } else {
+            arg(vm, separator)?
+        };
+        vm.call_method(&*arg(vm, text)?, "split", (separator, limit))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn PyUnicode_FromWideChar(data: *const u32, length: isize) -> *mut Object {
+    object(|vm| {
+        let length = if length < 0 {
+            let mut at = 0;
+            while unsafe { *data.add(at) } != 0 {
+                at += 1;
+            }
+            at
+        } else {
+            length.unsigned_abs()
+        };
+        let units: &[u32] = if length == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(data, length) }
+        };
+        let mut text = rustpython_vm::common::wtf8::Wtf8Buf::new();
+        for &unit in units {
+            text.push(crate::bridge::code_point(unit));
+        }
+        Ok(vm.ctx.new_str(text).into())
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn PyUnicode_DecodeLocale(
+    data: *const c_char,
+    _errors: *const c_char,
+) -> *mut Object {
+    object(|vm| {
+        let bytes = vm
+            .ctx
+            .new_bytes(unsafe { CStr::from_ptr(data) }.to_bytes().to_vec());
+        vm.call_method(bytes.as_object(), "decode", ("utf-8", "surrogateescape"))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn PyUnicode_EncodeLocale(text: *mut Object, _errors: *const c_char) -> *mut Object {
+    object(|vm| vm.call_method(&*arg(vm, text)?, "encode", ("utf-8", "surrogateescape")))
 }

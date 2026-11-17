@@ -210,6 +210,20 @@ PyObject *PyUnicode_FromFormatV(const char *format, va_list arguments) {
                 goto fail;
             break;
         }
+        case 'N': {
+            PyObject *type = va_arg(va, PyObject *);
+            PyObject *module = PyObject_GetAttrString(type, "__module__");
+            if (!module)
+                PyErr_Clear();
+            else if (PyUnicode_Check(module) && PyUnicode_CompareWithASCIIString(module, "builtins") != 0) {
+                if (text_object(&text, module, -1) < 0 || text_add(&text, ".", 1) < 0)
+                    goto fail;
+            } else
+                Py_DECREF(module);
+            if (text_object(&text, PyObject_GetAttrString(type, "__qualname__"), -1) < 0)
+                goto fail;
+            break;
+        }
         default:
             va_end(va);
             PyMem_Free(text.data);

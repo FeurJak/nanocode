@@ -898,6 +898,16 @@ fn slots(
                 Some(class) => bridge::type_pointer(vm, class),
                 None => ty as *mut Type,
             };
+            let mut f = f;
+            let mut base = unsafe { (*target).base_type };
+            while !base.is_null() && base != ty as *mut Type {
+                base = unsafe { (*base).base_type };
+            }
+            if base.is_null()
+                && let Some(solid) = unsafe { (*target).new }
+            {
+                f = solid;
+            }
             enter(vm, || {
                 let tuple = vm.ctx.new_tuple(args.args.clone());
                 let kwargs = keywords(vm, &args)?;
@@ -931,6 +941,14 @@ pub fn ready_type(ty: *mut Type) {
                 t.basicsize = (*t.base_type).basicsize;
                 t.itemsize = (*t.base_type).itemsize;
             }
+            let own = t.as_buffer.cast_mut().cast::<BufferProcs>();
+            if let Some(inherited) = crate::buffer::procs(t.base_type)
+                && !own.is_null()
+                && (*own).getbuffer.is_none()
+            {
+                (*own).getbuffer = inherited.getbuffer;
+                (*own).release = inherited.release;
+            }
         }
         if t.alloc.is_none() {
             t.alloc = Some(PyType_GenericAlloc);
@@ -942,6 +960,12 @@ pub fn ready_type(ty: *mut Type) {
     }
 }
 
+fn shadows_slot(vm: &VirtualMachine, class: &Py<PyType>, name: &str) -> bool {
+    class
+        .get_attr(vm.ctx.intern_str(name))
+        .is_some_and(|found| found.class().is(vm.ctx.types.member_descriptor_type))
+}
+
 const SPECIAL_MEMBERS: [&str; 3] = [
     "__weaklistoffset__",
     "__dictoffset__",
@@ -950,6 +974,11 @@ const SPECIAL_MEMBERS: [&str; 3] = [
 
 pub fn c_type(vm: &VirtualMachine, ty: *mut Type) -> PyResult<PyTypeRef> {
     if let Some(class) = bridge::static_type(ty) {
+        return Ok(class);
+    }
+    if bridge::proxy_type(ty)
+        && let Ok(class) = bridge::arg(vm, ty.cast())?.downcast::<PyType>()
+    {
         return Ok(class);
     }
     ready_type(ty);
@@ -1007,6 +1036,7 @@ pub fn c_type(vm: &VirtualMachine, ty: *mut Type) -> PyResult<PyTypeRef> {
     let extra = extra || !metaclass.is(vm.ctx.types.type_type);
     let layout = {
         let mut slots = PyTypeSlots::heap_default();
+        slots.member_count = base.slots.member_count;
         if unsafe { (*ty).flags } & TPFLAGS_BASETYPE != 0 {
             slots.flags |= PyTypeFlags::from_slice(&[PyTypeFlags::BASETYPE]);
         }
@@ -1136,7 +1166,7 @@ pub fn c_type(vm: &VirtualMachine, ty: *mut Type) -> PyResult<PyTypeRef> {
     let mut def = unsafe { (*ty).members };
     while !def.is_null() && !unsafe { (*def).name }.is_null() {
         let member_name = text(unsafe { (*def).name }).unwrap_or("?");
-        if SPECIAL_MEMBERS.contains(&member_name) {
+        if SPECIAL_MEMBERS.contains(&member_name) || shadows_slot(vm, &class, member_name) {
             def = unsafe { def.add(1) };
             continue;
         }
@@ -1148,6 +1178,10 @@ pub fn c_type(vm: &VirtualMachine, ty: *mut Type) -> PyResult<PyTypeRef> {
     }
     let mut def = unsafe { (*ty).getset };
     while !def.is_null() && !unsafe { (*def).name }.is_null() {
+        if shadows_slot(vm, &class, text(unsafe { (*def).name }).unwrap_or("?")) {
+            def = unsafe { def.add(1) };
+            continue;
+        }
         attributes.push((
             text(unsafe { (*def).name }).unwrap_or("?"),
             getset(vm, leaked, unsafe { &*def })?,

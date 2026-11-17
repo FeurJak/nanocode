@@ -118,6 +118,10 @@ impl PyFrozenSet {
         self.inner.elements()
     }
 
+    pub fn add_unshared(&self, item: &PyObject, vm: &VirtualMachine) -> PyResult<()> {
+        self.inner.add(item, vm)
+    }
+
     fn fold_op(
         &self,
         others: impl core::iter::Iterator<Item = ArgIterable>,
