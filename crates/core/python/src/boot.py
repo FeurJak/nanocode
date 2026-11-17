@@ -299,7 +299,7 @@ sys.meta_path.insert(0, _Shim)
 class _Located:
     @staticmethod
     def find_spec(name, path=None, target=None):
-        if name.partition('.')[0] not in ('matplotlib', 'mpl_toolkits'):
+        if name.partition('.')[0] not in ('matplotlib', 'mpl_toolkits', 'numpy'):
             return None
         spec = _frozen_importlib.FrozenImporter.find_spec(name)
         if spec is not None:
