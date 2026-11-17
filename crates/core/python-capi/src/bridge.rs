@@ -1141,6 +1141,19 @@ fn proxy(vm: &VirtualMachine, object: &PyObject) -> *mut Object {
     allocate_object(size_of::<Object>(), ty, 0)
 }
 
+fn described_slot(ty: *mut Type) -> Option<usize> {
+    if ty == PyCFunction_Type.get() {
+        Some(0)
+    } else if ty == PyMethodDescr_Type.get()
+        || ty == PyGetSetDescr_Type.get()
+        || ty == PyMemberDescr_Type.get()
+    {
+        Some(3)
+    } else {
+        None
+    }
+}
+
 fn described(vm: &VirtualMachine, object: &PyObject, ty: *mut Type, slot: usize) -> *mut Object {
     let words = size_of::<MemberDef>()
         .max(size_of::<GetSetDef>())
@@ -1460,6 +1473,16 @@ unsafe fn destroy(pointer: *mut Object) {
             xdecref((*target).start);
             xdecref((*target).stop);
             xdecref((*target).step);
+        } else if let Some(slot) = described_slot((*pointer).ty)
+            && heap::header(pointer).kind.get() == Kind::Proxy
+        {
+            let definition = *pointer.add(1).cast::<*mut *mut c_char>().add(slot);
+            if !definition.is_null() {
+                if !(*definition).is_null() {
+                    drop(CString::from_raw(*definition));
+                }
+                heap::release(definition.cast());
+            }
         }
         heap::release(pointer.cast());
     }
