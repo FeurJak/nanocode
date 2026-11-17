@@ -582,6 +582,11 @@ mod _host {
     }
 
     #[pyfunction]
+    fn halted(vm: &VirtualMachine) -> bool {
+        vm.stopped.borrow().is_some()
+    }
+
+    #[pyfunction]
     fn spawns(vm: &VirtualMachine) -> PyResult<bool> {
         state(vm, |state| Ok(state.files.spawns()))
     }

@@ -181,6 +181,82 @@ def _deliver(target, fd, data):
         view = view[os.write(target, view):]
 
 
+_PYTHONS = (b'python', b'python3', b'python%d.%d' % sys.version_info[:2])
+_QUIET = ('-u', '-B', '-E', '-s', '-S', '-I', '-P', '-q', '-O', '-OO', '-b', '-bb')
+
+
+def _inline(argv, env, cwd, data, merged):
+    if os.path.basename(argv[0]) not in _PYTHONS and argv[0] != os.fsencode(sys.executable):
+        return None
+    args = [os.fsdecode(arg) for arg in argv[1:]]
+    while args and args[0] in _QUIET:
+        del args[0]
+    if not args or args[0] == '-' or (args[0].startswith('-') and args[0] not in ('-c', '-m')):
+        return None
+    if args[0] in ('-c', '-m') and len(args) < 2:
+        return None
+    import runpy, posix
+    saved = (sys.argv, sys.stdin, sys.stdout, sys.stderr, sys.path[0], posix._cwd,
+             dict(os.environ._data), sys.modules.get('__main__'))
+    out = io.BytesIO()
+    err = out if merged else io.BytesIO()
+    status = 0
+    try:
+        posix._cwd = cwd
+        os.environ._data.clear()
+        os.environ._data.update(zip(env[::2], env[1::2]))
+        sys.stdin = io.TextIOWrapper(io.BytesIO(data), 'utf-8', 'surrogateescape')
+        sys.stdout = io.TextIOWrapper(out, 'utf-8', 'surrogateescape', '\n', write_through=True)
+        sys.stderr = io.TextIOWrapper(err, 'utf-8', 'backslashreplace', '\n', write_through=True)
+        try:
+            if args[0] == '-c':
+                sys.argv = ['-c'] + args[2:]
+                sys.path[0] = ''
+                main = type(sys)('__main__')
+                sys.modules['__main__'] = main
+                exec(compile(args[1], '<string>', 'exec'), main.__dict__)
+            elif args[0] == '-m':
+                sys.argv = [args[1]] + args[2:]
+                sys.path[0] = os.getcwd()
+                runpy.run_module(args[1], run_name='__main__', alter_sys=True)
+            else:
+                sys.argv = args
+                sys.path[0] = os.path.dirname(os.path.abspath(args[0]))
+                runpy.run_path(args[0], run_name='__main__')
+        except SystemExit as exit:
+            if _host.halted():
+                raise
+            code = exit.code
+            if code is None:
+                status = 0
+            elif isinstance(code, int):
+                status = code & 0xff
+            else:
+                print(code, file=sys.stderr)
+                status = 1
+        except BaseException as error:
+            if _host.halted() or isinstance(error, (KeyboardInterrupt, MemoryError)):
+                raise
+            import traceback
+            traceback.print_exception(error)
+            status = 1
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except Exception:
+                pass
+        data = out.getvalue()
+        problems = b'' if merged else err.getvalue()
+    finally:
+        (sys.argv, sys.stdin, sys.stdout, sys.stderr, sys.path[0], posix._cwd,
+         environ, main) = saved
+        os.environ._data.clear()
+        os.environ._data.update(environ)
+        if main is not None:
+            sys.modules['__main__'] = main
+    return status, data, problems
+
+
 class Popen:
     _spawned = 0
 
@@ -240,7 +316,8 @@ class Popen:
                 pass
         merged = self._stderr == STDOUT
         try:
-            status, out, err = _host.spawn(self._argv, self._env, self._cwd, data, merged)
+            ran = _inline(self._argv, self._env, self._cwd, data, merged)
+            status, out, err = ran or _host.spawn(self._argv, self._env, self._cwd, data, merged)
         except OSError as error:
             self.returncode = 127
             self._streams = {1: self._stream(b''), 2: self._stream(b'')}
