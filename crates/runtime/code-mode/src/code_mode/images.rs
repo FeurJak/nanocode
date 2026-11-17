@@ -11,6 +11,7 @@ use crate::embedded::OwnedToolContext;
 
 const IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
 const PATH_PUNCTUATION: &str = "/._-+@%";
+const WORKING_DIRECTORY: &str = "workdir";
 
 pub(super) struct ImageFiles {
     reader: Option<(String, &'static str)>,
@@ -65,6 +66,17 @@ impl ImageFiles {
         self.touched = true;
         let mut paths = Vec::new();
         mentioned(input, &mut paths);
+        if let Some(directory) = input
+            .get(WORKING_DIRECTORY)
+            .and_then(Value::as_str)
+            .filter(|directory| !directory.is_empty())
+        {
+            paths = paths
+                .iter()
+                .chain(self.files.iter().map(|(path, _)| path))
+                .map(|path| within(directory, path))
+                .collect();
+        }
         for path in paths {
             if self.files.len() >= self.limit || self.files.iter().any(|(known, _)| *known == path)
             {
@@ -123,6 +135,14 @@ impl ImageFiles {
             }
             _ => None,
         })
+    }
+}
+
+fn within(directory: &str, path: &str) -> String {
+    if path.starts_with('/') {
+        path.to_owned()
+    } else {
+        format!("{}/{path}", directory.trim_end_matches('/'))
     }
 }
 
