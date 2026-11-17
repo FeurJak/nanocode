@@ -19,7 +19,6 @@ mod exp2;
 mod frexp;
 mod modf;
 mod nextafter;
-mod pow;
 mod remainder;
 mod remquo;
 
@@ -29,10 +28,9 @@ pub use exp2::exp2;
 pub use frexp::frexp;
 pub use modf::modf;
 pub use nextafter::nextafter;
-pub use pow::pow;
 pub use remainder::remainder;
 
-use djs_libm::{exp, fabs, scalbn, sqrt};
+use djs_libm::{exp, fabs, scalbn};
 use remquo::remquo;
 
 const SIGN_MASK: u64 = 1 << (u64::BITS - 1);
@@ -40,14 +38,6 @@ const SIGN_MASK: u64 = 1 << (u64::BITS - 1);
 #[inline]
 fn get_high_word(x: f64) -> u32 {
     (x.to_bits() >> 32) as u32
-}
-
-#[inline]
-fn with_set_high_word(f: f64, hi: u32) -> f64 {
-    let mut tmp = f.to_bits();
-    tmp &= 0x00000000_ffffffff;
-    tmp |= (hi as u64) << 32;
-    f64::from_bits(tmp)
 }
 
 #[inline]

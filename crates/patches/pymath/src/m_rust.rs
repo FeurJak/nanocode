@@ -121,7 +121,7 @@ pub fn hypot(x: f64, y: f64) -> f64 {
 
 #[inline(always)]
 pub fn pow(x: f64, y: f64) -> f64 {
-    crate::m_libm::pow(x, y)
+    djs_libm::pow(x, y)
 }
 
 #[inline(always)]

@@ -6,6 +6,12 @@ use std::{
 
 use nanocode_platform::Instant;
 
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub extern "C" fn pow(x: f64, y: f64) -> f64 {
+    djs_libm::pow(x, y)
+}
+
 fn ascii(c: c_int) -> Option<u8> {
     u8::try_from(c).ok().filter(u8::is_ascii)
 }
