@@ -2980,7 +2980,7 @@ impl EmbeddedHost {
                         RuntimeEvent::ToolCall {
                             id, name, input, host, ..
                         } => {
-                            images.before(&name, &input, replaying, tools, context).await;
+                            images.called(&name);
                             if held {
                                 calls.queue(id, name, input, host);
                             } else {

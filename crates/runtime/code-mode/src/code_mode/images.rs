@@ -63,41 +63,9 @@ impl ImageFiles {
             .is_none_or(|(reader, _)| reader == name)
     }
 
-    pub(super) async fn before(
-        &mut self,
-        name: &str,
-        input: &Value,
-        replaying: bool,
-        tools: &dyn CodeModeToolset,
-        context: &OwnedToolContext,
-    ) {
-        if self.reads(name) {
-            return;
-        }
-        self.touched = true;
-        let mut paths = Vec::new();
-        mentioned(input, &mut paths);
-        if let Some(directory) = input
-            .get(WORKING_DIRECTORY)
-            .and_then(Value::as_str)
-            .filter(|directory| !directory.is_empty())
-        {
-            paths = paths
-                .iter()
-                .chain(self.files.iter().map(|(path, _)| path))
-                .map(|path| within(directory, path))
-                .collect();
-        }
-        for path in paths {
-            if !self.room(&path) {
-                continue;
-            }
-            let before = if replaying {
-                None
-            } else {
-                self.read(&path, tools, context).await.map(|(hash, _)| hash)
-            };
-            self.files.push((path, before));
+    pub(super) fn called(&mut self, name: &str) {
+        if !self.reads(name) {
+            self.touched = true;
         }
     }
 
