@@ -14,6 +14,13 @@ use rustpython_compiler_core::frozen::FrozenCodeObject;
 
 const DATA: &[&str] = &["matplotlib/mpl-data"];
 
+// Site packages compiled at optimize 2 (no docstrings, no asserts), as
+// CPython's -OO would: their docstrings are a third of their code.
+const OPTIMIZED: &[&str] = &["matplotlib", "mpl_toolkits", "numpy", "pandas"];
+
+// Testing helpers keep their asserts: scripts check results with them.
+const KEEP_ASSERTS: &[&str] = &["numpy.testing", "pandas._testing"];
+
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     let mut entries: Vec<_> = fs::read_dir(dir)
         .expect("data directory")
@@ -46,7 +53,7 @@ fn deflate(data: &[u8]) -> Vec<u8> {
     out
 }
 
-fn freeze(dir: &Path, parent: &str, modules: &mut BTreeMap<String, (bool, Vec<u8>)>) {
+fn freeze(dir: &Path, parent: &str, optimize: u8, modules: &mut BTreeMap<String, (bool, Vec<u8>)>) {
     let mut entries: Vec<_> = fs::read_dir(dir)
         .expect("module directory")
         .map(|entry| entry.expect("entry").path())
@@ -63,7 +70,12 @@ fn freeze(dir: &Path, parent: &str, modules: &mut BTreeMap<String, (bool, Vec<u8
             } else {
                 format!("{parent}.{file_name}")
             };
-            freeze(&path, &child, modules);
+            let optimize = if parent.is_empty() && OPTIMIZED.contains(&file_name) {
+                2
+            } else {
+                optimize
+            };
+            freeze(&path, &child, optimize, modules);
             continue;
         }
         let Some(stem) = file_name.strip_suffix(".py") else {
@@ -81,7 +93,15 @@ fn freeze(dir: &Path, parent: &str, modules: &mut BTreeMap<String, (bool, Vec<u8
         if source.starts_with('\u{feff}') {
             source.drain(..'\u{feff}'.len_utf8());
         }
-        let code = match compile(&source, Mode::Exec, &name, CompileOpts::default()) {
+        let keep = KEEP_ASSERTS.iter().any(|package| {
+            name.strip_prefix(package)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+        });
+        let opts = CompileOpts {
+            optimize: if keep { 0 } else { optimize },
+            ..CompileOpts::default()
+        };
+        let code = match compile(&source, Mode::Exec, &name, opts) {
             Ok(code) => code,
             Err(_) if stem.starts_with("badsyntax_") || parent.ends_with(".encoded_modules") => {
                 continue;
@@ -101,8 +121,8 @@ fn main() {
     let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
 
     let mut modules = BTreeMap::new();
-    freeze(lib, "", &mut modules);
-    freeze(&site, "", &mut modules);
+    freeze(lib, "", 0, &mut modules);
+    freeze(&site, "", 0, &mut modules);
 
     let mut blob = Vec::new();
     let mut table = String::from("pub static MODULES: &[(&str, bool, u32, u32)] = &[\n");
