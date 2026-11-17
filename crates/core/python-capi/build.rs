@@ -223,12 +223,23 @@ fn address_taken(object: &Path) -> Vec<(String, usize)> {
 }
 
 fn apple(target: &str) -> Option<(String, PathBuf)> {
-    let (arch, rest) = target.split_once("-apple-ios")?;
-    let simulator = rest == "-sim" || arch == "x86_64";
-    let sdk = if simulator {
-        "iphonesimulator"
-    } else {
-        "iphoneos"
+    let (arch, system) = target.split_once("-apple-")?;
+    let (os, sdk, suffix, variable) = match system {
+        "darwin" => ("macosx", "macosx", "", "MACOSX_DEPLOYMENT_TARGET"),
+        "ios-sim" => (
+            "ios",
+            "iphonesimulator",
+            "-simulator",
+            "IPHONEOS_DEPLOYMENT_TARGET",
+        ),
+        "ios" if arch == "x86_64" => (
+            "ios",
+            "iphonesimulator",
+            "-simulator",
+            "IPHONEOS_DEPLOYMENT_TARGET",
+        ),
+        "ios" => ("ios", "iphoneos", "", "IPHONEOS_DEPLOYMENT_TARGET"),
+        _ => return None,
     };
     let output = |command: &mut Command| {
         let output = command
@@ -240,7 +251,7 @@ fn apple(target: &str) -> Option<(String, PathBuf)> {
             .trim()
             .to_owned()
     };
-    println!("cargo:rerun-if-env-changed=IPHONEOS_DEPLOYMENT_TARGET");
+    println!("cargo:rerun-if-env-changed={variable}");
     let printed = output(
         Command::new(env::var_os("RUSTC").expect("RUSTC"))
             .args(["--print", "deployment-target", "--target"])
@@ -250,9 +261,8 @@ fn apple(target: &str) -> Option<(String, PathBuf)> {
         .split_once('=')
         .map_or(printed.as_str(), |(_, version)| version);
     let sysroot = output(Command::new("xcrun").args(["--sdk", sdk, "--show-sdk-path"]));
-    let suffix = if simulator { "-simulator" } else { "" };
     Some((
-        format!("{arch}-apple-ios{version}{suffix}"),
+        format!("{arch}-apple-{os}{version}{suffix}"),
         PathBuf::from(sysroot),
     ))
 }
