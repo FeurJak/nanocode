@@ -12,6 +12,14 @@ use crate::embedded::OwnedToolContext;
 const IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
 const PATH_PUNCTUATION: &str = "/._-+@%";
 const WORKING_DIRECTORY: &str = "workdir";
+/// The files python.wasm's default matplotlib backend writes on `plt.show()`, one per open
+/// figure, in the working directory; a call that runs Python tracks the first few.
+const SHOWN_FIGURES: [&str; 4] = [
+    "Figure_1.png",
+    "Figure_2.png",
+    "Figure_3.png",
+    "Figure_4.png",
+];
 
 pub(super) struct ImageFiles {
     reader: Option<(String, &'static str)>,
@@ -66,6 +74,13 @@ impl ImageFiles {
         self.touched = true;
         let mut paths = Vec::new();
         mentioned(input, &mut paths);
+        if runs_python(input) {
+            for figure in SHOWN_FIGURES {
+                if !paths.iter().any(|known| known == figure) {
+                    paths.push(figure.to_owned());
+                }
+            }
+        }
         if let Some(directory) = input
             .get(WORKING_DIRECTORY)
             .and_then(Value::as_str)
@@ -143,6 +158,15 @@ fn within(directory: &str, path: &str) -> String {
         path.to_owned()
     } else {
         format!("{}/{path}", directory.trim_end_matches('/'))
+    }
+}
+
+fn runs_python(value: &Value) -> bool {
+    match value {
+        Value::String(text) => text.contains("python") || text.contains(".py"),
+        Value::Array(items) => items.iter().any(runs_python),
+        Value::Object(fields) => fields.values().any(runs_python),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
     }
 }
 
