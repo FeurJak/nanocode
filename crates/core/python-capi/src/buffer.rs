@@ -27,7 +27,7 @@ pub struct CBuffer {
 impl CBuffer {}
 
 impl CBuffer {
-    fn view(&self) -> *mut Buffer {
+    pub fn view(&self) -> *mut Buffer {
         self.view.load(Ordering::Relaxed)
     }
 }
