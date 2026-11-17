@@ -1401,10 +1401,6 @@ pub fn type_pointer(vm: &VirtualMachine, class: &Py<PyType>) -> *mut Type {
     PROXIES.with_borrow_mut(|proxies| proxies.remove(&key));
     C_TYPES.with_borrow_mut(|types| types.insert(key, pointer as usize));
     PROXY_TYPES.with_borrow_mut(|types| types.insert(pointer as usize));
-    // C code reads tp_mro and tp_bases of any type it meets: numpy's
-    // _descr_from_subtype takes tp_mro[1] of a Python subclass of a numpy
-    // scalar. Filled after the type is registered, since both tuples name
-    // the class itself.
     let mro: Vec<PyObjectRef> = class.mro_map_collect(|cls| cls.to_owned().into());
     let bases: Vec<PyObjectRef> = class.bases.read().iter().map(|base| base.clone().into()).collect();
     unsafe {
