@@ -67,6 +67,22 @@ extern crate serde_core as serde;
 pub mod __private {
     #[doc(hidden)]
     pub use alloc::vec;
+
+    #[doc(hidden)]
+    #[cfg_attr(not(target_family = "wasm"), inline)]
+    pub fn insert(
+        object: &mut crate::Map<alloc::string::String, crate::Value>,
+        key: &str,
+        value: crate::Value,
+    ) {
+        object.insert(alloc::string::String::from(key), value);
+    }
+
+    #[doc(hidden)]
+    #[cfg_attr(not(target_family = "wasm"), inline)]
+    pub fn to_value<T: serde::Serialize + ?Sized>(value: &T) -> crate::Value {
+        crate::to_value(value).unwrap()
+    }
 }
 
 #[doc(inline)]
@@ -100,10 +116,14 @@ pub mod map;
 pub mod ser;
 pub mod value;
 
+#[cfg(not(target_family = "wasm"))]
+mod float;
+#[cfg(target_family = "wasm")]
+#[path = "float_wasm.rs"]
+mod float;
 mod io;
 mod iter;
 mod number;
-mod float;
 mod read;
 
 mod raw;

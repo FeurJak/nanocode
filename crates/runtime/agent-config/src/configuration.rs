@@ -15,7 +15,7 @@ pub enum AgentTools {
 }
 
 impl AgentTools {
-    pub const fn has_code_mode_host(&self) -> bool {
+    pub fn has_code_mode_host(&self) -> bool {
         match self {
             Self::Shared(tools) => tools.has_code_mode_host(),
             Self::PerAgent(_) => false,
@@ -147,6 +147,8 @@ pub trait RuntimeDefaults: Clone + Default + Send + Sync + 'static {
     type Codex: RuntimeBackend;
     type Claude: RuntimeBackend;
     type Host: HostServices;
+    const BUILTIN_CODEC: bool = true;
+    const SUBAGENTS: bool = true;
     fn preferred_backend(existing: &[BackendId]) -> Option<BackendId>;
     fn default_backends(existing: &[BackendId]) -> Vec<Arc<dyn RuntimeBackend>>;
     fn default_store() -> nanocode_durability::Result<SessionStore>;

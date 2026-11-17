@@ -59,9 +59,17 @@ impl<'a> Deserializer<read::SliceRead<'a>> {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 impl<'a> Deserializer<read::StrRead<'a>> {
     pub fn from_str(s: &'a str) -> Self {
         Deserializer::new(read::StrRead::new(s))
+    }
+}
+
+#[cfg(target_family = "wasm")]
+impl<'a> Deserializer<read::SliceRead<'a>> {
+    pub fn from_str(s: &'a str) -> Self {
+        Deserializer::new(read::SliceRead::new(s.as_bytes()))
     }
 }
 
@@ -2002,9 +2010,18 @@ where
     from_trait(read::SliceRead::new(v))
 }
 
+#[cfg(not(target_family = "wasm"))]
 pub fn from_str<'a, T>(s: &'a str) -> Result<T>
 where
     T: de::Deserialize<'a>,
 {
     from_trait(read::StrRead::new(s))
+}
+
+#[cfg(target_family = "wasm")]
+pub fn from_str<'a, T>(s: &'a str) -> Result<T>
+where
+    T: de::Deserialize<'a>,
+{
+    from_trait(read::SliceRead::new(s.as_bytes()))
 }

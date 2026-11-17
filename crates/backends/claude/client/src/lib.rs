@@ -291,7 +291,8 @@ pub enum Role {
     System,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[cfg_attr(not(target_family = "wasm"), derive(Deserialize))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Image {
@@ -419,11 +420,223 @@ pub enum ContentBlock {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[cfg_attr(not(target_family = "wasm"), derive(Deserialize))]
 #[serde(untagged)]
 pub enum ToolResultContent {
     Text(String),
     Blocks(Vec<Value>),
+}
+
+#[cfg(target_family = "wasm")]
+impl<'de> Deserialize<'de> for ToolResultContent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match Value::deserialize(deserializer)? {
+            Value::String(text) => Ok(Self::Text(text)),
+            Value::Array(blocks) => Ok(Self::Blocks(blocks)),
+            _ => Err(serde::de::Error::custom(
+                "data did not match any variant of untagged enum ToolResultContent",
+            )),
+        }
+    }
+}
+
+#[cfg(target_family = "wasm")]
+struct Fields(serde_json::Map<String, Value>);
+
+#[cfg(target_family = "wasm")]
+impl Fields {
+    fn value(&mut self, name: &'static str) -> Result<Value, serde_json::Error> {
+        self.0
+            .remove(name)
+            .ok_or_else(|| serde::de::Error::missing_field(name))
+    }
+
+    fn take<T: serde::de::DeserializeOwned>(
+        &mut self,
+        name: &'static str,
+    ) -> Result<T, serde_json::Error> {
+        serde_json::from_value(self.value(name)?)
+    }
+
+    fn string(&mut self, name: &'static str) -> Result<String, serde_json::Error> {
+        String::deserialize(self.value(name)?)
+    }
+
+    fn index(&mut self, name: &'static str) -> Result<usize, serde_json::Error> {
+        usize::deserialize(self.value(name)?)
+    }
+
+    fn fields(&mut self, name: &'static str) -> Result<Self, serde_json::Error> {
+        serde_json::Map::deserialize(self.value(name)?).map(Self)
+    }
+
+    fn defaulted_string(&mut self, name: &'static str) -> Result<String, serde_json::Error> {
+        self.0
+            .remove(name)
+            .map_or_else(|| Ok(String::new()), String::deserialize)
+    }
+
+    fn object(&mut self, name: &'static str) -> Value {
+        self.0.remove(name).unwrap_or_else(empty_object)
+    }
+
+    fn extra(self) -> BTreeMap<String, Value> {
+        let mut extra = BTreeMap::new();
+        for (key, value) in self.0 {
+            extra.insert(key, value);
+        }
+        extra
+    }
+}
+
+#[cfg(target_family = "wasm")]
+const CONTENT_BLOCK_TYPES: &[&str] = &[
+    "image",
+    "document",
+    "text",
+    "tool_use",
+    "server_tool_use",
+    "web_search_tool_result",
+    "web_fetch_tool_result",
+    "tool_search_tool_result",
+    "code_execution_tool_result",
+    "bash_code_execution_tool_result",
+    "text_editor_code_execution_tool_result",
+    "mcp_tool_use",
+    "mcp_tool_result",
+    "mcp_tool_listing",
+    "tool_result",
+    "thinking",
+    "redacted_thinking",
+    "compaction",
+    "tool_addition",
+    "tool_removal",
+];
+
+#[cfg(target_family = "wasm")]
+impl<'de> Deserialize<'de> for ContentBlock {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let fields = Fields(serde_json::Map::deserialize(deserializer)?);
+        Self::from_fields(fields).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(target_family = "wasm")]
+impl ContentBlock {
+    fn from_fields(mut fields: Fields) -> Result<Self, serde_json::Error> {
+        let kind = fields.string("type")?;
+        Ok(match kind.as_str() {
+            "image" => Self::Image {
+                source: fields.value("source")?,
+                extra: fields.extra(),
+            },
+            "document" => Self::Document {
+                source: fields.value("source")?,
+                extra: fields.extra(),
+            },
+            "text" => Self::Text {
+                text: fields.string("text")?,
+                extra: fields.extra(),
+            },
+            "tool_use" => Self::ToolUse {
+                id: fields.string("id")?,
+                name: fields.string("name")?,
+                input: fields.value("input")?,
+                extra: fields.extra(),
+            },
+            "server_tool_use" => Self::ServerToolUse {
+                id: fields.string("id")?,
+                name: fields.string("name")?,
+                input: fields.object("input"),
+                extra: fields.extra(),
+            },
+            "web_search_tool_result" => Self::WebSearchToolResult {
+                tool_use_id: fields.string("tool_use_id")?,
+                content: fields.value("content")?,
+                extra: fields.extra(),
+            },
+            "web_fetch_tool_result" => Self::WebFetchToolResult {
+                tool_use_id: fields.string("tool_use_id")?,
+                content: fields.value("content")?,
+                extra: fields.extra(),
+            },
+            "tool_search_tool_result" => Self::ToolSearchToolResult {
+                tool_use_id: fields.string("tool_use_id")?,
+                content: fields.value("content")?,
+                extra: fields.extra(),
+            },
+            "code_execution_tool_result" => Self::CodeExecutionToolResult {
+                tool_use_id: fields.string("tool_use_id")?,
+                content: fields.value("content")?,
+                extra: fields.extra(),
+            },
+            "bash_code_execution_tool_result" => Self::BashCodeExecutionToolResult {
+                tool_use_id: fields.string("tool_use_id")?,
+                content: fields.value("content")?,
+                extra: fields.extra(),
+            },
+            "text_editor_code_execution_tool_result" => Self::TextEditorCodeExecutionToolResult {
+                tool_use_id: fields.string("tool_use_id")?,
+                content: fields.value("content")?,
+                extra: fields.extra(),
+            },
+            "mcp_tool_use" => Self::McpToolUse {
+                id: fields.string("id")?,
+                name: fields.string("name")?,
+                server_name: fields.string("server_name")?,
+                input: fields.object("input"),
+                extra: fields.extra(),
+            },
+            "mcp_tool_result" => Self::McpToolResult {
+                tool_use_id: fields.string("tool_use_id")?,
+                content: fields.value("content")?,
+                extra: fields.extra(),
+            },
+            "mcp_tool_listing" => Self::McpToolListing {
+                mcp_server_name: fields.string("mcp_server_name")?,
+                tools: fields.value("tools")?,
+                extra: fields.extra(),
+            },
+            "tool_result" => Self::ToolResult {
+                tool_use_id: fields.string("tool_use_id")?,
+                content: ToolResultContent::deserialize(fields.value("content")?)?,
+                is_error: fields
+                    .0
+                    .remove("is_error")
+                    .map_or(Ok(None), Option::<bool>::deserialize)?,
+                extra: fields.extra(),
+            },
+            "thinking" => Self::Thinking {
+                thinking: fields.string("thinking")?,
+                signature: fields.defaulted_string("signature")?,
+                extra: fields.extra(),
+            },
+            "redacted_thinking" => Self::RedactedThinking {
+                data: fields.string("data")?,
+                extra: fields.extra(),
+            },
+            "compaction" => Self::Compaction {
+                content: fields.string("content")?,
+                signature: fields.string("signature")?,
+                extra: fields.extra(),
+            },
+            "tool_addition" => Self::ToolAddition {
+                tool: fields.value("tool")?,
+                extra: fields.extra(),
+            },
+            "tool_removal" => Self::ToolRemoval {
+                tool: fields.value("tool")?,
+                extra: fields.extra(),
+            },
+            _ => {
+                return Err(serde::de::Error::unknown_variant(
+                    &kind,
+                    CONTENT_BLOCK_TYPES,
+                ));
+            }
+        })
+    }
 }
 
 fn empty_object() -> Value {
@@ -1524,8 +1737,12 @@ pub struct UsageIteration {
     pub cache_creation: Option<CacheCreation>,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    not(target_family = "wasm"),
+    derive(Deserialize),
+    serde(tag = "type", rename_all = "snake_case")
+)]
 pub enum ContentDelta {
     TextDelta {
         text: String,
@@ -1542,8 +1759,40 @@ pub enum ContentDelta {
     CitationsDelta {
         citation: Value,
     },
-    #[serde(other)]
+    #[cfg_attr(not(target_family = "wasm"), serde(other))]
     Other,
+}
+
+#[cfg(target_family = "wasm")]
+impl<'de> Deserialize<'de> for ContentDelta {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let fields = Fields(serde_json::Map::deserialize(deserializer)?);
+        Self::from_fields(fields).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(target_family = "wasm")]
+impl ContentDelta {
+    fn from_fields(mut fields: Fields) -> Result<Self, serde_json::Error> {
+        Ok(match fields.string("type")?.as_str() {
+            "text_delta" => Self::TextDelta {
+                text: fields.string("text")?,
+            },
+            "input_json_delta" => Self::InputJsonDelta {
+                partial_json: fields.string("partial_json")?,
+            },
+            "thinking_delta" => Self::ThinkingDelta {
+                thinking: fields.string("thinking")?,
+            },
+            "signature_delta" => Self::SignatureDelta {
+                signature: fields.string("signature")?,
+            },
+            "citations_delta" => Self::CitationsDelta {
+                citation: fields.value("citation")?,
+            },
+            _ => Self::Other,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -1553,8 +1802,12 @@ pub struct ApiError {
     pub message: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    not(target_family = "wasm"),
+    derive(Deserialize),
+    serde(tag = "type", rename_all = "snake_case")
+)]
 pub enum StreamEvent {
     MessageStart {
         message: MessageResponse,
@@ -1579,8 +1832,48 @@ pub enum StreamEvent {
     Error {
         error: ApiError,
     },
-    #[serde(other)]
+    #[cfg_attr(not(target_family = "wasm"), serde(other))]
     Other,
+}
+
+#[cfg(target_family = "wasm")]
+impl<'de> Deserialize<'de> for StreamEvent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let fields = Fields(serde_json::Map::deserialize(deserializer)?);
+        Self::from_fields(fields).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(target_family = "wasm")]
+impl StreamEvent {
+    fn from_fields(mut fields: Fields) -> Result<Self, serde_json::Error> {
+        Ok(match fields.string("type")?.as_str() {
+            "message_start" => Self::MessageStart {
+                message: fields.take("message")?,
+            },
+            "content_block_start" => Self::ContentBlockStart {
+                index: fields.index("index")?,
+                content_block: ContentBlock::from_fields(fields.fields("content_block")?)?,
+            },
+            "content_block_delta" => Self::ContentBlockDelta {
+                index: fields.index("index")?,
+                delta: ContentDelta::from_fields(fields.fields("delta")?)?,
+            },
+            "content_block_stop" => Self::ContentBlockStop {
+                index: fields.index("index")?,
+            },
+            "message_delta" => Self::MessageDelta {
+                delta: fields.take("delta")?,
+                usage: fields.take("usage")?,
+            },
+            "message_stop" => Self::MessageStop,
+            "ping" => Self::Ping,
+            "error" => Self::Error {
+                error: fields.take("error")?,
+            },
+            _ => Self::Other,
+        })
+    }
 }
 
 #[derive(Deserialize)]
