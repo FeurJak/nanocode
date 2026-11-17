@@ -22,7 +22,6 @@ const SHOWN_FIGURES: [&str; 4] = [
 
 #[derive(Clone, Default)]
 pub(super) struct Carried {
-    pending: Vec<String>,
     shown: HashSet<u64>,
 }
 
@@ -47,11 +46,7 @@ impl ImageFiles {
             }),
             hasher: BuildHasherDefault::default(),
             shown: carried.shown.clone(),
-            files: carried
-                .pending
-                .iter()
-                .map(|path| (path.clone(), None))
-                .collect(),
+            files: Vec::new(),
             touched: false,
         }
     }
@@ -82,13 +77,6 @@ impl ImageFiles {
         self.touched = true;
         let mut paths = Vec::new();
         mentioned(input, &mut paths);
-        if runs_python(input) {
-            for figure in SHOWN_FIGURES {
-                if !paths.iter().any(|known| known == figure) {
-                    paths.push(figure.to_owned());
-                }
-            }
-        }
         if let Some(directory) = input
             .get(WORKING_DIRECTORY)
             .and_then(Value::as_str)
@@ -129,17 +117,23 @@ impl ImageFiles {
             }
         }
         mentioned(&call.structured_result, &mut paths);
-        let [path] = paths.as_slice() else {
-            return;
+        let named = match paths.as_slice() {
+            [_] => paths,
+            _ => paths
+                .into_iter()
+                .filter(|path| SHOWN_FIGURES.contains(&path.as_str()))
+                .collect(),
         };
         let directory = call
             .input
             .get(WORKING_DIRECTORY)
             .and_then(Value::as_str)
             .filter(|directory| !directory.is_empty());
-        let path = directory.map_or_else(|| path.clone(), |directory| within(directory, path));
-        if self.room(&path) {
-            self.files.push((path, None));
+        for path in named {
+            let path = directory.map_or_else(|| path.clone(), |directory| within(directory, &path));
+            if self.room(&path) {
+                self.files.push((path, None));
+            }
         }
     }
 
@@ -159,10 +153,8 @@ impl ImageFiles {
             Vec::new()
         };
         let mut images = Vec::new();
-        let mut missing = Vec::new();
         for (path, before) in &files {
             let Some((hash, image)) = self.read(path, tools, context).await else {
-                missing.push(path.clone());
                 continue;
             };
             if *before != Some(hash) && self.shown.insert(hash) {
@@ -170,10 +162,6 @@ impl ImageFiles {
             }
         }
         carried.update(|carried| {
-            carried
-                .pending
-                .retain(|path| !files.iter().any(|(known, _)| known == path));
-            carried.pending.extend(missing.iter().cloned());
             carried.shown.extend(self.shown.iter().copied());
         });
         images
@@ -235,23 +223,15 @@ fn within(directory: &str, path: &str) -> String {
     }
 }
 
-fn runs_python(value: &Value) -> bool {
-    match value {
-        Value::String(text) => text.contains("python") || text.contains(".py"),
-        Value::Array(items) => items.iter().any(runs_python),
-        Value::Object(fields) => fields.values().any(runs_python),
-        Value::Null | Value::Bool(_) | Value::Number(_) => false,
-    }
-}
-
 fn mentioned_text(text: &str, paths: &mut Vec<String>) {
     for token in text.split(|c: char| !c.is_alphanumeric() && !PATH_PUNCTUATION.contains(c)) {
-        let image = token.rsplit_once('.').is_some_and(|(stem, extension)| {
-            !stem.is_empty()
-                && IMAGE_EXTENSIONS
-                    .iter()
-                    .any(|known| extension.eq_ignore_ascii_case(known))
-        });
+        let image = !token.starts_with("//")
+            && token.rsplit_once('.').is_some_and(|(stem, extension)| {
+                !stem.is_empty()
+                    && IMAGE_EXTENSIONS
+                        .iter()
+                        .any(|known| extension.eq_ignore_ascii_case(known))
+            });
         if image && !paths.iter().any(|known| known == token) {
             paths.push(token.to_owned());
         }
