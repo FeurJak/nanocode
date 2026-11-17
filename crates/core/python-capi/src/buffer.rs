@@ -155,7 +155,7 @@ static BUILT: std::sync::Mutex<Vec<(usize, Box<BuiltView>)>> = std::sync::Mutex:
 /// What PyMemoryView_GET_BUFFER reads: memoryviews are runtime objects, not
 /// CPython's struct, so numpy and others get the exporter's own C view when a
 /// C type exported it unchanged, and otherwise a C view built from the
-/// memoryview's shape and format (kept, with the memoryview, for the run).
+/// memoryview's shape and format (kept while the memoryview lives).
 #[unsafe(no_mangle)]
 pub extern "C" fn _PyMemoryView_GetBuffer(pointer: *mut Object) -> *mut Buffer {
     crate::bridge::guard(null_mut(), |vm| {
@@ -176,6 +176,13 @@ pub extern "C" fn _PyMemoryView_GetBuffer(pointer: *mut Object) -> *mut Buffer {
         }
         let key = pointer as usize;
         let mut built = BUILT.lock().unwrap();
+        // C reads a view through the memoryview's C object, so a view is
+        // dead once that object has no C references: drop those, so views
+        // don't pile up for the run (the bridge parks a proxy whose object
+        // this table still holds, which kept both forever). _keep holds the
+        // object, so the bridge hasn't freed the C object and its count is
+        // still readable.
+        built.retain(|(key, _)| unsafe { (*(*key as *mut Object)).refcnt } != 0);
         if let Some((_, view)) = built.iter_mut().find(|(k, _)| *k == key) {
             return Ok(&raw mut view.view);
         }
