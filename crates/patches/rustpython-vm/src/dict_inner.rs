@@ -1169,7 +1169,12 @@ impl<T: Clone> Dict<T> {
             let entry = inner.entries.get(position)?;
             position += 1;
             if let Some(entry) = entry {
-                break Some((position, entry.key.clone(), entry.value.clone(), entry.hash.get()));
+                break Some((
+                    position,
+                    entry.key.clone(),
+                    entry.value.clone(),
+                    entry.hash.get(),
+                ));
             }
         }
     }
