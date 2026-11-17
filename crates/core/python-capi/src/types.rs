@@ -924,6 +924,9 @@ pub fn ready_type(ty: *mut Type) {
         }
         if !t.base_type.is_null() {
             t.flags |= (*t.base_type).flags & TPFLAGS_TYPE_SUBCLASS;
+            if t.dealloc.is_none() {
+                t.dealloc = (*t.base_type).dealloc;
+            }
             if t.basicsize == 0 {
                 t.basicsize = (*t.base_type).basicsize;
                 t.itemsize = (*t.base_type).itemsize;
