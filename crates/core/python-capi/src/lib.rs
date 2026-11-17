@@ -21,4 +21,4 @@ mod libc;
 mod module;
 mod types;
 
-pub use module::{EXTENSIONS, Extension, module_defs};
+pub use module::{EXTENSIONS, Extension, add_extensions, module_defs, run_constructors};

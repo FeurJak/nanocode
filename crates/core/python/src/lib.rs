@@ -14,12 +14,15 @@ use rustpython_vm::{
     AsObject, Interpreter, PyObjectRef, PyResult, Settings, VirtualMachine,
     builtins::{PyBaseExceptionRef, PyDictRef},
     common::rc::PyRc,
+    frozen::FrozenLib,
     function::IntoFuncArgs,
     scope::Scope,
     vm::limit::Limiter,
 };
 
+pub use capi::{Extension, add_extensions};
 pub use psh::UTILITY;
+pub use rustpython_vm;
 #[cfg(not(target_family = "wasm"))]
 pub use psh::serve;
 pub use rustpython_vm::vm::limit::Metered;
@@ -245,6 +248,17 @@ enum Prepared {
     Exited(i32),
 }
 
+static FROZEN: std::sync::OnceLock<&'static FrozenLib> = std::sync::OnceLock::new();
+
+pub fn add_frozen(lib: &'static FrozenLib) -> Result<(), &'static FrozenLib> {
+    FROZEN.set(lib)
+}
+
+fn added_frozen() -> Option<&'static FrozenLib> {
+    capi::run_constructors();
+    FROZEN.get().copied()
+}
+
 pub struct Python {
     interpreter: Option<Interpreter>,
     boot: PyDictRef,
@@ -291,6 +305,7 @@ impl Python {
             .add_native_module(host)
             .add_native_module(kiwisolver)
             .add_native_module(matplotlib)
+            .add_frozen_modules(added_frozen().into_iter().flat_map(|lib| lib.decode()))
             .build();
         let (boot, depth) = interpreter.enter(|vm| (vm.ctx.new_dict(), vm.recursion_limit.get()));
         Ok(Self {

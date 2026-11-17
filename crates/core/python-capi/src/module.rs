@@ -23,6 +23,32 @@ pub struct Extension {
 
 include!(concat!(env!("OUT_DIR"), "/extensions.rs"));
 
+impl Extension {
+    pub const fn new(name: &'static str, init: unsafe extern "C" fn() -> *mut c_void) -> Self {
+        Self {
+            name,
+            init: unsafe {
+                std::mem::transmute::<
+                    unsafe extern "C" fn() -> *mut c_void,
+                    unsafe extern "C" fn() -> *mut Object,
+                >(init)
+            },
+        }
+    }
+}
+
+static ADDED: std::sync::OnceLock<&'static [Extension]> = std::sync::OnceLock::new();
+
+pub fn add_extensions(extensions: &'static [Extension]) -> Result<(), &'static [Extension]> {
+    ADDED.set(extensions)
+}
+
+fn extensions() -> impl Iterator<Item = &'static Extension> {
+    EXTENSIONS
+        .iter()
+        .chain(ADDED.get().copied().unwrap_or_default())
+}
+
 thread_local! {
     static MODULES: RefCell<crate::address::AddressMap<usize>> = const { RefCell::new(crate::address::map()) };
     static STATES: RefCell<crate::address::AddressMap<usize>> = const { RefCell::new(crate::address::map()) };
@@ -51,8 +77,7 @@ pub fn run_constructors() {}
 
 pub fn module_defs(ctx: &rustpython_vm::Context) -> Vec<&'static PyModuleDef> {
     run_constructors();
-    EXTENSIONS
-        .iter()
+    extensions()
         .map(|extension| {
             &*Box::leak(Box::new(PyModuleDef {
                 name: ctx.intern_str(extension.name),
@@ -74,8 +99,7 @@ fn create(
 ) -> PyResult<PyRef<PyModule>> {
     run_constructors();
     let name = def.name.as_str();
-    let extension = EXTENSIONS
-        .iter()
+    let extension = extensions()
         .find(|extension| extension.name == name)
         .ok_or_else(|| {
             vm.new_import_error(

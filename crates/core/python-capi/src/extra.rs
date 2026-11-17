@@ -1233,3 +1233,26 @@ pub extern "C" fn PyUnicode_DecodeLocale(
 pub extern "C" fn PyUnicode_EncodeLocale(text: *mut Object, _errors: *const c_char) -> *mut Object {
     object(|vm| vm.call_method(&*arg(vm, text)?, "encode", ("utf-8", "surrogateescape")))
 }
+
+#[unsafe(no_mangle)]
+pub extern "C" fn PyOS_FSPath(path: *mut Object) -> *mut Object {
+    object(|vm| {
+        vm.import("os", 0)?
+            .get_attr("fspath", vm)?
+            .call((arg(vm, path)?,), vm)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn PyUnicode_EncodeFSDefault(pointer: *mut Object) -> *mut Object {
+    object(|vm| vm.call_method(&*arg(vm, pointer)?, "encode", ("utf-8", "surrogateescape")))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn PyTraceBack_Print(traceback: *mut Object, file: *mut Object) -> c_int {
+    status(|vm| {
+        let print = vm.import("traceback", 0)?.get_attr("print_tb", vm)?;
+        print.call((arg(vm, traceback)?, vm.ctx.none(), arg(vm, file)?), vm)?;
+        Ok(())
+    })
+}
