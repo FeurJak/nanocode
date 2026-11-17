@@ -1505,6 +1505,10 @@ impl Board {
 enum Event {
     Catalog {
         max_frame_bytes: usize,
+        held: Option<String>,
+        reply: oneshot::Sender<Result<String, CodeModeHostError>>,
+    },
+    Digest {
         reply: oneshot::Sender<Result<String, CodeModeHostError>>,
     },
     Connect {
@@ -1565,12 +1569,29 @@ impl HandCore {
     }
 
     pub async fn catalog(&self, max_frame_bytes: usize) -> Result<String, CodeModeHostError> {
+        self.held_catalog(max_frame_bytes, None).await
+    }
+
+    pub async fn held_catalog(
+        &self,
+        max_frame_bytes: usize,
+        held: Option<String>,
+    ) -> Result<String, CodeModeHostError> {
         let (reply, answer) = oneshot::channel();
         self.events
             .send(Event::Catalog {
                 max_frame_bytes,
+                held,
                 reply,
             })
+            .map_err(|_| error("the hand stopped"))?;
+        answer.await.map_err(|_| error("the hand stopped"))?
+    }
+
+    pub async fn catalog_digest(&self) -> Result<String, CodeModeHostError> {
+        let (reply, answer) = oneshot::channel();
+        self.events
+            .send(Event::Digest { reply })
             .map_err(|_| error("the hand stopped"))?;
         answer.await.map_err(|_| error("the hand stopped"))?
     }
@@ -1760,9 +1781,13 @@ impl State {
         match event {
             Event::Catalog {
                 max_frame_bytes,
+                held,
                 reply,
             } => {
-                let _ = reply.send(self.catalog(max_frame_bytes).await);
+                let _ = reply.send(self.catalog(max_frame_bytes, held).await);
+            }
+            Event::Digest { reply } => {
+                let _ = reply.send(super::catalog_digest(&self.definitions().await));
             }
             Event::Connect { link, standby } => {
                 if standby {
@@ -1832,7 +1857,11 @@ impl State {
         true
     }
 
-    async fn catalog(&mut self, max_frame_bytes: usize) -> Result<String, CodeModeHostError> {
+    async fn catalog(
+        &mut self,
+        max_frame_bytes: usize,
+        held: Option<String>,
+    ) -> Result<String, CodeModeHostError> {
         if self.outgoing.lost() {
             self.reset().await;
             if self.options.runtime_id.is_some() {
@@ -1847,8 +1876,12 @@ impl State {
         if self.options.moves {
             capabilities.push(super::move_capability());
         }
-        Frame::Catalog {
-            definitions: self.definitions().await,
+        let frame = Frame::Catalog {
+            definitions: if held.is_some() {
+                Vec::new()
+            } else {
+                self.definitions().await
+            },
             name: self.options.name.clone(),
             workspace: self.host.workspace(),
             runtime_id: self.options.runtime_id.clone(),
@@ -1870,8 +1903,11 @@ impl State {
                 Some(source) => Some(source().await),
                 None => None,
             },
+        };
+        match held {
+            Some(catalog_hash) => super::bodiless_catalog(&frame, &catalog_hash, max_frame_bytes),
+            None => frame.encode(max_frame_bytes),
         }
-        .encode(max_frame_bytes)
     }
 
     async fn definitions(&mut self) -> Vec<ToolDefinition> {

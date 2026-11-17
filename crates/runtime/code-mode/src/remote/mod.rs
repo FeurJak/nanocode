@@ -1,4 +1,5 @@
 mod admission;
+mod catalogs;
 mod client;
 mod compact;
 mod executors;
@@ -13,7 +14,10 @@ use std::{collections::HashMap, sync::Arc};
 use nanocode_sync::Atom;
 use nanocode_tool_contracts::ToolSettings;
 
-pub use admission::{Admission, CatalogError, admit_runtime, read_catalog};
+pub use admission::{Admission, CatalogError, admit_runtime, read_catalog, read_held_catalog};
+pub use catalogs::{
+    CATALOG_HEADER, CatalogLease, RemoteCatalogs, bodiless_catalog, catalog_digest,
+};
 pub use client::{
     CallReply, Carried, LOCAL_CLOSED, PEER_CLOSED, RemoteActivity, RemoteBarrier, RemoteClient,
     RemoteDelivery, RemoteLedger, RemoteLink, RemoteReply, RemoteRequest, ResumedReply,

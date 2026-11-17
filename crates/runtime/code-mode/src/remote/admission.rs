@@ -1,6 +1,6 @@
 use std::{fmt, future::Future, time::Duration};
 
-use super::RemoteCatalog;
+use super::{CatalogLease, RemoteCatalog, RemoteCatalogs};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CatalogError {
@@ -36,6 +36,27 @@ pub async fn read_catalog(
         return Err(CatalogError::Outdated);
     }
     RemoteCatalog::decode(&text, max_frame_bytes)
+        .map_err(|error| CatalogError::Invalid(error.to_string()))
+}
+
+pub async fn read_held_catalog(
+    first: impl Future<Output = Option<Option<String>>>,
+    timeout: Duration,
+    max_frame_bytes: usize,
+    catalogs: &RemoteCatalogs,
+    offered: Option<CatalogLease>,
+) -> Result<(RemoteCatalog, CatalogLease), CatalogError> {
+    let Ok(Some(frame)) = nanocode_platform::timeout(timeout, first).await else {
+        return Err(CatalogError::NoCatalog);
+    };
+    let text = frame.ok_or(CatalogError::Outdated)?;
+    if !serde_json::from_str::<std::collections::HashMap<String, serde::de::IgnoredAny>>(&text)
+        .is_ok_and(|frame| frame.contains_key("definitions") || frame.contains_key("catalog_hash"))
+    {
+        return Err(CatalogError::Outdated);
+    }
+    catalogs
+        .decode(&text, max_frame_bytes, offered)
         .map_err(|error| CatalogError::Invalid(error.to_string()))
 }
 

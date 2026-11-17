@@ -206,6 +206,7 @@ enum Outgoing {
         idle: bool,
     },
     Forget(u64),
+    Boundary(Frame),
 }
 
 impl Outgoing {
@@ -237,6 +238,101 @@ fn works(operation: &RemoteOperation) -> Option<&str> {
         | RemoteOperation::Call { context, .. } => Some(&context.session_id),
         _ => None,
     }
+}
+
+fn scoped(operation: &RemoteOperation) -> Option<&str> {
+    match operation {
+        RemoteOperation::Execute { context, .. }
+        | RemoteOperation::Wait { context, .. }
+        | RemoteOperation::Call { context, .. } => Some(&context.session_id),
+        RemoteOperation::DetachTurn { session_id }
+        | RemoteOperation::CancelTurn { session_id, .. }
+        | RemoteOperation::Cancel { session_id }
+        | RemoteOperation::CancelCall { session_id, .. }
+        | RemoteOperation::BeginTurn { session_id }
+        | RemoteOperation::Preempt { session_id }
+        | RemoteOperation::SettlePreempt { session_id }
+        | RemoteOperation::EndTurn { session_id, .. }
+        | RemoteOperation::Notices { session_id, .. } => Some(session_id),
+        RemoteOperation::Capabilities
+        | RemoteOperation::RequestCapability { .. }
+        | RemoteOperation::HostInfo => None,
+    }
+}
+
+const fn boundary(operation: &RemoteOperation) -> bool {
+    matches!(
+        operation,
+        RemoteOperation::BeginTurn { .. } | RemoteOperation::SettlePreempt { .. }
+    )
+}
+
+fn hold(boundaries: &mut HashMap<String, Vec<Frame>>, frame: Frame) {
+    let Frame::Request { operation, .. } = &frame else {
+        return;
+    };
+    let Some(session) = scoped(operation) else {
+        return;
+    };
+    let kind = std::mem::discriminant(operation);
+    let held = boundaries.entry(session.to_owned()).or_default();
+    held.retain(|kept| {
+        !matches!(kept, Frame::Request { operation, .. } if std::mem::discriminant(operation) == kind)
+    });
+    held.push(frame);
+}
+
+fn quiet(
+    quiet: &mut HashSet<String>,
+    cancelling: &mut HashMap<u64, String>,
+    frames: Vec<(Frame, Option<String>)>,
+    skipped: &mut Vec<u64>,
+) -> Vec<(Frame, Option<String>)> {
+    frames
+        .into_iter()
+        .filter(|(frame, _)| {
+            let Frame::Request { id, operation, .. } = frame else {
+                return true;
+            };
+            let Some(session) = scoped(operation) else {
+                return true;
+            };
+            if boundary(operation) {
+                return true;
+            }
+            let turn = matches!(operation, RemoteOperation::CancelTurn { turn_id: None, .. });
+            if turn && quiet.contains(session) {
+                skipped.push(*id);
+                return false;
+            }
+            quiet.remove(session);
+            cancelling.retain(|_, cancelled| cancelled != session);
+            if turn || matches!(operation, RemoteOperation::Cancel { .. }) {
+                cancelling.insert(*id, session.to_owned());
+            }
+            true
+        })
+        .collect()
+}
+
+fn release(
+    boundaries: &mut HashMap<String, Vec<Frame>>,
+    frames: Vec<(Frame, Option<String>)>,
+) -> Vec<(Frame, Option<String>)> {
+    if boundaries.is_empty() {
+        return frames;
+    }
+    let mut released = Vec::with_capacity(frames.len());
+    for (frame, key) in frames {
+        if let Frame::Request { operation, .. } = &frame
+            && let Some(session) = scoped(operation)
+            && let Some(held) = boundaries.remove(session)
+        {
+            released.extend(held.into_iter().map(|held| (held, None)));
+        }
+        released.push((frame, key));
+    }
+    released
 }
 
 fn stops(operation: &RemoteOperation) -> Option<&str> {
@@ -1332,6 +1428,9 @@ async fn drive(
     let mut ack_due = None;
     let mut dispatched: HashMap<u64, String> = HashMap::new();
     let mut controls: HashSet<u64> = HashSet::new();
+    let mut boundaries: HashMap<String, Vec<Frame>> = HashMap::new();
+    let mut quieted: HashSet<String> = HashSet::new();
+    let mut cancelling: HashMap<u64, String> = HashMap::new();
     let result = {
         let mut receiving = link.receive();
         let mut sending: Option<Sending<'_>> = None;
@@ -1392,6 +1491,10 @@ async fn drive(
                                 waiters,
                                 idle,
                             }) => {
+                                let mut skipped = Vec::new();
+                                let frames =
+                                    quiet(&mut quieted, &mut cancelling, frames, &mut skipped);
+                                let frames = release(&mut boundaries, frames);
                                 for (frame, _) in &frames {
                                     let Frame::Request { id, operation, .. } = frame else {
                                         continue;
@@ -1411,6 +1514,7 @@ async fn drive(
                                     }
                                 }
                                 pending.extend(waiters);
+                                answer(&skipped, &mut pending);
                                 if needs == RemoteDelivery::Durable {
                                     delivery = needs;
                                 }
@@ -1419,6 +1523,7 @@ async fn drive(
                             Some(Outgoing::Forget(id)) => {
                                 pending.remove(&id);
                             }
+                            Some(Outgoing::Boundary(frame)) => hold(&mut boundaries, frame),
                         }
                     }
                     if !acks.is_empty() {
@@ -1455,7 +1560,12 @@ async fn drive(
                             return Poll::Ready(Ok(()));
                         };
                         for frame in received {
-                            if let Frame::Reply { id, .. } = &frame {
+                            if let Frame::Reply { id, result } = &frame {
+                                if let Some(session) = cancelling.remove(id)
+                                    && result.is_ok()
+                                {
+                                    quieted.insert(session);
+                                }
                                 dispatched.remove(id);
                                 let control = controls.remove(id);
                                 let unawaited = control || !pending.contains_key(id);
@@ -1503,6 +1613,7 @@ async fn drive(
             Outgoing::Forget(id) => {
                 pending.remove(&id);
             }
+            Outgoing::Boundary(_) => {}
         }
     }
     let message = result.map_or_else(|issue| issue.to_string(), |()| LOCAL_CLOSED.to_owned());
@@ -1831,15 +1942,18 @@ impl RemoteTransport for RemoteClient {
             return Err(error(failure));
         }
         let delivery = delivery(&operation);
-        self.client.dispatch(
-            (
-                self.client
-                    .request_frame(self.client.next.fetch_add(1, Ordering::Relaxed), operation),
-                None,
-            ),
-            delivery,
-            None,
-        )
+        let lazy = boundary(&operation);
+        let frame = self
+            .client
+            .request_frame(self.client.next.fetch_add(1, Ordering::Relaxed), operation);
+        if lazy {
+            return self
+                .client
+                .outgoing
+                .send(Outgoing::Boundary(frame))
+                .map_err(|_| error(LOCAL_CLOSED));
+        }
+        self.client.dispatch((frame, None), delivery, None)
     }
 
     fn detach_turn(

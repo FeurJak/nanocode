@@ -289,14 +289,14 @@ pub(super) async fn dial(
 ) -> Result<DialedSocket, Dial> {
     dial_staged(target, headers, policy)
         .await
-        .map(|(socket, _)| socket)
+        .map(|(socket, _, _)| socket)
 }
 
 pub(super) async fn dial_staged(
     target: &crate::attachment::AttachmentTarget,
     headers: &nanocode_http::types::HeaderMap,
     policy: SocketPolicy,
-) -> Result<(DialedSocket, DialStages), Dial> {
+) -> Result<(DialedSocket, DialStages, Option<String>), Dial> {
     validate_policy(policy).map_err(|issue| Dial::Rejected(issue, None))?;
     nanocode_tls::install_default_rustls_crypto_provider();
     let mut request = target
@@ -321,6 +321,10 @@ pub(super) async fn dial_staged(
         *at = now - stage;
         stage = now;
     };
+    let offered = request
+        .headers()
+        .get(crate::remote::CATALOG_HEADER)
+        .cloned();
     let secure = request.uri().scheme_str() == Some("wss");
     let tls = if secure {
         Some(
@@ -369,13 +373,22 @@ pub(super) async fn dial_staged(
         let upgraded =
             nanocode_websocket::client_async_with_config(request, stream, Some(config(policy)))
                 .await
-                .map(|(socket, _)| socket)
+                .map(|(socket, response)| {
+                    let held = offered.filter(|offered| {
+                        response.headers().get(crate::remote::CATALOG_HEADER) == Some(offered)
+                    });
+                    (
+                        socket,
+                        held.and_then(|held| held.to_str().ok().map(str::to_owned)),
+                    )
+                })
                 .map_err(rejection)?;
         lap(&mut stages.upgrade);
         Ok(upgraded)
     })
     .await
     .map_err(|issue| Dial::Failed(error(issue)))??;
+    let (socket, held) = socket;
     nanocode_trace::debug!(
         trust_ms = stages.trust.as_millis(),
         dns_ms = stages.dns.as_millis(),
@@ -384,7 +397,7 @@ pub(super) async fn dial_staged(
         upgrade_ms = stages.upgrade.as_millis(),
         "dialed the brain"
     );
-    Ok((socket, stages))
+    Ok((socket, stages, held))
 }
 
 fn rejection(issue: nanocode_websocket::Error) -> Dial {
@@ -1279,7 +1292,17 @@ async fn serve_once<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     meter: Option<Arc<Meter>>,
 ) -> Result<(), CodeModeHostError> {
     let core = hand_core(workspace.to_owned(), tools, options, activity);
-    let served = serve(socket, &core, policy, meter, Role::Current, || {}, || {}).await;
+    let served = serve(
+        socket,
+        &core,
+        policy,
+        meter,
+        Role::Current,
+        None,
+        || {},
+        || {},
+    )
+    .await;
     core.reset().await;
     served.result
 }
@@ -1298,17 +1321,22 @@ pub(super) enum Role {
 
 const LEAVE_CLOSE: Duration = Duration::from_secs(2);
 
+#[expect(clippy::too_many_arguments, reason = "one connection's state")]
 pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     socket: WebSocketStream<S>,
     core: &HandCore,
     policy: SocketPolicy,
     meter: Option<Arc<Meter>>,
     role: Role,
+    held: Option<String>,
     heard: impl FnOnce() + Send,
     moved: impl FnOnce() + Send,
 ) -> Served {
     let liveness = Liveness::new();
-    let result = serve_link(socket, core, policy, meter, &liveness, role, heard, moved).await;
+    let result = serve_link(
+        socket, core, policy, meter, &liveness, role, held, heard, moved,
+    )
+    .await;
     Served {
         result,
         close_code: liveness.close_code(),
@@ -1324,13 +1352,14 @@ async fn serve_link<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     meter: Option<Arc<Meter>>,
     liveness: &Arc<Liveness>,
     role: Role,
+    held: Option<String>,
     heard: impl FnOnce() + Send,
     moved: impl FnOnce() + Send,
 ) -> Result<(), CodeModeHostError> {
     let mut heard = Some(heard);
     let mut moved = Some(moved);
     let mut moving = false;
-    let catalog = core.catalog(policy.max_frame_bytes).await?;
+    let catalog = core.held_catalog(policy.max_frame_bytes, held).await?;
     let catalog = match &meter {
         Some(meter) => meter.catalog(catalog),
         None => catalog,

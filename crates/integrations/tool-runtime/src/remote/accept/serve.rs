@@ -12,7 +12,7 @@ use nanocode_websocket::{
 };
 
 use super::registry::{Acceptor, Binding};
-use crate::remote::{MessageWriter, SocketMessage, read_catalog, websocket};
+use crate::remote::{CATALOG_HEADER, MessageWriter, SocketMessage, read_held_catalog, websocket};
 
 struct Replayed {
     io: Box<dyn Duplex>,
@@ -117,13 +117,25 @@ impl Acceptor {
 
     async fn upgrade(self: &Arc<Self>, io: Replayed) -> Result<(), String> {
         let mut bound: Option<Binding> = None;
-        let callback = |request: &server::Request, response: server::Response| match (self
+        let mut offered = None;
+        let callback = |request: &server::Request, mut response: server::Response| match (self
             .authorize)(
             request.uri().path(),
             request.headers(),
         ) {
             Ok(binding) => {
                 bound = Some(binding);
+                if let Some(digest) = request.headers().get(CATALOG_HEADER)
+                    && let Some(lease) = digest
+                        .to_str()
+                        .ok()
+                        .and_then(|digest| self.catalogs.lease(digest))
+                {
+                    response
+                        .headers_mut()
+                        .insert(CATALOG_HEADER, digest.clone());
+                    offered = Some(lease);
+                }
                 Ok(response)
             }
             Err(refusal) => {
@@ -153,9 +165,15 @@ impl Acceptor {
                 Some(Err(_)) | None => None,
             }
         };
-        let catalog = read_catalog(first, self.options.catalog_timeout, limit)
-            .await
-            .map_err(|error| format!("hand {key}: {error}"))?;
+        let (catalog, _lease) = read_held_catalog(
+            first,
+            self.options.catalog_timeout,
+            limit,
+            &self.catalogs,
+            offered,
+        )
+        .await
+        .map_err(|error| format!("hand {key}: {error}"))?;
         if let Err(reason) = (self.admit)(&key, &catalog) {
             let close = CloseFrame {
                 code: CloseCode::Policy,

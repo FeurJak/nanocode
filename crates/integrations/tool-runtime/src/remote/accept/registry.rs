@@ -15,8 +15,8 @@ use crate::embedded::{
 };
 use crate::remote::{
     Carried, HAND_RESTARTED, NOT_RECEIVED, PEER_CLOSED, REQUEST_IN_USE, RemoteBarrier,
-    RemoteCatalog, RemoteClient, RemoteContext, RemoteDelivery, RemoteFrame, RemoteLedger,
-    RemoteLink, RemoteOperation, RemoteReply, RemoteRequest, RemoteTransport,
+    RemoteCatalog, RemoteCatalogs, RemoteClient, RemoteContext, RemoteDelivery, RemoteFrame,
+    RemoteLedger, RemoteLink, RemoteOperation, RemoteReply, RemoteRequest, RemoteTransport,
 };
 
 #[derive(Clone, Debug)]
@@ -289,6 +289,7 @@ pub struct Acceptor {
     requests: Arc<dyn HandRequests>,
     runtimes: Atom<HashMap<String, Runtime>>,
     encoded: Atom<HashMap<String, (Arc<RemoteCatalog>, Arc<str>)>>,
+    pub(super) catalogs: RemoteCatalogs,
     sockets: AtomicU64,
     changes: Arc<Changes>,
     attached: mpsc::Sender<String>,
@@ -370,6 +371,7 @@ impl Acceptor {
             requests,
             runtimes: Atom::default(),
             encoded: Atom::default(),
+            catalogs: RemoteCatalogs::default(),
             sockets: AtomicU64::new(0),
             changes,
             attached,

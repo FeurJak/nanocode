@@ -325,7 +325,13 @@ impl Hand {
                                 endpoint: endpoint.clone(),
                             }
                         });
-                        let dialing = dial_staged(&target, &headers, policy);
+                        let mut offered = headers.clone();
+                        if let Ok(digest) = core.catalog_digest().await
+                            && let Ok(digest) = nanocode_http::types::HeaderValue::from_str(&digest)
+                        {
+                            offered.insert(super::CATALOG_HEADER, digest);
+                        }
+                        let dialing = dial_staged(&target, &offered, policy);
                         let mut dialing = std::pin::pin!(dialing);
                         let dialed = loop {
                             nanocode_sync::select! {
@@ -340,15 +346,21 @@ impl Hand {
                         };
                         let mut fresh = false;
                         match dialed {
-                            Ok((socket, dialed)) => {
+                            Ok((socket, dialed, held)) => {
                                 let started = Instant::now();
                                 let role = if leaving.is_some() {
                                     Role::Standby
                                 } else {
                                     Role::Current
                                 };
-                                let mut link =
-                                    Serving::spawn(socket, &core, policy, meter.clone(), role);
+                                let mut link = Serving::spawn(
+                                    socket,
+                                    &core,
+                                    policy,
+                                    meter.clone(),
+                                    role,
+                                    held,
+                                );
                                 let ended = loop {
                                     nanocode_sync::select! {
                                         served = ended(&mut link.task) => break Phase::Ended(served),
@@ -525,6 +537,7 @@ impl Serving {
         policy: SocketPolicy,
         meter: Option<std::sync::Arc<Meter>>,
         role: Role,
+        held: Option<String>,
     ) -> Self {
         let (notify, notes) = mpsc::unbounded_channel();
         let core = core.clone();
@@ -536,6 +549,7 @@ impl Serving {
                 policy,
                 meter,
                 role,
+                held,
                 move || drop(notify.send(Note::Heard)),
                 move || drop(moved.send(Note::Moved)),
             )
