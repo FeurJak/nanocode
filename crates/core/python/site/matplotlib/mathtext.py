@@ -19,16 +19,23 @@ import functools
 import logging
 
 import matplotlib as mpl
-from matplotlib import _api, _mathtext
+from matplotlib import _api
 from matplotlib.ft2font import LoadFlags
 from matplotlib.font_manager import FontProperties
-from ._mathtext import (  # noqa: F401, reexported API
-    RasterParse, VectorParse, get_unicode_index)
 
 _log = logging.getLogger(__name__)
 
 
-get_unicode_index.__module__ = __name__
+def _mathtext():
+    from matplotlib import _mathtext
+    _mathtext.get_unicode_index.__module__ = __name__
+    return _mathtext
+
+
+def __getattr__(name):
+    if name in ("RasterParse", "VectorParse", "get_unicode_index"):
+        return getattr(_mathtext(), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 ##############################################################################
 # MAIN
@@ -36,13 +43,13 @@ get_unicode_index.__module__ = __name__
 
 class MathTextParser:
     _parser = None
-    _font_type_mapping = {
-        'cm':          _mathtext.BakomaFonts,
-        'dejavuserif': _mathtext.DejaVuSerifFonts,
-        'dejavusans':  _mathtext.DejaVuSansFonts,
-        'stix':        _mathtext.StixFonts,
-        'stixsans':    _mathtext.StixSansFonts,
-        'custom':      _mathtext.UnicodeFonts,
+    _font_type_names = {
+        'cm':          'BakomaFonts',
+        'dejavuserif': 'DejaVuSerifFonts',
+        'dejavusans':  'DejaVuSansFonts',
+        'stix':        'StixFonts',
+        'stixsans':    'StixSansFonts',
+        'custom':      'UnicodeFonts',
     }
 
     def __init__(self, output):
@@ -89,8 +96,9 @@ class MathTextParser:
     def _parse_cached(self, s, dpi, prop, antialiased, load_glyph_flags):
         if prop is None:
             prop = FontProperties()
-        fontset_class = _api.getitem_checked(
-            self._font_type_mapping, fontset=prop.get_math_fontfamily())
+        _mathtext = globals()["_mathtext"]()
+        fontset_class = getattr(_mathtext, _api.getitem_checked(
+            self._font_type_names, fontset=prop.get_math_fontfamily()))
         fontset = fontset_class(prop, load_glyph_flags)
         fontsize = prop.get_size_in_points()
 

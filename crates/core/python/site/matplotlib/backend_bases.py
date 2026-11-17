@@ -48,7 +48,8 @@ import numpy as np
 import matplotlib as mpl
 from matplotlib import (
     _api, backend_tools as tools, cbook, colors, _docstring, text,
-    _tight_bbox, transforms, widgets, is_interactive, rcParams)
+    _tight_bbox, transforms, is_interactive, rcParams)
+from matplotlib._lockdraw import LockDraw
 from matplotlib._pylab_helpers import Gcf
 from matplotlib.backend_managers import ToolManager
 from matplotlib.cbook import _setattr_cm
@@ -1768,7 +1769,7 @@ class FigureCanvasBase:
         figure.set_canvas(self)
         self.figure = figure
         self.manager = None
-        self.widgetlock = widgets.LockDraw()
+        self.widgetlock = LockDraw()
         self._button = None  # the button pressed
         self._key = None  # the key pressed
         self.mouse_grabber = None  # the Axes currently grabbing mouse
@@ -3397,6 +3398,7 @@ class NavigationToolbar2:
         manager.set_window_title("Subplot configuration tool")
         tool_fig = manager.canvas.figure
         tool_fig.subplots_adjust(top=0.9)
+        from matplotlib import widgets
         self.subplot_tool = widgets.SubplotTool(self.canvas.figure, tool_fig)
         cid = self.canvas.mpl_connect(
             "close_event", lambda e: manager.destroy())

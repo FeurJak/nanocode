@@ -15,6 +15,7 @@ Builtin colormaps, colormap handling utilities, and the `ScalarMappable` mixin.
 """
 
 from collections.abc import Mapping
+import functools
 
 import matplotlib as mpl
 from matplotlib import _api, colors
@@ -29,19 +30,45 @@ from matplotlib._cm_bivar import cmaps as bivar_cmaps
 _LUTSIZE = mpl.rcParams['image.lut']
 
 
+class _LazyCmap:
+    __slots__ = ("make",)
+
+    def __init__(self, make):
+        self.make = make
+
+
+def _materialize(cmaps, name):
+    cmap = cmaps[name]
+    if type(cmap) is _LazyCmap:
+        cmap = cmaps[name] = cmap.make()
+    return cmap
+
+
 def _gen_cmap_registry():
     """
     Generate a dict mapping standard colormap names to standard colormaps, as
     well as the reversed colormaps.
     """
     cmap_d = {**cmaps_listed}
-    for name, spec in datad.items():
-        cmap_d[name] = (  # Precache the cmaps at a fixed lutsize..
+
+    def make(name, spec):
+        return (  # Precache the cmaps at a fixed lutsize..
             colors.LinearSegmentedColormap(name, spec, _LUTSIZE)
             if 'red' in spec else
             colors.ListedColormap(spec['listed'], name)
             if 'listed' in spec else
             colors.LinearSegmentedColormap.from_list(name, spec, _LUTSIZE))
+
+    for name, spec in datad.items():
+        cmap_d[name] = _LazyCmap(functools.partial(make, name, spec))
+
+    def alias(alias, original_name):
+        cmap = _materialize(cmap_d, original_name).copy()
+        cmap.name = alias
+        return cmap
+
+    def reverse(name):
+        return _materialize(cmap_d, name).reversed()
 
     # Register colormap aliases for gray and grey.
     aliases = {
@@ -51,15 +78,12 @@ def _gen_cmap_registry():
         'gist_yerg': 'gist_yarg',
         'Grays': 'Greys',
     }
-    for alias, original_name in aliases.items():
-        cmap = cmap_d[original_name].copy()
-        cmap.name = alias
-        cmap_d[alias] = cmap
+    for alias_name, original_name in aliases.items():
+        cmap_d[alias_name] = _LazyCmap(functools.partial(alias, alias_name, original_name))
 
     # Generate reversed cmaps.
-    for cmap in list(cmap_d.values()):
-        rmap = cmap.reversed()
-        cmap_d[rmap.name] = rmap
+    for name in list(cmap_d):
+        cmap_d[name + "_r"] = _LazyCmap(functools.partial(reverse, name))
     return cmap_d
 
 
@@ -95,8 +119,8 @@ class ColormapRegistry(Mapping):
         return item in self._cmaps
 
     def __getitem__(self, item):
-        cmap = _api.getitem_checked(self._cmaps, colormap=item, _error_cls=KeyError)
-        return cmap.copy()
+        _api.getitem_checked(self._cmaps, colormap=item, _error_cls=KeyError)
+        return _materialize(self._cmaps, item).copy()
 
     def __iter__(self):
         return iter(self._cmaps)
@@ -237,7 +261,14 @@ class ColormapRegistry(Mapping):
 # we still create the registry here, but that should stay an implementation
 # detail.
 _colormaps = ColormapRegistry(_gen_cmap_registry())
-globals().update(_colormaps)
+
+
+def __getattr__(name):
+    if name in _colormaps._builtin_cmaps:
+        cmap = globals()[name] = _colormaps[name]
+        return cmap
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 _multivar_colormaps = ColormapRegistry(multivar_cmaps)
 

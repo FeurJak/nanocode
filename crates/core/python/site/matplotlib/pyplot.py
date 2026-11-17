@@ -166,7 +166,6 @@ from matplotlib.lines import Line2D, AxLine
 from matplotlib.text import Text, Annotation
 from matplotlib.patches import Arrow, Circle, Rectangle  # noqa: F401
 from matplotlib.patches import Polygon
-from matplotlib.widgets import Button, Slider, Widget  # noqa: F401
 
 from .ticker import (  # noqa: F401
     TickHelper, Formatter, FixedFormatter, NullFormatter, FuncFormatter,
@@ -1344,7 +1343,8 @@ def savefig(fname: str | os.PathLike | IO, **kwargs) -> None:
     # savefig default implementation has no return, so mypy is unhappy
     # presumably this is here because subclasses can return?
     res = fig.savefig(fname, **kwargs)  # type: ignore[func-returns-value]
-    fig.canvas.draw_idle()  # Need this if 'transparent=True', to reset colors.
+    if fig.canvas.required_interactive_framework is not None:
+        fig.canvas.draw_idle()  # Need this if 'transparent=True', to reset colors.
     return res
 
 
@@ -4829,3 +4829,12 @@ def nipy_spectral() -> None:
     image if there is one. See ``help(colormaps)`` for more information.
     """
     set_cmap("nipy_spectral")
+
+
+def __getattr__(name: str):
+    if name in ("Button", "Slider", "Widget"):
+        from matplotlib import widgets
+        value = getattr(widgets, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

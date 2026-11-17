@@ -12,8 +12,6 @@ A module for parsing and generating `fontconfig patterns`_.
 from functools import cache, lru_cache, partial
 import re
 
-from pyparsing import (
-    Group, Optional, ParseException, Regex, StringEnd, Suppress, ZeroOrMore, one_of)
 
 
 _family_punc = r'\\\-:,'
@@ -54,6 +52,9 @@ _CONSTANTS = {
 
 @cache  # The parser instance is a singleton.
 def _make_fontconfig_parser():
+    from pyparsing import (
+        Group, Optional, Regex, StringEnd, Suppress, ZeroOrMore, one_of)
+
     def comma_separated(elem):
         return elem + ZeroOrMore(Suppress(",") + elem)
 
@@ -74,12 +75,40 @@ def _make_fontconfig_parser():
 # repeatedly called when the rcParams are reset (to validate the default
 # fonts).  In practice, the cache size doesn't grow beyond a few dozen entries
 # during the test suite.
+_plain_family = re.compile(
+    r"(?:[^\\\-:,=\s]|\\[\\\-:,])(?:(?:[^\\\-:,=]|\\[\\\-:,])*(?:[^\\\-:,=\s]|\\[\\\-:,]))?")
+_plain_value = re.compile(r"[^\\=_:,\s]+")
+_plain_name = re.compile(r"[a-z]+")
+
+
+def _parse_plain(pattern):
+    family, *props = pattern.split(":")
+    families = family.split(",")
+    if not all(_plain_family.fullmatch(name) for name in families):
+        return None
+    out = {"family": [*map(_family_unescape, families)]}
+    for prop in props:
+        if prop in _CONSTANTS:
+            key, value = _CONSTANTS[prop]
+            out.setdefault(key, []).append(value)
+            continue
+        key, eq, value = prop.partition("=")
+        if not (eq and _plain_name.fullmatch(key) and _plain_value.fullmatch(value)):
+            return None
+        out.setdefault(key, []).append(value)
+    return out
+
+
 @lru_cache
 def parse_fontconfig_pattern(pattern):
     """
     Parse a fontconfig *pattern* into a dict that can initialize a
     `.font_manager.FontProperties` object.
     """
+    plain = _parse_plain(pattern)
+    if plain is not None:
+        return plain
+    from pyparsing import ParseException
     parser = _make_fontconfig_parser()
     try:
         parse = parser.parse_string(pattern)

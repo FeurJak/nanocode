@@ -1,4 +1,5 @@
-from matplotlib import _api, backend_tools, cbook, widgets
+from matplotlib import _api, backend_tools, cbook
+from matplotlib._lockdraw import LockDraw
 
 
 class ToolEvent:
@@ -53,8 +54,8 @@ class ToolManager:
         self._callbacks = cbook.CallbackRegistry()
 
         # to process keypress event
-        self.keypresslock = widgets.LockDraw()
-        self.messagelock = widgets.LockDraw()
+        self.keypresslock = LockDraw()
+        self.messagelock = LockDraw()
 
         self._figure = None
         self.set_figure(figure)

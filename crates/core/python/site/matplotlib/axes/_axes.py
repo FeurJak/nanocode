@@ -15,7 +15,6 @@ import matplotlib.collections as mcoll
 import matplotlib.colorizer as mcolorizer
 import matplotlib.colors as mcolors
 import matplotlib.contour as mcontour
-import matplotlib.dates  # noqa: F401, Register date unit converter as side effect.
 import matplotlib.image as mimage
 import matplotlib.inset as minset
 import matplotlib.legend as mlegend

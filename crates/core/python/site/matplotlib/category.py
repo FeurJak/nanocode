@@ -11,7 +11,6 @@ strings to integers and provides a tick locator, a tick formatter, and the
 """
 
 from collections import OrderedDict
-import dateutil.parser
 import itertools
 import logging
 
@@ -190,6 +189,7 @@ class UnitData:
             float(val)
         except ValueError:
             try:
+                import dateutil.parser
                 dateutil.parser.parse(val)
             except (ValueError, TypeError):
                 # TypeError if dateutil >= 2.8.1 else ValueError

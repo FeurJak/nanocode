@@ -47,7 +47,7 @@ import sys
 import threading
 
 import matplotlib as mpl
-from matplotlib import _api, _afm, cbook, ft2font
+from matplotlib import _api, cbook, ft2font
 from matplotlib._fontconfig_pattern import (
     parse_fontconfig_pattern, generate_fontconfig_pattern)
 from matplotlib.rcsetup import _validators
@@ -1288,6 +1288,7 @@ class FontManager:
         # afmFontProperty and FT2Font expect this
         path = os.fsdecode(path)
         if Path(path).suffix.lower() == ".afm":
+            from matplotlib import _afm
             with open(path, "rb") as fh:
                 font = _afm.AFM(fh)
             prop = afmFontProperty(path, font)

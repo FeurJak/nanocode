@@ -56,14 +56,18 @@ from .. import _api, axes, _docstring
 from .geo import AitoffAxes, HammerAxes, LambertAxes, MollweideAxes
 from .polar import PolarAxes
 
-try:
-    from mpl_toolkits.mplot3d import Axes3D
-except Exception:
-    import warnings
-    warnings.warn("Unable to import Axes3D. This may be due to multiple versions of "
-                  "Matplotlib being installed (e.g. as a system package and as a pip "
-                  "package). As a result, the 3D projection is not available.")
-    Axes3D = None
+
+def _axes3d():
+    try:
+        from mpl_toolkits.mplot3d import Axes3D
+    except Exception:
+        import warnings
+        warnings.warn("Unable to import Axes3D. This may be due to multiple versions of "
+                      "Matplotlib being installed (e.g. as a system package and as a pip "
+                      "package). As a result, the 3D projection is not available.")
+        return None
+    projection_registry.register(Axes3D)
+    return Axes3D
 
 
 class ProjectionRegistry:
@@ -80,12 +84,14 @@ class ProjectionRegistry:
 
     def get_projection_class(self, name, _error_cls=KeyError):
         """Get a projection class from its *name*."""
+        if name == '3d' and name not in self._all_projection_types:
+            _axes3d()
         return _api.getitem_checked(self._all_projection_types, _error_cls=_error_cls,
                                     projection=name)
 
     def get_projection_names(self):
         """Return the names of all projections currently registered."""
-        return sorted(self._all_projection_types)
+        return sorted({*self._all_projection_types, '3d'})
 
 
 projection_registry = ProjectionRegistry()
@@ -97,11 +103,14 @@ projection_registry.register(
     LambertAxes,
     MollweideAxes,
 )
-if Axes3D is not None:
-    projection_registry.register(Axes3D)
-else:
-    # remove from namespace if not importable
-    del Axes3D
+
+
+def __getattr__(name):
+    if name == 'Axes3D':
+        Axes3D = projection_registry._all_projection_types.get('3d') or _axes3d()
+        if Axes3D is not None:
+            return Axes3D
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def register_projection(cls):

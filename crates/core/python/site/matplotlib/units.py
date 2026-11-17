@@ -40,8 +40,10 @@ datetime objects::
     units.registry[datetime.date] = DateConverter()
 """
 
+import datetime
 from decimal import Decimal
 from numbers import Number
+import sys
 
 import numpy as np
 from numpy import ma
@@ -179,6 +181,9 @@ class Registry(dict):
                 return self[cls]
             except KeyError:
                 pass
+            if cls in (datetime.date, np.datetime64) and "matplotlib.dates" not in sys.modules:
+                import matplotlib.dates  # noqa: F401
+                return self.get_converter(x)
         try:  # If cache lookup fails, look up based on first element...
             first = cbook._safe_first_finite(x)
         except (TypeError, StopIteration):

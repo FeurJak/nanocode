@@ -153,7 +153,6 @@ from .helpers import *
 from .helpers import _builtin_exprs as helper_builtin_exprs
 
 from .unicode import unicode_set, UnicodeRangeList, pyparsing_unicode as unicode
-from .testing import pyparsing_test as testing
 from .common import (
     pyparsing_common as common,
     _builtin_exprs as common_builtin_exprs,
@@ -166,8 +165,15 @@ if "pyparsing_unicode" not in globals():
     pyparsing_unicode = unicode  # type: ignore[misc]
 if "pyparsing_common" not in globals():
     pyparsing_common = common
-if "pyparsing_test" not in globals():
-    pyparsing_test = testing
+
+
+def __getattr__(name):
+    if name in ("testing", "pyparsing_test"):
+        from .testing import pyparsing_test
+
+        globals().update(testing=pyparsing_test, pyparsing_test=pyparsing_test)
+        return pyparsing_test
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 core_builtin_exprs += common_builtin_exprs + helper_builtin_exprs
 

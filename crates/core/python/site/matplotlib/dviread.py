@@ -32,7 +32,6 @@ from collections import namedtuple
 from functools import cache, cached_property, lru_cache, partial, wraps
 from pathlib import Path
 
-import fontTools.agl
 import numpy as np
 
 import matplotlib as mpl
@@ -139,6 +138,7 @@ class Text(namedtuple('Text', 'x y font glyph width')):
                     f"pk{self.glyph:#02x}")
         face = font_manager.get_font(path)
         glyph_name = face.get_glyph_name(self.index)
+        import fontTools.agl
         glyph_str = fontTools.agl.toUnicode(glyph_name)
         return glyph_str or glyph_name
 
