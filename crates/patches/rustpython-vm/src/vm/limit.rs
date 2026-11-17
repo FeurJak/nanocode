@@ -115,6 +115,19 @@ impl VirtualMachine {
         })
     }
 
+    /// Runs `f` without the budget, then puts back the budget and any refusal it
+    /// had: for work that cannot fail, such as building a code object's constants.
+    pub fn unmetered<R>(&self, f: impl FnOnce() -> R) -> R {
+        let stopped = self.stopped.take();
+        let limiter = self.limiter.borrow_mut().take();
+        let fuel = self.fuel.replace(u64::MAX);
+        let result = f();
+        *self.limiter.borrow_mut() = limiter;
+        drop(self.stopped.replace(stopped));
+        self.fuel.set(fuel);
+        result
+    }
+
     /// Sets or removes the budget and forgets an earlier refusal. With a limiter the
     /// first step asks it for fuel.
     pub fn set_limiter(&self, limiter: Option<PyRc<dyn Limiter>>) {

@@ -365,6 +365,9 @@ impl Python {
             Prepared::Source(source, name) => (source, name),
             Prepared::Module(module) => {
                 let missing = self.missing(vm, "_absent", vm.ctx.new_str(module.as_str()).into());
+                if vm.stopped.borrow().is_some() {
+                    return Ended::Exited(1);
+                }
                 if !missing.is_empty() {
                     return Ended::Needs(missing);
                 }
@@ -380,6 +383,12 @@ impl Python {
             .map(|name| vm.ctx.new_str(name).into())
             .collect();
         let missing = self.missing(vm, "_missing", vm.ctx.new_list(names).into());
+        // A budget that stopped while looking for the imports (a file the host has
+        // yet to fetch, a cancel, a limit) ends the run here: the script must not
+        // start on a machine that refuses every step.
+        if vm.stopped.borrow().is_some() {
+            return Ended::Exited(1);
+        }
         if !missing.is_empty() {
             return Ended::Needs(missing);
         }
@@ -475,6 +484,7 @@ impl Python {
                     error: found[2].clone(),
                 })
                 .collect(),
+            Err(_) if vm.stopped.borrow().is_some() => Vec::new(),
             Err(error) => {
                 vm.print_exception(&error);
                 Vec::new()

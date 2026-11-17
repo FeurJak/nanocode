@@ -476,7 +476,10 @@ def _missing(names):
     missing = []
     for name in names:
         top = name.partition('.')[0]
-        if name in sys.modules or _Finder.find_spec(top) is not None:
+        if name in sys.modules:
+            continue
+        spec = _Finder.find_spec(top)
+        if spec is not None and '/site-packages/' not in (spec.origin or ''):
             continue
         try:
             __import__(name)

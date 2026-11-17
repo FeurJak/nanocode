@@ -398,8 +398,12 @@ impl ConstantBag for PyVmBag<'_> {
                 let elements = elements
                     .iter()
                     .map(|constant| self.make_constant(constant.borrow_constant()).0);
-                PyFrozenSet::from_iter(vm, elements)
-                    .unwrap()
+                // nanocode: a literal's elements are constants, which hash without
+                // failing, so only a budget that stopped could refuse here: a code
+                // object is built whole whatever the budget left.
+                let elements: Vec<_> = elements.collect();
+                vm.unmetered(|| PyFrozenSet::from_iter(vm, elements))
+                    .expect("a frozenset constant's elements hash")
                     .into_ref(ctx)
                     .into()
             }
