@@ -1192,7 +1192,7 @@ pub fn c_type(vm: &VirtualMachine, ty: *mut Type) -> PyResult<PyTypeRef> {
     for (name, value) in attributes {
         let name = vm.ctx.intern_str(name);
         class.set_attr(name, value);
-        if name.as_str().starts_with("__") {
+        if name.as_str().starts_with("__") && name.as_str().ends_with("__") {
             class.update_slot::<true>(name, &vm.ctx);
         }
     }
