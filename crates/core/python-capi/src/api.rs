@@ -1164,7 +1164,14 @@ fn decode(vm: &VirtualMachine, data: &[u8], errors: *const c_char) -> PyResult {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn PyUnicode_FromString(data: *const c_char) -> *mut Object {
-    object(|vm| decode(vm, unsafe { CStr::from_ptr(data) }.to_bytes(), null()))
+    decoded(unsafe { CStr::from_ptr(data) }.to_bytes(), null())
+}
+
+fn decoded(bytes: &[u8], errors: *const c_char) -> *mut Object {
+    if let Some(pointer) = bridge::decoded(bytes) {
+        return pointer;
+    }
+    object(|vm| decode(vm, bytes, errors))
 }
 
 #[unsafe(no_mangle)]
@@ -1172,13 +1179,10 @@ pub extern "C" fn PyUnicode_FromStringAndSize(data: *const c_char, length: isize
     if data.is_null() {
         return PyUnicode_New(length, u32::from(u8::MAX >> 1));
     }
-    object(|vm| {
-        decode(
-            vm,
-            unsafe { slice::from_raw_parts(data.cast::<u8>(), length.unsigned_abs()) },
-            null(),
-        )
-    })
+    decoded(
+        unsafe { slice::from_raw_parts(data.cast::<u8>(), length.unsigned_abs()) },
+        null(),
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -1187,13 +1191,10 @@ pub extern "C" fn PyUnicode_DecodeUTF8(
     length: isize,
     errors: *const c_char,
 ) -> *mut Object {
-    object(|vm| {
-        decode(
-            vm,
-            unsafe { slice::from_raw_parts(data.cast::<u8>(), length.unsigned_abs()) },
-            errors,
-        )
-    })
+    decoded(
+        unsafe { slice::from_raw_parts(data.cast::<u8>(), length.unsigned_abs()) },
+        errors,
+    )
 }
 
 #[unsafe(no_mangle)]

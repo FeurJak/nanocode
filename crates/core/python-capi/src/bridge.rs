@@ -572,7 +572,29 @@ pub fn guard<T>(failed: T, f: impl FnOnce(&VirtualMachine) -> PyResult<T>) -> T 
 }
 
 pub fn object(f: impl FnOnce(&VirtualMachine) -> PyResult<PyObjectRef>) -> *mut Object {
-    guard(null_mut(), |vm| f(vm).map(|value| new_ref(vm, &value)))
+    guard(null_mut(), |vm| f(vm).map(|value| owned(vm, value)))
+}
+
+fn owned(vm: &VirtualMachine, value: PyObjectRef) -> *mut Object {
+    if let Some(text) = value.downcast_ref_if_exact::<PyStr>(vm)
+        && value.strong_count() == 1
+        && let Some(bytes) = text.to_str().map(str::as_bytes)
+        && decodable(bytes)
+    {
+        if let Some(pointer) = decoded(bytes) {
+            return pointer;
+        }
+        let pointer = new_unicode(PyUnicode_Type.get(), bytes.len(), 0, 1);
+        if !pointer.is_null() {
+            unsafe {
+                unicode_data(pointer).copy_from_nonoverlapping(bytes.as_ptr(), bytes.len());
+                heap::header(pointer).kind.set(Kind::Pending);
+            }
+            remember_decoded(bytes, pointer);
+            return pointer;
+        }
+    }
+    new_ref(vm, &value)
 }
 
 pub fn borrowed_object(f: impl FnOnce(&VirtualMachine) -> PyResult<PyObjectRef>) -> *mut Object {
@@ -939,6 +961,87 @@ pub fn new_unicode(ty: *mut Type, length: usize, max: u32, refcnt: isize) -> *mu
             ((kind as u32) << KIND_SHIFT) | if legacy { 0 } else { COMPACT } | ascii_flag;
     }
     pointer
+}
+
+const DECODED_SLOTS: usize = 1 << 16;
+const DECODED_MAX: usize = 48;
+
+thread_local! {
+    static DECODED: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+fn decoded_slot(bytes: &[u8]) -> usize {
+    let mut hash: u32 = 0x811c_9dc5;
+    for &byte in bytes {
+        hash = (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193);
+    }
+    (hash ^ (hash >> 15)) as usize & (DECODED_SLOTS - 1)
+}
+
+fn decodable(bytes: &[u8]) -> bool {
+    bytes.len() <= DECODED_MAX && bytes.is_ascii()
+}
+
+pub fn decoded(bytes: &[u8]) -> Option<*mut Object> {
+    if !decodable(bytes) {
+        return None;
+    }
+    let slot = decoded_slot(bytes);
+    [slot, slot ^ 1].into_iter().find_map(|slot| {
+        let pointer =
+            DECODED.with_borrow(|table| table.get(slot).copied().unwrap_or(0)) as *mut Object;
+        decoded_at(pointer, bytes)
+    })
+}
+
+fn decoded_at(pointer: *mut Object, bytes: &[u8]) -> Option<*mut Object> {
+    if pointer.is_null() || unsafe { (*pointer).ty } != PyUnicode_Type.get() {
+        return None;
+    }
+    let ascii = pointer.cast::<Ascii>();
+    let (length, state) = unsafe { ((*ascii).length.unsigned_abs(), (*ascii).state) };
+    if state & (COMPACT | ASCII) != COMPACT | ASCII || length != bytes.len() {
+        return None;
+    }
+    let data = unsafe { slice::from_raw_parts(unicode_data(pointer), length) };
+    if data != bytes {
+        return None;
+    }
+    unsafe { incref(pointer) };
+    Some(pointer)
+}
+
+pub fn remember_decoded(bytes: &[u8], pointer: *mut Object) {
+    if pointer.is_null() || !decodable(bytes) || immortal(pointer) {
+        return;
+    }
+    DECODED.with_borrow_mut(|table| {
+        if table.is_empty() {
+            table.resize(DECODED_SLOTS, 0);
+        }
+        let slot = decoded_slot(bytes) & !1;
+        table[slot + 1] = table[slot];
+        table[slot] = pointer as usize;
+    });
+}
+
+fn forget_decoded(pointer: *mut Object) {
+    let ascii = pointer.cast::<Ascii>();
+    let (length, state) = unsafe { ((*ascii).length.unsigned_abs(), (*ascii).state) };
+    if length > DECODED_MAX || state & (COMPACT | ASCII) != COMPACT | ASCII {
+        return;
+    }
+    let bytes = unsafe { slice::from_raw_parts(unicode_data(pointer), length) };
+    let slot = decoded_slot(bytes) & !1;
+    let _ = DECODED.try_with(|table| {
+        if let Ok(mut table) = table.try_borrow_mut() {
+            for slot in [slot, slot + 1] {
+                if table.get(slot).copied() == Some(pointer as usize) {
+                    table[slot] = 0;
+                }
+            }
+        }
+    });
 }
 
 pub fn unicode_data(pointer: *mut Object) -> *mut u8 {
@@ -1533,6 +1636,7 @@ unsafe fn destroy(pointer: *mut Object) {
             }
             heap::release((*list).items.cast());
         } else if flags & TPFLAGS_UNICODE_SUBCLASS != 0 {
+            forget_decoded(pointer);
             let state = (*pointer.cast::<Ascii>()).state;
             if state & ASCII == 0 {
                 heap::release((*pointer.cast::<Compact>()).utf8.cast());
