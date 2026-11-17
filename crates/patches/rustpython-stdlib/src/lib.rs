@@ -57,7 +57,6 @@ mod suggestions;
 // TODO: maybe make this an extension module, if we ever get those
 // mod re;
 
-#[cfg(any(all(target_arch = "wasm32", target_os = "unknown"), target_os = "wasi"))]
 #[path = "socket_wasm.rs"]
 pub mod socket;
 
@@ -109,7 +108,6 @@ pub fn stdlib_module_defs(ctx: &Context) -> Vec<&'static builtins::PyModuleDef> 
         sha256::module_def(ctx),
         sha3::module_def(ctx),
         sha512::module_def(ctx),
-        #[cfg(any(all(target_arch = "wasm32", target_os = "unknown"), target_os = "wasi"))]
         socket::module_def(ctx),
         statistics::module_def(ctx),
         suggestions::module_def(ctx),

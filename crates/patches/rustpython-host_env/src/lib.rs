@@ -34,7 +34,6 @@ pub mod readline;
 #[cfg(windows)]
 pub mod windows;
 
-#[cfg(any(all(target_arch = "wasm32", target_os = "unknown"), target_os = "wasi"))]
 #[path = "socket_wasm.rs"]
 pub mod socket;
 

@@ -296,6 +296,11 @@ class RLock:
     def locked(self):
         return self.locked_count != 0
 
+    def _is_owned(self):
+        # threading.Condition probes ownership with acquire(False), which
+        # always succeeds on this lock; with one thread, held means owned.
+        return self.locked_count != 0
+
     def __repr__(self):
         return "<%s %s.%s object owner=%s count=%s at %s>" % (
             "locked" if self.locked_count else "unlocked",

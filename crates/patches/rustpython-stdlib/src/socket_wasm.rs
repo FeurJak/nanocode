@@ -13,7 +13,7 @@ mod _socket {
         Py, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
         builtins::{PyType, PyTypeRef, PyUtf8StrRef},
         common::lock::PyMutex,
-        function::{ArgBytesLike, ArgIntoFloat, OptionalArg},
+        function::{ArgBytesLike, ArgIntoFloat, FuncArgs, OptionalArg},
         types::{Constructor, Initializer},
     };
     use std::net::{Ipv4Addr, Ipv6Addr};
@@ -380,7 +380,7 @@ mod _socket {
     }
 
     impl Constructor for PySocket {
-        type Args = ();
+        type Args = FuncArgs;
 
         fn py_new(_cls: &Py<PyType>, _args: Self::Args, _vm: &VirtualMachine) -> PyResult<Self> {
             Ok(Self::default())

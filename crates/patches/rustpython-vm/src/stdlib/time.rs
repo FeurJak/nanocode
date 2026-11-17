@@ -26,7 +26,7 @@ mod decl {
         function::{Either, FuncArgs, OptionalArg, OptionalOption},
         types::{PyStructSequence, PyStructSequenceData, struct_sequence_new},
     };
-    #[cfg(target_os = "wasi")]
+    #[cfg(not(any(unix, windows)))]
     use crate::{
         PyRef,
         builtins::{PyNamespace, PyUtf8StrRef},
@@ -114,6 +114,24 @@ mod decl {
             "monotonic" => vm.ctx.new_bool(mono),
             "adjustable" => vm.ctx.new_bool(adj),
             "resolution" => vm.ctx.new_float(res),
+        }))
+    }
+
+    #[cfg(not(any(unix, windows, target_os = "wasi")))]
+    #[pyfunction]
+    fn get_clock_info(name: PyUtf8StrRef, vm: &VirtualMachine) -> PyResult<PyRef<PyNamespace>> {
+        let (imp, mono, adj) = match name.as_str() {
+            "monotonic" | "perf_counter" | "process_time" | "thread_time" => {
+                ("system clock", true, false)
+            }
+            "time" => ("system clock", false, true),
+            _ => return Err(vm.new_value_error("unknown clock")),
+        };
+        Ok(py_namespace!(vm, {
+            "implementation" => vm.new_pyobj(imp),
+            "monotonic" => vm.ctx.new_bool(mono),
+            "adjustable" => vm.ctx.new_bool(adj),
+            "resolution" => vm.ctx.new_float(1e-9),
         }))
     }
 
