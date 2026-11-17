@@ -1,0 +1,6 @@
+_common.c
+src/distributions/distributions.c
+src/distributions/logfactorial.c
+src/distributions/random_hypergeometric.c
+src/distributions/random_mvhg_count.c
+src/distributions/random_mvhg_marginals.c

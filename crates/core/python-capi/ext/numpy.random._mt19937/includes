@@ -1,0 +1,3 @@
+../numpy._core._multiarray_umath/include
+../numpy._core._multiarray_umath/gen
+../numpy.random._common
