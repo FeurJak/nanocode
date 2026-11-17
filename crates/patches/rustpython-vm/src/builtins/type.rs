@@ -58,7 +58,6 @@ pub struct PyType {
     pub attributes: TypeNamespace,
     #[pymember(name = "__itemsize__", path = "itemsize")]
     #[pymember(name = "__basicsize__", path = "basicsize")]
-    #[pymember(name = "__flags__", path = "flags")]
     pub slots: PyTypeSlots,
     pub heaptype_ext: Option<Pin<Box<HeapTypeExt>>>,
     /// Type version tag for inline caching. 0 means unassigned/invalidated.
@@ -2420,6 +2419,20 @@ impl Py<PyType> {
         let elements: Vec<PyObjectRef> = mro.iter().map(|x| x.as_object().to_owned()).collect();
         drop(mro);
         vm.ctx.new_tuple(elements).into()
+    }
+
+    #[pygetset]
+    fn __flags__(&self) -> u64 {
+        let flags = self.slots.flags.load().bits();
+        if self
+            .slots
+            .static_extension
+            .load(core::sync::atomic::Ordering::Relaxed)
+        {
+            flags & !(1 << PyTypeFlags::HEAPTYPE)
+        } else {
+            flags
+        }
     }
 
     #[pygetset]

@@ -176,6 +176,7 @@ pub struct PyTypeSlots {
     // Flags to define presence of optional/expanded features.
     // One atomic word: runtime code sets and clears bits in place.
     pub flags: AtomicPyTypeFlags,
+    pub static_extension: core::sync::atomic::AtomicBool,
 
     // tp_doc
     pub doc: ItemDoc,

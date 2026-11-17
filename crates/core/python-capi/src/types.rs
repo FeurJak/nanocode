@@ -235,39 +235,54 @@ fn method(
     .into()
 }
 
-fn member(vm: &VirtualMachine, def: &MemberDef) -> PyResult<PyObjectRef> {
+fn member(vm: &VirtualMachine, class: &'static Py<PyType>, def: &MemberDef) -> PyResult<PyObjectRef> {
     let name = text(def.name).unwrap_or("?");
     let kind = def.kind;
     let offset = def.offset as usize;
-    let getter = function(vm, name, move |vm, args| {
-        let zelf = args
-            .args
-            .first()
-            .cloned()
-            .ok_or_else(|| vm.new_type_error("the getter needs an instance".to_owned()))?;
+    let get: Getter = Box::new(move |vm, zelf| {
         let at = unsafe { pointer_of(vm, &zelf)?.cast::<u8>().add(offset) };
         read_member(vm, kind, at, name)
     });
-    let setter = if def.flags & READONLY != 0 {
-        vm.ctx.none()
-    } else {
-        function(vm, name, move |vm, args| {
-            let (Some(zelf), Some(value)) = (args.args.first(), args.args.get(1)) else {
-                return Err(
-                    vm.new_type_error("the setter needs an instance and a value".to_owned())
-                );
-            };
-            let at = unsafe { pointer_of(vm, zelf)?.cast::<u8>().add(offset) };
-            write_member(vm, kind, at, value)?;
-            Ok(vm.ctx.none())
-        })
-    };
-    let doc = text(def.doc).map_or_else(|| vm.ctx.none(), |doc| vm.ctx.new_str(doc).into());
-    vm.ctx
-        .types
-        .property_type
-        .as_object()
-        .call((getter, setter, vm.ctx.none(), doc), vm)
+    let set: Option<Setter> = (def.flags & READONLY == 0).then(|| {
+        Box::new(move |vm: &VirtualMachine, zelf: PyObjectRef, value: PyObjectRef| {
+            let at = unsafe { pointer_of(vm, &zelf)?.cast::<u8>().add(offset) };
+            write_member(vm, kind, at, &value)
+        }) as Setter
+    });
+    Ok(descriptor(vm, class, name, Some(get), set, text(def.doc)))
+}
+
+type Getter = Box<dyn Fn(&VirtualMachine, PyObjectRef) -> PyResult + Send + Sync>;
+type Setter = Box<dyn Fn(&VirtualMachine, PyObjectRef, PyObjectRef) -> PyResult<()> + Send + Sync>;
+
+fn descriptor(
+    vm: &VirtualMachine,
+    class: &'static Py<PyType>,
+    name: &str,
+    get: Option<Getter>,
+    set: Option<Setter>,
+    doc: Option<&'static str>,
+) -> PyObjectRef {
+    let mut descriptor = rustpython_vm::builtins::PyGetSet::new(name, class, &vm.ctx);
+    if let Some(get) = get {
+        descriptor = descriptor.with_get(move |zelf: PyObjectRef, vm: &VirtualMachine| get(vm, zelf));
+    }
+    if let Some(set) = set {
+        descriptor = descriptor.with_set(
+            move |zelf: PyObjectRef,
+                  value: rustpython_vm::function::PySetterValue,
+                  vm: &VirtualMachine| match value {
+                rustpython_vm::function::PySetterValue::Assign(value) => set(vm, zelf, value),
+                rustpython_vm::function::PySetterValue::Delete => {
+                    Err(vm.new_type_error("can't delete attribute".to_owned()))
+                }
+            },
+        );
+    }
+    if let Some(doc) = doc {
+        descriptor = descriptor.with_doc(rustpython_vm::function::ItemDoc::static_text(doc));
+    }
+    PyRef::new_ref(descriptor, vm.ctx.types.getset_type.to_owned(), None).into()
 }
 
 fn integer<T: Copy>(at: *mut u8) -> T {
@@ -354,53 +369,33 @@ fn write_member(
     Ok(())
 }
 
-fn getset(vm: &VirtualMachine, def: &GetSetDef) -> PyResult<PyObjectRef> {
+fn getset(vm: &VirtualMachine, class: &'static Py<PyType>, def: &GetSetDef) -> PyResult<PyObjectRef> {
     let name = text(def.name).unwrap_or("?");
     let closure = def.closure as usize;
-    let getter = def.get.map_or_else(
-        || vm.ctx.none(),
-        |get| {
-            function(vm, name, move |vm, args| {
-                let zelf =
-                    args.args.first().cloned().ok_or_else(|| {
-                        vm.new_type_error("the getter needs an instance".to_owned())
-                    })?;
-                enter(vm, || {
-                    let pointer = borrowed(vm, &zelf);
-                    finish(vm, unsafe { call2(get, pointer, closure as *mut c_void) })
-                })
+    let get = def.get.map(|get| {
+        Box::new(move |vm: &VirtualMachine, zelf: PyObjectRef| {
+            enter(vm, || {
+                let pointer = borrowed(vm, &zelf);
+                finish(vm, unsafe { call2(get, pointer, closure as *mut c_void) })
             })
-        },
-    );
-    let setter = def.set.map_or_else(
-        || vm.ctx.none(),
-        |set| {
-            function(vm, name, move |vm, args| {
-                let (Some(zelf), Some(value)) = (args.args.first(), args.args.get(1)) else {
-                    return Err(
-                        vm.new_type_error("the setter needs an instance and a value".to_owned())
-                    );
+        }) as Getter
+    });
+    let set = def.set.map(|set| {
+        Box::new(move |vm: &VirtualMachine, zelf: PyObjectRef, value: PyObjectRef| {
+            enter(vm, || {
+                let result = unsafe {
+                    call3(
+                        set,
+                        borrowed(vm, &zelf),
+                        borrowed(vm, &value),
+                        closure as *mut c_void,
+                    )
                 };
-                enter(vm, || {
-                    let result = unsafe {
-                        call3(
-                            set,
-                            borrowed(vm, zelf),
-                            borrowed(vm, value),
-                            closure as *mut c_void,
-                        )
-                    };
-                    check(vm, result as isize).map(|_| vm.ctx.none())
-                })
+                check(vm, result as isize).map(drop)
             })
-        },
-    );
-    let doc = text(def.doc).map_or_else(|| vm.ctx.none(), |doc| vm.ctx.new_str(doc).into());
-    vm.ctx
-        .types
-        .property_type
-        .as_object()
-        .call((getter, setter, vm.ctx.none(), doc), vm)
+        }) as Setter
+    });
+    Ok(descriptor(vm, class, name, get, set, text(def.doc)))
 }
 
 fn unary(
@@ -1039,6 +1034,12 @@ pub fn c_type(vm: &VirtualMachine, ty: *mut Type) -> PyResult<PyTypeRef> {
         )
         .map_err(|error| vm.new_type_error(format!("{full}: {error}")))?
     };
+    if unsafe { (*ty).flags } & TPFLAGS_HEAPTYPE == 0 {
+        class
+            .slots
+            .static_extension
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let types = &vm.ctx.types;
     let inherited = [
         (types.int_type, TPFLAGS_LONG_SUBCLASS),
@@ -1123,7 +1124,7 @@ pub fn c_type(vm: &VirtualMachine, ty: *mut Type) -> PyResult<PyTypeRef> {
         }
         attributes.push((
             text(unsafe { (*def).name }).unwrap_or("?"),
-            member(vm, unsafe { &*def })?,
+            member(vm, leaked, unsafe { &*def })?,
         ));
         def = unsafe { def.add(1) };
     }
@@ -1131,7 +1132,7 @@ pub fn c_type(vm: &VirtualMachine, ty: *mut Type) -> PyResult<PyTypeRef> {
     while !def.is_null() && !unsafe { (*def).name }.is_null() {
         attributes.push((
             text(unsafe { (*def).name }).unwrap_or("?"),
-            getset(vm, unsafe { &*def })?,
+            getset(vm, leaked, unsafe { &*def })?,
         ));
         def = unsafe { def.add(1) };
     }
