@@ -2286,3 +2286,7 @@ Syncing a C type's `tp_dict` into its RustPython type called `update_slot` for e
 ## Python: numpy.bytes_ scalars carry their bytes (2026-11-17)
 
 `numpy.bytes_` subclasses bytes with bytes' C layout and fills its data after `tp_alloc`. Wrapping such an object made a plain C-object proxy, so bytes' methods saw no payload: `len()` was garbage and `bytes(x)`, `x == b"abc"` and `x.decode()` failed. A C object whose class is a bytes subclass and whose basic size is at most bytes' now becomes a `PyBytes` payload of that class, built from `ob_size` and `ob_sval`, as str subclasses already are. pandas' date-axis formatter workaround (decoding `fmt.item()`) stays and still works.
+
+## Python: PyFrozenSet_New returns a new frozenset (2026-11-17)
+
+`PyFrozenSet_New(NULL)` called `frozenset()`, which returns the shared empty-frozenset singleton, and Cython then fills the result with `PySet_Add`, as CPython allows for a new frozenset. pandas builds module-level frozensets that way, so after `import pandas` every empty `frozenset()` in the process was `frozenset({'left', 'right', 'both', 'neither'})`, which broke resample and interval code and anything comparing with an empty frozenset. It now builds a fresh `PyFrozenSet` from the iterable's elements.
