@@ -510,6 +510,7 @@ pub struct PyCode {
             )],
         >,
     >,
+    location_lookups: core::sync::atomic::AtomicU8,
 }
 
 impl Deref for PyCode {
@@ -601,6 +602,8 @@ impl MemberLayout for CodeFlags {
     const KIND: MemberKind = MemberKind::Int;
 }
 
+const LOCATION_LOOKUPS: u8 = 8;
+
 impl PyCode {
     pub fn location(
         &self,
@@ -611,6 +614,15 @@ impl PyCode {
     )> {
         if !self.code.locations.is_empty() {
             return self.code.locations.get(idx).copied();
+        }
+        if let Some(locations) = self.locations.get() {
+            return locations.get(idx).copied();
+        }
+        let lookups = self.location_lookups.load(core::sync::atomic::Ordering::Relaxed);
+        if lookups < LOCATION_LOOKUPS {
+            self.location_lookups
+                .store(lookups + 1, core::sync::atomic::Ordering::Relaxed);
+            return self.code.location(idx);
         }
         self.locations
             .get_or_init(|| self.code.all_locations().into_owned().into_boxed_slice())
@@ -664,6 +676,7 @@ impl PyCode {
             quickened: core::sync::atomic::AtomicBool::new(false),
             has_exc_handling,
             locations: crate::common::lock::OnceCell::new(),
+            location_lookups: core::sync::atomic::AtomicU8::new(0),
         }
     }
 

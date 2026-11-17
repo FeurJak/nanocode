@@ -11,7 +11,8 @@ use core::{
     cell::UnsafeCell,
     hash, mem,
     ops::{Deref, DerefMut, Index, IndexMut},
-    sync::atomic::{AtomicU8, AtomicU16, AtomicUsize, Ordering},
+    ptr,
+    sync::atomic::{AtomicPtr, AtomicU8, AtomicU16, AtomicUsize, Ordering},
 };
 use rustpython_wtf8::iteration::Itertools;
 use nanocode_flags::flags;
@@ -651,11 +652,33 @@ impl TryFrom<[u8; 2]> for CodeUnit {
 
 pub struct CodeUnits {
     units: UnsafeCell<Box<[CodeUnit]>>,
+    caches: AtomicPtr<Caches>,
+}
+
+struct Caches {
     adaptive_counters: Box<[AtomicU16]>,
     /// Pointer-sized cache entries for descriptor pointers.
     /// Single atomic load/store prevents torn reads when multiple threads
     /// specialize the same instruction concurrently.
     pointer_cache: Box<[AtomicUsize]>,
+}
+
+impl Caches {
+    fn new(len: usize) -> Self {
+        Self {
+            adaptive_counters: (0..len).map(|_| AtomicU16::new(0)).collect(),
+            pointer_cache: (0..len).map(|_| AtomicUsize::new(0)).collect(),
+        }
+    }
+}
+
+impl Drop for CodeUnits {
+    fn drop(&mut self) {
+        let caches = *self.caches.get_mut();
+        if !caches.is_null() {
+            drop(unsafe { Box::from_raw(caches) });
+        }
+    }
 }
 
 // SAFETY: All cache operations use atomic read/write instructions.
@@ -672,20 +695,23 @@ impl Clone for CodeUnits {
         // SAFETY: No concurrent mutation during clone — cloning is only done
         // during code object construction or marshaling, not while instrumented.
         let units = unsafe { &*self.units.get() }.clone();
-        let adaptive_counters = self
-            .adaptive_counters
-            .iter()
-            .map(|c| AtomicU16::new(c.load(Ordering::Relaxed)))
-            .collect();
-        let pointer_cache = self
-            .pointer_cache
-            .iter()
-            .map(|c| AtomicUsize::new(c.load(Ordering::Relaxed)))
-            .collect();
+        let caches = self.caches().map_or(ptr::null_mut(), |caches| {
+            Box::into_raw(Box::new(Caches {
+                adaptive_counters: caches
+                    .adaptive_counters
+                    .iter()
+                    .map(|c| AtomicU16::new(c.load(Ordering::Relaxed)))
+                    .collect(),
+                pointer_cache: caches
+                    .pointer_cache
+                    .iter()
+                    .map(|c| AtomicUsize::new(c.load(Ordering::Relaxed)))
+                    .collect(),
+            }))
+        });
         Self {
             units: UnsafeCell::new(units),
-            adaptive_counters,
-            pointer_cache,
+            caches: AtomicPtr::new(caches),
         }
     }
 }
@@ -723,20 +749,9 @@ impl<const N: usize> From<[CodeUnit; N]> for CodeUnits {
 
 impl From<Vec<CodeUnit>> for CodeUnits {
     fn from(value: Vec<CodeUnit>) -> Self {
-        let units = value.into_boxed_slice();
-        let len = units.len();
-        let adaptive_counters = (0..len)
-            .map(|_| AtomicU16::new(0))
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        let pointer_cache = (0..len)
-            .map(|_| AtomicUsize::new(0))
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
         Self {
-            units: UnsafeCell::new(units),
-            adaptive_counters,
-            pointer_cache,
+            units: UnsafeCell::new(value.into_boxed_slice()),
+            caches: AtomicPtr::new(ptr::null_mut()),
         }
     }
 }
@@ -759,10 +774,33 @@ impl Deref for CodeUnits {
 }
 
 impl CodeUnits {
+    fn caches(&self) -> Option<&Caches> {
+        unsafe { self.caches.load(Ordering::Acquire).as_ref() }
+    }
+
+    fn caches_or_new(&self) -> &Caches {
+        if let Some(caches) = self.caches() {
+            return caches;
+        }
+        let fresh = Box::into_raw(Box::new(Caches::new(self.len())));
+        match self.caches.compare_exchange(
+            ptr::null_mut(),
+            fresh,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => unsafe { &*fresh },
+            Err(won) => {
+                drop(unsafe { Box::from_raw(fresh) });
+                unsafe { &*won }
+            }
+        }
+    }
+
     /// Disable adaptive specialization by setting all counters to unreachable.
     /// Used for CPython-compiled bytecode where specialization may not be safe.
     pub fn disable_specialization(&self) {
-        for counter in &self.adaptive_counters {
+        for counter in &self.caches_or_new().adaptive_counters {
             counter.store(UNREACHABLE_BACKOFF, Ordering::Relaxed);
         }
     }
@@ -930,7 +968,7 @@ impl CodeUnits {
     ///   invalidate the version guard before writing and publish the new
     ///   version after writing.
     pub unsafe fn write_cache_ptr(&self, index: usize, value: usize) {
-        self.pointer_cache[index].store(value, Ordering::Relaxed);
+        self.caches_or_new().pointer_cache[index].store(value, Ordering::Relaxed);
     }
 
     /// Load a pointer-sized value atomically from the pointer cache at `index`.
@@ -940,13 +978,15 @@ impl CodeUnits {
     /// # Panics
     /// Panics if `index` is out of bounds.
     pub fn read_cache_ptr(&self, index: usize) -> usize {
-        self.pointer_cache[index].load(Ordering::Relaxed)
+        self.caches().map_or(0, |caches| caches.pointer_cache[index].load(Ordering::Relaxed))
     }
 
     /// Read adaptive counter bits for instruction at `index`.
     /// Uses Relaxed atomic load.
     pub fn read_adaptive_counter(&self, index: usize) -> u16 {
-        self.adaptive_counters[index].load(Ordering::Relaxed)
+        self.caches().map_or(0, |caches| {
+            caches.adaptive_counters[index].load(Ordering::Relaxed)
+        })
     }
 
     /// Write adaptive counter bits for instruction at `index`.
@@ -955,7 +995,7 @@ impl CodeUnits {
     /// # Safety
     /// - `index` must be in bounds.
     pub unsafe fn write_adaptive_counter(&self, index: usize, value: u16) {
-        self.adaptive_counters[index].store(value, Ordering::Relaxed);
+        self.caches_or_new().adaptive_counters[index].store(value, Ordering::Relaxed);
     }
 
     /// Produce a clean copy of the bytecode suitable for serialization
@@ -1293,6 +1333,14 @@ impl<C: Constant> CodeObject<C> {
             alloc::borrow::Cow::Owned(self.decoded_locations().collect())
         } else {
             alloc::borrow::Cow::Borrowed(&self.locations)
+        }
+    }
+
+    pub fn location(&self, idx: usize) -> Option<(SourceLocation, SourceLocation)> {
+        if self.locations.is_empty() {
+            self.decoded_locations().nth(idx)
+        } else {
+            self.locations.get(idx).copied()
         }
     }
 
