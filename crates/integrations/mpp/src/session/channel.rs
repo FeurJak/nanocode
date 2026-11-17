@@ -27,8 +27,8 @@ const VOUCHER_TYPE: &str = "Voucher(bytes32 channelId,uint96 cumulativeAmount)";
 const CLOSE_AUTHORIZATION_TYPE: &str =
     "CloseAuthorization(bytes32 channelId,uint96 cumulativeAmount)";
 const EIP712_PREFIX: [u8; 2] = [0x19, 0x01];
-const OPEN_SIGNATURE: &str = "open(address,address,address,uint96,bytes32,address)";
-const TOP_UP_SIGNATURE: &str =
+pub(crate) const OPEN_SIGNATURE: &str = "open(address,address,address,uint96,bytes32,address)";
+pub(crate) const TOP_UP_SIGNATURE: &str =
     "topUp((address,address,address,address,bytes32,address,bytes32),uint96)";
 const GET_CHANNEL_STATE_SIGNATURE: &str = "getChannelState(bytes32)";
 const UINT96_BYTES: usize = 12;

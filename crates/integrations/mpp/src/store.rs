@@ -140,7 +140,7 @@ fn merged(
 }
 
 pub fn default_channel_database_path() -> Result<PathBuf, Fault> {
-    accounts::default_store_path()
+    accounts::default_credentials_path()
         .map(|path| path.with_file_name(DATABASE_FILE))
         .map_err(|error| Fault::Io(error.to_string()))
 }

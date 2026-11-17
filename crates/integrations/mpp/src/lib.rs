@@ -19,6 +19,7 @@ mod rpc;
 pub mod session;
 mod signing;
 pub mod store;
+pub mod tempo_id;
 pub mod tx;
 mod x509;
 

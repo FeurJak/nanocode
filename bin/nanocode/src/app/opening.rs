@@ -22,7 +22,7 @@ pub(super) fn open_session<'a>(
         let route = Route::of(stored.summary.record.provider.as_deref())?;
         if route != Route::Native && host.config.clients.tempo_models().is_none() {
             return Err(format!(
-                "session {session_id} runs {}, paid from the Tempo wallet, which this build does not offer",
+                "session {session_id} runs {}, paid from a Tempo ID account, which this build does not offer",
                 route.label(&model)
             )
             .into());

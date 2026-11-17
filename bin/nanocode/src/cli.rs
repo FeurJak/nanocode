@@ -175,7 +175,7 @@ const SESSION: Group = Group::new(&[
         .long("model")
         .env("NANOCODE_MODEL")
         .help(
-            "Model id or alias (see 'nanocode models'); tempo/<model> runs it on the Tempo gateway, paid from the Tempo wallet; defaults to claude-opus-5-5 at xhigh thinking",
+            "Model id or alias (see 'nanocode models'); tempo/<model> runs it on the Tempo gateway, paid from your Tempo ID account; defaults to claude-opus-5-5 at xhigh thinking",
         ),
     Argument::value("harness", "HARNESS", Parser::Choice(&HarnessArg::CHOICES))
         .long("harness")
@@ -397,7 +397,7 @@ const GATEWAY: Group = Group::named(
             .long("no-tempo-tools")
             .env("NANOCODE_NO_TEMPO_TOOLS")
             .help(
-                "Leave out the paid tools of the Tempo gateway (key-value store, buckets, compute) and Mercator, and the local proxy through which shell commands pay Tempo's services (*.mpp.tempo.xyz), the Tempo gateway and Mercator; every session has them by default and pays from the Tempo wallet (/login tempo, /fund) when one charges. A session whose environment sets its own HTTP(S)_PROXY, ALL_PROXY or CA bundle keeps those and gets no proxy",
+                "Leave out the paid tools of the Tempo gateway (key-value store, buckets, compute) and Mercator, and the local proxy through which shell commands pay Tempo's services (*.mpp.tempo.xyz), the Tempo gateway and Mercator; every session has them by default and pays from your Tempo ID account (/login tempo, /fund) when one charges. A session whose environment sets its own HTTP(S)_PROXY, ALL_PROXY or CA bundle keeps those and gets no proxy",
             ),
         Argument::repeated("identity_issuer", "URL", Parser::Text)
             .long("identity-issuer")

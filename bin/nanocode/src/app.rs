@@ -2468,7 +2468,7 @@ impl App {
             "zoom" => self.zoom_pane(),
             "login" => self.login(argument),
             "fund" => self.fund(argument),
-            "wallet" => self.wallet(),
+            "account" => self.account(),
             "pass" => self.pass(argument),
             "resume" | "sessions" => self.open_session_picker(),
             "new" | "clear" => self.new_session(),
