@@ -518,6 +518,21 @@ pub fn enter<R>(vm: &VirtualMachine, f: impl FnOnce() -> R) -> R {
     result
 }
 
+pub fn with_machine<R>(f: impl FnOnce() -> R) -> R {
+    if !MACHINE.get().is_null() {
+        return f();
+    }
+    let Some(vm) = rustpython_vm::vm::thread::try_with_current_vm(|vm| vm as *const VirtualMachine) else {
+        return f();
+    };
+    MACHINE.set(vm);
+    DEPTH.set(DEPTH.get() + 1);
+    let result = f();
+    DEPTH.set(DEPTH.get() - 1);
+    MACHINE.set(null());
+    result
+}
+
 pub fn set_error(error: PyBaseExceptionRef) {
     ERROR.with_borrow_mut(|slot| *slot = Some(error));
 }

@@ -39,7 +39,7 @@ pub unsafe extern "C" fn _Py_Dealloc(pointer: *mut Object) {
         }
         let ty = (*pointer).ty;
         match (*ty).dealloc {
-            Some(dealloc) => crate::cast::call1(dealloc, pointer),
+            Some(dealloc) => crate::bridge::with_machine(|| crate::cast::call1(dealloc, pointer)),
             None => heap::release(pointer.cast()),
         }
     }
