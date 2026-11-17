@@ -498,6 +498,7 @@
         false,
       );
     }
+    const reader = definitions.find((definition) => typeof definition.image_reader === "string");
     const tools = createCodeTools(
       Object.keys(declaredTools),
       (name, input) => declaredTools[name] ? declaredTools[name](input) : invokeTool(name, input, false),
@@ -516,6 +517,9 @@
     }
 
     function image(value, detail) {
+      if (reader && typeof value === "string" && value && !/^(data|https?):/i.test(value)) {
+        value = invokeToolSync(reader.tool_name, { [reader.image_reader]: value }, false);
+      }
       if (Array.isArray(value?.content)) value = value.content;
       if (!Array.isArray(value)) return nativeContent(jsonStringify(normalizeImage(value, detail)));
       if (!value.length) throw "image expects at least one image item in an array";

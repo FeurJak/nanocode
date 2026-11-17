@@ -610,7 +610,7 @@ impl CodeModeRuntime {
             None => {
                 let catalog = Arc::new(NestedCatalog {
                     metadata: Arc::clone(metadata),
-                    encoded: Arc::new(CellTools::encode(metadata)?),
+                    encoded: Arc::new(CellTools::encode(&images::with_reader(metadata))?),
                 });
                 let weak = Arc::downgrade(&catalog);
                 LIVE.update(|live| {

@@ -188,7 +188,7 @@ pub fn exec_description_with(
     if let Some((name, field)) = reader {
         let _ = write!(
             description,
-            "\n- Nanocode extension: an image file the cell's calls create or change is shown after its output, so to show a chart, run the script yourself and have it save the chart to a file (with matplotlib, `savefig` rather than `show`). `image` also takes an array of image items, or a tool result whose `content` is one. To show another image file, pass what reading it returns: `image(await tools.{name}({{ {field} }}))`. Do not base64-encode it through a shell, whose output is cut off."
+            "\n- Nanocode extension: an image file the cell's calls create or change is shown after its output, so to show a chart, run the script yourself and have it save the chart to a file (with matplotlib, `savefig` rather than `show`). `image` also takes an image file's path, which it reads with `tools.{name}({{ {field} }})`, an array of image items, or a tool result whose `content` is one. Do not base64-encode it through a shell, whose output is cut off."
         );
     }
     if !provider_summaries.is_empty() {

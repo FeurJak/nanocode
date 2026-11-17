@@ -12,6 +12,7 @@ use crate::embedded::{NestedToolCall, OwnedToolContext};
 const IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
 const PATH_PUNCTUATION: &str = "/._-+@%";
 const WORKING_DIRECTORY: &str = "workdir";
+const READER_FIELD: &str = "image_reader";
 const SHOWN_FIGURES: [&str; 4] = [
     "Figure_1.png",
     "Figure_2.png",
@@ -36,15 +37,11 @@ pub(super) struct ImageFiles {
 
 impl ImageFiles {
     pub(super) fn new(metadata: &[Value], guard: Option<CellGuard>, carried: &Carried) -> Self {
-        let reader = metadata.iter().find_map(|tool| {
-            let name = tool
-                .get("tool_name")
-                .or_else(|| tool.get("name"))
-                .and_then(Value::as_str)?;
-            image_reader(name).map(|field| (name.to_owned(), field))
-        });
         Self {
-            reader,
+            reader: metadata
+                .iter()
+                .find_map(reader)
+                .map(|(name, field)| (name.to_owned(), field)),
             limit: guard.map_or(usize::MAX, |guard| {
                 usize::try_from(guard.calls_per_tool).unwrap_or(usize::MAX)
             }),
@@ -207,6 +204,27 @@ impl ImageFiles {
             _ => None,
         })
     }
+}
+
+fn reader(tool: &Value) -> Option<(&str, &'static str)> {
+    let name = tool
+        .get("tool_name")
+        .or_else(|| tool.get("name"))
+        .and_then(Value::as_str)?;
+    image_reader(name).map(|field| (name, field))
+}
+
+pub(super) fn with_reader(metadata: &[Value]) -> Vec<Value> {
+    let mut tools = metadata.to_vec();
+    if let Some((index, field)) = tools
+        .iter()
+        .enumerate()
+        .find_map(|(index, tool)| reader(tool).map(|(_, field)| (index, field)))
+        && let Some(Value::Object(fields)) = tools.get_mut(index)
+    {
+        fields.insert(READER_FIELD.to_owned(), Value::from(field));
+    }
+    tools
 }
 
 fn within(directory: &str, path: &str) -> String {
