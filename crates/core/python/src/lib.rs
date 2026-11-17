@@ -5,6 +5,7 @@ mod kiwisolver;
 mod matplotlib;
 mod psh;
 mod shell;
+mod sitedata;
 mod tree;
 
 use std::{collections::BTreeSet, io, rc::Rc, sync::Arc, time::Duration};

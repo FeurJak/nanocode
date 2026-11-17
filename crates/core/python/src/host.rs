@@ -413,7 +413,16 @@ mod _host {
     #[pyfunction]
     fn stat(path: ArgBytesLike, vm: &VirtualMachine) -> PyResult<(u8, u64, u32, i64)> {
         let path = path.borrow_buf();
-        files(vm, &path, |state| state.files.stat(&path)).map(|stat| {
+        let site = |error: io::Error| match crate::sitedata::stat(&path) {
+            Some(stat) if error.kind() == io::ErrorKind::NotFound => Ok(stat),
+            _ => Err(error),
+        };
+        let found = crate::sitedata::stat(&path).filter(|stat| stat.kind == Kind::File);
+        let stat = match found {
+            Some(stat) => Ok(stat),
+            None => files(vm, &path, |state| state.files.stat(&path).or_else(site)),
+        };
+        stat.map(|stat| {
             let kind = match stat.kind {
                 Kind::File => 0,
                 Kind::Dir => 1,
@@ -427,7 +436,10 @@ mod _host {
     fn read(path: ArgBytesLike, vm: &VirtualMachine) -> PyResult<PyBytesRef> {
         let path = path.borrow_buf();
         files(vm, &path, |state| {
-            let data = state.files.read(&path, state.limits.file)?;
+            let data = match crate::sitedata::read(&path) {
+                Some(data) => data?,
+                None => state.files.read(&path, state.limits.file)?,
+            };
             if data.len() as u64 > state.limits.file {
                 return Err(io::ErrorKind::FileTooLarge.into());
             }
@@ -459,7 +471,20 @@ mod _host {
     #[pyfunction]
     fn list(path: ArgBytesLike, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         let path = path.borrow_buf();
-        let names = files(vm, &path, |state| state.files.list(&path))?;
+        let names = files(vm, &path, |state| {
+            match (state.files.list(&path), crate::sitedata::list(&path)) {
+                (Ok(names), Some(site)) => {
+                    let mut names: std::collections::BTreeSet<Vec<u8>> =
+                        names.into_iter().collect();
+                    names.extend(site);
+                    Ok(names.into_iter().collect())
+                }
+                (Err(error), Some(site)) if error.kind() == io::ErrorKind::NotFound => {
+                    Ok(site.into_iter().collect())
+                }
+                (names, _) => names,
+            }
+        })?;
         let names = names
             .into_iter()
             .map(|name| vm.ctx.new_bytes(name).into())
@@ -471,6 +496,9 @@ mod _host {
     fn mkdir(path: ArgBytesLike, mode: u32, vm: &VirtualMachine) -> PyResult<()> {
         let path = path.borrow_buf();
         files(vm, &path, |state| {
+            if crate::sitedata::stat(&path).is_some() {
+                return Err(io::ErrorKind::AlreadyExists.into());
+            }
             state.files.mkdir(&path, mode)?;
             state.changes.removed.remove(&*path);
             state.changes.made.insert(path.to_vec());

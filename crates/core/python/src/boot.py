@@ -296,6 +296,25 @@ class _Shim:
 sys.meta_path.insert(0, _Shim)
 
 
+class _Located:
+    @staticmethod
+    def find_spec(name, path=None, target=None):
+        if name.partition('.')[0] not in ('matplotlib', 'mpl_toolkits'):
+            return None
+        spec = _frozen_importlib.FrozenImporter.find_spec(name)
+        if spec is not None:
+            tail = '/__init__.py' if spec.submodule_search_locations is not None else '.py'
+            spec.loader_state.filename = '%s/lib/python%d.%d/site-packages/%s%s' % (sys.prefix, *sys.version_info[:2], name.replace('.', '/'), tail)
+        return spec
+
+    @staticmethod
+    def invalidate_caches():
+        pass
+
+
+sys.meta_path.insert(0, _Located)
+
+
 class _Resume:
     def __init__(self, module, loader):
         self.module = module
@@ -493,6 +512,11 @@ _bounded()
 def _start(argv, first):
     global _unfinished
     posix._reset()
+    if 'matplotlib' in sys.modules:
+        try:
+            __import__('nanocode_matplotlib')._reset()
+        except Exception:
+            pass
     if _unfinished:
         for name, module in list(sys.modules.items()):
             spec = getattr(module, '__spec__', None)
@@ -525,9 +549,11 @@ def _missing(names):
     missing = []
     for name in names:
         top = name.partition('.')[0]
-        if name in sys.modules:
+        if name in sys.modules or _frozen_importlib.FrozenImporter.find_spec(top) is not None:
             continue
+        probed = len(_loaded)
         spec = _Finder.find_spec(top)
+        del _loaded[probed:]
         if spec is not None and '/site-packages/' not in (spec.origin or ''):
             continue
         try:
