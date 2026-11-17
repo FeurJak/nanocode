@@ -208,6 +208,14 @@ class _Loader:
         with open(self.path, 'rb') as file:
             return compile(file.read(), self.path, 'exec')
 
+    def get_data(self, path):
+        with open(path, 'rb') as file:
+            return file.read()
+
+    def get_resource_reader(self, name=None):
+        from importlib.resources.readers import FileReader
+        return FileReader(self) if self.package else None
+
     def exec_module(self, module):
         module.__file__ = self.path
         exec(self.get_code(), module.__dict__)
@@ -268,6 +276,11 @@ class _Finder:
     @staticmethod
     def invalidate_caches():
         pass
+
+    @staticmethod
+    def find_distributions(context=None):
+        from importlib.metadata import DistributionFinder, MetadataPathFinder
+        return MetadataPathFinder.find_distributions(DistributionFinder.Context() if context is None else context)
 
 
 sys.meta_path.append(_Finder)

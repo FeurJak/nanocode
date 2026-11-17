@@ -749,4 +749,32 @@ const ERROR_CODES: &[(&str, i32)] = &[
 ];
 
 #[cfg(not(any(unix, windows, target_os = "wasi")))]
-const ERROR_CODES: &[(&str, i32)] = &[];
+const ERROR_CODES: &[(&str, i32)] = &[
+    ("EPERM", errors::EPERM),
+    ("ENOENT", errors::ENOENT),
+    ("ESRCH", errors::ESRCH),
+    ("EINTR", errors::EINTR),
+    ("EIO", errors::EIO),
+    ("EBADF", errors::EBADF),
+    ("ECHILD", errors::ECHILD),
+    ("EAGAIN", errors::EAGAIN),
+    ("EWOULDBLOCK", errors::EWOULDBLOCK),
+    ("EINPROGRESS", errors::EINPROGRESS),
+    ("EALREADY", errors::EALREADY),
+    ("EPIPE", errors::EPIPE),
+    ("ENOTDIR", errors::ENOTDIR),
+    ("EISDIR", errors::EISDIR),
+    ("EINVAL", errors::EINVAL),
+    ("EMFILE", errors::EMFILE),
+    ("ESPIPE", errors::ESPIPE),
+    ("EROFS", errors::EROFS),
+    ("EACCES", errors::EACCES),
+    ("EEXIST", errors::EEXIST),
+    ("ENOTSUP", errors::ENOTSUP),
+    ("EAFNOSUPPORT", errors::EAFNOSUPPORT),
+    ("ECONNABORTED", errors::ECONNABORTED),
+    ("ECONNRESET", errors::ECONNRESET),
+    ("ESHUTDOWN", errors::ESHUTDOWN),
+    ("ETIMEDOUT", errors::ETIMEDOUT),
+    ("ECONNREFUSED", errors::ECONNREFUSED),
+];
