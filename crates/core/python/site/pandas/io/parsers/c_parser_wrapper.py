@@ -42,6 +42,11 @@ from pandas.io.parsers.base_parser import (
     validate_parse_dates_presence,
 )
 
+# nanocode: tokenize about 64k fields per chunk instead of pandas' 1M, so
+# read_csv holds a few MiB of tokenizer buffers rather than the whole file's
+# (a 5 MB CSV: +43 -> +27 MiB held in python.wasm, CPython RSS +18 -> +4.5 MiB).
+parsers.DEFAULT_BUFFER_HEURISTIC = 2**16
+
 if TYPE_CHECKING:
     from collections.abc import (
         Hashable,
