@@ -23,6 +23,8 @@ pub struct State {
     steps: u64,
     slice: u64,
     held: Option<i64>,
+    credit: u64,
+    importing: (u32, i64),
     grace: bool,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
@@ -48,6 +50,8 @@ impl State {
             steps: 0,
             slice: 0,
             held: held(),
+            credit: run.limits.memory.unwrap_or(0),
+            importing: (0, 0),
             grace: false,
             stdout: Vec::new(),
             stderr: Vec::new(),
@@ -122,8 +126,9 @@ impl State {
     }
 
     fn over(&mut self, more: u64) -> bool {
+        let room = if self.importing.0 > 0 { self.credit } else { 0 };
         match (self.limits.memory, self.used()) {
-            (Some(limit), Some(used)) if used.saturating_add(more) > limit => {
+            (Some(limit), Some(used)) if used.saturating_add(more) > limit.saturating_add(room) => {
                 self.held_at_refusal = Held {
                     bytes: used,
                     asked: more,
@@ -131,6 +136,29 @@ impl State {
                 true
             }
             _ => false,
+        }
+    }
+
+    fn import(&mut self, on: bool) {
+        let Some(now) = held() else { return };
+        let (depth, from) = self.importing;
+        let room = isize::try_from(self.credit).unwrap_or(isize::MAX);
+        match (on, depth) {
+            (true, 0) => {
+                self.importing = (1, now);
+                rustpython_vm::vm::limit::raise_memory_ceiling(room);
+            }
+            (true, _) => self.importing.0 = depth + 1,
+            (false, 0) => {}
+            (false, 1) => {
+                self.importing = (0, 0);
+                let kept = u64::try_from(now.saturating_sub(from)).unwrap_or(0).min(self.credit);
+                self.credit -= kept;
+                self.held = self.held.map(|held| held.saturating_add(i64::try_from(kept).unwrap_or(0)));
+                let kept = isize::try_from(kept).unwrap_or(isize::MAX);
+                rustpython_vm::vm::limit::raise_memory_ceiling(kept.saturating_sub(room));
+            }
+            (false, _) => self.importing.0 = depth - 1,
         }
     }
 
@@ -418,6 +446,14 @@ mod _host {
     #[pyfunction]
     fn region(on: bool) -> bool {
         rustpython_vm::vm::region::set(on)
+    }
+
+    #[pyfunction]
+    fn importing(on: bool) {
+        let _ = with(|state| {
+            state.import(on);
+            Ok(())
+        });
     }
 
     #[pyfunction]

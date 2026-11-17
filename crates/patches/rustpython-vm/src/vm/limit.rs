@@ -259,6 +259,15 @@ pub fn lift_memory_ceiling() {
     });
 }
 
+pub fn raise_memory_ceiling(by: isize) {
+    let _ = METER.try_with(|meter| {
+        let ceiling = meter.ceiling.get();
+        if ceiling != isize::MAX {
+            meter.ceiling.set(ceiling.saturating_add(by).min(isize::MAX - 1));
+        }
+    });
+}
+
 // SAFETY: every call is forwarded unchanged to the wrapped allocator, whose contract
 // this one therefore keeps; the count touches only a thread-local cell.
 unsafe impl<A: core::alloc::GlobalAlloc> core::alloc::GlobalAlloc for Metered<A> {

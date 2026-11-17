@@ -277,9 +277,11 @@ def _load_unlocked(spec, load=_frozen_importlib._load_unlocked):
     if isinstance(spec.loader, _Loader):
         return load(spec)
     was = _host.region(False)
+    _host.importing(True)
     try:
         return load(spec)
     finally:
+        _host.importing(False)
         _host.region(was)
 
 
