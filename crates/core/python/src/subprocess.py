@@ -188,7 +188,8 @@ class Popen:
                  preexec_fn=None, close_fds=True, shell=False, cwd=None, env=None,
                  universal_newlines=None, startupinfo=None, creationflags=0, restore_signals=True,
                  start_new_session=False, pass_fds=(), *, user=None, group=None, extra_groups=None,
-                 encoding=None, errors=None, text=None, umask=-1, pipesize=-1, process_group=None):
+                 encoding=None, errors=None, text=None, umask=-1, pipesize=-1, process_group=None,
+                 _timeout=None):
         if stderr == STDOUT and stdout is None:
             stdout = 1
         self.args = args
@@ -203,6 +204,11 @@ class Popen:
             argv = [os.fsencode(executable or '/bin/sh'), b'-c'] + argv
         if not argv:
             raise IndexError('list index out of range')
+        self._timeout = _timeout
+        if _timeout is not None:
+            argv = [b'timeout', b'%r' % max(float(_timeout), 0.001)] + argv
+            if os.path.dirname(argv[2]) in (b'/bin', b'/usr/bin', b'/usr/local/bin'):
+                argv[2] = os.path.basename(argv[2])
         self._argv = argv
         self._cwd = os.fsencode(os.path.abspath(os.getcwd() if cwd is None else cwd))
         pairs = (os.environ if env is None else env).items()
@@ -247,6 +253,8 @@ class Popen:
         _deliver(self._stdout, 1, out)
         if not merged:
             _deliver(self._stderr, 2, err)
+        if self._timeout is not None and status == 124:
+            raise TimeoutExpired(self.args, self._timeout, output=out, stderr=err)
 
     def _stream(self, data):
         if not self._text:
@@ -299,7 +307,7 @@ def run(*popenargs, input=None, capture_output=False, timeout=None, check=False,
             raise ValueError('stdout and stderr arguments may not be used with capture_output.')
         kwargs['stdout'] = PIPE
         kwargs['stderr'] = PIPE
-    process = Popen(*popenargs, **kwargs)
+    process = Popen(*popenargs, _timeout=timeout, **kwargs)
     stdout, stderr = process.communicate(input, timeout=timeout)
     if check and process.returncode:
         raise CalledProcessError(process.returncode, process.args, output=stdout, stderr=stderr)
@@ -307,7 +315,7 @@ def run(*popenargs, input=None, capture_output=False, timeout=None, check=False,
 
 
 def call(*popenargs, timeout=None, **kwargs):
-    return Popen(*popenargs, **kwargs).wait(timeout=timeout)
+    return Popen(*popenargs, _timeout=timeout, **kwargs).wait(timeout=timeout)
 
 
 def check_call(*popenargs, **kwargs):
