@@ -64,7 +64,10 @@ case $target in
     flags="-Crelocation-model=static -Clink-arg=-Wl,--emit-relocs -Clink-arg=-Wl,-T,$root/scripts/cli-eh-frame.ld $remap"
     icf=all
     "$bolt" --help-hidden | grep -q -- '--icf=<value>' || icf=1
-    case $target in x86_64-unknown-linux-gnu) flags="$flags -Clink-arg=-Wl,--icf=all" ;; esac
+    case $target in
+      x86_64-unknown-linux-gnu) flags="$flags -Clink-arg=-Wl,--icf=all" ;;
+      *) flags="$flags -Clink-arg=-fuse-ld=lld" ;;
+    esac
     nostrip="CARGO_PROFILE_$(printf '%s' "$profile" | tr a-z- A-Z_)_STRIP=none"
     if [ "$package" = nanocode-cli ]; then
       env "$nostrip" RUSTFLAGS="$flags" cargo build --locked --offline --profile "$profile" --target "$target" -p nanocode-python-cli --bin nanocode-python >&2
@@ -113,13 +116,26 @@ case $target in
         input="$train/static"
         order="$train/static.order"
       fi
-      "$bolt" "$input" -o "$train/optimized" -data="$train/profile.fdata" $layout -reorder-functions=user -function-order="$order" > "$train/optimized.log" 2>&1
+      if ! "$bolt" "$input" -o "$train/optimized" -data="$train/profile.fdata" $layout -reorder-functions=user -function-order="$order" > "$train/optimized.log" 2>&1; then
+        [ "$input" = "$train/static" ] || { cat "$train/optimized.log" >&2; exit 1; }
+        tail -n 3 "$train/optimized.log" >&2
+        echo "build-cli.sh: BOLT can't rewrite the static $name; optimizing the dynamic link instead" >&2
+        input="$train/linked"
+        order="$train/startup.order"
+        "$bolt" "$input" -o "$train/optimized" -data="$train/profile.fdata" $layout -reorder-functions=user -function-order="$order" > "$train/optimized.log" 2>&1
+      fi
       cat "$train/optimized.log" >&2
       if [ "$input" = "$train/static" ] && grep -q 'original .text too small' "$train/optimized.log"; then
         reserve=$(sed -n 's/.*using 0x\([0-9a-f]*\) alignment\. \([0-9]*\) bytes needed, have \([0-9]*\) bytes available.*/\1 \2 \3/p' "$train/optimized.log" | head -n 1 | { read -r align needed have; align=$((0x$align)); echo $(( (needed - have + align - 1) / align * align )); })
         python3 "$root/scripts/static-cli.py" "$out/$name.link" "$train/linked.ld" "$root/scripts/cli-libc.order" "$train/static" "$reserve" >&2
-        "$bolt" "$input" -o "$train/optimized" -data="$train/profile.fdata" $layout -reorder-functions=user -function-order="$order" > "$train/optimized.log" 2>&1
-        cat "$train/optimized.log" >&2
+        if ! "$bolt" "$input" -o "$train/optimized" -data="$train/profile.fdata" $layout -reorder-functions=user -function-order="$order" > "$train/optimized.log" 2>&1; then
+          tail -n 3 "$train/optimized.log" >&2
+          echo "build-cli.sh: BOLT can't rewrite the reserved static $name; using -lite on the unreserved one" >&2
+          python3 "$root/scripts/static-cli.py" "$out/$name.link" "$train/linked.ld" "$root/scripts/cli-libc.order" "$train/static" >&2
+          echo "original .text too small" > "$train/optimized.log"
+        else
+          cat "$train/optimized.log" >&2
+        fi
       fi
       if grep -q 'original .text too small' "$train/optimized.log"; then
         "$bolt" "$input" -o "$train/optimized" -data="$train/profile.fdata" $layout -lite -reorder-functions=user -function-order="$order" >&2
