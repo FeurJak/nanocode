@@ -908,7 +908,7 @@ impl TempoCharge {
             .await
             .map_err(|error| {
                 Fault::http(format!(
-                    "failed to prepare Tempo Accounts access key: {error}"
+                    "failed to prepare the Tempo ID access key: {error}"
                 ))
             })?;
         let from = access_key.account();
@@ -971,9 +971,7 @@ impl TempoCharge {
             .with_chain_id(self.chain_id)
             .active_access_key()
             .map_err(|error| {
-                Fault::config(format!(
-                    "failed to select Tempo Accounts access key: {error}"
-                ))
+                Fault::config(format!("failed to select the Tempo ID access key: {error}"))
             })?;
         if access_key.account() != from {
             return Err(Fault::config(

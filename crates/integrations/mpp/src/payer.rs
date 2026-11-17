@@ -60,7 +60,7 @@ fn http_origin(url: &str) -> Option<String> {
 impl Payer {
     pub fn from_default_store() -> Result<Self, Fault> {
         let accounts = Accounts::from_default_store().map_err(|error| {
-            Fault::Config(format!("failed to open Tempo Accounts store: {error}"))
+            Fault::Config(format!("failed to read the Tempo ID sign-in: {error}"))
         })?;
         Ok(Self {
             accounts,
@@ -125,7 +125,7 @@ impl Payer {
 
     fn session_provider(&self, store: ChannelStore) -> Result<SessionProvider, Fault> {
         let chain_id = self.expected_chain_id.ok_or_else(|| {
-            Fault::config("Tempo Accounts session provider requires an expected chain ID")
+            Fault::config("the Tempo ID session provider requires an expected chain ID")
         })?;
         let key = self
             .accounts
@@ -133,9 +133,7 @@ impl Payer {
             .with_chain_id(chain_id)
             .active_access_key()
             .map_err(|error| {
-                Fault::Config(format!(
-                    "failed to select a Tempo Accounts session key: {error}"
-                ))
+                Fault::Config(format!("failed to select a Tempo ID session key: {error}"))
             })?;
         let account = key.account();
         let access_key = key.address();

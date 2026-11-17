@@ -20,15 +20,15 @@ pub const COMMANDS: [(&str, &str); 35] = [
     ("/resume", "resume a saved session"),
     (
         "/login",
-        "sign in with ChatGPT, Claude or a Tempo wallet: /login codex|claude|tempo",
+        "sign in with ChatGPT, Claude or Tempo ID: /login codex|claude|tempo",
     ),
     (
         "/fund",
-        "buy MACH by card for the Tempo wallet that pays for tools and tempo/ models: /fund [usd]",
+        "buy MACH by card on Tempo ID for the Tempo account that pays for tools and tempo/ models: /fund [usd]",
     ),
     (
-        "/wallet",
-        "open the Tempo wallet web app for the wallet nanocode pays from",
+        "/account",
+        "open Tempo ID and show the Tempo account nanocode pays from",
     ),
     (
         "/pass",

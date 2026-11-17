@@ -12,15 +12,13 @@ use nanocode_sync::Atom;
 use nanocode_tempo::{
     Address, CallScope, ClientData, KeyAuthorization, KeychainSignature, P256Signature,
     PrimitiveSignature, SelectorRule, SignatureType, SignedKeyAuthorization, SigningKey,
-    TempoSignature, TempoTransaction, base64, hex, sha256,
+    TempoSignature, TempoTransaction, sha256,
 };
 use serde::Deserialize;
 
 use super::accounts::{
-    self, AccountsError, PersistedAccessKey, PersistedAccountsState, PersistedHandleKind,
-    PersistedKeyAuthorization, PersistedKeyError, PersistedKeyHandleKind, PersistedKeyType,
-    PersistedPrivateKeyHandle, PersistedScope, PersistedSignedKeyAuthorization,
-    PersistedWebCryptoHandle,
+    self, AccountsError, PersistedCredentials, PersistedKeyError, PersistedKeyType, RpcCallScope,
+    RpcKeyAuthorization,
 };
 use super::rpc::{Rpc, RpcFault};
 use super::tx::{self, TempoTransactionRequest};
@@ -32,32 +30,15 @@ const TIP20_TOKEN_PREFIX: [u8; 12] = [0x20, 0xc0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 const TRANSFER_SELECTOR: &str = "transfer(address,uint256)";
 const APPROVE_SELECTOR: &str = "approve(address,uint256)";
 const TRANSFER_WITH_MEMO_SELECTOR: &str = "transferWithMemo(address,uint256,bytes32)";
-const JWK_KEY_TYPE: &str = "EC";
-const JWK_CURVE: &str = "P-256";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum P256SignerError {
-    UnsupportedJwk,
-    InvalidBase64 { field: &'static str },
-    InvalidLength { field: &'static str },
     InvalidPrivateKey,
-    PublicKeyMismatch,
 }
 
 impl fmt::Display for P256SignerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnsupportedJwk => f.write_str("expected an EC P-256 JWK"),
-            Self::InvalidBase64 { field } => {
-                write!(f, "invalid base64url in P-256 JWK field {field}")
-            }
-            Self::InvalidLength { field } => {
-                write!(f, "P-256 JWK field {field} must decode to 32 bytes")
-            }
             Self::InvalidPrivateKey => f.write_str("invalid P-256 private key"),
-            Self::PublicKeyMismatch => {
-                f.write_str("P-256 JWK public key does not match its private key")
-            }
         }
     }
 }
@@ -131,7 +112,7 @@ impl fmt::Display for KeyError {
                 signature_type_debug(*actual)
             ),
             Self::AuthorizationMismatch => f.write_str(
-                "request key authorization does not match the selected Tempo Accounts key",
+                "request key authorization does not match the selected Tempo ID access key",
             ),
             Self::InvalidAuthorization(reason) => {
                 write!(f, "invalid pending Tempo key authorization: {reason}")
@@ -260,18 +241,6 @@ impl KeySigner {
             .map_err(|_| P256SignerError::InvalidPrivateKey)
     }
 
-    pub(crate) fn webcrypto_jwk(jwk: &Jwk) -> Result<Self, P256SignerError> {
-        let signer = Self::p256(&jwk.d, true)?;
-        let Self::P256 { key, .. } = &signer else {
-            return Err(P256SignerError::InvalidPrivateKey);
-        };
-        let (x, y) = key.public_key();
-        if *x != jwk.x || *y != jwk.y {
-            return Err(P256SignerError::PublicKeyMismatch);
-        }
-        Ok(signer)
-    }
-
     pub(crate) const fn signature_type(&self) -> SignatureType {
         match self {
             Self::Secp256k1(_) => SignatureType::Secp256k1,
@@ -310,61 +279,6 @@ impl KeySigner {
             }
         }
     }
-}
-
-pub(crate) struct Jwk {
-    x: [u8; WORD],
-    y: [u8; WORD],
-    d: [u8; WORD],
-}
-
-impl<'de> Deserialize<'de> for Jwk {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        struct Encoded {
-            kty: String,
-            crv: String,
-            x: String,
-            y: String,
-            d: String,
-        }
-        let encoded = Encoded::deserialize(deserializer)?;
-        Self::from_base64url(
-            &encoded.kty,
-            &encoded.crv,
-            &encoded.x,
-            &encoded.y,
-            &encoded.d,
-        )
-        .map_err(serde::de::Error::custom)
-    }
-}
-
-impl Jwk {
-    pub(crate) fn from_base64url(
-        kty: &str,
-        crv: &str,
-        x: &str,
-        y: &str,
-        d: &str,
-    ) -> Result<Self, P256SignerError> {
-        if kty != JWK_KEY_TYPE || crv != JWK_CURVE {
-            return Err(P256SignerError::UnsupportedJwk);
-        }
-        Ok(Self {
-            x: jwk_field("x", x)?,
-            y: jwk_field("y", y)?,
-            d: jwk_field("d", d)?,
-        })
-    }
-}
-
-fn jwk_field(field: &'static str, value: &str) -> Result<[u8; WORD], P256SignerError> {
-    let decoded =
-        base64::decode_url(value).map_err(|_| P256SignerError::InvalidBase64 { field })?;
-    decoded
-        .try_into()
-        .map_err(|_| P256SignerError::InvalidLength { field })
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
@@ -773,8 +687,7 @@ impl fmt::Debug for Accounts {
 impl Accounts {
     pub(crate) fn from_store(path: impl Into<PathBuf>) -> Result<Self, AccountsError> {
         let path = path.into();
-        let state = accounts::load_state(&path)?;
-        let fallback_account = accounts::active_account(&state)?;
+        let fallback_account = accounts::load_credentials(&path)?.account.0;
         Ok(Self {
             source: Source::Store {
                 path,
@@ -786,7 +699,7 @@ impl Accounts {
     }
 
     pub(crate) fn from_default_store() -> Result<Self, AccountsError> {
-        Self::from_store(accounts::default_store_path()?)
+        Self::from_store(accounts::default_credentials_path()?)
     }
 
     pub(crate) fn from_access_key(selected: AccessKey) -> Self {
@@ -818,7 +731,7 @@ impl Accounts {
 
     pub(crate) fn active_account(&self) -> Result<Address, AccountsError> {
         match &self.source {
-            Source::Store { path, .. } => accounts::active_account(&accounts::load_state(path)?),
+            Source::Store { path, .. } => Ok(accounts::load_credentials(path)?.account.0),
             Source::Local { account, .. } => Ok(*account),
         }
     }
@@ -867,8 +780,8 @@ impl Accounts {
     pub(crate) fn active_access_key(&self) -> Result<AccessKey, AccountsError> {
         match &self.source {
             Source::Store { path, .. } => {
-                let state = accounts::load_state(path)?;
-                let account = accounts::active_account(&state)?;
+                let state = accounts::load_credentials(path)?;
+                let account = state.account.0;
                 let chain_id = self.chain_id.unwrap_or(state.chain_id);
                 select_access_key(
                     &state,
@@ -901,11 +814,8 @@ impl Accounts {
     ) -> Result<AccessKey, AccountsError> {
         match &self.source {
             Source::Store { path, .. } => {
-                let state = accounts::load_state(path)?;
-                let account = match request.from {
-                    Some(from) => from,
-                    None => accounts::active_account(&state)?,
-                };
+                let state = accounts::load_credentials(path)?;
+                let account = request.from.unwrap_or(state.account.0);
                 let chain_id = request
                     .chain_id
                     .or(self.chain_id)
@@ -1209,79 +1119,56 @@ fn is_tip20(address: &Address) -> bool {
     address.as_bytes().starts_with(&TIP20_TOKEN_PREFIX)
 }
 
-pub(crate) fn persisted_scopes_to_call_scopes(
-    scopes: Vec<PersistedScope>,
-) -> Result<Vec<CallScope>, PersistedKeyError> {
-    let mut grouped: Vec<CallScope> = Vec::new();
+fn rpc_call_scopes(scopes: Vec<RpcCallScope>) -> Result<Vec<CallScope>, PersistedKeyError> {
     let recipient_selectors = [
         nanocode_tempo::abi::selector(TRANSFER_SELECTOR),
         nanocode_tempo::abi::selector(APPROVE_SELECTOR),
         nanocode_tempo::abi::selector(TRANSFER_WITH_MEMO_SELECTOR),
     ];
+    let mut targets = BTreeSet::new();
+    let mut grouped = Vec::with_capacity(scopes.len());
     for scope in scopes {
-        let target = scope.address.0;
-        if target.is_zero() {
+        let target = scope.target.0;
+        if target.is_zero() || !targets.insert(target) {
             return Err(PersistedKeyError::InvalidCallScope);
         }
-        if scope.selector.is_none()
-            && scope
+        let mut selectors = BTreeSet::new();
+        let mut selector_rules = Vec::with_capacity(scope.selector_rules.len());
+        for rule in scope.selector_rules {
+            if !selectors.insert(rule.selector.0) {
+                return Err(PersistedKeyError::InvalidCallScope);
+            }
+            let recipients: Vec<Address> = rule
                 .recipients
-                .as_ref()
-                .is_some_and(|recipients| !recipients.is_empty())
-        {
-            return Err(PersistedKeyError::RecipientsWithoutSelector);
-        }
-        let index = match grouped
-            .iter()
-            .position(|candidate| candidate.target == target)
-        {
-            Some(index) => index,
-            None => {
-                grouped.push(CallScope {
-                    target,
-                    selector_rules: Vec::new(),
-                });
-                grouped.len() - 1
+                .into_iter()
+                .map(|recipient| recipient.0)
+                .collect();
+            if !recipients.is_empty() {
+                let mut unique = BTreeSet::new();
+                if !is_tip20(&target)
+                    || !recipient_selectors.contains(&rule.selector.0)
+                    || recipients
+                        .iter()
+                        .any(|recipient| recipient.is_zero() || !unique.insert(*recipient))
+                {
+                    return Err(PersistedKeyError::InvalidRecipientConstraint);
+                }
             }
-        };
-        let entry = &mut grouped[index];
-        let Some(selector) = scope.selector else {
-            continue;
-        };
-        if entry
-            .selector_rules
-            .iter()
-            .any(|rule| rule.selector == selector.0)
-        {
-            return Err(PersistedKeyError::InvalidCallScope);
+            selector_rules.push(SelectorRule {
+                selector: rule.selector.0,
+                recipients,
+            });
         }
-        let recipients: Vec<Address> = scope
-            .recipients
-            .unwrap_or_default()
-            .into_iter()
-            .map(|recipient| recipient.0)
-            .collect();
-        if !recipients.is_empty() {
-            let mut unique = BTreeSet::new();
-            if !is_tip20(&target)
-                || !recipient_selectors.contains(&selector.0)
-                || recipients
-                    .iter()
-                    .any(|recipient| recipient.is_zero() || !unique.insert(*recipient))
-            {
-                return Err(PersistedKeyError::InvalidRecipientConstraint);
-            }
-        }
-        entry.selector_rules.push(SelectorRule {
-            selector: selector.0,
-            recipients,
+        grouped.push(CallScope {
+            target,
+            selector_rules,
         });
     }
     Ok(grouped)
 }
 
-fn structured_authorization(
-    value: PersistedSignedKeyAuthorization,
+pub(crate) fn rpc_authorization(
+    value: RpcKeyAuthorization,
 ) -> Result<SignedKeyAuthorization, PersistedKeyError> {
     let expiry = value
         .expiry
@@ -1290,133 +1177,39 @@ fn structured_authorization(
             expiry => Ok(expiry),
         })
         .transpose()?;
-    let has_scopes = value.scopes.is_some();
-    let has_tip1053_fields = value.witness.is_some() || value.is_admin || value.account.is_some();
-    let limits = match value.limits {
-        Some(limits) => Some(limits.into_iter().map(Into::into).collect()),
-        None if has_scopes && !has_tip1053_fields => Some(Vec::new()),
-        None => None,
-    };
-    let allowed_calls = value
-        .scopes
-        .map(persisted_scopes_to_call_scopes)
-        .transpose()?;
     let authorization = KeyAuthorization {
         chain_id: value.chain_id.0,
         key_type: value.key_type.signature_type()?,
-        key_id: value.address.0,
+        key_id: value.key_id.0,
         expiry,
-        limits,
-        allowed_calls,
+        limits: value
+            .limits
+            .map(|limits| limits.into_iter().map(Into::into).collect()),
+        allowed_calls: value.allowed_calls.map(rpc_call_scopes).transpose()?,
         witness: value.witness.map(|witness| witness.0),
-        is_admin: value.is_admin,
+        is_admin: false,
         account: value.account.map(|account| account.0),
     };
     Ok(SignedKeyAuthorization {
         authorization,
-        signature: value.signature.try_into()?,
+        signature: accounts::rpc_signature(&value.signature)?,
     })
 }
 
-pub(crate) fn persisted_authorization(
-    value: PersistedKeyAuthorization,
-) -> Result<SignedKeyAuthorization, PersistedKeyError> {
-    match value {
-        PersistedKeyAuthorization::Structured(value) => structured_authorization(*value),
-        PersistedKeyAuthorization::Rlp(value) => {
-            let bytes =
-                hex::decode(&value).map_err(|_| PersistedKeyError::InvalidAuthorizationRlp)?;
-            SignedKeyAuthorization::decode(&bytes)
-                .map_err(|_| PersistedKeyError::InvalidAuthorizationRlp)
+fn credential_signer(credentials: &PersistedCredentials) -> Result<KeySigner, PersistedKeyError> {
+    match credentials.key_type {
+        PersistedKeyType::Secp256k1 => KeySigner::secp256k1(&credentials.private_key.0),
+        PersistedKeyType::P256 => {
+            KeySigner::p256(&credentials.private_key.0, false).map_err(PersistedKeyError::P256)
         }
-    }
-}
-
-fn effective_allowed_calls(
-    key: &PersistedAccessKey,
-    authorization: Option<&SignedKeyAuthorization>,
-) -> Result<Option<Vec<CallScope>>, PersistedKeyError> {
-    let persisted = key
-        .scopes
-        .clone()
-        .map(persisted_scopes_to_call_scopes)
-        .transpose()?;
-    let Some(authorization) = authorization else {
-        return Ok(persisted);
-    };
-    match (
-        persisted,
-        authorization.authorization.allowed_calls.as_ref(),
-    ) {
-        (Some(persisted), Some(signed)) if &persisted != signed => {
-            Err(PersistedKeyError::AuthorizationScopesMismatch)
-        }
-        (Some(_), None) => Err(PersistedKeyError::AuthorizationScopesMismatch),
-        (Some(persisted), Some(_)) => Ok(Some(persisted)),
-        (None, signed) => Ok(signed.cloned()),
-    }
-}
-
-fn hydrate_private_key(
-    key_type: PersistedKeyType,
-    secret: &[u8; WORD],
-) -> Result<KeySigner, PersistedKeyError> {
-    match key_type {
-        PersistedKeyType::P256 | PersistedKeyType::WebCrypto => {
-            KeySigner::p256(secret, false).map_err(PersistedKeyError::P256)
-        }
-        PersistedKeyType::Secp256k1 => KeySigner::secp256k1(secret),
         PersistedKeyType::WebAuthn | PersistedKeyType::Unsupported => {
             Err(PersistedKeyError::UnsupportedKeyType)
         }
     }
 }
 
-fn hydrate_access_key(key: &PersistedAccessKey) -> Result<KeySigner, PersistedKeyError> {
-    if let Some(private_key) = &key.private_key {
-        return hydrate_private_key(key.key_type, &private_key.0);
-    }
-    let handle = key
-        .handle
-        .as_ref()
-        .ok_or(PersistedKeyError::MissingCredential)?;
-    let kind = PersistedKeyHandleKind::deserialize(handle)
-        .map_err(|_| PersistedKeyError::InvalidHandle)?
-        .kind;
-    match kind {
-        PersistedHandleKind::Secp256k1 | PersistedHandleKind::P256 => {
-            let handle = PersistedPrivateKeyHandle::deserialize(handle)
-                .map_err(|_| PersistedKeyError::InvalidHandle)?;
-            let private_key = handle
-                .private_key
-                .ok_or(PersistedKeyError::MissingCredential)?;
-            let key_type = match kind {
-                PersistedHandleKind::Secp256k1 => PersistedKeyType::Secp256k1,
-                _ => PersistedKeyType::P256,
-            };
-            hydrate_private_key(key_type, &private_key.0)
-        }
-        PersistedHandleKind::WebCryptoP256 => {
-            let handle = PersistedWebCryptoHandle::deserialize(handle)
-                .map_err(|_| PersistedKeyError::InvalidHandle)?;
-            let jwk = handle
-                .jwk
-                .as_ref()
-                .map(Jwk::deserialize)
-                .transpose()
-                .map_err(|_| PersistedKeyError::InvalidHandle)?;
-            if key.public_key.is_none() {
-                return Err(PersistedKeyError::MissingPublicKey);
-            }
-            KeySigner::webcrypto_jwk(jwk.as_ref().ok_or(PersistedKeyError::MissingJwk)?)
-                .map_err(PersistedKeyError::P256)
-        }
-        PersistedHandleKind::Unsupported => Err(PersistedKeyError::UnsupportedKeyType),
-    }
-}
-
 fn select_access_key(
-    state: &PersistedAccountsState,
+    credentials: &PersistedCredentials,
     account: Address,
     chain_id: u64,
     requested_key: (Option<Address>, Option<SignatureType>),
@@ -1424,62 +1217,41 @@ fn select_access_key(
     now: u64,
     reservations: &Reservations,
 ) -> Result<AccessKey, AccountsError> {
+    let missing = AccountsError::MissingAccessKey { account, chain_id };
     let (preferred, signature_type) = requested_key;
-    for key in state
-        .access_keys
-        .iter()
-        .filter(|key| key.chain_id == chain_id && key.access.0 == account)
-        .filter(|key| preferred.is_none_or(|preferred| key.address.0 == preferred))
-        .filter(|key| key.expiry.is_none_or(|expiry| expiry > now))
-    {
-        let Ok(signer) = hydrate_access_key(key) else {
-            continue;
-        };
-        if signer.address() != key.address.0
-            || signature_type.is_some_and(|expected| signer.signature_type() != expected)
-        {
-            continue;
-        }
-        let Ok(key_authorization) = key
-            .key_authorization
-            .clone()
-            .map(persisted_authorization)
-            .transpose()
-        else {
-            continue;
-        };
-        if key_authorization.as_ref().is_some_and(|signed| {
-            let authorization = &signed.authorization;
-            authorization.key_id != key.address.0
-                || authorization.chain_id != chain_id
-                || authorization.key_type != signer.signature_type()
-                || authorization.expiry.is_some_and(|expiry| expiry <= now)
-                || authorization
-                    .account
-                    .is_some_and(|authorized| authorized != account)
-        }) {
-            continue;
-        }
-        if key_authorization.as_ref().is_some_and(|signed| {
-            signed.authorization.account.is_none() && recover_signer(signed) != Some(account)
-        }) {
-            continue;
-        }
-        let Ok(allowed_calls) = effective_allowed_calls(key, key_authorization.as_ref()) else {
-            continue;
-        };
-        let should_match_scopes = preferred.is_none() || calls.is_some();
-        if should_match_scopes && !scopes_match(allowed_calls.as_deref(), calls) {
-            continue;
-        }
-        return Ok(AccessKey {
-            account,
-            address: key.address.0,
-            chain_id,
-            signer,
-            key_authorization: key_authorization.map(Box::new),
-            reservations: reservations.clone(),
-        });
+    if credentials.account.0 != account || credentials.chain_id != chain_id {
+        return Err(missing);
     }
-    Err(AccountsError::MissingAccessKey { account, chain_id })
+    let Ok(signer) = credential_signer(credentials) else {
+        return Err(missing);
+    };
+    let Ok(signed) = rpc_authorization(credentials.key_authorization.clone()) else {
+        return Err(missing);
+    };
+    let authorization = &signed.authorization;
+    if preferred.is_some_and(|preferred| preferred != signer.address())
+        || signature_type.is_some_and(|expected| signer.signature_type() != expected)
+        || authorization.key_id != signer.address()
+        || authorization.chain_id != chain_id
+        || authorization.key_type != signer.signature_type()
+        || authorization.expiry.is_some_and(|expiry| expiry <= now)
+        || authorization
+            .account
+            .is_some_and(|authorized| authorized != account)
+        || (authorization.account.is_none() && recover_signer(&signed) != Some(account))
+    {
+        return Err(missing);
+    }
+    let should_match_scopes = preferred.is_none() || calls.is_some();
+    if should_match_scopes && !scopes_match(authorization.allowed_calls.as_deref(), calls) {
+        return Err(missing);
+    }
+    Ok(AccessKey {
+        account,
+        address: signer.address(),
+        chain_id,
+        signer,
+        key_authorization: Some(Box::new(signed)),
+        reservations: reservations.clone(),
+    })
 }

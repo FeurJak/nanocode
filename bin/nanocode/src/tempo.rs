@@ -788,7 +788,7 @@ impl Wallet {
             .await
             .map_err(|error| error.to_string())?
             .map_err(|error| {
-                format!("{error}; sign in to a Tempo wallet with /login tempo to pay {host}")
+                format!("{error}; sign in with Tempo ID with /login tempo to pay {host}")
             })?;
         let client = self.payments.client()?;
         let mut held = (U256::ZERO, None);
@@ -799,7 +799,7 @@ impl Wallet {
             }
         }
         held.1
-            .ok_or_else(|| format!("{host} sponsors no gas, and the Tempo wallet holds no USDC.e, USDT0 or pathUSD to pay it in; --tempo-fee-token names another token"))?
+            .ok_or_else(|| format!("{host} sponsors no gas, and the Tempo account holds no USDC.e, USDT0 or pathUSD to pay it in; --tempo-fee-token names another token"))?
             .parse()
             .map_err(|error| format!("{error}"))
     }
@@ -812,7 +812,7 @@ impl Wallet {
                     error => error.to_string(),
                 };
                 format!(
-                    "{error}; sign in to a Tempo wallet with /login tempo to pay {}",
+                    "{error}; sign in with Tempo ID with /login tempo to pay {}",
                     self.url.host_str().unwrap_or_default()
                 )
             })?
@@ -844,7 +844,7 @@ impl Wallet {
             notify(
                 &self.payments.listeners,
                 Some(format!(
-                    "the Tempo wallet holds too little to pay {} ({error}); /fund buys MACH by card, and nanocode pays with it once it arrives",
+                    "the Tempo account holds too little to pay {} ({error}); /fund buys MACH by card, and nanocode pays with it once it arrives",
                     self.url.host_str().unwrap_or_default()
                 )),
             );
@@ -1383,9 +1383,9 @@ impl Tempo {
     pub(crate) const NAME: &str = "tempo";
     pub(crate) const OUTPUT_TOKENS: u32 = 32_768;
     pub(crate) const PREFIX: &str = "tempo/";
-    pub(crate) const ABOUT: &str = "models the Tempo gateway serves (OpenAI, Anthropic, Workers AI, Vercel, OpenRouter), paid from the Tempo wallet";
+    pub(crate) const ABOUT: &str = "models the Tempo gateway serves (OpenAI, Anthropic, Workers AI, Vercel, OpenRouter), paid from your Tempo ID account";
     pub(crate) const BOUNDLESS: &str = "boundless";
-    pub(crate) const BOUNDLESS_ABOUT: &str = "models Boundless serves at api.inference.boundless.network, paid directly from the Tempo wallet";
+    pub(crate) const BOUNDLESS_ABOUT: &str = "models Boundless serves at api.inference.boundless.network, paid directly from your Tempo ID account";
 
     fn new(payments: &Payments, args: &GatewayArgs, identity: Arc<Identity>) -> Result<Self> {
         let terms = Terms::tempo(args)?;
