@@ -1197,7 +1197,9 @@ class TimeSeries_DateFormatter(mpl.ticker.Formatter):  # pyright: ignore[reportA
         else:
             fmt = self.formatdict.pop(x, "")
             if isinstance(fmt, np.bytes_):
-                fmt = fmt.decode("utf-8")
+                # nanocode: .item() gives a plain bytes; bytes methods called
+                # directly on numpy's bytes_ scalar don't see its bytes yet.
+                fmt = fmt.item().decode("utf-8")
             # error: "BaseOffset" has no attribute "_period_dtype_code"
             dtype_code = self.freq._period_dtype_code  # type: ignore[attr-defined]
             freq_group = FreqGroup.from_period_dtype_code(dtype_code)
