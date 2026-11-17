@@ -324,13 +324,23 @@ fn absolute(cwd: &[u8], path: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(not(target_family = "wasm"))]
-fn wait(duration: Duration) -> io::Result<()> {
-    std::thread::sleep(duration);
-    Ok(())
+fn wait(duration: Duration, stop: &Stop) -> io::Result<bool> {
+    const POLL: Duration = Duration::from_millis(20);
+    let until = Instant::now() + duration;
+    loop {
+        if stop() {
+            return Ok(false);
+        }
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(true);
+        }
+        std::thread::sleep(left.min(POLL));
+    }
 }
 
 #[cfg(target_family = "wasm")]
-fn wait(_: Duration) -> io::Result<()> {
+fn wait(_: Duration, _: &Stop) -> io::Result<bool> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
@@ -619,10 +629,20 @@ mod _host {
         let slept = state(vm, |state| {
             let slept = state.slept.saturating_add(duration);
             let left = state.limits.time.saturating_sub(state.started.elapsed());
-            if slept > state.limits.sleep || wait(duration.min(left)).is_err() {
-                state.refused.get_or_insert(Limit::Sleep);
-            } else if duration > left {
-                state.refused.get_or_insert(Limit::Time);
+            let waited = if slept > state.limits.sleep {
+                Err(io::ErrorKind::TimedOut.into())
+            } else {
+                wait(duration.min(left), &state.stop)
+            };
+            match waited {
+                Err(_) => {
+                    state.refused.get_or_insert(Limit::Sleep);
+                }
+                Ok(false) => state.cancelled = true,
+                Ok(true) if duration > left => {
+                    state.refused.get_or_insert(Limit::Time);
+                }
+                Ok(true) => {}
             }
             state.slept = slept;
             Ok(!state.stopped())
