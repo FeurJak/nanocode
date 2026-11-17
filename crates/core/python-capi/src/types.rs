@@ -6,7 +6,7 @@ use std::{
 
 use rustpython_vm::{
     AsObject, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
-    builtins::{PyTuple, PyType, PyTypeRef},
+    builtins::{PyStr, PyTuple, PyType, PyTypeRef},
     function::{Callee, FuncArgs, ItemDoc, PyMethodDef, PyMethodFlags},
     types::{PyTypeFlags, PyTypeSlots},
 };
@@ -1215,6 +1215,7 @@ pub fn c_type(vm: &VirtualMachine, ty: *mut Type) -> PyResult<PyTypeRef> {
             (*ty).dict = new_ref(vm, dict.as_object());
         }
     }
+    intern_keys(vm, &class);
     Ok(class)
 }
 
@@ -1352,5 +1353,19 @@ pub unsafe extern "C" fn PyType_GetFlags(ty: *mut Type) -> std::ffi::c_ulong {
 pub unsafe extern "C" fn PyType_Modified(ty: *mut Type) {
     if let Some(class) = bridge::static_type(ty) {
         class.modified();
+        if let Some(vm) = bridge::machine() {
+            intern_keys(vm, &class);
+        }
+    }
+}
+
+fn intern_keys(vm: &VirtualMachine, class: &PyType) {
+    let Some(dict) = class.attributes.as_dict() else {
+        return;
+    };
+    for key in dict.keys_vec() {
+        if let Ok(key) = key.downcast_exact::<PyStr>(vm) {
+            vm.ctx.intern_str(key);
+        }
     }
 }

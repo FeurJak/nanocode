@@ -1480,11 +1480,31 @@ pub extern "C" fn PyUnicode_AsUTF8String(pointer: *mut Object) -> *mut Object {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn PyUnicode_InternFromString(data: *const c_char) -> *mut Object {
-    PyUnicode_FromString(data)
+    let mut text = PyUnicode_FromString(data);
+    if !text.is_null() {
+        PyUnicode_InternInPlace(&raw mut text);
+    }
+    text
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn PyUnicode_InternInPlace(_pointer: *mut *mut Object) {}
+pub extern "C" fn PyUnicode_InternInPlace(pointer: *mut *mut Object) {
+    if pointer.is_null() || unsafe { (*pointer).is_null() } {
+        return;
+    }
+    guard((), |vm| {
+        let Ok(text) = arg(vm, unsafe { *pointer })?.downcast_exact::<PyStr>(vm) else {
+            return Ok(());
+        };
+        let interned = vm.ctx.intern_str(text);
+        let replacement = new_ref(vm, interned.as_object());
+        unsafe {
+            decref(*pointer);
+            *pointer = replacement;
+        }
+        Ok(())
+    });
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _PyUnicode_ToLowercase(point: u32) -> u32 {
@@ -1960,7 +1980,7 @@ pub extern "C" fn PyDict_SetItemString(
 ) -> c_int {
     status(|vm| {
         let target = dict(vm, pointer)?;
-        target.set_item(name(vm, key)?, arg(vm, value)?, vm)?;
+        target.set_item(vm.ctx.intern_str(name(vm, key)?), arg(vm, value)?, vm)?;
         dict_changed(pointer, &target);
         Ok(())
     })
