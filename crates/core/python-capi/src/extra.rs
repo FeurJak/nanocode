@@ -1096,7 +1096,14 @@ pub extern "C" fn PySet_New(iterable: *mut Object) -> *mut Object {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn PyFrozenSet_New(iterable: *mut Object) -> *mut Object {
-    object(|vm| new_set(vm, vm.ctx.types.frozenset_type.as_object(), iterable))
+    object(|vm| {
+        let items = if iterable.is_null() {
+            Vec::new()
+        } else {
+            vm.extract_elements_with(&*arg(vm, iterable)?, Ok)?
+        };
+        Ok(rustpython_vm::builtins::PyFrozenSet::from_iter(vm, items)?.into_pyobject(vm))
+    })
 }
 
 #[unsafe(no_mangle)]
