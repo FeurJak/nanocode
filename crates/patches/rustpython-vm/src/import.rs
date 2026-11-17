@@ -30,27 +30,79 @@ pub(crate) fn init_importlib_base(vm: &mut VirtualMachine) -> PyResult<PyObjectR
     Ok(importlib)
 }
 
+#[derive(Clone, Copy)]
+pub struct ExternalFrozen {
+    pub find: fn(&str) -> Option<bool>,
+    pub load: fn(&str) -> Option<Vec<u8>>,
+}
+
+static EXTERNAL_FROZEN: std::sync::OnceLock<ExternalFrozen> = std::sync::OnceLock::new();
+
+pub fn set_external_frozen(external: ExternalFrozen) {
+    let _ = EXTERNAL_FROZEN.set(external);
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Frozen {
+    pub package: bool,
+    code: Option<crate::frozen::FrozenCodeObject<&'static [u8]>>,
+}
+
+pub(crate) fn look_up_frozen(vm: &VirtualMachine, name: &str) -> Option<Frozen> {
+    if let Some(frozen) = vm.state.frozen.get(name) {
+        return Some(Frozen {
+            package: frozen.package,
+            code: Some(frozen.code),
+        });
+    }
+    let package = (EXTERNAL_FROZEN.get()?.find)(name)?;
+    Some(Frozen {
+        package,
+        code: None,
+    })
+}
+
+pub(crate) fn frozen_code(
+    vm: &VirtualMachine,
+    name: &str,
+    frozen: Frozen,
+) -> PyResult<PyRef<PyCode>> {
+    if let Some(code) = frozen.code {
+        return Ok(PyCode::new_ref_from_frozen(vm, code));
+    }
+    let bytes = EXTERNAL_FROZEN
+        .get()
+        .and_then(|external| (external.load)(name))
+        .ok_or_else(|| {
+            vm.new_import_error(
+                format!("the frozen code of {name} could not be read"),
+                vm.ctx.new_utf8_str(name),
+            )
+        })?;
+    Ok(PyCode::new_ref_from_frozen(
+        vm,
+        crate::frozen::FrozenCodeObject { bytes },
+    ))
+}
+
+fn no_frozen(vm: &VirtualMachine, name: &str) -> PyRef<PyBaseException> {
+    vm.new_import_error(
+        format!("No such frozen object named {name}"),
+        vm.ctx.new_utf8_str(name),
+    )
+}
+
 pub fn make_frozen(vm: &VirtualMachine, name: &str) -> PyResult<PyRef<PyCode>> {
-    let frozen = vm.state.frozen.get(name).ok_or_else(|| {
-        vm.new_import_error(
-            format!("No such frozen object named {name}"),
-            vm.ctx.new_utf8_str(name),
-        )
-    })?;
-    Ok(PyCode::new_ref_from_frozen(vm, frozen.code))
+    let frozen = look_up_frozen(vm, name).ok_or_else(|| no_frozen(vm, name))?;
+    frozen_code(vm, name, frozen)
 }
 
 pub fn import_frozen(vm: &VirtualMachine, module_name: &str) -> PyResult {
-    let frozen = vm.state.frozen.get(module_name).ok_or_else(|| {
-        vm.new_import_error(
-            format!("No such frozen object named {module_name}"),
-            vm.ctx.new_utf8_str(module_name),
-        )
-    })?;
+    let frozen = look_up_frozen(vm, module_name).ok_or_else(|| no_frozen(vm, module_name))?;
     let module = import_code_obj(
         vm,
         module_name,
-        PyCode::new_ref_from_frozen(vm, frozen.code),
+        frozen_code(vm, module_name, frozen)?,
         false,
     )?;
     debug_assert!(module.get_attr(identifier!(vm, __name__), vm).is_ok());

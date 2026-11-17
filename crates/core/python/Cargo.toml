@@ -14,16 +14,13 @@ autobenches = false
 nanocode-compression.workspace = true
 nanocode-platform.workspace = true
 nanocode-python-capi.workspace = true
+nanocode-python-data.workspace = true
 nanocode-shell.workspace = true
 psh-engine.workspace = true
 ruff_python_ast.workspace = true
 ruff_python_parser.workspace = true
-rustpython-pylib.workspace = true
 rustpython-stdlib.workspace = true
 rustpython-vm.workspace = true
-
-[build-dependencies]
-nanocode-compression.workspace = true
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 nanocode-sync.workspace = true

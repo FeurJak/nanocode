@@ -1,5 +1,4 @@
 use crate::builtins::{PyCode, PyStrInterned};
-use crate::frozen::FrozenModule;
 use crate::{Py, VirtualMachine, builtins::PyBaseExceptionRef};
 use core::borrow::Borrow;
 
@@ -46,13 +45,8 @@ impl FrozenError {
 }
 
 // look_up_frozen + use_frozen in import.c
-fn find_frozen(name: &str, vm: &VirtualMachine) -> Result<FrozenModule, FrozenError> {
-    let frozen = vm
-        .state
-        .frozen
-        .get(name)
-        .copied()
-        .ok_or(FrozenError::NotFound)?;
+fn find_frozen(name: &str, vm: &VirtualMachine) -> Result<crate::import::Frozen, FrozenError> {
+    let frozen = crate::import::look_up_frozen(vm, name).ok_or(FrozenError::NotFound)?;
 
     // Bootstrap modules are always available regardless of override flag
     if matches!(
@@ -297,7 +291,7 @@ mod _imp {
         // Frozen modules are stored in their own encoding, so it has to be
         // re-serialized rather than handed out as a view of the stored bytes.
         let data = if withdata {
-            let code = PyCode::new_ref_from_frozen(vm, info.code);
+            let code = import::frozen_code(vm, name_str, info)?;
             let dumps = vm.import("marshal", 0)?.get_attr("dumps", vm)?;
             let bytes = dumps.call((code,), vm)?;
             Some(PyMemoryView::from_object(&bytes, vm)?.into_ref(&vm.ctx))

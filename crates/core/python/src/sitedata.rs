@@ -4,7 +4,7 @@ use nanocode_compression::inflate::{InflateStatus, inflate_all};
 
 use crate::{Kind, Stat};
 
-include!(concat!(env!("OUT_DIR"), "/site_data.rs"));
+use nanocode_python_data::{FILES, read as read_entry};
 
 fn root() -> &'static [u8] {
     static ROOT: OnceLock<Vec<u8>> = OnceLock::new();
@@ -26,7 +26,7 @@ fn relative(path: &[u8]) -> Option<&str> {
     std::str::from_utf8(rest).ok()
 }
 
-fn file(path: &[u8]) -> Option<&'static (&'static str, u32, &'static [u8])> {
+fn file(path: &[u8]) -> Option<&'static (&'static str, u32, u32, u32)> {
     let name = relative(path)?;
     FILES
         .binary_search_by(|entry| entry.0.cmp(name))
@@ -70,12 +70,13 @@ pub fn stat(path: &[u8]) -> Option<Stat> {
 
 pub fn read(path: &[u8]) -> Option<io::Result<Vec<u8>>> {
     let entry = file(path)?;
-    Some(match inflate_all(-15, entry.2, entry.1 as usize) {
+    let corrupt = || io::Error::new(io::ErrorKind::InvalidData, "corrupt embedded site data");
+    let Some(packed) = read_entry(entry.2, entry.3) else {
+        return Some(Err(corrupt()));
+    };
+    Some(match inflate_all(-15, &packed, entry.1 as usize) {
         Ok((InflateStatus::StreamEnd, data)) if data.len() == entry.1 as usize => Ok(data),
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "corrupt embedded site data",
-        )),
+        _ => Err(corrupt()),
     })
 }
 

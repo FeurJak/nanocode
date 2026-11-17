@@ -42,6 +42,7 @@ members = [
     "crates/core/numeric",
     "crates/core/flags",
     "crates/core/python",
+    "crates/core/python-data",
     "crates/core/python-capi",
     "crates/core/schema",
     "crates/core/shell",
@@ -137,6 +138,7 @@ nanocode-mcp-http = { version = "0.7.0", path = "crates/core/mcp-http" }
 nanocode-platform = { version = "0.7.0", path = "crates/core/platform" }
 nanocode-python = { version = "0.7.0", path = "crates/core/python" }
 nanocode-python-capi = { version = "0.7.0", path = "crates/core/python-capi" }
+nanocode-python-data = { version = "0.7.0", path = "crates/core/python-data" }
 nanocode-machine = { version = "0.7.0", path = "crates/core/machine" }
 nanocode-sync = { version = "0.7.0", path = "crates/core/sync" }
 nanocode-trace = { version = "0.7.0", path = "crates/core/trace" }
@@ -182,7 +184,9 @@ nanocode-jpeg = { version = "0.7.0", path = "crates/core/jpeg" }
 nanocode-webp = { version = "0.7.0", path = "crates/core/webp" }
 ruff_python_ast = { package = "rustpython-ruff_python_ast", version = "=0.16.5" }
 ruff_python_parser = { package = "rustpython-ruff_python_parser", version = "=0.16.5" }
-rustpython-pylib = { version = "=0.6.0", features = ["freeze-stdlib"] }
+rustpython-compiler = "=0.6.0"
+rustpython-compiler-core = "=0.6.0"
+rustpython-pylib = "=0.6.0"
 rustpython-stdlib = { version = "=0.6.0", default-features = false, features = ["compiler"] }
 rustpython-vm = { version = "=0.6.0", default-features = false, features = ["compiler", "gc", "freeze-stdlib"] }
 

@@ -724,10 +724,10 @@ dependencies = [
  "nanocode-compression",
  "nanocode-platform",
  "nanocode-python-capi",
+ "nanocode-python-data",
  "nanocode-shell",
  "nanocode-sync",
  "psh-engine",
- "rustpython-pylib",
  "rustpython-ruff_python_ast",
  "rustpython-ruff_python_parser",
  "rustpython-stdlib",
@@ -750,6 +750,16 @@ version = "0.7.0"
 dependencies = [
  "nanocode-python",
  "nanocode-sys",
+]
+
+[[package]]
+name = "nanocode-python-data"
+version = "0.7.0"
+dependencies = [
+ "nanocode-compression",
+ "rustpython-compiler",
+ "rustpython-compiler-core",
+ "rustpython-pylib",
 ]
 
 [[package]]
@@ -1335,10 +1345,6 @@ dependencies = [
 [[package]]
 name = "rustpython-pylib"
 version = "0.6.0"
-dependencies = [
- "rustpython-compiler-core",
- "rustpython-derive",
-]
 
 [[package]]
 name = "rustpython-ruff_python_ast"

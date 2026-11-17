@@ -275,6 +275,10 @@ impl Python {
         settings.ignore_environment = true;
         settings.isolated = true;
         settings.hash_seed = Some(u32::from_le_bytes(seed));
+        rustpython_vm::import::set_external_frozen(rustpython_vm::import::ExternalFrozen {
+            find: nanocode_python_data::find_module,
+            load: nanocode_python_data::load_module,
+        });
         let builder = Interpreter::builder(settings);
         let defs = rustpython_stdlib::stdlib_module_defs(&builder.ctx);
         let host = host::module_def(&builder.ctx);
@@ -287,8 +291,6 @@ impl Python {
             .add_native_module(host)
             .add_native_module(kiwisolver)
             .add_native_module(matplotlib)
-            .add_frozen_modules(rustpython_pylib::FROZEN_STDLIB)
-            .add_frozen_modules(rustpython_vm::py_freeze!(dir = "../site"))
             .build();
         let (boot, depth) = interpreter.enter(|vm| (vm.ctx.new_dict(), vm.recursion_limit.get()));
         Ok(Self {
