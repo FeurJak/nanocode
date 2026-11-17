@@ -10,8 +10,8 @@ use rustpython_vm::{
     AsObject, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromBorrowedObject,
     VirtualMachine,
     builtins::{
-        PyBaseException, PyBaseExceptionRef, PyDict, PyIntRef, PyList, PySlice, PyStr, PyTraceback,
-        PyTuple, PyType,
+        PyBaseException, PyBaseExceptionRef, PyDict, PyIntRef, PyList, PyMemoryView, PySlice,
+        PyStr, PyTraceback, PyTuple, PyType,
     },
     function::FuncArgs,
     protocol::PyBuffer,
@@ -2505,6 +2505,13 @@ pub unsafe extern "C" fn PyObject_GetBuffer(
     {
         return unsafe { getbuffer(pointer, view, flags) };
     }
+    let exporter = whole_view_exporter(pointer, flags);
+    if !exporter.is_null()
+        && let Some(getbuffer) =
+            crate::buffer::procs(unsafe { (*exporter).ty }).and_then(|procs| procs.getbuffer)
+    {
+        return unsafe { getbuffer(exporter, view, flags) };
+    }
     guard(-1, |vm| {
         let value = arg(vm, pointer)?;
         let buffer = PyBuffer::try_from_borrowed_object(vm, &value)?;
@@ -2524,6 +2531,35 @@ pub unsafe extern "C" fn PyObject_GetBuffer(
         }
         unsafe { (*view).internal = copy.cast() };
         Ok(0)
+    })
+}
+
+fn whole_view_exporter(pointer: *mut Object, flags: c_int) -> *mut Object {
+    if pointer.is_null() {
+        return null_mut();
+    }
+    guard(null_mut(), |vm| {
+        let value = arg(vm, pointer)?;
+        let Some(memory) = value.downcast_ref::<PyMemoryView>() else {
+            return Ok(null_mut());
+        };
+        let exporter = memory.exporter_buffer();
+        let (mine, theirs) = (memory.view_desc(), &exporter.desc);
+        let whole = mine.len == theirs.len
+            && mine.offset == theirs.offset
+            && mine.itemsize == theirs.itemsize
+            && mine.format == theirs.format
+            && mine.dim_desc == theirs.dim_desc
+            && (flags & BUFFER_WRITABLE == 0 || !mine.readonly);
+        let held = match exporter.obj.downcast_ref::<crate::buffer::CBuffer>() {
+            Some(holder) if whole => holder.view(),
+            _ => null_mut(),
+        };
+        Ok(if held.is_null() {
+            null_mut()
+        } else {
+            unsafe { (*held).obj }
+        })
     })
 }
 
