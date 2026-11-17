@@ -9,6 +9,9 @@ nanocode/time.c
 src/internal/floatscan.c
 src/internal/intscan.c
 src/internal/shgetc.c
+src/math/nan.c
+src/math/nanf.c
+src/math/nanl.c
 src/multibyte/btowc.c
 src/multibyte/internal.c
 src/multibyte/mblen.c
