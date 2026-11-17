@@ -22,9 +22,9 @@ use rustpython_vm::{
 
 pub use capi::{Extension, add_extensions};
 pub use psh::UTILITY;
-pub use rustpython_vm;
 #[cfg(not(target_family = "wasm"))]
 pub use psh::serve;
+pub use rustpython_vm;
 pub use rustpython_vm::vm::limit::Metered;
 pub use shell::{Budget, Command};
 pub use tree::{Delta, Entry, Tree};
