@@ -295,7 +295,10 @@ def chdir(path):
 
 
 class _File:
-    __slots__ = ('path', 'flags', 'data', 'pos', 'base', 'dir')
+    __slots__ = ('path', 'flags', 'data', 'pos', 'base', 'dir', 'size')
+
+
+_RANGED = 1 << 20
 
 
 _files = {}
@@ -348,7 +351,12 @@ def open(path, flags, mode=0o777, *, dir_fd=None):
                 file.base = size
                 file.data = bytearray()
             else:
-                file.data = bytearray(_host.read(target))
+                if access == O_RDONLY and size >= _RANGED and _host.ranged():
+                    file.data = None
+                    file.size = size
+                else:
+                    data = _host.read(target)
+                    file.data = data if access == O_RDONLY else bytearray(data)
     fd = _next
     _next += 1
     _files[fd] = file
@@ -401,7 +409,10 @@ def read(fd, size):
     file = _file(fd)
     if file.flags & O_ACCMODE == O_WRONLY:
         raise _fail(_errno.EBADF)
-    data = bytes(file.data[file.pos:file.pos + size])
+    if file.data is None:
+        data = _host.read_at(file.path, file.pos, size)
+    else:
+        data = bytes(file.data[file.pos:file.pos + size])
     file.pos += len(data)
     return data
 
@@ -410,7 +421,10 @@ def _readall(fd):
     if fd == 0:
         return _host.input(-1)
     file = _file(fd)
-    data = bytes(file.data[file.pos:])
+    if file.data is None:
+        data = _host.read_at(file.path, file.pos, max(file.size - file.pos, 0))
+    else:
+        data = bytes(file.data[file.pos:])
     file.pos += len(data)
     return data
 
@@ -453,7 +467,7 @@ def lseek(fd, pos, how):
     if how == 1:
         pos += file.pos
     elif how == 2:
-        pos += len(file.data)
+        pos += file.size if file.data is None else len(file.data)
     elif how != 0:
         raise _fail(_errno.EINVAL)
     if pos < 0:

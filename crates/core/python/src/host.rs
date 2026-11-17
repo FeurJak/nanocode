@@ -500,6 +500,31 @@ mod _host {
     }
 
     #[pyfunction]
+    fn read_at(
+        path: ArgBytesLike,
+        offset: u64,
+        len: usize,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyBytesRef> {
+        let path = path.borrow_buf();
+        files(vm, &path, |state| match crate::sitedata::read(&path) {
+            Some(data) => {
+                let data = data?;
+                let start = usize::try_from(offset).unwrap_or(usize::MAX).min(data.len());
+                let end = start.saturating_add(len).min(data.len());
+                Ok(data[start..end].to_vec())
+            }
+            None => state.files.read_at(&path, offset, len, state.limits.file),
+        })
+        .map(|data| vm.ctx.new_bytes(data))
+    }
+
+    #[pyfunction]
+    fn ranged(vm: &VirtualMachine) -> PyResult<bool> {
+        files(vm, b"", |state| Ok(state.files.ranged()))
+    }
+
+    #[pyfunction]
     fn write(path: ArgBytesLike, data: ArgBytesLike, how: u8, vm: &VirtualMachine) -> PyResult<()> {
         let path = path.borrow_buf();
         let data = data.borrow_buf();

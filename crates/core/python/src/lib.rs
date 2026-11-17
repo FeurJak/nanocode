@@ -90,6 +90,17 @@ pub trait Files {
     fn remove(&self, path: &[u8], what: Remove) -> io::Result<()>;
     fn rename(&self, from: &[u8], to: &[u8]) -> io::Result<()>;
 
+    fn read_at(&self, path: &[u8], offset: u64, len: usize, limit: u64) -> io::Result<Vec<u8>> {
+        let data = self.read(path, limit)?;
+        let start = usize::try_from(offset).unwrap_or(usize::MAX).min(data.len());
+        let end = start.saturating_add(len).min(data.len());
+        Ok(data[start..end].to_vec())
+    }
+
+    fn ranged(&self) -> bool {
+        false
+    }
+
     fn spawns(&self) -> bool {
         false
     }
