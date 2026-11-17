@@ -46,6 +46,7 @@ from pandas.io.parsers.base_parser import (
 # read_csv holds a few MiB of tokenizer buffers rather than the whole file's
 # (a 5 MB CSV: +43 -> +27 MiB held in python.wasm, CPython RSS +18 -> +4.5 MiB).
 parsers.DEFAULT_BUFFER_HEURISTIC = 2**16
+_TOKENIZE_CHUNKSIZE = 2**15
 
 if TYPE_CHECKING:
     from collections.abc import (
@@ -109,6 +110,7 @@ class CParserWrapper(ParserBase):
         if kwds["dtype_backend"] == "pyarrow":
             # Fail here loudly instead of in cython after reading
             import_optional_dependency("pyarrow")
+        kwds.setdefault("tokenize_chunksize", _TOKENIZE_CHUNKSIZE)
         self._reader = parsers.TextReader(src, **kwds)
         # Let the pyarrow string fast path return raw pending-column handles;
         # read() wraps them into one ExtensionArray per column at the end.
