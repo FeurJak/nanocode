@@ -158,7 +158,7 @@ impl<T> fmt::Debug for Dict<T> {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[repr(transparent)]
-struct IndexEntry(i64);
+struct IndexEntry(isize);
 
 impl IndexEntry {
     const FREE: Self = Self(-1);
@@ -168,7 +168,7 @@ impl IndexEntry {
     /// idx must not be one of FREE or DUMMY
     const unsafe fn from_index_unchecked(idx: usize) -> Self {
         debug_assert!((idx as isize) >= 0);
-        Self(idx as i64)
+        Self(idx as isize)
     }
 
     const fn index(self) -> Option<usize> {
@@ -249,12 +249,26 @@ impl<T> Default for Dict<T> {
 
 #[derive(Clone)]
 struct DictEntry<T> {
-    hash: HashValue,
+    hash: StoredHash,
     key: PyObjectRef,
     index: IndexIndex,
     value: T,
 }
 const _: () = assert!(size_of::<DictEntry<PyObjectRef>>() == size_of::<Option<DictEntry<PyObjectRef>>>());
+
+#[derive(Clone, Copy)]
+struct StoredHash([u32; 2]);
+
+impl StoredHash {
+    const fn new(hash: HashValue) -> Self {
+        let bits = hash as u64;
+        Self([bits as u32, (bits >> 32) as u32])
+    }
+
+    const fn get(self) -> HashValue {
+        ((self.0[1] as u64) << 32 | self.0[0] as u64) as HashValue
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct DictSize {
@@ -329,7 +343,7 @@ impl<T> DictInner<T> {
             // SAFETY: compaction above removed every hole, so every slot is
             // occupied here.
             let entry = entry.as_mut().unwrap();
-            let mut idxs = GenIndexes::new(entry.hash, mask);
+            let mut idxs = GenIndexes::new(entry.hash.get(), mask);
             loop {
                 let index_index = idxs.next();
                 unsafe {
@@ -357,7 +371,7 @@ impl<T> DictInner<T> {
         index_entry: IndexEntry,
     ) -> usize {
         let entry = DictEntry {
-            hash: hash_value,
+            hash: StoredHash::new(hash_value),
             key,
             value,
             index,
@@ -1155,7 +1169,7 @@ impl<T: Clone> Dict<T> {
             let entry = inner.entries.get(position)?;
             position += 1;
             if let Some(entry) = entry {
-                break Some((position, entry.key.clone(), entry.value.clone(), entry.hash));
+                break Some((position, entry.key.clone(), entry.value.clone(), entry.hash.get()));
             }
         }
     }
@@ -1197,7 +1211,7 @@ impl<T: Clone> Dict<T> {
         self.read()
             .entries
             .iter()
-            .filter_map(|v| v.as_ref().map(|v| (v.key.clone(), v.hash)))
+            .filter_map(|v| v.as_ref().map(|v| (v.key.clone(), v.hash.get())))
             .collect()
     }
 
@@ -1225,7 +1239,7 @@ impl<T: Clone> Dict<T> {
         self.read()
             .entries
             .iter()
-            .filter_map(|v| v.as_ref().map(|v| v.hash))
+            .filter_map(|v| v.as_ref().map(|v| v.hash.get()))
             .fold(init, f)
     }
 
@@ -1304,7 +1318,7 @@ impl<T: Clone> Dict<T> {
                             )]
                             if key.key_is(&entry.key) {
                                 return Ok((ret, Some(extract(entry))));
-                            } else if entry.hash == hash_value {
+                            } else if entry.hash.get() == hash_value {
                                 break (entry.key.clone(), ret);
                             } else {
                                 // entry mismatch
