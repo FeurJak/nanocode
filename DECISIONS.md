@@ -2282,3 +2282,7 @@ RustPython looks a class attribute up only through the intern table: generic get
 ## Python: only dunder names in a C type's dict update its slots (2026-11-17)
 
 Syncing a C type's `tp_dict` into its RustPython type called `update_slot` for every name starting with `__`, which includes Cython's private `__pyx_*` names. Debug builds assert in `update_slot` that the name is a slot name, so importing pandas' offsets aborted there. Only names that start and end with `__` are passed now; release builds behave as before, since such names never matched a slot.
+
+## Python: numpy.bytes_ scalars carry their bytes (2026-11-17)
+
+`numpy.bytes_` subclasses bytes with bytes' C layout and fills its data after `tp_alloc`. Wrapping such an object made a plain C-object proxy, so bytes' methods saw no payload: `len()` was garbage and `bytes(x)`, `x == b"abc"` and `x.decode()` failed. A C object whose class is a bytes subclass and whose basic size is at most bytes' now becomes a `PyBytes` payload of that class, built from `ob_size` and `ob_sval`, as str subclasses already are. pandas' date-axis formatter workaround (decoding `fmt.item()`) stays and still works.

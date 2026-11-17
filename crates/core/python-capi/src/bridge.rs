@@ -745,6 +745,16 @@ fn instance(vm: &VirtualMachine, pointer: *mut Object) -> PyResult<PyObjectRef> 
         attach(pointer, &object);
         return Ok(object);
     }
+    if class.fast_issubclass(vm.ctx.types.bytes_type)
+        && unsafe { (*(*pointer).ty).basicsize <= (*PyBytes_Type.get()).basicsize }
+    {
+        let bytes = pointer.cast::<Bytes>();
+        let length = unsafe { (*bytes).base.size.unsigned_abs() };
+        let data = unsafe { slice::from_raw_parts((*bytes).data.as_ptr().cast::<u8>(), length) };
+        let object: PyObjectRef = PyRef::new_ref(PyBytes::from(data.to_vec()), class, dict).into();
+        attach(pointer, &object);
+        return Ok(object);
+    }
     let wrapper = PyRef::new_ref(
         CObject {
             pointer: AtomicPtr::new(pointer),
