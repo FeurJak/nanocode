@@ -143,7 +143,7 @@ pub struct CodeModeRuntime {
 
     cells: Arc<Atom<CellRegistry>>,
     stored: Arc<Atom<HashMap<String, Arc<RawValue>>>>,
-    images: Arc<Atom<Vec<String>>>,
+    images: Arc<Atom<images::Carried>>,
     host: Arc<Slot<EmbeddedHost>>,
     current_turn: Arc<AtomicU64>,
     preempt: watch::Sender<(u64, u64)>,
@@ -1518,7 +1518,7 @@ impl LiveCell {
         context: OwnedToolContext,
         stored: HashMap<String, Arc<RawValue>>,
         shared_stored: Arc<Atom<HashMap<String, Arc<RawValue>>>>,
-        images: Arc<Atom<Vec<String>>>,
+        images: Arc<Atom<images::Carried>>,
         host: Arc<Slot<EmbeddedHost>>,
         prelude: Option<Arc<str>>,
         limits: Limits,
@@ -2807,7 +2807,7 @@ impl EmbeddedHost {
         mut plan: Option<ReplayPlan>,
         mut hold: Option<watch::Receiver<bool>>,
         limits: Limits,
-        pending_images: &Atom<Vec<String>>,
+        pending_images: &Atom<images::Carried>,
     ) -> Result<CellTerminal, HostFailure> {
         let mut pending_calls: InOrder<CallFuture<'_>> = InOrder::new();
         let unstarted = Arc::new(AtomicUsize::new(0));
@@ -2883,6 +2883,7 @@ impl EmbeddedHost {
                     let Some(completed) = completed else {
                         continue;
                     };
+                    images.settled(&completed.call);
                     match watch.settled(&completed.call, nanocode_platform::now()) {
                         Watched::Note(text) if !replaying => {
                             let _ = updates.send(CellUpdate::Notification {
@@ -2978,9 +2979,7 @@ impl EmbeddedHost {
                         RuntimeEvent::ToolCall {
                             id, name, input, host, ..
                         } => {
-                            if !replaying {
-                                images.before(&name, &input, tools, context).await;
-                            }
+                            images.before(&name, &input, replaying, tools, context).await;
                             if held {
                                 calls.queue(id, name, input, host);
                             } else {
@@ -3165,7 +3164,7 @@ async fn run_cell_actor(
     context: OwnedToolContext,
     stored: HashMap<String, Arc<RawValue>>,
     shared_stored: Arc<Atom<HashMap<String, Arc<RawValue>>>>,
-    images: Arc<Atom<Vec<String>>>,
+    images: Arc<Atom<images::Carried>>,
     updates: mpsc::UnboundedSender<CellUpdate>,
     mut terminate: oneshot::Receiver<()>,
     interrupt: Interrupt,
