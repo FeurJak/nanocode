@@ -1059,6 +1059,12 @@ pub fn c_type(vm: &VirtualMachine, ty: *mut Type) -> PyResult<PyTypeRef> {
     .fold(0, |flags, (_, flag)| flags | flag);
     unsafe { (*ty).flags |= inherited };
     bridge::register_c_type(ty, &class);
+    // The Python class made here lives for the whole run (it is leaked
+    // below and kept in the type table), and it holds the C type, so it owns
+    // one reference to it. Without that, a heap type C code made (pybind11's
+    // classes) drops to zero when a tuple naming it is freed, and its
+    // metaclass dealloc unregisters the class while Python still uses it.
+    unsafe { bridge::incref(ty.cast()) };
     if crate::buffer::procs(ty).is_some() {
         class.slots.as_buffer.store(Some(crate::buffer::export));
     }
