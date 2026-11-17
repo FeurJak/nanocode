@@ -1159,6 +1159,12 @@ pub fn c_type(vm: &VirtualMachine, ty: *mut Type) -> PyResult<PyTypeRef> {
             class.update_slot::<true>(name, &vm.ctx);
         }
     }
+    // A C type with mp_subscript but no sq_item is not a sequence: CPython's
+    // iter() falls back to indexing only through sq_item. update_slot fills
+    // both from __getitem__, which made numpy scalars iterable (empty).
+    if unsafe { (*ty).as_sequence.is_null() || (*(*ty).as_sequence).item.is_none() } {
+        class.slots.as_sequence.item.store(None);
+    }
     unsafe {
         if (*ty).bases.is_null() {
             let bases = class
