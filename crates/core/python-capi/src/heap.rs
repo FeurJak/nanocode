@@ -81,11 +81,79 @@ fn image() -> (usize, usize) {
 
 #[cfg(target_vendor = "apple")]
 fn image() -> (usize, usize) {
-    unsafe extern "C" {
-        static _mh_execute_header: u8;
-        fn get_end() -> usize;
+    use std::sync::OnceLock;
+
+    const LC_SEGMENT_64: u32 = 0x19;
+
+    #[repr(C)]
+    struct Info {
+        file: *const u8,
+        base: *const MachHeader,
+        symbol: *const u8,
+        address: *const u8,
     }
-    (&raw const _mh_execute_header as usize, unsafe { get_end() })
+    #[repr(C)]
+    struct MachHeader {
+        magic: u32,
+        cpu: i32,
+        subtype: i32,
+        file: u32,
+        commands: u32,
+        size: u32,
+        flags: u32,
+        reserved: u32,
+    }
+    #[repr(C)]
+    struct Segment {
+        command: u32,
+        size: u32,
+        name: [u8; 16],
+        address: u64,
+        length: u64,
+    }
+    unsafe extern "C" {
+        fn dladdr(address: *const c_void, info: *mut Info) -> i32;
+    }
+    static RANGE: OnceLock<(usize, usize)> = OnceLock::new();
+    *RANGE.get_or_init(|| {
+        let mut info = Info {
+            file: std::ptr::null(),
+            base: std::ptr::null(),
+            symbol: std::ptr::null(),
+            address: std::ptr::null(),
+        };
+        if unsafe { dladdr(image as *const c_void, &raw mut info) } == 0 || info.base.is_null() {
+            return (0, 0);
+        }
+        let header = unsafe { info.base.read_unaligned() };
+        let mut command = unsafe { info.base.add(1) }.cast::<u8>();
+        let mut text = None;
+        let (mut low, mut high) = (usize::MAX, 0);
+        for _ in 0..header.commands {
+            let segment = unsafe { command.cast::<Segment>().read_unaligned() };
+            if segment.command == LC_SEGMENT_64 {
+                let name = segment
+                    .name
+                    .split(|byte| *byte == 0)
+                    .next()
+                    .unwrap_or_default();
+                let (address, length) = (segment.address as usize, segment.length as usize);
+                if name == b"__TEXT" {
+                    text = Some(address);
+                }
+                if name != b"__PAGEZERO" && name != b"__LINKEDIT" {
+                    low = low.min(address);
+                    high = high.max(address + length);
+                }
+            }
+            command = unsafe { command.add(segment.size as usize) };
+        }
+        let Some(text) = text.filter(|_| low < high) else {
+            return (0, 0);
+        };
+        let slide = (info.base as usize).wrapping_sub(text);
+        (low.wrapping_add(slide), high.wrapping_add(slide))
+    })
 }
 
 pub fn is_static<T>(pointer: *mut T) -> bool {

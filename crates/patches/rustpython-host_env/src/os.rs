@@ -579,7 +579,7 @@ pub fn isatty(_fd: i32) -> bool {
     false
 }
 
-#[cfg(any(unix, windows))]
+#[cfg(any(all(unix, not(target_os = "ios")), windows))]
 pub fn system(command: &CStr) -> libc::c_int {
     unsafe { libc::system(command.as_ptr()) }
 }

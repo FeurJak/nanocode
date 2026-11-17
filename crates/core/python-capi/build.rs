@@ -222,6 +222,41 @@ fn address_taken(object: &Path) -> Vec<(String, usize)> {
         .collect()
 }
 
+fn apple(target: &str) -> Option<(String, PathBuf)> {
+    let (arch, rest) = target.split_once("-apple-ios")?;
+    let simulator = rest == "-sim" || arch == "x86_64";
+    let sdk = if simulator {
+        "iphonesimulator"
+    } else {
+        "iphoneos"
+    };
+    let output = |command: &mut Command| {
+        let output = command
+            .output()
+            .unwrap_or_else(|error| panic!("{command:?}: {error}"));
+        assert!(output.status.success(), "{command:?} failed");
+        String::from_utf8(output.stdout)
+            .expect("UTF-8 output")
+            .trim()
+            .to_owned()
+    };
+    println!("cargo:rerun-if-env-changed=IPHONEOS_DEPLOYMENT_TARGET");
+    let printed = output(
+        Command::new(env::var_os("RUSTC").expect("RUSTC"))
+            .args(["--print", "deployment-target", "--target"])
+            .arg(target),
+    );
+    let version = printed
+        .split_once('=')
+        .map_or(printed.as_str(), |(_, version)| version);
+    let sysroot = output(Command::new("xcrun").args(["--sdk", sdk, "--show-sdk-path"]));
+    let suffix = if simulator { "-simulator" } else { "" };
+    Some((
+        format!("{arch}-apple-ios{version}{suffix}"),
+        PathBuf::from(sysroot),
+    ))
+}
+
 fn is_cxx(path: &Path) -> bool {
     path.extension()
         .is_some_and(|extension| extension == "cpp" || extension == "cc" || extension == "cxx")
@@ -265,9 +300,15 @@ fn main() {
         .max(1);
     let runtime = root.join("cxx");
     println!("cargo:rerun-if-changed=cxx");
+    let apple = apple(&target);
     let compile = |source: &Path, object: &Path, defines: &[String]| {
         let mut command = Command::new(&compiler);
-        if target != host {
+        if let Some((triple, sysroot)) = &apple {
+            command
+                .arg(format!("--target={triple}"))
+                .arg("-isysroot")
+                .arg(sysroot);
+        } else if target != host {
             command.arg(format!(
                 "--target={}",
                 target.replace("riscv64gc-", "riscv64-")
