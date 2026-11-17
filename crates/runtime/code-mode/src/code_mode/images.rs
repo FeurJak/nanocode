@@ -12,8 +12,6 @@ use crate::embedded::OwnedToolContext;
 const IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
 const PATH_PUNCTUATION: &str = "/._-+@%";
 const WORKING_DIRECTORY: &str = "workdir";
-/// The files python.wasm's default matplotlib backend writes on `plt.show()`, one per open
-/// figure, in the working directory; a call that runs Python tracks the first few.
 const SHOWN_FIGURES: [&str; 4] = [
     "Figure_1.png",
     "Figure_2.png",

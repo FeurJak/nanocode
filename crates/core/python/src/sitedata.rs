@@ -34,7 +34,6 @@ fn file(path: &[u8]) -> Option<&'static (&'static str, u32, &'static [u8])> {
         .map(|index| &FILES[index])
 }
 
-/// Whether `path` is a directory the table holds files under, the site-packages root and its ancestors included.
 fn dir(path: &[u8]) -> bool {
     let path = path.strip_suffix(b"/").unwrap_or(path);
     if root().starts_with(path)
@@ -80,7 +79,6 @@ pub fn read(path: &[u8]) -> Option<io::Result<Vec<u8>>> {
     })
 }
 
-/// The names the table holds directly under `path`, or None when it holds nothing there.
 pub fn list(path: &[u8]) -> Option<BTreeSet<Vec<u8>>> {
     if !dir(path) {
         return None;
