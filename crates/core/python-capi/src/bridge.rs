@@ -300,6 +300,50 @@ fn forward_slots(pointer: *mut Type, class: &Py<PyType>, vm: &VirtualMachine) {
             if index {
                 number.index = Some(crate::extra::forward_index);
             }
+            // int, float and complex also get their arithmetic, which C code
+            // calls through the type (numpy's as_integer_ratio shifts through
+            // PyLong_Type.tp_as_number->nb_lshift).
+            let types = &vm.ctx.types;
+            if [types.int_type, types.float_type, types.complex_type, types.bool_type]
+                .iter()
+                .any(|builtin| class.is(*builtin))
+            {
+                use crate::api::*;
+                let binary: [(&'static str, &mut crate::abi::Binary, crate::abi::Binary); 13] = [
+                    ("__add__", &mut number.add, Some(PyNumber_Add)),
+                    ("__sub__", &mut number.subtract, Some(PyNumber_Subtract)),
+                    ("__mul__", &mut number.multiply, Some(PyNumber_Multiply)),
+                    ("__mod__", &mut number.remainder, Some(PyNumber_Remainder)),
+                    ("__divmod__", &mut number.divmod, Some(crate::extra::PyNumber_Divmod)),
+                    ("__lshift__", &mut number.lshift, Some(PyNumber_Lshift)),
+                    ("__rshift__", &mut number.rshift, Some(PyNumber_Rshift)),
+                    ("__and__", &mut number.and, Some(PyNumber_And)),
+                    ("__xor__", &mut number.xor, Some(PyNumber_Xor)),
+                    ("__or__", &mut number.or, Some(PyNumber_Or)),
+                    ("__floordiv__", &mut number.floor_divide, Some(PyNumber_FloorDivide)),
+                    ("__truediv__", &mut number.true_divide, Some(PyNumber_TrueDivide)),
+                    ("__matmul__", &mut number.matrix_multiply, Some(PyNumber_MatrixMultiply)),
+                ];
+                for (name, slot, forward) in binary {
+                    if has(name) {
+                        *slot = forward;
+                    }
+                }
+                let unary: [(&'static str, &mut crate::abi::Unary, crate::abi::Unary); 4] = [
+                    ("__neg__", &mut number.negative, Some(crate::extra::PyNumber_Negative)),
+                    ("__pos__", &mut number.positive, Some(crate::extra::PyNumber_Positive)),
+                    ("__abs__", &mut number.absolute, Some(crate::extra::PyNumber_Absolute)),
+                    ("__invert__", &mut number.invert, Some(crate::extra::PyNumber_Invert)),
+                ];
+                for (name, slot, forward) in unary {
+                    if has(name) {
+                        *slot = forward;
+                    }
+                }
+                if has("__pow__") {
+                    number.power = Some(crate::extra::PyNumber_Power);
+                }
+            }
             (*pointer).as_number = Box::leak(Box::new(number));
         }
     }
@@ -650,6 +694,29 @@ fn instance(vm: &VirtualMachine, pointer: *mut Object) -> PyResult<PyObjectRef> 
             .has_feature(PyTypeFlags::HAS_DICT)
             .then(|| vm.ctx.new_dict())
     });
+    // A C subclass of float laid out as float (numpy.float64) gets a float
+    // payload, so float's own methods and math's functions read its value,
+    // and the C object mirrors it as a proxy does; the bridge finds the C
+    // object of any payload through its proxy map.
+    if class.fast_issubclass(vm.ctx.types.float_type)
+        && unsafe { (*(*pointer).ty).basicsize } == size_of::<Float>() as isize
+    {
+        let value = unsafe { (*pointer.cast::<Float>()).value };
+        let object: PyObjectRef = PyRef::new_ref(PyFloat::from(value), class, dict).into();
+        attach(pointer, &object);
+        return Ok(object);
+    }
+    // The same for complex (numpy.complex128: a header, then real and imag).
+    if class.fast_issubclass(vm.ctx.types.complex_type)
+        && unsafe { (*(*pointer).ty).basicsize } == (size_of::<Object>() + 2 * size_of::<f64>()) as isize
+    {
+        let parts = unsafe { pointer.cast::<u8>().add(size_of::<Object>()).cast::<[f64; 2]>().read() };
+        let value = nanocode_numeric::Complex64::new(parts[0], parts[1]);
+        let object: PyObjectRef =
+            PyRef::new_ref(rustpython_vm::builtins::PyComplex::from(value), class, dict).into();
+        attach(pointer, &object);
+        return Ok(object);
+    }
     let wrapper = PyRef::new_ref(
         CObject {
             pointer: AtomicPtr::new(pointer),
