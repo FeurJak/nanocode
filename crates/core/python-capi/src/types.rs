@@ -1065,6 +1065,15 @@ pub fn c_type(vm: &VirtualMachine, ty: *mut Type) -> PyResult<PyTypeRef> {
     // classes) drops to zero when a tuple naming it is freed, and its
     // metaclass dealloc unregisters the class while Python still uses it.
     unsafe { bridge::incref(ty.cast()) };
+    // C code walks tp_mro (pybind11 finds a buffer or a base's type info
+    // through it), so it gets the class's MRO as a tuple it owns.
+    unsafe {
+        if (*ty).mro.is_null() {
+            let mro: Vec<rustpython_vm::PyObjectRef> =
+                class.mro_map_collect(|cls| cls.to_owned().into());
+            (*ty).mro = bridge::new_ref(vm, vm.ctx.new_tuple(mro).as_object());
+        }
+    }
     if crate::buffer::procs(ty).is_some() {
         class.slots.as_buffer.store(Some(crate::buffer::export));
     }

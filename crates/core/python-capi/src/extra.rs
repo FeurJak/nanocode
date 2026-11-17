@@ -829,6 +829,22 @@ pub unsafe extern "C" fn forward_iternext(pointer: *mut Object) -> *mut Object {
     crate::api::PyIter_Next(pointer)
 }
 
+pub unsafe extern "C" fn forward_bool(pointer: *mut Object) -> std::ffi::c_int {
+    crate::api::PyObject_IsTrue(pointer)
+}
+
+pub unsafe extern "C" fn forward_int(pointer: *mut Object) -> *mut Object {
+    crate::api::PyNumber_Long(pointer)
+}
+
+pub unsafe extern "C" fn forward_float(pointer: *mut Object) -> *mut Object {
+    crate::api::PyNumber_Float(pointer)
+}
+
+pub unsafe extern "C" fn forward_index(pointer: *mut Object) -> *mut Object {
+    crate::api::PyNumber_Index(pointer)
+}
+
 fn construct(
     pick: fn(&VirtualMachine) -> &'static rustpython_vm::Py<rustpython_vm::builtins::PyType>,
     subtype: *mut Type,
