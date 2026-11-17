@@ -493,6 +493,7 @@ pub struct HostConfig {
     pub max_output_tokens: Option<u32>,
     pub compact_instructions: bool,
     pub codex_direct: bool,
+    pub codesign: bool,
     pub no_reasoning_replay: bool,
     pub tool_output_token_limit: Option<usize>,
     pub lean_tool_arguments: bool,
@@ -788,6 +789,7 @@ impl Host {
             .direct_tools_for(move |_| codex_direct)
             .direct_subagents(config.subagents == Subagents::AllModels)
             .headless(config.headless)
+            .codesign(config.codesign)
             .configure(move |builder| {
                 let window = context_window
                     .or_else(|| listed_window(listed.as_ref(), builder.selected_model().as_str()));
@@ -837,9 +839,9 @@ impl Host {
                 .clone()
                 .filter(|_| route(request) == Some(Route::Tempo))
         })
-        .direct_tools_for(|request| !native_model(&request.model))
         .direct_subagents(config.subagents == Subagents::AllModels)
         .headless(config.headless)
+        .codesign(config.codesign)
         .configure(move |builder| {
             let builder = builder
                 .hedging(std::sync::Arc::clone(&hedging))

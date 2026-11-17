@@ -934,7 +934,7 @@ pub(super) fn attempt_factory(
             &system_prompt,
             model,
             config.lean_custom_tool_arguments,
-            config.headless,
+            config.headless_tuning(),
         )?
         .with_thread_id(events.request_id()),
         events.clone(),

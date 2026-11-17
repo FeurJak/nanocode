@@ -6,6 +6,7 @@ use crate::client::{
 };
 
 const SOL_SYSTEM_PROMPT: &str = include_str!("../../prompts/sol.md");
+const SOL_62_SYSTEM_PROMPT: &str = include_str!("../../prompts/sol-6.2.md");
 const LUNA_SYSTEM_PROMPT: &str = include_str!("../../prompts/luna.md");
 const GLM_SYSTEM_PROMPT: &str = include_str!("../../prompts/glm.md");
 const ASTRA_SYSTEM_PROMPT: &str = include_str!("../../prompts/astra.md");
@@ -84,6 +85,8 @@ pub struct ModelConfig {
     pub working_state: Option<crate::session::working_state::WorkingStatePolicy>,
 
     pub headless: bool,
+
+    pub codesign: bool,
 
     pub compaction_thinking: Option<Thinking>,
 
@@ -264,6 +267,11 @@ impl ModelConfig {
     }
 
     #[must_use]
+    pub const fn headless_tuning(&self) -> bool {
+        self.headless && self.codesign
+    }
+
+    #[must_use]
     pub const fn orchestration() -> &'static str {
         "local_code_mode"
     }
@@ -272,10 +280,11 @@ impl ModelConfig {
     #[doc(hidden)]
     pub fn base_system_prompt(&self) -> Cow<'_, str> {
         let base = self.system_prompt.as_deref().unwrap_or(match self.model {
-            Model::Astra62 | Model::Astra | Model::Terra => ASTRA_SYSTEM_PROMPT,
+            Model::Sol62 | Model::Astra62 => SOL_62_SYSTEM_PROMPT,
+            Model::Astra | Model::Terra => ASTRA_SYSTEM_PROMPT,
             Model::Glm53 | Model::Kimi | Model::Mimo => GLM_SYSTEM_PROMPT,
             Model::Custom(_) => UNKNOWN_MODEL_SYSTEM_PROMPT,
-            Model::Sol62 | Model::Sol | Model::DaybreakBlue => SOL_SYSTEM_PROMPT,
+            Model::Sol | Model::DaybreakBlue => SOL_SYSTEM_PROMPT,
             Model::Luna => LUNA_SYSTEM_PROMPT,
             _ => ASTRA_SYSTEM_PROMPT,
         });
@@ -300,7 +309,7 @@ impl ModelConfig {
         {
             dropped.push(SKILLS_SECTION_HEADING);
         }
-        if self.headless {
+        if self.headless_tuning() {
             dropped.extend(HEADLESS_SECTION_HEADINGS);
         }
         let base = if base
@@ -311,7 +320,7 @@ impl ModelConfig {
         } else {
             base
         };
-        if !self.headless || !base.lines().any(|line| line == HEADLESS_USER_SECTION) {
+        if !self.headless_tuning() || !base.lines().any(|line| line == HEADLESS_USER_SECTION) {
             return base;
         }
         let kept = keep_section_paragraphs(&base, HEADLESS_USER_SECTION, &HEADLESS_USER_PARAGRAPHS);
@@ -338,7 +347,7 @@ impl ModelConfig {
     #[doc(hidden)]
     pub fn host_instructions(&self) -> String {
         let mut instructions = self.standing_instructions();
-        if self.headless {
+        if self.headless_tuning() {
             if !instructions.is_empty() {
                 instructions.push_str("\n\n");
             }
@@ -368,7 +377,7 @@ impl ModelConfig {
             }
             instructions.push_str("\n\n");
         }
-        if matches!(self.model, Model::Custom(_)) {
+        if !self.codesign || matches!(self.model, Model::Custom(_)) {
             return instructions;
         }
         instructions.push_str(&format!(
@@ -431,6 +440,7 @@ impl ModelConfig {
             single_verification: false,
             working_state: None,
             headless: false,
+            codesign: true,
             compaction_thinking: None,
             responses_transport: ResponsesTransport::default(),
             websocket_warmup: false,

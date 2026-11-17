@@ -1046,7 +1046,7 @@ impl ModelRun {
                     );
                     return Ok(checked_final);
                 }
-                if self.config.headless
+                if self.config.headless_tuning()
                     && !nudged
                     && message
                         .as_deref()
@@ -1076,7 +1076,7 @@ impl ModelRun {
                     session.conversation.clear_delta();
                     continue;
                 }
-                if self.config.headless
+                if self.config.headless_tuning()
                     && self.config.finish_check
                     && self.finish_check
                     && acted

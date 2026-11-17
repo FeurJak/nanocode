@@ -65,7 +65,7 @@ pub fn tool_runtime(
         .with_code_mode_policy(code_mode_policy::standard_tool_policy())
         .with_exec_yield(CODE_MODE_EXEC_YIELD)
         .with_output_budget(CODE_MODE_OUTPUT_TOKENS);
-    let tools = if config.headless {
+    let tools = if config.headless_tuning() {
         tools
     } else {
         tools.with_full_exec_description()

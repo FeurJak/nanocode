@@ -22,6 +22,7 @@ pub struct ClaudeHarness {
     direct_tools_for: Option<Direct>,
     direct_subagents: bool,
     headless: bool,
+    codesign: bool,
     deadline: Option<crate::Deadline>,
 }
 impl ClaudeHarness {
@@ -35,6 +36,7 @@ impl ClaudeHarness {
             direct_tools_for: None,
             direct_subagents: false,
             headless: false,
+            codesign: true,
             deadline: None,
         }
     }
@@ -42,6 +44,12 @@ impl ClaudeHarness {
     #[must_use]
     pub const fn headless(mut self, headless: bool) -> Self {
         self.headless = headless;
+        self
+    }
+
+    #[must_use]
+    pub const fn codesign(mut self, codesign: bool) -> Self {
+        self.codesign = codesign;
         self
     }
 
@@ -163,6 +171,7 @@ impl RuntimeBackend for ClaudeHarness {
         let direct_subagents = self.direct_subagents;
         let deadline = self.deadline;
         let headless = self.headless;
+        let codesign = self.codesign;
         Box::pin(async move {
             let remote = settings
                 .tools
@@ -207,7 +216,7 @@ impl RuntimeBackend for ClaudeHarness {
             if let Some(deadline) = deadline {
                 builder = builder.deadline(deadline);
             }
-            builder = builder.headless(headless);
+            builder = builder.headless(headless).codesign(codesign);
             #[cfg(not(target_family = "wasm"))]
             if direct {
                 builder = builder.upstream_web().upstream_context();

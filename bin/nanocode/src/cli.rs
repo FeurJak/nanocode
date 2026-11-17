@@ -271,7 +271,11 @@ const SESSION: Group = Group::new(&[
     Argument::value("codex_orchestration", "MODE", Parser::Choice(&CodexOrchestrationArg::CHOICES))
         .long("codex-orchestration")
         .env("NANOCODE_CODEX_ORCHESTRATION")
-        .help("How Codex models call tools: direct (the default) or code-mode"),
+        .help("How Codex models call tools: code-mode (the default, as Codex CLI does) or direct"),
+    Argument::flag("no_codesign")
+        .long("no-codesign")
+        .env("NANOCODE_NO_CODESIGN")
+        .help("Send the stock Codex and Claude Code requests: leave out nanocode's per-model prompt and tool tuning, headless additions, nudges and finish checks"),
     Argument::flag("no_subagents")
         .long("no-subagents")
         .help("Disable subagent tools"),
@@ -680,6 +684,7 @@ pub struct SessionArgs {
     pub tool_output_token_limit: Option<u64>,
     pub lean_tool_arguments: bool,
     pub codex_orchestration: Option<CodexOrchestrationArg>,
+    pub no_codesign: bool,
     pub no_subagents: bool,
     pub subagents: bool,
     pub lenient_patches: bool,
@@ -749,6 +754,7 @@ impl SessionArgs {
             codex_orchestration: matches
                 .choice("codex_orchestration")
                 .map(|index| CodexOrchestrationArg::ALL[index]),
+            no_codesign: matches.flag("no_codesign"),
             no_subagents: matches.flag("no_subagents"),
             subagents: matches.flag("subagents"),
             lenient_patches: matches.flag("lenient_patches"),
@@ -793,6 +799,7 @@ impl SessionArgs {
                 .or(root.tool_output_token_limit),
             lean_tool_arguments: self.lean_tool_arguments || root.lean_tool_arguments,
             codex_orchestration: self.codex_orchestration.or(root.codex_orchestration),
+            no_codesign: self.no_codesign || root.no_codesign,
             no_subagents: self.no_subagents || root.no_subagents,
             subagents: self.subagents || root.subagents,
             lenient_patches: self.lenient_patches || root.lenient_patches,

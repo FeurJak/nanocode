@@ -21,6 +21,7 @@ pub struct CodexHarness {
     deadline: Option<crate::Deadline>,
     direct_subagents: bool,
     headless: bool,
+    codesign: bool,
 }
 
 impl CodexHarness {
@@ -35,6 +36,7 @@ impl CodexHarness {
             deadline: None,
             direct_subagents: false,
             headless: false,
+            codesign: true,
         }
     }
 
@@ -47,6 +49,12 @@ impl CodexHarness {
     #[must_use]
     pub const fn headless(mut self, headless: bool) -> Self {
         self.headless = headless;
+        self
+    }
+
+    #[must_use]
+    pub const fn codesign(mut self, codesign: bool) -> Self {
+        self.codesign = codesign;
         self
     }
 
@@ -162,6 +170,7 @@ impl RuntimeBackend for CodexHarness {
             .is_some_and(|direct_tools_for| direct_tools_for(&spec));
         let direct_subagents = self.direct_subagents;
         let headless = self.headless;
+        let codesign = self.codesign;
         let deadline = self.deadline;
         Box::pin(async move {
             let remote = settings
@@ -187,6 +196,7 @@ impl RuntimeBackend for CodexHarness {
                 .spawn_factory(spec.spawn_factory)
                 .host_context(spec.host_context)
                 .headless(headless)
+                .codesign(codesign)
                 .workspace(workspace.to_path_buf());
             if let Some(deadline) = deadline {
                 builder = builder.deadline(deadline);

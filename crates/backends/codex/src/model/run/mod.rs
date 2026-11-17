@@ -773,7 +773,7 @@ pub(crate) fn prepare_resumed_checkpoint(
         &config.base_system_prompt(),
         config.model,
         config.lean_custom_tool_arguments,
-        config.headless,
+        config.headless_tuning(),
     )?
     .shared_prefix();
     let selected_agents_md = context_source
@@ -817,7 +817,7 @@ pub(crate) fn prepare_history_checkpoint(
         &config.base_system_prompt(),
         config.model,
         config.lean_custom_tool_arguments,
-        config.headless,
+        config.headless_tuning(),
     )?
     .shared_prefix();
     let mut checkpoint = ModelCheckpoint::resume(

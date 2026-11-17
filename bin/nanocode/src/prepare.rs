@@ -135,7 +135,8 @@ pub(super) fn prepare<'a>(
                 .transpose()
                 .map_err(|error| format!("--max-output-tokens: {error}"))?,
             compact_instructions: args.compact_instructions,
-            codex_direct: args.codex_orchestration != Some(cli::CodexOrchestrationArg::CodeMode),
+            codex_direct: args.codex_orchestration == Some(cli::CodexOrchestrationArg::Direct),
+            codesign: !args.no_codesign,
             no_reasoning_replay: args.no_reasoning_replay,
             tool_output_token_limit: args
                 .tool_output_token_limit
