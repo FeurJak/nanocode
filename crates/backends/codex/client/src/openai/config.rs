@@ -298,7 +298,7 @@ impl ModelConfig {
             } else {
                 Cow::Borrowed(base)
             };
-        if self.system_prompt.is_some() {
+        if self.system_prompt.is_some() || !self.codesign {
             return base;
         }
         let mut dropped: Vec<&str> = UNSERVED_SECTION_HEADINGS.to_vec();

@@ -15,6 +15,7 @@ fixture_path = root / 'crates/backends/codex/upstream/request.json'
 parser = argparse.ArgumentParser()
 parser.add_argument('--nanocode', type=Path, default=root / 'target/debug/nanocode')
 parser.add_argument('--codex', type=Path)
+parser.add_argument('--codesign', action='store_true', help='compare headless codesign tuning instead of the upstream baseline')
 parser.add_argument('--keep', type=Path)
 args = parser.parse_args()
 fixture = json.loads(fixture_path.read_text())
@@ -89,8 +90,8 @@ def capture(command, env, scratch):
             f'base_url = "{base}"\nenv_key = "MOCK_KEY"\nwire_api = "responses"\n')
     run = subprocess.run(command, cwd=work, env=full, capture_output=True, text=True, timeout=120)
     mock.shutdown()
-    if not mock.requests:
-        raise SystemExit(f'{command[0]} sent no request (exit {run.returncode}):\n{run.stdout}\n{run.stderr}')
+    if run.returncode or not mock.requests:
+        raise SystemExit(f'{command[0]} did not complete the mock turn (exit {run.returncode}, requests {len(mock.requests)}):\n{run.stdout}\n{run.stderr}')
     return scrub(mock.requests[0], [(str(work), '<cwd>'), (str(home), '<home>')])
 
 
@@ -102,6 +103,7 @@ def scrub(value, paths):
     if isinstance(value, str):
         for path, name in paths:
             value = value.replace(path, name)
+        value = re.sub(r'(?<=<current_date>)\d{4}-\d{2}-\d{2}(?=</current_date>)', '<date>', value)
         return uuid.sub('<uuid>', value)
     return value
 
@@ -167,23 +169,28 @@ def facts(request):
 scratch = Path(tempfile.mkdtemp())
 try:
     if args.codex:
+        fixture['codex'] = subprocess.check_output([str(args.codex.resolve()), '--version'], text=True).strip().removeprefix('codex-cli ')
         (scratch / 'codex').mkdir()
         command = [str(args.codex.resolve()), 'exec', '--json', '--dangerously-bypass-approvals-and-sandbox',
                    '--skip-git-repo-check', '-m', model, '-c', 'model_reasoning_effort=high', prompt]
         fixture['request'] = capture(command, {'CODEX_HOME': '{home}/.codex', 'MOCK_KEY': 'sk-mock'}, scratch / 'codex')
         fixture_path.write_text(json.dumps(fixture, indent=1, sort_keys=True) + '\n')
     (scratch / 'nanocode').mkdir()
-    command = [str(args.nanocode.resolve()), 'exec', '--ephemeral', '--codex-orchestration', 'code-mode',
-               '-m', model, '-t', 'high', prompt]
+    command = [str(args.nanocode.resolve()), 'exec', '--ephemeral', '--codex-orchestration', 'code-mode']
+    if not args.codesign:
+        command.append('--no-codesign')
+    command += ['-m', model, '-t', 'high', prompt]
     ours = capture(command, {'NANOCODE_OPENAI_BASE_URL': '{base}', 'OPENAI_API_KEY': 'sk-mock'}, scratch / 'nanocode')
 finally:
     shutil.rmtree(scratch)
 if args.keep:
     args.keep.write_text(json.dumps(ours, indent=1, sort_keys=True) + '\n')
-upstream = facts(fixture['request'])
+upstream = facts(scrub(fixture['request'], []))
 local = facts(ours)
 found = {key for key in upstream.keys() | local.keys() if upstream.get(key) != local.get(key)}
-documented = fixture['differences']
+documented = dict(fixture['differences'])
+if args.codesign:
+    documented.update(fixture['codesign_differences'])
 for key in sorted(found):
     mark = ' ' if key in documented else '+'
     print(f'{mark} {key}: codex={upstream.get(key)!r} nanocode={local.get(key)!r}')
