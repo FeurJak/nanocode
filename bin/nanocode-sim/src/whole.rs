@@ -1,3 +1,5 @@
+mod ownership;
+
 use std::{
     cell::RefCell,
     collections::{BTreeSet, VecDeque},
@@ -976,6 +978,9 @@ async fn epoch(
     remote: Option<&Remote>,
 ) -> Result<Option<Listing>, String> {
     world.trace(&format!("epoch {epoch}"));
+    ownership::check()
+        .await
+        .map_err(|error| format!("ownership: {error}"))?;
     nanocode::claude::durability::forget_templates();
     let (store, parts) = durable.session_store().await?;
     let children = remote.map(|remote| remote.children(epoch, world));

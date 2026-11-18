@@ -600,7 +600,6 @@ struct Driver {
     terminal_receipt_limit: Option<usize>,
     logged_prompts: bool,
     deferred_start: bool,
-    start_unsettled: bool,
     state_format: Option<u8>,
     ownership: Ownership,
     next_agent_generation: u64,
@@ -624,7 +623,32 @@ struct Driver {
 
 enum Ownership {
     Unacquired(Seed),
+    Deferred(OwnerToken),
     Owned(OwnerToken),
+}
+
+impl Ownership {
+    fn require_acquired(&self) -> Result<()> {
+        match self {
+            Self::Unacquired(_) => Err(Error::InvalidState(
+                "the session owner was not acquired before admission".to_owned(),
+            )),
+            Self::Deferred(_) | Self::Owned(_) => Ok(()),
+        }
+    }
+
+    fn settle_initial(&mut self) -> Result<()> {
+        match self {
+            Self::Unacquired(_) => Err(Error::InvalidState(
+                "the initial session write was settled before its owner was acquired".to_owned(),
+            )),
+            Self::Deferred(owner) => {
+                *self = Self::Owned(owner.clone());
+                Ok(())
+            }
+            Self::Owned(_) => Ok(()),
+        }
+    }
 }
 
 enum Seed {
@@ -884,7 +908,7 @@ impl Driver {
             Command::CurrentOwner { result } => {
                 let outcome = match &self.ownership {
                     Ownership::Unacquired(_) => Ok(true),
-                    Ownership::Owned(owner) => self
+                    Ownership::Deferred(owner) | Ownership::Owned(owner) => self
                         .store
                         .owner(&self.state_id)
                         .await
@@ -902,8 +926,8 @@ impl Driver {
                     .map(|(id, operation)| (id.to_owned(), operation.input.clone()));
                 let outcome = match (&self.ownership, pending) {
                     (Ownership::Unacquired(_), _) => Ok(PendingTurn::Unacquired),
-                    (Ownership::Owned(_), None) => Ok(PendingTurn::Idle),
-                    (Ownership::Owned(_), Some((id, input))) => input
+                    (Ownership::Deferred(_) | Ownership::Owned(_), None) => Ok(PendingTurn::Idle),
+                    (Ownership::Deferred(_) | Ownership::Owned(_), Some((id, input))) => input
                         .load(&mut *self.store, &self.state_id)
                         .await
                         .map(|input| PendingTurn::Turn { id, input }),
@@ -1473,7 +1497,9 @@ impl Driver {
         let (record, create) = match &self.ownership {
             Ownership::Unacquired(Seed::Described(record)) => (Some(record.clone()), false),
             Ownership::Unacquired(Seed::New(record)) => (Some(record.clone()), true),
-            Ownership::Unacquired(Seed::Existing) | Ownership::Owned(_) => (None, false),
+            Ownership::Unacquired(Seed::Existing)
+            | Ownership::Deferred(_)
+            | Ownership::Owned(_) => (None, false),
         };
         if let Some(record) = &record
             && record.lineage.origin == nanocode_agent_core::Origin::Subagent
@@ -1566,10 +1592,13 @@ impl Driver {
             self.poisoned = true;
             return Err(error);
         }
-        self.ownership = Ownership::Owned(acquired.owner);
+        self.ownership = if deferred {
+            Ownership::Deferred(acquired.owner)
+        } else {
+            Ownership::Owned(acquired.owner)
+        };
         self.state = state;
         self.next_event = None;
-        self.start_unsettled = deferred;
         Ok(committed.load(Ordering::Acquire))
     }
 
@@ -1720,6 +1749,7 @@ impl Driver {
         operation_id: String,
         input: EncodedPayload,
     ) -> Result<StoredAdmission> {
+        self.ownership.require_acquired()?;
         self.abandon_stale(&operation_id).await?;
         if let Some(operation) = self.state.operation(&operation_id) {
             let stored = operation.input.clone();
@@ -1782,13 +1812,13 @@ impl Driver {
                 operation_id: operation_id.clone(),
                 input,
             };
-            if self.start_unsettled && self.batch.is_none() {
+            if matches!(self.ownership, Ownership::Deferred(_)) && self.batch.is_none() {
                 self.applied_settling(entry, Settle::Ordered).await?;
             } else {
                 self.apply(entry).await?;
             }
         }
-        self.start_unsettled = false;
+        self.ownership.settle_initial()?;
         self.claimed.insert(operation_id, caller.clone());
         Ok(StoredAdmission::Accepted)
     }
@@ -1799,6 +1829,7 @@ impl Driver {
         candidate_operation_id: String,
         input: EncodedPayload,
     ) -> Result<(String, StoredAdmission)> {
+        self.ownership.require_acquired()?;
         self.abandon_stale(&candidate_operation_id).await?;
         if let Some((pending_id, operation)) = self
             .state
@@ -2485,7 +2516,7 @@ impl Driver {
         } else {
             SummaryUpdate::Unchanged
         };
-        let Ownership::Owned(owner) = &self.ownership else {
+        let (Ownership::Deferred(owner) | Ownership::Owned(owner)) = &self.ownership else {
             return Err(Error::InvalidState(format!(
                 "state {} was persisted before its owner was acquired",
                 self.state_id
@@ -3002,7 +3033,6 @@ impl DurableSession {
             terminal_receipt_limit,
             logged_prompts: store.logged_prompts,
             deferred_start: store.deferred_start,
-            start_unsettled: false,
             state_format: store.state_format,
             ownership: Ownership::Unacquired(seed),
             next_agent_generation: 0,
