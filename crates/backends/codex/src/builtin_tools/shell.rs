@@ -69,7 +69,11 @@ impl Tool for ExecCommandHandler {
             let output: ToolResult = {
                 let mut arguments = input.decode_json::<ExecCommandArguments>()?;
                 let mut summary = String::new();
-                if let Some((patch, cd, rest)) = heredoc(&arguments.cmd) {
+                let patch = match heredoc(&arguments.cmd) {
+                    Ok(patch) => patch,
+                    Err(error) => return Ok(ToolOutput::error(error)),
+                };
+                if let Some((patch, cd, rest)) = patch {
                     let base = self
                         .workspace
                         .join(arguments.workdir.as_deref().unwrap_or_default());

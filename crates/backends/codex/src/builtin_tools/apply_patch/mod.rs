@@ -218,7 +218,17 @@ fn patch_input(input: ToolInput) -> Result<String, nanocode_tools::ToolInputErro
     }
 }
 
-pub(crate) fn heredoc(script: &str) -> Option<(String, Option<String>, String)> {
+pub(crate) fn heredoc(script: &str) -> Result<Option<(String, Option<String>, String)>, String> {
+    let Some((patch, directory, rest, quoted)) = parse_heredoc(script) else {
+        return Ok(None);
+    };
+    if !quoted && patch.contains(['$', '\x60', '\\']) {
+        return Err("apply_patch heredoc may require shell expansion; quote the delimiter or use the apply_patch tool with the intended literal patch".to_owned());
+    }
+    Ok(Some((patch, directory, rest)))
+}
+
+fn parse_heredoc(script: &str) -> Option<(String, Option<String>, String, bool)> {
     let script = script.trim_start();
     let (directory, invocation) = match cd_prefix(script) {
         Some((directory, rest)) => (Some(directory), rest),
@@ -232,6 +242,7 @@ pub(crate) fn heredoc(script: &str) -> Option<(String, Option<String>, String)> 
         .trim_start_matches([' ', '\t']);
     let (header, body) = redirect.split_once('\n')?;
     let delimiter = heredoc_delimiter(header.trim_end_matches([' ', '\t']))?;
+    let quoted = header.starts_with(['\'', '"']);
     let mut lines = body.split('\n');
     let mut patch = Vec::new();
     loop {
@@ -245,6 +256,7 @@ pub(crate) fn heredoc(script: &str) -> Option<(String, Option<String>, String)> 
         patch.join("\n").trim_end_matches('\n').to_owned(),
         directory,
         lines.collect::<Vec<_>>().join("\n").trim().to_owned(),
+        quoted,
     ))
 }
 
