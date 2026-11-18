@@ -104,6 +104,7 @@ def scrub(value, paths):
         for path, name in paths:
             value = value.replace(path, name)
         value = re.sub(r'(?<=<current_date>)\d{4}-\d{2}-\d{2}(?=</current_date>)', '<date>', value)
+        value = value.replace('<timezone>UTC</timezone>', '<timezone>Etc/UTC</timezone>')
         return uuid.sub('<uuid>', value)
     return value
 

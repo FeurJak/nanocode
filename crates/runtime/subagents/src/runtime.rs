@@ -6986,7 +6986,7 @@ impl Registry {
     ) -> std::io::Result<Option<MessageReceipt>> {
         self.await_restored(session_id).await?;
         let _warm = self.warm_all(session_id).await?;
-        self.sent(session_id, call_id).await
+        self.sent(session_id, call_id, None).await
     }
 
     pub(super) async fn resent_to(
@@ -6997,13 +6997,14 @@ impl Registry {
     ) -> std::io::Result<Option<MessageReceipt>> {
         self.await_restored(session_id).await?;
         let _warm = self.warm(&self.root_of(session_id), vec![to]).await?;
-        self.sent(session_id, call_id).await
+        self.sent(session_id, call_id, Some(to)).await
     }
 
     async fn sent(
         &self,
         session_id: &str,
         call_id: &str,
+        to: Option<AgentId>,
     ) -> std::io::Result<Option<MessageReceipt>> {
         let session = session_id.to_owned();
         let call = call_id.to_owned();
@@ -7012,13 +7013,14 @@ impl Registry {
             .call(move |state| {
                 let root = state.root_session_id(&session).to_owned();
                 let scope = state.scopes.get(&root)?;
-                let sent = scope.sessions.values().find_map(|child| {
-                    child
-                        .sent
-                        .iter()
-                        .find(|sent| sent.session == session && sent.call == call)
-                        .cloned()
-                })?;
+                let held = |sent: &&durable::Sent| sent.session == session && sent.call == call;
+                let sent = match to {
+                    Some(to) => scope.sessions.get(&to)?.sent.iter().find(held).cloned(),
+                    None => scope
+                        .sessions
+                        .values()
+                        .find_map(|child| child.sent.iter().find(held).cloned()),
+                }?;
                 let message = scope.messages.message(sent.message)?;
                 Some(MessageReceipt {
                     message_id: message.id,

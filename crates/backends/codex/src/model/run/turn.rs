@@ -898,6 +898,7 @@ impl ModelRun {
         let mut reprompted = false;
         let mut nudged = false;
         let mut finish_check = FinishCheck::Due;
+        let mut persistence_final = None;
         let mut acted = resumed;
         loop {
             let call_index = self.stats.model_calls + 1;
@@ -908,6 +909,7 @@ impl ModelRun {
                 self.drain_steers(&mut session.conversation, &mut pending_steers, call_index)
                     .await?;
                 if self.stats.steers != delivered {
+                    persistence_final = None;
                     session.tools.control().settle_preempt();
                 }
             }
@@ -989,6 +991,11 @@ impl ModelRun {
             } else {
                 finish_check.answer()
             };
+            let nudged_final = if code_calls.is_empty() && end_turn == Some(false) {
+                None
+            } else {
+                persistence_final.take()
+            };
             acted |= !code_calls.is_empty();
 
             if code_calls.is_empty() {
@@ -1022,6 +1029,7 @@ impl ModelRun {
                     pending_steers.extend(queued);
                 }
                 if !pending_steers.is_empty() {
+                    persistence_final = None;
                     session.conversation.clear_delta();
                     self.maybe_compact(
                         call_index,
@@ -1037,12 +1045,12 @@ impl ModelRun {
                 }
                 let message = final_message.filter(|message| !message.trim().is_empty());
                 if message.is_none()
-                    && let Some(checked_final) = checked_final
+                    && let Some(checked_final) = checked_final.or(nudged_final)
                 {
                     nanocode_trace::info!(
                         target: "nanocode",
                         model_call_index = call_index,
-                        "finish check answered with an empty reply; keeping the final message before it"
+                        "completion notice answered with an empty reply; keeping the final message before it"
                     );
                     return Ok(checked_final);
                 }
@@ -1053,6 +1061,7 @@ impl ModelRun {
                         .is_some_and(nanocode_tool_host::deadline::admits_incomplete)
                 {
                     nudged = true;
+                    persistence_final = message;
                     nanocode_trace::info!(
                         target: "nanocode",
                         model_call_index = call_index,
