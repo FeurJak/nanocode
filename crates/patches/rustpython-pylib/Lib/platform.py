@@ -531,10 +531,14 @@ def ios_ver(system="", release="", model="", is_simulator=False):
     parameters.
     """
     if sys.platform == "ios":
-        import _ios_support
-        result = _ios_support.get_platform_ios()
-        if result is not None:
-            return IOSVersionInfo(*result)
+        try:
+            import _ios_support
+        except ImportError:
+            pass
+        else:
+            result = _ios_support.get_platform_ios()
+            if result is not None:
+                return IOSVersionInfo(*result)
 
     return IOSVersionInfo(system, release, model, is_simulator)
 
