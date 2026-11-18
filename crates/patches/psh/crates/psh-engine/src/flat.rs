@@ -784,7 +784,7 @@ impl<'c> Compiler<'c> {
 
     fn int_lit(&self, w: &Word) -> Option<i64> {
         match w.parts.as_slice() {
-            [p] if matches!(p.kind, Part::Lit) => plain_decimal(self.code.ast.bytes(p.span)),
+            [p] if matches!(p.kind, Part::Lit) => slot_decimal(self.code.ast.bytes(p.span)),
             _ => None,
         }
     }
@@ -895,6 +895,11 @@ impl Cmp {
     }
 }
 
+fn slot_decimal(value: &[u8]) -> Option<i64> {
+    let n = plain_decimal(value)?;
+    (n != 0 || value == b"0").then_some(n)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SV {
     Int(i64),
@@ -987,7 +992,7 @@ impl Ex<'_> {
                 None => SV::Unset,
                 Some(v) if v.nameref || v.readonly || v.dynamic.is_some() => SV::Other,
                 Some(v) => match &v.value {
-                    Value::Str(s) => plain_decimal(s).map_or(SV::Other, SV::Int),
+                    Value::Str(s) => slot_decimal(s).map_or(SV::Other, SV::Int),
                     Value::Unset if !v.declared_only => SV::Unset,
                     _ => SV::Other,
                 },
@@ -1660,7 +1665,7 @@ async fn run_with<'p>(
                     let v = match vp.vars.get(name) {
                         Some(v) if !v.nameref && !v.readonly && v.dynamic.is_none() => {
                             match &v.value {
-                                Value::Str(s) => plain_decimal(s).map_or(SV::Other, SV::Int),
+                                Value::Str(s) => slot_decimal(s).map_or(SV::Other, SV::Int),
                                 _ => SV::Other,
                             }
                         }
@@ -1903,6 +1908,69 @@ async fn interpret(vp: &mut Vp, code: &Rc<Code>, src: Src) -> R {
                 k => &item.rest[k as usize - 1].1,
             };
             exec::andor_pipeline(vp, code, p).await
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::rc::Rc;
+
+    use crate::{Script, Shell, Step, testhost::TestHost};
+
+    fn check(source: &str, expected: &[u8]) {
+        for latency in [false, true] {
+            for budget in [1, 1000] {
+                let host = Rc::new(TestHost::new());
+                host.set_latency(latency);
+                let mut shell = Shell::new(host.config());
+                shell.start(Script::command(source));
+                let status = loop {
+                    match shell.step(budget) {
+                        Step::Done(status) => break status,
+                        Step::Yield | Step::Blocked => {}
+                        Step::Idle => panic!("{source}: idle before completion"),
+                    }
+                };
+                assert_eq!(status, 0, "{source}: latency={latency}, budget={budget}");
+                assert_eq!(host.stderr(), b"", "{source}");
+                assert_eq!(host.stdout(), expected, "{source}");
+                assert_eq!(shell.step(budget), Step::Idle, "{source}");
+            }
+        }
+    }
+
+    #[test]
+    fn flat_loops_preserve_negative_zero_text() {
+        for source in [
+            "x=-0; for ((i=0;i<1;i++)); do echo \"$x\"; done",
+            "x=-0; for ((i=0;i<1;i++)); do echo $x; done",
+            "x=-0; for ((i=0;i<1;i++)); do y=$x; done; echo \"$y\"",
+            "for ((i=0;i<1;i++)); do x=-0; echo \"$x\"; done",
+            "for x in -0; do echo \"$x\"; done",
+            "for x in -0; do y=$x; done; echo \"$y\"",
+            "x=-0; i=0; while ((i++<1)); do echo \"$x\"; done",
+            "x=-0; i=0; until ((i++>=1)); do echo \"$x\"; done",
+            "x=-0; for ((i=0;i<2;i++)); do ((i)) && x=-0; done; echo \"$x\"",
+        ] {
+            check(source, b"-0\n");
+        }
+    }
+
+    #[test]
+    fn flat_loops_normalize_negative_zero_after_arithmetic() {
+        for (source, expected) in [
+            (
+                "x=-0; for ((i=0;i<1;i++)); do ((x+=0)); echo \"$x\"; done",
+                &b"0\n"[..],
+            ),
+            (
+                "x=-0; for ((i=0;i<1;i++)); do ((x++)); echo \"$x\"; done",
+                &b"1\n"[..],
+            ),
+            ("for x in -0; do ((x+=0)); echo \"$x\"; done", &b"0\n"[..]),
+        ] {
+            check(source, expected);
         }
     }
 }
