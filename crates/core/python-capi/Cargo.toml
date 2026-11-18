@@ -12,7 +12,7 @@ autobenches = false
 build = "build.rs"
 
 [dependencies]
-djs-libm = { path = "../../patches/djs/crates/djs-libm" }
+djs-libm = { version = "0.0.0", path = "../../patches/djs/crates/djs-libm" }
 nanocode-numeric = { path = "../numeric" }
 nanocode-platform.workspace = true
 rustpython-vm.workspace = true

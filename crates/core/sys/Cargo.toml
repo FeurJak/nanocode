@@ -11,7 +11,7 @@ autotests = false
 autobenches = false
 
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
-djs-libm = { path = "../../patches/djs/crates/djs-libm" }
+djs-libm = { version = "0.0.0", path = "../../patches/djs/crates/djs-libm" }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

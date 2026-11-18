@@ -11,7 +11,7 @@ doctest = false
 
 [dependencies]
 # Math (D3174): libm 0.2.16's functions; its sources are hashed into BUILD_HASH (build.rs).
-djs-libm = { path = "../djs-libm" }
+djs-libm = { version = "0.0.0", path = "../djs-libm" }
 
 [features]
 default = ["full", "unicode", "embed"]
