@@ -113,7 +113,9 @@ impl HostApplyPatchHandler {
                 })?;
             initial_files.insert(path, contents);
         }
-        let plan = plan_hunks(hunks, &initial_files, lenient)?;
+        let plan = plan_hunks(hunks, &initial_files, lenient, |path| {
+            normalize_path(&resolve(&self.workspace, path))
+        })?;
         for operation in plan.operations() {
             match operation {
                 PatchOperation::Write { path, contents } => {
@@ -347,10 +349,12 @@ fn required_files_from_hunks(hunks: &[Hunk]) -> Vec<PathBuf> {
 
 pub fn plan(patch: &str, initial_files: &HashMap<PathBuf, String>) -> Result<PatchPlan, String> {
     let hunks = parse(patch)?;
+    validate_unique_targets(&hunks, normalize_path)?;
     plan_hunks(
         hunks,
         initial_files,
         LENIENT_MATCHING.load(Ordering::Relaxed),
+        normalize_path,
     )
 }
 
@@ -358,22 +362,31 @@ fn plan_hunks(
     hunks: Vec<Hunk>,
     initial_files: &HashMap<PathBuf, String>,
     lenient: bool,
+    resolve_target: impl Fn(&Path) -> PathBuf,
 ) -> Result<PatchPlan, String> {
     let mut files = initial_files.clone();
     let mut operations = Vec::new();
     let mut added = Vec::new();
     let mut modified = Vec::new();
-    let mut deleted = Vec::new();
+    let mut deleted = Vec::<PathBuf>::new();
 
     for hunk in hunks {
         match hunk {
             Hunk::AddFile { path, contents } => {
                 files.insert(path.clone(), contents.clone());
-                operations.push(PatchOperation::Write {
-                    path: path.clone(),
-                    contents,
-                });
-                added.push(path);
+                if let Some(index) = deleted
+                    .iter()
+                    .position(|deleted| resolve_target(deleted) == resolve_target(&path))
+                {
+                    deleted.remove(index);
+                    operations.retain(|operation| {
+                        !matches!(operation, PatchOperation::Delete { path: deleted } if resolve_target(deleted) == resolve_target(&path))
+                    });
+                    modified.push(path.clone());
+                } else {
+                    added.push(path.clone());
+                }
+                operations.push(PatchOperation::Write { path, contents });
             }
             Hunk::DeleteFile { path } => {
                 files.remove(&path);
@@ -455,7 +468,9 @@ fn apply_in(patch: &str, workspace: &Path, lenient: bool) -> Result<String, Stri
         })?;
         initial_files.insert(path, contents);
     }
-    let plan = plan_hunks(hunks, &initial_files, lenient)?;
+    let plan = plan_hunks(hunks, &initial_files, lenient, |path| {
+        normalize_path(&resolve(workspace, path))
+    })?;
     for operation in plan.operations() {
         match operation {
             PatchOperation::Write { path, contents } => {
@@ -500,7 +515,6 @@ fn validate_unique_targets(
         };
 
         if let Hunk::AddFile { .. } = hunk
-            && LENIENT_MATCHING.load(Ordering::Relaxed)
             && deleted.remove(&resolve(source))
         {
             continue;
@@ -568,6 +582,7 @@ fn apply_chunks(
     path: &Path,
     lenient: bool,
 ) -> Result<String, String> {
+    let trailing_newline = original.ends_with('\n');
     let mut original_lines = original
         .split('\n')
         .map(ToOwned::to_owned)
@@ -604,12 +619,7 @@ fn apply_chunks(
         }
 
         if chunk.old_lines.is_empty() {
-            let insertion_index = if original_lines.last().is_some_and(String::is_empty) {
-                original_lines.len() - 1
-            } else {
-                original_lines.len()
-            };
-            replacements.push((insertion_index, 0, chunk.new_lines.clone()));
+            replacements.push((original_lines.len(), 0, chunk.new_lines.clone()));
             continue;
         }
 
@@ -650,7 +660,7 @@ fn apply_chunks(
     for (start, old_len, new_lines) in replacements.into_iter().rev() {
         original_lines.splice(start..start + old_len, new_lines);
     }
-    if !original_lines.last().is_some_and(String::is_empty) {
+    if trailing_newline {
         original_lines.push(String::new());
     }
     Ok(original_lines.join("\n"))
