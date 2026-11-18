@@ -286,6 +286,46 @@ class _Finder:
 sys.meta_path.append(_Finder)
 
 
+class _Entry:
+    def __init__(self, path):
+        try:
+            directory = posix.stat(path or '.').st_mode & 0o170000 == 0o040000
+        except OSError:
+            directory = False
+        if not directory:
+            raise ImportError('not a directory', path=path)
+        self.path = path
+
+    def find_spec(self, name, target=None):
+        return _Finder.find_spec(name, [self.path])
+
+    def iter_modules(self, prefix=''):
+        base = self.path or '.'
+        try:
+            names = sorted(posix.listdir(base))
+        except OSError:
+            return
+        seen = set()
+        for name in names:
+            stem, dot, suffix = name.partition('.')
+            if dot and suffix == 'py' and stem.isidentifier() and stem != '__init__':
+                package = False
+            elif not dot and name.isidentifier():
+                try:
+                    posix.stat(base + '/' + name + '/__init__.py')
+                except OSError:
+                    continue
+                package = True
+            else:
+                continue
+            if stem not in seen:
+                seen.add(stem)
+                yield prefix + stem, package
+
+
+sys.path_hooks.append(_Entry)
+
+
 def _load_unlocked(spec, load=_frozen_importlib._load_unlocked):
     if isinstance(spec.loader, _Loader):
         return load(spec)
@@ -607,8 +647,10 @@ def _missing(names):
             continue
         try:
             __import__(name)
-        except ImportError as error:
+        except ModuleNotFoundError as error:
             missing += (name, 'standard' if _standard(top) else 'package', str(error))
+        except ImportError:
+            pass
     return missing
 
 

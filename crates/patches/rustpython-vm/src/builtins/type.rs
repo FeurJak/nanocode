@@ -3547,6 +3547,10 @@ fn linearise_mro(mut bases: Vec<Vec<PyTypeRef>>) -> Result<Vec<PyTypeRef>, Strin
         }
     }
 
+    if !bases.is_empty() {
+        let direct = bases.iter().map(|mro| mro[0].clone()).collect();
+        bases.push(direct);
+    }
     let mut result = vec![];
     while !bases.is_empty() {
         let head = take_next_base(&mut bases).ok_or_else(|| {

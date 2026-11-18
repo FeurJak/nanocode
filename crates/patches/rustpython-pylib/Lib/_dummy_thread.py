@@ -87,6 +87,8 @@ def start_joinable_thread(function, handle=None, daemon=True):
 
     In dummy thread, we just run the function synchronously.
     """
+    if daemon:
+        raise RuntimeError("daemon threads are not supported in this interpreter")
     if handle is None:
         handle = _ThreadHandle()
     try:
@@ -103,7 +105,7 @@ def start_joinable_thread(function, handle=None, daemon=True):
 
 def daemon_threads_allowed():
     """Dummy implementation of _thread.daemon_threads_allowed()."""
-    return True
+    return False
 
 
 def _shutdown():

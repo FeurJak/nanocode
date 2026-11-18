@@ -1,4 +1,4 @@
-use ruff_python_ast::{Stmt, StmtImportFrom};
+use ruff_python_ast::{Expr, Stmt, StmtExpr, StmtImportFrom};
 use ruff_python_parser::parse_module;
 
 pub fn top_level(source: &str) -> Vec<String> {
@@ -23,7 +23,8 @@ pub fn top_level(source: &str) -> Vec<String> {
                 level: 0,
                 ..
             }) => add(module.as_str()),
-            _ => {}
+            Stmt::Expr(StmtExpr { value, .. }) if matches!(**value, Expr::StringLiteral(_)) => {}
+            _ => break,
         }
     }
     names

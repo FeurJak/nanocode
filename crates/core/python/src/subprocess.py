@@ -195,6 +195,8 @@ def _inline(argv, env, cwd, data, merged):
         return None
     if args[0] in ('-c', '-m') and len(args) < 2:
         return None
+    if args[0] == '-m' and args[1] in ('pip', 'pip3'):
+        return None
     import runpy, posix
     saved = (sys.argv, sys.stdin, sys.stdout, sys.stderr, sys.path[0], posix._cwd,
              dict(os.environ._data), sys.modules.get('__main__'))
