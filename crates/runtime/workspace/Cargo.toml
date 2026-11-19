@@ -11,10 +11,13 @@ autotests = false
 autobenches = false
 
 [dependencies]
+nanocode-code-mode = { workspace = true, features = ["local-cells"] }
+nanocode-hands.workspace = true
 nanocode-platform.workspace = true
 nanocode-process-contracts.workspace = true
 nanocode-shell.workspace = true
 nanocode-sync.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

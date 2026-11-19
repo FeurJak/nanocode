@@ -588,7 +588,7 @@ impl<T: CodeModeHost + ?Sized> CodeModeHost for std::sync::Arc<T> {
     }
 }
 
-pub(crate) fn nested_tool_input(
+pub fn nested_tool_input(
     definition: &ToolDefinition,
     name: &str,
     input: Value,

@@ -25,12 +25,11 @@ pub enum Job {
 
 #[cfg(not(target_family = "wasm"))]
 pub fn start(config: Config, jobs: unbounded::Receiver<Job>) -> io::Result<()> {
-    let handle = nanocode_platform::Handle::try_current()
-        .map_err(|_| io::Error::other("a workspace starts inside a runtime"))?;
+    let handle = nanocode_platform::Handle::try_current().ok();
     std::thread::Builder::new()
         .name("workspace".to_owned())
         .spawn(move || {
-            let _entered = handle.enter();
+            let _entered = handle.as_ref().map(nanocode_platform::Handle::enter);
             nanocode_sync::block_on(serve(config, jobs));
         })
         .map(drop)

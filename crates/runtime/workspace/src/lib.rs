@@ -1,3 +1,4 @@
+mod cells;
 mod host;
 mod machine;
 mod worker;
@@ -7,6 +8,7 @@ use std::{io, rc::Rc, sync::Arc, time::Duration};
 use nanocode_shell::{Commands, Fetch, FileSystem, Identity, Limits, Machine};
 use nanocode_sync::{oneshot, unbounded};
 
+pub use cells::WorkspaceHost;
 pub use machine::Platform;
 pub use nanocode_shell::{Changes, Ended, Limit, Ran};
 
