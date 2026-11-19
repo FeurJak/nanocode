@@ -1058,7 +1058,7 @@ impl Reference {
                 labels.extend(set);
                 true
             }
-            Op::Renew { .. } | Op::Release { .. } | Op::Finish { .. } | Op::Reply { .. } | Op::Relabel { .. } => false,
+            Op::Renew { .. } | Op::Release { .. } | Op::Finish { .. } | Op::Reply { .. } | Op::Relabel { .. } | Op::Sync { .. } => false,
             Op::Grant { .. } | Op::Revoke { .. } | Op::Charter {} => true,
         }
     }

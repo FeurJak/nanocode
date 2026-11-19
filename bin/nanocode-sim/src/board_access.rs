@@ -418,6 +418,10 @@ impl Gate {
             }),
             Op::Reply { task, .. } => read(task) && self.can(by, &task.0, Can::Post),
             Op::Relabel { task, .. } => read(task) && (self.chain(by, task, tasks) || self.can(by, &task.0, Can::Label)),
+            Op::Sync { sync } => match sync.task() {
+                Some(task) => read(task) && self.can(by, &task.0, sync.needs()),
+                None => self.can(by, "*", Can::Sync),
+            },
             Op::Grant { grant } => {
                 !grant.who.is_empty()
                     && !grant.can.is_empty()

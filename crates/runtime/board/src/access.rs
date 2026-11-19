@@ -535,6 +535,13 @@ impl Fold {
                 }
                 Ok(())
             }
+            Op::Sync { sync } => match sync.task() {
+                Some(task) => {
+                    access.see(&actor, task)?;
+                    access.need(&actor, &task.0, sync.needs())
+                }
+                None => access.need(&actor, "*", Can::Sync),
+            },
             Op::Revoke { grant } => match access.grants.get(grant) {
                 Some(stored) if stored.can.keys().all(|text| access.reaches(&actor, text)) => {
                     Ok(())

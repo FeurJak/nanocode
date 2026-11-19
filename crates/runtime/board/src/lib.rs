@@ -8,6 +8,7 @@ use nanocode_turnlog::LogHost;
 use serde::{Deserialize, Serialize};
 
 pub mod access;
+pub mod mirror;
 pub mod sim;
 pub mod tasks;
 
@@ -99,6 +100,9 @@ pub enum Op {
     },
     Charter {},
     Tasks(TaskOp),
+    Sync {
+        sync: mirror::SyncOp,
+    },
 }
 
 impl Op {
@@ -113,6 +117,7 @@ impl Op {
             | Self::Reply { task, .. }
             | Self::Relabel { task, .. } => Some(task),
             Self::Tasks(op) => Some(op.task()),
+            Self::Sync { sync } => sync.task(),
             Self::Grant { .. } | Self::Revoke { .. } | Self::Charter {} => None,
         }
     }
@@ -179,6 +184,7 @@ pub enum Rejection {
     Terminal,
     Access(access::Denied),
     Tasks(Refusal),
+    Sync(mirror::Refusal),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -211,6 +217,7 @@ pub enum Change {
         set: BTreeMap<String, String>,
         unset: BTreeSet<String>,
     },
+    Synced(mirror::Synced),
 }
 
 impl Change {
@@ -273,6 +280,7 @@ pub struct Fold {
     seen: BTreeMap<EventId, Result<u64, Rejection>>,
     entries: Vec<Entry>,
     access: access::Access,
+    mirror: mirror::Mirror,
 }
 
 impl Default for Fold {
@@ -292,6 +300,7 @@ impl Fold {
             seen: BTreeMap::new(),
             entries: Vec::new(),
             access: access::Access::new(),
+            mirror: mirror::Mirror::new(),
         }
     }
 
@@ -426,6 +435,7 @@ impl Fold {
             }
             Op::Grant { .. } | Op::Revoke { .. } | Op::Charter {} => Ok(()),
             Op::Tasks(op) => self.check_tasks(at_ms, op),
+            Op::Sync { sync } => self.check_sync(sync),
         }
     }
 
@@ -455,6 +465,7 @@ impl Fold {
     }
 
     fn record(&mut self, seq: u64, event: &Event, task: &TaskId, change: Change) {
+        self.observe(seq, event, task, &change);
         self.entries.push(Entry {
             seq,
             event: event.id.clone(),
@@ -466,6 +477,10 @@ impl Fold {
 
     fn transition(&mut self, seq: u64, event: &Event) {
         let now = self.now_ms;
+        if let Op::Sync { sync } = &event.op {
+            self.transition_sync(seq, event, sync);
+            return;
+        }
         let Some(id) = event.op.task().cloned() else {
             return;
         };
@@ -606,6 +621,7 @@ impl Fold {
                 self.steer(seq, event, op);
                 return;
             }
+            Op::Sync { .. } => return,
         };
         self.record(seq, event, &id, change);
     }

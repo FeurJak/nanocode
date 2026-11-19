@@ -34,6 +34,23 @@ pub enum Mutation {
     TasksUnchecked,
     RelabelUnchecked,
     RelabelKeepsUnset,
+    DeliverToOrigin,
+    ReceiptsIgnored,
+    DeletesNotSynced,
+    ParkedDropped,
+    ImportsDuplicated,
+    EchoImported,
+    EditsUnordered,
+    StaleLabels,
+    IdentityIgnored,
+    MentionsNotDm,
+    DeadLettersBlock,
+    StatusPostsAll,
+    FollowIgnored,
+    OrderIgnored,
+    UnlinkIgnored,
+    BotMarksRead,
+    ReadRegresses,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);
