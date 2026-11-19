@@ -61,6 +61,7 @@ pub enum Mutation {
     LabelIndexStale,
     AckSkipsFold,
     ResumeSkipsRows,
+    SnapshotSkipsRows,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

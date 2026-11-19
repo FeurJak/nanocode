@@ -77,10 +77,11 @@ pub enum BoardMutation {
     LabelIndexStale,
     AckSkipsFold,
     ResumeSkipsRows,
+    SnapshotSkipsRows,
 }
 
 impl BoardMutation {
-    const ALL: [Self; 42] = [
+    const ALL: [Self; 43] = [
         Self::None,
         Self::ClaimIgnoresLease,
         Self::ClaimIgnoresNeeds,
@@ -123,6 +124,7 @@ impl BoardMutation {
         Self::LabelIndexStale,
         Self::AckSkipsFold,
         Self::ResumeSkipsRows,
+        Self::SnapshotSkipsRows,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -173,6 +175,7 @@ impl BoardMutation {
             Self::LabelIndexStale => "label_index_stale",
             Self::AckSkipsFold => "ack_skips_fold",
             Self::ResumeSkipsRows => "resume_skips_rows",
+            Self::SnapshotSkipsRows => "snapshot_skips_rows",
         }
     }
 
@@ -226,6 +229,7 @@ impl BoardMutation {
             Self::LabelIndexStale => BoardRule::LabelIndexStale,
             Self::AckSkipsFold => BoardRule::AckSkipsFold,
             Self::ResumeSkipsRows => BoardRule::ResumeSkipsRows,
+            Self::SnapshotSkipsRows => BoardRule::SnapshotSkipsRows,
             Self::None | Self::CursorBeforeEffect | Self::EffectBeforeCursor => BoardRule::None,
         }
     }
@@ -1224,6 +1228,11 @@ fn resumes(rows: &[(u64, String)]) -> Result<(), String> {
     }
     for cut in [0, rows.len() / 3, rows.len() / 2, rows.len()] {
         let held = fold(&rows[..cut])?;
+        let held = if cut % 2 == 0 {
+            nanocode_board::Fold::restore(&held.snapshot()).map_err(|error| format!("restore a snapshot of {cut} rows: {error}"))?
+        } else {
+            held
+        };
         let host: Arc<dyn LogHost> = Arc::clone(&log) as Arc<dyn LogHost>;
         let board = nanocode_sync::block_on(Board::resume(host, SCOPE, access::identity("user:resumer"), held))
             .map_err(|error| format!("resume from a fold of {cut} rows: {error}"))?;

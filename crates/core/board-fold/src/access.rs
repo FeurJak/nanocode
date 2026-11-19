@@ -53,7 +53,7 @@ pub struct Grant {
     pub can: BTreeMap<String, Vec<Can>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Denied {
     Unverified,
     Malformed(String),
@@ -63,7 +63,7 @@ pub enum Denied {
     NotHolder,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Actor {
     principal: String,
     profile: Option<String>,
@@ -224,11 +224,14 @@ fn closeness(who: &[Who], actor: &Actor) -> Option<u8> {
         .max()
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Access {
     owner: Option<String>,
+    #[serde(with = "crate::pairs")]
     grants: BTreeMap<EventId, Grant>,
+    #[serde(with = "crate::pairs")]
     posters: BTreeMap<TaskId, Actor>,
+    #[serde(with = "crate::pairs")]
     holders: BTreeMap<TaskId, Actor>,
 }
 

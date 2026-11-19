@@ -136,7 +136,7 @@ pub struct Event {
     pub op: Op,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Phase {
     Open,
     Claimed {
@@ -168,7 +168,7 @@ impl Phase {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Task {
     pub spec: NewTask,
     pub phase: Phase,
@@ -178,7 +178,7 @@ pub struct Task {
     pub rank: Option<u64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Rejection {
     Exists,
     UnknownTask,
@@ -193,7 +193,7 @@ pub enum Rejection {
     Sync(mirror::Refusal),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Change {
     Posted,
     Claimed {
@@ -239,7 +239,7 @@ impl Change {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub seq: u64,
     pub event: EventId,
@@ -283,18 +283,23 @@ impl From<StoreError> for BoardError {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Fold {
     next: u64,
     now_ms: u64,
+    #[serde(with = "crate::pairs")]
     tasks: BTreeMap<TaskId, Task>,
+    #[serde(with = "crate::pairs")]
     children: BTreeMap<TaskId, BTreeSet<TaskId>>,
+    #[serde(with = "crate::pairs")]
     dependents: BTreeMap<TaskId, BTreeSet<TaskId>>,
+    #[serde(with = "crate::pairs")]
     seen: BTreeMap<EventId, Result<u64, Rejection>>,
     entries: Vec<Entry>,
     access: access::Access,
     mirror: mirror::Mirror,
     live: BTreeSet<TaskId>,
+    #[serde(with = "crate::pairs")]
     labelled: BTreeMap<String, BTreeMap<String, BTreeSet<TaskId>>>,
 }
 
@@ -548,6 +553,21 @@ impl Fold {
             at = self.tasks.get(id).and_then(|above| above.spec.parent.as_ref());
         }
         Ok(())
+    }
+
+    pub fn snapshot(&self) -> String {
+        serde_json::to_string(self).expect("a fold serializes")
+    }
+
+    pub fn restore(snapshot: &str) -> Result<Self, BoardError> {
+        let mut fold: Self = serde_json::from_str(snapshot).map_err(|error| BoardError::Corrupt {
+            seq: 0,
+            detail: format!("fold snapshot: {error}"),
+        })?;
+        if mutated(Mutation::SnapshotSkipsRows) {
+            fold.next += 1;
+        }
+        Ok(fold)
     }
 
     pub fn apply(&mut self, seq: u64, body: &str) -> Result<(), BoardError> {
@@ -954,5 +974,27 @@ impl Pending {
         }
         self.attempt = Attempt::Appended { seq, result };
         Ok(())
+    }
+}
+
+mod pairs {
+    use std::collections::BTreeMap;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<K: Serialize, V: Serialize, S: Serializer>(
+        map: &BTreeMap<K, V>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(map)
+    }
+
+    pub fn deserialize<'de, K, V, D>(deserializer: D) -> Result<BTreeMap<K, V>, D::Error>
+    where
+        K: Deserialize<'de> + Ord,
+        V: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        Vec::<(K, V)>::deserialize(deserializer).map(|pairs| pairs.into_iter().collect())
     }
 }

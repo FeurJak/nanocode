@@ -243,7 +243,7 @@ impl SyncOp {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Refusal {
     Linked,
     NotLinked(Target),
@@ -258,7 +258,7 @@ pub enum Refusal {
     UnknownReply(EventId),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Synced {
     Linked { target: Target, mode: Mode },
     Unlinked { target: Target },
@@ -275,7 +275,7 @@ pub enum Synced {
     Acted { message: EventId, by: String, control: String, values: BTreeMap<String, String> },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Linked {
     pub task: TaskId,
     pub join: Join,
@@ -286,7 +286,7 @@ pub struct Linked {
     pub to: Target,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Kind {
     Root,
     Reply,
@@ -294,14 +294,14 @@ pub enum Kind {
     Status,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Origin {
     pub thread: Target,
     pub message: String,
     pub user: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub task: TaskId,
     pub kind: Kind,
@@ -320,14 +320,14 @@ pub struct Message {
     pub deleted: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Copy {
     pub external: String,
     pub revision: u64,
     pub removed: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Action {
     Post { starts: bool },
     Edit { external: String },
@@ -335,7 +335,7 @@ pub enum Action {
     Sweep,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Delivery {
     pub task: TaskId,
     pub message: EventId,
@@ -354,24 +354,39 @@ pub struct Delivery {
 
 type Parked = (EventId, u64, SyncOp);
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mirror {
+    #[serde(with = "crate::pairs")]
     links: BTreeMap<Target, Linked>,
     ever: BTreeSet<(TaskId, Target)>,
     gone: BTreeSet<Target>,
+    #[serde(with = "crate::pairs")]
     threads: BTreeMap<Target, Target>,
+    #[serde(with = "crate::pairs")]
     messages: BTreeMap<EventId, Message>,
+    #[serde(with = "crate::pairs")]
     by_task: BTreeMap<TaskId, Vec<EventId>>,
+    #[serde(with = "crate::pairs")]
     status: BTreeMap<TaskId, EventId>,
+    #[serde(with = "crate::pairs")]
     external: BTreeMap<(Target, String), EventId>,
+    #[serde(with = "crate::pairs")]
     copies: BTreeMap<(EventId, Target), Copy>,
+    #[serde(with = "crate::pairs")]
     attempts: BTreeMap<(EventId, Target, u64), u64>,
+    #[serde(with = "crate::pairs")]
     dead: BTreeMap<(EventId, Target), String>,
+    #[serde(with = "crate::pairs")]
     labels: BTreeMap<(TaskId, String), u64>,
+    #[serde(with = "crate::pairs")]
     accounts: BTreeMap<(String, String), String>,
+    #[serde(with = "crate::pairs")]
     members: BTreeMap<String, BTreeMap<String, String>>,
+    #[serde(with = "crate::pairs")]
     read: BTreeMap<(TaskId, String), u64>,
+    #[serde(with = "crate::pairs")]
     parked: BTreeMap<(Target, Option<String>), Vec<Parked>>,
+    #[serde(with = "crate::pairs")]
     owned: BTreeMap<(TaskId, String), u64>,
 }
 

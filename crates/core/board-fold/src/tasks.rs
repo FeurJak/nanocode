@@ -93,7 +93,7 @@ impl TaskOp {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Refusal {
     Assigned(String),
     Blocked,
@@ -107,7 +107,7 @@ pub enum Refusal {
     Duplicate,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Moved {
     Blocked {
         kind: String,
