@@ -19,6 +19,7 @@ pub struct Board {
     identity: access::Identity,
     minted: u64,
     fold: Fold,
+    contended: bool,
 }
 
 impl Board {
@@ -35,6 +36,7 @@ impl Board {
             identity,
             minted: 0,
             fold: Fold::new(),
+            contended: false,
         };
         board.fold_rows(rows)?;
         if !mutated(Mutation::MintedRestarts) {
@@ -89,12 +91,19 @@ impl Board {
             at_ms,
             op,
         })?;
-        let mut step = pending.optimistic(&self.fold);
+        let mut step = if self.contended {
+            None
+        } else {
+            pending.optimistic(&self.fold)
+        };
         loop {
             let step = match step.take() {
                 Some(step) => step,
                 None => {
                     let rows = self.host.scan(&self.scope, self.fold.next(), END).await;
+                    if rows.as_ref().is_ok_and(Vec::is_empty) {
+                        self.contended = false;
+                    }
                     pending.read(&mut self.fold, rows)?
                 }
             };
@@ -102,6 +111,7 @@ impl Board {
                 Step::Done(applied) => return Ok(applied),
                 Step::Append { seq, body } => {
                     let appended = self.host.append(&self.scope, &[(seq, body)]).await;
+                    self.contended |= appended.is_err();
                     if let Some(applied) = pending.acknowledged(&mut self.fold, seq, appended)? {
                         return Ok(applied);
                     }
