@@ -1148,6 +1148,16 @@ name = "nanocode-zstd"
 version = "0.7.0"
 
 [[package]]
+name = "nc-board"
+version = "0.7.0"
+dependencies = [
+ "nanocode-board",
+ "nanocode-executor",
+ "nanocode-turnlog",
+ "serde_json",
+]
+
+[[package]]
 name = "nc-lite"
 version = "0.7.0"
 dependencies = [
