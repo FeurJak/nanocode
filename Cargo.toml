@@ -20,6 +20,7 @@ members = [
     "crates/runtime/code-mode-engine",
     "crates/runtime/durability",
     "crates/runtime/subagents",
+    "crates/core/board-fold",
     "crates/runtime/board",
     "crates/runtime/board-sync",
     "crates/backends/claude",
@@ -152,6 +153,7 @@ nanocode-schema = { version = "0.7.0", path = "crates/core/schema" }
 nanocode-shell = { version = "0.7.0", path = "crates/core/shell" }
 nanocode-durability = { version = "0.7.0", path = "crates/runtime/durability" }
 nanocode-subagents = { version = "0.7.0", path = "crates/runtime/subagents" }
+nanocode-board-fold = { version = "0.7.0", path = "crates/core/board-fold" }
 nanocode-board = { version = "0.7.0", path = "crates/runtime/board" }
 nanocode-board-sync = { version = "0.7.0", path = "crates/runtime/board-sync" }
 nanocode-code-mode = { version = "0.7.0", path = "crates/runtime/code-mode"  }

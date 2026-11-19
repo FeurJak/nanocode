@@ -59,6 +59,6 @@ pub fn mutate(mutation: Mutation) {
     MUTATION.store(mutation as u8, Ordering::SeqCst);
 }
 
-pub(crate) fn mutated(mutation: Mutation) -> bool {
+pub fn mutated(mutation: Mutation) -> bool {
     MUTATION.load(Ordering::Relaxed) == mutation as u8
 }

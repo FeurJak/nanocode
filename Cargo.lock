@@ -336,8 +336,15 @@ dependencies = [
 name = "nanocode-board"
 version = "0.7.0"
 dependencies = [
- "nanocode-durability-core",
+ "nanocode-board-fold",
  "nanocode-turnlog",
+]
+
+[[package]]
+name = "nanocode-board-fold"
+version = "0.7.0"
+dependencies = [
+ "nanocode-durability-core",
  "serde",
  "serde_json",
 ]
