@@ -1179,6 +1179,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocode-workspace-fs"
+version = "0.7.0"
+dependencies = [
+ "nanocode-bytes",
+ "nanocode-digest",
+ "nanocode-durability-core",
+ "nanocode-platform",
+ "nanocode-shell",
+ "nanocode-sync",
+]
+
+[[package]]
 name = "nanocode-x509"
 version = "0.7.0"
 dependencies = [

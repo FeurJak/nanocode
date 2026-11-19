@@ -23,6 +23,7 @@
 | `nanocode-cost-fold` | Cost attribution as a pure fold: tokens, dollars and Hand time per step, rolled up by agent, turn, board task and commit |
 | `nanocode-agent-core` | Agent lifecycle, handles and session contracts |
 | `nanocode-durability-core` | `StateStore`, content-addressed payloads, the deterministic state machine, `SqlStore`, `RowStore`, `StagedStore`, `BlobStore` |
+| `nanocode-workspace-fs` | A versioned virtual workspace: a manifest of content-addressed files changed all-or-nothing under caller caps, its stores, and the shell filesystem over it |
 | `nanocode-tool-contracts`, `nanocode-tool-provider` | Tool invocation traits and dynamic tool providers |
 | `nanocode-tools`, `nanocode-tools-macros` | The `#[tool]` macro and the crate its expansion names |
 | `nanocode-process-contracts` | Portable shell and file host interfaces, `Redactor` |
