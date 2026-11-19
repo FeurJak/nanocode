@@ -24,6 +24,7 @@ members = [
     "crates/core/cost-fold",
     "crates/runtime/board",
     "crates/runtime/board-sync",
+    "crates/runtime/hands",
     "crates/backends/claude",
     "crates/backends/claude/client",
     "crates/backends/claude/tools",
@@ -158,6 +159,7 @@ nanocode-board-fold = { version = "0.7.0", path = "crates/core/board-fold" }
 nanocode-cost-fold = { version = "0.7.0", path = "crates/core/cost-fold" }
 nanocode-board = { version = "0.7.0", path = "crates/runtime/board" }
 nanocode-board-sync = { version = "0.7.0", path = "crates/runtime/board-sync" }
+nanocode-hands = { version = "0.7.0", path = "crates/runtime/hands" }
 nanocode-code-mode = { version = "0.7.0", path = "crates/runtime/code-mode"  }
 nanocode-tool-runtime = { version = "0.7.0", path = "crates/integrations/tool-runtime" }
 nanocode-tool-provider = { version = "0.7.0", path = "crates/core/tool-provider" }

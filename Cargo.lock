@@ -555,6 +555,17 @@ name = "nanocode-gif"
 version = "0.7.0"
 
 [[package]]
+name = "nanocode-hands"
+version = "0.7.0"
+dependencies = [
+ "nanocode-code-mode",
+ "nanocode-digest",
+ "nanocode-platform",
+ "nanocode-tool-contracts",
+ "serde_json",
+]
+
+[[package]]
 name = "nanocode-home"
 version = "0.7.0"
 dependencies = [
