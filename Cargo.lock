@@ -1201,6 +1201,8 @@ dependencies = [
  "nanocode-platform",
  "nanocode-shell",
  "nanocode-sync",
+ "nanocode-sys",
+ "serde_json",
 ]
 
 [[package]]

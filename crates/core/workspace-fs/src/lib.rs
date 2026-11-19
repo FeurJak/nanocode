@@ -1,6 +1,7 @@
 mod fs;
 mod mem;
 mod model;
+mod sql;
 mod store;
 
 pub use fs::{Download, SYMLINK_HOPS, Upload, WorkspaceFs};
@@ -9,4 +10,5 @@ pub use model::{
     Caps, Change, Corrupt, DIGEST_BYTES, Digest, Entry, MODE_BITS, Manifest, Op, PARENT_MODE,
     Refusal, normalize, parent,
 };
+pub use sql::SqlStore;
 pub use store::{Batch, Blob, Failure, Store};
