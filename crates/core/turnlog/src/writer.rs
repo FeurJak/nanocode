@@ -1557,9 +1557,27 @@ impl Lease<'_> {
                 .map_err(|error| {
                     StoreError::NotCommitted(format!("turn log rewrite size: {error}"))
                 })?;
-            let size = packed.packed.len() + rewrite;
+            let mut line = Vec::new();
+            let mut inline = 0;
+            for record in &writer.buffer {
+                if matches!(record, Record::Event { .. }) {
+                    crate::record::write(record, &mut line)?;
+                    inline += line.len() + 1;
+                    line.clear();
+                }
+            }
+            let inline = usize::try_from(
+                (inline.min(packed.plain) as u128 * packed.packed.len() as u128)
+                    .checked_div(packed.plain as u128)
+                    .unwrap_or(0),
+            )
+            .unwrap_or(usize::MAX);
+            let size = packed.packed.len() - inline.min(packed.packed.len()) + rewrite;
             let tail = writer.tail + body.len();
-            if due || (writer.snapshot + tail > self.ratio * size && tail >= self.ratio * rewrite) {
+            if due
+                || (writer.snapshot + writer.tail > self.ratio * size
+                    && tail >= self.ratio * rewrite)
+            {
                 snapshot = Some(Partitioned {
                     head: packed,
                     index,
