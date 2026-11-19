@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use nanocode_agent_core::hedge::HedgeOutcome;
+use nanocode_hedge::HedgeOutcome;
 use nanocode_platform::Instant;
 
 use crate::client::{

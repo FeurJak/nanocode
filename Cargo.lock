@@ -149,6 +149,7 @@ name = "nanocode-agent-core"
 version = "0.7.0"
 dependencies = [
  "nanocode-agent-types",
+ "nanocode-hedge",
  "nanocode-home",
  "nanocode-platform",
  "nanocode-sync",
@@ -308,13 +309,13 @@ name = "nanocode-backend-codex-client"
 version = "0.7.0"
 dependencies = [
  "memchr",
- "nanocode-agent-core",
  "nanocode-agent-types",
  "nanocode-audio",
  "nanocode-bytes",
  "nanocode-compression",
  "nanocode-digest",
  "nanocode-executor",
+ "nanocode-hedge",
  "nanocode-home",
  "nanocode-http",
  "nanocode-image",
@@ -565,6 +566,15 @@ dependencies = [
  "nanocode-sync",
  "nanocode-tool-contracts",
  "serde_json",
+]
+
+[[package]]
+name = "nanocode-hedge"
+version = "0.7.0"
+dependencies = [
+ "nanocode-platform",
+ "nanocode-sync",
+ "serde",
 ]
 
 [[package]]

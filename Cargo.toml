@@ -5,6 +5,7 @@ members = [
     "crates/runtime/agent-config",
     "crates/core/agent",
     "crates/core/agent-types",
+    "crates/core/hedge",
     "crates/core/durability",
     "crates/core/turnlog",
     "crates/core/types-core",
@@ -112,6 +113,7 @@ publish = true
 [workspace.dependencies]
 nanocode-backend-claude-tools = { version = "0.7.0", path = "crates/backends/claude/tools" }
 nanocode-agent-types = { version = "0.7.0", path = "crates/core/agent-types" }
+nanocode-hedge = { version = "0.7.0", path = "crates/core/hedge" }
 nanocode-durability-core = { version = "0.7.0", path = "crates/core/durability" }
 nanocode-turnlog = { version = "0.7.0", path = "crates/core/turnlog" }
 nanocode-types-core = { version = "0.7.0", path = "crates/core/types-core" }

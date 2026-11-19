@@ -98,7 +98,7 @@ pub struct ModelConfig {
 
     pub tool_input_deltas: bool,
 
-    pub hedging: Option<Arc<nanocode_agent_core::hedge::Hedging>>,
+    pub hedging: Option<Arc<nanocode_hedge::Hedging>>,
 
     pub responses_history: ResponsesHistory,
 

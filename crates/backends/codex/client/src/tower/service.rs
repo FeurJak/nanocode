@@ -14,7 +14,7 @@ use crate::client::{
     AgentEventKind, ModelConfig, OpenAiAuthSnapshot, ResponsesHistory, ResponsesTransport,
     responses::{CreatePolicy, ResponseCreate, WarmupResponse, WarmupServerEvent},
 };
-use nanocode_agent_core::hedge::{HedgeOutcome, HedgeWinner, Hedging};
+use nanocode_hedge::{HedgeOutcome, HedgeWinner, Hedging};
 use nanocode_platform::Instant;
 use nanocode_sync::Actor;
 use nanocode_trace::{Instrument, info_span};

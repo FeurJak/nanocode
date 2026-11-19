@@ -366,7 +366,7 @@ fn reconnectable(error: &ResponsesError) -> bool {
     }
 }
 
-fn reconnect_delay(reconnect: u32) -> Duration {
+const fn reconnect_delay(reconnect: u32) -> Duration {
     Duration::from_millis(200 * 2_u64.pow(reconnect.saturating_sub(1)))
 }
 

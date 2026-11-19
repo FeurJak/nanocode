@@ -21,6 +21,7 @@
 | `nanocode-types` | Event channels, over `nanocode-types-core` |
 | `nanocode-agent-types` | Model, usage and error values |
 | `nanocode-cost-fold` | Cost attribution as a pure fold: tokens, dollars and Hand time per step, rolled up by agent, turn, board task and commit |
+| `nanocode-hedge` | Hedged first-byte request policy and the primary-versus-hedge race |
 | `nanocode-agent-core` | Agent lifecycle, handles and session contracts |
 | `nanocode-durability-core` | `StateStore`, content-addressed payloads, the deterministic state machine, `SqlStore`, `RowStore`, `StagedStore`, `BlobStore` |
 | `nanocode-workspace-fs` | A versioned virtual workspace: a manifest of content-addressed files changed all-or-nothing under caller caps, its stores, and the shell filesystem over it |

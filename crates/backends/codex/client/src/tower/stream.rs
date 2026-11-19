@@ -7,7 +7,7 @@ use crate::client::{
     AgentEventKind, ContentItem, EventSink, MessagePhase, MessageRole, ResponseEvent, ResponseItem,
     ResponseItemId, events::TextDeltaRef, monotonic_now_ns, responses::Usage,
 };
-use nanocode_agent_core::hedge::HedgeOutcome;
+use nanocode_hedge::HedgeOutcome;
 use nanocode_platform::Instant;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
