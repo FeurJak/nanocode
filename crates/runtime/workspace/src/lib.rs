@@ -1,6 +1,7 @@
 mod cells;
 mod host;
 mod machine;
+pub mod sim;
 mod worker;
 
 use std::{io, rc::Rc, sync::Arc, time::Duration};

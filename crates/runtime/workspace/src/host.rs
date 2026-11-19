@@ -6,7 +6,10 @@ use nanocode_process_contracts::{
     effective_token_limit, redact_and_limit_in,
 };
 
-use crate::{Command, Ended, Finished, Limit, Workspace};
+use crate::{
+    Command, Ended, Finished, Limit, Workspace,
+    sim::{self, Mutation},
+};
 
 fn bytes(path: &Path) -> Vec<u8> {
     path.as_os_str().as_encoded_bytes().to_vec()
@@ -64,6 +67,7 @@ impl FileHost for Workspace {
 
 fn status(finished: &Finished) -> (i32, Option<String>) {
     match &finished.ran.ended {
+        Ended::Exited(_) if sim::mutated(Mutation::ExitIgnored) => (0, None),
         Ended::Exited(status) => (*status, None),
         Ended::Cancelled if finished.timed_out => (
             124,

@@ -928,6 +928,7 @@ dependencies = [
  "nanocode-trace",
  "nanocode-turnlog",
  "nanocode-websocket",
+ "nanocode-workspace",
  "nanocode-workspace-fs",
  "rustls",
  "serde_json",

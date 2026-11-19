@@ -12,7 +12,10 @@ use nanocode_shell::{
 };
 use nanocode_sync::{Stream, oneshot, stream::FuturesUnordered, unbounded};
 
-use crate::{Command, Config, Finished};
+use crate::{
+    Command, Config, Finished,
+    sim::{self, Mutation},
+};
 
 type Reply<T> = oneshot::Sender<Result<T, String>>;
 
@@ -95,7 +98,16 @@ impl Kept {
                 let _ = reply.send(self.remove(&path).await);
             }
             Job::Run(command, mut reply) => {
-                let finished = self.run(command, &mut reply).await;
+                let again = sim::mutated(Mutation::RunsTwice).then(|| Command {
+                    script: command.script.clone(),
+                    cwd: command.cwd.clone(),
+                    env: command.env.clone(),
+                    timeout: command.timeout,
+                });
+                let mut finished = self.run(command, &mut reply).await;
+                if let Some(again) = again {
+                    finished = self.run(again, &mut reply).await;
+                }
                 let _ = reply.send(finished);
             }
         }
@@ -111,14 +123,21 @@ impl Kept {
             return Err(format!("{}: Is a directory", shown(path)));
         }
         let data = self.files.read(path, self.limits.file).get().await;
-        data.map(|data| Some(data.to_vec()))
-            .map_err(|error| said(path, &error))
+        data.map(|data| match sim::mutated(Mutation::ReadTruncates) {
+            true => Some(data[..data.len() / 2].to_vec()),
+            false => Some(data.to_vec()),
+        })
+        .map_err(|error| said(path, &error))
     }
 
     async fn write(&self, path: &[u8], data: &[u8]) -> Result<(), String> {
         let mut parent = Vec::new();
         let names: Vec<&[u8]> = path.split(|byte| *byte == b'/').collect();
-        for name in names.iter().take(names.len().saturating_sub(1)) {
+        let parents = match sim::mutated(Mutation::WriteSkipsParents) {
+            true => 0,
+            false => names.len().saturating_sub(1),
+        };
+        for name in names.iter().take(parents) {
             if name.is_empty() {
                 continue;
             }
