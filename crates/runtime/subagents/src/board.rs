@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use nanocode_board::access::{Identity, Verifier};
+use nanocode_board::tasks::Terms;
 use nanocode_board::{
     Applied, Board, BoardError, Change, ClaimId, EventId, NewTask, Op, Outcome, Phase, Rejection,
     TaskId,
@@ -387,6 +388,7 @@ impl Inner {
                 spec: format!("root session {root}"),
                 labels: BTreeMap::from([("root".to_owned(), root.to_owned())]),
                 needs: Vec::new(),
+                terms: Terms::default(),
             };
             match self.dispatch(&format!("post:{id}"), Op::Post { task }) {
                 Some(Ok((_, false))) => self.stats.posts += 1,
@@ -409,6 +411,7 @@ impl Inner {
                 ("agent".to_owned(), agent.to_string()),
             ]),
             needs: Vec::new(),
+            terms: Terms::default(),
         };
         match self.dispatch(&format!("post:{id}"), Op::Post { task }) {
             Some(Ok((_, false))) => self.stats.posts += 1,
