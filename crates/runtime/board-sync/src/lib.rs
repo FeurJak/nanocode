@@ -342,6 +342,13 @@ impl<R: Renderer, M: Router, I: IdentityMap> Engine<R, M, I> {
             revision: *revision,
             thread,
         };
+        if delivery.action == Action::Orphan {
+            let dead = SyncOp::Undelivered { task: task.clone(), message: message.clone(), target: target.clone(), error: "root undelivered".to_owned() };
+            if Self::settle(board, format!("dead:{lane}"), at_ms, dead, drained).await? {
+                drained.dead += 1;
+            }
+            return Ok(());
+        }
         let posting = matches!(delivery.action, Action::Post { .. });
         let sweep = matches!(delivery.action, Action::Sweep);
         if sweep || (posting && counted > 0 && !mutated(Mutation::RetryGuardSkipped)) {
@@ -396,7 +403,7 @@ impl<R: Renderer, M: Router, I: IdentityMap> Engine<R, M, I> {
             Action::Post { .. } => platform.post(call).await.map(Some),
             Action::Edit { external } => platform.edit(call, external).await.map(|()| None),
             Action::Delete { external } => platform.delete(&delivery.to, external).await.map(|()| None),
-            Action::Sweep => return Ok(()),
+            Action::Sweep | Action::Orphan => return Ok(()),
         };
         if mutated(Mutation::AttemptAfterCall) {
             Self::settle(board, key, at_ms, attempt, drained).await?;

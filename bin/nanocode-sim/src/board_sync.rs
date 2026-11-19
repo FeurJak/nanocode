@@ -75,10 +75,11 @@ pub enum SyncMutation {
     RootEditsIgnored,
     RetryAfterIgnored,
     RateLimitCountsAttempt,
+    RootDeadIgnored,
 }
 
 impl SyncMutation {
-    const ALL: [Self; 23] = [
+    const ALL: [Self; 24] = [
         Self::None,
         Self::DeliverToOrigin,
         Self::ReceiptsIgnored,
@@ -102,6 +103,7 @@ impl SyncMutation {
         Self::RootEditsIgnored,
         Self::RetryAfterIgnored,
         Self::RateLimitCountsAttempt,
+        Self::RootDeadIgnored,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -133,6 +135,7 @@ impl SyncMutation {
             Self::RootEditsIgnored => "root_edits_ignored",
             Self::RetryAfterIgnored => "retry_after_ignored",
             Self::RateLimitCountsAttempt => "rate_limit_counts_attempt",
+            Self::RootDeadIgnored => "root_dead_ignored",
         }
     }
 
@@ -160,6 +163,7 @@ impl SyncMutation {
             Self::BotMarksRead => BoardRule::BotMarksRead,
             Self::ReadRegresses => BoardRule::ReadRegresses,
             Self::RootEditsIgnored => BoardRule::RootEditsIgnored,
+            Self::RootDeadIgnored => BoardRule::RootDeadIgnored,
             Self::None | Self::RetryGuardSkipped | Self::AttemptAfterCall | Self::RetryAfterIgnored | Self::RateLimitCountsAttempt => BoardRule::None,
         }
     }
@@ -651,7 +655,10 @@ impl Shape {
             plan.hook(format!("{sync}/react/{key}"), at, Place::Copy(key.clone(), sync.clone()), What::React { author }, None);
         }
         let hooks = plan.hooks;
-        let poison = rng.chance(350_000).then(|| answers[rng.pick(answers.len())].0.clone());
+        let roots = lanes.iter().filter(|(_, quiet, _)| !quiet).map(|(id, _, _)| format!("post/{id}/post")).collect::<Vec<_>>();
+        let poison = rng.chance(350_000).then(|| {
+            if !roots.is_empty() && rng.chance(400_000) { roots[rng.pick(roots.len())].clone() } else { answers[rng.pick(answers.len())].0.clone() }
+        });
         let mut lead = vec![Planned { step: Step::Accounts, nap_ms: 0, after: None }];
         let mut all = lanes.into_iter().map(|(_, _, lane)| lane).collect::<Vec<_>>();
         all.extend(pr_lanes);
@@ -1574,9 +1581,10 @@ impl Reference {
                 }
             }
             SyncOp::Removed { .. } => {}
-            SyncOp::Undelivered { message, target, .. } => {
-                let known = self.said.get(message).is_some_and(|said| self.routable(said, target));
-                if known && !self.copies.contains(&(message.clone(), target.clone())) && self.attempted.contains(&(message.clone(), target.clone())) {
+            SyncOp::Undelivered { task, message, target, .. } => {
+                let known = self.said.get(message).is_some_and(|said| said.task == *task && self.routable(said, target));
+                let tried = self.attempted.contains(&(message.clone(), target.clone())) || self.rootless(task, target);
+                if known && !self.copies.contains(&(message.clone(), target.clone())) && tried {
                     self.dead.insert((message.clone(), target.clone()));
                 }
             }
@@ -1625,6 +1633,13 @@ impl Reference {
             labels.remove(key);
         }
         labels.extend(added);
+    }
+
+    fn rootless(&self, task: &TaskId, target: &Target) -> bool {
+        self.by_task
+            .get(task)
+            .and_then(|ids| ids.first())
+            .is_some_and(|root| self.said[root].kind == Kind::Root && self.dead.contains(&(root.clone(), target.clone())))
     }
 
     fn messages(&self, task: &TaskId) -> Vec<&EventId> {
@@ -1786,6 +1801,7 @@ fn check(world: &World, rows: &[(u64, String)], fold: &Fold) -> Result<SyncStats
         return Err(format!("rule 12: {id} was dead-lettered for {key} by 429s alone: {error}"));
     }
     let poison = world.shape.poison.as_ref().map(|key| EventId(format!("{LEAD}#{key}")));
+    let reached = held.keys().cloned().collect::<BTreeSet<_>>();
     let mut judge = |id: &EventId, said: &Said, key: &Target, live: bool, now: bool, ever: bool, late: bool| -> Result<(), String> {
         let copies = held.remove(&(id.clone(), key.clone())).unwrap_or_default();
         if late {
@@ -1836,8 +1852,15 @@ fn check(world: &World, rows: &[(u64, String)], fold: &Fold) -> Result<SyncStats
         Ok(())
     };
     for (key, link, live) in &all {
+        let orphaned = *live && link.channel && link.thread.is_none() && model.rootless(&link.task, key);
         for id in model.messages(&link.task) {
             let said = &model.said[id];
+            if orphaned && said.kind != Kind::Root && !said.deleted && link.now(said) {
+                let copied = reached.contains(&(id.clone(), (*key).clone()));
+                if copied || !model.dead.contains(&(id.clone(), (*key).clone())) {
+                    return Err(format!("rule 11: {id} ({:?}) on {key} after its root was dead-lettered was {}", said.kind, if copied { "delivered" } else { "left pending" }));
+                }
+            }
             let late = !live && link.unlinked.is_some_and(|at| said.seq > at);
             let reached = !link.channel || said.kind == Kind::Root || link.thread.is_some();
             judge(id, said, key, *live, reached && link.now(said), reached && link.ever(said), late)?;

@@ -349,6 +349,7 @@ pub enum Action {
     Edit { external: String },
     Delete { external: String },
     Sweep,
+    Orphan,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -443,7 +444,7 @@ fn sum(tally: &Tally, id: &EventId, target: &Target) -> u64 {
 
 fn tally(tally: &Tally, id: &EventId, target: &Target, action: &Action, revision: u64) -> u64 {
     match action {
-        Action::Post { .. } | Action::Sweep => sum(tally, id, target),
+        Action::Post { .. } | Action::Sweep | Action::Orphan => sum(tally, id, target),
         Action::Edit { .. } | Action::Delete { .. } => tally.get(&(id.clone(), target.clone(), revision)).copied().unwrap_or_default(),
     }
 }
@@ -591,6 +592,13 @@ impl Mirror {
         sum(&self.attempts, id, target)
     }
 
+    fn rootless(&self, task: &TaskId, target: &Target) -> bool {
+        self.by_task
+            .get(task)
+            .and_then(|ids| ids.first())
+            .is_some_and(|root| self.messages[root].kind == Kind::Root && self.dead.contains_key(&(root.clone(), target.clone())))
+    }
+
     fn action(&self, id: &EventId, message: &Message, target: &Target, eligible: bool) -> Option<Action> {
         let copy = self
             .copies
@@ -652,6 +660,12 @@ impl Mirror {
                 let to = match (&linked.join, &linked.thread) {
                     (Join::Channel, Some(thread)) => thread.clone(),
                     (Join::Channel, None) if message.kind == Kind::Root => linked.to.clone(),
+                    (Join::Channel, None) if self.rootless(&linked.task, target) && !mutated(Mutation::RootDeadIgnored) => {
+                        if let Some(Action::Post { .. }) = self.action(id, message, target, Self::eligible(linked, message)) {
+                            out.push(self.delivery(id, message, target, linked.to.clone(), Action::Orphan));
+                        }
+                        continue;
+                    }
                     (Join::Channel, None) => {
                         blocked = true;
                         continue;
@@ -891,7 +905,7 @@ impl Fold {
                 if mirror.copies.contains_key(&(message.clone(), target.clone())) {
                     return refuse(Refusal::Delivered);
                 }
-                if mirror.tries(message, target) == 0 {
+                if mirror.tries(message, target) == 0 && !mirror.rootless(task, target) {
                     return refuse(Refusal::NoAttempt);
                 }
                 Ok(())

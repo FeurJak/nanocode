@@ -87,6 +87,7 @@ pub enum Mutation {
     CursorInclusive,
     SaysUnchecked,
     MessagesLeak,
+    RootDeadIgnored,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);
