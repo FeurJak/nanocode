@@ -193,9 +193,14 @@ impl Router {
                 ToolOutput::from_wire(wire).ok()
             }
             Step::Finished { wire: None } if sim::mutated(Mutation::RecoverReruns) => {
-                self.steps
-                    .update(|map| map.remove(&key(context.session_id(), context.call_id())));
-                Some(self.route(hand, "", Value::Null, context).await)
+                if let Ok(Target::Hand(target)) = Target::parse(hand) {
+                    let (session, step) = (context.session_id(), context.call_id());
+                    let _ = self
+                        .host
+                        .run(session, step, &target, "", Value::Null, context)
+                        .await;
+                }
+                Some(uncertain(hand, "its Hand was lost mid-step"))
             }
             Step::Finished { wire: None } | Step::Running => Some(uncertain(
                 hand,

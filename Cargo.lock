@@ -911,6 +911,7 @@ dependencies = [
  "nanocode-durability",
  "nanocode-durability-core",
  "nanocode-executor",
+ "nanocode-hands",
  "nanocode-http",
  "nanocode-io",
  "nanocode-mpp",

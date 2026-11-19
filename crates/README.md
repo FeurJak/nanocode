@@ -48,6 +48,7 @@
 | `nanocode-code-mode-engine` | The QuickJS cell worker pool (native) and stepped execution (WASM) |
 | `nanocode-durability` | Session drivers, the `SessionStore` catalog, `SharedStore`, `MemoryStore`, branches, the record cache |
 | `nanocode-tool-host` | The `Tools` builder, tool selection, admission, `FunctionTool`, description pins |
+| `nanocode-hands` | Per-call Code Mode targets (workspace, hosted, pool, native, mac), the `HandHost` contract, lazy start and idle release, sha-checked atomic copies |
 
 ## backends
 

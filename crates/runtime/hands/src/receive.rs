@@ -20,7 +20,13 @@ pub async fn receive(
                 bytes.extend_from_slice(&chunk);
             }
             Ok(None) => break,
-            Err(_) if sim::mutated(Mutation::CommitsPartial) => break,
+            Err(_) if sim::mutated(Mutation::CommitsPartial) => {
+                let stored = Stored {
+                    size_bytes: bytes.len() as u64,
+                    sha256: Sha256Digest(hasher.finalize()),
+                };
+                return Ok((bytes, stored));
+            }
             Err(error) => return Err(PutError::Source(error)),
         }
     }
