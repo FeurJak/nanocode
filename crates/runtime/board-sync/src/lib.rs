@@ -78,6 +78,7 @@ pub enum Event {
     Message { thread: Target, message: String, author: Author, body: String, context: Option<String>, sub: Option<String>, marker: Option<EventId> },
     Edited { thread: Target, message: String, body: String, version: u64 },
     Deleted { thread: Target, message: String },
+    Reworded { thread: Target, author: Author, title: String, body: Option<String>, version: u64 },
     Reaction { thread: Target, message: String, author: Author, emoji: String },
     Clicked { thread: Target, message: String, author: Author, control: String, values: BTreeMap<String, String> },
     Labels { task: TaskId, set: BTreeMap<String, String>, unset: Vec<String>, own: Vec<String>, version: u64 },
@@ -202,6 +203,10 @@ impl<R: Renderer, M: Router, I: IdentityMap> Engine<R, M, I> {
             }
             Event::Deleted { thread, message } => {
                 let op = SyncOp::Delete { thread: thread.clone(), message: message.clone() };
+                Self::write(board, key, at_ms, sync(op), &mut done).await?;
+            }
+            Event::Reworded { thread, author, title, body, version } => {
+                let op = SyncOp::Reword { thread: thread.clone(), author: author.clone(), title: title.clone(), body: body.clone(), version: *version };
                 Self::write(board, key, at_ms, sync(op), &mut done).await?;
             }
             Event::Reaction { thread, message, author, emoji } => {

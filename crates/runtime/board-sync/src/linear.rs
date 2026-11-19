@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use nanocode_board::{NewTask, TaskId, tasks::Terms};
+use nanocode_board::{NewTask, TaskId, mirror, tasks::Terms};
 use serde_json::Value;
 
 use super::github::{Parts, keyed, marker, millis, names, tagged, text};
@@ -34,7 +34,7 @@ fn reconcile(data: &Value) -> (BTreeMap<String, String>, Vec<String>) {
     (set, own)
 }
 
-fn issue(action: &str, data: &Value) -> Option<Parts> {
+fn issue(config: &Config, action: &str, payload: &Value, data: &Value) -> Option<Parts> {
     let identifier = text(data, "/identifier")?;
     let task = TaskId(format!("{SYNC}/{identifier}"));
     let (mut set, own) = reconcile(data);
@@ -43,11 +43,7 @@ fn issue(action: &str, data: &Value) -> Option<Parts> {
     }
     match action {
         "create" => {
-            let title = text(data, "/title")?;
-            let spec = match text(data, "/description") {
-                Some(description) if !description.trim().is_empty() => format!("{title}\n\n{description}"),
-                _ => title.to_owned(),
-            };
+            let spec = mirror::spec(text(data, "/title")?, text(data, "/description"));
             set.insert("issue".to_owned(), identifier.to_owned());
             let new = NewTask { id: task, parent: None, spec, labels: set, needs: Vec::new(), terms: Terms::default() };
             let opened = Event::Opened { task: new, thread: thread(identifier), message: format!("issue:{identifier}"), mode: Mode::Always };
@@ -55,7 +51,17 @@ fn issue(action: &str, data: &Value) -> Option<Parts> {
         }
         "update" => {
             let version = text(data, "/updatedAt").and_then(millis)?;
-            Some(vec![("labels", Event::Labels { task, set, unset: Vec::new(), own, version })])
+            let mut parts = vec![("labels", Event::Labels { task, set, unset: Vec::new(), own, version })];
+            let changed = |field: &str| payload.pointer(&format!("/updatedFrom/{field}")).is_some();
+            if changed("title") || changed("description") {
+                let user = text(payload, "/actor/id")?;
+                let name = text(payload, "/actor/name").unwrap_or(user);
+                let author = Author { user: user.to_owned(), name: name.to_owned(), bot: config.bot.as_deref() == Some(user) };
+                let title = text(data, "/title")?.to_owned();
+                let body = text(data, "/description").map(str::to_owned);
+                parts.push(("reworded", Event::Reworded { thread: thread(identifier), author, title, body, version }));
+            }
+            Some(parts)
         }
         _ => None,
     }
@@ -106,7 +112,7 @@ pub fn parse_with(config: &Config, delivery: &str, payload: &Value) -> Vec<Inbou
         return Vec::new();
     };
     let parts = match kind {
-        "Issue" => issue(action, data),
+        "Issue" => issue(config, action, payload, data),
         "Comment" => comment(config, action, payload, data),
         _ => None,
     };

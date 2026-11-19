@@ -134,6 +134,13 @@ pub enum SyncOp {
         thread: Target,
         message: String,
     },
+    Reword {
+        thread: Target,
+        author: Author,
+        title: String,
+        body: Option<String>,
+        version: u64,
+    },
     React {
         thread: Target,
         message: String,
@@ -208,6 +215,7 @@ impl SyncOp {
             | Self::Delete { .. }
             | Self::React { .. }
             | Self::Act { .. }
+            | Self::Reword { .. }
             | Self::Account { .. } => None,
             Self::Link { task, .. }
             | Self::Unlink { task, .. }
@@ -233,7 +241,7 @@ impl SyncOp {
 
     const fn thread(&self) -> Option<(&Target, Option<&String>)> {
         match self {
-            Self::Import { thread, .. } => Some((thread, None)),
+            Self::Import { thread, .. } | Self::Reword { thread, .. } => Some((thread, None)),
             Self::Edit { thread, message, .. }
             | Self::Delete { thread, message }
             | Self::React { thread, message, .. }
@@ -266,6 +274,7 @@ pub enum Synced {
     Account { member: String, sync: String, user: String, linked: bool },
     Labelled { set: BTreeMap<String, String>, unset: BTreeSet<String> },
     Edited { message: EventId },
+    Reworded { spec: String },
     Deleted { message: EventId },
     Delivered { message: EventId, target: Target, external: String },
     Removed { message: EventId, target: Target },
@@ -388,6 +397,14 @@ pub struct Mirror {
     parked: BTreeMap<(Target, Option<String>), Vec<Parked>>,
     #[serde(with = "crate::pairs")]
     owned: BTreeMap<(TaskId, String), u64>,
+    worded: BTreeMap<TaskId, u64>,
+}
+
+pub fn spec(title: &str, body: Option<&str>) -> String {
+    match body {
+        Some(body) if !body.trim().is_empty() => format!("{title}\n\n{body}"),
+        _ => title.to_owned(),
+    }
 }
 
 pub fn mentions(body: &str) -> Vec<String> {
@@ -426,6 +443,7 @@ impl Mirror {
             read: BTreeMap::new(),
             parked: BTreeMap::new(),
             owned: BTreeMap::new(),
+            worded: BTreeMap::new(),
         }
     }
 
@@ -782,6 +800,7 @@ impl Fold {
             | SyncOp::Edit { .. }
             | SyncOp::Delete { .. }
             | SyncOp::React { .. }
+            | SyncOp::Reword { .. }
             | SyncOp::Act { .. } => Ok(()),
             SyncOp::Answer { task, reply_to, .. } => {
                 known(task)?;
@@ -976,6 +995,7 @@ impl Fold {
                     self.delete(seq, event, &task, id);
                 }
             }
+            SyncOp::Reword { thread, author, title, body, version } => self.reword(seq, event, thread, author, &spec(title, body.as_deref()), *version),
             SyncOp::React { thread, message, author, emoji } => {
                 let link = self.mirror.threads[thread].clone();
                 let id = self.mirror.external[&(link.clone(), message.clone())].clone();
@@ -1159,6 +1179,35 @@ impl Fold {
         if let Some(thread) = routed {
             self.unpark(seq, &(thread, Some(external.clone())));
         }
+    }
+
+    fn reword(&mut self, seq: u64, event: &Event, thread: &Target, author: &Author, spec: &str, version: u64) {
+        let linked = &self.mirror.links[&self.mirror.threads[thread]];
+        let task = linked.task.clone();
+        if author.bot || !matches!(linked.join, Join::Root { .. }) || mutated(Mutation::RootEditsIgnored) {
+            return;
+        }
+        let held = self.mirror.worded.entry(task.clone()).or_default();
+        if version <= *held {
+            return;
+        }
+        *held = version;
+        let Some(state) = self.tasks.get_mut(&task) else {
+            return;
+        };
+        if state.spec.spec == spec {
+            return;
+        }
+        state.spec.spec = spec.to_owned();
+        let root = self.mirror.by_task.get(&task).and_then(|ids| ids.first());
+        if let Some(root) = root.and_then(|id| self.mirror.messages.get_mut(id))
+            && root.kind == Kind::Root
+        {
+            spec.clone_into(&mut root.body);
+            root.mentions = mentions(spec);
+            root.revision += 1;
+        }
+        self.note(seq, event, &task, Synced::Reworded { spec: spec.to_owned() });
     }
 
     fn imported(&self, thread: &Target, message: &str) -> Option<(EventId, TaskId)> {

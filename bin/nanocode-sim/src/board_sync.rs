@@ -72,10 +72,11 @@ pub enum SyncMutation {
     ReadRegresses,
     RetryGuardSkipped,
     AttemptAfterCall,
+    RootEditsIgnored,
 }
 
 impl SyncMutation {
-    const ALL: [Self; 20] = [
+    const ALL: [Self; 21] = [
         Self::None,
         Self::DeliverToOrigin,
         Self::ReceiptsIgnored,
@@ -96,6 +97,7 @@ impl SyncMutation {
         Self::ReadRegresses,
         Self::RetryGuardSkipped,
         Self::AttemptAfterCall,
+        Self::RootEditsIgnored,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -124,6 +126,7 @@ impl SyncMutation {
             Self::ReadRegresses => "read_regresses",
             Self::RetryGuardSkipped => "retry_guard_skipped",
             Self::AttemptAfterCall => "attempt_after_call",
+            Self::RootEditsIgnored => "root_edits_ignored",
         }
     }
 
@@ -150,6 +153,7 @@ impl SyncMutation {
             Self::UnlinkIgnored => BoardRule::UnlinkIgnored,
             Self::BotMarksRead => BoardRule::BotMarksRead,
             Self::ReadRegresses => BoardRule::ReadRegresses,
+            Self::RootEditsIgnored => BoardRule::RootEditsIgnored,
             Self::None | Self::RetryGuardSkipped | Self::AttemptAfterCall => BoardRule::None,
         }
     }
@@ -243,6 +247,7 @@ enum What {
     Message { message: String, author: Author, body: String },
     Edited { message: String, body: String, version: u64 },
     Deleted { message: String },
+    Reworded { author: Author, title: String, body: Option<String>, version: u64 },
     Labels { task: TaskId, set: BTreeMap<String, String>, version: u64 },
     Closed { task: TaskId },
     React { author: Author },
@@ -551,6 +556,15 @@ impl Shape {
                 let what = What::Labels { task: id.clone(), set, version };
                 plan.hook(format!("github/labels/{pr}/{version}"), at, Place::Fixed(target.clone()), what, Some(opened.clone()));
             }
+            if plan.rng.chance(600_000) {
+                for version in 1..=plan.rng.range(1, 4) {
+                    let author = if plan.rng.chance(200_000) { bot("github") } else { human(users("github")[plan.rng.pick(3)]) };
+                    let body = plan.rng.chance(500_000).then(|| format!("body {version} by {}", author.name));
+                    let what = What::Reworded { author, title: format!("pull {pr} title {version}"), body, version };
+                    let at = open_at + plan.rng.range(0, work_ms / 2);
+                    plan.hook(format!("github/reword/{pr}/{version}"), at, Place::Fixed(target.clone()), what, Some(opened.clone()));
+                }
+            }
             for _ in 0..plan.rng.range(0, 2) {
                 plan.talk(&Place::Fixed(target.clone()), "github", Some(&opened), false);
             }
@@ -792,6 +806,9 @@ impl World {
             },
             What::Edited { message, body, version } => Event::Edited { thread, message: message.clone(), body: body.clone(), version: *version },
             What::Deleted { message } => Event::Deleted { thread, message: message.clone() },
+            What::Reworded { author, title, body, version } => {
+                Event::Reworded { thread, author: author.clone(), title: title.clone(), body: body.clone(), version: *version }
+            }
             What::Labels { task, set, version } => Event::Labels {
                 task: task.clone(),
                 set: set.clone(),
@@ -1109,6 +1126,7 @@ type Waiting = (EventId, String, SyncOp);
 #[derive(Default)]
 struct Reference {
     tasks: BTreeMap<TaskId, (BTreeMap<String, String>, bool)>,
+    words: BTreeMap<TaskId, (String, u64)>,
     links: BTreeMap<Target, Link>,
     unlinked: Vec<(Target, Link)>,
     ever: BTreeSet<(TaskId, Target)>,
@@ -1223,6 +1241,7 @@ impl Reference {
                         continue;
                     }
                     model.tasks.insert(task.id.clone(), (task.labels.clone(), false));
+                    model.words.insert(task.id.clone(), (task.spec.clone(), 0));
                     model.add(row.id.clone(), &task.id, *seq, Kind::Root, row.by.clone(), task.spec.clone());
                     model.add(EventId(format!("{}#status", task.id.0)), &task.id, *seq, Kind::Status, row.by.clone(), "open".to_owned());
                 }
@@ -1286,7 +1305,7 @@ impl Reference {
     #[allow(clippy::too_many_lines)]
     fn sync(&mut self, seq: u64, id: &EventId, by: &str, op: &SyncOp) {
         let place = match op {
-            SyncOp::Import { thread, .. } => Some((thread, None)),
+            SyncOp::Import { thread, .. } | SyncOp::Reword { thread, .. } => Some((thread, None)),
             SyncOp::Edit { thread, message, .. }
             | SyncOp::Delete { thread, message }
             | SyncOp::React { thread, message, .. }
@@ -1409,6 +1428,31 @@ impl Reference {
                 }
                 said.version = *version;
                 said.body.clone_from(body);
+            }
+            SyncOp::Reword { thread, author, title, body, version } => {
+                let link = &self.links[&self.threads[thread]];
+                let task = link.task.clone();
+                if author.bot || !link.root {
+                    return;
+                }
+                let Some((spec, seen)) = self.words.get_mut(&task) else {
+                    return;
+                };
+                if *version <= *seen {
+                    return;
+                }
+                *seen = *version;
+                *spec = match body {
+                    Some(body) if !body.trim().is_empty() => format!("{title}\n\n{body}"),
+                    _ => title.clone(),
+                };
+                let spec = spec.clone();
+                if let Some(root) = self.by_task.get(&task).and_then(|ids| ids.first()).cloned()
+                    && let Some(said) = self.said.get_mut(&root)
+                    && said.kind == Kind::Root
+                {
+                    said.body = spec;
+                }
             }
             SyncOp::Delete { thread, message } => {
                 if let Some(id) = self.imported(thread, message) {
@@ -1641,6 +1685,12 @@ fn check(world: &World, rows: &[(u64, String)], fold: &Fold) -> Result<SyncStats
         let held = &fold.tasks()[task].spec.labels;
         if held != labels {
             return Err(format!("rule 9: {task} has labels {held:?} but the newest snapshot gives {labels:?}"));
+        }
+    }
+    for (task, (spec, _)) in &model.words {
+        let held = &fold.tasks()[task].spec.spec;
+        if held != spec {
+            return Err(format!("rule 10: {task} reads {held:?} but its newest platform edit gives {spec:?}"));
         }
     }
     let all = model.links.iter().map(|(key, link)| (key, link, true)).chain(model.unlinked.iter().map(|(key, link)| (key, link, false))).collect::<Vec<_>>();

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use nanocode_board::{EventId, NewTask, TaskId, tasks::Terms};
+use nanocode_board::{EventId, NewTask, TaskId, mirror, tasks::Terms};
 use serde_json::Value;
 
 use super::{Author, Event, Inbound, Mode, Settle, Target};
@@ -210,11 +210,7 @@ fn subject(config: &Config, kind: Kind, repo: &str, action: &str, payload: &Valu
     let head = text(item, "/head/sha").unwrap_or_default();
     Some(match action {
         "opened" => {
-            let title = text(item, "/title")?;
-            let spec = match text(item, "/body") {
-                Some(body) if !body.trim().is_empty() => format!("{title}\n\n{body}"),
-                _ => title.to_owned(),
-            };
+            let spec = mirror::spec(text(item, "/title")?, text(item, "/body"));
             let mut set = reconcile(item);
             set.insert(kind.word().to_owned(), num.to_string());
             set.insert("state".to_owned(), state(kind, item).to_owned());
@@ -225,6 +221,12 @@ fn subject(config: &Config, kind: Kind, repo: &str, action: &str, payload: &Valu
             let new = NewTask { id: task.clone(), parent: None, spec, labels: set, needs: Vec::new(), terms: Terms::default() };
             let opened = Event::Opened { task: new, thread: thread(repo, num), message: format!("{}:{num}", kind.word()), mode: Mode::Always };
             vec![("opened", opened)]
+        }
+        "edited" if payload.pointer("/changes/title").is_some() || payload.pointer("/changes/body").is_some() => {
+            let title = text(item, "/title")?.to_owned();
+            let body = text(item, "/body").map(str::to_owned);
+            let author = author(config, payload.get("sender")?)?;
+            vec![("reworded", Event::Reworded { thread: thread(repo, num), author, title, body, version: stamp })]
         }
         "labeled" | "unlabeled" | "assigned" | "unassigned" => vec![("labels", labels(&[]))],
         "synchronize" if kind == Kind::Pull => vec![("labels", labels(&[("head", head)]))],
