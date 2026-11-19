@@ -16,16 +16,18 @@ pub enum Can {
     React,
     Label,
     Sync,
+    Rank,
     Manage,
 }
 
 impl Can {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Read,
         Self::Post,
         Self::React,
         Self::Label,
         Self::Sync,
+        Self::Rank,
         Self::Manage,
     ];
 
@@ -33,7 +35,7 @@ impl Can {
         self as u8 == other as u8
             || matches!(self, Self::Manage)
             || (matches!(other, Self::Read)
-                && matches!(self, Self::React | Self::Label | Self::Sync))
+                && matches!(self, Self::React | Self::Label | Self::Sync | Self::Rank))
     }
 }
 
@@ -507,6 +509,13 @@ impl Fold {
                 } else {
                     Err(Rejection::Access(Denied::Missing(Can::Label)))
                 }
+            }
+            Op::Rank { task, .. } => {
+                access.see(&actor, task)?;
+                if mutated(Mutation::RankUnchecked) {
+                    return Ok(());
+                }
+                access.need(&actor, &task.0, Can::Rank)
             }
             Op::Grant { grant } => {
                 if grant.who.is_empty() || grant.can.is_empty() {

@@ -87,6 +87,10 @@ pub enum Op {
         set: BTreeMap<String, String>,
         unset: BTreeSet<String>,
     },
+    Rank {
+        task: TaskId,
+        rank: Option<u64>,
+    },
     Grant {
         grant: access::Grant,
     },
@@ -110,7 +114,8 @@ impl Op {
             | Self::Finish { task, .. }
             | Self::Cancel { task, .. }
             | Self::Reply { task, .. }
-            | Self::Relabel { task, .. } => Some(task),
+            | Self::Relabel { task, .. }
+            | Self::Rank { task, .. } => Some(task),
             Self::Tasks(op) => Some(op.task()),
             Self::Sync { sync } => sync.task(),
             Self::Grant { .. } | Self::Revoke { .. } | Self::Charter {} => None,
@@ -165,6 +170,7 @@ pub struct Task {
     pub attempts: u64,
     pub replies: Vec<(String, String)>,
     pub assignee: Option<String>,
+    pub rank: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -211,6 +217,9 @@ pub enum Change {
     Relabeled {
         set: BTreeMap<String, String>,
         unset: BTreeSet<String>,
+    },
+    Ranked {
+        rank: Option<u64>,
     },
     Synced(mirror::Synced),
 }
@@ -425,7 +434,7 @@ impl Fold {
                 Some(task) if task.finished() => Err(Rejection::Terminal),
                 Some(_) => Ok(()),
             },
-            Op::Reply { task, .. } | Op::Relabel { task, .. } => {
+            Op::Reply { task, .. } | Op::Relabel { task, .. } | Op::Rank { task, .. } => {
                 self.tasks.get(task).map(drop).ok_or(Rejection::UnknownTask)
             }
             Op::Grant { .. } | Op::Revoke { .. } | Op::Charter {} => Ok(()),
@@ -501,6 +510,7 @@ impl Fold {
                         attempts: 0,
                         replies: Vec::new(),
                         assignee: task.terms.assignee.clone(),
+                        rank: None,
                     },
                 );
                 self.record(seq, event, &id, Change::Posted);
@@ -610,6 +620,12 @@ impl Fold {
                     set: set.clone(),
                     unset: unset.clone(),
                 }
+            }
+            Op::Rank { rank, .. } => {
+                if let Some(task) = self.tasks.get_mut(&id) {
+                    task.rank = *rank;
+                }
+                Change::Ranked { rank: *rank }
             }
             Op::Grant { .. } | Op::Revoke { .. } | Op::Charter {} => return,
             Op::Tasks(op) => {

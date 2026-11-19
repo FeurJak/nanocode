@@ -221,7 +221,7 @@ impl Fold {
         at_ms: u64,
     ) -> Option<&TaskId> {
         let me = Actor::parse(actor).ok()?;
-        let mut unassigned = None;
+        let mut best = None;
         for entry in &self.entries {
             if entry.change != Change::Posted {
                 continue;
@@ -238,12 +238,17 @@ impl Fold {
             {
                 continue;
             }
-            if task.assignee.is_some() || mutated(Mutation::NextIgnoresAssignee) {
-                return Some(&entry.task);
+            let rank = task.rank.filter(|_| !mutated(Mutation::NextIgnoresRank));
+            let key = (
+                rank.is_none(),
+                rank,
+                task.assignee.is_none() && !mutated(Mutation::NextIgnoresAssignee),
+            );
+            if best.as_ref().is_none_or(|(_, held)| key < *held) {
+                best = Some((&entry.task, key));
             }
-            unassigned.get_or_insert(&entry.task);
         }
-        unassigned
+        best.map(|(id, _)| id)
     }
 
     pub(crate) fn check_tasks(&self, at_ms: u64, op: &TaskOp) -> Result<(), Rejection> {
@@ -355,6 +360,7 @@ impl Fold {
                 attempts: 0,
                 replies: Vec::new(),
                 assignee: task.terms.assignee.clone(),
+                rank: None,
             },
         );
         self.record(seq, event, &task.id, Change::Posted);

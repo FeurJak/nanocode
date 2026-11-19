@@ -49,6 +49,7 @@ pub fn grants() -> Vec<(&'static str, Grant)> {
         ("grant:lock", grant(Who::Principal(EVE.to_owned()), &format!("{LOCKED}/"), &[])),
         ("grant:temp", grant(Who::Principal(EVE.to_owned()), "goal", &[Can::Post])),
         ("grant:ivy", grant(Who::Principal(IVY.to_owned()), "*", &[Can::Read])),
+        ("grant:rank", grant(Who::Principal(IVY.to_owned()), "*", &[Can::Rank])),
     ]
 }
 
@@ -216,6 +217,23 @@ pub async fn intruder(world: &World, epoch: u64) {
         }
     }
     relabel(world, epoch, span).await;
+    rank(world, epoch, span).await;
+}
+
+async fn rank(world: &World, epoch: u64, span: u64) {
+    let mut rng = Rng::derive(world.shape.seed ^ epoch.rotate_left(32), "board ranks");
+    for round in 0..rng.range(0, 6) {
+        world.nap(rng.range(0, span)).await;
+        let (_, fold) = raw(world).await;
+        let tasks = fold.tasks().keys().cloned().collect::<Vec<_>>();
+        if tasks.is_empty() {
+            continue;
+        }
+        let task = tasks[rng.pick(tasks.len())].clone();
+        let by = [OWNER, EVE, IVY, SOURCE][rng.pick(4)];
+        let rank = if rng.chance(200_000) { None } else { Some(rng.range(0, 4)) };
+        forge(world, by, format!("{by}#rank.e{epoch}.{round}"), Op::Rank { task, rank }).await;
+    }
 }
 
 async fn relabel(world: &World, epoch: u64, span: u64) {
@@ -251,7 +269,7 @@ fn spot(pattern: &str, target: &str) -> Option<(u8, usize)> {
 }
 
 fn gives(held: Can, wanted: Can) -> bool {
-    held == wanted || held == Can::Manage || (wanted == Can::Read && matches!(held, Can::React | Can::Label | Can::Sync))
+    held == wanted || held == Can::Manage || (wanted == Can::Read && matches!(held, Can::React | Can::Label | Can::Sync | Can::Rank))
 }
 
 fn split(by: &str) -> (&str, Option<&str>) {
@@ -418,6 +436,7 @@ impl Gate {
             }),
             Op::Reply { task, .. } => read(task) && self.can(by, &task.0, Can::Post),
             Op::Relabel { task, .. } => read(task) && (self.chain(by, task, tasks) || self.can(by, &task.0, Can::Label)),
+            Op::Rank { task, .. } => read(task) && self.can(by, &task.0, Can::Rank),
             Op::Sync { sync } => match sync.task() {
                 Some(task) => read(task) && self.can(by, &task.0, sync.needs()),
                 None => self.can(by, "*", Can::Sync),
@@ -493,6 +512,10 @@ pub fn audit(fold: &Fold, model: &Reference) -> Result<(), String> {
         let labels = model.labels.get(&id.0).cloned().unwrap_or_default();
         if task.spec.labels != labels {
             return Err(format!("{id}: the board's labels are {:?}, the reference model's {labels:?}", task.spec.labels));
+        }
+        let rank = model.ranks.get(&id.0).copied();
+        if task.rank != rank {
+            return Err(format!("{id}: the board ranks it {:?}, the reference model {rank:?}", task.rank));
         }
     }
     views(fold, &model.gate, &model.tasks)

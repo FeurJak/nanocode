@@ -169,8 +169,11 @@ fn expected(board: &Board, labels: &BTreeMap<String, String>, now: u64) -> Optio
     };
     order
         .iter()
-        .find(|id| fits(id, true))
-        .or_else(|| order.iter().find(|id| fits(id, false)))
+        .filter(|id| fits(id, true) || fits(id, false))
+        .min_by_key(|id| {
+            let rank = fold.task(id).and_then(|task| task.rank);
+            (rank.is_none(), rank, !fits(id, true))
+        })
         .map(|id| (*id).clone())
 }
 
@@ -186,7 +189,7 @@ pub fn pick(world: &World, board: &Board, rng: &mut Rng) -> Option<TaskId> {
         let mut oracle = world.oracle.borrow_mut();
         oracle.stats.picks += 1;
         if got != want {
-            oracle.wrong.push(format!("{} picked {got:?} for {filter:?}, the oldest ready task for it is {want:?}", board.writer()));
+            oracle.wrong.push(format!("{} picked {got:?} for {filter:?}, the best-ranked ready task for it is {want:?}", board.writer()));
         }
         if got.is_some() {
             return got;

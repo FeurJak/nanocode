@@ -66,10 +66,12 @@ pub enum BoardMutation {
     TasksUnchecked,
     RelabelUnchecked,
     RelabelKeepsUnset,
+    RankUnchecked,
+    NextIgnoresRank,
 }
 
 impl BoardMutation {
-    const ALL: [Self; 33] = [
+    const ALL: [Self; 35] = [
         Self::None,
         Self::ClaimIgnoresLease,
         Self::ClaimIgnoresNeeds,
@@ -103,6 +105,8 @@ impl BoardMutation {
         Self::TasksUnchecked,
         Self::RelabelUnchecked,
         Self::RelabelKeepsUnset,
+        Self::RankUnchecked,
+        Self::NextIgnoresRank,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -144,6 +148,8 @@ impl BoardMutation {
             Self::TasksUnchecked => "tasks_unchecked",
             Self::RelabelUnchecked => "relabel_unchecked",
             Self::RelabelKeepsUnset => "relabel_keeps_unset",
+            Self::RankUnchecked => "rank_unchecked",
+            Self::NextIgnoresRank => "next_ignores_rank",
         }
     }
 
@@ -188,6 +194,8 @@ impl BoardMutation {
             Self::TasksUnchecked => BoardRule::TasksUnchecked,
             Self::RelabelUnchecked => BoardRule::RelabelUnchecked,
             Self::RelabelKeepsUnset => BoardRule::RelabelKeepsUnset,
+            Self::RankUnchecked => BoardRule::RankUnchecked,
+            Self::NextIgnoresRank => BoardRule::NextIgnoresRank,
             Self::None | Self::CursorBeforeEffect | Self::EffectBeforeCursor => BoardRule::None,
         }
     }
@@ -941,6 +949,7 @@ struct Reference {
     finishes: BTreeMap<String, u64>,
     replies: BTreeMap<String, Vec<String>>,
     labels: BTreeMap<String, BTreeMap<String, String>>,
+    ranks: BTreeMap<String, u64>,
     gate: access::Gate,
     verdicts: BTreeMap<String, bool>,
     assignees: BTreeMap<String, String>,
@@ -1058,7 +1067,14 @@ impl Reference {
                 labels.extend(set);
                 true
             }
-            Op::Renew { .. } | Op::Release { .. } | Op::Finish { .. } | Op::Reply { .. } | Op::Relabel { .. } | Op::Sync { .. } => false,
+            Op::Rank { task, rank } if self.tasks.contains_key(&task.0) => {
+                match rank {
+                    Some(rank) => self.ranks.insert(task.0, rank),
+                    None => self.ranks.remove(&task.0),
+                };
+                true
+            }
+            Op::Renew { .. } | Op::Release { .. } | Op::Finish { .. } | Op::Reply { .. } | Op::Relabel { .. } | Op::Rank { .. } | Op::Sync { .. } => false,
             Op::Grant { .. } | Op::Revoke { .. } | Op::Charter {} => true,
         }
     }
@@ -1070,6 +1086,7 @@ impl Reference {
             finishes: BTreeMap::new(),
             replies: BTreeMap::new(),
             labels: BTreeMap::new(),
+            ranks: BTreeMap::new(),
             gate: access::Gate::default(),
             verdicts: BTreeMap::new(),
             assignees: BTreeMap::new(),

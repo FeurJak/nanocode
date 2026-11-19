@@ -51,6 +51,8 @@ pub enum Mutation {
     UnlinkIgnored,
     BotMarksRead,
     ReadRegresses,
+    RankUnchecked,
+    NextIgnoresRank,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);
