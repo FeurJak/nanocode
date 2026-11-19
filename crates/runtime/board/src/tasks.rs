@@ -142,7 +142,7 @@ impl Board {
                     lease.until.store(pace.now_ms() + lease_ms, Ordering::Release);
                     wake = pace.now_ms() + third;
                 }
-                Err(error @ (BoardError::Rejected(_) | BoardError::Corrupt { .. })) => {
+                Err(error @ (BoardError::Rejected(_) | BoardError::Corrupt { .. } | BoardError::Dropped(_))) => {
                     return error;
                 }
                 Err(BoardError::Store(_) | BoardError::Unsettled { .. }) => {

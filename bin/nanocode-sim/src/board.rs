@@ -11,7 +11,7 @@ use std::{
 };
 
 use nanocode_board::{
-    Applied, Board, BoardError, ClaimId, NewTask, Op, Outcome, Phase, Rejection, TaskId,
+    Applied, Board, BoardError, ClaimId, NewTask, Op, Outcome, Phase, Rejection, Say, TaskId,
     sim::{self as board_sim, Mutation as BoardRule},
 };
 use nanocode_durability_core::{StoreError, StoreFuture};
@@ -25,6 +25,8 @@ use crate::{
 
 #[path = "board_access.rs"]
 mod access;
+#[path = "board_messages.rs"]
+mod messages;
 #[path = "board_tasks.rs"]
 mod tasks;
 #[path = "board_due.rs"]
@@ -84,10 +86,30 @@ pub enum BoardMutation {
     DueFiresTwice,
     RecurrenceSkipsOnRestart,
     AttemptsNotCounted,
+    EditsByAnyone,
+    TombstonesEditable,
+    RepliesNest,
+    ReservedLabelsWritable,
+    NamesUnchecked,
+    ReactionsShared,
+    UnknownFilesAccepted,
+    FileLimitIgnored,
+    TextLimitIgnored,
+    SchemasMutable,
+    SchemaShapeIgnored,
+    BlocksUnchecked,
+    TaskLabelStale,
+    DeleteKeepsTask,
+    TaskRootsEditable,
+    MiddlewareEveryAttempt,
+    MiddlewareRerunsLanded,
+    CursorInclusive,
+    SaysUnchecked,
+    MessagesLeak,
 }
 
 impl BoardMutation {
-    const ALL: [Self; 47] = [
+    const ALL: [Self; 67] = [
         Self::None,
         Self::ClaimIgnoresLease,
         Self::ClaimIgnoresNeeds,
@@ -135,6 +157,26 @@ impl BoardMutation {
         Self::DueFiresTwice,
         Self::RecurrenceSkipsOnRestart,
         Self::AttemptsNotCounted,
+        Self::EditsByAnyone,
+        Self::TombstonesEditable,
+        Self::RepliesNest,
+        Self::ReservedLabelsWritable,
+        Self::NamesUnchecked,
+        Self::ReactionsShared,
+        Self::UnknownFilesAccepted,
+        Self::FileLimitIgnored,
+        Self::TextLimitIgnored,
+        Self::SchemasMutable,
+        Self::SchemaShapeIgnored,
+        Self::BlocksUnchecked,
+        Self::TaskLabelStale,
+        Self::DeleteKeepsTask,
+        Self::TaskRootsEditable,
+        Self::MiddlewareEveryAttempt,
+        Self::MiddlewareRerunsLanded,
+        Self::CursorInclusive,
+        Self::SaysUnchecked,
+        Self::MessagesLeak,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -190,6 +232,26 @@ impl BoardMutation {
             Self::DueFiresTwice => "due_fires_twice",
             Self::RecurrenceSkipsOnRestart => "recurrence_skips_on_restart",
             Self::AttemptsNotCounted => "attempts_not_counted",
+            Self::EditsByAnyone => "edits_by_anyone",
+            Self::TombstonesEditable => "tombstones_editable",
+            Self::RepliesNest => "replies_nest",
+            Self::ReservedLabelsWritable => "reserved_labels_writable",
+            Self::NamesUnchecked => "names_unchecked",
+            Self::ReactionsShared => "reactions_shared",
+            Self::UnknownFilesAccepted => "unknown_files_accepted",
+            Self::FileLimitIgnored => "file_limit_ignored",
+            Self::TextLimitIgnored => "text_limit_ignored",
+            Self::SchemasMutable => "schemas_mutable",
+            Self::SchemaShapeIgnored => "schema_shape_ignored",
+            Self::BlocksUnchecked => "blocks_unchecked",
+            Self::TaskLabelStale => "task_label_stale",
+            Self::DeleteKeepsTask => "delete_keeps_task",
+            Self::TaskRootsEditable => "task_roots_editable",
+            Self::MiddlewareEveryAttempt => "middleware_every_attempt",
+            Self::MiddlewareRerunsLanded => "middleware_reruns_landed",
+            Self::CursorInclusive => "cursor_inclusive",
+            Self::SaysUnchecked => "says_unchecked",
+            Self::MessagesLeak => "messages_leak",
         }
     }
 
@@ -248,6 +310,26 @@ impl BoardMutation {
             Self::DueFiresTwice => BoardRule::DueFiresTwice,
             Self::RecurrenceSkipsOnRestart => BoardRule::RecurrenceSkipsOnRestart,
             Self::AttemptsNotCounted => BoardRule::AttemptsNotCounted,
+            Self::EditsByAnyone => BoardRule::EditsByAnyone,
+            Self::TombstonesEditable => BoardRule::TombstonesEditable,
+            Self::RepliesNest => BoardRule::RepliesNest,
+            Self::ReservedLabelsWritable => BoardRule::ReservedLabelsWritable,
+            Self::NamesUnchecked => BoardRule::NamesUnchecked,
+            Self::ReactionsShared => BoardRule::ReactionsShared,
+            Self::UnknownFilesAccepted => BoardRule::UnknownFilesAccepted,
+            Self::FileLimitIgnored => BoardRule::FileLimitIgnored,
+            Self::TextLimitIgnored => BoardRule::TextLimitIgnored,
+            Self::SchemasMutable => BoardRule::SchemasMutable,
+            Self::SchemaShapeIgnored => BoardRule::SchemaShapeIgnored,
+            Self::BlocksUnchecked => BoardRule::BlocksUnchecked,
+            Self::TaskLabelStale => BoardRule::TaskLabelStale,
+            Self::DeleteKeepsTask => BoardRule::DeleteKeepsTask,
+            Self::TaskRootsEditable => BoardRule::TaskRootsEditable,
+            Self::MiddlewareEveryAttempt => BoardRule::MiddlewareEveryAttempt,
+            Self::MiddlewareRerunsLanded => BoardRule::MiddlewareRerunsLanded,
+            Self::CursorInclusive => BoardRule::CursorInclusive,
+            Self::SaysUnchecked => BoardRule::SaysUnchecked,
+            Self::MessagesLeak => BoardRule::MessagesLeak,
             Self::None | Self::CursorBeforeEffect | Self::EffectBeforeCursor => BoardRule::None,
         }
     }
@@ -561,6 +643,7 @@ struct World {
     cancelled: RefCell<bool>,
     minted: RefCell<BTreeMap<String, u64>>,
     reopens: RefCell<BTreeMap<TaskId, u64>>,
+    chat: messages::Chat,
 }
 
 impl World {
@@ -634,7 +717,7 @@ impl World {
                 Sent::Applied(applied.seq)
             }
             Ok(applied) => Sent::Applied(applied.seq),
-            Err(BoardError::Rejected(_)) => Sent::Rejected,
+            Err(BoardError::Rejected(_) | BoardError::Dropped(_)) => Sent::Rejected,
             Err(BoardError::Unsettled { .. } | BoardError::Corrupt { .. }) => Sent::Unsettled,
             Err(BoardError::Store(_)) => Sent::Failed,
         };
@@ -647,14 +730,14 @@ impl World {
         let mut oracle = self.oracle.borrow_mut();
         match error {
             BoardError::Corrupt { .. } => oracle.wrong.push(format!("{error}")),
-            BoardError::Rejected(_) => oracle.stats.rejected += 1,
+            BoardError::Rejected(_) | BoardError::Dropped(_) => oracle.stats.rejected += 1,
             BoardError::Unsettled { .. } => oracle.stats.unsettled += 1,
             BoardError::Store(_) => {}
         }
     }
 
     const fn expected(&self) -> usize {
-        self.shape.plan.len() + self.shape.prs.len()
+        self.shape.plan.len() + self.shape.prs.len() + self.chat.tasks
     }
 
     fn planned(&self, board: &Board) -> bool {
@@ -975,6 +1058,7 @@ async fn epoch(world: &World, number: u64) {
         Box::pin(watcher(world, number)),
         Box::pin(access::intruder(world, number)),
         Box::pin(tasks::desk(world, number)),
+        Box::pin(messages::chatter(world, number)),
     ];
     for index in 0..world.shape.workers {
         actors.push(Box::pin(worker(world, index, number)));
@@ -1017,6 +1101,7 @@ struct Reference {
     assignees: BTreeMap<String, String>,
     waits: BTreeSet<String>,
     reopens: BTreeMap<String, u64>,
+    roots: BTreeMap<String, (String, bool)>,
 }
 
 impl Reference {
@@ -1161,6 +1246,7 @@ impl Reference {
             }
             Op::Renew { .. } | Op::Release { .. } | Op::Finish { .. } | Op::Reply { .. } | Op::Relabel { .. } | Op::Rank { .. } | Op::Sync { .. } => false,
             Op::Grant { .. } | Op::Revoke { .. } | Op::Charter {} => true,
+            Op::Say { .. } => false,
         }
     }
 
@@ -1177,6 +1263,7 @@ impl Reference {
             assignees: BTreeMap::new(),
             waits: BTreeSet::new(),
             reopens: BTreeMap::new(),
+            roots: BTreeMap::new(),
         };
         let mut now = 0;
         for (seq, body) in rows {
@@ -1186,10 +1273,29 @@ impl Reference {
                 continue;
             }
             now = now.max(event.at_ms);
+            if let Op::Say { say } = &event.op {
+                if !model.gate.says(&event.by, say, &model.tasks) {
+                    model.verdicts.insert(event.id.0.clone(), false);
+                    continue;
+                }
+                model.gate.heard(&event.id.0, say);
+                if let Say::Delete { message } = say
+                    && model.roots.get(&message.0) == Some(&(event.by.clone(), false))
+                {
+                    model.roots.insert(message.0.clone(), (event.by.clone(), true));
+                    if !model.finished(&message.0) {
+                        model.doom(&message.0);
+                    }
+                }
+                continue;
+            }
             let accepted = model.gate.allows(&event.by, &event.op, &model.tasks)
                 && model.step(&event.by, &event.id.0, now, event.op.clone());
             if accepted {
                 model.gate.record(&event.by, &event.id.0, &event.op);
+                if let Op::Post { task } = &event.op {
+                    model.roots.entry(task.id.0.clone()).or_insert((event.by.clone(), false));
+                }
             }
             model.verdicts.insert(event.id.0, accepted);
         }
@@ -1278,6 +1384,7 @@ fn check(world: &World, rows: &[(u64, String)]) -> Result<BoardStats, String> {
     }
     let model = Reference::of(rows)?;
     access::audit(&fold, &model)?;
+    messages::check(world, &fold, rows)?;
     let mut stats = oracle.stats;
     if fold.tasks().len() != world.expected() || model.tasks.len() != world.expected() {
         return Err(format!(
@@ -1398,6 +1505,7 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
         cancelled: RefCell::new(false),
         minted: RefCell::new(BTreeMap::new()),
         reopens: RefCell::new(BTreeMap::new()),
+        chat: messages::Chat::of(seed),
         shape,
     };
     board_sim::mutate(mutation.rule());

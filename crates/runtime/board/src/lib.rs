@@ -6,6 +6,8 @@ pub use nanocode_board_fold::*;
 
 pub mod access;
 pub mod cost;
+pub mod files;
+pub mod middleware;
 pub mod tasks;
 
 use sim::{Mutation, mutated};
@@ -20,6 +22,7 @@ pub struct Board {
     minted: u64,
     fold: Fold,
     contended: bool,
+    chain: middleware::Chain,
 }
 
 impl Board {
@@ -58,6 +61,7 @@ impl Board {
             minted: 0,
             fold,
             contended: false,
+            chain: middleware::Chain::default(),
         };
         board.fold_rows(rows)?;
         if !mutated(Mutation::MintedRestarts) {
@@ -72,6 +76,14 @@ impl Board {
 
     pub fn writer(&self) -> &str {
         &self.writer
+    }
+
+    pub fn read(&self, query: &messages::Query) -> messages::Page<'_> {
+        self.fold.read_as(Some(self.identity.actor()), query)
+    }
+
+    pub fn heard(&self) -> impl Iterator<Item = &messages::Message> + '_ {
+        self.fold.heard_by(self.identity.actor())
     }
 
     fn fold_rows(&mut self, rows: Vec<(u64, String)>) -> Result<(), BoardError> {
@@ -106,6 +118,17 @@ impl Board {
     }
 
     async fn submit_as(&mut self, id: EventId, at_ms: u64, op: Op) -> Result<Applied, BoardError> {
+        if mutated(Mutation::MiddlewareRerunsLanded) {
+            self.chain.vet(&id, &self.writer, &op)?;
+        }
+        self.refresh().await?;
+        if let Some(verdict) = self.fold.outcome(&id) {
+            return verdict
+                .clone()
+                .map(|seq| Applied { seq, event: id })
+                .map_err(BoardError::Rejected);
+        }
+        let op = self.chain.vet(&id, &self.writer, &op)?;
         let mut pending = self.fold.submit(Event {
             id,
             by: self.writer.clone(),

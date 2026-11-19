@@ -339,7 +339,9 @@ version = "0.7.0"
 dependencies = [
  "nanocode-board-fold",
  "nanocode-cost-fold",
+ "nanocode-digest",
  "nanocode-durability-core",
+ "nanocode-sync",
  "nanocode-turnlog",
  "serde_json",
 ]
@@ -349,6 +351,7 @@ name = "nanocode-board-fold"
 version = "0.7.0"
 dependencies = [
  "nanocode-durability-core",
+ "nanocode-schema",
  "serde",
  "serde_json",
 ]

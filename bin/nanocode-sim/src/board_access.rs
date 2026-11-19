@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nanocode_board::{
-    BoardError, Event, EventId, Fold, Op, Rejection, TaskId,
+    BoardError, Event, EventId, Fold, Op, Rejection, Say, TaskId,
     access::{Actor, Can, Grant, Identity, Verifier, Who},
     tasks::{Need, Planned, TaskOp, Terms},
 };
@@ -50,6 +50,13 @@ pub fn grants() -> Vec<(&'static str, Grant)> {
         ("grant:temp", grant(Who::Principal(EVE.to_owned()), "goal", &[Can::Post])),
         ("grant:ivy", grant(Who::Principal(IVY.to_owned()), "*", &[Can::Read])),
         ("grant:rank", grant(Who::Principal(IVY.to_owned()), "*", &[Can::Rank])),
+        (
+            "grant:chat",
+            Grant {
+                who: super::messages::WRITERS[..2].iter().map(|who| Who::Principal((*who).to_owned())).collect(),
+                can: BTreeMap::from([("*".to_owned(), vec![Can::Read, Can::Post, Can::React, Can::Label])]),
+            },
+        ),
     ]
 }
 
@@ -361,6 +368,7 @@ pub struct Gate {
     grants: BTreeMap<String, Grant>,
     posters: BTreeMap<String, String>,
     holders: BTreeMap<String, String>,
+    roots: BTreeMap<String, (String, String)>,
 }
 
 impl Gate {
@@ -489,6 +497,7 @@ impl Gate {
                     && self.can(by, &parent.as_ref().unwrap_or(task).0, Can::Post)
                     && (self.chain(by, task, tasks) || self.can(by, &task.0, Can::Manage))
             }
+            Op::Say { say } => self.says(by, say, tasks),
             Op::Sync { sync } => match sync.task() {
                 Some(task) => read(task) && self.can(by, &task.0, sync.needs()),
                 None => self.can(by, "*", Can::Sync),
@@ -511,6 +520,48 @@ impl Gate {
                 .grants
                 .get(&grant.0)
                 .is_some_and(|stored| stored.can.keys().all(|pattern| self.reaches(by, pattern))),
+        }
+    }
+
+    fn home(&self, id: &str, tasks: &BTreeMap<String, (Option<String>, Vec<String>, Expect)>) -> Option<String> {
+        if tasks.contains_key(id) {
+            return Some(id.to_owned());
+        }
+        let (root, channel) = self.roots.get(id)?;
+        Some(if tasks.contains_key(root) { root.clone() } else { channel.clone() })
+    }
+
+    pub fn says(&self, by: &str, say: &Say, tasks: &BTreeMap<String, (Option<String>, Vec<String>, Expect)>) -> bool {
+        if !actor_ok(by) || self.owner.is_none() {
+            return false;
+        }
+        let (place, can) = match say {
+            Say::Post { channel, re, .. } => (
+                re.as_ref().and_then(|root| self.home(&root.0, tasks)).unwrap_or_else(|| channel.clone()),
+                Can::Post,
+            ),
+            Say::Edit { message, .. } | Say::Delete { message } | Say::React { message, .. } | Say::Label { message, .. } => {
+                let Some(home) = self.home(&message.0, tasks) else {
+                    return false;
+                };
+                let can = match say {
+                    Say::React { .. } => Can::React,
+                    Say::Label { .. } => Can::Label,
+                    _ => Can::Post,
+                };
+                (home, can)
+            }
+            Say::Schema { name, .. } => (format!("schemas/{name}"), Can::Post),
+            Say::File { .. } => ("files".to_owned(), Can::Post),
+        };
+        self.can(by, &place, Can::Read) && self.can(by, &place, can)
+    }
+
+    pub fn heard(&mut self, id: &str, say: &Say) {
+        if let Say::Post { channel, re, .. } = say {
+            let root = re.as_ref().map_or(id, |root| &root.0);
+            let channel = self.roots.get(root).map_or_else(|| channel.clone(), |(_, channel)| channel.clone());
+            self.roots.entry(id.to_owned()).or_insert((root.to_owned(), channel));
         }
     }
 

@@ -339,7 +339,7 @@ impl Access {
         false
     }
 
-    fn need(&self, actor: &Actor, channel: &str, can: Can) -> Result<(), Rejection> {
+    pub(crate) fn need(&self, actor: &Actor, channel: &str, can: Can) -> Result<(), Rejection> {
         if self.may(actor, channel, can) {
             Ok(())
         } else {
@@ -571,6 +571,7 @@ impl Fold {
                 }
                 None => access.need(&actor, "*", Can::Sync),
             },
+            Op::Say { say } => self.say_allowed(&actor, say),
             Op::Revoke { grant } => match access.grants.get(grant) {
                 Some(stored) if stored.can.keys().all(|text| access.reaches(&actor, text)) => {
                     Ok(())

@@ -14,7 +14,9 @@ description = "A task board for agents and people: one append-only log on any tu
 [dependencies]
 nanocode-board-fold.workspace = true
 nanocode-cost-fold.workspace = true
+nanocode-digest.workspace = true
 nanocode-durability-core.workspace = true
+nanocode-sync.workspace = true
 nanocode-turnlog.workspace = true
 serde_json.workspace = true
 

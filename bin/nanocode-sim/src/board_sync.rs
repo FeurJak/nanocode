@@ -802,7 +802,7 @@ impl World {
         match error {
             BoardError::Corrupt { .. } => progress.wrong.push(format!("{error}")),
             BoardError::Unsettled { .. } => progress.stats.unsettled += 1,
-            BoardError::Rejected(_) | BoardError::Store(_) => {}
+            BoardError::Rejected(_) | BoardError::Store(_) | BoardError::Dropped(_) => {}
         }
     }
 

@@ -32,6 +32,11 @@ id!(TaskId);
 id!(ClaimId);
 id!(EventId);
 
+pub mod blocks;
+pub mod messages;
+
+pub use messages::{MessageId, Say};
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewTask {
     pub id: TaskId,
@@ -107,6 +112,9 @@ pub enum Op {
     Sync {
         sync: mirror::SyncOp,
     },
+    Say {
+        say: Say,
+    },
 }
 
 impl Op {
@@ -124,7 +132,7 @@ impl Op {
             | Self::Move { task, .. } => Some(task),
             Self::Tasks(op) => Some(op.task()),
             Self::Sync { sync } => sync.task(),
-            Self::Grant { .. } | Self::Revoke { .. } | Self::Charter {} => None,
+            Self::Grant { .. } | Self::Revoke { .. } | Self::Charter {} | Self::Say { .. } => None,
         }
     }
 }
@@ -196,6 +204,7 @@ pub enum Rejection {
     Access(access::Denied),
     Tasks(Refusal),
     Sync(mirror::Refusal),
+    Said(messages::Refusal),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,6 +274,7 @@ pub enum BoardError {
     Corrupt { seq: u64, detail: String },
     Rejected(Rejection),
     Unsettled { event: EventId, error: StoreError },
+    Dropped(String),
 }
 
 impl std::fmt::Display for BoardError {
@@ -278,6 +288,7 @@ impl std::fmt::Display for BoardError {
             Self::Unsettled { event, error } => {
                 write!(formatter, "board write {event} is unsettled: {error}")
             }
+            Self::Dropped(why) => write!(formatter, "board middleware dropped the write: {why}"),
         }
     }
 }
@@ -306,6 +317,7 @@ pub struct Fold {
     live: BTreeSet<TaskId>,
     #[serde(with = "crate::pairs")]
     labelled: BTreeMap<String, BTreeMap<String, BTreeSet<TaskId>>>,
+    said: messages::Said,
 }
 
 impl Default for Fold {
@@ -328,6 +340,7 @@ impl Fold {
             mirror: mirror::Mirror::new(),
             live: BTreeSet::new(),
             labelled: BTreeMap::new(),
+            said: messages::Said::new(),
         }
     }
 
@@ -552,6 +565,7 @@ impl Fold {
             Op::Grant { .. } | Op::Revoke { .. } | Op::Charter {} => Ok(()),
             Op::Tasks(op) => self.check_tasks(at_ms, op),
             Op::Sync { sync } => self.check_sync(sync),
+            Op::Say { .. } => Ok(()),
         }
     }
 
@@ -617,11 +631,12 @@ impl Fold {
             return Ok(());
         }
         self.now_ms = self.now_ms.max(event.at_ms);
-        let verdict = self.admit(&event.by, event.at_ms, &event.op).map(|()| seq);
+        let verdict = self.judge(&event).map(|()| seq);
         self.seen.insert(event.id.clone(), verdict.clone());
         if verdict.is_ok() {
             self.access.record(&event.by, &event.id, &event.op);
             self.transition(seq, &event);
+            self.hear(seq, &event);
         }
         Ok(())
     }
@@ -817,7 +832,7 @@ impl Fold {
                 self.steer(seq, event, op);
                 return;
             }
-            Op::Sync { .. } => return,
+            Op::Sync { .. } | Op::Say { .. } => return,
         };
         self.record(seq, event, &id, change);
     }
@@ -939,8 +954,7 @@ impl Pending {
                 Err(_) => {}
             }
         }
-        fold.admit(&self.event.by, self.event.at_ms, &self.event.op)
-            .map_err(BoardError::Rejected)?;
+        fold.judge(&self.event).map_err(BoardError::Rejected)?;
         Ok(Step::Append {
             seq: fold.next,
             body: self.body.clone(),
@@ -951,8 +965,7 @@ impl Pending {
         if fold.outcome(&self.event.id).is_some() {
             return None;
         }
-        fold.admit(&self.event.by, self.event.at_ms, &self.event.op)
-            .ok()?;
+        fold.judge(&self.event).ok()?;
         Some(Step::Append {
             seq: fold.next,
             body: self.body.clone(),
