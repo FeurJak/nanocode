@@ -1,5 +1,5 @@
 mod board;
-pub use board::{BoardCoordination, BoardStats, Coordination};
+pub use board::{BoardAgents, BoardCoordination, BoardStats, Coordination};
 mod capacity;
 mod diagnostics;
 mod durable;

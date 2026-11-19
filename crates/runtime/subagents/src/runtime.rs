@@ -3087,6 +3087,16 @@ const AGENT_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 
 const IDLE_WAIT_LIMIT: u32 = 2;
 
+fn board_status(board: &crate::board::BoardAgents, id: AgentId, status: &mut AgentStatus) {
+    if matches!(
+        status,
+        AgentStatus::Completed { .. } | AgentStatus::Failed { .. }
+    ) && let Some(Some(finished)) = board.get(&id)
+    {
+        finished.clone_into(status);
+    }
+}
+
 fn wait_mark(status: &AgentStatus, revision: u64) -> u64 {
     use std::hash::{Hash as _, Hasher as _};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -3168,6 +3178,38 @@ impl Registry {
         if let Some(coordination) = Option::clone(&self.coordination.get()) {
             coordination.observe(root_session_id, update);
         }
+    }
+
+    async fn board_agents(
+        &self,
+        root_session_id: &str,
+    ) -> std::io::Result<Option<crate::board::BoardAgents>> {
+        let Some(coordination) = Option::clone(&self.coordination.get()) else {
+            return Ok(None);
+        };
+        coordination
+            .agents(root_session_id)
+            .await
+            .map(Some)
+            .map_err(|error| std::io::Error::other(format!("subagent board read: {error}")))
+    }
+
+    async fn board_listed(
+        &self,
+        root_session_id: &str,
+        entries: Vec<AgentDirectoryEntry>,
+    ) -> std::io::Result<Vec<AgentDirectoryEntry>> {
+        let Some(board) = self.board_agents(root_session_id).await? else {
+            return Ok(entries);
+        };
+        Ok(entries
+            .into_iter()
+            .filter(|entry| board.contains_key(&entry.agent_id))
+            .map(|mut entry| {
+                board_status(&board, entry.agent_id, &mut entry.status);
+                entry
+            })
+            .collect())
     }
 
     pub fn set_parent_resolver(&self, resolver: ParentResolver) {
@@ -6764,7 +6806,11 @@ impl Registry {
                 })
                 .await;
             match listed {
-                Ok(entries) => return Ok(self.resuming(&root, entries)),
+                Ok(entries) => {
+                    return self
+                        .board_listed(&root, self.resuming(&root, entries))
+                        .await;
+                }
                 Err(unlisted) => self.list_cold(&root, unlisted).await?,
             }
         }
@@ -6844,7 +6890,11 @@ impl Registry {
                 })
                 .await;
             match listed {
-                Ok(entries) => return Ok(self.resuming(&root, entries)),
+                Ok(entries) => {
+                    return self
+                        .board_listed(&root, self.resuming(&root, entries))
+                        .await;
+                }
                 Err(unlisted) => self.list_cold(&root, unlisted).await?,
             }
         }
@@ -7331,18 +7381,26 @@ impl Registry {
                     .unwrap_or_default()
             })
             .await;
+        if let Some(coordination) = Option::clone(&self.coordination.get()) {
+            changes.push(coordination.changes());
+        }
 
         let deadline = nanocode_platform::now().checked_add(duration);
         loop {
             let session = session_id.to_owned();
             let wanted = ids.to_vec();
-            let (snapshot, root) = self
+            let (mut snapshot, root) = self
                 .state
                 .call(move |state| -> std::io::Result<_> {
                     let root = state.root_session_id(&session).to_owned();
                     Ok((state.wait_snapshot(&session, &wanted)?, root))
                 })
                 .await?;
+            if let Some(board) = self.board_agents(&root).await? {
+                for (summary, _) in &mut snapshot {
+                    board_status(&board, summary.agent_id, &mut summary.status);
+                }
+            }
 
             let resuming = self
                 .pending_resume
@@ -7445,10 +7503,15 @@ impl Registry {
             if timed_out {
                 let session = session_id.to_owned();
                 let wanted = ids.to_vec();
-                let summaries = self
+                let mut summaries = self
                     .state
                     .call(move |state| state.summaries(&session, &wanted))
                     .await?;
+                if let Some(board) = self.board_agents(&root).await? {
+                    for summary in &mut summaries {
+                        board_status(&board, summary.agent_id, &mut summary.status);
+                    }
+                }
                 return Ok((summaries, delivered, true, None));
             }
         }

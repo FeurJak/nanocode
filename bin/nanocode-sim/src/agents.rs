@@ -2,7 +2,8 @@ use std::{cell::RefCell, sync::Arc, time::Duration};
 
 use nanocode_agent_core::AgentHandle;
 use nanocode_subagents::{
-    AgentStatus, AgentTask, DEFAULT_MAX_SUBAGENTS, Registry, ScopedAgentUpdate, SubagentControl,
+    AgentStatus, AgentTask, Coordination, DEFAULT_MAX_SUBAGENTS, Registry, ScopedAgentUpdate,
+    SubagentControl,
 };
 use nanocode_sync::mpsc::UnboundedReceiver;
 use serde_json::Value;
@@ -32,15 +33,17 @@ pub enum AgentsMutation {
     ShutdownHangs,
     ShutdownKeepsHarness,
     TurnLeaks,
+    BoardFailuresUnread,
 }
 
 impl AgentsMutation {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::None,
         Self::CancelIgnored,
         Self::ShutdownHangs,
         Self::ShutdownKeepsHarness,
         Self::TurnLeaks,
+        Self::BoardFailuresUnread,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -56,6 +59,7 @@ impl AgentsMutation {
             Self::ShutdownHangs => "shutdown_hangs",
             Self::ShutdownKeepsHarness => "shutdown_keeps_harness",
             Self::TurnLeaks => "turn_leaks",
+            Self::BoardFailuresUnread => "board_failures_unread",
         }
     }
 
@@ -178,11 +182,13 @@ struct Run {
     control: SubagentControl,
     root: AgentHandle,
     updates: UnboundedReceiver<ScopedAgentUpdate>,
+    plane: Option<Arc<dyn Coordination>>,
 }
 
 fn build(ledger: &Arc<Ledger>, shape: &Shape) -> Run {
     let (registry, control, updates) = nanocode_subagents::channel(DEFAULT_MAX_SUBAGENTS);
-    control.set_coordination(crate::boardagents::plane());
+    let plane = crate::boardagents::plane();
+    control.set_coordination(plane.clone());
     control.set_hibernation(true);
     control.set_max_resident(shape.resident_max);
     registry.set_store(Arc::new(ScriptedStore::new(Arc::clone(ledger))));
@@ -196,6 +202,7 @@ fn build(ledger: &Arc<Ledger>, shape: &Shape) -> Run {
         control,
         root,
         updates,
+        plane,
     }
 }
 
@@ -280,6 +287,89 @@ async fn judge(run: &Run, shape: &Shape, ledger: &Ledger) -> Result<(), String> 
             ));
         }
     }
+    if let Some(plane) = &run.plane {
+        board_agrees(run, plane, true).await?;
+    }
+    Ok(())
+}
+
+async fn board_agrees(
+    run: &Run,
+    plane: &Arc<dyn Coordination>,
+    settled: bool,
+) -> Result<(), String> {
+    let listed = run
+        .registry
+        .directory(ROOT_SESSION, true, false)
+        .await
+        .map_err(|error| format!("list_agents from the board failed: {error}"))?;
+    let ids = listed
+        .iter()
+        .map(|entry| entry.agent_id)
+        .collect::<Vec<_>>();
+    let (waited, ..) = run
+        .registry
+        .wait(ROOT_SESSION, "board-agrees", &ids, Duration::ZERO)
+        .await
+        .map_err(|error| format!("wait_agent from the board failed: {error}"))?;
+    run.registry.set_coordination(None);
+    let registry = run.registry.directory(ROOT_SESSION, true, false).await;
+    run.registry.set_coordination(Some(Arc::clone(plane)));
+    let registry = registry.map_err(|error| format!("the registry did not list: {error}"))?;
+    let board = plane
+        .agents(ROOT_SESSION)
+        .await
+        .map_err(|error| format!("the board did not read: {error}"))?;
+    let truth = |id| {
+        registry
+            .iter()
+            .find(|entry| entry.agent_id == id)
+            .map(|entry| &entry.status)
+    };
+    let finished = |status: &AgentStatus| {
+        matches!(
+            status,
+            AgentStatus::Completed { .. } | AgentStatus::Failed { .. }
+        )
+    };
+    if settled && listed.len() != registry.len() {
+        return Err(format!(
+            "list_agents from the board lists {} of the registry's {} children",
+            listed.len(),
+            registry.len()
+        ));
+    }
+    let answers = listed
+        .iter()
+        .map(|entry| ("list_agents", entry.agent_id, &entry.status))
+        .chain(
+            waited
+                .iter()
+                .map(|summary| ("wait_agent", summary.agent_id, &summary.status)),
+        );
+    for entry in &registry {
+        let read = board.get(&entry.agent_id);
+        let agrees = match read {
+            _ if !finished(&entry.status) => true,
+            Some(Some(status)) => *status == entry.status,
+            _ => !settled,
+        };
+        if !agrees {
+            return Err(format!(
+                "the board reads agent {} as {read:?}, the registry {:?}",
+                entry.agent_id, entry.status
+            ));
+        }
+    }
+    for (tool, id, status) in answers {
+        let expected = truth(id);
+        let lagging = !settled && !finished(status);
+        if expected != Some(status) && !lagging {
+            return Err(format!(
+                "{tool} from the board says agent {id} is {status:?}, the registry {expected:?}"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -295,6 +385,9 @@ async fn drive(shape: &Shape, ledger: &Arc<Ledger>, clock: &Clock) -> Result<u64
     .map_err(|error| format!("start_agents failed: {error}"))?;
     ledger.trace("started");
     nanocode_platform::sleep(shape.stop_after).await;
+    if let Some(plane) = &run.plane {
+        board_agrees(&run, plane, false).await?;
+    }
     ledger.trace("stop");
     let took_ms = stop(&run, shape, clock).await?;
     ledger.trace("stopped");
@@ -305,6 +398,9 @@ async fn drive(shape: &Shape, ledger: &Arc<Ledger>, clock: &Clock) -> Result<u64
 }
 
 pub fn simulate(seed: u64, mutation: AgentsMutation) -> AgentOutcome {
+    if mutation == AgentsMutation::BoardFailuresUnread {
+        nanocode_board::sim::mutate(nanocode_board::sim::Mutation::SubagentFailuresUnread);
+    }
     let shape = Shape::of(seed, mutation);
     let clock = Clock::new();
     crate::host::enter(seed, &clock);
@@ -322,6 +418,7 @@ pub fn simulate(seed: u64, mutation: AgentsMutation) -> AgentOutcome {
         (ended, None) => Err(format!("the run ended {ended:?} without a verdict")),
     };
     let stop_ms = *outcome.as_ref().unwrap_or(&0);
+    nanocode_board::sim::mutate(nanocode_board::sim::Mutation::None);
     AgentOutcome {
         digest: ledger.digest(),
         wrong: outcome.err(),

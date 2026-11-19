@@ -4,18 +4,32 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use nanocode_board::access::{Identity, Verifier};
+use nanocode_board::sim::{Mutation, mutated};
 use nanocode_board::tasks::Terms;
 use nanocode_board::{
     Applied, Board, BoardError, Change, ClaimId, EventId, NewTask, Op, Outcome, Phase, Rejection,
     TaskId,
 };
-use nanocode_sync::Mailbox;
+use nanocode_sync::{Mailbox, watch};
 use nanocode_turnlog::LogHost;
 
 use crate::model::{AgentId, AgentStatus, AgentUpdate, MessageSender};
 
+#[cfg(not(target_family = "wasm"))]
+pub type ReadFuture<'a, T> = nanocode_sync::future::BoxFuture<'a, T>;
+
+#[cfg(target_family = "wasm")]
+pub type ReadFuture<'a, T> = nanocode_sync::future::LocalBoxFuture<'a, T>;
+
+pub type BoardAgents = BTreeMap<AgentId, Option<AgentStatus>>;
+
 pub trait Coordination: Send + Sync {
     fn observe(&self, root_session_id: &str, update: &AgentUpdate);
+    fn changes(&self) -> watch::Receiver<u64>;
+    fn agents<'a>(
+        &'a self,
+        root_session_id: &'a str,
+    ) -> ReadFuture<'a, Result<BoardAgents, String>>;
 }
 
 pub const LEASE_MS: u64 = 1 << 30;
@@ -124,10 +138,12 @@ struct Inner {
     roots: BTreeSet<String>,
     stats: BoardStats,
     errors: Vec<String>,
+    changes: watch::Sender<u64>,
 }
 
 pub struct BoardCoordination {
     inner: Mailbox<Inner>,
+    changes: watch::Sender<u64>,
 }
 
 fn ready<F: Future>(future: F) -> Option<F::Output> {
@@ -150,7 +166,9 @@ fn open(host: &Arc<dyn LogHost>, scope: &str, profile: Option<&str>) -> Result<O
 
 impl BoardCoordination {
     pub fn new(host: Arc<dyn LogHost>, scope: &str) -> Arc<Self> {
+        let changes = watch::Sender::new(0);
         Arc::new(Self {
+            changes: changes.clone(),
             inner: Mailbox::new(Inner {
                 host,
                 scope: scope.to_owned(),
@@ -162,6 +180,7 @@ impl BoardCoordination {
                 roots: BTreeSet::new(),
                 stats: BoardStats::default(),
                 errors: Vec::new(),
+                changes,
             }),
         })
     }
@@ -238,6 +257,41 @@ impl Inner {
             .collect()
     }
 
+    fn agents(&mut self, root: &str) -> Result<BoardAgents, String> {
+        let Some(board) = self.dispatcher_board() else {
+            return Err("the subagent board is not open".to_owned());
+        };
+        let _ = ready(board.refresh());
+        let fold = board.fold();
+        let mut latest = BTreeMap::<AgentId, (u64, &Phase)>::new();
+        for (id, task) in fold.tasks() {
+            if task.spec.labels.get("root").map(String::as_str) != Some(root) {
+                continue;
+            }
+            let Some(agent) = task.spec.labels.get("agent") else {
+                continue;
+            };
+            let agent = agent
+                .parse::<u64>()
+                .map(AgentId::new)
+                .map_err(|error| format!("board task {id} has agent label {agent:?}: {error}"))?;
+            let name = id.0.as_str();
+            let (_, k) = name
+                .rsplit_once('/')
+                .ok_or_else(|| format!("board task {id} has no attempt number"))?;
+            let k = k
+                .parse::<u64>()
+                .map_err(|error| format!("board task {id} has attempt {k:?}: {error}"))?;
+            if latest.get(&agent).is_none_or(|(seen, _)| *seen < k) {
+                latest.insert(agent, (k, &task.phase));
+            }
+        }
+        latest
+            .into_iter()
+            .map(|(agent, (_, phase))| Ok((agent, finished(phase)?)))
+            .collect()
+    }
+
     fn audit(&self) -> Result<BoardStats, String> {
         if let Some(error) = self.errors.first() {
             return Err(format!("board coordination error: {error}"));
@@ -289,6 +343,19 @@ impl Inner {
             }
         }
         Ok(self.stats.clone())
+    }
+}
+
+fn finished(phase: &Phase) -> Result<Option<AgentStatus>, String> {
+    match phase {
+        Phase::Done { result } => serde_json::from_str(result)
+            .map(|output| Some(AgentStatus::Completed { output }))
+            .map_err(|error| format!("board result {result:?} is not JSON: {error}")),
+        Phase::Failed { .. } if mutated(Mutation::SubagentFailuresUnread) => Ok(None),
+        Phase::Failed { error } => Ok(Some(AgentStatus::Failed {
+            error: error.clone(),
+        })),
+        _ => Ok(None),
     }
 }
 
@@ -793,6 +860,18 @@ impl Coordination for BoardCoordination {
             return;
         };
         let root = root.to_owned();
-        self.inner.send(move |inner| inner.seen(&root, seen));
+        self.inner.send(move |inner| {
+            inner.seen(&root, seen);
+            inner.changes.send_modify(|revision| *revision += 1);
+        });
+    }
+
+    fn changes(&self) -> watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
+    fn agents<'a>(&'a self, root: &'a str) -> ReadFuture<'a, Result<BoardAgents, String>> {
+        let root = root.to_owned();
+        Box::pin(self.inner.call(move |inner| inner.agents(&root)))
     }
 }
