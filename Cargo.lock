@@ -919,6 +919,7 @@ dependencies = [
  "nanocode-process",
  "nanocode-process-contracts",
  "nanocode-sandbox",
+ "nanocode-shell",
  "nanocode-subagents",
  "nanocode-sync",
  "nanocode-sys",
@@ -927,6 +928,7 @@ dependencies = [
  "nanocode-trace",
  "nanocode-turnlog",
  "nanocode-websocket",
+ "nanocode-workspace-fs",
  "rustls",
  "serde_json",
 ]

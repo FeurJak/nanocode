@@ -1,6 +1,7 @@
 mod fs;
 mod mem;
 mod model;
+pub mod sim;
 mod sql;
 mod store;
 

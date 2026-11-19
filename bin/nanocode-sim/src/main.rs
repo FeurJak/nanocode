@@ -38,6 +38,7 @@ mod cost;
 mod handrouter;
 mod boardagents;
 mod board_sync;
+mod workspacefs;
 mod tidy;
 mod turnlog;
 mod turns;
@@ -72,6 +73,7 @@ use crate::{
     cost::{CostMutation, CostStats},
     handrouter::{HandRouterMutation, HandRouterStats},
     board_sync::{SyncMutation as BoardSyncMutation, SyncStats as BoardSyncStats},
+    workspacefs::{WorkspaceFsMutation, WorkspaceFsStats},
     websocket::{WebSocketMutation, WebSocketStats},
     whole::{ChildMode, StoreKind, WholeOptions, WholeStats, WireKind},
     children::ChildMutation,
@@ -105,6 +107,7 @@ enum Scenario {
     Cost,
     HandRouter,
     BoardSync,
+    WorkspaceFs,
 }
 
 struct Args {
@@ -131,6 +134,7 @@ struct Args {
     cost: CostMutation,
     hand_router: HandRouterMutation,
     board_sync: BoardSyncMutation,
+    workspace_fs: WorkspaceFsMutation,
     #[cfg(unix)]
     alloc: alloc::AllocMutation,
     #[cfg(unix)]
@@ -145,7 +149,7 @@ type Caught = BTreeMap<Invariant, (u64, u64, (u64, u64))>;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|inbox_stress|capture|executor|dns|board|cost|hand_router|board_sync] [--ops N] [--twice] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
+        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|inbox_stress|capture|executor|dns|board|cost|hand_router|board_sync|workspace_fs] [--ops N] [--twice] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
        websocket: [--mutation {}]
        http_server: [--mutation {}]
        alloc: [--mutation overstate_size|forget_free|scribble]
@@ -162,7 +166,8 @@ fn usage() -> ExitCode {
        board: [--mutation {}]
        cost: [--mutation {}]
        hand_router: [--mutation {}]
-       board_sync: [--mutation {}]",
+       board_sync: [--mutation {}]
+       workspace_fs: [--mutation {}]",
         Mutation::names(),
         TurnMutation::names(),
         onelog::PROTECTIONS.join("|"),
@@ -181,7 +186,8 @@ fn usage() -> ExitCode {
         BoardMutation::names(),
         CostMutation::names(),
         HandRouterMutation::names(),
-        BoardSyncMutation::names()
+        BoardSyncMutation::names(),
+        WorkspaceFsMutation::names()
     );
     ExitCode::from(2)
 }
@@ -240,6 +246,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
     let mut cost = CostMutation::None;
     let mut hand_router = HandRouterMutation::None;
     let mut board_sync = BoardSyncMutation::None;
+    let mut workspace_fs = WorkspaceFsMutation::None;
     #[cfg(unix)]
     let mut capture = capture::CaptureMutation::None;
     #[cfg(target_os = "linux")]
@@ -304,6 +311,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
                     "cost" => Scenario::Cost,
                     "hand_router" => Scenario::HandRouter,
                     "board_sync" => Scenario::BoardSync,
+                    "workspace_fs" => Scenario::WorkspaceFs,
                     #[cfg(unix)]
                     "capture" => Scenario::Capture,
                     #[cfg(target_os = "linux")]
@@ -352,6 +360,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         (Scenario::Cost, Some(name)) => cost = CostMutation::parse(name)?,
         (Scenario::HandRouter, Some(name)) => hand_router = HandRouterMutation::parse(name)?,
         (Scenario::BoardSync, Some(name)) => board_sync = BoardSyncMutation::parse(name)?,
+        (Scenario::WorkspaceFs, Some(name)) => workspace_fs = WorkspaceFsMutation::parse(name)?,
         #[cfg(unix)]
         (Scenario::Capture, Some(name)) => capture = capture::CaptureMutation::parse(name)?,
         #[cfg(not(unix))]
@@ -400,6 +409,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         cost,
         hand_router,
         board_sync,
+        workspace_fs,
         #[cfg(unix)]
         alloc,
         #[cfg(unix)]
@@ -473,6 +483,9 @@ fn replay(seed: u64, args: &Args) -> String {
     }
     if args.scenario == Scenario::BoardSync {
         return board_sync::replay(seed, args.board_sync);
+    }
+    if args.scenario == Scenario::WorkspaceFs {
+        return workspacefs::replay(seed, args.workspace_fs);
     }
     #[cfg(unix)]
     if args.scenario == Scenario::Capture {
@@ -808,6 +821,7 @@ fn mutations() -> ExitCode {
     add("cost", CostMutation::names());
     add("hand_router", HandRouterMutation::names());
     add("board_sync", BoardSyncMutation::names());
+    add("workspace_fs", WorkspaceFsMutation::names());
     #[cfg(unix)]
     {
         add("alloc", alloc::AllocMutation::names());
@@ -879,6 +893,7 @@ fn main() -> ExitCode {
         || (args.scenario == Scenario::Cost && args.cost != CostMutation::None)
         || (args.scenario == Scenario::HandRouter && args.hand_router != HandRouterMutation::None)
         || (args.scenario == Scenario::BoardSync && args.board_sync != BoardSyncMutation::None)
+        || (args.scenario == Scenario::WorkspaceFs && args.workspace_fs != WorkspaceFsMutation::None)
         || alloc_experiment(&args);
     let (mut passed, mut failed) = (0_u64, 0_u64);
     let mut totals = Stats::default();
@@ -900,6 +915,7 @@ fn main() -> ExitCode {
     let mut cost_totals = CostStats::default();
     let mut hand_router_totals = HandRouterStats::default();
     let mut board_sync_totals = BoardSyncStats::default();
+    let mut workspace_fs_totals = WorkspaceFsStats::default();
     #[cfg(unix)]
     let mut capture_totals = capture::CaptureStats::default();
     #[cfg(target_os = "linux")]
@@ -1023,6 +1039,13 @@ fn main() -> ExitCode {
                 args.options.verbose,
                 &mut board_sync_totals,
             ),
+            Scenario::WorkspaceFs => workspacefs::judge(
+                seed,
+                args.workspace_fs,
+                args.twice,
+                args.options.verbose,
+                &mut workspace_fs_totals,
+            ),
             #[cfg(unix)]
             Scenario::Capture => capture::judge(
                 seed,
@@ -1136,6 +1159,9 @@ fn main() -> ExitCode {
     }
     if args.scenario == Scenario::HandRouter {
         return handrouter::report(&args.seeds, passed, failed, args.twice, args.hand_router, &hand_router_totals);
+    }
+    if args.scenario == Scenario::WorkspaceFs {
+        return workspacefs::report(&args.seeds, passed, failed, args.twice, args.workspace_fs, &workspace_fs_totals);
     }
     if args.scenario == Scenario::BoardSync {
         return board_sync::report(&args.seeds, passed, failed, args.twice, args.board_sync, &board_sync_totals);

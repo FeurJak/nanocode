@@ -1,5 +1,6 @@
 use crate::{
     model::{Caps, Digest, Entry, MODE_BITS, Manifest, Op, Refusal, parent},
+    sim::{Mutation, mutated},
     store::{Batch, Blob, Failure, Store},
 };
 use nanocode_bytes::{Bytes, BytesMut};
@@ -365,6 +366,10 @@ impl Inner {
                 Ok(version)
             }
             Err(failure) => {
+                if mutated(Mutation::VisibleBeforeCommit) {
+                    *self.manifest.borrow_mut() = next;
+                    return Err(failure.into());
+                }
                 if let Failure::Refused(Refusal::Stale { .. }) | Failure::Backend(_) = &failure {
                     let _ = self.reload().await;
                 }

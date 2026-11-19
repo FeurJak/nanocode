@@ -1,5 +1,6 @@
 use crate::{
     model::{Digest, Manifest, Refusal},
+    sim::{Mutation, mutated},
     store::{Batch, Blob, Failure, Store},
 };
 use nanocode_durability_core::StoreFuture;
@@ -45,6 +46,24 @@ impl Store for MemStore {
         let change = batch.change();
         let result = self.held.modify(|held| {
             let mut head = held.heads.get(workspace).cloned().unwrap_or_default();
+            if head.version() != change.base && mutated(Mutation::LostUpdate) {
+                let mut entries = head.entries().clone();
+                for (path, entry) in &change.entries {
+                    match entry {
+                        Some(entry) => entries.insert(path.clone(), entry.clone()),
+                        None => entries.remove(path),
+                    };
+                }
+                head = Manifest::from_entries(change.version, entries)?;
+                for blob in batch.blobs() {
+                    held.blobs
+                        .entry(*blob.digest())
+                        .or_insert_with(|| (blob.clone(), 0))
+                        .1 += 1;
+                }
+                held.heads.insert(workspace.to_owned(), head);
+                return Ok(change.version);
+            }
             if head.version() != change.base {
                 return Err(Failure::Refused(Refusal::Stale {
                     base: change.base,
@@ -52,7 +71,8 @@ impl Store for MemStore {
                 }));
             }
             head.advance(change);
-            for blob in batch.blobs() {
+            let torn = usize::from(mutated(Mutation::TornCommit));
+            for blob in batch.blobs().iter().skip(torn) {
                 held.blobs
                     .entry(*blob.digest())
                     .or_insert_with(|| (blob.clone(), 0))

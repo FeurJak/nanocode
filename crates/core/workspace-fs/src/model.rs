@@ -1,3 +1,4 @@
+use crate::sim::{Mutation, mutated};
 use nanocode_digest::Sha256;
 use std::{collections::BTreeMap, fmt, io};
 
@@ -427,7 +428,7 @@ impl Draft<'_> {
     ) -> Result<(), Refusal> {
         let path = self.path(path)?;
         Self::mode(&path, mode)?;
-        if size > self.caps.file_bytes {
+        if size > self.caps.file_bytes && !mutated(Mutation::FileCapIgnored) {
             return Err(Refusal::FileTooLarge {
                 path,
                 size,
