@@ -898,6 +898,54 @@ impl Pending {
         })
     }
 
+    pub fn optimistic(&self, fold: &Fold) -> Option<Step> {
+        if fold.outcome(&self.event.id).is_some() {
+            return None;
+        }
+        fold.admit(&self.event.by, self.event.at_ms, &self.event.op)
+            .ok()?;
+        Some(Step::Append {
+            seq: fold.next,
+            body: self.body.clone(),
+        })
+    }
+
+    pub fn acknowledged(
+        &mut self,
+        fold: &mut Fold,
+        seq: u64,
+        result: Result<(), StoreError>,
+    ) -> Result<Option<Applied>, BoardError> {
+        if result.is_err() {
+            self.appended(seq, result)?;
+            return Ok(None);
+        }
+        if !mutated(Mutation::AckSkipsFold) {
+            fold.apply(seq, &self.body)?;
+        }
+        let Some(verdict) = fold.outcome(&self.event.id) else {
+            if mutated(Mutation::AckSkipsFold) {
+                return Ok(Some(Applied {
+                    seq,
+                    event: self.event.id.clone(),
+                }));
+            }
+            return Err(BoardError::Corrupt {
+                seq,
+                detail: format!("the store acknowledged {} but it did not fold", self.event.id),
+            });
+        };
+        verdict
+            .clone()
+            .map(|seq| {
+                Some(Applied {
+                    seq,
+                    event: self.event.id.clone(),
+                })
+            })
+            .map_err(BoardError::Rejected)
+    }
+
     pub fn appended(&mut self, seq: u64, result: Result<(), StoreError>) -> Result<(), BoardError> {
         if let Err(error) = &result
             && mutated(Mutation::ErrorsLoseWrites)

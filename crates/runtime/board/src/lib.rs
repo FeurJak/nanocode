@@ -89,13 +89,22 @@ impl Board {
             at_ms,
             op,
         })?;
+        let mut step = pending.optimistic(&self.fold);
         loop {
-            let rows = self.host.scan(&self.scope, self.fold.next(), END).await;
-            match pending.read(&mut self.fold, rows)? {
+            let step = match step.take() {
+                Some(step) => step,
+                None => {
+                    let rows = self.host.scan(&self.scope, self.fold.next(), END).await;
+                    pending.read(&mut self.fold, rows)?
+                }
+            };
+            match step {
                 Step::Done(applied) => return Ok(applied),
                 Step::Append { seq, body } => {
                     let appended = self.host.append(&self.scope, &[(seq, body)]).await;
-                    pending.appended(seq, appended)?;
+                    if let Some(applied) = pending.acknowledged(&mut self.fold, seq, appended)? {
+                        return Ok(applied);
+                    }
                 }
             }
         }

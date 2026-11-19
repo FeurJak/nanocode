@@ -75,10 +75,11 @@ pub enum BoardMutation {
     MoveKeepsChildren,
     ReadyIndexStale,
     LabelIndexStale,
+    AckSkipsFold,
 }
 
 impl BoardMutation {
-    const ALL: [Self; 40] = [
+    const ALL: [Self; 41] = [
         Self::None,
         Self::ClaimIgnoresLease,
         Self::ClaimIgnoresNeeds,
@@ -119,6 +120,7 @@ impl BoardMutation {
         Self::MoveKeepsChildren,
         Self::ReadyIndexStale,
         Self::LabelIndexStale,
+        Self::AckSkipsFold,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -167,6 +169,7 @@ impl BoardMutation {
             Self::MoveKeepsChildren => "move_keeps_children",
             Self::ReadyIndexStale => "ready_index_stale",
             Self::LabelIndexStale => "label_index_stale",
+            Self::AckSkipsFold => "ack_skips_fold",
         }
     }
 
@@ -218,6 +221,7 @@ impl BoardMutation {
             Self::MoveKeepsChildren => BoardRule::MoveKeepsChildren,
             Self::ReadyIndexStale => BoardRule::ReadyIndexStale,
             Self::LabelIndexStale => BoardRule::LabelIndexStale,
+            Self::AckSkipsFold => BoardRule::AckSkipsFold,
             Self::None | Self::CursorBeforeEffect | Self::EffectBeforeCursor => BoardRule::None,
         }
     }
@@ -589,6 +593,10 @@ impl World {
         let sent = board.submit(self.now_ms(), op).await;
         let mut oracle = self.oracle.borrow_mut();
         let outcome = match &sent {
+            Ok(applied) if board.fold().outcome(&applied.event) != Some(&Ok(applied.seq)) => {
+                oracle.wrong.push(format!("{id} settled at {} but the board's own fold does not hold it there", applied.seq));
+                Sent::Applied(applied.seq)
+            }
             Ok(applied) if applied.event.0 != id => {
                 oracle.wrong.push(format!("{id} settled as {}", applied.event));
                 Sent::Applied(applied.seq)
