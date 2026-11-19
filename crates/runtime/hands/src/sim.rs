@@ -14,6 +14,8 @@ pub enum Mutation {
     CommitsPartial,
     ShaUnchecked,
     PlacementSkipsUncertain,
+    StopsUnknown,
+    ListKeepsStopped,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

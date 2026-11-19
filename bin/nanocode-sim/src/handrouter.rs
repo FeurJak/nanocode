@@ -12,9 +12,10 @@ use std::{
 use nanocode_code_mode::embedded::HandCalls;
 use nanocode_code_mode::{ToolContext, ToolOutput, ToolOutputBody};
 use nanocode_hands::{
-    ChunkError, Chunks, Clock, Fetch, GetError, HandError, HandHost, HandPhase, HandRef,
-    HandStatus, HostFuture, Placement, Placements, Policy, PutError, REFUSED, Router, Sha256Digest,
-    StepOutcome, Stored, Target, UNCERTAIN, Workspace, receive,
+    ChunkError, Chunks, Clock, Fetch, GetError, HandError, HandHost, HandPhase, HandProvider,
+    HandRef, HandSize, HandStatus, HostFuture, MemoryProvider, Placement, Placements, Policy,
+    ProviderError, PutError, REFUSED, Router, Sha256Digest, StepOutcome, Stored, Target, UNCERTAIN,
+    Workspace, receive,
     sim::{self as hands_sim, Mutation as HandRule},
 };
 use nanocode_sync::{Atom, OnceCell, block_on};
@@ -42,10 +43,12 @@ pub enum HandRouterMutation {
     CommitsPartial,
     ShaUnchecked,
     PlacementSkipsUncertain,
+    StopsUnknown,
+    ListKeepsStopped,
 }
 
 impl HandRouterMutation {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 13] = [
         Self::None,
         Self::ForwardsRefused,
         Self::SkipsToolCheck,
@@ -57,6 +60,8 @@ impl HandRouterMutation {
         Self::CommitsPartial,
         Self::ShaUnchecked,
         Self::PlacementSkipsUncertain,
+        Self::StopsUnknown,
+        Self::ListKeepsStopped,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -78,6 +83,8 @@ impl HandRouterMutation {
             Self::CommitsPartial => "commits_partial",
             Self::ShaUnchecked => "sha_unchecked",
             Self::PlacementSkipsUncertain => "placement_skips_uncertain",
+            Self::StopsUnknown => "stops_unknown",
+            Self::ListKeepsStopped => "list_keeps_stopped",
         }
     }
 
@@ -103,6 +110,8 @@ impl HandRouterMutation {
             Self::CommitsPartial => HandRule::CommitsPartial,
             Self::ShaUnchecked => HandRule::ShaUnchecked,
             Self::PlacementSkipsUncertain => HandRule::PlacementSkipsUncertain,
+            Self::StopsUnknown => HandRule::StopsUnknown,
+            Self::ListKeepsStopped => HandRule::ListKeepsStopped,
         }
     }
 }
@@ -998,6 +1007,9 @@ pub fn simulate(seed: u64, mutation: HandRouterMutation) -> HandRouterOutcome {
         }
     }
     if wrong.is_none() {
+        wrong = provide(&mut rng);
+    }
+    if wrong.is_none() {
         world.advance(idle_ms);
         block_on(router.release_idle());
         let unreleased: Vec<String> = world.hands.read(|hands| {
@@ -1053,6 +1065,87 @@ pub fn simulate(seed: u64, mutation: HandRouterMutation) -> HandRouterOutcome {
         stats,
         shape,
     }
+}
+
+struct Ticks(AtomicU64);
+
+impl Clock for Ticks {
+    fn now_ms(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+fn provide(rng: &mut Rng) -> Option<String> {
+    let clock = Arc::new(Ticks(AtomicU64::new(0)));
+    let hands_max = rng.range(1, 8) as usize;
+    let prices = [rng.range(1, PPM), rng.range(1, PPM)];
+    let provider = MemoryProvider::new(clock.clone(), hands_max, prices);
+    let mut expected: BTreeMap<Box<str>, HandSize> = BTreeMap::new();
+    let mut stopped: Vec<Box<str>> = Vec::new();
+    for _ in 0..rng.range(4, 40) {
+        clock.0.fetch_add(rng.below(1_000), Ordering::SeqCst);
+        let now_ms = clock.now_ms();
+        match rng.below(3) {
+            0 => {
+                let size = HandSize::ALL[rng.pick(HandSize::ALL.len())];
+                match block_on(provider.start(size)) {
+                    Ok(hand) => {
+                        if expected.len() >= hands_max {
+                            return Some(format!("start {size} ran past {hands_max} Hands"));
+                        }
+                        if hand.size != size
+                            || hand.started_ms != now_ms
+                            || hand.nano_usd_per_hour != prices[size as usize]
+                        {
+                            return Some(format!("start {size} at {now_ms} ms gave {hand:?}"));
+                        }
+                        if expected.insert(hand.id.clone(), size).is_some() {
+                            return Some(format!("start reused id {}", hand.id));
+                        }
+                    }
+                    Err(ProviderError::Exhausted { .. }) if expected.len() >= hands_max => {}
+                    Err(error) => {
+                        return Some(format!(
+                            "start {size} with {} of {hands_max} running failed: {error}",
+                            expected.len()
+                        ));
+                    }
+                }
+            }
+            1 if !expected.is_empty() => {
+                let ids: Vec<Box<str>> = expected.keys().cloned().collect();
+                let id = ids[rng.pick(ids.len())].clone();
+                if let Err(error) = block_on(provider.stop(&id)) {
+                    return Some(format!("stop of running {id} failed: {error}"));
+                }
+                expected.remove(&id);
+                stopped.push(id);
+            }
+            _ => {
+                let id: Box<str> = if stopped.is_empty() || rng.chance(PPM / 2) {
+                    "never-started".into()
+                } else {
+                    stopped[rng.pick(stopped.len())].clone()
+                };
+                match block_on(provider.stop(&id)) {
+                    Err(ProviderError::UnknownHand { id: named }) if named == id => {}
+                    other => return Some(format!("stop of unknown {id} gave {other:?}")),
+                }
+            }
+        }
+        let listed = match block_on(provider.list()) {
+            Ok(listed) => listed,
+            Err(error) => return Some(format!("list failed: {error}")),
+        };
+        let seen: BTreeMap<Box<str>, HandSize> = listed
+            .into_iter()
+            .map(|hand| (hand.id, hand.size))
+            .collect();
+        if seen != expected {
+            return Some(format!("list gave {seen:?}, expected {expected:?}"));
+        }
+    }
+    None
 }
 
 pub fn run_seed(seed: u64, mutation: HandRouterMutation) -> HandRouterOutcome {

@@ -1,5 +1,6 @@
 mod copy;
 mod host;
+mod provider;
 mod receive;
 mod router;
 pub mod sim;
@@ -10,6 +11,9 @@ pub use copy::CopyError;
 pub use host::{HandHost, Workspace};
 pub use nanocode_code_mode::embedded::HostFuture;
 pub use nanocode_cost_fold::Placement;
+pub use provider::{
+    HandProvider, HandSize, MemoryProvider, ProvidedHand, ProvidedState, ProviderError,
+};
 pub use receive::receive;
 pub use router::{
     Clock, Placements, Policy, REFUSED, Released, Router, UNCERTAIN, WORKSPACE, refused, uncertain,
