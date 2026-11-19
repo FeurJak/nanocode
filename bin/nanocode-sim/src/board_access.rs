@@ -281,7 +281,13 @@ async fn relabel(world: &World, epoch: u64, span: u64) {
     for round in 0..rng.range(0, 5) {
         world.nap(rng.range(0, span)).await;
         let (_, fold) = raw(world).await;
-        let tasks = fold.tasks().keys().cloned().collect::<Vec<_>>();
+        let live = rng.chance(500_000);
+        let tasks = fold
+            .tasks()
+            .iter()
+            .filter(|(_, task)| !live || !task.phase.terminal())
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
         if tasks.is_empty() {
             continue;
         }

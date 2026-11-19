@@ -294,6 +294,8 @@ pub struct Fold {
     entries: Vec<Entry>,
     access: access::Access,
     mirror: mirror::Mirror,
+    live: BTreeSet<TaskId>,
+    labelled: BTreeMap<String, BTreeMap<String, BTreeSet<TaskId>>>,
 }
 
 impl Default for Fold {
@@ -314,6 +316,8 @@ impl Fold {
             entries: Vec::new(),
             access: access::Access::new(),
             mirror: mirror::Mirror::new(),
+            live: BTreeSet::new(),
+            labelled: BTreeMap::new(),
         }
     }
 
@@ -388,9 +392,71 @@ impl Fold {
     }
 
     pub fn ready(&self, at_ms: u64) -> impl Iterator<Item = &TaskId> + '_ {
-        self.tasks
-            .keys()
+        self.live
+            .iter()
             .filter(move |id| self.claimable(id, at_ms).is_ok())
+    }
+
+    pub fn labelled<'a>(&'a self, key: &str, value: &str) -> impl Iterator<Item = &'a TaskId> + 'a {
+        self.labelled
+            .get(key)
+            .and_then(|values| values.get(value))
+            .into_iter()
+            .flatten()
+    }
+
+    pub fn ready_labelled<'a>(
+        &'a self,
+        key: &str,
+        value: &str,
+        at_ms: u64,
+    ) -> impl Iterator<Item = &'a TaskId> + 'a {
+        self.labelled(key, value)
+            .filter(move |id| self.claimable(id, at_ms).is_ok())
+    }
+
+    fn reindex(&mut self, id: &TaskId) {
+        let Some(task) = self.tasks.get(id) else {
+            return;
+        };
+        let live = !task.phase.terminal();
+        for (key, value) in &task.spec.labels {
+            if live {
+                self.labelled
+                    .entry(key.clone())
+                    .or_default()
+                    .entry(value.clone())
+                    .or_default()
+                    .insert(id.clone());
+            } else if let Some(ids) = self
+                .labelled
+                .get_mut(key)
+                .and_then(|values| values.get_mut(value))
+            {
+                ids.remove(id);
+            }
+        }
+        if live {
+            self.live.insert(id.clone());
+        } else {
+            self.live.remove(id);
+        }
+    }
+
+    fn unlabel(&mut self, id: &TaskId, keys: impl Iterator<Item = String>) {
+        let Some(task) = self.tasks.get(id) else {
+            return;
+        };
+        for key in keys {
+            if let Some(value) = task.spec.labels.get(&key)
+                && let Some(ids) = self
+                    .labelled
+                    .get_mut(&key)
+                    .and_then(|values| values.get_mut(value))
+            {
+                ids.remove(id);
+            }
+        }
     }
 
     pub fn settled(&self) -> bool {
@@ -511,6 +577,9 @@ impl Fold {
 
     fn record(&mut self, seq: u64, event: &Event, task: &TaskId, change: Change) {
         self.observe(seq, event, task, &change);
+        if !mutated(Mutation::ReadyIndexStale) {
+            self.reindex(task);
+        }
         self.entries.push(Entry {
             seq,
             event: event.id.clone(),
@@ -650,6 +719,9 @@ impl Fold {
                 }
             }
             Op::Relabel { set, unset, .. } => {
+                if !mutated(Mutation::LabelIndexStale) {
+                    self.unlabel(&id, unset.iter().chain(set.keys()).cloned());
+                }
                 if let Some(task) = self.tasks.get_mut(&id) {
                     let labels = &mut task.spec.labels;
                     if !mutated(Mutation::RelabelKeepsUnset) {

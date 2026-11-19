@@ -71,10 +71,12 @@ pub enum BoardMutation {
     MoveUnchecked,
     MoveAllowsCycle,
     MoveKeepsChildren,
+    ReadyIndexStale,
+    LabelIndexStale,
 }
 
 impl BoardMutation {
-    const ALL: [Self; 38] = [
+    const ALL: [Self; 40] = [
         Self::None,
         Self::ClaimIgnoresLease,
         Self::ClaimIgnoresNeeds,
@@ -113,6 +115,8 @@ impl BoardMutation {
         Self::MoveUnchecked,
         Self::MoveAllowsCycle,
         Self::MoveKeepsChildren,
+        Self::ReadyIndexStale,
+        Self::LabelIndexStale,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -159,6 +163,8 @@ impl BoardMutation {
             Self::MoveUnchecked => "move_unchecked",
             Self::MoveAllowsCycle => "move_allows_cycle",
             Self::MoveKeepsChildren => "move_keeps_children",
+            Self::ReadyIndexStale => "ready_index_stale",
+            Self::LabelIndexStale => "label_index_stale",
         }
     }
 
@@ -208,6 +214,8 @@ impl BoardMutation {
             Self::MoveUnchecked => BoardRule::MoveUnchecked,
             Self::MoveAllowsCycle => BoardRule::MoveAllowsCycle,
             Self::MoveKeepsChildren => BoardRule::MoveKeepsChildren,
+            Self::ReadyIndexStale => BoardRule::ReadyIndexStale,
+            Self::LabelIndexStale => BoardRule::LabelIndexStale,
             Self::None | Self::CursorBeforeEffect | Self::EffectBeforeCursor => BoardRule::None,
         }
     }
@@ -1147,6 +1155,46 @@ impl Reference {
     }
 }
 
+fn indexes(rows: &[(u64, String)]) -> Result<(), String> {
+    let mut fold = nanocode_board::Fold::new();
+    let mut labels = BTreeSet::new();
+    for (seq, body) in rows {
+        fold.apply(*seq, body).map_err(|error| format!("refold: {error}"))?;
+        labels.extend(fold.tasks().values().flat_map(|task| task.spec.labels.clone()));
+        for (key, value) in &labels {
+            let live = fold.labelled(key, value).collect::<Vec<_>>();
+            let scan = fold
+                .tasks()
+                .iter()
+                .filter(|(_, task)| !task.phase.terminal() && task.spec.labels.get(key) == Some(value))
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>();
+            if live != scan {
+                return Err(format!("after row {seq} the {key}={value} index holds {live:?}, a scan finds {scan:?}"));
+            }
+        }
+        for at in [fold.now_ms(), fold.now_ms() + 60_000] {
+            let ready = fold.ready(at).collect::<Vec<_>>();
+            let scan = fold.tasks().keys().filter(|id| fold.claimable(id, at).is_ok()).collect::<Vec<_>>();
+            if ready != scan {
+                return Err(format!("after row {seq} at {at} ms the ready index says {ready:?}, a scan says {scan:?}"));
+            }
+            for (key, value) in &labels {
+                let indexed = fold.ready_labelled(key, value, at).collect::<Vec<_>>();
+                let scan = ready
+                    .iter()
+                    .copied()
+                    .filter(|id| fold.tasks()[*id].spec.labels.get(key) == Some(value))
+                    .collect::<Vec<_>>();
+                if indexed != scan {
+                    return Err(format!("after row {seq} the {key}={value} index says {indexed:?}, a scan says {scan:?}"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn check(world: &World, rows: &[(u64, String)]) -> Result<BoardStats, String> {
     let mut fold = nanocode_board::Fold::new();
     for (seq, body) in rows {
@@ -1332,11 +1380,12 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
         number += 1;
     }
     let live = access::live(&world);
+    let rows = nanocode_sync::block_on(world.host.inner.scan(SCOPE, 0, i64::MAX as u64)).unwrap_or_default();
+    let indexed = indexes(&rows);
     board_sim::mutate(BoardRule::None);
-    if let Err(wrong) = live {
+    for wrong in [live, indexed].into_iter().filter_map(Result::err) {
         world.oracle.borrow_mut().wrong.push(wrong);
     }
-    let rows = nanocode_sync::block_on(world.host.inner.scan(SCOPE, 0, i64::MAX as u64)).unwrap_or_default();
     let mut digest = fnv(FNV_OFFSET, described.as_bytes());
     for (seq, body) in &rows {
         digest = fnv(digest, &seq.to_le_bytes());
