@@ -11,8 +11,10 @@ use std::{
 };
 
 use nanocode_board::{
-    Applied, Board, BoardError, ClaimId, NewTask, Op, Outcome, Phase, Rejection, Say, TaskId,
+    Applied, Board, BoardError, ClaimId, EventId, NewTask, Op, Outcome, Phase, Rejection, Say,
+    TaskId,
     sim::{self as board_sim, Mutation as BoardRule},
+    watch::Step,
 };
 use nanocode_durability_core::{StoreError, StoreFuture};
 use nanocode_sync::Slot;
@@ -36,6 +38,9 @@ pub(crate) use access::identity;
 
 const SCOPE: &str = "board";
 const MS: u64 = 1_000_000;
+
+#[path = "board_watch.rs"]
+mod watching;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoardMutation {
@@ -106,6 +111,7 @@ pub enum BoardMutation {
     CursorInclusive,
     SaysUnchecked,
     MessagesLeak,
+    Watch(BoardRule),
 }
 
 impl BoardMutation {
@@ -180,7 +186,10 @@ impl BoardMutation {
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|mutation| mutation.name() == name)
+        Self::ALL
+            .into_iter()
+            .chain(watching::ALL.map(Self::Watch))
+            .find(|mutation| mutation.name() == name)
     }
 
     pub const fn name(self) -> &'static str {
@@ -252,6 +261,7 @@ impl BoardMutation {
             Self::CursorInclusive => "cursor_inclusive",
             Self::SaysUnchecked => "says_unchecked",
             Self::MessagesLeak => "messages_leak",
+            Self::Watch(rule) => watching::name(rule),
         }
     }
 
@@ -259,6 +269,8 @@ impl BoardMutation {
         Self::ALL
             .iter()
             .skip(1)
+            .copied()
+            .chain(watching::ALL.map(Self::Watch))
             .map(|mutation| mutation.name())
             .collect::<Vec<_>>()
             .join("|")
@@ -330,6 +342,7 @@ impl BoardMutation {
             Self::CursorInclusive => BoardRule::CursorInclusive,
             Self::SaysUnchecked => BoardRule::SaysUnchecked,
             Self::MessagesLeak => BoardRule::MessagesLeak,
+            Self::Watch(rule) => rule,
             Self::None | Self::CursorBeforeEffect | Self::EffectBeforeCursor => BoardRule::None,
         }
     }
@@ -428,7 +441,11 @@ fn task(id: String, parent: Option<&TaskId>, needs: Vec<TaskId>, step: &str) -> 
         id: TaskId(id),
         parent: parent.cloned(),
         spec: format!("{step} work"),
-        labels: BTreeMap::from([("step".to_owned(), step.to_owned())]),
+        labels: [("step", step)]
+            .into_iter()
+            .chain((step == "consolidate").then_some(("gate", "join")))
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect(),
         needs,
         terms: nanocode_board::tasks::Terms::default(),
     }
@@ -644,6 +661,7 @@ struct World {
     minted: RefCell<BTreeMap<String, u64>>,
     reopens: RefCell<BTreeMap<TaskId, u64>>,
     chat: messages::Chat,
+    watched: watching::Watched,
 }
 
 impl World {
@@ -657,7 +675,7 @@ impl World {
 
     async fn open(&self, writer: &str) -> Board {
         loop {
-            let host: Arc<dyn LogHost> = Arc::clone(&self.host) as Arc<dyn LogHost>;
+            let host = self.watched.wrap(Arc::clone(&self.host) as Arc<dyn LogHost>);
             match Board::open(host, SCOPE, access::identity(writer)).await {
                 Ok(board) => {
                     self.resume(board.writer()).await;
@@ -1063,6 +1081,7 @@ async fn epoch(world: &World, number: u64) {
     for index in 0..world.shape.workers {
         actors.push(Box::pin(worker(world, index, number)));
     }
+    watching::actors(world, number, &mut actors);
     nanocode_sync::join_in_order(actors).await;
 }
 
@@ -1102,6 +1121,7 @@ struct Reference {
     waits: BTreeSet<String>,
     reopens: BTreeMap<String, u64>,
     roots: BTreeMap<String, (String, bool)>,
+    schedules: BTreeMap<String, (String, Op, bool)>,
 }
 
 impl Reference {
@@ -1247,6 +1267,47 @@ impl Reference {
             Op::Renew { .. } | Op::Release { .. } | Op::Finish { .. } | Op::Reply { .. } | Op::Relabel { .. } | Op::Rank { .. } | Op::Sync { .. } => false,
             Op::Grant { .. } | Op::Revoke { .. } | Op::Charter {} => true,
             Op::Say { .. } => false,
+            Op::Watch(_) => false,
+        }
+    }
+
+    fn inner(&mut self, fold: &nanocode_board::Fold, id: String, by: &str, now: u64, op: Op) {
+        let accepted = self.gate.allows(by, &op, &self.tasks) && self.step(by, &id, now, op.clone());
+        if accepted {
+            self.gate.record(by, &id, &op);
+        }
+        if accepted || fold.outcome(&EventId(id.clone())).is_some() {
+            self.verdicts.insert(id, accepted);
+        }
+    }
+
+    fn watch(&mut self, fold: &nanocode_board::Fold, id: &str, by: &str, now: u64, step: &Step) {
+        match step {
+            Step::Consume { effects, .. } => {
+                for (index, op) in effects.iter().enumerate() {
+                    self.inner(fold, format!("{id}/{index}"), by, now, op.clone());
+                }
+            }
+            Step::Schedule { id: schedule, by: made, send, every_ms, .. } => {
+                self.schedules.insert(schedule.clone(), (made.clone(), (**send).clone(), every_ms.is_some()));
+            }
+            Step::Fire { id: schedule, n } => {
+                let Some((made, send, repeating)) = self.schedules.get(schedule).cloned() else {
+                    return;
+                };
+                let send = match send {
+                    Op::Post { mut task } if repeating => {
+                        task.id = TaskId(format!("{}/{n}", task.id));
+                        Op::Post { task }
+                    }
+                    send => send,
+                };
+                self.inner(fold, format!("fire/{schedule}/{n}"), &made, now, send);
+            }
+            Step::Unschedule { id: schedule, .. } => {
+                self.schedules.remove(schedule);
+            }
+            Step::Watch { .. } | Step::Unwatch { .. } | Step::Take { .. } | Step::Fail { .. } | Step::Bury { .. } => {}
         }
     }
 
@@ -1264,7 +1325,12 @@ impl Reference {
             waits: BTreeSet::new(),
             reopens: BTreeMap::new(),
             roots: BTreeMap::new(),
+            schedules: BTreeMap::new(),
         };
+        let mut fold = nanocode_board::Fold::new();
+        for (seq, body) in rows {
+            fold.apply(*seq, body).map_err(|error| format!("reference refold: {error}"))?;
+        }
         let mut now = 0;
         for (seq, body) in rows {
             let event: nanocode_board::Event =
@@ -1287,6 +1353,15 @@ impl Reference {
                         model.doom(&message.0);
                     }
                 }
+                continue;
+            }
+            if let Op::Watch(step) = &event.op {
+                let accepted = fold.outcome(&event.id).is_some_and(Result::is_ok)
+                    && model.gate.allows(&event.by, &event.op, &model.tasks);
+                if accepted {
+                    model.watch(&fold, &event.id.0, &event.by, now, step);
+                }
+                model.verdicts.insert(event.id.0, accepted);
                 continue;
             }
             let accepted = model.gate.allows(&event.by, &event.op, &model.tasks)
@@ -1474,6 +1549,7 @@ fn check(world: &World, rows: &[(u64, String)]) -> Result<BoardStats, String> {
             terminal.len()
         ));
     }
+    watching::check(world, rows, &fold)?;
     stats.consumed = watch.consumed.len() as u64;
     stats.rows = rows.len() as u64;
     Ok(stats)
@@ -1481,7 +1557,8 @@ fn check(world: &World, rows: &[(u64, String)]) -> Result<BoardStats, String> {
 
 pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
     let shape = Shape::of(seed);
-    let described = shape.describe();
+    let watched = watching::Watched::new(seed);
+    let described = format!("{} {}", shape.describe(), watched.shape.describe());
     let clock = Clock::new();
     let host = Arc::new(FaultLog {
         inner: MemoryLog::new(),
@@ -1506,6 +1583,7 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
         minted: RefCell::new(BTreeMap::new()),
         reopens: RefCell::new(BTreeMap::new()),
         chat: messages::Chat::of(seed),
+        watched,
         shape,
     };
     board_sim::mutate(mutation.rule());
@@ -1516,7 +1594,7 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
     loop {
         let crash_at = crashes.get(number as usize).map(|ms| ms * MS);
         let last = crash_at.is_none();
-        let deadline = clock.now_ns() + world.shape.deadline_ms * MS;
+        let deadline = clock.now_ns() + (world.shape.deadline_ms + world.watched.shape.slack_ms()) * MS;
         let mut executor = Executor::new(Arc::clone(&clock), Rng::derive(seed, &format!("board scheduler {number}")));
         let task: Task<'_> = Box::pin(epoch(&world, number));
         let ended = executor.run(vec![task], Some(crash_at.map_or(deadline, |at| at.max(clock.now_ns()))));
@@ -1540,11 +1618,12 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
                     .take(4)
                     .collect::<Vec<_>>();
                 wrong = Some(format!(
-                    "the board did not settle within {} ms of the last restart; {} rows, {}/{} tasks posted, open: {open:?}",
+                    "the board did not settle within {} ms of the last restart; {} rows, {}/{} tasks posted, open: {open:?}; {}",
                     world.shape.deadline_ms,
                     rows.len(),
                     fold.tasks().len(),
-                    world.shape.plan.len()
+                    world.shape.plan.len(),
+                    watching::stalled(&world, &fold)
                 ));
                 break;
             }
@@ -1640,6 +1719,7 @@ pub fn replay(seed: u64, mutation: BoardMutation) -> String {
 }
 
 pub fn report(seeds: &Range<u64>, passed: u64, failed: u64, twice: bool, mutation: BoardMutation, totals: &BoardStats) -> ExitCode {
+    println!("{}", watching::summary());
     println!(
         "RESULT seeds={}..{} scenario=board mutation={} passed={passed} failed={failed} twice={twice} stats={totals:?}",
         seeds.start,

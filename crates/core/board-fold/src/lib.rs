@@ -8,6 +8,7 @@ pub mod mirror;
 pub mod schedule;
 pub mod sim;
 pub mod tasks;
+pub mod watch;
 
 use sim::{Mutation, mutated};
 use tasks::{Moved, Occurrence, Refusal, TaskOp, Terms};
@@ -115,6 +116,7 @@ pub enum Op {
     Say {
         say: Say,
     },
+    Watch(watch::Step),
 }
 
 impl Op {
@@ -132,7 +134,11 @@ impl Op {
             | Self::Move { task, .. } => Some(task),
             Self::Tasks(op) => Some(op.task()),
             Self::Sync { sync } => sync.task(),
-            Self::Grant { .. } | Self::Revoke { .. } | Self::Charter {} | Self::Say { .. } => None,
+            Self::Grant { .. }
+            | Self::Revoke { .. }
+            | Self::Charter {}
+            | Self::Say { .. }
+            | Self::Watch(_) => None,
         }
     }
 }
@@ -205,6 +211,7 @@ pub enum Rejection {
     Tasks(Refusal),
     Sync(mirror::Refusal),
     Said(messages::Refusal),
+    Watch(watch::Refusal),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -318,6 +325,7 @@ pub struct Fold {
     #[serde(with = "crate::pairs")]
     labelled: BTreeMap<String, BTreeMap<String, BTreeSet<TaskId>>>,
     said: messages::Said,
+    marks: watch::Marks,
 }
 
 impl Default for Fold {
@@ -341,6 +349,7 @@ impl Fold {
             live: BTreeSet::new(),
             labelled: BTreeMap::new(),
             said: messages::Said::new(),
+            marks: watch::Marks::new(),
         }
     }
 
@@ -566,6 +575,7 @@ impl Fold {
             Op::Tasks(op) => self.check_tasks(at_ms, op),
             Op::Sync { sync } => self.check_sync(sync),
             Op::Say { .. } => Ok(()),
+            Op::Watch(step) => self.check_step(at_ms, step),
         }
     }
 
@@ -637,6 +647,7 @@ impl Fold {
             self.access.record(&event.by, &event.id, &event.op);
             self.transition(seq, &event);
             self.hear(seq, &event);
+            self.index_marks();
         }
         Ok(())
     }
@@ -659,6 +670,10 @@ impl Fold {
         let now = self.now_ms;
         if let Op::Sync { sync } = &event.op {
             self.transition_sync(seq, event, sync);
+            return;
+        }
+        if let Op::Watch(step) = &event.op {
+            self.apply_step(seq, event, step);
             return;
         }
         let Some(id) = event.op.task().cloned() else {
@@ -827,7 +842,7 @@ impl Fold {
                     to: parent.clone(),
                 }
             }
-            Op::Grant { .. } | Op::Revoke { .. } | Op::Charter {} => return,
+            Op::Grant { .. } | Op::Revoke { .. } | Op::Charter {} | Op::Watch(_) => return,
             Op::Tasks(op) => {
                 self.steer(seq, event, op);
                 return;

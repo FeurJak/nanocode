@@ -9,6 +9,8 @@ pub mod cost;
 pub mod files;
 pub mod middleware;
 pub mod tasks;
+pub mod wake;
+pub mod watch;
 
 use sim::{Mutation, mutated};
 

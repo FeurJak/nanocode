@@ -4,10 +4,11 @@ use nanocode_board::{
     BoardError, Event, EventId, Fold, Op, Rejection, Say, TaskId,
     access::{Actor, Can, Grant, Identity, Verifier, Who},
     tasks::{Need, Planned, TaskOp, Terms},
+    watch::{Key, Step},
 };
 use nanocode_turnlog::LogHost;
 
-use super::{Expect, Reference, SCOPE, World};
+use super::{Expect, Reference, SCOPE, World, watching};
 use crate::rng::Rng;
 
 pub const OWNER: &str = "user:lead";
@@ -55,6 +56,15 @@ pub fn grants() -> Vec<(&'static str, Grant)> {
             Grant {
                 who: super::messages::WRITERS[..2].iter().map(|who| Who::Principal((*who).to_owned())).collect(),
                 can: BTreeMap::from([("*".to_owned(), vec![Can::Read, Can::Post, Can::React, Can::Label])]),
+            },
+        ),
+        (
+            "grant:watch",
+            Grant {
+                who: [watching::TALLY, watching::ECHO, watching::CLOCK]
+                    .map(|name| Who::Principal(name.to_owned()))
+                    .to_vec(),
+                can: BTreeMap::from([("*".to_owned(), vec![Can::Read, Can::Post])]),
             },
         ),
     ]
@@ -163,7 +173,7 @@ pub async fn intruder(world: &World, epoch: u64) {
         let (_, fold) = raw(world).await;
         let tasks = fold.tasks().keys().cloned().collect::<Vec<_>>();
         let key = |by: &str| format!("{by}#forged.e{epoch}.{round}");
-        let action = rng.range(0, 9);
+        let action = rng.range(0, 12);
         match action {
             0 | 1 if !tasks.is_empty() => {
                 let task = tasks[rng.pick(tasks.len())].clone();
@@ -219,6 +229,34 @@ pub async fn intruder(world: &World, epoch: u64) {
                     },
                 };
                 forge(world, EVE, key(EVE), Op::Tasks(op)).await;
+            }
+            9 => {
+                let cursor = Key::Cursor { actor: watching::TALLY.to_owned(), scope: None };
+                let from = fold.position(&cursor);
+                let to = raw(world).await.0.last().map_or(0, |(seq, _)| *seq);
+                if to > from {
+                    let step = Step::Consume { key: cursor, lease: None, from, to, effects: Vec::new() };
+                    forge(world, EVE, key(EVE), Op::Watch(step)).await;
+                }
+            }
+            10 if !tasks.is_empty() => {
+                let send = Op::Reply { task: tasks[rng.pick(tasks.len())].clone(), body: "forged".to_owned() };
+                let step = Step::Schedule {
+                    id: format!("forged.e{epoch}.{round}"),
+                    by: EVE.to_owned(),
+                    send: Box::new(send),
+                    first_ms: 0,
+                    every_ms: None,
+                    until_ms: None,
+                    times: None,
+                };
+                forge(world, EVE, key(EVE), Op::Watch(step)).await;
+            }
+            11 => {
+                if let Some(id) = fold.marks().schedules().keys().next().cloned() {
+                    let step = Step::Unschedule { id, by: watching::CLOCK.to_owned() };
+                    forge(world, EVE, key(EVE), Op::Watch(step)).await;
+                }
             }
             _ => {}
         }
@@ -520,6 +558,29 @@ impl Gate {
                 .grants
                 .get(&grant.0)
                 .is_some_and(|stored| stored.can.keys().all(|pattern| self.reaches(by, pattern))),
+            Op::Watch(step) => self.allows_step(by, step, tasks),
+        }
+    }
+
+    fn allows_step(&self, by: &str, step: &Step, tasks: &BTreeMap<String, (Option<String>, Vec<String>, Expect)>) -> bool {
+        let acts = |named: &str| covers(named, by) || covers(by, named);
+        let see = |task: &TaskId| self.can(by, &task.0, Can::Read);
+        match step {
+            Step::Consume { key, effects, .. } => {
+                let (named, thread) = match key {
+                    Key::Cursor { actor, scope } => (actor, scope.as_ref()),
+                    Key::Watcher { watcher, thread } => (watcher, Some(thread)),
+                };
+                acts(named) && thread.is_none_or(see) && effects.iter().all(|op| self.allows(by, op, tasks))
+            }
+            Step::Watch { watcher, filter, .. } => acts(watcher) && filter.under.as_ref().is_none_or(see),
+            Step::Unwatch { watcher } => acts(watcher),
+            Step::Take { watcher, thread, .. } | Step::Fail { watcher, thread, .. } | Step::Bury { watcher, thread, .. } => {
+                acts(watcher) && see(thread)
+            }
+            Step::Schedule { by: made, send, .. } => made == by && self.allows(by, send, tasks),
+            Step::Fire { .. } => true,
+            Step::Unschedule { by: made, .. } => made == by,
         }
     }
 
