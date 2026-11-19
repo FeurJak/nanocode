@@ -113,10 +113,20 @@ const fn expected(tag: u64, at: usize) -> u8 {
 }
 
 fn positions(size: usize, upto: usize) -> impl Iterator<Item = usize> {
+    let end = upto.min(size);
     let whole = size <= PATTERN_WHOLE_BYTES_MAX;
-    (0..upto.min(size)).filter(move |at| {
-        whole || *at < PATTERN_HEAD_BYTES || at % PATTERN_STRIDE_BYTES == 0 || *at + 1 == size
-    })
+    let head = if whole {
+        end
+    } else {
+        end.min(PATTERN_HEAD_BYTES)
+    };
+    let strides = if whole { head } else { end };
+    let last = size.checked_sub(1).filter(|last| {
+        !whole && *last >= head && *last < end && !last.is_multiple_of(PATTERN_STRIDE_BYTES)
+    });
+    (0..head)
+        .chain((head.next_multiple_of(PATTERN_STRIDE_BYTES)..strides).step_by(PATTERN_STRIDE_BYTES))
+        .chain(last)
 }
 
 impl Block {
