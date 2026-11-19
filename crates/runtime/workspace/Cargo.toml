@@ -1,0 +1,25 @@
+[package]
+name = "nanocode-workspace"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A workspace without a machine: the psh shell, embedder-supplied commands such as python3, and the shell and file host interfaces over an embedder's filesystem, on a worker that owns it"
+autotests = false
+autobenches = false
+
+[dependencies]
+nanocode-platform.workspace = true
+nanocode-process-contracts.workspace = true
+nanocode-shell.workspace = true
+nanocode-sync.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+test = false
+doctest = false
+bench = false

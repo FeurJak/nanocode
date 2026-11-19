@@ -46,6 +46,7 @@
 | `nanocode-subagents` | The task tree: spawning, waiting, messages, residency, completions, budgets, the journal |
 | `nanocode-code-mode` | `exec` and `wait`, cell orchestration and replay, the remote hand protocol |
 | `nanocode-code-mode-engine` | The QuickJS cell worker pool (native) and stepped execution (WASM) |
+| `nanocode-workspace` | A workspace without a machine: the psh shell and file host interfaces over an embedder's filesystem, owned by one worker |
 | `nanocode-durability` | Session drivers, the `SessionStore` catalog, `SharedStore`, `MemoryStore`, branches, the record cache |
 | `nanocode-tool-host` | The `Tools` builder, tool selection, admission, `FunctionTool`, description pins |
 | `nanocode-hands` | Per-call Code Mode targets (workspace, hosted, pool, native, mac), the `HandHost` contract, lazy start and idle release, sha-checked atomic copies |

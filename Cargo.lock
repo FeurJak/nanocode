@@ -1193,6 +1193,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocode-workspace"
+version = "0.7.0"
+dependencies = [
+ "nanocode-platform",
+ "nanocode-process-contracts",
+ "nanocode-shell",
+ "nanocode-sync",
+]
+
+[[package]]
 name = "nanocode-workspace-fs"
 version = "0.7.0"
 dependencies = [
