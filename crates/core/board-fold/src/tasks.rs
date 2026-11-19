@@ -3,8 +3,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Change, ClaimId, Event, Fold, NewTask, Op, Phase, Rejection, Task, TaskId,
+    Change, ClaimId, Event, Fold, NewTask, Op, Outcome, Phase, Rejection, Task, TaskId,
     access::{Actor, Can},
+    schedule::{Invalid, Recur, Retry},
     sim::{Mutation, mutated},
 };
 
@@ -30,12 +31,37 @@ pub struct Terms {
     pub assignee: Option<String>,
     #[serde(default, skip_serializing_if = "OnFail::is_cascade")]
     pub on_fail: OnFail,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recur: Option<Recur>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<Retry>,
 }
 
 impl Terms {
     pub fn is_default(&self) -> bool {
         *self == Self::default()
     }
+
+    pub fn check(&self) -> Result<(), Rejection> {
+        let checked = self
+            .recur
+            .as_ref()
+            .map_or(Ok(()), |recur| recur.check(self.due_at_ms))
+            .and(self.retry.as_ref().map_or(Ok(()), Retry::check));
+        checked.map_err(|invalid| Rejection::Tasks(Refusal::Schedule(invalid)))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Occurrence {
+    pub series: TaskId,
+    pub slot: u64,
+}
+
+pub fn occurrence(series: &TaskId, slot: u64) -> TaskId {
+    TaskId(format!("{series}@{slot}"))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +131,8 @@ pub enum Refusal {
     UnknownKey(String),
     Cycle(String),
     Duplicate,
+    NotDue(u64),
+    Schedule(Invalid),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +146,10 @@ pub enum Moved {
     Reopened,
     Assigned {
         to: Option<String>,
+    },
+    Retrying {
+        error: String,
+        due_at_ms: u64,
     },
 }
 
@@ -162,6 +194,24 @@ fn cyclic(at: usize, edges: &[Vec<usize>], marks: &mut [u8]) -> bool {
 }
 
 impl Task {
+    fn new(spec: &NewTask, series: TaskId) -> Self {
+        Self {
+            spec: spec.clone(),
+            phase: Phase::Open,
+            attempts: 0,
+            replies: Vec::new(),
+            assignee: spec.terms.assignee.clone(),
+            rank: None,
+            due_at_ms: spec.terms.due_at_ms,
+            occurrence: spec
+                .terms
+                .recur
+                .as_ref()
+                .and(spec.terms.due_at_ms)
+                .map(|slot| Occurrence { series, slot }),
+        }
+    }
+
     pub fn finished(&self) -> bool {
         match &self.phase {
             Phase::Failed { .. } => self.spec.terms.on_fail == OnFail::Cascade,
@@ -304,6 +354,7 @@ impl Fold {
             if self.tasks.contains_key(&member(name, &planned.key)) {
                 return Err(Rejection::Exists);
             }
+            planned.terms.check()?;
         }
         let mut edges = vec![Vec::new(); tasks.len()];
         for (index, planned) in tasks.iter().enumerate() {
@@ -339,7 +390,7 @@ impl Fold {
         }
     }
 
-    fn place(&mut self, seq: u64, event: &Event, task: &NewTask) {
+    pub(crate) fn place(&mut self, seq: u64, event: &Event, task: &NewTask, series: TaskId) {
         if let Some(parent) = &task.parent {
             self.children
                 .entry(parent.clone())
@@ -352,18 +403,76 @@ impl Fold {
                 .or_default()
                 .insert(task.id.clone());
         }
-        self.tasks.insert(
-            task.id.clone(),
-            Task {
-                spec: task.clone(),
-                phase: Phase::Open,
-                attempts: 0,
-                replies: Vec::new(),
-                assignee: task.terms.assignee.clone(),
-                rank: None,
-            },
-        );
+        self.tasks
+            .insert(task.id.clone(), Task::new(task, series));
         self.record(seq, event, &task.id, Change::Posted);
+    }
+
+    pub(crate) fn scheduled(
+        &self,
+        id: &TaskId,
+        now_ms: u64,
+        outcome: &Outcome,
+    ) -> Result<Option<u64>, Rejection> {
+        let refuse = |invalid| Rejection::Tasks(Refusal::Schedule(invalid));
+        let task = self.tasks.get(id).ok_or(Rejection::UnknownTask)?;
+        if let (Outcome::Failed(_), Some(retry)) = (outcome, &task.spec.terms.retry)
+            && task.attempts < retry.max_attempts
+        {
+            let delay = retry.delay(task.attempts.max(1)).ok_or(refuse(Invalid::Overflow))?;
+            let due_at_ms = now_ms.checked_add(delay).ok_or(refuse(Invalid::Overflow))?;
+            return Ok(Some(due_at_ms));
+        }
+        if let Some(recur) = &task.spec.terms.recur
+            && let Some(occurrence) = &task.occurrence
+        {
+            recur.next_after(occurrence.slot).map_err(refuse)?;
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn recur(&mut self, seq: u64, event: &Event, id: &TaskId) {
+        let Some(task) = self.tasks.get(id) else {
+            return;
+        };
+        let (Some(recur), Some(Occurrence { series, slot })) =
+            (&task.spec.terms.recur, &task.occurrence)
+        else {
+            return;
+        };
+        if !task.finished() {
+            return;
+        }
+        let after = if mutated(Mutation::RecurrenceSkipsOnRestart) {
+            (*slot).max(self.now_ms)
+        } else {
+            *slot
+        };
+        let Ok(next) = recur.next_after(after) else {
+            return;
+        };
+        let series = series.clone();
+        let (next, next_id) = if mutated(Mutation::DueFiresTwice) {
+            (*slot, TaskId(format!("{series}@{slot}.{seq}")))
+        } else {
+            (next, occurrence(&series, next))
+        };
+        if self.tasks.contains_key(&next_id) {
+            return;
+        }
+        let mut spec = task.spec.clone();
+        spec.id = next_id.clone();
+        spec.terms.due_at_ms = Some(next);
+        self.place(seq, event, &spec, series);
+        let doomed = spec
+            .parent
+            .iter()
+            .chain(&spec.needs)
+            .find(|above| self.dooms(above))
+            .cloned();
+        if let Some(above) = doomed {
+            self.cancel(seq, event, &next_id, format!("{above} did not finish"));
+        }
     }
 
     pub(crate) fn steer(&mut self, seq: u64, event: &Event, op: &TaskOp) {
@@ -373,7 +482,7 @@ impl Fold {
                 assert!(tasks.len() <= BATCH, "a checked batch fits one write");
                 let placed = resolve(name, tasks);
                 for task in &placed {
-                    self.place(seq, event, task);
+                    self.place(seq, event, task, task.id.clone());
                 }
                 for task in &placed {
                     let doomed = task

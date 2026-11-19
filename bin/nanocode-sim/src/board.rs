@@ -27,6 +27,8 @@ use crate::{
 mod access;
 #[path = "board_tasks.rs"]
 mod tasks;
+#[path = "board_due.rs"]
+mod due;
 
 pub(crate) use access::identity;
 
@@ -78,10 +80,14 @@ pub enum BoardMutation {
     AckSkipsFold,
     ResumeSkipsRows,
     SnapshotSkipsRows,
+    DueIgnored,
+    DueFiresTwice,
+    RecurrenceSkipsOnRestart,
+    AttemptsNotCounted,
 }
 
 impl BoardMutation {
-    const ALL: [Self; 43] = [
+    const ALL: [Self; 47] = [
         Self::None,
         Self::ClaimIgnoresLease,
         Self::ClaimIgnoresNeeds,
@@ -125,6 +131,10 @@ impl BoardMutation {
         Self::AckSkipsFold,
         Self::ResumeSkipsRows,
         Self::SnapshotSkipsRows,
+        Self::DueIgnored,
+        Self::DueFiresTwice,
+        Self::RecurrenceSkipsOnRestart,
+        Self::AttemptsNotCounted,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -176,6 +186,10 @@ impl BoardMutation {
             Self::AckSkipsFold => "ack_skips_fold",
             Self::ResumeSkipsRows => "resume_skips_rows",
             Self::SnapshotSkipsRows => "snapshot_skips_rows",
+            Self::DueIgnored => "due_ignored",
+            Self::DueFiresTwice => "due_fires_twice",
+            Self::RecurrenceSkipsOnRestart => "recurrence_skips_on_restart",
+            Self::AttemptsNotCounted => "attempts_not_counted",
         }
     }
 
@@ -230,6 +244,10 @@ impl BoardMutation {
             Self::AckSkipsFold => BoardRule::AckSkipsFold,
             Self::ResumeSkipsRows => BoardRule::ResumeSkipsRows,
             Self::SnapshotSkipsRows => BoardRule::SnapshotSkipsRows,
+            Self::DueIgnored => BoardRule::DueIgnored,
+            Self::DueFiresTwice => BoardRule::DueFiresTwice,
+            Self::RecurrenceSkipsOnRestart => BoardRule::RecurrenceSkipsOnRestart,
+            Self::AttemptsNotCounted => BoardRule::AttemptsNotCounted,
             Self::None | Self::CursorBeforeEffect | Self::EffectBeforeCursor => BoardRule::None,
         }
     }
@@ -262,6 +280,9 @@ pub struct BoardStats {
     pub lost: u64,
     pub blocks: u64,
     pub reopens: u64,
+    pub due_runs: u64,
+    pub due_retries: u64,
+    pub due_restarts: u64,
 }
 
 impl BoardStats {
@@ -291,6 +312,9 @@ impl BoardStats {
         self.lost += other.lost;
         self.blocks += other.blocks;
         self.reopens += other.reopens;
+        self.due_runs += other.due_runs;
+        self.due_retries += other.due_retries;
+        self.due_restarts += other.due_restarts;
     }
 }
 
@@ -1431,6 +1455,7 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
     let rows = nanocode_sync::block_on(world.host.inner.scan(SCOPE, 0, i64::MAX as u64)).unwrap_or_default();
     let indexed = indexes(&rows);
     let resumed = resumes(&rows);
+    let due = due::run(seed);
     board_sim::mutate(BoardRule::None);
     for wrong in [live, indexed, resumed].into_iter().filter_map(Result::err) {
         world.oracle.borrow_mut().wrong.push(wrong);
@@ -1440,7 +1465,13 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
         digest = fnv(digest, &seq.to_le_bytes());
         digest = fnv(digest, body.as_bytes());
     }
-    let verdict = wrong.map_or_else(|| check(&world, &rows), Err);
+    let verdict = wrong.map_or_else(|| check(&world, &rows), Err).and_then(|mut stats| {
+        let due = due?;
+        stats.due_runs = due.runs;
+        stats.due_retries = due.retries;
+        stats.due_restarts = due.restarts;
+        Ok(stats)
+    });
     let mut stats = verdict.as_ref().copied().unwrap_or_else(|_| world.oracle.borrow().stats);
     stats.seeds = 1;
     stats.stable = u64::from(world.shape.stable);

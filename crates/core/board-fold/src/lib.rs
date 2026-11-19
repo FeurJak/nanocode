@@ -5,11 +5,12 @@ use serde::{Deserialize, Serialize};
 
 pub mod access;
 pub mod mirror;
+pub mod schedule;
 pub mod sim;
 pub mod tasks;
 
 use sim::{Mutation, mutated};
-use tasks::{Moved, Refusal, TaskOp, Terms};
+use tasks::{Moved, Occurrence, Refusal, TaskOp, Terms};
 
 const FIRST: u64 = 1;
 
@@ -176,6 +177,10 @@ pub struct Task {
     pub replies: Vec<(String, String)>,
     pub assignee: Option<String>,
     pub rank: Option<u64>,
+    #[serde(default)]
+    pub due_at_ms: Option<u64>,
+    #[serde(default)]
+    pub occurrence: Option<Occurrence>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,6 +387,13 @@ impl Fold {
             Phase::Blocked { .. } => {}
             _ => return Err(Rejection::Terminal),
         }
+        if let Some(due_at_ms) = task.due_at_ms
+            && due_at_ms > now
+            && matches!(task.phase, Phase::Open)
+            && !mutated(Mutation::DueIgnored)
+        {
+            return Err(Rejection::Tasks(Refusal::NotDue(due_at_ms)));
+        }
         if mutated(Mutation::ClaimIgnoresNeeds) {
             return Ok(None);
         }
@@ -464,6 +476,15 @@ impl Fold {
         }
     }
 
+    pub fn next_due(&self) -> Option<u64> {
+        self.tasks
+            .values()
+            .filter(|task| task.phase == Phase::Open)
+            .filter_map(|task| task.due_at_ms)
+            .filter(|due_at_ms| *due_at_ms > self.now_ms)
+            .min()
+    }
+
     pub fn settled(&self) -> bool {
         self.tasks.values().all(Task::finished)
     }
@@ -488,6 +509,7 @@ impl Fold {
                 {
                     return Err(Rejection::UnknownParent(parent.clone()));
                 }
+                task.terms.check()?;
                 match task
                     .needs
                     .iter()
@@ -506,9 +528,18 @@ impl Fold {
                     Some(_) => Ok(()),
                 }
             }
-            Op::Renew { task, claim, .. }
-            | Op::Release { task, claim, .. }
-            | Op::Finish { task, claim, .. } => self.holder(task, claim).map(drop),
+            Op::Finish {
+                task,
+                claim,
+                outcome,
+            } => {
+                self.holder(task, claim)?;
+                self.scheduled(task, self.now_ms.max(at_ms), outcome)
+                    .map(drop)
+            }
+            Op::Renew { task, claim, .. } | Op::Release { task, claim, .. } => {
+                self.holder(task, claim).map(drop)
+            }
             Op::Cancel { task, .. } => match self.tasks.get(task) {
                 None => Err(Rejection::UnknownTask),
                 Some(task) if task.finished() => Err(Rejection::Terminal),
@@ -595,7 +626,7 @@ impl Fold {
         Ok(())
     }
 
-    fn record(&mut self, seq: u64, event: &Event, task: &TaskId, change: Change) {
+    pub(crate) fn record(&mut self, seq: u64, event: &Event, task: &TaskId, change: Change) {
         self.observe(seq, event, task, &change);
         if !mutated(Mutation::ReadyIndexStale) {
             self.reindex(task);
@@ -620,30 +651,7 @@ impl Fold {
         };
         let change = match &event.op {
             Op::Post { task } => {
-                if let Some(parent) = &task.parent {
-                    self.children
-                        .entry(parent.clone())
-                        .or_default()
-                        .insert(task.id.clone());
-                }
-                for need in &task.needs {
-                    self.dependents
-                        .entry(need.clone())
-                        .or_default()
-                        .insert(task.id.clone());
-                }
-                self.tasks.insert(
-                    task.id.clone(),
-                    Task {
-                        spec: task.clone(),
-                        phase: Phase::Open,
-                        attempts: 0,
-                        replies: Vec::new(),
-                        assignee: task.terms.assignee.clone(),
-                        rank: None,
-                    },
-                );
-                self.record(seq, event, &id, Change::Posted);
+                self.place(seq, event, task, task.id.clone());
                 let doomed = task
                     .parent
                     .iter()
@@ -667,7 +675,9 @@ impl Fold {
                     Phase::Claimed { claim, .. } => Some(claim.clone()),
                     _ => None,
                 };
-                task.attempts += 1;
+                if !mutated(Mutation::AttemptsNotCounted) {
+                    task.attempts += 1;
+                }
                 task.phase = Phase::Claimed {
                     claim: claim.clone(),
                     worker: event.by.clone(),
@@ -709,6 +719,24 @@ impl Fold {
                 }
             }
             Op::Finish { outcome, .. } => {
+                if let Ok(Some(due_at_ms)) = self.scheduled(&id, now, outcome)
+                    && let Outcome::Failed(error) = outcome
+                {
+                    if let Some(task) = self.tasks.get_mut(&id) {
+                        task.phase = Phase::Open;
+                        task.due_at_ms = Some(due_at_ms);
+                    }
+                    self.record(
+                        seq,
+                        event,
+                        &id,
+                        Change::Tasks(Moved::Retrying {
+                            error: error.clone(),
+                            due_at_ms,
+                        }),
+                    );
+                    return;
+                }
                 if let Some(task) = self.tasks.get_mut(&id) {
                     task.phase = match outcome {
                         Outcome::Done(result) => Phase::Done {
@@ -723,6 +751,7 @@ impl Fold {
                 if matches!(outcome, Outcome::Failed(_)) && self.cascades(&id) {
                     self.cascade(seq, event, &id);
                 }
+                self.recur(seq, event, &id);
                 return;
             }
             Op::Cancel { reason, .. } => {
@@ -793,7 +822,7 @@ impl Fold {
         self.record(seq, event, &id, change);
     }
 
-    fn cancel(&mut self, seq: u64, event: &Event, id: &TaskId, reason: String) {
+    pub(crate) fn cancel(&mut self, seq: u64, event: &Event, id: &TaskId, reason: String) {
         let Some(task) = self.tasks.get_mut(id) else {
             return;
         };
