@@ -28,6 +28,8 @@ mod access;
 #[path = "board_tasks.rs"]
 mod tasks;
 
+pub(crate) use access::identity;
+
 const SCOPE: &str = "board";
 const MS: u64 = 1_000_000;
 
@@ -407,16 +409,16 @@ impl Shape {
     }
 }
 
-struct FaultLog {
-    inner: MemoryLog,
-    rng: Slot<Rng>,
-    clock: Arc<Clock>,
-    before_ppm: u64,
-    after_ppm: u64,
-    read_ppm: u64,
-    latency_ms: u64,
-    faults: AtomicU64,
-    conflicts: AtomicU64,
+pub(crate) struct FaultLog {
+    pub(crate) inner: MemoryLog,
+    pub(crate) rng: Slot<Rng>,
+    pub(crate) clock: Arc<Clock>,
+    pub(crate) before_ppm: u64,
+    pub(crate) after_ppm: u64,
+    pub(crate) read_ppm: u64,
+    pub(crate) latency_ms: u64,
+    pub(crate) faults: AtomicU64,
+    pub(crate) conflicts: AtomicU64,
 }
 
 impl FaultLog {

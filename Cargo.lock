@@ -901,6 +901,7 @@ dependencies = [
  "nanocode",
  "nanocode-agent-core",
  "nanocode-board",
+ "nanocode-board-sync",
  "nanocode-bytes",
  "nanocode-code-mode",
  "nanocode-code-mode-engine",
