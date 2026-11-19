@@ -1,7 +1,7 @@
 use crate::{
     answers::{self, Answers},
     command::Commands,
-    fetch::{Fetch, Network, Stepping},
+    fetch::{Credentials, Fetch, Network, Stepping},
     file::{Capture, Source},
     fs::FileSystem,
     host::{Host, Vfs},
@@ -23,7 +23,16 @@ use std::{
 };
 
 fn with_host(bundled: &[UtilEntry]) -> Vec<UtilEntry> {
-    let mut all = bundled.to_vec();
+    let mut all: Vec<UtilEntry> = bundled
+        .iter()
+        .map(|entry| {
+            if entry.names == crate::net::GIT.names {
+                crate::net::GIT
+            } else {
+                *entry
+            }
+        })
+        .collect();
     all.extend_from_slice(psh_utils::HOST_FACTS);
     all.extend_from_slice(&crate::net::UTILITIES);
     all
@@ -169,6 +178,7 @@ pub struct Shell {
     spent: u64,
     cancelled: bool,
     network: Option<Network>,
+    credentials: Option<Rc<dyn Credentials>>,
 }
 
 impl Shell {
@@ -243,6 +253,7 @@ impl Shell {
             spent: 0,
             cancelled: false,
             network: None,
+            credentials: None,
         }
     }
 
@@ -250,7 +261,15 @@ impl Shell {
         self.network = Some(Network {
             fetch,
             limit: self.vfs.limits.file,
+            credentials: self.credentials.clone(),
         });
+    }
+
+    pub fn set_credentials(&mut self, credentials: Rc<dyn Credentials>) {
+        if let Some(network) = &mut self.network {
+            network.credentials = Some(credentials.clone());
+        }
+        self.credentials = Some(credentials);
     }
 
     pub fn start(&mut self, script: Script) {

@@ -39,10 +39,20 @@ pub trait Fetch {
     fn fetch(&self, request: Request) -> Pin<Box<dyn Future<Output = Result<Response, Failure>>>>;
 }
 
+pub struct Credential {
+    pub user: String,
+    pub secret: String,
+}
+
+pub trait Credentials {
+    fn credential(&self, url: &str) -> Pin<Box<dyn Future<Output = Option<Credential>>>>;
+}
+
 #[derive(Clone)]
 pub(crate) struct Network {
     pub(crate) fetch: Rc<dyn Fetch>,
     pub(crate) limit: u64,
+    pub(crate) credentials: Option<Rc<dyn Credentials>>,
 }
 
 thread_local! {

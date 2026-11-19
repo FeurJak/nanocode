@@ -4,7 +4,8 @@ use psh_engine::{
     host::{OpenOptions, error_text},
     util::{LocalBoxFuture, Mode, UtilCtx, UtilEntry},
 };
-use std::time::Duration;
+use psh_utils::git_remote;
+use std::{cell::RefCell, rc::Rc, time::Duration};
 
 pub(crate) const UTILITIES: [UtilEntry; 2] = [
     UtilEntry {
@@ -532,7 +533,7 @@ async fn curl(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
             .await;
         return 2;
     }
-    let Some(Network { fetch, limit }) = network else {
+    let Some(Network { fetch, limit, .. }) = network else {
         ctx.error(&format!("(7) {UNAVAILABLE}")).await;
         return 7;
     };
@@ -935,7 +936,7 @@ async fn wget(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
             .await;
         return 1;
     }
-    let Some(Network { fetch, limit }) = network else {
+    let Some(Network { fetch, limit, .. }) = network else {
         ctx.error(UNAVAILABLE).await;
         return 4;
     };
@@ -1177,4 +1178,116 @@ async fn wget(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
         }
     }
     last
+}
+
+pub(crate) const GIT: UtilEntry = UtilEntry {
+    names: &["git"],
+    mode: Mode::SandboxOnly,
+    destructive: false,
+    run: git_entry,
+};
+
+const GIT_REDIRECTS: u32 = 20;
+const HTTP_UNAUTHORIZED: u16 = 401;
+
+fn git_entry<'a>(ctx: &'a mut UtilCtx<'_>, argv: &'a [Vec<u8>]) -> LocalBoxFuture<'a, i32> {
+    Box::pin(git(ctx, argv))
+}
+
+async fn git(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
+    let remote = current().map(|network| GitHttp {
+        network,
+        authorization: Rc::new(RefCell::new(None)),
+    });
+    git_remote::run_with(
+        ctx,
+        argv,
+        remote
+            .as_ref()
+            .map(|remote| remote as &dyn git_remote::Remote),
+    )
+    .await
+}
+
+struct GitHttp {
+    network: Network,
+    authorization: Rc<RefCell<Option<String>>>,
+}
+
+fn failure_text(failure: Failure) -> String {
+    match failure {
+        Failure::Resolve => "Could not resolve host".to_owned(),
+        Failure::Connect => "Failed to connect".to_owned(),
+        Failure::Timeout => "Operation timed out".to_owned(),
+        Failure::Redirects => "Maximum redirects followed".to_owned(),
+        Failure::TooLarge => "the response is larger than this shell allows".to_owned(),
+        Failure::Secure(why) | Failure::Denied(why) | Failure::Other(why) => why,
+    }
+}
+
+impl git_remote::Remote for GitHttp {
+    fn call(
+        &self,
+        call: git_remote::Call,
+    ) -> LocalBoxFuture<'static, Result<git_remote::Answer, String>> {
+        let Network {
+            fetch,
+            limit,
+            credentials,
+        } = self.network.clone();
+        let remembered = self.authorization.clone();
+        Box::pin(async move {
+            let url = git_remote::clean(&call.url);
+            let Some(target) = parts(&url) else {
+                return Err("URL rejected: No host part in the URL".to_owned());
+            };
+            let mut headers = vec![(
+                "Host".to_owned(),
+                match (target.scheme.as_str(), target.port) {
+                    ("http", 80) | ("https", 443) => target.host.clone(),
+                    (_, port) => format!("{}:{port}", target.host),
+                },
+            )];
+            headers.extend(call.headers);
+            let body = Bytes::from(call.body);
+            let request = |authorization: Option<&str>| {
+                let mut headers = headers.clone();
+                if let Some(authorization) = authorization {
+                    headers.push(("Authorization".to_owned(), authorization.to_owned()));
+                }
+                Request {
+                    method: call.method.to_owned(),
+                    url: url.clone(),
+                    headers,
+                    body: body.clone(),
+                    follow: Some(GIT_REDIRECTS),
+                    timeout: None,
+                    limit,
+                }
+            };
+            let known = remembered.borrow().clone();
+            let mut response = fetch
+                .fetch(request(known.as_deref()))
+                .await
+                .map_err(failure_text)?;
+            if response.status == HTTP_UNAUTHORIZED
+                && known.is_none()
+                && let Some(credentials) = credentials
+                && let Some(credential) = credentials.credential(&url).await
+            {
+                let pair = format!("{}:{}", credential.user, credential.secret);
+                let authorization = format!("Basic {}", base64(pair.as_bytes()));
+                remembered.replace(Some(authorization.clone()));
+                response = fetch
+                    .fetch(request(Some(&authorization)))
+                    .await
+                    .map_err(failure_text)?;
+            }
+            Ok(git_remote::Answer {
+                status: response.status,
+                headers: response.headers,
+                body: Vec::from(response.body),
+            })
+        })
+    }
 }

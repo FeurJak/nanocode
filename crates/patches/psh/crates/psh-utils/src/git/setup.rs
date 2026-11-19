@@ -32,7 +32,7 @@ pub fn outside(
     }
 }
 
-fn init(
+pub fn init(
     fs: &Fs<'_>,
     cwd: &[u8],
     env: &dyn Fn(&[u8]) -> Option<Vec<u8>>,

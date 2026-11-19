@@ -817,7 +817,7 @@ impl<'a> Odb<'a> {
     }
 }
 
-fn apply_delta(base: &[u8], delta: &[u8]) -> io::Result<Vec<u8>> {
+pub fn apply_delta(base: &[u8], delta: &[u8]) -> io::Result<Vec<u8>> {
     let bad = || corrupt("a delta does not fit its base");
     let mut i = 0;
     let mut varint = || -> io::Result<usize> {

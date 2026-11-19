@@ -11,8 +11,8 @@ mod fsutil;
 mod hasher;
 mod math;
 mod modes;
-mod order;
 pub mod opts;
+mod order;
 pub mod search;
 mod sum_hash;
 mod textio;
@@ -64,6 +64,7 @@ mod uniq;
 
 mod find;
 mod git;
+pub use git::remote as git_remote;
 mod jq;
 
 mod codec;
