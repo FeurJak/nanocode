@@ -655,6 +655,113 @@ impl Fold {
     }
 }
 
+pub enum Step {
+    Append { seq: u64, body: String },
+    Done(Applied),
+}
+
+enum Attempt {
+    Fresh,
+    Appended {
+        seq: u64,
+        result: Result<(), StoreError>,
+    },
+}
+
+pub struct Pending {
+    event: Event,
+    body: String,
+    attempt: Attempt,
+}
+
+impl Fold {
+    pub fn submit(&self, event: Event) -> Result<Pending, BoardError> {
+        let body = serde_json::to_string(&event).map_err(|error| BoardError::Corrupt {
+            seq: self.next,
+            detail: error.to_string(),
+        })?;
+        Ok(Pending {
+            event,
+            body,
+            attempt: Attempt::Fresh,
+        })
+    }
+}
+
+impl Pending {
+    pub const fn event(&self) -> &Event {
+        &self.event
+    }
+
+    pub fn read(
+        &mut self,
+        fold: &mut Fold,
+        rows: Result<Vec<(u64, String)>, StoreError>,
+    ) -> Result<Step, BoardError> {
+        let attempt = std::mem::replace(&mut self.attempt, Attempt::Fresh);
+        let rows = match (rows, &attempt) {
+            (Ok(rows), _) => rows,
+            (Err(error), Attempt::Appended { .. }) => {
+                return Err(BoardError::Unsettled {
+                    event: self.event.id.clone(),
+                    error,
+                });
+            }
+            (Err(error), _) => return Err(BoardError::Store(error)),
+        };
+        for (seq, body) in rows {
+            fold.apply(seq, &body)?;
+        }
+        if let Some(verdict) = fold.outcome(&self.event.id) {
+            return verdict
+                .clone()
+                .map(|seq| {
+                    Step::Done(Applied {
+                        seq,
+                        event: self.event.id.clone(),
+                    })
+                })
+                .map_err(BoardError::Rejected);
+        }
+        if let Attempt::Appended { seq, result } = attempt {
+            match result {
+                Ok(()) => {
+                    return Err(BoardError::Corrupt {
+                        seq,
+                        detail: format!(
+                            "the store acknowledged {} but holds another row",
+                            self.event.id
+                        ),
+                    });
+                }
+                Err(error) if fold.next <= seq => {
+                    return Err(BoardError::Unsettled {
+                        event: self.event.id.clone(),
+                        error,
+                    });
+                }
+                Err(_) => {}
+            }
+        }
+        fold.admit(&self.event.by, self.event.at_ms, &self.event.op)
+            .map_err(BoardError::Rejected)?;
+        Ok(Step::Append {
+            seq: fold.next,
+            body: self.body.clone(),
+        })
+    }
+
+    pub fn appended(&mut self, seq: u64, result: Result<(), StoreError>) -> Result<(), BoardError> {
+        if let Err(error) = &result
+            && mutated(Mutation::ErrorsLoseWrites)
+        {
+            return Err(BoardError::Store(error.clone()));
+        }
+        self.attempt = Attempt::Appended { seq, result };
+        Ok(())
+    }
+}
+
 pub struct Board {
     host: Arc<dyn LogHost>,
     scope: String,
@@ -726,75 +833,21 @@ impl Board {
     }
 
     async fn submit_as(&mut self, id: EventId, at_ms: u64, op: Op) -> Result<Applied, BoardError> {
-        let event = Event {
+        let mut pending = self.fold.submit(Event {
             id,
             by: self.writer.clone(),
             at_ms,
             op,
-        };
-        let body = serde_json::to_string(&event).map_err(|error| BoardError::Corrupt {
-            seq: self.fold.next,
-            detail: error.to_string(),
         })?;
         loop {
-            self.refresh().await?;
-            if let Some(verdict) = self.fold.outcome(&event.id) {
-                return self.settled(&event.id, verdict.clone());
-            }
-            self.fold
-                .admit(&event.by, at_ms, &event.op)
-                .map_err(BoardError::Rejected)?;
-            let seq = self.fold.next;
-            let appended = self.host.append(&self.scope, &[(seq, body.clone())]).await;
-            if let Err(error) = &appended
-                && mutated(Mutation::ErrorsLoseWrites)
-            {
-                return Err(BoardError::Store(error.clone()));
-            }
-            match self.refresh().await {
-                Ok(()) => {}
-                Err(BoardError::Store(error)) => {
-                    return Err(BoardError::Unsettled {
-                        event: event.id,
-                        error,
-                    });
+            let rows = self.host.scan(&self.scope, self.fold.next, END).await;
+            match pending.read(&mut self.fold, rows)? {
+                Step::Done(applied) => return Ok(applied),
+                Step::Append { seq, body } => {
+                    let appended = self.host.append(&self.scope, &[(seq, body)]).await;
+                    pending.appended(seq, appended)?;
                 }
-                Err(error) => return Err(error),
-            }
-            if let Some(verdict) = self.fold.outcome(&event.id) {
-                return self.settled(&event.id, verdict.clone());
-            }
-            match appended {
-                Ok(()) => {
-                    return Err(BoardError::Corrupt {
-                        seq,
-                        detail: format!(
-                            "the store acknowledged {} but holds another row",
-                            event.id
-                        ),
-                    });
-                }
-                Err(error) if self.fold.next <= seq => {
-                    return Err(BoardError::Unsettled {
-                        event: event.id,
-                        error,
-                    });
-                }
-                Err(_) => {}
             }
         }
-    }
-
-    fn settled(
-        &self,
-        event: &EventId,
-        verdict: Result<u64, Rejection>,
-    ) -> Result<Applied, BoardError> {
-        verdict
-            .map(|seq| Applied {
-                seq,
-                event: event.clone(),
-            })
-            .map_err(BoardError::Rejected)
     }
 }
