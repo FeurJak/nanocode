@@ -21,6 +21,7 @@
 | `nanocode-types` | Event channels, over `nanocode-types-core` |
 | `nanocode-agent-types` | Model, usage and error values |
 | `nanocode-cost-fold` | Cost attribution as a pure fold: tokens, dollars and Hand time per step, rolled up by agent, turn, board task and commit |
+| `nanocode-partitions` | Partitioned ownership without a leader: stable partition hashing, rendezvous assignment over live nodes, fenced per-partition lease rows and the claim/release plan |
 | `nanocode-hedge` | Hedged first-byte request policy and the primary-versus-hedge race |
 | `nanocode-agent-core` | Agent lifecycle, handles and session contracts |
 | `nanocode-durability-core` | `StateStore`, content-addressed payloads, the deterministic state machine, `SqlStore`, `RowStore`, `StagedStore`, `BlobStore` |

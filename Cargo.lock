@@ -750,6 +750,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocode-partitions"
+version = "0.7.0"
+
+[[package]]
 name = "nanocode-platform"
 version = "0.7.0"
 dependencies = [
