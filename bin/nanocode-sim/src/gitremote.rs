@@ -1,0 +1,1364 @@
+use std::{
+    cell::{Cell, RefCell},
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+    ops::Range,
+    pin::Pin,
+    process::ExitCode,
+    rc::Rc,
+    time::Duration,
+};
+
+use nanocode_bytes::Bytes;
+use nanocode_compression::inflate::{Inflate, InflateFlush, InflateStatus};
+use nanocode_compression::miniz::{Format, Level, compress};
+use nanocode_digest::Sha1;
+use nanocode_shell::{
+    Config, Credential, Credentials, Ended, Failure, Fetch, FileSystem, HostInfo, Identity, Kind,
+    Limits, Machine, MemFs, NoCommands, Request, Response, Script, Shell,
+};
+use nanocode_sync::block_on;
+
+use crate::rng::{FNV_OFFSET, Rng, fnv};
+
+const HOST: &str = "sim.test";
+const REPO: &str = "/team/app.git";
+const MAIN: &str = "refs/heads/main";
+const USER: &str = "agent";
+const WORK: &str = "/work/app";
+const SECRET_BYTES: usize = 24;
+const OID: usize = 20;
+const ZERO: [u8; OID] = [0; OID];
+const PPM_DELTA: u64 = 500_000;
+const PPM_REF_DELTA: u64 = 300_000;
+const PPM_USERINFO: u64 = 500_000;
+const PPM_QUIET: u64 = 300_000;
+const FILE_NAMES: [&str; 6] = [
+    "README.md",
+    "src/lib.rs",
+    "src/main.rs",
+    "docs/a.txt",
+    "b",
+    "src/deep/c.rs",
+];
+const OPS_MIN: u64 = 4;
+const OPS_MAX: u64 = 10;
+const SCRIPT_BUDGET: u32 = 1 << 20;
+const BLOB: u8 = 3;
+const TREE: u8 = 2;
+const COMMIT: u8 = 1;
+const OFS_DELTA: u8 = 6;
+const REF_DELTA: u8 = 7;
+const HTTP_OK: u16 = 200;
+const HTTP_UNAUTHORIZED: u16 = 401;
+const HTTP_NOT_FOUND: u16 = 404;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GitRemoteMutation {
+    None,
+    StoresSecret,
+    UpdatesRefOnBadPack,
+    ServerDropsObject,
+    ServerKeepsRef,
+    StaleTracking,
+}
+
+impl GitRemoteMutation {
+    const ALL: [Self; 6] = [
+        Self::None,
+        Self::StoresSecret,
+        Self::UpdatesRefOnBadPack,
+        Self::ServerDropsObject,
+        Self::ServerKeepsRef,
+        Self::StaleTracking,
+    ];
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|mutation| mutation.name() == name)
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::StoresSecret => "stores_secret",
+            Self::UpdatesRefOnBadPack => "updates_ref_on_bad_pack",
+            Self::ServerDropsObject => "server_drops_object",
+            Self::ServerKeepsRef => "server_keeps_ref",
+            Self::StaleTracking => "stale_tracking",
+        }
+    }
+
+    pub fn names() -> String {
+        Self::ALL[1..]
+            .iter()
+            .map(|mutation| mutation.name())
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GitRemoteStats {
+    pub clones: u64,
+    pub fetches: u64,
+    pub pulls: u64,
+    pub pushes: u64,
+    pub rejected_pushes: u64,
+    pub bad_packs: u64,
+    pub deltas: u64,
+    pub credential_asks: u64,
+}
+
+impl GitRemoteStats {
+    pub const fn add(&mut self, other: &Self) {
+        self.clones += other.clones;
+        self.fetches += other.fetches;
+        self.pulls += other.pulls;
+        self.pushes += other.pushes;
+        self.rejected_pushes += other.rejected_pushes;
+        self.bad_packs += other.bad_packs;
+        self.deltas += other.deltas;
+        self.credential_asks += other.credential_asks;
+    }
+}
+
+pub struct GitRemoteOutcome {
+    digest: u64,
+    wrong: Option<String>,
+    stats: GitRemoteStats,
+    shape: String,
+}
+
+type Oid = [u8; OID];
+
+fn hex(oid: &Oid) -> String {
+    oid.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn unhex(text: &[u8]) -> Option<Oid> {
+    let text = std::str::from_utf8(text.get(..2 * OID)?).ok()?;
+    let mut oid = ZERO;
+    for (i, slot) in oid.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&text[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(oid)
+}
+
+fn object_id(kind: u8, data: &[u8]) -> Oid {
+    let name = match kind {
+        COMMIT => "commit",
+        TREE => "tree",
+        _ => "blob",
+    };
+    let mut whole = format!("{name} {}\0", data.len()).into_bytes();
+    whole.extend_from_slice(data);
+    Sha1::digest(&whole)
+}
+
+fn pkt(out: &mut Vec<u8>, data: &[u8]) {
+    out.extend_from_slice(format!("{:04x}", data.len() + 4).as_bytes());
+    out.extend_from_slice(data);
+}
+
+type Commands<'a> = (Vec<Option<Vec<u8>>>, &'a [u8]);
+
+fn pkts(mut body: &[u8]) -> Option<Commands<'_>> {
+    let mut lines = Vec::new();
+    while body.len() >= 4 {
+        let len = usize::from_str_radix(std::str::from_utf8(&body[..4]).ok()?, 16).ok()?;
+        if len == 0 {
+            lines.push(None);
+            body = &body[4..];
+            if lines.iter().filter(|line| line.is_none()).count() == 1 {
+                return Some((lines, body));
+            }
+            continue;
+        }
+        let line = body.get(4..len)?;
+        lines.push(Some(line.to_vec()));
+        body = &body[len..];
+    }
+    Some((lines, body))
+}
+
+fn every_line(mut body: &[u8]) -> Vec<Vec<u8>> {
+    let mut lines = Vec::new();
+    while body.len() >= 4 {
+        let Some(len) = std::str::from_utf8(&body[..4])
+            .ok()
+            .and_then(|head| usize::from_str_radix(head, 16).ok())
+        else {
+            break;
+        };
+        if len < 4 {
+            body = &body[4..];
+            continue;
+        }
+        let Some(line) = body.get(4..len) else {
+            break;
+        };
+        lines.push(line.to_vec());
+        body = &body[len..];
+    }
+    lines
+}
+
+fn base64(data: &[u8]) -> String {
+    const SYMBOLS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let mut wide = [0u8; 3];
+        wide[..chunk.len()].copy_from_slice(chunk);
+        let bits = u32::from(wide[0]) << 16 | u32::from(wide[1]) << 8 | u32::from(wide[2]);
+        for index in 0..4 {
+            if index <= chunk.len() {
+                out.push(SYMBOLS[(bits >> (18 - 6 * index) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Corruption {
+    Truncate,
+    FlipChecksum,
+    FlipResealed,
+    DropWanted,
+}
+
+const CORRUPTIONS: [Corruption; 4] = [
+    Corruption::Truncate,
+    Corruption::FlipChecksum,
+    Corruption::FlipResealed,
+    Corruption::DropWanted,
+];
+
+struct Server {
+    objects: RefCell<BTreeMap<Oid, (u8, Vec<u8>)>>,
+    refs: RefCell<BTreeMap<String, Oid>>,
+    secret: String,
+    rng: RefCell<Rng>,
+    corrupt: Cell<Option<Corruption>>,
+    mutation: GitRemoteMutation,
+    leaks: RefCell<Vec<String>>,
+    deltas: Cell<u64>,
+    trace: RefCell<Vec<String>>,
+}
+
+fn respond(status: u16, kind: &str, body: Vec<u8>) -> Response {
+    Response {
+        protocol: "HTTP/1.1".to_owned(),
+        status,
+        reason: String::new(),
+        headers: if kind.is_empty() {
+            Vec::new()
+        } else {
+            vec![("Content-Type".to_owned(), kind.to_owned())]
+        },
+        body: Bytes::from(body),
+        url: String::new(),
+        redirects: 0,
+    }
+}
+
+fn varint_size(out: &mut Vec<u8>, mut size: usize) {
+    loop {
+        let byte = (size & 0x7f) as u8;
+        size >>= 7;
+        if size == 0 {
+            out.push(byte);
+            return;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+fn delta(base: &[u8], target: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    varint_size(&mut out, base.len());
+    varint_size(&mut out, target.len());
+    let common = base
+        .iter()
+        .zip(target)
+        .take_while(|(a, b)| a == b)
+        .count()
+        .min(0xffff);
+    if common > 0 {
+        out.push(0x80 | 0x10 | 0x20);
+        out.push((common & 0xff) as u8);
+        out.push((common >> 8) as u8);
+    }
+    for chunk in target[common..].chunks(0x7f) {
+        out.push(chunk.len() as u8);
+        out.extend_from_slice(chunk);
+    }
+    out
+}
+
+fn entry_header(out: &mut Vec<u8>, kind: u8, mut size: usize) {
+    let mut byte = (kind << 4) | (size & 0x0f) as u8;
+    size >>= 4;
+    while size > 0 {
+        out.push(byte | 0x80);
+        byte = (size & 0x7f) as u8;
+        size >>= 7;
+    }
+    out.push(byte);
+}
+
+fn ofs(out: &mut Vec<u8>, mut back: usize) {
+    let mut bytes = vec![(back & 0x7f) as u8];
+    back >>= 7;
+    while back > 0 {
+        back -= 1;
+        bytes.push(0x80 | (back & 0x7f) as u8);
+        back >>= 7;
+    }
+    bytes.reverse();
+    out.extend_from_slice(&bytes);
+}
+
+fn parse_commit(data: &[u8]) -> (Oid, Vec<Oid>) {
+    let mut tree = ZERO;
+    let mut parents = Vec::new();
+    for line in data.split(|&byte| byte == b'\n') {
+        if line.is_empty() {
+            break;
+        }
+        if let Some(rest) = line.strip_prefix(b"tree ") {
+            tree = unhex(rest).unwrap_or(ZERO);
+        } else if let Some(rest) = line.strip_prefix(b"parent ") {
+            parents.extend(unhex(rest));
+        }
+    }
+    (tree, parents)
+}
+
+fn parse_tree(mut data: &[u8]) -> Vec<(Vec<u8>, bool, Oid)> {
+    let mut entries = Vec::new();
+    while let Some(space) = data.iter().position(|&byte| byte == b' ') {
+        let mode = &data[..space];
+        let Some(nul) = data[space..].iter().position(|&byte| byte == 0) else {
+            break;
+        };
+        let name = data[space + 1..space + nul].to_vec();
+        let start = space + nul + 1;
+        let Some(raw) = data.get(start..start + OID) else {
+            break;
+        };
+        let mut oid = ZERO;
+        oid.copy_from_slice(raw);
+        entries.push((name, mode == b"40000", oid));
+        data = &data[start + OID..];
+    }
+    entries
+}
+
+impl Server {
+    fn reach(&self, tips: &[Oid], stop: &BTreeSet<Oid>) -> Result<Vec<Oid>, String> {
+        let objects = self.objects.borrow();
+        let mut seen = BTreeSet::new();
+        let mut order = Vec::new();
+        let mut stack: Vec<Oid> = tips.to_vec();
+        while let Some(oid) = stack.pop() {
+            if stop.contains(&oid) || !seen.insert(oid) {
+                continue;
+            }
+            let (kind, data) = objects
+                .get(&oid)
+                .ok_or_else(|| format!("server lacks object {}", hex(&oid)))?;
+            order.push(oid);
+            match *kind {
+                COMMIT => {
+                    let (tree, parents) = parse_commit(data);
+                    stack.push(tree);
+                    stack.extend(parents);
+                }
+                TREE => stack.extend(parse_tree(data).into_iter().map(|(_, _, oid)| oid)),
+                _ => {}
+            }
+        }
+        Ok(order)
+    }
+
+    fn advert(&self, service: &str) -> Vec<u8> {
+        let mut body = Vec::new();
+        pkt(&mut body, format!("# service={service}\n").as_bytes());
+        body.extend_from_slice(b"0000");
+        let refs = self.refs.borrow();
+        let caps = if service == "git-upload-pack" {
+            format!("multi_ack_detailed ofs-delta symref=HEAD:{MAIN} agent=git/sim")
+        } else {
+            "report-status delete-refs ofs-delta agent=git/sim".to_owned()
+        };
+        let mut lines: Vec<(String, Oid)> = Vec::new();
+        if service == "git-upload-pack"
+            && let Some(main) = refs.get(MAIN)
+        {
+            lines.push(("HEAD".to_owned(), *main));
+        }
+        lines.extend(refs.iter().map(|(name, oid)| (name.clone(), *oid)));
+        if lines.is_empty() {
+            pkt(
+                &mut body,
+                format!("{} capabilities^{{}}\0{caps}\n", hex(&ZERO)).as_bytes(),
+            );
+        }
+        for (i, (name, oid)) in lines.iter().enumerate() {
+            let line = if i == 0 {
+                format!("{} {name}\0{caps}\n", hex(oid))
+            } else {
+                format!("{} {name}\n", hex(oid))
+            };
+            pkt(&mut body, line.as_bytes());
+        }
+        body.extend_from_slice(b"0000");
+        body
+    }
+
+    fn pack(&self, oids: &[Oid]) -> Vec<u8> {
+        let objects = self.objects.borrow();
+        let mut rng = self.rng.borrow_mut();
+        let mut out = b"PACK".to_vec();
+        out.extend_from_slice(&2u32.to_be_bytes());
+        out.extend_from_slice(&(oids.len() as u32).to_be_bytes());
+        let mut placed: Vec<(Oid, usize)> = Vec::new();
+        for oid in oids {
+            let (kind, data) = &objects[oid];
+            let offset = out.len();
+            let base = placed
+                .iter()
+                .rev()
+                .find(|(other, _)| objects[other].0 == *kind)
+                .copied();
+            match base {
+                Some((base, at)) if rng.chance(PPM_DELTA) => {
+                    let body = delta(&objects[&base].1, data);
+                    if rng.chance(PPM_REF_DELTA) {
+                        entry_header(&mut out, REF_DELTA, body.len());
+                        out.extend_from_slice(&base);
+                    } else {
+                        entry_header(&mut out, OFS_DELTA, body.len());
+                        ofs(&mut out, offset - at);
+                    }
+                    out.extend_from_slice(&compress(&body, Level::DEFAULT, Format::Zlib));
+                    self.deltas.set(self.deltas.get() + 1);
+                }
+                _ => {
+                    entry_header(&mut out, *kind, data.len());
+                    out.extend_from_slice(&compress(data, Level::DEFAULT, Format::Zlib));
+                }
+            }
+            placed.push((*oid, offset));
+        }
+        let sum = Sha1::digest(&out);
+        out.extend_from_slice(&sum);
+        out
+    }
+
+    fn upload(&self, body: &[u8]) -> Response {
+        let mut wants = Vec::new();
+        let mut haves = Vec::new();
+        let lines = every_line(body);
+        for line in lines {
+            if let Some(oid) = line.strip_prefix(b"want ").and_then(unhex) {
+                wants.push(oid);
+            } else if let Some(oid) = line.strip_prefix(b"have ").and_then(unhex) {
+                haves.push(oid);
+            }
+        }
+        let common: Vec<Oid> = haves
+            .iter()
+            .filter(|oid| self.objects.borrow().contains_key(*oid))
+            .copied()
+            .collect();
+        let stop: BTreeSet<Oid> = match self.reach(&common, &BTreeSet::new()) {
+            Ok(old) => old.into_iter().collect(),
+            Err(_) => BTreeSet::new(),
+        };
+        let Ok(mut send) = self.reach(&wants, &stop) else {
+            return respond(500, "", Vec::new());
+        };
+        send.reverse();
+        let corruption = self.corrupt.take();
+        if corruption == Some(Corruption::DropWanted) {
+            send.retain(|oid| !wants.contains(oid));
+        }
+        let mut pack = self.pack(&send);
+        let mut rng = self.rng.borrow_mut();
+        match corruption {
+            Some(Corruption::Truncate) => {
+                let cut = 1 + rng.pick(pack.len() - 1);
+                pack.truncate(cut);
+            }
+            Some(Corruption::FlipChecksum) => {
+                let at = 12 + rng.pick(pack.len() - 12 - OID);
+                pack[at] ^= 0x40;
+            }
+            Some(Corruption::FlipResealed) => {
+                let end = pack.len() - OID;
+                let at = 12 + rng.pick(end - 12);
+                pack[at] ^= 0x01;
+                let sum = Sha1::digest(&pack[..end]);
+                pack[end..].copy_from_slice(&sum);
+            }
+            Some(Corruption::DropWanted) | None => {}
+        }
+        let mut out = Vec::new();
+        pkt(&mut out, b"NAK\n");
+        out.extend_from_slice(&pack);
+        respond(HTTP_OK, "application/x-git-upload-pack-result", out)
+    }
+
+    fn unpack(&self, pack: &[u8]) -> Result<Vec<(Oid, u8, Vec<u8>)>, String> {
+        if pack.len() < 12 + OID || &pack[..4] != b"PACK" {
+            return Err("not a pack".to_owned());
+        }
+        let end = pack.len() - OID;
+        if Sha1::digest(&pack[..end])[..] != pack[end..] {
+            return Err("pack checksum".to_owned());
+        }
+        let count = u32::from_be_bytes([pack[8], pack[9], pack[10], pack[11]]) as usize;
+        let mut at = 12;
+        let mut out = Vec::new();
+        for _ in 0..count {
+            let mut byte = pack[at];
+            at += 1;
+            let kind = (byte >> 4) & 7;
+            let mut size = usize::from(byte & 0x0f);
+            let mut shift = 4;
+            while byte & 0x80 != 0 {
+                byte = pack[at];
+                at += 1;
+                size |= usize::from(byte & 0x7f) << shift;
+                shift += 7;
+            }
+            if !matches!(kind, COMMIT | TREE | BLOB) {
+                return Err(format!("the client sent a type {kind} entry"));
+            }
+            let mut state = Inflate::new(15).map_err(|_| "inflate".to_owned())?;
+            let mut data = vec![0; size + 1];
+            match state.inflate(&pack[at..end], &mut data, InflateFlush::NoFlush) {
+                Ok(InflateStatus::StreamEnd) if state.total_out() as usize == size => {}
+                _ => return Err("an entry does not inflate to its size".to_owned()),
+            }
+            data.truncate(size);
+            at += state.total_in() as usize;
+            out.push((object_id(kind, &data), kind, data));
+        }
+        if at != end {
+            return Err("trailing bytes".to_owned());
+        }
+        Ok(out)
+    }
+
+    fn receive(&self, body: &[u8]) -> Response {
+        let Some((lines, pack)) = pkts(body) else {
+            return respond(400, "", Vec::new());
+        };
+        let mut commands = Vec::new();
+        for line in lines.into_iter().flatten() {
+            let line = match line.iter().position(|&byte| byte == 0) {
+                Some(nul) => line[..nul].to_vec(),
+                None => line,
+            };
+            let line = String::from_utf8_lossy(&line).trim_end().to_owned();
+            let mut parts = line.splitn(3, ' ');
+            let (Some(old), Some(new), Some(name)) = (parts.next(), parts.next(), parts.next())
+            else {
+                return respond(400, "", Vec::new());
+            };
+            let (Some(old), Some(new)) = (unhex(old.as_bytes()), unhex(new.as_bytes())) else {
+                return respond(400, "", Vec::new());
+            };
+            commands.push((old, new, name.to_owned()));
+        }
+        let mut out = Vec::new();
+        let unpacked = if pack.is_empty() {
+            Ok(Vec::new())
+        } else {
+            self.unpack(pack)
+        };
+        match unpacked {
+            Err(why) => {
+                pkt(&mut out, format!("unpack {why}\n").as_bytes());
+                for (_, _, name) in &commands {
+                    pkt(&mut out, format!("ng {name} unpacker error\n").as_bytes());
+                }
+            }
+            Ok(objects) => {
+                let drop_one = self.mutation == GitRemoteMutation::ServerDropsObject;
+                let mut dropped = false;
+                for (oid, kind, data) in objects {
+                    if drop_one && !dropped && kind == BLOB {
+                        dropped = true;
+                        continue;
+                    }
+                    self.objects.borrow_mut().insert(oid, (kind, data));
+                }
+                pkt(&mut out, b"unpack ok\n");
+                for (old, new, name) in &commands {
+                    let current = self.refs.borrow().get(name).copied().unwrap_or(ZERO);
+                    if current != *old {
+                        pkt(&mut out, format!("ng {name} stale info\n").as_bytes());
+                        continue;
+                    }
+                    if self.mutation != GitRemoteMutation::ServerKeepsRef {
+                        if *new == ZERO {
+                            self.refs.borrow_mut().remove(name);
+                        } else {
+                            self.refs.borrow_mut().insert(name.clone(), *new);
+                        }
+                    }
+                    pkt(&mut out, format!("ok {name}\n").as_bytes());
+                }
+            }
+        }
+        out.extend_from_slice(b"0000");
+        respond(HTTP_OK, "application/x-git-receive-pack-result", out)
+    }
+
+    fn handle(&self, request: &Request) -> Response {
+        let secret = self.secret.as_bytes();
+        let authorized = format!(
+            "Basic {}",
+            base64(format!("{USER}:{}", self.secret).as_bytes())
+        );
+        if request.url.contains(&self.secret) {
+            self.leaks.borrow_mut().push(format!("url {}", request.url));
+        }
+        let mut auth = None;
+        for (key, value) in &request.headers {
+            if key.eq_ignore_ascii_case("authorization") {
+                auth = Some(value.clone());
+            } else if value.as_bytes().windows(secret.len()).any(|w| w == secret) {
+                self.leaks.borrow_mut().push(format!("header {key}"));
+            }
+        }
+        if request.body.windows(secret.len()).any(|w| w == secret)
+            && !request.url.ends_with("git-receive-pack")
+        {
+            self.leaks.borrow_mut().push("body".to_owned());
+        }
+        let Some(rest) = request.url.strip_prefix(&format!("http://{HOST}{REPO}")) else {
+            return respond(HTTP_NOT_FOUND, "", Vec::new());
+        };
+        let receive = rest.contains("git-receive-pack");
+        self.trace
+            .borrow_mut()
+            .push(format!("{} {rest} auth={}", request.method, auth.is_some()));
+        if receive && auth.as_deref() != Some(authorized.as_str()) {
+            return respond(HTTP_UNAUTHORIZED, "", Vec::new());
+        }
+        match (request.method.as_str(), rest) {
+            ("GET", "/info/refs?service=git-upload-pack") => respond(
+                HTTP_OK,
+                "application/x-git-upload-pack-advertisement",
+                self.advert("git-upload-pack"),
+            ),
+            ("GET", "/info/refs?service=git-receive-pack") => respond(
+                HTTP_OK,
+                "application/x-git-receive-pack-advertisement",
+                self.advert("git-receive-pack"),
+            ),
+            ("POST", "/git-upload-pack") => self.upload(&request.body),
+            ("POST", "/git-receive-pack") => self.receive(&request.body),
+            _ => respond(HTTP_NOT_FOUND, "", Vec::new()),
+        }
+    }
+
+    fn put(&self, kind: u8, data: Vec<u8>) -> Oid {
+        let oid = object_id(kind, &data);
+        self.objects.borrow_mut().insert(oid, (kind, data));
+        oid
+    }
+
+    fn commit(
+        &self,
+        files: &BTreeMap<String, Vec<u8>>,
+        parent: Option<Oid>,
+        message: &str,
+        time: u64,
+    ) -> Oid {
+        let tree = self.tree(files, "");
+        let mut body = format!("tree {}\n", hex(&tree));
+        if let Some(parent) = parent {
+            body.push_str(&format!("parent {}\n", hex(&parent)));
+        }
+        body.push_str(&format!(
+            "author S <s@sim> {time} +0000\ncommitter S <s@sim> {time} +0000\n\n{message}\n"
+        ));
+        self.put(COMMIT, body.into_bytes())
+    }
+
+    fn tree(&self, files: &BTreeMap<String, Vec<u8>>, prefix: &str) -> Oid {
+        let mut entries: BTreeMap<String, (bool, Oid)> = BTreeMap::new();
+        for (path, data) in files {
+            let Some(rest) = path.strip_prefix(prefix) else {
+                continue;
+            };
+            match rest.split_once('/') {
+                Some((dir, _)) => {
+                    if !entries.contains_key(dir) {
+                        let sub = self.tree(files, &format!("{prefix}{dir}/"));
+                        entries.insert(dir.to_owned(), (true, sub));
+                    }
+                }
+                None => {
+                    let oid = self.put(BLOB, data.clone());
+                    entries.insert(rest.to_owned(), (false, oid));
+                }
+            }
+        }
+        let mut sorted: Vec<(Vec<u8>, bool, Oid)> = entries
+            .into_iter()
+            .map(|(name, (dir, oid))| {
+                let mut key = name.into_bytes();
+                if dir {
+                    key.push(b'/');
+                }
+                (key, dir, oid)
+            })
+            .collect();
+        sorted.sort();
+        let mut body = Vec::new();
+        for (mut name, dir, oid) in sorted {
+            if dir {
+                name.pop();
+                body.extend_from_slice(b"40000 ");
+            } else {
+                body.extend_from_slice(b"100644 ");
+            }
+            body.extend_from_slice(&name);
+            body.push(0);
+            body.extend_from_slice(&oid);
+        }
+        self.put(TREE, body)
+    }
+
+    fn files(&self, commit: &Oid) -> BTreeMap<String, Vec<u8>> {
+        let objects = self.objects.borrow();
+        let mut out = BTreeMap::new();
+        let Some((_, data)) = objects.get(commit) else {
+            return out;
+        };
+        let (tree, _) = parse_commit(data);
+        let mut stack = vec![(String::new(), tree)];
+        while let Some((prefix, tree)) = stack.pop() {
+            let Some((_, data)) = objects.get(&tree) else {
+                continue;
+            };
+            for (name, dir, oid) in parse_tree(data) {
+                let path = format!("{prefix}{}", String::from_utf8_lossy(&name));
+                if dir {
+                    stack.push((format!("{path}/"), oid));
+                } else if let Some((_, blob)) = objects.get(&oid) {
+                    out.insert(path, blob.clone());
+                }
+            }
+        }
+        out
+    }
+}
+
+struct Wire(Rc<Server>);
+
+impl Fetch for Wire {
+    fn fetch(&self, request: Request) -> Pin<Box<dyn Future<Output = Result<Response, Failure>>>> {
+        let mut response = self.0.handle(&request);
+        response.url = request.url;
+        Box::pin(std::future::ready(Ok(response)))
+    }
+}
+
+struct Keys {
+    secret: String,
+    asks: Cell<u64>,
+}
+
+impl Credentials for Keys {
+    fn credential(&self, url: &str) -> Pin<Box<dyn Future<Output = Option<Credential>>>> {
+        self.asks.set(self.asks.get() + 1);
+        let answer = (!url.contains('@')).then(|| Credential {
+            user: USER.to_owned(),
+            secret: self.secret.clone(),
+        });
+        Box::pin(std::future::ready(answer))
+    }
+}
+
+struct Clock {
+    now: Cell<u64>,
+}
+
+impl Machine for Clock {
+    fn now(&self) -> Duration {
+        let now = self.now.get() + 1;
+        self.now.set(now);
+        Duration::from_secs(1_700_000_000 + now)
+    }
+
+    fn sleep(&self, _duration: Duration) -> Pin<Box<dyn Future<Output = ()>>> {
+        Box::pin(std::future::ready(()))
+    }
+
+    fn random(&self, bytes: &mut [u8]) {
+        bytes.fill(0x5a);
+    }
+}
+
+fn now<T: 'static>(reply: nanocode_shell::Reply<T>) -> std::io::Result<T> {
+    block_on(reply.get())
+}
+
+fn snapshot(fs: &MemFs) -> BTreeMap<Vec<u8>, Vec<u8>> {
+    let mut out = BTreeMap::new();
+    let mut stack = vec![b"/".to_vec()];
+    while let Some(dir) = stack.pop() {
+        let Ok(names) = now(fs.list(&dir)) else {
+            continue;
+        };
+        for name in names {
+            let mut path = dir.clone();
+            if !path.ends_with(b"/") {
+                path.push(b'/');
+            }
+            path.extend_from_slice(&name);
+            match now(fs.stat(&path, false)).map(|stat| stat.kind) {
+                Ok(Kind::Dir) => {
+                    out.insert(path.clone(), Vec::new());
+                    stack.push(path);
+                }
+                Ok(Kind::File) => {
+                    out.insert(
+                        path.clone(),
+                        now(fs.read(&path, u64::MAX))
+                            .map(Vec::from)
+                            .unwrap_or_default(),
+                    );
+                }
+                Ok(Kind::Symlink) => {
+                    out.insert(path.clone(), now(fs.read_link(&path)).unwrap_or_default());
+                }
+                Err(_) => {}
+            }
+        }
+    }
+    out
+}
+
+struct World {
+    rng: Rng,
+    server: Rc<Server>,
+    fs: Rc<MemFs>,
+    shell: Shell,
+    keys: Rc<Keys>,
+    url: String,
+    trace: Vec<String>,
+    stats: GitRemoteStats,
+    files: BTreeMap<String, Vec<u8>>,
+    local_ahead: bool,
+    base: Oid,
+    message: String,
+    mutation: GitRemoteMutation,
+    commits: u64,
+}
+
+impl World {
+    fn run(&mut self, script: &str) -> Result<(i32, String), String> {
+        let ran = block_on(self.shell.run(
+            Script {
+                source: script.as_bytes().to_vec(),
+                name: b"sh".to_vec(),
+                args: Vec::new(),
+                options: Vec::new(),
+                stdin: None,
+            },
+            SCRIPT_BUDGET,
+        ));
+        let status = match ran.ended {
+            Ended::Exited(status) => status,
+            other => return Err(format!("{script}: ended {other:?}")),
+        };
+        let mut text = String::from_utf8_lossy(&ran.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&ran.stderr));
+        if text.contains(&self.server.secret) {
+            return Err(format!("{script}: the secret was printed"));
+        }
+        self.trace.push(format!("{script} -> {status}"));
+        Ok((status, text))
+    }
+
+    fn read_ref(&self, name: &str) -> Option<Oid> {
+        let path = format!("{WORK}/.git/{name}");
+        let data = self.fs.get(path.as_bytes()).ok()?;
+        unhex(&data)
+    }
+
+    fn server_main(&self) -> Option<Oid> {
+        self.server.refs.borrow().get(MAIN).copied()
+    }
+
+    fn check_tree(&self, commit: &Oid) -> Result<(), String> {
+        let want = self.server.files(commit);
+        for (path, data) in &want {
+            let got = self
+                .fs
+                .get(format!("{WORK}/{path}").as_bytes())
+                .map_err(|_| format!("work tree lacks {path}"))?;
+            if got[..] != data[..] {
+                return Err(format!("work tree's {path} differs from the commit"));
+            }
+        }
+        Ok(())
+    }
+
+    fn check_secret(&self) -> Result<(), String> {
+        let secret = self.server.secret.as_bytes();
+        for (path, data) in snapshot(&self.fs) {
+            if data.windows(secret.len()).any(|w| w == secret) {
+                return Err(format!(
+                    "the secret is stored in {}",
+                    String::from_utf8_lossy(&path)
+                ));
+            }
+        }
+        if let Some(leak) = self.server.leaks.borrow().first() {
+            return Err(format!(
+                "the secret left outside the Authorization header: {leak}"
+            ));
+        }
+        Ok(())
+    }
+
+    fn server_advance(&mut self) {
+        let name = FILE_NAMES[self.rng.pick(FILE_NAMES.len())];
+        let mut data = self.files.get(name).cloned().unwrap_or_default();
+        data.extend_from_slice(
+            format!("line {} {}\n", self.commits, self.rng.below(1000)).as_bytes(),
+        );
+        self.files.insert(name.to_owned(), data);
+        self.commits += 1;
+        let parent = self.server_main();
+        let oid = self.server.commit(
+            &self.files,
+            parent,
+            &format!("server {}", self.commits),
+            self.commits,
+        );
+        self.server.refs.borrow_mut().insert(MAIN.to_owned(), oid);
+        self.trace.push(format!("server main {}", hex(&oid)));
+    }
+
+    fn clone_repo(&mut self) -> Result<(), String> {
+        let quiet = if self.rng.chance(PPM_QUIET) {
+            " -q"
+        } else {
+            ""
+        };
+        let (status, text) = self.run(&format!("git clone{quiet} {} {WORK}", self.url))?;
+        if status != 0 {
+            return Err(format!("clone exited {status}: {text}"));
+        }
+        self.stats.clones += 1;
+        let main = self.server_main().ok_or("the server has no main")?;
+        if self.read_ref("refs/remotes/origin/main") != Some(main)
+            || self.read_ref(MAIN) != Some(main)
+        {
+            return Err("clone's refs differ from the server's".to_owned());
+        }
+        let config = self
+            .fs
+            .get(format!("{WORK}/.git/config").as_bytes())
+            .map_err(|e| e.to_string())?;
+        if config.contains(&b'@') {
+            return Err("clone wrote user info into .git/config".to_owned());
+        }
+        self.base = main;
+        if self.mutation == GitRemoteMutation::StoresSecret {
+            let mut data = config.to_vec();
+            data.extend_from_slice(
+                format!("[credential]\n\tpassword = {}\n", self.server.secret).as_bytes(),
+            );
+            self.fs
+                .insert(format!("{WORK}/.git/config").as_bytes(), Bytes::from(data))
+                .map_err(|e| e.to_string())?;
+        }
+        self.check_tree(&main)
+    }
+
+    fn fetch(&mut self) -> Result<(), String> {
+        let tracking = format!("{WORK}/.git/refs/remotes/origin/main");
+        let before = self
+            .fs
+            .get(tracking.as_bytes())
+            .map_err(|e| e.to_string())?;
+        let quiet = if self.rng.chance(PPM_QUIET) {
+            " -q"
+        } else {
+            ""
+        };
+        let (status, text) = self.run(&format!("cd {WORK} && git fetch{quiet}"))?;
+        if status != 0 {
+            return Err(format!("fetch exited {status}: {text}"));
+        }
+        self.stats.fetches += 1;
+        if self.mutation == GitRemoteMutation::StaleTracking {
+            self.fs
+                .insert(tracking.as_bytes(), before)
+                .map_err(|e| e.to_string())?;
+        }
+        if self.read_ref("refs/remotes/origin/main") != self.server_main() {
+            return Err("fetch left origin/main behind the server".to_owned());
+        }
+        Ok(())
+    }
+
+    fn diverged(&self) -> bool {
+        self.local_ahead && self.server_main() != Some(self.base)
+    }
+
+    fn pull(&mut self) -> Result<(), String> {
+        let before = self.read_ref(MAIN);
+        let diverged = self.diverged();
+        let (status, text) = self.run(&format!("cd {WORK} && git pull --ff-only"))?;
+        if diverged {
+            if status == 0 || self.read_ref(MAIN) != before {
+                return Err("pull --ff-only of a diverged history moved main".to_owned());
+            }
+            return Ok(());
+        }
+        if status != 0 {
+            return Err(format!("pull exited {status}: {text}"));
+        }
+        self.stats.pulls += 1;
+        let main = self.server_main().ok_or("no main")?;
+        if self.local_ahead {
+            if self.read_ref(MAIN) != before {
+                return Err("pull moved a main that was already ahead".to_owned());
+            }
+            return Ok(());
+        }
+        if self.read_ref(MAIN) != Some(main) {
+            return Err("pull did not move main to the server's".to_owned());
+        }
+        self.base = main;
+        self.check_tree(&main)
+    }
+
+    fn local_commit(&mut self) -> Result<(), String> {
+        let name = FILE_NAMES[self.rng.pick(FILE_NAMES.len())];
+        let line = format!("local {} {}", self.commits, self.rng.below(1000));
+        let dir = name
+            .rsplit_once('/')
+            .map(|(dir, _)| format!("mkdir -p {dir} && "))
+            .unwrap_or_default();
+        self.commits += 1;
+        self.message = format!("local {}", self.commits);
+        let (status, text) = self.run(&format!(
+            "cd {WORK} && {dir}echo '{line}' >> {name} && git add -A && git commit -qm '{}'",
+            self.message
+        ))?;
+        if status != 0 {
+            return Err(format!("commit exited {status}: {text}"));
+        }
+        self.local_ahead = true;
+        Ok(())
+    }
+
+    fn push(&mut self) -> Result<(), String> {
+        let before = self.server_main();
+        let local = self.read_ref(MAIN).ok_or("no local main")?;
+        let accepted = self.local_ahead && !self.diverged();
+        let current = before == Some(local);
+        let (status, text) = self.run(&format!("cd {WORK} && git push"))?;
+        if !accepted && !current {
+            if status == 0 || self.server_main() != before {
+                return Err("a non-fast-forward push changed the server".to_owned());
+            }
+            self.stats.rejected_pushes += 1;
+            return Ok(());
+        }
+        if status != 0 {
+            return Err(format!("push exited {status}: {text}"));
+        }
+        if current {
+            return Ok(());
+        }
+        self.stats.pushes += 1;
+        if self.server_main() != Some(local) {
+            return Err("the server's main is not the pushed commit".to_owned());
+        }
+        self.server.reach(&[local], &BTreeSet::new())?;
+        let readable = self
+            .server
+            .objects
+            .borrow()
+            .get(&local)
+            .is_some_and(|(kind, body)| {
+                *kind == COMMIT && String::from_utf8_lossy(body).contains(&self.message)
+            });
+        if !readable {
+            return Err("the server cannot read the pushed commit".to_owned());
+        }
+        if self.read_ref("refs/remotes/origin/main") != Some(local) {
+            return Err("push did not move origin/main".to_owned());
+        }
+        self.local_ahead = false;
+        self.base = local;
+        self.files = self.server.files(&local);
+        Ok(())
+    }
+
+    fn bad_fetch(&mut self) -> Result<(), String> {
+        self.server_advance();
+        let corruption = CORRUPTIONS[self.rng.pick(CORRUPTIONS.len())];
+        self.server.corrupt.set(Some(corruption));
+        let before = snapshot(&self.fs);
+        let (status, _) = self.run(&format!("cd {WORK} && git fetch"))?;
+        self.server.corrupt.set(None);
+        self.stats.bad_packs += 1;
+        if self.mutation == GitRemoteMutation::UpdatesRefOnBadPack
+            && let Some(main) = self.server_main()
+        {
+            self.fs
+                .insert(
+                    format!("{WORK}/.git/refs/remotes/origin/main").as_bytes(),
+                    Bytes::from(format!("{}\n", hex(&main))),
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        if status == 0 {
+            return Err(format!("a {corruption:?} pack was accepted"));
+        }
+        if snapshot(&self.fs) != before {
+            return Err(format!(
+                "a rejected {corruption:?} pack changed the filesystem"
+            ));
+        }
+        self.trace.push(format!("rejected {corruption:?}"));
+        Ok(())
+    }
+}
+
+fn simulate(seed: u64, mutation: GitRemoteMutation) -> GitRemoteOutcome {
+    let mut rng = Rng::derive(seed, "gitremote");
+    let secret: String = (0..SECRET_BYTES)
+        .map(|_| char::from(b'a' + rng.below(26) as u8))
+        .collect();
+    let server = Rc::new(Server {
+        objects: RefCell::new(BTreeMap::new()),
+        refs: RefCell::new(BTreeMap::new()),
+        secret: secret.clone(),
+        rng: RefCell::new(Rng::derive(seed, "gitremote-server")),
+        corrupt: Cell::new(None),
+        mutation,
+        leaks: RefCell::new(Vec::new()),
+        deltas: Cell::new(0),
+        trace: RefCell::new(Vec::new()),
+    });
+    let machine = Rc::new(Clock { now: Cell::new(0) });
+    let fs = Rc::new(MemFs::new(machine.clone()));
+    let _ = now(fs.mkdir(b"/work", 0o755));
+    let _ = now(fs.mkdir(b"/home", 0o755));
+    let keys = Rc::new(Keys {
+        secret: secret.clone(),
+        asks: Cell::new(0),
+    });
+    let config = Config {
+        fs: fs.clone(),
+        commands: Rc::new(NoCommands),
+        machine,
+        identity: Identity {
+            info: HostInfo::default(),
+            pid: 2,
+            user: USER.as_bytes().to_vec(),
+            group: USER.as_bytes().to_vec(),
+            home: b"/home".to_vec(),
+        },
+        limits: Limits {
+            fuel: u64::MAX / 4,
+            output: 1 << 20,
+            file: 1 << 26,
+            operations: u64::MAX / 4,
+            depth: 64,
+        },
+        env: [
+            ("HOME", "/home"),
+            ("GIT_AUTHOR_NAME", "Agent"),
+            ("GIT_AUTHOR_EMAIL", "agent@sim"),
+            ("GIT_COMMITTER_NAME", "Agent"),
+            ("GIT_COMMITTER_EMAIL", "agent@sim"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec()))
+        .collect(),
+        cwd: b"/work".to_vec(),
+        without: Vec::new(),
+        strict: false,
+    };
+    let mut shell = Shell::new(config);
+    shell.set_fetch(Rc::new(Wire(server.clone())));
+    shell.set_credentials(keys.clone());
+    let url = if rng.chance(PPM_USERINFO) {
+        format!("http://{USER}:{secret}@{HOST}{REPO}")
+    } else {
+        format!("http://{HOST}{REPO}")
+    };
+    let mut world = World {
+        rng,
+        server: server.clone(),
+        fs,
+        shell,
+        keys,
+        url,
+        trace: Vec::new(),
+        stats: GitRemoteStats::default(),
+        files: BTreeMap::new(),
+        local_ahead: false,
+        base: ZERO,
+        message: String::new(),
+        mutation,
+        commits: 0,
+    };
+    let initial = world.rng.range(1, 3);
+    for _ in 0..initial {
+        world.server_advance();
+    }
+    let ops = world.rng.range(OPS_MIN, OPS_MAX);
+    let mut plan: Vec<u64> = vec![3, 4];
+    plan.extend((0..ops).map(|_| world.rng.below(5)));
+    plan.push(5);
+    let mut shape = format!("ops={} initial={initial}", plan.len());
+    let mut wrong = world.clone_repo().err();
+    if wrong.is_none() {
+        for op in plan {
+            let step = match op {
+                0 => {
+                    world.server_advance();
+                    Ok(())
+                }
+                1 => world.fetch(),
+                2 => world.pull(),
+                3 => world.local_commit(),
+                4 => world.push(),
+                _ => world.bad_fetch(),
+            };
+            if let Err(why) = step.and_then(|()| world.check_secret()) {
+                wrong = Some(format!("op {op}: {why}"));
+                break;
+            }
+        }
+    } else if let Err(why) = world.check_secret() {
+        wrong = Some(why);
+    }
+    if wrong.is_none()
+        && let Err(why) = world.check_secret()
+    {
+        wrong = Some(why);
+    }
+    world.stats.deltas = server.deltas.get();
+    world.stats.credential_asks = world.keys.asks.get();
+    shape.push_str(&format!(
+        " pushes={} bad={}",
+        world.stats.pushes, world.stats.bad_packs
+    ));
+    let digest = world
+        .trace
+        .iter()
+        .chain(server.trace.borrow().iter())
+        .fold(FNV_OFFSET, |hash, event| fnv(hash, event.as_bytes()));
+    GitRemoteOutcome {
+        digest,
+        wrong,
+        stats: world.stats,
+        shape,
+    }
+}
+
+pub fn run_seed(seed: u64, mutation: GitRemoteMutation) -> GitRemoteOutcome {
+    std::panic::catch_unwind(|| simulate(seed, mutation)).unwrap_or_else(|panic| {
+        let message = panic
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| panic.downcast_ref::<&str>().map(|text| (*text).to_owned()))
+            .unwrap_or_default();
+        GitRemoteOutcome {
+            digest: 0,
+            wrong: Some(format!("panic: {message}")),
+            stats: GitRemoteStats::default(),
+            shape: String::new(),
+        }
+    })
+}
+
+pub fn judge(
+    seed: u64,
+    mutation: GitRemoteMutation,
+    twice: bool,
+    verbose: bool,
+    totals: &mut GitRemoteStats,
+) -> Option<String> {
+    let first = run_seed(seed, mutation);
+    totals.add(&first.stats);
+    if verbose {
+        println!(
+            "seed {seed} digest {:016x} {} stats={:?}",
+            first.digest, first.shape, first.stats
+        );
+    }
+    if first.wrong.is_some() || !twice {
+        return first
+            .wrong
+            .map(|message| format!("{} :: {message}", first.shape));
+    }
+    let second = run_seed(seed, mutation);
+    (second.digest != first.digest || second.wrong.is_some()).then(|| {
+        format!(
+            "{} :: nondeterminism: digest {:016x} then {:016x}",
+            first.shape, first.digest, second.digest
+        )
+    })
+}
+
+pub fn replay(seed: u64, mutation: GitRemoteMutation) -> String {
+    let mut command = format!("nanocode-sim --scenario git_remote --seed {seed}");
+    if mutation != GitRemoteMutation::None {
+        command.push_str(" --mutation ");
+        command.push_str(mutation.name());
+    }
+    command
+}
+
+pub fn report(
+    seeds: &Range<u64>,
+    passed: u64,
+    failed: u64,
+    twice: bool,
+    mutation: GitRemoteMutation,
+    totals: &GitRemoteStats,
+) -> ExitCode {
+    println!(
+        "RESULT seeds={}..{} scenario=git_remote mutation={} passed={passed} failed={failed} twice={twice} stats={totals:?}",
+        seeds.start,
+        seeds.end,
+        mutation.name()
+    );
+    match mutation {
+        GitRemoteMutation::None if failed == 0 => ExitCode::SUCCESS,
+        GitRemoteMutation::None => ExitCode::FAILURE,
+        _ if failed > 0 => {
+            println!("MUTATION {} caught by {failed} seeds", mutation.name());
+            ExitCode::SUCCESS
+        }
+        _ => {
+            println!("MUTATION {} NOT caught", mutation.name());
+            ExitCode::FAILURE
+        }
+    }
+}

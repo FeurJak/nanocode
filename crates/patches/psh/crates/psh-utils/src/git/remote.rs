@@ -344,6 +344,10 @@ async fn upload(
     Ok(reader.rest().to_vec())
 }
 
+fn incomplete() -> Error {
+    Error::Fatal("remote did not send all necessary objects".to_string())
+}
+
 fn received(pack: &[u8], wants: &[Oid]) -> Res<Indexed> {
     let indexed = pack::index(pack).map_err(|e| {
         Error::Fatal(format!(
@@ -352,9 +356,7 @@ fn received(pack: &[u8], wants: &[Oid]) -> Res<Indexed> {
         ))
     })?;
     if wants.iter().any(|want| indexed.kind(want).is_none()) {
-        return Err(Error::Fatal(
-            "remote did not send all necessary objects".to_string(),
-        ));
+        return Err(incomplete());
     }
     Ok(indexed)
 }
@@ -641,11 +643,14 @@ fn objects(repo: &Repo<'_>, tips: &[Oid], known: &[Oid], checks: &[(Oid, Oid)]) 
     let mut seen = HashSet::new();
     let mut stack: Vec<Oid> = tips.to_vec();
     while let Some(oid) = stack.pop() {
-        if excluded.contains(&oid) || !seen.insert(oid) {
+        if !seen.insert(oid) {
             continue;
         }
         if done.contains(&oid) {
             boundary.push(oid);
+            continue;
+        }
+        if excluded.contains(&oid) {
             continue;
         }
         let (kind, data) = repo.object(&oid)?;
@@ -896,6 +901,13 @@ async fn fetch(
         }
         let data = upload(remote, &target.url, &advert, &wants, &haves).await?;
         let indexed = received(&data, &wants)?;
+        let outside = indexed.outside(&wants);
+        if !outside.is_empty() {
+            let third = local(ctx, inv, outside).await?;
+            if third.present.iter().any(|present| !present) {
+                return Err(incomplete());
+            }
+        }
         plan.ops
             .extend(pack_ops(&join(&second.common, b"objects"), data, &indexed));
     }
@@ -1325,6 +1337,9 @@ async fn clone(ctx: &mut UtilCtx<'_>, remote: &dyn Remote, inv: &Invocation) -> 
     }
     let data = upload(remote, &url, &advert, &wants, &[]).await?;
     let indexed = received(&data, &wants)?;
+    if !indexed.outside(&wants).is_empty() {
+        return Err(incomplete());
+    }
     let mut checkout_ops = Vec::new();
     let mut index = None;
     if let Some((_, oid)) = &checkout {

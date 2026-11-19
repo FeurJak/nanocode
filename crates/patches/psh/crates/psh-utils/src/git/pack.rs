@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io;
 
+use super::repo::{parse_tree, tag_target};
 use super::store::{Kind, Oid, apply_delta, corrupt, object_oid};
 use crate::codec::{Format, Inflater, InputEnd, Progress, compress, crc32};
 use crate::sum_hash::{Algo, Digest};
@@ -24,6 +25,7 @@ const IDX_VERSION: u32 = 2;
 const FANOUT: usize = 256;
 const LARGE: u32 = 0x8000_0000;
 const GIT_DEFAULT_ZLIB_LEVEL: u8 = 6;
+const MODE_GITLINK: u32 = 0o160000;
 
 #[derive(Clone, Copy)]
 enum Base {
@@ -44,6 +46,7 @@ struct Entry {
 pub struct Indexed {
     entries: Vec<Entry>,
     found: Vec<(Oid, Kind)>,
+    links: Vec<Vec<Oid>>,
     by_oid: HashMap<Oid, usize>,
     pub checksum: Oid,
 }
@@ -77,6 +80,37 @@ fn inflate(inflater: &mut Inflater, input: &[u8], size: usize) -> io::Result<(Ve
     match inflater.inflate(input, InputEnd::Final, &mut out, size) {
         Ok(Progress::Done { consumed }) if out.len() == size => Ok((out, consumed)),
         _ => Err(corrupt("a pack entry does not inflate to its size")),
+    }
+}
+
+fn links(kind: Kind, data: &[u8]) -> io::Result<Vec<Oid>> {
+    let bad = || corrupt("a pack object names others in a malformed way");
+    match kind {
+        Kind::Blob => Ok(Vec::new()),
+        Kind::Tag => Ok(vec![tag_target(data).ok_or_else(bad)?]),
+        Kind::Tree => Ok(parse_tree(data)?
+            .into_iter()
+            .filter(|entry| entry.mode != MODE_GITLINK)
+            .map(|entry| entry.oid)
+            .collect()),
+        Kind::Commit => {
+            let mut out = Vec::new();
+            for line in data.split(|&b| b == b'\n') {
+                if line.is_empty() {
+                    break;
+                }
+                if let Some(hex) = line
+                    .strip_prefix(b"tree ")
+                    .or_else(|| line.strip_prefix(b"parent "))
+                {
+                    out.push(Oid::from_hex(hex).ok_or_else(bad)?);
+                }
+            }
+            if out.is_empty() {
+                return Err(bad());
+            }
+            Ok(out)
+        }
     }
 }
 
@@ -155,6 +189,7 @@ pub fn index(pack: &[u8]) -> io::Result<Indexed> {
     let mut inflater = Inflater::new(Format::Zlib);
     let mut entries: Vec<Entry> = Vec::new();
     let mut found: Vec<Option<(Oid, Kind)>> = Vec::new();
+    let mut named: Vec<Vec<Oid>> = Vec::new();
     let mut by_offset = HashMap::new();
     let mut at = HEAD;
     for _ in 0..count {
@@ -166,6 +201,10 @@ pub fn index(pack: &[u8]) -> io::Result<Indexed> {
         found.push(match item.base {
             Base::Whole(kind) => Some((object_oid(kind, &data), kind)),
             Base::Offset(_) | Base::Named(_) => None,
+        });
+        named.push(match item.base {
+            Base::Whole(kind) => links(kind, &data)?,
+            Base::Offset(_) | Base::Named(_) => Vec::new(),
         });
         at = item.end;
         entries.push(item);
@@ -209,6 +248,7 @@ pub fn index(pack: &[u8]) -> io::Result<Indexed> {
                 let whole = apply_delta(&data, &delta)?;
                 let oid = object_oid(kind, &whole);
                 found[child] = Some((oid, kind));
+                named[child] = links(kind, &whole)?;
                 stack.push((child, oid, whole));
             }
         }
@@ -224,12 +264,29 @@ pub fn index(pack: &[u8]) -> io::Result<Indexed> {
     Ok(Indexed {
         entries,
         found,
+        links: named,
         by_oid,
         checksum,
     })
 }
 
 impl Indexed {
+    pub fn outside(&self, tips: &[Oid]) -> Vec<Oid> {
+        let mut seen = std::collections::HashSet::new();
+        let mut outside = Vec::new();
+        let mut stack = tips.to_vec();
+        while let Some(oid) = stack.pop() {
+            if !seen.insert(oid) {
+                continue;
+            }
+            match self.by_oid.get(&oid) {
+                Some(&i) => stack.extend(self.links[i].iter().copied()),
+                None => outside.push(oid),
+            }
+        }
+        outside
+    }
+
     pub fn kind(&self, oid: &Oid) -> Option<Kind> {
         self.by_oid.get(oid).map(|&i| self.found[i].1)
     }
