@@ -1,6 +1,6 @@
 # TigerStyle
 
-How nanocode applies [TigerBeetle's TigerStyle](https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md), as tempoxyz/zempo does, so that bugs surface early, in a simulator, and performance follows from the design. AGENTS.md wins where the two differ. A change that departs from a rule says so in its DECISIONS.md entry, with why and what bounds it.
+How nanocode applies [TigerBeetle's TigerStyle](https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md), as tempoxyz/zempo does, so that bugs surface early, in a simulator, and performance follows from the design. AGENTS.md wins where the two differ. A change that departs from a rule says so in its commit message, with why and what bounds it.
 
 ## Safety
 
@@ -21,13 +21,13 @@ How nanocode applies [TigerBeetle's TigerStyle](https://github.com/tigerbeetle/t
 
 - Size buffers from known bounds up front and reuse them on hot paths; no allocation per token, per line or per record where a reused buffer does.
 - Copy-on-write state (`Atom`) is sized so an update copies what it must and no more; shard what grows with the number of sessions or agents.
-- Back every memory or allocation change with before and after measurements in DECISIONS.md.
+- Back every memory or allocation change with before and after measurements in the commit message.
 
 ## Control flow
 
 - Model each lifecycle as one enum whose variants carry only what that phase has (AGENTS.md).
 - Push `if`s up and `for`s down: decide once at the top, then run straight-line loops over the batch.
-- Handle every `Result`. Dropping one is a decision with a reason in DECISIONS.md.
+- Handle every `Result`. Dropping one is a decision with a reason in the commit message.
 - One owner per piece of state, changed through its mailbox or atomics (AGENTS.md); no hidden work in `Drop` beyond releasing what the value owns.
 - Keep functions short enough to read at once, around 70 lines; split a longer one when touching it.
 
@@ -45,9 +45,8 @@ The simulator replays a seed exactly only if the code under it is deterministic.
 
 - Prefer std, then a workspace crate (nanocode-sync, nanocode-zstd, nanocode-http, nanocode-platform), then a small crate without dependencies. No C build scripts in the SDK crates.
 - `default-features = false`, enabling only what is used.
-- A dependency is added or kept with its cost in its DECISIONS.md entry: the packages only it brings (`cargo tree`), its build time (`cargo build --timings`) and its share of the binary (`cargo bloat --crates`), and why std or an existing crate does not do.
+- A dependency is added or kept with its cost in its commit message: the packages only it brings (`cargo tree`), its build time (`cargo build --timings`) and its share of the binary (`cargo bloat --crates`), and why std or an existing crate does not do.
 - One version of each crate. A change that adds a duplicate to `cargo tree --duplicates` says why.
-- DEPENDENCIES.md ranks what to trim or replace next; take from it when touching those crates.
 
 ## Naming
 

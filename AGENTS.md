@@ -1,29 +1,32 @@
-# Development
+# nanocode
+
+A Rust agent SDK: one workspace of reusable crates that run the same agent natively and in WASM. Many agents work on it at once, so every rule here is about keeping master green while they do.
+
+## Code
 
 - Keep code simple and changes small. Match the surrounding code and preserve unrelated work.
-- No code comments, doc comments, README edits, tests, test-only dependencies or Cargo features (`local-cells` on `nanocode-code-mode` is the one exception).
-- `bin/nanocode-sim` is the deterministic simulator and the one exception to "no tests": checks live there and are run by hand by seed (`bin/nanocode-sim/sweep.sh`), and a new invariant there comes with a mutation the simulator catches, as tempoxyz/zempo requires.
+- No code comments, doc comments, tests, test-only dependencies or Cargo features (`local-cells` on `nanocode-code-mode` is the one exception).
+- `bin/nanocode-sim` is the deterministic simulator and the one exception to "no tests": checks live there and run by seed (`bin/nanocode-sim/sweep.sh`), and a new invariant comes with a mutation the simulator catches.
 - No magic constants or arbitrary caps: a limit comes from a protocol, a measurement or caller policy. Surface invalid states; never hide them with silent truncation, clamping or fallbacks.
 - Make invalid states unrepresentable: model a lifecycle as one enum whose variants carry only what that phase has.
 - Lock-free: no Mutex, RwLock or Condvar. Use nanocode-sync (an owning task, Actor or Mailbox; Atom changed copy-on-write with side effects after the commit; Slot, Signal, atomics). Blocking I/O runs on an owning worker behind channels, never on Tokio workers.
-- One workspace of reusable crates that each build for native and WASM with parity; bindings, apps, services and wasm-bindgen live elsewhere. Follow [the crate layout](crates/README.md): contracts in `core/`, backend-generic orchestration in `runtime/`, each provider's wire client, tools and driver in `backends/<provider>`, host adapters in `integrations/`; `nanocode` only re-exports.
+- Every crate builds for native and WASM with parity; bindings, apps, services and wasm-bindgen live elsewhere. Follow [the crate layout](crates/README.md): contracts in `core/`, backend-generic orchestration in `runtime/`, each provider's wire client, tools and driver in `backends/<provider>`, host adapters in `integrations/`; `nanocode` only re-exports.
 - Preserve public APIs. Use authentic, version-pinned upstream Claude and Codex prompts and tool shapes, keeping SDK additions separate, and share Code Mode and computer use across both backends.
 - Inference, subagents and durability live in the brain; Code Mode runs on the user's machine. Never silently replay dispatched work: report uncertain outcomes.
-- Validate with focused builds (`cargo check --locked --lib -p <crate>`, again with `--target wasm32-unknown-unknown`) and back performance changes with reproducible before/after measurements.
-- Check behavior with harnesses in ignored `output/`, such as `output/hand-wiring`: a crate with its own `[workspace]` and path dependencies on these crates, one binary per check or benchmark, run against local mocks, with builds compared by interleaved runs. Keep every artifact there; never commit them, credentials or personal data.
-- Work on master in the main checkout, commit only your own changes and push each one straight to master: no pull requests and no other branches (feature, wip or snapshot), including for unfinished work. Every agent working in parallel does the same: rebase on origin/master, run the checks, push; never force-push master. Nothing stays only on a machine: end each session with git status clean and nothing ahead of origin/master. There is no CI: build, release and deploy by hand. Use subagents only when asked.
-- Keep reference-build dependencies in the repository. Separate online acquisition from builds. Verify local references with OS network access denied.
-- Keep `SHIPPY_REMOTE_BUILD=0` for local checks. Preserve compiler wrappers. Record external toolchains and system libraries explicitly.
+- [TIGER_STYLE.md](TIGER_STYLE.md) is how we apply TigerStyle; this file wins where they differ.
+
+## Checks
+
+- Validate with focused builds (`cargo check --locked --lib -p <crate>`, again with `--target wasm32-unknown-unknown`) and the simulator sweep for what you touched. There is no CI: build, release and deploy by hand ([docs/RELEASE-CHAIN.md](docs/RELEASE-CHAIN.md)).
+- Back performance changes with reproducible before/after measurements, interleaved, and put them in the commit message.
+- Check behavior with harnesses in ignored `output/`, such as `output/hand-wiring`: a crate with its own `[workspace]` and path dependencies on these crates, one binary per check or benchmark, run against local mocks. Keep every artifact there; never commit them, credentials or personal data.
+- Keep reference-build dependencies in the repository (`vendor/cargo`), separate online acquisition from builds, and verify local references with network access denied: `scripts/reference-cargo.sh metadata`, `scripts/reference-cargo.sh check nanocode-bytes`. Keep `SHIPPY_REMOTE_BUILD=0` for local checks, preserve compiler wrappers, and record external toolchains and system libraries explicitly.
 - Use `cf --profile tempo` for Cloudflare operations, with `CLOUDFLARE_ACCOUNT_ID=0a39052b0a32ba8c8444345fe21b7595`. Use Wrangler only for a documented missing capability.
-- This file holds principles only and rarely changes. DECISIONS.md is the growing log: add what each change establishes and why, with the commands, dates and measurements behind it.
 
-## Local reference checks
+## Git and swarms
 
-The root reference checks use the five registry sources in `vendor/cargo`, with upstream notices retained. CLI archives require separately reviewed local inputs.
-
-```sh
-scripts/reference-cargo.sh metadata
-scripts/reference-cargo.sh check nanocode-bytes
-```
-
-The reference runner applies Cargo source replacement only to its own invocation; nested CLI, Swift and Python builds keep their existing configuration.
+- Master only. Commit only your own changes and push each one straight to master: no pull requests and no other branches (feature, wip or snapshot), including for unfinished work, which lands in small commits that keep the checks passing.
+- Many agents push at once. Take a write scope no other agent holds, rebase on origin/master before every push, rerun the checks your change touches, and never force-push or rewrite someone else's commit. On a conflict in another agent's change, keep theirs and redo yours on top.
+- Nothing lives only on a machine: end every session with `git status` clean and nothing ahead of origin/master.
+- The commit message is the record: `type(scope): summary`, then why, with the commands and measurements behind it. This repository is public: no internal links, people's private details or security findings in commits.
+- No decision logs, status, plan or results documents. Docs describe what exists now and how to use it; delete one when it stops being true. History is in git (the old decision log is `DECISIONS.md` at 6a15d78).
