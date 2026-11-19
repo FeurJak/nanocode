@@ -34,6 +34,7 @@ mod streams;
 mod sync;
 mod tasks;
 mod board;
+mod cost;
 mod boardagents;
 mod tidy;
 mod turnlog;
@@ -66,6 +67,7 @@ use crate::{
     sync::{SyncMutation, SyncStats},
     tasks::{TasksMutation, TasksStats},
     board::{BoardMutation, BoardStats},
+    cost::{CostMutation, CostStats},
     websocket::{WebSocketMutation, WebSocketStats},
     whole::{ChildMode, StoreKind, WholeOptions, WholeStats, WireKind},
     children::ChildMutation,
@@ -96,6 +98,7 @@ enum Scenario {
     Executor,
     Dns,
     Board,
+    Cost,
 }
 
 struct Args {
@@ -119,6 +122,7 @@ struct Args {
     long_thread: LongThreadMutation,
     tasks: TasksMutation,
     board: BoardMutation,
+    cost: CostMutation,
     #[cfg(unix)]
     alloc: alloc::AllocMutation,
     #[cfg(unix)]
@@ -133,7 +137,7 @@ type Caught = BTreeMap<Invariant, (u64, u64, (u64, u64))>;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|inbox_stress|capture|executor|dns|board] [--ops N] [--twice] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
+        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|inbox_stress|capture|executor|dns|board|cost] [--ops N] [--twice] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
        websocket: [--mutation {}]
        http_server: [--mutation {}]
        alloc: [--mutation overstate_size|forget_free|scribble]
@@ -147,7 +151,8 @@ fn usage() -> ExitCode {
        capture: [--mutation skip_trim|drop_chunk|skip_redact|redact_then_trim]
        executor: [--mutation {}]
        dns: [--mutation cut_answer|drop_search]
-       board: [--mutation {}]",
+       board: [--mutation {}]
+       cost: [--mutation {}]",
         Mutation::names(),
         TurnMutation::names(),
         onelog::PROTECTIONS.join("|"),
@@ -163,7 +168,8 @@ fn usage() -> ExitCode {
         CellCallsMutation::names(),
         LongThreadMutation::names(),
         TasksMutation::names(),
-        BoardMutation::names()
+        BoardMutation::names(),
+        CostMutation::names()
     );
     ExitCode::from(2)
 }
@@ -219,6 +225,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
     let mut long_thread = LongThreadMutation::None;
     let mut tasks = TasksMutation::None;
     let mut board = BoardMutation::None;
+    let mut cost = CostMutation::None;
     #[cfg(unix)]
     let mut capture = capture::CaptureMutation::None;
     #[cfg(target_os = "linux")]
@@ -280,6 +287,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
                     "inbox_stress" => Scenario::InboxStress,
                     "executor" => Scenario::Executor,
                     "board" => Scenario::Board,
+                    "cost" => Scenario::Cost,
                     #[cfg(unix)]
                     "capture" => Scenario::Capture,
                     #[cfg(target_os = "linux")]
@@ -325,6 +333,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         (Scenario::RequestClose, Some(_)) => return None,
         (Scenario::InboxStress, Some(_)) => return None,
         (Scenario::Board, Some(name)) => board = BoardMutation::parse(name)?,
+        (Scenario::Cost, Some(name)) => cost = CostMutation::parse(name)?,
         #[cfg(unix)]
         (Scenario::Capture, Some(name)) => capture = capture::CaptureMutation::parse(name)?,
         #[cfg(not(unix))]
@@ -370,6 +379,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         long_thread,
         tasks,
         board,
+        cost,
         #[cfg(unix)]
         alloc,
         #[cfg(unix)]
@@ -434,6 +444,9 @@ fn replay(seed: u64, args: &Args) -> String {
     }
     if args.scenario == Scenario::Board {
         return board::replay(seed, args.board);
+    }
+    if args.scenario == Scenario::Cost {
+        return cost::replay(seed, args.cost);
     }
     #[cfg(unix)]
     if args.scenario == Scenario::Capture {
@@ -766,6 +779,7 @@ fn mutations() -> ExitCode {
     add("long_thread", LongThreadMutation::names());
     add("executor", TasksMutation::names());
     add("board", BoardMutation::names());
+    add("cost", CostMutation::names());
     #[cfg(unix)]
     {
         add("alloc", alloc::AllocMutation::names());
@@ -834,6 +848,7 @@ fn main() -> ExitCode {
         || (args.scenario == Scenario::LongThread && args.long_thread != LongThreadMutation::None)
         || (args.scenario == Scenario::Executor && args.tasks != TasksMutation::None)
         || (args.scenario == Scenario::Board && args.board != BoardMutation::None)
+        || (args.scenario == Scenario::Cost && args.cost != CostMutation::None)
         || alloc_experiment(&args);
     let (mut passed, mut failed) = (0_u64, 0_u64);
     let mut totals = Stats::default();
@@ -852,6 +867,7 @@ fn main() -> ExitCode {
     let mut inbox_stress_totals = InboxStressStats::default();
     let mut tasks_totals = TasksStats::default();
     let mut board_totals = BoardStats::default();
+    let mut cost_totals = CostStats::default();
     #[cfg(unix)]
     let mut capture_totals = capture::CaptureStats::default();
     #[cfg(target_os = "linux")]
@@ -953,6 +969,13 @@ fn main() -> ExitCode {
                 args.twice,
                 args.options.verbose,
                 &mut board_totals,
+            ),
+            Scenario::Cost => cost::judge(
+                seed,
+                args.cost,
+                args.twice,
+                args.options.verbose,
+                &mut cost_totals,
             ),
             #[cfg(unix)]
             Scenario::Capture => capture::judge(
@@ -1061,6 +1084,9 @@ fn main() -> ExitCode {
     }
     if args.scenario == Scenario::Board {
         return board::report(&args.seeds, passed, failed, args.twice, args.board, &board_totals);
+    }
+    if args.scenario == Scenario::Cost {
+        return cost::report(&args.seeds, passed, failed, args.twice, args.cost, &cost_totals);
     }
     if args.scenario == Scenario::Executor {
         return tasks::report(&args.seeds, passed, failed, args.twice, args.tasks, &tasks_totals);

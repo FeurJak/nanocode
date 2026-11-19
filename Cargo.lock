@@ -893,6 +893,7 @@ dependencies = [
  "nanocode-code-mode",
  "nanocode-code-mode-engine",
  "nanocode-compression",
+ "nanocode-cost-fold",
  "nanocode-digest",
  "nanocode-durability",
  "nanocode-durability-core",

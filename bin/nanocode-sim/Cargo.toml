@@ -43,6 +43,7 @@ nanocode-sys.workspace = true
 nanocode-tls.workspace = true
 nanocode-turnlog.workspace = true
 nanocode-board.workspace = true
+nanocode-cost-fold.workspace = true
 nanocode-tool-runtime.workspace = true
 nanocode-websocket.workspace = true
 serde_json.workspace = true
