@@ -29,13 +29,34 @@ impl Board {
         identity: access::Identity,
     ) -> Result<Self, BoardError> {
         let rows = host.load(scope).await?;
+        Self::start(host, scope, identity, Fold::new(), rows)
+    }
+
+    pub async fn resume(
+        host: Arc<dyn LogHost>,
+        scope: &str,
+        identity: access::Identity,
+        fold: Fold,
+    ) -> Result<Self, BoardError> {
+        let from = fold.next() + u64::from(mutated(Mutation::ResumeSkipsRows));
+        let rows = host.scan(scope, from, END).await?;
+        Self::start(host, scope, identity, fold, rows)
+    }
+
+    fn start(
+        host: Arc<dyn LogHost>,
+        scope: &str,
+        identity: access::Identity,
+        fold: Fold,
+        rows: Vec<(u64, String)>,
+    ) -> Result<Self, BoardError> {
         let mut board = Self {
             host,
             scope: scope.to_owned(),
             writer: identity.actor().to_string(),
             identity,
             minted: 0,
-            fold: Fold::new(),
+            fold,
             contended: false,
         };
         board.fold_rows(rows)?;

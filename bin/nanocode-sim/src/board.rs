@@ -76,10 +76,11 @@ pub enum BoardMutation {
     ReadyIndexStale,
     LabelIndexStale,
     AckSkipsFold,
+    ResumeSkipsRows,
 }
 
 impl BoardMutation {
-    const ALL: [Self; 41] = [
+    const ALL: [Self; 42] = [
         Self::None,
         Self::ClaimIgnoresLease,
         Self::ClaimIgnoresNeeds,
@@ -121,6 +122,7 @@ impl BoardMutation {
         Self::ReadyIndexStale,
         Self::LabelIndexStale,
         Self::AckSkipsFold,
+        Self::ResumeSkipsRows,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -170,6 +172,7 @@ impl BoardMutation {
             Self::ReadyIndexStale => "ready_index_stale",
             Self::LabelIndexStale => "label_index_stale",
             Self::AckSkipsFold => "ack_skips_fold",
+            Self::ResumeSkipsRows => "resume_skips_rows",
         }
     }
 
@@ -222,6 +225,7 @@ impl BoardMutation {
             Self::ReadyIndexStale => BoardRule::ReadyIndexStale,
             Self::LabelIndexStale => BoardRule::LabelIndexStale,
             Self::AckSkipsFold => BoardRule::AckSkipsFold,
+            Self::ResumeSkipsRows => BoardRule::ResumeSkipsRows,
             Self::None | Self::CursorBeforeEffect | Self::EffectBeforeCursor => BoardRule::None,
         }
     }
@@ -1205,6 +1209,31 @@ fn indexes(rows: &[(u64, String)]) -> Result<(), String> {
     Ok(())
 }
 
+fn resumes(rows: &[(u64, String)]) -> Result<(), String> {
+    let fold = |rows: &[(u64, String)]| -> Result<nanocode_board::Fold, String> {
+        let mut fold = nanocode_board::Fold::new();
+        for (seq, body) in rows {
+            fold.apply(*seq, body).map_err(|error| format!("refold: {error}"))?;
+        }
+        Ok(fold)
+    };
+    let full = fold(rows)?;
+    let log = Arc::new(MemoryLog::new());
+    if !rows.is_empty() {
+        nanocode_sync::block_on(log.append(SCOPE, rows)).map_err(|error| format!("copy the log: {error}"))?;
+    }
+    for cut in [0, rows.len() / 3, rows.len() / 2, rows.len()] {
+        let held = fold(&rows[..cut])?;
+        let host: Arc<dyn LogHost> = Arc::clone(&log) as Arc<dyn LogHost>;
+        let board = nanocode_sync::block_on(Board::resume(host, SCOPE, access::identity("user:resumer"), held))
+            .map_err(|error| format!("resume from a fold of {cut} rows: {error}"))?;
+        if board.fold() != &full {
+            return Err(format!("a board resumed from a fold of {cut} rows differs from a full replay of {} rows", rows.len()));
+        }
+    }
+    Ok(())
+}
+
 fn check(world: &World, rows: &[(u64, String)]) -> Result<BoardStats, String> {
     let mut fold = nanocode_board::Fold::new();
     for (seq, body) in rows {
@@ -1392,8 +1421,9 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
     let live = access::live(&world);
     let rows = nanocode_sync::block_on(world.host.inner.scan(SCOPE, 0, i64::MAX as u64)).unwrap_or_default();
     let indexed = indexes(&rows);
+    let resumed = resumes(&rows);
     board_sim::mutate(BoardRule::None);
-    for wrong in [live, indexed].into_iter().filter_map(Result::err) {
+    for wrong in [live, indexed, resumed].into_iter().filter_map(Result::err) {
         world.oracle.borrow_mut().wrong.push(wrong);
     }
     let mut digest = fnv(FNV_OFFSET, described.as_bytes());
