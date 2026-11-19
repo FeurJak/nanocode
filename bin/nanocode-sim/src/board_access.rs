@@ -218,6 +218,46 @@ pub async fn intruder(world: &World, epoch: u64) {
     }
     relabel(world, epoch, span).await;
     rank(world, epoch, span).await;
+    reparent(world, epoch, span).await;
+}
+
+async fn reparent(world: &World, epoch: u64, span: u64) {
+    let mut rng = Rng::derive(world.shape.seed ^ epoch.rotate_left(32), "board moves");
+    for round in 0..rng.range(0, 4) {
+        world.nap(rng.range(0, span / 2)).await;
+        let (_, fold) = raw(world).await;
+        let tasks = fold.tasks().keys().cloned().collect::<Vec<_>>();
+        if tasks.is_empty() {
+            continue;
+        }
+        let task = tasks[rng.pick(tasks.len())].clone();
+        let under = |id: &TaskId| {
+            let mut at = Some(id);
+            while let Some(above) = at {
+                if *above == task {
+                    return true;
+                }
+                at = fold.task(above).and_then(|above| above.spec.parent.as_ref());
+            }
+            false
+        };
+        let below = tasks.iter().filter(|id| under(id)).cloned().collect::<Vec<_>>();
+        let parent = match rng.pick(4) {
+            0 => None,
+            1 => Some(below[rng.pick(below.len())].clone()),
+            2 => Some(TaskId(format!("{LOCKED}/nowhere"))),
+            _ => Some(tasks[rng.pick(tasks.len())].clone()),
+        };
+        let cyclic = parent.as_ref().is_some_and(under);
+        let by = [OWNER, OWNER, EVE, IVY, SOURCE][rng.pick(5)];
+        let id = format!("{by}#moves.e{epoch}.{round}");
+        forge(world, by, id.clone(), Op::Move { task: task.clone(), parent: parent.clone() }).await;
+        let (_, fold) = raw(world).await;
+        if cyclic && fold.outcome(&EventId(id)).is_some_and(Result::is_ok) {
+            // A cycle makes every later walk up the parent links spin, so stop the run here.
+            panic!("the board moved {task} under {parent:?}, which sits below it");
+        }
+    }
 }
 
 async fn rank(world: &World, epoch: u64, span: u64) {
@@ -437,6 +477,12 @@ impl Gate {
             Op::Reply { task, .. } => read(task) && self.can(by, &task.0, Can::Post),
             Op::Relabel { task, .. } => read(task) && (self.chain(by, task, tasks) || self.can(by, &task.0, Can::Label)),
             Op::Rank { task, .. } => read(task) && self.can(by, &task.0, Can::Rank),
+            Op::Move { task, parent } => {
+                read(task)
+                    && parent.iter().all(read)
+                    && self.can(by, &parent.as_ref().unwrap_or(task).0, Can::Post)
+                    && (self.chain(by, task, tasks) || self.can(by, &task.0, Can::Manage))
+            }
             Op::Sync { sync } => match sync.task() {
                 Some(task) => read(task) && self.can(by, &task.0, sync.needs()),
                 None => self.can(by, "*", Can::Sync),
@@ -516,6 +562,20 @@ pub fn audit(fold: &Fold, model: &Reference) -> Result<(), String> {
         let rank = model.ranks.get(&id.0).copied();
         if task.rank != rank {
             return Err(format!("{id}: the board ranks it {:?}, the reference model {rank:?}", task.rank));
+        }
+    }
+    for (id, task) in fold.tasks() {
+        let parent = model.tasks.get(&id.0).and_then(|(parent, _, _)| parent.as_deref());
+        if task.spec.parent.as_ref().map(|parent| parent.0.as_str()) != parent {
+            return Err(format!("{id}: the board's parent is {:?}, the reference model's {parent:?}", task.spec.parent));
+        }
+        if let Some(parent) = &task.spec.parent
+            && !fold.children(parent).any(|child| child == id)
+        {
+            return Err(format!("{id} is missing from the children of its parent {parent}"));
+        }
+        if let Some(child) = fold.children(id).find(|child| fold.task(child).is_none_or(|below| below.spec.parent.as_ref() != Some(id))) {
+            return Err(format!("{child} is listed under {id} but is not its child"));
         }
     }
     views(fold, &model.gate, &model.tasks)

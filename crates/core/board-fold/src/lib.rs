@@ -87,6 +87,10 @@ pub enum Op {
         set: BTreeMap<String, String>,
         unset: BTreeSet<String>,
     },
+    Move {
+        task: TaskId,
+        parent: Option<TaskId>,
+    },
     Rank {
         task: TaskId,
         rank: Option<u64>,
@@ -115,7 +119,8 @@ impl Op {
             | Self::Cancel { task, .. }
             | Self::Reply { task, .. }
             | Self::Relabel { task, .. }
-            | Self::Rank { task, .. } => Some(task),
+            | Self::Rank { task, .. }
+            | Self::Move { task, .. } => Some(task),
             Self::Tasks(op) => Some(op.task()),
             Self::Sync { sync } => sync.task(),
             Self::Grant { .. } | Self::Revoke { .. } | Self::Charter {} => None,
@@ -217,6 +222,10 @@ pub enum Change {
     Relabeled {
         set: BTreeMap<String, String>,
         unset: BTreeSet<String>,
+    },
+    Reparented {
+        from: Option<TaskId>,
+        to: Option<TaskId>,
     },
     Ranked {
         rank: Option<u64>,
@@ -437,10 +446,42 @@ impl Fold {
             Op::Reply { task, .. } | Op::Relabel { task, .. } | Op::Rank { task, .. } => {
                 self.tasks.get(task).map(drop).ok_or(Rejection::UnknownTask)
             }
+            Op::Move { task, parent } => self.movable(task, parent.as_ref()),
             Op::Grant { .. } | Op::Revoke { .. } | Op::Charter {} => Ok(()),
             Op::Tasks(op) => self.check_tasks(at_ms, op),
             Op::Sync { sync } => self.check_sync(sync),
         }
+    }
+
+    pub fn children(&self, task: &TaskId) -> impl Iterator<Item = &TaskId> {
+        self.children.get(task).into_iter().flatten()
+    }
+
+    fn movable(&self, task: &TaskId, parent: Option<&TaskId>) -> Result<(), Rejection> {
+        match self.tasks.get(task) {
+            None => return Err(Rejection::UnknownTask),
+            Some(moving) if moving.finished() => return Err(Rejection::Terminal),
+            Some(_) => {}
+        }
+        let Some(parent) = parent else {
+            return Ok(());
+        };
+        match self.tasks.get(parent) {
+            None => return Err(Rejection::UnknownParent(parent.clone())),
+            Some(above) if above.finished() => return Err(Rejection::Terminal),
+            Some(_) => {}
+        }
+        if mutated(Mutation::MoveAllowsCycle) {
+            return Ok(());
+        }
+        let mut at = Some(parent);
+        while let Some(id) = at {
+            if id == task {
+                return Err(Rejection::Tasks(Refusal::Cycle(task.0.clone())));
+            }
+            at = self.tasks.get(id).and_then(|above| above.spec.parent.as_ref());
+        }
+        Ok(())
     }
 
     pub fn apply(&mut self, seq: u64, body: &str) -> Result<(), BoardError> {
@@ -626,6 +667,29 @@ impl Fold {
                     task.rank = *rank;
                 }
                 Change::Ranked { rank: *rank }
+            }
+            Op::Move { parent, .. } => {
+                let Some(task) = self.tasks.get_mut(&id) else {
+                    return;
+                };
+                let from = std::mem::replace(&mut task.spec.parent, parent.clone());
+                if !mutated(Mutation::MoveKeepsChildren) {
+                    if let Some(old) = &from
+                        && let Some(below) = self.children.get_mut(old)
+                    {
+                        below.remove(&id);
+                        if below.is_empty() {
+                            self.children.remove(old);
+                        }
+                    }
+                    if let Some(new) = parent {
+                        self.children.entry(new.clone()).or_default().insert(id.clone());
+                    }
+                }
+                Change::Reparented {
+                    from,
+                    to: parent.clone(),
+                }
             }
             Op::Grant { .. } | Op::Revoke { .. } | Op::Charter {} => return,
             Op::Tasks(op) => {

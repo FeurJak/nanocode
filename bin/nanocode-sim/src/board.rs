@@ -68,10 +68,13 @@ pub enum BoardMutation {
     RelabelKeepsUnset,
     RankUnchecked,
     NextIgnoresRank,
+    MoveUnchecked,
+    MoveAllowsCycle,
+    MoveKeepsChildren,
 }
 
 impl BoardMutation {
-    const ALL: [Self; 35] = [
+    const ALL: [Self; 38] = [
         Self::None,
         Self::ClaimIgnoresLease,
         Self::ClaimIgnoresNeeds,
@@ -107,6 +110,9 @@ impl BoardMutation {
         Self::RelabelKeepsUnset,
         Self::RankUnchecked,
         Self::NextIgnoresRank,
+        Self::MoveUnchecked,
+        Self::MoveAllowsCycle,
+        Self::MoveKeepsChildren,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -150,6 +156,9 @@ impl BoardMutation {
             Self::RelabelKeepsUnset => "relabel_keeps_unset",
             Self::RankUnchecked => "rank_unchecked",
             Self::NextIgnoresRank => "next_ignores_rank",
+            Self::MoveUnchecked => "move_unchecked",
+            Self::MoveAllowsCycle => "move_allows_cycle",
+            Self::MoveKeepsChildren => "move_keeps_children",
         }
     }
 
@@ -196,6 +205,9 @@ impl BoardMutation {
             Self::RelabelKeepsUnset => BoardRule::RelabelKeepsUnset,
             Self::RankUnchecked => BoardRule::RankUnchecked,
             Self::NextIgnoresRank => BoardRule::NextIgnoresRank,
+            Self::MoveUnchecked => BoardRule::MoveUnchecked,
+            Self::MoveAllowsCycle => BoardRule::MoveAllowsCycle,
+            Self::MoveKeepsChildren => BoardRule::MoveKeepsChildren,
             Self::None | Self::CursorBeforeEffect | Self::EffectBeforeCursor => BoardRule::None,
         }
     }
@@ -976,6 +988,17 @@ impl Reference {
         }
     }
 
+    fn under(&self, id: &str, above: &str) -> bool {
+        let mut at = Some(id.to_owned());
+        while let Some(id) = at {
+            if id == above {
+                return true;
+            }
+            at = self.tasks.get(&id).and_then(|(parent, _, _)| parent.clone());
+        }
+        false
+    }
+
     fn holds(&self, task: &TaskId, claim: &ClaimId) -> bool {
         matches!(self.tasks.get(&task.0), Some((_, _, Expect::Claimed(held, _))) if *held == claim.0)
     }
@@ -1072,6 +1095,18 @@ impl Reference {
                     Some(rank) => self.ranks.insert(task.0, rank),
                     None => self.ranks.remove(&task.0),
                 };
+                true
+            }
+            Op::Move { task, parent } => {
+                if !self.tasks.contains_key(&task.0) || self.finished(&task.0) {
+                    return false;
+                }
+                if let Some(parent) = &parent
+                    && (!self.tasks.contains_key(&parent.0) || self.finished(&parent.0) || self.under(&parent.0, &task.0))
+                {
+                    return false;
+                }
+                self.tasks.get_mut(&task.0).expect("present").0 = parent.map(|parent| parent.0);
                 true
             }
             Op::Renew { .. } | Op::Release { .. } | Op::Finish { .. } | Op::Reply { .. } | Op::Relabel { .. } | Op::Rank { .. } | Op::Sync { .. } => false,

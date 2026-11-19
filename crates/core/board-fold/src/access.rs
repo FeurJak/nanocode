@@ -517,6 +517,23 @@ impl Fold {
                 }
                 access.need(&actor, &task.0, Can::Rank)
             }
+            Op::Move { task, parent } => {
+                access.see(&actor, task)?;
+                if let Some(parent) = parent
+                    && !access.reads(&actor, &parent.0)
+                {
+                    return Err(Rejection::UnknownParent(parent.clone()));
+                }
+                if mutated(Mutation::MoveUnchecked) {
+                    return Ok(());
+                }
+                access.need(&actor, &parent.as_ref().unwrap_or(task).0, Can::Post)?;
+                if access.may(&actor, &task.0, Can::Manage) || access.chain(self, &actor, task) {
+                    Ok(())
+                } else {
+                    Err(Rejection::Access(Denied::NotPoster))
+                }
+            }
             Op::Grant { grant } => {
                 if grant.who.is_empty() || grant.can.is_empty() {
                     return Err(Rejection::Access(Denied::Malformed(
