@@ -486,6 +486,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocode-cost-fold"
+version = "0.7.0"
+dependencies = [
+ "nanocode-agent-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nanocode-cua-driver"
 version = "0.7.0"
 dependencies = [

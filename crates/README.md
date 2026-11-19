@@ -20,6 +20,7 @@
 | `nanocode-types-core` | SDK values and event wire formats |
 | `nanocode-types` | Event channels, over `nanocode-types-core` |
 | `nanocode-agent-types` | Model, usage and error values |
+| `nanocode-cost-fold` | Cost attribution as a pure fold: tokens, dollars and Hand time per step, rolled up by agent, turn, board task and commit |
 | `nanocode-agent-core` | Agent lifecycle, handles and session contracts |
 | `nanocode-durability-core` | `StateStore`, content-addressed payloads, the deterministic state machine, `SqlStore`, `RowStore`, `StagedStore`, `BlobStore` |
 | `nanocode-tool-contracts`, `nanocode-tool-provider` | Tool invocation traits and dynamic tool providers |
