@@ -5,6 +5,7 @@ use nanocode_turnlog::LogHost;
 pub use nanocode_board_fold::*;
 
 pub mod access;
+pub mod cost;
 pub mod tasks;
 
 use sim::{Mutation, mutated};

@@ -337,7 +337,10 @@ name = "nanocode-board"
 version = "0.7.0"
 dependencies = [
  "nanocode-board-fold",
+ "nanocode-cost-fold",
+ "nanocode-durability-core",
  "nanocode-turnlog",
+ "serde_json",
 ]
 
 [[package]]

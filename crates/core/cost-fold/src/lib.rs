@@ -18,7 +18,7 @@ pub struct Tokens {
 
 impl Tokens {
     #[must_use]
-    pub fn of(usage: &TurnUsage) -> Self {
+    pub const fn of(usage: &TurnUsage) -> Self {
         Self {
             input: usage.input_tokens(),
             cache_read: usage.cached_input_tokens(),
@@ -36,7 +36,7 @@ impl Tokens {
             .saturating_add(self.output)
     }
 
-    fn add(&mut self, other: Self) {
+    const fn add(&mut self, other: Self) {
         self.input = self.input.saturating_add(other.input);
         self.cache_read = self.cache_read.saturating_add(other.cache_read);
         self.cache_write = self.cache_write.saturating_add(other.cache_write);
@@ -124,7 +124,7 @@ impl Cost {
         self.model_nano_usd.saturating_add(self.hand_nano_usd)
     }
 
-    pub fn add(&mut self, other: &Self) {
+    pub const fn add(&mut self, other: &Self) {
         self.steps = self.steps.saturating_add(other.steps);
         self.tokens.add(other.tokens);
         self.model_nano_usd = self.model_nano_usd.saturating_add(other.model_nano_usd);
@@ -252,117 +252,154 @@ impl Ledger {
     }
 
     pub fn apply(&mut self, event: CostEvent) -> Result<Applied, CostError> {
+        let applied = self.check(&event)?;
+        if applied == Applied::Recorded {
+            self.record(event);
+        }
+        Ok(applied)
+    }
+
+    pub fn check(&self, event: &CostEvent) -> Result<Applied, CostError> {
         match event {
             CostEvent::Agent {
                 agent,
                 parent,
                 task,
-            } => self.agent(agent, parent, task),
-            CostEvent::Step(step) => self.step(step),
-            CostEvent::Commit { sha, agent, turn } => self.commit(sha, agent, turn),
+            } => self.check_agent(agent, parent.as_deref(), task.as_deref()),
+            CostEvent::Step(step) => self.check_step(step),
+            CostEvent::Commit { sha, agent, turn } => self.check_commit(sha, agent, turn),
         }
     }
 
-    fn agent(
-        &mut self,
-        agent: String,
-        parent: Option<String>,
-        task: Option<String>,
+    fn check_agent(
+        &self,
+        agent: &str,
+        parent: Option<&str>,
+        task: Option<&str>,
     ) -> Result<Applied, CostError> {
-        if let Some(node) = self.agents.get(&agent) {
-            if node.parent == parent && node.task == task {
+        if let Some(node) = self.agents.get(agent) {
+            if node.parent.as_deref() == parent && node.task.as_deref() == task {
                 return Ok(Applied::Duplicate);
             }
-            return Err(CostError::AgentChanged { agent });
+            return Err(CostError::AgentChanged {
+                agent: agent.to_owned(),
+            });
         }
-        let parent_task = match &parent {
-            Some(parent) if self.agents.contains_key(parent) => {
-                self.task_of(parent).map(str::to_owned)
-            }
-            Some(parent) => {
-                return Err(CostError::UnknownAgent {
-                    agent: parent.clone(),
+        if let Some(parent) = parent
+            && !self.agents.contains_key(parent)
+        {
+            return Err(CostError::UnknownAgent {
+                agent: parent.to_owned(),
+            });
+        }
+        let Some((task, above)) = self.link(parent, task) else {
+            return Ok(Applied::Recorded);
+        };
+        if let Some(seen) = self.task_parents.get(task)
+            && seen != above
+        {
+            return Err(CostError::TaskMoved {
+                task: task.to_owned(),
+            });
+        }
+        let mut at = Some(above);
+        while let Some(ancestor) = at {
+            if ancestor == task {
+                return Err(CostError::TaskCycle {
+                    task: task.to_owned(),
                 });
             }
-            None => None,
-        };
-        let link = match (&task, parent_task) {
-            (Some(task), Some(above)) if *task != above => {
-                if let Some(seen) = self.task_parents.get(task) {
-                    if *seen != above {
-                        return Err(CostError::TaskMoved { task: task.clone() });
-                    }
-                }
-                let mut at = Some(above.as_str());
-                while let Some(ancestor) = at {
-                    if ancestor == task {
-                        return Err(CostError::TaskCycle { task: task.clone() });
-                    }
-                    at = self.task_parents.get(ancestor).map(String::as_str);
-                }
-                Some((task.clone(), above))
-            }
-            _ => None,
-        };
-        if let Some((task, above)) = link {
-            self.task_children
-                .entry(above.clone())
-                .or_default()
-                .insert(task.clone());
-            self.task_parents.insert(task, above);
+            at = self.task_parents.get(ancestor).map(String::as_str);
         }
-        if let Some(parent) = &parent {
-            if let Some(node) = self.agents.get_mut(parent) {
-                node.children.insert(agent.clone());
-            }
-        }
-        self.agents.insert(
-            agent,
-            Node {
-                parent,
-                task,
-                children: BTreeSet::new(),
-                own: Cost::default(),
-            },
-        );
         Ok(Applied::Recorded)
     }
 
-    fn step(&mut self, step: Step) -> Result<Applied, CostError> {
-        if !mutated(Mutation::RetriesCounted) {
-            if let Some(seen) = self.steps.get(&step.key) {
-                if seen == &step {
-                    return Ok(Applied::Duplicate);
-                }
-                return Err(CostError::StepChanged { key: step.key });
-            }
-        }
-        if !self.agents.contains_key(&step.agent) {
-            return Err(CostError::UnknownAgent { agent: step.agent });
-        }
-        let cost = Cost::of(&step);
-        let task = self.task_of(&step.agent).map(str::to_owned);
-        self.tasks.entry(task).or_default().add(&cost);
-        if let Some(node) = self.agents.get_mut(&step.agent) {
-            node.own.add(&cost);
-        }
-        self.turns.entry(step.turn.clone()).or_default().add(&cost);
-        self.steps.insert(step.key.clone(), step);
-        Ok(Applied::Recorded)
+    fn link<'a>(&'a self, parent: Option<&str>, task: Option<&'a str>) -> Option<(&'a str, &'a str)> {
+        let above = self.task_of(parent?)?;
+        let task = task?;
+        (task != above).then_some((task, above))
     }
 
-    fn commit(&mut self, sha: String, agent: String, turn: String) -> Result<Applied, CostError> {
-        if !self.agents.contains_key(&agent) {
-            return Err(CostError::UnknownAgent { agent });
-        }
-        if let Some(seen) = self.commits.get(&sha) {
-            if seen.0 == agent && seen.1 == turn {
+    fn check_step(&self, step: &Step) -> Result<Applied, CostError> {
+        if !mutated(Mutation::RetriesCounted)
+            && let Some(seen) = self.steps.get(&step.key)
+        {
+            if seen == step {
                 return Ok(Applied::Duplicate);
             }
-            return Err(CostError::CommitChanged { sha });
+            return Err(CostError::StepChanged {
+                key: step.key.clone(),
+            });
         }
-        self.commits.insert(sha, (agent, turn));
+        if !self.agents.contains_key(&step.agent) {
+            return Err(CostError::UnknownAgent {
+                agent: step.agent.clone(),
+            });
+        }
         Ok(Applied::Recorded)
+    }
+
+    fn check_commit(&self, sha: &str, agent: &str, turn: &str) -> Result<Applied, CostError> {
+        if !self.agents.contains_key(agent) {
+            return Err(CostError::UnknownAgent {
+                agent: agent.to_owned(),
+            });
+        }
+        if let Some((seen_agent, seen_turn)) = self.commits.get(sha) {
+            if seen_agent == agent && seen_turn == turn {
+                return Ok(Applied::Duplicate);
+            }
+            return Err(CostError::CommitChanged {
+                sha: sha.to_owned(),
+            });
+        }
+        Ok(Applied::Recorded)
+    }
+
+    fn record(&mut self, event: CostEvent) {
+        match event {
+            CostEvent::Agent {
+                agent,
+                parent,
+                task,
+            } => {
+                let link = self
+                    .link(parent.as_deref(), task.as_deref())
+                    .map(|(task, above)| (task.to_owned(), above.to_owned()));
+                if let Some((task, above)) = link {
+                    self.task_children
+                        .entry(above.clone())
+                        .or_default()
+                        .insert(task.clone());
+                    self.task_parents.insert(task, above);
+                }
+                if let Some(node) = parent.as_ref().and_then(|parent| self.agents.get_mut(parent)) {
+                    node.children.insert(agent.clone());
+                }
+                self.agents.insert(
+                    agent,
+                    Node {
+                        parent,
+                        task,
+                        children: BTreeSet::new(),
+                        own: Cost::default(),
+                    },
+                );
+            }
+            CostEvent::Step(step) => {
+                let cost = Cost::of(&step);
+                let task = self.task_of(&step.agent).map(str::to_owned);
+                self.tasks.entry(task).or_default().add(&cost);
+                if let Some(node) = self.agents.get_mut(&step.agent) {
+                    node.own.add(&cost);
+                }
+                self.turns.entry(step.turn.clone()).or_default().add(&cost);
+                self.steps.insert(step.key.clone(), step);
+            }
+            CostEvent::Commit { sha, agent, turn } => {
+                self.commits.insert(sha, (agent, turn));
+            }
+        }
     }
 
     pub fn agents(&self) -> impl Iterator<Item = &str> + '_ {
