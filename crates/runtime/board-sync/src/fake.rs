@@ -12,6 +12,15 @@ pub enum Fault {
     None,
     Refuse,
     Lose,
+    Limit(u64),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Early {
+    pub call: String,
+    pub to: Target,
+    pub at_ms: u64,
+    pub until_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,6 +48,11 @@ pub struct State {
     pub copies: Vec<Copy>,
     pub echoes: Vec<Echo>,
     pub calls: u64,
+    pub limited: u64,
+    pub early: Vec<Early>,
+    now_ms: u64,
+    until_ms: Option<u64>,
+    told: bool,
     minted: u64,
     faults: Option<Faults>,
     poisoned: BTreeSet<EventId>,
@@ -53,7 +67,19 @@ impl Fake {
     pub fn new(sync: &str) -> Self {
         Self {
             sync: sync.to_owned(),
-            state: Mutex::new(State { copies: Vec::new(), echoes: Vec::new(), calls: 0, minted: 0, faults: None, poisoned: BTreeSet::new() }),
+            state: Mutex::new(State {
+                copies: Vec::new(),
+                echoes: Vec::new(),
+                calls: 0,
+                limited: 0,
+                early: Vec::new(),
+                now_ms: 0,
+                until_ms: None,
+                told: false,
+                minted: 0,
+                faults: None,
+                poisoned: BTreeSet::new(),
+            }),
         }
     }
 
@@ -65,6 +91,14 @@ impl Fake {
 
     pub fn poison(&self, marker: EventId) {
         self.lock().poisoned.insert(marker);
+    }
+
+    pub fn at(&self, now_ms: u64) {
+        self.lock().now_ms = now_ms;
+    }
+
+    pub fn restart(&self) {
+        self.lock().told = false;
     }
 
     pub fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -79,25 +113,41 @@ impl Fake {
         std::mem::take(&mut self.lock().echoes)
     }
 
-    fn fault(state: &mut State, call: &str, to: &Target) -> Fault {
+    fn fault(state: &mut State, call: &str, to: &Target) -> Result<Fault, PlatformError> {
         state.calls += 1;
-        state.faults.as_mut().map_or(Fault::None, |faults| faults(call, to))
+        let now_ms = state.now_ms;
+        if let Some(until_ms) = state.until_ms.filter(|until_ms| now_ms < *until_ms) {
+            if state.told {
+                state.early.push(Early { call: call.to_owned(), to: to.clone(), at_ms: now_ms, until_ms });
+            }
+            state.told = true;
+            state.limited += 1;
+            return Err(PlatformError::RateLimited { retry_after_ms: until_ms - now_ms });
+        }
+        let fault = state.faults.as_mut().map_or(Fault::None, |faults| faults(call, to));
+        if let Fault::Limit(retry_after_ms) = fault {
+            state.until_ms = Some(now_ms + retry_after_ms);
+            state.told = true;
+            state.limited += 1;
+            return Err(PlatformError::RateLimited { retry_after_ms });
+        }
+        Ok(fault)
     }
 }
 
 fn refused(call: &str, to: &Target) -> PlatformError {
-    PlatformError(format!("{call} to {to} refused"))
+    PlatformError::Failed(format!("{call} to {to} refused"))
 }
 
 fn lost(call: &str, to: &Target) -> PlatformError {
-    PlatformError(format!("{call} to {to} timed out"))
+    PlatformError::Failed(format!("{call} to {to} timed out"))
 }
 
 impl Platform for Fake {
     fn post<'a>(&'a self, call: Call<'a>) -> PlatformFuture<'a, Result<Posted, PlatformError>> {
         Box::pin(async move {
             let mut state = self.lock();
-            let fault = Self::fault(&mut state, "post", call.to);
+            let fault = Self::fault(&mut state, "post", call.to)?;
             if fault == Fault::Refuse || state.poisoned.contains(call.marker) {
                 return Err(refused("post", call.to));
             }
@@ -130,12 +180,12 @@ impl Platform for Fake {
     fn edit<'a>(&'a self, call: Call<'a>, external: &'a str) -> PlatformFuture<'a, Result<(), PlatformError>> {
         Box::pin(async move {
             let mut state = self.lock();
-            let fault = Self::fault(&mut state, "edit", call.to);
+            let fault = Self::fault(&mut state, "edit", call.to)?;
             if fault == Fault::Refuse {
                 return Err(refused("edit", call.to));
             }
             let Some(copy) = state.copies.iter_mut().find(|copy| copy.external == external) else {
-                return Err(PlatformError(format!("no message {external}")));
+                return Err(PlatformError::Failed(format!("no message {external}")));
             };
             if !copy.deleted && copy.rendered != *call.rendered {
                 copy.rendered = call.rendered.clone();
@@ -153,7 +203,7 @@ impl Platform for Fake {
     fn delete<'a>(&'a self, to: &'a Target, external: &'a str) -> PlatformFuture<'a, Result<(), PlatformError>> {
         Box::pin(async move {
             let mut state = self.lock();
-            let fault = Self::fault(&mut state, "delete", to);
+            let fault = Self::fault(&mut state, "delete", to)?;
             if fault == Fault::Refuse {
                 return Err(refused("delete", to));
             }
@@ -173,7 +223,7 @@ impl Platform for Fake {
     fn find<'a>(&'a self, to: &'a Target, marker: &'a EventId) -> PlatformFuture<'a, Result<Option<Posted>, PlatformError>> {
         Box::pin(async move {
             let mut state = self.lock();
-            if Self::fault(&mut state, "find", to) == Fault::Refuse {
+            if Self::fault(&mut state, "find", to)? == Fault::Refuse {
                 return Err(refused("find", to));
             }
             let found = state

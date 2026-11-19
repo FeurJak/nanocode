@@ -4,7 +4,7 @@ use nanocode_board::EventId;
 use serde_json::{Value, json};
 
 use super::github::{Parts, keyed, marker, text};
-use super::{Author, Control, Event, Inbound, Target};
+use super::{Author, Control, Event, Inbound, PlatformError, Target, seconds, throttled};
 
 pub const SYNC: &str = "slack";
 
@@ -180,4 +180,11 @@ pub fn blocks(text: &str, controls: &[Control]) -> Value {
         }
     }
     Value::Array(blocks)
+}
+
+pub fn limited(status: u16, headers: &BTreeMap<String, String>, body: &Value) -> Option<PlatformError> {
+    if status != 429 && text(body, "/error") != Some("ratelimited") {
+        return None;
+    }
+    Some(throttled(headers.get("retry-after").and_then(|header| seconds(header))))
 }

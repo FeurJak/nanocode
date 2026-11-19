@@ -4,7 +4,7 @@ use nanocode_board::{NewTask, TaskId, mirror, tasks::Terms};
 use serde_json::Value;
 
 use super::github::{Parts, keyed, marker, millis, names, tagged, text};
-use super::{Author, Event, Inbound, Mode, Target};
+use super::{Author, Event, Inbound, Mode, PlatformError, Target, seconds, throttled};
 
 pub const SYNC: &str = "linear";
 
@@ -117,4 +117,24 @@ pub fn parse_with(config: &Config, delivery: &str, payload: &Value) -> Vec<Inbou
         _ => None,
     };
     keyed(delivery, parts.unwrap_or_default())
+}
+
+pub fn limited(headers: &BTreeMap<String, String>, body: &Value, now_ms: u64) -> Option<PlatformError> {
+    let errors = body.pointer("/errors").and_then(Value::as_array)?;
+    if !errors.iter().any(|error| text(error, "/extensions/code") == Some("RATELIMITED")) {
+        return None;
+    }
+    if let Some(header) = headers.get("retry-after") {
+        return Some(throttled(seconds(header)));
+    }
+    let mut retry_after_ms = None;
+    for name in ["x-ratelimit-requests-reset", "x-ratelimit-complexity-reset"] {
+        if let Some(header) = headers.get(name) {
+            let Ok(reset) = header.trim().parse::<u64>() else {
+                return Some(throttled(None));
+            };
+            retry_after_ms = retry_after_ms.max(Some(reset.saturating_sub(now_ms)));
+        }
+    }
+    Some(throttled(retry_after_ms))
 }

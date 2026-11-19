@@ -20,7 +20,21 @@ pub type PlatformFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type PlatformFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PlatformError(pub String);
+pub enum PlatformError {
+    Failed(String),
+    RateLimited { retry_after_ms: u64 },
+}
+
+pub(crate) fn seconds(header: &str) -> Option<u64> {
+    header.trim().parse::<u64>().ok().map(|seconds| seconds * 1000)
+}
+
+pub(crate) fn throttled(retry_after_ms: Option<u64>) -> PlatformError {
+    retry_after_ms.map_or_else(
+        || PlatformError::Failed("rate limited without a readable retry deadline".to_owned()),
+        |retry_after_ms| PlatformError::RateLimited { retry_after_ms },
+    )
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Posted {
@@ -107,6 +121,7 @@ pub struct Drained {
     pub failed: u64,
     pub dead: u64,
     pub unsettled: u64,
+    pub limited: u64,
 }
 
 pub struct Engine<R, M, I> {
@@ -116,6 +131,8 @@ pub struct Engine<R, M, I> {
     pub platforms: BTreeMap<String, Arc<dyn Platform>>,
     pub attempts: u64,
     errors: BTreeMap<(EventId, Target), String>,
+    limits: BTreeMap<String, u64>,
+    refunds: BTreeMap<String, SyncOp>,
 }
 
 const fn benign(rejection: &Rejection) -> bool {
@@ -129,7 +146,36 @@ const fn benign(rejection: &Rejection) -> bool {
 
 impl<R: Renderer, M: Router, I: IdentityMap> Engine<R, M, I> {
     pub const fn new(renderer: R, router: M, identity: I, platforms: BTreeMap<String, Arc<dyn Platform>>, attempts: u64) -> Self {
-        Self { renderer, router, identity, platforms, attempts, errors: BTreeMap::new() }
+        Self { renderer, router, identity, platforms, attempts, errors: BTreeMap::new(), limits: BTreeMap::new(), refunds: BTreeMap::new() }
+    }
+
+    pub fn not_before(&self, sync: &str) -> Option<u64> {
+        self.limits.get(sync).copied()
+    }
+
+    fn limit(&mut self, sync: &str, at_ms: u64, retry_after_ms: u64, drained: &mut Drained) {
+        drained.limited += 1;
+        let until = self.limits.entry(sync.to_owned()).or_default();
+        *until = (*until).max(at_ms + retry_after_ms);
+    }
+
+    fn held(&self, sync: &str, at_ms: u64) -> bool {
+        !mutated(Mutation::RetryAfterIgnored) && self.limits.get(sync).is_some_and(|until| at_ms < *until)
+    }
+
+    async fn refund(&mut self, board: &mut Board, key: String, at_ms: u64, op: SyncOp, drained: &mut Drained) -> Result<(), BoardError> {
+        match board.submit_keyed(&key, at_ms, Op::Sync { sync: op.clone() }).await {
+            Ok(_) | Err(BoardError::Rejected(_)) => Ok(()),
+            Err(BoardError::Unsettled { .. } | BoardError::Store(_)) => {
+                drained.unsettled += 1;
+                self.refunds.insert(key, op);
+                Ok(())
+            }
+            Err(error) => {
+                self.refunds.insert(key, op);
+                Err(error)
+            }
+        }
     }
 
     async fn write(board: &mut Board, key: &str, at_ms: u64, op: Op, done: &mut Ingested) -> Result<(), BoardError> {
@@ -256,10 +302,16 @@ impl<R: Renderer, M: Router, I: IdentityMap> Engine<R, M, I> {
     pub async fn drain(&mut self, board: &mut Board, at_ms: u64) -> Result<Drained, BoardError> {
         board.refresh().await?;
         let mut drained = Drained::default();
+        for (key, op) in std::mem::take(&mut self.refunds) {
+            self.refund(board, key, at_ms, op, &mut drained).await?;
+        }
         for delivery in board.fold().outbox() {
             let Some(platform) = self.platforms.get(&delivery.target.sync).cloned() else {
                 continue;
             };
+            if self.held(&delivery.target.sync, at_ms) {
+                continue;
+            }
             self.deliver(board, at_ms, &*platform, &delivery, &mut drained).await?;
         }
         Ok(drained)
@@ -278,7 +330,8 @@ impl<R: Renderer, M: Router, I: IdentityMap> Engine<R, M, I> {
     }
 
     async fn deliver(&mut self, board: &mut Board, at_ms: u64, platform: &dyn Platform, delivery: &Delivery, drained: &mut Drained) -> Result<(), BoardError> {
-        let Delivery { task, message, target, revision, attempts, .. } = delivery;
+        let Delivery { task, message, target, revision, attempts, throttled, .. } = delivery;
+        let counted = attempts - throttled;
         let lane = format!("{message}:{target}:{revision}");
         let slot = (message.clone(), target.clone());
         let synced = |external: String, thread: Option<String>| SyncOp::Synced {
@@ -291,7 +344,7 @@ impl<R: Renderer, M: Router, I: IdentityMap> Engine<R, M, I> {
         };
         let posting = matches!(delivery.action, Action::Post { .. });
         let sweep = matches!(delivery.action, Action::Sweep);
-        if sweep || (posting && *attempts > 0 && !mutated(Mutation::RetryGuardSkipped)) {
+        if sweep || (posting && counted > 0 && !mutated(Mutation::RetryGuardSkipped)) {
             match platform.find(&delivery.to, message).await {
                 Ok(Some(found)) => {
                     let adopted = SyncOp::Synced {
@@ -313,15 +366,19 @@ impl<R: Renderer, M: Router, I: IdentityMap> Engine<R, M, I> {
                     return Ok(());
                 }
                 Ok(None) => {}
-                Err(PlatformError(error)) => {
+                Err(PlatformError::RateLimited { retry_after_ms }) => {
+                    self.limit(&target.sync, at_ms, retry_after_ms, drained);
+                    return Ok(());
+                }
+                Err(PlatformError::Failed(error)) => {
                     self.errors.insert(slot, error);
                     drained.failed += 1;
                     return Ok(());
                 }
             }
         }
-        if posting && *attempts >= self.attempts {
-            let error = self.errors.remove(&slot).unwrap_or_else(|| format!("gave up after {attempts} attempts"));
+        if posting && counted >= self.attempts {
+            let error = self.errors.remove(&slot).unwrap_or_else(|| format!("gave up after {counted} attempts"));
             let dead = SyncOp::Undelivered { task: task.clone(), message: message.clone(), target: target.clone(), error };
             if Self::settle(board, format!("dead:{lane}"), at_ms, dead, drained).await? {
                 drained.dead += 1;
@@ -361,7 +418,14 @@ impl<R: Renderer, M: Router, I: IdentityMap> Engine<R, M, I> {
                     drained.deleted += 1;
                 }
             }
-            (Err(PlatformError(error)), _) => {
+            (Err(PlatformError::RateLimited { retry_after_ms }), _) => {
+                self.limit(&target.sync, at_ms, retry_after_ms, drained);
+                if !mutated(Mutation::RateLimitCountsAttempt) {
+                    let refund = SyncOp::Throttled { task: task.clone(), message: message.clone(), target: target.clone(), revision: *revision };
+                    self.refund(board, format!("wait:{lane}:{attempts}"), at_ms, refund, drained).await?;
+                }
+            }
+            (Err(PlatformError::Failed(error)), _) => {
                 self.errors.insert(slot, error);
                 drained.failed += 1;
             }

@@ -73,10 +73,12 @@ pub enum SyncMutation {
     RetryGuardSkipped,
     AttemptAfterCall,
     RootEditsIgnored,
+    RetryAfterIgnored,
+    RateLimitCountsAttempt,
 }
 
 impl SyncMutation {
-    const ALL: [Self; 21] = [
+    const ALL: [Self; 23] = [
         Self::None,
         Self::DeliverToOrigin,
         Self::ReceiptsIgnored,
@@ -98,6 +100,8 @@ impl SyncMutation {
         Self::RetryGuardSkipped,
         Self::AttemptAfterCall,
         Self::RootEditsIgnored,
+        Self::RetryAfterIgnored,
+        Self::RateLimitCountsAttempt,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -127,6 +131,8 @@ impl SyncMutation {
             Self::RetryGuardSkipped => "retry_guard_skipped",
             Self::AttemptAfterCall => "attempt_after_call",
             Self::RootEditsIgnored => "root_edits_ignored",
+            Self::RetryAfterIgnored => "retry_after_ignored",
+            Self::RateLimitCountsAttempt => "rate_limit_counts_attempt",
         }
     }
 
@@ -154,7 +160,7 @@ impl SyncMutation {
             Self::BotMarksRead => BoardRule::BotMarksRead,
             Self::ReadRegresses => BoardRule::ReadRegresses,
             Self::RootEditsIgnored => BoardRule::RootEditsIgnored,
-            Self::None | Self::RetryGuardSkipped | Self::AttemptAfterCall => BoardRule::None,
+            Self::None | Self::RetryGuardSkipped | Self::AttemptAfterCall | Self::RetryAfterIgnored | Self::RateLimitCountsAttempt => BoardRule::None,
         }
     }
 
@@ -162,6 +168,8 @@ impl SyncMutation {
         match self {
             Self::RetryGuardSkipped => SyncRule::RetryGuardSkipped,
             Self::AttemptAfterCall => SyncRule::AttemptAfterCall,
+            Self::RetryAfterIgnored => SyncRule::RetryAfterIgnored,
+            Self::RateLimitCountsAttempt => SyncRule::RateLimitCountsAttempt,
             _ => SyncRule::None,
         }
     }
@@ -188,6 +196,7 @@ pub struct SyncStats {
     pub conflicts: u64,
     pub calls: u64,
     pub crashes: u64,
+    pub limited: u64,
 }
 
 impl SyncStats {
@@ -211,6 +220,7 @@ impl SyncStats {
         self.conflicts += other.conflicts;
         self.calls += other.calls;
         self.crashes += other.crashes;
+        self.limited += other.limited;
     }
 }
 
@@ -272,6 +282,9 @@ struct Shape {
     read_ppm: u64,
     refuse_ppm: u64,
     lose_ppm: u64,
+    limit_ppm: u64,
+    retry_ms: u64,
+    storm: bool,
     channels: BTreeMap<Target, Mode>,
     identity: BTreeMap<(String, String), String>,
     lead: Vec<Planned>,
@@ -644,6 +657,17 @@ impl Shape {
         all.extend(pr_lanes);
         lead.extend(merge(&mut rng, all));
         let crashes = (0..rng.range(0, 2)).map(|_| rng.range(1, work_ms * 2)).collect();
+        let mut limits = Rng::derive(seed, "board sync rate limits");
+        let storm = limits.chance(300_000);
+        let limit_ppm = if storm {
+            limits.range(100_000, 500_000)
+        } else if limits.chance(300_000) {
+            limits.range(0, 100_000)
+        } else {
+            0
+        };
+        let retry_ms = limits.range(1, 4 * poll_ms + 20);
+        let (refuse_ppm, lose_ppm, poison) = if storm { (0, 0, None) } else { (refuse_ppm, lose_ppm, poison) };
         Self {
             poll_ms,
             latency_ms,
@@ -652,6 +676,9 @@ impl Shape {
             read_ppm,
             refuse_ppm,
             lose_ppm,
+            limit_ppm,
+            retry_ms,
+            storm,
             channels,
             identity,
             lead,
@@ -665,7 +692,7 @@ impl Shape {
 
     fn describe(&self) -> String {
         format!(
-            "lead_steps={} hooks={} channels={:?} poll_ms={} latency_ms={} faults_ppm={}/{}/{} refuse_ppm={} lose_ppm={} poison={} crashes={:?}",
+            "lead_steps={} hooks={} channels={:?} poll_ms={} latency_ms={} faults_ppm={}/{}/{} refuse_ppm={} lose_ppm={} limit_ppm={} retry_ms={} storm={} poison={} crashes={:?}",
             self.lead.len(),
             self.hooks.len(),
             self.channels.values().collect::<Vec<_>>(),
@@ -676,6 +703,9 @@ impl Shape {
             self.read_ppm,
             self.refuse_ppm,
             self.lose_ppm,
+            self.limit_ppm,
+            self.retry_ms,
+            self.storm,
             self.poison.as_deref().unwrap_or("none"),
             self.crashes
         )
@@ -723,13 +753,16 @@ struct World {
     progress: RefCell<Progress>,
 }
 
-fn faults(seed: u64, sync: &str, refuse_ppm: u64, lose_ppm: u64) -> impl FnMut(&str, &Target) -> Fault + Send + 'static {
+fn faults(seed: u64, sync: &str, shape: &Shape) -> impl FnMut(&str, &Target) -> Fault + Send + 'static {
     let mut rng = Rng::derive(seed, &format!("board sync {sync} faults"));
+    let (refuse_ppm, lose_ppm, limit_ppm, retry_ms) = (shape.refuse_ppm, shape.lose_ppm, shape.limit_ppm, shape.retry_ms);
     move |_call: &str, _to: &Target| {
         if rng.chance(refuse_ppm) {
             Fault::Refuse
         } else if rng.chance(lose_ppm) {
             Fault::Lose
+        } else if limit_ppm > 0 && rng.chance(limit_ppm) {
+            Fault::Limit(rng.range(1, retry_ms + 1))
         } else {
             Fault::None
         }
@@ -1026,9 +1059,16 @@ async fn echo(world: &World, epoch: u64) {
 async fn drainer(world: &World) {
     let mut board = world.open(&format!("{SYNC}+drain")).await;
     let mut engine = world.engine();
+    for fake in world.fakes.values() {
+        fake.restart();
+    }
     let mut since = None;
     loop {
-        match engine.drain(&mut board, world.now_ms()).await {
+        let now = world.now_ms();
+        for fake in world.fakes.values() {
+            fake.at(now);
+        }
+        match engine.drain(&mut board, now).await {
             Ok(drained) => world.progress.borrow_mut().stats.unsettled += drained.unsettled,
             Err(error) => world.note(&error),
         }
@@ -1506,6 +1546,7 @@ impl Reference {
             SyncOp::Attempt { message, target, .. } => {
                 self.attempted.insert((message.clone(), target.clone()));
             }
+            SyncOp::Throttled { .. } => {}
             SyncOp::Synced { task, message, target, external, thread, .. } => {
                 let Some(said) = self.said.get(message) else {
                     return;
@@ -1620,6 +1661,7 @@ fn render(model: &Reference, said: &Said, id: &EventId, target: &Target) -> Rend
         mentions,
         revision: 0,
         attempts: 0,
+        throttled: 0,
         action: Action::Post { starts: false },
     };
     Plain.render(&delivery)
@@ -1730,6 +1772,19 @@ fn check(world: &World, rows: &[(u64, String)], fold: &Fold) -> Result<SyncStats
             }
         }
     }
+    for (sync, fake) in &world.fakes {
+        if let Some(early) = fake.lock().early.first() {
+            return Err(format!(
+                "rule 11: {sync} got {} to {} at {} ms before its Retry-After deadline {} ms",
+                early.call, early.to, early.at_ms, early.until_ms
+            ));
+        }
+    }
+    if world.shape.storm
+        && let Some(((id, key), error)) = fold.mirror().dead().iter().find(|(_, error)| *error != "withdrawn")
+    {
+        return Err(format!("rule 12: {id} was dead-lettered for {key} by 429s alone: {error}"));
+    }
     let poison = world.shape.poison.as_ref().map(|key| EventId(format!("{LEAD}#{key}")));
     let mut judge = |id: &EventId, said: &Said, key: &Target, live: bool, now: bool, ever: bool, late: bool| -> Result<(), String> {
         let copies = held.remove(&(id.clone(), key.clone())).unwrap_or_default();
@@ -1829,7 +1884,7 @@ pub fn simulate(seed: u64, mutation: SyncMutation) -> SyncOutcome {
     let fakes = ["github", "linear", "slack"]
         .into_iter()
         .map(|sync| {
-            let fake = Fake::with_faults(sync, faults(seed, sync, shape.refuse_ppm, shape.lose_ppm));
+            let fake = Fake::with_faults(sync, faults(seed, sync, &shape));
             if let Some(key) = &shape.poison {
                 fake.poison(EventId(format!("{LEAD}#{key}")));
             }
@@ -1899,6 +1954,7 @@ pub fn simulate(seed: u64, mutation: SyncMutation) -> SyncOutcome {
     stats.faults = host.faults.load(Ordering::SeqCst);
     stats.conflicts = host.conflicts.load(Ordering::SeqCst);
     stats.calls = world.fakes.values().map(|fake| fake.lock().calls).sum();
+    stats.limited = world.fakes.values().map(|fake| fake.lock().limited).sum();
     stats.abandoned = u64::from(world.progress.borrow().abandoned);
     SyncOutcome { digest, wrong: verdict.err(), stats, shape: described }
 }

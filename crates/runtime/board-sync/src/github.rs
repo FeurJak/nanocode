@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use nanocode_board::{EventId, NewTask, TaskId, mirror, tasks::Terms};
 use serde_json::Value;
 
-use super::{Author, Event, Inbound, Mode, Settle, Target};
+use super::{Author, Event, Inbound, Mode, PlatformError, Settle, Target, seconds, throttled};
 
 pub const SYNC: &str = "github";
 
@@ -11,6 +11,7 @@ const OWN: [&str; 2] = ["tag.", "assignee."];
 const KEY_MAX: usize = 64;
 const MARKER_OPEN: &str = "<!-- board:";
 const MARKER_CLOSE: &str = " -->";
+const SECONDARY_WAIT_MS: u64 = 60_000;
 
 pub(crate) type Parts = Vec<(&'static str, Event)>;
 
@@ -332,4 +333,17 @@ pub fn parse_with(config: &Config, delivery: &str, payload: &Value) -> Vec<Inbou
         None
     };
     keyed(delivery, parts.unwrap_or_default())
+}
+
+pub fn limited(status: u16, headers: &BTreeMap<String, String>, message: &str, now_ms: u64) -> Option<PlatformError> {
+    let spent = headers.get("x-ratelimit-remaining").is_some_and(|remaining| remaining.trim() == "0");
+    if status != 429 && !(status == 403 && (spent || message.contains("rate limit"))) {
+        return None;
+    }
+    let retry_after_ms = match headers.get("retry-after") {
+        Some(header) => seconds(header),
+        None if spent => headers.get("x-ratelimit-reset").and_then(|header| seconds(header)).map(|reset| reset.saturating_sub(now_ms)),
+        None => Some(SECONDARY_WAIT_MS),
+    };
+    Some(throttled(retry_after_ms))
 }

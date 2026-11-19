@@ -205,6 +205,12 @@ pub enum SyncOp {
         target: Target,
         error: String,
     },
+    Throttled {
+        task: TaskId,
+        message: EventId,
+        target: Target,
+        revision: u64,
+    },
 }
 
 impl SyncOp {
@@ -228,7 +234,8 @@ impl SyncOp {
             | Self::Attempt { task, .. }
             | Self::Synced { task, .. }
             | Self::Removed { task, .. }
-            | Self::Undelivered { task, .. } => Some(task),
+            | Self::Undelivered { task, .. }
+            | Self::Throttled { task, .. } => Some(task),
         }
     }
 
@@ -358,6 +365,7 @@ pub struct Delivery {
     pub mentions: BTreeMap<String, Option<String>>,
     pub revision: u64,
     pub attempts: u64,
+    pub throttled: u64,
     pub action: Action,
 }
 
@@ -398,6 +406,8 @@ pub struct Mirror {
     #[serde(with = "crate::pairs")]
     owned: BTreeMap<(TaskId, String), u64>,
     worded: BTreeMap<TaskId, u64>,
+    #[serde(with = "crate::pairs")]
+    throttled: BTreeMap<(EventId, Target, u64), u64>,
 }
 
 pub fn spec(title: &str, body: Option<&str>) -> String {
@@ -423,6 +433,21 @@ pub fn mentions(body: &str) -> Vec<String> {
     found
 }
 
+type Tally = BTreeMap<(EventId, Target, u64), u64>;
+
+fn sum(tally: &Tally, id: &EventId, target: &Target) -> u64 {
+    let low = (id.clone(), target.clone(), 0);
+    let high = (id.clone(), target.clone(), u64::MAX);
+    tally.range(low..=high).map(|(_, count)| *count).sum()
+}
+
+fn tally(tally: &Tally, id: &EventId, target: &Target, action: &Action, revision: u64) -> u64 {
+    match action {
+        Action::Post { .. } | Action::Sweep => sum(tally, id, target),
+        Action::Edit { .. } | Action::Delete { .. } => tally.get(&(id.clone(), target.clone(), revision)).copied().unwrap_or_default(),
+    }
+}
+
 impl Mirror {
     pub const fn new() -> Self {
         Self {
@@ -444,6 +469,7 @@ impl Mirror {
             parked: BTreeMap::new(),
             owned: BTreeMap::new(),
             worded: BTreeMap::new(),
+            throttled: BTreeMap::new(),
         }
     }
 
@@ -555,22 +581,14 @@ impl Mirror {
             controls: message.controls.clone(),
             mentions,
             revision: message.revision,
-            attempts: match action {
-                Action::Post { .. } | Action::Sweep => self.tries(id, target),
-                Action::Edit { .. } | Action::Delete { .. } => self
-                    .attempts
-                    .get(&(id.clone(), target.clone(), message.revision))
-                    .copied()
-                    .unwrap_or_default(),
-            },
+            attempts: tally(&self.attempts, id, target, &action, message.revision),
+            throttled: tally(&self.throttled, id, target, &action, message.revision),
             action,
         }
     }
 
     fn tries(&self, id: &EventId, target: &Target) -> u64 {
-        let low = (id.clone(), target.clone(), 0);
-        let high = (id.clone(), target.clone(), u64::MAX);
-        self.attempts.range(low..=high).map(|(_, count)| *count).sum()
+        sum(&self.attempts, id, target)
     }
 
     fn action(&self, id: &EventId, message: &Message, target: &Target, eligible: bool) -> Option<Action> {
@@ -878,6 +896,15 @@ impl Fold {
                 }
                 Ok(())
             }
+            SyncOp::Throttled { task, message, target, revision } => {
+                routable(task, message, target)?;
+                let slot = (message.clone(), target.clone(), *revision);
+                let tried = mirror.attempts.get(&slot).copied().unwrap_or_default();
+                if tried <= mirror.throttled.get(&slot).copied().unwrap_or_default() {
+                    return refuse(Refusal::NoAttempt);
+                }
+                Ok(())
+            }
         }
     }
 
@@ -1065,6 +1092,9 @@ impl Fold {
                 self.mirror.dead.insert((message.clone(), target.clone()), error.clone());
                 let dead = Synced::Undelivered { message: message.clone(), target: target.clone(), error: error.clone() };
                 self.note(seq, event, task, dead);
+            }
+            SyncOp::Throttled { message, target, revision, .. } => {
+                *self.mirror.throttled.entry((message.clone(), target.clone(), *revision)).or_default() += 1;
             }
         }
     }

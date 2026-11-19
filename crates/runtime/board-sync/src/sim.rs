@@ -6,6 +6,8 @@ pub enum Mutation {
     None,
     RetryGuardSkipped,
     AttemptAfterCall,
+    RetryAfterIgnored,
+    RateLimitCountsAttempt,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);
