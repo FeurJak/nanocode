@@ -155,24 +155,33 @@ impl Connection {
         &mut self,
         parse: impl Fn(&[u8]) -> Result<Option<(T, usize)>, WireError>,
     ) -> Result<T, WireError> {
+        // A head ends at a line break, so bytes without one can't complete it: parse again only
+        // when a read brings a b'\n', and once more before giving up, so the result is the one
+        // parsing after every read would give, at a cost linear in the head's length rather
+        // than quadratic in it when the head arrives in many small reads.
+        let (mut parsed, mut closed) = (0, false);
         loop {
-            if !self.unread().is_empty()
-                && let Some((head, length)) = parse(self.unread())?
-            {
-                if length > HEAD_BYTES_MAX {
-                    return Err(WireError::HeadTooLarge);
+            let unread = self.unread();
+            let give_up = closed || unread.len() > HEAD_BYTES_MAX;
+            if unread.len() > parsed && (give_up || unread[parsed..].contains(&b'\n')) {
+                parsed = unread.len();
+                if let Some((head, length)) = parse(unread)? {
+                    if length > HEAD_BYTES_MAX {
+                        return Err(WireError::HeadTooLarge);
+                    }
+                    self.consume(length);
+                    return Ok(head);
                 }
-                self.consume(length);
-                return Ok(head);
             }
-            if self.unread().len() > HEAD_BYTES_MAX {
-                return Err(WireError::HeadTooLarge);
-            }
-            if self.fill().await? == 0 {
+            if closed {
                 return Err(WireError::Closed {
                     partial: !self.unread().is_empty(),
                 });
             }
+            if self.unread().len() > HEAD_BYTES_MAX {
+                return Err(WireError::HeadTooLarge);
+            }
+            closed = self.fill().await? == 0;
         }
     }
 
