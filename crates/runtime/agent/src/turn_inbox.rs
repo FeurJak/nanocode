@@ -1210,18 +1210,22 @@ impl<L: TurnLog + ?Sized> TurnInbox<L> {
         }
         let _busy = Busy(&self.busy);
         let root = self.session_id();
+        let open = self
+            .shared
+            .log
+            .pending()
+            .await?
+            .into_iter()
+            .find(|record| record.state == TurnState::Running);
+        let _hold = open
+            .as_ref()
+            .map(|open| Hold::new(&self.shared, &open.request_id));
         if let Some(delegates) = self.runtime.delegates() {
             delegates.await_restored(&self.agent, root).await;
         }
         if let Some(first) = self.runtime.pending_turns(root).await?.into_iter().next() {
             if first.starts_with(COMPLETION_REQUEST_PREFIX)
-                && let Some(open) = self
-                    .shared
-                    .log
-                    .pending()
-                    .await?
-                    .into_iter()
-                    .find(|record| record.state == TurnState::Running)
+                && let Some(open) = &open
             {
                 return self.run(&open.request_id, true).await;
             }
