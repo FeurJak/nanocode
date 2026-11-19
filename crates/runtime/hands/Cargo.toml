@@ -13,8 +13,10 @@ description = "Code Mode hosts per session: a per-call target, lazy Hands releas
 
 [dependencies]
 nanocode-code-mode.workspace = true
+nanocode-cost-fold.workspace = true
 nanocode-digest.workspace = true
 nanocode-platform.workspace = true
+nanocode-sync.workspace = true
 nanocode-tool-contracts.workspace = true
 serde_json.workspace = true
 

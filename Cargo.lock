@@ -559,8 +559,10 @@ name = "nanocode-hands"
 version = "0.7.0"
 dependencies = [
  "nanocode-code-mode",
+ "nanocode-cost-fold",
  "nanocode-digest",
  "nanocode-platform",
+ "nanocode-sync",
  "nanocode-tool-contracts",
  "serde_json",
 ]

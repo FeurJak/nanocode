@@ -1,5 +1,6 @@
 use std::fmt;
 
+use nanocode_cost_fold::Placement;
 use nanocode_platform::MaybeSend;
 use nanocode_tool_contracts::ToolOutput;
 
@@ -65,6 +66,22 @@ pub enum StepOutcome {
     },
 }
 
+impl StepOutcome {
+    #[must_use]
+    pub fn placement(&self, hand: &HandRef) -> Option<Placement> {
+        match self {
+            Self::Done { hand_ms, usd, .. } | Self::Uncertain { hand_ms, usd, .. } => {
+                Some(Placement {
+                    hand: hand.to_string(),
+                    hand_ms: *hand_ms,
+                    hand_nano_usd: *usd,
+                })
+            }
+            Self::Refused { .. } => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Stored {
     pub size_bytes: u64,
@@ -113,6 +130,9 @@ pub enum PutError {
     },
     Uncertain {
         reason: Box<str>,
+    },
+    TooLarge {
+        bytes_max: u64,
     },
 }
 
@@ -170,6 +190,10 @@ impl fmt::Display for PutError {
             Self::Uncertain { reason } => write!(
                 formatter,
                 "the destination holds either its old or its new file, not known which: {reason}"
+            ),
+            Self::TooLarge { bytes_max } => write!(
+                formatter,
+                "the file exceeds the destination's {bytes_max}-byte limit; the destination is unchanged"
             ),
         }
     }
