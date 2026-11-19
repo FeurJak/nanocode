@@ -2,8 +2,38 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicUsize, Ordering},
     thread,
 };
+
+/// Runs work on each item with up to jobs threads, each taking the next item as it finishes,
+/// and returns the results in item order.
+fn pool<T: Sync, R: Send>(jobs: usize, items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let next = AtomicUsize::new(0);
+    let mut done: Vec<(usize, R)> = thread::scope(|scope| {
+        let workers: Vec<_> = (0..jobs.min(items.len()))
+            .map(|_| {
+                let (next, work) = (&next, &work);
+                scope.spawn(move || {
+                    let mut done = Vec::new();
+                    loop {
+                        let at = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(item) = items.get(at) else {
+                            break done;
+                        };
+                        done.push((at, work(item)));
+                    }
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().expect("a compile worker"))
+            .collect()
+    });
+    done.sort_by_key(|(at, _)| *at);
+    done.into_iter().map(|(_, result)| result).collect()
+}
 
 fn sorted(dir: &Path, keep: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = fs::read_dir(dir)
@@ -372,13 +402,24 @@ fn main() {
         assert!(status.success(), "compiling {} failed", source.display());
     };
     let mut cxx_runtime = false;
-    for source in sorted(&root.join("c"), |path| {
+    // Every C and C++ source below goes into one work list, compiled by NUM_JOBS workers that
+    // each take the next source as they finish, so one directory's sources never wait for
+    // another's. Objects keep the numbering and archive order of a directory-by-directory build.
+    let sources: Vec<PathBuf> = sorted(&root.join("c"), |path| {
         path.extension().is_some_and(|extension| extension == "c")
-    }) {
-        let object = out.join(format!("{}.o", objects.len()));
-        compile(&source, &object, &[]);
-        objects.push(object);
-    }
+    });
+    let first = objects.len();
+    let units: Vec<(usize, &Path, &[String])> = sources
+        .iter()
+        .enumerate()
+        .map(|(offset, source)| (first + offset, source.as_path(), &[][..]))
+        .collect();
+    objects.extend(pool(jobs, &units, |&(index, source, flags)| {
+        let object = out.join(format!("{index}.o"));
+        compile(source, &object, flags);
+        object
+    }));
+    let mut libs: Vec<(Vec<String>, Vec<PathBuf>)> = Vec::new();
     for dir in sorted(&root.join("lib"), |path| path.is_dir()) {
         let only: Vec<String> = listed(&dir, "families").collect();
         if !only.is_empty()
@@ -403,34 +444,20 @@ fn main() {
                 path.extension().is_some_and(|extension| extension == "c")
             })
         };
-        let first = objects.len();
-        let mut built: Vec<(usize, PathBuf)> = thread::scope(|scope| {
-            let workers: Vec<_> = (0..jobs.min(sources.len()))
-                .map(|worker| {
-                    let (sources, flags, compile, out) = (&sources, &flags, &compile, &out);
-                    scope.spawn(move || {
-                        sources
-                            .iter()
-                            .enumerate()
-                            .skip(worker)
-                            .step_by(jobs)
-                            .map(|(offset, source)| {
-                                let object = out.join(format!("{}.o", first + offset));
-                                compile(source, &object, flags);
-                                (first + offset, object)
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .collect();
-            workers
-                .into_iter()
-                .flat_map(|worker| worker.join().expect("a compile worker"))
-                .collect()
-        });
-        built.sort_by_key(|(index, _)| *index);
-        objects.extend(built.into_iter().map(|(_, object)| object));
+        libs.push((flags, sources));
     }
+    let mut units: Vec<(usize, &Path, &[String])> = Vec::new();
+    for (flags, sources) in &libs {
+        for source in sources {
+            units.push((objects.len() + units.len(), source, flags));
+        }
+    }
+    objects.extend(pool(jobs, &units, |&(index, source, flags)| {
+        let object = out.join(format!("{index}.o"));
+        compile(source, &object, flags);
+        object
+    }));
+    let mut modules: Vec<(String, String, Vec<String>, Vec<PathBuf>)> = Vec::new();
     for dir in sorted(&root.join("ext"), |path| path.is_dir()) {
         let name = dir
             .file_name()
@@ -472,7 +499,7 @@ fn main() {
                     .map(str::to_owned),
             );
         }
-        let sources = match fs::read_to_string(dir.join("sources")) {
+        let sources: Vec<PathBuf> = match fs::read_to_string(dir.join("sources")) {
             Ok(list) => list
                 .lines()
                 .filter(|line| !line.is_empty())
@@ -483,74 +510,63 @@ fn main() {
             }),
         };
         cxx_runtime |= sources.iter().any(|source| is_cxx(source));
-        let first = objects.len();
-        let mut built: Vec<(usize, PathBuf, bool)> = thread::scope(|scope| {
-            let workers: Vec<_> = (0..jobs.min(sources.len()))
-                .map(|worker| {
-                    let (sources, defines, compile, out) = (&sources, &defines, &compile, &out);
-                    scope.spawn(move || {
-                        let mut done = Vec::new();
-                        for (offset, source) in
-                            sources.iter().enumerate().skip(worker).step_by(jobs)
-                        {
-                            let index = first + offset;
-                            let object = out.join(format!("{index}.o"));
-                            compile(source, &object, defines);
-                            let mut table = false;
-                            if wasm {
-                                let cxx = is_cxx(source);
-                                let functions = address_taken(&object);
-                                let mut wrapper =
-                                    format!("#include {:?}\n", source.display().to_string());
-                                if cxx {
-                                    wrapper.push_str(&format!(
-                                        "__asm__(\".section .rodata.nanocode_arity_{index},\\\"\\\",@\\n.globl nanocode_arity_{index}\\n.p2align 2\\nnanocode_arity_{index}:\\n\"\n"
-                                    ));
-                                    for (function, params) in &functions {
-                                        wrapper.push_str(&format!(
-                                            "\".int32 \\\"{function}\\\"\\n.int32 {params}\\n\"\n"
-                                        ));
-                                    }
-                                    wrapper.push_str(&format!(
-                                        "\".int32 0\\n.int32 0\\n.size nanocode_arity_{index}, {}\\n.text\\n\");\n",
-                                        8 * (functions.len() + 1)
-                                    ));
-                                } else {
-                                    wrapper.push_str(&format!(
-                                        "__attribute__((used)) const void *const nanocode_arity_{index}[] = {{\n"
-                                    ));
-                                    for (function, params) in &functions {
-                                        wrapper.push_str(&format!(
-                                            "    (const void *){function}, (const void *){params},\n"
-                                        ));
-                                    }
-                                    wrapper.push_str("    0, 0\n};\n");
-                                }
-                                let extension = source
-                                    .extension()
-                                    .and_then(|extension| extension.to_str())
-                                    .unwrap_or("c");
-                                if !functions.is_empty() {
-                                    let path = out.join(format!("{index}.{extension}"));
-                                    fs::write(&path, wrapper).expect("the arity wrapper");
-                                    compile(&path, &object, defines);
-                                    table = true;
-                                }
-                            }
-                            done.push((index, object, table));
-                        }
-                        done
-                    })
-                })
-                .collect();
-            workers
-                .into_iter()
-                .flat_map(|worker| worker.join().expect("a compile worker"))
-                .collect()
-        });
-        built.sort_by_key(|(index, _, _)| *index);
-        for (index, object, table) in built {
-            if table {
+        modules.push((name, symbol, defines, sources));
+    }
+    let mut units: Vec<(usize, &Path, &[String])> = Vec::new();
+    for (_, _, defines, sources) in &modules {
+        for source in sources {
+            units.push((objects.len() + units.len(), source, defines));
+        }
+    }
+    let built = pool(jobs, &units, |&(index, source, defines)| {
+        let object = out.join(format!("{index}.o"));
+        compile(source, &object, defines);
+        let mut table = false;
+        if wasm {
+            let cxx = is_cxx(source);
+            let functions = address_taken(&object);
+            let mut wrapper = format!("#include {:?}\n", source.display().to_string());
+            if cxx {
+                wrapper.push_str(&format!(
+                    "__asm__(\".section .rodata.nanocode_arity_{index},\\\"\\\",@\\n.globl nanocode_arity_{index}\\n.p2align 2\\nnanocode_arity_{index}:\\n\"\n"
+                ));
+                for (function, params) in &functions {
+                    wrapper.push_str(&format!(
+                        "\".int32 \\\"{function}\\\"\\n.int32 {params}\\n\"\n"
+                    ));
+                }
+                wrapper.push_str(&format!(
+                    "\".int32 0\\n.int32 0\\n.size nanocode_arity_{index}, {}\\n.text\\n\");\n",
+                    8 * (functions.len() + 1)
+                ));
+            } else {
+                wrapper.push_str(&format!(
+                    "__attribute__((used)) const void *const nanocode_arity_{index}[] = {{\n"
+                ));
+                for (function, params) in &functions {
+                    wrapper.push_str(&format!(
+                        "    (const void *){function}, (const void *){params},\n"
+                    ));
+                }
+                wrapper.push_str("    0, 0\n};\n");
+            }
+            let extension = source
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .unwrap_or("c");
+            if !functions.is_empty() {
+                let path = out.join(format!("{index}.{extension}"));
+                fs::write(&path, wrapper).expect("the arity wrapper");
+                compile(&path, &object, defines);
+                table = true;
+            }
+        }
+        (index, object, table)
+    });
+    let mut built = built.into_iter();
+    for (name, symbol, _, sources) in &modules {
+        for (index, object, has_table) in built.by_ref().take(sources.len()) {
+            if has_table {
                 arities.push_str(&format!("    static nanocode_arity_{index}: [usize; 0];\n"));
                 tables.push_str(&format!(
                     "        &raw const nanocode_arity_{index} as *const usize,\n"
