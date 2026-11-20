@@ -24,11 +24,13 @@ mod patch;
 mod prepare;
 mod python;
 mod sessions;
+mod setup;
 mod side;
 mod split;
 mod stream;
 mod telemetry;
 mod tempo;
+mod vertex_claude;
 mod view;
 
 use std::{
@@ -340,6 +342,7 @@ fn start<const EXEC: bool>(clients: ModelClients) -> ExitCode {
             Some(Command::Hand(args)) => hand(args).await,
             #[cfg(unix)]
             Some(Command::Cua(args)) => cua::cua(args).await,
+            Some(Command::Setup(args)) => setup::setup(args).await,
             Some(Command::Sessions(mut args)) => {
                 args.home = args.home.or(cli.session.home);
                 on_worker(list_sessions(args)).await
@@ -442,10 +445,11 @@ fn runner_failure(event: &nanocode::RunnerEvent) -> Option<String> {
     }
 }
 
-const fn family(harness: HarnessArg) -> nanocode::HarnessFamily {
+fn family(harness: HarnessArg) -> nanocode::HarnessFamily {
     match harness {
         HarnessArg::Codex => nanocode::HarnessFamily::Codex,
         HarnessArg::Claude => nanocode::HarnessFamily::Claude,
+        HarnessArg::Antigravity => nanocode::HarnessFamily::new(nanocode::antigravity::FAMILY),
     }
 }
 
