@@ -738,6 +738,9 @@ def _start(argv, first, unbuffered=False):
                 logger.setLevel(logging.WARNING if logger is logging.root else logging.NOTSET)
                 logger.disabled = False
                 logger.propagate = True
+    decimal = sys.modules.get('_pydecimal')
+    if decimal is not None:
+        decimal.setcontext(decimal.Context())
     sys.argv = argv
     sys.executable = sys._base_executable = '/usr/bin/python3'
     extra = []
