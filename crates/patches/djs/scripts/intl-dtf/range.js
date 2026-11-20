@@ -36,8 +36,10 @@ const PAIRS = {
 };
 const SRC = {startRange: 0, endRange: 1, shared: 2};
 const zcache = new Map();
+// the zone kind to try first (rangez.js sets it: far-past offsets read the same in several kinds)
+const ZPREF = {kind: -1};
 function zoneLetters(d, v) {
-  for (let k = 0; k < 6; k++) {
+  for (const k of ZPREF.kind >= 0 ? [ZPREF.kind, 0, 1, 2, 3, 4, 5] : [0, 1, 2, 3, 4, 5]) {
     const key = d.getTime() + ":" + k;
     if (!zcache.has(key)) zcache.set(key, fmt({hour: "numeric", timeZoneName: KINDS[k]}).formatToParts(d).find(p => p.type === "timeZoneName").value);
     if (zcache.get(key) === v) return "Z:" + ZL[k];
@@ -136,7 +138,7 @@ function timeOpts(k) {
 const ST = ["full", "long", "medium", "short"];
 // a time key's levels: era and day (year and month format like day: the yMd fallback), then am/pm, hour, minute
 const TLV = ["G", "d", "a", "h", "m"];
-module.exports = {infer, predict, toks, PAIRS, LEVELS, nodeRange, dateOpts, timeOpts, same, fmt, local, W, KINDS, ZL};
+module.exports = {ZPREF, infer, predict, toks, PAIRS, LEVELS, nodeRange, dateOpts, timeOpts, same, fmt, local, W, KINDS, ZL};
 if (require.main === module) {
   const T = JSON.parse(fs.readFileSync(__dirname + '/t-' + LOC + '.json'));
   const out = {date: {}, time: {}, timez: KINDS.map(() => ({})), sdate: [], stime: [], sboth: [], bad: []};

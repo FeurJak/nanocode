@@ -20,15 +20,50 @@ const gs = tmpl(m.infer({month: "numeric", day: "numeric", hour: "numeric", minu
 const gm = out.gm;
 const sep = JSON.parse(fs.readFileSync(__dirname + '/r-' + LOC + '.json')).sep;
 const q = lit => /[A-Za-z']/.test(lit) ? "'" + lit.replace(/'/g, "''") + "'" : lit;
-// strip a known date pattern D and glue g from P = apply(g, D, X), giving X
+// a pattern's units: letter runs, and literal characters one by one (quotes resolved)
+function units(P) {
+  const out = [];
+  for (let i = 0; i < P.length;) {
+    const c = P[i];
+    if (c === "'") {
+      if (P[i + 1] === "'") { out.push({c: "'"}); i += 2; continue; }
+      i++;
+      while (i < P.length) {
+        if (P[i] === "'") { if (P[i + 1] === "'") { out.push({c: "'"}); i += 2; continue; } i++; break; }
+        out.push({c: P[i++]});
+      }
+    } else if (/[A-Za-z]/.test(c)) { let j = i; while (P[j] === c) j++; out.push({f: P.slice(i, j)}); i = j; }
+    else out.push({c: P[i++]});
+  }
+  return out;
+}
+const ukey = u => u.f ? "" + u.f : u.c;
+// units back to a pattern, literal text quoted where it has letters or quotes
+function emit(us) {
+  let out = "", lit = "";
+  const flush = () => { if (lit) out += q(lit); lit = ""; };
+  for (const u of us) { if (u.f) { flush(); out += u.f; } else lit += u.c; }
+  flush();
+  return out;
+}
+// strip a known date pattern D and glue g from P = apply(g, D, X), giving X (compared unit by unit,
+// so quoting that falls differently still matches)
 function strip(P, g, D) {
-  if (!g.includes("{")) return P.startsWith(D + g) ? P.slice((D + g).length) : null;
-  const i0 = g.indexOf("{0}"), i1 = g.indexOf("{1}");
-  const pre = g.slice(0, Math.min(i0, i1)), mid = g.slice(Math.min(i0, i1) + 3, Math.max(i0, i1)), post = g.slice(Math.max(i0, i1) + 3);
-  if (!P.startsWith(pre) || !P.endsWith(post)) return null;
-  const body = P.slice(pre.length, P.length - post.length);
-  if (i1 < i0) return body.startsWith(D + mid) ? body.slice((D + mid).length) : null;
-  return body.endsWith(mid + D) ? body.slice(0, body.length - (mid + D).length) : null;
+  const eq = (a, b) => a.length === b.length && a.every((u, i) => ukey(u) === ukey(b[i]));
+  const p = units(P), d = units(D);
+  let pre, mid, post, dateFirst;
+  if (!g.includes("{")) { pre = []; mid = units(g); post = []; dateFirst = true; }
+  else {
+    const i0 = g.indexOf("{0}"), i1 = g.indexOf("{1}");
+    pre = [...g.slice(0, Math.min(i0, i1))].map(c => ({c}));
+    mid = [...g.slice(Math.min(i0, i1) + 3, Math.max(i0, i1))].map(c => ({c}));
+    post = [...g.slice(Math.max(i0, i1) + 3)].map(c => ({c}));
+    dateFirst = i1 < i0;
+  }
+  if (!eq(p.slice(0, pre.length), pre) || !eq(p.slice(p.length - post.length), post)) return null;
+  const body = p.slice(pre.length, p.length - post.length), dm = dateFirst ? [...d, ...mid] : [...mid, ...d];
+  if (dateFirst) return eq(body.slice(0, dm.length), dm) ? emit(body.slice(dm.length)) : null;
+  return eq(body.slice(body.length - dm.length), dm) ? emit(body.slice(0, body.length - dm.length)) : null;
 }
 const bad = [];
 // a fallback pair: the first half is the second plus the separator (however the quotes fall)

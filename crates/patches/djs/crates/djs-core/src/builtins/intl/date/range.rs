@@ -36,6 +36,9 @@ const STYLE: usize = TIME + (7 * 252 * 5usize).div_ceil(16);
 // from the normalized skeleton (864), which a fallback time range is joined to.
 const TPF: usize = STYLE + (16 + 224 + 896usize).div_ceil(16);
 const DPN: usize = TPF + 7 * 3024 / 16;
+// Date interval entries with a zone name (6 kinds x 864 x levels G y M d): ICU leaves an offset
+// zone (O) out of the interval skeleton, so these are read as node shows them.
+const DZ: usize = DPN + 864 / 16;
 
 /// What the resolved options select: fields (weekday era year month day dayPeriod hour minute
 /// second, encoded as resolve reads them), fractional digits, hour cycle choice (0 to 6), zone name
@@ -219,6 +222,11 @@ fn entry(l: &RangeLocale, k: &Key, single: &str, level: usize) -> Entry {
         return if level < 4 { get(DATE, dkey(f) * 4 + level) } else { Entry::Same };
     }
     if !has_time {
+        if level < 4
+            && let Some(e) = entry_of(cell(l, DZ, ((k.z - 1) * 864 + dkey(f)) * 4 + level))
+        {
+            return e;
+        }
         return if ignored(level, single) { Entry::Same } else { fallback(single, sep) };
     }
     let tk = ((((f[6] * 3 + f[7]) * 3 + f[8]) * 7 + k.cy) * 4 + f[5]) * 4 + k.fsd;
@@ -229,7 +237,9 @@ fn entry(l: &RangeLocale, k: &Key, single: &str, level: usize) -> Entry {
         core::array::from_fn(|i| entry_of(cell(l, TIME, base + i)))
     });
     // ICU has interval patterns for every hour skeleton (in some locales they read like a fallback).
-    let found = tab.as_ref().is_some_and(|t| f[6] != 0 || t[2..].iter().any(|e| matches!(e, Some(e @ Entry::Pair(..)) if !is_fallback(e, sep))));
+    // With a day period (B) ICU can miss: en-US with a zone has none, and its hour entry reads as one.
+    let real = |e: &Option<Entry>| matches!(e, Some(e @ Entry::Pair(..)) if !is_fallback(e, sep));
+    let found = tab.as_ref().is_some_and(|t| (f[6] != 0 && (f[5] == 0 || k.z == 0 || real(&t[3]))) || t[2..].iter().any(real));
     fn pat_or<'a>(l: &RangeLocale, row: usize, i: usize, or: &'a str) -> &'a str {
         let c = cell(l, row, i);
         if c == NONE { or } else { pattern(c) }
@@ -246,7 +256,9 @@ fn entry(l: &RangeLocale, k: &Key, single: &str, level: usize) -> Entry {
     if !has_date {
         if level < 4 {
             let fd: [usize; 5] = if level == 0 { [0, 2, 1, 1, 1] } else { [0, 0, 1, 1, 1] };
-            return fallback(&apply(l.glue[3], pat_or(l, DP, dkey(&fd), ""), tpatf), sep);
+            // ICU builds this skeleton from its time skeleton, which leaves an offset zone (O) out.
+            let t = if matches!(k.z, 3 | 4) { pat_or(l, TPF, tk, pat_or(l, TP, tk, tpatf)) } else { tpatf };
+            return fallback(&apply(l.glue[3], pat_or(l, DP, dkey(&fd), ""), t), sep);
         }
         if found && level <= 6 {
             return tab.and_then(|t| t[level - 2].clone()).unwrap_or(Entry::Same);
@@ -257,7 +269,10 @@ fn entry(l: &RangeLocale, k: &Key, single: &str, level: usize) -> Entry {
         // ICU sets an interval pattern for a date field the skeleton lacks: the skeleton with that
         // field and every finer one it lacks added. A field it has falls back to the whole pattern.
         let mut g = [f[0], f[1], f[2], f[3], f[4]];
-        if found && f[level + 1] == 0 {
+        // ICU looks for the field's letter in the skeleton V8 reads off the pattern, so a stand-alone
+        // month (L, as en-US picks for a month without a day) counts as missing too.
+        let missing = f[level + 1] == 0 || (level == 2 && tokens(single).iter().any(|t| letter(t) == Some('L')));
+        if found && missing {
             for (lv, i, v) in [(3, 4, 1), (2, 3, 1), (1, 2, 1), (0, 1, 2)] {
                 if level <= lv && g[i] == 0 {
                     g[i] = v;
@@ -277,7 +292,15 @@ fn entry(l: &RangeLocale, k: &Key, single: &str, level: usize) -> Entry {
         return Entry::Same;
     }
     let dpn = pat_or(l, DPN, dkey(f), pat_or(l, DP, dkey(f), ""));
-    glue_date(l.gm, dpn, &format!("{tpat}{}", quote(sep)), tpat)
+    // ICU's time pattern here comes from the normalized time skeleton: one z or v, and no O.
+    let zn = match k.z {
+        2 => 1,
+        6 => 5,
+        3 | 4 => 0,
+        z => z,
+    };
+    let tpn = pat_or(l, TP, zn * 3024 + tk, tpat);
+    glue_date(l.gm, dpn, &format!("{tpn}{}", quote(sep)), tpn)
 }
 
 /// A part's type for a pattern letter, to tell which fields both halves show.
@@ -325,7 +348,8 @@ pub(in crate::builtins::intl) fn format_range(spec: &Spec, x: f64, y: f64) -> Re
     let level = (0..9).find(|&i| fa[i] != fb[i]);
     let key = spec.get("@rk").and_then(Key::decode);
     let l = match spec.get("@dl").and_then(|i| i.parse::<usize>().ok()) {
-        Some(i) if i < DATE_LOCALES.len() => RANGE_LOCALES.get(i),
+        // RANGE_LOCALES follows DATE_LOCALES and ends with en-US: a locale past it has no tables.
+        Some(i) if i < DATE_LOCALES.len() && i + 1 < RANGE_LOCALES.len() => RANGE_LOCALES.get(i),
         _ if spec.get("locale").is_some_and(|loc| loc == "en-US" || loc.starts_with("en-US-")) => RANGE_LOCALES.last(),
         _ => None,
     };
