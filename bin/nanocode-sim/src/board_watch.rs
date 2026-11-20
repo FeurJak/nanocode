@@ -586,7 +586,10 @@ async fn clock(world: &World, epoch: u64) {
                         if result.is_ok() && live {
                             // Left live, it stays due and this loop unschedules it again until
                             // the run's deadline, so stop the run here.
-                            panic!("the board applied the unschedule of {} but kept it live", every.id);
+                            panic!(
+                                "the board applied the unschedule of {} but kept it live",
+                                every.id
+                            );
                         }
                         result
                     }
