@@ -2,6 +2,7 @@ mod agents;
 #[cfg(unix)]
 mod alloc;
 mod board;
+mod board_steer;
 mod board_sync;
 mod boardagents;
 #[cfg(unix)]
@@ -58,6 +59,7 @@ use std::{collections::BTreeMap, ops::Range, process::ExitCode};
 use crate::{
     agents::{AgentStats, AgentsMutation},
     board::{BoardMutation, BoardStats},
+    board_steer::{SteerMutation as BoardSteerMutation, SteerStats as BoardSteerStats},
     board_sync::{SyncMutation as BoardSyncMutation, SyncStats as BoardSyncStats},
     cellcalls::{CellCallsMutation, CellCallsStats},
     children::ChildMutation,
@@ -115,6 +117,7 @@ enum Scenario {
     HandRouter,
     WorkspaceHost,
     BoardSync,
+    BoardSteer,
     WorkspaceFs,
     GitRemote,
     WorkspaceStack,
@@ -145,6 +148,7 @@ struct Args {
     hand_router: HandRouterMutation,
     workspace_host: WorkspaceHostMutation,
     board_sync: BoardSyncMutation,
+    board_steer: BoardSteerMutation,
     workspace_fs: WorkspaceFsMutation,
     git_remote: GitRemoteMutation,
     workspace_stack: WorkspaceStackMutation,
@@ -162,7 +166,7 @@ type Caught = BTreeMap<Invariant, (u64, u64, (u64, u64))>;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|inbox_stress|capture|executor|dns|board|cost|hand_router|workspace_host|board_sync|workspace_fs|git_remote|workspace_stack] [--ops N] [--twice] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
+        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|inbox_stress|capture|executor|dns|board|cost|hand_router|workspace_host|board_sync|board_steer|workspace_fs|git_remote|workspace_stack] [--ops N] [--twice] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
        websocket: [--mutation {}]
        http_server: [--mutation {}]
        alloc: [--mutation overstate_size|forget_free|scribble]
@@ -264,6 +268,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
     let mut hand_router = HandRouterMutation::None;
     let mut workspace_host = WorkspaceHostMutation::None;
     let mut board_sync = BoardSyncMutation::None;
+    let mut board_steer = BoardSteerMutation::None;
     let mut workspace_fs = WorkspaceFsMutation::None;
     let mut git_remote = GitRemoteMutation::None;
     let mut workspace_stack = WorkspaceStackMutation::None;
@@ -332,6 +337,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
                     "hand_router" => Scenario::HandRouter,
                     "workspace_host" => Scenario::WorkspaceHost,
                     "board_sync" => Scenario::BoardSync,
+                    "board_steer" => Scenario::BoardSteer,
                     "workspace_fs" => Scenario::WorkspaceFs,
                     "git_remote" => Scenario::GitRemote,
                     "workspace_stack" => Scenario::WorkspaceStack,
@@ -386,6 +392,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
             workspace_host = WorkspaceHostMutation::parse(name)?
         }
         (Scenario::BoardSync, Some(name)) => board_sync = BoardSyncMutation::parse(name)?,
+        (Scenario::BoardSteer, Some(name)) => board_steer = BoardSteerMutation::parse(name)?,
         (Scenario::WorkspaceFs, Some(name)) => workspace_fs = WorkspaceFsMutation::parse(name)?,
         (Scenario::GitRemote, Some(name)) => git_remote = GitRemoteMutation::parse(name)?,
         (Scenario::WorkspaceStack, Some(name)) => {
@@ -440,6 +447,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         hand_router,
         workspace_host,
         board_sync,
+        board_steer,
         workspace_fs,
         git_remote,
         workspace_stack,
@@ -525,6 +533,9 @@ fn replay(seed: u64, args: &Args) -> String {
     }
     if args.scenario == Scenario::BoardSync {
         return board_sync::replay(seed, args.board_sync);
+    }
+    if args.scenario == Scenario::BoardSteer {
+        return board_steer::replay(seed, args.board_steer);
     }
     if args.scenario == Scenario::WorkspaceFs {
         return workspacefs::replay(seed, args.workspace_fs);
@@ -867,6 +878,7 @@ fn mutations() -> ExitCode {
     add("hand_router", HandRouterMutation::names());
     add("workspace_host", WorkspaceHostMutation::names());
     add("board_sync", BoardSyncMutation::names());
+    add("board_steer", BoardSteerMutation::names());
     add("workspace_fs", WorkspaceFsMutation::names());
     add("git_remote", GitRemoteMutation::names());
     add("workspace_stack", WorkspaceStackMutation::names());
@@ -949,6 +961,7 @@ fn main() -> ExitCode {
         || (args.scenario == Scenario::WorkspaceHost
             && args.workspace_host != WorkspaceHostMutation::None)
         || (args.scenario == Scenario::BoardSync && args.board_sync != BoardSyncMutation::None)
+        || (args.scenario == Scenario::BoardSteer && args.board_steer != BoardSteerMutation::None)
         || (args.scenario == Scenario::WorkspaceFs
             && args.workspace_fs != WorkspaceFsMutation::None)
         || (args.scenario == Scenario::GitRemote && args.git_remote != GitRemoteMutation::None)
@@ -976,6 +989,7 @@ fn main() -> ExitCode {
     let mut hand_router_totals = HandRouterStats::default();
     let mut workspace_host_totals = WorkspaceHostStats::default();
     let mut board_sync_totals = BoardSyncStats::default();
+    let mut board_steer_totals = BoardSteerStats::default();
     let mut workspace_fs_totals = WorkspaceFsStats::default();
     let mut git_remote_totals = GitRemoteStats::default();
     let mut workspace_stack_totals = WorkspaceStackStats::default();
@@ -1108,6 +1122,13 @@ fn main() -> ExitCode {
                 args.twice,
                 args.options.verbose,
                 &mut board_sync_totals,
+            ),
+            Scenario::BoardSteer => board_steer::judge(
+                seed,
+                args.board_steer,
+                args.twice,
+                args.options.verbose,
+                &mut board_steer_totals,
             ),
             Scenario::WorkspaceFs => workspacefs::judge(
                 seed,
@@ -1309,6 +1330,16 @@ fn main() -> ExitCode {
             args.twice,
             args.workspace_host,
             &workspace_host_totals,
+        );
+    }
+    if args.scenario == Scenario::BoardSteer {
+        return board_steer::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.board_steer,
+            &board_steer_totals,
         );
     }
     if args.scenario == Scenario::BoardSync {

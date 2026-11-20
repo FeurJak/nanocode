@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::steer::SteerOp;
 use crate::tasks::{TaskOp, resolve};
 use crate::{
     Entry, EventId, Fold, Op, Phase, Rejection, Task, TaskId,
@@ -447,6 +448,7 @@ impl Fold {
             Op::Renew { task, claim, .. }
             | Op::Release { task, claim, .. }
             | Op::Finish { task, claim, .. }
+            | Op::Steer(SteerOp::Heed { task, claim, .. })
             | Op::Tasks(TaskOp::Block {
                 task,
                 claim: Some(claim),
@@ -506,7 +508,7 @@ impl Fold {
                 }
                 Ok(())
             }
-            Op::Reply { task, .. } => {
+            Op::Reply { task, .. } | Op::Steer(SteerOp::Send { task, .. }) => {
                 access.see(&actor, task)?;
                 access.need(&actor, &task.0, Can::Post)
             }

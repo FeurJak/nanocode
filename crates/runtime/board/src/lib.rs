@@ -8,6 +8,7 @@ pub mod access;
 pub mod cost;
 pub mod files;
 pub mod middleware;
+pub mod steer;
 pub mod tasks;
 pub mod wake;
 pub mod watch;

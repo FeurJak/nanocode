@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use nanocode_board::{
     BoardError, Event, EventId, Fold, Op, Rejection, Say, TaskId,
     access::{Actor, Can, Grant, Identity, Verifier, Who},
+    steer::SteerOp,
     tasks::{Need, Planned, TaskOp, Terms},
     watch::{Key, Step},
 };
@@ -722,6 +723,7 @@ impl Gate {
             Op::Renew { task, claim, .. }
             | Op::Release { task, claim, .. }
             | Op::Finish { task, claim, .. }
+            | Op::Steer(SteerOp::Heed { task, claim, .. })
             | Op::Tasks(TaskOp::Block {
                 task,
                 claim: Some(claim),
@@ -757,7 +759,9 @@ impl Gate {
                     && self.can(by, &own, Can::Read)
                     && self.can(by, &own, Can::Post)
             }),
-            Op::Reply { task, .. } => read(task) && self.can(by, &task.0, Can::Post),
+            Op::Reply { task, .. } | Op::Steer(SteerOp::Send { task, .. }) => {
+                read(task) && self.can(by, &task.0, Can::Post)
+            }
             Op::Relabel { task, .. } => {
                 read(task) && (self.chain(by, task, tasks) || self.can(by, &task.0, Can::Label))
             }

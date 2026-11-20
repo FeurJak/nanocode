@@ -104,6 +104,12 @@ pub enum Mutation {
     UnscheduleIgnored,
     WaitSkipsPoll,
     WatchUnchecked,
+    SteerLostOnMove,
+    SteerRedeliveredAfterHeed,
+    HeedFromStaleClaim,
+    SteerByClaimFollows,
+    SteerToTerminal,
+    FinishIgnoresSteers,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

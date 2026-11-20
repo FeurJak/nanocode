@@ -1438,7 +1438,7 @@ impl Reference {
             | Op::Sync { .. } => false,
             Op::Grant { .. } | Op::Revoke { .. } | Op::Charter {} => true,
             Op::Say { .. } => false,
-            Op::Watch(_) => false,
+            Op::Watch(_) | Op::Steer(_) => false,
         }
     }
 

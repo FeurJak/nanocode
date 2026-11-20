@@ -7,6 +7,7 @@ pub mod access;
 pub mod mirror;
 pub mod schedule;
 pub mod sim;
+pub mod steer;
 pub mod tasks;
 pub mod watch;
 
@@ -117,6 +118,7 @@ pub enum Op {
         say: Say,
     },
     Watch(watch::Step),
+    Steer(steer::SteerOp),
 }
 
 impl Op {
@@ -134,6 +136,7 @@ impl Op {
             | Self::Move { task, .. } => Some(task),
             Self::Tasks(op) => Some(op.task()),
             Self::Sync { sync } => sync.task(),
+            Self::Steer(op) => Some(op.task()),
             Self::Grant { .. }
             | Self::Revoke { .. }
             | Self::Charter {}
@@ -212,6 +215,7 @@ pub enum Rejection {
     Sync(mirror::Refusal),
     Said(messages::Refusal),
     Watch(watch::Refusal),
+    Steer(steer::Refusal),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -252,6 +256,7 @@ pub enum Change {
         rank: Option<u64>,
     },
     Synced(mirror::Synced),
+    Steered(steer::Steered),
 }
 
 impl Change {
@@ -326,6 +331,8 @@ pub struct Fold {
     labelled: BTreeMap<String, BTreeMap<String, BTreeSet<TaskId>>>,
     said: messages::Said,
     marks: watch::Marks,
+    #[serde(default)]
+    steers: steer::Steers,
 }
 
 impl Default for Fold {
@@ -350,6 +357,7 @@ impl Fold {
             labelled: BTreeMap::new(),
             said: messages::Said::new(),
             marks: watch::Marks::new(),
+            steers: steer::Steers::new(),
         }
     }
 
@@ -558,6 +566,7 @@ impl Fold {
                 outcome,
             } => {
                 self.holder(task, claim)?;
+                self.unheeded(task)?;
                 self.scheduled(task, self.now_ms.max(at_ms), outcome)
                     .map(drop)
             }
@@ -578,6 +587,7 @@ impl Fold {
             Op::Sync { sync } => self.check_sync(sync),
             Op::Say { .. } => Ok(()),
             Op::Watch(step) => self.check_step(at_ms, step),
+            Op::Steer(op) => self.check_steer(op),
         }
     }
 
@@ -680,6 +690,10 @@ impl Fold {
         }
         if let Op::Watch(step) = &event.op {
             self.apply_step(seq, event, step);
+            return;
+        }
+        if let Op::Steer(op) = &event.op {
+            self.apply_steer(seq, event, op);
             return;
         }
         let Some(id) = event.op.task().cloned() else {
@@ -856,7 +870,7 @@ impl Fold {
                 self.steer(seq, event, op);
                 return;
             }
-            Op::Sync { .. } | Op::Say { .. } => return,
+            Op::Sync { .. } | Op::Say { .. } | Op::Steer(_) => return,
         };
         self.record(seq, event, &id, change);
     }
