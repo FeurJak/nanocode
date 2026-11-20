@@ -71,3 +71,8 @@ fn assignment_before_export_of_that_name_persists() {
         "declare -x foo=\"\"\n[]\n"
     );
 }
+
+#[test]
+fn nested_time_runs_the_command() {
+    assert_eq!(out("TIMEFORMAT=\ntime time echo hi\n"), "hi\n");
+}

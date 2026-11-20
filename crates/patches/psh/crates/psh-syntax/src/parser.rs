@@ -1551,6 +1551,16 @@ impl<'a> P<'a> {
                     prefix_end = self.pos;
                     prefixed = true;
                 }
+                // `time time cmd`: bash's grammar nests timespecs; the inner one is taken
+                // in (one report), so the command after it still runs.
+                Some("time") => {
+                    self.pos += 4;
+                    self.skip_blanks();
+                    if self.run() == b"-p" || self.run() == b"--" {
+                        self.pos += 2;
+                    }
+                    prefix_end = self.pos;
+                }
                 Some("!") => {
                     self.pos += 1;
                     bangs += 1;
