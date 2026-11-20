@@ -454,8 +454,14 @@ impl Python {
             if let Program::File(path) = &invocation.program {
                 let path = vm.ctx.new_str(path.as_str());
                 scope.globals.set_item("__file__", path.into(), vm)?;
+                return vm.run_string(scope, &source, &name);
             }
-            vm.run_string(scope, &source, &name)
+            // CPython 3.12 keeps no source for a program from -c or stdin, so its
+            // tracebacks name the lines without showing them: skip linecache.
+            let code = vm
+                .compile(&source, rustpython_vm::compiler::Mode::Exec, &name)
+                .map_err(|err| err.into_pyexception(vm, Some(&source)))?;
+            vm.run_code_obj(code, scope)
         });
         Ended::Exited(self.exit(vm, result.err()))
     }
