@@ -986,6 +986,9 @@ fn main() -> ExitCode {
     if args == ["--mutations"] {
         return mutations();
     }
+    if args.first().map(String::as_str) == Some("--repo-cache-disk") {
+        return repocache::disk(&args[1..]);
+    }
     log::install();
     if let Err(error) = host::install() {
         eprintln!("could not install the simulated platform host: {error}");

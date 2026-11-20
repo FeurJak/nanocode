@@ -11,6 +11,11 @@ use std::{
     time::Duration,
 };
 
+use std::os::unix::{
+    ffi::OsStrExt,
+    fs::{DirBuilderExt, MetadataExt},
+};
+
 use nanocode_bytes::Bytes;
 use nanocode_repo_cache::{
     Config, Error, Id, Kind, Object, Objects, Ref, Schedule, Store, haves, missing, open, pack,
@@ -18,7 +23,7 @@ use nanocode_repo_cache::{
     sim::{self as cache_sim, Mutation as CacheRule},
     update_ref, wants,
 };
-use nanocode_shell::{FileSystem, Machine, MemFs, Remove, Reply, Stat, Write};
+use nanocode_shell::{FileSystem, Kind as FsKind, Machine, MemFs, Remove, Reply, Stat, Write};
 
 use crate::rng::{FNV_OFFSET, Rng, fnv};
 
@@ -783,6 +788,163 @@ pub fn report(
         }
         _ => {
             println!("MUTATION {} NOT caught", mutation.name());
+            ExitCode::FAILURE
+        }
+    }
+}
+
+const DISK_READ_LIMIT: u64 = 1 << 26;
+const DISK_HEAD: &[u8] = b"master";
+
+struct Disk;
+
+fn os(path: &[u8]) -> &std::path::Path {
+    std::path::Path::new(std::ffi::OsStr::from_bytes(path))
+}
+
+fn stat_of(meta: &std::fs::Metadata) -> Stat {
+    let kind = if meta.file_type().is_symlink() {
+        FsKind::Symlink
+    } else if meta.is_dir() {
+        FsKind::Dir
+    } else {
+        FsKind::File
+    };
+    Stat {
+        kind,
+        size: meta.len(),
+        mode: meta.mode(),
+        mtime_ns: meta
+            .mtime()
+            .saturating_mul(1_000_000_000)
+            .saturating_add(meta.mtime_nsec()),
+    }
+}
+
+impl FileSystem for Disk {
+    fn stat(&self, path: &[u8], follow: bool) -> Reply<Stat> {
+        let meta = if follow {
+            std::fs::metadata(os(path))
+        } else {
+            std::fs::symlink_metadata(os(path))
+        };
+        Reply::Now(meta.map(|meta| stat_of(&meta)))
+    }
+
+    fn read(&self, path: &[u8], limit: u64) -> Reply<Bytes> {
+        Reply::Now(std::fs::read(os(path)).and_then(|data| {
+            if data.len() as u64 > limit {
+                Err(io::ErrorKind::FileTooLarge.into())
+            } else {
+                Ok(Bytes::from(data))
+            }
+        }))
+    }
+
+    fn write(&self, path: &[u8], data: &[u8], how: Write) -> Reply<()> {
+        let mut options = std::fs::OpenOptions::new();
+        match how {
+            Write::Replace => options.write(true).create(true).truncate(true),
+            Write::Append => options.append(true).create(true),
+            Write::New => options.write(true).create_new(true),
+        };
+        Reply::Now(
+            options
+                .open(os(path))
+                .and_then(|mut file| std::io::Write::write_all(&mut file, data)),
+        )
+    }
+
+    fn list(&self, path: &[u8]) -> Reply<Vec<Vec<u8>>> {
+        Reply::Now(std::fs::read_dir(os(path)).and_then(|entries| {
+            let mut names = entries
+                .map(|entry| entry.map(|entry| entry.file_name().as_bytes().to_vec()))
+                .collect::<io::Result<Vec<_>>>()?;
+            names.sort();
+            Ok(names)
+        }))
+    }
+
+    fn mkdir(&self, path: &[u8], mode: u32) -> Reply<()> {
+        Reply::Now(std::fs::DirBuilder::new().mode(mode).create(os(path)))
+    }
+
+    fn remove(&self, path: &[u8], what: Remove) -> Reply<()> {
+        Reply::Now(match what {
+            Remove::File => std::fs::remove_file(os(path)),
+            Remove::Dir => std::fs::remove_dir(os(path)),
+        })
+    }
+
+    fn rename(&self, from: &[u8], to: &[u8]) -> Reply<()> {
+        Reply::Now(std::fs::rename(os(from), os(to)))
+    }
+}
+
+pub fn disk(args: &[String]) -> ExitCode {
+    let [root, count, url] = args else {
+        eprintln!("usage: nanocode-sim --repo-cache-disk DIR WORKTREES URL");
+        return ExitCode::FAILURE;
+    };
+    let Ok(count) = count.parse::<usize>() else {
+        eprintln!("WORKTREES is a count");
+        return ExitCode::FAILURE;
+    };
+    let fs = Disk;
+    let store_dir = format!("{root}/store.git").into_bytes();
+    let config = Config {
+        head: DISK_HEAD,
+        remote: ORIGIN,
+        url: url.as_bytes(),
+        alternates: &[],
+        read_limit: DISK_READ_LIMIT,
+    };
+    let made = drive(open(&fs, &store_dir, &config)).and_then(|store| {
+        let start = drive(read_ref(&fs, &store, &store.tracking(ORIGIN, DISK_HEAD)))?;
+        Ok((store, start))
+    });
+    let (store, start) = match made {
+        Ok((store, Some(start))) => (store, start),
+        Ok((_, None)) => {
+            println!(
+                "STORE opened at {root}/store.git with no {}; fetch it and run again",
+                hex(DISK_HEAD)
+            );
+            return ExitCode::SUCCESS;
+        }
+        Err(error) => {
+            println!("FAIL open: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    for n in 0..count {
+        let name = format!("a{n}").into_bytes();
+        let dir = format!("{root}/wt/a{n}").into_bytes();
+        let branch = format!("agent/a{n}").into_bytes();
+        if let Err(error) = drive(store.worktree(&fs, &name, &dir, &branch, start)) {
+            println!("FAIL worktree a{n}: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
+    match drive(store.worktrees(&fs)) {
+        Ok(listed) => {
+            for worktree in &listed {
+                println!(
+                    "WORKTREE {} {} {}",
+                    hex(&worktree.name),
+                    hex(&worktree.dir),
+                    hex(&worktree.branch)
+                );
+            }
+            println!("WORKTREES {} at {}", listed.len(), start.hex());
+            if listed.len() >= count {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(error) => {
+            println!("FAIL list: {error}");
             ExitCode::FAILURE
         }
     }
