@@ -408,7 +408,12 @@ impl Formatter<'_> {
                 }
             }
             const HUGE: usize = i32::MAX as usize;
-            if spec.width.unwrap_or(0) >= HUGE || spec.prec.unwrap_or(0) >= HUGE {
+            // A string conversion only cuts at its precision; a number pads to it.
+            let numeric = fmt[i..]
+                .iter()
+                .find(|b| !b"hlLqjzt".contains(b))
+                .is_some_and(|b| b"diouxXeEfFgGaA".contains(b));
+            if spec.width.unwrap_or(0) >= HUGE || (numeric && spec.prec.unwrap_or(0) >= HUGE) {
                 self.huge = true;
                 self.stop = true;
                 return;
