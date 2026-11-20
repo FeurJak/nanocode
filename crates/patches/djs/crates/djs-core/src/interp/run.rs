@@ -343,6 +343,9 @@ pub(crate) struct Exec<'h> {
     /// `None` while it has not executed any (it returned a status right away).
     fuel_start: Option<i64>,
     tier1_nudge: Option<u32>,
+    /// The tier-0 loop's backward-jump budget to start from (`run_hot`), and what was
+    /// left of it when the run ran out of fuel there.
+    hot_left: Option<u32>,
 }
 
 /// `Exec::retry_len` when the current instruction is not retried.
@@ -394,6 +397,7 @@ impl<'h> Exec<'h> {
             n_res: None,
             fuel_start: None,
             tier1_nudge: None,
+            hot_left: None,
         }
     }
 

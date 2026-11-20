@@ -173,6 +173,10 @@ pub struct Vm {
     /// The last run ended nudged to tier up at once (`Exec::tier1_nudged`): the next
     /// starts so. Where tier 1 takes over changes no result or fuel.
     tier1_nudged: bool,
+    /// The backward jumps left before tier-up when the last run ran out of fuel in the
+    /// tier-0 loop (`Exec::hot_left`): the next run counts on from there, so a loop
+    /// that takes longer than a slice to reach the count still tiers up.
+    hot_left: Option<u32>,
 }
 
 impl Vm {
@@ -185,6 +189,7 @@ impl Vm {
             heap,
             opts,
             tier1_nudged: false,
+            hot_left: None,
         };
         crate::builtins::number::set_seed(&mut vm.heap, opts.random_seed);
         if opts.prelude {
@@ -485,6 +490,7 @@ impl Vm {
             heap,
             opts,
             tier1_nudged: false,
+            hot_left: None,
         })
     }
 
@@ -818,9 +824,11 @@ impl Vm {
         if self.tier1_nudged {
             ex.nudge_tier1();
         }
+        ex.set_hot_left(self.hot_left);
         let st = ex.run(fuel);
         let used = ex.fuel_used();
         self.tier1_nudged = ex.tier1_nudged();
+        self.hot_left = ex.hot_left();
         (self.after_run(st), used)
     }
 

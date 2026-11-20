@@ -1554,6 +1554,17 @@ fn local_put(w: u64) -> Option<(u32, bool)> {
 }
 
 impl Exec<'_> {
+    /// What was left of the tier-0 loop's backward-jump budget when this run ran out of
+    /// fuel there (`None`: it ended otherwise).
+    pub(crate) fn hot_left(&self) -> Option<u32> {
+        self.hot_left
+    }
+
+    /// Starts the tier-0 loop's budget at `left` (`None`: in full).
+    pub(crate) fn set_hot_left(&mut self, left: Option<u32>) {
+        self.hot_left = left;
+    }
+
     pub(crate) fn tier1_nudged(&self) -> bool {
         self.tier1_nudge.is_some()
     }

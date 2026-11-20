@@ -978,7 +978,10 @@ impl Exec<'_> {
     /// general-path instructions went by (`None`, for V8's tier-up).
     #[inline(never)]
     pub(super) fn run_hot(&mut self) -> Option<super::Status> {
-        let mut budget = self.opts.hot_backedges;
+        let mut budget = match self.hot_left.take() {
+            Some(left) => left.min(self.opts.hot_backedges),
+            None => self.opts.hot_backedges,
+        };
         let slow_call_flags = self.slow_call_flags;
         // Below it the arena tracks written pages (0: nothing): the one write here that
         // is not to the value stack, a Box's value, notes its page.
@@ -2106,6 +2109,7 @@ impl Exec<'_> {
                         _ => 0,
                     };
                     if self.fuel <= 0 {
+                        self.hot_left = Some(budget);
                         return None;
                     }
                     // A call of a `@fast` builtin (D1850) or an intrinsic (D2307), else the
@@ -2128,6 +2132,7 @@ impl Exec<'_> {
                 }
             }
             if self.fuel <= 0 {
+                self.hot_left = Some(budget);
                 return None;
             }
             // `step` may have collected, grown the stack or changed the frame.
