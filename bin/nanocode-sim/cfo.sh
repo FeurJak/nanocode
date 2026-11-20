@@ -265,6 +265,7 @@ default_table='
 1 canary_subagents_board_reopen_lost canary:100 --scenario runtime --subagents-board-mutation reopen_lost
 1 canary_subagents_board_steers_taken_mid_turn canary:40 --scenario agents --subagents-board-mutation steers_taken_mid_turn
 1 canary_subagents_board_steers_never_delivered canary:40 --scenario agents --subagents-board-mutation steers_never_delivered
+1 canary_subagents_board_refresh_once canary:40 --scenario runtime --subagents-board-mutation refresh_once
 1 canary_board_fenced_unsettled canary:40 --scenario board --mutation fenced_unsettled
 1 canary_runtime_kv_power_loss_drops_acked canary:100 --scenario runtime --store kv --mutation power_loss_drops_acked
 1 canary_runtime_kv_power_loss_drops_acceptance canary:100 --scenario runtime --store kv --mutation power_loss_drops_acceptance

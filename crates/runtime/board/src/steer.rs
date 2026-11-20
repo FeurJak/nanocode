@@ -65,7 +65,9 @@ impl Board {
         task: &TaskId,
         claim: &ClaimId,
     ) -> Result<Vec<Steer>, BoardError> {
-        self.refresh().await?;
+        // The heed before this read has landed: failing the boundary on a read that a retry
+        // would answer leaves the worker unable to finish.
+        self.catch_up().await?;
         let steers = self
             .fold
             .steers_for(task, claim)

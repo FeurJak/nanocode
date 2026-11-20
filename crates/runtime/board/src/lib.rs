@@ -18,6 +18,9 @@ use sim::{Mutation, mutated};
 
 const END: u64 = i64::MAX as u64;
 
+/// How many times [`Board::catch_up`] tries a read that fails.
+pub const READ_TRIES: usize = 3;
+
 pub struct Board {
     host: Arc<dyn LogHost>,
     scope: String,
@@ -102,6 +105,25 @@ impl Board {
     pub async fn refresh(&mut self) -> Result<(), BoardError> {
         let rows = self.host.scan(&self.scope, self.fold.next(), END).await?;
         self.fold_rows(rows)
+    }
+
+    /// Refreshes, trying a read that fails with a store error up to [`READ_TRIES`] times. A
+    /// failed refresh leaves the fold where it was, so it hides tasks, claims, steers and
+    /// phases that landed since: a caller that answers or decides from the fold calls this
+    /// and learns whether the fold is current.
+    pub async fn catch_up(&mut self) -> Result<(), BoardError> {
+        let tries = if mutated(Mutation::RefreshOnce) {
+            1
+        } else {
+            READ_TRIES
+        };
+        let mut tried = 1;
+        loop {
+            match self.refresh().await {
+                Err(BoardError::Store(_)) if tried < tries => tried += 1,
+                result => return result,
+            }
+        }
     }
 
     /// The log scope this board reads and appends.

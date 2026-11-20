@@ -415,7 +415,7 @@ impl Inner {
         let Some(board) = self.dispatcher_board().await else {
             return (Vec::new(), cursor);
         };
-        let _ = board.refresh().await;
+        let _ = board.catch_up().await;
         let fold = board.fold();
         let terminal = fold
             .entries()
@@ -433,7 +433,7 @@ impl Inner {
         let Some(board) = self.dispatcher_board().await else {
             return Vec::new();
         };
-        let _ = board.refresh().await;
+        let _ = board.catch_up().await;
         let prefix = format!("{parent}/");
         let root = root_task(parent);
         board
@@ -456,7 +456,11 @@ impl Inner {
         let Some(board) = self.dispatcher_board().await else {
             return Err("the subagent board is not open".to_owned());
         };
-        let _ = board.refresh().await;
+        // Agents' statuses overlay the runtime's own: a stale fold would report finished
+        // agents as running.
+        if let Err(error) = board.catch_up().await {
+            return Err(format!("the subagent board did not refresh: {error}"));
+        }
         let fold = board.fold();
         let mut latest = BTreeMap::<AgentId, (u64, &Phase)>::new();
         for (id, task) in fold.tasks() {
@@ -594,7 +598,7 @@ impl Inner {
         let Some(board) = self.workers.get_mut(&held.session) else {
             return;
         };
-        let _ = board.refresh().await;
+        let _ = board.catch_up().await;
         let before = board.fold().next();
         let submitted = board
             .submit_keyed(&held.key, held.write.at_ms, held.write.op.clone())
@@ -718,7 +722,13 @@ impl Inner {
         let Some(board) = self.dispatcher.as_mut() else {
             return;
         };
-        let _ = board.refresh().await;
+        // A fold that missed rows would forget the agents posted in them.
+        if let Err(error) = board.catch_up().await {
+            self.fail(format!(
+                "reopen: the subagent board did not refresh: {error}"
+            ));
+            return;
+        }
         let mut roots = Vec::new();
         let mut attempts = Vec::new();
         let mut errors = Vec::new();
@@ -794,7 +804,7 @@ impl Inner {
     async fn dispatch(&mut self, key: &str, op: Op) -> Option<Result<(Applied, bool), BoardError>> {
         let at = self.tick();
         let board = self.dispatcher_board().await?;
-        let _ = board.refresh().await;
+        let _ = board.catch_up().await;
         let before = board.fold().next();
         let result = board.submit_keyed(key, at, op).await;
         Some(result.map(|applied| {
@@ -884,7 +894,7 @@ impl Inner {
             self.unhold(held).await;
             return None;
         };
-        let _ = board.refresh().await;
+        let _ = board.catch_up().await;
         if board.fold().task(&id).is_some() {
             self.unhold(held).await;
             return None;
@@ -965,7 +975,7 @@ impl Inner {
         let Some(board) = self.worker(session).await else {
             return;
         };
-        let _ = board.refresh().await;
+        let _ = board.catch_up().await;
         let (phase, attempts) = board
             .fold()
             .task(&id)
@@ -1069,7 +1079,7 @@ impl Inner {
             .unwrap_or(root_id);
         let mut k = 0;
         if let Some(board) = self.dispatcher_board().await {
-            let _ = board.refresh().await;
+            let _ = board.catch_up().await;
             while board.fold().task(&task_of(session, k + 1)).is_some() {
                 k += 1;
             }
@@ -1180,7 +1190,7 @@ impl Inner {
         let current = self.sessions.get(session).map(|state| state.task(session));
         let replayed = match self.dispatcher_board().await {
             Some(board) => {
-                let _ = board.refresh().await;
+                let _ = board.catch_up().await;
                 let fold = board.fold();
                 fold.outcome(&event).map(|outcome| {
                     let seq = match outcome {
