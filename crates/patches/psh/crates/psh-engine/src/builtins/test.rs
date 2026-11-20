@@ -316,8 +316,15 @@ pub(crate) async fn binary(vp: &Vp, l: &[u8], op: &[u8], r: &[u8]) -> T {
         b"-ge" => int(l)? >= int(r)?,
         b"-nt" | b"-ot" | b"-ef" => {
             let host = vp.host();
-            let a = host.stat(&vp.abs_path(l), true).await.ok();
-            let b = host.stat(&vp.abs_path(r), true).await.ok();
+            // An empty name is no file (stat fails), not the current directory.
+            let a = match l.is_empty() {
+                true => None,
+                false => host.stat(&vp.abs_path(l), true).await.ok(),
+            };
+            let b = match r.is_empty() {
+                true => None,
+                false => host.stat(&vp.abs_path(r), true).await.ok(),
+            };
             match op {
                 b"-nt" => match (a, b) {
                     (Some(a), Some(b)) => a.mtime_ns > b.mtime_ns,

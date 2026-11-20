@@ -42,3 +42,11 @@ fn pattern_substitution_on_an_empty_value() {
         "x x x y []\n"
     );
 }
+
+#[test]
+fn file_comparisons_with_an_empty_name_are_false() {
+    assert_eq!(
+        out("[[ '' -ef . ]]; echo $?\n[[ . -ef '' ]]; echo $?\n[ '' -nt . ]; echo $?\n[ . -nt '' ]; echo $?\n[[ . -ef . ]]; echo $?\n"),
+        "1\n1\n1\n0\n0\n"
+    );
+}
