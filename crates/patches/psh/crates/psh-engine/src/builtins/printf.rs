@@ -290,7 +290,13 @@ impl Formatter<'_> {
         if self.next >= self.args.len() {
             i64::from(v as i32)
         } else {
-            v.clamp(i32::MIN.into(), i32::MAX.into())
+            let c = v.clamp(i32::MIN.into(), i32::MAX.into());
+            if c != v {
+                // bash warns after it moved on, naming the argument after it.
+                let next = self.args[self.next].clone();
+                self.warn_range(&next);
+            }
+            c
         }
     }
 
@@ -548,7 +554,11 @@ impl Formatter<'_> {
             if matches!(self.conv, b'b' | b'q' | b'Q' | b'T') {
                 self.out.extend_from_slice(body);
             } else if self.var {
-                self.out.pop();
+                // With nothing before it, the -1 takes the next byte written.
+                match self.out.len() > self.lost {
+                    true => drop(self.out.pop()),
+                    false => self.lost += 1,
+                }
             }
             return;
         }

@@ -166,3 +166,13 @@ fn posix_single_quote_in_double_quoted_default_word_is_plain() {
         "'a'\n'bar\n}z ''z}\n"
     );
 }
+
+#[test]
+fn printf_v_overflowed_star_width_eats_the_next_byte() {
+    let (_, o, e) = run(
+        "x=5; printf -v v '% *.*o\t%*d' '-9223372036854775809' 9 '$x' '%' 20; declare -p v\n",
+    );
+    assert_eq!(String::from_utf8_lossy(&o), "declare -- v=\"20\"\n");
+    let e = String::from_utf8_lossy(&e);
+    assert!(e.contains("warning: 9: Numerical result out of range"), "{e}");
+}
