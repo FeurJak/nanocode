@@ -2232,6 +2232,14 @@ impl<'a> P<'a> {
                     return Err(self.missing_word());
                 };
                 let (delim, quoted) = self.heredoc_delimiter(&delimiter);
+                // bash's HEREDOC_MAX: at most 16 here-documents wait for their bodies.
+                if self.pending.len() >= 16 {
+                    return Err(self.error_at(
+                        start,
+                        start,
+                        String::from("maximum here-document count exceeded"),
+                    ));
+                }
                 let id = HereDocId(self.heredocs.len() as u32);
                 let strip = op == RedirOp::HereDocStrip;
                 self.heredocs.push(HereDoc {
