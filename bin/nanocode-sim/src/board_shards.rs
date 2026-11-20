@@ -300,7 +300,7 @@ impl Shape {
     /// 156486433204944099: 31 writers at batch 1 behind a 218 ms lease). Four rounds of
     /// margin plus a step keep the lease above the queue without lengthening any lease that
     /// already was.
-    fn lease_floor_ms(&self) -> u64 {
+    const fn lease_floor_ms(&self) -> u64 {
         let rounds = self.writers.div_ceil(self.batch as u64);
         let round_ms = self.cost.rtt_us / 1_000 + 2 * self.cost.jitter_ms + 1;
         4 * rounds * round_ms + 2 * self.step_ms
@@ -834,7 +834,7 @@ async fn fencer(world: &World) {
         }
         let _ = world.refresh().await;
         let partition = if bump < first {
-            Partition(bump as u32 % world.count.get())
+            Partition(bump as u32 % world.count)
         } else {
             Partition(rng.below(u64::from(world.count.get())) as u32)
         };

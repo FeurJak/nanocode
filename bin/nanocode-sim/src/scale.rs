@@ -202,7 +202,7 @@ struct StageSum {
 }
 
 impl StageSum {
-    fn add(&mut self, other: &Self) {
+    const fn add(&mut self, other: &Self) {
         self.runs += other.runs;
         self.steps += other.steps;
         self.claims += other.claims;
