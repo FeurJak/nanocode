@@ -327,6 +327,8 @@ pub struct Manifest {
     refs: OrdMap<Digest, u64>,
     /// Each hard-link group's names.
     links: OrdMap<u64, BTreeSet<String>>,
+    /// How many entries are symbolic links.
+    symlinks: u64,
 }
 
 struct Draft<'a> {
@@ -720,6 +722,7 @@ impl Manifest {
         let mut bytes: u64 = 0;
         let mut refs = OrdMap::new();
         let mut links: OrdMap<u64, BTreeSet<String>> = OrdMap::new();
+        let mut symlinks = 0;
         for (path, entry) in &entries {
             let corrupt = |why| {
                 Err(Corrupt {
@@ -751,6 +754,7 @@ impl Manifest {
                 return corrupt("file sizes overflow");
             };
             bytes = total;
+            symlinks += u64::from(matches!(entry, Entry::Symlink { .. }));
         }
         Ok(Self {
             version,
@@ -758,7 +762,15 @@ impl Manifest {
             bytes,
             refs,
             links,
+            symlinks,
         })
+    }
+
+    /// Whether any entry is a symbolic link; without one every normalized path names
+    /// itself.
+    #[must_use]
+    pub const fn has_symlinks(&self) -> bool {
+        self.symlinks > 0
     }
 
     #[must_use]
@@ -977,6 +989,9 @@ impl Manifest {
                     .or_default()
                     .insert(path.clone());
             }
+            let symlink =
+                |entry: Option<&Entry>| u64::from(matches!(entry, Some(Entry::Symlink { .. })));
+            self.symlinks = self.symlinks - symlink(old.as_ref()) + symlink(entry.as_ref());
             if let Some(old) = &old {
                 self.bytes -= old.size();
                 if let Some(digest) = old.digest() {

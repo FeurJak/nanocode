@@ -96,6 +96,9 @@ fn plain(manifest: &Manifest, path: &str) -> bool {
     if path.is_empty() {
         return true;
     }
+    if !manifest.has_symlinks() {
+        return path.split('/').all(|part| !matches!(part, "" | "." | ".."));
+    }
     let mut end = 0;
     for part in path.split('/') {
         if matches!(part, "" | "." | "..") {
