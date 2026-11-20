@@ -56,10 +56,10 @@ metric() {
     [ $full = 1 ] && cmd="check --full"
     if [ ! -e "$logs/ran.mark" ]; then noop=true
     elif [ "$metric_rust" = 1 ]; then
-      # cargo prints its Compiling lines first; read the head of each log in bash, which is cheaper than grep
+      # cargo prints its Compiling and Checking lines first; read the head of each log in bash, which is cheaper than grep
       cached=true
       for l in "$logs"/*.log; do
-        c=0; while [ $c -lt 40 ] && read -r s; do c=$((c + 1)); [[ $s = Compiling* ]] && { cached=false; break 2; }; done <"$l"
+        c=0; while [ $c -lt 40 ] && read -r s; do c=$((c + 1)); [[ $s = Compiling* || $s = Checking* ]] && { cached=false; break 2; }; done <"$l"
       done
     fi
     g=$root/.git
