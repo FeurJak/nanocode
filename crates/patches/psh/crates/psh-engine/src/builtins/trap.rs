@@ -102,6 +102,9 @@ pub(crate) struct Trap {
 pub(crate) struct Traps {
     pub map: BTreeMap<TrapKey, Trap>,
     pub locked: u64,
+    /// Traps a function call hid (DEBUG, RETURN, ERR): they do not run in the function
+    /// but `trap` still lists them, as bash's are global.
+    pub fn_hidden: BTreeMap<TrapKey, Trap>,
 }
 
 impl Traps {
@@ -127,6 +130,23 @@ impl Traps {
             );
         }
         t
+    }
+
+    /// The trap `trap -p` shows for `key`: a hidden one counts when it ignores (bash
+    /// lists `trap '' RETURN` in a function, not `trap 'echo r' RETURN`).
+    fn listed(&self, key: TrapKey) -> Option<&Trap> {
+        self.map
+            .get(&key)
+            .or_else(|| self.fn_hidden.get(&key).filter(|t| t.action.is_empty()))
+    }
+
+    /// The keys `trap` lists, in order.
+    fn listed_keys(&self) -> Vec<TrapKey> {
+        let mut keys: Vec<TrapKey> = self.map.keys().copied().collect();
+        keys.extend(self.fn_hidden.keys().copied().filter(|k| self.listed(*k).is_some()));
+        keys.sort();
+        keys.dedup();
+        keys
     }
 
     /// The action that runs for `key` here, if any.
@@ -299,11 +319,14 @@ pub(crate) fn enter_function(vp: &mut Vp, traced: bool) -> Option<Hidden> {
     }
     let traps = Rc::make_mut(&mut vp.traps);
     let keys: Vec<TrapKey> = traps.map.keys().copied().filter(hide).collect();
-    Some(
-        keys.into_iter()
-            .filter_map(|k| traps.map.remove(&k).map(|t| (k, t)))
-            .collect(),
-    )
+    let mut hidden = Vec::new();
+    for k in keys {
+        if let Some(t) = traps.map.remove(&k) {
+            traps.fn_hidden.insert(k, t.clone());
+            hidden.push((k, t));
+        }
+    }
+    Some(hidden)
 }
 
 /// After a function body: the RETURN trap the function sees, then the hidden traps come
@@ -312,8 +335,11 @@ pub(crate) async fn leave_function(vp: &mut Vp, hidden: Option<Hidden>) -> Resul
     let r = run_trap(vp, TrapKey::Return).await;
     if let Some(hidden) = hidden {
         let traps = Rc::make_mut(&mut vp.traps);
-        for (k, t) in hidden {
-            traps.map.entry(k).or_insert(t);
+        // A trap the function set itself replaced the hidden one; a reset did not.
+        for (k, _) in hidden {
+            if let Some(t) = traps.fn_hidden.remove(&k) {
+                traps.map.entry(k).or_insert(t);
+            }
         }
     }
     r
@@ -476,7 +502,7 @@ pub(crate) async fn trap(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         for spec in rest {
             match TrapKey::parse(spec) {
                 Some(k) => {
-                    if let Some(t) = vp.traps.map.get(&k) {
+                    if let Some(t) = vp.traps.listed(k) {
                         buf.extend_from_slice(&t.action);
                         buf.push(b'\n');
                     }
@@ -493,7 +519,7 @@ pub(crate) async fn trap(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         let mut buf = Vec::new();
         let mut status = 0;
         let keys: Vec<TrapKey> = if rest.is_empty() {
-            vp.traps.map.keys().copied().collect()
+            vp.traps.listed_keys()
         } else {
             let mut keys = Vec::new();
             for spec in rest {
@@ -505,7 +531,7 @@ pub(crate) async fn trap(vp: &mut Vp, args: &[Vec<u8>]) -> R {
             keys
         };
         for k in keys {
-            if let Some(t) = vp.traps.map.get(&k) {
+            if let Some(t) = vp.traps.listed(k) {
                 buf.extend_from_slice(b"trap -- ");
                 buf.extend_from_slice(&single_quote(&t.action));
                 buf.push(b' ');
@@ -546,6 +572,7 @@ pub(crate) async fn trap(vp: &mut Vp, args: &[Vec<u8>]) -> R {
             Some(TrapKey::Signal(n)) if traps.locked & (1u64 << n) != 0 => {}
             Some(k) => match action {
                 Some(a) => {
+                    traps.fn_hidden.remove(&k);
                     traps.map.insert(
                         k,
                         Trap {

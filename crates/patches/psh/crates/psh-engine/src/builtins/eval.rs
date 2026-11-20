@@ -216,14 +216,40 @@ pub(super) async fn source(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         b"." => ".",
         _ => "source",
     }));
+    // Without functrace a sourced file runs without the DEBUG trap, which comes back
+    // after it unless the file set its own (bash).
+    let functrace = vp.opts.get(crate::options::SetOpt::Functrace)
+        || vp.opts.shopt(crate::options::Shopt::Extdebug);
+    let debug = match functrace {
+        true => None,
+        false => vp
+            .traps
+            .map
+            .get(&super::trap::TrapKey::Debug)
+            .filter(|t| t.active && !t.action.is_empty())
+            .cloned(),
+    };
+    if debug.is_some() {
+        Rc::make_mut(&mut vp.traps)
+            .map
+            .remove(&super::trap::TrapKey::Debug);
+    }
     vp.xtrace_level += 1;
     let r = Box::pin(run_text(vp, &text, 0, Origin::File)).await;
     vp.xtrace_level -= 1;
+    if let Some(t) = debug {
+        let traps = Rc::make_mut(&mut vp.traps);
+        if !traps.fn_hidden.contains_key(&super::trap::TrapKey::Debug) {
+            traps.map.entry(super::trap::TrapKey::Debug).or_insert(t);
+        }
+    }
     vp.calls.pop();
     vp.line = line;
     if let Some(a) = saved_args {
         vp.args = a;
     }
+    // After `return`, the RETURN trap's `$?` is the status before it, as in a function.
+    let returned = matches!(r, Err(Unwind::Return(_)));
     let r = match r {
         Err(Unwind::Return(st)) => Ok(st),
         r => r,
@@ -232,7 +258,9 @@ pub(super) async fn source(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     if let Ok(st) = r
         && vp.traps.live()
     {
-        vp.status = st;
+        if !returned {
+            vp.status = st;
+        }
         Box::pin(super::trap::run_trap(vp, super::trap::TrapKey::Return)).await?;
     }
     r
