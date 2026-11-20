@@ -1109,7 +1109,7 @@ pub(crate) fn value_quote(v: &[u8], utf8: bool) -> Vec<u8> {
 }
 
 /// An associative key: bare when it has no special chars, else like a value.
-fn key_quote(k: &[u8], utf8: bool) -> Vec<u8> {
+pub(crate) fn key_quote(k: &[u8], utf8: bool) -> Vec<u8> {
     let plain = !k.is_empty()
         && k.iter().all(|&b| {
             !b.is_ascii_control()

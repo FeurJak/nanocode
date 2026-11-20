@@ -2424,7 +2424,7 @@ async fn param(
                     emit_val(vp, f, val, quoted)
                 }
                 b'A' | b'a' | b'K' | b'k' => {
-                    let val = transform_var(vp, code, p, op, val, via.as_deref());
+                    let val = transform_var(vp, code, p, op, val, via.as_deref(), quoted);
                     emit_val(vp, f, val, quoted)
                 }
                 _ => bad(vp).await,
@@ -2443,8 +2443,9 @@ fn transform_var(
     op: u8,
     val: Val,
     via: Option<&[u8]>,
+    quoted: bool,
 ) -> Val {
-    use crate::builtins::declare::{declaration, value_quote};
+    use crate::builtins::declare::{declaration, key_quote, value_quote};
     let mut name = match p.name {
         ParamName::Var => vp.resolve(code.ast.text(p.name_span)).into_owned(),
         _ => String::new(),
@@ -2478,7 +2479,9 @@ fn transform_var(
             });
             match val {
                 // A declared array with no elements still shows its attributes once.
-                Val::List(items, _) if items.is_empty() && var.is_some() => Val::Str(flags.into_bytes()),
+                Val::List(items, _) if items.is_empty() && var.is_some() => {
+                    Val::Str(flags.into_bytes())
+                }
                 Val::List(items, st) => Val::List(
                     items.iter().map(|_| flags.clone().into_bytes()).collect(),
                     st,
@@ -2495,14 +2498,22 @@ fn transform_var(
                 };
             };
             if list && var.is_array() {
+                // Quoted, `"${x[@]@A}"` is `declare`, the flags and the assignment as
+                // three words; `[*]` or unquoted, one text.
                 let mut d = declaration(&name, &var, vp.utf8());
                 d.pop();
-                return Val::Str(d);
+                if !quoted || star {
+                    return Val::Str(d);
+                }
+                let words = d.splitn(3, |&b| b == b' ').map(<[u8]>::to_vec).collect();
+                return Val::List(words, false);
             }
             let flags = var.flags();
             // `${x[@]@A}` of a scalar is `${x@A}`.
             let val = match val {
-                Val::List(mut l, _) if list && l.len() == 1 => Val::Str(l.pop().unwrap_or_default()),
+                Val::List(mut l, _) if list && l.len() == 1 => {
+                    Val::Str(l.pop().unwrap_or_default())
+                }
                 v => v,
             };
             let Val::Str(s) = val else {
@@ -2540,12 +2551,20 @@ fn transform_var(
                 return Val::List(pairs.into_iter().flat_map(|(k, v)| [k, v]).collect(), star);
             }
             let assoc = var.as_ref().is_some_and(|v| v.is_assoc());
+            // An empty associative array's `@K` is no word at all.
+            if assoc && pairs.is_empty() {
+                return Val::List(Vec::new(), false);
+            }
             let mut out = Vec::new();
             for (i, (k, v)) in pairs.iter().enumerate() {
                 if i > 0 {
                     out.push(b' ');
                 }
-                out.extend_from_slice(k);
+                if assoc {
+                    out.extend_from_slice(&key_quote(k, vp.utf8()));
+                } else {
+                    out.extend_from_slice(k);
+                }
                 out.push(b' ');
                 out.extend_from_slice(&value_quote(v, vp.utf8()));
             }
