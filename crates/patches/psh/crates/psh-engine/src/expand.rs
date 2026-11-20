@@ -2434,6 +2434,52 @@ async fn param(
     }
 }
 
+/// Split `s` on the bytes of `ifs` that are outside its quoted parts (`"…"`,
+/// `'…'`, `$'…'`) and parentheses, dropping empty fields.
+fn split_outside_quotes(s: &[u8], ifs: &[u8]) -> Vec<Vec<u8>> {
+    let mut words = Vec::new();
+    let mut cur = Vec::new();
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < s.len() {
+        let b = s[i];
+        let close = match b {
+            b'"' => Some(b'"'),
+            b'\'' => Some(b'\''),
+            b'$' if s.get(i + 1) == Some(&b'\'') => Some(b'\''),
+            _ => None,
+        };
+        if let Some(c) = close {
+            let escapes = b != b'\'';
+            let st = i;
+            i += if b == b'$' { 2 } else { 1 };
+            while i < s.len() && s[i] != c {
+                i += if escapes && s[i] == b'\\' { 2 } else { 1 };
+            }
+            i = (i + 1).min(s.len());
+            cur.extend_from_slice(&s[st..i]);
+            continue;
+        }
+        match b {
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if depth == 0 && ifs.contains(&b) {
+            if !cur.is_empty() {
+                words.push(std::mem::take(&mut cur));
+            }
+        } else {
+            cur.push(b);
+        }
+        i += 1;
+    }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+    words
+}
+
 /// `${x@A}`, `@a`, `@K`, `@k`: transformations that need the variable, not only
 /// its value.
 fn transform_var(
@@ -2478,8 +2524,11 @@ fn transform_var(
                 if f == "-" { String::new() } else { f }
             });
             match val {
-                // A declared array with no elements still shows its attributes once.
-                Val::List(items, _) if items.is_empty() && var.is_some() => {
+                // An array declared but never assigned still shows its attributes once;
+                // an assigned empty one shows nothing.
+                Val::List(items, _)
+                    if items.is_empty() && var.as_ref().is_some_and(|v| v.declared_only) =>
+                {
                     Val::Str(flags.into_bytes())
                 }
                 Val::List(items, st) => Val::List(
@@ -2498,15 +2547,16 @@ fn transform_var(
                 };
             };
             if list && var.is_array() {
-                // Quoted, `"${x[@]@A}"` is `declare`, the flags and the assignment as
-                // three words; `[*]` or unquoted, one text.
+                // Quoted, `"${x[@]@A}"` is the declaration split on IFS outside its
+                // quotes (`declare`, the flags, the assignment); `[*]` or unquoted,
+                // one text.
                 let mut d = declaration(&name, &var, vp.utf8());
                 d.pop();
                 if !quoted || star {
                     return Val::Str(d);
                 }
-                let words = d.splitn(3, |&b| b == b' ').map(<[u8]>::to_vec).collect();
-                return Val::List(words, false);
+                let ifs = vp.var("IFS").map_or(b" \t\n".to_vec(), <[u8]>::to_vec);
+                return Val::List(split_outside_quotes(&d, &ifs), false);
             }
             let flags = var.flags();
             // `${x[@]@A}` of a scalar is `${x@A}`.
