@@ -465,6 +465,9 @@ struct Lexer {
     inside_token: bool,
     end_of_input_handled: bool,
     reparse_depth: u8,
+    /// Where libexpat reports a lexer error, when that is not the start of
+    /// the token being read.
+    error_position: Option<TextPosition>,
 }
 
 impl Lexer {
@@ -481,6 +484,7 @@ impl Lexer {
             inside_token: false,
             end_of_input_handled: false,
             reparse_depth: 0,
+            error_position: None,
         }
     }
 
@@ -500,12 +504,20 @@ impl Lexer {
         }
         self.reparse_depth = 0;
         while let Some(character) = self.decoder.next_character(source)? {
+            let before = self.head_position;
             if character == '\n' {
                 self.head_position.new_line();
             } else {
                 self.head_position.advance_column();
             }
-            if let Some(token) = self.dispatch(character)? {
+            // '--' inside a comment is reported at the character after it.
+            let after_double_hyphen =
+                matches!(self.state, LexerState::CommentClosing(Closing::Second));
+            let result = self.dispatch(character);
+            if result.is_err() && after_double_hyphen {
+                self.error_position = Some(before);
+            }
+            if let Some(token) = result? {
                 self.inside_token = false;
                 return Ok(token);
             }
@@ -945,6 +957,11 @@ struct Parser {
     queued_positions: VecDeque<TextPosition>,
     encountered: Encountered,
     pop_namespace: bool,
+    /// Where libexpat reports the pending error, when that is not the
+    /// position of the event being built.
+    error_position: Option<TextPosition>,
+    attribute_start: TextPosition,
+    attribute_positions: Vec<TextPosition>,
 }
 
 impl Parser {
@@ -986,6 +1003,9 @@ impl Parser {
             queued_positions: VecDeque::with_capacity(POSITION_QUEUE_CAPACITY),
             encountered: Encountered::Nothing,
             pop_namespace: false,
+            error_position: None,
+            attribute_start: TextPosition::START,
+            attribute_positions: Vec::new(),
         }
     }
 
@@ -996,6 +1016,10 @@ impl Parser {
             None => {}
         }
         if let Some(event) = self.next_event.pop_front() {
+            // libexpat reports an empty element's end at the end of its tag.
+            if matches!(event, XmlEvent::EndElement { .. }) {
+                self.position = self.lexer.head_position;
+            }
             return Ok(event);
         }
         if self.pop_namespace {
@@ -1008,10 +1032,14 @@ impl Parser {
                 Ok(token) => token,
                 Err(error) => {
                     self.next_position();
+                    if let Some(position) = self.lexer.error_position.take() {
+                        self.position = position;
+                    }
                     return self.fail(error);
                 }
             };
             if token == Token::EndOfInput {
+                self.queued_positions.clear();
                 self.next_position();
                 return self.end_of_input();
             }
@@ -1023,6 +1051,9 @@ impl Parser {
                 }
                 Some(Err(error)) => {
                     self.next_position();
+                    if let Some(position) = self.error_position.take() {
+                        self.position = position;
+                    }
                     return self.fail(error);
                 }
             }
@@ -1216,16 +1247,18 @@ impl Parser {
                 self.push_text_markup(markup)
             }
             Token::ReferenceStart if self.depth() > 0 => {
+                // libexpat reports the text before a reference, and each
+                // character reference, as chunks of their own.
                 self.state_after_reference = ParserState::OutsideTag;
-                self.proceed(ParserState::InsideReference)
+                let pending = if self.text.is_empty() {
+                    None
+                } else {
+                    Some(Ok(XmlEvent::Characters(self.take_text())))
+                };
+                self.push_position();
+                self.enter(ParserState::InsideReference, pending)
             }
-            Token::ReferenceEnd if self.depth() > 0 => {
-                if self.text.len() > MAX_DATA_LENGTH_BYTES {
-                    return Some(Err(ReaderError::LimitExceeded));
-                }
-                self.text.push(';');
-                None
-            }
+            Token::ReferenceEnd if self.depth() > 0 => self.push_text_markup(";"),
             _ => self.markup_outside_tag(token),
         }
     }
@@ -1239,6 +1272,9 @@ impl Parser {
         self.push_position();
         match token {
             Token::OpeningTagStart => {
+                if self.depth() == 0 && self.encountered >= Encountered::Element {
+                    return Some(Err(ReaderError::UnexpectedTokenOutsideRoot));
+                }
                 if let Some(event) = self.set_encountered(Encountered::Element) {
                     next_event = Some(event);
                 }
@@ -1288,10 +1324,12 @@ impl Parser {
             }
             Token::CommentStart => {
                 let next_event = self.set_encountered(Encountered::Comment);
+                self.push_position();
                 self.enter(ParserState::InsideComment, next_event)
             }
             Token::OpeningTagStart => {
                 let next_event = self.set_encountered(Encountered::Element);
+                self.push_position();
                 self.namespaces.push(Vec::new());
                 self.enter(
                     ParserState::InsideOpeningTag(OpeningTag::InsideName),
@@ -1378,7 +1416,10 @@ impl Parser {
                 ValueStep::Failed(ReaderError::InvalidCharacter)
             }
             _ if self.quote.is_some() => self.push_attribute_token(token),
-            _ => ValueStep::Failed(ReaderError::UnexpectedToken),
+            _ => {
+                self.error_position = Some(self.lexer.position);
+                ValueStep::Failed(ReaderError::UnexpectedToken)
+            }
         }
     }
 
@@ -1410,6 +1451,7 @@ impl Parser {
             return Some(Err(ReaderError::UnexpectedToken));
         };
         let mut attributes = core::mem::take(&mut self.attributes);
+        let attribute_positions = core::mem::take(&mut self.attribute_positions);
         name.namespace = match self.resolve(name.prefix.as_deref().unwrap_or(NO_PREFIX)) {
             Ok(namespace) => namespace,
             Err(error) => return Some(Err(error)),
@@ -1423,6 +1465,15 @@ impl Parser {
             }
         }
         if Self::has_duplicate_attribute(&attributes) {
+            // libexpat reports the repeated attribute's name.
+            let repeated = (0..attributes.len()).find(|&index| {
+                attributes[..index].iter().any(|(previous, _)| {
+                    previous.namespace == attributes[index].0.namespace
+                        && previous.local_name == attributes[index].0.local_name
+                })
+            });
+            self.error_position =
+                repeated.and_then(|index| attribute_positions.get(index).copied());
             return Some(Err(ReaderError::RedefinedAttribute));
         }
         if empty {
@@ -1508,6 +1559,7 @@ impl Parser {
                 Token::EmptyTagEnd => self.emit_start_element(true),
                 Token::Character(character) if is_whitespace(character) => None,
                 Token::Character(character) if is_name_start_character(character) => {
+                    self.attribute_start = self.lexer.position;
                     if self.qualified_name.len() > MAX_NAME_LENGTH_BYTES {
                         return Some(Err(ReaderError::LimitExceeded));
                     }
@@ -1589,6 +1641,7 @@ impl Parser {
                     return Some(Err(ReaderError::LimitExceeded));
                 }
                 self.attributes.push((name, value));
+                self.attribute_positions.push(self.attribute_start);
                 self.proceed(after_value)
             }
         }
@@ -1663,9 +1716,14 @@ impl Parser {
                     },
                 };
                 if let Some(character) = predefined {
+                    if self.state_after_reference == ParserState::OutsideTag {
+                        self.state = ParserState::OutsideTag;
+                        return Some(Ok(XmlEvent::Characters(character.to_string())));
+                    }
                     self.text.push(character);
                 } else if let Some(value) = self.entities.get(&name) {
                     if self.state_after_reference == ParserState::OutsideTag {
+                        self.queued_positions.pop_back();
                         if let Err(error) = self.lexer.reparse(value) {
                             return Some(Err(error));
                         }
@@ -1677,7 +1735,12 @@ impl Parser {
                 }
                 self.proceed(self.state_after_reference)
             }
-            _ => Some(Err(ReaderError::UnexpectedToken)),
+            _ => {
+                if self.state_after_reference == ParserState::OutsideTag {
+                    self.queued_positions.pop_back();
+                }
+                Some(Err(ReaderError::UnexpectedToken))
+            }
         }
     }
 

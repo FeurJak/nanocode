@@ -341,12 +341,13 @@ mod _pyexpat {
         // ErrorColumnNumber / ErrorByteIndex.
         #[pytraverse(skip)]
         error_code: PyRwLock<i64>,
+        // Character data held back while buffer_text is on, and the
+        // running total of bytes fed by each Parse() call (libexpat reports
+        // the data of each call as its own chunk).
         #[pytraverse(skip)]
-        error_line: PyRwLock<i64>,
+        text_buffer: PyRwLock<String>,
         #[pytraverse(skip)]
-        error_column: PyRwLock<i64>,
-        #[pytraverse(skip)]
-        error_byte_index: PyRwLock<i64>,
+        fed_offsets: PyRwLock<Vec<usize>>,
         buffer_size: MutableObject,
         // Incremental-parsing state: Parse()/ParseFile() may be called
         // multiple times with successive chunks of the same document (e.g.
@@ -827,6 +828,16 @@ mod _pyexpat {
         loop {
             match parser.next() {
                 Ok(XmlEvent::EndDocument) => {
+                    // Report where the document ended (libexpat's position
+                    // once parsing finished).
+                    let pos = parser.position();
+                    let byte_index = tracker.borrow_mut().byte_index_for(pos);
+                    let _ = tx.send(ParserMsg::Event(PreparedEvent {
+                        event: XmlEvent::EndDocument,
+                        line: pos.row() as i64 + 1,
+                        column: pos.column() as i64,
+                        byte_index,
+                    }));
                     let _ = tx.send(ParserMsg::Finished);
                     break;
                 }
@@ -946,9 +957,8 @@ mod _pyexpat {
                 current_column: PyRwLock::new(0),
                 current_byte_index: PyRwLock::new(-1),
                 error_code: PyRwLock::new(0),
-                error_line: PyRwLock::new(1),
-                error_column: PyRwLock::new(0),
-                error_byte_index: PyRwLock::new(-1),
+                text_buffer: PyRwLock::new(String::new()),
+                fed_offsets: PyRwLock::new(Vec::new()),
                 buffer_size: MutableObject::new(vm.ctx.new_int(8192).into()),
                 backend: PyRwLock::new(None),
                 busy: AtomicBool::new(false),
@@ -1043,20 +1053,20 @@ mod _pyexpat {
                 current_byte_index
             );
             create_readonly_int_property!(ctx, attributes, "ErrorCode", class, error_code);
-            create_readonly_int_property!(ctx, attributes, "ErrorLineNumber", class, error_line);
+            create_readonly_int_property!(ctx, attributes, "ErrorLineNumber", class, current_line);
             create_readonly_int_property!(
                 ctx,
                 attributes,
                 "ErrorColumnNumber",
                 class,
-                error_column
+                current_column
             );
             create_readonly_int_property!(
                 ctx,
                 attributes,
                 "ErrorByteIndex",
                 class,
-                error_byte_index
+                current_byte_index
             );
             create_property!(ctx, attributes, "buffer_size", class, buffer_size);
             // Additional handlers (stubs for compatibility)
@@ -1223,6 +1233,22 @@ mod _pyexpat {
         /// Dispatch a single parser event to the registered handlers. Runs on
         /// the calling thread only -- see the module doc comment.
         fn dispatch(&self, vm: &VirtualMachine, event: XmlEvent) -> PyResult<()> {
+            // Like CPython, buffered character data is delivered before any
+            // other handler that is set runs.
+            let next_handler = match &event {
+                XmlEvent::StartElement { .. } => Some(&self.start_element),
+                XmlEvent::EndElement { .. } => Some(&self.end_element),
+                XmlEvent::ProcessingInstruction { .. } => Some(&self.processing_instruction),
+                XmlEvent::Comment(_) => Some(&self.comment),
+                XmlEvent::XmlDecl { .. } => Some(&self.xml_decl),
+                XmlEvent::Doctype { .. } => Some(&self.start_doctype_decl),
+                XmlEvent::StartNamespace { .. } => Some(&self.start_namespace_decl),
+                XmlEvent::EndNamespace { .. } => Some(&self.end_namespace_decl),
+                _ => None,
+            };
+            if let Some(handler) = next_handler {
+                self.flush_for(vm, handler)?;
+            }
             match event {
                 XmlEvent::StartElement {
                     name, attributes, ..
@@ -1259,8 +1285,8 @@ mod _pyexpat {
                     invoke_handler(vm, &self.end_element, (name_str,))
                 }
                 XmlEvent::Characters(chars) => {
-                    let str = PyStr::from(chars).into_ref(&vm.ctx);
-                    invoke_handler(vm, &self.character_data, (str,))
+                    let start = *self.current_byte_index.read();
+                    self.character_run(vm, &chars, usize::try_from(start).ok())
                 }
                 XmlEvent::ProcessingInstruction { name, data } => {
                     let name = PyStr::from(name).into_ref(&vm.ctx);
@@ -1329,13 +1355,88 @@ mod _pyexpat {
                     invoke_handler(vm, &self.end_namespace_decl, (prefix,))
                 }
                 XmlEvent::CData(chars) => {
+                    self.flush_for(vm, &self.start_cdata_section)?;
                     invoke_handler(vm, &self.start_cdata_section, ())?;
-                    let str = PyStr::from(chars).into_ref(&vm.ctx);
-                    invoke_handler(vm, &self.character_data, (str,))?;
+                    self.character_run(vm, &chars, None)?;
+                    self.flush_for(vm, &self.end_cdata_section)?;
                     invoke_handler(vm, &self.end_cdata_section, ())
                 }
                 _ => Ok(()),
             }
+        }
+
+        /// Deliver a run of character data the way libexpat chunks it: each
+        /// newline on its own, and the data of each Parse() call apart
+        /// (start is the run's byte offset in the input, when known).
+        fn character_run(&self, vm: &VirtualMachine, chars: &str, start: Option<usize>) -> PyResult<()> {
+            let offsets = self.fed_offsets.read().clone();
+            let mut piece = String::new();
+            let mut at = start;
+            for character in chars.chars() {
+                if let Some(offset) = at
+                    && Some(offset) != start
+                    && offsets.binary_search(&offset).is_ok()
+                {
+                    if !piece.is_empty() {
+                        self.char_data(vm, core::mem::take(&mut piece))?;
+                    }
+                    self.flush_text(vm)?;
+                }
+                if character == '\n' {
+                    if !piece.is_empty() {
+                        self.char_data(vm, core::mem::take(&mut piece))?;
+                    }
+                    self.char_data(vm, "\n".to_owned())?;
+                } else {
+                    piece.push(character);
+                }
+                at = at.map(|offset| offset + character.len_utf8());
+            }
+            if !piece.is_empty() {
+                self.char_data(vm, piece)?;
+            }
+            Ok(())
+        }
+
+        /// CPython's character data handler: call it at once, or with
+        /// buffer_text on, gather data up to buffer_size bytes.
+        fn char_data(&self, vm: &VirtualMachine, data: String) -> PyResult<()> {
+            let buffered = self.buffer_text.read().clone().is_true(vm)?;
+            if !buffered {
+                let data = PyStr::from(data).into_ref(&vm.ctx);
+                return invoke_handler(vm, &self.character_data, (data,));
+            }
+            if vm.is_none(&self.character_data.read().clone()) {
+                return Ok(());
+            }
+            let size = usize::try_from_object(vm, self.buffer_size.read().clone()).unwrap_or(8192);
+            let overflow = self.text_buffer.read().len() + data.len() > size;
+            if overflow {
+                self.flush_text(vm)?;
+            }
+            if data.len() > size {
+                let data = PyStr::from(data).into_ref(&vm.ctx);
+                return invoke_handler(vm, &self.character_data, (data,));
+            }
+            self.text_buffer.write().push_str(&data);
+            Ok(())
+        }
+
+        fn flush_text(&self, vm: &VirtualMachine) -> PyResult<()> {
+            let data = core::mem::take(&mut *self.text_buffer.write());
+            if data.is_empty() {
+                return Ok(());
+            }
+            let data = PyStr::from(data).into_ref(&vm.ctx);
+            invoke_handler(vm, &self.character_data, (data,))
+        }
+
+        /// Flush buffered data before handler runs, if it is set.
+        fn flush_for(&self, vm: &VirtualMachine, handler: &MutableObject) -> PyResult<()> {
+            if vm.is_none(&handler.read().clone()) {
+                return Ok(());
+            }
+            self.flush_text(vm)
         }
 
         /// Tear down the current backend (if any). For `Backend::Threaded`
@@ -1363,9 +1464,9 @@ mod _pyexpat {
                 column
             };
             *self.error_code.write() = code as i64;
-            *self.error_line.write() = line;
-            *self.error_column.write() = column;
-            *self.error_byte_index.write() = byte_index;
+            *self.current_line.write() = line;
+            *self.current_column.write() = column;
+            *self.current_byte_index.write() = byte_index;
             let message = format!("{}: line {line}, column {column}", ERRORS[code].1);
             let exc = vm.new_exception_msg(
                 PyExpatError::class(&vm.ctx).to_owned(),
@@ -1502,7 +1603,14 @@ mod _pyexpat {
                     // never move to an earlier index across reparses (the
                     // bytes producing them are unchanged), so leaving
                     // `EndDocument` uncounted is always safe.
-                    Ok(XmlEvent::EndDocument) => break Ok(()),
+                    Ok(XmlEvent::EndDocument) => {
+                        let pos = parser.position();
+                        let byte_index = tracker.borrow_mut().byte_index_for(pos);
+                        *self.current_line.write() = pos.row() as i64 + 1;
+                        *self.current_column.write() = pos.column() as i64;
+                        *self.current_byte_index.write() = byte_index;
+                        break Ok(());
+                    }
                     Ok(event) => {
                         let this_index = index;
                         index += 1;
@@ -1577,7 +1685,9 @@ mod _pyexpat {
                 // corrupt state, so reject it instead, mirroring CPython.
                 return Err(vm.new_runtime_error("Parse() called before Parse() returned"));
             }
-            let result = self.feed_inner(vm, chunk, isfinal);
+            let result = self
+                .feed_inner(vm, chunk, isfinal)
+                .and_then(|()| self.flush_text(vm));
             self.busy.store(false, Ordering::SeqCst);
             result
         }
@@ -1587,6 +1697,11 @@ mod _pyexpat {
                 // The document already ended; further data is ignored, same
                 // as libexpat happily no-oping once XML_Parse has seen EOF.
                 return Ok(());
+            }
+            if !chunk.is_empty() {
+                let mut offsets = self.fed_offsets.write();
+                let total = offsets.last().copied().unwrap_or(0) + chunk.len();
+                offsets.push(total);
             }
             {
                 let mut guard = self.backend.write();
