@@ -281,12 +281,15 @@ class _Finder:
             if not base.startswith('/'):
                 base = posix.getcwd() if base in ('', '.') else posix.getcwd() + '/' + base
             # A zip archive on the path, or a package inside one, imports through zipimport.
+            # As with CPython's path hook, an archive zipimport can't open is skipped, while
+            # errors from finding the module (a SyntaxError in its source) propagate.
             if _archive(base) is not None:
+                import zipimport
                 try:
-                    import zipimport
-                    spec = zipimport.zipimporter(base).find_spec(name)
-                except Exception:
-                    spec = None
+                    importer = zipimport.zipimporter(base)
+                except ImportError:
+                    continue
+                spec = importer.find_spec(name)
                 if spec is not None:
                     _loaded.append(name)
                     return spec
