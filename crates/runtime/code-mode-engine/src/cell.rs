@@ -107,14 +107,7 @@ fn build(
     runs: PreludeRuns,
 ) -> Result<Snapshot, Unprepared> {
     let Some(source) = prelude else {
-        let builder = crate::setup::per_cell().map_err(bootstrap_error)?;
-        let shared = match Snapshot::from_static(builder.clone(), PER_CELL_IMAGE) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                nanocode_trace::warn!(%error, "the build-time Code Mode snapshot did not load; building it");
-                stored(builder)?
-            }
-        };
+        let shared = per_cell_snapshot()?;
         let limits = Limits {
             memory: CELL_MEMORY.load(Ordering::Relaxed),
             fuel: u64::MAX,
@@ -146,6 +139,22 @@ fn build(
         ))
         .source(crate::setup::bootstrap(&definitions).map_err(bootstrap_error)?);
     stored(crate::setup::node(builder))
+}
+
+fn per_cell_snapshot() -> Result<Snapshot, Unprepared> {
+    static SHARED: OnceLock<Snapshot> = OnceLock::new();
+    if let Some(snapshot) = SHARED.get() {
+        return Ok(snapshot.clone());
+    }
+    let builder = crate::setup::per_cell().map_err(bootstrap_error)?;
+    let snapshot = match Snapshot::from_static(builder.clone(), PER_CELL_IMAGE) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            nanocode_trace::warn!(%error, "the build-time Code Mode snapshot did not load; building it");
+            stored(builder)?
+        }
+    };
+    Ok(SHARED.get_or_init(|| snapshot).clone())
 }
 
 fn bootstrap_error(message: String) -> Unprepared {
