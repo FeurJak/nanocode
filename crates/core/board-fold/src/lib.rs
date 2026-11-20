@@ -334,6 +334,8 @@ pub struct Fold {
     access: access::Access,
     mirror: mirror::Mirror,
     live: BTreeSet<TaskId>,
+    #[serde(skip)]
+    posted: BTreeMap<TaskId, usize>,
     #[serde(with = "crate::pairs")]
     labelled: BTreeMap<String, BTreeMap<String, BTreeSet<TaskId>>>,
     said: messages::Said,
@@ -363,6 +365,7 @@ impl Fold {
             access: access::Access::new(),
             mirror: mirror::Mirror::new(),
             live: BTreeSet::new(),
+            posted: BTreeMap::new(),
             labelled: BTreeMap::new(),
             said: messages::Said::new(),
             marks: watch::Marks::new(),
@@ -638,6 +641,16 @@ impl Fold {
         Ok(())
     }
 
+    fn posted_order(&self) -> BTreeMap<TaskId, usize> {
+        let mut posted = BTreeMap::new();
+        for (index, entry) in self.entries.iter().enumerate() {
+            if entry.change == Change::Posted {
+                posted.entry(entry.task.clone()).or_insert(index);
+            }
+        }
+        posted
+    }
+
     pub fn snapshot(&self) -> String {
         serde_json::to_string(self).expect("a fold serializes")
     }
@@ -648,6 +661,7 @@ impl Fold {
                 seq: 0,
                 detail: format!("fold snapshot: {error}"),
             })?;
+        fold.posted = fold.posted_order();
         if mutated(Mutation::SnapshotSkipsRows) {
             fold.next += 1;
         }
@@ -692,6 +706,11 @@ impl Fold {
             self.reindex(task);
         }
         let terminal = change.terminal().then(|| change.clone());
+        if change == Change::Posted {
+            self.posted
+                .entry(task.clone())
+                .or_insert(self.entries.len());
+        }
         self.entries.push(Entry {
             seq,
             event: event.id.clone(),

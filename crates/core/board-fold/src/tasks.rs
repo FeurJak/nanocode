@@ -307,21 +307,26 @@ impl Fold {
         at_ms: u64,
     ) -> Option<&TaskId> {
         let me = Actor::parse(actor).ok()?;
+        let sets = labels
+            .iter()
+            .map(|(key, value)| self.labelled.get(key).and_then(|values| values.get(value)))
+            .collect::<Option<Vec<_>>>()?;
+        let candidates = sets
+            .into_iter()
+            .min_by_key(|ids| ids.len())
+            .unwrap_or(&self.live);
         let mut best = None;
-        for entry in &self.entries {
-            if entry.change != Change::Posted {
-                continue;
-            }
-            let Some(task) = self.tasks.get(&entry.task) else {
+        for id in candidates {
+            let (Some(task), Some(posted)) = (self.tasks.get(id), self.posted.get(id)) else {
                 continue;
             };
             if !labels
                 .iter()
                 .all(|(key, value)| task.spec.labels.get(key) == Some(value))
                 || task.spec.terms.intent.is_goal()
-                || self.claimable(&entry.task, at_ms).is_err()
-                || self.admits(&entry.task, actor).is_err()
-                || !self.access.may(&me, &entry.task.0, Can::Label)
+                || self.claimable(id, at_ms).is_err()
+                || self.admits(id, actor).is_err()
+                || !self.access.may(&me, &id.0, Can::Label)
             {
                 continue;
             }
@@ -330,9 +335,10 @@ impl Fold {
                 rank.is_none(),
                 rank,
                 task.assignee.is_none() && !mutated(Mutation::NextIgnoresAssignee),
+                *posted,
             );
             if best.as_ref().is_none_or(|(_, held)| key < *held) {
-                best = Some((&entry.task, key));
+                best = Some((id, key));
             }
         }
         best.map(|(id, _)| id)
