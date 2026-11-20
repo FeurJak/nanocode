@@ -31,7 +31,7 @@ struct State {
     effects: BTreeMap<String, u64>,
     sent: BTreeMap<String, BTreeSet<u64>>,
     acked: BTreeMap<String, BTreeMap<u64, String>>,
-    seen: BTreeMap<String, BTreeSet<u64>>,
+    seen: BTreeMap<String, BTreeSet<(u64, u64)>>,
     cancelled: BTreeMap<String, BTreeSet<u64>>,
     receipts: BTreeSet<String>,
     durable_receipts: BTreeMap<String, u64>,
@@ -143,7 +143,12 @@ impl World {
 
     pub fn see(&self, label: &str, turn: u64) {
         self.with(|state| {
-            state.seen.entry(label.to_owned()).or_default().insert(turn);
+            let epoch = state.epoch;
+            state
+                .seen
+                .entry(label.to_owned())
+                .or_default()
+                .insert((epoch, turn));
         });
     }
 
@@ -152,7 +157,7 @@ impl World {
             state
                 .seen
                 .get(label)
-                .is_some_and(|seen| seen.contains(&turn))
+                .is_some_and(|seen| seen.contains(&(state.epoch, turn)))
         })
     }
 
