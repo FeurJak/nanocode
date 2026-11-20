@@ -19,7 +19,7 @@ use std::{
 };
 
 pub(crate) const PIPE_BYTES: usize = 65_536;
-const FILE_MODE: u32 = 0o644;
+pub(crate) const FILE_MODE: u32 = 0o644;
 
 pub(crate) fn bad_descriptor() -> io::Error {
     io::Error::other("Bad file descriptor")

@@ -2,7 +2,7 @@ use crate::{
     answers::Answers,
     command::{Call, Commands, Session, Stream},
     file::{self, Device, bad_descriptor},
-    fs::{FileSystem, Kind, Remove, Reply, Stat, Write, join, normalize},
+    fs::{FileSystem, Kind, Remove, Reply, Stat, WholeFile, Write, join, normalize},
     machine::{Identity, Machine},
     shell::{Changes, Limit, Limits},
 };
@@ -150,6 +150,45 @@ impl Vfs {
             }
             Err(error) => Reply::Now(Err(error)),
         }
+    }
+
+    /// Writes the leading files of `files` in one step where the file system has one
+    /// (see [`FileSystem::write_files`]), as many as the operation and file limits let
+    /// pass: how many it wrote. The caller writes the rest one by one, meeting a limit
+    /// as a single write does.
+    pub(crate) fn write_files(self: &Rc<Self>, files: &[WholeFile<'_>], dir_mode: u32) -> Reply<usize> {
+        let left = self.limits.operations.saturating_sub(self.operations.get());
+        let files = &files[..files
+            .iter()
+            .take(usize::try_from(left).unwrap_or(usize::MAX))
+            .take_while(|file| file.data.len() as u64 <= self.limits.file)
+            .count()];
+        if files.is_empty() {
+            return Reply::Now(Ok(0));
+        }
+        let paths: Vec<(Vec<u8>, bool)> = files
+            .iter()
+            .map(|file| (file.path.to_vec(), file.mode & 0o7777 != file::FILE_MODE))
+            .collect();
+        let vfs = self.clone();
+        self.fs().write_files(files, dir_mode).map(move |result| {
+            let wrote = result?;
+            vfs.operations.set(vfs.operations.get() + wrote.files as u64);
+            let mut changes = vfs.changes.borrow_mut();
+            for dir in wrote.made {
+                changes.removed.remove(&dir);
+                changes.made.insert(dir);
+            }
+            for at in wrote.created {
+                if let Some((path, true)) = paths.get(at) {
+                    changes.modes.insert(path.clone());
+                }
+            }
+            for (path, _) in paths.into_iter().take(wrote.files) {
+                changes.wrote(path);
+            }
+            Ok(wrote.files)
+        })
     }
 
     pub(crate) fn set_mode(self: &Rc<Self>, path: &[u8], mode: u32) -> Reply<()> {
@@ -329,6 +368,28 @@ impl psh_engine::Host for Host {
             return Box::pin(std::future::ready(Ok(Rc::new(device) as Rc<dyn HostFile>)));
         }
         Box::pin(file::open(self.0.clone(), path, opts))
+    }
+
+    fn write_files(
+        &self,
+        files: &[psh_engine::host::WholeFile<'_>],
+        dir_mode: u32,
+    ) -> HostFuture<io::Result<usize>> {
+        let paths: Vec<Vec<u8>> = files
+            .iter()
+            .map(|file| normalize(file.path))
+            .take_while(|path| Device::at(path, &self.0.machine).is_none())
+            .collect();
+        let files: Vec<WholeFile<'_>> = files
+            .iter()
+            .zip(&paths)
+            .map(|(file, path)| WholeFile {
+                path,
+                data: file.data,
+                mode: file.mode,
+            })
+            .collect();
+        self.0.write_files(&files, dir_mode).boxed()
     }
 
     fn stat(&self, path: &[u8], follow: bool) -> HostFuture<io::Result<Metadata>> {

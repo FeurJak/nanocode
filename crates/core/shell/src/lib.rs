@@ -13,8 +13,8 @@ pub use answers::Answers;
 pub use command::{Call, Child, Commands, Exited, NoCommands, Session, Stream};
 pub use fetch::{Credential, Credentials, Failure, Fetch, Request, Response};
 pub use fs::{
-    FileDownload, FileSystem, FileUpload, Kind, Remove, Reply, SHA256_BYTES, Stat, Write, join,
-    normalize, parent,
+    FileDownload, FileSystem, FileUpload, Kind, Remove, Reply, SHA256_BYTES, Stat, WholeFile, Write,
+    Wrote, join, normalize, parent,
 };
 pub use machine::{Identity, Machine};
 pub use mem::MemFs;

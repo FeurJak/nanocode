@@ -676,6 +676,30 @@ impl UtilCtx<'_> {
         })
     }
 
+    /// Writes the leading files of `files` (paths against the cwd) in one step where
+    /// the host has one ([`crate::host::Host::write_files`]): how many it wrote. It
+    /// stops before one of the shell's own descriptors.
+    pub async fn write_files(
+        &self,
+        files: &[crate::host::WholeFile<'_>],
+        dir_mode: u32,
+    ) -> io::Result<usize> {
+        let paths: Vec<Vec<u8>> = files
+            .iter()
+            .take_while(|file| crate::exec::dev_fd(file.path).is_none())
+            .map(|file| self.path(file.path))
+            .collect();
+        if paths.is_empty() {
+            return Ok(0);
+        }
+        let files: Vec<crate::host::WholeFile<'_>> = files
+            .iter()
+            .zip(&paths)
+            .map(|(file, path)| crate::host::WholeFile { path, ..*file })
+            .collect();
+        self.vp.host().write_files(&files, dir_mode).await
+    }
+
     /// `stat` (`follow`) or `lstat`.
     pub async fn stat(&self, path: &[u8], follow: bool) -> io::Result<Metadata> {
         self.vp.host().stat(&self.path(path), follow).await

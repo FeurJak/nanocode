@@ -73,6 +73,27 @@ pub trait FileUpload {
     fn commit(self: Box<Self>) -> Reply<()>;
 }
 
+/// A file [`FileSystem::write_files`] leaves holding `data`.
+#[derive(Clone, Copy)]
+pub struct WholeFile<'a> {
+    pub path: &'a [u8],
+    pub data: &'a [u8],
+    /// Permission bits the file gets when this write makes it; one already there keeps
+    /// its own.
+    pub mode: u32,
+}
+
+/// What [`FileSystem::write_files`] did.
+#[derive(Default)]
+pub struct Wrote {
+    /// How many of the leading files it wrote.
+    pub files: usize,
+    /// The directories it made, as their paths.
+    pub made: Vec<Vec<u8>>,
+    /// The files it made, by their place in the list.
+    pub created: Vec<usize>,
+}
+
 pub trait FileSystem {
     fn stat(&self, path: &[u8], follow: bool) -> Reply<Stat>;
     fn read(&self, path: &[u8], limit: u64) -> Reply<Bytes>;
@@ -110,6 +131,16 @@ pub trait FileSystem {
     fn download(&self, path: &[u8], limit: u64) -> Reply<FileDownload> {
         let _ = (path, limit);
         Reply::Now(Err(io::ErrorKind::Unsupported.into()))
+    }
+
+    /// Writes the leading files of `files` in one step, each as `write` with
+    /// [`Write::Replace`] would after `mkdir` made its missing directories with
+    /// `dir_mode`, and a file it makes with the file's mode. It stops before a file the
+    /// step cannot take, such as one behind a symlink; an error means it wrote none.
+    /// A file system without such a step writes none.
+    fn write_files(&self, files: &[WholeFile<'_>], dir_mode: u32) -> Reply<Wrote> {
+        let _ = (files, dir_mode);
+        Reply::Now(Ok(Wrote::default()))
     }
 
     fn answers_now(&self) -> bool {
