@@ -6,7 +6,8 @@ use nanocode_dispatch::{Budgets, IntentState, Policy, Role};
 use nanocode_dispatcher::{BRIEF, Dispatcher, Pool};
 use nanocode_subagents::{
     AgentId, AgentStatus, AgentTask, Coordination, DEFAULT_MAX_SUBAGENTS, DISPATCH_LABEL,
-    DISPATCH_POLL_MS, DISPATCH_ROLE, HostedView, Registry, ScopedAgentUpdate, SubagentControl, SubagentPool,
+    DISPATCH_POLL_MS, DISPATCH_ROLE, HostedView, Registry, ScopedAgentUpdate, SubagentControl,
+    SubagentPool,
 };
 use nanocode_sync::mpsc::UnboundedReceiver;
 use nanocode_turnlog::{LogHost, MemoryLog};
