@@ -8,6 +8,7 @@ use std::{
 };
 
 use nanocode_build_opt::{
+    ab::{Comparison, Side, Verdict},
     graph::Graph,
     plan::{self, Rules, Scope},
     schedule::{self, Job, Shard},
@@ -27,6 +28,11 @@ const USAGE: &str = "usage:
                                       on stdin (--local runs it here); busy cores are its runnable threads outside SCHED_IDLE, so preemptible
                                       filler never blocks a take; without the ps lines, the 1-minute load average
   nc-build slots list                 each machine's busy cores, load, memory and expiry, also appended to machines.log
+  nc-build ab --a CMD --b CMD [--runs N] [--setup CMD] [--label L] [--post TASK [--proposal TEXT] [--board-dir D] [--board-as A]]
+                                      runs A and B interleaved N times (default 5) with setup before each run, prints medians, min, max,
+                                      the delta and a verdict (faster when the ranges do not overlap, else noise) as text and a JSON line,
+                                      and appends it to $NC_BUILD_AB_LOG (~/swarm/ab.jsonl); --post files the winner as a board task
+                                      through $NC_BOARD_BIN (nc-board) and posts nothing on noise
   state: $NC_BUILD_SLOTS (~/swarm/slots.json); machines: $NC_BUILD_BOXES (~/swarm/boxes.json), dev-georgios only with a fresh observation, gak-9 by name";
 
 pub fn main() -> ExitCode {
@@ -37,6 +43,7 @@ pub fn main() -> ExitCode {
         Some("affected") => affected(&args[1..]),
         Some("shard") => shard(&args[1..]),
         Some("slots") => slots_command(&args[1..]),
+        Some("ab") => ab_command(&args[1..]),
         _ => Err(USAGE.to_owned()),
     };
     let code = match result {
@@ -486,4 +493,130 @@ fn list(machines: &[Machine]) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     }
     writeln!(out, "{total}").map_err(|error| error.to_string())
+}
+
+fn shell(command: &str) -> Result<std::time::Duration, String> {
+    let started = std::time::Instant::now();
+    let output = Command::new("sh")
+        .args(["-c", command])
+        .output()
+        .map_err(|error| format!("sh -c {command}: {error}"))?;
+    let elapsed = started.elapsed();
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let tail: Vec<&str> = stderr.lines().rev().take(20).collect();
+        return Err(format!(
+            "{command}: {}\n{}",
+            output.status,
+            tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+        ));
+    }
+    Ok(elapsed)
+}
+
+fn ab_command(args: &[String]) -> Result<(), String> {
+    let a = option(args, "--a").ok_or("--a CMD")?;
+    let b = option(args, "--b").ok_or("--b CMD")?;
+    let runs: usize = option(args, "--runs")
+        .map_or(Ok(5), str::parse)
+        .map_err(|error| format!("--runs: {error}"))?;
+    if runs == 0 {
+        return Err("--runs must be at least 1".to_owned());
+    }
+    let setup = option(args, "--setup");
+    let label = option(args, "--label").unwrap_or("ab");
+    let mut samples = [Vec::with_capacity(runs), Vec::with_capacity(runs)];
+    for run in 1..=runs {
+        for (index, (side, command)) in [(Side::A, a), (Side::B, b)].into_iter().enumerate() {
+            if let Some(setup) = setup {
+                shell(setup)
+                    .map_err(|error| format!("setup before {} run {run}: {error}", side.name()))?;
+            }
+            let elapsed =
+                shell(command).map_err(|error| format!("{} run {run}: {error}", side.name()))?;
+            let ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+            let _ = writeln!(
+                io::stderr(),
+                "run {run}/{runs} {} {:.2}s",
+                side.name(),
+                elapsed.as_secs_f64()
+            );
+            samples[index].push(ms);
+        }
+    }
+    let comparison = Comparison::of(&samples[0], &samples[1]).ok_or("no samples")?;
+    let mut record = comparison.to_json();
+    record["label"] = label.into();
+    record["a_cmd"] = a.into();
+    record["b_cmd"] = b.into();
+    record["setup"] = setup.into();
+    record["at"] = (now_ms() / 1000).into();
+    record["cwd"] = std::env::current_dir()
+        .map(|dir| dir.display().to_string())
+        .unwrap_or_default()
+        .into();
+    let path = std::env::var_os("NC_BUILD_AB_LOG")
+        .map_or_else(|| home().join("swarm/ab.jsonl"), PathBuf::from);
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut file| writeln!(file, "{record}"))
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    writeln!(io::stdout().lock(), "{label}\n{}", comparison.text())
+        .map_err(|error| error.to_string())?;
+    if let Some(task) = option(args, "--post") {
+        record["posted"] = post(task, args, &comparison, a, b, label)?.into();
+    }
+    print(&record)
+}
+
+fn post(
+    task: &str,
+    args: &[String],
+    comparison: &Comparison,
+    a: &str,
+    b: &str,
+    label: &str,
+) -> Result<bool, String> {
+    let (winner, loser) = match comparison.verdict {
+        Verdict::Faster(Side::B) => (b, a),
+        Verdict::Faster(Side::A) => (a, b),
+        Verdict::Noise => {
+            let _ = writeln!(io::stderr(), "noise: no proposal posted");
+            return Ok(false);
+        }
+    };
+    let proposal = option(args, "--proposal").unwrap_or(label);
+    let (fast, slow) = match comparison.verdict {
+        Verdict::Faster(Side::A) => (&comparison.a, &comparison.b),
+        _ => (&comparison.b, &comparison.a),
+    };
+    let spec = format!(
+        "{proposal}\n\nnc-build ab measured {} interleaved runs: `{winner}` median {:.2}s (min {:.2}s, max {:.2}s) vs `{loser}` median {:.2}s (min {:.2}s, max {:.2}s), {:.1}% faster, ranges disjoint, sign test p={:.3}.",
+        fast.samples_ms.len(),
+        fast.median_ms / 1000.0,
+        fast.min_ms as f64 / 1000.0,
+        fast.max_ms as f64 / 1000.0,
+        slow.median_ms / 1000.0,
+        slow.min_ms as f64 / 1000.0,
+        slow.max_ms as f64 / 1000.0,
+        (slow.median_ms - fast.median_ms) * 100.0 / slow.median_ms.max(1.0),
+        comparison.sign_p()
+    );
+    let board = std::env::var("NC_BOARD_BIN").unwrap_or_else(|_| "nc-board".to_owned());
+    let mut command = vec!["post".to_owned(), task.to_owned()];
+    for pair in ["kind=build-opt".to_owned(), format!("ab={label}")] {
+        command.extend(["--label".to_owned(), pair]);
+    }
+    for flag in ["--board-dir", "--board-as"] {
+        if let Some(value) = option(args, flag) {
+            command.extend([flag.replace("board-", ""), value.to_owned()]);
+        }
+    }
+    command.push(spec);
+    let words: Vec<&str> = command.iter().map(String::as_str).collect();
+    let posted = run(&board, &words)?;
+    let _ = writeln!(io::stderr(), "posted {task}: {}", posted.trim());
+    Ok(true)
 }
