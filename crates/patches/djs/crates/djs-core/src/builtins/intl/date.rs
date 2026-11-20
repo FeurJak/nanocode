@@ -5,6 +5,8 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use locales::{DATE_LOCALES, DTF_PATTERNS_ENDS, DTF_PATTERNS_TEXT, DTF_ROWS, DTF_STRINGS_ENDS, DTF_STRINGS_TEXT, EN_GENERIC_ALT};
 
+mod calendar;
+mod calendar_data;
 mod locales;
 mod range;
 mod range_data;
@@ -270,6 +272,21 @@ pub(super) fn resolve(locale: &str, tags: &[String], raw: &Spec) -> Result<Spec,
     // unless an option overrode it), else the locale's own.
     let lang = locale.split('-').next();
     let keywords = tags.iter().find(|t| t.split('-').next() == lang).map(|t| super::collate::unicode_keywords(t)).unwrap_or_default();
+    // calendar: a supported option wins, else a supported -u-ca- keyword, which the locale keeps unless
+    // an option overrode it.
+    let ca_opt = raw.get("calendar");
+    if let Some(v) = ca_opt
+        && !calendar::well_formed(v)
+    {
+        return range(&format!("Invalid calendar : {v}"));
+    }
+    let ca_key = keywords.iter().find(|(k, _)| *k == "ca").and_then(|(_, v)| calendar::canonical(v));
+    let (mut cal, mut ca_kept) = match (ca_opt.and_then(calendar::canonical), ca_key) {
+        (Some(o), Some(k)) if o != k => (o, false),
+        (Some(o), k) => (o, k.is_some()),
+        (None, Some(k)) => (k, true),
+        (None, None) => (0, false),
+    };
     let nu_key = keywords.iter().find(|(k, _)| *k == "nu").map(|(_, v)| v.as_str()).filter(|v| nu_supported(v));
     let nu_opt = raw.get("numberingSystem");
     if let Some(v) = nu_opt
@@ -376,11 +393,11 @@ pub(super) fn resolve(locale: &str, tags: &[String], raw: &Spec) -> Result<Spec,
         (None, Some(c)) => 3 + pos(&CYCLES, Some(c)),
         (None, None) => 0,
     };
-    let pattern = match (dl, ds, ts) {
-        (Some(i), _, _) => locale_pattern(&DATE_LOCALES[i], &fields, fsd, cy, (ds, ts), tzn),
-        (None, None, None) => match local.and_then(|l| local_pattern(l, &fields, fsd, hour12.is_some() || hc_opt.is_some() || tzn.is_some())) {
+    let build = |fields: &[usize; 10], ds: Option<&str>, ts: Option<&str>| match (dl, ds, ts) {
+        (Some(i), _, _) => locale_pattern(&DATE_LOCALES[i], fields, fsd, cy, (ds, ts), tzn),
+        (None, None, None) => match local.and_then(|l| local_pattern(l, fields, fsd, hour12.is_some() || hc_opt.is_some() || tzn.is_some())) {
             Some(p) => p,
-            None => compose(&fields, fsd, cycle, tzn),
+            None => compose(fields, fsd, cycle, tzn),
         },
         (None, d, t) => {
             let dp = d.map(|s| PATTERNS[usize::from(STYLE_PATTERNS[pos(&STYLES, Some(s))])]);
@@ -396,9 +413,44 @@ pub(super) fn resolve(locale: &str, tags: &[String], raw: &Spec) -> Result<Spec,
             }
         }
     };
+    let cal_locale = (cal != 0).then(|| calendar::locale_for(cal, dl.map_or("en", |i| DATE_LOCALES[i].tags[0]))).flatten();
+    if cal != 0 && cal_locale.is_none() {
+        // no names or patterns for this calendar in this locale: format gregorian, as resolvedOptions says
+        (cal, ca_kept) = (0, false);
+    }
+    let pattern = match cal_locale {
+        Some(ci) => {
+            let has_t = fields[5..9].iter().any(|f| *f != 0) || fsd != 0 || ts.is_some();
+            let mut tf = fields;
+            tf[..5].fill(0);
+            let own = calendar::time(calendar::get(ci), &fields, fsd, cy, ts.map(|t| pos(&STYLES, Some(t))), tzn.is_some());
+            let time = match (has_t, own, tzn) {
+                (false, _, _) => String::new(),
+                (true, Some(t), Some(z)) => sub_zone(t, TZ_LETTERS[pos(&TZ_NAMES, Some(z))]),
+                (true, Some(t), None) => t.to_string(),
+                (true, None, _) => build(&tf, None, ts),
+            };
+            let p = calendar::compose(calendar::get(ci), &fields, ds.map(|d| pos(&STYLES, Some(d))), &time, tzn.is_some());
+            match tzn {
+                Some(z) if !has_t => sub_zone(&p, TZ_LETTERS[pos(&TZ_NAMES, Some(z))]),
+                _ => p,
+            }
+        }
+        None => build(&fields, ds, ts),
+    };
     let mut out = Spec::default();
-    out.put("locale", &format!("{locale}{}", nu_kept.unwrap_or_default()));
-    out.put("calendar", "gregory");
+    let mut kept: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+    if ca_kept {
+        kept.push(format!("ca-{}", calendar::CALENDARS[cal]));
+    }
+    if let Some(k) = nu_kept {
+        kept.push(k.trim_start_matches("-u-").to_string());
+    }
+    out.put("locale", &if kept.is_empty() { locale.to_string() } else { format!("{locale}-u-{}", kept.join("-")) });
+    out.put("calendar", calendar::CALENDARS[cal]);
+    if let Some(ci) = cal_locale {
+        out.put("@cal", &ci.to_string());
+    }
     out.put("numberingSystem", &nu);
     out.put("timeZone", &zone);
     if raw.get("timeZone").is_some_and(greenwich_alias) {
@@ -920,6 +972,9 @@ fn format_pattern(spec: &Spec, t: f64, pattern: &str, ctx: &str) -> Result<Parts
     let days = local.div_euclid(86_400_000);
     let in_day = local.rem_euclid(86_400_000);
     let (y, mo, d) = civil(days);
+    let cal = spec.get("@cal").and_then(|i| i.parse::<usize>().ok()).map(calendar::get);
+    let cal = cal.map(|l| (l, calendar::fields(usize::from(l.cal), days, (y, mo, d))));
+    let mut mark = None;
     let wd = (days + 4).rem_euclid(7) as usize;
     let (h, mi, s, frac) = (in_day / 3_600_000, in_day / 60_000 % 60, in_day / 1000 % 60, in_day % 1000);
     let dl = spec.get("@dl").and_then(|i| i.parse::<usize>().ok()).and_then(|i| DATE_LOCALES.get(i));
@@ -957,6 +1012,11 @@ fn format_pattern(spec: &Spec, t: f64, pattern: &str, ctx: &str) -> Result<Parts
             i = j + 1;
             continue;
         }
+        if let Some(m) = calendar::mark(c) {
+            mark = Some(m);
+            i += 1;
+            continue;
+        }
         if !c.is_ascii_alphabetic() {
             let mut lit = String::new();
             lit.push(c);
@@ -969,6 +1029,12 @@ fn format_pattern(spec: &Spec, t: f64, pattern: &str, ctx: &str) -> Result<Parts
             n += 1;
         }
         i += n;
+        if let Some((l, f)) = &cal
+            && let Some((ty, v)) = calendar::field(l, f, c, n, mark.take())
+        {
+            out.push(ty, &v);
+            continue;
+        }
         let era_year = if y <= 0 { 1 - y } else { y };
         if let Some(l) = dl {
             let standalone = usize::from(c == 'c' || c == 'L') * 3;
