@@ -244,6 +244,7 @@ default_table='
 1 canary_agents_shutdown_keeps_harness canary:200 --scenario agents --mutation shutdown_keeps_harness
 1 canary_agents_pool_retire_keeps_agent canary:40 --scenario agents --mutation pool_retire_keeps_agent
 1 canary_agents_pool_forgets_intent canary:40 --scenario agents --mutation pool_forgets_intent
+1 canary_agents_board_pool_forgets_intent canary:40 --scenario agents --subagents-board --mutation pool_forgets_intent
 4 agents_subagents_board_delayed pass --scenario agents --subagents-board-delayed
 4 runtime_subagents_board_delayed pass --scenario runtime --subagents-board-delayed
 1 canary_subagents_board_polled_once canary:40 --scenario agents --subagents-board-mutation polled_once
