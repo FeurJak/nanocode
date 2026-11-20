@@ -222,14 +222,24 @@ function IntlConstructor(name: Str): Obj {
   return AsObj(Get(AsObj(Get(GlobalObject(), "Intl")), name));
 }
 
-/** A new Intl object of kind for locales and the raw options. */
-function IntlConstruct(newTarget: Value, name: Str, kind: i32, locales: Value, raw: Str): Obj {
+/**
+ * The requested locales' tags (IntlLocaleTags), after checking each is a valid tag: a
+ * constructor canonicalizes them, with its RangeError, before it reads its options.
+ */
+function IntlRequested(locales: Value): Str {
+  const tags: Str = IntlLocaleTags(locales);
+  IntlLocales(tags, 0);
+  return tags;
+}
+
+/** A new Intl object of kind for the requested tags (IntlRequested) and the raw options. */
+function IntlConstruct(newTarget: Value, name: Str, kind: i32, tags: Str, raw: Str): Obj {
   const ctor: Obj = IntlConstructor(name);
   let proto: Value = Get(AsObj(newTarget === undefined ? ctor : newTarget), "prototype");
   if (!IsObject(proto)) {
     proto = Get(ctor, "prototype");
   }
-  return IntlCreate(AsObj(proto), kind, IntlResolve(kind, IntlLocaleTags(locales), raw));
+  return IntlCreate(AsObj(proto), kind, IntlResolve(kind, tags, raw));
 }
 
 /** The TypeError of an Intl constructor called without new. */
@@ -359,7 +369,8 @@ function IntlSupportedLocales(locales: Value, options: Value, kind: i32, ctor: S
 
 /** A new NumberFormat. */
 function IntlNewNumberFormat(newTarget: Value, locales: Value, options: Value): Obj {
-  return IntlConstruct(newTarget, "NumberFormat", 0, locales, IntlReadOptions(IntlNoNull(locales, options, "Intl.NumberFormat called on null or undefined"), IntlNfOptions()));
+  const tags: Str = IntlRequested(locales);
+  return IntlConstruct(newTarget, "NumberFormat", 0, tags, IntlReadOptions(IntlNoNull(locales, options, "Intl.NumberFormat called on null or undefined"), IntlNfOptions()));
 }
 
 /**
@@ -477,11 +488,12 @@ function IntlNumberFormatToStringTag(): Str {
  * or time; date, time or all).
  */
 function IntlNewDateTimeFormat(newTarget: Value, locales: Value, options: Value, required: Str, defaults: Str): Obj {
+  const tags: Str = IntlRequested(locales);
   let raw: Str = IntlReadOptions(options, IntlDtfOptions());
   raw = IntlWith(raw, "@required", required);
   raw = IntlWith(raw, "@defaults", defaults);
   raw = IntlWith(raw, "@offset", NumberToString(0 - DateTimezoneOffset(0), 10));
-  return IntlConstruct(newTarget, "DateTimeFormat", 1, locales, raw);
+  return IntlConstruct(newTarget, "DateTimeFormat", 1, tags, raw);
 }
 
 /**
@@ -591,7 +603,8 @@ function IntlDateTimeFormatToStringTag(): Str {
 
 /** A new Collator. */
 function IntlNewCollator(newTarget: Value, locales: Value, options: Value): Obj {
-  return IntlConstruct(newTarget, "Collator", 2, locales, IntlReadOptions(options, IntlCollatorOptions()));
+  const tags: Str = IntlRequested(locales);
+  return IntlConstruct(newTarget, "Collator", 2, tags, IntlReadOptions(options, IntlCollatorOptions()));
 }
 
 /**
@@ -647,7 +660,8 @@ function IntlCollatorToStringTag(): Str {
  */
 function IntlPluralRulesConstructor(locales?: Value, options?: Value): Obj {
   IntlRequireNew(new.target, "PluralRules");
-  return IntlConstruct(new.target, "PluralRules", 3, locales, IntlReadOptions(IntlNoNull(locales, options, "Intl.PluralRules called on null or undefined"), IntlPluralOptions()));
+  const tags: Str = IntlRequested(locales);
+  return IntlConstruct(new.target, "PluralRules", 3, tags, IntlReadOptions(IntlNoNull(locales, options, "Intl.PluralRules called on null or undefined"), IntlPluralOptions()));
 }
 
 /**
@@ -719,7 +733,8 @@ function IntlPluralRulesToStringTag(): Str {
  */
 function IntlListFormatConstructor(locales?: Value, options?: Value): Obj {
   IntlRequireNew(new.target, "ListFormat");
-  return IntlConstruct(new.target, "ListFormat", 4, locales, IntlReadOptions(IntlNoNull(locales, options, "invalid_argument"), "localeMatcher:s,type:s,style:s"));
+  const tags: Str = IntlRequested(locales);
+  return IntlConstruct(new.target, "ListFormat", 4, tags, IntlReadOptions(IntlNoNull(locales, options, "invalid_argument"), "localeMatcher:s,type:s,style:s"));
 }
 
 /**
@@ -795,8 +810,9 @@ function IntlListFormatToStringTag(): Str {
  */
 function IntlRelativeTimeFormatConstructor(locales?: Value, options?: Value): Obj {
   IntlRequireNew(new.target, "RelativeTimeFormat");
+  const tags: Str = IntlRequested(locales);
   const raw: Str = IntlReadOptions(IntlNoNull(locales, options, "Intl.RelativeTimeFormat called on null or undefined"), "localeMatcher:s,numberingSystem:s,style:s,numeric:s");
-  return IntlConstruct(new.target, "RelativeTimeFormat", 5, locales, raw);
+  return IntlConstruct(new.target, "RelativeTimeFormat", 5, tags, raw);
 }
 
 /**
@@ -1105,10 +1121,11 @@ function IntlSupportedValuesOf(key?: Value): Obj {
  */
 function IntlDisplayNamesConstructor(locales?: Value, options?: Value): Obj {
   IntlRequireNew(new.target, "DisplayNames");
+  const tags: Str = IntlRequested(locales);
   if (options === undefined || options === null) {
     throw NewTypeError("invalid_argument");
   }
-  return IntlConstruct(new.target, "DisplayNames", 17, locales, IntlReadOptions(options, "localeMatcher:s,style:s,type:s,fallback:s,languageDisplay:s"));
+  return IntlConstruct(new.target, "DisplayNames", 17, tags, IntlReadOptions(options, "localeMatcher:s,style:s,type:s,fallback:s,languageDisplay:s"));
 }
 
 /**
@@ -1157,10 +1174,11 @@ function IntlDisplayNamesToStringTag(): Str {
  */
 function IntlSegmenterConstructor(locales?: Value, options?: Value): Obj {
   IntlRequireNew(new.target, "Segmenter");
+  const tags: Str = IntlRequested(locales);
   if (options === null) {
     throw NewTypeError("Cannot convert undefined or null to object");
   }
-  return IntlConstruct(new.target, "Segmenter", 18, locales, IntlReadOptions(options, "localeMatcher:s,granularity:s"));
+  return IntlConstruct(new.target, "Segmenter", 18, tags, IntlReadOptions(options, "localeMatcher:s,granularity:s"));
 }
 
 /**

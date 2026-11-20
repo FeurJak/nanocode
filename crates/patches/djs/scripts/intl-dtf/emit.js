@@ -6,7 +6,7 @@ const dir = process.argv[2];
 // Each alias formats exactly like its locale in node 22 (alias.js checks it; ar-EG and the other
 // arab-digit regions differ from ar only in their digits, which date.rs transliterates).
 const LOCS = ["de", "fr", "es", "ja", "zh", "pt-BR", "ko", "it", "ru", "nl", "pl", "tr", "ar", "hi", "id", "vi", "zh-TW", "en-GB", "en-IN", "es-MX", "fr-CA",
-  "hu", "nb", "he", "ta", "sr", "sr-Latn", "cs", "uk", "sv", "da", "ms", "ro", "bn"];
+  "hu", "nb", "he", "ta", "sr", "sr-Latn", "cs", "uk", "sv", "da", "ms", "ro", "bn", "el"];
 const ALIASES = {de: ["de", "de-DE"], fr: ["fr", "fr-FR"], es: ["es", "es-ES"], ja: ["ja", "ja-JP"], zh: ["zh", "zh-CN", "zh-Hans", "zh-Hans-CN"], "pt-BR": ["pt", "pt-BR"],
   ko: ["ko", "ko-KR"], it: ["it", "it-IT"], ru: ["ru", "ru-RU", "ru-BY", "ru-KZ"], nl: ["nl", "nl-NL"], pl: ["pl", "pl-PL"], tr: ["tr", "tr-TR"],
   ar: ["ar", "ar-001", "ar-AE", "ar-EG", "ar-BH", "ar-DJ", "ar-KW", "ar-OM", "ar-QA", "ar-SD", "ar-YE"], hi: ["hi", "hi-IN"], id: ["id", "id-ID"], vi: ["vi", "vi-VN"],

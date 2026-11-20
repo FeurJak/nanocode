@@ -19,8 +19,18 @@ for (const w of W3) {
   names.months["L" + w] = Array.from({length: 12}, (_, m) => part({month: w}, U(2024, m, 5), "month"));
   names.months["M" + w] = Array.from({length: 12}, (_, m) => part({month: w, day: "numeric"}, U(2024, m, 5), "month"));
   if (names.months["M" + w].every(v => /^\d+$/.test(undig(v)))) names.months["M" + w] = names.months["L" + w];
+  // el: the month alone is genitive like the format form; its standalone forms (nominative, accented abbreviations) show with a year and era
+  if (names.months["L" + w].join() === names.months["M" + w].join()) {
+    const ly = Array.from({length: 12}, (_, m) => part({month: w, year: "numeric", era: "short"}, U(2024, m, 5), "month"));
+    if (ly.every(v => !/^\d+$/.test(undig(v)))) names.months["L" + w] = ly;
+  }
   names.days["c" + w] = Array.from({length: 7}, (_, d) => part({weekday: w}, U(2024, 2, 3 + d), "weekday"));
   names.days["E" + w] = Array.from({length: 7}, (_, d) => part({weekday: w, month: "long", day: "numeric"}, U(2024, 2, 3 + d), "weekday"));
+  // fi: the format forms (essive "tiistaina") show with a day but no month; with a month the pattern uses standalone ones
+  if (names.days["E" + w].join() === names.days["c" + w].join()) {
+    const wd = Array.from({length: 7}, (_, d) => part({weekday: w, day: "numeric"}, U(2024, 2, 3 + d), "weekday"));
+    if (wd.every(v => v)) names.days["E" + w] = wd;
+  }
 }
 names.eras = W3.map(w => [part({era: w, year: "numeric"}, U(-5, 0, 1), "era"), part({era: w, year: "numeric"}, U(2024, 0, 1), "era")]);
 names.ampm = [part({hour: "numeric", hourCycle: "h12"}, U(2024, 0, 1, 4), "dayPeriod"), part({hour: "numeric", hourCycle: "h12"}, U(2024, 0, 1, 16), "dayPeriod")];

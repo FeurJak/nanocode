@@ -37,9 +37,9 @@ pub(super) struct DateLocale {
     gmt: [&'static str; 2],
 }
 
-pub(super) const LANGS: [&str; 30] = [
+pub(super) const LANGS: [&str; 31] = [
     "en", "de", "fr", "es", "it", "pt", "nl", "ja", "zh", "ko", "ru", "pl", "tr", "ar", "hi", "id", "vi", "hu", "nb", "no", "he", "ta", "sr", "cs", "uk", "sv", "da",
-    "ms", "ro", "bn",
+    "ms", "ro", "bn", "el",
 ];
 
 fn date_locale(locale: &str) -> Option<usize> {
