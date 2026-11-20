@@ -530,6 +530,12 @@ macro_rules! registry {
         run: util_fn!(sum::run),
     },
     UtilEntry {
+        names: &["cksum"],
+        mode: Mode::Always,
+        destructive: false,
+        run: util_fn!(sum::run_cksum),
+    },
+    UtilEntry {
         names: &["md5"],
         mode: Mode::Always,
         destructive: false,

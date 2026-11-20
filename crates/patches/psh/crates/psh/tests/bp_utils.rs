@@ -83,3 +83,18 @@ fn xargs_reports_a_missing_command_in_its_own_words() {
         ("xargs: nosuchcmd: No such file or directory\n127\n".into(), 0)
     );
 }
+
+#[test]
+fn cksum_prints_the_posix_crc_and_digests_like_gnu() {
+    let src = "printf 'hello\\n' > a; : > e; cksum a e; printf 'hello\\n' | cksum; cksum nope a 2>/dev/null; echo $?";
+    assert_eq!(sh(src), ("3015617425 6 a\n4294967295 0 e\n3015617425 6\n3015617425 6 a\n1\n".into(), 0));
+    let src = "printf 'hello\\n' > a; cksum -a md5 a; cksum -a sha256 --untagged a; cksum -a sha1 --base64 a; cksum -a bsd a; cksum -a sysv a";
+    assert_eq!(
+        sh(src),
+        (
+            "MD5 (a) = b1946ac92492d2347c6235b4d2611184\n5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03  a\nSHA1 (a) = 9XLTlvrpIGYocU+yzgD3LpTyJY8=\n36979     1 a\n542 1 a\n"
+                .into(),
+            0
+        )
+    );
+}

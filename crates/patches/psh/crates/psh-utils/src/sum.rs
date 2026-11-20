@@ -666,3 +666,308 @@ pub async fn run_shasum(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
     let tag = p.has(&SHASUM_SPEC, "tag");
     print_sums(ctx, algo, &names, binary, tag, false, false).await
 }
+
+pub const CKSUM_SPEC: Spec = Spec {
+    name: "cksum",
+    opts: &[
+        both('a', "algorithm").value(),
+        long("base64"),
+        both('c', "check"),
+        both('l', "length").value(),
+        long("raw"),
+        long("tag"),
+        long("untagged"),
+        both('z', "zero"),
+        long("ignore-missing"),
+        long("quiet"),
+        long("status"),
+        long("strict"),
+        both('w', "warn"),
+        long("debug"),
+    ],
+    posix_order: false,
+};
+
+/// What GNU `cksum -a` computes: the POSIX CRC (the default), the two historical sum
+/// checksums, or a digest.
+#[derive(Clone, Copy, PartialEq)]
+enum Cksum {
+    Crc,
+    Sysv,
+    Bsd,
+    Digest(Algo),
+}
+
+const CKSUM_ALGOS: &[&str] = &[
+    "bsd", "sysv", "crc", "md5", "sha1", "sha224", "sha256", "sha384", "sha512", "blake2b", "sm3",
+];
+
+/// The table of the CRC-32 POSIX specifies for cksum (polynomial 0x04C11DB7, most
+/// significant bit first).
+const CRC_TABLE: [u32; 256] = {
+    let mut t = [0u32; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut c = (i as u32) << 24;
+        let mut k = 0;
+        while k < 8 {
+            c = if c & 0x8000_0000 != 0 { (c << 1) ^ 0x04C1_1DB7 } else { c << 1 };
+            k += 1;
+        }
+        t[i] = c;
+        i += 1;
+    }
+    t
+};
+
+/// The running state of one of cksum's checksums that are not digests.
+struct Classic {
+    kind: Cksum,
+    crc: u32,
+    bsd: u32,
+    sysv: u64,
+    len: u64,
+}
+
+impl Classic {
+    fn new(kind: Cksum) -> Classic {
+        Classic { kind, crc: 0, bsd: 0, sysv: 0, len: 0 }
+    }
+
+    fn update(&mut self, data: &[u8]) {
+        self.len += data.len() as u64;
+        match self.kind {
+            Cksum::Crc => {
+                for &b in data {
+                    self.crc = (self.crc << 8) ^ CRC_TABLE[((self.crc >> 24) as u8 ^ b) as usize];
+                }
+            }
+            Cksum::Bsd => {
+                for &b in data {
+                    self.bsd = ((self.bsd >> 1) + ((self.bsd & 1) << 15) + u32::from(b)) & 0xffff;
+                }
+            }
+            _ => {
+                for &b in data {
+                    self.sysv = self.sysv.wrapping_add(u64::from(b));
+                }
+            }
+        }
+    }
+
+    /// The line's fields before the name (CRC and length, BSD's sum and 1 KiB blocks, or
+    /// System V's sum and 512-byte blocks), and the raw checksum.
+    fn finish(mut self) -> (String, Vec<u8>) {
+        match self.kind {
+            Cksum::Crc => {
+                let mut n = self.len;
+                while n > 0 {
+                    self.crc = (self.crc << 8) ^ CRC_TABLE[((self.crc >> 24) as u8 ^ n as u8) as usize];
+                    n >>= 8;
+                }
+                let crc = !self.crc;
+                (format!("{crc} {}", self.len), crc.to_be_bytes().to_vec())
+            }
+            Cksum::Bsd => (
+                format!("{:05} {:5}", self.bsd, self.len.div_ceil(1024)),
+                (self.bsd as u16).to_be_bytes().to_vec(),
+            ),
+            _ => {
+                let s = self.sysv & 0xffff_ffff;
+                let r = (s & 0xffff) + (s >> 16);
+                let ck = (r & 0xffff) + (r >> 16);
+                (format!("{ck} {}", self.len.div_ceil(512)), (ck as u16).to_be_bytes().to_vec())
+            }
+        }
+    }
+}
+
+/// The POSIX cksum CRC of a whole buffer.
+#[cfg(test)]
+fn posix_crc(data: &[u8]) -> u32 {
+    let mut c = Classic::new(Cksum::Crc);
+    c.update(data);
+    c.finish().1.iter().fold(0u32, |a, &b| (a << 8) | u32::from(b))
+}
+
+fn base64(data: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in data.chunks(3) {
+        let n = (u32::from(c[0]) << 16)
+            | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*c.get(2).unwrap_or(&0));
+        for k in 0..4 {
+            if k <= c.len() {
+                out.push(A[((n >> (18 - 6 * k)) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// GNU coreutils 9 cksum [-a ALG] [--untagged] [--tag] [--base64] [--raw] [-z] [-c] [FILE]...:
+/// CRC SIZE FILE by default (no name for standard input without operands), ALG (FILE) =
+/// HASH for a digest.
+pub async fn run_cksum(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
+    let p = match common::parse(ctx, &CKSUM_SPEC, argv).await {
+        Ok(p) => p,
+        Err(st) => return st,
+    };
+    let kind = match p.last(&CKSUM_SPEC, "algorithm") {
+        None => Cksum::Crc,
+        Some(a) => match a {
+            b"crc" => Cksum::Crc,
+            b"sysv" => Cksum::Sysv,
+            b"bsd" => Cksum::Bsd,
+            b"md5" => Cksum::Digest(Algo::Md5),
+            b"sha1" => Cksum::Digest(Algo::Sha1),
+            b"sha224" => Cksum::Digest(Algo::Sha224),
+            b"sha256" => Cksum::Digest(Algo::Sha256),
+            b"sha384" => Cksum::Digest(Algo::Sha384),
+            b"sha512" => Cksum::Digest(Algo::Sha512),
+            b"blake2b" => Cksum::Digest(Algo::Blake2b),
+            _ => {
+                let shown = String::from_utf8_lossy(a).into_owned();
+                if CKSUM_ALGOS.contains(&shown.as_str()) {
+                    ctx.error(&format!("{shown}: algorithm not supported")).await;
+                    return 1;
+                }
+                let mut msg = format!(
+                    "invalid argument \u{2018}{shown}\u{2019} for \u{2018}--algorithm\u{2019}\nValid arguments are:"
+                );
+                for name in CKSUM_ALGOS {
+                    msg.push_str(&format!("\n  - \u{2018}{name}\u{2019}"));
+                }
+                return common::usage(ctx, &msg).await;
+            }
+        },
+    };
+    if let Some(l) = p.last(&CKSUM_SPEC, "length") {
+        let full = kind == Cksum::Digest(Algo::Blake2b) && (l == b"0" || l == b"512");
+        if !full {
+            ctx.error("--length: only the full blake2b length is supported").await;
+            return 1;
+        }
+    }
+    if p.has(&CKSUM_SPEC, "check") {
+        if !matches!(kind, Cksum::Digest(_)) && p.has(&CKSUM_SPEC, "algorithm") {
+            return common::usage(ctx, "--check is not supported with --algorithm={bsd,sysv,crc}").await;
+        }
+        let algo = match kind {
+            Cksum::Digest(a) => Some(a),
+            _ => None,
+        };
+        let flags = CheckFlags::new(&p, &CKSUM_SPEC, "status");
+        let mut status = 0;
+        for name in common::operands_or_stdin(&p) {
+            status = status.max(verify(ctx, algo, &name, &flags, Dialect::Gnu).await);
+        }
+        return status;
+    }
+    // --tag and --untagged: the last one wins.
+    let untagged = p
+        .iter(&CKSUM_SPEC)
+        .filter(|(k, _)| k == "tag" || k == "untagged")
+        .last()
+        .is_some_and(|(k, _)| k == "untagged");
+    let b64 = p.has(&CKSUM_SPEC, "base64");
+    let raw = p.has(&CKSUM_SPEC, "raw");
+    let zero = p.has(&CKSUM_SPEC, "zero");
+    let named = !p.operands.is_empty();
+    let mut status = 0;
+    for name in common::operands_or_stdin(&p) {
+        let (text, bytes) = match cksum_of(ctx, kind, &name, b64).await {
+            Ok(s) => s,
+            Err(e) => {
+                file_error(ctx, &name, &e, true).await;
+                status = 1;
+                continue;
+            }
+        };
+        let mut line = Vec::new();
+        if raw {
+            line = bytes;
+        } else if let Cksum::Digest(algo) = kind {
+            let escaped = if zero { None } else { escape_name(&name) };
+            if escaped.is_some() {
+                line.push(b'\\');
+            }
+            let shown = escaped.as_deref().unwrap_or(&name);
+            if untagged {
+                line.extend_from_slice(text.as_bytes());
+                line.extend_from_slice(b"  ");
+                line.extend_from_slice(shown);
+            } else {
+                line.extend_from_slice(algo.tag().as_bytes());
+                line.extend_from_slice(b" (");
+                line.extend_from_slice(shown);
+                line.extend_from_slice(b") = ");
+                line.extend_from_slice(text.as_bytes());
+            }
+            line.push(if zero { 0 } else { b'\n' });
+        } else {
+            line.extend_from_slice(text.as_bytes());
+            if named {
+                line.push(b' ');
+                line.extend_from_slice(&name);
+            }
+            line.push(if zero { 0 } else { b'\n' });
+        }
+        if let Err(e) = ctx.write(&line).await {
+            return common::write_failed(ctx, &e).await;
+        }
+    }
+    status
+}
+
+/// One operand's checksum as cksum prints it, and its raw bytes.
+async fn cksum_of(ctx: &mut UtilCtx<'_>, kind: Cksum, name: &[u8], b64: bool) -> io::Result<(String, Vec<u8>)> {
+    if let Cksum::Digest(algo) = kind {
+        let sum = digest_of(ctx, algo, name).await?;
+        return Ok((if b64 { base64(&sum) } else { hex(&sum) }, sum));
+    }
+    let input = Input::open(ctx, name).await?;
+    let mut c = Classic::new(kind);
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = input.read(ctx, &mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        c.update(&buf[..n]);
+        ctx.check().await;
+    }
+    Ok(c.finish())
+}
+
+#[cfg(test)]
+mod cksum_tests {
+    use super::*;
+
+    #[test]
+    fn posix_crc_matches_gnu() {
+        assert_eq!(posix_crc(b"hello\n"), 3015617425);
+        assert_eq!(posix_crc(b""), 4294967295);
+        assert_eq!(posix_crc(&[b'x'; 3000]), 1370179171);
+    }
+
+    #[test]
+    fn sum_checksums_match_gnu() {
+        let mut c = Classic::new(Cksum::Bsd);
+        c.update(b"hi");
+        assert_eq!(c.finish().0, "00157     1");
+        let mut c = Classic::new(Cksum::Sysv);
+        c.update(b"hello\n");
+        assert_eq!(c.finish().0, "542 1");
+    }
+
+    #[test]
+    fn base64_pads() {
+        assert_eq!(base64(b"hi"), "aGk=");
+        assert_eq!(base64(b"abc"), "YWJj");
+        assert_eq!(base64(b"a"), "YQ==");
+    }
+}
