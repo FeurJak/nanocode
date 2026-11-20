@@ -1,5 +1,6 @@
 use super::number::{self, Num};
 use super::numdata::{LISTS, RELATIVE, RELATIVE_AUTO};
+use super::plurdata::PLURAL_RULES;
 use super::{Parts, Spec, plural_categories, range, type_err};
 use crate::interp::conv::Fault;
 use alloc::format;
@@ -161,6 +162,10 @@ pub(super) fn format(
             // (as node 22) other for ordinals.
             let cat = match y {
                 None => cat,
+                // A language with CLDR rules here takes CLDR's range of the ends' ordinal categories.
+                Some(b) if spec.get("type") == Some("ordinal") && rule_categories(lang, true).is_some() => {
+                    super::plurdata::PLURAL_RANGES_CLDR.iter().find(|r| r.0 == lang && r.1 == cat && r.2 == b).map_or("other", |r| r.3)
+                }
                 Some(_) if spec.get("type") == Some("ordinal") => "other",
                 Some(b) => {
                     let b = ["zero", "one", "two", "few", "many", "other"]
@@ -309,4 +314,60 @@ pub(super) fn format(
         _ => return type_err("unsupported Intl kind"),
     }
     Ok(out)
+}
+
+/// A value's plural category by its language's CLDR rules (plurdata.rs), for the languages that
+/// have them there. i, v and f are CLDR's operands, n the absolute value.
+pub(super) fn rule_plural(lang: &str, i: u64, v: u32, f: u64, n: f64, ordinal: bool) -> Option<&'static str> {
+    let row = PLURAL_RULES.iter().find(|r| r.0 == lang && r.1 == ordinal)?;
+    let (mut t, mut w) = (f, v);
+    while w > 0 && t % 10 == 0 {
+        t /= 10;
+        w -= 1;
+    }
+    let ops = [n.abs(), i as f64, f64::from(v), f64::from(w), f as f64, t as f64];
+    Some(row.3.iter().find(|r| rule_holds(r.1, &ops)).map_or("other", |r| r.0))
+}
+
+/// The categories resolvedOptions lists for a language with rules in plurdata.rs.
+pub(super) fn rule_categories(lang: &str, ordinal: bool) -> Option<&'static str> {
+    PLURAL_RULES.iter().find(|r| r.0 == lang && r.1 == ordinal).map(|r| r.2)
+}
+
+/// Whether a CLDR rule ("v = 0 and i % 10 = 1 or n = 0..2") holds for operands n, i, v, w, f, t
+/// (c and e, the compact exponent, are 0).
+fn rule_holds(rule: &str, ops: &[f64; 6]) -> bool {
+    rule.split(" or ").any(|and| and.split(" and ").all(|rel| rule_relation(rel, ops)))
+}
+
+fn rule_relation(rel: &str, ops: &[f64; 6]) -> bool {
+    let (lhs, rhs, eq) = match rel.split_once("!=") {
+        Some((l, r)) => (l, r, false),
+        None => match rel.split_once('=') {
+            Some((l, r)) => (l, r, true),
+            None => return false,
+        },
+    };
+    let (op, m) = match lhs.split_once('%') {
+        Some((o, m)) => (o.trim(), m.trim().parse::<f64>().ok()),
+        None => (lhs.trim(), None),
+    };
+    let mut x = match op {
+        "n" => ops[0],
+        "i" => ops[1],
+        "v" => ops[2],
+        "w" => ops[3],
+        "f" => ops[4],
+        "t" => ops[5],
+        _ => 0.0,
+    };
+    if let Some(m) = m {
+        x %= m;
+    }
+    let num = |s: &str| s.trim().parse::<f64>().unwrap_or(f64::NAN);
+    let hit = rhs.split(',').any(|r| match r.split_once("..") {
+        Some((a, b)) => x == (x as i64) as f64 && num(a) <= x && x <= num(b),
+        None => num(r) == x,
+    });
+    hit == eq
 }

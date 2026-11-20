@@ -43,6 +43,7 @@ pub(super) fn data_key(locale: &str) -> Option<&'static str> {
         "en" if has("IN") => "en-IN",
         "es" if has("MX") => "es-MX",
         "fr" if has("CA") => "fr-CA",
+        "sr" if has("Latn") => "sr-Latn",
         "zh" if has("TW") || (has("Hant") && !has("HK") && !has("MO")) => "zh-Hant",
         _ => return None,
     })
@@ -87,8 +88,39 @@ fn sign_mark(loc: &NumLocale) -> (&'static str, &'static str) {
     }
 }
 
+/// The exponent separator of a language that writes its own.
+fn exp_sep(lang: &str) -> &'static str {
+    match lang {
+        "uk" => "\u{415}",
+        "sv" => "\u{d7}10^",
+        "el" => "e",
+        _ => "E",
+    }
+}
+
+/// ta's accounting pattern groups in threes (¤#,##0.00), its others as Indian.
+static TA_ACCT: NumLocale = NumLocale { tag: "ta", dec: ".", grp: ",", min2: false, indian: false, minus: "-", cur: "\u{a4}#", neg_cur: "-\u{a4}#", acct: "(\u{a4}#)", pct: "#%", neg_pct: "-#%", nan: "NaN" };
+
+static FA_ARABEXT_SPACED: NumLocale = NumLocale {
+    tag: "fa-arabext",
+    dec: "\u{66b}",
+    grp: "\u{66c}",
+    min2: false,
+    indian: false,
+    minus: "\u{200e}\u{2212}",
+    cur: "\u{200e}\u{a4}\u{a0}#",
+    neg_cur: "-\u{200e}\u{a4}\u{a0}#",
+    acct: "\u{200e}(\u{a4}\u{a0}#)",
+    pct: "#%",
+    neg_pct: "-#%",
+    nan: "\u{646}\u{627}\u{639}\u{62f}\u{62f}",
+};
+
+/// bn's percent pattern groups in threes (#,##0%), its others as Indian.
+static BN_PERCENT: NumLocale = NumLocale { tag: "bn", dec: ".", grp: ",", min2: false, indian: false, minus: "-", cur: "#\u{a4}", neg_cur: "-#\u{a4}", acct: "(#\u{a4})", pct: "#%", neg_pct: "-#%", nan: "NaN" };
+
 fn pct_sign(loc: &NumLocale) -> &'static str {
-    if is_arab(loc) { "\u{66a}" } else { "%" }
+    if is_arab(loc) || loc.tag == "fa-arabext" { "\u{66a}" } else { "%" }
 }
 
 fn is_arab(loc: &NumLocale) -> bool {
@@ -1161,6 +1193,57 @@ fn format_full(
             }
         }
     }
+    let items = &mut f.parts.items;
+    let first_num = items.iter().position(|p| matches!(p.0, "integer" | "nan" | "infinity"));
+    let sign_at = items.iter().position(|p| matches!(p.0, "minusSign" | "plusSign" | "approximatelySign"));
+    // sw's compact currency patterns put the sign next to the number (₩ -1M)
+    let sw_cur = spec.get("locale").is_some_and(|l| l.split('-').next() == Some("sw"))
+        && spec.get("style") == Some("currency")
+        && items.iter().any(|p| p.0 == "compact")
+        // except its millions and trillions in the other plural form (-₩ 1.2M, ₩ -1M)
+        && !(items.iter().any(|p| p.0 == "compact" && matches!(p.1.as_str(), "M" | "T"))
+            && (items.iter().any(|p| p.0 == "fraction") || items.iter().filter(|p| p.0 == "integer").map(|p| p.1.as_str()).ne(["1"])));
+    if let (Some(n), Some(s)) = (first_num, sign_at)
+        && let Some(c) = items.get(s..n).and_then(|r| r.iter().rposition(|p| p.0 == "compact" || (sw_cur && p.0 == "currency")))
+    {
+        {
+            // every sign ahead of the compact prefix follows it, in order
+            let c = s + c;
+            let signs: Vec<_> = (s..c).filter(|&j| matches!(items[j].0, "minusSign" | "plusSign" | "approximatelySign")).collect();
+            let moved: Vec<_> = signs.iter().rev().map(|&j| items.remove(j)).collect();
+            let at = n - moved.len();
+            for sg in moved {
+                items.insert(at, sg);
+            }
+        }
+    }
+    // fa's compact symbol is spaced only for a compacted or negative number, or by ICU's currency
+    // spacing (a symbol ending in a letter before a digit: $MX ۰)
+    let fa_ext = spec.get("locale").is_some_and(|l| l.split('-').next() == Some("fa")) && nu == "arabext";
+    let bare = spec.get("notation") == Some("compact")
+        && spec.get("currencySign") != Some("accounting")
+        && !items.iter().any(|p| p.0 == "compact");
+    if fa_ext
+        && bare
+        && let Some(c) = items.iter().position(|p| p.0 == "currency")
+        && items.get(c + 1).is_some_and(|p| p.0 == "literal" && p.1 == "\u{a0}")
+        && !(items[c].1.chars().last().is_some_and(char::is_alphabetic) && items.get(c + 2).is_some_and(|p| p.0 == "integer"))
+    {
+        items.remove(c + 1);
+    }
+    if spec.get("locale").is_some_and(|l| l.split('-').next() == Some("he"))
+        && let Some(c) = items.iter().position(|p| p.0 == "currency" && p.1 == "CN\u{a5}")
+    {
+        {
+            if c > 0 && items[c - 1].0 == "literal" {
+                items[c - 1].1.push('\u{200e}');
+            } else {
+                items.insert(c, ("literal", "\u{200e}".to_string()));
+            }
+            let c = items.iter().position(|p| p.0 == "currency").unwrap_or(0);
+            items.insert(c + 1, ("literal", "\u{200e}".to_string()));
+        }
+    }
     // Han digits aren't decimal digits to ICU's currency spacing, so no space joins them to a code.
     // (A space the locale's own pattern has, as de's "# ¤", stays.)
     let loc = num_locale_nu(super::numsys::base_locale(spec.get("locale").unwrap_or("en-US")), nu);
@@ -1197,10 +1280,23 @@ fn format_full_latn(
         && spec.get("currencyDisplay") != Some("name")
     {
         num_locale_nu("en", nu)
+    } else if lang == "ta" && style == "currency" && spec.get("currencySign") == Some("accounting") && spec.get("currencyDisplay") != Some("name") {
+        &TA_ACCT
+    } else if lang == "bn"
+        && spec.get("notation").unwrap_or("standard") == "standard"
+        && (style == "percent" || (style == "unit" && spec.get("unit").is_some_and(|u| u == "percent" || u.starts_with("percent-per-")) && spec.get("unitDisplay") != Some("long")))
+    {
+        &BN_PERCENT
     } else {
         num_locale_nu(locale, nu)
     };
     let notation = spec.get("notation").unwrap_or("standard");
+    // fa in its own digits spaces the symbol in accounting and compact patterns (‎$ ۱)
+    let loc = if loc.tag == "fa-arabext" && style == "currency" && (notation == "compact" || spec.get("currencySign") == Some("accounting")) {
+        &FA_ARABEXT_SPACED
+    } else {
+        loc
+    };
     let grouping = spec.get("useGrouping").unwrap_or("auto");
     // ICU groups compact numbers as min2 under auto.
     let grouping = if notation == "compact" && grouping == "auto" {
@@ -1272,7 +1368,7 @@ fn format_full_latn(
                     zero = r.dec.is_zero();
                     plural = plural_exp(lang, &r, e, e);
                     digits_parts(&r, loc, grouping, &mut body);
-                    body.push("exponentSeparator", if loc.tag == "ar-arab" { "\u{623}\u{633}" } else if loc.tag == "arab" { "\u{627}\u{633}" } else if loc.tag == "arabext" { "\u{d7}\u{6f1}\u{6f0}^" } else { "E" });
+                    body.push("exponentSeparator", if loc.tag == "ar-arab" { "\u{623}\u{633}" } else if loc.tag == "arab" { "\u{627}\u{633}" } else if loc.tag == "arabext" || loc.tag == "fa-arabext" { "\u{d7}\u{6f1}\u{6f0}^" } else { exp_sep(lang) });
                     if e < 0 {
                         let (mark, minus) = sign_mark(loc);
                         if !mark.is_empty() {
@@ -1362,21 +1458,29 @@ fn format_full_latn(
             }
         };
         let mut nb = Parts::default();
-        let core = pre.trim_end();
-        if !core.is_empty() {
+        // Spaces and bidi marks (he's RLM) around the compact text are literals.
+        let lit = |c: char| c.is_whitespace() || matches!(c, '\u{200e}' | '\u{200f}' | '\u{61c}');
+        let affix = |nb: &mut Parts, s: &str| {
+            let core = s.trim_matches(lit);
+            if core.is_empty() {
+                if !s.is_empty() {
+                    nb.push("literal", s);
+                }
+                return;
+            }
+            let start = s.len() - s.trim_start_matches(lit).len();
+            let end = start + core.len();
+            if start > 0 {
+                nb.push("literal", &s[..start]);
+            }
             nb.push("compact", core);
-        }
-        if core.len() < pre.len() {
-            nb.push("literal", &pre[core.len()..]);
-        }
+            if end < s.len() {
+                nb.push("literal", &s[end..]);
+            }
+        };
+        affix(&mut nb, pre);
         nb.extend(&body);
-        let core = post.trim_start();
-        if core.len() < post.len() {
-            nb.push("literal", &post[..post.len() - core.len()]);
-        }
-        if !core.is_empty() {
-            nb.push("compact", core);
-        }
+        affix(&mut nb, post);
         body = nb;
     }
     // NaN is unsigned, but signDisplay always gives it a plus sign.
@@ -1509,7 +1613,25 @@ fn format_full_latn(
                     if out.items[i].0 == "percentSign" {
                         out.items[i].0 = "unit";
                         let spaced = i > 0 && out.items[i - 1].0 == "literal" && out.items[i - 1].1.trim().is_empty();
+                        match lang {
+                            "da" => out.items[i].1 = "pct.".to_string(),
+                            "sw" => {
+                                // sw puts its word for percent ahead of the number (asilimia elfu 1.2)
+                                out.items.remove(i);
+                                if spaced {
+                                    out.items.remove(i - 1);
+                                }
+                                out.items.insert(0, ("unit", "asilimia".to_string()));
+                                out.items.insert(1, ("literal", " ".to_string()));
+                                break;
+                            }
+                            _ => {}
+                        }
                         match gap {
+                            Some("") if spaced => {
+                                out.items.remove(i - 1);
+                                break;
+                            }
                             Some(gap) if spaced => out.items[i - 1].1 = gap.to_string(),
                             // es-MX spaces it though its percent pattern doesn't (0 %).
                             Some(gap) if !gap.is_empty() && i > 0 && out.items[i - 1].0 != "literal" => {
@@ -1711,6 +1833,18 @@ fn format_range_parts(
             .map(|(t, v)| (t, v, "shared"))
             .collect();
     }
+    // A plural form without the number (he מעלה אחת) shows the number in a range, as other's.
+    let numbered = |f: Formatted, v: &Num| {
+        if f.parts.items.iter().any(|p| matches!(p.0, "integer" | "nan" | "infinity")) {
+            f
+        } else {
+            format_full(spec, v.clone(), false, Some("other")).0
+        }
+    };
+    let (a, b) = (numbered(a, &x), numbered(b, &y));
+    // A start whose plural form leads with its unit (he one: kB‏‎+0.9) takes the end's layout.
+    let lead_unit = |f: &Formatted| f.parts.items.first().is_some_and(|p| p.0 == "unit");
+    let a = if lead_unit(&a) && !lead_unit(&b) { format_full(spec, x.clone(), false, Some("other")).0 } else { a };
     let lang_r = if RANGES.iter().any(|r| r.0 == lang) {
         lang
     } else {
@@ -1753,6 +1887,14 @@ fn format_range_parts(
         }
     };
     put(&lo.outer_pre, "shared", &mut out);
+    // the outer text's trailing bidi marks are the start's (he B‏‎-5 – 2.5)
+    if let (Some(last), Some(("literal", m))) = (out.last_mut(), l1.outer_pre.last().map(|p| (p.0, p.1.as_str())))
+        && last.0 == "literal"
+        && l1.outer_pre.len() == lo.outer_pre.len()
+        && m.chars().all(|c| matches!(c, '\u{200e}' | '\u{200f}' | '\u{61c}'))
+    {
+        last.1 = m.to_string();
+    }
     if collapse_middle {
         put(&l1.middle_pre, "shared", &mut out);
     }

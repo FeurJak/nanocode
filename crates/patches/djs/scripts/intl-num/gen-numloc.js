@@ -8,6 +8,7 @@ function pat(parts, mark) {
   for (const p of parts) {
     if (NUM.has(p.type)) { if (!inNum) out += "#"; inNum = true; continue; }
     inNum = false;
+    if (p.type === "minusSign" && mark && out.endsWith(mark)) out = out.slice(0, -mark.length);
     out += p.type === "currency" ? "\u00a4" : p.type === "minusSign" ? "-" : p.type === "percentSign" ? "%" : p.value;
   }
   return out;
@@ -19,7 +20,8 @@ for (const L of process.argv.slice(2)) {
   const p = nf({}).formatToParts(1234567.5);
   const dec = p.find((x) => x.type === "decimal").value, grp = p.find((x) => x.type === "group").value;
   const min2 = !nf({}).formatToParts(1234).some((x) => x.type === "group");
-  const indian = nf({}).format(1234567).startsWith("12" + grp);
+  // read in Latin digits: bn writes its own
+  const indian = nf({ numberingSystem: "latn" }).format(1234567).startsWith("12,");
   const m = nf({}).formatToParts(-1);
   const minus = m.slice(0, m.findIndex((x) => x.type === "integer")).map((x) => x.value).join("");
   const mark = minus.slice(0, -1);

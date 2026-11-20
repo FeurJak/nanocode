@@ -12,6 +12,7 @@ mod locdata_avail;
 mod number;
 mod numdata;
 mod numsys;
+mod plurdata;
 mod text;
 mod tzdata;
 
@@ -173,6 +174,9 @@ impl Parts {
 
 /// i, v and f are CLDR's operands, n the whole value as ICU holds it (a double).
 pub(crate) fn plural_en_like(lang: &str, i: u64, v: u32, f: u64, n: f64, ordinal: bool) -> &'static str {
+    if let Some(c) = text::rule_plural(lang, i, v, f, n, ordinal) {
+        return c;
+    }
     // n is the whole value: an integer when its visible fraction is zero.
     let n_int = f == 0;
     if ordinal {
@@ -251,6 +255,9 @@ fn plural_other_langs(lang: &str, i: u64, v: u32, f: u64) -> &'static str {
 
 /// The categories PluralRules' resolvedOptions lists, in ICU's order (sorted, other last).
 pub(crate) fn plural_categories(lang: &str, ordinal: bool) -> &'static str {
+    if let Some(c) = text::rule_categories(lang, ordinal) {
+        return c;
+    }
     if ordinal {
         return match lang {
             "en" => "few,one,two,other",
@@ -278,7 +285,10 @@ const SEGMENTER: i32 = 18;
 pub(crate) const LANGS: [&str; 11] = ["en", "de", "fr", "es", "it", "pt", "nl", "ja", "zh", "ko", "ru"];
 
 /// The languages NumberFormat, PluralRules, ListFormat and RelativeTimeFormat have data for.
-pub(crate) const NUM_LANGS: [&str; 17] = ["en", "de", "fr", "es", "it", "pt", "nl", "ja", "zh", "ko", "ru", "pl", "tr", "ar", "hi", "id", "vi"];
+pub(crate) const NUM_LANGS: [&str; 37] = [
+    "en", "de", "fr", "es", "it", "pt", "nl", "ja", "zh", "ko", "ru", "pl", "tr", "ar", "hi", "id", "vi", "hu", "nb", "no", "he", "ta", "sr", "cs", "uk", "sv",
+    "da", "ms", "ro", "bn", "el", "sw", "ur", "fil", "ca", "th", "fi",
+];
 
 fn canonical_list(tags: &str) -> Result<Vec<String>, Fault> {
     let mut out: Vec<String> = Vec::new();

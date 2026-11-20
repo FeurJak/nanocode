@@ -6,10 +6,11 @@
 // currency name patterns and symbols. Plural categories: zero one two few many other;
 // "" means the same as other.
 const LANGS = ["en", "de", "fr", "es", "it", "pt", "nl", "ja", "zh", "ko", "ru", "pl", "tr", "ar", "hi", "id", "vi",
-  "en-GB", "en-IN", "es-MX", "fr-CA", "zh-Hant"];
+  "hu", "nb", "no", "he", "ta", "sr", "cs", "uk", "sv", "da", "ms", "ro", "bn", "el", "sw", "ur", "fil", "ca", "fa", "th", "fi",
+  "en-GB", "en-IN", "es-MX", "fr-CA", "zh-Hant", "sr-Latn"];
 // Regional data: its rows are kept only where they differ from its language's (djs reads a
 // regional row first, then the language's).
-const REGIONAL = { "en-GB": "en", "en-IN": "en", "es-MX": "es", "fr-CA": "fr", "zh-Hant": "zh" };
+const REGIONAL = { "en-GB": "en", "en-IN": "en", "es-MX": "es", "fr-CA": "fr", "zh-Hant": "zh", "sr-Latn": "sr" };
 const SIMPLE = ["acre", "bit", "byte", "celsius", "centimeter", "day", "degree", "fahrenheit", "fluid-ounce",
   "foot", "gallon", "gigabit", "gigabyte", "gram", "hectare", "hour", "inch", "kilobit",
   "kilobyte", "kilogram", "kilometer", "liter", "megabit", "megabyte", "meter", "microsecond",
@@ -19,7 +20,7 @@ const SIMPLE = ["acre", "bit", "byte", "celsius", "centimeter", "day", "degree",
 const CATS = ["zero", "one", "two", "few", "many", "other"];
 const DISP = ["short", "long", "narrow"];
 const CUR = process.argv[2] ? process.argv[2].split(",") : null;
-const SAMPLES = [1, 2, 0, 3, 5, 11, 21, 22, 100, 1000000, 0.5, 1.5, 1.25, 7, 25];
+const SAMPLES = [1, 2, 0, 3, 5, 11, 21, 22, 100, 1000000, 0.5, 1.5, 1.25, 7, 25, 4, 6, 9];
 function samples(lang, opts) {
   const ro = opts ? new Intl.NumberFormat(lang, opts).resolvedOptions() : {};
   const pr = new Intl.PluralRules(lang, opts ? { minimumFractionDigits: ro.minimumFractionDigits, maximumFractionDigits: ro.maximumFractionDigits } : {}), out = {};
@@ -94,7 +95,7 @@ comps.length = 0; comps.push(...kept);
 const ranges = [], prange = [];
 for (const lang of LANGS) {
   const nf = new Intl.NumberFormat(lang);
-  const sep = nf.formatRange(1, 2).slice(1, -1), approx = nf.formatRange(5, 5).replace("5", "");
+  const sep = nf.formatRange(1, 2).slice(1, -1), approx = nf.formatRange(5, 5).replace(nf.format(5), "");
   ranges.push([lang, sep, approx]);
   if (lang in REGIONAL) continue;
   const sm = samples(lang), pr = new Intl.PluralRules(lang);
@@ -115,7 +116,9 @@ for (const lang of LANGS) for (const long of [false, true]) {
   for (let m = 3; m <= 20; m++) {
     const p2 = f.formatToParts(2 * 10 ** m);
     if (!p2.some((p) => p.type === "compact")) { compact.push([lang, long, m, 0, null, ""]); continue; }
-    const shown = Number(p2.filter((p) => p.type === "integer").map((p) => p.value).join(""));
+    // the locale's own digits (fa, bn) read as ASCII ones
+    const dg = [...Array(10).keys()].map((d) => new Intl.NumberFormat(lang).format(d));
+    const shown = Number([...p2.filter((p) => p.type === "integer").map((p) => p.value).join("")].map((c) => (dg.includes(c) ? dg.indexOf(c) : c)).join(""));
     const div = m - Math.round(Math.log10(shown / 2));
     const pats = {};
     // 1.02 to 1.23 reach pl's and ru's few and one, and ar's few and many, at magnitudes that show
