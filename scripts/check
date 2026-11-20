@@ -14,12 +14,14 @@
 # one per worktree: its .owner file names the worktree, and one owned by another worktree is refused.
 # RUSTC_WRAPPER is left as the caller has it: blank would turn the configured compiler cache off.
 # Cores: CARGO_BUILD_JOBS when set; else, where the nc-build slot ledger lists this machine, a lease of
-#   NANOCODE_CHECK_CORES (default 16) cores, waiting up to NANOCODE_CHECK_WAIT seconds (default 600)
-#   for room, run under its taskset and given back on exit; else every core this process may run on.
+#   NANOCODE_CHECK_CORES (default 16) cores, run under its taskset and given back on exit; with no room
+#   for them within NANOCODE_CHECK_WAIT seconds (default 600) it takes what is free (half, a quarter, ...
+#   down to 2 cores), else keeps waiting, and logs which; it never builds unleased on a listed machine.
+#   On a machine the ledger doesn't list: every core this process may run on.
 set -uo pipefail
 root=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 cd "$root"
-case " $* " in *" -h "* | *" --help "*) sed -n '2,18p' "$0"; exit 0 ;; esac
+case " $* " in *" -h "* | *" --help "*) sed -n '2,20p' "$0"; exit 0 ;; esac
 export SHIPPY_REMOTE_BUILD=0 CARGO_TERM_COLOR=never
 # python-capi's wasm32 libc++ needs clang 22 (as scripts/pin-rebuild.sh sets); an explicit NANOCODE_CC wins.
 if [ -z "${NANOCODE_CC:-}" ] && [ -x /usr/lib/llvm-22/bin/clang ]; then export NANOCODE_CC=/usr/lib/llvm-22/bin/clang PATH=/usr/lib/llvm-22/bin:$PATH; fi
@@ -28,17 +30,28 @@ lease=""
 give() { [ -z "$lease" ] || nc-build slots give "$lease" >/dev/null 2>&1; lease=""; }
 if [ -z "${CARGO_BUILD_JOBS:-}" ] && command -v nc-build >/dev/null 2>&1 &&
   nc-build slots list 2>/dev/null | grep -q "^$(hostname) "; then
-  out=$(nc-build slots take --cores "${NANOCODE_CHECK_CORES:-16}" --label "check ${root##*/}" \
-    --machine "$(hostname)" --wait "${NANOCODE_CHECK_WAIT:-600}" 2>&1)
-  if read -r lease cores cpus < <(printf '%s' "$out" | python3 -I -c 'import json, sys; l = json.load(sys.stdin); print(l["lease"], l["cores"], l["cpus"])' 2>/dev/null); then
-    trap give EXIT
-    trap 'give; exit 130' INT TERM
-    export CARGO_BUILD_JOBS=$cores NC_BUILD_LEASE=$lease NC_BUILD_LEASE_CORES=$cores
-    prefix=(taskset -c "$cpus")
-  else
-    lease=""
-    echo "scripts/check: no nc-build slot lease ($out); using every core" >&2
-  fi
+  want=${NANOCODE_CHECK_CORES:-16} patience=${NANOCODE_CHECK_WAIT:-600} t0=$SECONDS
+  take() { nc-build slots take --cores "$1" --label "check ${root##*/}" --machine "$(hostname)" ${2:+--wait "$2"} 2>&1; }
+  leased() { read -r lease cores cpus < <(printf '%s' "$1" | python3 -I -c 'import json, sys; l = json.load(sys.stdin); print(l["lease"], l["cores"], l["cpus"])' 2>/dev/null); }
+  trap give EXIT
+  trap 'give; exit 130' INT TERM
+  out=$(take "$want" "$patience")
+  until leased "$out"; do
+    # No room for $want within the wait: take what is free now, halving down to 2 cores, else wait again.
+    n=$((want / 2))
+    while [ "$n" -ge 2 ] && ! leased "$(take "$n")"; do n=$((n / 2)); done
+    if [ -n "$lease" ]; then
+      echo "scripts/check: no room for $want cores in $((SECONDS - t0))s; took the $cores free cores (lease $lease)" >&2
+      break
+    fi
+    echo "scripts/check: no nc-build slot lease in $((SECONDS - t0))s ($out); still waiting for $want cores, not building unleased" >&2
+    s=$SECONDS
+    out=$(take "$want" "$patience")
+    [ $((SECONDS - s)) -ge 30 ] || sleep 30  # a take that fails at once (ledger unreachable) waits too
+  done
+  [ "$cores" = "$want" ] && [ $((SECONDS - t0)) -ge 5 ] && echo "scripts/check: waited $((SECONDS - t0))s for a lease of $want cores (lease $lease)" >&2
+  export CARGO_BUILD_JOBS=$cores NC_BUILD_LEASE=$lease NC_BUILD_LEASE_CORES=$cores
+  prefix=(taskset -c "$cpus")
 fi
 # The engine builds in the worktree's own target dir, like everything the check builds.
 mkdir -p output
