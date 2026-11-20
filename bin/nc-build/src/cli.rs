@@ -37,6 +37,8 @@ const USAGE: &str = "usage:
                                       when that is set, so only an explicit --machine places elsewhere; a lease on a machine that is
                                       neither that name nor this hostname prints a warning to stderr;
                                       a label containing fill (any case) is refused: filler runs SCHED_IDLE in fill.slice and never holds a lease;
+                                      stop only jobs under your own lease: by its systemd unit or cgroup, or by a PID file you wrote; never pkill
+                                      or killall by process name, which also kills other lanes' jobs that share the name;
                                       a label starting with a standing --label-prefix reservation's prefix places inside its cpus when they have room;
                                       a take whose label and kind a lane cap covers is refused (and with --wait retried) when that lane's
                                       leased cores across all machines plus N would exceed the cap; takes placed inside a standing
@@ -354,6 +356,7 @@ fn now_ms() -> u64 {
 }
 
 const NO_ROOM: &str = "no machine has";
+const KILL_RULE: &str = "; stop only jobs under your own lease (its systemd unit or cgroup, or a PID file you wrote), never pkill or killall by process name";
 
 const OVER_CAP: &str = "over its cap:";
 
@@ -995,8 +998,8 @@ fn slots_once(args: &[String], input: &str) -> Result<String, String> {
             })?;
             log_gone(&gone);
             let (json, lease) = taken.map_err(|refusal| match (refusal, &want.only) {
-                (Refusal::NoRoom, Some(name)) => format!("{NO_ROOM} {cores} free cores on {name}"),
-                (Refusal::NoRoom, None) => format!("{NO_ROOM} {cores} free cores"),
+                (Refusal::NoRoom, Some(name)) => format!("{NO_ROOM} {cores} free cores on {name}{KILL_RULE}"),
+                (Refusal::NoRoom, None) => format!("{NO_ROOM} {cores} free cores{KILL_RULE}"),
                 (Refusal::OverCap { lane, held, cap }, _) => format!(
                     "{OVER_CAP} lane {lane} holds {held}/{cap} cores across the fleet, so --label {} cannot take {cores} more",
                     want.label
