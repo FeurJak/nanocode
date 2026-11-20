@@ -801,9 +801,32 @@ impl<'a> P<'a> {
         if let Some((_, _, _, len)) = self.peek_redirect() {
             return (start, start + len);
         }
-        let mut i = start + self.run().len();
+        // A word is named whole, its quoted blanks too (`"x y"').
+        let b = &self.b[..self.end];
+        let mut i = start;
+        while i < b.len() && !is_meta(b[i]) {
+            match b[i] {
+                b'\\' => i += 2,
+                b'\'' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'\'' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                b'"' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'"' {
+                        i += if b[i] == b'\\' { 2 } else { 1 };
+                    }
+                    i += 1;
+                }
+                _ => i += 1,
+            }
+        }
+        let i = i.min(b.len());
         if i == start {
-            i = start + 1;
+            return (start, start + 1);
         }
         (start, i)
     }

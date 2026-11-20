@@ -2,9 +2,10 @@
 //! kept and printed (`complete -p`), nothing ever completes, and `bind` warns that
 //! line editing is off.
 
+use crate::host::{OpenOptions, error_text};
 use crate::state::{R, Vp};
 
-use super::out;
+use super::{out, s};
 
 /// `-o` options in the order bash prints them.
 const OPTS: [&str; 8] = [
@@ -375,22 +376,186 @@ pub(super) async fn compopt(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     Ok(status)
 }
 
-/// `bind` that defines key bindings warns and succeeds, as in a shell without line
-/// editing; one that lists or reads bindings is not supported yet.
+/// The functions `bind -l` lists, as readline 8.2 names them.
+const FUNCTIONS: &[&str] = &[
+    "abort", "accept-line", "alias-expand-line", "arrow-key-prefix", "backward-byte",
+    "backward-char", "backward-delete-char", "backward-kill-line", "backward-kill-word",
+    "backward-word", "beginning-of-history", "beginning-of-line", "bracketed-paste-begin",
+    "call-last-kbd-macro", "capitalize-word", "character-search",
+    "character-search-backward", "clear-display", "clear-screen", "complete",
+    "complete-command", "complete-filename", "complete-hostname", "complete-into-braces",
+    "complete-username", "complete-variable", "copy-backward-word", "copy-forward-word",
+    "copy-region-as-kill", "dabbrev-expand", "delete-char", "delete-char-or-list",
+    "delete-horizontal-space", "digit-argument", "display-shell-version",
+    "do-lowercase-version", "downcase-word", "dump-functions", "dump-macros",
+    "dump-variables", "dynamic-complete-history", "edit-and-execute-command",
+    "emacs-editing-mode", "end-kbd-macro", "end-of-history", "end-of-line",
+    "exchange-point-and-mark", "fetch-history", "forward-backward-delete-char",
+    "forward-byte", "forward-char", "forward-search-history", "forward-word",
+    "glob-complete-word", "glob-expand-word", "glob-list-expansions",
+    "history-and-alias-expand-line", "history-expand-line", "history-search-backward",
+    "history-search-forward", "history-substring-search-backward",
+    "history-substring-search-forward", "insert-comment", "insert-completions",
+    "insert-last-argument", "kill-line", "kill-region", "kill-whole-line", "kill-word",
+    "magic-space", "menu-complete", "menu-complete-backward", "next-history",
+    "next-screen-line", "non-incremental-forward-search-history",
+    "non-incremental-forward-search-history-again",
+    "non-incremental-reverse-search-history",
+    "non-incremental-reverse-search-history-again", "old-menu-complete",
+    "operate-and-get-next", "overwrite-mode", "possible-command-completions",
+    "possible-completions", "possible-filename-completions",
+    "possible-hostname-completions", "possible-username-completions",
+    "possible-variable-completions", "previous-history", "previous-screen-line",
+    "print-last-kbd-macro", "quoted-insert", "redraw-current-line", "re-read-init-file",
+    "reverse-search-history", "revert-line", "self-insert", "set-mark",
+    "shell-backward-kill-word", "shell-backward-word", "shell-expand-line",
+    "shell-forward-word", "shell-kill-word", "shell-transpose-words", "skip-csi-sequence",
+    "spell-correct-word", "start-kbd-macro", "tab-insert", "tilde-expand",
+    "transpose-chars", "transpose-words", "tty-status", "undo", "universal-argument",
+    "unix-filename-rubout", "unix-line-discard", "unix-word-rubout", "upcase-word",
+    "vi-append-eol", "vi-append-mode", "vi-arg-digit", "vi-back-to-indent",
+    "vi-backward-bigword", "vi-backward-word", "vi-bword", "vi-bWord", "vi-change-case",
+    "vi-change-char", "vi-change-to", "vi-char-search", "vi-column", "vi-complete",
+    "vi-delete", "vi-delete-to", "vi-edit-and-execute-command", "vi-editing-mode",
+    "vi-end-bigword", "vi-end-word", "vi-eof-maybe", "vi-eword", "vi-eWord",
+    "vi-fetch-history", "vi-first-print", "vi-forward-bigword", "vi-forward-word",
+    "vi-fword", "vi-fWord", "vi-goto-mark", "vi-insert-beg", "vi-insertion-mode",
+    "vi-match", "vi-movement-mode", "vi-next-word", "vi-overstrike", "vi-overstrike-delete",
+    "vi-prev-word", "vi-put", "vi-redo", "vi-replace", "vi-rubout", "vi-search",
+    "vi-search-again", "vi-set-mark", "vi-subst", "vi-tilde-expand", "vi-undo",
+    "vi-unix-word-rubout", "vi-yank-arg", "vi-yank-pop", "vi-yank-to", "yank",
+    "yank-last-arg", "yank-nth-arg", "yank-pop",
+];
+
+/// Readline's variables and their values in a non-interactive bash 5.2; `*` is
+/// `convert-meta`, off in a UTF-8 locale.
+const VARIABLES: &[(&str, &str)] = &[
+    ("bind-tty-special-chars", "on"),
+    ("blink-matching-paren", "off"),
+    ("byte-oriented", "off"),
+    ("colored-completion-prefix", "off"),
+    ("colored-stats", "off"),
+    ("completion-ignore-case", "off"),
+    ("completion-map-case", "off"),
+    ("convert-meta", "*"),
+    ("disable-completion", "off"),
+    ("echo-control-characters", "on"),
+    ("enable-active-region", "off"),
+    ("enable-bracketed-paste", "off"),
+    ("enable-keypad", "off"),
+    ("enable-meta-key", "on"),
+    ("expand-tilde", "off"),
+    ("history-preserve-point", "off"),
+    ("horizontal-scroll-mode", "off"),
+    ("input-meta", "on"),
+    ("mark-directories", "on"),
+    ("mark-modified-lines", "off"),
+    ("mark-symlinked-directories", "off"),
+    ("match-hidden-files", "on"),
+    ("menu-complete-display-prefix", "off"),
+    ("meta-flag", "on"),
+    ("output-meta", "on"),
+    ("page-completions", "on"),
+    ("prefer-visible-bell", "on"),
+    ("print-completions-horizontally", "off"),
+    ("revert-all-at-newline", "off"),
+    ("show-all-if-ambiguous", "off"),
+    ("show-all-if-unmodified", "off"),
+    ("show-mode-in-prompt", "off"),
+    ("skip-completed-text", "off"),
+    ("visible-stats", "off"),
+    ("bell-style", "audible"),
+    ("comment-begin", "#"),
+    ("completion-display-width", "-1"),
+    ("completion-prefix-display-length", "0"),
+    ("completion-query-items", "100"),
+    ("editing-mode", "emacs"),
+    ("emacs-mode-string", "@"),
+    ("history-size", "0"),
+    ("keymap", "emacs"),
+    ("keyseq-timeout", "500"),
+    ("vi-cmd-mode-string", "(cmd)"),
+    ("vi-ins-mode-string", "(ins)"),
+];
+
+/// `bind` of a shell without line editing: it warns, then lists readline's functions
+/// (`-l`) and variables (`-v`, `-V`), lists no macros or shell commands (`-s`,
+/// `-S`, `-X`) and accepts bindings it never uses; listing key bindings (`-p`,
+/// `-P`, `-q`, `-u`) is not supported yet.
 pub(super) async fn bind(vp: &mut Vp, args: &[Vec<u8>]) -> R {
+    let mut flags = Vec::new();
+    let mut file = None;
     let mut i = 1;
     while let Some(a) = args.get(i) {
-        if a == b"--" || a.len() < 2 || a[0] != b'-' {
+        if a == b"--" {
             break;
         }
-        if a[1..].iter().any(|c| !matches!(c, b'x' | b'm')) {
-            return crate::expand::unsupported(vp, "bind").await;
+        if a.len() < 2 || a[0] != b'-' {
+            break;
         }
-        if a.ends_with(b"m") {
-            i += 1;
+        for (j, &c) in a.iter().enumerate().skip(1) {
+            match c {
+                b'l' | b'v' | b'V' | b's' | b'S' | b'X' | b'x' => flags.push(c),
+                b'm' | b'r' | b'f' => {
+                    let value = match a.len() > j + 1 {
+                        true => a[j + 1..].to_vec(),
+                        false => {
+                            i += 1;
+                            match args.get(i) {
+                                Some(v) => v.clone(),
+                                None => return crate::expand::unsupported(vp, "bind").await,
+                            }
+                        }
+                    };
+                    if c == b'f' {
+                        file = Some(value);
+                    }
+                    break;
+                }
+                _ => return crate::expand::unsupported(vp, "bind").await,
+            }
         }
         i += 1;
     }
     vp.error("bind: warning: line editing not enabled").await;
+    let mut buf = Vec::new();
+    if flags.contains(&b'l') {
+        for f in FUNCTIONS {
+            buf.extend_from_slice(f.as_bytes());
+            buf.push(b'\n');
+        }
+    }
+    let utf8 = vp.utf8();
+    for (flag, readable) in [(b'V', true), (b'v', false)] {
+        if !flags.contains(&flag) {
+            continue;
+        }
+        for (name, value) in VARIABLES {
+            let value = match *value {
+                "*" if utf8 => "off",
+                "*" => "on",
+                v => v,
+            };
+            let line = match readable {
+                true => format!("{name} is set to `{value}'\n"),
+                false => format!("set {name} {value}\n"),
+            };
+            buf.extend_from_slice(line.as_bytes());
+        }
+    }
+    if !buf.is_empty() {
+        let status = out(vp, "bind", &buf).await?;
+        if status != 0 {
+            return Ok(status);
+        }
+    }
+    if let Some(f) = file {
+        let path = vp.abs_path(&f);
+        if let Err(e) = vp.host().open(&path, OpenOptions::read()).await {
+            let why = error_text(&e);
+            vp.error(&format!("bind: {}: cannot read: {why}", s(&f))).await;
+            return Ok(1);
+        }
+    }
     Ok(0)
 }

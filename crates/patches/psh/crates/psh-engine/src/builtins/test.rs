@@ -337,7 +337,16 @@ pub(crate) async fn binary(vp: &Vp, l: &[u8], op: &[u8], r: &[u8]) -> T {
                     _ => false,
                 },
                 _ => match (a, b) {
-                    (Some(a), Some(b)) => a.dev == b.dev && a.ino == b.ino,
+                    (Some(a), Some(b)) if a.dev == b.dev && a.ino == b.ino => true,
+                    // A host whose files have no inode numbers of their own (a sandbox)
+                    // still resolves both names to one file through symbolic links.
+                    (Some(_), Some(_)) => {
+                        let (x, y) = (vp.abs_path(l), vp.abs_path(r));
+                        matches!(
+                            (host.canonicalize(&x).await, host.canonicalize(&y).await),
+                            (Ok(x), Ok(y)) if x == y
+                        )
+                    }
                     _ => false,
                 },
             }

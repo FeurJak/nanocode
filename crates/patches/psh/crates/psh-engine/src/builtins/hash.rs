@@ -8,6 +8,7 @@
 use std::rc::Rc;
 
 use crate::host::FileKind;
+use crate::options::SetOpt;
 use crate::state::{R, Vp};
 
 use super::{out, s, shell_quote};
@@ -121,7 +122,22 @@ pub(crate) async fn names_program(vp: &Vp, name: &[u8]) -> bool {
 }
 
 pub(crate) async fn remember_utility(vp: &mut Vp, name: &[u8]) {
-    if vp.core.utilities.sandbox || (vp.var("PATH").is_none() && !cfg!(windows)) {
+    if (vp.var("PATH").is_none() && !cfg!(windows)) || !vp.opts.get(SetOpt::Hashall) {
+        return;
+    }
+    // A sandbox remembers the program in /usr/bin its utility stands in for, as a real
+    // system remembers the program it ran (`hash -t ls` after `ls`).
+    if vp.core.utilities.sandbox {
+        let _ = take_searched(vp, name);
+        if utility_hashed(vp, name).await {
+            if let Some(e) = table(vp).entries.iter_mut().find(|e| e.0 == name) {
+                e.2 += 1;
+            }
+        } else if let Some(found) = stand_in(vp, name, None).await {
+            let t = table(vp);
+            t.insert_dot(name, found, 1, false);
+            t.utility.push(name.to_vec());
+        }
         return;
     }
     let synced = vp.var("PATH") == Some(vp.hash.path.as_slice());
@@ -143,6 +159,15 @@ pub(crate) async fn remember_utility(vp: &mut Vp, name: &[u8]) {
         t.insert_dot(name, found, 1, dot);
         t.utility.push(name.to_vec());
     }
+}
+
+/// Whether `name` is remembered as a utility's stand-in.
+pub(crate) async fn utility_hashed(vp: &Vp, name: &[u8]) -> bool {
+    vp.hash.utility.iter().any(|n| n == name) && hashed(vp, name).await.is_some()
+}
+
+pub(crate) async fn is_executable(vp: &Vp, path: &[u8]) -> bool {
+    executable(vp, path).await
 }
 
 async fn executable(vp: &Vp, path: &[u8]) -> bool {
@@ -301,7 +326,9 @@ pub(crate) async fn find(
         return search(vp, name, None).await;
     }
     let (found, dot) = search_dot(vp, name, path).await?;
-    table(vp).insert_dot(name, found.clone(), hit, dot && path.is_none());
+    if vp.opts.get(SetOpt::Hashall) {
+        table(vp).insert_dot(name, found.clone(), hit, dot && path.is_none());
+    }
     Some(found)
 }
 
@@ -352,6 +379,10 @@ pub(super) async fn hash(vp: &mut Vp, args: &[Vec<u8>]) -> R {
             }
         }
         i += 1;
+    }
+    if !vp.opts.get(SetOpt::Hashall) {
+        vp.error("hash: hashing disabled").await;
+        return Ok(1);
     }
     let names = &args[i..];
     if reset {

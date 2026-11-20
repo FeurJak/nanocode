@@ -81,3 +81,31 @@ fn export_f_takes_function_names_that_are_not_identifiers() {
     let (st, o, e) = all("a::b(){ echo hi; }; export -f a::b; echo rc=$?; export -nf a::b; echo rc=$?");
     assert_eq!((st, o.as_str(), e.as_str()), (0, "rc=0\nrc=0\n", ""));
 }
+
+#[test]
+fn bind_lists_functions_and_variables() {
+    let (st, o, e) = all("bind -l; bind -v; bind -V; bind -s; bind -X; echo rc=$?");
+    assert_eq!(st, 0);
+    assert!(o.starts_with("abort\naccept-line\nalias-expand-line\n"), "{o}");
+    assert!(o.contains("\nyank-pop\nset bind-tty-special-chars on\n"), "{o}");
+    assert!(o.ends_with("\nvi-ins-mode-string is set to `(ins)'\nrc=0\n"), "{o}");
+    assert_eq!(o.lines().count(), 173 + 46 + 46 + 1, "{o}");
+    assert_eq!(e.matches("bind: warning: line editing not enabled").count(), 5, "{e}");
+    let (_, o, e) = all("bind -f /nonexist; echo rc=$?");
+    assert_eq!(o, "rc=1\n");
+    assert!(e.contains("bind: /nonexist: cannot read: No such file or directory"), "{e}");
+}
+
+#[test]
+fn hash_is_refused_with_hashall_off() {
+    let (st, o, e) = all("set +h; hash -r; echo rc=$?; set -h; hash -r; echo rc=$?");
+    assert_eq!((st, o.as_str()), (0, "rc=1\nrc=0\n"));
+    assert_eq!(e.matches("hash: hashing disabled").count(), 1, "{e}");
+}
+
+#[test]
+fn syntax_error_names_the_whole_quoted_word() {
+    let (st, _, e) = all("_(\"x y\")");
+    assert_eq!(st, 2);
+    assert!(e.contains("syntax error near unexpected token `\"x y\"'"), "{e}");
+}

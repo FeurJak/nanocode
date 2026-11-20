@@ -123,8 +123,19 @@ pub(crate) async fn lookup(vp: &Vp, name: &[u8]) -> Option<&'static UtilEntry> {
         Mode::PathFallback | Mode::SandboxOnly => true,
         Mode::WindowsShadow => !cfg!(windows),
     };
-    if policy.sandbox || policy.force_names.iter().any(|n| n == name) {
+    if policy.force_names.iter().any(|n| n == name) {
         return Some(entry);
+    }
+    if policy.sandbox {
+        // A sandbox has no program files but those a script writes: one it put in a
+        // `PATH` directory (a stub `curl`) runs instead of the utility, as in bash.
+        if crate::builtins::hash::utility_hashed(vp, name).await {
+            return Some(entry);
+        }
+        return match crate::builtins::hash::search_for_utility(vp, name).await {
+            Some(found) if crate::builtins::hash::is_executable(vp, &found).await => None,
+            _ => Some(entry),
+        };
     }
     if entry.mode == Mode::SandboxOnly || (vp.var("PATH").is_none() && !cfg!(windows)) {
         return None;
