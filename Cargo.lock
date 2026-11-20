@@ -733,6 +733,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocode-live-fold"
+version = "0.7.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nanocode-machine"
 version = "0.7.0"
 dependencies = [

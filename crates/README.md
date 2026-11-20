@@ -21,6 +21,7 @@
 | `nanocode-types` | Event channels, over `nanocode-types-core` |
 | `nanocode-agent-types` | Model, usage and error values |
 | `nanocode-cost-fold` | Cost attribution as a pure fold: tokens, dollars and Hand time per step, rolled up by agent, turn, board task and commit |
+| `nanocode-live-fold` | Live views as a pure fold: the sync wire frames, views folded from the log into coalesced diffs, diff rings with resume, sealed projections encoded once per access level |
 | `nanocode-partitions` | Partitioned ownership without a leader: stable partition hashing, rendezvous assignment over live nodes, fenced per-partition lease rows and the claim/release plan |
 | `nanocode-hedge` | Hedged first-byte request policy and the primary-versus-hedge race |
 | `nanocode-agent-core` | Agent lifecycle, handles and session contracts |

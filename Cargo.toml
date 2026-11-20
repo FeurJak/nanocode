@@ -24,6 +24,7 @@ members = [
     "crates/runtime/subagents",
     "crates/core/board-fold",
     "crates/core/cost-fold",
+    "crates/core/live-fold",
     "crates/core/partitions",
     "crates/runtime/board",
     "crates/runtime/board-sync",
@@ -163,6 +164,7 @@ nanocode-durability = { version = "0.7.0", path = "crates/runtime/durability" }
 nanocode-subagents = { version = "0.7.0", path = "crates/runtime/subagents" }
 nanocode-board-fold = { version = "0.7.0", path = "crates/core/board-fold" }
 nanocode-cost-fold = { version = "0.7.0", path = "crates/core/cost-fold" }
+nanocode-live-fold = { version = "0.7.0", path = "crates/core/live-fold" }
 nanocode-partitions = { version = "0.7.0", path = "crates/core/partitions" }
 nanocode-board = { version = "0.7.0", path = "crates/runtime/board" }
 nanocode-board-sync = { version = "0.7.0", path = "crates/runtime/board-sync" }
