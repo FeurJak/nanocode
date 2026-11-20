@@ -1053,9 +1053,9 @@ class TracebackException:
                 wrong_name = getattr(exc_value, "name", None)
                 if wrong_name is not None and wrong_name in sys.stdlib_module_names:
                     if suggestion:
-                        self._str += f" Or did you forget to import '{wrong_name}'?"
+                        self._str += f" Or did you forget to import '{wrong_name}'"
                     else:
-                        self._str += f". Did you forget to import '{wrong_name}'?"
+                        self._str += f". Did you forget to import '{wrong_name}'"
         if lookup_lines:
             self._load_lines()
         self.__suppress_context__ = \
