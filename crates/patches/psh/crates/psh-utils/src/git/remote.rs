@@ -484,8 +484,10 @@ fn incomplete() -> Error {
     Error::Fatal("remote did not send all necessary objects".to_string())
 }
 
-fn received(pack: &[u8], wants: &[Oid]) -> Res<Indexed> {
-    let indexed = pack::index(pack).map_err(|e| {
+/// Indexes a received pack; `keep` keeps its objects for a caller that reads them all.
+fn received(pack: &[u8], wants: &[Oid], keep: bool) -> Res<Indexed> {
+    let index = if keep { pack::index_keeping } else { pack::index };
+    let indexed = index(pack).map_err(|e| {
         Error::Fatal(format!(
             "index-pack failed: {}",
             psh_engine::host::error_text(&e)
@@ -1225,7 +1227,7 @@ async fn fetch(
         };
         let got = upload(remote, &target.url, &advert, &want).await?;
         let data = got.pack;
-        let indexed = received(&data, &must)?;
+        let indexed = received(&data, &must, false)?;
         let mut next = second.shallow.clone();
         for oid in got.shallow {
             if !next.contains(&oid) {
@@ -1839,7 +1841,7 @@ async fn clone(ctx: &mut UtilCtx<'_>, remote: &dyn Remote, inv: &Invocation) -> 
     };
     let got = upload(remote, &url, &advert, &want).await?;
     let data = got.pack;
-    let indexed = received(&data, &wants)?;
+    let indexed = received(&data, &wants, true)?;
     let mut shallow = got.shallow;
     crate::order::sort(&mut shallow);
     shallow.dedup();

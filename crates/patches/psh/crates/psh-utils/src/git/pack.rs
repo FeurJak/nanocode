@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -57,6 +58,13 @@ pub struct Indexed {
     links: Vec<Vec<Oid>>,
     by_oid: HashMap<Oid, usize>,
     pub checksum: Oid,
+    /// One inflater for every `read`: a new one allocates and zeroes its window and
+    /// tables, which costs more than inflating a small object.
+    inflater: RefCell<Inflater>,
+    /// The objects `index_keeping` inflated, by entry, each handed out by its first
+    /// `read`: a clone reads every object of its pack once, so keeping them spares
+    /// inflating each a second time. Empty for `index`.
+    kept: RefCell<Vec<Option<Vec<u8>>>>,
 }
 
 fn code(kind: Kind) -> u8 {
@@ -181,6 +189,15 @@ fn entry(pack: &[u8], offset: usize, end: usize) -> io::Result<(u8, Entry)> {
 }
 
 pub fn index(pack: &[u8]) -> io::Result<Indexed> {
+    index_with(pack, false)
+}
+
+/// `index`, keeping every object it inflates for one `read` each.
+pub fn index_keeping(pack: &[u8]) -> io::Result<Indexed> {
+    index_with(pack, true)
+}
+
+fn index_with(pack: &[u8], keep: bool) -> io::Result<Indexed> {
     if pack.len() < HEAD + OID || &pack[..SIGNATURE.len()] != SIGNATURE {
         return Err(corrupt("the remote did not send a pack"));
     }
@@ -199,6 +216,7 @@ pub fn index(pack: &[u8]) -> io::Result<Indexed> {
     let mut found: Vec<Option<(Oid, Kind)>> = Vec::new();
     let mut named: Vec<Vec<Oid>> = Vec::new();
     let mut by_offset = HashMap::new();
+    let mut kept: Vec<Option<Vec<u8>>> = Vec::new();
     let mut at = HEAD;
     for _ in 0..count {
         let (_, mut item) = entry(pack, at, end)?;
@@ -214,6 +232,12 @@ pub fn index(pack: &[u8]) -> io::Result<Indexed> {
             Base::Whole(kind) => links(kind, &data)?,
             Base::Offset(_) | Base::Named(_) => Vec::new(),
         });
+        if keep {
+            kept.push(match item.base {
+                Base::Whole(_) => Some(data),
+                Base::Offset(_) | Base::Named(_) => None,
+            });
+        }
         at = item.end;
         entries.push(item);
     }
@@ -245,7 +269,10 @@ pub fn index(pack: &[u8]) -> io::Result<Indexed> {
             continue;
         }
         let item = &entries[root];
-        let (data, _) = inflate(&mut inflater, &pack[item.data..item.end], item.size)?;
+        let data = match kept.get(root) {
+            Some(Some(data)) => data.clone(),
+            _ => inflate(&mut inflater, &pack[item.data..item.end], item.size)?.0,
+        };
         let mut stack = vec![(root, oid, data)];
         while let Some((at, oid, data)) = stack.pop() {
             let mut children = by_base.remove(&at).unwrap_or_default();
@@ -257,6 +284,9 @@ pub fn index(pack: &[u8]) -> io::Result<Indexed> {
                 let oid = object_oid(kind, &whole);
                 found[child] = Some((oid, kind));
                 named[child] = links(kind, &whole)?;
+                if keep {
+                    kept[child] = Some(whole.clone());
+                }
                 stack.push((child, oid, whole));
             }
         }
@@ -275,6 +305,8 @@ pub fn index(pack: &[u8]) -> io::Result<Indexed> {
         links: named,
         by_oid,
         checksum,
+        inflater: RefCell::new(inflater),
+        kept: RefCell::new(kept),
     })
 }
 
@@ -303,6 +335,9 @@ impl Indexed {
         let Some(&first) = self.by_oid.get(oid) else {
             return Ok(None);
         };
+        if let Some(data) = self.kept.borrow_mut().get_mut(first).and_then(Option::take) {
+            return Ok(Some((self.found[first].1, data)));
+        }
         let mut chain = vec![first];
         loop {
             let last = chain[chain.len() - 1];
@@ -319,7 +354,7 @@ impl Indexed {
             };
             chain.push(next);
         }
-        let mut inflater = Inflater::new(Format::Zlib);
+        let mut inflater = self.inflater.borrow_mut();
         let mut data = Vec::new();
         for (step, &i) in chain.iter().rev().enumerate() {
             let item = &self.entries[i];
