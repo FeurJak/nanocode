@@ -373,7 +373,10 @@ mod math {
     fn fsum(seq: ArgIterable<ArgIntoFloat>, vm: &VirtualMachine) -> PyResult<f64> {
         let values: Result<Vec<f64>, _> =
             seq.iter(vm)?.map(|r| r.map(|v| v.into_float())).collect();
-        pymath::math::fsum(values?).map_err(|err| pymath_exception(err, vm))
+        pymath::math::fsum(values?).map_err(|err| match err {
+            pymath::Error::ERANGE => vm.new_overflow_error("intermediate overflow in fsum"),
+            pymath::Error::EDOM => vm.new_value_error("-inf + inf in fsum"),
+        })
     }
 
     #[pyfunction]
