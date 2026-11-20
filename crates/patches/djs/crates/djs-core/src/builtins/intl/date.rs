@@ -315,6 +315,13 @@ pub(super) fn resolve(locale: &str, tags: &[String], raw: &Spec) -> Result<Spec,
         return type_err("Invalid option : option");
     }
     let need = raw.get("@required").unwrap_or("any");
+    // ToDateTimeOptions: toLocaleDateString takes no timeStyle, toLocaleTimeString no dateStyle.
+    if need == "date" && ts.is_some() {
+        return type_err("Invalid option : timeStyle");
+    }
+    if need == "time" && ds.is_some() {
+        return type_err("Invalid option : dateStyle");
+    }
     let defaults = raw.get("@defaults").unwrap_or("date");
     if ds.is_none() && ts.is_none() {
         let has_date = fields[0] != 0 || fields[2] != 0 || fields[3] != 0 || fields[4] != 0;

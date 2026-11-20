@@ -285,7 +285,8 @@ pub(crate) fn intrinsic(heap: &mut Heap, k: u16, a: [Value; 5]) -> Result<Option
                 return Ok(Some(string_value(heap, &locale::construct(&str_arg(heap, a[1]).unwrap_or_default(), &Spec::parse(&raw))?)?));
             }
             let tags = canonical_list(&str_arg(heap, a[1]).unwrap_or_default())?;
-            let locale = resolve_locale(&tags, if kind == 1 { &date::LANGS } else { &LANGS });
+            let collator_langs: Vec<&str> = LANGS.iter().chain(collate::TAILORED.iter()).copied().collect();
+            let locale = resolve_locale(&tags, if kind == 1 { &date::LANGS } else if kind == 2 { &collator_langs } else { &LANGS });
             let raw = Spec::parse(&raw);
             let spec = match kind {
                 0 => number::resolve(&locale, &raw)?,

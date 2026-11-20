@@ -28,6 +28,8 @@ struct Ce {
 }
 
 struct Options {
+    order: (&'static [Script], bool),
+    tail: (&'static [Tail], bool),
     numeric: bool,
     shifted: bool,
     case_first: u8,
@@ -197,6 +199,174 @@ fn code_points(units: &[u16]) -> Vec<u32> {
         .collect()
 }
 
+/// One tailored letter of a locale (CLDR's collation rules for it, as ICU applies them): seq
+/// in NFC, lowercase, sorts by the primary of after (a lowercase ASCII letter), n places
+/// after it (0: the same primary), with sec added to its secondary weight. The letter's
+/// uppercase matches too, at the tertiary level.
+type Tail = (&'static str, char, u8, u16);
+
+const SV: &[Tail] = &[("å", 'z', 1, 0), ("ä", 'z', 2, 0), ("æ", 'z', 2, 1), ("ö", 'z', 3, 0), ("ø", 'z', 3, 1), ("ü", 'y', 0, 1)];
+const DA: &[Tail] = &[("æ", 'z', 1, 0), ("ä", 'z', 1, 1), ("ø", 'z', 2, 0), ("ö", 'z', 2, 1), ("å", 'z', 3, 0), ("ü", 'y', 0, 1)];
+const ES: &[Tail] = &[("ñ", 'n', 1, 0)];
+const ES_TRAD: &[Tail] = &[("ch", 'c', 1, 0), ("ll", 'l', 1, 0), ("ñ", 'n', 1, 0)];
+const TR: &[Tail] = &[("ç", 'c', 1, 0), ("ğ", 'g', 1, 0), ("ı", 'h', 1, 0), ("ö", 'o', 1, 0), ("ş", 's', 1, 0), ("ü", 'u', 1, 0)];
+const CS: &[Tail] = &[("č", 'c', 1, 0), ("ch", 'h', 1, 0), ("ř", 'r', 1, 0), ("š", 's', 1, 0), ("ž", 'z', 1, 0)];
+const PL: &[Tail] = &[("ą", 'a', 1, 0), ("ć", 'c', 1, 0), ("ę", 'e', 1, 0), ("ł", 'l', 1, 0), ("ń", 'n', 1, 0), ("ó", 'o', 1, 0), ("ś", 's', 1, 0), ("ź", 'z', 1, 0), ("ż", 'z', 2, 0)];
+/// de-u-co-phonebk: the umlauts expand to their base letter and e.
+const DE_PHONEBK: &[(&str, &str)] = &[("ä", "ae"), ("ö", "oe"), ("ü", "ue")];
+
+/// The languages a Collator resolves to beyond mod.rs LANGS: tailored, reordered, or (ca, sw,
+/// id) collating as the root does.
+pub(super) const TAILORED: [&str; 16] = ["sv", "fi", "da", "nb", "no", "tr", "cs", "pl", "uk", "el", "he", "ar", "th", "ca", "sw", "id"];
+
+fn tailoring(spec: &Spec) -> (&'static [Tail], bool) {
+    let locale = spec.get("locale").unwrap_or("");
+    let co = spec.get("collation").unwrap_or("default");
+    let search = spec.get("usage") == Some("search");
+    match (locale.split('-').next().unwrap_or(""), co) {
+        // The search collations of cs and pl are the root's; de's expands umlauts as phonebk does.
+        ("cs" | "pl", _) if search => (&[], false),
+        ("de", _) if search => (&[], true),
+        ("sv" | "fi", _) => (SV, false),
+        ("da" | "nb" | "no", _) => (DA, false),
+        ("es", "trad") if spec.get("usage") != Some("search") => (ES_TRAD, false),
+        ("es", _) => (ES, false),
+        ("tr", _) => (TR, false),
+        ("cs", _) => (CS, false),
+        ("pl", _) => (PL, false),
+        ("de", "phonebk") => (&[], true),
+        _ => (&[], false),
+    }
+}
+
+fn nfd_of(s: &str) -> Vec<u32> {
+    let units: Vec<u16> = s.encode_utf16().collect();
+    code_points(&units)
+}
+
+/// Whether want (NFD) starts at cps[i], its first code point in either case, with no further
+/// combining mark on it; the case of the match (0 lower, 2 upper).
+fn tail_match(cps: &[u32], used: &[bool], i: usize, want: &[u32]) -> Option<u8> {
+    if i + want.len() > cps.len() || used[i..i + want.len()].iter().any(|u| *u) {
+        return None;
+    }
+    let first = char::from_u32(want[0])?;
+    let upper: Vec<u32> = first.to_uppercase().map(u32::from).collect();
+    let case = if cps[i] == want[0] {
+        0
+    } else if upper.len() == 1 && cps[i] == upper[0] {
+        2
+    } else if first == '\u{131}' && cps[i] == u32::from('I') {
+        2
+    } else {
+        return None;
+    };
+    // Ch is mixed case; CH, and an uppercase letter with combining marks, upper.
+    let rest_lower = want[1..].iter().zip(&cps[i + 1..]).any(|(w, c)| w == c && char::from_u32(*w).is_some_and(char::is_lowercase));
+    let case = if case == 2 && rest_lower { 1 } else { case };
+    let rest_ok = want[1..].iter().zip(&cps[i + 1..]).all(|(w, c)| {
+        *w == *c || char::from_u32(*w).is_some_and(|w| w.to_uppercase().eq(char::from_u32(*c)))
+    });
+    let next_free = cps.get(i + want.len()).is_none_or(|c| ccc(*c) == 0);
+    (rest_ok && next_free).then_some(case)
+}
+
+/// The CEs of a tailored letter or expansion at cps[i], and how many code points it takes.
+fn tailored(cps: &[u32], used: &[bool], i: usize, tail: &(&'static [Tail], bool), out: &mut Vec<Ce>) -> Option<usize> {
+    // Turkish: dotted İ (I and U+0307 in NFD) is the uppercase of i.
+    if core::ptr::eq(tail.0, TR) && cps[i] == u32::from('I') && cps.get(i + 1) == Some(&0x307) && !used[i + 1] {
+        let mut base = Vec::new();
+        single(u32::from('i'), &mut base);
+        let b = *base.first()?;
+        out.push(Ce { p: b.p, s: b.s, t: upper_tertiary('i'), case: 2 });
+        return Some(2);
+    }
+    for &(seq, after, n, sec) in tail.0 {
+        let want = nfd_of(seq);
+        let Some(case) = tail_match(cps, used, i, &want) else { continue };
+        if seq == "\u{131}" && case == 2 && cps[i] != u32::from('I') {
+            continue;
+        }
+        let mut base = Vec::new();
+        single(u32::from(after), &mut base);
+        let b = *base.first()?;
+        let t = match case {
+            2 => upper_tertiary(after) + u8::from(want.len() > 1),
+            1 => upper_tertiary(after),
+            _ => b.t,
+        };
+        out.push(Ce { p: b.p | u64::from(n), s: b.s + sec, t, case });
+        return Some(want.len());
+    }
+    if tail.1 {
+        for &(seq, exp) in DE_PHONEBK {
+            let want = nfd_of(seq);
+            let Some(case) = tail_match(cps, used, i, &want) else { continue };
+            let start = out.len();
+            for (k, c) in exp.chars().enumerate() {
+                single(u32::from(if case == 2 && k == 0 { c.to_ascii_uppercase() } else { c }), out);
+            }
+            if let Some(e) = out.get_mut(start) {
+                e.s += 1;
+            }
+            return Some(want.len());
+        }
+    }
+    None
+}
+
+/// The tertiary weight of an uppercase ASCII letter.
+fn upper_tertiary(c: char) -> u8 {
+    let mut v = Vec::new();
+    single(u32::from(c.to_ascii_uppercase()), &mut v);
+    v.first().map_or(COMMON_T, |e| e.t)
+}
+/// The script groups a locale's collation moves (CLDR's reorder codes): before Latin, or
+/// right after it (ja), each group keeping its own order.
+#[derive(Clone, Copy, PartialEq)]
+enum Script { Cyrl, Grek, Hebr, Arab, Thai, Hang, Kana, Hani }
+
+fn script_of(cp: u32) -> Option<Script> {
+    Some(match cp {
+        0x400..=0x52F | 0x1C80..=0x1C8F | 0x2DE0..=0x2DFF | 0xA640..=0xA69F => Script::Cyrl,
+        0x370..=0x3FF | 0x1F00..=0x1FFF => Script::Grek,
+        0x591..=0x5FF | 0xFB1D..=0xFB4F => Script::Hebr,
+        0x600..=0x6FF | 0x750..=0x77F | 0x8A0..=0x8FF | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF => Script::Arab,
+        0xE01..=0xE7F => Script::Thai,
+        0x1100..=0x11FF | 0x3130..=0x318F | 0xA960..=0xA97F | 0xAC00..=0xD7AF | 0xD7B0..=0xD7FF => Script::Hang,
+        0x3041..=0x30FF | 0x31F0..=0x31FF | 0xFF66..=0xFF9F => Script::Kana,
+        _ if han_position(cp).is_some() => Script::Hani,
+        _ => return None,
+    })
+}
+
+/// The locale's reordered groups, and whether they go after Latin rather than before it.
+fn reorder(locale: &str) -> (&'static [Script], bool) {
+    match locale.split('-').next().unwrap_or("") {
+        "ru" | "uk" => (&[Script::Cyrl], false),
+        "el" => (&[Script::Grek], false),
+        "he" => (&[Script::Hebr], false),
+        "ar" => (&[Script::Arab], false),
+        "th" => (&[Script::Thai], false),
+        "zh" => (&[Script::Hani], false),
+        "ko" => (&[Script::Hani, Script::Hang], false),
+        "ja" => (&[Script::Kana, Script::Hani], true),
+        _ => (&[], false),
+    }
+}
+
+/// Moves the primaries of a reordered group's CEs next to Latin: under the main key just
+/// before Latin's first letter (or Greek's, after Latin), by group and then original key.
+fn reorder_ces(ces: &mut [Ce], cp: u32, order: &(&'static [Script], bool)) {
+    let Some(at) = script_of(cp).and_then(|s| order.0.iter().position(|g| *g == s)) else { return };
+    let mut first = Vec::new();
+    single(u32::from(if order.1 { '\u{3b1}' } else { 'a' }), &mut first);
+    let Some(anchor) = first.first().map(|e| e.p >> 32) else { return };
+    for e in ces.iter_mut().filter(|e| e.p != 0) {
+        // Every main key (Han and implicit ones too) fits in 24 bits.
+        e.p = ((anchor - 1) << 32) | ((at as u64 + 1) << 24) | ((e.p >> 32) & 0xFF_FFFF);
+    }
+}
 fn elems(units: &[u16], o: &Options) -> Vec<Ce> {
     let cps = code_points(units);
     let mut out: Vec<Ce> = Vec::new();
@@ -227,6 +397,11 @@ fn elems(units: &[u16], o: &Options) -> Vec<Ce> {
             }
             continue;
         }
+        let start = out.len();
+        if let Some(n) = tailored(&cps, &used, i, &o.tail, &mut out) {
+            i += n;
+            continue;
+        }
         if i > 0
             && let Some(&(_, _, w)) = PREFIX.iter().find(|e| e.0 == c && e.1 == cps[i - 1])
         {
@@ -238,6 +413,9 @@ fn elems(units: &[u16], o: &Options) -> Vec<Ce> {
             push_words(pool(e), &mut out);
         } else {
             single(c, &mut out);
+        }
+        if !o.order.0.is_empty() {
+            reorder_ces(&mut out[start..], c, &o.order);
         }
         i += 1;
     }
@@ -267,6 +445,9 @@ fn options(spec: &Spec) -> Options {
         _ => 4,
     };
     Options {
+        // The search collations keep the root script order.
+        order: if spec.get("usage") == Some("search") { (&[], false) } else { reorder(spec.get("locale").unwrap_or("")) },
+        tail: tailoring(spec),
         numeric: spec.get("numeric") == Some("!t"),
         shifted: spec.get("ignorePunctuation") == Some("!t"),
         case_first: match spec.get("caseFirst") {
@@ -361,6 +542,8 @@ pub(super) fn resolve(locale: &str, tags: &[String], raw: &Spec) -> Result<Spec,
             kept.push(alloc::format!("kf-{k}"));
             k
         }
+        // Danish sorts uppercase first by default (CLDR's [caseFirst upper]).
+        (None, None) if lang == Some("da") && usage == "sort" => "upper",
         (None, None) => "false",
     };
     kept.sort();
@@ -371,12 +554,27 @@ pub(super) fn resolve(locale: &str, tags: &[String], raw: &Spec) -> Result<Spec,
     {
         return range(&alloc::format!("Invalid collation : {c}"));
     }
+    // co: phonebk for de and trad for es, from the option or else the keyword; the locale keeps it.
+    let co = |c: &&str| matches!((lang, *c), (Some("de"), "phonebk") | (Some("es"), "trad"));
+    // usage: "search" selects the search collation, which drops co (ICU reports default).
+    let collation = if usage == "search" { "default" } else { match raw.get("collation") {
+            Some(c) => Some(c).filter(co),
+            None => keyword("co").filter(co),
+        }
+        .unwrap_or("default") };
+    let with_co;
+    let locale = if collation == "default" {
+        locale
+    } else {
+        with_co = if locale.contains("-u-") { alloc::format!("{locale}-co-{collation}") } else { alloc::format!("{locale}-u-co-{collation}") };
+        with_co.as_str()
+    };
     let mut out = Spec::default();
     out.put("locale", locale);
     out.put("usage", usage);
     out.put("sensitivity", sensitivity);
     out.put("ignorePunctuation", if ignore { "!t" } else { "!f" });
-    out.put("collation", "default");
+    out.put("collation", collation);
     out.put("numeric", if numeric { "!t" } else { "!f" });
     out.put("caseFirst", case_first);
     Ok(out)
