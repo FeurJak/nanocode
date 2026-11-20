@@ -23,3 +23,12 @@ stored once in DTF_ROWS, and the pattern and zone-name pools are each one text w
 zones.tsv is the zone list of data.rs's ZONES (name, POSIX rule), in order.
 intl-dtf.jsonl holds parity cases (copy to the parity suites as suites/js/intl-dtf.jsonl);
 mkcases.py FILE writes them and matrix.py compares djs with node over options x zones x dates.
+
+range.js LOC (after infer.js LOC > t-LOC.json) writes r-LOC.json: node's formatRange interval
+patterns for every date key (era, year, month and day levels), every time key without seconds
+(am/pm, hour and minute levels, plain and with each timeZoneName), and the date and time styles,
+each cut where the end date starts and checked against formatRangeToParts on three date pairs.
+Under node v22.23.5 all 22 locales infer with no mismatches except it (96 era-level keys). djs has
+no formatRange yet: the table is about 11k distinct pattern pairs, so the port should implement
+ICU's DateIntervalFormat over CLDR 48 intervalFormats (node 22.23.5 runs ICU 78.3) and use these
+tables to check it rather than embed them.
