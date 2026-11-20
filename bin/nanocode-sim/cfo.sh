@@ -177,6 +177,13 @@ default_table='
 1 canary_workspace_stack_has_nothing canary:200 --scenario workspace_stack --mutation has_nothing
 1 canary_workspace_stack_has_everything canary:200 --scenario workspace_stack --mutation has_everything
 1 canary_workspace_stack_auto_off canary:200 --scenario workspace_stack --mutation auto_off
+4 workspace_crash pass --scenario workspace_crash
+1 workspace_crash_twice pass --scenario workspace_crash --twice
+1 canary_workspace_crash_torn_commit canary:200 --scenario workspace_crash --mutation torn_commit
+1 canary_workspace_crash_backend_failure_acked canary:200 --scenario workspace_crash --mutation backend_failure_acked
+1 canary_workspace_crash_visible_before_commit canary:200 --scenario workspace_crash --mutation visible_before_commit
+1 canary_workspace_crash_lost_update canary:200 --scenario workspace_crash --mutation lost_update
+1 canary_workspace_crash_stale_retry_overwrites canary:200 --scenario workspace_crash --mutation stale_retry_overwrites
 8 workspace_sql pass --scenario workspace_sql
 1 canary_workspace_sql_stale_read_skips_reload canary:400 --scenario workspace_sql --mutation stale_read_skips_reload
 1 canary_executor_skip_abort canary --scenario executor --mutation skip_abort

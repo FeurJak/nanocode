@@ -474,6 +474,16 @@ impl Inner {
                     self.advance(batch.change()).await;
                     return Err(failure.into());
                 }
+                if mutated(Mutation::BackendFailureAcked) && matches!(failure, Failure::Backend(_)) {
+                    self.advance(batch.change()).await;
+                    return Ok(batch.change().version);
+                }
+                if mutated(Mutation::StaleRetryOverwrites)
+                    && matches!(failure, Failure::Refused(Refusal::Stale { .. }))
+                {
+                    self.reload().await?;
+                    return Box::pin(self.commit(ops, batch.blobs().to_vec())).await;
+                }
                 if let Failure::Refused(Refusal::Stale { .. }) | Failure::Backend(_) = &failure {
                     let _ = self.reload().await;
                 }
