@@ -1,5 +1,5 @@
 use std::{
-    cell::{Cell, OnceCell},
+    cell::{Cell, OnceCell, RefCell},
     future::Future,
     io,
     pin::Pin,
@@ -39,6 +39,12 @@ struct Kept {
 }
 
 const MIB: u64 = 1 << 20;
+
+/// How many times a run that touched paths outside what was copied in may run.
+const TRIES: usize = 6;
+/// The most entries, and bytes, a directory fetched whole for a run may hold.
+const FETCH_ENTRIES: usize = 2048;
+const FETCH_BYTES: u64 = 32 * MIB;
 
 const NAMES: [&[u8]; 4] = [
     b"python3",
@@ -120,9 +126,9 @@ impl Kept {
         }
         let shell = call.shell.limits();
         let fuel = call.shell.fuel();
-        let run = Run {
-            argv,
-            stdio: crate::Stdio::Held(stdin),
+        let run = || Run {
+            argv: argv.clone(),
+            stdio: crate::Stdio::Held(stdin.clone()),
             cwd: call.cwd.clone(),
             env: call.env.clone(),
             limits: Limits {
@@ -139,29 +145,48 @@ impl Kept {
         let files = call.shell.files();
         let ran = match (files.answers_now(), files.stat(&call.cwd, true)) {
             (true, Reply::Now(_)) => {
-                let direct = Direct {
-                    files,
-                    shell: call.shell.clone(),
-                    copied: None,
-                };
-                self.interpret(run, Rc::new(direct))?
+                let direct = Direct::new(files, call.shell.clone(), None);
+                self.interpret(run(), Rc::new(direct))?
             }
             (_, asked) => {
                 asked.get().await?;
-                let roots = roots(&files, &call.cwd, &run.argv).await;
-                let tree = Rc::new(copy(&files, roots, shell.file).await?);
-                let mixed = Mixed {
-                    tree: tree.clone(),
-                    real: files.clone(),
-                };
-                let direct = Direct {
-                    files: Rc::new(mixed),
-                    shell: call.shell.clone(),
-                    copied: Some(tree.clone()),
-                };
-                let ran = self.interpret(run, Rc::new(direct))?;
-                apply(&tree, &files).await?;
-                ran
+                let base = nested(roots(&files, &call.cwd, &argv).await);
+                // A run that touched a path outside what was copied in, and started
+                // no command, runs again with that path (or its small directory)
+                // fetched, until it touches nothing new.
+                let mut fetched: Vec<Vec<u8>> = Vec::new();
+                let mut tries = 0;
+                loop {
+                    let mut wanted = base.clone();
+                    wanted.extend(fetched.iter().cloned());
+                    let tree = Rc::new(copy(&files, nested(wanted), &call.cwd, shell.file).await?);
+                    let mixed = Mixed {
+                        tree: tree.clone(),
+                        real: files.clone(),
+                    };
+                    let direct = Rc::new(Direct::new(
+                        Rc::new(mixed),
+                        call.shell.clone(),
+                        Some(tree.clone()),
+                    ));
+                    let ran = self.interpret(run(), direct.clone())?;
+                    tries += 1;
+                    let missed = direct.missed.take();
+                    let before = fetched.len();
+                    if !missed.is_empty()
+                        && !direct.spawned.get()
+                        && tries < TRIES
+                        && !matches!(ran.ended, Ended::Cancelled)
+                    {
+                        for path in missed {
+                            fetch(&files, &base, &path, &mut fetched).await;
+                        }
+                    }
+                    if fetched.len() == before {
+                        apply(&tree, &files).await?;
+                        break ran;
+                    }
+                }
             }
         };
         call.shell.spend(ran.steps);
@@ -245,13 +270,6 @@ fn later() -> io::Error {
         io::ErrorKind::WouldBlock,
         "the host cannot answer this at once",
     )
-}
-
-fn now<T>(reply: Reply<T>) -> io::Result<T> {
-    match reply {
-        Reply::Now(result) => result,
-        Reply::Later(_) => Err(later()),
-    }
 }
 
 const fn stat(stat: nanocode_shell::Stat) -> Stat {
@@ -439,59 +457,87 @@ struct Direct {
     files: Rc<dyn FileSystem>,
     shell: Session,
     copied: Option<Rc<Tree>>,
+    /// Paths the file system could not answer at once.
+    missed: RefCell<Vec<Vec<u8>>>,
+    /// The run started a command, which may have changed files outside the copy.
+    spawned: Cell<bool>,
+}
+
+impl Direct {
+    fn new(files: Rc<dyn FileSystem>, shell: Session, copied: Option<Rc<Tree>>) -> Self {
+        Self {
+            files,
+            shell,
+            copied,
+            missed: RefCell::default(),
+            spawned: Cell::new(false),
+        }
+    }
+
+    fn now<T>(&self, paths: &[&[u8]], reply: Reply<T>) -> io::Result<T> {
+        match reply {
+            Reply::Now(result) => result,
+            Reply::Later(_) => {
+                let mut missed = self.missed.borrow_mut();
+                missed.extend(paths.iter().map(|path| path.to_vec()));
+                Err(later())
+            }
+        }
+    }
 }
 
 impl Files for Direct {
     fn stat(&self, path: &[u8]) -> io::Result<Stat> {
-        now(self.files.stat(path, true)).map(stat)
+        self.now(&[path], self.files.stat(path, true)).map(stat)
     }
 
     fn read(&self, path: &[u8], limit: u64) -> io::Result<Vec<u8>> {
-        now(self.files.read(path, limit)).map(|data| data.to_vec())
+        self.now(&[path], self.files.read(path, limit))
+            .map(|data| data.to_vec())
     }
 
     fn write(&self, path: &[u8], data: &[u8], write: Write) -> io::Result<()> {
-        now(self.files.write(path, data, how(write)))
+        self.now(&[path], self.files.write(path, data, how(write)))
     }
 
     fn list(&self, path: &[u8]) -> io::Result<Vec<Vec<u8>>> {
-        now(self.files.list(path))
+        self.now(&[path], self.files.list(path))
     }
 
     fn mkdir(&self, path: &[u8], mode: u32) -> io::Result<()> {
-        now(self.files.mkdir(path, mode))
+        self.now(&[path], self.files.mkdir(path, mode))
     }
 
     fn remove(&self, path: &[u8], remove: Remove) -> io::Result<()> {
-        now(self.files.remove(path, what(remove)))
+        self.now(&[path], self.files.remove(path, what(remove)))
     }
 
     fn rename(&self, from: &[u8], to: &[u8]) -> io::Result<()> {
-        now(self.files.rename(from, to))
+        self.now(&[from, to], self.files.rename(from, to))
     }
 
     fn set_mode(&self, path: &[u8], mode: u32) -> io::Result<()> {
-        now(self.files.set_mode(path, mode))
+        self.now(&[path], self.files.set_mode(path, mode))
     }
 
     fn set_mtime(&self, path: &[u8], mtime_ns: i64) -> io::Result<()> {
-        now(self.files.set_mtime(path, mtime_ns))
+        self.now(&[path], self.files.set_mtime(path, mtime_ns))
     }
 
     fn lstat(&self, path: &[u8]) -> io::Result<Stat> {
-        now(self.files.stat(path, false)).map(stat)
+        self.now(&[path], self.files.stat(path, false)).map(stat)
     }
 
     fn symlink(&self, target: &[u8], link: &[u8]) -> io::Result<()> {
-        now(self.files.symlink(target, link))
+        self.now(&[link], self.files.symlink(target, link))
     }
 
     fn read_link(&self, path: &[u8]) -> io::Result<Vec<u8>> {
-        now(self.files.read_link(path))
+        self.now(&[path], self.files.read_link(path))
     }
 
     fn hard_link(&self, existing: &[u8], link: &[u8]) -> io::Result<()> {
-        now(self.files.hard_link(existing, link))
+        self.now(&[existing, link], self.files.hard_link(existing, link))
     }
 
     fn links(&self, path: &[u8], follow: bool) -> Option<(u64, u64)> {
@@ -505,6 +551,7 @@ impl Files for Direct {
     }
 
     fn spawn(&self, child: Child) -> io::Result<Exited> {
+        self.spawned.set(true);
         let child = nanocode_shell::Child {
             argv: child.argv,
             env: child.env,
@@ -538,12 +585,11 @@ async fn roots(files: &Rc<dyn FileSystem>, cwd: &[u8], argv: &[String]) -> Vec<V
     let mut extra = vec![b"/tmp".to_vec()];
     if let Some(script) = argv.first().filter(|arg| !arg.starts_with('-')) {
         let script = script.as_bytes();
-        if script.starts_with(b"/") {
-            if let Some(slash) = script.iter().rposition(|&byte| byte == b'/') {
-                if slash > 0 {
-                    extra.push(script[..slash].to_vec());
-                }
-            }
+        if script.starts_with(b"/")
+            && let Some(slash) = script.iter().rposition(|&byte| byte == b'/')
+            && slash > 0
+        {
+            extra.push(script[..slash].to_vec());
         }
     }
     for dir in extra {
@@ -555,11 +601,15 @@ async fn roots(files: &Rc<dyn FileSystem>, cwd: &[u8], argv: &[String]) -> Vec<V
             wanted.push(dir);
         }
     }
-    let inside = |path: &[u8], dir: &[u8]| {
-        dir == b"/"
-            || path == dir
-            || (path.starts_with(dir) && path.get(dir.len()) == Some(&b'/'))
-    };
+    wanted
+}
+
+fn inside(path: &[u8], dir: &[u8]) -> bool {
+    dir == b"/" || path == dir || (path.starts_with(dir) && path.get(dir.len()) == Some(&b'/'))
+}
+
+/// The roots without one nested in another, in their order.
+fn nested(wanted: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
     let mut kept: Vec<Vec<u8>> = Vec::new();
     for (index, dir) in wanted.iter().enumerate() {
         let covered = wanted.iter().enumerate().any(|(other, root)| {
@@ -572,14 +622,136 @@ async fn roots(files: &Rc<dyn FileSystem>, cwd: &[u8], argv: &[String]) -> Vec<V
     kept
 }
 
-/// Copies the roots in; the first must copy whole, while a file or directory
-/// under a later one that cannot be read is left out rather than failing the run.
-async fn copy(files: &Rc<dyn FileSystem>, roots: Vec<Vec<u8>>, limit: u64) -> io::Result<Tree> {
-    let tree = Tree::new(roots.clone());
-    let first = roots.first().cloned().unwrap_or_default();
-    let mut dirs = roots;
+fn normal(path: &[u8]) -> Vec<u8> {
+    let mut parts: Vec<&[u8]> = Vec::new();
+    for part in path.split(|&byte| byte == b'/') {
+        match part {
+            b"" | b"." => {}
+            b".." => {
+                parts.pop();
+            }
+            part => parts.push(part),
+        }
+    }
+    let mut out = Vec::new();
+    for part in parts {
+        out.push(b'/');
+        out.extend_from_slice(part);
+    }
+    if out.is_empty() {
+        out.push(b'/');
+    }
+    out
+}
+
+fn parent_of(path: &[u8]) -> Vec<u8> {
+    match path.iter().rposition(|&byte| byte == b'/') {
+        Some(0) | None => b"/".to_vec(),
+        Some(cut) => path[..cut].to_vec(),
+    }
+}
+
+/// Whether the directory holds at most FETCH_ENTRIES entries and
+/// FETCH_BYTES bytes.
+async fn small(files: &Rc<dyn FileSystem>, dir: &[u8]) -> bool {
+    let mut dirs = vec![dir.to_vec()];
+    let (mut entries, mut bytes) = (0_usize, 0_u64);
     while let Some(dir) = dirs.pop() {
-        let strict = dir.starts_with(&first);
+        let Ok(names) = files.list(&dir).get().await else {
+            return false;
+        };
+        for name in names {
+            entries += 1;
+            if entries > FETCH_ENTRIES {
+                return false;
+            }
+            let path = join(&dir, &name);
+            match files.stat(&path, true).get().await {
+                Ok(found) if matches!(found.kind, nanocode_shell::Kind::Dir) => dirs.push(path),
+                Ok(found) => {
+                    bytes = bytes.saturating_add(found.size);
+                    if bytes > FETCH_BYTES {
+                        return false;
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+    }
+    true
+}
+
+/// Adds what a run needs to reach the path next time: the directory holding it
+/// when that is small, or else the path alone, which then answers missing or as
+/// the file it is.
+async fn fetch(
+    files: &Rc<dyn FileSystem>,
+    base: &[Vec<u8>],
+    path: &[u8],
+    fetched: &mut Vec<Vec<u8>>,
+) {
+    if !path.starts_with(b"/") {
+        return;
+    }
+    let path = normal(path);
+    if fetched.iter().chain(base).any(|root| inside(&path, root)) {
+        return;
+    }
+    let is_dir = |found: &io::Result<nanocode_shell::Stat>| matches!(found, Ok(found) if matches!(found.kind, nanocode_shell::Kind::Dir));
+    let found = files.stat(&path, true).get().await;
+    let dir = if is_dir(&found) {
+        path.clone()
+    } else {
+        parent_of(&path)
+    };
+    if dir != b"/" && is_dir(&files.stat(&dir, true).get().await) && small(files, &dir).await {
+        fetched.push(dir);
+    } else if !is_dir(&found) {
+        fetched.push(path);
+    }
+}
+
+/// Copies the roots in: a directory root whole, and any other root as the file it
+/// is (or nothing, when missing) under its directory. The working directory must
+/// copy whole, while a file or directory elsewhere that cannot be read is left out
+/// rather than failing the run.
+async fn copy(
+    files: &Rc<dyn FileSystem>,
+    roots: Vec<Vec<u8>>,
+    cwd: &[u8],
+    limit: u64,
+) -> io::Result<Tree> {
+    let tree = Tree::new(roots.clone());
+    let mut dirs = Vec::new();
+    for root in roots {
+        match files.stat(&root, true).get().await {
+            Ok(found) if matches!(found.kind, nanocode_shell::Kind::Dir) => dirs.push(root),
+            found => {
+                let parent = parent_of(&root);
+                if let Ok(above) = files.stat(&parent, true).get().await
+                    && matches!(above.kind, nanocode_shell::Kind::Dir)
+                {
+                    tree.put(parent, Entry::Dir { mode: above.mode });
+                }
+                if let Ok(found) = found
+                    && matches!(found.kind, nanocode_shell::Kind::File)
+                    && let Ok(data) = files.read(&root, limit).get().await
+                {
+                    if let Some(links) = files.links(&root, true) {
+                        tree.join(root.clone(), links.group);
+                    }
+                    let entry = Entry::File {
+                        data: data.to_vec(),
+                        mode: found.mode,
+                        mtime_ns: found.mtime_ns,
+                    };
+                    tree.put(root, entry);
+                }
+            }
+        }
+    }
+    while let Some(dir) = dirs.pop() {
+        let strict = inside(&dir, cwd) || inside(cwd, &dir);
         match copy_dir(files, &tree, &dir, limit, &mut dirs).await {
             Err(_) if !strict => {}
             done => done?,
