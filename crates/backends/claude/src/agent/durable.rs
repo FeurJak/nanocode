@@ -318,18 +318,15 @@ impl Effect<'_> {
             content: std::mem::take(&mut response.content),
             output_config: None,
         };
-        let record = serde_json::to_string(&message)
-            .map(|json| EncodedPayload::from_json(Arc::from(json)));
-        let output = record
-            .as_ref()
+        let record =
+            serde_json::to_string(&message).map(|json| EncodedPayload::from_json(Arc::from(json)));
+        let output = record.as_ref().map_err(provider_error).and_then(|record| {
+            serde_json::value::to_raw_value(&Receipt {
+                content_record: record.reference(),
+                response,
+            })
             .map_err(provider_error)
-            .and_then(|record| {
-                serde_json::value::to_raw_value(&Receipt {
-                    content_record: record.reference(),
-                    response,
-                })
-                .map_err(provider_error)
-            });
+        });
         response.content = message.content;
         let record = record.map_err(provider_error)?;
         Ok(JournalWrite::Complete {
@@ -1199,14 +1196,20 @@ impl Detached {
             records.push(base.clone());
         }
         Ok(PagedConversation {
-            messages: paging
-                .messages
-                .page(&self.messages, unchanged, records, paging.stored.as_ref())?,
+            messages: paging.messages.page(
+                &self.messages,
+                unchanged,
+                records,
+                paging.stored.as_ref(),
+            )?,
             code_calls: {
                 let unchanged = paging.code_calls.unchanged(&self.code_calls);
-                paging
-                    .code_calls
-                    .page(&self.code_calls, unchanged, records, paging.stored.as_ref())?
+                paging.code_calls.page(
+                    &self.code_calls,
+                    unchanged,
+                    records,
+                    paging.stored.as_ref(),
+                )?
             },
             compacted: if self.compacted.is_empty() {
                 None

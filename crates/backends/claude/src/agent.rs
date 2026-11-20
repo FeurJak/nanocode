@@ -2876,7 +2876,10 @@ fn plain_summaries(messages: &mut [HistoryMessage]) {
 }
 
 fn tools_used(messages: &[HistoryMessage]) -> String {
-    let views = messages.iter().map(HistoryMessage::view).collect::<Vec<_>>();
+    let views = messages
+        .iter()
+        .map(HistoryMessage::view)
+        .collect::<Vec<_>>();
     views
         .iter()
         .flat_map(|message| message.content.iter())
@@ -4686,14 +4689,19 @@ fn delivered_notice(conversation: &Conversation, prefix: &str) -> Option<String>
         .rev()
         .filter(|message| message.role() == Role::User && message.mentions(DEVELOPER_NOTICE_OPEN))
         .find_map(|message| {
-            message.view().content.iter().rev().find_map(|block| match block {
-                ContentBlock::Text { text, .. } => text
-                    .strip_prefix(DEVELOPER_NOTICE_OPEN)?
-                    .strip_suffix(DEVELOPER_NOTICE_CLOSE)?
-                    .strip_prefix(prefix)
-                    .map(str::to_owned),
-                _ => None,
-            })
+            message
+                .view()
+                .content
+                .iter()
+                .rev()
+                .find_map(|block| match block {
+                    ContentBlock::Text { text, .. } => text
+                        .strip_prefix(DEVELOPER_NOTICE_OPEN)?
+                        .strip_suffix(DEVELOPER_NOTICE_CLOSE)?
+                        .strip_prefix(prefix)
+                        .map(str::to_owned),
+                    _ => None,
+                })
         })
 }
 
@@ -4713,14 +4721,19 @@ fn latest_developer_notice(snapshot: &Snapshot, prefix: &str) -> Option<String> 
         .rev()
         .filter(|message| message.role() == Role::User && message.mentions(DEVELOPER_NOTICE_OPEN))
         .find_map(|message| {
-            message.view().content.iter().rev().find_map(|block| match block {
-                ContentBlock::Text { text, .. } => text
-                    .strip_prefix(DEVELOPER_NOTICE_OPEN)?
-                    .strip_suffix(DEVELOPER_NOTICE_CLOSE)
-                    .filter(|text| text.starts_with(prefix))
-                    .map(str::to_owned),
-                _ => None,
-            })
+            message
+                .view()
+                .content
+                .iter()
+                .rev()
+                .find_map(|block| match block {
+                    ContentBlock::Text { text, .. } => text
+                        .strip_prefix(DEVELOPER_NOTICE_OPEN)?
+                        .strip_suffix(DEVELOPER_NOTICE_CLOSE)
+                        .filter(|text| text.starts_with(prefix))
+                        .map(str::to_owned),
+                    _ => None,
+                })
         })
 }
 

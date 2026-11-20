@@ -116,7 +116,9 @@ fn normalize(path: &[u8]) -> Vec<u8> {
 fn now() -> i64 {
     nanocode_platform::system_time()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| i64::try_from(since.as_nanos()).unwrap_or(i64::MAX))
+        .map_or(0, |since| {
+            i64::try_from(since.as_nanos()).unwrap_or(i64::MAX)
+        })
 }
 
 fn missing() -> io::Error {
@@ -237,7 +239,10 @@ impl Tree {
                 _ => {}
             }
             if let Node::File {
-                changed, moded, mode, ..
+                changed,
+                moded,
+                mode,
+                ..
             } = node
             {
                 if *changed {
@@ -249,7 +254,8 @@ impl Tree {
             }
         }
         for path in self.timed.borrow().iter() {
-            if let Some(Node::File { mtime_ns, .. } | Node::Dir { mtime_ns, .. }) = nodes.get(path) {
+            if let Some(Node::File { mtime_ns, .. } | Node::Dir { mtime_ns, .. }) = nodes.get(path)
+            {
                 delta.times.push((path.clone(), *mtime_ns));
             }
         }
@@ -589,7 +595,11 @@ impl Files for Tree {
 
     fn lstat(&self, path: &[u8]) -> io::Result<Stat> {
         self.within(path)?;
-        let size = self.links.borrow().get(path).map(|target| target.len() as u64);
+        let size = self
+            .links
+            .borrow()
+            .get(path)
+            .map(|target| target.len() as u64);
         match size {
             Some(size) => Ok(Stat {
                 kind: Kind::Symlink,

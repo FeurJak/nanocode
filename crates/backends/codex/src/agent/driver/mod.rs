@@ -2402,7 +2402,9 @@ fn replayed_boundary(
 ) -> Option<TurnBoundary> {
     match snapshot {
         Some(snapshot) => Some(checkpoints.replayed(snapshot, model, thinking, service_tier)),
-        None => live.map(|committed| checkpoints.live(Arc::clone(committed), thinking, service_tier)),
+        None => {
+            live.map(|committed| checkpoints.live(Arc::clone(committed), thinking, service_tier))
+        }
     }
 }
 

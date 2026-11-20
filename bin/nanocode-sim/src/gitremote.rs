@@ -1128,7 +1128,9 @@ impl Origin {
             .refs
             .borrow()
             .iter()
-            .filter_map(|(name, oid)| Some((name.strip_prefix("refs/heads/")?.to_owned(), hex(oid))))
+            .filter_map(|(name, oid)| {
+                Some((name.strip_prefix("refs/heads/")?.to_owned(), hex(oid)))
+            })
             .collect()
     }
 }

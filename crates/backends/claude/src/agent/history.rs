@@ -1,6 +1,6 @@
 use crate::{
-    ClaudeError, ContentBlock, Encoded, Message, MessageLayout, MessageView,
-    OutputConfig, Role, WireMessage,
+    ClaudeError, ContentBlock, Encoded, Message, MessageLayout, MessageView, OutputConfig, Role,
+    WireMessage,
 };
 use nanocode_durability::EncodedPayload;
 use nanocode_sync::SwapOption;
@@ -565,7 +565,9 @@ pub(super) fn media_placeholders(messages: &mut [HistoryMessage]) {
         _ => false,
     };
     for message in messages {
-        if !(message.mentions("image") || message.mentions("document")) || !message.any_block(&media) {
+        if !(message.mentions("image") || message.mentions("document"))
+            || !message.any_block(&media)
+        {
             continue;
         }
         for block in &mut message.make_mut().content {
@@ -590,12 +592,14 @@ pub(super) fn media_placeholders(messages: &mut [HistoryMessage]) {
 
 pub(super) fn strip_thinking(messages: &mut Vec<HistoryMessage>) {
     messages.retain_mut(|message| {
-        if message.mentions("thinking") && message.any_block(|block| {
-            matches!(
-                block,
-                ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
-            )
-        }) {
+        if message.mentions("thinking")
+            && message.any_block(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
+                )
+            })
+        {
             message.make_mut().content.retain(|block| {
                 !matches!(
                     block,

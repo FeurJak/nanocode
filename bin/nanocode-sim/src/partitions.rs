@@ -1464,7 +1464,8 @@ impl World {
         for (key, task) in &self.store.tasks {
             if let TaskState::Claimed { host } = task.state {
                 let node = &self.nodes[host.index()];
-                if matches!(node.life, Life::Up | Life::Leaving) && !node.running.contains_key(key) {
+                if matches!(node.life, Life::Up | Life::Leaving) && !node.running.contains_key(key)
+                {
                     return Err(format!(
                         "invariant 4 (no lost claim): thread {} step {} is claimed by {host:?}, which is up but no longer runs it",
                         key.0, key.1

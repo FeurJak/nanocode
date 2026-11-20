@@ -226,7 +226,16 @@ pub fn main(args: &[String]) -> ExitCode {
     );
     println!(
         "{:<14} {:>9} {:>6} {:>9} {:>7} {:>7} {:>7} {:>9} {:>8} {:>7}  verdict",
-        "combo", "history", "msgs", "retained", "max", "final", "B/msg", "transient", "xbody", "prefix"
+        "combo",
+        "history",
+        "msgs",
+        "retained",
+        "max",
+        "final",
+        "B/msg",
+        "transient",
+        "xbody",
+        "prefix"
     );
     let mut breached = 0_usize;
     let mut broken = 0_usize;
@@ -321,8 +330,12 @@ impl Report {
     }
 
     fn sample(&mut self, options: &Options, retained: usize, transient: usize, model: &Model) {
-        let (history, messages, largest, body) =
-            (model.history(), model.messages(), model.largest(), model.body());
+        let (history, messages, largest, body) = (
+            model.history(),
+            model.messages(),
+            model.largest(),
+            model.body(),
+        );
         self.history = history;
         self.messages = messages;
         self.largest = largest;

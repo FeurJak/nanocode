@@ -402,12 +402,16 @@ pub fn plan(fold: &Fold, at_ms: u64, pool: &[Agent], policy: &Policy) -> Plan {
             gauge.covered += 1;
             continue;
         }
-        let Some(role) = policy.roles.iter().find(|role| role.name == work.domain.role) else {
+        let Some(role) = policy
+            .roles
+            .iter()
+            .find(|role| role.name == work.domain.role)
+        else {
             continue;
         };
-        let reason = blocked.hit(&work.domain).or_else(|| {
-            usage.refuse(&policy.budgets, &work.domain, role.cost_nano_usd)
-        });
+        let reason = blocked
+            .hit(&work.domain)
+            .or_else(|| usage.refuse(&policy.budgets, &work.domain, role.cost_nano_usd));
         if let Some(reason) = reason {
             blocked.mark(&reason);
             gauge.waiting += 1;

@@ -906,7 +906,10 @@ pub fn main(args: &[String]) -> u8 {
                 .args(FULL_TESTS.iter().flat_map(|name| ["-p", name]))
                 .args(["--lib", "--bins"]);
             let step = logged("test", logs, test);
-            ui.step(&step, &format!("cargo test --lib --bins: {}", FULL_TESTS.join(" ")));
+            ui.step(
+                &step,
+                &format!("cargo test --lib --bins: {}", FULL_TESTS.join(" ")),
+            );
         }
         let checked = Instant::now();
         sim.map(|handle| (checked, handle.join()))

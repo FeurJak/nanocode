@@ -181,7 +181,10 @@ fn main() {
                     .await
                     .expect("a fresh board opens");
                 // The first writer charters the board and owns it.
-                board.submit(0, Op::Charter {}).await.expect("the board charters");
+                board
+                    .submit(0, Op::Charter {})
+                    .await
+                    .expect("the board charters");
                 fill(&mut board, events, behind).await;
                 let saved = log
                     .checkpoint(SCOPE)

@@ -544,7 +544,9 @@ fn main() {
     // sccache) when it is set.
     println!("cargo:rerun-if-env-changed=NANOCODE_CC_LAUNCHER");
     let launcher = env::var_os("NANOCODE_CC_LAUNCHER").filter(|launcher| !launcher.is_empty());
-    let object_cache = cache.as_ref().map(|(_, objects, toolchain)| (objects, toolchain));
+    let object_cache = cache
+        .as_ref()
+        .map(|(_, objects, toolchain)| (objects, toolchain));
     let (hits, misses) = (AtomicUsize::new(0), AtomicUsize::new(0));
     let (root_text, out_text) = (root.display().to_string(), out.display().to_string());
     let portable = |text: &str| text.replace(&out_text, "@out").replace(&root_text, "@root");
@@ -600,7 +602,10 @@ fn main() {
         // OUT_DIR to fixed names makes them the same from any checkout, so a cached archive
         // never carries another worktree's paths.
         command
-            .arg(format!("-ffile-prefix-map={}=/nanocode/python-capi", root.display()))
+            .arg(format!(
+                "-ffile-prefix-map={}=/nanocode/python-capi",
+                root.display()
+            ))
             .arg(format!("-ffile-prefix-map={}=/nanocode/out", out.display()))
             .args([
                 "-O2",

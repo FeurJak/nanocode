@@ -557,7 +557,9 @@ pub(crate) async fn restore_cached_snapshot(
     let earlier = Earlier {
         history: std::mem::take(&mut cache.history),
         log: std::mem::take(&mut cache.history_log),
-        prefix: prefix_references.as_ref().map(|_| Arc::clone(&cache.prefix)),
+        prefix: prefix_references
+            .as_ref()
+            .map(|_| Arc::clone(&cache.prefix)),
         prefix_references,
     };
     let advanced = advance_parts(reader, saved, earlier, HashSet::new()).await?;

@@ -155,7 +155,6 @@ impl Checkpoint {
         match self {
             Self::Value(value) => Ok(value.clone()),
             Self::Typed { hydrated, .. } => hydrated.render().unwrap_or_else(|| {
-
                 Err(Error::InvalidState(
                     "a typed checkpoint has no JSON form".to_owned(),
                 ))

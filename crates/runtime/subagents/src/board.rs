@@ -927,16 +927,21 @@ impl Inner {
         let posted = verdicts.pop();
         let finished = verdicts.pop();
         let claim = match &claimed {
-            Some(Ok(_)) => board.fold().entries().iter().rev().find_map(|entry| {
-                match &entry.change {
-                    Change::Claimed {
-                        claim,
-                        worker: holder,
-                        ..
-                    } if entry.task == id && *holder == worker => Some(claim.clone()),
-                    _ => None,
-                }
-            }),
+            Some(Ok(_)) => {
+                board
+                    .fold()
+                    .entries()
+                    .iter()
+                    .rev()
+                    .find_map(|entry| match &entry.change {
+                        Change::Claimed {
+                            claim,
+                            worker: holder,
+                            ..
+                        } if entry.task == id && *holder == worker => Some(claim.clone()),
+                        _ => None,
+                    })
+            }
             _ => None,
         };
         match posted {
@@ -945,8 +950,7 @@ impl Inner {
             Some(Err(error)) => self.fail(format!("post {id}: {error}")),
         }
         if let Some(held) = held {
-            let verdict =
-                finished.unwrap_or_else(|| Err(BoardError::Dropped("unsettled".into())));
+            let verdict = finished.unwrap_or_else(|| Err(BoardError::Dropped("unsettled".into())));
             self.finished(held, verdict, before);
         }
         match claimed {

@@ -79,9 +79,9 @@ use std::{
 use nanocode_code_mode_engine::{CellTools, EmbeddedHost, Interrupt, RuntimeEvent};
 use nanocode_durability_core::StoreFuture;
 use nanocode_shell::{
-    Commands, Config as ShellConfig, Credentials, Ended, Fetch, FileDownload,
-    FileSystem, FileUpload, HostInfo, Identity, Kind, Limits, Links, Machine, NoCommands, Remove,
-    Reply, SHA256_BYTES, Script, Shell, Stat, WholeFile, Write, Wrote,
+    Commands, Config as ShellConfig, Credentials, Ended, Fetch, FileDownload, FileSystem,
+    FileUpload, HostInfo, Identity, Kind, Limits, Links, Machine, NoCommands, Remove, Reply,
+    SHA256_BYTES, Script, Shell, Stat, WholeFile, Write, Wrote,
 };
 use nanocode_sys::base64::STANDARD;
 use nanocode_workspace_fs::{
@@ -134,8 +134,18 @@ const PIECES_MAX: u64 = 7;
 const OLD: [&str; 5] = ["o0.txt", "o1.txt", "d/o2.txt", "d/o3.txt", "d/o4.txt"];
 const MOVED: [&str; 2] = ["mv/m0.txt", "d/m1.txt"];
 const NEW: [&str; 12] = [
-    "n/f0.txt", "n/f1.txt", "n/m/f2.txt", "n/f3.txt", "n/m/f4.txt", "n/m/k/f5.txt",
-    "f6.txt", "n/f7.txt", "d/f8.txt", "n/m/f9.txt", "n/m/k/f10.txt", "n/f11.txt",
+    "n/f0.txt",
+    "n/f1.txt",
+    "n/m/f2.txt",
+    "n/f3.txt",
+    "n/m/f4.txt",
+    "n/m/k/f5.txt",
+    "f6.txt",
+    "n/f7.txt",
+    "d/f8.txt",
+    "n/m/f9.txt",
+    "n/m/k/f10.txt",
+    "n/f11.txt",
 ];
 const MANY_MIN: u64 = 6;
 const MANY_MAX: u64 = 12;
@@ -332,7 +342,10 @@ impl FileSystem for Bent {
             }
             if bend == Bend::TornTrackingRef {
                 let half = data.len() / 2;
-                files.write(&path, &data[..half], Write::Replace).get().await?;
+                files
+                    .write(&path, &data[..half], Write::Replace)
+                    .get()
+                    .await?;
                 return files.write(&path, &data[half..], Write::Append).get().await;
             }
             let old = files
@@ -884,7 +897,12 @@ async fn answer(files: &Rc<dyn FileSystem>, input: &Value) -> Result<Value, Stri
     let done = match field("op") {
         "put" => files.write(path, data, Write::Replace).get().await,
         "append" => files.write(path, data, Write::Append).get().await,
-        "mv" => files.rename(path, absolute(field("to")).as_bytes()).get().await,
+        "mv" => {
+            files
+                .rename(path, absolute(field("to")).as_bytes())
+                .get()
+                .await
+        }
         "rm" => match files.stat(path, false).get().await {
             Ok(_) => files.remove(path, Remove::File).get().await,
             Err(_) => Ok(()),
@@ -919,7 +937,10 @@ async fn answer(files: &Rc<dyn FileSystem>, input: &Value) -> Result<Value, Stri
 /// Makes path and every directory above it that is missing.
 async fn mkdir_all(files: &Rc<dyn FileSystem>, path: &[u8]) -> std::io::Result<()> {
     let mut at = Vec::with_capacity(path.len());
-    for part in path.split(|&byte| byte == b'/').filter(|part| !part.is_empty()) {
+    for part in path
+        .split(|&byte| byte == b'/')
+        .filter(|part| !part.is_empty())
+    {
         at.push(b'/');
         at.extend_from_slice(part);
         match files.stat(&at, true).get().await {
@@ -985,24 +1006,50 @@ async fn bridge(files: &Rc<dyn FileSystem>, input: &Value) -> Result<Value, Stri
         "list" => {
             let mut entries = Vec::new();
             for name in files.list(path).get().await.map_err(failed)? {
-                let stat = files.stat(&under(path, &name), true).get().await.map_err(failed)?;
-                let kind = if stat.kind == Kind::Dir { "dir" } else { "file" };
+                let stat = files
+                    .stat(&under(path, &name), true)
+                    .get()
+                    .await
+                    .map_err(failed)?;
+                let kind = if stat.kind == Kind::Dir {
+                    "dir"
+                } else {
+                    "file"
+                };
                 entries.push(json!([String::from_utf8_lossy(&name), kind]));
             }
             Ok(json!({ "entries": entries }))
         }
         "write" => {
-            let data = STANDARD.decode(field("data")).map_err(|error| error.to_string())?;
-            files.write(path, &data, Write::Replace).get().await.map_err(failed)?;
+            let data = STANDARD
+                .decode(field("data"))
+                .map_err(|error| error.to_string())?;
+            files
+                .write(path, &data, Write::Replace)
+                .get()
+                .await
+                .map_err(failed)?;
             Ok(json!({}))
         }
         "append" => {
-            let data = STANDARD.decode(field("data")).map_err(|error| error.to_string())?;
-            files.write(path, &data, Write::Append).get().await.map_err(failed)?;
+            let data = STANDARD
+                .decode(field("data"))
+                .map_err(|error| error.to_string())?;
+            files
+                .write(path, &data, Write::Append)
+                .get()
+                .await
+                .map_err(failed)?;
             Ok(json!({}))
         }
-        "mkdir" => mkdir_all(files, path).await.map(|()| json!({})).map_err(failed),
-        "remove" => remove_all(files, path).await.map(|()| json!({})).map_err(failed),
+        "mkdir" => mkdir_all(files, path)
+            .await
+            .map(|()| json!({}))
+            .map_err(failed),
+        "remove" => remove_all(files, path)
+            .await
+            .map(|()| json!({}))
+            .map_err(failed),
         "rename" => files
             .rename(field("from").as_bytes(), field("to").as_bytes())
             .get()
@@ -1021,7 +1068,8 @@ async fn cell(files: Rc<dyn FileSystem>, code: String) -> Said {
 
 /// The prelude that connects a cell's node:fs to the workspace through the
 /// synchronous host call BRIDGE, as a host connects it.
-const BRIDGED: &str = "globalThis.__nanocodeNodeWorkspace = (request) => callSync(\"ws\", request);";
+const BRIDGED: &str =
+    "globalThis.__nanocodeNodeWorkspace = (request) => callSync(\"ws\", request);";
 
 /// Runs code as a Code Mode cell, with prelude when given: its tools.w calls go
 /// to answer and its node:fs workspace calls (tool ws) to bridge, both over files.
@@ -1051,7 +1099,9 @@ async fn cell_with(files: Rc<dyn FileSystem>, code: String, prelude: Option<&str
     let mut failed = false;
     loop {
         match host.read_event().await {
-            Ok(RuntimeEvent::ToolCall { id, name, input, .. }) => {
+            Ok(RuntimeEvent::ToolCall {
+                id, name, input, ..
+            }) => {
                 let answered = if name == "ws" {
                     bridge(&files, &input).await
                 } else {
@@ -1152,7 +1202,11 @@ async fn setup(files: WorkspaceFs, initial: Vec<(&'static str, String)>) -> Resu
     }
     for (path, content) in initial {
         files
-            .write(absolute(path).as_bytes(), content.as_bytes(), Write::Replace)
+            .write(
+                absolute(path).as_bytes(),
+                content.as_bytes(),
+                Write::Replace,
+            )
             .get()
             .await
             .map_err(|error| at(path, error))?;
@@ -1348,7 +1402,8 @@ fn crash(
             shown_state(expected)
         ));
     }
-    let contents = one(readable(files.clone()), rng)?.map_err(|error| format!("{when}: {error}"))?;
+    let contents =
+        one(readable(files.clone()), rng)?.map_err(|error| format!("{when}: {error}"))?;
     fold(digest, &contents);
     whole(runtime, &contents, &prefixes(&plan)).map_err(|error| format!("{when}: {error}"))?;
     let mut summary = String::new();
@@ -1369,7 +1424,8 @@ fn crash(
     drop(files);
     stats.resumed += 1;
     let files = one(open(Dying::new(inner, None)), rng)??;
-    let mut again = one(readable(files), rng)?.map_err(|error| format!("{when}: after resuming: {error}"))?;
+    let mut again =
+        one(readable(files), rng)?.map_err(|error| format!("{when}: after resuming: {error}"))?;
     fold(digest, &again);
     let wrote = again.remove(&keyed(SUMMARY));
     if wrote.as_deref() != Some(summary.as_bytes()) {
@@ -1485,7 +1541,9 @@ fn race(
     let made = one(open(stores[0].clone()), rng)??;
     one(setup(made.clone(), Vec::new()), rng)??;
     for path in RACE_FILES {
-        let wrote = made.write(absolute(path).as_bytes(), b"", Write::Replace).get();
+        let wrote = made
+            .write(absolute(path).as_bytes(), b"", Write::Replace)
+            .get();
         one(wrote, rng)?.map_err(|error| format!("setup {path}: {error}"))?;
     }
     let views: Vec<WorkspaceFs> = match shared {
@@ -1525,7 +1583,11 @@ fn race(
         if !text.is_empty() && !text.ends_with(';') {
             return Err(format!("{path} holds a torn token: {text:?}"));
         }
-        for (at, token) in text.split(';').filter(|token| !token.is_empty()).enumerate() {
+        for (at, token) in text
+            .split(';')
+            .filter(|token| !token.is_empty())
+            .enumerate()
+        {
             if found.insert(token.to_owned(), (path, at)).is_some() {
                 return Err(format!("{path} holds {token} twice: {text:?}"));
             }
@@ -1554,7 +1616,9 @@ fn race(
                 }
                 (_, Some((held_in, at))) => {
                     if held_in != *path {
-                        return Err(format!("{token} was written to {path} but sits in {held_in}"));
+                        return Err(format!(
+                            "{token} was written to {path} but sits in {held_in}"
+                        ));
                     }
                     if last.get(path).is_some_and(|&previous| previous > at) {
                         return Err(format!(
@@ -1743,9 +1807,11 @@ fn mid_append(
         .map(|at| format!("<{at}{}>", words(rng, 3)))
         .collect();
     let initial = vec![(path, first.clone())];
-    let setup_fn: SetupFn = Box::new(move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
-        Box::pin(setup(files, initial.clone()))
-    });
+    let setup_fn: SetupFn = Box::new(
+        move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
+            Box::pin(setup(files, initial.clone()))
+        },
+    );
     let all = pieces.clone();
     let job: JobFn = Box::new(move |files: Rc<dyn FileSystem>| -> Boxed<'static, Said> {
         Box::pin(appending(runtime, files, path, all.clone()))
@@ -1822,9 +1888,11 @@ fn rename_across(
         FileOp::Append(side, format!("<{}>", words(rng, 3))),
     ];
     let between = prefixes(&(initial.clone(), ops.clone()));
-    let setup_fn: SetupFn = Box::new(move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
-        Box::pin(setup(files, initial.clone()))
-    });
+    let setup_fn: SetupFn = Box::new(
+        move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
+            Box::pin(setup(files, initial.clone()))
+        },
+    );
     let planned = ops.clone();
     let job: JobFn = Box::new(move |files: Rc<dyn FileSystem>| -> Boxed<'static, Said> {
         Box::pin(program(runtime, files, planned.clone()))
@@ -1894,7 +1962,11 @@ fn python_rest(
         }
     }
     let (from, to, side) = match ops {
-        [FileOp::Append(side, _), FileOp::Rename(from, to), FileOp::Append(_, _)] => (*from, *to, *side),
+        [
+            FileOp::Append(side, _),
+            FileOp::Rename(from, to),
+            FileOp::Append(_, _),
+        ] => (*from, *to, *side),
         _ => return Err(format!("{when}: not a rename job: {ops:?}")),
     };
     let moved = start.get(&keyed(from));
@@ -1970,17 +2042,19 @@ fn checkout(
         writes(&first),
         writes(&second)
     );
-    let setup_fn: SetupFn = Box::new(move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
-        let script = script.clone();
-        Box::pin(async move {
-            setup(files.clone(), Vec::new()).await?;
-            let said = psh(Rc::new(files), script).await;
-            match said.ok {
-                true => Ok(()),
-                false => Err(format!("the repository's setup failed: {}", said.output)),
-            }
-        })
-    });
+    let setup_fn: SetupFn = Box::new(
+        move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
+            let script = script.clone();
+            Box::pin(async move {
+                setup(files.clone(), Vec::new()).await?;
+                let said = psh(Rc::new(files), script).await;
+                match said.ok {
+                    true => Ok(()),
+                    false => Err(format!("the repository's setup failed: {}", said.output)),
+                }
+            })
+        },
+    );
     let switch = format!("set -e\n{GIT_ENV}\ncd {repo}\ngit checkout -q two\n");
     let job: JobFn = Box::new(move |files: Rc<dyn FileSystem>| -> Boxed<'static, Said> {
         Box::pin(psh(files, switch.clone()))
@@ -2055,17 +2129,25 @@ impl Author {
 }
 
 fn parent(path: &str) -> String {
-    path.rsplit_once('/').map_or_else(|| ROOT.to_owned(), |(dir, _)| dir.to_owned())
+    path.rsplit_once('/')
+        .map_or_else(|| ROOT.to_owned(), |(dir, _)| dir.to_owned())
 }
 
 impl ManyFiles {
     fn new(rng: &mut Rng) -> Self {
-        let initial: Vec<(&'static str, String)> = OLD.iter().map(|&path| (path, words(rng, 4))).collect();
+        let initial: Vec<(&'static str, String)> =
+            OLD.iter().map(|&path| (path, words(rng, 4))).collect();
         let mut free = OLD.to_vec();
         let mut take = |rng: &mut Rng| free.remove(rng.pick(free.len()));
         let replaced: Vec<&'static str> = (0..rng.range(1, 2)).map(|_| take(rng)).collect();
-        let moves = (0..rng.range(1, 2)).map(|at| (take(rng), MOVED[at as usize])).collect();
-        let removes = if rng.chance(HALF_PPM) { vec![take(rng)] } else { Vec::new() };
+        let moves = (0..rng.range(1, 2))
+            .map(|at| (take(rng), MOVED[at as usize]))
+            .collect();
+        let removes = if rng.chance(HALF_PPM) {
+            vec![take(rng)]
+        } else {
+            Vec::new()
+        };
         let fresh = rng.range(MANY_MIN, MANY_MAX) as usize - replaced.len();
         let writes = replaced
             .into_iter()
@@ -2082,7 +2164,10 @@ impl ManyFiles {
     }
 
     fn initial(&self, path: &str) -> Option<&String> {
-        self.initial.iter().find(|(at, _)| *at == path).map(|(_, content)| content)
+        self.initial
+            .iter()
+            .find(|(at, _)| *at == path)
+            .map(|(_, content)| content)
     }
 
     /// What each path the job touches may hold after a crash part of the way
@@ -2158,9 +2243,11 @@ fn many(
     let job = ManyFiles::new(rng);
     let code = job.code(writer);
     let initial = job.initial.clone();
-    let setup_fn: SetupFn = Box::new(move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
-        Box::pin(setup(files, initial.clone()))
-    });
+    let setup_fn: SetupFn = Box::new(
+        move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
+            Box::pin(setup(files, initial.clone()))
+        },
+    );
     let ran = code.clone();
     let job_fn: JobFn = Box::new(move |files: Rc<dyn FileSystem>| -> Boxed<'static, Said> {
         Box::pin(write_many(writer, files, ran.clone()))
@@ -2173,38 +2260,59 @@ fn many(
     stats.points_many += 1;
     let when = died.when;
     let paths = job.paths();
-    if let Some(stray) = died.contents.keys().find(|key| !paths.iter().any(|path| keyed(path) == **key)) {
-        return Err(format!("{when}: the store holds {stray}, which the job never wrote"));
+    if let Some(stray) = died
+        .contents
+        .keys()
+        .find(|key| !paths.iter().any(|path| keyed(path) == **key))
+    {
+        return Err(format!(
+            "{when}: the store holds {stray}, which the job never wrote"
+        ));
     }
     for path in &paths {
-        let held = died.contents.get(&keyed(path)).map(|bytes| String::from_utf8_lossy(bytes).into_owned());
+        let held = died
+            .contents
+            .get(&keyed(path))
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned());
         let (may, _) = job.allowed(path);
         if !may.iter().any(|content| content.cloned() == held) {
             return Err(format!("{when}: {path} holds {held:?}, not one of {may:?}"));
         }
     }
-    if let Some((from, to)) = job
-        .moves
-        .iter()
-        .find(|(from, to)| !died.contents.contains_key(&keyed(from)) && !died.contents.contains_key(&keyed(to)))
-    {
-        return Err(format!("{when}: moving {from} to {to} left it under neither name"));
+    if let Some((from, to)) = job.moves.iter().find(|(from, to)| {
+        !died.contents.contains_key(&keyed(from)) && !died.contents.contains_key(&keyed(to))
+    }) {
+        return Err(format!(
+            "{when}: moving {from} to {to} left it under neither name"
+        ));
     }
     let files = one(open(Dying::new(died.inner.clone(), None)), rng)??;
     let resumed = one(write_many(writer, Rc::new(files), code), rng)?;
     if !resumed.ok {
-        return Err(format!("{when}: running the job again failed: {}", resumed.output));
+        return Err(format!(
+            "{when}: running the job again failed: {}",
+            resumed.output
+        ));
     }
     stats.resumed += 1;
     let again = reopened(&died.inner, rng, digest).map_err(|error| format!("{when}: {error}"))?;
     for path in &paths {
-        let held = again.get(&keyed(path)).map(|bytes| String::from_utf8_lossy(bytes).into_owned());
+        let held = again
+            .get(&keyed(path))
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned());
         let (_, done) = job.allowed(path);
         if held.as_ref() != done {
-            return Err(format!("{when}: after running the job again, {path} holds {held:?}, not {done:?}"));
+            return Err(format!(
+                "{when}: after running the job again, {path} holds {held:?}, not {done:?}"
+            ));
         }
     }
-    if again.len() != paths.iter().filter(|path| job.allowed(path).1.is_some()).count() {
+    if again.len()
+        != paths
+            .iter()
+            .filter(|path| job.allowed(path).1.is_some())
+            .count()
+    {
         return Err(format!(
             "{when}: after running the job again the store holds {:?}",
             again.keys().collect::<Vec<_>>()
@@ -2226,7 +2334,11 @@ fn push(
     shape: &mut String,
 ) -> Result<(), String> {
     let kept = &BRANCHES[..rng.range(1, BRANCHES.len() as u64) as usize];
-    let mut moved: Vec<&'static str> = kept.iter().copied().filter(|_| rng.chance(HALF_PPM)).collect();
+    let mut moved: Vec<&'static str> = kept
+        .iter()
+        .copied()
+        .filter(|_| rng.chance(HALF_PPM))
+        .collect();
     let fresh = rng.chance(HALF_PPM);
     if moved.is_empty() && !fresh {
         moved.push(kept[0]);
@@ -2275,39 +2387,52 @@ fn push(
         }
     };
     let setup_fn: SetupFn = {
-        let (origin, refs, network, pushed) = (origin.clone(), refs.clone(), network.clone(), pushed.clone());
-        Box::new(move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
-            *origin.borrow_mut() = Some(Origin::new(seed));
-            let (script, refs, network, pushed) = (script.clone(), refs.clone(), network(), pushed.clone());
-            Box::pin(async move {
-                setup(files.clone(), Vec::new()).await?;
-                let said = psh_on(Rc::new(files.clone()), script, Some(network)).await;
-                if !said.ok {
-                    return Err(format!("the pushing repository's setup failed: {}", said.output));
-                }
-                let mut held = BTreeMap::new();
-                for branch in pushed {
-                    let read = |path: String| {
-                        let files = files.clone();
-                        async move {
-                            let path = absolute(&format!("{PUSH_REPO}/.git/{path}"));
-                            files
-                                .read(path.as_bytes(), u64::MAX)
-                                .get()
-                                .await
-                                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-                        }
-                    };
-                    let old = read(format!("refs/remotes/origin/{branch}")).await.ok();
-                    let new = read(format!("refs/heads/{branch}"))
-                        .await
-                        .map_err(|error| format!("setup left no loose ref for {branch}: {error}"))?;
-                    held.insert(branch, (old, new));
-                }
-                *refs.borrow_mut() = held;
-                Ok(())
-            })
-        })
+        let (origin, refs, network, pushed) = (
+            origin.clone(),
+            refs.clone(),
+            network.clone(),
+            pushed.clone(),
+        );
+        Box::new(
+            move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
+                *origin.borrow_mut() = Some(Origin::new(seed));
+                let (script, refs, network, pushed) =
+                    (script.clone(), refs.clone(), network(), pushed.clone());
+                Box::pin(async move {
+                    setup(files.clone(), Vec::new()).await?;
+                    let said = psh_on(Rc::new(files.clone()), script, Some(network)).await;
+                    if !said.ok {
+                        return Err(format!(
+                            "the pushing repository's setup failed: {}",
+                            said.output
+                        ));
+                    }
+                    let mut held = BTreeMap::new();
+                    for branch in pushed {
+                        let read = |path: String| {
+                            let files = files.clone();
+                            async move {
+                                let path = absolute(&format!("{PUSH_REPO}/.git/{path}"));
+                                files
+                                    .read(path.as_bytes(), u64::MAX)
+                                    .get()
+                                    .await
+                                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                            }
+                        };
+                        let old = read(format!("refs/remotes/origin/{branch}")).await.ok();
+                        let new = read(format!("refs/heads/{branch}"))
+                            .await
+                            .map_err(|error| {
+                                format!("setup left no loose ref for {branch}: {error}")
+                            })?;
+                        held.insert(branch, (old, new));
+                    }
+                    *refs.borrow_mut() = held;
+                    Ok(())
+                })
+            },
+        )
     };
     let job = format!("set -e\ncd {repo}\ngit push -q origin {named}\n");
     let job_fn: JobFn = {
@@ -2342,7 +2467,11 @@ fn push(
     }
     stats.resumed += 1;
     let again = reopened(&died.inner, rng, digest).map_err(|error| format!("{when}: {error}"))?;
-    let heads = origin.borrow().as_ref().map(Origin::heads).unwrap_or_default();
+    let heads = origin
+        .borrow()
+        .as_ref()
+        .map(Origin::heads)
+        .unwrap_or_default();
     for (branch, (old, new)) in &refs {
         let held = lossy(again.get(&tracking(branch)));
         if held.as_ref() != Some(new) {
@@ -2361,7 +2490,10 @@ fn push(
     let fetch = format!("set -e\ncd {repo}\ngit fetch -q origin\n");
     let fetched = one(psh_on(Rc::new(files), fetch, Some(network())), rng)?;
     if !fetched.ok {
-        return Err(format!("{when}: fetching after pushing again failed: {}", fetched.output));
+        return Err(format!(
+            "{when}: fetching after pushing again failed: {}",
+            fetched.output
+        ));
     }
     let after = reopened(&died.inner, rng, digest).map_err(|error| format!("{when}: {error}"))?;
     for (branch, (_, new)) in &refs {
@@ -2408,9 +2540,11 @@ fn atomic(
     let code = format!("python3 -c {}", quoted(&program));
     let setup_fn: SetupFn = {
         let initial = initial.clone();
-        Box::new(move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
-            Box::pin(setup(files, initial.clone()))
-        })
+        Box::new(
+            move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
+                Box::pin(setup(files, initial.clone()))
+            },
+        )
     };
     let job_fn: JobFn = {
         let code = code.clone();
@@ -2424,10 +2558,26 @@ fn atomic(
     };
     stats.points_atomic += 1;
     let when = died.when;
-    let old = |path: &str| initial.iter().find(|(at, _)| *at == path).map(|(_, content)| content.clone());
-    let new = |path: &str| targets.iter().find(|(at, _)| *at == path).map(|(_, content)| content.clone());
-    if let Some(stray) = died.contents.keys().find(|key| !ATOMIC.iter().any(|path| keyed(path) == **key)) {
-        return Err(format!("{when}: the store holds {stray}, which the program never meant to leave"));
+    let old = |path: &str| {
+        initial
+            .iter()
+            .find(|(at, _)| *at == path)
+            .map(|(_, content)| content.clone())
+    };
+    let new = |path: &str| {
+        targets
+            .iter()
+            .find(|(at, _)| *at == path)
+            .map(|(_, content)| content.clone())
+    };
+    if let Some(stray) = died
+        .contents
+        .keys()
+        .find(|key| !ATOMIC.iter().any(|path| keyed(path) == **key))
+    {
+        return Err(format!(
+            "{when}: the store holds {stray}, which the program never meant to leave"
+        ));
     }
     for path in ATOMIC {
         let held = lossy(died.contents.get(&keyed(path)));
@@ -2442,7 +2592,10 @@ fn atomic(
     let files = one(open(Dying::new(died.inner.clone(), None)), rng)??;
     let resumed = one(psh(Rc::new(files), code), rng)?;
     if !resumed.ok {
-        return Err(format!("{when}: running the program again failed: {}", resumed.output));
+        return Err(format!(
+            "{when}: running the program again failed: {}",
+            resumed.output
+        ));
     }
     stats.resumed += 1;
     let again = reopened(&died.inner, rng, digest).map_err(|error| format!("{when}: {error}"))?;
@@ -2452,7 +2605,9 @@ fn atomic(
         let done = new(path).or_else(|| old(path));
         want += usize::from(done.is_some());
         if held != done {
-            return Err(format!("{when}: after running it again {path} holds {held:?}, not {done:?}"));
+            return Err(format!(
+                "{when}: after running it again {path} holds {held:?}, not {done:?}"
+            ));
         }
     }
     if again.len() != want {
@@ -2493,7 +2648,11 @@ impl NodeOp {
         let text = |path: &str| Value::from(absolute(path)).to_string();
         match self {
             Self::Write(path, content) => {
-                format!("fs.writeFileSync({}, {});", text(path), Value::from(content.as_str()))
+                format!(
+                    "fs.writeFileSync({}, {});",
+                    text(path),
+                    Value::from(content.as_str())
+                )
             }
             Self::Rename(from, to) => format!("fs.renameSync({}, {});", text(from), text(to)),
             Self::Unlink(path) => format!("fs.unlinkSync({});", text(path)),
@@ -2536,20 +2695,26 @@ fn seq(
         let op = match rng.pick(3) {
             1 if !present.is_empty() => {
                 let from = present[rng.pick(present.len())];
-                let others: Vec<&'static str> = SEQ.iter().copied().filter(|path| *path != from).collect();
+                let others: Vec<&'static str> =
+                    SEQ.iter().copied().filter(|path| *path != from).collect();
                 NodeOp::Rename(from, others[rng.pick(others.len())])
             }
             2 if !present.is_empty() => NodeOp::Unlink(present[rng.pick(present.len())]),
-            _ => NodeOp::Write(SEQ[rng.pick(SEQ.len())], format!("<n{at}{}>", words(rng, 3))),
+            _ => NodeOp::Write(
+                SEQ[rng.pick(SEQ.len())],
+                format!("<n{at}{}>", words(rng, 3)),
+            ),
         };
         op.apply(&mut held);
         states.push(held.clone());
         ops.push(op);
     }
     let code = node_code(&ops);
-    let setup_fn: SetupFn = Box::new(move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
-        Box::pin(setup(files, initial.clone()))
-    });
+    let setup_fn: SetupFn = Box::new(
+        move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
+            Box::pin(setup(files, initial.clone()))
+        },
+    );
     let job_fn: JobFn = Box::new(move |files: Rc<dyn FileSystem>| -> Boxed<'static, Said> {
         Box::pin(cell_with(files, code.clone(), Some(BRIDGED)))
     });
@@ -2622,7 +2787,8 @@ fn held(
         .iter()
         .map(|piece| format!("printf '%s' {}", quoted(piece)))
         .collect();
-    let shell = json!({ "op": "sh", "script": format!("set -e\n{{ {}; }} > {path}", writes.join("; ")) });
+    let shell =
+        json!({ "op": "sh", "script": format!("set -e\n{{ {}; }} > {path}", writes.join("; ")) });
     let target = Value::from(path.as_str());
     let code = if appends {
         let (b, z) = (Value::from(before.as_str()), Value::from(after.as_str()));
@@ -2645,9 +2811,11 @@ fn held(
     }
     allowed.push(done.clone());
     let initial = vec![(HELD, first)];
-    let setup_fn: SetupFn = Box::new(move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
-        Box::pin(setup(files, initial.clone()))
-    });
+    let setup_fn: SetupFn = Box::new(
+        move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
+            Box::pin(setup(files, initial.clone()))
+        },
+    );
     let job_fn: JobFn = {
         let code = code.clone();
         Box::new(move |files: Rc<dyn FileSystem>| -> Boxed<'static, Said> {
@@ -2672,7 +2840,10 @@ fn held(
     let files = one(open(Dying::new(died.inner.clone(), None)), rng)??;
     let resumed = one(cell_with(Rc::new(files), code, Some(BRIDGED)), rng)?;
     if !resumed.ok {
-        return Err(format!("{when}: running the job again failed: {}", resumed.output));
+        return Err(format!(
+            "{when}: running the job again failed: {}",
+            resumed.output
+        ));
     }
     stats.resumed += 1;
     let again = reopened(&died.inner, rng, digest).map_err(|error| format!("{when}: {error}"))?;

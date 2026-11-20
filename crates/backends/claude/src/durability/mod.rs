@@ -22,8 +22,8 @@ use serde_json::{Value, value::RawValue};
 use crate::{
     Claude, ClaudeBuilder, PreparedWire,
     execution::{
-        Admission as ClaudeAdmission, BeginRequest, ClaudeContinuation, ClaudeExecutionPolicy, ClaudeSteer,
-        EncodedState, JournalWrite, PolicyFuture, Settlement, Step,
+        Admission as ClaudeAdmission, BeginRequest, ClaudeContinuation, ClaudeExecutionPolicy,
+        ClaudeSteer, EncodedState, JournalWrite, PolicyFuture, Settlement, Step,
     },
 };
 
@@ -811,7 +811,9 @@ impl ClaudeExecutionPolicy for ClaudeExecution {
                     // live conversation already holds; Null tells the agent to
                     // reuse it rather than hydrate a second full copy.
                     checkpoint: match checkpoint {
-                        Some(checkpoint) => hydrate(reader, checkpoint, &mut HashSet::new()).await?,
+                        Some(checkpoint) => {
+                            hydrate(reader, checkpoint, &mut HashSet::new()).await?
+                        }
                         None => Value::Null,
                     },
                     output: format::hydrate_output(reader, output)

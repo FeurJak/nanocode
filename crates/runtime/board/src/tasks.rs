@@ -40,8 +40,11 @@ pub enum Step {
 }
 
 pub trait Steps {
-    fn step(&mut self, lease: Lease, steers: Vec<Steer>)
-    -> Pin<Box<dyn Future<Output = Step> + '_>>;
+    fn step(
+        &mut self,
+        lease: Lease,
+        steers: Vec<Steer>,
+    ) -> Pin<Box<dyn Future<Output = Step> + '_>>;
 }
 
 async fn race<A: Future>(
@@ -188,7 +191,9 @@ impl Board {
                     outcome: Outcome::clone(&outcome),
                 };
                 match self.submit(pace.now_ms(), finish).await {
-                    Err(BoardError::Rejected(Rejection::Steer(SteerRefusal::Unheeded { .. }))) => {
+                    Err(BoardError::Rejected(Rejection::Steer(SteerRefusal::Unheeded {
+                        ..
+                    }))) => {
                         done = Some(outcome);
                         continue;
                     }

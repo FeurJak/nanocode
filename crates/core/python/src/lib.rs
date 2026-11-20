@@ -506,7 +506,8 @@ impl Python {
                 }
                 // A module that is no package of the standard library is missing as
                 // CPython says it is (status 1), not a gap of this shell.
-                if !missing.is_empty() && missing.iter().all(|missing| missing.why == Why::Package) {
+                if !missing.is_empty() && missing.iter().all(|missing| missing.why == Why::Package)
+                {
                     let said = if module.contains('.') {
                         format!(
                             "/usr/bin/python3: Error while finding module specification for {module:?} (ModuleNotFoundError: {})\n",
@@ -562,9 +563,7 @@ impl Python {
                 if let Some(compiled) = &compiled {
                     // CPython 3.12 runs a .pyc's code object itself as __main__, with
                     // __cached__ None.
-                    scope
-                        .globals
-                        .set_item("__cached__", vm.ctx.none(), vm)?;
+                    scope.globals.set_item("__cached__", vm.ctx.none(), vm)?;
                     let code = vm
                         .import("marshal", 0)?
                         .get_attr("loads", vm)?
@@ -688,7 +687,10 @@ impl Python {
                         host::print("RuntimeError: Bad magic number in .pyc file\n");
                         Prepared::Exited(1)
                     } else {
-                        Prepared::Compiled(source.get(16..).unwrap_or_default().to_vec(), path.clone())
+                        Prepared::Compiled(
+                            source.get(16..).unwrap_or_default().to_vec(),
+                            path.clone(),
+                        )
                     }
                 }
                 Ok(source) => decoded(source, path),

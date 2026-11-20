@@ -104,16 +104,22 @@ pub fn agent_name(intent: &TaskId) -> String {
     intent
         .0
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 
 const fn intent_of(action: &Action) -> Option<&TaskId> {
     match action {
         Action::Spawn(spawn) => Some(&spawn.intent),
-        Action::Start { intent } | Action::Settle { intent, .. } | Action::Release { intent, .. } => {
-            Some(intent)
-        }
+        Action::Start { intent }
+        | Action::Settle { intent, .. }
+        | Action::Release { intent, .. } => Some(intent),
         Action::Retire { .. } | Action::Wait { .. } => None,
     }
 }
@@ -136,7 +142,10 @@ impl Dispatcher {
             !board.writer().contains('+'),
             "a dispatcher acts as a whole principal so it covers its workers"
         );
-        assert!(brief.tokens_max > 0, "a dispatcher brief policy needs tokens");
+        assert!(
+            brief.tokens_max > 0,
+            "a dispatcher brief policy needs tokens"
+        );
         Self {
             board,
             policy,
@@ -303,23 +312,17 @@ impl Dispatcher {
     }
 
     fn stage(&self, at_ms: u64, action: &Action, staged: &mut Staged) {
-        let ops = nanocode_dispatch::ops(
-            self.board.fold(),
-            &self.policy,
-            self.board.writer(),
-            action,
-        );
+        let ops =
+            nanocode_dispatch::ops(self.board.fold(), &self.policy, self.board.writer(), action);
         if let Some(intent) = intent_of(action) {
             staged.intents.insert(intent.clone());
         }
-        staged
-            .writes
-            .extend(ops.into_iter().map(|(key, op)| Write {
-                by: None,
-                key: Some(key),
-                at_ms,
-                op,
-            }));
+        staged.writes.extend(ops.into_iter().map(|(key, op)| Write {
+            by: None,
+            key: Some(key),
+            at_ms,
+            op,
+        }));
     }
 
     /// Sends the staged ops as one group, then starts each staged spawn whose intent the
@@ -392,8 +395,14 @@ impl Dispatcher {
         spawn: Spawn,
         brief: Brief,
     ) -> Result<Option<Failure>, DispatchError> {
-        assert_eq!(brief.task, spawn.task, "a start carries its own task's brief");
-        assert!(brief.tokens <= self.brief.tokens_max, "a brief fits its policy");
+        assert_eq!(
+            brief.task, spawn.task,
+            "a start carries its own task's brief"
+        );
+        assert!(
+            brief.tokens <= self.brief.tokens_max,
+            "a brief fits its policy"
+        );
         let intent = spawn.intent.clone();
         let agent = agent_name(&intent);
         let worker = self.worker_of(&agent);

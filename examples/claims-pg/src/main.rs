@@ -130,10 +130,14 @@ fn thread_ticks() -> BTreeMap<String, u64> {
             continue;
         };
         let fields: Vec<&str> = stat[close + 1..].split_whitespace().collect();
-        let used = fields
-            .get(11..13)
-            .map_or(0, |pair| pair.iter().filter_map(|f| f.parse::<u64>().ok()).sum());
-        let name = format!("{}#{}", &stat[open + 1..close], task.file_name().to_string_lossy());
+        let used = fields.get(11..13).map_or(0, |pair| {
+            pair.iter().filter_map(|f| f.parse::<u64>().ok()).sum()
+        });
+        let name = format!(
+            "{}#{}",
+            &stat[open + 1..close],
+            task.file_name().to_string_lossy()
+        );
         ticks.insert(name, used);
     }
     ticks
@@ -367,7 +371,8 @@ fn task(index: usize) -> NewTask {
 
 /// The board partitions node owns of parts, split into nodes contiguous ranges.
 fn range_of(node: u32, nodes: u32, parts: u32) -> std::ops::Range<u32> {
-    let share = |n: u32| u32::try_from(u64::from(n) * u64::from(parts) / u64::from(nodes)).unwrap_or(parts);
+    let share =
+        |n: u32| u32::try_from(u64::from(n) * u64::from(parts) / u64::from(nodes)).unwrap_or(parts);
     share(node)..share(node + 1)
 }
 
@@ -643,7 +648,13 @@ async fn open_boards(
     range: std::ops::Range<u32>,
     identity: &Identity,
     batch: usize,
-) -> Result<(Vec<Committer>, Vec<nanocode_executor::JoinHandle<shards::Stats>>), BoardError> {
+) -> Result<
+    (
+        Vec<Committer>,
+        Vec<nanocode_executor::JoinHandle<shards::Stats>>,
+    ),
+    BoardError,
+> {
     let mut committers = Vec::new();
     let mut drives = Vec::new();
     for part in range {
@@ -688,7 +699,9 @@ async fn adopt(
         .map_err(|error| format!("adopt open: {error:?}"))?;
     let takeover_ms = began.elapsed().as_secs_f64() * 1e3;
     let homes = homes_of(range.clone(), count, options.tasks);
-    let mine = range_of(options.node, options.nodes, options.parts).len().max(1);
+    let mine = range_of(options.node, options.nodes, options.parts)
+        .len()
+        .max(1);
     let per_part = (options.claimers / mine).max(1);
     let race = options.race;
     let started = Instant::now();
@@ -874,7 +887,9 @@ fn main() -> std::process::ExitCode {
         now_ms().saturating_sub(options.start_ms)
     };
     if options.start_ms > now_ms() {
-        std::thread::sleep(std::time::Duration::from_millis(options.start_ms - now_ms()));
+        std::thread::sleep(std::time::Duration::from_millis(
+            options.start_ms - now_ms(),
+        ));
     }
 
     // Claimer i works local partition i % parts, splitting its tasks with that partition's other
@@ -882,7 +897,10 @@ fn main() -> std::process::ExitCode {
     let trips_before = sql.trips.load(Ordering::Relaxed);
     let log_before = log.stats();
     let ticks_before = if options.prof {
-        PROFILE.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        PROFILE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         println!("PHASE claim_start unix_ms={}", now_ms());
         thread_ticks()
     } else {

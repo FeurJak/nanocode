@@ -785,9 +785,9 @@ pub(super) fn request_response<'a>(
                         && (request.compaction.is_some()
                             || error.to_string().contains("compaction")))
                     || (refused_tool_changes(&error)
-                        && sent
-                            .iter()
-                            .any(|message| message.mentions("tool_") && message.any_block(tool_change))))
+                        && sent.iter().any(|message| {
+                            message.mentions("tool_") && message.any_block(tool_change)
+                        })))
                     && let Some(effect) = active_effect
                 {
                     effect.refuse(&error).await?;

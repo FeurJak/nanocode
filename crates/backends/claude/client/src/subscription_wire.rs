@@ -353,9 +353,14 @@ impl<'de: 'a, 'a> serde::Deserialize<'de> for RawEntries<'a> {
                 formatter.write_str("a JSON object")
             }
 
-            fn visit_map<M: serde::de::MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> Result<Self::Value, M::Error> {
                 let mut entries: Vec<(String, &'a serde_json::value::RawValue)> = Vec::new();
-                while let Some((key, value)) = map.next_entry::<String, &'de serde_json::value::RawValue>()? {
+                while let Some((key, value)) =
+                    map.next_entry::<String, &'de serde_json::value::RawValue>()?
+                {
                     match entries.iter_mut().find(|(seen, _)| *seen == key) {
                         Some(entry) => entry.1 = value,
                         None => entries.push((key, value)),

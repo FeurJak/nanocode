@@ -13,7 +13,9 @@ use nanocode_board::{
     Board, Change, Entry, Event, EventId, Fold, Op, TaskId,
     sim::Mutation as BoardRule,
     wake::{Listening, Napping, Notifier, Notifying, Polling, Ring, Timer, Wake},
-    watch::{self, Attempt, Filter, Handled, Handler, Key, Kind, Lease, Plan, Policy, Registered, Step},
+    watch::{
+        self, Attempt, Filter, Handled, Handler, Key, Kind, Lease, Plan, Policy, Registered, Step,
+    },
 };
 use nanocode_durability_core::{StoreError, StoreFuture};
 use nanocode_turnlog::{LogHost, StoredCheckpoint};
@@ -688,11 +690,9 @@ async fn waiter(world: &World, epoch: u64) {
     let got = got
         .into_iter()
         .filter(|(seq, task)| {
-            board
-                .fold()
-                .entries()
-                .iter()
-                .any(|entry| entry.seq == *seq && entry.task == *task && awaited(board.fold(), entry))
+            board.fold().entries().iter().any(|entry| {
+                entry.seq == *seq && entry.task == *task && awaited(board.fold(), entry)
+            })
         })
         .collect::<BTreeSet<_>>();
     if want != got {

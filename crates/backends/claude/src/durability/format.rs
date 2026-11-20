@@ -79,11 +79,15 @@ impl HydratedConversation {
     }
 
     pub(crate) fn code_calls(&self) -> Option<&[EncodedPayload]> {
-        self.code_calls.as_ref().map(|sequence| sequence.loaded.as_slice())
+        self.code_calls
+            .as_ref()
+            .map(|sequence| sequence.loaded.as_slice())
     }
 
     pub(crate) fn compacted(&self) -> Option<&[EncodedPayload]> {
-        self.compacted.as_ref().map(|sequence| sequence.loaded.as_slice())
+        self.compacted
+            .as_ref()
+            .map(|sequence| sequence.loaded.as_slice())
     }
 
     fn assemble(&self, head: &Value) -> Result<Value> {

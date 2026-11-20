@@ -27,7 +27,11 @@ impl Grow {
         // has the layout of `u8`, so the first `bytes.len()` slots take `bytes`.
         unsafe {
             data.set_len(capacity);
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), data.as_mut_ptr().cast::<u8>(), bytes.len());
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                data.as_mut_ptr().cast::<u8>(),
+                bytes.len(),
+            );
         }
         Self {
             data: data.into_boxed_slice(),
@@ -41,7 +45,12 @@ impl Grow {
         let written = self.written.load(Ordering::Acquire);
         // SAFETY: the bytes below `written` are initialized and no append writes them
         // again; `UnsafeCell<MaybeUninit<u8>>` has the layout of `u8`.
-        unsafe { std::slice::from_raw_parts(UnsafeCell::raw_get(self.data.as_ptr()).cast::<u8>(), written) }
+        unsafe {
+            std::slice::from_raw_parts(
+                UnsafeCell::raw_get(self.data.as_ptr()).cast::<u8>(),
+                written,
+            )
+        }
     }
 
     /// Writes `more` at `at` and returns true when `at` is the end of the written

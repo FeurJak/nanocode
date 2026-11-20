@@ -649,7 +649,10 @@ impl Stepper<'_> {
     fn heard(&mut self, steers: &[Steer]) {
         for steer in steers {
             if self.seen.contains(&steer.seq) {
-                panic!("steer {} was taken twice, again in step {}", steer.seq, self.steps);
+                panic!(
+                    "steer {} was taken twice, again in step {}",
+                    steer.seq, self.steps
+                );
             }
             match self.sent.get(&steer.seq) {
                 Some(at) if *at >= self.steps => panic!(
@@ -657,18 +660,28 @@ impl Stepper<'_> {
                     steer.seq, self.steps
                 ),
                 Some(_) => self.seen.push(steer.seq),
-                None => panic!("step {} was given steer {} nobody sent", self.steps, steer.seq),
+                None => panic!(
+                    "step {} was given steer {} nobody sent",
+                    self.steps, steer.seq
+                ),
             }
         }
     }
 }
 
 impl Steps for Stepper<'_> {
-    fn step(&mut self, lease: Lease, steers: Vec<Steer>) -> Pin<Box<dyn Future<Output = Step> + '_>> {
+    fn step(
+        &mut self,
+        lease: Lease,
+        steers: Vec<Steer>,
+    ) -> Pin<Box<dyn Future<Output = Step> + '_>> {
         Box::pin(async move {
             self.steps += 1;
             assert!(self.steps < 10_000, "the worked task never finished");
-            assert!(lease.task == self.task, "a step ran under another task's lease");
+            assert!(
+                lease.task == self.task,
+                "a step ran under another task's lease"
+            );
             self.heard(&steers);
             for _ in 0..self.rng.range(0, 3) {
                 if self.rng.chance(self.send_ppm) {
@@ -688,7 +701,9 @@ impl Steps for Stepper<'_> {
 
 fn worked(seed: u64) -> Result<(u64, u64, Vec<u64>), String> {
     let mut rng = Rng::derive(seed, "board steer work");
-    let clock = Clock(Cell::new(1_700_000_000_000 + rng.range(0, 400 * 24 * 3_600 * SECOND)));
+    let clock = Clock(Cell::new(
+        1_700_000_000_000 + rng.range(0, 400 * 24 * 3_600 * SECOND),
+    ));
     let host: Arc<dyn LogHost> = Arc::new(MemoryLog::new());
     let scope = "steer-work";
     nanocode_sync::block_on(async {

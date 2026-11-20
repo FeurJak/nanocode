@@ -535,10 +535,19 @@ async fn curl_file(
     let (status, message) = match read_file(ctx, path.as_bytes()).await {
         Err(_) => (37, format!("Couldn't open file {path}")),
         Ok(body) if options.head => {
-            let head = format!("Content-Length: {}\r\nAccept-ranges: bytes\r\n\r\n", body.len());
+            let head = format!(
+                "Content-Length: {}\r\nAccept-ranges: bytes\r\n\r\n",
+                body.len()
+            );
             match ctx.write(head.as_bytes()).await {
                 Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => return 141,
-                Err(error) => (23, format!("Failure writing output to destination: {}", error_text(&error))),
+                Err(error) => (
+                    23,
+                    format!(
+                        "Failure writing output to destination: {}",
+                        error_text(&error)
+                    ),
+                ),
                 Ok(()) => (0, String::new()),
             }
         }
@@ -553,7 +562,13 @@ async fn curl_file(
             };
             match written {
                 Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => return 141,
-                Err(error) => (23, format!("Failure writing output to destination: {}", error_text(&error))),
+                Err(error) => (
+                    23,
+                    format!(
+                        "Failure writing output to destination: {}",
+                        error_text(&error)
+                    ),
+                ),
                 Ok(()) => (0, String::new()),
             }
         }

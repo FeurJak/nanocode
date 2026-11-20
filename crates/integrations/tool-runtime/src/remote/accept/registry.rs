@@ -217,7 +217,9 @@ impl RemoteLink for Shared {
 
     fn supports_tool_selection(&self) -> bool {
         self.tool_selection
-            && !nanocode_tool_host::sim::mutated(nanocode_tool_host::sim::Mutation::AcceptorDropsSelection)
+            && !nanocode_tool_host::sim::mutated(
+                nanocode_tool_host::sim::Mutation::AcceptorDropsSelection,
+            )
     }
 }
 

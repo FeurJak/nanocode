@@ -299,9 +299,8 @@ pub(crate) fn prepared(
                 && prepared.prelude.as_deref() == prelude.map(|prelude| &**prelude)
         })
     };
-    let found = snapshots.read(|list| {
-        find(list).map(|at| (at + 1 == list.len(), Arc::clone(&list[at])))
-    });
+    let found =
+        snapshots.read(|list| find(list).map(|at| (at + 1 == list.len(), Arc::clone(&list[at]))));
     match found {
         Some((true, prepared)) => return Ok(prepared),
         Some((false, _)) => {

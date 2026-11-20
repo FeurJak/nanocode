@@ -743,7 +743,13 @@ fn hosted_placed(view: &HostedView, want: u64) -> Result<Option<String>, String>
         // end before the last one claims.
         if matches!(
             phase,
-            Some(Phase::Done { .. } | Phase::Failed { worker: Some(_), .. })
+            Some(
+                Phase::Done { .. }
+                    | Phase::Failed {
+                        worker: Some(_),
+                        ..
+                    }
+            )
         ) {
             continue;
         }

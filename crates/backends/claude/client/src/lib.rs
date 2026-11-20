@@ -1065,9 +1065,9 @@ impl MessageLayout {
 
     #[must_use]
     pub fn of<M: WireMessage>(messages: &[M]) -> Self {
-        messages
-            .iter()
-            .fold(Self::default(), |layout, message| layout.then(message.layout()))
+        messages.iter().fold(Self::default(), |layout, message| {
+            layout.then(message.layout())
+        })
     }
 }
 
@@ -1508,7 +1508,10 @@ impl MessagesRequest {
         messages: &mut [M],
         floors: [Option<usize>; 2],
         subscription: bool,
-        edit: impl Fn(&mut M, &mut dyn FnMut(&mut Message) -> Result<(), ClaudeError>) -> Result<(), ClaudeError>,
+        edit: impl Fn(
+            &mut M,
+            &mut dyn FnMut(&mut Message) -> Result<(), ClaudeError>,
+        ) -> Result<(), ClaudeError>,
     ) -> Result<(), ClaudeError> {
         let Some(control) = self.cache_control.clone() else {
             return Ok(());

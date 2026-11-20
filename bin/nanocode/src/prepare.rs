@@ -28,10 +28,12 @@ pub(super) fn prepare<'a>(
         }
         let saved = defaults::load(&home).await?;
         let saved_harness = saved.harness()?;
-        let saved_model = saved
-            .model
-            .clone()
-            .filter(|_| args.model.is_none() && args.harness.is_none_or(|harness| Some(harness) == saved_harness));
+        let saved_model = saved.model.clone().filter(|_| {
+            args.model.is_none()
+                && args
+                    .harness
+                    .is_none_or(|harness| Some(harness) == saved_harness)
+        });
         let requested_model = args.model.clone().or_else(|| saved_model.clone());
         let requested_harness = args
             .harness
@@ -59,14 +61,15 @@ pub(super) fn prepare<'a>(
                 ),
             ),
             (Some(model), harness) => {
-                let (route, model) = clients.resolve(model).map_err(|error| match &saved_model {
-                    Some(_) => format!(
-                        "the default model saved in {}: {error}; change it with nc default",
-                        defaults::path(&home).display()
-                    )
-                    .into(),
-                    None => error,
-                })?;
+                let (route, model) =
+                    clients.resolve(model).map_err(|error| match &saved_model {
+                        Some(_) => format!(
+                            "the default model saved in {}: {error}; change it with nc default",
+                            defaults::path(&home).display()
+                        )
+                        .into(),
+                        None => error,
+                    })?;
                 let model = match harness {
                     Some(harness) if host::follows_harness(route, &model) => {
                         host::on_harness(&model, &family(harness))

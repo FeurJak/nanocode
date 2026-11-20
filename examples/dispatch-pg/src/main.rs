@@ -52,9 +52,7 @@ impl Sql for Counted {
         statements: &'a [SqlStatement<'a>],
     ) -> StoreFuture<'a, Result<Vec<Vec<SqlRow>>, StoreError>> {
         self.trips.fetch_add(1, Ordering::Relaxed);
-        Box::pin(async move {
-            self.inner.transaction(operation, statements).await
-        })
+        Box::pin(async move { self.inner.transaction(operation, statements).await })
     }
 }
 
@@ -67,7 +65,9 @@ impl Verifier for Named {
 }
 
 fn identity(actor: &str) -> Identity {
-    let (principal, profile) = actor.split_once('+').map_or((actor, None), |(p, f)| (p, Some(f)));
+    let (principal, profile) = actor
+        .split_once('+')
+        .map_or((actor, None), |(p, f)| (p, Some(f)));
     let Ok(owner) = Identity::verify(&Named, principal) else {
         panic!("{principal} does not verify");
     };
@@ -101,7 +101,12 @@ impl BenchPool {
 
 impl Pool for BenchPool {
     fn agents(&self) -> PoolFuture<'_, Vec<Agent>> {
-        let agents = self.bots().bots.iter().map(|bot| bot.agent.clone()).collect();
+        let agents = self
+            .bots()
+            .bots
+            .iter()
+            .map(|bot| bot.agent.clone())
+            .collect();
         Box::pin(std::future::ready(agents))
     }
 
@@ -180,7 +185,9 @@ fn main() -> std::process::ExitCode {
     let policy = Policy {
         roles: vec![Role {
             name: "coder".to_owned(),
-            labels: [("kind".to_owned(), "code".to_owned())].into_iter().collect(),
+            labels: [("kind".to_owned(), "code".to_owned())]
+                .into_iter()
+                .collect(),
             cost_nano_usd: 1,
             placement: "coder-pool".to_owned(),
         }],

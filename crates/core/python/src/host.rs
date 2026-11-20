@@ -551,7 +551,11 @@ mod _host {
     }
 
     #[pyfunction]
-    fn links(path: ArgBytesLike, follow: bool, vm: &VirtualMachine) -> PyResult<Option<(u64, u64)>> {
+    fn links(
+        path: ArgBytesLike,
+        follow: bool,
+        vm: &VirtualMachine,
+    ) -> PyResult<Option<(u64, u64)>> {
         let path = path.borrow_buf();
         state(vm, |state| Ok(state.files.links(&path, follow)))
     }
@@ -691,11 +695,13 @@ mod _host {
     #[pyfunction]
     fn utime(path: ArgBytesLike, mtime_ns: i64, vm: &VirtualMachine) -> PyResult<()> {
         let path = path.borrow_buf();
-        files(vm, &path, |state| match state.files.set_mtime(&path, mtime_ns) {
-            Err(error) if error.kind() == io::ErrorKind::Unsupported => {
-                state.files.stat(&path).map(|_| ())
+        files(vm, &path, |state| {
+            match state.files.set_mtime(&path, mtime_ns) {
+                Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                    state.files.stat(&path).map(|_| ())
+                }
+                done => done,
             }
-            done => done,
         })
     }
 
@@ -801,7 +807,9 @@ mod _host {
         state(vm, |state| {
             Ok(nanocode_platform::system_time()
                 .duration_since(UNIX_EPOCH)
-                .map_or(0.0, |since| since.saturating_add(state.skipped).as_secs_f64()))
+                .map_or(0.0, |since| {
+                    since.saturating_add(state.skipped).as_secs_f64()
+                }))
         })
     }
 

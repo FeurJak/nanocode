@@ -36,9 +36,15 @@ pub enum Admission<C = EncodedPayload, O = EncodedPayload> {
     /// the state the opener restored, and kept current since, is that
     /// checkpoint, so it is neither loaded nor decoded again. Build the
     /// replayed boundary from the live state instead.
-    Completed { checkpoint: Option<C>, output: O },
+    Completed {
+        checkpoint: Option<C>,
+        output: O,
+    },
 
-    Failed { checkpoint: C, error: String },
+    Failed {
+        checkpoint: C,
+        error: String,
+    },
 
     Cancelled,
 }
@@ -104,7 +110,9 @@ impl StoredAdmission {
             Self::Accepted => Ok(Admission::Accepted),
             Self::Pending => Ok(Admission::Pending),
             Self::Completed { checkpoint, output } => Ok(Admission::Completed {
-                checkpoint: checkpoint.map(|checkpoint| checkpoint.decode()).transpose()?,
+                checkpoint: checkpoint
+                    .map(|checkpoint| checkpoint.decode())
+                    .transpose()?,
                 output: output.decode()?,
             }),
             Self::Failed { checkpoint, error } => Ok(Admission::Failed {

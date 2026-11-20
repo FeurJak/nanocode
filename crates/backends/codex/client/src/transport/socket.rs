@@ -278,8 +278,7 @@ impl ResponsesSocket {
             Message::Binary(_) => Err(ResponsesError::UnexpectedBinary),
             Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => Ok(None),
             Message::Close(Some(frame))
-                if frame.code == CloseCode::Size
-                    && !self.answered.load(Ordering::Acquire) =>
+                if frame.code == CloseCode::Size && !self.answered.load(Ordering::Acquire) =>
             {
                 Err(ResponsesError::MessageTooLarge {
                     detail: format!("closed with code {}: {}", frame.code, frame.reason),

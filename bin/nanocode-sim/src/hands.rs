@@ -603,7 +603,8 @@ impl Store {
             }
         });
         if !replaced.is_empty() {
-            self.overwrites.update(|overwrites| overwrites.extend(replaced.iter().cloned()));
+            self.overwrites
+                .update(|overwrites| overwrites.extend(replaced.iter().cloned()));
         }
     }
 

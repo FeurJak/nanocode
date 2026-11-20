@@ -22,7 +22,9 @@ pub enum Command {
     #[cfg(unix)]
     Cua(CuaArgs),
     Setup(SetupArgs),
-    Default { words: Vec<String> },
+    Default {
+        words: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug)]

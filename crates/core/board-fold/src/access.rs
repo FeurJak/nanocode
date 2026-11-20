@@ -295,9 +295,15 @@ impl Access {
     fn decide(&self, actor: &Actor, target: &str, everyone: bool, can: Can) -> bool {
         let gives = |cans: &[Can]| cans.iter().any(|held| held.implies(can));
         if mutated(Mutation::SpecificityIgnored) {
-            return self.found(actor, target, everyone).any(|(_, cans)| gives(cans));
+            return self
+                .found(actor, target, everyone)
+                .any(|(_, cans)| gives(cans));
         }
-        let Some(best) = self.found(actor, target, everyone).map(|(spot, _)| spot).max() else {
+        let Some(best) = self
+            .found(actor, target, everyone)
+            .map(|(spot, _)| spot)
+            .max()
+        else {
             return false;
         };
         self.found(actor, target, everyone)

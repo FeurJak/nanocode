@@ -139,7 +139,9 @@ impl<H: ?Sized> Drop for SqlParts<H> {
 }
 
 fn notify_payloads<'a>(heads: impl Iterator<Item = (&'a str, u64)>) -> Result<String, StoreError> {
-    let payloads: Vec<String> = heads.map(|(scope, head)| format!("{scope}:{head}")).collect();
+    let payloads: Vec<String> = heads
+        .map(|(scope, head)| format!("{scope}:{head}"))
+        .collect();
     serde_json::to_string(&payloads)
         .map_err(|error| StoreError::Backend(format!("encode notify: {error}")))
 }

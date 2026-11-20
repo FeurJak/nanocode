@@ -252,11 +252,8 @@ fn run_seed(seed: u64, mutation: NestedMetaMutation) -> Outcome {
     let mut esc = Rng::derive(seed, "nested_meta escalation calls");
     let unescalated = Rng::derive(seed, "nested_meta escalation").below(2) == 0;
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let runtime = ToolRuntime::new_with_tools(
-        std::env::temp_dir(),
-        Vec::new(),
-        &tools(unescalated, &seen),
-    );
+    let runtime =
+        ToolRuntime::new_with_tools(std::env::temp_dir(), Vec::new(), &tools(unescalated, &seen));
     let mut stats = NestedMetaStats {
         seeds: 1,
         calls,
@@ -282,15 +279,25 @@ fn run_seed(seed: u64, mutation: NestedMetaMutation) -> Outcome {
         let listed: Vec<&str> = ESCALATION_INPUTS
             .iter()
             .copied()
-            .filter(|field| properties.iter().any(|name| name == field) || required.iter().any(|name| name == field))
+            .filter(|field| {
+                properties.iter().any(|name| name == field)
+                    || required.iter().any(|name| name == field)
+            })
             .collect();
-        let expected = if unescalated { 0 } else { ESCALATION_INPUTS.len() };
+        let expected = if unescalated {
+            0
+        } else {
+            ESCALATION_INPUTS.len()
+        };
         if listed.len() != expected || !properties.iter().any(|name| name == "cmd") {
             wrong = Some(format!(
                 "catalog_escalation: {surface} catalog lists {listed:?} (unescalated={unescalated}) properties={properties:?}"
             ));
         }
-        digest = fnv(digest, format!("{surface}:{properties:?}:{required:?}").as_bytes());
+        digest = fnv(
+            digest,
+            format!("{surface}:{properties:?}:{required:?}").as_bytes(),
+        );
     }
     for index in 0..calls {
         if wrong.is_some() {
@@ -308,9 +315,13 @@ fn run_seed(seed: u64, mutation: NestedMetaMutation) -> Outcome {
             }
             let step = format!("esc-{index}");
             let context = ToolContext::new("", SESSION, &step, &[], usize::MAX);
-            let output = block_on(runtime.execute_nested_tool(ESCALATE, Value::Object(input), context));
+            let output =
+                block_on(runtime.execute_nested_tool(ESCALATE, Value::Object(input), context));
             let keys = std::mem::take(&mut *seen.lock().expect("the escalate log is not poisoned"));
-            digest = fnv(digest, format!("{step}:{}:{keys:?}", output.success).as_bytes());
+            digest = fnv(
+                digest,
+                format!("{step}:{}:{keys:?}", output.success).as_bytes(),
+            );
             if !sent.is_empty() {
                 stats.escalating += 1;
             }
@@ -319,7 +330,11 @@ fn run_seed(seed: u64, mutation: NestedMetaMutation) -> Outcome {
                 .copied()
                 .filter(|field| keys.iter().any(|key| key == field))
                 .collect();
-            let want: Vec<&str> = if unescalated { Vec::new() } else { sent.clone() };
+            let want: Vec<&str> = if unescalated {
+                Vec::new()
+            } else {
+                sent.clone()
+            };
             if !output.success || arrived != want || !keys.iter().any(|key| key == "cmd") {
                 wrong = Some(format!(
                     "call_escalation: call {index} sent {sent:?} (unescalated={unescalated}), the tool saw {keys:?}, success={}",
@@ -349,9 +364,18 @@ fn run_seed(seed: u64, mutation: NestedMetaMutation) -> Outcome {
         let reported = written(&output);
         digest = fnv(digest, step.as_bytes());
         digest = fnv(digest, &[u8::from(output.success)]);
-        digest = fnv(digest, reported.as_ref().map_or_else(String::new, Value::to_string).as_bytes());
+        digest = fnv(
+            digest,
+            reported
+                .as_ref()
+                .map_or_else(String::new, Value::to_string)
+                .as_bytes(),
+        );
         if output.success == fail {
-            wrong = Some(format!("call {index}: {name} fail={fail} returned success={}", output.success));
+            wrong = Some(format!(
+                "call {index}: {name} fail={fail} returned success={}",
+                output.success
+            ));
             break;
         }
         let want = (name == TOUCH && !fail && !expected.is_empty())

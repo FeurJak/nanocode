@@ -122,7 +122,12 @@ impl SimPool {
 
 impl Pool for SimPool {
     fn agents(&self) -> PoolFuture<'_, Vec<Agent>> {
-        let agents = self.borrow().bots.iter().map(|bot| bot.agent.clone()).collect();
+        let agents = self
+            .borrow()
+            .bots
+            .iter()
+            .map(|bot| bot.agent.clone())
+            .collect();
         Box::pin(std::future::ready(agents))
     }
 
@@ -235,7 +240,11 @@ impl World {
         let (task, now) = {
             let mut shared = self.shared();
             let id = TaskId(format!("t{}", shared.rng.below(1 << 40)));
-            let kind = if shared.rng.chance(250_000) { "goal" } else { "code" };
+            let kind = if shared.rng.chance(250_000) {
+                "goal"
+            } else {
+                "code"
+            };
             let labels = [
                 (KIND, kind.to_owned()),
                 (MEMBER, format!("m{}", shared.rng.below(3))),
@@ -244,7 +253,11 @@ impl World {
             .into_iter()
             .map(|(key, value)| (key.to_owned(), value))
             .collect();
-            let bytes = if shared.rng.chance(30_000) { 40_000 } else { 64 };
+            let bytes = if shared.rng.chance(30_000) {
+                40_000
+            } else {
+                64
+            };
             let task = NewTask {
                 id,
                 parent: None,
@@ -292,7 +305,13 @@ impl World {
         Ok(board)
     }
 
-    async fn claim(&mut self, index: usize, worker: &str, domain: &Domain, now: u64) -> Result<(), String> {
+    async fn claim(
+        &mut self,
+        index: usize,
+        worker: &str,
+        domain: &Domain,
+        now: u64,
+    ) -> Result<(), String> {
         let labels = self.labels(domain);
         let board = self.worker(worker).await?;
         let Some(task) = board.fold().pick(worker, &labels, now).cloned() else {
@@ -328,7 +347,13 @@ impl World {
         Ok(())
     }
 
-    async fn finish(&mut self, index: usize, worker: &str, work: (TaskId, ClaimId), now: u64) -> Result<(), String> {
+    async fn finish(
+        &mut self,
+        index: usize,
+        worker: &str,
+        work: (TaskId, ClaimId),
+        now: u64,
+    ) -> Result<(), String> {
         let (task, claim) = work;
         let board = self.worker(worker).await?;
         let finish = Op::Finish {
@@ -395,13 +420,17 @@ impl World {
             .iter()
             .find(|(_, count)| **count > budgets.agents_per_member_max)
         {
-            return Err(format!("member {member} runs {count} agents over its budget"));
+            return Err(format!(
+                "member {member} runs {count} agents over its budget"
+            ));
         }
         if let Some((project, count)) = projects
             .iter()
             .find(|(_, count)| **count > budgets.agents_per_project_max)
         {
-            return Err(format!("project {project} runs {count} agents over its budget"));
+            return Err(format!(
+                "project {project} runs {count} agents over its budget"
+            ));
         }
         if cost > budgets.nano_usd_max {
             return Err(format!(
@@ -455,7 +484,11 @@ impl World {
         shared.stats.parked_ms += parked * step_ms;
     }
 
-    async fn step(&mut self, dispatcher: &mut Option<Dispatcher>, posting: bool) -> Result<(), String> {
+    async fn step(
+        &mut self,
+        dispatcher: &mut Option<Dispatcher>,
+        posting: bool,
+    ) -> Result<(), String> {
         let step_ms = {
             let mut shared = self.shared();
             let step_ms = shared.rng.range(20, STEP_MS_MAX);
@@ -487,7 +520,11 @@ impl World {
         }
         let before = active.counters();
         let pass = active.pass(&self.pool, now).await.map_err(shown)?;
-        self.failures = pass.failures.iter().map(|failure| format!("{failure:?}")).collect();
+        self.failures = pass
+            .failures
+            .iter()
+            .map(|failure| format!("{failure:?}"))
+            .collect();
         let counters = active.counters();
         self.wake_at = pass.wake_at_ms;
         self.probe.refresh().await.map_err(shown)?;
@@ -587,7 +624,11 @@ async fn drive(world: &mut World) -> Result<(), String> {
     }
     let open = world.open();
     if let Some(first) = open.first() {
-        let phase = world.probe.fold().task(first).map(|task| task.phase.clone());
+        let phase = world
+            .probe
+            .fold()
+            .task(first)
+            .map(|task| task.phase.clone());
         let shared = world.pool.borrow();
         let bots = shared
             .bots

@@ -580,7 +580,9 @@ mod store {
         pub fn transcript(&self) -> Result<Vec<TranscriptItem>> {
             match &self.transcript {
                 Transcript::Read(items) => Ok(items.clone()),
-                Transcript::Checkpoint { family, steers } => self.checkpoint_transcript(family, steers),
+                Transcript::Checkpoint { family, steers } => {
+                    self.checkpoint_transcript(family, steers)
+                }
             }
         }
 
@@ -591,9 +593,10 @@ mod store {
         pub fn into_transcript(self) -> Result<Vec<TranscriptItem>> {
             match self.transcript {
                 Transcript::Read(items) => Ok(items),
-                Transcript::Checkpoint { ref family, ref steers } => {
-                    self.checkpoint_transcript(family, steers)
-                }
+                Transcript::Checkpoint {
+                    ref family,
+                    ref steers,
+                } => self.checkpoint_transcript(family, steers),
             }
         }
 

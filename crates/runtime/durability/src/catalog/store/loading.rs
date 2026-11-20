@@ -43,7 +43,10 @@ pub(super) fn load<'a>(
         };
         drop(admitted);
         let mut stored = StoredSession {
-            summary: SessionSummary { record, preview: None },
+            summary: SessionSummary {
+                record,
+                preview: None,
+            },
             transcript,
             turns,
             in_progress: progress.map(|(operation, _, _)| operation),
@@ -62,10 +65,13 @@ pub(super) fn load<'a>(
         };
         stored.summary.preview = match stored.turns.iter().find_map(|turn| turn.preview.clone()) {
             Some(preview) => Some(preview),
-            None => stored.transcript()?.into_iter().find_map(|item| match item {
-                TranscriptItem::User(text) => Some(text),
-                _ => None,
-            }),
+            None => stored
+                .transcript()?
+                .into_iter()
+                .find_map(|item| match item {
+                    TranscriptItem::User(text) => Some(text),
+                    _ => None,
+                }),
         };
         Ok(stored)
     })

@@ -1003,10 +1003,7 @@ impl Manifest {
                 }
             }
             if let Some(link) = entry.as_ref().and_then(Entry::link) {
-                self.links
-                    .entry(link)
-                    .or_default()
-                    .insert(path.clone());
+                self.links.entry(link).or_default().insert(path.clone());
             }
             let symlink =
                 |entry: Option<&Entry>| u64::from(matches!(entry, Some(Entry::Symlink { .. })));

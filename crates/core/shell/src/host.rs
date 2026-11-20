@@ -10,8 +10,9 @@ use nanocode_bytes::Bytes;
 use psh_engine::{
     ControlHandle, HostFile,
     host::{
-        Access, ChildFd, DirEntry, ExitStatus, ExtProc, ExtraMetadata, FileKind, HostFuture, HostInfo, KnownEntry, Metadata,
-        OpenOptions, Rlimit, RunInShell, SIGKILL, Signal, SpawnSpec, Spawned,
+        Access, ChildFd, DirEntry, ExitStatus, ExtProc, ExtraMetadata, FileKind, HostFuture,
+        HostInfo, KnownEntry, Metadata, OpenOptions, Rlimit, RunInShell, SIGKILL, Signal,
+        SpawnSpec, Spawned,
     },
 };
 use std::{
@@ -156,7 +157,11 @@ impl Vfs {
     /// (see [`FileSystem::write_files`]), as many as the operation and file limits let
     /// pass: how many it wrote. The caller writes the rest one by one, meeting a limit
     /// as a single write does.
-    pub(crate) fn write_files(self: &Rc<Self>, files: &[WholeFile<'_>], dir_mode: u32) -> Reply<usize> {
+    pub(crate) fn write_files(
+        self: &Rc<Self>,
+        files: &[WholeFile<'_>],
+        dir_mode: u32,
+    ) -> Reply<usize> {
         let left = self.limits.operations.saturating_sub(self.operations.get());
         let files = &files[..files
             .iter()
@@ -173,7 +178,8 @@ impl Vfs {
         let vfs = self.clone();
         self.fs().write_files(files, dir_mode).map(move |result| {
             let wrote = result?;
-            vfs.operations.set(vfs.operations.get() + wrote.files as u64);
+            vfs.operations
+                .set(vfs.operations.get() + wrote.files as u64);
             let mut changes = vfs.changes.borrow_mut();
             for dir in wrote.made {
                 changes.removed.remove(&dir);
@@ -392,12 +398,17 @@ pub(crate) struct Host(pub(crate) Rc<Vfs>);
 /// shares (no core dumps by default, the rest unlimited), so `ulimit -f` and `ulimit -c`
 /// work as there; the machine-dependent ones (open files, processes, stack) are absent.
 /// What `ulimit` sets stays in the shell, as nothing here enforces it.
-const fn sandbox_rlimit(resource: Rlimit) -> Option<(psh_engine::host::Limit, psh_engine::host::Limit)> {
+const fn sandbox_rlimit(
+    resource: Rlimit,
+) -> Option<(psh_engine::host::Limit, psh_engine::host::Limit)> {
     match resource {
         Rlimit::Core => Some((Some(0), None)),
-        Rlimit::FileSize | Rlimit::Data | Rlimit::Rss | Rlimit::As | Rlimit::Cpu | Rlimit::Locks => {
-            Some((None, None))
-        }
+        Rlimit::FileSize
+        | Rlimit::Data
+        | Rlimit::Rss
+        | Rlimit::As
+        | Rlimit::Cpu
+        | Rlimit::Locks => Some((None, None)),
         _ => None,
     }
 }
@@ -508,7 +519,9 @@ impl psh_engine::Host for Host {
         if path == DEVICES {
             // Devices are not in the file system's listing; read_dir adds them.
             let listed = self.read_dir(&path);
-            return Box::pin(async move { Ok(listed.await?.into_iter().map(|e| (e, None)).collect()) });
+            return Box::pin(
+                async move { Ok(listed.await?.into_iter().map(|e| (e, None)).collect()) },
+            );
         }
         self.0
             .list_kinds(&path)
@@ -629,7 +642,10 @@ impl psh_engine::Host for Host {
         info
     }
 
-    fn rlimit(&self, resource: Rlimit) -> Option<(psh_engine::host::Limit, psh_engine::host::Limit)> {
+    fn rlimit(
+        &self,
+        resource: Rlimit,
+    ) -> Option<(psh_engine::host::Limit, psh_engine::host::Limit)> {
         sandbox_rlimit(resource)
     }
 
@@ -654,7 +670,9 @@ impl psh_engine::Host for Host {
     }
 
     fn hard_link(&self, existing: &[u8], link: &[u8]) -> HostFuture<io::Result<()>> {
-        self.0.hard_link(&normalize(existing), normalize(link)).boxed()
+        self.0
+            .hard_link(&normalize(existing), normalize(link))
+            .boxed()
     }
 
     fn stat_extra(

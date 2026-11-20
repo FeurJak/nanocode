@@ -1085,7 +1085,11 @@ impl World {
             .position(|frame| frame.sub == Some(victim))
             .unwrap_or(state.queue.len());
         if keeps {
-            for frame in state.queue.iter_mut().filter(|frame| frame.sub == Some(victim)) {
+            for frame in state
+                .queue
+                .iter_mut()
+                .filter(|frame| frame.sub == Some(victim))
+            {
                 frame.stale = true;
             }
         } else {
@@ -1105,7 +1109,11 @@ impl World {
             },
         );
         state.dropped.insert(victim);
-        let held = state.queue.iter().filter(|frame| frame.sub.is_some()).count();
+        let held = state
+            .queue
+            .iter()
+            .filter(|frame| frame.sub.is_some())
+            .count();
         self.stats.overloads += 1;
         self.remove_sub(socket, victim);
         if held > bound {

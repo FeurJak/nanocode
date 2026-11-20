@@ -251,7 +251,8 @@ async fn write_at(
     let reply = match vfs.stat(&path, true).get().await {
         Ok(stat) if stat.size != at => {
             let mut content = vfs.read(&path).get().await?.to_vec();
-            let start = usize::try_from(at).map_err(|_| io::Error::from(io::ErrorKind::FileTooLarge))?;
+            let start =
+                usize::try_from(at).map_err(|_| io::Error::from(io::ErrorKind::FileTooLarge))?;
             let end = start + data.len();
             if content.len() < end {
                 content.resize(end, 0);
@@ -664,15 +665,26 @@ mod tests {
 
     #[test]
     fn truncating_redirect_keeps_its_offset() {
-        assert_eq!(out("( echo x >> out; cat out; echo x ) > out; cat out"), "x\n");
-        assert_eq!(out("{ echo x >> out; cat out; echo x; } > out; cat out"), "x\n");
-        assert_eq!(out("( echo x > out; cat out; echo x ) > out; cat out"), "x\n");
+        assert_eq!(
+            out("( echo x >> out; cat out; echo x ) > out; cat out"),
+            "x\n"
+        );
+        assert_eq!(
+            out("{ echo x >> out; cat out; echo x; } > out; cat out"),
+            "x\n"
+        );
+        assert_eq!(
+            out("( echo x > out; cat out; echo x ) > out; cat out"),
+            "x\n"
+        );
         assert_eq!(
             out("for x in x x x; do echo \"<$x>\"; echo x >> out; cat out; done > out; cat out"),
             "<x>\n<x>\n<x>\nx\n"
         );
         assert_eq!(
-            out("f() { echo \"$#:$1\"; echo x > out; cat out; shift; echo \"$@\"; }; f x x > out; cat out"),
+            out(
+                "f() { echo \"$#:$1\"; echo x > out; cat out; shift; echo \"$@\"; }; f x x > out; cat out"
+            ),
             "x\n\0\0x\n"
         );
     }
@@ -686,21 +698,39 @@ mod tests {
 
     #[test]
     fn appending_redirect_writes_at_the_end() {
-        assert_eq!(out("{ echo a; echo b >> out; echo c; } >> out; cat out"), "a\nb\nc\n");
-        assert_eq!(out("exec 3> out; echo abc >&3; echo z > out; echo d >&3; cat out"), "z\n\0\0d\n");
+        assert_eq!(
+            out("{ echo a; echo b >> out; echo c; } >> out; cat out"),
+            "a\nb\nc\n"
+        );
+        assert_eq!(
+            out("exec 3> out; echo abc >&3; echo z > out; echo d >&3; cat out"),
+            "z\n\0\0d\n"
+        );
     }
 
     #[test]
     fn a_script_the_shell_runs_gets_the_command_environment() {
         let make = "printf '#!/usr/bin/env bash\\necho \"[$V][$W]\"\\n' > s; chmod +x s; ";
         assert_eq!(out(&format!("{make}V=x W=y ./s; ./s")), "[x][y]\n[][]\n");
-        assert_eq!(out(&format!("{make}export V=e; ./s; V=p ./s; echo \"$V\"")), "[e][]\n[p][]\ne\n");
+        assert_eq!(
+            out(&format!("{make}export V=e; ./s; V=p ./s; echo \"$V\"")),
+            "[e][]\n[p][]\ne\n"
+        );
         assert_eq!(out(&format!("{make}V=x; ./s")), "[][]\n");
         let zero = "mkdir -p bin; printf '#!/bin/bash\\necho $0\\n' > bin/z; chmod +x bin/z; ";
-        assert_eq!(out(&format!("{zero}PATH=/bin:$PATH z; bin/z; ./bin/z")), "/bin/z\nbin/z\n./bin/z\n");
+        assert_eq!(
+            out(&format!("{zero}PATH=/bin:$PATH z; bin/z; ./bin/z")),
+            "/bin/z\nbin/z\n./bin/z\n"
+        );
         let fun = "printf '#!/bin/bash\\nf 2>/dev/null || echo none\\n' > t; chmod +x t; f() { echo fn; }; ";
-        assert_eq!(out(&format!("{fun}./t; export -f f; ./t; export -nf f; ./t")), "none\nfn\nnone\n");
-        assert_eq!(out(&format!("{fun}export -f f; env -i ./t; env ./t")), "none\nfn\n");
+        assert_eq!(
+            out(&format!("{fun}./t; export -f f; ./t; export -nf f; ./t")),
+            "none\nfn\nnone\n"
+        );
+        assert_eq!(
+            out(&format!("{fun}export -f f; env -i ./t; env ./t")),
+            "none\nfn\n"
+        );
     }
 
     #[test]
@@ -715,6 +745,9 @@ mod tests {
         assert_eq!(out("let n=1 < .; echo $n"), "1\n");
         let (stdout, stderr) = run("cat < .; echo $?");
         assert_eq!(String::from_utf8(stdout).unwrap(), "1\n");
-        assert!(String::from_utf8_lossy(&stderr).contains("Is a directory"), "{stderr:?}");
+        assert!(
+            String::from_utf8_lossy(&stderr).contains("Is a directory"),
+            "{stderr:?}"
+        );
     }
 }

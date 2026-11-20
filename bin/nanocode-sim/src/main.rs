@@ -25,7 +25,6 @@ mod executor;
 mod faults;
 mod gitremote;
 mod handauto;
-mod nestedmeta;
 mod handrouter;
 mod hands;
 mod host;
@@ -39,6 +38,7 @@ mod machines;
 mod memory;
 mod model;
 mod mpp;
+mod nestedmeta;
 mod network;
 mod onelog;
 mod partitions;
@@ -84,7 +84,6 @@ use crate::{
     dispatcher::{DispatcherMutation, DispatcherStats},
     gitremote::{GitRemoteMutation, GitRemoteStats},
     handauto::{HandAutoMutation, HandAutoStats},
-    nestedmeta::{NestedMetaMutation, NestedMetaStats},
     handrouter::{HandRouterMutation, HandRouterStats},
     hands::{HandsMutation, HandsStats},
     httpd::WireMutation,
@@ -94,6 +93,7 @@ use crate::{
     longthread::{LongThreadMutation, LongThreadStats},
     model::Stats,
     mpp::{MppMutation, MppStats},
+    nestedmeta::{NestedMetaMutation, NestedMetaStats},
     onelog::{LiveSeqs, Protections},
     partitions::{PartitionsMutation, PartitionsStats},
     plog::{PlogMutation, PlogStats},

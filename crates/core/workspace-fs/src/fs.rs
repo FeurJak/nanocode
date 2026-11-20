@@ -218,7 +218,11 @@ struct Planned {
 /// would end: no symlink on the way, no directory or other file where a directory or
 /// the file goes, each path once, within the commit's operations. It stops at the
 /// first file that is not so.
-fn plan(manifest: &Manifest, caps: &Caps, paths: impl Iterator<Item = io::Result<String>>) -> Planned {
+fn plan(
+    manifest: &Manifest,
+    caps: &Caps,
+    paths: impl Iterator<Item = io::Result<String>>,
+) -> Planned {
     let mut files = Vec::new();
     let mut ops = 0;
     let mut written: BTreeSet<String> = BTreeSet::new();
@@ -504,7 +508,8 @@ impl Inner {
                     self.advance(batch.change()).await;
                     return Err(failure.into());
                 }
-                if mutated(Mutation::BackendFailureAcked) && matches!(failure, Failure::Backend(_)) {
+                if mutated(Mutation::BackendFailureAcked) && matches!(failure, Failure::Backend(_))
+                {
                     self.advance(batch.change()).await;
                     return Ok(batch.change().version);
                 }
@@ -650,7 +655,11 @@ impl Inner {
         self.commit(&ops, vec![blob]).await.map(drop)
     }
 
-    async fn write_files(&self, files: Vec<(String, Bytes, u32)>, dir_mode: u32) -> io::Result<Wrote> {
+    async fn write_files(
+        &self,
+        files: Vec<(String, Bytes, u32)>,
+        dir_mode: u32,
+    ) -> io::Result<Wrote> {
         let _turn = self.gate.acquire().await.map_err(io::Error::other)?;
         let planned = plan(
             &self.manifest.borrow(),
@@ -667,7 +676,9 @@ impl Inner {
             files: planned.files.len(),
             ..Wrote::default()
         };
-        for (at, ((path, dirs, held), (_, data, mode))) in planned.files.into_iter().zip(files).enumerate() {
+        for (at, ((path, dirs, held), (_, data, mode))) in
+            planned.files.into_iter().zip(files).enumerate()
+        {
             for dir in dirs {
                 ops.push(Op::Mkdir {
                     path: dir.clone(),
@@ -1060,7 +1071,10 @@ mod tests {
 
     fn resolve<T>(future: impl Future<Output = T>) -> T {
         let mut future = pin!(future);
-        match future.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+        match future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
             Poll::Ready(value) => value,
             Poll::Pending => panic!("the in-memory store answers at once"),
         }
@@ -1117,7 +1131,12 @@ mod tests {
         assert_eq!(reply(fs.list_kinds(b"/d")).expect("a listing"), want);
         let names: Vec<Vec<u8>> = want.into_iter().map(|(name, _)| name).collect();
         assert_eq!(reply(fs.list(b"/d")).expect("names"), names);
-        assert_eq!(reply(fs.list_kinds(b"/d/l")).expect("through the link").len(), 1);
+        assert_eq!(
+            reply(fs.list_kinds(b"/d/l"))
+                .expect("through the link")
+                .len(),
+            1
+        );
         assert_eq!(reply(fs.list(b"/")).expect("the root"), vec![b"d".to_vec()]);
         assert!(reply(fs.list_kinds(b"/d/b0")).is_err());
     }
@@ -1168,7 +1187,10 @@ mod tests {
         for (files, took) in cases {
             let wrote = reply(fs.write_files(files, 0o755)).expect("the leading files");
             assert_eq!(wrote.files, took);
-            assert_eq!(&reply(fs.read(files[0].path, 64)).expect("written")[..], files[0].data);
+            assert_eq!(
+                &reply(fs.read(files[0].path, 64)).expect("written")[..],
+                files[0].data
+            );
         }
         assert_eq!(stat_kind(&fs, b"/dir"), Kind::Dir);
         assert_eq!(&reply(fs.read(b"/plain", 64)).expect("plain")[..], b"x");
@@ -1232,7 +1254,10 @@ mod tests {
         reply(fs.write(b"/b", b"two", Write::Append)).expect("a write through b");
         reply(fs.set_mode(b"/a", 0o600)).expect("a mode through a");
         assert_eq!(&reply(fs.read(b"/a", 64)).expect("a")[..], b"onetwo");
-        assert_eq!(reply(fs.stat(b"/b", false)).expect("b").mode & MODE_BITS, 0o600);
+        assert_eq!(
+            reply(fs.stat(b"/b", false)).expect("b").mode & MODE_BITS,
+            0o600
+        );
         assert_eq!(
             reply(fs.hard_link(b"/a", b"/other")).map_err(|error| error.kind()),
             Err(io::ErrorKind::AlreadyExists)

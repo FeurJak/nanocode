@@ -1,6 +1,5 @@
 use std::{borrow::Cow, sync::Arc};
 
-
 use serde::{Serialize, Serializer, ser::SerializeSeq};
 use serde_json::value::{RawValue, to_raw_value};
 

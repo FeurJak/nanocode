@@ -150,14 +150,15 @@ pub(super) fn omit_images(messages: &mut [HistoryMessage]) -> bool {
 pub(super) fn omit_documents(messages: &mut [HistoryMessage]) -> bool {
     let mut omitted = false;
     for message in messages {
-        let has_document = message.mentions("document") && message.any_block(|block| match block {
-            ContentBlock::Document { .. } => true,
-            ContentBlock::ToolResult {
-                content: ToolResultContent::Blocks(blocks),
-                ..
-            } => blocks.iter().any(|block| block["type"] == "document"),
-            _ => false,
-        });
+        let has_document = message.mentions("document")
+            && message.any_block(|block| match block {
+                ContentBlock::Document { .. } => true,
+                ContentBlock::ToolResult {
+                    content: ToolResultContent::Blocks(blocks),
+                    ..
+                } => blocks.iter().any(|block| block["type"] == "document"),
+                _ => false,
+            });
         if !has_document {
             continue;
         }

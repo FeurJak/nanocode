@@ -455,10 +455,13 @@ impl EncodedPayload {
     }
 
     pub fn with_records(mut self, records: Vec<crate::StoreRecord>) -> Self {
-        let children = self.closure.take().map(|closure| match Arc::try_unwrap(closure) {
-            Ok(closure) => closure.children,
-            Err(closure) => closure.children.clone(),
-        });
+        let children = self
+            .closure
+            .take()
+            .map(|closure| match Arc::try_unwrap(closure) {
+                Ok(closure) => closure.children,
+                Err(closure) => closure.children.clone(),
+            });
         self.closure = Some(Arc::new(Closure {
             pending: records.into(),
             children: children.unwrap_or_default(),
@@ -467,10 +470,13 @@ impl EncodedPayload {
     }
 
     pub fn with_payloads(mut self, payloads: Vec<Self>) -> Self {
-        let pending = self.closure.take().map(|closure| match Arc::try_unwrap(closure) {
-            Ok(closure) => closure.pending,
-            Err(closure) => closure.pending.clone(),
-        });
+        let pending = self
+            .closure
+            .take()
+            .map(|closure| match Arc::try_unwrap(closure) {
+                Ok(closure) => closure.pending,
+                Err(closure) => closure.pending.clone(),
+            });
         self.closure = Some(Arc::new(Closure {
             pending: pending.unwrap_or_default(),
             children: payloads.into(),
@@ -856,12 +862,7 @@ impl EncodedPayload {
             } else if let Some(hashes) = record.strip_prefix(SHA256_MANIFEST_PREFIX) {
                 Assembly::Leaves(hashes.to_owned(), false)
             } else {
-                Assembly::Assembled(
-                    value
-                        .numbered_chunks(store, state_id, record)
-                        .await?
-                        .into(),
-                )
+                Assembly::Assembled(value.numbered_chunks(store, state_id, record).await?.into())
             });
         }
         Self::resolve_trees(values, store, state_id, &mut pending).await?;
