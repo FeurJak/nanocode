@@ -74,7 +74,9 @@ const USAGE: &str = "usage:
   $NC_BUILD_SLOTS_GIT or ~/.config/nc-build/slots-git, a git remote whose branch $NC_BUILD_SLOTS_BRANCH (nc-build-slots) holds
   slots.json as one parentless commit, replaced by a push with --force-with-lease on the fetched commit that retries when
   another push won; else the file $NC_BUILD_SLOTS
-  (~/swarm/slots.json); machines: the stored boxes, else $NC_BUILD_BOXES (~/swarm/boxes.json), each until it expires;
+  (~/swarm/slots.json); lane caps live apart from it, where clients older than caps never write: caps.json on the branch
+  NC_BUILD_SLOTS_BRANCH-caps (nc-build-slots-caps), else slots.caps.json beside the file; caps still found in slots.json
+  move there on first use; machines: the stored boxes, else $NC_BUILD_BOXES (~/swarm/boxes.json), each until it expires;
   dev-georgios only with a fresh observation, gak-9 by name; log: $NC_BUILD_MACHINES_LOG (~/swarm/machines.log)";
 
 pub fn main() -> ExitCode {
@@ -412,9 +414,16 @@ fn run_input(program: &str, args: &[&str], input: &str) -> Result<String, String
     String::from_utf8(output.stdout).map_err(|error| format!("{program}: {error}"))
 }
 
-fn with_git_state<T>(remote: &str, mut change: impl FnMut(&mut State) -> T) -> Result<T, String> {
-    let branch = config("NC_BUILD_SLOTS_BRANCH", "slots-branch")
-        .unwrap_or_else(|| "nc-build-slots".to_owned());
+fn slots_branch() -> String {
+    config("NC_BUILD_SLOTS_BRANCH", "slots-branch").unwrap_or_else(|| "nc-build-slots".to_owned())
+}
+
+fn with_git_file<T>(
+    remote: &str,
+    branch: &str,
+    file: &str,
+    mut change: impl FnMut(Option<&str>) -> Result<(Option<String>, T), String>,
+) -> Result<T, String> {
     let dir = home().join(".cache/nc-build/slots.git");
     let dir = dir.to_str().ok_or("cache path is not UTF-8")?.to_owned();
     std::fs::create_dir_all(&dir).map_err(|error| format!("{dir}: {error}"))?;
@@ -440,27 +449,23 @@ fn with_git_state<T>(remote: &str, mut change: impl FnMut(&mut State) -> T) -> R
         run_input("git", &all, input)
     };
     loop {
-        let parent = match git(&["fetch", "-q", "--depth", "1", remote, &branch], "") {
+        let parent = match git(&["fetch", "-q", "--depth", "1", remote, branch], "") {
             Ok(_) => Some(git(&["rev-parse", "FETCH_HEAD"], "")?.trim().to_owned()),
             Err(error) if error.contains("couldn't find remote ref") => None,
             Err(error) => return Err(error),
         };
-        let json = match &parent {
-            Some(parent) => git(&["show", &format!("{parent}:slots.json")], "")?,
-            None => String::new(),
+        let text = match &parent {
+            Some(parent) => Some(git(&["show", &format!("{parent}:{file}")], "")?),
+            None => None,
         };
-        let mut state = State::from_json(&json)
-            .ok_or_else(|| format!("{remote} {branch}: not a slots state"))?;
-        let before = state.to_json();
-        let result = change(&mut state);
-        let after = state.to_json();
-        if parent.is_some() && after == before {
+        let (after, result) = change(text.as_deref())?;
+        let Some(after) = after else {
             return Ok(result);
-        }
+        };
         let blob = git(&["hash-object", "-w", "--stdin"], &after)?;
         let tree = git(
             &["mktree"],
-            &format!("100644 blob {}\tslots.json\n", blob.trim()),
+            &format!("100644 blob {}\t{file}\n", blob.trim()),
         )?;
         let commit = git(&["commit-tree", tree.trim(), "-m", "slots"], "")?;
         let lease = format!(
@@ -486,12 +491,90 @@ fn with_git_state<T>(remote: &str, mut change: impl FnMut(&mut State) -> T) -> R
     }
 }
 
+fn with_git_state<T>(remote: &str, mut change: impl FnMut(&mut State) -> T) -> Result<T, String> {
+    let branch = slots_branch();
+    with_git_file(remote, &branch, "slots.json", |json| {
+        let mut state = State::from_json(json.unwrap_or_default())
+            .ok_or_else(|| format!("{remote} {branch}: not a slots state"))?;
+        let before = state.to_json();
+        let result = change(&mut state);
+        let after = state.to_json();
+        Ok(((json.is_none() || after != before).then_some(after), result))
+    })
+}
+
+fn slots_path() -> PathBuf {
+    std::env::var_os("NC_BUILD_SLOTS")
+        .map_or_else(|| home().join("swarm/slots.json"), PathBuf::from)
+}
+
+fn parse_caps(text: &str, from: &str) -> Result<Vec<slots::Cap>, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|error| format!("{from}: {error}"))?;
+    slots::caps_from_json(&value).map_err(|error| format!("{from}: {error}"))
+}
+
+fn caps_text(caps: &[slots::Cap]) -> String {
+    serde_json::Value::from(caps.iter().map(slots::Cap::to_json).collect::<Vec<_>>()).to_string()
+}
+
+fn stored_caps(write: Option<&[slots::Cap]>) -> Result<Option<Vec<slots::Cap>>, String> {
+    if let Some(remote) = config("NC_BUILD_SLOTS_GIT", "slots-git") {
+        let branch = format!("{}-caps", slots_branch());
+        let from = format!("{remote} {branch} caps.json");
+        return with_git_file(&remote, &branch, "caps.json", |text| {
+            let read = text.map(|text| parse_caps(text, &from)).transpose()?;
+            Ok((
+                write.map(caps_text),
+                write.map(<[slots::Cap]>::to_vec).or(read),
+            ))
+        });
+    }
+    let path = slots_path().with_extension("caps.json");
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    file.lock().map_err(|error| error.to_string())?;
+    if let Some(caps) = write {
+        file.set_len(0).map_err(|error| error.to_string())?;
+        file.write_all(caps_text(caps).as_bytes())
+            .map_err(|error| error.to_string())?;
+        return Ok(Some(caps.to_vec()));
+    }
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .map_err(|error| error.to_string())?;
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    parse_caps(&text, &path.display().to_string()).map(Some)
+}
+
 fn with_state<T>(mut change: impl FnMut(&mut State) -> T) -> Result<T, String> {
+    let stored = stored_caps(None)?;
+    let mut caps = Vec::new();
+    let result = with_slots_state(|state| {
+        let legacy = std::mem::take(&mut state.caps);
+        state.caps = stored.clone().unwrap_or(legacy);
+        let result = change(state);
+        caps = std::mem::take(&mut state.caps);
+        result
+    })?;
+    if stored.as_ref() != Some(&caps) && (stored.is_some() || !caps.is_empty()) {
+        stored_caps(Some(&caps))?;
+    }
+    Ok(result)
+}
+
+fn with_slots_state<T>(mut change: impl FnMut(&mut State) -> T) -> Result<T, String> {
     if let Some(remote) = config("NC_BUILD_SLOTS_GIT", "slots-git") {
         return with_git_state(&remote, change);
     }
-    let path = std::env::var_os("NC_BUILD_SLOTS")
-        .map_or_else(|| home().join("swarm/slots.json"), PathBuf::from);
+    let path = slots_path();
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -1530,14 +1613,24 @@ mod tests {
     }
 
     #[test]
-    fn caps_survive_the_state_round_trip_and_reject_bad_entries() {
+    fn caps_live_apart_from_the_state_and_reject_bad_entries() {
         let mut state = state(&[], &[]);
         state.caps.push(lane_cap(16));
         let mut cap = lane_cap(8);
         cap.lane = "sim".to_owned();
         cap.kinds = Some(vec!["sim".to_owned()]);
         state.caps.push(cap);
-        assert_eq!(State::from_json(&state.to_json()), Some(state));
+        let caps = state.caps.clone();
+        assert_eq!(
+            super::parse_caps(&super::caps_text(&caps), "caps"),
+            Ok(caps.clone())
+        );
+        let json = state.to_json();
+        assert!(!json.contains("\"caps\""));
+        assert!(State::from_json(&json).unwrap().caps.is_empty());
+        let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
+        legacy["caps"] = serde_json::from_str(&super::caps_text(&caps)).unwrap();
+        assert_eq!(State::from_json(&legacy.to_string()).unwrap().caps, caps);
         for bad in [
             r#"{"lane":"a","prefixes":["a-"],"cores":1}"#,
             r#"[{"lane":"","prefixes":["a-"],"cores":1}]"#,

@@ -327,7 +327,6 @@ impl State {
             "leases": leases,
             "next": self.next,
             "boxes": self.boxes,
-            "caps": self.caps.iter().map(Cap::to_json).collect::<Vec<Value>>(),
         }))
         .unwrap_or_default()
     }
