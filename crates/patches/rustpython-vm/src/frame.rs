@@ -5044,6 +5044,22 @@ impl ExecutingFrame<'_> {
             }
             Instruction::LoadName { namei: idx } => {
                 let name = self.code.names[idx.get(arg) as usize];
+                // An exact dict is read directly: the mapping protocol would
+                // go through the object hash and raise a KeyError to say a
+                // name lives in the globals instead.
+                if let Some(dict) = self
+                    .locals
+                    .get_or_create(vm)
+                    .obj()
+                    .downcast_ref_if_exact::<PyDict>(vm)
+                {
+                    let value = match dict.inner_getitem_opt(name, vm)? {
+                        Some(value) => value,
+                        None => self.load_global_or_builtin(name, vm)?,
+                    };
+                    self.push_value(value);
+                    return Ok(None);
+                }
                 let result = self.locals.mapping(vm).subscript(name, vm);
                 match result {
                     Ok(x) => self.push_value(x),
@@ -5626,6 +5642,14 @@ impl ExecutingFrame<'_> {
             Instruction::StoreName { namei: idx } => {
                 let name = self.code.names[idx.get(arg) as usize];
                 let value = self.pop_value();
+                let locals = self.locals.get_or_create(vm).obj();
+                if let Some(dict) = locals.downcast_ref_if_exact::<PyDict>(vm) {
+                    dict.inner_setitem(name, value, vm)?;
+                    if locals.is(vm.builtins.dict().as_object()) {
+                        crate::stdlib::_testinternalcapi::note_builtin_dict();
+                    }
+                    return Ok(None);
+                }
                 self.locals
                     .mapping(vm)
                     .ass_subscript(name, Some(value), vm)?;
