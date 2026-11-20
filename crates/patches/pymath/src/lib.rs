@@ -6,6 +6,7 @@ pub mod math;
 // Internal modules
 mod err;
 mod exp;
+mod glibc;
 // Native libm via FFI (unix/windows)
 #[cfg(any(unix, windows))]
 pub(crate) mod m;

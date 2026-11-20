@@ -21,7 +21,7 @@ pub fn atan(n: f64) -> f64 {
 
 #[inline(always)]
 pub fn atan2(y: f64, x: f64) -> f64 {
-    unsafe { m_sys::atan2(y, x) }
+    crate::glibc::atan2(y, x)
 }
 
 #[inline(always)]
@@ -90,12 +90,12 @@ pub fn expm1(n: f64) -> f64 {
 
 #[inline(always)]
 pub fn log(n: f64) -> f64 {
-    unsafe { m_sys::log(n) }
+    crate::glibc::log(n)
 }
 
 #[inline(always)]
 pub fn log10(n: f64) -> f64 {
-    unsafe { m_sys::log10(n) }
+    crate::glibc::log10(n)
 }
 
 #[inline(always)]
@@ -105,7 +105,7 @@ pub fn log1p(n: f64) -> f64 {
 
 #[inline(always)]
 pub fn log2(n: f64) -> f64 {
-    unsafe { m_sys::log2(n) }
+    crate::glibc::log2(n)
 }
 
 // Power functions
