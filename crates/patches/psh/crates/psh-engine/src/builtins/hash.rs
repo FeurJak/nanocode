@@ -168,11 +168,14 @@ pub(crate) async fn search(vp: &Vp, name: &[u8], path: Option<&[u8]>) -> Option<
 
 type Searched = Option<(Vec<u8>, bool)>;
 
+/// A PATH search: name, PATH, cwd and result.
+type LastSearch = (Vec<u8>, Vec<u8>, Vec<u8>, Searched);
+
 thread_local! {
     /// The last `PATH` search a utility lookup made: (name, `PATH`, cwd, result). The
     /// run that follows the lookup takes it to fill the table instead of searching
     /// again (each miss is a `stat` per `PATH` entry, slow on some file systems).
-    static SEARCHED: std::cell::RefCell<Option<(Vec<u8>, Vec<u8>, Vec<u8>, Searched)>> =
+    static SEARCHED: std::cell::RefCell<Option<LastSearch>> =
         const { std::cell::RefCell::new(None) };
 }
 

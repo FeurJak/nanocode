@@ -342,7 +342,7 @@ impl Indexed {
                 (self.found[i].0, item.crc, item.offset as u64)
             })
             .collect();
-        sorted.sort_by(|a, b| a.0.0.cmp(&b.0.0));
+        sorted.sort_by_key(|a| a.0.0);
         let mut out = Vec::new();
         out.extend_from_slice(&IDX_MAGIC);
         out.extend_from_slice(&IDX_VERSION.to_be_bytes());

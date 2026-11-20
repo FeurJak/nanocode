@@ -406,38 +406,6 @@ pub(crate) fn could_expand_subscript(text: &[u8]) -> bool {
     false
 }
 
-#[cfg(test)]
-mod tests {
-    use super::could_expand_subscript as could;
-
-    #[test]
-    fn plain_arithmetic_keeps_the_gate_off() {
-        for s in [
-            "i=0; while [ $i -lt 100000 ]; do i=$((i+1)); done",
-            "i=0; while ((i<100000)); do ((i++)); done",
-            "i=0; while [[ $i -lt 100000 ]]; do i=$((i+1)); done",
-            "a=(1 2 3); echo \"${a[$i]}\" $((a[$i] + 1)); a[$i]=2; x=\"${a[${#a[@]}-1]}\"",
-            "echo '[ok]' '$HOME' \"[$x]\"; echo \\$5 [ \\$x",
-        ] {
-            assert!(!could(s.as_bytes()), "{s}");
-        }
-    }
-
-    #[test]
-    fn a_written_subscript_turns_it_on() {
-        for s in [
-            "x='a[$(echo 2)]'; echo $((x))",
-            "x='a[`echo 2`]'",
-            "expr='a[ $(echo 2) ]'",
-            "x=a[\\$i]",
-            "x=\"a[\\$(echo 2)]\"",
-            "x=$'a[$i]'",
-        ] {
-            assert!(could(s.as_bytes()), "{s}");
-        }
-    }
-}
-
 fn unquote(k: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     if !k.iter().any(|&b| matches!(b, b'\'' | b'"' | b'\\')) {
         return std::borrow::Cow::Borrowed(k);
@@ -526,5 +494,37 @@ pub(crate) fn eval_literal(vp: &mut Vp, lit: &Literal) -> Result<i64, String> {
         Ok(v) => Ok(v),
         Err(EvalError::Env(msg)) => Err(msg),
         Err(e) => Err(e.bash_text().unwrap_or_default()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::could_expand_subscript as could;
+
+    #[test]
+    fn plain_arithmetic_keeps_the_gate_off() {
+        for s in [
+            "i=0; while [ $i -lt 100000 ]; do i=$((i+1)); done",
+            "i=0; while ((i<100000)); do ((i++)); done",
+            "i=0; while [[ $i -lt 100000 ]]; do i=$((i+1)); done",
+            "a=(1 2 3); echo \"${a[$i]}\" $((a[$i] + 1)); a[$i]=2; x=\"${a[${#a[@]}-1]}\"",
+            "echo '[ok]' '$HOME' \"[$x]\"; echo \\$5 [ \\$x",
+        ] {
+            assert!(!could(s.as_bytes()), "{s}");
+        }
+    }
+
+    #[test]
+    fn a_written_subscript_turns_it_on() {
+        for s in [
+            "x='a[$(echo 2)]'; echo $((x))",
+            "x='a[`echo 2`]'",
+            "expr='a[ $(echo 2) ]'",
+            "x=a[\\$i]",
+            "x=\"a[\\$(echo 2)]\"",
+            "x=$'a[$i]'",
+        ] {
+            assert!(could(s.as_bytes()), "{s}");
+        }
     }
 }

@@ -255,7 +255,7 @@ impl Blake2b {
         let block = self.block;
         blake2b_compress(&mut self.h, &block, self.length_bytes, true);
         let mut out = [0; BLAKE2B_OUTPUT_BYTES];
-        for (chunk, word) in out.chunks_exact_mut(8).zip(self.h) {
+        for (chunk, word) in out.as_chunks_mut::<8>().0.iter_mut().zip(self.h) {
             chunk.copy_from_slice(&word.to_le_bytes());
         }
         out
@@ -264,10 +264,8 @@ impl Blake2b {
 
 fn blake2b_compress(h: &mut [u64; 8], block: &[u8; BLAKE2B_BLOCK_BYTES], t: u128, last: bool) {
     let mut m = [0u64; 16];
-    for (word, chunk) in m.iter_mut().zip(block.chunks_exact(8)) {
-        let mut bytes = [0; 8];
-        bytes.copy_from_slice(chunk);
-        *word = u64::from_le_bytes(bytes);
+    for (word, chunk) in m.iter_mut().zip(block.as_chunks::<8>().0) {
+        *word = u64::from_le_bytes(*chunk);
     }
     let mut v = [0u64; 16];
     v[..8].copy_from_slice(h);

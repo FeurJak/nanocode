@@ -1950,6 +1950,10 @@ fn resolve_src(local: &Local, src: &str) -> Option<(String, Oid)> {
     .find_map(|name| local.get_ref(&name).map(|oid| (name, oid)))
 }
 
+/// A ref to push: its source (full name and id; none to delete), destination and
+/// whether to force.
+type PushWant = (Option<(String, Oid)>, String, bool);
+
 async fn push(ctx: &mut UtilCtx<'_>, remote: &dyn Remote, inv: &Invocation) -> Res<i32> {
     let (mut force, mut upstream, mut quiet, mut delete) = (false, false, false, false);
     let mut positional = Vec::new();
@@ -1972,7 +1976,7 @@ async fn push(ctx: &mut UtilCtx<'_>, remote: &dyn Remote, inv: &Invocation) -> R
     });
     let target = target(&first, arg, "push")?;
     let shown = base(&clean(&target.url)).to_string();
-    let mut wanted: Vec<(Option<(String, Oid)>, String, bool)> = Vec::new();
+    let mut wanted: Vec<PushWant> = Vec::new();
     let specs = positional.get(1..).unwrap_or_default();
     if specs.is_empty() {
         let Some(branch) = &branch else {

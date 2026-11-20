@@ -814,6 +814,9 @@ pub async fn join(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
 /// A line of `join`'s input: its fields.
 type Row = Vec<Vec<u8>>;
 
+/// `join`'s join field of a row, by side.
+type KeyFn<'a> = dyn Fn(&[Vec<u8>], usize) -> Vec<u8> + 'a;
+
 /// `join`'s input order check (GNU `check_order`).
 struct Order {
     /// `None`: --nocheck-order; `Some(true)`: --check-order (fatal).
@@ -831,7 +834,7 @@ impl Order {
         side: usize,
         n: usize,
         tables: &[Vec<Row>],
-        key: &dyn Fn(&[Vec<u8>], usize) -> Vec<u8>,
+        key: &KeyFn<'_>,
         raws: &[Vec<(usize, Vec<u8>)>],
         names: [&[u8]; 2],
     ) -> bool {
@@ -1308,7 +1311,7 @@ pub async fn tsort(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
     let mut index = std::collections::HashMap::new();
     let mut next: Vec<Vec<usize>> = Vec::new();
     let mut indegree: Vec<usize> = Vec::new();
-    for pair in tokens.chunks_exact(2) {
+    for pair in tokens.as_chunks::<2>().0 {
         let mut ids = [0usize; 2];
         for (slot, &token) in ids.iter_mut().zip(pair) {
             *slot = *index.entry(token).or_insert_with(|| {
@@ -1560,10 +1563,10 @@ fn fmt_paragraph(out: &mut Vec<u8>, words: &mut Vec<FmtWord>, indent: &[u8], wid
     while start < count {
         let end = next[start];
         out.extend_from_slice(indent);
-        for i in start..end {
-            out.extend_from_slice(&words[i].text);
+        for (i, w) in words.iter().enumerate().take(end).skip(start) {
+            out.extend_from_slice(&w.text);
             if i + 1 < end {
-                out.extend(std::iter::repeat_n(b' ', words[i].space));
+                out.extend(std::iter::repeat_n(b' ', w.space));
             }
         }
         out.push(b'\n');

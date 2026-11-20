@@ -264,6 +264,9 @@ impl Core {
     }
 }
 
+/// A cache by a word's span.
+pub(crate) type SpanMap<T> = RefCell<crate::vars::NameMap<(u32, u32), T>>;
+
 /// A parsed chunk plus the line table of its source, for `line N:` in messages.
 pub(crate) struct Code {
     pub ast: Arc<Ast>,
@@ -273,9 +276,9 @@ pub(crate) struct Code {
     pub line_base: u32,
     /// The arithmetic words of this chunk that are literal text, parsed
     /// (`arith::literal`), by the word's span.
-    pub arith: RefCell<crate::vars::NameMap<(u32, u32), Rc<crate::arith::Literal>>>,
+    pub arith: SpanMap<Rc<crate::arith::Literal>>,
     /// The loops of this chunk compiled to flat code (`flat::compiled`), by span.
-    pub flat: RefCell<crate::vars::NameMap<(u32, u32), Option<Rc<crate::flat::Prog>>>>,
+    pub flat: SpanMap<Option<Rc<crate::flat::Prog>>>,
 }
 
 impl Code {
