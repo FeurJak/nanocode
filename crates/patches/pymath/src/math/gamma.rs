@@ -1,6 +1,7 @@
 //! Special functions: gamma, lgamma, erf, erfc.
 
-use crate::{Error, mul_add};
+use crate::Error;
+use crate::m::{cos, exp, log, pow, sin};
 use std::f64::consts::PI;
 
 /// Error function.
@@ -67,8 +68,8 @@ fn lanczos_sum(x: f64) -> f64 {
     // this resulted in lower accuracy.
     if x < 5.0 {
         for i in (0..LANCZOS_N).rev() {
-            num = mul_add(num, x, LANCZOS_NUM_COEFFS[i]);
-            den = mul_add(den, x, LANCZOS_DEN_COEFFS[i]);
+            num = num * x + LANCZOS_NUM_COEFFS[i];
+            den = den * x + LANCZOS_DEN_COEFFS[i];
         }
     } else {
         for i in 0..LANCZOS_N {
@@ -85,15 +86,15 @@ fn m_sinpi(x: f64) -> f64 {
     let y = x.abs() % 2.0;
     let n = (2.0 * y).round() as i32;
     let r = match n {
-        0 => (PI * y).sin(),
-        1 => (PI * (y - 0.5)).cos(),
+        0 => sin(PI * y),
+        1 => cos(PI * (y - 0.5)),
         2 => {
             // N.B. -sin(pi*(y-1.0)) is *not* equivalent: it would give
             // -0.0 instead of 0.0 when y == 1.0.
-            (PI * (1.0 - y)).sin()
+            sin(PI * (1.0 - y))
         }
-        3 => -(PI * (y - 1.5)).cos(),
-        4 => (PI * (y - 2.0)).sin(),
+        3 => -cos(PI * (y - 1.5)),
+        4 => sin(PI * (y - 2.0)),
         _ => unreachable!(),
     };
     (1.0f64).copysign(x) * r
@@ -192,23 +193,23 @@ pub fn gamma(x: f64) -> crate::Result<f64> {
     };
     let z = z * LANCZOS_G / y;
     let r = if x < 0.0 {
-        let mut r = -PI / m_sinpi(absx) / absx * y.exp() / lanczos_sum(absx);
+        let mut r = -PI / m_sinpi(absx) / absx * exp(y) / lanczos_sum(absx);
         r -= z * r;
         if absx < 140.0 {
-            r /= y.powf(absx - 0.5);
+            r /= pow(y, absx - 0.5);
         } else {
-            let sqrtpow = y.powf(absx / 2.0 - 0.25);
+            let sqrtpow = pow(y, absx / 2.0 - 0.25);
             r /= sqrtpow;
             r /= sqrtpow;
         }
         r
     } else {
-        let mut r = lanczos_sum(absx) / y.exp();
+        let mut r = lanczos_sum(absx) / exp(y);
         r += z * r;
         if absx < 140.0 {
-            r *= y.powf(absx - 0.5);
+            r *= pow(y, absx - 0.5);
         } else {
-            let sqrtpow = y.powf(absx / 2.0 - 0.25);
+            let sqrtpow = pow(y, absx / 2.0 - 0.25);
             r *= sqrtpow;
             r *= sqrtpow;
         }
@@ -247,20 +248,20 @@ pub fn lgamma(x: f64) -> crate::Result<f64> {
     let absx = x.abs();
     // tiny arguments: lgamma(x) ~ -log(fabs(x)) for small x
     if absx < 1e-20 {
-        return Ok(-absx.ln());
+        return Ok(-log(absx));
     }
 
     // Lanczos' formula.  We could save a fraction of a ulp in accuracy by
     // having a second set of numerator coefficients for lanczos_sum that
     // absorbed the exp(-lanczos_g) term, and throwing out the lanczos_g
     // subtraction below; it's probably not worth it.
-    let mut r = lanczos_sum(absx).ln() - LANCZOS_G;
+    let mut r = log(lanczos_sum(absx)) - LANCZOS_G;
     let t = absx - 0.5;
-    r = mul_add(t, (absx + LANCZOS_G - 0.5).ln() - 1.0, r);
+    r += t * (log(absx + LANCZOS_G - 0.5) - 1.0);
 
     if x < 0.0 {
         // Use reflection formula to get value for negative x
-        r = LOG_PI - m_sinpi(absx).abs().ln() - absx.ln() - r;
+        r = LOG_PI - log(m_sinpi(absx).abs()) - log(absx) - r;
     }
     if r.is_infinite() {
         return Err(Error::ERANGE);
