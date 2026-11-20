@@ -40,7 +40,15 @@ const KEYWORDS: [&str; 26] = [
 ];
 
 const FORMATS: [&str; 9] = [
-    "date-time", "date", "time", "email", "uri", "uuid", "hostname", "ipv4", "ipv6",
+    "date-time",
+    "date",
+    "time",
+    "email",
+    "uri",
+    "uuid",
+    "hostname",
+    "ipv4",
+    "ipv6",
 ];
 
 #[derive(Default)]
@@ -86,11 +94,18 @@ fn walk(schema: &Value, depth: u64, size: &mut Size) -> Result<(), String> {
                 _ => return Err("enum is not a list".to_owned()),
             },
             "required" => {
-                if !value.as_array().is_some_and(|names| names.iter().all(Value::is_string)) {
+                if !value
+                    .as_array()
+                    .is_some_and(|names| names.iter().all(Value::is_string))
+                {
                     return Err("required is not a list of names".to_owned());
                 }
             }
-            "format" if !value.as_str().is_some_and(|format| FORMATS.contains(&format)) => {
+            "format"
+                if !value
+                    .as_str()
+                    .is_some_and(|format| FORMATS.contains(&format)) =>
+            {
                 return Err(format!("format {value} is not one the board checks"));
             }
             _ => {}
@@ -174,7 +189,11 @@ fn item(line: &str) -> Option<(usize, &str)> {
     if gap == 0 && !after.is_empty() {
         return None;
     }
-    let gap = if gap > 4 || after.trim().is_empty() { 1 } else { gap };
+    let gap = if gap > 4 || after.trim().is_empty() {
+        1
+    } else {
+        gap
+    };
     Some((lead + marker + gap, after.get(gap..).unwrap_or("")))
 }
 
@@ -189,7 +208,8 @@ fn opener(line: &str) -> Option<(u8, usize, &str)> {
     }
     let len = rest.bytes().take_while(|byte| *byte == mark).count();
     let info = rest[len..].trim();
-    (len >= 3 && !(mark == BACKTICK && info.bytes().any(|byte| byte == BACKTICK))).then_some((mark, len, info))
+    (len >= 3 && !(mark == BACKTICK && info.bytes().any(|byte| byte == BACKTICK)))
+        .then_some((mark, len, info))
 }
 
 fn closes(line: &str, mark: u8, len: usize) -> bool {
@@ -262,7 +282,9 @@ pub(crate) fn fences(text: &str) -> Result<Vec<(String, String)>, String> {
         });
     }
     match open {
-        Some(Fence { block: Some(id), .. }) => Err(format!("the fence of block {id} never closes")),
+        Some(Fence {
+            block: Some(id), ..
+        }) => Err(format!("the fence of block {id} never closes")),
         _ => Ok(found),
     }
 }
@@ -278,7 +300,10 @@ pub fn block(id: &str, data: &Value) -> String {
     format!("{fence}json#{id}\n{data}\n{fence}")
 }
 
-pub(crate) fn read(text: &str, lookup: impl Fn(&str, u64) -> Option<Value>) -> Result<Vec<Block>, Refusal> {
+pub(crate) fn read(
+    text: &str,
+    lookup: impl Fn(&str, u64) -> Option<Value>,
+) -> Result<Vec<Block>, Refusal> {
     let mut blocks = Vec::new();
     for (id, body) in fences(text).map_err(Refusal::Block)? {
         let (name, version) = split(&id).ok_or_else(|| Refusal::UnknownSchema(id.clone()))?;

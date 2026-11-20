@@ -10,7 +10,8 @@ use crate::{
 };
 
 pub trait FileStore: Send + Sync {
-    fn put<'a>(&'a self, hash: &'a str, bytes: &'a [u8]) -> StoreFuture<'a, Result<(), StoreError>>;
+    fn put<'a>(&'a self, hash: &'a str, bytes: &'a [u8])
+    -> StoreFuture<'a, Result<(), StoreError>>;
     fn get<'a>(&'a self, hash: &'a str) -> StoreFuture<'a, Result<Option<Vec<u8>>, StoreError>>;
 }
 
@@ -26,10 +27,16 @@ impl MemoryFiles {
 }
 
 impl FileStore for MemoryFiles {
-    fn put<'a>(&'a self, hash: &'a str, bytes: &'a [u8]) -> StoreFuture<'a, Result<(), StoreError>> {
+    fn put<'a>(
+        &'a self,
+        hash: &'a str,
+        bytes: &'a [u8],
+    ) -> StoreFuture<'a, Result<(), StoreError>> {
         Box::pin(async move {
             self.files.update(|files| {
-                files.entry(hash.to_owned()).or_insert_with(|| Arc::from(bytes));
+                files
+                    .entry(hash.to_owned())
+                    .or_insert_with(|| Arc::from(bytes));
             });
             Ok(())
         })
@@ -37,7 +44,9 @@ impl FileStore for MemoryFiles {
 
     fn get<'a>(&'a self, hash: &'a str) -> StoreFuture<'a, Result<Option<Vec<u8>>, StoreError>> {
         Box::pin(async move {
-            Ok(self.files.read(|files| files.get(hash).map(|bytes| bytes.to_vec())))
+            Ok(self
+                .files
+                .read(|files| files.get(hash).map(|bytes| bytes.to_vec())))
         })
     }
 }
@@ -47,10 +56,18 @@ pub fn hash(bytes: &[u8]) -> String {
 }
 
 impl Board {
-    pub async fn upload(&mut self, files: &dyn FileStore, at_ms: u64, bytes: &[u8], media: &str) -> Result<String, BoardError> {
+    pub async fn upload(
+        &mut self,
+        files: &dyn FileStore,
+        at_ms: u64,
+        bytes: &[u8],
+        media: &str,
+    ) -> Result<String, BoardError> {
         let size = bytes.len() as u64;
         if size > FILE_BYTES {
-            return Err(BoardError::Rejected(Rejection::Said(Refusal::FileSize(size))));
+            return Err(BoardError::Rejected(Rejection::Said(Refusal::FileSize(
+                size,
+            ))));
         }
         let hash = hash(bytes);
         files.put(&hash, bytes).await?;
@@ -59,11 +76,16 @@ impl Board {
             size,
             media: media.to_owned(),
         };
-        self.submit_keyed(&format!("file:{hash}"), at_ms, Op::Say { say }).await?;
+        self.submit_keyed(&format!("file:{hash}"), at_ms, Op::Say { say })
+            .await?;
         Ok(hash)
     }
 
-    pub async fn download(&self, files: &dyn FileStore, hash: &str) -> Result<Option<Vec<u8>>, BoardError> {
+    pub async fn download(
+        &self,
+        files: &dyn FileStore,
+        hash: &str,
+    ) -> Result<Option<Vec<u8>>, BoardError> {
         let Some(file) = self.fold.file(hash) else {
             return Ok(None);
         };

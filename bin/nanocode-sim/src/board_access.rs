@@ -31,8 +31,13 @@ pub fn identity(actor: &str) -> Identity {
         Some((principal, profile)) => (principal, Some(profile)),
         None => (actor, None),
     };
-    let verified = Identity::verify(&Credentials, &format!("token:{principal}")).expect("a simulated principal verifies");
-    profile.map_or(verified.clone(), |name| verified.profile(name).expect("a simulated profile is valid"))
+    let verified = Identity::verify(&Credentials, &format!("token:{principal}"))
+        .expect("a simulated principal verifies");
+    profile.map_or(verified.clone(), |name| {
+        verified
+            .profile(name)
+            .expect("a simulated profile is valid")
+    })
 }
 
 fn grant(who: Who, pattern: &str, can: &[Can]) -> Grant {
@@ -44,18 +49,49 @@ fn grant(who: Who, pattern: &str, can: &[Can]) -> Grant {
 
 pub fn grants() -> Vec<(&'static str, Grant)> {
     vec![
-        ("grant:agents", grant(Who::Kind("agent".to_owned()), "*", &[Can::Label])),
-        ("grant:sources", grant(Who::Kind("source".to_owned()), "*", &[Can::Read, Can::Post])),
-        ("grant:eve", grant(Who::Principal(EVE.to_owned()), "*", &[Can::Read, Can::Label])),
-        ("grant:lock", grant(Who::Principal(EVE.to_owned()), &format!("{LOCKED}/"), &[])),
-        ("grant:temp", grant(Who::Principal(EVE.to_owned()), "goal", &[Can::Post])),
-        ("grant:ivy", grant(Who::Principal(IVY.to_owned()), "*", &[Can::Read])),
-        ("grant:rank", grant(Who::Principal(IVY.to_owned()), "*", &[Can::Rank])),
+        (
+            "grant:agents",
+            grant(Who::Kind("agent".to_owned()), "*", &[Can::Label]),
+        ),
+        (
+            "grant:sources",
+            grant(Who::Kind("source".to_owned()), "*", &[Can::Read, Can::Post]),
+        ),
+        (
+            "grant:eve",
+            grant(
+                Who::Principal(EVE.to_owned()),
+                "*",
+                &[Can::Read, Can::Label],
+            ),
+        ),
+        (
+            "grant:lock",
+            grant(Who::Principal(EVE.to_owned()), &format!("{LOCKED}/"), &[]),
+        ),
+        (
+            "grant:temp",
+            grant(Who::Principal(EVE.to_owned()), "goal", &[Can::Post]),
+        ),
+        (
+            "grant:ivy",
+            grant(Who::Principal(IVY.to_owned()), "*", &[Can::Read]),
+        ),
+        (
+            "grant:rank",
+            grant(Who::Principal(IVY.to_owned()), "*", &[Can::Rank]),
+        ),
         (
             "grant:chat",
             Grant {
-                who: super::messages::WRITERS[..2].iter().map(|who| Who::Principal((*who).to_owned())).collect(),
-                can: BTreeMap::from([("*".to_owned(), vec![Can::Read, Can::Post, Can::React, Can::Label])]),
+                who: super::messages::WRITERS[..2]
+                    .iter()
+                    .map(|who| Who::Principal((*who).to_owned()))
+                    .collect(),
+                can: BTreeMap::from([(
+                    "*".to_owned(),
+                    vec![Can::Read, Can::Post, Can::React, Can::Label],
+                )]),
             },
         ),
         (
@@ -79,13 +115,21 @@ pub const REVOKE: &str = "revoke:temp";
 pub async fn setup(world: &World) {
     let mut board = world.open(OWNER).await;
     let mut writes = vec![("charter", Op::Charter {})];
-    writes.extend(grants().into_iter().map(|(key, grant)| (key, Op::Grant { grant })));
+    writes.extend(
+        grants()
+            .into_iter()
+            .map(|(key, grant)| (key, Op::Grant { grant })),
+    );
     for (key, op) in writes {
         loop {
             match board.submit_keyed(key, world.now_ms(), op.clone()).await {
                 Ok(_) | Err(BoardError::Rejected(Rejection::Exists)) => break,
                 Err(error @ BoardError::Rejected(_)) => {
-                    world.oracle.borrow_mut().wrong.push(format!("the owner could not write {key}: {error}"));
+                    world
+                        .oracle
+                        .borrow_mut()
+                        .wrong
+                        .push(format!("the owner could not write {key}: {error}"));
                     break;
                 }
                 Err(error) => {
@@ -100,10 +144,17 @@ pub async fn setup(world: &World) {
 pub async fn revoke(world: &World) {
     let mut board = world.open(OWNER).await;
     loop {
-        match board.revoke(REVOKE, world.now_ms(), keyed("grant:temp")).await {
+        match board
+            .revoke(REVOKE, world.now_ms(), keyed("grant:temp"))
+            .await
+        {
             Ok(_) => return,
             Err(error @ BoardError::Rejected(_)) => {
-                world.oracle.borrow_mut().wrong.push(format!("the owner could not revoke: {error}"));
+                world
+                    .oracle
+                    .borrow_mut()
+                    .wrong
+                    .push(format!("the owner could not revoke: {error}"));
                 return;
             }
             Err(error) => {
@@ -115,7 +166,12 @@ pub async fn revoke(world: &World) {
 }
 
 async fn raw(world: &World) -> (Vec<(u64, String)>, Fold) {
-    let rows = world.host.inner.scan(SCOPE, 0, i64::MAX as u64).await.unwrap_or_default();
+    let rows = world
+        .host
+        .inner
+        .scan(SCOPE, 0, i64::MAX as u64)
+        .await
+        .unwrap_or_default();
     let mut fold = Fold::new();
     for (seq, body) in &rows {
         let _ = fold.apply(*seq, body);
@@ -127,9 +183,20 @@ async fn forge(world: &World, by: &str, id: String, op: Op) {
     loop {
         let (rows, _) = raw(world).await;
         let next = rows.last().map_or(1, |(seq, _)| seq + 1);
-        let event = Event { id: EventId(id.clone()), by: by.to_owned(), at_ms: world.now_ms(), op: op.clone() };
+        let event = Event {
+            id: EventId(id.clone()),
+            by: by.to_owned(),
+            at_ms: world.now_ms(),
+            op: op.clone(),
+        };
         let body = serde_json::to_string(&event).expect("an event serializes");
-        if world.host.inner.append(SCOPE, &[(next, body)]).await.is_ok() {
+        if world
+            .host
+            .inner
+            .append(SCOPE, &[(next, body)])
+            .await
+            .is_ok()
+        {
             world.oracle.borrow_mut().stats.forged += 1;
             return;
         }
@@ -137,21 +204,42 @@ async fn forge(world: &World, by: &str, id: String, op: Op) {
 }
 
 async fn probe(world: &World, epoch: u64) {
-    let writer = if world.shape.stable { EVE.to_owned() } else { format!("{EVE}+e{epoch}") };
+    let writer = if world.shape.stable {
+        EVE.to_owned()
+    } else {
+        format!("{EVE}+e{epoch}")
+    };
     let mut board = world.open(&writer).await;
-    for task in [TaskId(LOCKED.to_owned()), TaskId(format!("{LOCKED}/nowhere"))] {
+    for task in [
+        TaskId(LOCKED.to_owned()),
+        TaskId(format!("{LOCKED}/nowhere")),
+    ] {
         for _ in 0..8 {
-            let sent = board.submit(world.now_ms(), Op::Reply { task: task.clone(), body: "probe".to_owned() }).await;
+            let sent = board
+                .submit(
+                    world.now_ms(),
+                    Op::Reply {
+                        task: task.clone(),
+                        body: "probe".to_owned(),
+                    },
+                )
+                .await;
             match sent {
                 Err(BoardError::Rejected(Rejection::UnknownTask)) => {
                     if board.task(&task).is_some() {
-                        world.oracle.borrow_mut().wrong.push(format!("{EVE} reads locked {task}"));
+                        world
+                            .oracle
+                            .borrow_mut()
+                            .wrong
+                            .push(format!("{EVE} reads locked {task}"));
                     }
                     break;
                 }
                 Err(BoardError::Store(_)) => world.nap(world.shape.poll_ms).await,
                 other => {
-                    world.oracle.borrow_mut().wrong.push(format!("{EVE} probing locked {task} got {other:?}, not an unknown task"));
+                    world.oracle.borrow_mut().wrong.push(format!(
+                        "{EVE} probing locked {task} got {other:?}, not an unknown task"
+                    ));
                     break;
                 }
             }
@@ -164,7 +252,10 @@ pub async fn intruder(world: &World, epoch: u64) {
     if epoch == 0
         && let Some(hook) = world.shape.hooks.iter().find(|hook| hook.review.is_some())
     {
-        let reply = Op::Reply { task: super::pr_task(hook.pr), body: "squat".to_owned() };
+        let reply = Op::Reply {
+            task: super::pr_task(hook.pr),
+            body: "squat".to_owned(),
+        };
         forge(world, EVE, format!("{SOURCE}#{}", hook.key), reply).await;
     }
     let span = world.shape.lease_ms * 4;
@@ -178,9 +269,15 @@ pub async fn intruder(world: &World, epoch: u64) {
             0 | 1 if !tasks.is_empty() => {
                 let task = tasks[rng.pick(tasks.len())].clone();
                 let op = if action == 0 {
-                    Op::Claim { task, lease_ms: world.shape.lease_ms }
+                    Op::Claim {
+                        task,
+                        lease_ms: world.shape.lease_ms,
+                    }
                 } else {
-                    Op::Cancel { task, reason: "forged".to_owned() }
+                    Op::Cancel {
+                        task,
+                        reason: "forged".to_owned(),
+                    }
                 };
                 forge(world, EVE, key(EVE), op).await;
             }
@@ -192,29 +289,68 @@ pub async fn intruder(world: &World, epoch: u64) {
                 forge(world, EVE, key(EVE), Op::Grant { grant }).await;
             }
             3 if fold.outcome(&keyed(REVOKE)).is_some_and(Result::is_ok) => {
-                let op = Op::Reply { task: TaskId("goal".to_owned()), body: "after revoke".to_owned() };
+                let op = Op::Reply {
+                    task: TaskId("goal".to_owned()),
+                    body: "after revoke".to_owned(),
+                };
                 forge(world, EVE, key(EVE), op).await;
             }
             4 => {
-                let held = fold.tasks().iter().find_map(|(id, task)| match &task.phase {
-                    nanocode_board::Phase::Claimed { claim, .. } => Some((id.clone(), claim.clone())),
-                    _ => None,
-                });
+                let held = fold
+                    .tasks()
+                    .iter()
+                    .find_map(|(id, task)| match &task.phase {
+                        nanocode_board::Phase::Claimed { claim, .. } => {
+                            Some((id.clone(), claim.clone()))
+                        }
+                        _ => None,
+                    });
                 if let Some((task, claim)) = held {
                     let outcome = nanocode_board::Outcome::Done("stolen".to_owned());
-                    forge(world, THIEF, key(THIEF), Op::Finish { task, claim, outcome }).await;
+                    forge(
+                        world,
+                        THIEF,
+                        key(THIEF),
+                        Op::Finish {
+                            task,
+                            claim,
+                            outcome,
+                        },
+                    )
+                    .await;
                 }
             }
             5 if fold.task(&TaskId("goal".to_owned())).is_some() => {
-                let op = Op::Reply { task: TaskId("goal".to_owned()), body: "outside its source".to_owned() };
+                let op = Op::Reply {
+                    task: TaskId("goal".to_owned()),
+                    body: "outside its source".to_owned(),
+                };
                 forge(world, SOURCE, key(SOURCE), op).await;
             }
-            6 => forge(world, EVE, key(EVE), Op::Revoke { grant: keyed("grant:agents") }).await,
-            7 if fold.outcome(&keyed("grant:lock")).is_some_and(Result::is_ok) => probe(world, epoch).await,
+            6 => {
+                forge(
+                    world,
+                    EVE,
+                    key(EVE),
+                    Op::Revoke {
+                        grant: keyed("grant:agents"),
+                    },
+                )
+                .await
+            }
+            7 if fold
+                .outcome(&keyed("grant:lock"))
+                .is_some_and(Result::is_ok) =>
+            {
+                probe(world, epoch).await
+            }
             8 if !tasks.is_empty() => {
                 let task = tasks[rng.pick(tasks.len())].clone();
                 let op = match rng.pick(3) {
-                    0 => TaskOp::Assign { task, to: Some(EVE.to_owned()) },
+                    0 => TaskOp::Assign {
+                        task,
+                        to: Some(EVE.to_owned()),
+                    },
                     1 => TaskOp::Unblock { task },
                     _ => TaskOp::Batch {
                         name: TaskId("goal".to_owned()),
@@ -231,16 +367,28 @@ pub async fn intruder(world: &World, epoch: u64) {
                 forge(world, EVE, key(EVE), Op::Tasks(op)).await;
             }
             9 => {
-                let cursor = Key::Cursor { actor: watching::TALLY.to_owned(), scope: None };
+                let cursor = Key::Cursor {
+                    actor: watching::TALLY.to_owned(),
+                    scope: None,
+                };
                 let from = fold.position(&cursor);
                 let to = raw(world).await.0.last().map_or(0, |(seq, _)| *seq);
                 if to > from {
-                    let step = Step::Consume { key: cursor, lease: None, from, to, effects: Vec::new() };
+                    let step = Step::Consume {
+                        key: cursor,
+                        lease: None,
+                        from,
+                        to,
+                        effects: Vec::new(),
+                    };
                     forge(world, EVE, key(EVE), Op::Watch(step)).await;
                 }
             }
             10 if !tasks.is_empty() => {
-                let send = Op::Reply { task: tasks[rng.pick(tasks.len())].clone(), body: "forged".to_owned() };
+                let send = Op::Reply {
+                    task: tasks[rng.pick(tasks.len())].clone(),
+                    body: "forged".to_owned(),
+                };
                 let step = Step::Schedule {
                     id: format!("forged.e{epoch}.{round}"),
                     by: EVE.to_owned(),
@@ -254,7 +402,10 @@ pub async fn intruder(world: &World, epoch: u64) {
             }
             11 => {
                 if let Some(id) = fold.marks().schedules().keys().next().cloned() {
-                    let step = Step::Unschedule { id, by: watching::CLOCK.to_owned() };
+                    let step = Step::Unschedule {
+                        id,
+                        by: watching::CLOCK.to_owned(),
+                    };
                     forge(world, EVE, key(EVE), Op::Watch(step)).await;
                 }
             }
@@ -282,11 +433,17 @@ async fn reparent(world: &World, epoch: u64, span: u64) {
                 if *above == task {
                     return true;
                 }
-                at = fold.task(above).and_then(|above| above.spec.parent.as_ref());
+                at = fold
+                    .task(above)
+                    .and_then(|above| above.spec.parent.as_ref());
             }
             false
         };
-        let below = tasks.iter().filter(|id| under(id)).cloned().collect::<Vec<_>>();
+        let below = tasks
+            .iter()
+            .filter(|id| under(id))
+            .cloned()
+            .collect::<Vec<_>>();
         let parent = match rng.pick(4) {
             0 => None,
             1 => Some(below[rng.pick(below.len())].clone()),
@@ -296,7 +453,16 @@ async fn reparent(world: &World, epoch: u64, span: u64) {
         let cyclic = parent.as_ref().is_some_and(under);
         let by = [OWNER, OWNER, EVE, IVY, SOURCE][rng.pick(5)];
         let id = format!("{by}#moves.e{epoch}.{round}");
-        forge(world, by, id.clone(), Op::Move { task: task.clone(), parent: parent.clone() }).await;
+        forge(
+            world,
+            by,
+            id.clone(),
+            Op::Move {
+                task: task.clone(),
+                parent: parent.clone(),
+            },
+        )
+        .await;
         let (_, fold) = raw(world).await;
         if cyclic && fold.outcome(&EventId(id)).is_some_and(Result::is_ok) {
             // A cycle makes every later walk up the parent links spin, so stop the run here.
@@ -316,8 +482,18 @@ async fn rank(world: &World, epoch: u64, span: u64) {
         }
         let task = tasks[rng.pick(tasks.len())].clone();
         let by = [OWNER, EVE, IVY, SOURCE][rng.pick(4)];
-        let rank = if rng.chance(200_000) { None } else { Some(rng.range(0, 4)) };
-        forge(world, by, format!("{by}#rank.e{epoch}.{round}"), Op::Rank { task, rank }).await;
+        let rank = if rng.chance(200_000) {
+            None
+        } else {
+            Some(rng.range(0, 4))
+        };
+        forge(
+            world,
+            by,
+            format!("{by}#rank.e{epoch}.{round}"),
+            Op::Rank { task, rank },
+        )
+        .await;
     }
 }
 
@@ -339,9 +515,18 @@ async fn relabel(world: &World, epoch: u64, span: u64) {
         let task = tasks[rng.pick(tasks.len())].clone();
         let by = [OWNER, EVE, IVY, SOURCE][rng.pick(4)];
         let keys = ["step", "k0", "k1"];
-        let set = BTreeMap::from([(keys[1 + rng.pick(2)].to_owned(), format!("v{epoch}.{round}"))]);
+        let set = BTreeMap::from([(
+            keys[1 + rng.pick(2)].to_owned(),
+            format!("v{epoch}.{round}"),
+        )]);
         let unset = BTreeSet::from([keys[rng.pick(3)].to_owned()]);
-        forge(world, by, format!("{by}#labels.e{epoch}.{round}"), Op::Relabel { task, set, unset }).await;
+        forge(
+            world,
+            by,
+            format!("{by}#labels.e{epoch}.{round}"),
+            Op::Relabel { task, set, unset },
+        )
+        .await;
     }
 }
 
@@ -360,26 +545,40 @@ fn spot(pattern: &str, target: &str) -> Option<(u8, usize)> {
 }
 
 fn gives(held: Can, wanted: Can) -> bool {
-    held == wanted || held == Can::Manage || (wanted == Can::Read && matches!(held, Can::React | Can::Label | Can::Sync | Can::Rank))
+    held == wanted
+        || held == Can::Manage
+        || (wanted == Can::Read && matches!(held, Can::React | Can::Label | Can::Sync | Can::Rank))
 }
 
 fn split(by: &str) -> (&str, Option<&str>) {
-    by.split_once('+').map_or((by, None), |(principal, profile)| (principal, Some(profile)))
+    by.split_once('+')
+        .map_or((by, None), |(principal, profile)| {
+            (principal, Some(profile))
+        })
 }
 
 fn principal_ok(principal: &str) -> bool {
     principal.split_once(':').is_some_and(|(kind, rest)| {
         !kind.is_empty()
             && !rest.is_empty()
-            && kind.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-            && principal.bytes().all(|byte| byte.is_ascii_alphanumeric() || b":_-/@".contains(&byte))
+            && kind
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            && principal
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b":_-/@".contains(&byte))
     })
 }
 
 fn actor_ok(by: &str) -> bool {
     let (principal, profile) = split(by);
     principal_ok(principal)
-        && profile.is_none_or(|profile| !profile.is_empty() && profile.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte)))
+        && profile.is_none_or(|profile| {
+            !profile.is_empty()
+                && profile
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+        })
 }
 
 pub fn owns(by: &str, id: &str) -> bool {
@@ -457,7 +656,9 @@ impl Gate {
                 return false;
             }
         }
-        self.level(by, target, everyone).into_iter().any(|held| gives(held, can))
+        self.level(by, target, everyone)
+            .into_iter()
+            .any(|held| gives(held, can))
     }
 
     pub fn can(&self, by: &str, target: &str, can: Can) -> bool {
@@ -474,10 +675,19 @@ impl Gate {
                 .all(|under| self.has(by, under, Can::Manage, false))
     }
 
-    fn chain(&self, by: &str, task: &TaskId, tasks: &BTreeMap<String, (Option<String>, Vec<String>, Expect)>) -> bool {
+    fn chain(
+        &self,
+        by: &str,
+        task: &TaskId,
+        tasks: &BTreeMap<String, (Option<String>, Vec<String>, Expect)>,
+    ) -> bool {
         let mut at = Some(task.0.clone());
         while let Some(id) = at {
-            if self.posters.get(&id).is_some_and(|poster| covers(by, poster)) {
+            if self
+                .posters
+                .get(&id)
+                .is_some_and(|poster| covers(by, poster))
+            {
                 return true;
             }
             at = tasks.get(&id).and_then(|(parent, _, _)| parent.clone());
@@ -485,7 +695,12 @@ impl Gate {
         false
     }
 
-    pub fn allows(&self, by: &str, op: &Op, tasks: &BTreeMap<String, (Option<String>, Vec<String>, Expect)>) -> bool {
+    pub fn allows(
+        &self,
+        by: &str,
+        op: &Op,
+        tasks: &BTreeMap<String, (Option<String>, Vec<String>, Expect)>,
+    ) -> bool {
         if !actor_ok(by) {
             return false;
         }
@@ -507,14 +722,26 @@ impl Gate {
             Op::Renew { task, claim, .. }
             | Op::Release { task, claim, .. }
             | Op::Finish { task, claim, .. }
-            | Op::Tasks(TaskOp::Block { task, claim: Some(claim), .. }) => {
+            | Op::Tasks(TaskOp::Block {
+                task,
+                claim: Some(claim),
+                ..
+            }) => {
                 let stolen = matches!(tasks.get(&task.0), Some((_, _, Expect::Claimed(held, _))) if *held == claim.0)
-                    && self.holders.get(&task.0).is_some_and(|holder| !covers(by, holder));
+                    && self
+                        .holders
+                        .get(&task.0)
+                        .is_some_and(|holder| !covers(by, holder));
                 self.can(by, &task.0, Can::Label) && !stolen
             }
             Op::Cancel { task, .. }
             | Op::Tasks(
-                TaskOp::Block { task, claim: None, .. } | TaskOp::Unblock { task } | TaskOp::Reopen { task } | TaskOp::Assign { task, .. },
+                TaskOp::Block {
+                    task, claim: None, ..
+                }
+                | TaskOp::Unblock { task }
+                | TaskOp::Reopen { task }
+                | TaskOp::Assign { task, .. },
             ) => read(task) && (self.chain(by, task, tasks) || self.can(by, &task.0, Can::Manage)),
             Op::Tasks(TaskOp::Batch { name, tasks }) => tasks.iter().all(|planned| {
                 let id = |need: &Need| match need {
@@ -522,12 +749,18 @@ impl Gate {
                     Need::Key(key) => format!("{}/{key}", name.0),
                 };
                 let own = format!("{}/{}", name.0, planned.key);
-                planned.parent.iter().chain(&planned.needs).all(|above| self.can(by, &id(above), Can::Read))
+                planned
+                    .parent
+                    .iter()
+                    .chain(&planned.needs)
+                    .all(|above| self.can(by, &id(above), Can::Read))
                     && self.can(by, &own, Can::Read)
                     && self.can(by, &own, Can::Post)
             }),
             Op::Reply { task, .. } => read(task) && self.can(by, &task.0, Can::Post),
-            Op::Relabel { task, .. } => read(task) && (self.chain(by, task, tasks) || self.can(by, &task.0, Can::Label)),
+            Op::Relabel { task, .. } => {
+                read(task) && (self.chain(by, task, tasks) || self.can(by, &task.0, Can::Label))
+            }
             Op::Rank { task, .. } => read(task) && self.can(by, &task.0, Can::Rank),
             Op::Move { task, parent } => {
                 read(task)
@@ -550,7 +783,10 @@ impl Gate {
                     })
                     && grant.can.keys().all(|pattern| {
                         let base = pattern.strip_suffix('/').unwrap_or(pattern);
-                        (pattern == "*" || (!base.is_empty() && !base.split('/').any(str::is_empty) && !pattern.contains('*')))
+                        (pattern == "*"
+                            || (!base.is_empty()
+                                && !base.split('/').any(str::is_empty)
+                                && !pattern.contains('*')))
                             && self.reaches(by, pattern)
                     })
             }
@@ -562,7 +798,12 @@ impl Gate {
         }
     }
 
-    fn allows_step(&self, by: &str, step: &Step, tasks: &BTreeMap<String, (Option<String>, Vec<String>, Expect)>) -> bool {
+    fn allows_step(
+        &self,
+        by: &str,
+        step: &Step,
+        tasks: &BTreeMap<String, (Option<String>, Vec<String>, Expect)>,
+    ) -> bool {
         let acts = |named: &str| covers(named, by) || covers(by, named);
         let see = |task: &TaskId| self.can(by, &task.0, Can::Read);
         match step {
@@ -571,37 +812,65 @@ impl Gate {
                     Key::Cursor { actor, scope } => (actor, scope.as_ref()),
                     Key::Watcher { watcher, thread } => (watcher, Some(thread)),
                 };
-                acts(named) && thread.is_none_or(see) && effects.iter().all(|op| self.allows(by, op, tasks))
+                acts(named)
+                    && thread.is_none_or(see)
+                    && effects.iter().all(|op| self.allows(by, op, tasks))
             }
-            Step::Watch { watcher, filter, .. } => acts(watcher) && filter.under.as_ref().is_none_or(see),
+            Step::Watch {
+                watcher, filter, ..
+            } => acts(watcher) && filter.under.as_ref().is_none_or(see),
             Step::Unwatch { watcher } => acts(watcher),
-            Step::Take { watcher, thread, .. } | Step::Fail { watcher, thread, .. } | Step::Bury { watcher, thread, .. } => {
-                acts(watcher) && see(thread)
+            Step::Take {
+                watcher, thread, ..
             }
+            | Step::Fail {
+                watcher, thread, ..
+            }
+            | Step::Bury {
+                watcher, thread, ..
+            } => acts(watcher) && see(thread),
             Step::Schedule { by: made, send, .. } => made == by && self.allows(by, send, tasks),
             Step::Fire { .. } => true,
             Step::Unschedule { by: made, .. } => made == by,
         }
     }
 
-    fn home(&self, id: &str, tasks: &BTreeMap<String, (Option<String>, Vec<String>, Expect)>) -> Option<String> {
+    fn home(
+        &self,
+        id: &str,
+        tasks: &BTreeMap<String, (Option<String>, Vec<String>, Expect)>,
+    ) -> Option<String> {
         if tasks.contains_key(id) {
             return Some(id.to_owned());
         }
         let (root, channel) = self.roots.get(id)?;
-        Some(if tasks.contains_key(root) { root.clone() } else { channel.clone() })
+        Some(if tasks.contains_key(root) {
+            root.clone()
+        } else {
+            channel.clone()
+        })
     }
 
-    pub fn says(&self, by: &str, say: &Say, tasks: &BTreeMap<String, (Option<String>, Vec<String>, Expect)>) -> bool {
+    pub fn says(
+        &self,
+        by: &str,
+        say: &Say,
+        tasks: &BTreeMap<String, (Option<String>, Vec<String>, Expect)>,
+    ) -> bool {
         if !actor_ok(by) || self.owner.is_none() {
             return false;
         }
         let (place, can) = match say {
             Say::Post { channel, re, .. } => (
-                re.as_ref().and_then(|root| self.home(&root.0, tasks)).unwrap_or_else(|| channel.clone()),
+                re.as_ref()
+                    .and_then(|root| self.home(&root.0, tasks))
+                    .unwrap_or_else(|| channel.clone()),
                 Can::Post,
             ),
-            Say::Edit { message, .. } | Say::Delete { message } | Say::React { message, .. } | Say::Label { message, .. } => {
+            Say::Edit { message, .. }
+            | Say::Delete { message }
+            | Say::React { message, .. }
+            | Say::Label { message, .. } => {
                 let Some(home) = self.home(&message.0, tasks) else {
                     return false;
                 };
@@ -621,8 +890,13 @@ impl Gate {
     pub fn heard(&mut self, id: &str, say: &Say) {
         if let Say::Post { channel, re, .. } = say {
             let root = re.as_ref().map_or(id, |root| &root.0);
-            let channel = self.roots.get(root).map_or_else(|| channel.clone(), |(_, channel)| channel.clone());
-            self.roots.entry(id.to_owned()).or_insert((root.to_owned(), channel));
+            let channel = self
+                .roots
+                .get(root)
+                .map_or_else(|| channel.clone(), |(_, channel)| channel.clone());
+            self.roots
+                .entry(id.to_owned())
+                .or_insert((root.to_owned(), channel));
         }
     }
 
@@ -643,7 +917,8 @@ impl Gate {
             }
             Op::Tasks(TaskOp::Batch { name, tasks }) => {
                 for task in tasks {
-                    self.posters.insert(format!("{}/{}", name.0, task.key), by.to_owned());
+                    self.posters
+                        .insert(format!("{}/{}", name.0, task.key), by.to_owned());
                 }
             }
             _ => {}
@@ -651,15 +926,28 @@ impl Gate {
     }
 }
 
-pub fn views(fold: &Fold, gate: &Gate, tasks: &BTreeMap<String, (Option<String>, Vec<String>, Expect)>) -> Result<(), String> {
+pub fn views(
+    fold: &Fold,
+    gate: &Gate,
+    tasks: &BTreeMap<String, (Option<String>, Vec<String>, Expect)>,
+) -> Result<(), String> {
     for reader in [EVE, SOURCE, THIEF] {
         let actor = Actor::parse(reader).map_err(|error| format!("{reader}: {error:?}"))?;
-        let shown = fold.view(&actor).map(|(id, _)| id.0.clone()).collect::<BTreeSet<_>>();
-        let allowed = tasks.keys().filter(|id| gate.can(reader, id, Can::Read)).cloned().collect::<BTreeSet<_>>();
+        let shown = fold
+            .view(&actor)
+            .map(|(id, _)| id.0.clone())
+            .collect::<BTreeSet<_>>();
+        let allowed = tasks
+            .keys()
+            .filter(|id| gate.can(reader, id, Can::Read))
+            .cloned()
+            .collect::<BTreeSet<_>>();
         if shown != allowed {
             let extra = shown.difference(&allowed).take(3).collect::<Vec<_>>();
             let missing = allowed.difference(&shown).take(3).collect::<Vec<_>>();
-            return Err(format!("{reader} sees the wrong tasks: extra {extra:?}, missing {missing:?}"));
+            return Err(format!(
+                "{reader} sees the wrong tasks: extra {extra:?}, missing {missing:?}"
+            ));
         }
     }
     Ok(())
@@ -669,30 +957,49 @@ pub fn audit(fold: &Fold, model: &Reference) -> Result<(), String> {
     for (id, accepted) in &model.verdicts {
         let applied = fold.outcome(&EventId(id.clone())).map(Result::is_ok);
         if applied != Some(*accepted) {
-            return Err(format!("event {id}: the board says {applied:?}, the reference model says {accepted}"));
+            return Err(format!(
+                "event {id}: the board says {applied:?}, the reference model says {accepted}"
+            ));
         }
     }
     for (id, task) in fold.tasks() {
         let labels = model.labels.get(&id.0).cloned().unwrap_or_default();
         if task.spec.labels != labels {
-            return Err(format!("{id}: the board's labels are {:?}, the reference model's {labels:?}", task.spec.labels));
+            return Err(format!(
+                "{id}: the board's labels are {:?}, the reference model's {labels:?}",
+                task.spec.labels
+            ));
         }
         let rank = model.ranks.get(&id.0).copied();
         if task.rank != rank {
-            return Err(format!("{id}: the board ranks it {:?}, the reference model {rank:?}", task.rank));
+            return Err(format!(
+                "{id}: the board ranks it {:?}, the reference model {rank:?}",
+                task.rank
+            ));
         }
     }
     for (id, task) in fold.tasks() {
-        let parent = model.tasks.get(&id.0).and_then(|(parent, _, _)| parent.as_deref());
+        let parent = model
+            .tasks
+            .get(&id.0)
+            .and_then(|(parent, _, _)| parent.as_deref());
         if task.spec.parent.as_ref().map(|parent| parent.0.as_str()) != parent {
-            return Err(format!("{id}: the board's parent is {:?}, the reference model's {parent:?}", task.spec.parent));
+            return Err(format!(
+                "{id}: the board's parent is {:?}, the reference model's {parent:?}",
+                task.spec.parent
+            ));
         }
         if let Some(parent) = &task.spec.parent
             && !fold.children(parent).any(|child| child == id)
         {
-            return Err(format!("{id} is missing from the children of its parent {parent}"));
+            return Err(format!(
+                "{id} is missing from the children of its parent {parent}"
+            ));
         }
-        if let Some(child) = fold.children(id).find(|child| fold.task(child).is_none_or(|below| below.spec.parent.as_ref() != Some(id))) {
+        if let Some(child) = fold.children(id).find(|child| {
+            fold.task(child)
+                .is_none_or(|below| below.spec.parent.as_ref() != Some(id))
+        }) {
             return Err(format!("{child} is listed under {id} but is not its child"));
         }
     }
@@ -700,10 +1007,12 @@ pub fn audit(fold: &Fold, model: &Reference) -> Result<(), String> {
 }
 
 pub fn live(world: &World) -> Result<(), String> {
-    let rows = nanocode_sync::block_on(world.host.inner.scan(SCOPE, 0, i64::MAX as u64)).unwrap_or_default();
+    let rows = nanocode_sync::block_on(world.host.inner.scan(SCOPE, 0, i64::MAX as u64))
+        .unwrap_or_default();
     let mut fold = Fold::new();
     for (seq, body) in &rows {
-        fold.apply(*seq, body).map_err(|error| format!("live refold: {error}"))?;
+        fold.apply(*seq, body)
+            .map_err(|error| format!("live refold: {error}"))?;
     }
     audit(&fold, &Reference::of(&rows)?)
 }

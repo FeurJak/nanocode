@@ -4041,16 +4041,12 @@ impl Registry {
                 let progress = &mut session.in_flight_progress;
                 let omitted = commits.omitted.min(progress.committable);
                 progress.committable -= omitted;
-                let live = progress
-                    .nested
-                    .values()
-                    .fold(progress.settled.saturating_add(progress.committable), |sum, count| {
-                        sum.saturating_add(*count)
-                    });
-                session.in_flight_omitted = session
-                    .in_flight_omitted
-                    .saturating_sub(omitted)
-                    .min(live);
+                let live = progress.nested.values().fold(
+                    progress.settled.saturating_add(progress.committable),
+                    |sum, count| sum.saturating_add(*count),
+                );
+                session.in_flight_omitted =
+                    session.in_flight_omitted.saturating_sub(omitted).min(live);
             }
             if progressed && session.active() {
                 session.resume_attempts = 0;
@@ -4448,10 +4444,7 @@ impl Registry {
                     .get(&root)
                     .and_then(|scope| scope.sessions.get(&id))
                     .map(|session| {
-                        durable::resume_message(
-                            &session.in_flight_calls,
-                            session.in_flight_omitted,
-                        )
+                        durable::resume_message(&session.in_flight_calls, session.in_flight_omitted)
                     })
                     .unwrap_or_else(|| durable::RESUME_MESSAGE.to_owned())
             })

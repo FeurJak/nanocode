@@ -1,89 +1,89 @@
 mod agents;
-mod requestclose;
-mod inboxstress;
 #[cfg(unix)]
 mod alloc;
+mod board;
+mod board_sync;
+mod boardagents;
 #[cfg(unix)]
 mod capture;
 mod cellcalls;
 mod cells;
 mod children;
+mod cost;
 mod disk;
 #[cfg(target_os = "linux")]
 mod dns;
+mod drive;
 #[cfg(unix)]
 mod egress;
-mod drive;
 mod executor;
 mod faults;
+mod gitremote;
+mod handrouter;
 mod hands;
 mod host;
 mod httpd;
 mod httpserver;
+mod inboxstress;
 mod log;
 mod longthread;
 mod memory;
 mod model;
 mod mpp;
+mod network;
 mod onelog;
+mod requestclose;
 mod rng;
 mod scripted;
+mod server;
 mod simulate;
 mod socket;
 mod store;
 mod streams;
 mod sync;
 mod tasks;
-mod board;
-mod cost;
-mod handrouter;
-mod workspacehost;
-mod gitremote;
-mod workspacestack;
-mod boardagents;
-mod board_sync;
-mod workspacefs;
 mod tidy;
 mod turnlog;
 mod turns;
+mod websocket;
 mod whole;
 mod workload;
+mod workspacefs;
+mod workspacehost;
+mod workspacestack;
 mod world;
-mod network;
-mod server;
-mod websocket;
 
 use std::{collections::BTreeMap, ops::Range, process::ExitCode};
 
 use crate::{
     agents::{AgentStats, AgentsMutation},
-    model::Stats,
-    onelog::{LiveSeqs, Protections},
-    simulate::{Options, run_seed},
-    store::Mutation,
-    turns::{Invariant, PolicyKind, TurnMutation, TurnOptions, TurnStats},
+    board::{BoardMutation, BoardStats},
+    board_sync::{SyncMutation as BoardSyncMutation, SyncStats as BoardSyncStats},
+    cellcalls::{CellCallsMutation, CellCallsStats},
+    children::ChildMutation,
+    cost::{CostMutation, CostStats},
+    gitremote::{GitRemoteMutation, GitRemoteStats},
+    handrouter::{HandRouterMutation, HandRouterStats},
+    hands::{HandsMutation, HandsStats},
     httpd::WireMutation,
     httpserver::{HttpServerMutation, HttpServerStats},
-    mpp::{MppMutation, MppStats},
-    streams::{StreamsMutation, StreamsStats},
-    hands::{HandsMutation, HandsStats},
-    cellcalls::{CellCallsMutation, CellCallsStats},
-    longthread::{LongThreadMutation, LongThreadStats},
-    requestclose::RequestCloseStats,
     inboxstress::InboxStressStats,
+    longthread::{LongThreadMutation, LongThreadStats},
+    model::Stats,
+    mpp::{MppMutation, MppStats},
+    onelog::{LiveSeqs, Protections},
+    requestclose::RequestCloseStats,
+    simulate::{Options, run_seed},
+    store::Mutation,
+    streams::{StreamsMutation, StreamsStats},
     sync::{SyncMutation, SyncStats},
     tasks::{TasksMutation, TasksStats},
-    board::{BoardMutation, BoardStats},
-    cost::{CostMutation, CostStats},
-    handrouter::{HandRouterMutation, HandRouterStats},
-    workspacehost::{WorkspaceHostMutation, WorkspaceHostStats},
-    gitremote::{GitRemoteMutation, GitRemoteStats},
-    workspacestack::{WorkspaceStackMutation, WorkspaceStackStats},
-    board_sync::{SyncMutation as BoardSyncMutation, SyncStats as BoardSyncStats},
-    workspacefs::{WorkspaceFsMutation, WorkspaceFsStats},
+    turns::{Invariant, PolicyKind, TurnMutation, TurnOptions, TurnStats},
     websocket::{WebSocketMutation, WebSocketStats},
     whole::{ChildMode, StoreKind, WholeOptions, WholeStats, WireKind},
-    children::ChildMutation,
+    workspacefs::{WorkspaceFsMutation, WorkspaceFsStats},
+    workspacehost::{WorkspaceHostMutation, WorkspaceHostStats},
+    workspacestack::{WorkspaceStackMutation, WorkspaceStackStats},
 };
 
 const DEFAULT_OPS: u64 = 1000;
@@ -382,11 +382,15 @@ fn parse_args(args: &[String]) -> Option<Args> {
         (Scenario::Board, Some(name)) => board = BoardMutation::parse(name)?,
         (Scenario::Cost, Some(name)) => cost = CostMutation::parse(name)?,
         (Scenario::HandRouter, Some(name)) => hand_router = HandRouterMutation::parse(name)?,
-        (Scenario::WorkspaceHost, Some(name)) => workspace_host = WorkspaceHostMutation::parse(name)?,
+        (Scenario::WorkspaceHost, Some(name)) => {
+            workspace_host = WorkspaceHostMutation::parse(name)?
+        }
         (Scenario::BoardSync, Some(name)) => board_sync = BoardSyncMutation::parse(name)?,
         (Scenario::WorkspaceFs, Some(name)) => workspace_fs = WorkspaceFsMutation::parse(name)?,
         (Scenario::GitRemote, Some(name)) => git_remote = GitRemoteMutation::parse(name)?,
-        (Scenario::WorkspaceStack, Some(name)) => workspace_stack = WorkspaceStackMutation::parse(name)?,
+        (Scenario::WorkspaceStack, Some(name)) => {
+            workspace_stack = WorkspaceStackMutation::parse(name)?
+        }
         #[cfg(unix)]
         (Scenario::Capture, Some(name)) => capture = capture::CaptureMutation::parse(name)?,
         #[cfg(not(unix))]
@@ -836,7 +840,10 @@ const fn mutation_name(whole: &WholeOptions) -> &'static str {
 fn mutations() -> ExitCode {
     let mut lines = Vec::new();
     let mut add = |scenario: &str, names: String| {
-        for name in names.split('|').filter(|name| !name.is_empty() && *name != "none") {
+        for name in names
+            .split('|')
+            .filter(|name| !name.is_empty() && *name != "none")
+        {
             lines.push(format!("MUTATION scenario={scenario} mutation={name}"));
         }
     };
@@ -939,11 +946,14 @@ fn main() -> ExitCode {
         || (args.scenario == Scenario::Board && args.board != BoardMutation::None)
         || (args.scenario == Scenario::Cost && args.cost != CostMutation::None)
         || (args.scenario == Scenario::HandRouter && args.hand_router != HandRouterMutation::None)
-        || (args.scenario == Scenario::WorkspaceHost && args.workspace_host != WorkspaceHostMutation::None)
+        || (args.scenario == Scenario::WorkspaceHost
+            && args.workspace_host != WorkspaceHostMutation::None)
         || (args.scenario == Scenario::BoardSync && args.board_sync != BoardSyncMutation::None)
-        || (args.scenario == Scenario::WorkspaceFs && args.workspace_fs != WorkspaceFsMutation::None)
+        || (args.scenario == Scenario::WorkspaceFs
+            && args.workspace_fs != WorkspaceFsMutation::None)
         || (args.scenario == Scenario::GitRemote && args.git_remote != GitRemoteMutation::None)
-        || (args.scenario == Scenario::WorkspaceStack && args.workspace_stack != WorkspaceStackMutation::None)
+        || (args.scenario == Scenario::WorkspaceStack
+            && args.workspace_stack != WorkspaceStackMutation::None)
         || alloc_experiment(&args);
     let (mut passed, mut failed) = (0_u64, 0_u64);
     let mut totals = Stats::default();
@@ -1214,57 +1224,174 @@ fn main() -> ExitCode {
     }
     boardagents::report();
     if args.scenario == Scenario::CellCalls {
-        return cellcalls::report(&args.seeds, passed, failed, args.twice, args.cell_calls, &cell_calls_totals);
+        return cellcalls::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.cell_calls,
+            &cell_calls_totals,
+        );
     }
     if args.scenario == Scenario::LongThread {
-        return longthread::report(&args.seeds, passed, failed, args.twice, args.long_thread, &long_thread_totals);
+        return longthread::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.long_thread,
+            &long_thread_totals,
+        );
     }
     if args.scenario == Scenario::RequestClose {
-        return requestclose::report(&args.seeds, passed, failed, args.twice, &request_close_totals);
+        return requestclose::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            &request_close_totals,
+        );
     }
     if args.scenario == Scenario::InboxStress {
-        return inboxstress::report(&args.seeds, passed, failed, args.twice, &inbox_stress_totals);
+        return inboxstress::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            &inbox_stress_totals,
+        );
     }
     if args.scenario == Scenario::Board {
-        return board::report(&args.seeds, passed, failed, args.twice, args.board, &board_totals);
+        return board::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.board,
+            &board_totals,
+        );
     }
     if args.scenario == Scenario::Cost {
-        return cost::report(&args.seeds, passed, failed, args.twice, args.cost, &cost_totals);
+        return cost::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.cost,
+            &cost_totals,
+        );
     }
     if args.scenario == Scenario::HandRouter {
-        return handrouter::report(&args.seeds, passed, failed, args.twice, args.hand_router, &hand_router_totals);
+        return handrouter::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.hand_router,
+            &hand_router_totals,
+        );
     }
     if args.scenario == Scenario::WorkspaceFs {
-        return workspacefs::report(&args.seeds, passed, failed, args.twice, args.workspace_fs, &workspace_fs_totals);
+        return workspacefs::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.workspace_fs,
+            &workspace_fs_totals,
+        );
     }
     if args.scenario == Scenario::WorkspaceHost {
-        return workspacehost::report(&args.seeds, passed, failed, args.twice, args.workspace_host, &workspace_host_totals);
+        return workspacehost::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.workspace_host,
+            &workspace_host_totals,
+        );
     }
     if args.scenario == Scenario::BoardSync {
-        return board_sync::report(&args.seeds, passed, failed, args.twice, args.board_sync, &board_sync_totals);
+        return board_sync::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.board_sync,
+            &board_sync_totals,
+        );
     }
     if args.scenario == Scenario::GitRemote {
-        return gitremote::report(&args.seeds, passed, failed, args.twice, args.git_remote, &git_remote_totals);
+        return gitremote::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.git_remote,
+            &git_remote_totals,
+        );
     }
     if args.scenario == Scenario::WorkspaceStack {
-        return workspacestack::report(&args.seeds, passed, failed, args.twice, args.workspace_stack, &workspace_stack_totals);
+        return workspacestack::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.workspace_stack,
+            &workspace_stack_totals,
+        );
     }
     if args.scenario == Scenario::Executor {
-        return tasks::report(&args.seeds, passed, failed, args.twice, args.tasks, &tasks_totals);
+        return tasks::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.tasks,
+            &tasks_totals,
+        );
     }
     #[cfg(target_os = "linux")]
     if args.scenario == Scenario::Dns {
-        return dns::report(&args.seeds, passed, failed, args.twice, args.dns, &dns_totals);
+        return dns::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.dns,
+            &dns_totals,
+        );
     }
     #[cfg(unix)]
     if args.scenario == Scenario::Capture {
-        return capture::report(&args.seeds, passed, failed, args.twice, args.capture, &capture_totals);
+        return capture::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.capture,
+            &capture_totals,
+        );
     }
     if args.scenario == Scenario::Sync {
-        return sync::report(&args.seeds, passed, failed, args.twice, args.sync, &sync_totals);
+        return sync::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.sync,
+            &sync_totals,
+        );
     }
     if args.scenario == Scenario::Mpp {
-        return mpp::report(&args.seeds, passed, failed, args.twice, args.mpp, &mpp_totals);
+        return mpp::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.mpp,
+            &mpp_totals,
+        );
     }
     if args.scenario == Scenario::HttpServer {
         return httpserver::report(
@@ -1278,11 +1405,25 @@ fn main() -> ExitCode {
     }
     #[cfg(unix)]
     if args.scenario == Scenario::Alloc {
-        return alloc::report(&args.seeds, passed, failed, args.twice, args.alloc, &alloc_totals);
+        return alloc::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.alloc,
+            &alloc_totals,
+        );
     }
     #[cfg(unix)]
     if args.scenario == Scenario::Egress {
-        return egress::report(&args.seeds, passed, failed, args.twice, args.egress, &egress_totals);
+        return egress::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.egress,
+            &egress_totals,
+        );
     }
     if args.scenario == Scenario::Turns {
         return report_turns(&args, passed, failed, &turn_totals, &caught);
@@ -1302,7 +1443,10 @@ fn main() -> ExitCode {
             || args.whole.store_mutation != Mutation::None
         {
             if failed > 0 {
-                println!("MUTATION {} caught by {failed} seeds", mutation_name(&args.whole));
+                println!(
+                    "MUTATION {} caught by {failed} seeds",
+                    mutation_name(&args.whole)
+                );
                 return ExitCode::SUCCESS;
             }
             println!("MUTATION {} NOT caught", mutation_name(&args.whole));

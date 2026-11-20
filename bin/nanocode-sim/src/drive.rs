@@ -72,7 +72,11 @@ pub fn sleepers_of(rng: &mut Rng) -> Option<Sleepers> {
 
 impl Sleepers {
     pub fn describe(&self) -> String {
-        let naps: Vec<String> = self.naps.iter().map(|naps| naps.len().to_string()).collect();
+        let naps: Vec<String> = self
+            .naps
+            .iter()
+            .map(|naps| naps.len().to_string())
+            .collect();
         format!("sleepers=[{}]", naps.join(","))
     }
 

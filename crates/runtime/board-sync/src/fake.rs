@@ -37,9 +37,21 @@ pub struct Copy {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Echo {
-    Posted { to: Target, external: String, marker: EventId, text: String },
-    Edited { to: Target, external: String, text: String },
-    Deleted { to: Target, external: String },
+    Posted {
+        to: Target,
+        external: String,
+        marker: EventId,
+        text: String,
+    },
+    Edited {
+        to: Target,
+        external: String,
+        text: String,
+    },
+    Deleted {
+        to: Target,
+        external: String,
+    },
 }
 
 type Faults = Box<dyn FnMut(&str, &Target) -> Fault + Send>;
@@ -83,7 +95,10 @@ impl Fake {
         }
     }
 
-    pub fn with_faults(sync: &str, faults: impl FnMut(&str, &Target) -> Fault + Send + 'static) -> Self {
+    pub fn with_faults(
+        sync: &str,
+        faults: impl FnMut(&str, &Target) -> Fault + Send + 'static,
+    ) -> Self {
         let fake = Self::new(sync);
         fake.lock().faults = Some(Box::new(faults));
         fake
@@ -102,7 +117,9 @@ impl Fake {
     }
 
     pub fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn copies(&self) -> Vec<Copy> {
@@ -118,13 +135,23 @@ impl Fake {
         let now_ms = state.now_ms;
         if let Some(until_ms) = state.until_ms.filter(|until_ms| now_ms < *until_ms) {
             if state.told {
-                state.early.push(Early { call: call.to_owned(), to: to.clone(), at_ms: now_ms, until_ms });
+                state.early.push(Early {
+                    call: call.to_owned(),
+                    to: to.clone(),
+                    at_ms: now_ms,
+                    until_ms,
+                });
             }
             state.told = true;
             state.limited += 1;
-            return Err(PlatformError::RateLimited { retry_after_ms: until_ms - now_ms });
+            return Err(PlatformError::RateLimited {
+                retry_after_ms: until_ms - now_ms,
+            });
         }
-        let fault = state.faults.as_mut().map_or(Fault::None, |faults| faults(call, to));
+        let fault = state
+            .faults
+            .as_mut()
+            .map_or(Fault::None, |faults| faults(call, to));
         if let Fault::Limit(retry_after_ms) = fault {
             state.until_ms = Some(now_ms + retry_after_ms);
             state.told = true;
@@ -177,20 +204,32 @@ impl Platform for Fake {
         })
     }
 
-    fn edit<'a>(&'a self, call: Call<'a>, external: &'a str) -> PlatformFuture<'a, Result<(), PlatformError>> {
+    fn edit<'a>(
+        &'a self,
+        call: Call<'a>,
+        external: &'a str,
+    ) -> PlatformFuture<'a, Result<(), PlatformError>> {
         Box::pin(async move {
             let mut state = self.lock();
             let fault = Self::fault(&mut state, "edit", call.to)?;
             if fault == Fault::Refuse {
                 return Err(refused("edit", call.to));
             }
-            let Some(copy) = state.copies.iter_mut().find(|copy| copy.external == external) else {
+            let Some(copy) = state
+                .copies
+                .iter_mut()
+                .find(|copy| copy.external == external)
+            else {
                 return Err(PlatformError::Failed(format!("no message {external}")));
             };
             if !copy.deleted && copy.rendered != *call.rendered {
                 copy.rendered = call.rendered.clone();
                 copy.edits += 1;
-                let edited = Echo::Edited { to: call.to.clone(), external: external.to_owned(), text: call.rendered.text.clone() };
+                let edited = Echo::Edited {
+                    to: call.to.clone(),
+                    external: external.to_owned(),
+                    text: call.rendered.text.clone(),
+                };
                 state.echoes.push(edited);
             }
             if fault == Fault::Lose {
@@ -200,18 +239,28 @@ impl Platform for Fake {
         })
     }
 
-    fn delete<'a>(&'a self, to: &'a Target, external: &'a str) -> PlatformFuture<'a, Result<(), PlatformError>> {
+    fn delete<'a>(
+        &'a self,
+        to: &'a Target,
+        external: &'a str,
+    ) -> PlatformFuture<'a, Result<(), PlatformError>> {
         Box::pin(async move {
             let mut state = self.lock();
             let fault = Self::fault(&mut state, "delete", to)?;
             if fault == Fault::Refuse {
                 return Err(refused("delete", to));
             }
-            if let Some(copy) = state.copies.iter_mut().find(|copy| copy.external == external)
+            if let Some(copy) = state
+                .copies
+                .iter_mut()
+                .find(|copy| copy.external == external)
                 && !copy.deleted
             {
                 copy.deleted = true;
-                state.echoes.push(Echo::Deleted { to: to.clone(), external: external.to_owned() });
+                state.echoes.push(Echo::Deleted {
+                    to: to.clone(),
+                    external: external.to_owned(),
+                });
             }
             if fault == Fault::Lose {
                 return Err(lost("delete", to));
@@ -220,7 +269,11 @@ impl Platform for Fake {
         })
     }
 
-    fn find<'a>(&'a self, to: &'a Target, marker: &'a EventId) -> PlatformFuture<'a, Result<Option<Posted>, PlatformError>> {
+    fn find<'a>(
+        &'a self,
+        to: &'a Target,
+        marker: &'a EventId,
+    ) -> PlatformFuture<'a, Result<Option<Posted>, PlatformError>> {
         Box::pin(async move {
             let mut state = self.lock();
             if Self::fault(&mut state, "find", to)? == Fault::Refuse {
@@ -230,7 +283,10 @@ impl Platform for Fake {
                 .copies
                 .iter()
                 .find(|copy| copy.to == *to && copy.marker == *marker)
-                .map(|copy| Posted { external: copy.external.clone(), thread: copy.thread.clone() });
+                .map(|copy| Posted {
+                    external: copy.external.clone(),
+                    thread: copy.thread.clone(),
+                });
             Ok(found)
         })
     }

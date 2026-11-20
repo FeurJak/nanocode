@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    access::Can,
     Change, Event, EventId, Fold, Op, Outcome, Phase, Rejection, TaskId,
+    access::Can,
     sim::{Mutation, mutated},
     tasks::Moved,
 };
@@ -65,8 +65,15 @@ pub enum Settle {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Control {
-    Button { id: String, label: String },
-    Form { id: String, label: String, fields: Vec<String> },
+    Button {
+        id: String,
+        label: String,
+    },
+    Form {
+        id: String,
+        label: String,
+        fields: Vec<String>,
+    },
 }
 
 impl Control {
@@ -249,10 +256,16 @@ impl SyncOp {
     const fn thread(&self) -> Option<(&Target, Option<&String>)> {
         match self {
             Self::Import { thread, .. } | Self::Reword { thread, .. } => Some((thread, None)),
-            Self::Edit { thread, message, .. }
+            Self::Edit {
+                thread, message, ..
+            }
             | Self::Delete { thread, message }
-            | Self::React { thread, message, .. }
-            | Self::Act { thread, message, .. } => Some((thread, Some(message))),
+            | Self::React {
+                thread, message, ..
+            }
+            | Self::Act {
+                thread, message, ..
+            } => Some((thread, Some(message))),
             _ => None,
         }
     }
@@ -275,20 +288,65 @@ pub enum Refusal {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Synced {
-    Linked { target: Target, mode: Mode },
-    Unlinked { target: Target },
-    Moded { target: Target, mode: Mode },
-    Account { member: String, sync: String, user: String, linked: bool },
-    Labelled { set: BTreeMap<String, String>, unset: BTreeSet<String> },
-    Edited { message: EventId },
-    Reworded { spec: String },
-    Deleted { message: EventId },
-    Delivered { message: EventId, target: Target, external: String },
-    Removed { message: EventId, target: Target },
-    Undelivered { message: EventId, target: Target, error: String },
-    Read { member: String, upto: u64 },
-    Reacted { message: EventId, by: String, emoji: String },
-    Acted { message: EventId, by: String, control: String, values: BTreeMap<String, String> },
+    Linked {
+        target: Target,
+        mode: Mode,
+    },
+    Unlinked {
+        target: Target,
+    },
+    Moded {
+        target: Target,
+        mode: Mode,
+    },
+    Account {
+        member: String,
+        sync: String,
+        user: String,
+        linked: bool,
+    },
+    Labelled {
+        set: BTreeMap<String, String>,
+        unset: BTreeSet<String>,
+    },
+    Edited {
+        message: EventId,
+    },
+    Reworded {
+        spec: String,
+    },
+    Deleted {
+        message: EventId,
+    },
+    Delivered {
+        message: EventId,
+        target: Target,
+        external: String,
+    },
+    Removed {
+        message: EventId,
+        target: Target,
+    },
+    Undelivered {
+        message: EventId,
+        target: Target,
+        error: String,
+    },
+    Read {
+        member: String,
+        upto: u64,
+    },
+    Reacted {
+        message: EventId,
+        by: String,
+        emoji: String,
+    },
+    Acted {
+        message: EventId,
+        by: String,
+        control: String,
+        values: BTreeMap<String, String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -420,13 +478,16 @@ pub fn spec(title: &str, body: Option<&str>) -> String {
 
 pub fn mentions(body: &str) -> Vec<String> {
     let mut found = Vec::new();
-    for word in body.split(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | ':' | '(' | ')')) {
+    for word in body.split(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | ':' | '(' | ')'))
+    {
         let Some(name) = word.strip_prefix('@') else {
             continue;
         };
         let name = name.trim_end_matches(['.', '!', '?']);
         let valid = !name.is_empty()
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
         if valid && !found.iter().any(|seen: &String| seen == name) {
             found.push(name.to_owned());
         }
@@ -445,7 +506,10 @@ fn sum(tally: &Tally, id: &EventId, target: &Target) -> u64 {
 fn tally(tally: &Tally, id: &EventId, target: &Target, action: &Action, revision: u64) -> u64 {
     match action {
         Action::Post { .. } | Action::Sweep | Action::Orphan => sum(tally, id, target),
-        Action::Edit { .. } | Action::Delete { .. } => tally.get(&(id.clone(), target.clone(), revision)).copied().unwrap_or_default(),
+        Action::Edit { .. } | Action::Delete { .. } => tally
+            .get(&(id.clone(), target.clone(), revision))
+            .copied()
+            .unwrap_or_default(),
     }
 }
 
@@ -483,9 +547,11 @@ impl Mirror {
 
     pub fn link_of(&self, task: &TaskId, target: &Target) -> Option<Target> {
         let channel = Self::key(task, target, &Join::Channel);
-        [target.clone(), channel]
-            .into_iter()
-            .find(|key| self.links.get(key).is_some_and(|linked| linked.task == *task))
+        [target.clone(), channel].into_iter().find(|key| {
+            self.links
+                .get(key)
+                .is_some_and(|linked| linked.task == *task)
+        })
     }
 
     pub const fn links(&self) -> &BTreeMap<Target, Linked> {
@@ -525,7 +591,9 @@ impl Mirror {
     }
 
     pub fn account(&self, member: &str, sync: &str) -> Option<&String> {
-        self.members.get(member).and_then(|accounts| accounts.get(sync))
+        self.members
+            .get(member)
+            .and_then(|accounts| accounts.get(sync))
     }
 
     pub fn find(&self, thread: &Target, message: &str) -> Option<&EventId> {
@@ -559,7 +627,14 @@ impl Mirror {
         }
     }
 
-    fn delivery(&self, id: &EventId, message: &Message, target: &Target, to: Target, action: Action) -> Delivery {
+    fn delivery(
+        &self,
+        id: &EventId,
+        message: &Message,
+        target: &Target,
+        to: Target,
+        action: Action,
+    ) -> Delivery {
         let mentions = message
             .mentions
             .iter()
@@ -569,7 +644,13 @@ impl Mirror {
             .reply_to
             .as_ref()
             .and_then(|above| self.messages.get(above))
-            .and_then(|above| above.origin.as_ref().filter(|origin| self.threads.get(&origin.thread) == Some(target)).and(above.sub.clone()));
+            .and_then(|above| {
+                above
+                    .origin
+                    .as_ref()
+                    .filter(|origin| self.threads.get(&origin.thread) == Some(target))
+                    .and(above.sub.clone())
+            });
         Delivery {
             task: message.task.clone(),
             message: id.clone(),
@@ -596,10 +677,19 @@ impl Mirror {
         self.by_task
             .get(task)
             .and_then(|ids| ids.first())
-            .is_some_and(|root| self.messages[root].kind == Kind::Root && self.dead.contains_key(&(root.clone(), target.clone())))
+            .is_some_and(|root| {
+                self.messages[root].kind == Kind::Root
+                    && self.dead.contains_key(&(root.clone(), target.clone()))
+            })
     }
 
-    fn action(&self, id: &EventId, message: &Message, target: &Target, eligible: bool) -> Option<Action> {
+    fn action(
+        &self,
+        id: &EventId,
+        message: &Message,
+        target: &Target,
+        eligible: bool,
+    ) -> Option<Action> {
         let copy = self
             .copies
             .get(&(id.clone(), target.clone()))
@@ -618,7 +708,11 @@ impl Mirror {
                 let dead = self.dead.contains_key(&(id.clone(), target.clone()));
                 (!dead && self.tries(id, target) > 0).then_some(Action::Sweep)
             }
-            None if self.dead.contains_key(&(id.clone(), target.clone())) && !mutated(Mutation::DeadLettersBlock) => None,
+            None if self.dead.contains_key(&(id.clone(), target.clone()))
+                && !mutated(Mutation::DeadLettersBlock) =>
+            {
+                None
+            }
             None => Some(Action::Post { starts: false }),
         }
     }
@@ -651,18 +745,31 @@ impl Mirror {
             let mut blocked = false;
             for id in order {
                 let message = &self.messages[id];
-                let echo = message.origin.as_ref().is_some_and(|origin| {
-                    self.threads.get(&origin.thread) == Some(target)
-                }) && !mutated(Mutation::DeliverToOrigin);
+                let echo = message
+                    .origin
+                    .as_ref()
+                    .is_some_and(|origin| self.threads.get(&origin.thread) == Some(target))
+                    && !mutated(Mutation::DeliverToOrigin);
                 if echo {
                     continue;
                 }
                 let to = match (&linked.join, &linked.thread) {
                     (Join::Channel, Some(thread)) => thread.clone(),
                     (Join::Channel, None) if message.kind == Kind::Root => linked.to.clone(),
-                    (Join::Channel, None) if self.rootless(&linked.task, target) && !mutated(Mutation::RootDeadIgnored) => {
-                        if let Some(Action::Post { .. }) = self.action(id, message, target, Self::eligible(linked, message)) {
-                            out.push(self.delivery(id, message, target, linked.to.clone(), Action::Orphan));
+                    (Join::Channel, None)
+                        if self.rootless(&linked.task, target)
+                            && !mutated(Mutation::RootDeadIgnored) =>
+                    {
+                        if let Some(Action::Post { .. }) =
+                            self.action(id, message, target, Self::eligible(linked, message))
+                        {
+                            out.push(self.delivery(
+                                id,
+                                message,
+                                target,
+                                linked.to.clone(),
+                                Action::Orphan,
+                            ));
                         }
                         continue;
                     }
@@ -672,7 +779,9 @@ impl Mirror {
                     }
                     _ => target.clone(),
                 };
-                let Some(mut action) = self.action(id, message, target, Self::eligible(linked, message)) else {
+                let Some(mut action) =
+                    self.action(id, message, target, Self::eligible(linked, message))
+                else {
                     continue;
                 };
                 if let Action::Post { starts } = &mut action {
@@ -704,7 +813,9 @@ fn status_text(change: &Change) -> Option<String> {
         Change::Finished(Outcome::Done(result)) => format!("done: {result}"),
         Change::Finished(Outcome::Failed(error)) => format!("failed: {error}"),
         Change::Cancelled { reason } => format!("cancelled: {reason}"),
-        Change::Tasks(Moved::Blocked { kind, reason, .. }) => format!("blocked on {kind}: {reason}"),
+        Change::Tasks(Moved::Blocked { kind, reason, .. }) => {
+            format!("blocked on {kind}: {reason}")
+        }
         Change::Tasks(Moved::Unblocked | Moved::Reopened) => "open".to_owned(),
         _ => return None,
     })
@@ -729,8 +840,16 @@ impl Fold {
     }
 
     fn fresh(&self, task: &TaskId, seq: u64, kind: Kind, author: String, body: String) -> Message {
-        let named = if kind == Kind::Status { Vec::new() } else { mentions(&body) };
-        let linked = self.mirror.links.values().any(|linked| linked.task == *task);
+        let named = if kind == Kind::Status {
+            Vec::new()
+        } else {
+            mentions(&body)
+        };
+        let linked = self
+            .mirror
+            .links
+            .values()
+            .any(|linked| linked.task == *task);
         let dms = if linked || mutated(Mutation::MentionsNotDm) {
             Vec::new()
         } else {
@@ -779,7 +898,10 @@ impl Fold {
             Change::Posted => (
                 event.id.clone(),
                 Kind::Root,
-                self.tasks.get(task).map(|task| task.spec.spec.clone()).unwrap_or_default(),
+                self.tasks
+                    .get(task)
+                    .map(|task| task.spec.spec.clone())
+                    .unwrap_or_default(),
             ),
             Change::Replied { body, .. } => (event.id.clone(), Kind::Reply, body.clone()),
             Change::Finished(_) | Change::Cancelled { .. } => (
@@ -802,7 +924,12 @@ impl Fold {
 
     pub(crate) fn check_sync(&self, op: &SyncOp) -> Result<(), Rejection> {
         let refuse = |refusal| Err(Rejection::Sync(refusal));
-        let known = |task: &TaskId| self.tasks.contains_key(task).then_some(()).ok_or(Rejection::UnknownTask);
+        let known = |task: &TaskId| {
+            self.tasks
+                .contains_key(task)
+                .then_some(())
+                .ok_or(Rejection::UnknownTask)
+        };
         let mirror = &self.mirror;
         let linked = |task: &TaskId, target: &Target| {
             mirror
@@ -819,14 +946,18 @@ impl Fold {
             }
         };
         match op {
-            SyncOp::Link { task, target, join, .. } => {
+            SyncOp::Link {
+                task, target, join, ..
+            } => {
                 known(task)?;
                 if mirror.links.contains_key(&Mirror::key(task, target, join)) {
                     return refuse(Refusal::Linked);
                 }
                 Ok(())
             }
-            SyncOp::Unlink { task, target } | SyncOp::Mode { task, target, .. } => linked(task, target),
+            SyncOp::Unlink { task, target } | SyncOp::Mode { task, target, .. } => {
+                linked(task, target)
+            }
             SyncOp::Account { .. }
             | SyncOp::Import { .. }
             | SyncOp::Edit { .. }
@@ -837,13 +968,16 @@ impl Fold {
             SyncOp::Answer { task, reply_to, .. } => {
                 known(task)?;
                 match reply_to {
-                    Some(above) if mirror.message(task, above).is_err() => refuse(Refusal::UnknownReply(above.clone())),
+                    Some(above) if mirror.message(task, above).is_err() => {
+                        refuse(Refusal::UnknownReply(above.clone()))
+                    }
                     _ => Ok(()),
                 }
             }
             SyncOp::Revise { task, message, .. } | SyncOp::Retract { task, message } => {
                 let message = mirror.message(task, message)?;
-                let board = matches!(message.kind, Kind::Root | Kind::Reply) && message.origin.is_none();
+                let board =
+                    matches!(message.kind, Kind::Root | Kind::Reply) && message.origin.is_none();
                 if !board || message.deleted {
                     return refuse(Refusal::NotBoardMessage);
                 }
@@ -864,7 +998,12 @@ impl Fold {
                 }
                 Ok(())
             }
-            SyncOp::Attempt { task, message, target, revision } => {
+            SyncOp::Attempt {
+                task,
+                message,
+                target,
+                revision,
+            } => {
                 let state = routable(task, message, target)?;
                 let copy = mirror.copies.get(&(message.clone(), target.clone()));
                 let done = if state.deleted {
@@ -877,12 +1016,18 @@ impl Fold {
                 }
                 Ok(())
             }
-            SyncOp::Synced { task, message, target, external, revision, .. } => {
+            SyncOp::Synced {
+                task,
+                message,
+                target,
+                external,
+                revision,
+                ..
+            } => {
                 let state = routable(task, message, target)?;
-                let echo = state
-                    .origin
-                    .as_ref()
-                    .is_some_and(|origin| mirror.threads.get(&origin.thread) == Some(target) || origin.thread == *target);
+                let echo = state.origin.as_ref().is_some_and(|origin| {
+                    mirror.threads.get(&origin.thread) == Some(target) || origin.thread == *target
+                });
                 if echo && !mutated(Mutation::DeliverToOrigin) {
                     return refuse(Refusal::Echo);
                 }
@@ -893,16 +1038,28 @@ impl Fold {
                     _ => Ok(()),
                 }
             }
-            SyncOp::Removed { task, message, target } => {
+            SyncOp::Removed {
+                task,
+                message,
+                target,
+            } => {
                 routable(task, message, target)?;
                 match mirror.copies.get(&(message.clone(), target.clone())) {
                     Some(_) => Ok(()),
                     None => refuse(Refusal::NoCopy),
                 }
             }
-            SyncOp::Undelivered { task, message, target, .. } => {
+            SyncOp::Undelivered {
+                task,
+                message,
+                target,
+                ..
+            } => {
                 routable(task, message, target)?;
-                if mirror.copies.contains_key(&(message.clone(), target.clone())) {
+                if mirror
+                    .copies
+                    .contains_key(&(message.clone(), target.clone()))
+                {
                     return refuse(Refusal::Delivered);
                 }
                 if mirror.tries(message, target) == 0 && !mirror.rootless(task, target) {
@@ -910,7 +1067,12 @@ impl Fold {
                 }
                 Ok(())
             }
-            SyncOp::Throttled { task, message, target, revision } => {
+            SyncOp::Throttled {
+                task,
+                message,
+                target,
+                revision,
+            } => {
                 routable(task, message, target)?;
                 let slot = (message.clone(), target.clone(), *revision);
                 let tried = mirror.attempts.get(&slot).copied().unwrap_or_default();
@@ -931,7 +1093,14 @@ impl Fold {
             return Err(!self.mirror.gone.contains(thread));
         };
         match message {
-            Some(message) if !self.mirror.external.contains_key(&(link.clone(), message.clone())) => Err(true),
+            Some(message)
+                if !self
+                    .mirror
+                    .external
+                    .contains_key(&(link.clone(), message.clone())) =>
+            {
+                Err(true)
+            }
             _ => Ok(link.clone()),
         }
     }
@@ -941,30 +1110,75 @@ impl Fold {
             && let Err(wait) = self.located(thread, message)
         {
             if wait && !mutated(Mutation::ParkedDropped) {
-                let key = (thread.clone(), message.cloned().filter(|_| self.mirror.threads.contains_key(thread)));
-                self.mirror.parked.entry(key).or_default().push((event.id.clone(), event.at_ms, op.clone()));
+                let key = (
+                    thread.clone(),
+                    message
+                        .cloned()
+                        .filter(|_| self.mirror.threads.contains_key(thread)),
+                );
+                self.mirror.parked.entry(key).or_default().push((
+                    event.id.clone(),
+                    event.at_ms,
+                    op.clone(),
+                ));
             }
             return;
         }
         match op {
-            SyncOp::Link { task, target, join, mode } => {
+            SyncOp::Link {
+                task,
+                target,
+                join,
+                mode,
+            } => {
                 let key = Mirror::key(task, target, join);
                 let thread = (!matches!(join, Join::Channel)).then(|| target.clone());
-                let since = if matches!(join, Join::Channel) { 0 } else { seq };
-                let linked = Linked { task: task.clone(), join: join.clone(), mode: *mode, seq, since, thread: thread.clone(), to: target.clone() };
+                let since = if matches!(join, Join::Channel) {
+                    0
+                } else {
+                    seq
+                };
+                let linked = Linked {
+                    task: task.clone(),
+                    join: join.clone(),
+                    mode: *mode,
+                    seq,
+                    since,
+                    thread: thread.clone(),
+                    to: target.clone(),
+                };
                 self.mirror.links.insert(key.clone(), linked);
                 self.mirror.ever.insert((task.clone(), key));
                 if let Join::Root { message } = join
-                    && let Some(root) = self.mirror.by_task.get(task).and_then(|ids| ids.first()).cloned()
+                    && let Some(root) = self
+                        .mirror
+                        .by_task
+                        .get(task)
+                        .and_then(|ids| ids.first())
+                        .cloned()
                 {
                     if let Some(state) = self.mirror.messages.get_mut(&root)
                         && state.origin.is_none()
                     {
-                        state.origin = Some(Origin { thread: target.clone(), message: message.clone(), user: String::new() });
+                        state.origin = Some(Origin {
+                            thread: target.clone(),
+                            message: message.clone(),
+                            user: String::new(),
+                        });
                     }
-                    self.mirror.external.insert((target.clone(), message.clone()), root);
+                    self.mirror
+                        .external
+                        .insert((target.clone(), message.clone()), root);
                 }
-                self.note(seq, event, task, Synced::Linked { target: target.clone(), mode: *mode });
+                self.note(
+                    seq,
+                    event,
+                    task,
+                    Synced::Linked {
+                        target: target.clone(),
+                        mode: *mode,
+                    },
+                );
                 if let Some(thread) = thread {
                     self.thread_found(seq, thread, target.clone());
                 }
@@ -978,16 +1192,32 @@ impl Fold {
                     self.mirror.threads.remove(&thread);
                     self.mirror.gone.insert(thread.clone());
                     self.mirror.gone.insert(key);
-                    self.mirror.parked.retain(|(parked, _), _| *parked != thread);
+                    self.mirror
+                        .parked
+                        .retain(|(parked, _), _| *parked != thread);
                 }
-                self.note(seq, event, task, Synced::Unlinked { target: target.clone() });
+                self.note(
+                    seq,
+                    event,
+                    task,
+                    Synced::Unlinked {
+                        target: target.clone(),
+                    },
+                );
             }
             SyncOp::Mode { task, target, mode } => {
                 if mutated(Mutation::FollowIgnored) {
                     return;
                 }
-                let key = self.mirror.link_of(task, target).expect("a checked link exists");
-                let linked = self.mirror.links.get_mut(&key).expect("a checked link exists");
+                let key = self
+                    .mirror
+                    .link_of(task, target)
+                    .expect("a checked link exists");
+                let linked = self
+                    .mirror
+                    .links
+                    .get_mut(&key)
+                    .expect("a checked link exists");
                 if linked.mode == *mode {
                     return;
                 }
@@ -995,13 +1225,30 @@ impl Fold {
                 if *mode == Mode::Always {
                     linked.since = linked.since.max(seq);
                 }
-                self.note(seq, event, task, Synced::Moded { target: key, mode: *mode });
+                self.note(
+                    seq,
+                    event,
+                    task,
+                    Synced::Moded {
+                        target: key,
+                        mode: *mode,
+                    },
+                );
             }
-            SyncOp::Account { member, sync, user, linked } => {
+            SyncOp::Account {
+                member,
+                sync,
+                user,
+                linked,
+            } => {
                 let key = (sync.clone(), user.clone());
                 if *linked {
                     self.mirror.accounts.insert(key, member.clone());
-                    self.mirror.members.entry(member.clone()).or_default().insert(sync.clone(), user.clone());
+                    self.mirror
+                        .members
+                        .entry(member.clone())
+                        .or_default()
+                        .insert(sync.clone(), user.clone());
                 } else if self.mirror.accounts.get(&key) == Some(member) {
                     self.mirror.accounts.remove(&key);
                     if let Some(accounts) = self.mirror.members.get_mut(member) {
@@ -1010,16 +1257,32 @@ impl Fold {
                 } else {
                     return;
                 }
-                let account = Synced::Account { member: member.clone(), sync: sync.clone(), user: user.clone(), linked: *linked };
+                let account = Synced::Account {
+                    member: member.clone(),
+                    sync: sync.clone(),
+                    user: user.clone(),
+                    linked: *linked,
+                };
                 self.note(seq, event, &ROUTED, account);
             }
             SyncOp::Import { .. } => self.import(seq, event, op),
-            SyncOp::Edit { thread, message, body, version } => {
+            SyncOp::Edit {
+                thread,
+                message,
+                body,
+                version,
+            } => {
                 let Some((id, task)) = self.imported(thread, message) else {
                     return;
                 };
-                let state = self.mirror.messages.get_mut(&id).expect("an imported message is indexed");
-                if state.deleted || (*version <= state.version && !mutated(Mutation::EditsUnordered)) {
+                let state = self
+                    .mirror
+                    .messages
+                    .get_mut(&id)
+                    .expect("an imported message is indexed");
+                if state.deleted
+                    || (*version <= state.version && !mutated(Mutation::EditsUnordered))
+                {
                     return;
                 }
                 state.version = *version;
@@ -1036,84 +1299,213 @@ impl Fold {
                     self.delete(seq, event, &task, id);
                 }
             }
-            SyncOp::Reword { thread, author, title, body, version } => self.reword(seq, event, thread, author, &spec(title, body.as_deref()), *version),
-            SyncOp::React { thread, message, author, emoji } => {
+            SyncOp::Reword {
+                thread,
+                author,
+                title,
+                body,
+                version,
+            } => self.reword(
+                seq,
+                event,
+                thread,
+                author,
+                &spec(title, body.as_deref()),
+                *version,
+            ),
+            SyncOp::React {
+                thread,
+                message,
+                author,
+                emoji,
+            } => {
                 let link = self.mirror.threads[thread].clone();
                 let id = self.mirror.external[&(link.clone(), message.clone())].clone();
                 let task = self.mirror.messages[&id].task.clone();
                 let by = self.mirror.author(&link.sync, author);
-                self.note(seq, event, &task, Synced::Reacted { message: id.clone(), by, emoji: emoji.clone() });
+                self.note(
+                    seq,
+                    event,
+                    &task,
+                    Synced::Reacted {
+                        message: id.clone(),
+                        by,
+                        emoji: emoji.clone(),
+                    },
+                );
                 self.mark_read(seq, event, &task, &link.sync, author, &id);
             }
-            SyncOp::Act { thread, message, author, control, values } => {
+            SyncOp::Act {
+                thread,
+                message,
+                author,
+                control,
+                values,
+            } => {
                 let link = self.mirror.threads[thread].clone();
                 let id = self.mirror.external[&(link.clone(), message.clone())].clone();
                 let state = &self.mirror.messages[&id];
                 let task = state.task.clone();
-                let valid = state.controls.iter().any(|known| known.id() == control && known.accepts(values));
+                let valid = state
+                    .controls
+                    .iter()
+                    .any(|known| known.id() == control && known.accepts(values));
                 if !valid || author.bot {
                     return;
                 }
                 let by = self.mirror.author(&link.sync, author);
-                let acted = Synced::Acted { message: id.clone(), by, control: control.clone(), values: values.clone() };
+                let acted = Synced::Acted {
+                    message: id.clone(),
+                    by,
+                    control: control.clone(),
+                    values: values.clone(),
+                };
                 self.note(seq, event, &task, acted);
                 self.mark_read(seq, event, &task, &link.sync, author, &id);
             }
-            SyncOp::Answer { task, body, reply_to, controls } => {
+            SyncOp::Answer {
+                task,
+                body,
+                reply_to,
+                controls,
+            } => {
                 if let Some(state) = self.tasks.get_mut(task) {
                     state.replies.push((event.by.clone(), body.clone()));
                 }
-                self.record(seq, event, task, Change::Replied { by: event.by.clone(), body: body.clone() });
+                self.record(
+                    seq,
+                    event,
+                    task,
+                    Change::Replied {
+                        by: event.by.clone(),
+                        body: body.clone(),
+                    },
+                );
                 if let Some(state) = self.mirror.messages.get_mut(&event.id) {
                     state.reply_to.clone_from(reply_to);
                     state.controls.clone_from(controls);
                 }
             }
-            SyncOp::Revise { task, message, body } => {
-                let state = self.mirror.messages.get_mut(message).expect("a checked message is indexed");
+            SyncOp::Revise {
+                task,
+                message,
+                body,
+            } => {
+                let state = self
+                    .mirror
+                    .messages
+                    .get_mut(message)
+                    .expect("a checked message is indexed");
                 if state.body == *body {
                     return;
                 }
                 state.body.clone_from(body);
                 state.mentions = mentions(body);
                 state.revision += 1;
-                self.note(seq, event, task, Synced::Edited { message: message.clone() });
+                self.note(
+                    seq,
+                    event,
+                    task,
+                    Synced::Edited {
+                        message: message.clone(),
+                    },
+                );
             }
             SyncOp::Retract { task, message } => self.delete(seq, event, task, message.clone()),
             SyncOp::Label { .. } => self.label(seq, event, op),
             SyncOp::Settle { task, outcome } => match outcome {
                 Settle::Done(result) => {
                     if let Some(state) = self.tasks.get_mut(task) {
-                        state.phase = Phase::Done { result: result.clone() };
+                        state.phase = Phase::Done {
+                            result: result.clone(),
+                        };
                     }
-                    self.record(seq, event, task, Change::Finished(Outcome::Done(result.clone())));
+                    self.record(
+                        seq,
+                        event,
+                        task,
+                        Change::Finished(Outcome::Done(result.clone())),
+                    );
                 }
                 Settle::Cancelled(reason) => self.cancel(seq, event, task, reason.clone()),
             },
-            SyncOp::Attempt { message, target, revision, .. } => {
-                *self.mirror.attempts.entry((message.clone(), target.clone(), *revision)).or_default() += 1;
+            SyncOp::Attempt {
+                message,
+                target,
+                revision,
+                ..
+            } => {
+                *self
+                    .mirror
+                    .attempts
+                    .entry((message.clone(), target.clone(), *revision))
+                    .or_default() += 1;
             }
             SyncOp::Synced { .. } => self.synced(seq, event, op),
-            SyncOp::Removed { task, message, target } => {
-                let copy = self.mirror.copies.get_mut(&(message.clone(), target.clone())).expect("a checked copy is indexed");
+            SyncOp::Removed {
+                task,
+                message,
+                target,
+            } => {
+                let copy = self
+                    .mirror
+                    .copies
+                    .get_mut(&(message.clone(), target.clone()))
+                    .expect("a checked copy is indexed");
                 if copy.removed {
                     return;
                 }
                 copy.removed = true;
-                self.note(seq, event, task, Synced::Removed { message: message.clone(), target: target.clone() });
+                self.note(
+                    seq,
+                    event,
+                    task,
+                    Synced::Removed {
+                        message: message.clone(),
+                        target: target.clone(),
+                    },
+                );
             }
-            SyncOp::Undelivered { task, message, target, error } => {
-                self.mirror.dead.insert((message.clone(), target.clone()), error.clone());
-                let dead = Synced::Undelivered { message: message.clone(), target: target.clone(), error: error.clone() };
+            SyncOp::Undelivered {
+                task,
+                message,
+                target,
+                error,
+            } => {
+                self.mirror
+                    .dead
+                    .insert((message.clone(), target.clone()), error.clone());
+                let dead = Synced::Undelivered {
+                    message: message.clone(),
+                    target: target.clone(),
+                    error: error.clone(),
+                };
                 self.note(seq, event, task, dead);
             }
-            SyncOp::Throttled { message, target, revision, .. } => {
-                *self.mirror.throttled.entry((message.clone(), target.clone(), *revision)).or_default() += 1;
+            SyncOp::Throttled {
+                message,
+                target,
+                revision,
+                ..
+            } => {
+                *self
+                    .mirror
+                    .throttled
+                    .entry((message.clone(), target.clone(), *revision))
+                    .or_default() += 1;
             }
         }
     }
 
-    fn mark_read(&mut self, seq: u64, event: &Event, task: &TaskId, sync: &str, author: &Author, at: &EventId) {
+    fn mark_read(
+        &mut self,
+        seq: u64,
+        event: &Event,
+        task: &TaskId,
+        sync: &str,
+        author: &Author,
+        at: &EventId,
+    ) {
         if author.bot && !mutated(Mutation::BotMarksRead) {
             return;
         }
@@ -1129,7 +1521,10 @@ impl Fold {
         let key = (task.clone(), member.clone());
         let held = self.mirror.read.get(&key).copied().unwrap_or_default();
         let upto = if mutated(Mutation::ReadRegresses) {
-            self.mirror.messages.get(at).map_or(latest, |message| message.seq)
+            self.mirror
+                .messages
+                .get(at)
+                .map_or(latest, |message| message.seq)
         } else {
             held.max(latest)
         };
@@ -1141,7 +1536,16 @@ impl Fold {
     }
 
     fn import(&mut self, seq: u64, event: &Event, op: &SyncOp) {
-        let SyncOp::Import { thread, message, author, body, context, sub, marker } = op else {
+        let SyncOp::Import {
+            thread,
+            message,
+            author,
+            body,
+            context,
+            sub,
+            marker,
+        } = op
+        else {
             return;
         };
         let link = self.mirror.threads[thread].clone();
@@ -1152,15 +1556,31 @@ impl Fold {
         }
         if author.bot && !mutated(Mutation::EchoImported) {
             let ours = marker.as_ref().filter(|marker| {
-                self.mirror.messages.get(*marker).is_some_and(|state| state.task == task)
-                    && !self.mirror.copies.contains_key(&((*marker).clone(), link.clone()))
+                self.mirror
+                    .messages
+                    .get(*marker)
+                    .is_some_and(|state| state.task == task)
+                    && !self
+                        .mirror
+                        .copies
+                        .contains_key(&((*marker).clone(), link.clone()))
             });
             if let Some(marker) = ours.cloned() {
-                let copy = Copy { external: message.clone(), revision: 0, removed: false };
-                self.mirror.copies.insert((marker.clone(), link.clone()), copy);
+                let copy = Copy {
+                    external: message.clone(),
+                    revision: 0,
+                    removed: false,
+                };
+                self.mirror
+                    .copies
+                    .insert((marker.clone(), link.clone()), copy);
                 self.mirror.dead.remove(&(marker.clone(), link.clone()));
                 self.mirror.external.insert(key, marker.clone());
-                let delivered = Synced::Delivered { message: marker.clone(), target: link.clone(), external: message.clone() };
+                let delivered = Synced::Delivered {
+                    message: marker.clone(),
+                    target: link.clone(),
+                    external: message.clone(),
+                };
                 self.note(seq, event, &task, delivered);
                 self.mark_read(seq, event, &task, &link.sync, author, &marker);
                 self.unpark(seq, &(thread.clone(), Some(message.clone())));
@@ -1169,7 +1589,11 @@ impl Fold {
         }
         let by = self.mirror.author(&link.sync, author);
         let mut state = self.fresh(&task, seq, Kind::Reply, by.clone(), body.clone());
-        state.origin = Some(Origin { thread: thread.clone(), message: message.clone(), user: author.user.clone() });
+        state.origin = Some(Origin {
+            thread: thread.clone(),
+            message: message.clone(),
+            user: author.user.clone(),
+        });
         state.sub.clone_from(sub);
         state.context.clone_from(context);
         self.add(event.id.clone(), state);
@@ -1177,22 +1601,47 @@ impl Fold {
         if let Some(state) = self.tasks.get_mut(&task) {
             state.replies.push((by.clone(), body.clone()));
         }
-        self.record(seq, event, &task, Change::Replied { by, body: body.clone() });
+        self.record(
+            seq,
+            event,
+            &task,
+            Change::Replied {
+                by,
+                body: body.clone(),
+            },
+        );
         self.mark_read(seq, event, &task, &link.sync, author, &event.id);
-        let follow = body.trim().eq_ignore_ascii_case("follow") && !mutated(Mutation::FollowIgnored);
+        let follow =
+            body.trim().eq_ignore_ascii_case("follow") && !mutated(Mutation::FollowIgnored);
         if follow
             && let Some(linked) = self.mirror.links.get_mut(&link)
             && linked.mode == Mode::Status
         {
             linked.mode = Mode::Always;
             linked.since = linked.since.max(seq);
-            self.note(seq, event, &task, Synced::Moded { target: link.clone(), mode: Mode::Always });
+            self.note(
+                seq,
+                event,
+                &task,
+                Synced::Moded {
+                    target: link.clone(),
+                    mode: Mode::Always,
+                },
+            );
         }
         self.unpark(seq, &(thread.clone(), Some(message.clone())));
     }
 
     fn synced(&mut self, seq: u64, event: &Event, op: &SyncOp) {
-        let SyncOp::Synced { task, message, target, external, revision, thread } = op else {
+        let SyncOp::Synced {
+            task,
+            message,
+            target,
+            external,
+            revision,
+            thread,
+        } = op
+        else {
             return;
         };
         let key = (message.clone(), target.clone());
@@ -1202,13 +1651,30 @@ impl Fold {
             }
             copy.revision = *revision;
         } else {
-            self.mirror.copies.insert(key.clone(), Copy { external: external.clone(), revision: *revision, removed: false });
+            self.mirror.copies.insert(
+                key.clone(),
+                Copy {
+                    external: external.clone(),
+                    revision: *revision,
+                    removed: false,
+                },
+            );
             self.mirror.dead.remove(&key);
-            self.mirror.external.insert((target.clone(), external.clone()), message.clone());
+            self.mirror
+                .external
+                .insert((target.clone(), external.clone()), message.clone());
         }
-        let delivered = Synced::Delivered { message: message.clone(), target: target.clone(), external: external.clone() };
+        let delivered = Synced::Delivered {
+            message: message.clone(),
+            target: target.clone(),
+            external: external.clone(),
+        };
         self.note(seq, event, task, delivered);
-        let root = self.mirror.messages.get(message).is_some_and(|state| state.kind == Kind::Root);
+        let root = self
+            .mirror
+            .messages
+            .get(message)
+            .is_some_and(|state| state.kind == Kind::Root);
         if let Some(thread) = thread
             && root
             && let Some(linked) = self.mirror.links.get_mut(target)
@@ -1219,16 +1685,31 @@ impl Fold {
             linked.thread = Some(thread.clone());
             self.thread_found(seq, thread, target.clone());
         }
-        let routed = self.mirror.links.get(target).and_then(|linked| linked.thread.clone());
+        let routed = self
+            .mirror
+            .links
+            .get(target)
+            .and_then(|linked| linked.thread.clone());
         if let Some(thread) = routed {
             self.unpark(seq, &(thread, Some(external.clone())));
         }
     }
 
-    fn reword(&mut self, seq: u64, event: &Event, thread: &Target, author: &Author, spec: &str, version: u64) {
+    fn reword(
+        &mut self,
+        seq: u64,
+        event: &Event,
+        thread: &Target,
+        author: &Author,
+        spec: &str,
+        version: u64,
+    ) {
         let linked = &self.mirror.links[&self.mirror.threads[thread]];
         let task = linked.task.clone();
-        if author.bot || !matches!(linked.join, Join::Root { .. }) || mutated(Mutation::RootEditsIgnored) {
+        if author.bot
+            || !matches!(linked.join, Join::Root { .. })
+            || mutated(Mutation::RootEditsIgnored)
+        {
             return;
         }
         let held = self.mirror.worded.entry(task.clone()).or_default();
@@ -1251,14 +1732,27 @@ impl Fold {
             root.mentions = mentions(spec);
             root.revision += 1;
         }
-        self.note(seq, event, &task, Synced::Reworded { spec: spec.to_owned() });
+        self.note(
+            seq,
+            event,
+            &task,
+            Synced::Reworded {
+                spec: spec.to_owned(),
+            },
+        );
     }
 
     fn imported(&self, thread: &Target, message: &str) -> Option<(EventId, TaskId)> {
         let link = self.mirror.threads.get(thread)?;
-        let id = self.mirror.external.get(&(link.clone(), message.to_owned()))?;
+        let id = self
+            .mirror
+            .external
+            .get(&(link.clone(), message.to_owned()))?;
         let state = &self.mirror.messages[id];
-        let origin = state.origin.as_ref().is_some_and(|origin| origin.thread == *thread || origin.thread == *link);
+        let origin = state
+            .origin
+            .as_ref()
+            .is_some_and(|origin| origin.thread == *thread || origin.thread == *link);
         origin.then(|| (id.clone(), state.task.clone()))
     }
 
@@ -1274,7 +1768,14 @@ impl Fold {
     }
 
     fn label(&mut self, seq: u64, event: &Event, op: &SyncOp) {
-        let SyncOp::Label { task, set, unset, own, version } = op else {
+        let SyncOp::Label {
+            task,
+            set,
+            unset,
+            own,
+            version,
+        } = op
+        else {
             return;
         };
         let Some(state) = self.tasks.get(task) else {
@@ -1289,7 +1790,11 @@ impl Fold {
             .collect::<Vec<_>>();
         let stale = mutated(Mutation::StaleLabels);
         for prefix in own {
-            let seen = self.mirror.owned.entry((task.clone(), prefix.clone())).or_default();
+            let seen = self
+                .mirror
+                .owned
+                .entry((task.clone(), prefix.clone()))
+                .or_default();
             *seen = (*seen).max(*version);
         }
         let owned_map = &self.mirror.owned;
@@ -1302,11 +1807,18 @@ impl Fold {
                 .max()
                 .unwrap_or_default()
         };
-        let floors = set.keys().map(|key| (key.clone(), floor(key))).collect::<BTreeMap<_, _>>();
+        let floors = set
+            .keys()
+            .map(|key| (key.clone(), floor(key)))
+            .collect::<BTreeMap<_, _>>();
         let mut added = BTreeMap::new();
         let mut removed = BTreeSet::new();
         for (key, value) in set {
-            let seen = self.mirror.labels.entry((task.clone(), key.clone())).or_default();
+            let seen = self
+                .mirror
+                .labels
+                .entry((task.clone(), key.clone()))
+                .or_default();
             if (*version >= *seen && *version >= floors[key]) || stale {
                 *seen = *version;
                 if state.spec.labels.get(key) != Some(value) {
@@ -1318,7 +1830,11 @@ impl Fold {
             if set.contains_key(key) {
                 continue;
             }
-            let seen = self.mirror.labels.entry((task.clone(), key.clone())).or_default();
+            let seen = self
+                .mirror
+                .labels
+                .entry((task.clone(), key.clone()))
+                .or_default();
             if *version >= *seen || stale {
                 *seen = *version;
                 if state.spec.labels.contains_key(key) {
@@ -1329,12 +1845,25 @@ impl Fold {
         if added.is_empty() && removed.is_empty() {
             return;
         }
-        let labels = &mut self.tasks.get_mut(task).expect("a labelled task exists").spec.labels;
+        let labels = &mut self
+            .tasks
+            .get_mut(task)
+            .expect("a labelled task exists")
+            .spec
+            .labels;
         for key in &removed {
             labels.remove(key);
         }
         labels.extend(added.clone());
-        self.note(seq, event, task, Synced::Labelled { set: added, unset: removed });
+        self.note(
+            seq,
+            event,
+            task,
+            Synced::Labelled {
+                set: added,
+                unset: removed,
+            },
+        );
     }
 
     fn thread_found(&mut self, seq: u64, thread: Target, link: Target) {
@@ -1346,7 +1875,12 @@ impl Fold {
     fn unpark(&mut self, seq: u64, key: &(Target, Option<String>)) {
         let waiting = self.mirror.parked.remove(key).unwrap_or_default();
         for (id, at_ms, op) in waiting {
-            let event = Event { id, by: String::new(), at_ms, op: Op::Sync { sync: op.clone() } };
+            let event = Event {
+                id,
+                by: String::new(),
+                at_ms,
+                op: Op::Sync { sync: op.clone() },
+            };
             self.transition_sync(seq, &event, &op);
         }
     }

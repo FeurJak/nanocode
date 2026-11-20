@@ -117,7 +117,9 @@ impl Parsed {
         let secs = secs
             .parse::<u64>()
             .map_err(|error| format!("--lease {secs}: {error}"))?;
-        Ok(secs.checked_mul(1000).ok_or("--lease overflows milliseconds")?)
+        Ok(secs
+            .checked_mul(1000)
+            .ok_or("--lease overflows milliseconds")?)
     }
 
     fn setting(&self, flag: &str, variable: &str) -> Result<String, Failure> {
@@ -142,7 +144,8 @@ fn identity(actor: &str) -> Result<Identity, Failure> {
         Some((principal, profile)) => (principal, Some(profile)),
         None => (actor, None),
     };
-    let identity = Identity::verify(&Trusted, principal).map_err(|denied| format!("{actor}: {denied:?}"))?;
+    let identity =
+        Identity::verify(&Trusted, principal).map_err(|denied| format!("{actor}: {denied:?}"))?;
     match profile {
         Some(profile) => identity
             .profile(profile)
@@ -152,7 +155,9 @@ fn identity(actor: &str) -> Result<Identity, Failure> {
 }
 
 fn now_ms() -> Result<u64, Failure> {
-    Ok(u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?)
+    Ok(u64::try_from(
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
+    )?)
 }
 
 const fn status(task: &Task) -> &'static str {
@@ -185,7 +190,9 @@ fn render(board: &Board, id: &TaskId, task: &Task, at_ms: u64) -> Value {
             claim,
             worker,
             until_ms,
-        } => json!({"claim": claim, "worker": worker, "until_ms": until_ms, "expired": *until_ms <= at_ms}),
+        } => {
+            json!({"claim": claim, "worker": worker, "until_ms": until_ms, "expired": *until_ms <= at_ms})
+        }
         Phase::Done { result } => json!({"result": result}),
         Phase::Failed { error } => json!({"error": error}),
         Phase::Cancelled { reason } => json!({"reason": reason}),
@@ -209,20 +216,30 @@ fn held(board: &Board, id: &TaskId, given: Option<String>) -> Result<ClaimId, Fa
         return Ok(ClaimId(claim));
     }
     match board.task(id).map(|task| &task.phase) {
-        Some(Phase::Claimed { claim, worker, .. }) if *worker == board.writer() => Ok(claim.clone()),
-        Some(Phase::Claimed { worker, .. }) => {
-            Err(format!("{id} is claimed by {worker}, not {}; pass --claim", board.writer()).into())
+        Some(Phase::Claimed { claim, worker, .. }) if *worker == board.writer() => {
+            Ok(claim.clone())
         }
+        Some(Phase::Claimed { worker, .. }) => Err(format!(
+            "{id} is claimed by {worker}, not {}; pass --claim",
+            board.writer()
+        )
+        .into()),
         Some(_) => Err(format!("{id} is not claimed").into()),
         None => Err(format!("no task {id} on this board").into()),
     }
 }
 
 async fn submit(board: &mut Board, at_ms: u64, op: Op) -> Result<(), Failure> {
-    board.submit(at_ms, op).await.map(drop).map_err(|error| match error {
-        BoardError::Unsettled { .. } => format!("{error}; run show to see whether it landed").into(),
-        error => error.to_string().into(),
-    })
+    board
+        .submit(at_ms, op)
+        .await
+        .map(drop)
+        .map_err(|error| match error {
+            BoardError::Unsettled { .. } => {
+                format!("{error}; run show to see whether it landed").into()
+            }
+            error => error.to_string().into(),
+        })
 }
 
 async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failure> {
@@ -233,13 +250,21 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
         "init" => {
             parsed.allow(&[])?;
             parsed.words::<0>()?;
-            board.charter(at_ms).await.map_err(|error| error.to_string())?;
+            board
+                .charter(at_ms)
+                .await
+                .map_err(|error| error.to_string())?;
             let grant = Grant {
                 who: vec![Who::Everyone],
                 can: BTreeMap::from([("*".to_owned(), Can::ALL.to_vec())]),
             };
-            board.grant("everyone", at_ms, grant).await.map_err(|error| error.to_string())?;
-            return Ok(Some(json!({"owner": board.writer(), "granted": "everyone may do everything"})));
+            board
+                .grant("everyone", at_ms, grant)
+                .await
+                .map_err(|error| error.to_string())?;
+            return Ok(Some(
+                json!({"owner": board.writer(), "granted": "everyone may do everything"}),
+            ));
         }
         "list" => {
             parsed.allow(&["label", "status"])?;
@@ -248,12 +273,17 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
             let statuses = parsed.many("status");
             let listed = board
                 .tasks()
-                .filter(|(_, task)| labels.iter().all(|(key, value)| task.spec.labels.get(key) == Some(value)))
+                .filter(|(_, task)| {
+                    labels
+                        .iter()
+                        .all(|(key, value)| task.spec.labels.get(key) == Some(value))
+                })
                 .map(|(id, task)| render(board, id, task, at_ms))
                 .filter(|task| {
                     statuses.is_empty()
                         || statuses.iter().any(|wanted| {
-                            task["status"] == wanted.as_str() || (wanted == "ready" && task["ready"] == true)
+                            task["status"] == wanted.as_str()
+                                || (wanted == "ready" && task["ready"] == true)
                         })
                 })
                 .collect::<Vec<_>>();
@@ -272,7 +302,15 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
             let Some(task) = board.fold().pick(board.writer(), &labels, at_ms).cloned() else {
                 return Ok(None);
             };
-            submit(board, at_ms, Op::Claim { task: task.clone(), lease_ms }).await?;
+            submit(
+                board,
+                at_ms,
+                Op::Claim {
+                    task: task.clone(),
+                    lease_ms,
+                },
+            )
+            .await?;
             task
         }
         "post" => {
@@ -281,7 +319,9 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
             let on_fail = match parsed.one("on-fail")?.as_deref() {
                 None | Some("cascade") => OnFail::Cascade,
                 Some("wait") => OnFail::Wait,
-                Some(other) => return Err(format!("--on-fail {other} is not cascade or wait").into()),
+                Some(other) => {
+                    return Err(format!("--on-fail {other} is not cascade or wait").into());
+                }
             };
             let new = NewTask {
                 id: id(&task),
@@ -302,7 +342,15 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
             parsed.allow(&["lease"])?;
             let [task] = parsed.words()?;
             let lease_ms = parsed.lease_ms()?;
-            submit(board, at_ms, Op::Claim { task: id(&task), lease_ms }).await?;
+            submit(
+                board,
+                at_ms,
+                Op::Claim {
+                    task: id(&task),
+                    lease_ms,
+                },
+            )
+            .await?;
             id(&task)
         }
         "renew" => {
@@ -310,7 +358,16 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
             let [task] = parsed.words()?;
             let lease_ms = parsed.lease_ms()?;
             let claim = held(board, &id(&task), parsed.one("claim")?)?;
-            submit(board, at_ms, Op::Renew { task: id(&task), claim, lease_ms }).await?;
+            submit(
+                board,
+                at_ms,
+                Op::Renew {
+                    task: id(&task),
+                    claim,
+                    lease_ms,
+                },
+            )
+            .await?;
             id(&task)
         }
         "finish" | "fail" => {
@@ -322,24 +379,54 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
             } else {
                 Outcome::Failed(detail)
             };
-            submit(board, at_ms, Op::Finish { task: id(&task), claim, outcome }).await?;
+            submit(
+                board,
+                at_ms,
+                Op::Finish {
+                    task: id(&task),
+                    claim,
+                    outcome,
+                },
+            )
+            .await?;
             id(&task)
         }
         "release" => {
             parsed.allow(&["claim"])?;
             let [task, note] = parsed.words()?;
             let claim = held(board, &id(&task), parsed.one("claim")?)?;
-            submit(board, at_ms, Op::Release { task: id(&task), claim, note }).await?;
+            submit(
+                board,
+                at_ms,
+                Op::Release {
+                    task: id(&task),
+                    claim,
+                    note,
+                },
+            )
+            .await?;
             id(&task)
         }
         "block" => {
             parsed.allow(&[])?;
             let [task, kind, reason] = parsed.words()?;
             let claim = match board.task(&id(&task)).map(|task| &task.phase) {
-                Some(Phase::Claimed { claim, worker, .. }) if *worker == board.writer() => Some(claim.clone()),
+                Some(Phase::Claimed { claim, worker, .. }) if *worker == board.writer() => {
+                    Some(claim.clone())
+                }
                 _ => None,
             };
-            submit(board, at_ms, Op::Tasks(TaskOp::Block { task: id(&task), claim, kind, reason })).await?;
+            submit(
+                board,
+                at_ms,
+                Op::Tasks(TaskOp::Block {
+                    task: id(&task),
+                    claim,
+                    kind,
+                    reason,
+                }),
+            )
+            .await?;
             id(&task)
         }
         "unblock" | "reopen" => {
@@ -356,13 +443,29 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
         "cancel" => {
             parsed.allow(&[])?;
             let [task, reason] = parsed.words()?;
-            submit(board, at_ms, Op::Cancel { task: id(&task), reason }).await?;
+            submit(
+                board,
+                at_ms,
+                Op::Cancel {
+                    task: id(&task),
+                    reason,
+                },
+            )
+            .await?;
             id(&task)
         }
         "reply" => {
             parsed.allow(&[])?;
             let [task, body] = parsed.words()?;
-            submit(board, at_ms, Op::Reply { task: id(&task), body }).await?;
+            submit(
+                board,
+                at_ms,
+                Op::Reply {
+                    task: id(&task),
+                    body,
+                },
+            )
+            .await?;
             id(&task)
         }
         other => return Err(format!("unknown command {other}; see nc-board --help").into()),
@@ -386,15 +489,25 @@ fn open(dir: &Path) -> Result<std::fs::File, Failure> {
 fn session(parsed: &Parsed) -> Result<Option<Value>, Failure> {
     let dir = PathBuf::from(parsed.setting("dir", "NC_BOARD_DIR")?);
     let actor = match parsed.words[0].as_str() {
-        "list" | "show" => parsed.setting("as", "NC_BOARD_AS").unwrap_or_else(|_| "agent:reader".to_owned()),
+        "list" | "show" => parsed
+            .setting("as", "NC_BOARD_AS")
+            .unwrap_or_else(|_| "agent:reader".to_owned()),
         _ => parsed.setting("as", "NC_BOARD_AS")?,
     };
     let identity = identity(&actor)?;
     let lock = open(&dir)?;
     let runtime = nanocode_executor::Runtime::new()?;
     let result = runtime.block_on(async {
-        let host = Arc::new(FileLog::open(&dir.join("board.log"), FileOptions { scope: SCOPE, sync: true })?);
-        let mut board = Board::open(host, SCOPE, identity).await.map_err(|error| error.to_string())?;
+        let host = Arc::new(FileLog::open(
+            &dir.join("board.log"),
+            FileOptions {
+                scope: SCOPE,
+                sync: true,
+            },
+        )?);
+        let mut board = Board::open(host, SCOPE, identity)
+            .await
+            .map_err(|error| error.to_string())?;
         let reader = parsed.words[0] == "list" || parsed.words[0] == "show";
         if reader && board.fold().access().owner().is_some() && !board.may("*", Can::Read) {
             return Err(format!("{actor} may not read this board").into());

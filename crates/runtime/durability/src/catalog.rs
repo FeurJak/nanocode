@@ -680,7 +680,9 @@ mod store {
 
         #[must_use]
         pub fn sharing_payloads(mut self, other: &Self) -> Self {
-            self.store.payload_memo.clone_from(&other.store.payload_memo);
+            self.store
+                .payload_memo
+                .clone_from(&other.store.payload_memo);
             self
         }
 
@@ -1072,7 +1074,10 @@ mod store {
                 .map(|(operation_id, operation)| (operation.accepted_order(), operation_id.clone()))
                 .collect();
             completed.sort_unstable();
-            Ok(completed.into_iter().map(|(_, operation_id)| operation_id).collect())
+            Ok(completed
+                .into_iter()
+                .map(|(_, operation_id)| operation_id)
+                .collect())
         }
 
         pub async fn steer_read(&self, id: &str, message_id: &str) -> Result<Option<bool>> {

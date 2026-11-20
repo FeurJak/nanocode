@@ -403,8 +403,7 @@ impl Fold {
                 .or_default()
                 .insert(task.id.clone());
         }
-        self.tasks
-            .insert(task.id.clone(), Task::new(task, series));
+        self.tasks.insert(task.id.clone(), Task::new(task, series));
         self.record(seq, event, &task.id, Change::Posted);
     }
 
@@ -419,7 +418,9 @@ impl Fold {
         if let (Outcome::Failed(_), Some(retry)) = (outcome, &task.spec.terms.retry)
             && task.attempts < retry.max_attempts
         {
-            let delay = retry.delay(task.attempts.max(1)).ok_or(refuse(Invalid::Overflow))?;
+            let delay = retry
+                .delay(task.attempts.max(1))
+                .ok_or(refuse(Invalid::Overflow))?;
             let due_at_ms = now_ms.checked_add(delay).ok_or(refuse(Invalid::Overflow))?;
             return Ok(Some(due_at_ms));
         }

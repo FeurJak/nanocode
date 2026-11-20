@@ -62,7 +62,10 @@ pub fn finish() -> Option<String> {
         }
     }
     if total.deferred > 0 {
-        return Some(format!("board: {} operations stayed pending", total.deferred));
+        return Some(format!(
+            "board: {} operations stayed pending",
+            total.deferred
+        ));
     }
     let mut totals = lock(&TOTALS);
     let totals = totals.get_or_insert_with(|| (0, BoardStats::default()));

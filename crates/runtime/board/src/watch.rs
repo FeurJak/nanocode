@@ -8,7 +8,6 @@ use crate::{
     wake::{Timer, Wake},
 };
 
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Batch {
     pub key: Key,
@@ -99,8 +98,15 @@ impl Board {
         batch: &Batch,
         effects: Vec<Op>,
     ) -> Result<Applied, BoardError> {
-        self.commit(at_ms, batch.key.clone(), None, batch.from, batch.to, effects)
-            .await
+        self.commit(
+            at_ms,
+            batch.key.clone(),
+            None,
+            batch.from,
+            batch.to,
+            effects,
+        )
+        .await
     }
 
     async fn commit(
@@ -265,8 +271,15 @@ impl Board {
         };
         self.refresh().await?;
         let from = self.fold.position(&key);
-        self.commit(at_ms, key, Some(lease.id.clone()), from, lease.upto, effects)
-            .await
+        self.commit(
+            at_ms,
+            key,
+            Some(lease.id.clone()),
+            from,
+            lease.upto,
+            effects,
+        )
+        .await
     }
 
     pub async fn fail(
@@ -386,8 +399,13 @@ impl Board {
         watcher: &Registered<'_>,
     ) -> Result<Served, BoardError> {
         let mut served = Served::default();
-        self.watch(timer.now_ms(), &watcher.name, &watcher.filter, watcher.policy)
-            .await?;
+        self.watch(
+            timer.now_ms(),
+            &watcher.name,
+            &watcher.filter,
+            watcher.policy,
+        )
+        .await?;
         self.fire_due(timer.now_ms()).await?;
         loop {
             let runnable = self.runnable(&watcher.name, timer.now_ms());
@@ -395,8 +413,11 @@ impl Board {
                 return Ok(served);
             }
             let before = served;
-            self.serve_once(timer, watcher, runnable, &mut served).await?;
-            if served.acked + served.failed + served.buried == before.acked + before.failed + before.buried {
+            self.serve_once(timer, watcher, runnable, &mut served)
+                .await?;
+            if served.acked + served.failed + served.buried
+                == before.acked + before.failed + before.buried
+            {
                 return Ok(served);
             }
         }
@@ -433,8 +454,14 @@ impl Board {
                 Err(error) => return Err(error),
             };
             let settled = match watcher.handler.run(&lease).await {
-                Ok(effects) => self.ack(timer.now_ms(), &lease, effects).await.map(|_| true),
-                Err(error) => self.fail(timer.now_ms(), &lease, &error).await.map(|_| false),
+                Ok(effects) => self
+                    .ack(timer.now_ms(), &lease, effects)
+                    .await
+                    .map(|_| true),
+                Err(error) => self
+                    .fail(timer.now_ms(), &lease, &error)
+                    .await
+                    .map(|_| false),
             };
             match settled {
                 Ok(true) => served.acked += 1,

@@ -515,7 +515,9 @@ impl Fold {
         let task = self.tasks.get(id).ok_or(Rejection::UnknownTask)?;
         match &task.phase {
             Phase::Claimed { claim, .. } if claim == held => Ok(task),
-            Phase::Claimed { .. } | Phase::Open | Phase::Blocked { .. } => Err(Rejection::NotHolder),
+            Phase::Claimed { .. } | Phase::Open | Phase::Blocked { .. } => {
+                Err(Rejection::NotHolder)
+            }
             _ => Err(Rejection::Terminal),
         }
     }
@@ -605,7 +607,10 @@ impl Fold {
             if id == task {
                 return Err(Rejection::Tasks(Refusal::Cycle(task.0.clone())));
             }
-            at = self.tasks.get(id).and_then(|above| above.spec.parent.as_ref());
+            at = self
+                .tasks
+                .get(id)
+                .and_then(|above| above.spec.parent.as_ref());
         }
         Ok(())
     }
@@ -615,10 +620,11 @@ impl Fold {
     }
 
     pub fn restore(snapshot: &str) -> Result<Self, BoardError> {
-        let mut fold: Self = serde_json::from_str(snapshot).map_err(|error| BoardError::Corrupt {
-            seq: 0,
-            detail: format!("fold snapshot: {error}"),
-        })?;
+        let mut fold: Self =
+            serde_json::from_str(snapshot).map_err(|error| BoardError::Corrupt {
+                seq: 0,
+                detail: format!("fold snapshot: {error}"),
+            })?;
         if mutated(Mutation::SnapshotSkipsRows) {
             fold.next += 1;
         }
@@ -834,7 +840,10 @@ impl Fold {
                         }
                     }
                     if let Some(new) = parent {
-                        self.children.entry(new.clone()).or_default().insert(id.clone());
+                        self.children
+                            .entry(new.clone())
+                            .or_default()
+                            .insert(id.clone());
                     }
                 }
                 Change::Reparented {
@@ -1009,7 +1018,10 @@ impl Pending {
             }
             return Err(BoardError::Corrupt {
                 seq,
-                detail: format!("the store acknowledged {} but it did not fold", self.event.id),
+                detail: format!(
+                    "the store acknowledged {} but it did not fold",
+                    self.event.id
+                ),
             });
         };
         verdict

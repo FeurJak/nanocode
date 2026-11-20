@@ -88,11 +88,16 @@ struct Oracle {
 
 impl Oracle {
     fn due(&self, fold: &Fold, id: &TaskId) -> Result<(TaskId, u64), String> {
-        let task = fold.task(id).ok_or_else(|| format!("{id} is ready but not on the board"))?;
+        let task = fold
+            .task(id)
+            .ok_or_else(|| format!("{id} is ready but not on the board"))?;
         match &task.occurrence {
             Some(occurrence) => Ok((occurrence.series.clone(), occurrence.slot)),
             None => {
-                let expect = self.series.get(id).ok_or_else(|| format!("{id} has no series"))?;
+                let expect = self
+                    .series
+                    .get(id)
+                    .ok_or_else(|| format!("{id} has no series"))?;
                 Ok((id.clone(), expect.first_ms))
             }
         }
@@ -105,10 +110,15 @@ impl Oracle {
             ..Track::default()
         });
         if track.terminal {
-            return Err(format!("{id} was claimed at {now} after it ran out of attempts"));
+            return Err(format!(
+                "{id} was claimed at {now} after it ran out of attempts"
+            ));
         }
         if now < track.due_ms {
-            return Err(format!("{id} was claimed at {now}, before it was due at {}", track.due_ms));
+            return Err(format!(
+                "{id} was claimed at {now}, before it was due at {}",
+                track.due_ms
+            ));
         }
         track.claims += 1;
         Ok(())
@@ -146,10 +156,14 @@ fn brute(cron: &str, offset: i16, after_ms: u64, next_ms: u64) -> Result<(), Str
     let offset = i64::from(offset);
     let minute = |ms: u64| ms as i64 / MINUTE as i64 + offset;
     if !next_ms.is_multiple_of(MINUTE) || next_ms <= after_ms || !parsed.matches(minute(next_ms)) {
-        return Err(format!("{cron} at {offset}: {next_ms} is not a match after {after_ms}"));
+        return Err(format!(
+            "{cron} at {offset}: {next_ms} is not a match after {after_ms}"
+        ));
     }
     match (minute(after_ms) + 1..minute(next_ms)).find(|at| parsed.matches(*at)) {
-        Some(at) => Err(format!("{cron} at {offset}: next after {after_ms} skipped minute {at}")),
+        Some(at) => Err(format!(
+            "{cron} at {offset}: next after {after_ms} skipped minute {at}"
+        )),
         None => Ok(()),
     }
 }
@@ -164,8 +178,13 @@ fn expected(expect: &Expect, until_ms: u64) -> Result<Vec<u64>, String> {
     };
     loop {
         let last = slots[slots.len() - 1];
-        let next = recur.next_after(last).map_err(|invalid| format!("{invalid:?}"))?;
-        if let Recur::Cron { cron, offset_minutes } = recur
+        let next = recur
+            .next_after(last)
+            .map_err(|invalid| format!("{invalid:?}"))?;
+        if let Recur::Cron {
+            cron,
+            offset_minutes,
+        } = recur
             && next - last <= 2 * 24 * HOUR
         {
             brute(cron, *offset_minutes, last, next)?;
@@ -189,7 +208,9 @@ fn post(rng: &mut Rng, number: u64, now: u64) -> Result<(NewTask, Expect), Strin
         }),
     };
     let first_ms = match &recur {
-        Some(cron @ Recur::Cron { .. }) => cron.next_after(now).map_err(|invalid| format!("{invalid:?}"))?,
+        Some(cron @ Recur::Cron { .. }) => cron
+            .next_after(now)
+            .map_err(|invalid| format!("{invalid:?}"))?,
         _ => now + rng.range(0, 3 * HOUR),
     };
     let retry = rng.chance(600_000).then(|| Retry {
@@ -209,17 +230,38 @@ fn post(rng: &mut Rng, number: u64, now: u64) -> Result<(NewTask, Expect), Strin
             ..Terms::default()
         },
     };
-    Ok((task, Expect { recur, retry, first_ms }))
+    Ok((
+        task,
+        Expect {
+            recur,
+            retry,
+            first_ms,
+        },
+    ))
 }
 
-fn step(host: &mut Host, oracle: &mut Oracle, rng: &mut Rng, now: u64, fail_ppm: u64, drop_ppm: u64) -> Result<bool, String> {
+fn step(
+    host: &mut Host,
+    oracle: &mut Oracle,
+    rng: &mut Rng,
+    now: u64,
+    fail_ppm: u64,
+    drop_ppm: u64,
+) -> Result<bool, String> {
     let ready = host.fold.ready(now).cloned().collect::<Vec<_>>();
     for id in &ready {
-        if !host.append(now, Op::Claim { task: id.clone(), lease_ms: LEASE })? {
+        if !host.append(
+            now,
+            Op::Claim {
+                task: id.clone(),
+                lease_ms: LEASE,
+            },
+        )? {
             continue;
         }
         oracle.claimed(&host.fold, id, now)?;
-        let Some(Phase::Claimed { claim, .. }) = host.fold.task(id).map(|task| task.phase.clone()) else {
+        let Some(Phase::Claimed { claim, .. }) = host.fold.task(id).map(|task| task.phase.clone())
+        else {
             return Err(format!("{id} was claimed but is not held"));
         };
         if rng.chance(drop_ppm) {
@@ -232,7 +274,14 @@ fn step(host: &mut Host, oracle: &mut Oracle, rng: &mut Rng, now: u64, fail_ppm:
             Outcome::Done("due run done".to_owned())
         };
         let claim: ClaimId = claim;
-        if host.append(now, Op::Finish { task: id.clone(), claim, outcome })? {
+        if host.append(
+            now,
+            Op::Finish {
+                task: id.clone(),
+                claim,
+                outcome,
+            },
+        )? {
             oracle.finished(&host.fold, id, now, failed)?;
         }
     }
@@ -301,14 +350,21 @@ pub fn run(seed: u64) -> Result<DueStats, String> {
         }
         match host.fold.next_due() {
             Some(due_ms) if owed => now = due_ms,
-            _ if owed => return Err(format!("due tasks owed before {cut} have no due time at {now}")),
+            _ if owed => {
+                return Err(format!(
+                    "due tasks owed before {cut} have no due time at {now}"
+                ));
+            }
             _ => break,
         }
     }
     for (id, task) in host.fold.tasks() {
         let claims = oracle.tasks.get(id).map_or(0, |track| track.claims);
         if task.attempts != claims {
-            return Err(format!("{id} counts {} attempts after {claims} claims", task.attempts));
+            return Err(format!(
+                "{id} counts {} attempts after {claims} claims",
+                task.attempts
+            ));
         }
     }
     for (series, expect) in &oracle.series {
@@ -320,11 +376,30 @@ pub fn run(seed: u64) -> Result<DueStats, String> {
             return Err(format!("{series} fired a due time twice: {fired:?}"));
         }
         if let Some(missed) = slots.iter().find(|slot| !unique.contains(slot)) {
-            let open = host.fold.tasks().iter().filter(|(_, task)| !task.finished()).map(|(id, task)| format!("{id} {:?} due={:?} {:?}", task.phase, task.due_at_ms, host.fold.claimable(id, now))).collect::<Vec<_>>();
-            return Err(format!("{series} never fired its due time {missed} (fired {} of {}) now={now} open={open:?}", fired.len(), slots.len()));
+            let open = host
+                .fold
+                .tasks()
+                .iter()
+                .filter(|(_, task)| !task.finished())
+                .map(|(id, task)| {
+                    format!(
+                        "{id} {:?} due={:?} {:?}",
+                        task.phase,
+                        task.due_at_ms,
+                        host.fold.claimable(id, now)
+                    )
+                })
+                .collect::<Vec<_>>();
+            return Err(format!(
+                "{series} never fired its due time {missed} (fired {} of {}) now={now} open={open:?}",
+                fired.len(),
+                slots.len()
+            ));
         }
         if let Some(extra) = fired.iter().find(|slot| !later.contains(slot)) {
-            return Err(format!("{series} fired at {extra}, which is not one of its due times"));
+            return Err(format!(
+                "{series} fired at {extra}, which is not one of its due times"
+            ));
         }
     }
     Ok(oracle.stats)

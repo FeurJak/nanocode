@@ -110,17 +110,34 @@ impl Script {
             Act::Squat | Act::Read => ALICE,
         };
         let id = format!("{}#{key}", WRITERS[who]);
-        self.steps.push(Step { key, id: id.clone(), act, bad });
+        self.steps.push(Step {
+            key,
+            id: id.clone(),
+            act,
+            bad,
+        });
         MessageId(id)
     }
 
     fn say(&mut self, who: usize, say: Say) -> MessageId {
-        self.push(Act::Write { who, op: Op::Say { say } }, None)
+        self.push(
+            Act::Write {
+                who,
+                op: Op::Say { say },
+            },
+            None,
+        )
     }
 
     fn bad(&mut self, rule: &'static str, who: usize, say: Say) {
         if self.rng.chance(BAD_PPM) {
-            self.push(Act::Write { who, op: Op::Say { say } }, Some(rule));
+            self.push(
+                Act::Write {
+                    who,
+                    op: Op::Say { say },
+                },
+                Some(rule),
+            );
         }
     }
 
@@ -134,7 +151,13 @@ impl Script {
             }
             2 => {
                 let say = post(CHANNELS[0], None, None, "not mine to say".to_owned());
-                self.push(Act::Write { who: CAROL, op: Op::Say { say } }, Some("says_unchecked"));
+                self.push(
+                    Act::Write {
+                        who: CAROL,
+                        op: Op::Say { say },
+                    },
+                    Some("says_unchecked"),
+                );
             }
             _ => {}
         }
@@ -157,7 +180,13 @@ impl Chat {
             definition,
         };
         script.say(ALICE, schema(probe()));
-        script.push(Act::Upload { who: ALICE, bytes: file.clone() }, None);
+        script.push(
+            Act::Upload {
+                who: ALICE,
+                bytes: file.clone(),
+            },
+            None,
+        );
         let mut roots = Vec::new();
         let mut replies: Vec<(MessageId, MessageId, String)> = Vec::new();
         for index in 0..script.rng.range(6, 14) {
@@ -168,7 +197,10 @@ impl Chat {
             match flavor {
                 0 => text.push_str(&format!(" {SHOUT}")),
                 1 => text.push_str(&format!(" {DROP}")),
-                2 => text.push_str(&format!("\n\n{}", block("probe@1", &json!({ "n": index, "tag": "a" })))),
+                2 => text.push_str(&format!(
+                    "\n\n{}",
+                    block("probe@1", &json!({ "n": index, "tag": "a" }))
+                )),
                 3 if script.rng.chance(500_000) => text.clear(),
                 _ => {}
             }
@@ -178,7 +210,10 @@ impl Chat {
                     labels.insert("status".to_owned(), "open".to_owned());
                 }
                 if flavor == 3 {
-                    files.push(Attached { file: file_hash.clone(), name: "log.txt".to_owned() });
+                    files.push(Attached {
+                        file: file_hash.clone(),
+                        name: "log.txt".to_owned(),
+                    });
                 }
             }
             let root = script.say(who, say);
@@ -194,7 +229,10 @@ impl Chat {
                     .filter(|_| script.rng.chance(500_000))
                     .unwrap_or_else(|| root.clone());
                 let writer = script.rng.pick(TALKERS);
-                let reply = script.say(writer, post(channel, Some(&root), Some(&target), format!("re {index}")));
+                let reply = script.say(
+                    writer,
+                    post(channel, Some(&root), Some(&target), format!("re {index}")),
+                );
                 replies.push((reply, root.clone(), channel.to_owned()));
             }
             script.sometimes();
@@ -203,25 +241,92 @@ impl Chat {
             match script.rng.below(5) {
                 0 => {
                     for writer in [ALICE, BOB] {
-                        script.say(writer, Say::React { message: root.clone(), emoji: "eyes".to_owned(), on: true });
+                        script.say(
+                            writer,
+                            Say::React {
+                                message: root.clone(),
+                                emoji: "eyes".to_owned(),
+                                on: true,
+                            },
+                        );
                     }
-                    script.say(BOB, Say::React { message: root, emoji: "eyes".to_owned(), on: false });
+                    script.say(
+                        BOB,
+                        Say::React {
+                            message: root,
+                            emoji: "eyes".to_owned(),
+                            on: false,
+                        },
+                    );
                 }
                 1 => {
-                    script.say(BOB, Say::Label { message: root.clone(), key: "status".to_owned(), value: Some("done".to_owned()) });
+                    script.say(
+                        BOB,
+                        Say::Label {
+                            message: root.clone(),
+                            key: "status".to_owned(),
+                            value: Some("done".to_owned()),
+                        },
+                    );
                     if script.rng.chance(500_000) {
-                        script.say(ALICE, Say::Label { message: root, key: "status".to_owned(), value: None });
+                        script.say(
+                            ALICE,
+                            Say::Label {
+                                message: root,
+                                key: "status".to_owned(),
+                                value: None,
+                            },
+                        );
                     }
                 }
                 2 => {
-                    script.say(who, Say::Edit { message: root.clone(), text: format!("edited {SHOUT}") });
-                    script.bad("edits_by_anyone", 1 - who, Say::Edit { message: root, text: "hijacked".to_owned() });
+                    script.say(
+                        who,
+                        Say::Edit {
+                            message: root.clone(),
+                            text: format!("edited {SHOUT}"),
+                        },
+                    );
+                    script.bad(
+                        "edits_by_anyone",
+                        1 - who,
+                        Say::Edit {
+                            message: root,
+                            text: "hijacked".to_owned(),
+                        },
+                    );
                 }
                 3 => {
-                    script.bad("edits_by_anyone", 1 - who, Say::Delete { message: root.clone() });
-                    script.say(who, Say::Delete { message: root.clone() });
-                    script.bad("tombstones_editable", who, Say::Edit { message: root.clone(), text: "back".to_owned() });
-                    script.bad("tombstones_editable", 1 - who, Say::React { message: root, emoji: "eyes".to_owned(), on: true });
+                    script.bad(
+                        "edits_by_anyone",
+                        1 - who,
+                        Say::Delete {
+                            message: root.clone(),
+                        },
+                    );
+                    script.say(
+                        who,
+                        Say::Delete {
+                            message: root.clone(),
+                        },
+                    );
+                    script.bad(
+                        "tombstones_editable",
+                        who,
+                        Say::Edit {
+                            message: root.clone(),
+                            text: "back".to_owned(),
+                        },
+                    );
+                    script.bad(
+                        "tombstones_editable",
+                        1 - who,
+                        Say::React {
+                            message: root,
+                            emoji: "eyes".to_owned(),
+                            on: true,
+                        },
+                    );
                 }
                 _ => {}
             }
@@ -235,76 +340,210 @@ impl Chat {
             .cloned()
             .collect::<Vec<_>>();
         if let Some((root, _, _)) = live.first() {
-            script.push(Act::Write { who: ALICE, op: Op::Post { task: chat_task(&root.0) } }, None);
+            script.push(
+                Act::Write {
+                    who: ALICE,
+                    op: Op::Post {
+                        task: chat_task(&root.0),
+                    },
+                },
+                None,
+            );
             script.tasks += 1;
         }
         for number in 0..script.rng.range(1, 3) {
             let id = format!("chat-task.{number}");
-            script.push(Act::Write { who: ALICE, op: Op::Post { task: chat_task(&id) } }, None);
+            script.push(
+                Act::Write {
+                    who: ALICE,
+                    op: Op::Post {
+                        task: chat_task(&id),
+                    },
+                },
+                None,
+            );
             script.tasks += 1;
             let root = MessageId(id);
-            script.say(BOB, post("tasks", Some(&root), Some(&root), "on it".to_owned()));
-            script.bad("task_roots_editable", ALICE, Say::Edit { message: root.clone(), text: "do something else".to_owned() });
+            script.say(
+                BOB,
+                post("tasks", Some(&root), Some(&root), "on it".to_owned()),
+            );
+            script.bad(
+                "task_roots_editable",
+                ALICE,
+                Say::Edit {
+                    message: root.clone(),
+                    text: "do something else".to_owned(),
+                },
+            );
             if script.rng.chance(500_000) {
                 script.say(ALICE, Say::Delete { message: root });
             }
             script.push(Act::Squat, None);
         }
-        let (root, channel) = live.last().map_or_else(|| (MessageId(format!("{}#chat.0", WRITERS[ALICE])), "notes".to_owned()), |(root, channel, _)| (root.clone(), channel.clone()));
+        let (root, channel) = live.last().map_or_else(
+            || {
+                (
+                    MessageId(format!("{}#chat.0", WRITERS[ALICE])),
+                    "notes".to_owned(),
+                )
+            },
+            |(root, channel, _)| (root.clone(), channel.clone()),
+        );
         if let Some((reply, of, at)) = replies.first().cloned() {
-            script.bad("replies_nest", BOB, post(&at, Some(&reply), Some(&reply), "nested".to_owned()));
+            script.bad(
+                "replies_nest",
+                BOB,
+                post(&at, Some(&reply), Some(&reply), "nested".to_owned()),
+            );
             if of != root {
-                script.bad("replies_nest", BOB, post(&at, Some(&of), Some(&root), "crossed".to_owned()));
+                script.bad(
+                    "replies_nest",
+                    BOB,
+                    post(&at, Some(&of), Some(&root), "crossed".to_owned()),
+                );
             }
         }
-        script.bad("replies_nest", BOB, post("notes/elsewhere", Some(&root), Some(&root), "wrong channel".to_owned()));
-        script.bad("reserved_labels_writable", BOB, Say::Label { message: root.clone(), key: TASK_LABEL.to_owned(), value: Some("ready".to_owned()) });
+        script.bad(
+            "replies_nest",
+            BOB,
+            post(
+                "notes/elsewhere",
+                Some(&root),
+                Some(&root),
+                "wrong channel".to_owned(),
+            ),
+        );
+        script.bad(
+            "reserved_labels_writable",
+            BOB,
+            Say::Label {
+                message: root.clone(),
+                key: TASK_LABEL.to_owned(),
+                value: Some("ready".to_owned()),
+            },
+        );
         let mut reserved = post(&channel, None, None, "reserved".to_owned());
         if let Say::Post { labels, .. } = &mut reserved {
             labels.insert("board.owner".to_owned(), "bob".to_owned());
         }
         script.bad("reserved_labels_writable", BOB, reserved);
-        script.bad("names_unchecked", BOB, Say::Label { message: root.clone(), key: "Bad Key".to_owned(), value: Some("x".to_owned()) });
-        script.bad("names_unchecked", BOB, Say::Label { message: root.clone(), key: "ok".to_owned(), value: Some("line\nbreak".to_owned()) });
-        script.bad("names_unchecked", BOB, Say::React { message: root, emoji: "constructor".to_owned(), on: true });
-        script.bad("names_unchecked", BOB, post("Chat//Ops", None, None, "bad path".to_owned()));
+        script.bad(
+            "names_unchecked",
+            BOB,
+            Say::Label {
+                message: root.clone(),
+                key: "Bad Key".to_owned(),
+                value: Some("x".to_owned()),
+            },
+        );
+        script.bad(
+            "names_unchecked",
+            BOB,
+            Say::Label {
+                message: root.clone(),
+                key: "ok".to_owned(),
+                value: Some("line\nbreak".to_owned()),
+            },
+        );
+        script.bad(
+            "names_unchecked",
+            BOB,
+            Say::React {
+                message: root,
+                emoji: "constructor".to_owned(),
+                on: true,
+            },
+        );
+        script.bad(
+            "names_unchecked",
+            BOB,
+            post("Chat//Ops", None, None, "bad path".to_owned()),
+        );
         let mut unknown = post(&channel, None, None, "see file".to_owned());
         if let Say::Post { files, .. } = &mut unknown {
-            files.push(Attached { file: "0".repeat(64), name: "ghost.txt".to_owned() });
+            files.push(Attached {
+                file: "0".repeat(64),
+                name: "ghost.txt".to_owned(),
+            });
         }
         script.bad("unknown_files_accepted", BOB, unknown);
-        script.bad("file_limit_ignored", BOB, Say::File { hash: "ab".repeat(32), size: FILE_BYTES + 1, media: "video/mp4".to_owned() });
+        script.bad(
+            "file_limit_ignored",
+            BOB,
+            Say::File {
+                hash: "ab".repeat(32),
+                size: FILE_BYTES + 1,
+                media: "video/mp4".to_owned(),
+            },
+        );
         let mut many = post(&channel, None, None, "many files".to_owned());
         if let Say::Post { files, .. } = &mut many {
             for index in 0..11 {
-                files.push(Attached { file: file_hash.clone(), name: format!("copy-{index}.txt") });
+                files.push(Attached {
+                    file: file_hash.clone(),
+                    name: format!("copy-{index}.txt"),
+                });
             }
         }
         script.bad("file_limit_ignored", BOB, many);
-        script.bad("text_limit_ignored", BOB, post(&channel, None, None, "x".repeat(TEXT_CHARS + 1)));
-        script.bad("text_limit_ignored", BOB, post(&channel, None, None, String::new()));
+        script.bad(
+            "text_limit_ignored",
+            BOB,
+            post(&channel, None, None, "x".repeat(TEXT_CHARS + 1)),
+        );
+        script.bad(
+            "text_limit_ignored",
+            BOB,
+            post(&channel, None, None, String::new()),
+        );
         script.bad("schemas_mutable", BOB, schema(json!({ "type": "object" })));
-        script.bad("schemas_mutable", BOB, Say::Schema {
-            name: "git-commit".to_owned(),
-            version: 2,
-            description: String::new(),
-            definition: json!({ "type": "object" }),
-        });
+        script.bad(
+            "schemas_mutable",
+            BOB,
+            Say::Schema {
+                name: "git-commit".to_owned(),
+                version: 2,
+                description: String::new(),
+                definition: json!({ "type": "object" }),
+            },
+        );
         script.bad("schema_shape_ignored", BOB, Say::Schema {
             name: "loose".to_owned(),
             version: 1,
             description: String::new(),
             definition: json!({ "type": "object", "properties": { "a": { "type": "string", "pattern": "x" } } }),
         });
-        script.bad("schema_shape_ignored", BOB, Say::Schema {
-            name: "Bad Name".to_owned(),
-            version: 1,
-            description: String::new(),
-            definition: json!({ "type": "object" }),
-        });
-        script.bad("blocks_unchecked", BOB, post(&channel, None, None, block("probe@1", &json!({ "n": -1 }))));
-        script.bad("blocks_unchecked", BOB, post(&channel, None, None, block("nope@1", &json!({ "n": 1 }))));
-        script.bad("blocks_unchecked", BOB, post(&channel, None, None, format!("{FENCE}probe@1\n{{\"n\": 1}}")));
+        script.bad(
+            "schema_shape_ignored",
+            BOB,
+            Say::Schema {
+                name: "Bad Name".to_owned(),
+                version: 1,
+                description: String::new(),
+                definition: json!({ "type": "object" }),
+            },
+        );
+        script.bad(
+            "blocks_unchecked",
+            BOB,
+            post(&channel, None, None, block("probe@1", &json!({ "n": -1 }))),
+        );
+        script.bad(
+            "blocks_unchecked",
+            BOB,
+            post(&channel, None, None, block("nope@1", &json!({ "n": 1 }))),
+        );
+        script.bad(
+            "blocks_unchecked",
+            BOB,
+            post(
+                &channel,
+                None,
+                None,
+                format!("{FENCE}probe@1\n{{\"n\": 1}}"),
+            ),
+        );
         script.push(Act::Read, None);
         Self {
             steps: script.steps,
@@ -332,7 +571,9 @@ fn layer(calls: Arc<Atom<Vec<(String, u64)>>>, epoch: u64) -> Middleware {
             return Verdict::Pass;
         }
         let labels = match write.op {
-            Op::Say { say: Say::Post { labels, .. } } => {
+            Op::Say {
+                say: Say::Post { labels, .. },
+            } => {
                 let mut labels = labels.clone();
                 labels.insert("vetted".to_owned(), "yes".to_owned());
                 Some(labels)
@@ -352,11 +593,17 @@ async fn write(world: &World, board: &mut Board, key: &str, op: &Op) {
         match board.submit_keyed(key, world.now_ms(), op.clone()).await {
             Ok(_) => return,
             Err(BoardError::Rejected(_)) => {
-                chat.heard.borrow_mut().refused.insert(format!("{}#{key}", board.writer()));
+                chat.heard
+                    .borrow_mut()
+                    .refused
+                    .insert(format!("{}#{key}", board.writer()));
                 return;
             }
             Err(BoardError::Dropped(_)) => {
-                chat.heard.borrow_mut().dropped.insert(format!("{}#{key}", board.writer()));
+                chat.heard
+                    .borrow_mut()
+                    .dropped
+                    .insert(format!("{}#{key}", board.writer()));
                 return;
             }
             Err(error) => {
@@ -372,11 +619,12 @@ fn expected_state(fold: &Fold, task: &TaskId, at_ms: u64) -> Option<&'static str
     let found = fold.task(task)?;
     Some(match &found.phase {
         Phase::Open
-            if found
-                .spec
-                .needs
-                .iter()
-                .all(|need| matches!(fold.task(need).map(|need| &need.phase), Some(Phase::Done { .. }))) =>
+            if found.spec.needs.iter().all(|need| {
+                matches!(
+                    fold.task(need).map(|need| &need.phase),
+                    Some(Phase::Done { .. })
+                )
+            }) =>
         {
             "ready"
         }
@@ -403,7 +651,9 @@ fn labels_check(chat: &Chat, fold: &Fold, at_ms: u64) {
         let expect = expected_state(fold, id, at_ms);
         let got = fold.labels(root, at_ms).get(TASK_LABEL).cloned();
         if got.as_deref() != expect {
-            chat.wrong(format!("task {id} reads {TASK_LABEL}={got:?}, its state says {expect:?}"));
+            chat.wrong(format!(
+                "task {id} reads {TASK_LABEL}={got:?}, its state says {expect:?}"
+            ));
         }
         if expect == Some("ready") {
             ready.insert(root.id.clone());
@@ -415,9 +665,18 @@ fn labels_check(chat: &Chat, fold: &Fold, at_ms: u64) {
         at_ms,
         ..Query::default()
     };
-    let found = fold.read(&query).messages.iter().map(|view| view.message.id.clone()).collect::<BTreeSet<_>>();
+    let found = fold
+        .read(&query)
+        .messages
+        .iter()
+        .map(|view| view.message.id.clone())
+        .collect::<BTreeSet<_>>();
     if found != ready {
-        chat.wrong(format!("the {TASK_LABEL}=ready filter found {} tasks of {}", found.len(), ready.len()));
+        chat.wrong(format!(
+            "the {TASK_LABEL}=ready filter found {} tasks of {}",
+            found.len(),
+            ready.len()
+        ));
     }
 }
 
@@ -436,7 +695,10 @@ fn read(chat: &Chat, fold: &Fold, at_ms: u64) {
         let page = fold.read(&query);
         for view in &page.messages {
             if view.message.seq <= after {
-                chat.wrong(format!("a read after {after} returned {} at {}", view.message.id, view.message.seq));
+                chat.wrong(format!(
+                    "a read after {after} returned {} at {}",
+                    view.message.id, view.message.seq
+                ));
             }
             seen.push(view.message.id.clone());
         }
@@ -451,17 +713,28 @@ fn read(chat: &Chat, fold: &Fold, at_ms: u64) {
         .map(|message| message.id.clone())
         .collect::<Vec<_>>();
     if seen != expect {
-        chat.wrong(format!("paging {PREFIX} read {} messages, the channel holds {}", seen.len(), expect.len()));
+        chat.wrong(format!(
+            "paging {PREFIX} read {} messages, the channel holds {}",
+            seen.len(),
+            expect.len()
+        ));
     }
     for root in fold.messages().filter(|message| message.re.is_none()) {
-        let thread = fold.thread(&root.id).iter().map(|message| message.id.clone()).collect::<Vec<_>>();
+        let thread = fold
+            .thread(&root.id)
+            .iter()
+            .map(|message| message.id.clone())
+            .collect::<Vec<_>>();
         let expect = fold
             .messages()
             .filter(|message| message.id == root.id || message.re.as_ref() == Some(&root.id))
             .map(|message| message.id.clone())
             .collect::<Vec<_>>();
         if thread != expect {
-            chat.wrong(format!("thread {} reads {thread:?}, the log holds {expect:?}", root.id));
+            chat.wrong(format!(
+                "thread {} reads {thread:?}, the log holds {expect:?}",
+                root.id
+            ));
         }
     }
     labels_check(chat, fold, at_ms);
@@ -479,7 +752,10 @@ pub(super) async fn chatter(world: &World, epoch: u64) {
         .steps
         .iter()
         .filter(|step| match &step.act {
-            Act::Write { who, .. } => boards[*who].fold().outcome(&EventId(step.id.clone())).is_some(),
+            Act::Write { who, .. } => boards[*who]
+                .fold()
+                .outcome(&EventId(step.id.clone()))
+                .is_some(),
             _ => false,
         })
         .map(|step| step.id.clone())
@@ -487,7 +763,9 @@ pub(super) async fn chatter(world: &World, epoch: u64) {
     chat.heard.borrow_mut().landed_at_open.insert(epoch, landed);
     let grant = super::access::keyed("grant:chat");
     for board in &mut boards[..TALKERS] {
-        while board.refresh().await.is_err() || !board.fold().outcome(&grant).is_some_and(Result::is_ok) {
+        while board.refresh().await.is_err()
+            || !board.fold().outcome(&grant).is_some_and(Result::is_ok)
+        {
             world.nap(world.shape.poll_ms).await;
         }
     }
@@ -495,7 +773,10 @@ pub(super) async fn chatter(world: &World, epoch: u64) {
         match &step.act {
             Act::Write { who, op } => write(world, &mut boards[*who], &step.key, op).await,
             Act::Upload { who, bytes } => loop {
-                match boards[*who].upload(&chat.files, world.now_ms(), bytes, "text/plain").await {
+                match boards[*who]
+                    .upload(&chat.files, world.now_ms(), bytes, "text/plain")
+                    .await
+                {
                     Ok(_) => break,
                     Err(error) => {
                         world.note(&error);
@@ -533,7 +814,10 @@ pub(super) async fn chatter(world: &World, epoch: u64) {
     let file = hash(&chat.file);
     match board.download(&chat.files, &file).await {
         Ok(Some(bytes)) if bytes == chat.file => {}
-        other => chat.wrong(format!("downloading {file} gave {:?}", other.map(|bytes| bytes.map(|bytes| bytes.len())))),
+        other => chat.wrong(format!(
+            "downloading {file} gave {:?}",
+            other.map(|bytes| bytes.map(|bytes| bytes.len()))
+        )),
     }
     if board.heard().next().is_none() {
         chat.wrong(format!("{} hears none of the chat", WRITERS[BOB]));
@@ -543,10 +827,23 @@ pub(super) async fn chatter(world: &World, epoch: u64) {
         world.nap(world.shape.poll_ms).await;
     }
     if let Some(message) = outsider.heard().next() {
-        chat.wrong(format!("{} hears {} without a grant", WRITERS[CAROL], message.id));
+        chat.wrong(format!(
+            "{} hears {} without a grant",
+            WRITERS[CAROL], message.id
+        ));
     }
-    if let Some(message) = outsider.read(&Query { limit: PAGE, ..Query::default() }).messages.first() {
-        chat.wrong(format!("{} reads {} without a grant", WRITERS[CAROL], message.message.id));
+    if let Some(message) = outsider
+        .read(&Query {
+            limit: PAGE,
+            ..Query::default()
+        })
+        .messages
+        .first()
+    {
+        chat.wrong(format!(
+            "{} reads {} without a grant",
+            WRITERS[CAROL], message.message.id
+        ));
     }
 }
 
@@ -608,10 +905,20 @@ fn reference(fold: &Fold, events: &[nanocode_board::Event]) -> BTreeMap<String, 
                 kept.insert(event.id.0.clone(), reply);
             }
             Op::Say { say } => match say {
-                Say::Post { channel, re, reply_to, text, labels, files } => {
+                Say::Post {
+                    channel,
+                    re,
+                    reply_to,
+                    text,
+                    labels,
+                    files,
+                } => {
                     let mut message = fresh(channel.clone(), text);
                     message.re = re.as_ref().map(|re| re.0.clone());
-                    message.reply_to = reply_to.as_ref().filter(|_| re.is_some()).map(|target| target.0.clone());
+                    message.reply_to = reply_to
+                        .as_ref()
+                        .filter(|_| re.is_some())
+                        .map(|target| target.0.clone());
                     message.labels.clone_from(labels);
                     message.files.clone_from(files);
                     kept.insert(event.id.0.clone(), message);
@@ -641,7 +948,11 @@ fn reference(fold: &Fold, events: &[nanocode_board::Event]) -> BTreeMap<String, 
                         found.reactions.retain(|_, actors| !actors.is_empty());
                     }
                 }
-                Say::Label { message, key, value } => {
+                Say::Label {
+                    message,
+                    key,
+                    value,
+                } => {
                     if let Some(found) = kept.get_mut(&message.0) {
                         match value {
                             Some(value) => found.labels.insert(key.clone(), value.clone()),
@@ -667,7 +978,11 @@ fn refold(world: &World, rows: &[(u64, String)]) -> Fold {
     live
 }
 
-pub(super) fn check(world: &World, fold: &Fold, rows: &[(u64, String)]) -> Result<(u64, u64), String> {
+pub(super) fn check(
+    world: &World,
+    fold: &Fold,
+    rows: &[(u64, String)],
+) -> Result<(u64, u64), String> {
     let chat = &world.chat;
     let heard = chat.heard.borrow();
     if let Some(wrong) = heard.wrong.first() {
@@ -676,8 +991,11 @@ pub(super) fn check(world: &World, fold: &Fold, rows: &[(u64, String)]) -> Resul
     let mut events = Vec::new();
     let mut landed = BTreeMap::new();
     for (seq, body) in rows {
-        let event: nanocode_board::Event = serde_json::from_str(body).map_err(|error| format!("row {seq}: {error}"))?;
-        if nanocode_board::access::owns(&event.by, &event.id) && landed.insert(event.id.0.clone(), event.clone()).is_none() {
+        let event: nanocode_board::Event =
+            serde_json::from_str(body).map_err(|error| format!("row {seq}: {error}"))?;
+        if nanocode_board::access::owns(&event.by, &event.id)
+            && landed.insert(event.id.0.clone(), event.clone()).is_none()
+        {
             events.push(event);
         }
     }
@@ -694,25 +1012,35 @@ pub(super) fn check(world: &World, fold: &Fold, rows: &[(u64, String)]) -> Resul
             continue;
         };
         let text = |op: &Op| match op {
-            Op::Say { say: Say::Post { text, .. } | Say::Edit { text, .. } } => Some(text.clone()),
+            Op::Say {
+                say: Say::Post { text, .. } | Say::Edit { text, .. },
+            } => Some(text.clone()),
             _ => None,
         };
         let Some(original) = text(op) else {
             continue;
         };
         if original.contains(DROP) && (found.is_some() || !heard.dropped.contains(&step.id)) {
-            return Err(format!("{} should have been dropped by the middleware", step.key));
+            return Err(format!(
+                "{} should have been dropped by the middleware",
+                step.key
+            ));
         }
         if original.contains(SHOUT)
             && let Some(event) = found
         {
             let patched = text(&event.op).unwrap_or_default();
             let labelled = match &event.op {
-                Op::Say { say: Say::Post { labels, .. } } => labels.get("vetted").is_some_and(|value| value == "yes"),
+                Op::Say {
+                    say: Say::Post { labels, .. },
+                } => labels.get("vetted").is_some_and(|value| value == "yes"),
                 _ => true,
             };
             if patched.contains(SHOUT) || !patched.contains("SHOUT") || !labelled {
-                return Err(format!("{} landed without the middleware's patch: {patched:?}", step.key));
+                return Err(format!(
+                    "{} landed without the middleware's patch: {patched:?}",
+                    step.key
+                ));
             }
         }
     }
@@ -723,10 +1051,18 @@ pub(super) fn check(world: &World, fold: &Fold, rows: &[(u64, String)]) -> Resul
     }
     for ((key, epoch), count) in runs {
         if count > 1 {
-            return Err(format!("the middleware ran {count} times for {key} in epoch {epoch}"));
+            return Err(format!(
+                "the middleware ran {count} times for {key} in epoch {epoch}"
+            ));
         }
-        if heard.landed_at_open.get(epoch).is_some_and(|landed| landed.contains(key)) {
-            return Err(format!("the middleware ran again for {key}, which had landed before epoch {epoch}"));
+        if heard
+            .landed_at_open
+            .get(epoch)
+            .is_some_and(|landed| landed.contains(key))
+        {
+            return Err(format!(
+                "the middleware ran again for {key}, which had landed before epoch {epoch}"
+            ));
         }
     }
     let kept = reference(fold, &events);
@@ -734,14 +1070,20 @@ pub(super) fn check(world: &World, fold: &Fold, rows: &[(u64, String)]) -> Resul
     for (id, task) in fold.tasks() {
         let phase = live.task(id).map(|task| &task.phase);
         if phase != Some(&task.phase) {
-            return Err(format!("{id} reads {phase:?} to a live reader, {:?} on a clean refold", task.phase));
+            return Err(format!(
+                "{id} reads {phase:?} to a live reader, {:?} on a clean refold",
+                task.phase
+            ));
         }
     }
     let mut said = 0;
     for message in live.messages() {
         said += 1;
         let Some(expect) = kept.get(&message.id.0) else {
-            return Err(format!("{} is on the board but not in the reference", message.id));
+            return Err(format!(
+                "{} is on the board but not in the reference",
+                message.id
+            ));
         };
         let actual = Kept {
             by: message.by.clone(),
@@ -756,16 +1098,30 @@ pub(super) fn check(world: &World, fold: &Fold, rows: &[(u64, String)]) -> Resul
             deleted: message.deleted,
         };
         if actual != *expect {
-            return Err(format!("{}: the board holds {actual:?}, the reference {expect:?}", message.id));
+            return Err(format!(
+                "{}: the board holds {actual:?}, the reference {expect:?}",
+                message.id
+            ));
         }
         if message.blocks.len() != message.text.matches(FENCE).count() {
-            return Err(format!("{} carries {} blocks for its text {:?}", message.id, message.blocks.len(), message.text));
+            return Err(format!(
+                "{} carries {} blocks for its text {:?}",
+                message.id,
+                message.blocks.len(),
+                message.text
+            ));
         }
     }
     if said != kept.len() as u64 {
-        return Err(format!("the board holds {said} messages, the reference {}", kept.len()));
+        return Err(format!(
+            "the board holds {said} messages, the reference {}",
+            kept.len()
+        ));
     }
-    if live.file(&hash(&chat.file)).is_none_or(|file| file.size != chat.file.len() as u64) {
+    if live
+        .file(&hash(&chat.file))
+        .is_none_or(|file| file.size != chat.file.len() as u64)
+    {
         return Err("the uploaded file is not registered with its size".to_owned());
     }
     Ok((said, refused))

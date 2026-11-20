@@ -101,7 +101,9 @@ pub fn worker_of(session: &str) -> String {
 fn identity(profile: Option<&str>) -> Result<Identity, String> {
     let owner = Identity::verify(&Named, PRINCIPAL).map_err(|denied| format!("{denied:?}"))?;
     match profile {
-        Some(profile) => owner.profile(profile).map_err(|denied| format!("{denied:?}")),
+        Some(profile) => owner
+            .profile(profile)
+            .map_err(|denied| format!("{denied:?}")),
         None => Ok(owner),
     }
 }
@@ -155,7 +157,11 @@ fn ready<F: Future>(future: F) -> Option<F::Output> {
     }
 }
 
-fn open(host: &Arc<dyn LogHost>, scope: &str, profile: Option<&str>) -> Result<Option<Board>, String> {
+fn open(
+    host: &Arc<dyn LogHost>,
+    scope: &str,
+    profile: Option<&str>,
+) -> Result<Option<Board>, String> {
     let identity = identity(profile)?;
     match ready(Board::open(Arc::clone(host), scope, identity)) {
         Some(Ok(board)) => Ok(Some(board)),
@@ -194,7 +200,9 @@ impl BoardCoordination {
     }
 
     pub async fn terminal_after(&self, cursor: u64) -> (Vec<(TaskId, Phase)>, u64) {
-        self.inner.call(move |inner| inner.terminal_after(cursor)).await
+        self.inner
+            .call(move |inner| inner.terminal_after(cursor))
+            .await
     }
 
     pub async fn children(&self, parent: &str) -> Vec<String> {
@@ -466,7 +474,15 @@ impl Inner {
         id
     }
 
-    fn post(&mut self, root: &str, session: &str, agent: AgentId, parent: &TaskId, k: u64, spec: &str) {
+    fn post(
+        &mut self,
+        root: &str,
+        session: &str,
+        agent: AgentId,
+        parent: &TaskId,
+        k: u64,
+        spec: &str,
+    ) {
         let id = task_of(session, k);
         let task = NewTask {
             id: id.clone(),
@@ -506,49 +522,56 @@ impl Inner {
         let mut claims = 0;
         let mut took_over = false;
         let mut failure = None;
-        let claim = match phase {
-            Some(Phase::Claimed {
-                claim,
-                worker: holder,
-                until_ms,
-            }) if holder == worker && until_ms > at => Some(claim),
-            Some(phase) if phase.terminal() => None,
-            Some(_) => {
-                let key = format!("claim:{id}:{}", attempts.unwrap_or(0) + 1);
-                match ready(board.submit_keyed(&key, at, Op::Claim {
-                    task: id.clone(),
-                    lease_ms: LEASE_MS,
-                })) {
-                    Some(Ok(_)) => {
-                        claims = 1;
-                        board.fold().entries().iter().rev().find_map(|entry| match &entry.change {
-                            Change::Claimed {
-                                claim,
-                                took_over: over,
-                                worker: holder,
-                                ..
-                            } if entry.task == id && *holder == worker => {
-                                took_over = over.is_some();
-                                Some(claim.clone())
-                            }
-                            _ => None,
-                        })
-                    }
-                    Some(Err(error)) => {
-                        failure = Some(format!("claim {id} for {session}: {error}"));
-                        None
-                    }
-                    None => {
-                        failure = Some(format!("claim {id} for {session} is pending"));
-                        None
+        let claim =
+            match phase {
+                Some(Phase::Claimed {
+                    claim,
+                    worker: holder,
+                    until_ms,
+                }) if holder == worker && until_ms > at => Some(claim),
+                Some(phase) if phase.terminal() => None,
+                Some(_) => {
+                    let key = format!("claim:{id}:{}", attempts.unwrap_or(0) + 1);
+                    match ready(board.submit_keyed(
+                        &key,
+                        at,
+                        Op::Claim {
+                            task: id.clone(),
+                            lease_ms: LEASE_MS,
+                        },
+                    )) {
+                        Some(Ok(_)) => {
+                            claims = 1;
+                            board.fold().entries().iter().rev().find_map(|entry| {
+                                match &entry.change {
+                                    Change::Claimed {
+                                        claim,
+                                        took_over: over,
+                                        worker: holder,
+                                        ..
+                                    } if entry.task == id && *holder == worker => {
+                                        took_over = over.is_some();
+                                        Some(claim.clone())
+                                    }
+                                    _ => None,
+                                }
+                            })
+                        }
+                        Some(Err(error)) => {
+                            failure = Some(format!("claim {id} for {session}: {error}"));
+                            None
+                        }
+                        None => {
+                            failure = Some(format!("claim {id} for {session} is pending"));
+                            None
+                        }
                     }
                 }
-            }
-            None => {
-                failure = Some(format!("claim {id}: the task was never posted"));
-                None
-            }
-        };
+                None => {
+                    failure = Some(format!("claim {id}: the task was never posted"));
+                    None
+                }
+            };
         if restored && claim.is_some() {
             self.stats.reclaims += 1;
         }
@@ -564,8 +587,16 @@ impl Inner {
         }
     }
 
-    fn added(&mut self, root: &str, id: AgentId, session: &str, parent: Option<AgentId>, spec: &str) {
-        self.agents.insert((root.to_owned(), id), session.to_owned());
+    fn added(
+        &mut self,
+        root: &str,
+        id: AgentId,
+        session: &str,
+        parent: Option<AgentId>,
+        spec: &str,
+    ) {
+        self.agents
+            .insert((root.to_owned(), id), session.to_owned());
         if self.sessions.contains_key(session) {
             return;
         }
@@ -627,7 +658,14 @@ impl Inner {
         self.claim(session, false);
     }
 
-    fn finish(&mut self, root: &str, id: AgentId, session: &str, status: &AgentStatus, revision: Option<u64>) {
+    fn finish(
+        &mut self,
+        root: &str,
+        id: AgentId,
+        session: &str,
+        status: &AgentStatus,
+        revision: Option<u64>,
+    ) {
         let outcome = match status {
             AgentStatus::Completed { output } => Outcome::Done(output.to_string()),
             AgentStatus::Failed { error } => Outcome::Failed(error.clone()),
@@ -656,7 +694,11 @@ impl Inner {
             return;
         }
         self.running(root, id, session);
-        if self.sessions.get(session).is_some_and(|state| state.claim.is_none()) {
+        if self
+            .sessions
+            .get(session)
+            .is_some_and(|state| state.claim.is_none())
+        {
             self.claim(session, false);
         }
         let Some(state) = self.sessions.get(session) else {
@@ -665,7 +707,9 @@ impl Inner {
         let task = state.task(session);
         let Some(claim) = state.claim.clone() else {
             let phase = self.phase(&task);
-            self.fail(format!("finish {task} ({key}): {session} holds no claim, the task is {phase:?}"));
+            self.fail(format!(
+                "finish {task} ({key}): {session} holds no claim, the task is {phase:?}"
+            ));
             return;
         };
         let last = match &outcome {
@@ -678,11 +722,15 @@ impl Inner {
         };
         let _ = ready(board.refresh());
         let before = board.fold().next();
-        let submitted = ready(board.submit_keyed(&key, at, Op::Finish {
-            task: task.clone(),
-            claim,
-            outcome,
-        }));
+        let submitted = ready(board.submit_keyed(
+            &key,
+            at,
+            Op::Finish {
+                task: task.clone(),
+                claim,
+                outcome,
+            },
+        ));
         match submitted {
             Some(Ok(applied)) => {
                 if applied.seq < before {
@@ -697,7 +745,9 @@ impl Inner {
             }
             Some(Err(BoardError::Rejected(Rejection::NotHolder))) => {
                 self.stats.fenced += 1;
-                self.fail(format!("finish {task}: fenced, {session} no longer holds the claim"));
+                self.fail(format!(
+                    "finish {task}: fenced, {session} no longer holds the claim"
+                ));
             }
             Some(Err(error)) => self.fail(format!("finish {task} ({key}): {error}")),
             None => self.stats.deferred += 1,
@@ -726,10 +776,13 @@ impl Inner {
             return;
         }
         let key = format!("cancel:{task}");
-        match self.dispatch(&key, Op::Cancel {
-            task,
-            reason: "closed".to_owned(),
-        }) {
+        match self.dispatch(
+            &key,
+            Op::Cancel {
+                task,
+                reason: "closed".to_owned(),
+            },
+        ) {
             Some(Ok((_, false))) => self.stats.cancels += 1,
             Some(Ok((_, true)) | Err(BoardError::Rejected(Rejection::Terminal))) | None => {}
             Some(Err(error)) => self.fail(format!("{key}: {error}")),
@@ -819,7 +872,12 @@ impl Inner {
                     AgentStatus::Running => self.running(root, id, &session),
                     AgentStatus::Interrupted => {
                         let seq = self.tick();
-                        self.reply(&session, &format!("steer:{session}:{seq}"), "interrupt".to_owned(), true);
+                        self.reply(
+                            &session,
+                            &format!("steer:{session}:{seq}"),
+                            "interrupt".to_owned(),
+                            true,
+                        );
                     }
                     AgentStatus::Closed => self.cancel(&session),
                     AgentStatus::Completed { .. } | AgentStatus::Failed { .. } => {

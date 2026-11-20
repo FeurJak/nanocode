@@ -89,7 +89,9 @@ impl Policy {
             .ok()
             .and_then(|shift| 1_u64.checked_shl(shift))
             .unwrap_or(u64::MAX);
-        self.backoff_ms.saturating_mul(doubled).min(self.backoff_cap_ms)
+        self.backoff_ms
+            .saturating_mul(doubled)
+            .min(self.backoff_cap_ms)
     }
 }
 
@@ -361,7 +363,9 @@ mod pairs {
         V: Deserialize<'de>,
         D: Deserializer<'de>,
     {
-        Ok(Vec::<(K, V)>::deserialize(deserializer)?.into_iter().collect())
+        Ok(Vec::<(K, V)>::deserialize(deserializer)?
+            .into_iter()
+            .collect())
     }
 }
 
@@ -416,10 +420,9 @@ impl Fold {
     pub fn position(&self, key: &Key) -> u64 {
         match key {
             Key::Cursor { .. } => self.marks.cursors.get(key).copied().unwrap_or_default(),
-            Key::Watcher { watcher, thread } => self
-                .marks
-                .lane(watcher, thread)
-                .map_or(0, |lane| lane.done),
+            Key::Watcher { watcher, thread } => {
+                self.marks.lane(watcher, thread).map_or(0, |lane| lane.done)
+            }
         }
     }
 
@@ -541,9 +544,7 @@ impl Fold {
                 acts(watcher)?;
                 access.see(actor, thread)
             }
-            Step::Schedule {
-                by: made, send, ..
-            } => {
+            Step::Schedule { by: made, send, .. } => {
                 creator(made)?;
                 self.authorize(by, send).map_err(effect)
             }
@@ -614,7 +615,11 @@ impl Fold {
                 if lane.head() != Some(*at) {
                     return Err(refused(Refusal::NotHead { head: lane.head() }));
                 }
-                let batched = lane.pending.iter().take(BATCH).any(|pending| pending == upto);
+                let batched = lane
+                    .pending
+                    .iter()
+                    .take(BATCH)
+                    .any(|pending| pending == upto);
                 if upto < at || !batched || (lane.single(*at) && upto != at) {
                     return Err(refused(Refusal::Shape));
                 }
@@ -654,7 +659,10 @@ impl Fold {
                 }
             }
             Step::Bury {
-                watcher, thread, at, ..
+                watcher,
+                thread,
+                at,
+                ..
             } => {
                 let (found, lane) = self.lane_of(watcher, thread)?;
                 if lane.head() != Some(*at) {
@@ -760,7 +768,9 @@ impl Fold {
             } => {
                 for (index, op) in effects.iter().enumerate() {
                     let id = EventId(format!("{}/{index}", event.id));
-                    self.marks.authors.insert(id.clone(), key.actor().to_owned());
+                    self.marks
+                        .authors
+                        .insert(id.clone(), key.actor().to_owned());
                     self.inner(seq, id, &event.by, event.at_ms, op.clone());
                 }
                 match key {

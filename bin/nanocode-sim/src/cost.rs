@@ -43,7 +43,9 @@ impl CostMutation {
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|mutation| mutation.name() == name)
+        Self::ALL
+            .into_iter()
+            .find(|mutation| mutation.name() == name)
     }
 
     pub const fn name(self) -> &'static str {
@@ -386,14 +388,19 @@ fn reference(world: &World) -> Reference {
         .tasks
         .iter()
         .map(|task| {
-            let own = task_own.get(&Some(task.clone())).copied().unwrap_or_default();
+            let own = task_own
+                .get(&Some(task.clone()))
+                .copied()
+                .unwrap_or_default();
             (task.clone(), own)
         })
         .collect();
     for task in world.tasks.iter().rev() {
         if let Some(above) = task_parent.get(task) {
             let below = task_total[task];
-            let entry = task_total.get_mut(above).expect("a parent task is generated");
+            let entry = task_total
+                .get_mut(above)
+                .expect("a parent task is generated");
             *entry = plus(*entry, &below);
         }
     }
@@ -632,7 +639,10 @@ fn changes(ledger: &mut Ledger, world: &World, rng: &mut Rng) -> Result<u64, Str
             ));
         }
         if *ledger != before {
-            return Err(format!("rejected changed row {} still moved the ledger", step.key));
+            return Err(format!(
+                "rejected changed row {} still moved the ledger",
+                step.key
+            ));
         }
     }
     Ok(count)
@@ -651,19 +661,35 @@ fn run(seed: u64, stats: &mut CostStats) -> Result<u64, String> {
     let log = schedule(&world, &mut rng);
     let deliveries = deliver(log, &mut rng);
     stats.agents = world.agents.len() as u64;
-    stats.untasked = world.agents.iter().filter(|agent| agent.task.is_none()).count() as u64;
+    stats.untasked = world
+        .agents
+        .iter()
+        .filter(|agent| agent.task.is_none())
+        .count() as u64;
     stats.tasks = world.tasks.len() as u64;
     stats.depth = (0..world.agents.len())
         .map(|index| depth(&world.agents, index))
         .max()
         .unwrap_or_default();
     stats.steps = world.steps.len() as u64;
-    stats.unpriced = world.steps.iter().filter(|step| step.model_nano_usd.is_none()).count() as u64;
-    stats.placed = world.steps.iter().filter(|step| step.placement.is_some()).count() as u64;
+    stats.unpriced = world
+        .steps
+        .iter()
+        .filter(|step| step.model_nano_usd.is_none())
+        .count() as u64;
+    stats.placed = world
+        .steps
+        .iter()
+        .filter(|step| step.placement.is_some())
+        .count() as u64;
     stats.unpriced_hand = world
         .steps
         .iter()
-        .filter(|step| step.placement.as_ref().is_some_and(|placement| placement.hand_nano_usd.is_none()))
+        .filter(|step| {
+            step.placement
+                .as_ref()
+                .is_some_and(|placement| placement.hand_nano_usd.is_none())
+        })
         .count() as u64;
     stats.commits = world.commits.len() as u64;
     stats.deliveries = deliveries.len() as u64;
@@ -697,7 +723,13 @@ pub fn simulate(seed: u64, mutation: CostMutation) -> CostOutcome {
     cost_sim::mutate(CostRule::None);
     let shape = format!(
         "agents={} tasks={} depth={} steps={} commits={} deliveries={} retries={}",
-        stats.agents, stats.tasks, stats.depth, stats.steps, stats.commits, stats.deliveries, stats.retries
+        stats.agents,
+        stats.tasks,
+        stats.depth,
+        stats.steps,
+        stats.commits,
+        stats.deliveries,
+        stats.retries
     );
     let (digest, wrong) = match verdict {
         Ok(digest) => (digest, None),
@@ -728,14 +760,25 @@ pub fn run_seed(seed: u64, mutation: CostMutation) -> CostOutcome {
     })
 }
 
-pub fn judge(seed: u64, mutation: CostMutation, twice: bool, verbose: bool, totals: &mut CostStats) -> Option<String> {
+pub fn judge(
+    seed: u64,
+    mutation: CostMutation,
+    twice: bool,
+    verbose: bool,
+    totals: &mut CostStats,
+) -> Option<String> {
     let first = run_seed(seed, mutation);
     totals.add(&first.stats);
     if verbose {
-        println!("seed {seed} digest {:016x} {} stats={:?}", first.digest, first.shape, first.stats);
+        println!(
+            "seed {seed} digest {:016x} {} stats={:?}",
+            first.digest, first.shape, first.stats
+        );
     }
     if first.wrong.is_some() || !twice {
-        return first.wrong.map(|message| format!("{} :: {message}", first.shape));
+        return first
+            .wrong
+            .map(|message| format!("{} :: {message}", first.shape));
     }
     let second = run_seed(seed, mutation);
     (second.digest != first.digest || second.wrong.is_some()).then(|| {
@@ -755,7 +798,14 @@ pub fn replay(seed: u64, mutation: CostMutation) -> String {
     command
 }
 
-pub fn report(seeds: &Range<u64>, passed: u64, failed: u64, twice: bool, mutation: CostMutation, totals: &CostStats) -> ExitCode {
+pub fn report(
+    seeds: &Range<u64>,
+    passed: u64,
+    failed: u64,
+    twice: bool,
+    mutation: CostMutation,
+    totals: &CostStats,
+) -> ExitCode {
     println!(
         "RESULT seeds={}..{} scenario=cost mutation={} passed={passed} failed={failed} twice={twice} stats={totals:?}",
         seeds.start,

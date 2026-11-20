@@ -3,7 +3,9 @@ use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 pub use nanocode_board::mirror::{
     Action, Author, Control, Delivery, Join, Kind, Mode, Settle, SyncOp, Synced, Target,
 };
-use nanocode_board::{Board, BoardError, EventId, NewTask, Op, Rejection, TaskId, mirror::Refusal, tasks::Terms};
+use nanocode_board::{
+    Board, BoardError, EventId, NewTask, Op, Rejection, TaskId, mirror::Refusal, tasks::Terms,
+};
 
 pub mod fake;
 pub mod github;
@@ -26,7 +28,11 @@ pub enum PlatformError {
 }
 
 pub(crate) fn seconds(header: &str) -> Option<u64> {
-    header.trim().parse::<u64>().ok().map(|seconds| seconds * 1000)
+    header
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|seconds| seconds * 1000)
 }
 
 pub(crate) fn throttled(retry_after_ms: Option<u64>) -> PlatformError {
@@ -58,11 +64,23 @@ pub struct Call<'a> {
 pub trait Platform: Send + Sync {
     fn post<'a>(&'a self, call: Call<'a>) -> PlatformFuture<'a, Result<Posted, PlatformError>>;
 
-    fn edit<'a>(&'a self, call: Call<'a>, external: &'a str) -> PlatformFuture<'a, Result<(), PlatformError>>;
+    fn edit<'a>(
+        &'a self,
+        call: Call<'a>,
+        external: &'a str,
+    ) -> PlatformFuture<'a, Result<(), PlatformError>>;
 
-    fn delete<'a>(&'a self, to: &'a Target, external: &'a str) -> PlatformFuture<'a, Result<(), PlatformError>>;
+    fn delete<'a>(
+        &'a self,
+        to: &'a Target,
+        external: &'a str,
+    ) -> PlatformFuture<'a, Result<(), PlatformError>>;
 
-    fn find<'a>(&'a self, to: &'a Target, marker: &'a EventId) -> PlatformFuture<'a, Result<Option<Posted>, PlatformError>>;
+    fn find<'a>(
+        &'a self,
+        to: &'a Target,
+        marker: &'a EventId,
+    ) -> PlatformFuture<'a, Result<Option<Posted>, PlatformError>>;
 }
 
 pub trait Renderer {
@@ -88,16 +106,66 @@ pub trait IdentityMap {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
-    Opened { task: NewTask, thread: Target, message: String, mode: Mode },
-    Message { thread: Target, message: String, author: Author, body: String, context: Option<String>, sub: Option<String>, marker: Option<EventId> },
-    Edited { thread: Target, message: String, body: String, version: u64 },
-    Deleted { thread: Target, message: String },
-    Reworded { thread: Target, author: Author, title: String, body: Option<String>, version: u64 },
-    Reaction { thread: Target, message: String, author: Author, emoji: String },
-    Clicked { thread: Target, message: String, author: Author, control: String, values: BTreeMap<String, String> },
-    Labels { task: TaskId, set: BTreeMap<String, String>, unset: Vec<String>, own: Vec<String>, version: u64 },
-    Closed { task: TaskId, outcome: Settle },
-    Unlinked { task: TaskId, thread: Target },
+    Opened {
+        task: NewTask,
+        thread: Target,
+        message: String,
+        mode: Mode,
+    },
+    Message {
+        thread: Target,
+        message: String,
+        author: Author,
+        body: String,
+        context: Option<String>,
+        sub: Option<String>,
+        marker: Option<EventId>,
+    },
+    Edited {
+        thread: Target,
+        message: String,
+        body: String,
+        version: u64,
+    },
+    Deleted {
+        thread: Target,
+        message: String,
+    },
+    Reworded {
+        thread: Target,
+        author: Author,
+        title: String,
+        body: Option<String>,
+        version: u64,
+    },
+    Reaction {
+        thread: Target,
+        message: String,
+        author: Author,
+        emoji: String,
+    },
+    Clicked {
+        thread: Target,
+        message: String,
+        author: Author,
+        control: String,
+        values: BTreeMap<String, String>,
+    },
+    Labels {
+        task: TaskId,
+        set: BTreeMap<String, String>,
+        unset: Vec<String>,
+        own: Vec<String>,
+        version: u64,
+    },
+    Closed {
+        task: TaskId,
+        outcome: Settle,
+    },
+    Unlinked {
+        task: TaskId,
+        thread: Target,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,13 +208,35 @@ const fn benign(rejection: &Rejection) -> bool {
         rejection,
         Rejection::Exists
             | Rejection::Terminal
-            | Rejection::Sync(Refusal::Linked | Refusal::Delivered | Refusal::Stale | Refusal::Echo | Refusal::NoCopy | Refusal::NotLinked(_))
+            | Rejection::Sync(
+                Refusal::Linked
+                    | Refusal::Delivered
+                    | Refusal::Stale
+                    | Refusal::Echo
+                    | Refusal::NoCopy
+                    | Refusal::NotLinked(_)
+            )
     )
 }
 
 impl<R: Renderer, M: Router, I: IdentityMap> Engine<R, M, I> {
-    pub const fn new(renderer: R, router: M, identity: I, platforms: BTreeMap<String, Arc<dyn Platform>>, attempts: u64) -> Self {
-        Self { renderer, router, identity, platforms, attempts, errors: BTreeMap::new(), limits: BTreeMap::new(), refunds: BTreeMap::new() }
+    pub const fn new(
+        renderer: R,
+        router: M,
+        identity: I,
+        platforms: BTreeMap<String, Arc<dyn Platform>>,
+        attempts: u64,
+    ) -> Self {
+        Self {
+            renderer,
+            router,
+            identity,
+            platforms,
+            attempts,
+            errors: BTreeMap::new(),
+            limits: BTreeMap::new(),
+            refunds: BTreeMap::new(),
+        }
     }
 
     pub fn not_before(&self, sync: &str) -> Option<u64> {
@@ -160,11 +250,22 @@ impl<R: Renderer, M: Router, I: IdentityMap> Engine<R, M, I> {
     }
 
     fn held(&self, sync: &str, at_ms: u64) -> bool {
-        !mutated(Mutation::RetryAfterIgnored) && self.limits.get(sync).is_some_and(|until| at_ms < *until)
+        !mutated(Mutation::RetryAfterIgnored)
+            && self.limits.get(sync).is_some_and(|until| at_ms < *until)
     }
 
-    async fn refund(&mut self, board: &mut Board, key: String, at_ms: u64, op: SyncOp, drained: &mut Drained) -> Result<(), BoardError> {
-        match board.submit_keyed(&key, at_ms, Op::Sync { sync: op.clone() }).await {
+    async fn refund(
+        &mut self,
+        board: &mut Board,
+        key: String,
+        at_ms: u64,
+        op: SyncOp,
+        drained: &mut Drained,
+    ) -> Result<(), BoardError> {
+        match board
+            .submit_keyed(&key, at_ms, Op::Sync { sync: op.clone() })
+            .await
+        {
             Ok(_) | Err(BoardError::Rejected(_)) => Ok(()),
             Err(BoardError::Unsettled { .. } | BoardError::Store(_)) => {
                 drained.unsettled += 1;
@@ -178,7 +279,13 @@ impl<R: Renderer, M: Router, I: IdentityMap> Engine<R, M, I> {
         }
     }
 
-    async fn write(board: &mut Board, key: &str, at_ms: u64, op: Op, done: &mut Ingested) -> Result<(), BoardError> {
+    async fn write(
+        board: &mut Board,
+        key: &str,
+        at_ms: u64,
+        op: Op,
+        done: &mut Ingested,
+    ) -> Result<(), BoardError> {
         match board.submit_keyed(key, at_ms, op).await {
             Ok(_) => done.written += 1,
             Err(BoardError::Rejected(rejection)) if benign(&rejection) => done.skipped += 1,
@@ -187,7 +294,15 @@ impl<R: Renderer, M: Router, I: IdentityMap> Engine<R, M, I> {
         Ok(())
     }
 
-    async fn identify(&self, board: &mut Board, key: &str, at_ms: u64, sync: &str, author: &Author, done: &mut Ingested) -> Result<(), BoardError> {
+    async fn identify(
+        &self,
+        board: &mut Board,
+        key: &str,
+        at_ms: u64,
+        sync: &str,
+        author: &Author,
+        done: &mut Ingested,
+    ) -> Result<(), BoardError> {
         if author.bot {
             return Ok(());
         }
@@ -197,21 +312,60 @@ impl<R: Renderer, M: Router, I: IdentityMap> Engine<R, M, I> {
         if board.fold().mirror().member(sync, &author.user) == Some(&member) {
             return Ok(());
         }
-        let op = Op::Sync { sync: SyncOp::Account { member, sync: sync.to_owned(), user: author.user.clone(), linked: true } };
+        let op = Op::Sync {
+            sync: SyncOp::Account {
+                member,
+                sync: sync.to_owned(),
+                user: author.user.clone(),
+                linked: true,
+            },
+        };
         Self::write(board, &format!("{key}/account"), at_ms, op, done).await
     }
 
-    pub async fn ingest(&self, board: &mut Board, at_ms: u64, inbound: &Inbound) -> Result<Ingested, BoardError> {
+    pub async fn ingest(
+        &self,
+        board: &mut Board,
+        at_ms: u64,
+        inbound: &Inbound,
+    ) -> Result<Ingested, BoardError> {
         let key = &inbound.key;
         let mut done = Ingested::default();
         let sync = |op: SyncOp| Op::Sync { sync: op };
         match &inbound.event {
-            Event::Opened { task, thread, message, mode } => {
-                Self::write(board, &format!("{key}/post"), at_ms, Op::Post { task: task.clone() }, &mut done).await?;
-                let link = SyncOp::Link { task: task.id.clone(), target: thread.clone(), join: Join::Root { message: message.clone() }, mode: *mode };
+            Event::Opened {
+                task,
+                thread,
+                message,
+                mode,
+            } => {
+                Self::write(
+                    board,
+                    &format!("{key}/post"),
+                    at_ms,
+                    Op::Post { task: task.clone() },
+                    &mut done,
+                )
+                .await?;
+                let link = SyncOp::Link {
+                    task: task.id.clone(),
+                    target: thread.clone(),
+                    join: Join::Root {
+                        message: message.clone(),
+                    },
+                    mode: *mode,
+                };
                 Self::write(board, &format!("{key}/link"), at_ms, sync(link), &mut done).await?;
             }
-            Event::Message { thread, message, author, body, context, sub, marker } => {
+            Event::Message {
+                thread,
+                message,
+                author,
+                body,
+                context,
+                sub,
+                marker,
+            } => {
                 if board.fold().mirror().routes(thread).is_none() && !author.bot {
                     board.refresh().await?;
                 }
@@ -222,16 +376,39 @@ impl<R: Renderer, M: Router, I: IdentityMap> Engine<R, M, I> {
                             return Ok(done);
                         }
                         Route::Start { task, mode } => {
-                            self.identify(board, key, at_ms, &thread.sync, author, &mut done).await?;
-                            Self::write(board, &format!("{key}/post"), at_ms, Op::Post { task: task.clone() }, &mut done).await?;
-                            let link = SyncOp::Link { task: task.id, target: thread.clone(), join: Join::Root { message: message.clone() }, mode };
-                            Self::write(board, &format!("{key}/link"), at_ms, sync(link), &mut done).await?;
+                            self.identify(board, key, at_ms, &thread.sync, author, &mut done)
+                                .await?;
+                            Self::write(
+                                board,
+                                &format!("{key}/post"),
+                                at_ms,
+                                Op::Post { task: task.clone() },
+                                &mut done,
+                            )
+                            .await?;
+                            let link = SyncOp::Link {
+                                task: task.id,
+                                target: thread.clone(),
+                                join: Join::Root {
+                                    message: message.clone(),
+                                },
+                                mode,
+                            };
+                            Self::write(
+                                board,
+                                &format!("{key}/link"),
+                                at_ms,
+                                sync(link),
+                                &mut done,
+                            )
+                            .await?;
                             return Ok(done);
                         }
                         Route::Wait => {}
                     }
                 }
-                self.identify(board, key, at_ms, &thread.sync, author, &mut done).await?;
+                self.identify(board, key, at_ms, &thread.sync, author, &mut done)
+                    .await?;
                 let op = SyncOp::Import {
                     thread: thread.clone(),
                     message: message.clone(),
@@ -243,57 +420,155 @@ impl<R: Renderer, M: Router, I: IdentityMap> Engine<R, M, I> {
                 };
                 Self::write(board, key, at_ms, sync(op), &mut done).await?;
             }
-            Event::Edited { thread, message, body, version } => {
-                let op = SyncOp::Edit { thread: thread.clone(), message: message.clone(), body: body.clone(), version: *version };
+            Event::Edited {
+                thread,
+                message,
+                body,
+                version,
+            } => {
+                let op = SyncOp::Edit {
+                    thread: thread.clone(),
+                    message: message.clone(),
+                    body: body.clone(),
+                    version: *version,
+                };
                 Self::write(board, key, at_ms, sync(op), &mut done).await?;
             }
             Event::Deleted { thread, message } => {
-                let op = SyncOp::Delete { thread: thread.clone(), message: message.clone() };
+                let op = SyncOp::Delete {
+                    thread: thread.clone(),
+                    message: message.clone(),
+                };
                 Self::write(board, key, at_ms, sync(op), &mut done).await?;
             }
-            Event::Reworded { thread, author, title, body, version } => {
-                let op = SyncOp::Reword { thread: thread.clone(), author: author.clone(), title: title.clone(), body: body.clone(), version: *version };
+            Event::Reworded {
+                thread,
+                author,
+                title,
+                body,
+                version,
+            } => {
+                let op = SyncOp::Reword {
+                    thread: thread.clone(),
+                    author: author.clone(),
+                    title: title.clone(),
+                    body: body.clone(),
+                    version: *version,
+                };
                 Self::write(board, key, at_ms, sync(op), &mut done).await?;
             }
-            Event::Reaction { thread, message, author, emoji } => {
-                self.identify(board, key, at_ms, &thread.sync, author, &mut done).await?;
-                let op = SyncOp::React { thread: thread.clone(), message: message.clone(), author: author.clone(), emoji: emoji.clone() };
+            Event::Reaction {
+                thread,
+                message,
+                author,
+                emoji,
+            } => {
+                self.identify(board, key, at_ms, &thread.sync, author, &mut done)
+                    .await?;
+                let op = SyncOp::React {
+                    thread: thread.clone(),
+                    message: message.clone(),
+                    author: author.clone(),
+                    emoji: emoji.clone(),
+                };
                 Self::write(board, key, at_ms, sync(op), &mut done).await?;
             }
-            Event::Clicked { thread, message, author, control, values } => {
-                self.identify(board, key, at_ms, &thread.sync, author, &mut done).await?;
-                let op = SyncOp::Act { thread: thread.clone(), message: message.clone(), author: author.clone(), control: control.clone(), values: values.clone() };
+            Event::Clicked {
+                thread,
+                message,
+                author,
+                control,
+                values,
+            } => {
+                self.identify(board, key, at_ms, &thread.sync, author, &mut done)
+                    .await?;
+                let op = SyncOp::Act {
+                    thread: thread.clone(),
+                    message: message.clone(),
+                    author: author.clone(),
+                    control: control.clone(),
+                    values: values.clone(),
+                };
                 Self::write(board, key, at_ms, sync(op), &mut done).await?;
             }
-            Event::Labels { task, set, unset, own, version } => {
-                let op = SyncOp::Label { task: task.clone(), set: set.clone(), unset: unset.iter().cloned().collect(), own: own.clone(), version: *version };
+            Event::Labels {
+                task,
+                set,
+                unset,
+                own,
+                version,
+            } => {
+                let op = SyncOp::Label {
+                    task: task.clone(),
+                    set: set.clone(),
+                    unset: unset.iter().cloned().collect(),
+                    own: own.clone(),
+                    version: *version,
+                };
                 Self::write(board, key, at_ms, sync(op), &mut done).await?;
             }
             Event::Closed { task, outcome } => {
-                let op = SyncOp::Settle { task: task.clone(), outcome: outcome.clone() };
+                let op = SyncOp::Settle {
+                    task: task.clone(),
+                    outcome: outcome.clone(),
+                };
                 Self::write(board, key, at_ms, sync(op), &mut done).await?;
             }
             Event::Unlinked { task, thread } => {
-                let op = SyncOp::Unlink { task: task.clone(), target: thread.clone() };
+                let op = SyncOp::Unlink {
+                    task: task.clone(),
+                    target: thread.clone(),
+                };
                 Self::write(board, key, at_ms, sync(op), &mut done).await?;
             }
         }
         Ok(done)
     }
 
-    pub async fn post(&self, board: &mut Board, key: &str, at_ms: u64, task: NewTask) -> Result<Ingested, BoardError> {
+    pub async fn post(
+        &self,
+        board: &mut Board,
+        key: &str,
+        at_ms: u64,
+        task: NewTask,
+    ) -> Result<Ingested, BoardError> {
         let mut done = Ingested::default();
         let targets = self.router.mirror(&task);
         let id = task.id.clone();
-        Self::write(board, &format!("{key}/post"), at_ms, Op::Post { task }, &mut done).await?;
+        Self::write(
+            board,
+            &format!("{key}/post"),
+            at_ms,
+            Op::Post { task },
+            &mut done,
+        )
+        .await?;
         for (target, mode) in targets {
-            let link = SyncOp::Link { task: id.clone(), target: target.clone(), join: Join::Channel, mode };
-            Self::write(board, &format!("{key}/link/{target}"), at_ms, Op::Sync { sync: link }, &mut done).await?;
+            let link = SyncOp::Link {
+                task: id.clone(),
+                target: target.clone(),
+                join: Join::Channel,
+                mode,
+            };
+            Self::write(
+                board,
+                &format!("{key}/link/{target}"),
+                at_ms,
+                Op::Sync { sync: link },
+                &mut done,
+            )
+            .await?;
         }
         Ok(done)
     }
 
-    pub async fn apply(&self, board: &mut Board, key: &str, at_ms: u64, op: SyncOp) -> Result<Ingested, BoardError> {
+    pub async fn apply(
+        &self,
+        board: &mut Board,
+        key: &str,
+        at_ms: u64,
+        op: SyncOp,
+    ) -> Result<Ingested, BoardError> {
         let mut done = Ingested::default();
         Self::write(board, key, at_ms, Op::Sync { sync: op }, &mut done).await?;
         Ok(done)
@@ -312,12 +587,19 @@ impl<R: Renderer, M: Router, I: IdentityMap> Engine<R, M, I> {
             if self.held(&delivery.target.sync, at_ms) {
                 continue;
             }
-            self.deliver(board, at_ms, &*platform, &delivery, &mut drained).await?;
+            self.deliver(board, at_ms, &*platform, &delivery, &mut drained)
+                .await?;
         }
         Ok(drained)
     }
 
-    async fn settle(board: &mut Board, key: String, at_ms: u64, op: SyncOp, drained: &mut Drained) -> Result<bool, BoardError> {
+    async fn settle(
+        board: &mut Board,
+        key: String,
+        at_ms: u64,
+        op: SyncOp,
+        drained: &mut Drained,
+    ) -> Result<bool, BoardError> {
         match board.submit_keyed(&key, at_ms, Op::Sync { sync: op }).await {
             Ok(_) => Ok(true),
             Err(BoardError::Rejected(_)) => Ok(false),
@@ -329,8 +611,23 @@ impl<R: Renderer, M: Router, I: IdentityMap> Engine<R, M, I> {
         }
     }
 
-    async fn deliver(&mut self, board: &mut Board, at_ms: u64, platform: &dyn Platform, delivery: &Delivery, drained: &mut Drained) -> Result<(), BoardError> {
-        let Delivery { task, message, target, revision, attempts, throttled, .. } = delivery;
+    async fn deliver(
+        &mut self,
+        board: &mut Board,
+        at_ms: u64,
+        platform: &dyn Platform,
+        delivery: &Delivery,
+        drained: &mut Drained,
+    ) -> Result<(), BoardError> {
+        let Delivery {
+            task,
+            message,
+            target,
+            revision,
+            attempts,
+            throttled,
+            ..
+        } = delivery;
         let counted = attempts - throttled;
         let lane = format!("{message}:{target}:{revision}");
         let slot = (message.clone(), target.clone());
@@ -343,7 +640,12 @@ impl<R: Renderer, M: Router, I: IdentityMap> Engine<R, M, I> {
             thread,
         };
         if delivery.action == Action::Orphan {
-            let dead = SyncOp::Undelivered { task: task.clone(), message: message.clone(), target: target.clone(), error: "root undelivered".to_owned() };
+            let dead = SyncOp::Undelivered {
+                task: task.clone(),
+                message: message.clone(),
+                target: target.clone(),
+                error: "root undelivered".to_owned(),
+            };
             if Self::settle(board, format!("dead:{lane}"), at_ms, dead, drained).await? {
                 drained.dead += 1;
             }
@@ -362,13 +664,19 @@ impl<R: Renderer, M: Router, I: IdentityMap> Engine<R, M, I> {
                         revision: 0,
                         thread: found.thread,
                     };
-                    if Self::settle(board, format!("found:{lane}"), at_ms, adopted, drained).await? {
+                    if Self::settle(board, format!("found:{lane}"), at_ms, adopted, drained).await?
+                    {
                         drained.recovered += 1;
                     }
                     return Ok(());
                 }
                 Ok(None) if sweep => {
-                    let withdrawn = SyncOp::Undelivered { task: task.clone(), message: message.clone(), target: target.clone(), error: "withdrawn".to_owned() };
+                    let withdrawn = SyncOp::Undelivered {
+                        task: task.clone(),
+                        message: message.clone(),
+                        target: target.clone(),
+                        error: "withdrawn".to_owned(),
+                    };
                     Self::settle(board, format!("dead:{lane}"), at_ms, withdrawn, drained).await?;
                     return Ok(());
                 }
@@ -385,24 +693,46 @@ impl<R: Renderer, M: Router, I: IdentityMap> Engine<R, M, I> {
             }
         }
         if posting && counted >= self.attempts {
-            let error = self.errors.remove(&slot).unwrap_or_else(|| format!("gave up after {counted} attempts"));
-            let dead = SyncOp::Undelivered { task: task.clone(), message: message.clone(), target: target.clone(), error };
+            let error = self
+                .errors
+                .remove(&slot)
+                .unwrap_or_else(|| format!("gave up after {counted} attempts"));
+            let dead = SyncOp::Undelivered {
+                task: task.clone(),
+                message: message.clone(),
+                target: target.clone(),
+                error,
+            };
             if Self::settle(board, format!("dead:{lane}"), at_ms, dead, drained).await? {
                 drained.dead += 1;
             }
             return Ok(());
         }
-        let attempt = SyncOp::Attempt { task: task.clone(), message: message.clone(), target: target.clone(), revision: *revision };
+        let attempt = SyncOp::Attempt {
+            task: task.clone(),
+            message: message.clone(),
+            target: target.clone(),
+            revision: *revision,
+        };
         let key = format!("try:{lane}:{attempts}");
-        if !mutated(Mutation::AttemptAfterCall) && !Self::settle(board, key.clone(), at_ms, attempt.clone(), drained).await? {
+        if !mutated(Mutation::AttemptAfterCall)
+            && !Self::settle(board, key.clone(), at_ms, attempt.clone(), drained).await?
+        {
             return Ok(());
         }
         let rendered = self.renderer.render(delivery);
-        let call = Call { to: &delivery.to, sub: delivery.sub.as_deref(), marker: message, rendered: &rendered };
+        let call = Call {
+            to: &delivery.to,
+            sub: delivery.sub.as_deref(),
+            marker: message,
+            rendered: &rendered,
+        };
         let result = match &delivery.action {
             Action::Post { .. } => platform.post(call).await.map(Some),
             Action::Edit { external } => platform.edit(call, external).await.map(|()| None),
-            Action::Delete { external } => platform.delete(&delivery.to, external).await.map(|()| None),
+            Action::Delete { external } => {
+                platform.delete(&delivery.to, external).await.map(|()| None)
+            }
             Action::Sweep | Action::Orphan => return Ok(()),
         };
         if mutated(Mutation::AttemptAfterCall) {
@@ -410,17 +740,37 @@ impl<R: Renderer, M: Router, I: IdentityMap> Engine<R, M, I> {
         }
         match (result, &delivery.action) {
             (Ok(Some(posted)), _) => {
-                if Self::settle(board, format!("ok:{lane}"), at_ms, synced(posted.external, posted.thread), drained).await? {
+                if Self::settle(
+                    board,
+                    format!("ok:{lane}"),
+                    at_ms,
+                    synced(posted.external, posted.thread),
+                    drained,
+                )
+                .await?
+                {
                     drained.posted += 1;
                 }
             }
             (Ok(None), Action::Edit { external }) => {
-                if Self::settle(board, format!("ok:{lane}"), at_ms, synced(external.clone(), None), drained).await? {
+                if Self::settle(
+                    board,
+                    format!("ok:{lane}"),
+                    at_ms,
+                    synced(external.clone(), None),
+                    drained,
+                )
+                .await?
+                {
                     drained.edited += 1;
                 }
             }
             (Ok(None), _) => {
-                let removed = SyncOp::Removed { task: task.clone(), message: message.clone(), target: target.clone() };
+                let removed = SyncOp::Removed {
+                    task: task.clone(),
+                    message: message.clone(),
+                    target: target.clone(),
+                };
                 if Self::settle(board, format!("gone:{lane}"), at_ms, removed, drained).await? {
                     drained.deleted += 1;
                 }
@@ -428,8 +778,20 @@ impl<R: Renderer, M: Router, I: IdentityMap> Engine<R, M, I> {
             (Err(PlatformError::RateLimited { retry_after_ms }), _) => {
                 self.limit(&target.sync, at_ms, retry_after_ms, drained);
                 if !mutated(Mutation::RateLimitCountsAttempt) {
-                    let refund = SyncOp::Throttled { task: task.clone(), message: message.clone(), target: target.clone(), revision: *revision };
-                    self.refund(board, format!("wait:{lane}:{attempts}"), at_ms, refund, drained).await?;
+                    let refund = SyncOp::Throttled {
+                        task: task.clone(),
+                        message: message.clone(),
+                        target: target.clone(),
+                        revision: *revision,
+                    };
+                    self.refund(
+                        board,
+                        format!("wait:{lane}:{attempts}"),
+                        at_ms,
+                        refund,
+                        drained,
+                    )
+                    .await?;
                 }
             }
             (Err(PlatformError::Failed(error)), _) => {
@@ -462,7 +824,8 @@ impl Renderer for Plain {
             Kind::Status => format!("status: {text}"),
             Kind::Root | Kind::Reply | Kind::Final => format!("{}: {text}", delivery.author),
         };
-        let blocks = (!delivery.controls.is_empty() && delivery.target.sync == "slack").then(|| slack::blocks(&text, &delivery.controls));
+        let blocks = (!delivery.controls.is_empty() && delivery.target.sync == "slack")
+            .then(|| slack::blocks(&text, &delivery.controls));
         let text = if blocks.is_none() && !delivery.controls.is_empty() {
             let labels = delivery.controls.iter().map(|control| match control {
                 Control::Button { label, .. } | Control::Form { label, .. } => format!("[{label}]"),
@@ -493,16 +856,25 @@ pub struct Channels {
 
 impl Router for Channels {
     fn route(&self, thread: &Target, author: &Author, body: &str) -> Route {
-        let channel = thread.id.split_once(':').map_or(thread.id.as_str(), |(channel, _)| channel);
+        let channel = thread
+            .id
+            .split_once(':')
+            .map_or(thread.id.as_str(), |(channel, _)| channel);
         let channel = Target::new(&thread.sync, channel);
-        let mentioned = self.bot.get(&thread.sync).is_some_and(|bot| nanocode_board::mirror::mentions(body).contains(bot));
+        let mentioned = self
+            .bot
+            .get(&thread.sync)
+            .is_some_and(|bot| nanocode_board::mirror::mentions(body).contains(bot));
         match self.mirrored.get(&channel) {
             Some(mode) if self.start && channel == *thread || mentioned => Route::Start {
                 task: NewTask {
                     id: TaskId(format!("{}/{}", thread.sync, thread.id)),
                     parent: None,
                     spec: body.to_owned(),
-                    labels: BTreeMap::from([("source".to_owned(), thread.sync.clone()), ("author".to_owned(), author.name.clone())]),
+                    labels: BTreeMap::from([
+                        ("source".to_owned(), thread.sync.clone()),
+                        ("author".to_owned(), author.name.clone()),
+                    ]),
                     needs: Vec::new(),
                     terms: Terms::default(),
                 },
@@ -525,6 +897,9 @@ impl Router for Channels {
     }
 
     fn mirror(&self, _task: &NewTask) -> Vec<(Target, Mode)> {
-        self.mirrored.iter().map(|(target, mode)| (target.clone(), *mode)).collect()
+        self.mirrored
+            .iter()
+            .map(|(target, mode)| (target.clone(), *mode))
+            .collect()
     }
 }

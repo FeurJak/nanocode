@@ -215,9 +215,7 @@ impl<S: StateStore + ?Sized + 'static> StateStore for CachedStore<S> {
                 .iter()
                 .zip(&read)
                 .filter_map(|(key, value)| {
-                    value
-                        .as_ref()
-                        .map(|value| (key.clone(), Arc::clone(value)))
+                    value.as_ref().map(|value| (key.clone(), Arc::clone(value)))
                 })
                 .collect::<Vec<_>>();
             self.cache.put(state_id, found);

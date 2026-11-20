@@ -335,10 +335,7 @@ impl ResponseHistory {
                     }
                 }
             }
-            current = segment
-                .previous
-                .as_deref()
-                .filter(|_| start < previous_len);
+            current = segment.previous.as_deref().filter(|_| start < previous_len);
         }
         stored
     }

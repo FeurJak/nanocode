@@ -8,7 +8,12 @@ use super::{Author, Control, Event, Inbound, PlatformError, Target, seconds, thr
 
 pub const SYNC: &str = "slack";
 
-const PLAIN: [&str; 4] = ["bot_message", "thread_broadcast", "file_share", "me_message"];
+const PLAIN: [&str; 4] = [
+    "bot_message",
+    "thread_broadcast",
+    "file_share",
+    "me_message",
+];
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Config {
@@ -25,29 +30,48 @@ fn root(message: &Value) -> Option<&str> {
 
 fn micros(ts: &str) -> Option<u64> {
     let (secs, frac) = ts.split_once('.').unwrap_or((ts, ""));
-    let frac = frac.chars().chain(std::iter::repeat('0')).take(6).collect::<String>();
-    secs.parse::<u64>().ok()?.checked_mul(1_000_000)?.checked_add(frac.parse::<u64>().ok()?)
+    let frac = frac
+        .chars()
+        .chain(std::iter::repeat('0'))
+        .take(6)
+        .collect::<String>();
+    secs.parse::<u64>()
+        .ok()?
+        .checked_mul(1_000_000)?
+        .checked_add(frac.parse::<u64>().ok()?)
 }
 
 fn named(message: &Value, user: &str) -> String {
-    ["/user_profile/display_name", "/user_profile/real_name", "/username"]
-        .iter()
-        .filter_map(|at| text(message, at))
-        .find(|name| !name.is_empty())
-        .unwrap_or(user)
-        .to_owned()
+    [
+        "/user_profile/display_name",
+        "/user_profile/real_name",
+        "/username",
+    ]
+    .iter()
+    .filter_map(|at| text(message, at))
+    .find(|name| !name.is_empty())
+    .unwrap_or(user)
+    .to_owned()
 }
 
 fn author(config: &Config, message: &Value) -> Option<Author> {
     let id = text(message, "/user").filter(|id| !id.is_empty());
     let bot_id = text(message, "/bot_id").filter(|id| !id.is_empty());
     let user = id.or(bot_id)?;
-    let bot = bot_id.is_some() || text(message, "/subtype") == Some("bot_message") || (id.is_some() && config.bot.as_deref() == id);
-    Some(Author { user: user.to_owned(), name: named(message, user), bot })
+    let bot = bot_id.is_some()
+        || text(message, "/subtype") == Some("bot_message")
+        || (id.is_some() && config.bot.as_deref() == id);
+    Some(Author {
+        user: user.to_owned(),
+        name: named(message, user),
+        bot,
+    })
 }
 
 fn unescape(raw: &str) -> String {
-    raw.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+    raw.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
 }
 
 fn body(message: &Value) -> (String, Option<EventId>) {
@@ -65,21 +89,40 @@ fn posted(config: &Config, channel: &str, event: &Value) -> Option<Parts> {
         return None;
     }
     let author = author(config, event)?;
-    let message = Event::Message { thread: thread(channel, root(event)?), message: ts.to_owned(), author, body, context: None, sub: None, marker };
+    let message = Event::Message {
+        thread: thread(channel, root(event)?),
+        message: ts.to_owned(),
+        author,
+        body,
+        context: None,
+        sub: None,
+        marker,
+    };
     Some(vec![("message", message)])
 }
 
 fn changed(channel: &str, event: &Value) -> Option<Parts> {
     let inner = event.get("message")?;
     let version = micros(text(inner, "/edited/ts")?)?;
-    let edited = Event::Edited { thread: thread(channel, root(inner)?), message: text(inner, "/ts")?.to_owned(), body: body(inner).0, version };
+    let edited = Event::Edited {
+        thread: thread(channel, root(inner)?),
+        message: text(inner, "/ts")?.to_owned(),
+        body: body(inner).0,
+        version,
+    };
     Some(vec![("edit", edited)])
 }
 
 fn deleted(channel: &str, event: &Value) -> Option<Parts> {
     let ts = text(event, "/deleted_ts")?;
     let top = event.get("previous_message").and_then(root).unwrap_or(ts);
-    Some(vec![("delete", Event::Deleted { thread: thread(channel, top), message: ts.to_owned() })])
+    Some(vec![(
+        "delete",
+        Event::Deleted {
+            thread: thread(channel, top),
+            message: ts.to_owned(),
+        },
+    )])
 }
 
 fn message(config: &Config, event: &Value) -> Option<Parts> {
@@ -98,20 +141,38 @@ fn reaction(config: &Config, event: &Value) -> Option<Parts> {
         return None;
     }
     let user = text(event, "/user")?;
-    let author = Author { user: user.to_owned(), name: user.to_owned(), bot: config.bot.as_deref() == Some(user) };
+    let author = Author {
+        user: user.to_owned(),
+        name: user.to_owned(),
+        bot: config.bot.as_deref() == Some(user),
+    };
     let ts = text(event, "/item/ts")?;
     let thread = thread(text(event, "/item/channel")?, ts);
     let emoji = text(event, "/reaction")?.to_owned();
-    Some(vec![("reaction", Event::Reaction { thread, message: ts.to_owned(), author, emoji })])
+    Some(vec![(
+        "reaction",
+        Event::Reaction {
+            thread,
+            message: ts.to_owned(),
+            author,
+            emoji,
+        },
+    )])
 }
 
 fn form(control: &str, payload: &Value) -> BTreeMap<String, String> {
     let prefix = format!("{control}/");
     let mut values = BTreeMap::new();
-    let blocks = payload.pointer("/state/values").and_then(Value::as_object).into_iter().flatten();
+    let blocks = payload
+        .pointer("/state/values")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten();
     for (_, fields) in blocks.filter(|(block, _)| block.starts_with(&prefix)) {
         for (field, input) in fields.as_object().into_iter().flatten() {
-            let value = text(input, "/value").or_else(|| text(input, "/selected_option/value")).or_else(|| text(input, "/selected_date"));
+            let value = text(input, "/value")
+                .or_else(|| text(input, "/selected_option/value"))
+                .or_else(|| text(input, "/selected_date"));
             if let Some(value) = value {
                 values.insert(field.clone(), value.to_owned());
             }
@@ -123,13 +184,28 @@ fn form(control: &str, payload: &Value) -> BTreeMap<String, String> {
 fn clicked(config: &Config, payload: &Value) -> Option<Parts> {
     let control = text(payload.pointer("/actions/0")?, "/action_id")?;
     let ts = text(payload, "/container/message_ts").or_else(|| text(payload, "/message/ts"))?;
-    let channel = text(payload, "/container/channel_id").or_else(|| text(payload, "/channel/id"))?;
-    let top = text(payload, "/message/thread_ts").or_else(|| text(payload, "/container/thread_ts")).unwrap_or(ts);
+    let channel =
+        text(payload, "/container/channel_id").or_else(|| text(payload, "/channel/id"))?;
+    let top = text(payload, "/message/thread_ts")
+        .or_else(|| text(payload, "/container/thread_ts"))
+        .unwrap_or(ts);
     let user = text(payload, "/user/id")?;
-    let name = text(payload, "/user/username").or_else(|| text(payload, "/user/name")).unwrap_or(user);
-    let author = Author { user: user.to_owned(), name: name.to_owned(), bot: config.bot.as_deref() == Some(user) };
+    let name = text(payload, "/user/username")
+        .or_else(|| text(payload, "/user/name"))
+        .unwrap_or(user);
+    let author = Author {
+        user: user.to_owned(),
+        name: name.to_owned(),
+        bot: config.bot.as_deref() == Some(user),
+    };
     let values = form(control, payload);
-    let event = Event::Clicked { thread: thread(channel, top), message: ts.to_owned(), author, control: control.to_owned(), values };
+    let event = Event::Clicked {
+        thread: thread(channel, top),
+        message: ts.to_owned(),
+        author,
+        control: control.to_owned(),
+        values,
+    };
     Some(vec![("click", event)])
 }
 
@@ -182,9 +258,17 @@ pub fn blocks(text: &str, controls: &[Control]) -> Value {
     Value::Array(blocks)
 }
 
-pub fn limited(status: u16, headers: &BTreeMap<String, String>, body: &Value) -> Option<PlatformError> {
+pub fn limited(
+    status: u16,
+    headers: &BTreeMap<String, String>,
+    body: &Value,
+) -> Option<PlatformError> {
     if status != 429 && text(body, "/error") != Some("ratelimited") {
         return None;
     }
-    Some(throttled(headers.get("retry-after").and_then(|header| seconds(header))))
+    Some(throttled(
+        headers
+            .get("retry-after")
+            .and_then(|header| seconds(header)),
+    ))
 }

@@ -5,10 +5,10 @@ use serde_json::{Value, json};
 
 use crate::{
     Event, Fold, NewTask, Op, Phase, Rejection, TaskId,
-    tasks::{TaskOp, resolve},
     access::{Actor, Can},
     blocks,
     sim::{Mutation, mutated},
+    tasks::{TaskOp, resolve},
 };
 
 id!(MessageId);
@@ -199,14 +199,24 @@ impl Said {
     }
 
     fn post(&mut self, message: Message) {
-        assert!(!self.messages.contains_key(&message.id), "a message is posted once");
-        assert!(message.re.is_none() || message.reply_to.is_some(), "a reply names its target");
+        assert!(
+            !self.messages.contains_key(&message.id),
+            "a message is posted once"
+        );
+        assert!(
+            message.re.is_none() || message.reply_to.is_some(),
+            "a reply names its target"
+        );
         let channel = self.channels.entry(message.channel.clone()).or_default();
         assert!(channel.last <= message.seq, "a channel grows in log order");
         channel.last = message.seq;
         channel.messages += 1;
         match &message.re {
-            Some(root) => self.replies.entry(root.clone()).or_default().push(message.id.clone()),
+            Some(root) => self
+                .replies
+                .entry(root.clone())
+                .or_default()
+                .push(message.id.clone()),
             None => channel.threads += 1,
         }
         self.order.insert((message.seq, message.id.clone()));
@@ -239,8 +249,11 @@ pub struct Page<'a> {
 
 fn segment(segment: &str, more: &[u8]) -> bool {
     let mut bytes = segment.bytes();
-    bytes.next().is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
-        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || more.contains(&byte))
+    bytes
+        .next()
+        .is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+        && bytes
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || more.contains(&byte))
 }
 
 pub fn channel_ok(path: &str) -> bool {
@@ -260,7 +273,10 @@ pub fn emoji_ok(emoji: &str) -> bool {
 }
 
 pub fn hash_ok(hash: &str) -> bool {
-    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    hash.len() == 64
+        && hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn plain(text: &str, most: usize) -> bool {
@@ -269,7 +285,10 @@ fn plain(text: &str, most: usize) -> bool {
 
 pub fn schema_name_ok(name: &str) -> bool {
     name.len() <= SCHEMA_NAME
-        && name.bytes().next().is_some_and(|first| first.is_ascii_lowercase())
+        && name
+            .bytes()
+            .next()
+            .is_some_and(|first| first.is_ascii_lowercase())
         && segment(name, b"._-")
 }
 
@@ -314,7 +333,9 @@ fn label_ok(key: &str, value: Option<&str>) -> Result<(), Refusal> {
 }
 
 fn labels_ok(labels: &BTreeMap<String, String>) -> Result<(), Refusal> {
-    labels.iter().try_for_each(|(key, value)| label_ok(key, Some(value)))
+    labels
+        .iter()
+        .try_for_each(|(key, value)| label_ok(key, Some(value)))
 }
 
 impl Fold {
@@ -330,9 +351,15 @@ impl Fold {
     fn said_ok(&self, event: &Event) -> Result<(), Rejection> {
         match &event.op {
             Op::Post { task } => self.root_ok(task),
-            Op::Tasks(TaskOp::Batch { name, tasks }) => resolve(name, tasks).iter().try_for_each(|task| self.root_ok(task)),
+            Op::Tasks(TaskOp::Batch { name, tasks }) => resolve(name, tasks)
+                .iter()
+                .try_for_each(|task| self.root_ok(task)),
             Op::Reply { body, .. } => {
-                if self.said.messages.contains_key(&MessageId(event.id.0.clone())) {
+                if self
+                    .said
+                    .messages
+                    .contains_key(&MessageId(event.id.0.clone()))
+                {
                     return Err(Rejection::Exists);
                 }
                 Ok(text_ok(body, true)?)
@@ -397,17 +424,26 @@ impl Fold {
             return Err(Refusal::Files(files.len()));
         }
         for attached in files {
-            if !self.said.files.contains_key(&attached.file) && !mutated(Mutation::UnknownFilesAccepted) {
+            if !self.said.files.contains_key(&attached.file)
+                && !mutated(Mutation::UnknownFilesAccepted)
+            {
                 return Err(Refusal::UnknownFile(attached.file.clone()));
             }
-            if !mutated(Mutation::NamesUnchecked) && (!plain(&attached.name, FILE_NAME) || attached.name.contains('/')) {
+            if !mutated(Mutation::NamesUnchecked)
+                && (!plain(&attached.name, FILE_NAME) || attached.name.contains('/'))
+            {
                 return Err(Refusal::FileName(attached.name.clone()));
             }
         }
         Ok(())
     }
 
-    fn thread_ok(&self, channel: &str, re: Option<&MessageId>, reply_to: Option<&MessageId>) -> Result<(), Refusal> {
+    fn thread_ok(
+        &self,
+        channel: &str,
+        re: Option<&MessageId>,
+        reply_to: Option<&MessageId>,
+    ) -> Result<(), Refusal> {
         let nests = mutated(Mutation::RepliesNest);
         let Some(root) = re else {
             return match reply_to {
@@ -447,7 +483,10 @@ impl Fold {
                 labels,
                 files,
             } => {
-                if self.said.messages.contains_key(&MessageId(event.id.0.clone()))
+                if self
+                    .said
+                    .messages
+                    .contains_key(&MessageId(event.id.0.clone()))
                     || self.tasks.contains_key(&TaskId(event.id.0.clone()))
                 {
                     return Err(Rejection::Exists);
@@ -477,7 +516,11 @@ impl Fold {
                 }
                 Ok(())
             }
-            Say::Label { message, key, value } => {
+            Say::Label {
+                message,
+                key,
+                value,
+            } => {
                 self.live(message)?;
                 Ok(label_ok(key, value.as_deref())?)
             }
@@ -495,25 +538,37 @@ impl Fold {
                     return Err(Refusal::FileSize(*size).into());
                 }
                 match self.said.files.get(hash) {
-                    Some(file) if file.size != *size => Err(Refusal::FileConflict(hash.clone()).into()),
+                    Some(file) if file.size != *size => {
+                        Err(Refusal::FileConflict(hash.clone()).into())
+                    }
                     _ => Ok(()),
                 }
             }
         }
     }
 
-    fn schema_ok(&self, name: &str, version: u64, description: &str, definition: &Value) -> Result<(), Refusal> {
+    fn schema_ok(
+        &self,
+        name: &str,
+        version: u64,
+        description: &str,
+        definition: &Value,
+    ) -> Result<(), Refusal> {
         let shape = !mutated(Mutation::SchemaShapeIgnored);
         let mutable = mutated(Mutation::SchemasMutable);
         let id = format!("{name}@{version}");
         if shape && (!schema_name_ok(name) || !(1..=SCHEMA_VERSION).contains(&version)) {
-            return Err(Refusal::Schema(format!("{id} is not a schema name and version")));
+            return Err(Refusal::Schema(format!(
+                "{id} is not a schema name and version"
+            )));
         }
         if BUILT_INS.contains(&name) && !mutable {
             return Err(Refusal::ReservedSchema(name.to_owned()));
         }
         match self.said.schemas.get(&(name.to_owned(), version)) {
-            Some(old) if old.definition == *definition && old.description == description => return Ok(()),
+            Some(old) if old.definition == *definition && old.description == description => {
+                return Ok(());
+            }
             Some(_) if !mutable => return Err(Refusal::SchemaImmutable(id)),
             _ => {}
         }
@@ -523,8 +578,12 @@ impl Fold {
         if self.said.schemas.len() >= SCHEMAS {
             return Err(Refusal::TooManySchemas);
         }
-        if description.chars().count() > SCHEMA_DESCRIPTION || description.chars().any(char::is_control) {
-            return Err(Refusal::Schema(format!("{id} has a description that is too long")));
+        if description.chars().count() > SCHEMA_DESCRIPTION
+            || description.chars().any(char::is_control)
+        {
+            return Err(Refusal::Schema(format!(
+                "{id} has a description that is too long"
+            )));
         }
         let bytes = serde_json::to_string(definition).map_or(usize::MAX, |json| json.len());
         if bytes > SCHEMA_BYTES {
@@ -534,24 +593,27 @@ impl Fold {
     }
 
     pub(crate) fn hear(&mut self, seq: u64, event: &Event) {
-        let message = |id: MessageId, channel: String, re: Option<MessageId>, text: &str, labels, blocks| Message {
-            id,
-            seq,
-            version: seq,
-            by: event.by.clone(),
-            at_ms: event.at_ms,
-            channel,
-            reply_to: re.clone(),
-            re,
-            text: text.to_owned(),
-            labels,
-            reactions: BTreeMap::new(),
-            files: Vec::new(),
-            blocks,
-            task: false,
-            deleted: false,
-            edits: 0,
-        };
+        let message =
+            |id: MessageId, channel: String, re: Option<MessageId>, text: &str, labels, blocks| {
+                Message {
+                    id,
+                    seq,
+                    version: seq,
+                    by: event.by.clone(),
+                    at_ms: event.at_ms,
+                    channel,
+                    reply_to: re.clone(),
+                    re,
+                    text: text.to_owned(),
+                    labels,
+                    reactions: BTreeMap::new(),
+                    files: Vec::new(),
+                    blocks,
+                    task: false,
+                    deleted: false,
+                    edits: 0,
+                }
+            };
         match &event.op {
             Op::Post { task } => self.root(task, seq, &message),
             Op::Tasks(TaskOp::Batch { name, tasks }) => {
@@ -561,10 +623,22 @@ impl Fold {
             }
             Op::Reply { task, body } => {
                 let root = MessageId(task.0.clone());
-                let Some(channel) = self.said.messages.get(&root).map(|root| root.channel.clone()) else {
+                let Some(channel) = self
+                    .said
+                    .messages
+                    .get(&root)
+                    .map(|root| root.channel.clone())
+                else {
                     return;
                 };
-                let reply = message(MessageId(event.id.0.clone()), channel, Some(root), body, BTreeMap::new(), Vec::new());
+                let reply = message(
+                    MessageId(event.id.0.clone()),
+                    channel,
+                    Some(root),
+                    body,
+                    BTreeMap::new(),
+                    Vec::new(),
+                );
                 self.said.post(reply);
             }
             Op::Say { say } => self.said_apply(seq, event, say, message),
@@ -572,7 +646,19 @@ impl Fold {
         }
     }
 
-    fn root(&mut self, task: &NewTask, seq: u64, message: &impl Fn(MessageId, String, Option<MessageId>, &str, BTreeMap<String, String>, Vec<Block>) -> Message) {
+    fn root(
+        &mut self,
+        task: &NewTask,
+        seq: u64,
+        message: &impl Fn(
+            MessageId,
+            String,
+            Option<MessageId>,
+            &str,
+            BTreeMap<String, String>,
+            Vec<Block>,
+        ) -> Message,
+    ) {
         let id = MessageId(task.id.0.clone());
         if let Some(root) = self.said.messages.get_mut(&id) {
             root.task = true;
@@ -584,7 +670,14 @@ impl Fold {
             .as_ref()
             .and_then(|parent| self.said.messages.get(&MessageId(parent.0.clone())))
             .map_or_else(|| TASKS.to_owned(), |parent| parent.channel.clone());
-        let mut root = message(id, channel, None, &task.spec, task.labels.clone(), Vec::new());
+        let mut root = message(
+            id,
+            channel,
+            None,
+            &task.spec,
+            task.labels.clone(),
+            Vec::new(),
+        );
         root.task = true;
         self.said.post(root);
     }
@@ -594,10 +687,19 @@ impl Fold {
         seq: u64,
         event: &Event,
         say: &Say,
-        message: impl Fn(MessageId, String, Option<MessageId>, &str, BTreeMap<String, String>, Vec<Block>) -> Message,
+        message: impl Fn(
+            MessageId,
+            String,
+            Option<MessageId>,
+            &str,
+            BTreeMap<String, String>,
+            Vec<Block>,
+        ) -> Message,
     ) {
         let blocks = match say {
-            Say::Post { text, .. } | Say::Edit { text, .. } => self.blocks(text).unwrap_or_default(),
+            Say::Post { text, .. } | Say::Edit { text, .. } => {
+                self.blocks(text).unwrap_or_default()
+            }
             _ => Vec::new(),
         };
         let target = match say {
@@ -619,7 +721,14 @@ impl Fold {
                 },
                 _,
             ) => {
-                let mut posted = message(MessageId(event.id.0.clone()), channel.clone(), re.clone(), text, labels.clone(), blocks);
+                let mut posted = message(
+                    MessageId(event.id.0.clone()),
+                    channel.clone(),
+                    re.clone(),
+                    text,
+                    labels.clone(),
+                    blocks,
+                );
                 if re.is_some() {
                     posted.reply_to.clone_from(reply_to);
                 }
@@ -648,7 +757,11 @@ impl Fold {
             (Say::React { emoji, on, .. }, Some(found)) => {
                 found.version = seq;
                 if *on {
-                    found.reactions.entry(emoji.clone()).or_default().insert(event.by.clone());
+                    found
+                        .reactions
+                        .entry(emoji.clone())
+                        .or_default()
+                        .insert(event.by.clone());
                     return;
                 }
                 if mutated(Mutation::ReactionsShared) {
@@ -703,7 +816,10 @@ impl Fold {
                     seq,
                 });
             }
-            (Say::Edit { .. } | Say::Delete { .. } | Say::React { .. } | Say::Label { .. }, None) => {}
+            (
+                Say::Edit { .. } | Say::Delete { .. } | Say::React { .. } | Say::Label { .. },
+                None,
+            ) => {}
         }
     }
 
@@ -713,7 +829,11 @@ impl Fold {
             Say::Edit { message, .. }
             | Say::Delete { message }
             | Say::React { message, .. }
-            | Say::Label { message, .. } => self.said.messages.get(message).map(|found| found.channel.as_str()),
+            | Say::Label { message, .. } => self
+                .said
+                .messages
+                .get(message)
+                .map(|found| found.channel.as_str()),
             Say::Schema { .. } | Say::File { .. } => None,
         }
     }
@@ -723,11 +843,19 @@ impl Fold {
     }
 
     pub fn messages(&self) -> impl Iterator<Item = &Message> + '_ {
-        self.said.order.iter().map(|(_, id)| &self.said.messages[id])
+        self.said
+            .order
+            .iter()
+            .map(|(_, id)| &self.said.messages[id])
     }
 
     pub fn thread(&self, root: &MessageId) -> Vec<&Message> {
-        let Some(found) = self.said.messages.get(root).filter(|found| found.re.is_none()) else {
+        let Some(found) = self
+            .said
+            .messages
+            .get(root)
+            .filter(|found| found.re.is_none())
+        else {
             return Vec::new();
         };
         let replies = self.said.replies.get(root).into_iter().flatten();
@@ -786,7 +914,10 @@ impl Fold {
     }
 
     pub fn read_as(&self, actor: Option<&Actor>, query: &Query) -> Page<'_> {
-        assert!(query.limit > 0 && query.limit <= PAGE, "a page holds 1 to {PAGE} messages");
+        assert!(
+            query.limit > 0 && query.limit <= PAGE,
+            "a page holds 1 to {PAGE} messages"
+        );
         let from = if mutated(Mutation::CursorInclusive) {
             query.after
         } else {
@@ -796,10 +927,17 @@ impl Fold {
         let mut cursor = self.next - 1;
         for (_, id) in self.said.order.range((from, MessageId(String::new()))..) {
             let message = &self.said.messages[id];
-            let place = query.channel.as_ref().is_none_or(|channel| match channel.strip_suffix('/') {
-                Some(prefix) => message.channel.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/')),
-                None => message.channel == *channel,
-            });
+            let place =
+                query
+                    .channel
+                    .as_ref()
+                    .is_none_or(|channel| match channel.strip_suffix('/') {
+                        Some(prefix) => message
+                            .channel
+                            .strip_prefix(prefix)
+                            .is_some_and(|rest| rest.starts_with('/')),
+                        None => message.channel == *channel,
+                    });
             if !place
                 || actor.is_some_and(|actor| !self.hears(actor, message))
                 || query.re.as_ref().is_some_and(|root| message.root() != root)
@@ -816,11 +954,15 @@ impl Fold {
                 continue;
             }
             if messages.len() == query.limit {
-                let split = messages.iter().position(|view: &View<'_>| view.message.seq == message.seq);
+                let split = messages
+                    .iter()
+                    .position(|view: &View<'_>| view.message.seq == message.seq);
                 if let Some(at) = split.filter(|at| *at > 0) {
                     messages.truncate(at);
                 }
-                cursor = messages.last().map_or(cursor, |view: &View<'_>| view.message.seq);
+                cursor = messages
+                    .last()
+                    .map_or(cursor, |view: &View<'_>| view.message.seq);
                 break;
             }
             messages.push(View { message, labels });
@@ -829,7 +971,10 @@ impl Fold {
     }
 
     pub fn changes(&self, after: u64, limit: usize) -> Vec<&Message> {
-        assert!(limit > 0 && limit <= PAGE, "a page holds 1 to {PAGE} messages");
+        assert!(
+            limit > 0 && limit <= PAGE,
+            "a page holds 1 to {PAGE} messages"
+        );
         let mut changed = self
             .said
             .messages
@@ -841,7 +986,6 @@ impl Fold {
         changed
     }
 }
-
 
 impl Fold {
     fn home<'a>(&'a self, message: &'a Message) -> &'a str {
@@ -867,7 +1011,10 @@ impl Fold {
                     .map_or(channel.as_str(), |root| self.home(root));
                 (place.to_owned(), Can::Post)
             }
-            Say::Edit { message, .. } | Say::Delete { message } | Say::React { message, .. } | Say::Label { message, .. } => {
+            Say::Edit { message, .. }
+            | Say::Delete { message }
+            | Say::React { message, .. }
+            | Say::Label { message, .. } => {
                 let found = self
                     .said
                     .messages
@@ -889,7 +1036,7 @@ impl Fold {
     }
 
     pub fn heard_by<'a>(&'a self, actor: &'a Actor) -> impl Iterator<Item = &'a Message> + 'a {
-        self.messages().filter(move |message| self.hears(actor, message))
+        self.messages()
+            .filter(move |message| self.hears(actor, message))
     }
 }
-

@@ -191,7 +191,10 @@ impl Shape {
     }
 
     fn poison(&self, seq: u64) -> bool {
-        let roll = fnv(fnv(FNV_OFFSET, &self.seed.to_le_bytes()), &seq.to_le_bytes());
+        let roll = fnv(
+            fnv(FNV_OFFSET, &self.seed.to_le_bytes()),
+            &seq.to_le_bytes(),
+        );
         roll % 1_000_000 < self.poison_ppm
     }
 }
@@ -206,7 +209,10 @@ struct Lossy {
 impl Ring for Lossy {
     fn ring(&self, scope: &str, head: u64) {
         let count = self.rings.fetch_add(1, Ordering::SeqCst);
-        let roll = fnv(fnv(FNV_OFFSET, &self.seed.to_le_bytes()), &count.to_le_bytes());
+        let roll = fnv(
+            fnv(FNV_OFFSET, &self.seed.to_le_bytes()),
+            &count.to_le_bytes(),
+        );
         if roll % 1_000_000 >= self.deaf_ppm {
             self.notifier.ring(scope, head);
         }
@@ -239,7 +245,10 @@ impl Watched {
     }
 
     pub fn wrap(&self, host: Arc<dyn LogHost>) -> Arc<dyn LogHost> {
-        Arc::new(Notifying::new(host, Arc::clone(&self.ring) as Arc<dyn Ring>))
+        Arc::new(Notifying::new(
+            host,
+            Arc::clone(&self.ring) as Arc<dyn Ring>,
+        ))
     }
 }
 
@@ -292,12 +301,12 @@ fn scheduled(board: &Board, shape: &Shape) -> bool {
 }
 
 fn quiet(world: &World, board: &Board) -> bool {
-    let echoed = board.fold().marks().watchers().get(ECHO).is_some_and(|watcher| {
-        watcher
-            .lanes
-            .values()
-            .all(|lane| lane.pending.is_empty())
-    });
+    let echoed = board
+        .fold()
+        .marks()
+        .watchers()
+        .get(ECHO)
+        .is_some_and(|watcher| watcher.lanes.values().all(|lane| lane.pending.is_empty()));
     let fed = world.shape.hooks.iter().all(|hook| {
         let id = EventId(format!("{}#{}", super::access::SOURCE, hook.key));
         world.firehose.borrow().acked.contains(&hook.key) && board.fold().outcome(&id).is_some()
@@ -306,12 +315,18 @@ fn quiet(world: &World, board: &Board) -> bool {
         && fed
         && scheduled(board, &world.watched.shape)
         && echoed
-        && board.pending(TALLY, None, &tally_filter()).entries.is_empty()
+        && board
+            .pending(TALLY, None, &tally_filter())
+            .entries
+            .is_empty()
 }
 
 async fn tally(world: &World, epoch: u64, index: u64) {
     let mut board = world.open(&format!("{TALLY}+i{index}e{epoch}")).await;
-    let mut rng = Rng::derive(world.watched.shape.seed, &format!("board tally {index} {epoch}"));
+    let mut rng = Rng::derive(
+        world.watched.shape.seed,
+        &format!("board tally {index} {epoch}"),
+    );
     loop {
         if let Err(error) = board.refresh().await {
             world.note(&error);
@@ -359,9 +374,19 @@ impl Handler for Echo<'_> {
             if rng.chance(shape.stall_ppm) {
                 world.nap(shape.lease_ms * 2).await;
             }
-            assert!(!lease.entries.is_empty(), "a watcher lease carries its matches");
-            let rows = lease.entries.iter().map(|entry| entry.seq).collect::<BTreeSet<_>>();
-            assert!(rows.first() == Some(&lease.at), "a watcher lease starts at its head");
+            assert!(
+                !lease.entries.is_empty(),
+                "a watcher lease carries its matches"
+            );
+            let rows = lease
+                .entries
+                .iter()
+                .map(|entry| entry.seq)
+                .collect::<BTreeSet<_>>();
+            assert!(
+                rows.first() == Some(&lease.at),
+                "a watcher lease starts at its head"
+            );
             if rows.iter().any(|row| shape.poison(*row)) {
                 return Err("poison".to_owned());
             }
@@ -476,9 +501,9 @@ fn consolidating(world: &World) -> usize {
 
 fn awaited(fold: &Fold, entry: &Entry) -> bool {
     entry.change.terminal()
-        && fold.task(&entry.task).is_some_and(|task| {
-            task.spec.labels.get("gate").map(String::as_str) == Some("join")
-        })
+        && fold
+            .task(&entry.task)
+            .is_some_and(|task| task.spec.labels.get("gate").map(String::as_str) == Some("join"))
 }
 
 async fn waiter(world: &World, epoch: u64) {
@@ -623,7 +648,11 @@ fn reply(entry: &Entry) -> Option<&str> {
     }
 }
 
-fn steps(world: &World, rows: &[(u64, String)], fold: &Fold) -> Result<BTreeMap<String, u64>, String> {
+fn steps(
+    world: &World,
+    rows: &[(u64, String)],
+    fold: &Fold,
+) -> Result<BTreeMap<String, u64>, String> {
     let policy = world.watched.shape.policy;
     let mut seen = BTreeSet::new();
     let mut now = 0;
@@ -631,8 +660,8 @@ fn steps(world: &World, rows: &[(u64, String)], fold: &Fold) -> Result<BTreeMap<
     let mut cursors: BTreeMap<Key, u64> = BTreeMap::new();
     let mut cancelled = BTreeMap::new();
     for (seq, body) in rows {
-        let event: Event =
-            serde_json::from_str(body).map_err(|error| format!("row {seq} is not an event: {error}"))?;
+        let event: Event = serde_json::from_str(body)
+            .map_err(|error| format!("row {seq} is not an event: {error}"))?;
         if !seen.insert(event.id.clone()) {
             continue;
         }
@@ -715,15 +744,23 @@ fn steps(world: &World, rows: &[(u64, String)], fold: &Fold) -> Result<BTreeMap<
             }
             Step::Bury { thread, .. } => {
                 let lane = lanes.entry(thread.clone()).or_default();
-                if lane.tries < policy.tries || lane.lease.as_ref().is_some_and(|(_, until)| *until > now) {
-                    return Err(format!("row {seq}: {thread} buried after {} tries", lane.tries));
+                if lane.tries < policy.tries
+                    || lane.lease.as_ref().is_some_and(|(_, until)| *until > now)
+                {
+                    return Err(format!(
+                        "row {seq}: {thread} buried after {} tries",
+                        lane.tries
+                    ));
                 }
                 *lane = Lane::default();
             }
             Step::Unschedule { id, .. } => {
                 cancelled.entry(id).or_insert(*seq);
             }
-            Step::Watch { .. } | Step::Unwatch { .. } | Step::Schedule { .. } | Step::Fire { .. } => {}
+            Step::Watch { .. }
+            | Step::Unwatch { .. }
+            | Step::Schedule { .. }
+            | Step::Fire { .. } => {}
         }
     }
     Ok(cancelled)
@@ -733,11 +770,19 @@ fn tallies(fold: &Fold) -> Result<(), String> {
     let mut seen = BTreeMap::new();
     for entry in fold.entries() {
         if let Some(seq) = reply(entry).and_then(|body| body.strip_prefix("seen:")) {
-            *seen.entry((entry.task.clone(), seq.to_owned())).or_insert(0) += 1;
+            *seen
+                .entry((entry.task.clone(), seq.to_owned()))
+                .or_insert(0) += 1;
         }
     }
-    for entry in fold.entries().iter().filter(|entry| entry.change.terminal()) {
-        let copies = seen.remove(&(entry.task.clone(), entry.seq.to_string())).unwrap_or(0);
+    for entry in fold
+        .entries()
+        .iter()
+        .filter(|entry| entry.change.terminal())
+    {
+        let copies = seen
+            .remove(&(entry.task.clone(), entry.seq.to_string()))
+            .unwrap_or(0);
         if copies != 1 {
             return Err(format!(
                 "the tally consumed {} at row {} {copies} times",
@@ -746,7 +791,9 @@ fn tallies(fold: &Fold) -> Result<(), String> {
         }
     }
     if let Some(((task, seq), _)) = seen.into_iter().next() {
-        return Err(format!("the tally counted {task} at row {seq}, which never ended there"));
+        return Err(format!(
+            "the tally counted {task} at row {seq}, which never ended there"
+        ));
     }
     Ok(())
 }
@@ -769,7 +816,9 @@ impl Roots {
             .entries()
             .iter()
             .filter_map(|entry| match &entry.change {
-                Change::Reparented { from, .. } => Some((entry.seq, entry.task.clone(), from.clone())),
+                Change::Reparented { from, .. } => {
+                    Some((entry.seq, entry.task.clone(), from.clone()))
+                }
                 _ => None,
             })
             .collect();
@@ -839,11 +888,16 @@ fn echoes(world: &World, fold: &Fold) -> Result<(), String> {
             ));
         }
         if echoes == 1 && shape.poison(source.1) {
-            return Err(format!("{} row {}: a poison reply was echoed", source.0, source.1));
+            return Err(format!(
+                "{} row {}: a poison reply was echoed",
+                source.0, source.1
+            ));
         }
     }
     if let Some(((thread, at), _)) = echoed.into_iter().next().or(dead.into_iter().next()) {
-        return Err(format!("{thread}: the watcher handled row {at}, which it does not match"));
+        return Err(format!(
+            "{thread}: the watcher handled row {at}, which it does not match"
+        ));
     }
     Ok(())
 }
@@ -886,7 +940,9 @@ fn ticks(world: &World, fold: &Fold, cancelled: &BTreeMap<String, u64>) -> Resul
             }
             count += 1;
             slot = match every.every_ms {
-                Some(gap) if at >= every.first_ms => (slot + 1).max((at - every.first_ms) / gap + 1),
+                Some(gap) if at >= every.first_ms => {
+                    (slot + 1).max((at - every.first_ms) / gap + 1)
+                }
                 _ => slot + 1,
             };
         }
@@ -894,7 +950,10 @@ fn ticks(world: &World, fold: &Fold, cancelled: &BTreeMap<String, u64>) -> Resul
             && every.times.is_none_or(|times| count < times)
             && due(slot).is_some_and(|due| every.until_ms.is_none_or(|until| due <= until));
         if more {
-            return Err(format!("{} stopped after {count} fires with slot {slot} still due", every.id));
+            return Err(format!(
+                "{} stopped after {count} fires with slot {slot} still due",
+                every.id
+            ));
         }
     }
     Ok(())

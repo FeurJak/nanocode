@@ -27,12 +27,12 @@ use crate::{
 
 #[path = "board_access.rs"]
 mod access;
+#[path = "board_due.rs"]
+mod due;
 #[path = "board_messages.rs"]
 mod messages;
 #[path = "board_tasks.rs"]
 mod tasks;
-#[path = "board_due.rs"]
-mod due;
 
 pub(crate) use access::identity;
 
@@ -467,26 +467,41 @@ impl Shape {
                 plan.push(task(verify.0.clone(), Some(&lane), vec![id], "verify"));
                 verifies.push(verify);
             }
-            plan.push(task(format!("repo{repo}/consolidate"), Some(&lane), verifies, "consolidate"));
+            plan.push(task(
+                format!("repo{repo}/consolidate"),
+                Some(&lane),
+                verifies,
+                "consolidate",
+            ));
         }
         let lease_ms = rng.range(20, 200);
         let step_ms = rng.range(1, lease_ms / 3);
         let poll_ms = rng.range(1, lease_ms / 2);
         let latency_ms = rng.range(0, step_ms);
         let workers = rng.range(1, 6);
-        let fixes = plan.iter().filter(|task| task.labels["step"] == "fix").collect::<Vec<_>>();
+        let fixes = plan
+            .iter()
+            .filter(|task| task.labels["step"] == "fix")
+            .collect::<Vec<_>>();
         let cancel = rng
             .chance(250_000)
             .then(|| fixes[rng.pick(fixes.len())].id.clone())
             .map(|task| (task, rng.range(0, lease_ms * 4)));
         let work_ms = plan.len() as u64 * 4 * (step_ms + latency_ms * 4 + poll_ms) + lease_ms * 2;
-        let crashes = (0..rng.range(0, 3)).map(|_| rng.range(1, work_ms)).collect();
+        let crashes = (0..rng.range(0, 3))
+            .map(|_| rng.range(1, work_ms))
+            .collect();
         let faulty = !rng.chance(200_000);
         let prs = (0..rng.range(0, 6)).collect::<Vec<_>>();
         let mut hooks = Vec::new();
         for pr in &prs {
             let opened = rng.range(0, work_ms / 2);
-            hooks.push(Hook { key: format!("github:{pr}:opened"), at_ms: opened, pr: *pr, review: None });
+            hooks.push(Hook {
+                key: format!("github:{pr}:opened"),
+                at_ms: opened,
+                pr: *pr,
+                review: None,
+            });
             for review in 0..rng.range(0, 3) {
                 hooks.push(Hook {
                     key: format!("github:{pr}:review:{review}"),
@@ -537,10 +552,13 @@ impl Shape {
             self.before_ppm,
             self.after_ppm,
             self.read_ppm,
-            self.cancel.as_ref().map_or("none".to_owned(), |(task, _)| task.0.clone()),
+            self.cancel
+                .as_ref()
+                .map_or("none".to_owned(), |(task, _)| task.0.clone()),
             self.crashes,
             if self.stable { "stable" } else { "epoch" }
-        ) + " " + &self.tasks.describe()
+        ) + " "
+            + &self.tasks.describe()
     }
 }
 
@@ -558,7 +576,10 @@ pub(crate) struct FaultLog {
 
 impl FaultLog {
     fn roll<T>(&self, each: impl FnOnce(&mut Rng) -> T) -> T {
-        let mut rng = self.rng.take().expect("the simulator polls one task at a time");
+        let mut rng = self
+            .rng
+            .take()
+            .expect("the simulator polls one task at a time");
         let value = each(&mut rng);
         assert!(self.rng.put(rng).is_none(), "the fault rng has one home");
         value
@@ -573,7 +594,12 @@ impl FaultLog {
         StoreError::Backend(format!("injected board {what} fault"))
     }
 
-    async fn read(&self, scope: &str, from: u64, to: u64) -> Result<Vec<(u64, String)>, StoreError> {
+    async fn read(
+        &self,
+        scope: &str,
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<(u64, String)>, StoreError> {
         self.clock.sleep(self.delay()).await;
         if self.roll(|rng| rng.chance(self.read_ppm)) {
             return Err(self.injected("read"));
@@ -594,7 +620,10 @@ impl LogHost for FaultLog {
         Box::pin(self.read(scope, from, to))
     }
 
-    fn load<'a>(&'a self, scope: &'a str) -> StoreFuture<'a, Result<Vec<(u64, String)>, StoreError>> {
+    fn load<'a>(
+        &'a self,
+        scope: &'a str,
+    ) -> StoreFuture<'a, Result<Vec<(u64, String)>, StoreError>> {
         Box::pin(self.read(scope, 0, i64::MAX as u64))
     }
 
@@ -675,7 +704,9 @@ impl World {
 
     async fn open(&self, writer: &str) -> Board {
         loop {
-            let host = self.watched.wrap(Arc::clone(&self.host) as Arc<dyn LogHost>);
+            let host = self
+                .watched
+                .wrap(Arc::clone(&self.host) as Arc<dyn LogHost>);
             match Board::open(host, SCOPE, access::identity(writer)).await {
                 Ok(board) => {
                     self.resume(board.writer()).await;
@@ -690,13 +721,24 @@ impl World {
     }
 
     async fn resume(&self, writer: &str) {
-        let rows = self.host.inner.scan(SCOPE, 0, i64::MAX as u64).await.unwrap_or_default();
+        let rows = self
+            .host
+            .inner
+            .scan(SCOPE, 0, i64::MAX as u64)
+            .await
+            .unwrap_or_default();
         let prefix = format!("{writer}.");
         let landed = rows
             .iter()
             .filter_map(|(_, body)| serde_json::from_str::<nanocode_board::Event>(body).ok())
             .filter(|event| event.by == writer)
-            .filter_map(|event| event.id.0.strip_prefix(&prefix).and_then(|count| count.parse::<u64>().ok()))
+            .filter_map(|event| {
+                event
+                    .id
+                    .0
+                    .strip_prefix(&prefix)
+                    .and_then(|count| count.parse::<u64>().ok())
+            })
             .max()
             .unwrap_or(0);
         let mut oracle = self.oracle.borrow_mut();
@@ -705,9 +747,14 @@ impl World {
         }
         let mut lost = Vec::new();
         oracle.sent.retain(|(id, sent)| {
-            let unlanded = id.strip_prefix(&prefix).and_then(|count| count.parse::<u64>().ok()).is_some_and(|count| count > landed);
+            let unlanded = id
+                .strip_prefix(&prefix)
+                .and_then(|count| count.parse::<u64>().ok())
+                .is_some_and(|count| count > landed);
             if unlanded && let Sent::Applied(seq) = sent {
-                lost.push(format!("{id} was applied at row {seq} but is not in the log when {writer} reopens"));
+                lost.push(format!(
+                    "{id} was applied at row {seq} but is not in the log when {writer} reopens"
+                ));
             }
             !unlanded
         });
@@ -727,11 +774,16 @@ impl World {
         let mut oracle = self.oracle.borrow_mut();
         let outcome = match &sent {
             Ok(applied) if board.fold().outcome(&applied.event) != Some(&Ok(applied.seq)) => {
-                oracle.wrong.push(format!("{id} settled at {} but the board's own fold does not hold it there", applied.seq));
+                oracle.wrong.push(format!(
+                    "{id} settled at {} but the board's own fold does not hold it there",
+                    applied.seq
+                ));
                 Sent::Applied(applied.seq)
             }
             Ok(applied) if applied.event.0 != id => {
-                oracle.wrong.push(format!("{id} settled as {}", applied.event));
+                oracle
+                    .wrong
+                    .push(format!("{id} settled as {}", applied.event));
                 Sent::Applied(applied.seq)
             }
             Ok(applied) => Sent::Applied(applied.seq),
@@ -768,17 +820,32 @@ impl World {
 
 async fn lead(world: &World, epoch: u64) {
     access::setup(world).await;
-    let writer = if world.shape.stable { format!("{}+lead", access::OWNER) } else { format!("{}+e{epoch}", access::OWNER) };
+    let writer = if world.shape.stable {
+        format!("{}+lead", access::OWNER)
+    } else {
+        format!("{}+e{epoch}", access::OWNER)
+    };
     let mut board = world.open(&writer).await;
     for task in &world.shape.plan {
-        if task.parent.as_ref().is_some_and(|parent| world.shape.tasks.batched.contains(parent)) {
+        if task
+            .parent
+            .as_ref()
+            .is_some_and(|parent| world.shape.tasks.batched.contains(parent))
+        {
             continue;
         }
         loop {
-            match world.submit(&mut board, Op::Post { task: task.clone() }).await {
+            match world
+                .submit(&mut board, Op::Post { task: task.clone() })
+                .await
+            {
                 Ok(_) | Err(BoardError::Rejected(Rejection::Exists)) => break,
                 Err(error @ BoardError::Rejected(_)) => {
-                    world.oracle.borrow_mut().wrong.push(format!("lead could not post {}: {error}", task.id));
+                    world
+                        .oracle
+                        .borrow_mut()
+                        .wrong
+                        .push(format!("lead could not post {}: {error}", task.id));
                     break;
                 }
                 Err(error) => {
@@ -801,7 +868,16 @@ async fn lead(world: &World, epoch: u64) {
     {
         world.nap(after_ms).await;
         loop {
-            match world.submit(&mut board, Op::Cancel { task: task.clone(), reason: "lead replanned".to_owned() }).await {
+            match world
+                .submit(
+                    &mut board,
+                    Op::Cancel {
+                        task: task.clone(),
+                        reason: "lead replanned".to_owned(),
+                    },
+                )
+                .await
+            {
                 Ok(_) | Err(BoardError::Rejected(_)) => break,
                 Err(error) => {
                     world.note(&error);
@@ -864,7 +940,10 @@ async fn firehose(world: &World, epoch: u64) {
                     terms: nanocode_board::tasks::Terms::default(),
                 },
             },
-            Some(_) => Op::Reply { task: pr_task(hook.pr), body: hook.key.clone() },
+            Some(_) => Op::Reply {
+                task: pr_task(hook.pr),
+                body: hook.key.clone(),
+            },
         };
         match board.submit_keyed(&hook.key, world.now_ms(), op).await {
             Ok(_) | Err(BoardError::Rejected(Rejection::Exists)) => {
@@ -898,7 +977,11 @@ impl Worker<'_> {
 
     fn until(&self, task: &TaskId, claim: &ClaimId) -> Option<u64> {
         match self.board.fold().task(task).map(|task| &task.phase) {
-            Some(Phase::Claimed { claim: held, until_ms, .. }) if held == claim => Some(*until_ms),
+            Some(Phase::Claimed {
+                claim: held,
+                until_ms,
+                ..
+            }) if held == claim => Some(*until_ms),
             _ => None,
         }
     }
@@ -908,14 +991,24 @@ impl Worker<'_> {
         let shape = &world.shape;
         for _ in 0..self.rng.range(1, 4) {
             if self.rng.chance(shape.stall_ppm) {
-                world.nap(shape.lease_ms + self.rng.range(1, shape.lease_ms)).await;
+                world
+                    .nap(shape.lease_ms + self.rng.range(1, shape.lease_ms))
+                    .await;
             } else {
                 world.nap(self.rng.range(1, shape.step_ms)).await;
             }
             if world.now_ms() < until_ms {
-                world.oracle.borrow_mut().effects.push((task.clone(), claim.clone(), world.now_ms()));
+                world.oracle.borrow_mut().effects.push((
+                    task.clone(),
+                    claim.clone(),
+                    world.now_ms(),
+                ));
             }
-            let renew = Op::Renew { task: task.clone(), claim: claim.clone(), lease_ms: shape.lease_ms };
+            let renew = Op::Renew {
+                task: task.clone(),
+                claim: claim.clone(),
+                lease_ms: shape.lease_ms,
+            };
             if self.submit(renew).await.is_none() && self.board.refresh().await.is_err() {
                 continue;
             }
@@ -937,7 +1030,13 @@ impl Worker<'_> {
             return;
         }
         if self.rng.chance(shape.release_ppm) {
-            let _ = self.submit(Op::Release { task, claim, note: "context full, handing off".to_owned() }).await;
+            let _ = self
+                .submit(Op::Release {
+                    task,
+                    claim,
+                    note: "context full, handing off".to_owned(),
+                })
+                .await;
             return;
         }
         let outcome = if self.rng.chance(shape.fail_ppm) {
@@ -945,13 +1044,23 @@ impl Worker<'_> {
         } else {
             Outcome::Done(format!("{task} by {claim}"))
         };
-        let _ = self.submit(Op::Finish { task, claim, outcome }).await;
+        let _ = self
+            .submit(Op::Finish {
+                task,
+                claim,
+                outcome,
+            })
+            .await;
     }
 }
 
 async fn worker(world: &World, index: u64, epoch: u64) {
     let seat = format!("agent:w{index}+e{epoch}");
-    let writer = if world.shape.stable { format!("agent:w{index}") } else { seat.clone() };
+    let writer = if world.shape.stable {
+        format!("agent:w{index}")
+    } else {
+        seat.clone()
+    };
     let board = world.open(&writer).await;
     let mut worker = Worker {
         world,
@@ -973,7 +1082,13 @@ async fn worker(world: &World, index: u64, epoch: u64) {
                 .board
                 .ready(world.now_ms())
                 .into_iter()
-                .filter(|task| worker.board.fold().admits(task, worker.board.writer()).is_ok())
+                .filter(|task| {
+                    worker
+                        .board
+                        .fold()
+                        .admits(task, worker.board.writer())
+                        .is_ok()
+                })
                 .collect::<Vec<_>>();
             (!ready.is_empty()).then(|| ready[worker.rng.pick(ready.len())].clone())
         } else {
@@ -983,7 +1098,12 @@ async fn worker(world: &World, index: u64, epoch: u64) {
             world.nap(world.shape.poll_ms).await;
             continue;
         };
-        if let Some(Phase::Claimed { claim: held, worker: holder, .. }) = worker.board.fold().task(&task).map(|task| &task.phase) {
+        if let Some(Phase::Claimed {
+            claim: held,
+            worker: holder,
+            ..
+        }) = worker.board.fold().task(&task).map(|task| &task.phase)
+        {
             let mut oracle = world.oracle.borrow_mut();
             oracle.stats.takeovers += 1;
             let earlier = if world.shape.stable {
@@ -999,7 +1119,13 @@ async fn worker(world: &World, index: u64, epoch: u64) {
             tasks::run(&mut worker, task).await;
             continue;
         }
-        let Some(seq) = worker.submit(Op::Claim { task: task.clone(), lease_ms: world.shape.lease_ms }).await else {
+        let Some(seq) = worker
+            .submit(Op::Claim {
+                task: task.clone(),
+                lease_ms: world.shape.lease_ms,
+            })
+            .await
+        else {
             continue;
         };
         world.oracle.borrow_mut().stats.claims += 1;
@@ -1012,7 +1138,11 @@ async fn worker(world: &World, index: u64, epoch: u64) {
             .find(|entry| entry.seq == seq)
             .map(|entry| ClaimId(entry.event.0.clone()));
         if let Some(claim) = &claim {
-            world.oracle.borrow_mut().claims.insert(claim.0.clone(), epoch);
+            world
+                .oracle
+                .borrow_mut()
+                .claims
+                .insert(claim.0.clone(), epoch);
         }
         if let Some(claim) = claim
             && let Some(until) = worker.until(&task, &claim)
@@ -1023,7 +1153,11 @@ async fn worker(world: &World, index: u64, epoch: u64) {
 }
 
 async fn watcher(world: &World, epoch: u64) {
-    let writer = if world.shape.stable { format!("{}+watch", access::OWNER) } else { format!("{}+watch-e{epoch}", access::OWNER) };
+    let writer = if world.shape.stable {
+        format!("{}+watch", access::OWNER)
+    } else {
+        format!("{}+watch-e{epoch}", access::OWNER)
+    };
     let mut board = world.open(&writer).await;
     let mut rng = Rng::derive(epoch, "board watcher");
     loop {
@@ -1128,7 +1262,9 @@ impl Reference {
     fn below(&self, id: &str) -> Vec<String> {
         self.tasks
             .iter()
-            .filter(|(_, (parent, needs, _))| parent.as_deref() == Some(id) || needs.iter().any(|need| need == id))
+            .filter(|(_, (parent, needs, _))| {
+                parent.as_deref() == Some(id) || needs.iter().any(|need| need == id)
+            })
             .map(|(below, _)| below.clone())
             .collect()
     }
@@ -1149,7 +1285,10 @@ impl Reference {
             if id == above {
                 return true;
             }
-            at = self.tasks.get(&id).and_then(|(parent, _, _)| parent.clone());
+            at = self
+                .tasks
+                .get(&id)
+                .and_then(|(parent, _, _)| parent.clone());
         }
         false
     }
@@ -1197,23 +1336,39 @@ impl Reference {
                     _ => false,
                 };
                 let met = needs.iter().all(|need| self.tasks[need].2 == Expect::Done);
-                let admitted = self.assignees.get(&task.0).is_none_or(|to| nanocode_board::tasks::acts_for(by, to));
+                let admitted = self
+                    .assignees
+                    .get(&task.0)
+                    .is_none_or(|to| nanocode_board::tasks::acts_for(by, to));
                 if !(free && met && admitted) {
                     return false;
                 }
-                self.tasks.get_mut(&task.0).expect("present").2 = Expect::Claimed(id.to_owned(), now + lease_ms);
-                self.grants.entry(task.0).or_default().push((now, id.to_owned()));
+                self.tasks.get_mut(&task.0).expect("present").2 =
+                    Expect::Claimed(id.to_owned(), now + lease_ms);
+                self.grants
+                    .entry(task.0)
+                    .or_default()
+                    .push((now, id.to_owned()));
                 true
             }
-            Op::Renew { task, claim, lease_ms } if self.holds(&task, &claim) => {
-                self.tasks.get_mut(&task.0).expect("held").2 = Expect::Claimed(claim.0, now + lease_ms);
+            Op::Renew {
+                task,
+                claim,
+                lease_ms,
+            } if self.holds(&task, &claim) => {
+                self.tasks.get_mut(&task.0).expect("held").2 =
+                    Expect::Claimed(claim.0, now + lease_ms);
                 true
             }
             Op::Release { task, claim, .. } if self.holds(&task, &claim) => {
                 self.tasks.get_mut(&task.0).expect("held").2 = Expect::Open;
                 true
             }
-            Op::Finish { task, claim, outcome } if self.holds(&task, &claim) => {
+            Op::Finish {
+                task,
+                claim,
+                outcome,
+            } if self.holds(&task, &claim) => {
                 *self.finishes.entry(task.0.clone()).or_default() += 1;
                 if let Outcome::Done(_) = outcome {
                     self.tasks.get_mut(&task.0).expect("held").2 = Expect::Done;
@@ -1257,14 +1412,22 @@ impl Reference {
                     return false;
                 }
                 if let Some(parent) = &parent
-                    && (!self.tasks.contains_key(&parent.0) || self.finished(&parent.0) || self.under(&parent.0, &task.0))
+                    && (!self.tasks.contains_key(&parent.0)
+                        || self.finished(&parent.0)
+                        || self.under(&parent.0, &task.0))
                 {
                     return false;
                 }
                 self.tasks.get_mut(&task.0).expect("present").0 = parent.map(|parent| parent.0);
                 true
             }
-            Op::Renew { .. } | Op::Release { .. } | Op::Finish { .. } | Op::Reply { .. } | Op::Relabel { .. } | Op::Rank { .. } | Op::Sync { .. } => false,
+            Op::Renew { .. }
+            | Op::Release { .. }
+            | Op::Finish { .. }
+            | Op::Reply { .. }
+            | Op::Relabel { .. }
+            | Op::Rank { .. }
+            | Op::Sync { .. } => false,
             Op::Grant { .. } | Op::Revoke { .. } | Op::Charter {} => true,
             Op::Say { .. } => false,
             Op::Watch(_) => false,
@@ -1272,7 +1435,8 @@ impl Reference {
     }
 
     fn inner(&mut self, fold: &nanocode_board::Fold, id: String, by: &str, now: u64, op: Op) {
-        let accepted = self.gate.allows(by, &op, &self.tasks) && self.step(by, &id, now, op.clone());
+        let accepted =
+            self.gate.allows(by, &op, &self.tasks) && self.step(by, &id, now, op.clone());
         if accepted {
             self.gate.record(by, &id, &op);
         }
@@ -1288,8 +1452,17 @@ impl Reference {
                     self.inner(fold, format!("{id}/{index}"), by, now, op.clone());
                 }
             }
-            Step::Schedule { id: schedule, by: made, send, every_ms, .. } => {
-                self.schedules.insert(schedule.clone(), (made.clone(), (**send).clone(), every_ms.is_some()));
+            Step::Schedule {
+                id: schedule,
+                by: made,
+                send,
+                every_ms,
+                ..
+            } => {
+                self.schedules.insert(
+                    schedule.clone(),
+                    (made.clone(), (**send).clone(), every_ms.is_some()),
+                );
             }
             Step::Fire { id: schedule, n } => {
                 let Some((made, send, repeating)) = self.schedules.get(schedule).cloned() else {
@@ -1307,7 +1480,11 @@ impl Reference {
             Step::Unschedule { id: schedule, .. } => {
                 self.schedules.remove(schedule);
             }
-            Step::Watch { .. } | Step::Unwatch { .. } | Step::Take { .. } | Step::Fail { .. } | Step::Bury { .. } => {}
+            Step::Watch { .. }
+            | Step::Unwatch { .. }
+            | Step::Take { .. }
+            | Step::Fail { .. }
+            | Step::Bury { .. } => {}
         }
     }
 
@@ -1329,12 +1506,13 @@ impl Reference {
         };
         let mut fold = nanocode_board::Fold::new();
         for (seq, body) in rows {
-            fold.apply(*seq, body).map_err(|error| format!("reference refold: {error}"))?;
+            fold.apply(*seq, body)
+                .map_err(|error| format!("reference refold: {error}"))?;
         }
         let mut now = 0;
         for (seq, body) in rows {
-            let event: nanocode_board::Event =
-                serde_json::from_str(body).map_err(|error| format!("row {seq} is not an event: {error}"))?;
+            let event: nanocode_board::Event = serde_json::from_str(body)
+                .map_err(|error| format!("row {seq} is not an event: {error}"))?;
             if model.verdicts.contains_key(&event.id.0) || !access::owns(&event.by, &event.id.0) {
                 continue;
             }
@@ -1348,7 +1526,9 @@ impl Reference {
                 if let Say::Delete { message } = say
                     && model.roots.get(&message.0) == Some(&(event.by.clone(), false))
                 {
-                    model.roots.insert(message.0.clone(), (event.by.clone(), true));
+                    model
+                        .roots
+                        .insert(message.0.clone(), (event.by.clone(), true));
                     if !model.finished(&message.0) {
                         model.doom(&message.0);
                     }
@@ -1369,7 +1549,10 @@ impl Reference {
             if accepted {
                 model.gate.record(&event.by, &event.id.0, &event.op);
                 if let Op::Post { task } = &event.op {
-                    model.roots.entry(task.id.0.clone()).or_insert((event.by.clone(), false));
+                    model
+                        .roots
+                        .entry(task.id.0.clone())
+                        .or_insert((event.by.clone(), false));
                 }
             }
             model.verdicts.insert(event.id.0, accepted);
@@ -1382,25 +1565,40 @@ fn indexes(rows: &[(u64, String)]) -> Result<(), String> {
     let mut fold = nanocode_board::Fold::new();
     let mut labels = BTreeSet::new();
     for (seq, body) in rows {
-        fold.apply(*seq, body).map_err(|error| format!("refold: {error}"))?;
-        labels.extend(fold.tasks().values().flat_map(|task| task.spec.labels.clone()));
+        fold.apply(*seq, body)
+            .map_err(|error| format!("refold: {error}"))?;
+        labels.extend(
+            fold.tasks()
+                .values()
+                .flat_map(|task| task.spec.labels.clone()),
+        );
         for (key, value) in &labels {
             let live = fold.labelled(key, value).collect::<Vec<_>>();
             let scan = fold
                 .tasks()
                 .iter()
-                .filter(|(_, task)| !task.phase.terminal() && task.spec.labels.get(key) == Some(value))
+                .filter(|(_, task)| {
+                    !task.phase.terminal() && task.spec.labels.get(key) == Some(value)
+                })
                 .map(|(id, _)| id)
                 .collect::<Vec<_>>();
             if live != scan {
-                return Err(format!("after row {seq} the {key}={value} index holds {live:?}, a scan finds {scan:?}"));
+                return Err(format!(
+                    "after row {seq} the {key}={value} index holds {live:?}, a scan finds {scan:?}"
+                ));
             }
         }
         for at in [fold.now_ms(), fold.now_ms() + 60_000] {
             let ready = fold.ready(at).collect::<Vec<_>>();
-            let scan = fold.tasks().keys().filter(|id| fold.claimable(id, at).is_ok()).collect::<Vec<_>>();
+            let scan = fold
+                .tasks()
+                .keys()
+                .filter(|id| fold.claimable(id, at).is_ok())
+                .collect::<Vec<_>>();
             if ready != scan {
-                return Err(format!("after row {seq} at {at} ms the ready index says {ready:?}, a scan says {scan:?}"));
+                return Err(format!(
+                    "after row {seq} at {at} ms the ready index says {ready:?}, a scan says {scan:?}"
+                ));
             }
             for (key, value) in &labels {
                 let indexed = fold.ready_labelled(key, value, at).collect::<Vec<_>>();
@@ -1410,7 +1608,9 @@ fn indexes(rows: &[(u64, String)]) -> Result<(), String> {
                     .filter(|id| fold.tasks()[*id].spec.labels.get(key) == Some(value))
                     .collect::<Vec<_>>();
                 if indexed != scan {
-                    return Err(format!("after row {seq} the {key}={value} index says {indexed:?}, a scan says {scan:?}"));
+                    return Err(format!(
+                        "after row {seq} the {key}={value} index says {indexed:?}, a scan says {scan:?}"
+                    ));
                 }
             }
         }
@@ -1422,27 +1622,38 @@ fn resumes(rows: &[(u64, String)]) -> Result<(), String> {
     let fold = |rows: &[(u64, String)]| -> Result<nanocode_board::Fold, String> {
         let mut fold = nanocode_board::Fold::new();
         for (seq, body) in rows {
-            fold.apply(*seq, body).map_err(|error| format!("refold: {error}"))?;
+            fold.apply(*seq, body)
+                .map_err(|error| format!("refold: {error}"))?;
         }
         Ok(fold)
     };
     let full = fold(rows)?;
     let log = Arc::new(MemoryLog::new());
     if !rows.is_empty() {
-        nanocode_sync::block_on(log.append(SCOPE, rows)).map_err(|error| format!("copy the log: {error}"))?;
+        nanocode_sync::block_on(log.append(SCOPE, rows))
+            .map_err(|error| format!("copy the log: {error}"))?;
     }
     for cut in [0, rows.len() / 3, rows.len() / 2, rows.len()] {
         let held = fold(&rows[..cut])?;
         let held = if cut % 2 == 0 {
-            nanocode_board::Fold::restore(&held.snapshot()).map_err(|error| format!("restore a snapshot of {cut} rows: {error}"))?
+            nanocode_board::Fold::restore(&held.snapshot())
+                .map_err(|error| format!("restore a snapshot of {cut} rows: {error}"))?
         } else {
             held
         };
         let host: Arc<dyn LogHost> = Arc::clone(&log) as Arc<dyn LogHost>;
-        let board = nanocode_sync::block_on(Board::resume(host, SCOPE, access::identity("user:resumer"), held))
-            .map_err(|error| format!("resume from a fold of {cut} rows: {error}"))?;
+        let board = nanocode_sync::block_on(Board::resume(
+            host,
+            SCOPE,
+            access::identity("user:resumer"),
+            held,
+        ))
+        .map_err(|error| format!("resume from a fold of {cut} rows: {error}"))?;
         if board.fold() != &full {
-            return Err(format!("a board resumed from a fold of {cut} rows differs from a full replay of {} rows", rows.len()));
+            return Err(format!(
+                "a board resumed from a fold of {cut} rows differs from a full replay of {} rows",
+                rows.len()
+            ));
         }
     }
     Ok(())
@@ -1451,7 +1662,8 @@ fn resumes(rows: &[(u64, String)]) -> Result<(), String> {
 fn check(world: &World, rows: &[(u64, String)]) -> Result<BoardStats, String> {
     let mut fold = nanocode_board::Fold::new();
     for (seq, body) in rows {
-        fold.apply(*seq, body).map_err(|error| format!("refold: {error}"))?;
+        fold.apply(*seq, body)
+            .map_err(|error| format!("refold: {error}"))?;
     }
     let oracle = world.oracle.borrow();
     if let Some(wrong) = oracle.wrong.first() {
@@ -1473,14 +1685,18 @@ fn check(world: &World, rows: &[(u64, String)]) -> Result<BoardStats, String> {
         let (_, _, expect) = &model.tasks[&id.0];
         let actual = match &task.phase {
             Phase::Open => Expect::Open,
-            Phase::Claimed { claim, until_ms, .. } => Expect::Claimed(claim.0.clone(), *until_ms),
+            Phase::Claimed {
+                claim, until_ms, ..
+            } => Expect::Claimed(claim.0.clone(), *until_ms),
             Phase::Done { .. } => Expect::Done,
             Phase::Failed { .. } => Expect::Failed,
             Phase::Cancelled { .. } => Expect::Cancelled,
             Phase::Blocked { .. } => Expect::Blocked,
         };
         if actual != *expect {
-            return Err(format!("{id}: the board says {actual:?}, the reference model says {expect:?}"));
+            return Err(format!(
+                "{id}: the board says {actual:?}, the reference model says {expect:?}"
+            ));
         }
         if !actual.terminal() {
             return Err(format!("{id} never settled: {actual:?}"));
@@ -1496,11 +1712,18 @@ fn check(world: &World, rows: &[(u64, String)]) -> Result<BoardStats, String> {
         }
     }
     for (task, claim, at_ms) in &oracle.effects {
-        let grants = model.grants.get(&task.0).map(Vec::as_slice).unwrap_or_default();
+        let grants = model
+            .grants
+            .get(&task.0)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         let Some(mine) = grants.iter().position(|(_, held)| *held == claim.0) else {
             return Err(format!("{task}: {claim} acted without a granted claim"));
         };
-        if let Some((granted, by)) = grants[mine + 1..].iter().find(|(granted, _)| granted < at_ms) {
+        if let Some((granted, by)) = grants[mine + 1..]
+            .iter()
+            .find(|(granted, _)| granted < at_ms)
+        {
             return Err(format!(
                 "{task}: {claim} acted at {at_ms} ms, after {by} took the task over at {granted} ms"
             ));
@@ -1508,15 +1731,23 @@ fn check(world: &World, rows: &[(u64, String)]) -> Result<BoardStats, String> {
     }
     let mut landed = BTreeMap::new();
     for (seq, body) in rows {
-        let event: nanocode_board::Event =
-            serde_json::from_str(body).map_err(|error| format!("row {seq} is not an event: {error}"))?;
+        let event: nanocode_board::Event = serde_json::from_str(body)
+            .map_err(|error| format!("row {seq} is not an event: {error}"))?;
         landed.entry(event.id.0).or_insert(*seq);
     }
     for (id, sent) in &oracle.sent {
         match (sent, landed.get(id)) {
             (Sent::Applied(seq), Some(at)) if seq == at => {}
-            (Sent::Applied(seq), at) => return Err(format!("{id} was applied at row {seq} but the log holds it at {at:?}")),
-            (Sent::Failed, Some(at)) => return Err(format!("{id} was reported as not written but landed at row {at}")),
+            (Sent::Applied(seq), at) => {
+                return Err(format!(
+                    "{id} was applied at row {seq} but the log holds it at {at:?}"
+                ));
+            }
+            (Sent::Failed, Some(at)) => {
+                return Err(format!(
+                    "{id} was reported as not written but landed at row {at}"
+                ));
+            }
             (Sent::Failed | Sent::Rejected | Sent::Unsettled, _) => {}
         }
     }
@@ -1525,12 +1756,14 @@ fn check(world: &World, rows: &[(u64, String)]) -> Result<BoardStats, String> {
             continue;
         }
         let task = pr_task(hook.pr);
-        let copies = model
-            .replies
-            .get(&task.0)
-            .map_or(0, |replies| replies.iter().filter(|body| **body == hook.key).count());
+        let copies = model.replies.get(&task.0).map_or(0, |replies| {
+            replies.iter().filter(|body| **body == hook.key).count()
+        });
         if copies != 1 {
-            return Err(format!("firehose event {} landed {copies} times on {task}", hook.key));
+            return Err(format!(
+                "firehose event {} landed {copies} times on {task}",
+                hook.key
+            ));
         }
     }
     let terminal = fold
@@ -1594,16 +1827,25 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
     loop {
         let crash_at = crashes.get(number as usize).map(|ms| ms * MS);
         let last = crash_at.is_none();
-        let deadline = clock.now_ns() + (world.shape.deadline_ms + world.watched.shape.slack_ms()) * MS;
-        let mut executor = Executor::new(Arc::clone(&clock), Rng::derive(seed, &format!("board scheduler {number}")));
+        let deadline =
+            clock.now_ns() + (world.shape.deadline_ms + world.watched.shape.slack_ms()) * MS;
+        let mut executor = Executor::new(
+            Arc::clone(&clock),
+            Rng::derive(seed, &format!("board scheduler {number}")),
+        );
         let task: Task<'_> = Box::pin(epoch(&world, number));
-        let ended = executor.run(vec![task], Some(crash_at.map_or(deadline, |at| at.max(clock.now_ns()))));
+        let ended = executor.run(
+            vec![task],
+            Some(crash_at.map_or(deadline, |at| at.max(clock.now_ns()))),
+        );
         drop(executor);
         match ended {
             Ended::Finished if last => break,
             Ended::Finished => {}
             Ended::Crashed if last => {
-                let rows = nanocode_sync::block_on(world.host.inner.scan(SCOPE, 0, i64::MAX as u64)).unwrap_or_default();
+                let rows =
+                    nanocode_sync::block_on(world.host.inner.scan(SCOPE, 0, i64::MAX as u64))
+                        .unwrap_or_default();
                 let mut fold = nanocode_board::Fold::new();
                 for (seq, body) in &rows {
                     let _ = fold.apply(*seq, body);
@@ -1613,7 +1855,10 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
                     .iter()
                     .filter(|(_, task)| !task.finished())
                     .map(|(id, task)| {
-                        format!("{id}={:?} to={:?} needs={:?}", task.phase, task.assignee, task.spec.needs)
+                        format!(
+                            "{id}={:?} to={:?} needs={:?}",
+                            task.phase, task.assignee, task.spec.needs
+                        )
                     })
                     .take(4)
                     .collect::<Vec<_>>();
@@ -1639,7 +1884,8 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
         number += 1;
     }
     let live = access::live(&world);
-    let rows = nanocode_sync::block_on(world.host.inner.scan(SCOPE, 0, i64::MAX as u64)).unwrap_or_default();
+    let rows = nanocode_sync::block_on(world.host.inner.scan(SCOPE, 0, i64::MAX as u64))
+        .unwrap_or_default();
     let indexed = indexes(&rows);
     let resumed = resumes(&rows);
     let due = due::run(seed);
@@ -1652,14 +1898,19 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
         digest = fnv(digest, &seq.to_le_bytes());
         digest = fnv(digest, body.as_bytes());
     }
-    let verdict = wrong.map_or_else(|| check(&world, &rows), Err).and_then(|mut stats| {
-        let due = due?;
-        stats.due_runs = due.runs;
-        stats.due_retries = due.retries;
-        stats.due_restarts = due.restarts;
-        Ok(stats)
-    });
-    let mut stats = verdict.as_ref().copied().unwrap_or_else(|_| world.oracle.borrow().stats);
+    let verdict = wrong
+        .map_or_else(|| check(&world, &rows), Err)
+        .and_then(|mut stats| {
+            let due = due?;
+            stats.due_runs = due.runs;
+            stats.due_retries = due.retries;
+            stats.due_restarts = due.restarts;
+            Ok(stats)
+        });
+    let mut stats = verdict
+        .as_ref()
+        .copied()
+        .unwrap_or_else(|_| world.oracle.borrow().stats);
     stats.seeds = 1;
     stats.stable = u64::from(world.shape.stable);
     stats.tasks = world.expected() as u64;
@@ -1691,14 +1942,25 @@ pub fn run_seed(seed: u64, mutation: BoardMutation) -> BoardOutcome {
     })
 }
 
-pub fn judge(seed: u64, mutation: BoardMutation, twice: bool, verbose: bool, totals: &mut BoardStats) -> Option<String> {
+pub fn judge(
+    seed: u64,
+    mutation: BoardMutation,
+    twice: bool,
+    verbose: bool,
+    totals: &mut BoardStats,
+) -> Option<String> {
     let first = run_seed(seed, mutation);
     totals.add(&first.stats);
     if verbose {
-        println!("seed {seed} digest {:016x} {} stats={:?}", first.digest, first.shape, first.stats);
+        println!(
+            "seed {seed} digest {:016x} {} stats={:?}",
+            first.digest, first.shape, first.stats
+        );
     }
     if first.wrong.is_some() || !twice {
-        return first.wrong.map(|message| format!("{} :: {message}", first.shape));
+        return first
+            .wrong
+            .map(|message| format!("{} :: {message}", first.shape));
     }
     let second = run_seed(seed, mutation);
     (second.digest != first.digest || second.wrong.is_some()).then(|| {
@@ -1718,7 +1980,14 @@ pub fn replay(seed: u64, mutation: BoardMutation) -> String {
     command
 }
 
-pub fn report(seeds: &Range<u64>, passed: u64, failed: u64, twice: bool, mutation: BoardMutation, totals: &BoardStats) -> ExitCode {
+pub fn report(
+    seeds: &Range<u64>,
+    passed: u64,
+    failed: u64,
+    twice: bool,
+    mutation: BoardMutation,
+    totals: &BoardStats,
+) -> ExitCode {
     println!("{}", watching::summary());
     println!(
         "RESULT seeds={}..{} scenario=board mutation={} passed={passed} failed={failed} twice={twice} stats={totals:?}",
@@ -1739,4 +2008,3 @@ pub fn report(seeds: &Range<u64>, passed: u64, failed: u64, twice: bool, mutatio
         }
     }
 }
-

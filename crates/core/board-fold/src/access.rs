@@ -417,7 +417,9 @@ impl Fold {
         if access.owner.is_none() {
             return Err(Rejection::Access(Denied::Unchartered));
         }
-        if mutated(Mutation::GrantsIgnored) || (matches!(op, Op::Tasks(_)) && mutated(Mutation::TasksUnchecked)) {
+        if mutated(Mutation::GrantsIgnored)
+            || (matches!(op, Op::Tasks(_)) && mutated(Mutation::TasksUnchecked))
+        {
             return Ok(());
         }
         match op {
@@ -492,7 +494,11 @@ impl Fold {
                     {
                         return Err(Rejection::UnknownParent(parent.clone()));
                     }
-                    if let Some(need) = task.needs.iter().find(|need| !access.reads(&actor, &need.0)) {
+                    if let Some(need) = task
+                        .needs
+                        .iter()
+                        .find(|need| !access.reads(&actor, &need.0))
+                    {
                         return Err(Rejection::UnknownNeed(need.clone()));
                     }
                     access.need(&actor, &task.id.0, Can::Read)?;

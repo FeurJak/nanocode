@@ -1325,7 +1325,12 @@ impl<L: TurnLog + ?Sized> TurnInbox<L> {
             }
             SteerReceiptStatus::Unknown => return Ok(MovedQueued::Unknown),
         }
-        if self.runtime.steer_read(self.session_id(), queued_id).await? == Some(true) {
+        if self
+            .runtime
+            .steer_read(self.session_id(), queued_id)
+            .await?
+            == Some(true)
+        {
             self.withdraw_steered(&queued).await?;
         }
         Ok(MovedQueued::Moved)
@@ -1490,7 +1495,9 @@ impl<L: TurnLog + ?Sized> TurnInbox<L> {
             .control()
             .close_all(self.session_id())
             .await
-            .map_err(|error| InboxError::Events(format!("closing the request's subagents failed: {error}")))?;
+            .map_err(|error| {
+                InboxError::Events(format!("closing the request's subagents failed: {error}"))
+            })?;
         Ok(())
     }
 

@@ -64,10 +64,11 @@ impl Board {
         let key = format!("batch/{name}");
         self.submit_keyed(&key, at_ms, Op::Tasks(TaskOp::Batch { name, tasks }))
             .await?;
-        if placed
-            .iter()
-            .any(|task| self.fold.task(&task.id).is_none_or(|landed| !placed_as(&landed.spec, task)))
-        {
+        if placed.iter().any(|task| {
+            self.fold
+                .task(&task.id)
+                .is_none_or(|landed| !placed_as(&landed.spec, task))
+        }) {
             return Err(BoardError::Rejected(Rejection::Tasks(Refusal::Duplicate)));
         }
         Ok(placed.into_iter().map(|task| task.id).collect())
@@ -139,10 +140,16 @@ impl Board {
                     None => wake = pace.now_ms() + third,
                 },
                 Err(BoardError::Rejected(_)) if mutated(Mutation::RunIgnoresLoss) => {
-                    lease.until.store(pace.now_ms() + lease_ms, Ordering::Release);
+                    lease
+                        .until
+                        .store(pace.now_ms() + lease_ms, Ordering::Release);
                     wake = pace.now_ms() + third;
                 }
-                Err(error @ (BoardError::Rejected(_) | BoardError::Corrupt { .. } | BoardError::Dropped(_))) => {
+                Err(
+                    error @ (BoardError::Rejected(_)
+                    | BoardError::Corrupt { .. }
+                    | BoardError::Dropped(_)),
+                ) => {
                     return error;
                 }
                 Err(BoardError::Store(_) | BoardError::Unsettled { .. }) => {

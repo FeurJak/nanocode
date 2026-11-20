@@ -314,7 +314,11 @@ impl Ledger {
         Ok(Applied::Recorded)
     }
 
-    fn link<'a>(&'a self, parent: Option<&str>, task: Option<&'a str>) -> Option<(&'a str, &'a str)> {
+    fn link<'a>(
+        &'a self,
+        parent: Option<&str>,
+        task: Option<&'a str>,
+    ) -> Option<(&'a str, &'a str)> {
         let above = self.task_of(parent?)?;
         let task = task?;
         (task != above).then_some((task, above))
@@ -373,7 +377,10 @@ impl Ledger {
                         .insert(task.clone());
                     self.task_parents.insert(task, above);
                 }
-                if let Some(node) = parent.as_ref().and_then(|parent| self.agents.get_mut(parent)) {
+                if let Some(node) = parent
+                    .as_ref()
+                    .and_then(|parent| self.agents.get_mut(parent))
+                {
                     node.children.insert(agent.clone());
                 }
                 self.agents.insert(

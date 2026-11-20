@@ -589,20 +589,23 @@ fn simulate(seed: u64, mutation: TasksMutation) -> TasksOutcome {
     if let Some(slept) = &slept {
         digest = fnv(digest, &slept.naps.to_le_bytes());
     }
-    let wrong = check(&script, &notes, &joined).and(busy).and_then(|()| {
-        match threaded
-            .as_ref()
-            .and_then(|threaded| threaded.stalled.clone())
-        {
-            Some(stalled) => Err(stalled),
-            None => Ok(()),
-        }
-    }).and_then(|()| {
-        match slept.as_ref().and_then(|slept| slept.stalled.clone()) {
-            Some(stalled) => Err(stalled),
-            None => Ok(()),
-        }
-    });
+    let wrong = check(&script, &notes, &joined)
+        .and(busy)
+        .and_then(|()| {
+            match threaded
+                .as_ref()
+                .and_then(|threaded| threaded.stalled.clone())
+            {
+                Some(stalled) => Err(stalled),
+                None => Ok(()),
+            }
+        })
+        .and_then(
+            |()| match slept.as_ref().and_then(|slept| slept.stalled.clone()) {
+                Some(stalled) => Err(stalled),
+                None => Ok(()),
+            },
+        );
     let count =
         |test: fn(&(usize, Joined)) -> bool| wide(joined.iter().filter(|item| test(item)).count());
     TasksOutcome {

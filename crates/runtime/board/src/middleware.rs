@@ -98,7 +98,10 @@ impl Chain {
             self.vetted.pop_front();
         }
         self.vetted.push_back((id.clone(), kept.clone()));
-        assert!(self.vetted.len() <= REMEMBERED, "the chain remembers a bounded window");
+        assert!(
+            self.vetted.len() <= REMEMBERED,
+            "the chain remembers a bounded window"
+        );
         kept.map_err(BoardError::Dropped)
     }
 

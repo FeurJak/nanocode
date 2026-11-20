@@ -11,7 +11,7 @@ use nanocode_board::{
     tasks::{Need, OnFail, Pace, Planned, Refusal, TaskOp},
 };
 
-use super::{Expect, Reference, World, Worker};
+use super::{Expect, Reference, Worker, World};
 use crate::rng::Rng;
 
 const STEPS: [&str; 6] = ["goal", "lane", "fix", "verify", "consolidate", "review"];
@@ -87,7 +87,11 @@ impl Plan {
 
 fn planned(world: &World, lane: &TaskId) -> Vec<Planned> {
     let prefix = format!("{lane}/");
-    let key = |id: &TaskId| id.0.strip_prefix(&prefix).expect("a lane's tasks are named under it").to_owned();
+    let key = |id: &TaskId| {
+        id.0.strip_prefix(&prefix)
+            .expect("a lane's tasks are named under it")
+            .to_owned()
+    };
     world
         .shape
         .plan
@@ -104,9 +108,17 @@ fn planned(world: &World, lane: &TaskId) -> Vec<Planned> {
         .collect()
 }
 
-async fn send(world: &World, board: &mut Board, name: &TaskId, tasks: &[Planned]) -> Result<(), BoardError> {
+async fn send(
+    world: &World,
+    board: &mut Board,
+    name: &TaskId,
+    tasks: &[Planned],
+) -> Result<(), BoardError> {
     loop {
-        match board.batch(world.now_ms(), name.clone(), tasks.to_vec()).await {
+        match board
+            .batch(world.now_ms(), name.clone(), tasks.to_vec())
+            .await
+        {
             Ok(_) => return Ok(()),
             Err(error @ BoardError::Rejected(_)) => return Err(error),
             Err(error) => {
@@ -119,8 +131,14 @@ async fn send(world: &World, board: &mut Board, name: &TaskId, tasks: &[Planned]
 
 pub async fn post_batch(world: &World, board: &mut Board, lane: &TaskId) {
     match send(world, board, lane, &planned(world, lane)).await {
-        Ok(()) | Err(BoardError::Rejected(Rejection::Exists)) => world.oracle.borrow_mut().stats.batched += 1,
-        Err(error) => world.oracle.borrow_mut().wrong.push(format!("lead could not post the batch {lane}: {error}")),
+        Ok(()) | Err(BoardError::Rejected(Rejection::Exists)) => {
+            world.oracle.borrow_mut().stats.batched += 1
+        }
+        Err(error) => world
+            .oracle
+            .borrow_mut()
+            .wrong
+            .push(format!("lead could not post the batch {lane}: {error}")),
     }
 }
 
@@ -133,10 +151,25 @@ pub async fn junk(world: &World, board: &mut Board) {
         needs: vec![Need::Key(need.to_owned())],
         terms: nanocode_board::tasks::Terms::default(),
     };
-    match send(world, board, &TaskId("junk".to_owned()), &[task("a", "b"), task("b", "a")]).await {
+    match send(
+        world,
+        board,
+        &TaskId("junk".to_owned()),
+        &[task("a", "b"), task("b", "a")],
+    )
+    .await
+    {
         Err(BoardError::Rejected(Rejection::Tasks(Refusal::Cycle(_)))) => {}
-        Ok(()) => world.oracle.borrow_mut().wrong.push("the board took a batch whose tasks need each other".to_owned()),
-        Err(error) => world.oracle.borrow_mut().wrong.push(format!("the looping batch was refused for {error}")),
+        Ok(()) => world
+            .oracle
+            .borrow_mut()
+            .wrong
+            .push("the board took a batch whose tasks need each other".to_owned()),
+        Err(error) => world
+            .oracle
+            .borrow_mut()
+            .wrong
+            .push(format!("the looping batch was refused for {error}")),
     }
 }
 
@@ -159,13 +192,23 @@ fn expected(board: &Board, labels: &BTreeMap<String, String>, now: u64) -> Optio
             Phase::Claimed { until_ms, .. } => *until_ms <= at,
             _ => false,
         };
-        let met = task
-            .spec
-            .needs
-            .iter()
-            .all(|need| matches!(fold.task(need).map(|need| &need.phase), Some(Phase::Done { .. })));
-        let assigned = if mine { task.assignee.as_deref() == Some(me) } else { task.assignee.is_none() };
-        free && met && assigned && board.may(&id.0, Can::Label) && labels.iter().all(|(key, value)| task.spec.labels.get(key) == Some(value))
+        let met = task.spec.needs.iter().all(|need| {
+            matches!(
+                fold.task(need).map(|need| &need.phase),
+                Some(Phase::Done { .. })
+            )
+        });
+        let assigned = if mine {
+            task.assignee.as_deref() == Some(me)
+        } else {
+            task.assignee.is_none()
+        };
+        free && met
+            && assigned
+            && board.may(&id.0, Can::Label)
+            && labels
+                .iter()
+                .all(|(key, value)| task.spec.labels.get(key) == Some(value))
     };
     order
         .iter()
@@ -189,7 +232,10 @@ pub fn pick(world: &World, board: &Board, rng: &mut Rng) -> Option<TaskId> {
         let mut oracle = world.oracle.borrow_mut();
         oracle.stats.picks += 1;
         if got != want {
-            oracle.wrong.push(format!("{} picked {got:?} for {filter:?}, the best-ranked ready task for it is {want:?}", board.writer()));
+            oracle.wrong.push(format!(
+                "{} picked {got:?} for {filter:?}, the best-ranked ready task for it is {want:?}",
+                board.writer()
+            ));
         }
         if got.is_some() {
             return got;
@@ -211,7 +257,11 @@ impl Pace for Drowsy<'_> {
     fn sleep(&self, ms: u64) -> Pin<Box<dyn Future<Output = ()> + '_>> {
         let lease_ms = self.world.shape.lease_ms;
         let mut rng = self.rng.borrow_mut();
-        let extra = if rng.chance(self.world.shape.tasks.drowse_ppm) { lease_ms + rng.range(1, lease_ms) } else { 0 };
+        let extra = if rng.chance(self.world.shape.tasks.drowse_ppm) {
+            lease_ms + rng.range(1, lease_ms)
+        } else {
+            0
+        };
         Box::pin(self.world.nap(ms + extra))
     }
 }
@@ -219,9 +269,14 @@ impl Pace for Drowsy<'_> {
 pub async fn run(worker: &mut Worker<'_>, task: TaskId) {
     let world = worker.world;
     let shape = &world.shape;
-    let steps = (0..worker.rng.range(1, 6)).map(|_| worker.rng.range(1, shape.step_ms)).collect::<Vec<_>>();
+    let steps = (0..worker.rng.range(1, 6))
+        .map(|_| worker.rng.range(1, shape.step_ms))
+        .collect::<Vec<_>>();
     let failed = worker.rng.chance(shape.fail_ppm);
-    let pace = Drowsy { world, rng: RefCell::new(Rng::derive(worker.rng.draw(), "board drowse")) };
+    let pace = Drowsy {
+        world,
+        rng: RefCell::new(Rng::derive(worker.rng.draw(), "board drowse")),
+    };
     world.oracle.borrow_mut().stats.runs += 1;
     let ran = worker
         .board
@@ -229,7 +284,11 @@ pub async fn run(worker: &mut Worker<'_>, task: TaskId) {
             for step in steps {
                 world.nap(step).await;
                 if world.now_ms() < lease.until_ms() {
-                    world.oracle.borrow_mut().effects.push((lease.task.clone(), lease.claim.clone(), world.now_ms()));
+                    world.oracle.borrow_mut().effects.push((
+                        lease.task.clone(),
+                        lease.claim.clone(),
+                        world.now_ms(),
+                    ));
                 }
             }
             if failed {
@@ -277,7 +336,8 @@ pub async fn desk(world: &World, epoch: u64) {
             let op = match phase {
                 Phase::Blocked { .. } => {
                     let at = *since.entry(id.clone()).or_insert(now);
-                    (now >= at + plan.hold_ms).then(|| Op::Tasks(TaskOp::Unblock { task: id.clone() }))
+                    (now >= at + plan.hold_ms)
+                        .then(|| Op::Tasks(TaskOp::Unblock { task: id.clone() }))
                 }
                 Phase::Failed { .. } if *on_fail == OnFail::Wait => {
                     let mut reopens = world.reopens.borrow_mut();
@@ -286,7 +346,10 @@ pub async fn desk(world: &World, epoch: u64) {
                     Some(if *tries <= TRIES {
                         Op::Tasks(TaskOp::Reopen { task: id.clone() })
                     } else {
-                        Op::Cancel { task: id.clone(), reason: "gave up after retries".to_owned() }
+                        Op::Cancel {
+                            task: id.clone(),
+                            reason: "gave up after retries".to_owned(),
+                        }
                     })
                 }
                 _ => None,
@@ -317,7 +380,9 @@ pub async fn desk(world: &World, epoch: u64) {
                 },
                 _ => TaskOp::Assign {
                     task,
-                    to: rng.chance(500_000).then(|| format!("agent:w{}", rng.below(world.shape.workers))),
+                    to: rng
+                        .chance(500_000)
+                        .then(|| format!("agent:w{}", rng.below(world.shape.workers))),
                 },
             };
             if let Err(error) = world.submit(&mut board, Op::Tasks(op)).await {
@@ -356,7 +421,9 @@ impl Reference {
     }
 
     pub(super) fn steer(&mut self, op: TaskOp, now: u64) -> bool {
-        let phase = |model: &Self, task: &TaskId| model.tasks.get(&task.0).map(|(_, _, phase)| phase.clone());
+        let phase = |model: &Self, task: &TaskId| {
+            model.tasks.get(&task.0).map(|(_, _, phase)| phase.clone())
+        };
         match op {
             TaskOp::Block { task, claim, .. } => {
                 let may = match (phase(self, &task), &claim) {
@@ -374,12 +441,16 @@ impl Reference {
                 self.tasks.get_mut(&task.0).expect("present").2 = Expect::Open;
                 true
             }
-            TaskOp::Reopen { task } if phase(self, &task) == Some(Expect::Failed) && self.waits.contains(&task.0) => {
+            TaskOp::Reopen { task }
+                if phase(self, &task) == Some(Expect::Failed) && self.waits.contains(&task.0) =>
+            {
                 self.tasks.get_mut(&task.0).expect("present").2 = Expect::Open;
                 *self.reopens.entry(task.0).or_default() += 1;
                 true
             }
-            TaskOp::Assign { task, to } if self.tasks.contains_key(&task.0) && !self.finished(&task.0) => {
+            TaskOp::Assign { task, to }
+                if self.tasks.contains_key(&task.0) && !self.finished(&task.0) =>
+            {
                 match to {
                     Some(to) => {
                         self.assignees.insert(task.0, to);
@@ -397,11 +468,16 @@ impl Reference {
 
     fn batch(&mut self, name: &TaskId, tasks: &[Planned]) -> bool {
         let id = |key: &str| format!("{}/{key}", name.0);
-        let keys = tasks.iter().map(|task| task.key.as_str()).collect::<BTreeSet<_>>();
+        let keys = tasks
+            .iter()
+            .map(|task| task.key.as_str())
+            .collect::<BTreeSet<_>>();
         if tasks.is_empty()
             || tasks.len() > nanocode_board::tasks::BATCH
             || keys.len() != tasks.len()
-            || tasks.iter().any(|task| self.tasks.contains_key(&id(&task.key)))
+            || tasks
+                .iter()
+                .any(|task| self.tasks.contains_key(&id(&task.key)))
         {
             return false;
         }
@@ -422,8 +498,15 @@ impl Reference {
         let mut left = tasks.iter().collect::<Vec<_>>();
         loop {
             let before = left.len();
-            let waiting = left.iter().map(|task| task.key.clone()).collect::<BTreeSet<_>>();
-            left.retain(|task| task.needs.iter().any(|need| matches!(need, Need::Key(key) if waiting.contains(key))));
+            let waiting = left
+                .iter()
+                .map(|task| task.key.clone())
+                .collect::<BTreeSet<_>>();
+            left.retain(|task| {
+                task.needs
+                    .iter()
+                    .any(|need| matches!(need, Need::Key(key) if waiting.contains(key)))
+            });
             if left.is_empty() {
                 break;
             }
@@ -438,7 +521,11 @@ impl Reference {
         for task in tasks {
             self.tasks.insert(
                 id(&task.key),
-                (task.parent.as_ref().map(resolve), task.needs.iter().map(resolve).collect(), Expect::Open),
+                (
+                    task.parent.as_ref().map(resolve),
+                    task.needs.iter().map(resolve).collect(),
+                    Expect::Open,
+                ),
             );
             if let Some(to) = &task.terms.assignee {
                 self.assignees.insert(id(&task.key), to.clone());
