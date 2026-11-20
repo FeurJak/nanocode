@@ -320,7 +320,12 @@ struct Mixed {
 impl FileSystem for Mixed {
     fn stat(&self, path: &[u8], follow: bool) -> Reply<nanocode_shell::Stat> {
         if self.tree.holds(path) {
-            Reply::Now(self.tree.stat(path).map(unstat))
+            let found = if follow {
+                self.tree.stat(path)
+            } else {
+                self.tree.lstat(path)
+            };
+            Reply::Now(found.map(unstat))
         } else {
             self.real.stat(path, follow)
         }
@@ -382,6 +387,22 @@ impl FileSystem for Mixed {
         }
     }
 
+    fn symlink(&self, target: &[u8], link: &[u8]) -> Reply<()> {
+        if self.tree.holds(link) {
+            Reply::Now(self.tree.symlink(target, link))
+        } else {
+            self.real.symlink(target, link)
+        }
+    }
+
+    fn read_link(&self, path: &[u8]) -> Reply<Vec<u8>> {
+        if self.tree.holds(path) {
+            Reply::Now(self.tree.read_link(path))
+        } else {
+            self.real.read_link(path)
+        }
+    }
+
     fn answers_now(&self) -> bool {
         false
     }
@@ -424,6 +445,18 @@ impl Files for Direct {
 
     fn set_mode(&self, path: &[u8], mode: u32) -> io::Result<()> {
         now(self.files.set_mode(path, mode))
+    }
+
+    fn lstat(&self, path: &[u8]) -> io::Result<Stat> {
+        now(self.files.stat(path, false)).map(stat)
+    }
+
+    fn symlink(&self, target: &[u8], link: &[u8]) -> io::Result<()> {
+        now(self.files.symlink(target, link))
+    }
+
+    fn read_link(&self, path: &[u8]) -> io::Result<Vec<u8>> {
+        now(self.files.read_link(path))
     }
 
     fn spawns(&self) -> bool {
@@ -500,6 +533,9 @@ async fn apply(tree: &Tree, files: &Rc<dyn FileSystem>) -> io::Result<()> {
     }
     for (path, mode) in &delta.modes {
         files.set_mode(path, *mode).get().await?;
+    }
+    for (link, target) in &delta.linked {
+        files.symlink(target, link).get().await?;
     }
     Ok(())
 }

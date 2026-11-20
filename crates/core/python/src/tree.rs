@@ -19,6 +19,8 @@ pub struct Delta {
     pub made: Vec<(Vec<u8>, u32)>,
     pub written: Vec<Vec<u8>>,
     pub modes: Vec<(Vec<u8>, u32)>,
+    /// Symlinks Python made, as (link, target).
+    pub linked: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 enum Node {
@@ -48,6 +50,8 @@ pub struct Tree {
     roots: Vec<Vec<u8>>,
     first: RefCell<BTreeMap<Vec<u8>, Kind>>,
     nodes: RefCell<BTreeMap<Vec<u8>, Node>>,
+    /// Symlinks Python made here, by path, each with its target as given.
+    links: RefCell<BTreeMap<Vec<u8>, Vec<u8>>>,
 }
 
 fn parent(path: &[u8]) -> &[u8] {
@@ -67,6 +71,28 @@ fn under(path: &[u8], dir: &[u8]) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with(b"/") || dir == b"/")
 }
 
+fn normalize(path: &[u8]) -> Vec<u8> {
+    let mut parts: Vec<&[u8]> = Vec::new();
+    for part in path.split(|&byte| byte == b'/') {
+        match part {
+            b"" | b"." => {}
+            b".." => {
+                parts.pop();
+            }
+            part => parts.push(part),
+        }
+    }
+    let mut out = Vec::new();
+    for part in parts {
+        out.push(b'/');
+        out.extend_from_slice(part);
+    }
+    if out.is_empty() {
+        out.push(b'/');
+    }
+    out
+}
+
 fn now() -> i64 {
     nanocode_platform::system_time()
         .duration_since(std::time::UNIX_EPOCH)
@@ -83,6 +109,7 @@ impl Tree {
             roots,
             first: RefCell::new(BTreeMap::new()),
             nodes: RefCell::new(BTreeMap::new()),
+            links: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -117,6 +144,9 @@ impl Tree {
                 delta.removed.push(path.clone());
             }
         }
+        for (path, target) in self.links.borrow().iter() {
+            delta.linked.push((path.clone(), target.clone()));
+        }
         for (path, node) in nodes.iter() {
             match node {
                 Node::Dir { mode, .. } if first.get(path) != Some(&Kind::Dir) => {
@@ -150,6 +180,27 @@ impl Tree {
         self.roots.iter().any(|root| under(path, root))
     }
 
+    /// Where a path leads once the symlinks Python made here are followed.
+    fn resolve(&self, path: &[u8]) -> io::Result<Vec<u8>> {
+        let links = self.links.borrow();
+        let mut path = path.to_vec();
+        for _ in 0..40 {
+            let Some(target) = links.get(&path) else {
+                return Ok(path);
+            };
+            path = if target.starts_with(b"/") {
+                normalize(target)
+            } else {
+                let mut joined = parent(&path).to_vec();
+                joined.push(b'/');
+                joined.extend_from_slice(target);
+                normalize(&joined)
+            };
+            self.within(&path)?;
+        }
+        Err(io::Error::other("Too many levels of symbolic links"))
+    }
+
     fn within(&self, path: &[u8]) -> io::Result<()> {
         if self.holds(path) {
             Ok(())
@@ -165,6 +216,7 @@ impl Tree {
 impl Files for Tree {
     fn stat(&self, path: &[u8]) -> io::Result<Stat> {
         self.within(path)?;
+        let path = &self.resolve(path)?[..];
         match self.nodes.borrow().get(path) {
             Some(Node::File {
                 data,
@@ -189,6 +241,7 @@ impl Files for Tree {
 
     fn read(&self, path: &[u8], _limit: u64) -> io::Result<Vec<u8>> {
         self.within(path)?;
+        let path = &self.resolve(path)?[..];
         match self.nodes.borrow().get(path) {
             Some(Node::File { data, .. }) => Ok(data.clone()),
             Some(Node::Dir { .. }) => Err(io::ErrorKind::IsADirectory.into()),
@@ -198,6 +251,7 @@ impl Files for Tree {
 
     fn write(&self, path: &[u8], more: &[u8], write: Write) -> io::Result<()> {
         self.within(path)?;
+        let path = &self.resolve(path)?[..];
         let mut nodes = self.nodes.borrow_mut();
         if !matches!(nodes.get(parent(path)), Some(Node::Dir { .. })) {
             return Err(missing());
@@ -249,6 +303,7 @@ impl Files for Tree {
 
     fn set_mode(&self, path: &[u8], mode: u32) -> io::Result<()> {
         self.within(path)?;
+        let path = &self.resolve(path)?[..];
         match self.nodes.borrow_mut().get_mut(path) {
             Some(Node::File {
                 mode: kept, moded, ..
@@ -271,6 +326,7 @@ impl Files for Tree {
         match nodes.get(path) {
             Some(Node::Dir { .. }) => Ok(nodes
                 .keys()
+                .chain(self.links.borrow().keys())
                 .filter(|other| other.len() > path.len() && parent(other) == path)
                 .map(|other| name(other).to_vec())
                 .collect()),
@@ -282,7 +338,7 @@ impl Files for Tree {
     fn mkdir(&self, path: &[u8], mode: u32) -> io::Result<()> {
         self.within(path)?;
         let mut nodes = self.nodes.borrow_mut();
-        if nodes.contains_key(path) {
+        if nodes.contains_key(path) || self.links.borrow().contains_key(path) {
             return Err(io::ErrorKind::AlreadyExists.into());
         }
         if !matches!(nodes.get(parent(path)), Some(Node::Dir { .. })) {
@@ -295,6 +351,13 @@ impl Files for Tree {
 
     fn remove(&self, path: &[u8], remove: Remove) -> io::Result<()> {
         self.within(path)?;
+        if self.links.borrow().contains_key(path) {
+            if matches!(remove, Remove::Dir) {
+                return Err(io::ErrorKind::NotADirectory.into());
+            }
+            self.links.borrow_mut().remove(path);
+            return Ok(());
+        }
         let mut nodes = self.nodes.borrow_mut();
         match (nodes.get(path), remove) {
             (None, _) => return Err(missing()),
@@ -324,6 +387,17 @@ impl Files for Tree {
     fn rename(&self, from: &[u8], to: &[u8]) -> io::Result<()> {
         self.within(from)?;
         self.within(to)?;
+        let link = self.links.borrow_mut().remove(from);
+        if let Some(target) = link {
+            if matches!(self.nodes.borrow().get(to), Some(Node::Dir { .. })) {
+                self.links.borrow_mut().insert(from.to_vec(), target);
+                return Err(io::ErrorKind::IsADirectory.into());
+            }
+            self.nodes.borrow_mut().remove(to);
+            self.links.borrow_mut().insert(to.to_vec(), target);
+            return Ok(());
+        }
+        self.links.borrow_mut().remove(to);
         let mut nodes = self.nodes.borrow_mut();
         if !nodes.contains_key(from) {
             return Err(missing());
@@ -351,5 +425,46 @@ impl Files for Tree {
             nodes.insert(placed, node);
         }
         Ok(())
+    }
+
+    fn lstat(&self, path: &[u8]) -> io::Result<Stat> {
+        self.within(path)?;
+        let size = self.links.borrow().get(path).map(|target| target.len() as u64);
+        match size {
+            Some(size) => Ok(Stat {
+                kind: Kind::Symlink,
+                size,
+                mode: 0o777,
+                mtime_ns: now(),
+            }),
+            None => self.stat(path),
+        }
+    }
+
+    fn symlink(&self, target: &[u8], link: &[u8]) -> io::Result<()> {
+        self.within(link)?;
+        let nodes = self.nodes.borrow();
+        if nodes.contains_key(link) || self.links.borrow().contains_key(link) {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        if !matches!(nodes.get(parent(link)), Some(Node::Dir { .. })) {
+            return Err(missing());
+        }
+        self.links
+            .borrow_mut()
+            .insert(link.to_vec(), target.to_vec());
+        Ok(())
+    }
+
+    fn read_link(&self, path: &[u8]) -> io::Result<Vec<u8>> {
+        self.within(path)?;
+        if let Some(target) = self.links.borrow().get(path) {
+            return Ok(target.clone());
+        }
+        if self.nodes.borrow().contains_key(path) {
+            Err(io::ErrorKind::InvalidInput.into())
+        } else {
+            Err(missing())
+        }
     }
 }

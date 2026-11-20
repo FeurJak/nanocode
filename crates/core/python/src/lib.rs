@@ -105,6 +105,19 @@ pub trait Files {
         Err(io::ErrorKind::Unsupported.into())
     }
 
+    /// The entry at a path itself: a symlink rather than what it points at.
+    fn lstat(&self, path: &[u8]) -> io::Result<Stat> {
+        self.stat(path)
+    }
+
+    fn symlink(&self, _target: &[u8], _link: &[u8]) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
+    fn read_link(&self, _path: &[u8]) -> io::Result<Vec<u8>> {
+        Err(io::ErrorKind::InvalidInput.into())
+    }
+
     fn ranged(&self) -> bool {
         false
     }

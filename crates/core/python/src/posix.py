@@ -171,13 +171,22 @@ def _stat(path):
 def stat(path, *, dir_fd=None, follow_symlinks=True):
     if isinstance(path, int):
         return fstat(path)
+    if not follow_symlinks:
+        return lstat(path)
     path = _abs(path)
     kind, size, mode, mtime_ns = _stat(path)
     return _stat_result(_mode(kind, mode), path, size, mtime_ns)
 
 
 def lstat(path, *, dir_fd=None):
-    return stat(path)
+    if isinstance(path, int):
+        return fstat(path)
+    path = _abs(path)
+    try:
+        kind, size, mode, mtime_ns = _host.lstat(path)
+    except FileNotFoundError:
+        return stat(path)
+    return _stat_result(_mode(kind, mode), path, size, mtime_ns)
 
 
 def access(path, mode, *, dir_fd=None, effective_ids=False, follow_symlinks=True):
@@ -205,6 +214,8 @@ class DirEntry:
         self._stat = None
 
     def stat(self, *, follow_symlinks=True):
+        if not follow_symlinks:
+            return lstat(self._abs)
         if self._stat is None:
             kind, size, mode, mtime_ns = _host.stat(self._abs)
             self._stat = _stat_result(_mode(kind, mode), self._abs, size, mtime_ns)
@@ -223,7 +234,10 @@ class DirEntry:
         return self._is(0o100000)
 
     def is_symlink(self):
-        return self._is(0o120000)
+        try:
+            return self.stat(follow_symlinks=False).st_mode & 0o170000 == 0o120000
+        except OSError:
+            return False
 
     def is_junction(self):
         return False
@@ -325,12 +339,26 @@ def chown(path, uid, gid, *, dir_fd=None, follow_symlinks=True):
 
 
 def readlink(path, *, dir_fd=None):
-    _host.stat(_abs(path))
-    raise _fail(_errno.EINVAL, path)
+    given = fspath(path)
+    target = _abs(path)
+    if _host.lstat(target)[0] != 2:
+        raise _fail(_errno.EINVAL, path)
+    found = _host.readlink(target)
+    if isinstance(given, bytes):
+        return found
+    return found.decode('utf-8', 'surrogateescape')
 
 
 def symlink(src, dst, target_is_directory=False, *, dir_fd=None):
-    raise _fail(_errno.EPERM, dst)
+    src = fspath(src)
+    if isinstance(src, str):
+        src = src.encode('utf-8', 'surrogateescape')
+    try:
+        _host.symlink(src, _abs(dst))
+    except OSError as error:
+        if error.errno == _errno.ENOTSUP:
+            raise _fail(_errno.EPERM, dst) from None
+        raise
 
 
 def link(src, dst, *, src_dir_fd=None, dst_dir_fd=None, follow_symlinks=True):

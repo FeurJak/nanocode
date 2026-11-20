@@ -467,17 +467,16 @@ mod _host {
         state(vm, |state| Ok(state.limits.file))
     }
 
-    #[pyfunction]
-    fn stat(path: ArgBytesLike, vm: &VirtualMachine) -> PyResult<(u8, u64, u32, i64)> {
-        let path = path.borrow_buf();
-        let site = |error: io::Error| match crate::sitedata::stat(&path) {
+    fn found(path: &[u8], follow: bool, vm: &VirtualMachine) -> PyResult<(u8, u64, u32, i64)> {
+        let site = |error: io::Error| match crate::sitedata::stat(path) {
             Some(stat) if error.kind() == io::ErrorKind::NotFound => Ok(stat),
             _ => Err(error),
         };
-        let found = crate::sitedata::stat(&path).filter(|stat| stat.kind == Kind::File);
+        let found = crate::sitedata::stat(path).filter(|stat| stat.kind == Kind::File);
         let stat = match found {
             Some(stat) => Ok(stat),
-            None => files(vm, &path, |state| state.files.stat(&path).or_else(site)),
+            None if follow => files(vm, path, |state| state.files.stat(path).or_else(site)),
+            None => files(vm, path, |state| state.files.lstat(path).or_else(site)),
         };
         stat.map(|stat| {
             let kind = match stat.kind {
@@ -487,6 +486,35 @@ mod _host {
             };
             (kind, stat.size, stat.mode, stat.mtime_ns)
         })
+    }
+
+    #[pyfunction]
+    fn stat(path: ArgBytesLike, vm: &VirtualMachine) -> PyResult<(u8, u64, u32, i64)> {
+        found(&path.borrow_buf(), true, vm)
+    }
+
+    #[pyfunction]
+    fn lstat(path: ArgBytesLike, vm: &VirtualMachine) -> PyResult<(u8, u64, u32, i64)> {
+        found(&path.borrow_buf(), false, vm)
+    }
+
+    #[pyfunction]
+    fn symlink(target: ArgBytesLike, link: ArgBytesLike, vm: &VirtualMachine) -> PyResult<()> {
+        let target = target.borrow_buf();
+        let link = link.borrow_buf();
+        files(vm, &link, |state| {
+            state.files.symlink(&target, &link)?;
+            state.changes.removed.remove(&*link);
+            state.changes.written.insert(link.to_vec());
+            Ok(())
+        })
+    }
+
+    #[pyfunction]
+    fn readlink(path: ArgBytesLike, vm: &VirtualMachine) -> PyResult<PyBytesRef> {
+        let path = path.borrow_buf();
+        let target = files(vm, &path, |state| state.files.read_link(&path))?;
+        Ok(vm.ctx.new_bytes(target))
     }
 
     #[pyfunction]
