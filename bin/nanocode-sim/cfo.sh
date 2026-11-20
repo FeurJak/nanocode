@@ -158,6 +158,13 @@ default_table='
 1 canary_hands_forget_pending canary:200 --scenario hands --mutation forget_pending
 1 canary_hands_cross_replies canary:200 --scenario hands --mutation cross_replies
 1 canary_hands_mangle_runtime canary:200 --scenario hands --mutation mangle_runtime
+8 workspace_stack pass --scenario workspace_stack
+2 workspace_stack_twice pass --scenario workspace_stack --twice
+1 canary_workspace_stack_torn_commit canary:200 --scenario workspace_stack --mutation torn_commit
+1 canary_workspace_stack_visible_before_commit canary:200 --scenario workspace_stack --mutation visible_before_commit
+1 canary_workspace_stack_sha_unchecked canary:200 --scenario workspace_stack --mutation sha_unchecked
+1 canary_workspace_stack_puts_in_place canary:200 --scenario workspace_stack --mutation puts_in_place
+1 canary_workspace_stack_answers_now canary:200 --scenario workspace_stack --mutation answers_now
 1 canary_executor_skip_abort canary --scenario executor --mutation skip_abort
 1 canary_executor_leak_cancelled canary --scenario executor --mutation leak_cancelled
 1 canary_executor_uncounted_polls canary:100 --scenario executor --mutation uncounted_polls
