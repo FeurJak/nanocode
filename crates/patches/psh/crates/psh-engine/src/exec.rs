@@ -2511,6 +2511,8 @@ fn run_argv(
                 hand_off_stdout(vp);
                 let r = crate::util::run(vp, e, argv, assigns).await;
                 hand_off_stdout(vp);
+                // bash waited for its child: the finished jobs leave the table.
+                notice_done_jobs(vp);
                 r
             }
             _ => run_external(vp, argv, assigns).await,

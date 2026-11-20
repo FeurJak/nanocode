@@ -202,6 +202,8 @@ pub(super) async fn wait(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         }
         reap(vp, &j);
     }
+    // Waiting for a child, bash also drops every other job that has finished.
+    crate::exec::notice_done_jobs(vp);
     Ok(status)
 }
 
