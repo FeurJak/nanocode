@@ -5645,7 +5645,7 @@ impl ExecutingFrame<'_> {
                 let locals = self.locals.get_or_create(vm).obj();
                 if let Some(dict) = locals.downcast_ref_if_exact::<PyDict>(vm) {
                     dict.inner_setitem(name, value, vm)?;
-                    if locals.is(vm.builtins.dict().as_object()) {
+                    if vm.is_builtins_dict(locals) {
                         crate::stdlib::_testinternalcapi::note_builtin_dict();
                     }
                     return Ok(None);

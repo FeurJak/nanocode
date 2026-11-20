@@ -64,6 +64,14 @@ impl PyPayload for PyInt {
         ctx.types.int_type
     }
 
+    // Inlined into each caller so the payload is built where the object is
+    // initialised: passed by pointer to an out-of-line copy, its 16-byte
+    // reload of two 8-byte stores missed store forwarding on every new int.
+    #[inline(always)]
+    fn into_ref(self, ctx: &Context) -> PyRef<Self> {
+        PyRef::new_ref(self, ctx.types.int_type.to_owned(), None)
+    }
+
     fn into_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
         vm.ctx.new_int(self.value).into()
     }

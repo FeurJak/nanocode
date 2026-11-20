@@ -682,7 +682,7 @@ impl AsMapping for PyDict {
                 let zelf = PyDict::mapping_downcast(mapping);
                 if let Some(value) = value {
                     zelf.inner_setitem(needle, value, vm)?;
-                    if zelf.as_object().is(vm.builtins.dict().as_object()) {
+                    if vm.is_builtins_dict(zelf.as_object()) {
                         crate::stdlib::_testinternalcapi::note_builtin_dict();
                     }
                     Ok(())
@@ -1031,7 +1031,7 @@ impl Py<PyDict> {
     ) -> PyResult<()> {
         if self.exact_dict(vm) {
             self.inner_setitem(key, value, vm)?;
-            if self.as_object().is(vm.builtins.dict().as_object()) {
+            if vm.is_builtins_dict(self.as_object()) {
                 crate::stdlib::_testinternalcapi::note_builtin_dict();
             }
             Ok(())

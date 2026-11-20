@@ -516,6 +516,16 @@ enum LengthHint<'a> {
 }
 
 impl VirtualMachine {
+    /// Whether `obj` is the builtins module's dict, compared in place: cloning
+    /// the dict out of the module costs a refcount round trip on every dict
+    /// store that asks.
+    #[inline]
+    pub(crate) fn is_builtins_dict(&self, obj: &PyObject) -> bool {
+        self.builtins
+            .as_object()
+            .with_instance_dict(|dict| dict.is_some_and(|dict| dict.as_object().is(obj)))
+    }
+
     fn init_callable_cache(&mut self) -> PyResult<()> {
         self.callable_cache.len = Some(self.builtins.get_attr("len", self)?);
         self.callable_cache.isinstance = Some(self.builtins.get_attr("isinstance", self)?);
