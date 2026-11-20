@@ -1217,6 +1217,7 @@ pub fn simulate(seed: u64, options: WholeOptions) -> WholeOutcome {
             result.replace(Some(outcome));
         });
         let crash_at = crashes.pop_front();
+        world.begin_epoch(number);
         world.crash_pending(crash_at.is_some());
         let ended = executor.run(vec![task], crash_at);
         drop(executor);
@@ -1256,6 +1257,7 @@ pub fn simulate(seed: u64, options: WholeOptions) -> WholeOutcome {
                 kv.with(crate::store::Kv::power_loss);
             }
             let result = RefCell::new(None);
+            world.begin_epoch(EPOCHS_MAX);
             let mut executor =
                 Executor::new(Arc::clone(&clock), Rng::derive(seed, "scheduler verify"));
             let task: Task<'_> = Box::pin(async {
