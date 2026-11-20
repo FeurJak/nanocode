@@ -9,11 +9,16 @@ const DTZ = process.env.DTZ || "UTC";
 const fmt = (o) => new Intl.DateTimeFormat(LOC, {timeZone: DTZ, ...o});
 const part = (o, d, ty) => { const p = fmt(o).formatToParts(d).find(p => p.type === ty); return p ? p.value : null; };
 const W3 = ["long", "short", "narrow"];
+// native digits (ar-EG and the like resolve numberingSystem "arab"); "" for latn
+const ZERO = (() => { const z = new Intl.NumberFormat(LOC, {useGrouping: false}).format(0); return z === "0" ? "" : z; })();
+const dig = s => ZERO ? s.replace(/[0-9]/g, c => String.fromCodePoint(ZERO.codePointAt(0) + +c)) : s;
+const undig = s => ZERO ? s.replace(/./gu, c => { const d = c.codePointAt(0) - ZERO.codePointAt(0); return d >= 0 && d <= 9 ? String(d) : c; }) : s;
+const NUMT = new Set(["year", "month", "day", "hour", "minute", "second", "fractionalSecond"]);
 const names = {months: {}, days: {}};
 for (const w of W3) {
   names.months["L" + w] = Array.from({length: 12}, (_, m) => part({month: w}, U(2024, m, 5), "month"));
   names.months["M" + w] = Array.from({length: 12}, (_, m) => part({month: w, day: "numeric"}, U(2024, m, 5), "month"));
-  if (names.months["M" + w].every(v => /^\d+$/.test(v))) names.months["M" + w] = names.months["L" + w];
+  if (names.months["M" + w].every(v => /^\d+$/.test(undig(v)))) names.months["M" + w] = names.months["L" + w];
   names.days["c" + w] = Array.from({length: 7}, (_, d) => part({weekday: w}, U(2024, 2, 3 + d), "weekday"));
   names.days["E" + w] = Array.from({length: 7}, (_, d) => part({weekday: w, month: "long", day: "numeric"}, U(2024, 2, 3 + d), "weekday"));
 }
@@ -70,7 +75,7 @@ function render(p, d, hc, bw) {
   // merge adjacent literals like ICU
   const m = [];
   for (const x of r) { if (x[0] === "literal" && m.length && m[m.length - 1][0] === "literal") m[m.length - 1][1] += x[1]; else m.push([x[0], x[1]]); }
-  return m.map(x => x[0] + ":" + x[1]).join("|");
+  return m.map(x => x[0] + ":" + (NUMT.has(x[0]) ? dig(x[1]) : x[1])).join("|");
 }
 const nodeParts = (o, d) => fmt(o).formatToParts(d).map(p => p.type + ":" + (p.type === "timeZoneName" ? "Z" : p.value)).join("|");
 const VDATES = [REF, ...Array.from({length: 12}, (_, m) => U(2024, m, 5 + (m % 7), (m * 5) % 24, m * 4)), ...Array.from({length: 7}, (_, d) => U(2024, 7, 4 + d, 12, 0)), U(2024, 0, 1, 0, 0), U(2024, 0, 1, 12, 0, 1), U(2024, 0, 1, 12, 30, 0), U(2024, 0, 1, 0, 0, 7), U(2024, 0, 1, 23, 59), U(-5, 5, 6, 7, 8)];
@@ -82,7 +87,8 @@ function infer(o) {
   // alternatives per text field
   let alts = [""];
   const addAll = arr => { const n = []; for (const a of alts) for (const b of arr) n.push(a + b); alts = n; };
-  for (const {type, value} of parts) {
+  for (let {type, value} of parts) {
+    if (NUMT.has(type)) value = undig(value);
     switch (type) {
       case "literal": addAll([q(value)]); break;
       case "year": addAll([value.length === 2 ? "yy" : "y"]); break;

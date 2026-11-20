@@ -40,7 +40,8 @@ const tex = KINDS.map(kind => {
 });
 // combined date + time glue, by month width (full = long month with weekday)
 const dkk = (f) => (((f[0] * 4 + f[1]) * 3 + f[2]) * 6 + f[3]) * 3 + f[4];
-const glueOf = (o, dp, tp) => { const p = m.infer(o).p; return p.slice(dp.length, p.length - tp.length); };
+const {tmpl, apply} = require('./glue.js');
+const glueOf = (o, dp, tp) => tmpl(m.infer(o).p, dp, tp);
 const t0 = T.time[tk([1, 1, 0, 4, 0, 0])];
 const glue_full = glueOf({weekday: "long", month: "long", day: "numeric", hour: "numeric", minute: "numeric", hourCycle: "h23"}, T.date[dkk([1, 0, 0, 3, 1])], t0);
 const glue_long = glueOf({month: "long", day: "numeric", hour: "numeric", minute: "numeric", hourCycle: "h23"}, T.date[dkk([0, 0, 0, 3, 1])], t0);
@@ -53,7 +54,7 @@ for (let w = 1; w <= 3; w++) for (let k = 0; k < 3024; k++) {
   if (!(ho || mi || se || dp || fsd)) continue;
   const o = opts([w, 0, 0, 0, 0], [ho, mi, se, cy, dp, fsd]);
   const want = m.infer(o).p;
-  if (want !== T.date[dkk([w, 0, 0, 0, 0])] + glue_short + T.time[k]) wex[w * 3024 + k] = want;
+  if (want !== apply(glue_short, T.date[dkk([w, 0, 0, 0, 0])], T.time[k])) wex[w * 3024 + k] = want;
 }
 // localized GMT format: [prefix, minus sign]
 const lo = new Intl.DateTimeFormat(LOC, {timeZone: "-03:00", timeZoneName: "shortOffset"}).formatToParts(0).find(p => p.type === "timeZoneName").value;

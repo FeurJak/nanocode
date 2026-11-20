@@ -1,6 +1,7 @@
 
 // check.js LOC: compose patterns from d-LOC.json like djs will, compare to node on random options
 const m = require('./infer.js');
+const {apply} = require('./glue.js');
 const fs = require('fs');
 const {WIDTHS, NUMS, MONTHS, CYC, LOC} = m;
 const D = JSON.parse(fs.readFileSync(__dirname + '/d-' + LOC + '.json'));
@@ -25,7 +26,7 @@ function compose(f, t, tz) {
       let d = D.date[dk(f)];
       if (f[1] && !f[0] && !f[2] && !f[3] && !f[4]) d = ["", "GGGG", "G", "GGGGG"][f[1]];
       const g = f[3] === 3 ? (f[0] ? G[0] : G[1]) : f[3] === 4 ? G[2] : G[3];
-      p = d + g + ti;
+      p = apply(g, d, ti);
     }
   }
   return tz ? sub(p, TL[TZ.indexOf(tz)]) : p;

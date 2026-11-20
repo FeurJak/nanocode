@@ -3,15 +3,15 @@ use super::{Parts, Spec, range, type_err};
 use crate::interp::conv::Fault;
 use alloc::format;
 use alloc::string::{String, ToString};
-use locales::{DATE_LOCALES, DTF_PATTERNS, DTF_STRINGS, EN_GENERIC_ALT};
+use locales::{DATE_LOCALES, DTF_PATTERNS_ENDS, DTF_PATTERNS_TEXT, DTF_ROWS, DTF_STRINGS_ENDS, DTF_STRINGS_TEXT, EN_GENERIC_ALT};
 
 mod locales;
 
 /// A locale's date and time data, generated from Node's ICU by intl-dtf/emit.js.
 /// Name arrays: months and days are [format long, short, narrow, standalone long, short, narrow];
 /// eras and periods are [long, short, narrow]; periods hold 24 hours then exact midnight and noon.
-/// Pattern tables index DTF_PATTERNS (u16::MAX: none) by date key and by time key with seven
-/// hour-cycle options (none, hour12 true/false, h12, h23, h11, h24).
+/// Pattern tables index DTF_ROWS (rows of 16 pattern indices, u16::MAX: none) by date key
+/// and by time key with seven hour-cycle options (none, hour12 true/false, h12, h23, h11, h24).
 pub(super) struct DateLocale {
     tags: &'static [&'static str],
     months: [[&'static str; 12]; 6],
@@ -19,10 +19,10 @@ pub(super) struct DateLocale {
     eras: [[&'static str; 2]; 3],
     ampm: [&'static str; 2],
     periods: [[&'static str; 26]; 3],
-    date: &'static [u16; 864],
-    datez: &'static [u16; 864],
-    time: &'static [u16; 3024],
-    timez: &'static [u16; 3024],
+    date: &'static [u16; 54],
+    datez: &'static [u16; 54],
+    time: &'static [u16; 189],
+    timez: &'static [u16; 189],
     timez_ex: [&'static [(u16, u16)]; 6],
     weekday_ex: &'static [(u16, u16)],
     style_date: [u16; 4],
@@ -33,12 +33,52 @@ pub(super) struct DateLocale {
     gmt: [&'static str; 2],
 }
 
+pub(super) const LANGS: [&str; 17] = ["en", "de", "fr", "es", "it", "pt", "nl", "ja", "zh", "ko", "ru", "pl", "tr", "ar", "hi", "id", "vi"];
+
 fn date_locale(locale: &str) -> Option<usize> {
-    DATE_LOCALES.iter().position(|l| l.tags.contains(&locale))
+    let find = |t: &str| DATE_LOCALES.iter().position(|l| l.tags.contains(&t));
+    if let Some(i) = find(locale) {
+        return Some(i);
+    }
+    let mut sub = locale.split('-');
+    let lang = sub.next().unwrap_or("");
+    if lang == "zh" && sub.any(|s| matches!(s, "Hant" | "TW" | "HK" | "MO")) {
+        return find("zh-Hant");
+    }
+    find(lang)
+}
+
+const ARAB_DIGIT_REGIONS: [&str; 21] = ["BH", "DJ", "EG", "ER", "IL", "IQ", "JO", "KM", "KW", "LB", "MR", "OM", "PS", "QA", "SA", "SD", "SO", "SS", "SY", "TD", "YE"];
+
+fn numbering_system(locale: &str) -> &'static str {
+    let mut sub = locale.split('-');
+    if sub.next() == Some("ar") && sub.any(|s| ARAB_DIGIT_REGIONS.contains(&s)) {
+        "arab"
+    } else {
+        "latn"
+    }
+}
+
+fn dtf_str(text: &'static str, ends: &[u32], i: u16) -> &'static str {
+    let i = usize::from(i);
+    let start = if i == 0 { 0 } else { ends[i - 1] as usize };
+    &text[start..ends[i] as usize]
+}
+
+fn cell(rows: &[u16], k: usize) -> u16 {
+    DTF_ROWS[usize::from(rows[k >> 4])][k & 15]
+}
+
+fn join(glue: &str, d: &str, t: &str) -> String {
+    if glue.contains('{') {
+        glue.replacen("{1}", d, 1).replacen("{0}", t, 1)
+    } else {
+        format!("{d}{glue}{t}")
+    }
 }
 
 fn dtf_pattern(i: u16) -> Option<&'static str> {
-    (i != u16::MAX).then(|| DTF_PATTERNS[usize::from(i)])
+    (i != u16::MAX).then(|| dtf_str(DTF_PATTERNS_TEXT, DTF_PATTERNS_ENDS, i))
 }
 
 /// Replaces each unquoted run of `z` with the letters for the requested zone name.
@@ -69,7 +109,7 @@ fn locale_pattern(l: &DateLocale, f: &[usize; 10], fsd: usize, cy: usize, styles
         let dp = di.and_then(|i| dtf_pattern(l.style_date[i]));
         let tp = ts.and_then(|s| dtf_pattern(l.style_time[cy][pos(&STYLES, Some(s))]));
         return match (dp, tp) {
-            (Some(d), Some(t)) => format!("{d}{}{t}", l.style_glue[di.unwrap_or(3)]),
+            (Some(d), Some(t)) => join(l.style_glue[di.unwrap_or(3)], d, t),
             (Some(d), None) => d.to_string(),
             (None, Some(t)) => t.to_string(),
             (None, None) => String::new(),
@@ -79,13 +119,13 @@ fn locale_pattern(l: &DateLocale, f: &[usize; 10], fsd: usize, cy: usize, styles
     let tk = ((((f[6] * 3 + f[7]) * 3 + f[8]) * 7 + cy) * 4 + f[5]) * 4 + fsd;
     let has_t = f[5] != 0 || f[6] != 0 || f[7] != 0 || f[8] != 0 || fsd != 0;
     let kind = tzn.map(|z| pos(&TZ_NAMES, Some(z)));
-    let find = |t: &[(u16, u16)], k: usize| t.iter().find(|e| usize::from(e.0) == k).map(|e| DTF_PATTERNS[usize::from(e.1)]);
+    let find = |t: &[(u16, u16)], k: usize| t.iter().find(|e| usize::from(e.0) == k).map(|e| dtf_str(DTF_PATTERNS_TEXT, DTF_PATTERNS_ENDS, e.1));
     let p: String = if !has_t {
-        dtf_pattern(if kind.is_some() { l.datez[dk] } else { l.date[dk] }).unwrap_or("").to_string()
+        dtf_pattern(cell(if kind.is_some() { l.datez } else { l.date }, dk)).unwrap_or("").to_string()
     } else {
         let t = match kind {
-            Some(k) => find(l.timez_ex[k], tk).or_else(|| dtf_pattern(l.timez[tk])),
-            None => dtf_pattern(l.time[tk]),
+            Some(k) => find(l.timez_ex[k], tk).or_else(|| dtf_pattern(cell(l.timez, tk))),
+            None => dtf_pattern(cell(l.time, tk)),
         }
         .unwrap_or("");
         let weekday_only = f[0] != 0 && f[1] == 0 && f[2] == 0 && f[3] == 0 && f[4] == 0;
@@ -95,14 +135,14 @@ fn locale_pattern(l: &DateLocale, f: &[usize; 10], fsd: usize, cy: usize, styles
         } else if let Some(w) = (kind.is_none() && weekday_only).then(|| find(l.weekday_ex, f[0] * 3024 + tk)).flatten() {
             w.to_string()
         } else {
-            let d = if only_era { ["", "GGGG", "G", "GGGGG"][f[1]] } else { dtf_pattern(l.date[dk]).unwrap_or("") };
+            let d = if only_era { ["", "GGGG", "G", "GGGGG"][f[1]] } else { dtf_pattern(cell(l.date, dk)).unwrap_or("") };
             let glue = match f[3] {
                 3 if f[0] != 0 => l.glue[0],
                 3 => l.glue[1],
                 4 => l.glue[2],
                 _ => l.glue[3],
             };
-            format!("{d}{glue}{t}")
+            join(glue, d, t)
         }
     };
     match kind {
@@ -271,7 +311,7 @@ pub(super) fn resolve(locale: &str, raw: &Spec) -> Result<Spec, Fault> {
     let mut out = Spec::default();
     out.put("locale", locale);
     out.put("calendar", "gregory");
-    out.put("numberingSystem", "latn");
+    out.put("numberingSystem", numbering_system(locale));
     out.put("timeZone", &zone);
     let has = |c: char| field_width(&pattern, c) != 0;
     if has('j') {
@@ -679,7 +719,7 @@ fn locale_zone_name(l: &DateLocale, kind: usize, off: i64, dst: bool, zone: &str
     };
     let at = |i: usize, slot: usize| l.zones.get(i * 8 + slot).copied().filter(|s| *s != u16::MAX);
     match ZONES.iter().position(|z| z.0 == zone).and_then(|i| at(i, slot).or_else(|| at(i, if slot >= 6 { slot - 2 } else { slot }))) {
-        Some(s) => DTF_STRINGS[usize::from(s)].to_string(),
+        Some(s) => dtf_str(DTF_STRINGS_TEXT, DTF_STRINGS_ENDS, s).to_string(),
         None => locale_offset(l, minutes, kind == 1 || kind == 5),
     }
 }
@@ -854,11 +894,25 @@ pub(super) fn format(spec: &Spec, t: f64) -> Result<Parts, Fault> {
                     .flatten()
                     .and_then(|i| EN_GENERIC_ALT.iter().find(|a| usize::from(a.0) == i));
                 match alt {
-                    Some(a) => out.push("timeZoneName", DTF_STRINGS[usize::from(if kind == 4 { a.1 } else { a.2 })]),
+                    Some(a) => out.push("timeZoneName", dtf_str(DTF_STRINGS_TEXT, DTF_STRINGS_ENDS, if kind == 4 { a.1 } else { a.2 })),
                     None => out.push("timeZoneName", &zone_name(kind, off, dst, entry)),
                 }
             }
             _ => {}
+        }
+    }
+    if spec.get("numberingSystem") == Some("arab") {
+        for i in 1..out.items.len() {
+            if out.items[i].0 == "fractionalSecond" && out.items[i - 1].0 == "literal" && out.items[i - 1].1.ends_with('.') {
+                let lit = &mut out.items[i - 1].1;
+                lit.pop();
+                lit.push('\u{66b}');
+            }
+        }
+        for (_, v) in out.items.iter_mut() {
+            if v.bytes().any(|b| b.is_ascii_digit()) {
+                *v = v.chars().map(|c| c.to_digit(10).and_then(|d| char::from_u32(0x660 + d)).unwrap_or(c)).collect();
+            }
         }
     }
     Ok(out)

@@ -1,9 +1,17 @@
 
 // emit.js DIR > date_locales.rs : Rust tables for Intl.DateTimeFormat locales, from gen.js / zn.js output
 const fs = require('fs');
+const {tmpl} = require('./glue.js');
 const dir = process.argv[2];
-const LOCS = ["de", "fr", "es", "ja", "zh", "pt-BR"];
-const ALIASES = {de: ["de", "de-DE"], fr: ["fr", "fr-FR"], es: ["es", "es-ES"], ja: ["ja", "ja-JP"], zh: ["zh", "zh-CN", "zh-Hans", "zh-Hans-CN"], "pt-BR": ["pt", "pt-BR"]};
+// Each alias formats exactly like its locale in node 22 (alias.js checks it; ar-EG and the other
+// arab-digit regions differ from ar only in their digits, which date.rs transliterates).
+const LOCS = ["de", "fr", "es", "ja", "zh", "pt-BR", "ko", "it", "ru", "nl", "pl", "tr"];
+const ALIASES = {de: ["de", "de-DE"], fr: ["fr", "fr-FR"], es: ["es", "es-ES"], ja: ["ja", "ja-JP"], zh: ["zh", "zh-CN", "zh-Hans", "zh-Hans-CN"], "pt-BR": ["pt", "pt-BR"], ko: ["ko", "ko-KR"], it: ["it", "it-IT"], ru: ["ru", "ru-RU", "ru-BY", "ru-KZ"], nl: ["nl", "nl-NL"], pl: ["pl", "pl-PL"], tr: ["tr", "tr-TR"]};
+// The four pattern tables are cut into rows of 16 cells, and each distinct row is stored once in
+// DTF_ROWS for every locale: a locale keeps only its row indices (about 60% smaller than flat tables).
+const rows = [], ridx = new Map();
+const R = a => { const k = a.join(","); if (!ridx.has(k)) { ridx.set(k, rows.length); rows.push(a); } return ridx.get(k); };
+const chunk = a => { const o = []; for (let i = 0; i < a.length; i += 16) o.push(R(a.slice(i, i + 16))); return o; };
 const zones = fs.readFileSync(__dirname + '/zones.tsv', 'utf8').trim().split('\n').map(l => l.split('\t')[0]);
 const pool = [], pidx = new Map();
 const P = s => { if (!pidx.has(s)) { pidx.set(s, pool.length); pool.push(s); } return pidx.get(s); };
@@ -24,15 +32,16 @@ for (const l of LOCS) {
   const W = ["long", "short", "narrow"];
   const months = [...W.map(w => n.months["M" + w]), ...W.map(w => n.months["L" + w])];
   const days = [...W.map(w => n.days["E" + w]), ...W.map(w => n.days["c" + w])];
-  const glue = [0, 1, 2, 3].map(s => d.styles.both[s][3].slice(d.styles.date[s].length, d.styles.both[s][3].length - d.styles.time[0][3].length));
+  const glue = [0, 1, 2, 3].map(s => tmpl(d.styles.both[s][3], d.styles.date[s], d.styles.time[0][3]));
+  if (glue.includes(null)) throw new Error(l + ': style glue');
   const fglue = [d.glue_full, d.glue_long, d.glue_medium, d.glue_short];
   const tex = d.tex.map(ex => "&[" + Object.entries(ex).sort((a, b) => a[0] - b[0]).map(([k, p]) => "(" + k + ", " + P(p) + ")").join(", ") + "]");
   const wex = "&[" + Object.entries(d.wex || {}).sort((a, b) => a[0] - b[0]).map(([k, p]) => "(" + k + ", " + P(p) + ")").join(", ") + "]";
   const zn = zones.flatMap(name => (z[name] || [null, null, null, null, null, null, null, null]).map(s => s === null ? 65535 : S(s)));
-  out += "static " + id + "_DATE: [u16; 864] = " + arr(pat(d.date)) + ";\n";
-  out += "static " + id + "_DATEZ: [u16; 864] = " + arr(pat(d.datez)) + ";\n";
-  out += "static " + id + "_TIME: [u16; 3024] = " + arr(pat(d.time)) + ";\n";
-  out += "static " + id + "_TIMEZ: [u16; 3024] = " + arr(pat(d.timez)) + ";\n";
+  out += "static " + id + "_DATE: [u16; 54] = " + arr(chunk(pat(d.date))) + ";\n";
+  out += "static " + id + "_DATEZ: [u16; 54] = " + arr(chunk(pat(d.datez))) + ";\n";
+  out += "static " + id + "_TIME: [u16; 189] = " + arr(chunk(pat(d.time))) + ";\n";
+  out += "static " + id + "_TIMEZ: [u16; 189] = " + arr(chunk(pat(d.timez))) + ";\n";
   out += "static " + id + "_ZONES: [u16; " + zn.length + "] = " + arr(zn) + ";\n";
   locs.push("    DateLocale {\n" +
     "        tags: &" + sarr(ALIASES[l]) + ",\n" +
@@ -55,7 +64,9 @@ for (const l of LOCS) {
 const ez = JSON.parse(fs.readFileSync(dir + '/z-en-US.json'));
 const alt = zones.flatMap((name, i) => ez[name] && ez[name][6] !== null ? ["(" + i + ", " + S(ez[name][6]) + ", " + S(ez[name][7]) + ")"] : []);
 out += "\n/// en-US generic zone names in the repeated hour before DST ends: (ZONES index, short, long).\npub(super) static EN_GENERIC_ALT: &[(u16, u16, u16)] = &[" + alt.join(", ") + "];\n";
-out += "\npub(super) static DTF_PATTERNS: &[&str] = &" + sarr(pool) + ";\n";
-out += "pub(super) static DTF_STRINGS: &[&str] = &" + sarr(spool) + ";\n";
+out += "\n/// Rows of 16 pattern indices (DTF_PATTERNS, u16::MAX for none) shared by every locale's tables.\npub(super) static DTF_ROWS: &[[u16; 16]] = &[" + rows.map(arr).join(", ") + "];\n";
+// A string pool is one text and the byte offset where each string ends (8 bytes a string less than &str slots).
+const blob = (name, a) => { let n = 0; const ends = a.map(x => n += Buffer.byteLength(x)); return "pub(super) static " + name + "_TEXT: &str = " + lit(a.join("")) + ";\npub(super) static " + name + "_ENDS: &[u32] = &" + arr(ends) + ";\n"; };
+out += "\n" + blob("DTF_PATTERNS", pool) + blob("DTF_STRINGS", spool);
 out += "\npub(super) static DATE_LOCALES: &[DateLocale] = &[\n" + locs.join("") + "];\n";
 process.stdout.write(out);

@@ -224,10 +224,10 @@ fn canonical_list(tags: &str) -> Result<Vec<String>, Fault> {
     Ok(out)
 }
 
-pub(crate) fn resolve_locale(tags: &[String]) -> String {
+pub(crate) fn resolve_locale(tags: &[String], langs: &[&str]) -> String {
     for t in tags {
         let base: Vec<&str> = t.split('-').take_while(|s| s.len() != 1).collect();
-        if LANGS.contains(&base[0]) {
+        if langs.contains(&base[0]) {
             let mut keep: Vec<&str> = alloc::vec![base[0]];
             for s in &base[1..] {
                 if (s.len() == 4 && keep.len() == 1) || ((s.len() == 2 || s.len() == 3) && s.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())) {
@@ -279,7 +279,7 @@ pub(crate) fn intrinsic(heap: &mut Heap, k: u16, a: [Value; 5]) -> Result<Option
                 return Ok(Some(string_value(heap, &locale::construct(&str_arg(heap, a[1]).unwrap_or_default(), &Spec::parse(&raw))?)?));
             }
             let tags = canonical_list(&str_arg(heap, a[1]).unwrap_or_default())?;
-            let locale = resolve_locale(&tags);
+            let locale = resolve_locale(&tags, if kind == 1 { &date::LANGS } else { &LANGS });
             let raw = Spec::parse(&raw);
             let spec = match kind {
                 0 => number::resolve(&locale, &raw)?,
