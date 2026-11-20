@@ -16,6 +16,9 @@ pub enum Mutation {
     PlacementSkipsUncertain,
     StopsUnknown,
     ListKeepsStopped,
+    AutoMovesExplicit,
+    AutoPrefersHand,
+    CountsAutoAsHosted,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

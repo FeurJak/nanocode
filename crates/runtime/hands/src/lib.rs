@@ -1,3 +1,4 @@
+mod auto;
 mod copy;
 mod host;
 mod provider;
@@ -7,6 +8,7 @@ pub mod sim;
 mod target;
 mod values;
 
+pub use auto::{AUTO, Auto, Decision, Origin, Reason, Shell, decide};
 pub use copy::CopyError;
 pub use host::{HandHost, Workspace};
 pub use nanocode_code_mode::embedded::HostFuture;
@@ -16,7 +18,8 @@ pub use provider::{
 };
 pub use receive::receive;
 pub use router::{
-    Clock, Placements, Policy, REFUSED, Released, Router, UNCERTAIN, WORKSPACE, refused, uncertain,
+    Clock, Placed, Placements, Policy, REFUSED, Released, Router, Stats, UNCERTAIN, WORKSPACE,
+    refused, uncertain,
 };
 pub use target::{HandRef, Target, TargetError};
 pub use values::{

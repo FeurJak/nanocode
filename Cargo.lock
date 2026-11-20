@@ -660,6 +660,7 @@ dependencies = [
  "nanocode-platform",
  "nanocode-sync",
  "nanocode-tool-contracts",
+ "psh-classify",
  "serde_json",
 ]
 

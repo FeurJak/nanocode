@@ -21,6 +21,7 @@ mod egress;
 mod executor;
 mod faults;
 mod gitremote;
+mod handauto;
 mod handrouter;
 mod hands;
 mod host;
@@ -90,6 +91,7 @@ use crate::{
     workspacehost::{WorkspaceHostMutation, WorkspaceHostStats},
     workspacesql::{WorkspaceSqlMutation, WorkspaceSqlStats},
     workspacestack::{WorkspaceStackMutation, WorkspaceStackStats},
+    handauto::{HandAutoMutation, HandAutoStats},
 };
 
 const DEFAULT_OPS: u64 = 1000;
@@ -127,6 +129,7 @@ enum Scenario {
     WorkspaceSql,
     GitRemote,
     WorkspaceStack,
+    HandAuto,
 }
 
 struct Args {
@@ -163,6 +166,7 @@ struct Args {
     workspace_sql: WorkspaceSqlMutation,
     git_remote: GitRemoteMutation,
     workspace_stack: WorkspaceStackMutation,
+    hand_auto: HandAutoMutation,
     #[cfg(unix)]
     alloc: alloc::AllocMutation,
     #[cfg(unix)]
@@ -198,7 +202,8 @@ fn usage() -> ExitCode {
        workspace_fs: [--mutation {}]
        workspace_sql: [--mutation {}]
        git_remote: [--mutation {}]
-       workspace_stack: [--mutation {}]",
+       workspace_stack: [--mutation {}]
+       hand_auto: [--mutation {}]",
         Mutation::names(),
         TurnMutation::names(),
         onelog::PROTECTIONS.join("|"),
@@ -221,7 +226,8 @@ fn usage() -> ExitCode {
         WorkspaceFsMutation::names(),
         WorkspaceSqlMutation::names(),
         GitRemoteMutation::names(),
-        WorkspaceStackMutation::names()
+        WorkspaceStackMutation::names(),
+        HandAutoMutation::names()
     );
     ExitCode::from(2)
 }
@@ -288,6 +294,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
     let mut workspace_sql = WorkspaceSqlMutation::None;
     let mut git_remote = GitRemoteMutation::None;
     let mut workspace_stack = WorkspaceStackMutation::None;
+    let mut hand_auto = HandAutoMutation::None;
     #[cfg(unix)]
     let mut capture = capture::CaptureMutation::None;
     #[cfg(target_os = "linux")]
@@ -360,6 +367,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
                     "workspace_sql" => Scenario::WorkspaceSql,
                     "git_remote" => Scenario::GitRemote,
                     "workspace_stack" => Scenario::WorkspaceStack,
+                    "hand_auto" => Scenario::HandAuto,
                     #[cfg(unix)]
                     "capture" => Scenario::Capture,
                     #[cfg(target_os = "linux")]
@@ -419,6 +427,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         (Scenario::WorkspaceStack, Some(name)) => {
             workspace_stack = WorkspaceStackMutation::parse(name)?
         }
+        (Scenario::HandAuto, Some(name)) => hand_auto = HandAutoMutation::parse(name)?,
         #[cfg(unix)]
         (Scenario::Capture, Some(name)) => capture = capture::CaptureMutation::parse(name)?,
         #[cfg(not(unix))]
@@ -475,6 +484,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         workspace_sql,
         git_remote,
         workspace_stack,
+        hand_auto,
         #[cfg(unix)]
         alloc,
         #[cfg(unix)]
@@ -554,6 +564,9 @@ fn replay(seed: u64, args: &Args) -> String {
     }
     if args.scenario == Scenario::WorkspaceStack {
         return workspacestack::replay(seed, args.workspace_stack);
+    }
+    if args.scenario == Scenario::HandAuto {
+        return handauto::replay(seed, args.hand_auto);
     }
     if args.scenario == Scenario::BoardSync {
         return board_sync::replay(seed, args.board_sync);
@@ -914,6 +927,7 @@ fn mutations() -> ExitCode {
     add("workspace_sql", WorkspaceSqlMutation::names());
     add("git_remote", GitRemoteMutation::names());
     add("workspace_stack", WorkspaceStackMutation::names());
+    add("hand_auto", HandAutoMutation::names());
     #[cfg(unix)]
     {
         add("alloc", alloc::AllocMutation::names());
@@ -1002,6 +1016,7 @@ fn main() -> ExitCode {
         || (args.scenario == Scenario::GitRemote && args.git_remote != GitRemoteMutation::None)
         || (args.scenario == Scenario::WorkspaceStack
             && args.workspace_stack != WorkspaceStackMutation::None)
+        || (args.scenario == Scenario::HandAuto && args.hand_auto != HandAutoMutation::None)
         || alloc_experiment(&args);
     let (mut passed, mut failed) = (0_u64, 0_u64);
     let mut totals = Stats::default();
@@ -1030,6 +1045,7 @@ fn main() -> ExitCode {
     let mut workspace_sql_totals = WorkspaceSqlStats::default();
     let mut git_remote_totals = GitRemoteStats::default();
     let mut workspace_stack_totals = WorkspaceStackStats::default();
+    let mut hand_auto_totals = HandAutoStats::default();
     #[cfg(unix)]
     let mut capture_totals = capture::CaptureStats::default();
     #[cfg(target_os = "linux")]
@@ -1201,6 +1217,13 @@ fn main() -> ExitCode {
                 args.twice,
                 args.options.verbose,
                 &mut workspace_stack_totals,
+            ),
+            Scenario::HandAuto => handauto::judge(
+                seed,
+                args.hand_auto,
+                args.twice,
+                args.options.verbose,
+                &mut hand_auto_totals,
             ),
             #[cfg(unix)]
             Scenario::Capture => capture::judge(
@@ -1444,6 +1467,16 @@ fn main() -> ExitCode {
             args.twice,
             args.workspace_stack,
             &workspace_stack_totals,
+        );
+    }
+    if args.scenario == Scenario::HandAuto {
+        return handauto::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.hand_auto,
+            &hand_auto_totals,
         );
     }
     if args.scenario == Scenario::Executor {
