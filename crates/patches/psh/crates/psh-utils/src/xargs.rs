@@ -664,6 +664,10 @@ pub async fn run(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
         };
         let flush = match got {
             Got::Error(msg) => {
+                // GNU runs the command with the items read so far, then fails.
+                if !args.is_empty() && !replace_mode {
+                    launch(ctx, &o, &command, &mut args, &mut runner, &mut names).await;
+                }
                 runner.wait_for(ctx, &mut names, 0).await;
                 ctx.error(&msg).await;
                 return 1;

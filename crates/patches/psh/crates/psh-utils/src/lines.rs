@@ -630,18 +630,15 @@ pub async fn join(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
         };
         let mut rows = Vec::new();
         let mut raw = Vec::new();
-        for (n, line) in data.split(|&b| b == b'\n').enumerate() {
-            if line.is_empty() {
-                continue;
-            }
+        // Every line counts, an empty one too (it has no fields, so an empty key).
+        let body = data.strip_suffix(b"\n").unwrap_or(&data);
+        let lines = (!data.is_empty()).then(|| body.split(|&b| b == b'\n'));
+        for (n, line) in lines.into_iter().flatten().enumerate() {
             raw.push((n + 1, line.to_vec()));
             let fields: Vec<Vec<u8>> = match sep {
+                Some(_) if line.is_empty() => Vec::new(),
                 Some(s) => line.split(|&b| b == s).map(<[u8]>::to_vec).collect(),
-                None => line
-                    .split(|&b| b == b' ' || b == b'\t')
-                    .filter(|f| !f.is_empty())
-                    .map(<[u8]>::to_vec)
-                    .collect(),
+                None => blank_fields(line),
             };
             rows.push(fields);
         }
@@ -809,6 +806,32 @@ pub async fn join(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
         return 1;
     }
     st
+}
+
+/// GNU join's default field split: leading blanks are skipped and runs of blanks
+/// separate fields, so blanks at the end of a line leave an empty last field.
+fn blank_fields(line: &[u8]) -> Vec<Vec<u8>> {
+    let blank = |b: &u8| *b == b' ' || *b == b'\t';
+    let Some(start) = line.iter().position(|b| !blank(b)) else {
+        return Vec::new();
+    };
+    let mut fields = Vec::new();
+    let mut rest = &line[start..];
+    loop {
+        let end = rest.iter().position(blank).unwrap_or(rest.len());
+        fields.push(rest[..end].to_vec());
+        if end == rest.len() {
+            return fields;
+        }
+        let next = rest[end..].iter().position(|b| !blank(b));
+        match next {
+            Some(k) => rest = &rest[end + k..],
+            None => {
+                fields.push(Vec::new());
+                return fields;
+            }
+        }
+    }
 }
 
 /// A line of `join`'s input: its fields.
