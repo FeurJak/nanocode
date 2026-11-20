@@ -175,12 +175,15 @@ async fn carry(ctx: &UtilCtx<'_>, op: Op) -> io::Result<()> {
                         write: true,
                         create: true,
                         create_new: true,
-                        mode: Some(0o444),
                         ..OpenOptions::default()
                     };
                     match put(ctx, &path, &data, opts).await {
+                        Ok(()) => match ctx.set_mode(&path, 0o444).await {
+                            Err(e) if e.kind() != io::ErrorKind::Unsupported => return Err(e),
+                            _ => {}
+                        },
                         Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
-                        _ => {}
+                        Err(_) => {}
                     }
                 }
                 Mode::Plain | Mode::Exec => {
