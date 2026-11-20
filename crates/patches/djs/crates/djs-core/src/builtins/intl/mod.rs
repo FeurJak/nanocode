@@ -10,6 +10,7 @@ mod locdata;
 mod number;
 mod numdata;
 mod text;
+mod tzdata;
 
 use crate::heap::{Heap, ObjectClass};
 use crate::interp::conv::{Fault, type_error};

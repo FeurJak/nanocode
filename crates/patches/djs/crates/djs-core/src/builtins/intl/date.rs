@@ -1,5 +1,5 @@
 use super::data::{DATE_PATTERNS, LOCALE_DATES, LocaleDates, PATTERNS, STYLE_PATTERNS, TIME_PATTERNS, ZONE_ALIASES, ZONE_NAMES, ZONES};
-use super::{Parts, Spec, range, type_err};
+use super::{Parts, Spec, range, tzdata, type_err};
 use crate::interp::conv::Fault;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -706,29 +706,59 @@ fn trans_local(t: Trans, y: i64) -> i64 {
     day * 86_400 + t.secs
 }
 
-/// (offset in seconds, in daylight time) at UTC seconds `t`.
-fn zone_offset(zone: &str, t: i64) -> (i64, bool, Option<&'static ZoneEntry>) {
-    if let Some(rest) = zone.strip_prefix(['+', '-']) {
-        let h: i64 = rest[..2].parse().unwrap_or(0);
-        let m: i64 = rest[3..].parse().unwrap_or(0);
-        let off = (h * 3600 + m * 60) * if zone.starts_with('-') { -1 } else { 1 };
-        return (off, false, None);
-    }
-    if let Some(h) = etc_gmt_hours(zone) {
-        return (h * 3600, false, None);
-    }
-    let (posix, z) = match (ZONES.iter().find(|z| z.0 == zone), US_POSIX_ZONES.iter().find(|z| z.0 == zone)) {
-        (Some(z), _) => (z.1, Some(z)),
-        (None, Some(p)) => (p.1, None),
-        (None, None) => return (0, false, None),
-    };
-    let r = rule(posix);
-    let Some((dst, a, b)) = r.dst else { return (r.std, false, z) };
+struct ZoneAt {
+    off: i64,
+    dst: bool,
+    entry: Option<&'static ZoneEntry>,
+    tuple: u16,
+    overlap: bool,
+}
+
+fn rule_offset(r: &Rule, t: i64) -> (i64, bool) {
+    let Some((dst, a, b)) = r.dst else { return (r.std, false) };
     let (y, _, _) = civil((t + r.std).div_euclid(86_400));
     let start = trans_local(a, y) - r.std;
     let end = trans_local(b, y) - dst;
     let in_dst = if start < end { t >= start && t < end } else { !(t >= end && t < start) };
-    (if in_dst { dst } else { r.std }, in_dst, z)
+    (if in_dst { dst } else { r.std }, in_dst)
+}
+
+fn zone_at(zone: &str, t: i64, gmt: bool) -> ZoneAt {
+    let fixed = |off| ZoneAt { off, dst: false, entry: None, tuple: 0, overlap: false };
+    if let Some(rest) = zone.strip_prefix(['+', '-']) {
+        let h: i64 = rest[..2].parse().unwrap_or(0);
+        let m: i64 = rest[3..].parse().unwrap_or(0);
+        return fixed((h * 3600 + m * 60) * if zone.starts_with('-') { -1 } else { 1 });
+    }
+    if let Some(h) = etc_gmt_hours(zone) {
+        return fixed(h * 3600);
+    }
+    let (i, posix, entry) = match ZONES.iter().position(|z| z.0 == zone) {
+        Some(i) => (i, ZONES[i].1, Some(&ZONES[i])),
+        None => match US_POSIX_ZONES.iter().position(|z| z.0 == zone) {
+            Some(k) => (ZONES.len() + k, US_POSIX_ZONES[k].1, None),
+            None => return fixed(0),
+        },
+    };
+    let r = rule(posix);
+    match tzdata::at(if gmt { ZONES.len() + US_POSIX_ZONES.len() } else { i }, t) {
+        tzdata::At::Period(k, next) => {
+            let overlap = next.is_some_and(|(nt, nk)| {
+                let noff = nk.map_or_else(|| rule_offset(&r, nt).0, |nk| nk.off);
+                noff < k.off && nt - t <= k.off - noff
+            });
+            ZoneAt { off: k.off, dst: k.dst, entry, tuple: k.tuple, overlap }
+        }
+        tzdata::At::Rule => {
+            let (off, dst) = rule_offset(&r, t);
+            let overlap = r.dst.is_some_and(|(dst, _, b)| {
+                let (y, _, _) = civil((t + dst).div_euclid(86_400));
+                let end = trans_local(b, y) - dst;
+                t < end && end - t <= dst - r.std
+            });
+            ZoneAt { off, dst, entry, tuple: 0, overlap }
+        }
+    }
 }
 
 fn offset_name(minutes: i64, long: bool, bare: bool) -> String {
@@ -749,64 +779,92 @@ fn offset_name(minutes: i64, long: bool, bare: bool) -> String {
     }
 }
 
-fn zone_name(kind: usize, off: i64, dst: bool, entry: Option<&(&str, &str, [u16; 6])>) -> String {
-    let minutes = off / 60;
-    match (kind, entry) {
-        (2, _) | (3, _) if minutes == 0 => if kind == 3 { "GMT+00:00" } else { "GMT+0" }.to_string(),
-        (2, _) | (3, _) => offset_name(minutes, kind == 3, false),
-        (_, None) => offset_name(minutes, kind == 1 || kind == 5, false),
-        (_, Some(z)) => {
+fn zone_name(kind: usize, z: &ZoneAt) -> String {
+    if kind == 2 || kind == 3 {
+        return tzdata::gmt(z.off, kind == 3);
+    }
+    if z.tuple != 0 {
+        let t = tzdata::tuple(z.tuple);
+        let id = match kind {
+            0 => t[0],
+            1 => t[1],
+            4 => t[if z.overlap { 4 } else { 2 }],
+            _ => t[if z.overlap { 5 } else { 3 }],
+        };
+        return tzdata::name(id, z.off);
+    }
+    match z.entry {
+        None => offset_name(z.off / 60, kind == 1 || kind == 5, false),
+        Some(e) => {
             let i = match kind {
-                0 => usize::from(dst),
-                1 => 2 + usize::from(dst),
+                0 => usize::from(z.dst),
+                1 => 2 + usize::from(z.dst),
                 4 => 4,
                 _ => 5,
             };
-            ZONE_NAMES[usize::from(z.2[i])].to_string()
+            ZONE_NAMES[usize::from(e.2[i])].to_string()
         }
     }
 }
 
-fn locale_offset(l: &DateLocale, minutes: i64, long: bool) -> String {
-    let sign = if minutes < 0 { l.gmt[1] } else { "+" };
-    let (h, m) = (minutes.abs() / 60, minutes.abs() % 60);
+fn locale_offset(l: &DateLocale, off: i64, long: bool) -> String {
+    let sign = if off < 0 { l.gmt[1] } else { "+" };
+    let (h, m, sec) = (off.abs() / 3600, off.abs() / 60 % 60, off.abs() % 60);
+    let secs = if sec != 0 { format!(":{sec:02}") } else { String::new() };
     if long {
-        format!("{}{sign}{h:02}:{m:02}", l.gmt[0])
-    } else if m == 0 {
-        format!("{}{sign}{h}", l.gmt[0])
+        format!("{}{sign}{h:02}:{m:02}{secs}", l.gmt[0])
+    } else if m != 0 || sec != 0 {
+        format!("{}{sign}{h}:{m:02}{secs}", l.gmt[0])
     } else {
-        format!("{}{sign}{h}:{m:02}", l.gmt[0])
+        format!("{}{sign}{h}", l.gmt[0])
     }
 }
 
-/// Whether `t` falls in the repeated wall-clock hour before the zone's DST ends, where ICU
-/// qualifies a generic name with the zone's location unless it is its metazone's golden zone.
-fn in_overlap(zone: &str, t: i64) -> bool {
-    let Some(z) = ZONES.iter().find(|z| z.0 == zone) else { return false };
-    let r = rule(z.1);
-    let Some((dst, _, b)) = r.dst else { return false };
-    let (y, _, _) = civil((t + dst).div_euclid(86_400));
-    let end = trans_local(b, y) - dst;
-    t < end && end - t <= dst - r.std
-}
-
-fn locale_zone_name(l: &DateLocale, kind: usize, off: i64, dst: bool, zone: &str, overlap: bool) -> String {
-    let minutes = off / 60;
+fn locale_zone_name(l: &DateLocale, kind: usize, z: &ZoneAt, zone: &str) -> String {
     if kind == 2 || kind == 3 {
-        return locale_offset(l, minutes, kind == 3);
+        return locale_offset(l, z.off, kind == 3);
     }
+    let zi = ZONES.iter().position(|e| e.0 == zone);
+    let overlap = kind >= 4 && z.overlap;
     let slot = match kind {
-        0 => usize::from(dst),
-        1 => 2 + usize::from(dst),
+        0 => usize::from(z.dst),
+        1 => 2 + usize::from(z.dst),
         4 if overlap => 6,
         4 => 4,
         _ if overlap => 7,
         _ => 5,
     };
+    let slot = if z.tuple == 0 {
+        Some(slot)
+    } else {
+        let t = tzdata::tuple(z.tuple);
+        let id = t[[0, 0, 1, 1, 2, 3, 4, 5][slot]];
+        if id < 2 {
+            return locale_offset(l, z.off, kind == 1 || kind == 5);
+        }
+        let en = tzdata::name(id, z.off);
+        let today = |s: usize| match s {
+            0..=5 => z.entry.map(|e| ZONE_NAMES[usize::from(e.2[s])]),
+            _ => zi
+                .and_then(|i| EN_GENERIC_ALT.iter().find(|a| usize::from(a.0) == i))
+                .map(|a| dtf_str(DTF_STRINGS_TEXT, DTF_STRINGS_ENDS, if s == 6 { a.1 } else { a.2 })),
+        };
+        let same: &[usize] = match kind {
+            0 => &[0, 1],
+            1 => &[2, 3],
+            4 => &[4, 6],
+            _ => &[5, 7],
+        };
+        core::iter::once(slot)
+            .chain(same.iter().copied())
+            .find(|s| today(*s) == Some(en.as_str()))
+            .or((kind >= 4 && t[2] == t[3]).then_some(4))
+            .or((kind < 2 && z.dst).then_some(slot))
+    };
     let at = |i: usize, slot: usize| l.zones.get(i * 8 + slot).copied().filter(|s| *s != u16::MAX);
-    match ZONES.iter().position(|z| z.0 == zone).and_then(|i| at(i, slot).or_else(|| at(i, if slot >= 6 { slot - 2 } else { slot }))) {
+    match slot.zip(zi).and_then(|(slot, i)| at(i, slot).or_else(|| at(i, if slot >= 6 { slot - 2 } else { slot }))) {
         Some(s) => dtf_str(DTF_STRINGS_TEXT, DTF_STRINGS_ENDS, s).to_string(),
-        None => locale_offset(l, minutes, kind == 1 || kind == 5),
+        None => locale_offset(l, z.off, kind == 1 || kind == 5),
     }
 }
 
@@ -820,7 +878,8 @@ pub(super) fn format(spec: &Spec, t: f64) -> Result<Parts, Fault> {
     let zone = spec.get("@zone").or(spec.get("timeZone")).unwrap_or("UTC");
     let gmt = spec.get("@gmt").is_some();
     let secs = ms.div_euclid(1000);
-    let (off, dst, entry) = zone_offset(zone, secs);
+    let za = zone_at(zone, secs, gmt);
+    let off = za.off;
     let local = ms + off * 1000;
     let days = local.div_euclid(86_400_000);
     let in_day = local.rem_euclid(86_400_000);
@@ -902,8 +961,7 @@ pub(super) fn format(spec: &Spec, t: f64) -> Result<Parts, Fault> {
                         ('v', 4) => 5,
                         _ => 4,
                     };
-                    let overlap = kind >= 4 && in_overlap(zone, secs);
-                    Some(("timeZoneName", locale_zone_name(l, kind, off, dst, zone, overlap)))
+                    Some(("timeZoneName", locale_zone_name(l, kind, &za, zone)))
                 }
                 _ => None,
             };
@@ -980,13 +1038,13 @@ pub(super) fn format(spec: &Spec, t: f64) -> Result<Parts, Fault> {
                     ('v', 4) => 5,
                     _ => 4,
                 };
-                let alt = (kind >= 4 && in_overlap(zone, secs))
+                let alt = (kind >= 4 && za.overlap && za.tuple == 0)
                     .then(|| ZONES.iter().position(|z| z.0 == zone))
                     .flatten()
                     .and_then(|i| EN_GENERIC_ALT.iter().find(|a| usize::from(a.0) == i));
                 match alt {
                     Some(a) => out.push("timeZoneName", dtf_str(DTF_STRINGS_TEXT, DTF_STRINGS_ENDS, if kind == 4 { a.1 } else { a.2 })),
-                    None => out.push("timeZoneName", &zone_name(kind, off, dst, entry)),
+                    None => out.push("timeZoneName", &zone_name(kind, &za)),
                 }
             }
             _ => {}
