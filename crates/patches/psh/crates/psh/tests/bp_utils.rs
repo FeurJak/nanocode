@@ -140,3 +140,12 @@ fn cut_empty_output_delimiter_is_nul() {
     let src = "echo 'a b c' | cut -d' ' -f1,3 --output-delimiter='' | od -An -c";
     assert_eq!(sh(src), ("   a  \\0   c  \\n\n".into(), 0));
 }
+
+#[test]
+fn awk_prints_integers_past_u64_with_ofmt_as_mawk() {
+    let src = "awk 'BEGIN{print 1e19, 2^63, -2^63, 1e20, -1e19; x = 1e20; print x \"\"}'";
+    assert_eq!(
+        sh(src),
+        ("10000000000000000000 9223372036854775808 -9223372036854775808 1e+20 -1e+19\n1e+20\n".into(), 0)
+    );
+}

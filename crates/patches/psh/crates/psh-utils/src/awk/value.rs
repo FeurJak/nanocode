@@ -192,7 +192,10 @@ pub fn special_str(n: f64) -> &'static str {
     }
 }
 
-/// Whether a number converts without CONVFMT/OFMT: integers, nan and inf.
+/// Whether a number converts without CONVFMT/OFMT: nan, inf, and integers from -2^63
+/// up to 2^64 (mawk prints 1e19 with all its digits but 1e20 and -1e19 with %.6g).
 pub fn is_integral(n: f64) -> bool {
-    !n.is_finite() || n == n.trunc()
+    !n.is_finite()
+        || (n == n.trunc()
+            && (-9_223_372_036_854_775_808.0..18_446_744_073_709_551_616.0).contains(&n))
 }
