@@ -1864,6 +1864,18 @@ fn vectorcall_dict(
     vm: &VirtualMachine,
 ) -> PyResult {
     let zelf: &Py<PyType> = zelf_obj.downcast_ref().unwrap();
+    if nargs == 0 && zelf.is(vm.ctx.types.dict_type) {
+        // dict(a=1, b=2): the keyword names are already str objects, so they
+        // go in as the keys themselves, as in CPython, rather than through an
+        // owned copy of each name that the insert then turns back into a str.
+        let dict = PyDict::default();
+        if let Some(names) = kwnames {
+            for (name, value) in names.iter().zip(args) {
+                dict.inner_setitem(&**name, value, vm)?;
+            }
+        }
+        return Ok(dict.into_ref(&vm.ctx).into());
+    }
     let obj = PyDict::default().into_ref_with_type(vm, zelf.to_owned())?;
     let func_args = FuncArgs::from_vectorcall_owned(args, nargs, kwnames);
     PyDict::slot_init(obj.as_object(), func_args, vm)?;
