@@ -74,7 +74,7 @@ pub fn tanh(n: f64) -> f64 {
 
 #[inline(always)]
 pub fn exp(n: f64) -> f64 {
-    crate::exp::exp(n, djs_libm::exp)
+    crate::glibc::exp(n)
 }
 
 #[inline(always)]

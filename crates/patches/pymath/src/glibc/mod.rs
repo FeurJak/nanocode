@@ -6,12 +6,15 @@
 
 mod atan2;
 mod atan2_tbl;
+mod exp;
+mod exp_tbl;
 mod log;
 mod log_tbl;
 mod sincos;
 mod sincos_tbl;
 
 pub(crate) use atan2::atan2;
+pub(crate) use exp::exp;
 pub(crate) use log::{log, log2, log10};
 pub(crate) use sincos::{cos, sin};
 
@@ -20,8 +23,9 @@ mod tests {
     // glibc 2.39 results (CPython 3.12 on Linux), where djs_libm's differ.
     #[test]
     fn matches_glibc() {
-        let cases: [(f64, f64); 4] = [
+        let cases: [(f64, f64); 5] = [
             (super::sin(2.3244968667700685), 0.7291614332842077),
+            (super::exp(-558.6901362520275), 2.3118344545091706e-243),
             (super::atan2(-1.713100038389232, 3.9121385928035437), -0.412740671008641),
             (super::log(1.0638503527860121), 0.06189473515008555),
             (super::log10(0.9417658139537338), -0.026057078472524864),
