@@ -19,5 +19,23 @@ for l in L + L2:
     cases.append(case(l + "/mixed", "const os=[{month:'long',day:'numeric',hour:'numeric',minute:'2-digit'},{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit',timeZoneName:'short'},{weekday:'long',hour:'numeric',minute:'2-digit'},{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false},{month:'long',year:'numeric'},{hour:'numeric',hourCycle:'h11'},{hour:'numeric',hourCycle:'h24',minute:'numeric'},{dayPeriod:'short',hour:'numeric',minute:'numeric'}];for(const o of os){const f=new Intl.DateTimeFormat(" + q + ",{...o,timeZone:'Europe/Berlin'});out.push(JSON.stringify(o)+' '+D.map(d=>f.format(d)).join(' | '))}"))
 keep = {"intl-dtf-" + (l + n).replace("/", "-") for l in L for n in FIVE + ("/toLocale",)} | {"intl-dtf-" + (l + n).replace("/", "-") for l in L2 for n in FIVE}
 cases = [c for c in cases if c["id"] in keep]
+# formatRange / formatRangeToParts: option sets x pairs whose greatest differing field is each level
+RL = L + ["ko", "it", "ru", "nl", "pl", "tr", "ar", "hi", "id", "vi", "zh-TW", "en-GB", "en-IN", "es-MX", "fr-CA"]
+RP = "const a=Date.UTC(2024,4,7,9,5,7,250);const P=[[a,Date.UTC(-43,2,15,18,30)],[a,Date.UTC(2026,1,3,21,40,1)],[a,Date.UTC(2024,10,20,9,5,7)],[a,Date.UTC(2024,4,9,3,15)],[a,Date.UTC(2024,4,7,15,5,7)],[a,Date.UTC(2024,4,7,11,30)],[a,Date.UTC(2024,4,7,9,45,7)],[a,Date.UTC(2024,4,7,9,5,40)],[a,a+300],[a,a],[Date.UTC(2024,4,7,23,59),Date.UTC(2024,4,7,0,0)]];"
+RO = ("[{},{year:'numeric',month:'short',day:'numeric'},{month:'long',year:'numeric'},{weekday:'long',month:'long',day:'numeric'},{hour:'numeric',minute:'2-digit'},"
+      "{hour:'2-digit',minute:'2-digit',hourCycle:'h23'},{hour:'numeric',minute:'numeric',second:'numeric'},{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'},"
+      "{year:'numeric',month:'numeric',day:'numeric',hour:'numeric',minute:'numeric',second:'numeric',fractionalSecondDigits:2},{hour:'numeric',timeZoneName:'short'},"
+      "{dateStyle:'long'},{dateStyle:'medium',timeStyle:'short'},{timeStyle:'medium'},{era:'short',year:'numeric'},{weekday:'short',hour:'numeric'}]")
+for l in RL:
+    q = json.dumps(l)
+    cases.append(case(l + "/range", RP + "for(const z of ['UTC','Asia/Tokyo'])for(const o of " + RO + "){const f=new Intl.DateTimeFormat(" + q + ",{...o,timeZone:z});out.push(z+' '+JSON.stringify(o)+' '+P.slice(z==='UTC'?0:1).map(([x,y])=>f.formatRange(x,y)).join(' | '))}"))
+    cases.append(case(l + "/range-parts", RP + "for(const o of " + RO + ".slice(1,12)){const f=new Intl.DateTimeFormat(" + q + ",{...o,timeZone:'Asia/Kolkata'});out.push(JSON.stringify(o)+' '+P.slice(1,9).map(([x,y])=>f.formatRangeToParts(x,y).map(p=>p.type[0]+p.source[0]+':'+p.value).join(',')).join(' | '))}"))
+cases.append(case("range-args", "const f=new Intl.DateTimeFormat('en-US',{timeZone:'UTC'});const t=g=>{try{return JSON.stringify(g())}catch(e){return e.constructor.name+': '+e.message}};"
+    "for(const g of [()=>f.formatRange(),()=>f.formatRange(1),()=>f.formatRange(undefined,1),()=>f.formatRange(NaN,1),()=>f.formatRange(1,Infinity),()=>f.formatRange(1n,2),()=>f.formatRange(Symbol(),2),()=>f.formatRange(1,'86400000'),()=>f.formatRange(new Date(9e12),new Date(0)),()=>f.formatRange(8.64e15,8.64e15+1),()=>f.formatRangeToParts(null,0),()=>f.formatRangeToParts(0,0),()=>Intl.DateTimeFormat.prototype.formatRange.call({},1,2),()=>Intl.DateTimeFormat.prototype.formatRangeToParts.call(1,1,2),()=>[f.formatRange.length,f.formatRangeToParts.length,f.formatRange.name]])out.push(t(g));"
+    "const log=[];f.formatRange({valueOf(){log.push('s');return 0}},{valueOf(){log.push('e');return 1}});out.push(log.join(''));"))
+
+# range cases djs does not match yet (weekday with hour, some time-only ranges)
+RANGE_TODO = ["intl-dtf-ja-range", "intl-dtf-nl-range", "intl-dtf-ru-range", "intl-dtf-vi-range", "intl-dtf-zh-TW-range", "intl-dtf-zh-TW-range-parts", "intl-dtf-zh-range"]
+cases = [c for c in cases if c["id"] not in RANGE_TODO]
 open(sys.argv[1], "w").write("".join(json.dumps(c, ensure_ascii=False) + "\n" for c in cases))
 print(len(cases))

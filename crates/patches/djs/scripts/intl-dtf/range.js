@@ -4,6 +4,7 @@
 // the ICU interval pattern cut where the end date starts. Fields present in both halves make each
 // half's startRange/endRange span (its first to last such field); all else is shared. Each pattern
 // is checked against node on three date pairs that differ first in its field.
+// Time keys hold G, d, a, h, m (y and M range like d). The fallback separator is out.sep.
 // Levels (greatest differing field): G era, y year, M month, d day, a am/pm, h hour, m minute, s second.
 const m = require('./infer.js');
 const fs = require('fs');
@@ -13,7 +14,7 @@ const fmt = (o) => new Intl.DateTimeFormat(LOC, {timeZone: TZ, ...o});
 const LEVELS = ["G", "y", "M", "d", "a", "h", "m", "s"];
 const KINDS = ["short", "long", "shortOffset", "longOffset", "shortGeneric", "longGeneric"];
 const ZL = ["z", "zzzz", "O", "OOOO", "v", "vvvv"];
-// pairs are wall-clock times in TZ
+// pairs are wall-clock times in TZ; some run backwards so each half sees one-digit and two-digit hours
 const W = (y, mo, d, h = 0, mi = 0, s = 0) => { const t = U(y, mo, d, h, mi, s); const off = t.getTime() - local(t).getTime(); return new Date(t.getTime() + off + (local(new Date(t.getTime() + off)).getTime() === t.getTime() ? 0 : t.getTime() - local(new Date(t.getTime() + off)).getTime())); };
 const LP = new Intl.DateTimeFormat("en-US", {timeZone: TZ, era: "short", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric", hourCycle: "h23"});
 function local(d) {
@@ -28,8 +29,8 @@ const PAIRS = {
   y: [[W(2024, 5, 5, 9, 5), W(2025, 7, 8, 15, 30)], [W(2019, 0, 3, 1, 2), W(2023, 11, 28, 23, 59)], [W(2019, 0, 3, 1, 2), W(2023, 1, 4, 3, 4)]],
   M: [[W(2024, 5, 5, 9, 5), W(2024, 7, 8, 15, 30)], [W(2023, 0, 3, 1, 2), W(2023, 10, 28, 23, 59)], [W(2023, 0, 3, 1, 2), W(2023, 1, 4, 3, 4)]],
   d: [[W(2024, 5, 5, 9, 5), W(2024, 5, 8, 15, 30)], [W(2023, 1, 3, 1, 2), W(2023, 1, 28, 23, 59)], [W(2023, 1, 3, 1, 2), W(2023, 1, 5, 3, 4)]],
-  a: [[W(2024, 5, 5, 9, 5), W(2024, 5, 5, 15, 30)], [W(2023, 1, 3, 1, 2), W(2023, 1, 3, 23, 59)], [W(2023, 1, 3, 8, 2), W(2023, 1, 3, 13, 4)]],
-  h: [[W(2024, 5, 5, 13, 5), W(2024, 5, 5, 15, 30)], [W(2023, 1, 3, 1, 2), W(2023, 1, 3, 10, 59)], [W(2023, 1, 3, 1, 2), W(2023, 1, 3, 3, 4)]],
+  a: [[W(2024, 5, 5, 9, 5), W(2024, 5, 5, 15, 30)], [W(2023, 1, 3, 1, 2), W(2023, 1, 3, 23, 59)], [W(2023, 1, 3, 8, 2), W(2023, 1, 3, 13, 4)], [W(2023, 1, 3, 13, 4), W(2023, 1, 3, 5, 6)]],
+  h: [[W(2024, 5, 5, 13, 5), W(2024, 5, 5, 15, 30)], [W(2023, 1, 3, 1, 2), W(2023, 1, 3, 10, 59)], [W(2023, 1, 3, 1, 2), W(2023, 1, 3, 3, 4)], [W(2023, 1, 3, 10, 2), W(2023, 1, 3, 3, 4)]],
   m: [[W(2024, 5, 5, 15, 5), W(2024, 5, 5, 15, 30)], [W(2023, 1, 3, 1, 2), W(2023, 1, 3, 1, 59)], [W(2023, 1, 3, 1, 2), W(2023, 1, 3, 1, 4)]],
   s: [[W(2024, 5, 5, 15, 5, 1), W(2024, 5, 5, 15, 5, 30)], [W(2023, 1, 3, 1, 2, 3), W(2023, 1, 3, 1, 2, 59)], [W(2023, 1, 3, 1, 2, 3), W(2023, 1, 3, 1, 2, 4)]],
 };
@@ -133,6 +134,8 @@ function timeOpts(k) {
   return o;
 }
 const ST = ["full", "long", "medium", "short"];
+// a time key's levels: era and day (year and month format like day: the yMd fallback), then am/pm, hour, minute
+const TLV = ["G", "d", "a", "h", "m"];
 module.exports = {infer, predict, toks, PAIRS, LEVELS, nodeRange, dateOpts, timeOpts, same, fmt, local, W, KINDS, ZL};
 if (require.main === module) {
   const T = JSON.parse(fs.readFileSync(__dirname + '/t-' + LOC + '.json'));
@@ -146,8 +149,8 @@ if (require.main === module) {
   for (let k = 0; k < 252; k++) {
     const o = timeOpts(k); if (!o) continue;
     const dp = k % 4, cy = ((k - dp) / 4) % 7, mi = ((k - dp) / 4 - cy) / 7 % 3, ho = Math.floor(((k - dp) / 4 - cy) / 21);
-    out.time[k] = ["a", "h", "m"].map(lv => run(o, lv, T.time[tk(ho, mi, cy, dp)]));
-    KINDS.forEach((z, i) => { out.timez[i][k] = ["a", "h", "m"].map(lv => run({...o, timeZoneName: z}, lv, null)); });
+    out.time[k] = TLV.map(lv => run(o, lv, T.time[tk(ho, mi, cy, dp)]));
+    KINDS.forEach((z, i) => { out.timez[i][k] = TLV.map(lv => run({...o, timeZoneName: z}, lv, null)); });
   }
   for (const ds of ST) out.sdate.push(["G", "y", "M", "d"].map(lv => run({dateStyle: ds}, lv, null)));
   for (const c of CYC) out.stime.push(ST.map(ts => LEVELS.map(lv => run({timeStyle: ts, ...c}, lv, null))));
@@ -156,7 +159,7 @@ if (require.main === module) {
   const [a, b] = PAIRS.h[0];
   const g = fmt({year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", hourCycle: "h23"}).formatRangeToParts(a, b);
   out.glue_parts = g.map(p => [p.type, p.value, p.source]);
-  const f = fmt({hour: "numeric", minute: "numeric", second: "numeric"}).formatRangeToParts(...PAIRS.h[0]);
+  const f = fmt({second: "numeric"}).formatRangeToParts(...PAIRS.m[0]);
   out.sep = f.find(p => p.source === "shared").value;
   fs.writeFileSync(__dirname + '/r-' + LOC + '.json', JSON.stringify(out));
   const pool = new Set();

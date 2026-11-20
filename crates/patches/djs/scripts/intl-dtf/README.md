@@ -28,7 +28,23 @@ range.js LOC (after infer.js LOC > t-LOC.json) writes r-LOC.json: node's formatR
 patterns for every date key (era, year, month and day levels), every time key without seconds
 (am/pm, hour and minute levels, plain and with each timeZoneName), and the date and time styles,
 each cut where the end date starts and checked against formatRangeToParts on three date pairs.
-Under node v22.23.5 all 22 locales infer with no mismatches except it (96 era-level keys). djs has
-no formatRange yet: the table is about 11k distinct pattern pairs, so the port should implement
-ICU's DateIntervalFormat over CLDR 48 intervalFormats (node 22.23.5 runs ICU 78.3) and use these
-tables to check it rather than embed them.
+Under node v22.23.5 all 22 locales infer with no mismatches except it (96 era-level keys).
+
+formatRange and formatRangeToParts (intl/date/range.rs) follow ICU's DateIntervalFormat as V8
+drives it: the greatest differing field (era, year, month, day, am/pm, hour, minute, second,
+millisecond) picks an interval pattern; ICU's fallback formats both dates in one pattern joined by
+the range separator; when no field the pattern shows differs, the start is formatted alone. The
+tables it reads (intl/date/range_data.rs, about 11k deduplicated pattern pairs in rows of 16 like
+DTF_ROWS) are written by rangeemit.js from, per locale:
+
+- r-LOC.json (range.js): interval patterns by date key, time key (with era and day levels) and style;
+- tp-LOC.json (tpat.js, then dpat.js, then tpatf.js): ICU's own time pattern per time key and zone
+  kind, the date pattern it joins to a time range and the medium glue, and the time and date
+  patterns its fallbacks use (they differ from format's: de HH, normalized date skeletons).
+
+rangemodel.js is the same algorithm in JS and rdiff.js checks it against node. rmatrix.py (cases
+from rcases.js) is the Rust differential through the parity harness's ws binary:
+  python3 rmatrix.py target/release/ws OUT en-US,de,fr,ja,ar,vi,pt-BR,zh-TW 300
+24000 cases (option sets x pairs at every level, 4 zones) match node 94.7%. Known gaps: date with
+time and with zone names (ICU skeleton adjustments), weekday with hour, ru/vi/zh time-only
+intervals; mkcases.py's RANGE_TODO lists the parity cases they fail.

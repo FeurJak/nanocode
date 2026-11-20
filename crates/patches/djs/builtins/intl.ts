@@ -513,6 +513,48 @@ function IntlDateTimeFormatPrototypeFormatToParts(this: Value, date?: Value): Ob
   return IntlParts(IntlFormat(1, spec, IntlDateValue(date), undefined, true), undefined);
 }
 
+/** formatRange's two dates: both must be defined, then each is read as a number, start first. */
+function IntlDateRange(start: Value, end: Value): f64 {
+  if (start === undefined || end === undefined) {
+    throw NewTypeError("Invalid time value");
+  }
+  return IntlRangeNumber(start);
+}
+
+/** ToNumber with V8's messages for the values it rejects. */
+function IntlRangeNumber(v: Value): f64 {
+  if (IsBigInt(v)) {
+    throw NewTypeError("Cannot convert a BigInt value to a number");
+  }
+  if (IsSymbol(v)) {
+    throw NewTypeError("Cannot convert a Symbol value to a number");
+  }
+  return ToNumber(v);
+}
+
+/**
+ * Intl.DateTimeFormat.prototype.formatRange ( startDate, endDate ).
+ * @builtin Intl.DateTimeFormat.prototype.formatRange
+ * @length 2
+ */
+function IntlDateTimeFormatPrototypeFormatRange(this: Value, startDate?: Value, endDate?: Value): Str {
+  const spec: Str = IntlThis(this, 1, "Intl.DateTimeFormat.prototype.formatRange");
+  const x: f64 = IntlDateRange(startDate, endDate);
+  return AsStr(IntlFormat(1, spec, x, IntlRangeNumber(endDate), false));
+}
+
+/**
+ * Intl.DateTimeFormat.prototype.formatRangeToParts ( startDate, endDate ).
+ * @builtin Intl.DateTimeFormat.prototype.formatRangeToParts
+ * @length 2
+ */
+function IntlDateTimeFormatPrototypeFormatRangeToParts(this: Value, startDate?: Value, endDate?: Value): Obj {
+  const spec: Str = IntlThis(this, 1, "Intl.DateTimeFormat.prototype.formatRangeToParts");
+  const x: f64 = IntlDateRange(startDate, endDate);
+  return IntlParts(IntlFormat(1, spec, x, IntlRangeNumber(endDate), true), undefined);
+}
+
+
 /**
  * Intl.DateTimeFormat.prototype.resolvedOptions ( ).
  * @builtin Intl.DateTimeFormat.prototype.resolvedOptions

@@ -6,6 +6,10 @@ use alloc::string::{String, ToString};
 use locales::{DATE_LOCALES, DTF_PATTERNS_ENDS, DTF_PATTERNS_TEXT, DTF_ROWS, DTF_STRINGS_ENDS, DTF_STRINGS_TEXT, EN_GENERIC_ALT};
 
 mod locales;
+mod range;
+mod range_data;
+
+pub(super) use range::format_range;
 
 /// A locale's date and time data, generated from Node's ICU by intl-dtf/emit.js.
 /// Name arrays: months and days are [format long, short, narrow, standalone long, short, narrow];
@@ -432,6 +436,15 @@ pub(super) fn resolve(locale: &str, tags: &[String], raw: &Spec) -> Result<Spec,
         out.put("@dl", &i.to_string());
     }
     out.put("@pattern", &pattern);
+    let key = range::Key {
+        f: [fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6], fields[7], fields[8]],
+        fsd,
+        cy,
+        z: tzn.map_or(0, |z| 1 + pos(&TZ_NAMES, Some(z))),
+        ds: ds.map(|d| pos(&STYLES, Some(d))),
+        ts: ts.map(|t| pos(&STYLES, Some(t))),
+    };
+    out.put("@rk", &key.encode());
     Ok(out)
 }
 
@@ -874,6 +887,13 @@ pub(super) fn format(spec: &Spec, t: f64) -> Result<Parts, Fault> {
     if !t.is_finite() || t.abs() > 8.64e15 {
         return range("Invalid time value");
     }
+    let pattern = spec.get("@pattern").unwrap_or("");
+    format_pattern(spec, t, pattern, pattern)
+}
+
+/// t formatted with pattern; ctx is the whole pattern it is cut from (a range's half), which
+/// decides whether noon and midnight show as such.
+fn format_pattern(spec: &Spec, t: f64, pattern: &str, ctx: &str) -> Result<Parts, Fault> {
     let ms = t as i64;
     let zone = spec.get("@zone").or(spec.get("timeZone")).unwrap_or("UTC");
     let gmt = spec.get("@gmt").is_some();
@@ -886,9 +906,8 @@ pub(super) fn format(spec: &Spec, t: f64) -> Result<Parts, Fault> {
     let (y, mo, d) = civil(days);
     let wd = (days + 4).rem_euclid(7) as usize;
     let (h, mi, s, frac) = (in_day / 3_600_000, in_day / 60_000 % 60, in_day / 1000 % 60, in_day % 1000);
-    let pattern = spec.get("@pattern").unwrap_or("");
     let dl = spec.get("@dl").and_then(|i| i.parse::<usize>().ok()).and_then(|i| DATE_LOCALES.get(i));
-    let exact = (field_width(pattern, 'm') == 0 || mi == 0) && (field_width(pattern, 's') == 0 || s == 0);
+    let exact = (field_width(ctx, 'm') == 0 || mi == 0) && (field_width(ctx, 's') == 0 || s == 0);
     let width = |n: usize| match n {
         4 => 0,
         5 => 2,

@@ -435,6 +435,29 @@ pub(crate) fn intrinsic(heap: &mut Heap, k: u16, a: [Value; 5]) -> Result<Option
                 }
                 1 => {
                     let Some(t) = a[2].as_number() else { return Ok(None) };
+                    if a[3] != Value::UNDEFINED {
+                        // formatRange: parts are type \u{3} source.
+                        let Some(u) = a[3].as_number() else { return Ok(None) };
+                        let (items, alone) = date::format_range(&spec, t, u)?;
+                        let mut s = String::new();
+                        for (i, (ty, v, src)) in items.iter().enumerate() {
+                            if parts {
+                                if i > 0 {
+                                    s.push('\u{1}');
+                                }
+                                s.push_str(ty);
+                                s.push('\u{3}');
+                                s.push_str(["startRange", "endRange", "shared"][usize::from(*src)]);
+                                s.push('\u{2}');
+                            }
+                            s.push_str(v);
+                        }
+                        // The start alone is format's text, with plain spaces for U+202F.
+                        if alone && !parts {
+                            s = s.replace('\u{202f}', " ");
+                        }
+                        return Ok(Some(string_value(heap, &s)?));
+                    }
                     date::format(&spec, t)?
                 }
                 2 => {
