@@ -580,7 +580,7 @@ impl Py<PyComplex> {
             .ok_or_else(|| {
                 vm.new_type_error(format!(
                     "must be real number, not {}",
-                    number.class().name()
+                    number.class().slot_name()
                 ))
             })?
             .0;
