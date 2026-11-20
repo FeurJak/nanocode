@@ -292,6 +292,7 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
                 terms: Terms {
                     assignee: parsed.one("assignee")?,
                     on_fail,
+                    ..Terms::default()
                 },
             };
             submit(board, at_ms, Op::Post { task: new }).await?;
