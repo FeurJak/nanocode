@@ -172,6 +172,7 @@ def libc_ver(executable=None, lib='', version='', chunksize=16384):
         The file is read and scanned in chunks of chunksize bytes.
 
     """
+    executable_given = bool(executable)
     if not executable:
         if sys.platform == "emscripten":
             # Emscripten's os.confstr reports that it is glibc, so special case
@@ -190,9 +191,8 @@ def libc_ver(executable=None, lib='', version='', chunksize=16384):
 
         executable = sys.executable
 
-        if not executable or not os.path.isfile(executable):
-            # sys.executable is not set, or names no file to scan (nanocode's
-            # python3 is built into the host, not a file in the workspace).
+        if not executable:
+            # sys.executable is not set.
             return lib, version
 
     libc_search = re.compile(br"""
@@ -210,7 +210,15 @@ def libc_ver(executable=None, lib='', version='', chunksize=16384):
     # able to open symlinks for reading
     executable = os.path.realpath(executable)
     ver = None
-    with open(executable, 'rb') as f:
+    try:
+        f = open(executable, 'rb')
+    except OSError:
+        if executable_given:
+            raise
+        # sys.executable can't be read (nanocode's python3 is built into the
+        # host, not a file in the workspace), so there is no binary to scan.
+        return lib, version
+    with f:
         binary = f.read(chunksize)
         pos = 0
         while pos < len(binary):

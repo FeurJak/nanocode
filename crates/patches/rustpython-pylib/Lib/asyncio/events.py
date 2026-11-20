@@ -688,6 +688,17 @@ class _AbstractEventLoopPolicy:
         the current context, set_event_loop must be called explicitly."""
         raise NotImplementedError
 
+    # Child processes watchers (3.12 API, removed in 3.14). There are no
+    # watchers here: subprocesses are reaped without one, as on Windows, so
+    # callers such as CPython 3.12's test.test_asyncio.utils fall back.
+    def get_child_watcher(self):
+        "Get the watcher for child processes."
+        raise NotImplementedError
+
+    def set_child_watcher(self, watcher):
+        """Set the watcher for child processes."""
+        raise NotImplementedError
+
 class _BaseDefaultEventLoopPolicy(_AbstractEventLoopPolicy):
     """Default policy implementation for accessing the event loop.
 
