@@ -150,3 +150,11 @@ fn command_substitution_body_lines_count_from_its_command() {
         "2\n7\na 9\na b 14\n"
     );
 }
+
+#[test]
+fn set_k_takes_assignment_arguments_as_assignments() {
+    assert_eq!(
+        out("set -k\na=5 $E c=7 $E d+=8\necho $a $c $d\nf() { echo \"$x\" \"$@\"; }\nf 1 x=2 3 'y=4'\n"),
+        "5 7 8\n2 1 3 y=4\n"
+    );
+}

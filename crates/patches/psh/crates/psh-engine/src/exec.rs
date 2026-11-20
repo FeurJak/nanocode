@@ -2127,6 +2127,60 @@ pub(crate) fn simple_line(code: &Code, cmd: &Command, s: &SimpleCommand) -> u32 
     }
 }
 
+/// `set -k`: every argument shaped like an assignment (`name=value`, the name
+/// unquoted) is an assignment in the command's environment, not an argument. None when
+/// no argument is one.
+fn keyword_assigns(code: &Code, s: &SimpleCommand) -> Option<SimpleCommand> {
+    let assign = |w: &psh_syntax::Word| {
+        let first = w.parts.first()?;
+        if !matches!(first.kind, psh_syntax::Part::Lit) {
+            return None;
+        }
+        let text = code.ast.text(first.span);
+        let eq = text.find('=')?;
+        let (name, append) = match text[..eq].strip_suffix('+') {
+            Some(n) => (n, true),
+            None => (&text[..eq], false),
+        };
+        if !is_name(name.as_bytes()) {
+            return None;
+        }
+        let at = first.span.start;
+        let value_start = at + eq as u32 + 1;
+        let mut parts = w.parts.clone();
+        if value_start == first.span.end {
+            parts.remove(0);
+        } else {
+            parts[0].span = psh_syntax::Span::new(value_start, first.span.end);
+        }
+        Some(psh_syntax::Assign {
+            span: w.span,
+            name: psh_syntax::Span::new(at, at + name.len() as u32),
+            index: None,
+            append,
+            value: AssignValue::Scalar(psh_syntax::Word {
+                span: psh_syntax::Span::new(value_start, w.span.end),
+                parts,
+            }),
+        })
+    };
+    let (head, rest) = s.words.split_first()?;
+    if !rest.iter().any(|w| assign(w).is_some()) {
+        return None;
+    }
+    let mut out = SimpleCommand {
+        assigns: s.assigns.clone(),
+        words: vec![head.clone()],
+    };
+    for w in rest {
+        match assign(w) {
+            Some(a) => out.assigns.push(a),
+            None => out.words.push(w.clone()),
+        }
+    }
+    Some(out)
+}
+
 async fn prepare_simple(
     vp: &mut Vp,
     code: &Rc<Code>,
@@ -2134,6 +2188,15 @@ async fn prepare_simple(
     s: &SimpleCommand,
 ) -> Result<Prepared, Unwind> {
     vp.line = simple_line(code, cmd, s);
+    let keyword;
+    let s = if vp.opts.get(SetOpt::Keyword)
+        && let Some(k) = keyword_assigns(code, s)
+    {
+        keyword = k;
+        &keyword
+    } else {
+        s
+    };
     let via = if vp.opts.get(SetOpt::Posix) {
         s.words
             .iter()
