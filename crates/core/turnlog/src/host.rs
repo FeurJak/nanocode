@@ -80,6 +80,9 @@ pub trait LogHost: Send + Sync {
 
 type Dialects = [&'static str; 2];
 
+/// Serializes schema preparation across processes on Postgres: two loads that create nanocode_log at once otherwise
+/// race in CREATE TABLE IF NOT EXISTS (duplicate key in pg_type for the table's row type). SQLite has one writer.
+const PREPARE_LOCK: Dialects = ["SELECT 1", "SELECT pg_advisory_xact_lock(7_061_636_193)"];
 const CREATE: Dialects = [
     "CREATE TABLE IF NOT EXISTS nanocode_log (scope TEXT NOT NULL, seq INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (scope, seq)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS nanocode_log (scope TEXT NOT NULL, seq BIGINT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (scope, seq))",
@@ -113,12 +116,34 @@ const DROP: Dialects = [
     "DELETE FROM nanocode_log WHERE scope = $1::text AND seq >= CAST($2::text AS BIGINT) AND seq < CAST($3::text AS BIGINT)",
 ];
 pub struct SqlLog<H: ?Sized> {
+    /// Set once this log created its table and index, so later loads read without the schema lock.
+    prepared: std::sync::atomic::AtomicBool,
     host: Arc<H>,
 }
 
 impl<H: Sql + ?Sized> SqlLog<H> {
     pub const fn new(host: Arc<H>) -> Self {
-        Self { host }
+        Self {
+            prepared: std::sync::atomic::AtomicBool::new(false),
+            host,
+        }
+    }
+
+    /// Creates nanocode_log and its index under PREPARE_LOCK, once per log.
+    async fn prepare(&self) -> Result<(), StoreError> {
+        use std::sync::atomic::Ordering;
+        if self.prepared.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let statements = [&PREPARE_LOCK, &CREATE, &INDEX].map(|statement| SqlStatement {
+            sql: self.pick(statement),
+            params: Vec::new(),
+        });
+        self.host
+            .transaction("turn_log_prepare", &statements)
+            .await?;
+        self.prepared.store(true, Ordering::Release);
+        Ok(())
     }
 
     fn pick(&self, statements: &Dialects) -> &'static str {
@@ -232,23 +257,14 @@ impl<H: Sql + Send + Sync + ?Sized> LogHost for SqlLog<H> {
         scope: &'a str,
     ) -> StoreFuture<'a, Result<Vec<(u64, String)>, StoreError>> {
         Box::pin(async move {
-            let statements = [
-                SqlStatement {
-                    sql: self.pick(&CREATE),
-                    params: Vec::new(),
-                },
-                SqlStatement {
-                    sql: self.pick(&INDEX),
-                    params: Vec::new(),
-                },
-                SqlStatement {
-                    sql: self.pick(&LOAD),
-                    params: vec![scope],
-                },
-            ];
+            self.prepare().await?;
+            let statements = [SqlStatement {
+                sql: self.pick(&LOAD),
+                params: vec![scope],
+            }];
             let rows = self.host.transaction("turn_log_load", &statements).await?;
             rows.into_iter()
-                .nth(2)
+                .next()
                 .ok_or_else(|| invalid("load returned no result"))?
                 .into_iter()
                 .map(row)
