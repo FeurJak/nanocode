@@ -21,7 +21,7 @@ use nanocode_build_opt::{
 
 const USAGE: &str = "usage: nc-build check [--full] [--base REF] [-j N] [--seeds N] [--no-sim] [--plan]
   changed scope: the crates the diff since REF (merge-base with the upstream, or HEAD~1 when nothing differs) and untracked files touch,
-  with their dependents (cargo check --locked: --lib --bins native, --lib wasm32), the simulator's --tidy and --machines walks, and the pass jobs and canaries of
+  with their dependents (cargo check --locked: --lib --bins --examples native, --lib wasm32), the simulator's --tidy and --machines walks, and the pass jobs and canaries of
   bin/nanocode-sim/cfo.sh's table for every scenario that reaches them; --full: the whole workspace and every scenario and canary
   -j N: parallel jobs (default: CARGO_BUILD_JOBS, else the cores this process may run on); --seeds N: seeds per pass job (default 8, 64 with --full)
   a canary passes once a seed catches it, trying seeds 0, then 1..8, then the rest of its budget in units of 16 seeds;
@@ -325,8 +325,9 @@ fn modules(src: &str) -> Result<Modules, String> {
 
 enum Selection {
     Workspace,
-    /// Every reached crate, checked natively with --lib --bins so a bin-only crate (nc-board,
-    /// nanocode-fuzz, ...) is checked too, and the libraries among them, checked for wasm32.
+    /// Every reached crate, checked natively with --lib --bins --examples so a bin-only crate
+    /// (nc-board, nanocode-fuzz, ...) and examples are checked too, and the libraries among them,
+    /// checked for wasm32.
     Crates {
         reached: BTreeSet<String>,
         libraries: BTreeSet<String>,
@@ -760,12 +761,13 @@ pub fn main(args: &[String]) -> u8 {
         wasm.push("--lib".to_owned());
         wasm
     };
-    // Native: --lib --bins (--bins alone when no reached crate has a library, since cargo refuses
-    // --lib then); wasm32: the libraries plus the crates nanocode-ts links. Empty means skipped.
+    // Native: --lib --bins --examples (--bins --examples alone when no reached crate has a library,
+    // since cargo refuses --lib then); wasm32: the libraries plus the crates nanocode-ts links.
+    // Empty means skipped.
     let (native_args, wasm_args, detail): (Vec<String>, Vec<String>, String) =
         match &planned.selection {
             Selection::Workspace => (
-                ["--workspace", "--lib", "--bins"]
+                ["--workspace", "--lib", "--bins", "--examples"]
                     .map(str::to_owned)
                     .to_vec(),
                 ["--workspace", "--lib"].map(str::to_owned).to_vec(),
@@ -782,6 +784,7 @@ pub fn main(args: &[String]) -> u8 {
                     native.push("--lib".to_owned());
                 }
                 native.push("--bins".to_owned());
+                native.push("--examples".to_owned());
                 let wasm = always_wasm(libraries);
                 (
                     native,
