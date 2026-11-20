@@ -245,7 +245,7 @@ impl Shape {
         let mut rng = Rng::derive(seed, "board shards shape");
         let partitions = [1, 2, 4, 8, 16][rng.pick(5)];
         let calm = rng.chance(250_000);
-        Self {
+        let shape = Self {
             partitions,
             committers: if rng.chance(250_000) { 2 } else { 1 },
             writers: rng.range(2, 40),
@@ -276,7 +276,22 @@ impl Shape {
             fence_ppm: rng.range(0, 1_000_000),
             cap: rng.chance(500_000).then(|| rng.range(1, 6) as u32),
             stale_ppm: rng.range(100_000, 600_000),
-        }
+        };
+        let lease_ms = shape.lease_ms.max(shape.lease_floor_ms());
+        Self { lease_ms, ..shape }
+    }
+
+    /// The shortest lease a winner can use: every writer queues a write on one committer, so a
+    /// claim waits about one round per batch of writers before it lands, and its finish waits
+    /// as long again. A lease shorter than that lapses before the finish lands however the
+    /// claims race, and the board only moves when a rank reorders the stuck head (seed
+    /// 156486433204944099: 31 writers at batch 1 behind a 218 ms lease). Four rounds of
+    /// margin plus a step keep the lease above the queue without lengthening any lease that
+    /// already was.
+    fn lease_floor_ms(&self) -> u64 {
+        let rounds = self.writers.div_ceil(self.batch as u64);
+        let round_ms = self.cost.rtt_us / 1_000 + 2 * self.cost.jitter_ms + 1;
+        4 * rounds * round_ms + 2 * self.step_ms
     }
 
     fn describe(&self) -> String {
