@@ -1,6 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     future::Future,
     ops::Range,
     pin::Pin,
@@ -33,6 +33,17 @@ const PPM_DELTA: u64 = 500_000;
 const PPM_REF_DELTA: u64 = 300_000;
 const PPM_USERINFO: u64 = 500_000;
 const PPM_QUIET: u64 = 300_000;
+const PPM_SHALLOW_CLONE: u64 = 400_000;
+const PPM_UNSHALLOW: u64 = 250_000;
+const PPM_FORCE: u64 = 250_000;
+const PPM_WILDCARD: u64 = 600_000;
+const PPM_REFUSE: u64 = 150_000;
+const PPM_SPEC_PRUNE: u64 = 400_000;
+const PPM_TOPIC_REWRITE: u64 = 500_000;
+const PPM_TOPIC_DELETE: u64 = 300_000;
+const DEPTH_MAX: u64 = 3;
+const TOPICS_MAX: u64 = 2;
+const INFINITE_DEPTH: u64 = 0x7fff_ffff;
 const FILE_NAMES: [&str; 6] = [
     "README.md",
     "src/lib.rs",
@@ -42,7 +53,8 @@ const FILE_NAMES: [&str; 6] = [
     "src/deep/c.rs",
 ];
 const OPS_MIN: u64 = 4;
-const OPS_MAX: u64 = 10;
+const OPS_MAX: u64 = 20;
+const OP_KINDS: u64 = 10;
 const LOCAL_COMMITS_MAX: u64 = 3;
 const SCRIPT_BUDGET: u32 = 1 << 20;
 const BLOB: u8 = 3;
@@ -63,10 +75,13 @@ pub enum GitRemoteMutation {
     ServerKeepsRef,
     StaleTracking,
     PushWrongBase,
+    ForgetsShallow,
+    KeepsPruned,
+    ForcesRefspec,
 }
 
 impl GitRemoteMutation {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 10] = [
         Self::None,
         Self::StoresSecret,
         Self::UpdatesRefOnBadPack,
@@ -74,6 +89,9 @@ impl GitRemoteMutation {
         Self::ServerKeepsRef,
         Self::StaleTracking,
         Self::PushWrongBase,
+        Self::ForgetsShallow,
+        Self::KeepsPruned,
+        Self::ForcesRefspec,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -91,6 +109,9 @@ impl GitRemoteMutation {
             Self::ServerKeepsRef => "server_keeps_ref",
             Self::StaleTracking => "stale_tracking",
             Self::PushWrongBase => "push_wrong_base",
+            Self::ForgetsShallow => "forgets_shallow",
+            Self::KeepsPruned => "keeps_pruned",
+            Self::ForcesRefspec => "forces_refspec",
         }
     }
 
@@ -114,6 +135,13 @@ pub struct GitRemoteStats {
     pub deltas: u64,
     pub pushed_deltas: u64,
     pub credential_asks: u64,
+    pub shallow_clones: u64,
+    pub shallow_fetches: u64,
+    pub unshallows: u64,
+    pub pruned: u64,
+    pub spec_fetches: u64,
+    pub rejected_refs: u64,
+    pub refused: u64,
 }
 
 impl GitRemoteStats {
@@ -127,6 +155,13 @@ impl GitRemoteStats {
         self.deltas += other.deltas;
         self.pushed_deltas += other.pushed_deltas;
         self.credential_asks += other.credential_asks;
+        self.shallow_clones += other.shallow_clones;
+        self.shallow_fetches += other.shallow_fetches;
+        self.unshallows += other.unshallows;
+        self.pruned += other.pruned;
+        self.spec_fetches += other.spec_fetches;
+        self.rejected_refs += other.rejected_refs;
+        self.refused += other.refused;
     }
 }
 
@@ -517,7 +552,12 @@ fn parse_tree(mut data: &[u8]) -> Vec<(Vec<u8>, bool, Oid)> {
 }
 
 impl Server {
-    fn reach(&self, tips: &[Oid], stop: &BTreeSet<Oid>) -> Result<Vec<Oid>, String> {
+    fn reach(
+        &self,
+        tips: &[Oid],
+        stop: &BTreeSet<Oid>,
+        cut: &BTreeSet<Oid>,
+    ) -> Result<Vec<Oid>, String> {
         let objects = self.objects.borrow();
         let mut seen = BTreeSet::new();
         let mut order = Vec::new();
@@ -534,7 +574,9 @@ impl Server {
                 COMMIT => {
                     let (tree, parents) = parse_commit(data);
                     stack.push(tree);
-                    stack.extend(parents);
+                    if !cut.contains(&oid) {
+                        stack.extend(parents);
+                    }
                 }
                 TREE => stack.extend(parse_tree(data).into_iter().map(|(_, _, oid)| oid)),
                 _ => {}
@@ -543,13 +585,72 @@ impl Server {
         Ok(order)
     }
 
+    fn within(&self, tips: &[Oid], depth: u64) -> (BTreeSet<Oid>, BTreeSet<Oid>) {
+        let objects = self.objects.borrow();
+        let mut level: BTreeSet<Oid> = BTreeSet::new();
+        let mut boundary = BTreeSet::new();
+        let mut queue: VecDeque<(Oid, u64)> = tips.iter().map(|tip| (*tip, 1)).collect();
+        while let Some((oid, at)) = queue.pop_front() {
+            let Some((COMMIT, data)) = objects.get(&oid).map(|(k, d)| (*k, d)) else {
+                continue;
+            };
+            if !level.insert(oid) {
+                continue;
+            }
+            let (_, parents) = parse_commit(data);
+            if at >= depth {
+                if !parents.is_empty() {
+                    boundary.insert(oid);
+                }
+                continue;
+            }
+            queue.extend(parents.into_iter().map(|parent| (parent, at + 1)));
+        }
+        (level, boundary)
+    }
+
+    fn descends(&self, new: Oid, old: Oid, cut: &BTreeSet<Oid>) -> bool {
+        let objects = self.objects.borrow();
+        let mut seen = BTreeSet::new();
+        let mut stack = vec![new];
+        while let Some(oid) = stack.pop() {
+            if oid == old {
+                return true;
+            }
+            if cut.contains(&oid) || !seen.insert(oid) {
+                continue;
+            }
+            if let Some((COMMIT, data)) = objects.get(&oid).map(|(k, d)| (*k, d)) {
+                stack.extend(parse_commit(data).1);
+            }
+        }
+        false
+    }
+
+    fn walk(&self, tip: Oid, shallow: &BTreeSet<Oid>) -> Vec<Oid> {
+        let objects = self.objects.borrow();
+        let mut out = Vec::new();
+        let mut at = Some(tip);
+        while let Some(oid) = at {
+            out.push(oid);
+            at = None;
+            if shallow.contains(&oid) {
+                break;
+            }
+            if let Some((COMMIT, data)) = objects.get(&oid).map(|(k, d)| (*k, d)) {
+                at = parse_commit(data).1.first().copied();
+            }
+        }
+        out
+    }
+
     fn advert(&self, service: &str) -> Vec<u8> {
         let mut body = Vec::new();
         pkt(&mut body, format!("# service={service}\n").as_bytes());
         body.extend_from_slice(b"0000");
         let refs = self.refs.borrow();
         let caps = if service == "git-upload-pack" {
-            format!("multi_ack_detailed ofs-delta symref=HEAD:{MAIN} agent=git/sim")
+            format!("multi_ack_detailed shallow ofs-delta symref=HEAD:{MAIN} agent=git/sim")
         } else {
             "report-status delete-refs ofs-delta agent=git/sim".to_owned()
         };
@@ -621,12 +722,18 @@ impl Server {
     fn upload(&self, body: &[u8]) -> Response {
         let mut wants = Vec::new();
         let mut haves = Vec::new();
+        let mut client_shallow = BTreeSet::new();
+        let mut depth = None;
         let lines = every_line(body);
         for line in lines {
             if let Some(oid) = line.strip_prefix(b"want ").and_then(unhex) {
                 wants.push(oid);
             } else if let Some(oid) = line.strip_prefix(b"have ").and_then(unhex) {
                 haves.push(oid);
+            } else if let Some(oid) = line.strip_prefix(b"shallow ").and_then(unhex) {
+                client_shallow.insert(oid);
+            } else if let Some(rest) = line.strip_prefix(b"deepen ") {
+                depth = String::from_utf8_lossy(rest).trim().parse::<u64>().ok();
             }
         }
         let common: Vec<Oid> = haves
@@ -634,13 +741,41 @@ impl Server {
             .filter(|oid| self.objects.borrow().contains_key(*oid))
             .copied()
             .collect();
-        let stop: BTreeSet<Oid> = match self.reach(&common, &BTreeSet::new()) {
-            Ok(old) => old.into_iter().collect(),
-            Err(_) => BTreeSet::new(),
+        let none = BTreeSet::new();
+        let mut update = Vec::new();
+        let reached = match depth {
+            None => match self.reach(&common, &none, &client_shallow) {
+                Ok(old) => self.reach(&wants, &old.into_iter().collect(), &none),
+                Err(why) => Err(why),
+            },
+            Some(depth) => {
+                let (within, boundary) = self.within(&wants, depth);
+                for oid in &boundary {
+                    pkt(&mut update, format!("shallow {}\n", hex(oid)).as_bytes());
+                }
+                for oid in client_shallow.intersection(&within) {
+                    if !boundary.contains(oid) {
+                        pkt(&mut update, format!("unshallow {}\n", hex(oid)).as_bytes());
+                    }
+                }
+                let mut cut = boundary;
+                cut.extend(client_shallow.difference(&within).copied());
+                match self.reach(&common, &none, &client_shallow) {
+                    Ok(has) => {
+                        let has: BTreeSet<Oid> = has.into_iter().collect();
+                        self.reach(&wants, &none, &cut)
+                            .map(|all| all.into_iter().filter(|oid| !has.contains(oid)).collect())
+                    }
+                    Err(why) => Err(why),
+                }
+            }
         };
-        let Ok(mut send) = self.reach(&wants, &stop) else {
+        let Ok(mut send) = reached else {
             return respond(500, "", Vec::new());
         };
+        if depth.is_some() || !client_shallow.is_empty() {
+            update.extend_from_slice(b"0000");
+        }
         send.reverse();
         let corruption = self.corrupt.take();
         if corruption == Some(Corruption::DropWanted) {
@@ -666,7 +801,7 @@ impl Server {
             }
             Some(Corruption::DropWanted) | None => {}
         }
-        let mut out = Vec::new();
+        let mut out = update;
         pkt(&mut out, b"NAK\n");
         out.extend_from_slice(&pack);
         respond(HTTP_OK, "application/x-git-upload-pack-result", out)
@@ -1016,9 +1151,264 @@ struct World {
     message: String,
     mutation: GitRemoteMutation,
     commits: u64,
+    single: bool,
+    shallow: BTreeSet<Oid>,
+    tracked: BTreeMap<String, Oid>,
+    mirror: BTreeMap<String, Oid>,
 }
 
 impl World {
+    fn server_heads(&self) -> BTreeMap<String, Oid> {
+        self.server
+            .refs
+            .borrow()
+            .iter()
+            .filter_map(|(name, oid)| Some((name.strip_prefix("refs/heads/")?.to_owned(), *oid)))
+            .collect()
+    }
+
+    fn refs_under(&self, dir: &str) -> BTreeMap<String, Oid> {
+        let prefix = format!("{WORK}/.git/{dir}");
+        snapshot(&self.fs)
+            .into_iter()
+            .filter_map(|(path, data)| {
+                let path = String::from_utf8(path).ok()?;
+                Some((path.strip_prefix(&prefix)?.to_owned(), unhex(&data)?))
+            })
+            .collect()
+    }
+
+    fn check_refs(&self, dir: &str, want: &BTreeMap<String, Oid>) -> Result<(), String> {
+        let got = self.refs_under(dir);
+        if &got == want {
+            return Ok(());
+        }
+        let names = |map: &BTreeMap<String, Oid>| {
+            map.iter()
+                .map(|(name, oid)| format!("{name}={}", &hex(oid)[..7]))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        Err(format!(
+            "{dir} holds [{}] where the model holds [{}]",
+            names(&got),
+            names(want)
+        ))
+    }
+
+    fn track_fetch(&mut self, prune: bool) -> Vec<(String, Oid)> {
+        let heads = self.server_heads();
+        if self.single {
+            if let Some(main) = heads.get("main") {
+                self.tracked.insert("main".to_owned(), *main);
+            }
+            return Vec::new();
+        }
+        let gone: Vec<(String, Oid)> = self
+            .tracked
+            .iter()
+            .filter(|(name, _)| prune && !heads.contains_key(*name))
+            .map(|(name, oid)| (name.clone(), *oid))
+            .collect();
+        for (name, _) in &gone {
+            self.tracked.remove(name);
+        }
+        self.tracked.extend(heads);
+        gone
+    }
+
+    fn check_shallow(&mut self) -> Result<(), String> {
+        let got: BTreeSet<Oid> = self
+            .fs
+            .get(format!("{WORK}/.git/shallow").as_bytes())
+            .map(|data| data.split(|&b| b == b'\n').filter_map(unhex).collect())
+            .unwrap_or_default();
+        if got != self.shallow {
+            return Err(format!(
+                ".git/shallow lists {} commits where the server cut {}",
+                got.len(),
+                self.shallow.len()
+            ));
+        }
+        let tip = self
+            .read_ref("refs/remotes/origin/main")
+            .ok_or("no origin/main")?;
+        let want: String = self
+            .server
+            .walk(tip, &self.shallow)
+            .iter()
+            .map(|oid| format!("{}\n", hex(oid)))
+            .collect();
+        let (status, text) = self.run(&format!(
+            "cd {WORK} && git log --format=%H refs/remotes/origin/main"
+        ))?;
+        if status != 0 || text != want {
+            return Err(format!(
+                "log of origin/main exited {status} with {} lines where the shallow history has {}",
+                text.lines().count(),
+                want.lines().count()
+            ));
+        }
+        let (status, text) = self.run(&format!(
+            "cd {WORK} && git rev-parse --is-shallow-repository && git status --porcelain"
+        ))?;
+        if status != 0 || text != format!("{}\n", !self.shallow.is_empty()) {
+            return Err(format!(
+                "rev-parse and status of a shallow repository: {text}"
+            ));
+        }
+        Ok(())
+    }
+
+    fn server_topic(&mut self) {
+        let n = self.rng.below(TOPICS_MAX);
+        let name = format!("refs/heads/topic-{n}");
+        let old = self.server.refs.borrow().get(&name).copied();
+        let parent = match old {
+            Some(_) if self.rng.chance(PPM_TOPIC_DELETE) => {
+                self.server.refs.borrow_mut().remove(&name);
+                self.trace.push(format!("server deleted {name}"));
+                return;
+            }
+            Some(old) if !self.rng.chance(PPM_TOPIC_REWRITE) => Some(old),
+            _ => self.server_main(),
+        };
+        self.commits += 1;
+        let mut files = self.files.clone();
+        files.insert(
+            format!("topic-{n}.txt"),
+            format!("topic {} {}\n", self.commits, self.rng.below(1000)).into_bytes(),
+        );
+        let oid = self.server.commit(
+            &files,
+            parent,
+            &format!("topic {}", self.commits),
+            self.commits,
+        );
+        self.server.refs.borrow_mut().insert(name.clone(), oid);
+        self.trace.push(format!("server {name} {}", hex(&oid)));
+    }
+
+    fn deepen(&mut self) -> Result<(), String> {
+        let unshallow = self.rng.chance(PPM_UNSHALLOW);
+        let depth = if unshallow {
+            INFINITE_DEPTH
+        } else {
+            self.rng.range(1, DEPTH_MAX + 2)
+        };
+        let arg = if unshallow {
+            " --unshallow".to_owned()
+        } else {
+            format!(" --depth {depth}")
+        };
+        let before = snapshot(&self.fs);
+        let (status, text) = self.run(&format!("cd {WORK} && git fetch -q{arg}"))?;
+        if unshallow && self.shallow.is_empty() {
+            if status == 0 || snapshot(&self.fs) != before {
+                return Err("--unshallow of a complete repository changed it".to_owned());
+            }
+            return Ok(());
+        }
+        if status != 0 {
+            return Err(format!("fetch{arg} exited {status}: {text}"));
+        }
+        let main = self.server_main().ok_or("no main")?;
+        let (within, boundary) = self.server.within(&[main], depth);
+        self.shallow.extend(boundary.iter().copied());
+        self.shallow
+            .retain(|oid| boundary.contains(oid) || !within.contains(oid));
+        self.track_fetch(false);
+        if unshallow {
+            self.stats.unshallows += 1;
+        } else {
+            self.stats.shallow_fetches += 1;
+        }
+        if self.mutation == GitRemoteMutation::ForgetsShallow && !self.shallow.is_empty() {
+            self.fs
+                .insert(format!("{WORK}/.git/shallow").as_bytes(), Bytes::new())
+                .map_err(|e| e.to_string())?;
+        }
+        self.check_refs("refs/remotes/origin/", &self.tracked)?;
+        self.check_shallow()
+    }
+
+    fn spec_fetch(&mut self) -> Result<(), String> {
+        let heads = self.server_heads();
+        if self.rng.chance(PPM_REFUSE) {
+            let before = snapshot(&self.fs);
+            let (status, _) = self.run(&format!("cd {WORK} && git fetch -q origin main:main"))?;
+            if status == 0 || snapshot(&self.fs) != before {
+                return Err("a fetch into the checked-out branch changed it".to_owned());
+            }
+            self.stats.refused += 1;
+            return Ok(());
+        }
+        let force = self.rng.chance(PPM_FORCE);
+        let prune = self.rng.chance(PPM_SPEC_PRUNE);
+        let plus = if force { "+" } else { "" };
+        let wild = self.rng.chance(PPM_WILDCARD);
+        let (spec, picked): (String, Vec<String>) = if wild {
+            (
+                format!("'{plus}refs/heads/*:refs/remotes/mirror/*'"),
+                heads.keys().cloned().collect(),
+            )
+        } else {
+            let names: Vec<&String> = heads
+                .keys()
+                .filter(|name| name.as_str() != "main" || heads.len() == 1)
+                .collect();
+            let name = names[self.rng.pick(names.len())].clone();
+            (
+                format!("{plus}refs/heads/{name}:refs/remotes/mirror/{name}"),
+                vec![name],
+            )
+        };
+        let flag = if prune { " --prune" } else { "" };
+        let (status, text) = self.run(&format!("cd {WORK} && git fetch -q{flag} origin {spec}"))?;
+        let mut rejected = Vec::new();
+        for name in &picked {
+            let new = heads[name];
+            match self.mirror.get(name) {
+                Some(old)
+                    if *old != new && !force && !self.server.descends(new, *old, &self.shallow) =>
+                {
+                    rejected.push(name.clone());
+                }
+                _ => {
+                    self.mirror.insert(name.clone(), new);
+                }
+            }
+            if !self.single || name == "main" {
+                self.tracked.insert(name.clone(), new);
+            }
+        }
+        if prune && wild {
+            let before = self.mirror.len();
+            self.mirror.retain(|name, _| heads.contains_key(name));
+            self.stats.pruned += (before - self.mirror.len()) as u64;
+        }
+        if status != i32::from(!rejected.is_empty()) {
+            return Err(format!(
+                "fetch {spec} exited {status} with {} refs to reject: {text}",
+                rejected.len()
+            ));
+        }
+        if self.mutation == GitRemoteMutation::ForcesRefspec
+            && let Some(name) = rejected.first()
+        {
+            self.fs
+                .insert(
+                    format!("{WORK}/.git/refs/remotes/mirror/{name}").as_bytes(),
+                    Bytes::from(format!("{}\n", hex(&heads[name]))),
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        self.stats.spec_fetches += 1;
+        self.stats.rejected_refs += rejected.len() as u64;
+        self.check_refs("refs/remotes/mirror/", &self.mirror)?;
+        self.check_refs("refs/remotes/origin/", &self.tracked)
+    }
+
     fn run(&mut self, script: &str) -> Result<(i32, String), String> {
         let ran = block_on(self.shell.run(
             Script {
@@ -1110,12 +1500,30 @@ impl World {
         } else {
             ""
         };
-        let (status, text) = self.run(&format!("git clone{quiet} {} {WORK}", self.url))?;
+        let depth = self
+            .rng
+            .chance(PPM_SHALLOW_CLONE)
+            .then(|| self.rng.range(1, DEPTH_MAX));
+        let arg = depth.map(|d| format!(" --depth {d}")).unwrap_or_default();
+        let (status, text) = self.run(&format!("git clone{quiet}{arg} {} {WORK}", self.url))?;
         if status != 0 {
             return Err(format!("clone exited {status}: {text}"));
         }
         self.stats.clones += 1;
         let main = self.server_main().ok_or("the server has no main")?;
+        if let Some(depth) = depth {
+            self.single = true;
+            self.shallow = self.server.within(&[main], depth).1;
+            self.stats.shallow_clones += 1;
+        }
+        self.track_fetch(false);
+        self.check_refs("refs/remotes/origin/", &self.tracked)?;
+        if self.mutation == GitRemoteMutation::ForgetsShallow && !self.shallow.is_empty() {
+            self.fs
+                .insert(format!("{WORK}/.git/shallow").as_bytes(), Bytes::new())
+                .map_err(|e| e.to_string())?;
+        }
+        self.check_shallow()?;
         if self.read_ref("refs/remotes/origin/main") != Some(main)
             || self.read_ref(MAIN) != Some(main)
         {
@@ -1152,11 +1560,25 @@ impl World {
         } else {
             ""
         };
-        let (status, text) = self.run(&format!("cd {WORK} && git fetch{quiet}"))?;
+        let prune = self.rng.chance(PPM_SPEC_PRUNE);
+        let flag = if prune { " --prune" } else { "" };
+        let (status, text) = self.run(&format!("cd {WORK} && git fetch{quiet}{flag}"))?;
         if status != 0 {
             return Err(format!("fetch exited {status}: {text}"));
         }
         self.stats.fetches += 1;
+        let gone = self.track_fetch(prune);
+        self.stats.pruned += gone.len() as u64;
+        if self.mutation == GitRemoteMutation::KeepsPruned
+            && let Some((name, oid)) = gone.first()
+        {
+            self.fs
+                .insert(
+                    format!("{WORK}/.git/refs/remotes/origin/{name}").as_bytes(),
+                    Bytes::from(format!("{}\n", hex(oid))),
+                )
+                .map_err(|e| e.to_string())?;
+        }
         if self.mutation == GitRemoteMutation::StaleTracking {
             self.fs
                 .insert(tracking.as_bytes(), before)
@@ -1165,7 +1587,8 @@ impl World {
         if self.read_ref("refs/remotes/origin/main") != self.server_main() {
             return Err("fetch left origin/main behind the server".to_owned());
         }
-        Ok(())
+        self.check_refs("refs/remotes/origin/", &self.tracked)?;
+        self.check_shallow()
     }
 
     fn diverged(&self) -> bool {
@@ -1176,7 +1599,12 @@ impl World {
         let before = self.read_ref(MAIN);
         let diverged = self.diverged();
         let (status, text) = self.run(&format!("cd {WORK} && git pull --ff-only"))?;
-        if diverged {
+        self.track_fetch(false);
+        let main = self.server_main().ok_or("no main")?;
+        let hidden = !self.local_ahead
+            && main != self.base
+            && !self.server.descends(main, self.base, &self.shallow);
+        if diverged || hidden {
             if status == 0 || self.read_ref(MAIN) != before {
                 return Err("pull --ff-only of a diverged history moved main".to_owned());
             }
@@ -1186,7 +1614,6 @@ impl World {
             return Err(format!("pull exited {status}: {text}"));
         }
         self.stats.pulls += 1;
-        let main = self.server_main().ok_or("no main")?;
         if self.local_ahead {
             if self.read_ref(MAIN) != before {
                 return Err("pull moved a main that was already ahead".to_owned());
@@ -1248,7 +1675,8 @@ impl World {
         if self.server_main() != Some(local) {
             return Err("the server's main is not the pushed commit".to_owned());
         }
-        self.server.reach(&[local], &BTreeSet::new())?;
+        self.server
+            .reach(&[local], &BTreeSet::new(), &BTreeSet::new())?;
         let readable = self
             .server
             .objects
@@ -1263,6 +1691,7 @@ impl World {
         if self.read_ref("refs/remotes/origin/main") != Some(local) {
             return Err("push did not move origin/main".to_owned());
         }
+        self.tracked.insert("main".to_owned(), local);
         self.local_ahead = false;
         self.base = local;
         self.files = self.server.files(&local);
@@ -1274,7 +1703,10 @@ impl World {
             return Ok(());
         };
         let sent = received.map_err(|why| format!("a pushed pack does not resolve: {why}"))?;
-        let Ok(reachable) = self.server.reach(&[local], &BTreeSet::new()) else {
+        let Ok(reachable) = self
+            .server
+            .reach(&[local], &BTreeSet::new(), &BTreeSet::new())
+        else {
             return Ok(());
         };
         let reachable: BTreeSet<Oid> = reachable.into_iter().collect();
@@ -1408,15 +1840,22 @@ fn simulate(seed: u64, mutation: GitRemoteMutation) -> GitRemoteOutcome {
         message: String::new(),
         mutation,
         commits: 0,
+        single: false,
+        shallow: BTreeSet::new(),
+        tracked: BTreeMap::new(),
+        mirror: BTreeMap::new(),
     };
-    let initial = world.rng.range(1, 3);
+    let initial = world.rng.range(1, DEPTH_MAX + 2);
     for _ in 0..initial {
         world.server_advance();
     }
+    for _ in 0..world.rng.below(TOPICS_MAX) {
+        world.server_topic();
+    }
     let ops = world.rng.range(OPS_MIN, OPS_MAX);
     let mut plan: Vec<u64> = vec![3, 4];
-    plan.extend((0..ops).map(|_| world.rng.below(5)));
-    plan.push(5);
+    plan.extend((0..ops).map(|_| world.rng.below(OP_KINDS)));
+    plan.push(OP_KINDS);
     let mut shape = format!("ops={} initial={initial}", plan.len());
     let mut wrong = world.clone_repo().err();
     if wrong.is_none() {
@@ -1430,6 +1869,13 @@ fn simulate(seed: u64, mutation: GitRemoteMutation) -> GitRemoteOutcome {
                 2 => world.pull(),
                 3 => world.local_commit(),
                 4 => world.push(),
+                5 | 8 => {
+                    world.server_topic();
+                    Ok(())
+                }
+                6 | 9 => world.spec_fetch(),
+                7 if world.single => world.deepen(),
+                7 => world.fetch(),
                 _ => world.bad_fetch(),
             };
             if let Err(why) = step.and_then(|()| world.check_secret()) {
@@ -1449,8 +1895,11 @@ fn simulate(seed: u64, mutation: GitRemoteMutation) -> GitRemoteOutcome {
     world.stats.pushed_deltas = server.pushed_deltas.get();
     world.stats.credential_asks = world.keys.asks.get();
     shape.push_str(&format!(
-        " pushes={} bad={}",
-        world.stats.pushes, world.stats.bad_packs
+        " pushes={} bad={} shallow={} specs={}",
+        world.stats.pushes,
+        world.stats.bad_packs,
+        world.stats.shallow_clones,
+        world.stats.spec_fetches
     ));
     let digest = world
         .trace
