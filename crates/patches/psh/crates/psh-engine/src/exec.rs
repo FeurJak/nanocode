@@ -432,6 +432,11 @@ pub(crate) fn set_pipestatus(vp: &mut Vp, statuses: &[i32]) {
 pub(crate) async fn check_failure(vp: &mut Vp, status: i32) -> R {
     if status != 0 && !vp.no_errexit {
         if vp.traps.live() {
+            // A signal that came while the command ran is taken first: one that kills
+            // the shell (`( kill -USR1 $$ )`) leaves no ERR trap to run.
+            if (vp.top && vp.sigs.peek(&vp.core) != 0) || vp.own_sigs.get() != 0 {
+                trap::take_signals(vp).await?;
+            }
             Box::pin(trap::err_trap(vp, status)).await?;
         }
         if vp.opts.get(SetOpt::Errexit) {
