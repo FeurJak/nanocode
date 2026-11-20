@@ -165,6 +165,9 @@ struct Shape {
     child_ppm: u64,
     thread_ppm: u64,
     top: usize,
+    /// Each writer claims only tasks that hash to it, so claims race only the lease and
+    /// group commit, never each other: the bench's throughput shape.
+    spread: bool,
     batch: usize,
     lease_ms: u64,
     step_ms: u64,
@@ -189,6 +192,7 @@ impl Shape {
             child_ppm: rng.range(0, 400_000),
             thread_ppm: rng.range(0, 1_000_000),
             top: rng.range(1, 5) as usize,
+            spread: false,
             batch: [1, 4, 64][rng.pick(3)],
             lease_ms: rng.range(200, 2_000),
             step_ms: rng.range(1, 40),
@@ -636,6 +640,10 @@ async fn writer(world: &World, index: u64) {
             merged
                 .ready(now)
                 .into_iter()
+                .filter(|(_, id)| {
+                    !world.shape.spread
+                        || fnv(FNV_OFFSET, id.0.as_bytes()) % world.shape.writers == index
+                })
                 .take(world.shape.top)
                 .map(|(_, id)| id.clone())
                 .collect()
@@ -1065,6 +1073,7 @@ pub fn bench(partitions: &[u32], writers: &[u64], batch: usize, cost: Cost) {
                 child_ppm: 0,
                 thread_ppm: 1_000_000,
                 top: 4,
+                spread: true,
                 batch,
                 lease_ms: 60_000,
                 step_ms: 1,
