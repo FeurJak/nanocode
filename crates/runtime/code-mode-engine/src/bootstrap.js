@@ -1,4 +1,4 @@
-((createCodeTools, valueHelpers) => {
+((createCodeTools, valueHelpers, installWebGlobals) => {
   const { stringify, storeSnapshot, normalizeImage, normalizeAudio, generatedImageItems } = valueHelpers;
   const native = (name) => {
     const value = globalThis[name];
@@ -89,6 +89,14 @@
   const now = typeof globalThis.performance?.now === "function"
     ? () => globalThis.performance.now()
     : () => Date.now();
+  installWebGlobals({
+    random: (length) => nativeBytes.random(length).buffer,
+    digest: (algorithm, buffer, offset, length) => nativeBytes.digest(algorithm, buffer, offset, length).buffer,
+    setTimeout,
+    uncaught,
+    clockNow,
+    monotonicNow: () => nativeValue(1),
+  });
   const timers = new Map();
   let stopCell = () => {};
   let settle = () => {};

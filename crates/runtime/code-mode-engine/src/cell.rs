@@ -9,7 +9,7 @@ use std::{
 };
 
 use djs_embed::{
-    Builder, CallId, HostCall, HostFn, Instance, Limits, Snapshot, Source, Throw, Value as JsValue,
+    Builder, CallId, HostCall, Instance, Limits, Snapshot, Source, Throw, Value as JsValue,
 };
 use nanocode_platform::Instant;
 use nanocode_sync::{Atom, Slot};
@@ -139,11 +139,7 @@ fn build(
             .map_err(|error| bootstrap_error(error.to_string()));
     };
     let definitions = Definitions::AtSetup(&tools.definitions);
-    let mut builder = crate::setup::builder(&definitions, runs == PreludeRuns::AtSetup);
-    for (id, name) in crate::bytes::HOST_FNS {
-        builder = builder.host_fn(HostFn::sync(id, name));
-    }
-    let builder = builder
+    let builder = crate::setup::builder(&definitions, runs == PreludeRuns::AtSetup)
         .source(Source::script(
             PRELUDE_SCRIPT,
             format!("globalThis.__nanocodePrelude = function (tools, call, callSync) {{\n{source}\n}};\n"),
