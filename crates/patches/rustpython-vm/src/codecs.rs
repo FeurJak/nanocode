@@ -326,11 +326,7 @@ impl CodecsRegistry {
         errors: Option<PyUtf8StrRef>,
         vm: &VirtualMachine,
     ) -> PyResult<PyBytesRef> {
-        if let Some(b) =
-            Self::encode_fast(&obj, encoding, errors.as_deref(), vm).inspect_err(|exc| {
-                Self::add_codec_note(exc, "encoding", encoding, vm);
-            })?
-        {
+        if let Some(b) = Self::encode_fast(&obj, encoding, errors.as_deref(), vm)? {
             return Ok(b);
         }
         let codec = self._lookup_text_encoding(encoding, "codecs.encode()", vm)?;
@@ -380,11 +376,7 @@ impl CodecsRegistry {
         errors: Option<PyUtf8StrRef>,
         vm: &VirtualMachine,
     ) -> PyResult<PyStrRef> {
-        if let Some(s) =
-            Self::decode_fast(&obj, encoding, errors.as_deref(), vm).inspect_err(|exc| {
-                Self::add_codec_note(exc, "decoding", encoding, vm);
-            })?
-        {
+        if let Some(s) = Self::decode_fast(&obj, encoding, errors.as_deref(), vm)? {
             return Ok(s);
         }
         let codec = self._lookup_text_encoding(encoding, "codecs.decode()", vm)?;
