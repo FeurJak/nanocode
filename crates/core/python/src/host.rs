@@ -34,6 +34,8 @@ pub struct State {
     pub changes: Changes,
     pub refused: Option<Limit>,
     pub cancelled: bool,
+    /// The status os._exit ended the run with: like a cancel, nothing after it runs.
+    pub exited: Option<i32>,
     pub held_at_refusal: Held,
 }
 
@@ -62,6 +64,7 @@ impl State {
             changes: Changes::default(),
             refused: None,
             cancelled: false,
+            exited: None,
             held_at_refusal: Held::default(),
         }
     }
@@ -132,7 +135,7 @@ impl State {
     }
 
     const fn stopped(&self) -> bool {
-        self.refused.is_some() || self.cancelled
+        self.refused.is_some() || self.cancelled || self.exited.is_some()
     }
 
     fn used(&self) -> Option<u64> {
@@ -695,6 +698,17 @@ mod _host {
             state.changes.moved.push((from.to_vec(), to.to_vec()));
             Ok(())
         })
+    }
+
+    /// os._exit: ends the run at once with status. The VM stops as it does at a
+    /// refused budget, so no except, finally, __exit__ or atexit runs after it.
+    #[pyfunction]
+    fn exit(status: i32, vm: &VirtualMachine) -> PyResult<()> {
+        state(vm, |state| {
+            state.exited.get_or_insert(status);
+            Ok(())
+        })?;
+        Err(halt(vm))
     }
 
     #[pyfunction]

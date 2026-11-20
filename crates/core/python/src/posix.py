@@ -813,7 +813,8 @@ def _exit(status):
     atexit = sys.modules.get('atexit')
     if atexit is not None:
         atexit._clear()
-    raise SystemExit(status)
+    # Nothing catches it: no except, finally or __exit__ runs after it, as in CPython.
+    _host.exit(status)
 
 
 def system(command):

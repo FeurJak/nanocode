@@ -455,7 +455,10 @@ impl Python {
             ended: match state.refused {
                 _ if state.cancelled => Ended::Cancelled,
                 Some(limit) => Ended::Refused(limit),
-                None => ended,
+                // A process's status is one byte, as in exit() below.
+                None => state
+                    .exited
+                    .map_or(ended, |code| Ended::Exited(code & 0xff)),
             },
             stdout: state.stdout,
             stderr: state.stderr,
