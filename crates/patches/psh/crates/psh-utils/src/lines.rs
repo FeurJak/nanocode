@@ -1,6 +1,6 @@
 //! Line and field tools (nanocode's addition), after GNU coreutils and util-linux: tac,
-//! rev, fold, expand, unexpand, column, join, shuf, split and numfmt. Inputs are read
-//! whole, except by fold, which writes each block as it reads.
+//! rev, fold, expand, unexpand, column, join, shuf, split, numfmt, tsort and fmt.
+//! Inputs are read whole, except by fold, which writes each block as it reads.
 
 use psh_engine::host::{OpenOptions, error_text};
 use psh_engine::util::UtilCtx;
@@ -1006,4 +1006,463 @@ pub async fn split(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
         }
     }
     0
+}
+
+pub const NUMFMT: Spec = Spec {
+    name: "numfmt",
+    opts: &[
+        long("to").value(),
+        long("from").value(),
+        long("suffix").value(),
+        long("to-unit").value(),
+        long("from-unit").value(),
+    ],
+    posix_order: false,
+};
+
+/// A unit system of numfmt: its base and whether suffixes end in `i`.
+#[derive(Clone, Copy, PartialEq)]
+enum Scale {
+    None,
+    Si,
+    Iec,
+    IecI,
+    Auto,
+}
+
+fn scale_of(text: &[u8]) -> Option<Scale> {
+    Some(match text {
+        b"none" => Scale::None,
+        b"si" => Scale::Si,
+        b"iec" => Scale::Iec,
+        b"iec-i" => Scale::IecI,
+        b"auto" => Scale::Auto,
+        _ => return None,
+    })
+}
+
+const NUMFMT_SUFFIXES: &[u8] = b"KMGTPEZYRQ";
+
+/// Reads a number with an optional unit suffix, as `--from` reads it.
+fn numfmt_parse(text: &str, from: Scale, unit: f64) -> Option<f64> {
+    let digits = text
+        .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+'))
+        .unwrap_or(text.len());
+    let (number, suffix) = text.split_at(digits);
+    let mut value: f64 = number.parse().ok()?;
+    if !suffix.is_empty() {
+        let mut chars = suffix.chars();
+        let letter = chars.next()?.to_ascii_uppercase();
+        let power = NUMFMT_SUFFIXES.iter().position(|&s| s as char == letter)? as i32 + 1;
+        let rest = chars.as_str();
+        let base = match (from, rest) {
+            (Scale::Si, "") => 1000.0,
+            (Scale::Iec, "") => 1024.0,
+            (Scale::IecI | Scale::Auto, "i") => 1024.0,
+            (Scale::Auto, "") => 1000.0,
+            _ => return None,
+        };
+        value *= f64::powi(base, power);
+    }
+    Some(value * unit)
+}
+
+/// Writes a number in a unit system, rounding away from zero as GNU does by default:
+/// one decimal below 10, none above.
+fn numfmt_show(value: f64, to: Scale) -> String {
+    let base = match to {
+        Scale::Si => 1000.0,
+        Scale::Iec | Scale::IecI => 1024.0,
+        Scale::None | Scale::Auto => {
+            return format!("{}", value.abs().ceil().copysign(value));
+        }
+    };
+    let magnitude = value.abs();
+    if magnitude < base {
+        return format!("{}", magnitude.ceil().copysign(value));
+    }
+    let mut scaled = magnitude;
+    let mut power = 0;
+    while scaled >= base && power < NUMFMT_SUFFIXES.len() {
+        scaled /= base;
+        power += 1;
+    }
+    let text = loop {
+        let shown = if scaled < 10.0 {
+            let tenths = (scaled * 10.0 - 1e-9).ceil() / 10.0;
+            if tenths >= 10.0 {
+                scaled = tenths;
+                continue;
+            }
+            format!("{tenths:.1}")
+        } else {
+            let whole = (scaled - 1e-9).ceil();
+            if whole >= base && power < NUMFMT_SUFFIXES.len() {
+                scaled = whole / base;
+                power += 1;
+                continue;
+            }
+            format!("{whole}")
+        };
+        break shown;
+    };
+    let sign = if value < 0.0 { "-" } else { "" };
+    let i = if to == Scale::IecI { "i" } else { "" };
+    format!("{sign}{text}{}{i}", NUMFMT_SUFFIXES[power - 1] as char)
+}
+
+pub async fn numfmt(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
+    let p = match common::parse(ctx, &NUMFMT, argv).await {
+        Ok(p) => p,
+        Err(st) => return st,
+    };
+    let mut scales = [Scale::None, Scale::None];
+    for (slot, key) in scales.iter_mut().zip(["to", "from"]) {
+        if let Some(v) = p.last(&NUMFMT, key) {
+            match scale_of(v) {
+                Some(s) if key == "from" || s != Scale::Auto => *slot = s,
+                _ => {
+                    let v = common::quote(ctx, v);
+                    return common::usage(ctx, &format!("invalid argument {v} for '--{key}'"))
+                        .await;
+                }
+            }
+        }
+    }
+    let [to, from] = scales;
+    let unit = |key: &str| -> Option<f64> {
+        match p.last(&NUMFMT, key) {
+            None => Some(1.0),
+            Some(v) => numfmt_parse(std::str::from_utf8(v).ok()?, Scale::Auto, 1.0),
+        }
+    };
+    let (Some(from_unit), Some(to_unit)) = (unit("from-unit"), unit("to-unit")) else {
+        return common::usage(ctx, "invalid unit size").await;
+    };
+    let suffix = p.last(&NUMFMT, "suffix").unwrap_or_default().to_vec();
+    let numbers: Vec<Vec<u8>> = if p.operands.is_empty() {
+        let data = match read_all(ctx, &[]).await {
+            Ok(data) => data,
+            Err(st) => return st,
+        };
+        data.split(|&b| b == b'\n').map(<[u8]>::to_vec).collect::<Vec<_>>()
+    } else {
+        p.operands.clone()
+    };
+    let last_empty = p.operands.is_empty() && numbers.last().is_some_and(Vec::is_empty);
+    let count = numbers.len() - usize::from(last_empty);
+    let mut out = Vec::new();
+    for raw in &numbers[..count] {
+        let text = String::from_utf8_lossy(raw);
+        let trimmed = text.trim();
+        let body = trimmed.strip_suffix(std::str::from_utf8(&suffix).unwrap_or("")).unwrap_or(trimmed);
+        let Some(value) = numfmt_parse(body, from, from_unit) else {
+            let _ = ctx.write(&out).await;
+            let shown = common::quote(ctx, trimmed.as_bytes());
+            ctx.error(&format!("invalid number: {shown}")).await;
+            return 2;
+        };
+        out.extend_from_slice(numfmt_show(value / to_unit, to).as_bytes());
+        out.extend_from_slice(&suffix);
+        out.push(b'\n');
+    }
+    emit(ctx, &out).await
+}
+
+pub const TSORT: Spec = Spec {
+    name: "tsort",
+    opts: &[],
+    posix_order: false,
+};
+
+/// tsort: Kahn's algorithm, nodes taken in the order they first appear. A loop is
+/// reported (its nodes listed) and broken, and the status is 1, as GNU does.
+pub async fn tsort(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
+    let p = match common::parse(ctx, &TSORT, argv).await {
+        Ok(p) => p,
+        Err(st) => return st,
+    };
+    if p.operands.len() > 1 {
+        let extra = common::quote(ctx, &p.operands[1]);
+        return common::usage(ctx, &format!("extra operand {extra}")).await;
+    }
+    let data = match read_all(ctx, &p.operands).await {
+        Ok(data) => data,
+        Err(st) => return st,
+    };
+    let shown = p.operands.first().map_or_else(|| "-".to_string(), |n| String::from_utf8_lossy(n).into_owned());
+    let tokens: Vec<&[u8]> = data
+        .split(|b| b.is_ascii_whitespace())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if tokens.len() % 2 == 1 {
+        ctx.error(&format!("{shown}: input contains an odd number of tokens")).await;
+        return 1;
+    }
+    let mut names: Vec<&[u8]> = Vec::new();
+    let mut index = std::collections::HashMap::new();
+    let mut next: Vec<Vec<usize>> = Vec::new();
+    let mut indegree: Vec<usize> = Vec::new();
+    for pair in tokens.chunks_exact(2) {
+        let mut ids = [0usize; 2];
+        for (slot, &token) in ids.iter_mut().zip(pair) {
+            *slot = *index.entry(token).or_insert_with(|| {
+                names.push(token);
+                next.push(Vec::new());
+                indegree.push(0);
+                names.len() - 1
+            });
+        }
+        if ids[0] != ids[1] {
+            next[ids[0]].push(ids[1]);
+            indegree[ids[1]] += 1;
+        }
+    }
+    let mut out = Vec::new();
+    let mut done = vec![false; names.len()];
+    let mut status = 0;
+    let mut left = names.len();
+    while left > 0 {
+        let ready: Vec<usize> = (0..names.len()).filter(|&n| !done[n] && indegree[n] == 0).collect();
+        let ready = if ready.is_empty() {
+            // A loop: report it from the first node left, and break it there.
+            status = 1;
+            let start = (0..names.len()).find(|&n| !done[n]).unwrap_or(0);
+            ctx.error(&format!("{shown}: input contains a loop:")).await;
+            let mut at = start;
+            let mut seen = vec![false; names.len()];
+            while !seen[at] {
+                seen[at] = true;
+                ctx.error(&String::from_utf8_lossy(names[at])).await;
+                match next[at].iter().find(|&&n| !done[n]) {
+                    Some(&n) => at = n,
+                    None => break,
+                }
+            }
+            indegree[start] = 0;
+            vec![start]
+        } else {
+            ready
+        };
+        for n in ready {
+            if done[n] {
+                continue;
+            }
+            done[n] = true;
+            left -= 1;
+            out.extend_from_slice(names[n]);
+            out.push(b'\n');
+            for &m in &next[n] {
+                indegree[m] = indegree[m].saturating_sub(1);
+            }
+        }
+    }
+    let st = emit(ctx, &out).await;
+    if st != 0 { st } else { status }
+}
+
+pub const FMT: Spec = Spec {
+    name: "fmt",
+    opts: &[
+        both('w', "width").value(),
+        both('p', "prefix").value(),
+        both('s', "split-only"),
+        both('u', "uniform-spacing"),
+        both('c', "crown-margin"),
+        both('t', "tagged-paragraph"),
+    ],
+    posix_order: false,
+};
+
+/// fmt: fills each paragraph (lines between blank lines with the same indentation)
+/// with GNU's line breaking: least cost against a goal width, sentence ends kept two
+/// spaces apart.
+pub async fn fmt(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
+    let mut args = argv.to_vec();
+    for arg in args.iter_mut().skip(1) {
+        if arg.len() > 1 && arg[0] == b'-' && arg[1..].iter().all(u8::is_ascii_digit) {
+            let mut wide = b"-w".to_vec();
+            wide.extend_from_slice(&arg[1..]);
+            *arg = wide;
+        }
+    }
+    let p = match common::parse(ctx, &FMT, &args).await {
+        Ok(p) => p,
+        Err(st) => return st,
+    };
+    if p.has(&FMT, "prefix") || p.has(&FMT, "tagged-paragraph") || p.has(&FMT, "crown-margin") {
+        return crate::textio::fall_through(ctx, argv, "fmt -p, -t and -c").await;
+    }
+    let width = match p.last(&FMT, "width") {
+        Some(w) => match count(w) {
+            Some(n) if n > 0 => n,
+            _ => {
+                let w = common::quote(ctx, w);
+                return common::usage(ctx, &format!("invalid width: {w}")).await;
+            }
+        },
+        None => 75,
+    };
+    let split_only = p.has(&FMT, "split-only");
+    let uniform = p.has(&FMT, "uniform-spacing");
+    let data = match read_all(ctx, &p.operands).await {
+        Ok(data) => data,
+        Err(st) => return st,
+    };
+    let mut out = Vec::new();
+    let mut words: Vec<FmtWord> = Vec::new();
+    let mut indent: &[u8] = b"";
+    for line in data.split_inclusive(|&b| b == b'\n') {
+        let body = line.strip_suffix(b"\n").unwrap_or(line);
+        let lead = body.iter().take_while(|b| **b == b' ' || **b == b'\t').count();
+        if lead == body.len() {
+            fmt_paragraph(&mut out, &mut words, indent, width);
+            out.extend_from_slice(body);
+            out.push(b'\n');
+            continue;
+        }
+        if words.is_empty() || split_only || body[..lead] != *indent {
+            fmt_paragraph(&mut out, &mut words, indent, width);
+            indent = &body[..lead];
+        }
+        fmt_words(&body[lead..], uniform, &mut words);
+    }
+    // The input's last word ends a sentence, as GNU counts it.
+    if let Some(last) = words.last_mut() {
+        last.final_ = true;
+    }
+    fmt_paragraph(&mut out, &mut words, indent, width);
+    emit(ctx, &out).await
+}
+
+/// A word of fmt, with what GNU's line breaking weighs.
+struct FmtWord {
+    text: Vec<u8>,
+    /// Spaces after it within a line.
+    space: usize,
+    /// Ends a sentence (`.?!` then two spaces or the line's end).
+    final_: bool,
+    period: bool,
+    punct: bool,
+    paren: bool,
+}
+
+fn fmt_words(line: &[u8], uniform: bool, words: &mut Vec<FmtWord>) {
+    let mut at = 0;
+    while at < line.len() {
+        let end = line[at..].iter().position(|&b| b == b' ' || b == b'\t').map_or(line.len(), |n| at + n);
+        let text = line[at..end].to_vec();
+        let gap_end = line[end..].iter().position(|&b| b != b' ' && b != b'\t').map_or(line.len(), |n| end + n);
+        let last_real = text.iter().rev().find(|&&b| !matches!(b, b')' | b']' | b'}' | b'\'' | b'"'));
+        let period = last_real.is_some_and(|&b| matches!(b, b'.' | b'?' | b'!'));
+        let at_end = gap_end == line.len();
+        let gap = gap_end - end;
+        let final_ = period && (gap > 1 || at_end);
+        let space = if at_end || uniform { if final_ { 2 } else { 1 } } else { gap };
+        words.push(FmtWord {
+            punct: text.last().is_some_and(u8::is_ascii_punctuation),
+            paren: text.first().is_some_and(|b| matches!(b, b'(' | b'[' | b'{' | b'\'' | b'"' | b'`')),
+            text,
+            space,
+            final_,
+            period,
+        });
+        at = gap_end;
+    }
+}
+
+/// GNU fmt's costs: the square of a shortfall, scaled.
+const fn fmt_equiv(n: i64) -> i64 {
+    n * n
+}
+
+fn fmt_short_cost(n: i64) -> i64 {
+    fmt_equiv(n * 10)
+}
+
+fn fmt_ragged_cost(n: i64) -> i64 {
+    fmt_short_cost(n) / 2
+}
+
+/// The cost of breaking a line before word `i`, as GNU's base_cost.
+fn fmt_base_cost(words: &[FmtWord], i: usize) -> i64 {
+    let mut cost = fmt_equiv(70);
+    if i > 0 {
+        let prev = &words[i - 1];
+        if prev.period {
+            if prev.final_ {
+                cost -= fmt_equiv(50);
+            } else {
+                cost += fmt_equiv(600);
+            }
+        } else if prev.punct {
+            cost -= fmt_equiv(40);
+        } else if i > 1 && words[i - 2].final_ {
+            cost += fmt_equiv(200) / (words[i - 2].text.len() as i64 + 2);
+        }
+    }
+    if words[i].paren {
+        cost -= fmt_equiv(40);
+    } else if words[i].final_ {
+        cost += fmt_equiv(150) / (words[i].text.len() as i64 + 2);
+    }
+    cost
+}
+
+/// Breaks a paragraph into lines as GNU fmt does: the least total cost, lines shorter
+/// than the width, aiming at 93.5% of it, with ragged edges costing too.
+fn fmt_paragraph(out: &mut Vec<u8>, words: &mut Vec<FmtWord>, indent: &[u8], width: usize) {
+    let count = words.len();
+    if count == 0 {
+        return;
+    }
+    let goal = (width * 187 / 200) as i64;
+    let mut best = vec![0i64; count + 1];
+    let mut next = vec![count; count + 1];
+    let mut length = vec![0i64; count + 1];
+    for start in (0..count).rev() {
+        let mut best_cost = i64::MAX;
+        let mut len = (indent.len() + words[start].text.len()) as i64;
+        let mut w = start;
+        loop {
+            w += 1;
+            let line_cost = if w == count {
+                0
+            } else {
+                let mut c = fmt_short_cost(goal - len);
+                if next[w] != count {
+                    c += fmt_ragged_cost(len - length[w]);
+                }
+                c
+            };
+            let cost = line_cost.saturating_add(best[w]);
+            if cost < best_cost {
+                best_cost = cost;
+                next[start] = w;
+                length[start] = len;
+            }
+            if w == count {
+                break;
+            }
+            len += (words[w - 1].space + words[w].text.len()) as i64;
+            if len >= width as i64 {
+                break;
+            }
+        }
+        best[start] = best_cost.saturating_add(fmt_base_cost(words, start));
+    }
+    let mut start = 0;
+    while start < count {
+        let end = next[start];
+        out.extend_from_slice(indent);
+        for i in start..end {
+            out.extend_from_slice(&words[i].text);
+            if i + 1 < end {
+                out.extend(std::iter::repeat_n(b' ', words[i].space));
+            }
+        }
+        out.push(b'\n');
+        start = end;
+    }
+    words.clear();
 }
