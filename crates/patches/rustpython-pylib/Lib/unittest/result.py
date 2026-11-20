@@ -192,7 +192,10 @@ class TestResult(object):
         from _colorize import can_colorize
 
         colorize = hasattr(self, "stream") and can_colorize(file=self.stream)
-        msgLines = list(tb_e.format(colorize=colorize))
+        # Pass colorize only when it is on: CPython 3.12 code (its own test suite's
+        # MockTraceback) replaces TracebackException with a format() that takes no
+        # colorize keyword, and the TypeError would escape the runner.
+        msgLines = list(tb_e.format(colorize=True) if colorize else tb_e.format())
 
         if self.buffer:
             output = sys.stdout.getvalue()
