@@ -130,6 +130,9 @@ struct Args {
     seeds: Range<u64>,
     options: Options,
     twice: bool,
+    /// Print `SEED seed=N pass|fail` as each seed settles, for runners that time, schedule
+    /// and recheck single seeds (bin/nanocode-sim/run.py).
+    seed_lines: bool,
     scenario: Scenario,
     turns: TurnOptions,
     whole: WholeOptions,
@@ -170,7 +173,7 @@ type Caught = BTreeMap<Invariant, (u64, u64, (u64, u64))>;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|inbox_stress|capture|executor|dns|board|cost|hand_router|workspace_host|board_sync|board_steer|workspace_fs|workspace_sql|git_remote|workspace_stack] [--ops N] [--twice] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
+        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|inbox_stress|capture|executor|dns|board|cost|hand_router|workspace_host|board_sync|board_steer|workspace_fs|workspace_sql|git_remote|workspace_stack] [--ops N] [--twice] [--seed-lines] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
        websocket: [--mutation {}]
        http_server: [--mutation {}]
        alloc: [--mutation overstate_size|forget_free|scribble]
@@ -236,6 +239,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         verbose: false,
     };
     let mut twice = false;
+    let mut seed_lines = false;
     let mut scenario = Scenario::Store;
     let mut mutation = None;
     let mut turns = TurnOptions {
@@ -291,6 +295,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
     while let Some(flag) = rest.next() {
         match flag.as_str() {
             "--twice" => twice = true,
+            "--seed-lines" => seed_lines = true,
             "--subagents-board" => boardagents::enable(),
             "--verbose" => options.verbose = true,
             "--calm" => turns.calm = true,
@@ -435,6 +440,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         seeds: seeds?,
         options,
         twice,
+        seed_lines,
         scenario,
         turns,
         whole,
@@ -1217,6 +1223,9 @@ fn main() -> ExitCode {
             #[cfg(not(unix))]
             Scenario::Egress => unreachable!("the egress scenario parses only on unix"),
         };
+        if args.seed_lines {
+            println!("SEED seed={seed} {}", if verdict.is_some() { "fail" } else { "pass" });
+        }
         let Some(message) = verdict else {
             passed += 1;
             continue;
