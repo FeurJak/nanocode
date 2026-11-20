@@ -395,7 +395,6 @@ mod _json {
                         break;
                     }
                     Some(b',') => {
-                        let comma_char_idx = char_idx;
                         char_idx += 1;
                         byte_idx += 1;
 
@@ -408,15 +407,6 @@ mod _json {
                         match bytes.get(byte_idx) {
                             Some(b'"') => {
                                 // Continue to next key-value pair
-                            }
-                            Some(b'}') => {
-                                // Trailing comma before end of object
-                                return Err(self.make_decode_error(
-                                    "Illegal trailing comma before end of object",
-                                    pystr,
-                                    comma_char_idx,
-                                    vm,
-                                ));
                             }
                             _ => {
                                 return Err(self.make_decode_error(
@@ -490,7 +480,6 @@ mod _json {
                         break;
                     }
                     Some(b',') => {
-                        let comma_char_idx = char_idx;
                         char_idx += 1;
                         byte_idx += 1;
 
@@ -499,15 +488,6 @@ mod _json {
                         char_idx += ws;
                         byte_idx += ws;
 
-                        // Check for trailing comma
-                        if bytes.get(byte_idx) == Some(&b']') {
-                            return Err(self.make_decode_error(
-                                "Illegal trailing comma before end of array",
-                                pystr,
-                                comma_char_idx,
-                                vm,
-                            ));
-                        }
                     }
                     _ => {
                         return Err(self.make_decode_error(
