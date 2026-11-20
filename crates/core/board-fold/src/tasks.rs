@@ -250,6 +250,7 @@ impl Task {
                 .as_ref()
                 .and(spec.terms.due_at_ms)
                 .map(|slot| Occurrence { series, slot }),
+            cap: None,
         }
     }
 

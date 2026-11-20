@@ -252,6 +252,9 @@ pub struct Task {
     pub due_at_ms: Option<u64>,
     #[serde(default)]
     pub occurrence: Option<Occurrence>,
+    /// The cap the current claim was taken under: renewing a lapsed claim takes a slot again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cap: Option<Cap>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -653,7 +656,14 @@ impl Fold {
                 self.scheduled(task, self.now_ms.max(at_ms), outcome)
                     .map(drop)
             }
-            Op::Renew { task, claim, .. } => self.holds(task, claim, Act::Renew).map(drop),
+            Op::Renew { task, claim, .. } => {
+                let held = self.holds(task, claim, Act::Renew)?;
+                if held.stage(self.now_ms.max(at_ms)) == Stage::Lapsed {
+                    self.room(task, held.cap.as_ref(), at_ms)
+                } else {
+                    Ok(())
+                }
+            }
             Op::Release { task, claim, .. } => self.holds(task, claim, Act::Release).map(drop),
             Op::Cancel { task, .. } => match self.tasks.get(task) {
                 None => Err(Rejection::UnknownTask),
@@ -911,7 +921,7 @@ impl Fold {
                 }
                 return;
             }
-            Op::Claim { lease_ms, .. } => {
+            Op::Claim { lease_ms, cap, .. } => {
                 let until_ms = now.saturating_add(*lease_ms);
                 let claim = ClaimId(event.id.0.clone());
                 let Some(task) = self.tasks.get_mut(&id) else {
@@ -933,6 +943,7 @@ impl Fold {
                 if !mutated(Mutation::AttemptsNotCounted) {
                     task.attempts += 1;
                 }
+                task.cap.clone_from(cap);
                 Change::Claimed {
                     claim,
                     worker: event.by.clone(),
@@ -1317,5 +1328,97 @@ mod pairs {
         D: Deserializer<'de>,
     {
         Vec::<(K, V)>::deserialize(deserializer).map(|pairs| pairs.into_iter().collect())
+    }
+}
+
+#[cfg(test)]
+mod renew_cap_tests {
+    use std::collections::BTreeMap;
+
+    use crate::access::{Can, Grant, Who};
+    use crate::tasks::Terms;
+    use crate::{Cap, ClaimId, Event, EventId, Fold, NewTask, Op, Rejection, TaskId};
+
+    struct Board {
+        fold: Fold,
+        minted: u64,
+    }
+
+    impl Board {
+        fn write(&mut self, by: &str, at_ms: u64, op: Op) -> (EventId, Result<u64, Rejection>) {
+            self.minted += 1;
+            let id = EventId(format!("{by}.{}", self.minted));
+            let body = serde_json::to_string(&Event {
+                id: id.clone(),
+                by: by.to_owned(),
+                at_ms,
+                op,
+            })
+            .expect("an event encodes");
+            self.fold
+                .apply(self.fold.next(), &body)
+                .expect("the row applies");
+            let outcome = self.fold.outcome(&id).cloned().expect("an outcome");
+            (id, outcome)
+        }
+    }
+
+    fn pooled(id: &str) -> Op {
+        Op::Post {
+            task: NewTask {
+                id: TaskId(id.to_owned()),
+                parent: None,
+                spec: id.to_owned(),
+                labels: BTreeMap::from([("pool".to_owned(), "lent".to_owned())]),
+                needs: Vec::new(),
+                terms: Terms::default(),
+            },
+        }
+    }
+
+    /// A claim that lapsed while another worker filled the cap stays out on renew.
+    #[test]
+    fn renewing_a_lapsed_claim_respects_its_cap() {
+        for cap in [
+            Cap::Partition(1),
+            Cap::Label {
+                max: 1,
+                key: "pool".to_owned(),
+                value: "lent".to_owned(),
+            },
+        ] {
+            let mut board = Board {
+                fold: Fold::default(),
+                minted: 0,
+            };
+            assert!(board.write("user:lead", 0, Op::Charter {}).1.is_ok());
+            let grant = Grant {
+                who: vec![Who::Everyone],
+                can: BTreeMap::from([("*".to_owned(), Can::ALL.to_vec())]),
+            };
+            assert!(board.write("user:lead", 0, Op::Grant { grant }).1.is_ok());
+            assert!(board.write("user:lead", 0, pooled("a")).1.is_ok());
+            assert!(board.write("user:lead", 0, pooled("b")).1.is_ok());
+            let claim = |task: &str| Op::Claim {
+                task: TaskId(task.to_owned()),
+                lease_ms: 100,
+                fence: None,
+                cap: Some(cap.clone()),
+            };
+            let (first, verdict) = board.write("agent:w0", 10, claim("a"));
+            assert!(verdict.is_ok(), "{verdict:?}");
+            let (_, verdict) = board.write("agent:w1", 50, claim("b"));
+            assert_eq!(verdict, Err(Rejection::Full { cap: cap.clone() }));
+            let (_, verdict) = board.write("agent:w1", 200, claim("b"));
+            assert!(verdict.is_ok(), "the first claim lapsed: {verdict:?}");
+            let renew = Op::Renew {
+                task: TaskId("a".to_owned()),
+                claim: ClaimId(first.0),
+                lease_ms: 100,
+            };
+            let (_, verdict) = board.write("agent:w0", 210, renew);
+            assert_eq!(verdict, Err(Rejection::Full { cap: cap.clone() }));
+            assert_eq!(board.fold.held(&cap, 210), 1);
+        }
     }
 }
