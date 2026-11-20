@@ -632,8 +632,13 @@ async fn apply(tree: &Tree, files: &Rc<dyn FileSystem>) -> io::Result<()> {
         files.mkdir(path, *mode).get().await?;
     }
     for path in &delta.written {
-        let data = tree.take(path).unwrap_or_default();
-        let write = nanocode_shell::Write::Replace;
+        let (data, write) = match tree.take_appended(path) {
+            Some(tail) => (tail, nanocode_shell::Write::Append),
+            None => (
+                tree.take(path).unwrap_or_default(),
+                nanocode_shell::Write::Replace,
+            ),
+        };
         files.write(path, &data, write).get().await?;
     }
     for (existing, link) in &delta.hard_linked {

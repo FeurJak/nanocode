@@ -38,6 +38,10 @@ enum Node {
         mtime_ns: i64,
         changed: bool,
         moded: bool,
+        /// How many bytes at the start are still the content copied in, when
+        /// Python only appended since: write back only the rest, so an append
+        /// another writer made meanwhile is kept.
+        kept: Option<usize>,
     },
     Dir {
         mode: u32,
@@ -164,6 +168,7 @@ impl Tree {
             mtime_ns,
             changed,
             moded,
+            ..
         }) = nodes.get(path)
         else {
             return;
@@ -177,6 +182,7 @@ impl Tree {
                 mtime_ns: time,
                 changed: written,
                 moded: chmoded,
+                ..
             }) = nodes.get_mut(&peer)
             {
                 held.clone_from(&data);
@@ -195,6 +201,7 @@ impl Tree {
                 mode,
                 mtime_ns,
             } => Node::File {
+                kept: Some(data.len()),
                 data,
                 mode,
                 mtime_ns,
@@ -265,6 +272,23 @@ impl Tree {
     pub fn take(&self, path: &[u8]) -> Option<Vec<u8>> {
         match self.nodes.borrow_mut().get_mut(path) {
             Some(Node::File { data, .. }) => Some(std::mem::take(data)),
+            _ => None,
+        }
+    }
+
+    /// What Python appended to a file it copied in and only appended to,
+    /// taken out of the tree; None for any other file, which is written whole,
+    /// and for a file with other names, whose every name is written back.
+    pub fn take_appended(&self, path: &[u8]) -> Option<Vec<u8>> {
+        if !self.peers(path).is_empty() {
+            return None;
+        }
+        match self.nodes.borrow_mut().get_mut(path) {
+            Some(Node::File {
+                data,
+                kept: Some(kept),
+                ..
+            }) => Some(data.split_off(*kept)),
             _ => None,
         }
     }
@@ -371,11 +395,13 @@ impl Files for Tree {
                     data,
                     changed,
                     mtime_ns,
+                    kept,
                     ..
                 }),
                 Write::Replace,
             ) => {
                 *data = more.to_vec();
+                *kept = None;
                 *changed = true;
                 *mtime_ns = now();
                 Ok(())
@@ -387,6 +413,7 @@ impl Files for Tree {
                     mtime_ns: now(),
                     changed: true,
                     moded: false,
+                    kept: None,
                 };
                 nodes.insert(path.to_vec(), node);
                 Ok(())
@@ -538,8 +565,9 @@ impl Files for Tree {
             let Some(mut node) = nodes.remove(&path) else {
                 continue;
             };
-            if let Node::File { changed, .. } = &mut node {
+            if let Node::File { changed, kept, .. } = &mut node {
                 *changed = true;
+                *kept = None;
             }
             let mut placed = to.to_vec();
             placed.extend_from_slice(&path[from.len()..]);
@@ -625,6 +653,7 @@ impl Files for Tree {
                 mtime_ns: *mtime_ns,
                 changed: false,
                 moded: false,
+                kept: None,
             },
             Some(Node::Dir { .. }) => return Err(io::ErrorKind::PermissionDenied.into()),
             None => return Err(missing()),
