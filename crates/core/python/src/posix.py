@@ -172,6 +172,8 @@ def _abs(path):
     path = fspath(path)
     if isinstance(path, str):
         path = path.encode('utf-8', 'surrogateescape')
+    if b'\0' in path:
+        raise ValueError('embedded null byte')
     if not path:
         raise _fail(_errno.ENOENT, '')
     if path[0] != 47:
