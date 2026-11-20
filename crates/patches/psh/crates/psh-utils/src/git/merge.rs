@@ -64,7 +64,8 @@ fn blob(repo: &Repo<'_>, oid: &Oid) -> Res<Vec<u8>> {
 }
 
 /// Merges theirs into ours, both changed from base, as git's ort strategy does for
-/// what agents meet: no rename detection, directory and file conflicts left alone.
+/// what agents meet: a rename on one side is followed, directory and file conflicts are
+/// left alone.
 pub fn merge_trees(
     repo: &Repo<'_>,
     base: Option<&Oid>,
@@ -105,6 +106,83 @@ fn merge_trees_at(
         merged.files.sort_by(|a, b| a.0.cmp(&b.0));
     }
     Ok(merged)
+}
+
+/// The renames on each side (base to side, as git's merge finds them) that the other
+/// side did not rename: the file's base and other-side versions move to the new
+/// name, so the path by path merge merges its contents there. The paths each side
+/// has the moved files under, by new name.
+#[allow(clippy::type_complexity)]
+fn follow_renames(
+    repo: &Repo<'_>,
+    (base, ours, theirs): (Option<&Oid>, Option<&Oid>, Option<&Oid>),
+    (b_files, o_files, t_files): (&mut Files, &mut Files, &mut Files),
+) -> Res<BTreeMap<Vec<u8>, (Vec<u8>, Vec<u8>)>> {
+    let mut names = BTreeMap::new();
+    let enabled = repo
+        .config
+        .bool("merge.renames")
+        .or_else(|| repo.config.bool("diff.renames"))
+        != Some(false);
+    let (Some(base), true) = (base, enabled) else {
+        return Ok(names);
+    };
+    let renames = |side: Option<&Oid>| -> Res<Vec<(Vec<u8>, Vec<u8>)>> {
+        let Some(side) = side else {
+            return Ok(Vec::new());
+        };
+        let mut changes = Vec::new();
+        trees(
+            repo,
+            Some(base),
+            Some(side),
+            b"",
+            &Pathspec::default(),
+            &mut changes,
+        )?;
+        Ok(detect_renames(repo, changes, 30000)?
+            .into_iter()
+            .filter_map(|c| Some((c.from?, c.path)))
+            .collect())
+    };
+    let (by_ours, by_theirs) = (renames(ours)?, renames(theirs)?);
+    let lacks =
+        |what: &str| Error::Lacks(format!("a merge where {what}"), "git's rename conflicts");
+    for (old, new) in &by_theirs {
+        if let Some((_, ours_new)) = by_ours.iter().find(|(o, _)| o == old) {
+            if ours_new != new {
+                return Err(lacks("both sides renamed a file, to different names"));
+            }
+            if let Some(entry) = b_files.remove(old) {
+                b_files.insert(new.clone(), entry);
+            }
+            continue;
+        }
+        if !o_files.contains_key(old) || o_files.contains_key(new) {
+            return Err(lacks("one side renamed a file the other deleted or added"));
+        }
+        for files in [&mut *b_files, &mut *o_files] {
+            if let Some(entry) = files.remove(old) {
+                files.insert(new.clone(), entry);
+            }
+        }
+        names.insert(new.clone(), (old.clone(), new.clone()));
+    }
+    for (old, new) in &by_ours {
+        if by_theirs.iter().any(|(o, _)| o == old) {
+            continue;
+        }
+        if !t_files.contains_key(old) || t_files.contains_key(new) {
+            return Err(lacks("one side renamed a file the other deleted or added"));
+        }
+        for files in [&mut *b_files, &mut *t_files] {
+            if let Some(entry) = files.remove(old) {
+                files.insert(new.clone(), entry);
+            }
+        }
+        names.insert(new.clone(), (new.clone(), old.clone()));
+    }
+    Ok(names)
 }
 
 /// The tree of a merge's files.
@@ -155,11 +233,16 @@ fn merge_level(
     labels: (&str, &str),
     depth: usize,
 ) -> Res<Merged> {
-    let (b_files, o_files, t_files) = (
+    let (mut b_files, mut o_files, mut t_files) = (
         files_of(repo, base)?,
         files_of(repo, ours)?,
         files_of(repo, theirs)?,
     );
+    let names = follow_renames(
+        repo,
+        (base, ours, theirs),
+        (&mut b_files, &mut o_files, &mut t_files),
+    )?;
     let paths: BTreeSet<&Vec<u8>> = b_files
         .keys()
         .chain(o_files.keys())
@@ -177,6 +260,11 @@ fn merge_level(
             t_files.get(path).copied(),
         );
         let shown = String::from_utf8_lossy(path).into_owned();
+        // A renamed file's conflict markers name each side's path, as git's do.
+        let renamed = names.get(path).map(|(o, t)| {
+            let side = |label: &str, p: &[u8]| format!("{label}:{}", String::from_utf8_lossy(p));
+            (side(labels.0, o), side(labels.1, t))
+        });
         let take = if o == t {
             o
         } else if b == o {
@@ -231,7 +319,9 @@ fn merge_level(
                     &base_text,
                     &ours_text,
                     &theirs_text,
-                    labels,
+                    renamed
+                        .as_ref()
+                        .map_or(labels, |(o, t)| (o.as_str(), t.as_str())),
                     7 + 2 * depth,
                 );
                 if clean {
