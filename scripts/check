@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/check: the checks below, one green/red line each with its time, then GREEN or RED.
 #   scripts/check          changed scope: the crates the diff touches plus their dependents
-#                          (cargo check, native and wasm32), and the simulator scenarios that
+#                          (cargo check: --lib --bins native, --lib wasm32), and the simulator scenarios that
 #                          reach those crates: their pass jobs and every canary they list
 #   scripts/check --full   release gate: the whole workspace and every scenario and canary
 # Options: --base REF (diff base; default: merge-base with the upstream, or HEAD~1 when nothing

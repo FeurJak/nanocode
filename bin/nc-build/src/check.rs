@@ -21,7 +21,7 @@ use nanocode_build_opt::{
 
 const USAGE: &str = "usage: nc-build check [--full] [--base REF] [-j N] [--seeds N] [--no-sim] [--plan]
   changed scope: the crates the diff since REF (merge-base with the upstream, or HEAD~1 when nothing differs) and untracked files touch,
-  with their dependents (cargo check --locked --lib, native and wasm32), the simulator's --tidy and --machines walks, and the pass jobs and canaries of
+  with their dependents (cargo check --locked: --lib --bins native, --lib wasm32), the simulator's --tidy and --machines walks, and the pass jobs and canaries of
   bin/nanocode-sim/cfo.sh's table for every scenario that reaches them; --full: the whole workspace and every scenario and canary
   -j N: parallel jobs (default: CARGO_BUILD_JOBS, else the cores this process may run on); --seeds N: seeds per pass job (default 8, 64 with --full)
   a canary passes once a seed catches it, trying seeds 0, then 1..8, then the rest of its budget in units of 16 seeds;
@@ -319,7 +319,12 @@ fn modules(src: &str) -> Result<Modules, String> {
 
 enum Selection {
     Workspace,
-    Crates(BTreeSet<String>),
+    /// Every reached crate, checked natively with --lib --bins so a bin-only crate (nc-board,
+    /// nanocode-fuzz, ...) is checked too, and the libraries among them, checked for wasm32.
+    Crates {
+        reached: BTreeSet<String>,
+        libraries: BTreeSet<String>,
+    },
 }
 
 struct Planned {
@@ -355,7 +360,10 @@ fn scope_of(full: bool, changed: &[String], graph: &Graph) -> Result<Planned, St
             };
             Ok(Planned {
                 simulator: reached.contains(SIM.package),
-                selection: Selection::Crates(gate::libraries(graph, &reached)),
+                selection: Selection::Crates {
+                    libraries: gate::libraries(graph, &reached),
+                    reached,
+                },
                 scenarios,
             })
         }
@@ -722,7 +730,7 @@ pub fn main(args: &[String]) -> u8 {
     };
     let crates_line = match &planned.selection {
         Selection::Workspace => "all".to_owned(),
-        Selection::Crates(crates) => crates.iter().cloned().collect::<Vec<_>>().join(" "),
+        Selection::Crates { reached, .. } => reached.iter().cloned().collect::<Vec<_>>().join(" "),
     };
     let _ = fs::write(
         logs.join("scope.txt"),
@@ -733,19 +741,50 @@ pub fn main(args: &[String]) -> u8 {
         .and_then(|base| git(&["rev-parse", "--short", base]))
         .map(|short| format!(" since {short}"))
         .unwrap_or_default();
-    let (selection, detail): (Vec<String>, String) = match &planned.selection {
-        Selection::Workspace => (vec!["--workspace".to_owned()], "workspace".to_owned()),
-        Selection::Crates(crates) if crates.is_empty() => {
-            (Vec::new(), format!("no crates changed{since}"))
-        }
-        Selection::Crates(crates) => (
-            crates
-                .iter()
-                .flat_map(|name| ["-p".to_owned(), name.clone()])
-                .collect(),
-            format!("{} crates changed{since}, with dependents", crates.len()),
-        ),
+    let packages = |crates: &BTreeSet<String>| -> Vec<String> {
+        crates
+            .iter()
+            .flat_map(|name| ["-p".to_owned(), name.clone()])
+            .collect()
     };
+    // Native: --lib --bins (--bins alone when no reached crate has a library, since cargo refuses
+    // --lib then); wasm32: the libraries only. Empty means skipped.
+    let (native_args, wasm_args, detail): (Vec<String>, Vec<String>, String) =
+        match &planned.selection {
+            Selection::Workspace => (
+                ["--workspace", "--lib", "--bins"]
+                    .map(str::to_owned)
+                    .to_vec(),
+                ["--workspace", "--lib"].map(str::to_owned).to_vec(),
+                "workspace".to_owned(),
+            ),
+            Selection::Crates { reached, .. } if reached.is_empty() => {
+                (Vec::new(), Vec::new(), format!("no crates changed{since}"))
+            }
+            Selection::Crates { reached, libraries } => {
+                let mut native = packages(reached);
+                if !libraries.is_empty() {
+                    native.push("--lib".to_owned());
+                }
+                native.push("--bins".to_owned());
+                let wasm = if libraries.is_empty() {
+                    Vec::new()
+                } else {
+                    let mut wasm = packages(libraries);
+                    wasm.push("--lib".to_owned());
+                    wasm
+                };
+                (
+                    native,
+                    wasm,
+                    format!(
+                        "{} crates changed{since}, with dependents ({} libraries)",
+                        reached.len(),
+                        libraries.len()
+                    ),
+                )
+            }
+        };
     let jobs = if options.sim
         && (!planned.scenarios.is_empty() || (planned.simulator && !memory_combos().is_empty()))
     {
@@ -801,21 +840,29 @@ pub fn main(args: &[String]) -> u8 {
         let sim = jobs
             .as_deref()
             .map(|jobs| scope.spawn(move || simulate(target, logs, options, jobs)));
-        if selection.is_empty() {
+        if native_args.is_empty() {
             ui.line(Status::Skip, "check", 0.0, &detail);
-            ui.line(Status::Skip, "check-wasm", 0.0, &detail);
         } else {
             let mut native = cargo(options.jobs);
             native
                 .env("CARGO_TARGET_DIR", target)
-                .args(["check", "--locked", "--lib"])
-                .args(&selection);
+                .args(["check", "--locked"])
+                .args(&native_args);
             let step = logged("check", logs, native);
             ui.step(&step, &detail);
+        }
+        if wasm_args.is_empty() {
+            let why = if native_args.is_empty() {
+                detail.clone()
+            } else {
+                "no library among the changed crates".to_owned()
+            };
+            ui.line(Status::Skip, "check-wasm", 0.0, &why);
+        } else {
             let mut wasm = cargo(options.jobs);
             wasm.env("CARGO_TARGET_DIR", target)
-                .args(["check", "--locked", "--lib", "--target", WASM])
-                .args(&selection);
+                .args(["check", "--locked", "--target", WASM])
+                .args(&wasm_args);
             let step = logged("check-wasm", logs, wasm);
             ui.step(&step, &detail);
             if step.exit != 0
