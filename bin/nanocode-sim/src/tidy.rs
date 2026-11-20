@@ -112,6 +112,12 @@ const ALLOWED: &[Allowed] = &[
         why: "slow-wait diagnostics time how long a holder waited for slow_waits reports, never a decision or persisted bytes, on whatever thread holds it",
     },
     Allowed {
+        path: "crates/core/turnlog/src/file.rs",
+        call: "thread::Builder",
+        uses: 1,
+        why: "a FileLog's blocking file I/O runs on its owning worker thread behind channels, as AGENTS.md requires; FileLog is native only and no simulated run opens one",
+    },
+    Allowed {
         path: "crates/integrations/store-jsonl/src/lib.rs",
         call: "Instant::now",
         uses: 5,
@@ -138,8 +144,8 @@ const ALLOWED: &[Allowed] = &[
     Allowed {
         path: "crates/runtime/durability/src/shared_store.rs",
         call: "nanocode_executor::Handle",
-        uses: 2,
-        why: "without a host, SharedStore drivers run on one current_thread runtime on their own thread; spawn_driver gives them to an installed host first",
+        uses: 3,
+        why: "without a host, SharedStore drivers run on the runtime a caller gave drive_on, else on one current_thread runtime on their own thread; spawn_driver gives them to an installed host first",
     },
     Allowed {
         path: "crates/runtime/durability/src/shared_store.rs",
