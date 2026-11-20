@@ -1,5 +1,8 @@
 mod board;
-pub use board::{BoardAgents, BoardCoordination, BoardStats, Coordination};
+pub use board::{
+    BoardAgents, BoardCoordination, BoardStats, Coordination, DISPATCH_LABEL, DISPATCH_POSTER,
+    DISPATCH_ROLE, Dispatching, HostedView, dispatch_policy, dispatch_scope,
+};
 mod capacity;
 mod diagnostics;
 mod durable;

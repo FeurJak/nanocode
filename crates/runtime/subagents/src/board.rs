@@ -18,8 +18,15 @@ use crate::model::{AgentId, AgentStatus, AgentUpdate, MessageSender};
 
 #[path = "brief.rs"]
 mod brief;
+#[path = "hosting.rs"]
+mod hosting;
 #[path = "steers.rs"]
 mod steers;
+
+pub use hosting::{
+    DISPATCH_LABEL, DISPATCH_POSTER, DISPATCH_ROLE, Dispatching, HostedView, dispatch_policy,
+    dispatch_scope,
+};
 
 #[cfg(not(target_family = "wasm"))]
 pub type ReadFuture<'a, T> = nanocode_sync::future::BoxFuture<'a, T>;
@@ -50,6 +57,9 @@ pub trait Coordination: Send + Sync {
     fn steers<'a>(&'a self, _session: &'a str) -> ReadFuture<'a, Result<Vec<String>, String>> {
         Box::pin(std::future::ready(Ok(Vec::new())))
     }
+    fn attach(&self, _registry: std::sync::Weak<crate::Registry>) {}
+    fn detach(&self) {}
+    fn release_root(&self, _root_session_id: &str) {}
 }
 
 pub const LEASE_MS: u64 = 1 << 30;
@@ -171,6 +181,7 @@ struct Inner {
     errors: Vec<String>,
     changes: watch::Sender<u64>,
     brief: Option<nanocode_board::brief::BriefPolicy>,
+    hosts: Arc<hosting::Hosts>,
 }
 
 struct Desk {
@@ -187,6 +198,7 @@ impl Desk {
 }
 
 pub struct BoardCoordination {
+    hosts: Arc<hosting::Hosts>,
     desk: Arc<Owned<Desk>>,
     letters: mpsc::UnboundedSender<Letter>,
     draining: Arc<AtomicBool>,
@@ -221,10 +233,34 @@ async fn open(
 }
 
 impl BoardCoordination {
+    /// Sets how each root's hosted dispatcher places pooled agents, or turns
+    /// hosting off with `None`. Running dispatchers stop and restart under
+    /// the new settings at the root's next update.
+    pub fn dispatching(&self, dispatching: Option<Dispatching>) {
+        self.hosts.configure(dispatching);
+    }
+
+    /// Roots with a dispatcher running.
+    pub fn hosting(&self) -> Vec<String> {
+        self.hosts.hosting()
+    }
+
+    /// The intents and pool of the dispatcher hosted for `root`.
+    pub async fn hosted(&self, root: &str) -> Result<Option<HostedView>, String> {
+        self.hosts.view(root).await
+    }
+
+    /// Posts work for `root`'s hosted dispatcher to place a pooled agent on.
+    pub async fn post_dispatch(&self, root: &str, task: NewTask) -> Result<(), String> {
+        self.hosts.post(root, task).await
+    }
+
     pub fn new(host: Arc<dyn LogHost>, scope: &str) -> Arc<Self> {
         let changes = watch::Sender::new(0);
         let (letters, received) = mpsc::unbounded_channel();
+        let hosts = Arc::new(hosting::Hosts::new(Arc::clone(&host), scope));
         Arc::new(Self {
+            hosts: Arc::clone(&hosts),
             changes: changes.clone(),
             letters,
             draining: Arc::new(AtomicBool::new(false)),
@@ -242,6 +278,7 @@ impl BoardCoordination {
                     errors: Vec::new(),
                     changes,
                     brief: None,
+                    hosts,
                 },
                 letters: received,
             })),
@@ -672,6 +709,7 @@ impl Inner {
     }
 
     async fn ensure_root(&mut self, root: &str) -> TaskId {
+        self.hosts.host(root);
         let id = root_task(root);
         if self.roots.insert(root.to_owned()) {
             let task = NewTask {
@@ -1250,5 +1288,17 @@ impl Coordination for BoardCoordination {
 
     fn steers<'a>(&'a self, session: &'a str) -> ReadFuture<'a, Result<Vec<String>, String>> {
         self.boundary(session)
+    }
+
+    fn attach(&self, registry: std::sync::Weak<crate::Registry>) {
+        self.hosts.attach(registry);
+    }
+
+    fn detach(&self) {
+        self.hosts.stop_all();
+    }
+
+    fn release_root(&self, root_session_id: &str) {
+        self.hosts.stop(root_session_id);
     }
 }

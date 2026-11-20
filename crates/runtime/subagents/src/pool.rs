@@ -93,10 +93,7 @@ impl SubagentPool {
     }
 
     async fn place(&self, start: Start) -> Result<(), PoolError> {
-        if self
-            .placed
-            .read(|placed| placed.contains_key(&start.agent))
-        {
+        if self.placed.read(|placed| placed.contains_key(&start.agent)) {
             return Ok(());
         }
         let registry = self.registry()?;
@@ -139,35 +136,35 @@ impl SubagentPool {
         };
         let now = (self.now_ms)();
         self.placed.update(|placed| {
-        placed.retain(|_, placed| {
-            let Some(entry) = listed.iter().find(|entry| entry.agent_id == placed.id) else {
-                return false;
-            };
-            placed.agent.phase = match &entry.status {
-                AgentStatus::Pending => AgentPhase::Starting,
-                AgentStatus::Running => {
-                    placed.idle_since_ms = None;
-                    placed.ended = None;
-                    AgentPhase::Busy
-                }
-                AgentStatus::Closing => AgentPhase::Retiring,
-                AgentStatus::Closed => return false,
-                AgentStatus::Completed { output } => {
-                    placed.ended = Some(Ended::Completed(output.to_string()));
-                    idle(placed, now)
-                }
-                AgentStatus::Failed { error } => {
-                    placed.ended = Some(Ended::Failed(error.clone()));
-                    idle(placed, now)
-                }
-                AgentStatus::Interrupted => {
-                    placed.ended = Some(Ended::Stopped);
-                    idle(placed, now)
-                }
-            };
-            true
-        });
-        placed.values().map(Placed::listed).collect()
+            placed.retain(|_, placed| {
+                let Some(entry) = listed.iter().find(|entry| entry.agent_id == placed.id) else {
+                    return false;
+                };
+                placed.agent.phase = match &entry.status {
+                    AgentStatus::Pending => AgentPhase::Starting,
+                    AgentStatus::Running => {
+                        placed.idle_since_ms = None;
+                        placed.ended = None;
+                        AgentPhase::Busy
+                    }
+                    AgentStatus::Closing => AgentPhase::Retiring,
+                    AgentStatus::Closed => return false,
+                    AgentStatus::Completed { output } => {
+                        placed.ended = Some(Ended::Completed(output.to_string()));
+                        idle(placed, now)
+                    }
+                    AgentStatus::Failed { error } => {
+                        placed.ended = Some(Ended::Failed(error.clone()));
+                        idle(placed, now)
+                    }
+                    AgentStatus::Interrupted => {
+                        placed.ended = Some(Ended::Stopped);
+                        idle(placed, now)
+                    }
+                };
+                true
+            });
+            placed.values().map(Placed::listed).collect()
         })
     }
 

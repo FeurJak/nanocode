@@ -3181,7 +3181,18 @@ impl Registry {
     }
 
     pub fn set_coordination(&self, coordination: Option<Arc<dyn crate::board::Coordination>>) {
-        self.coordination.set(coordination);
+        if let (Some(next), Some(this)) = (&coordination, self.this.get()) {
+            next.attach(Weak::clone(this));
+        }
+        let next = coordination
+            .as_ref()
+            .map(|next| Arc::as_ptr(next).cast::<()>());
+        let previous = Option::clone(&self.coordination.set(coordination));
+        if let Some(previous) = previous
+            && Some(Arc::as_ptr(&previous).cast::<()>()) != next
+        {
+            previous.detach();
+        }
     }
 
     pub(super) fn coordinate(&self, root_session_id: &str, update: &AgentUpdate) {
@@ -7850,6 +7861,9 @@ impl Registry {
             self.session_handles.update(|handles| {
                 handles.remove(&root);
             });
+            if let Some(coordination) = Option::clone(&self.coordination.get()) {
+                coordination.release_root(&root);
+            }
         }
         let summaries = result?;
         journal_result?;
