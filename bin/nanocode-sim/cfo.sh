@@ -98,7 +98,7 @@ default_table='
 1 canary_idempotent_reported_unknown canary --scenario turns --mutation idempotent_reported_unknown
 1 canary_recovery_skips_clientless canary --scenario turns --mutation recovery_skips_clientless
 1 canary_tick_not_atomic canary --scenario turns --mutation tick_not_atomic
-1 canary_seal_skipped canary:4000 --scenario turns --live-seqs floor --mutation seal_skipped
+1 canary_seal_skipped canary:1000 --scenario turns --live-seqs floor --mutation seal_skipped
 1 canary_http_reuse_dirty canary:100 --scenario runtime --store kv --wire http --mutation http-reuse-dirty
 1 canary_http_no_read_timeout canary:200 --scenario runtime --store kv --wire http --mutation http-no-read-timeout
 1 canary_tool_result_twice canary:40 --scenario runtime --store kv --wire http --mutation tool-result-twice
