@@ -2959,6 +2959,13 @@ impl<'a> P<'a> {
                                 span: sp(start, self.pos),
                                 kind: Part::Escaped,
                             });
+                        } else if n == b'\''
+                            && matches!(ctx, Ctx::Arith { .. } | Ctx::ArithBracket)
+                        {
+                            // Arithmetic text reads as double-quoted: `\'` is both
+                            // chars, for the arithmetic to reject (`$(( x\'y ))`).
+                            self.pos += 2;
+                            push_lit(out, start, self.pos);
                         } else {
                             self.pos += 1;
                             push_lit(out, start, self.pos);
