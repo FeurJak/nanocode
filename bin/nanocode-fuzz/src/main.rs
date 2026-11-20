@@ -164,7 +164,7 @@ fn main() -> ExitCode {
     let work = total * width;
     let cursor = AtomicU64::new(0);
     let started = Instant::now();
-    let mut failures: Vec<(u64, String)> = std::thread::scope(|scope| {
+    let failures: Vec<String> = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..run.jobs.min(usize::try_from(work).unwrap_or(usize::MAX)).max(1))
             .map(|_| {
                 scope.spawn(|| {
@@ -178,16 +178,16 @@ fn main() -> ExitCode {
                         let iteration = first + at / width;
                         if let Err(reason) = one(run.seed, target, iteration) {
                             let reason = reason.replace('\n', " ");
-                            failed.push((
-                                at,
-                                format!(
+                            let line = format!(
                                     "FAIL fuzz target={} seed={} iteration={iteration} {reason} :: replay: cargo run -q -p nanocode-fuzz --release -- fuzz --seed {} --target {} --iteration {iteration}",
                                     target.name(),
                                     run.seed,
                                     run.seed,
                                     target.name()
-                                ),
-                            ));
+                            );
+                            // Print as found, so a shard killed at its deadline keeps its failures.
+                            println!("{line}");
+                            failed.push(line);
                         }
                     }
                 })
@@ -198,10 +198,6 @@ fn main() -> ExitCode {
             .flat_map(|worker| worker.join().expect("a fuzz worker catches its panics"))
             .collect()
     });
-    failures.sort();
-    for (_, line) in &failures {
-        println!("{line}");
-    }
     let seconds = started.elapsed().as_secs_f64();
     let names: Vec<&str> = run.targets.iter().map(|target| target.name()).collect();
     println!(
