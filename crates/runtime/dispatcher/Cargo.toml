@@ -12,6 +12,7 @@ repository.workspace = true
 description = "Runs the board dispatcher: plans over a live board, records and fences spawn intents, starts agents from a budgeted task brief through a pool, retires idle agents and releases their claims, and sleeps on board wakes until the next due time"
 
 [dependencies]
+nanocode-platform.workspace = true
 nanocode-board.workspace = true
 nanocode-dispatch.workspace = true
 

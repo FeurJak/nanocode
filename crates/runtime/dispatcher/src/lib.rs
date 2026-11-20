@@ -19,6 +19,10 @@ pub const BRIEF: BriefPolicy = BriefPolicy {
     bytes_per_token: 4,
 };
 
+#[cfg(not(target_family = "wasm"))]
+pub type PoolFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+#[cfg(target_family = "wasm")]
 pub type PoolFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,7 +39,7 @@ pub enum PoolError {
     Unknown(String),
 }
 
-pub trait Pool {
+pub trait Pool: nanocode_platform::MaybeSync {
     fn agents(&self) -> PoolFuture<'_, Vec<Agent>>;
 
     fn start(&self, start: Start) -> PoolFuture<'_, Result<(), PoolError>>;

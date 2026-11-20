@@ -1,9 +1,8 @@
 use std::{
-    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     ops::Range,
     process::ExitCode,
-    sync::Arc,
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
 use nanocode_board::{Board, ClaimId, NewTask, Op, Outcome, Phase, TaskId};
@@ -113,16 +112,22 @@ struct Shared {
     stats: DispatcherStats,
 }
 
-struct SimPool(RefCell<Shared>);
+struct SimPool(Mutex<Shared>);
+
+impl SimPool {
+    fn borrow(&self) -> MutexGuard<'_, Shared> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
 
 impl Pool for SimPool {
     fn agents(&self) -> PoolFuture<'_, Vec<Agent>> {
-        let agents = self.0.borrow().bots.iter().map(|bot| bot.agent.clone()).collect();
+        let agents = self.borrow().bots.iter().map(|bot| bot.agent.clone()).collect();
         Box::pin(std::future::ready(agents))
     }
 
     fn start(&self, start: Start) -> PoolFuture<'_, Result<(), PoolError>> {
-        let mut guard = self.0.borrow_mut();
+        let mut guard = self.borrow();
         let shared = &mut *guard;
         let intent = start.spawn.intent.clone();
         if start.worker != format!("{OWNER}+{}", start.agent) {
@@ -178,7 +183,7 @@ impl Pool for SimPool {
     }
 
     fn retire<'a>(&'a self, agent: &'a str) -> PoolFuture<'a, Result<(), PoolError>> {
-        let mut guard = self.0.borrow_mut();
+        let mut guard = self.borrow();
         let shared = &mut *guard;
         if shared.rng.chance(shared.fail_ppm / 4) {
             return Box::pin(std::future::ready(Err(PoolError::Unknown(
@@ -215,8 +220,8 @@ fn shown(error: impl std::fmt::Debug) -> String {
 }
 
 impl World {
-    fn shared(&self) -> std::cell::RefMut<'_, Shared> {
-        self.pool.0.borrow_mut()
+    fn shared(&self) -> MutexGuard<'_, Shared> {
+        self.pool.borrow()
     }
 
     async fn dispatcher(&self) -> Result<Dispatcher, String> {
@@ -376,7 +381,7 @@ impl World {
     }
 
     fn check_budget(&self) -> Result<(), String> {
-        let shared = self.pool.0.borrow();
+        let shared = self.pool.borrow();
         let budgets = &self.policy.budgets;
         let mut members = BTreeMap::<&str, u64>::new();
         let mut projects = BTreeMap::<&str, u64>::new();
@@ -408,7 +413,7 @@ impl World {
     }
 
     fn check_claims(&self) -> Result<(), String> {
-        let shared = self.pool.0.borrow();
+        let shared = self.pool.borrow();
         let alive = shared
             .bots
             .iter()
@@ -522,7 +527,7 @@ impl World {
     }
 
     fn quiet(&self) -> bool {
-        let shared = self.pool.0.borrow();
+        let shared = self.pool.borrow();
         self.wake_at.is_none()
             && shared.bots.iter().all(|bot| {
                 matches!(bot.agent.phase, AgentPhase::Idle { .. })
@@ -583,7 +588,7 @@ async fn drive(world: &mut World) -> Result<(), String> {
     let open = world.open();
     if let Some(first) = open.first() {
         let phase = world.probe.fold().task(first).map(|task| task.phase.clone());
-        let shared = world.pool.0.borrow();
+        let shared = world.pool.borrow();
         let bots = shared
             .bots
             .iter()
@@ -596,7 +601,7 @@ async fn drive(world: &mut World) -> Result<(), String> {
             world.wake_at
         ));
     }
-    let shared = world.pool.0.borrow();
+    let shared = world.pool.borrow();
     if let Some(bot) = shared.bots.first() {
         return Err(format!(
             "{} agents left parked with nothing to do, first {} ({:?}), idle_retire_ms {}",
@@ -636,7 +641,7 @@ pub fn simulate(seed: u64, mutation: DispatcherMutation) -> DispatcherOutcome {
             poster,
             probe,
             workers: BTreeMap::new(),
-            pool: SimPool(RefCell::new(Shared {
+            pool: SimPool(Mutex::new(Shared {
                 rng,
                 now: 1_000,
                 bots: Vec::new(),
@@ -660,7 +665,7 @@ pub fn simulate(seed: u64, mutation: DispatcherMutation) -> DispatcherOutcome {
         };
         let verdict = drive(&mut world).await;
         world.probe.refresh().await.map_err(shown)?;
-        let stats = world.pool.0.borrow().stats;
+        let stats = world.pool.borrow().stats;
         let rows = host.load(SCOPE).await.map_err(shown)?;
         let digest = rows
             .iter()

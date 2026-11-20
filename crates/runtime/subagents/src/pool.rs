@@ -1,13 +1,20 @@
-use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Weak},
+};
 
 use nanocode_agent_core::AgentHandle;
 use nanocode_board::sim::{Mutation, mutated};
 use nanocode_dispatch::{Agent, AgentPhase};
 use nanocode_dispatcher::{Pool, PoolError, PoolFuture, Start};
+use nanocode_sync::Atom;
 use serde_json::Value;
 
 use crate::{AgentId, AgentStatus, AgentTask, Registry, start_agent};
 
+pub type PoolClock = Arc<dyn Fn() -> u64 + Send + Sync>;
+
+#[derive(Clone)]
 struct Placed {
     id: AgentId,
     agent: Agent,
@@ -26,10 +33,10 @@ impl Placed {
 
 pub struct SubagentPool {
     parent: AgentHandle,
-    registry: Arc<Registry>,
+    registry: Weak<Registry>,
     session: String,
-    now_ms: Box<dyn Fn() -> u64>,
-    placed: RefCell<BTreeMap<String, Placed>>,
+    now_ms: PoolClock,
+    placed: Atom<BTreeMap<String, Placed>>,
 }
 
 impl SubagentPool {
@@ -37,31 +44,46 @@ impl SubagentPool {
         parent: AgentHandle,
         registry: Arc<Registry>,
         session: impl Into<String>,
-        now_ms: Box<dyn Fn() -> u64>,
+        now_ms: impl Fn() -> u64 + Send + Sync + 'static,
     ) -> Self {
         Self {
             parent,
-            registry,
+            registry: Arc::downgrade(&registry),
             session: session.into(),
-            now_ms,
-            placed: RefCell::new(BTreeMap::new()),
+            now_ms: Arc::new(now_ms),
+            placed: Atom::new(BTreeMap::new()),
         }
+    }
+
+    pub fn session(&self) -> &str {
+        &self.session
+    }
+
+    fn registry(&self) -> Result<Arc<Registry>, PoolError> {
+        self.registry
+            .upgrade()
+            .ok_or_else(|| PoolError::Unknown("the subagent registry stopped".to_owned()))
     }
 
     pub fn agent_id(&self, agent: &str) -> Option<AgentId> {
-        self.placed.borrow().get(agent).map(|placed| placed.id)
+        self.placed
+            .read(|placed| placed.get(agent).map(|placed| placed.id))
     }
 
     async fn place(&self, start: Start) -> Result<(), PoolError> {
-        if self.placed.borrow().contains_key(&start.agent) {
+        if self
+            .placed
+            .read(|placed| placed.contains_key(&start.agent))
+        {
             return Ok(());
         }
+        let registry = self.registry()?;
         let task = AgentTask {
             role: start.spawn.domain.role.clone(),
             task: start.brief.text.clone(),
             output_schema: Value::Object(serde_json::Map::new()),
         };
-        let report = start_agent(&self.parent, &self.registry, &self.session, task)
+        let report = start_agent(&self.parent, &registry, &self.session, task)
             .await
             .map_err(|error| PoolError::Placement(error.to_string()))?;
         let agent = Agent {
@@ -76,16 +98,24 @@ impl SubagentPool {
             agent,
             idle_since_ms: None,
         };
-        self.placed.borrow_mut().insert(start.agent, placed);
+        self.placed.update(|all| {
+            all.insert(start.agent.clone(), placed.clone());
+        });
         Ok(())
     }
 
     async fn list(&self) -> Vec<Agent> {
-        let Ok(listed) = self.registry.directory(&self.session, true, false).await else {
-            return self.placed.borrow().values().map(Placed::listed).collect();
+        let listed = match self.registry() {
+            Ok(registry) => registry.directory(&self.session, true, false).await.ok(),
+            Err(_) => None,
+        };
+        let Some(listed) = listed else {
+            return self
+                .placed
+                .read(|placed| placed.values().map(Placed::listed).collect());
         };
         let now = (self.now_ms)();
-        let mut placed = self.placed.borrow_mut();
+        self.placed.update(|placed| {
         placed.retain(|_, placed| {
             let Some(entry) = listed.iter().find(|entry| entry.agent_id == placed.id) else {
                 return false;
@@ -107,6 +137,7 @@ impl SubagentPool {
             true
         });
         placed.values().map(Placed::listed).collect()
+        })
     }
 
     async fn close(&self, agent: &str) -> Result<(), PoolError> {
@@ -114,12 +145,14 @@ impl SubagentPool {
             return Ok(());
         };
         if !mutated(Mutation::PoolRetireKeepsAgent) {
-            self.registry
+            self.registry()?
                 .close(&self.session, id)
                 .await
                 .map_err(|error| PoolError::Unknown(error.to_string()))?;
         }
-        self.placed.borrow_mut().remove(agent);
+        self.placed.update(|placed| {
+            placed.remove(agent);
+        });
         Ok(())
     }
 }
