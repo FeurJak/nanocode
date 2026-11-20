@@ -869,7 +869,8 @@ declare function RecordSet(r: Obj, i: i32, v: Value): void;
  * AsyncFromSyncIteratorUnwrap, 14 AsyncFromSyncIteratorCloseThrow, 15
  * ProxyRevokeFunction, 16 FromAsyncFulfilled, 17 FromAsyncRejected, 18
  * AsyncDisposeFulfilled, 19 AsyncDisposeRejected, 20 DecoratorAddInitializer, 21
- * DecoratorAccessGet, 22 DecoratorAccessSet, 23 DecoratorAccessHas, 24 DecoratorParamCall) with `this` = data and its own
+ * DecoratorAccessGet, 22 DecoratorAccessSet, 23 DecoratorAccessHas, 24 DecoratorParamCall, 25 IntlBoundFormat, 26
+ * IntlBoundCompare) with `this` = data and its own
  * arguments.
  * @leaf
  */
@@ -989,6 +990,31 @@ declare function Utf8Encode(s: Str, buffer: Value, offset: Value, length: Value)
  * sequence for the next call if stream; undefined for a fatal error. @leaf
  */
 declare function Utf8Decode(decoder: Obj, buffer: Value, offset: Value, length: Value, stream: boolean): Value;
+// ---- Intl (ECMA-402; builtins/intl.ts, builtins/intl/) -------------------------------
+//
+// Kinds: 0 NumberFormat, 1 DateTimeFormat, 2 Collator, 3 PluralRules, 4 ListFormat, 5
+// RelativeTimeFormat. Option lists are name \u0002 value pairs joined by \u0001.
+
+/** Whether this build has Intl's locale data (djs-core's \`embed\`). @leaf */
+declare function IntlEnabled(): boolean;
+/** A new Intl object of kind with its resolved options spec. @leaf */
+declare function IntlCreate(proto: Obj, kind: i32, spec: Str): Obj;
+/** v's resolved options if it is an Intl object of kind, else undefined. @leaf */
+declare function IntlSpec(v: Value, kind: i32): Value;
+/** o's bound format or compare function, first set to f unless f is undefined. @leaf */
+declare function IntlBound(o: Obj, f: Value): Value;
+/**
+ * The resolved options of kind for the LF-joined language tags and the raw options, else
+ * RangeError or TypeError. @leaf
+ */
+declare function IntlResolve(kind: i32, locales: Str, raw: Str): Str;
+/**
+ * x (and y) formatted by the resolved options spec of kind: a string, or with parts the
+ * parts as type \u0002 value pairs joined by \u0001; a Collator's comparison as a number. @leaf
+ */
+declare function IntlFormat(kind: i32, spec: Str, x: Value, y: Value, parts: boolean): Value;
+/** The canonical LF-joined tags (supported: only those with locale data), else RangeError. @leaf */
+declare function IntlLocales(tags: Str, supported: boolean): Str;
 
 // ---- JSON (0033, builtins/json.rs over crate::json) -------------------------------------
 

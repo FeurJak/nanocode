@@ -866,6 +866,10 @@ pub(crate) fn runs_locale_compare(heap: &Heap, f: Value) -> bool {
 }
 
 fn locale_compare(heap: &mut Heap, this: Value, args: &[Value]) -> Fast {
+    // Locales or options: Intl.Collator's comparison, in the builtin.
+    if arg(args, 1) != Value::UNDEFINED || arg(args, 2) != Value::UNDEFINED {
+        return Ok(None);
+    }
     let Some((s, t)) = search(heap, this, arg(args, 0))? else {
         return Ok(None);
     };

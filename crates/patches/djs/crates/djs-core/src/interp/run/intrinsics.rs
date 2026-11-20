@@ -211,6 +211,9 @@ const DOM_EXCEPTION_CONSTANT: u16 = id("DOMExceptionConstant");
 const BTOA: u16 = id("Btoa");
 const TEXT_CODEC_CREATE: u16 = id("TextCodecCreate");
 const UTF8_DECODE: u16 = id("Utf8Decode");
+const INTL_ENABLED: u16 = id("IntlEnabled");
+const INTL_CREATE: u16 = id("IntlCreate");
+const INTL_LOCALES: u16 = id("IntlLocales");
 const ATOB: u16 = id("Atob");
 const F64_IMUL: u16 = id("F64Imul");
 const F64_LOG: u16 = id("F64Log");
@@ -367,7 +370,7 @@ pub(super) fn new_builtin_closure(
     Ok(Some(f))
 }
 
-const BUILTIN_CLOSURES: [u16; 25] = [
+const BUILTIN_CLOSURES: [u16; 27] = [
     id("PromiseResolveFunction"),
     id("PromiseRejectFunction"),
     id("GetCapabilitiesExecutor"),
@@ -393,6 +396,8 @@ const BUILTIN_CLOSURES: [u16; 25] = [
     id("DecoratorAccessSet"),
     id("DecoratorAccessHas"),
     id("DecoratorParamCall"),
+    id("IntlBoundFormat"),
+    id("IntlBoundCompare"),
 ];
 
 #[cfg(djs_prelude)]
@@ -2006,6 +2011,15 @@ impl Exec<'_> {
                 let args = [a0, arg(self, 1), arg(self, 2), arg(self, 3), arg(self, 4)];
                 let k = id - TEXT_CODEC_CREATE;
                 match encoding::intrinsic(self.heap, k, args, &mut self.fuel)? {
+                    Some(v) => v,
+                    None => return bad_argument(id),
+                }
+            }
+            INTL_ENABLED => Value::bool(crate::EMBED),
+            // The six are consecutive (builtins/intrinsics.d.ts).
+            INTL_CREATE..=INTL_LOCALES if crate::EMBED => {
+                let args = [a0, arg(self, 1), arg(self, 2), arg(self, 3), arg(self, 4)];
+                match crate::builtins::intl::intrinsic(self.heap, id - INTL_CREATE, args)? {
                     Some(v) => v,
                     None => return bad_argument(id),
                 }

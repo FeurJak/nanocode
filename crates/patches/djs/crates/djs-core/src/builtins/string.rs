@@ -569,10 +569,15 @@ pub(crate) fn normalize(heap: &mut Heap, s: Str, form: u8) -> Result<Option<Str>
     }
 }
 
-/// localeCompare without Intl, as QuickJS computes it: both strings NFC-normalized (with
+/// localeCompare with the default collation (builtins/intl) in builds with `embed`;
+/// without Intl, as QuickJS computes it: both strings NFC-normalized (with
 /// the `unicode-normalization` feature), then the difference of the first differing code
 /// points, else -1/0/1 by length.
 pub(crate) fn locale_compare(heap: &mut Heap, a: Str, b: Str) -> Result<f64, Fault> {
+    if crate::EMBED {
+        let (ua, ub) = (units(heap, a)?, units(heap, b)?);
+        return Ok(f64::from(crate::builtins::intl::locale_compare(&ua, &ub)));
+    }
     // One-byte strings are their own NFC form and have no surrogates: compared in place.
     let (a, b) = (heap.contiguous(a)?, heap.contiguous(b)?);
     if let (Some(StrView::Latin1(x)), Some(StrView::Latin1(y))) =

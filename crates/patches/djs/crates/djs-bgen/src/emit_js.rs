@@ -47,17 +47,18 @@ pub fn emit(p: &Program, sources: &Sources, omit: &[&str], slim: bool) -> String
     let kept: Vec<&Builtin> = p.builtins.iter().filter(|b| !gone(b)).collect();
     // The constructors the omitted builtins make: kept builtins installed onto them
     // (`%TypedArray%.prototype.toString` is Array's) go too.
-    let gone_ctors: Vec<&str> = p
+    let gone_ctors: Vec<String> = p
         .builtins
         .iter()
         .filter(|b| gone(b))
         .flat_map(|b| &b.installs)
-        .filter(|i| i.on_global() && matches!(i.kind, InstallKind::Constructor { .. }))
-        .map(|i| i.key.as_str())
+        .filter(|i| i.is_constructor())
+        .map(|i| i.path())
         .collect();
     let on_gone = |i: &Install| {
-        let root = i.target.split('.').next().unwrap_or("");
-        gone_ctors.contains(&root)
+        gone_ctors.iter().any(|c| {
+            i.target.strip_prefix(c.as_str()).is_some_and(|r| r.is_empty() || r.starts_with('.'))
+        })
     };
     let mut out = String::from(HEADER);
     if !slim && !omit.is_empty() {
@@ -125,19 +126,20 @@ pub fn emit(p: &Program, sources: &Sources, omit: &[&str], slim: bool) -> String
     // first, so that the paths of the others resolve; then the rest, in source order.
     // A constructor's statics (installs onto the constructor itself) come right after
     // it, then its `prototype` (D2052).
-    let ctor_keys: Vec<&str> = kept
+    let ctor_keys: Vec<String> = kept
         .iter()
         .flat_map(|b| &b.installs)
-        .filter(|i| i.on_global() && matches!(i.kind, InstallKind::Constructor { .. }))
-        .map(|i| i.key.as_str())
+        .filter(|i| i.is_constructor())
+        .map(|i| i.path())
         .collect();
     for &b in &kept {
-        for i in b.installs.iter().filter(|i| i.on_global()) {
+        for i in b.installs.iter().filter(|i| i.on_global() || i.is_constructor()) {
             out.push_str(&install(b, i));
             if let InstallKind::Constructor { parent } = &i.kind {
+                let path = i.path();
                 let mut statics = Vec::new();
                 for &sb in &kept {
-                    for si in sb.installs.iter().filter(|si| si.target == i.key) {
+                    for si in sb.installs.iter().filter(|si| si.target == path) {
                         statics.push((si.target.clone(), si.key.clone(), install(sb, si)));
                     }
                 }
@@ -160,7 +162,9 @@ pub fn emit(p: &Program, sources: &Sources, omit: &[&str], slim: bool) -> String
         for i in b
             .installs
             .iter()
-            .filter(|i| !i.on_global() && !ctor_keys.contains(&i.target.as_str()) && !on_gone(i))
+            .filter(|i| {
+                !i.on_global() && !i.is_constructor() && !ctor_keys.contains(&i.target) && !on_gone(i)
+            })
         {
             rest.push((i.target.clone(), i.key.clone(), install(b, i)));
         }
@@ -169,12 +173,9 @@ pub fn emit(p: &Program, sources: &Sources, omit: &[&str], slim: bool) -> String
     // otherwise (D2150).
     for &b in &kept {
         for i in &b.installs {
-            if i.on_global()
-                && let InstallKind::Constructor { .. } = i.kind
-                && i.key != "Proxy"
-            {
+            if i.is_constructor() && i.key != "Proxy" {
                 rest.push((
-                    format!("{}.prototype", i.key),
+                    format!("{}.prototype", i.path()),
                     "constructor".to_string(),
                     format!("%InstallPrototypeConstructor({});\n", js_str(&i.key)),
                 ));

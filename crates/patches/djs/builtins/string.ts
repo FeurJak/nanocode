@@ -232,13 +232,20 @@ function StringPrototypeEndsWith(this: Value, searchString: Value, endPosition?:
 }
 
 /**
- * String.prototype.localeCompare ( that ), 22.1.3.12: code point order (no Intl).
+ * String.prototype.localeCompare ( that [ , locales [ , options ] ] ), ECMA-402 19.1.1:
+ * the default collation, or Intl.Collator's for locales or options (code point order
+ * without Intl).
  * @builtin String.prototype.localeCompare
  * @fast
+ * @length 1
  */
-function StringPrototypeLocaleCompare(this: Value, that: Value): f64 {
+function StringPrototypeLocaleCompare(this: Value, that: Value, locales?: Value, options?: Value): f64 {
   const s: Str = ThisToString(this);
-  return StrLocaleCompare(s, ToString(that));
+  const t: Str = ToString(that);
+  if ((locales !== undefined || options !== undefined) && IntlEnabled()) {
+    return IntlLocaleCompare(s, t, locales, options);
+  }
+  return StrLocaleCompare(s, t);
 }
 
 // ---- Substrings -------------------------------------------------------------------------
