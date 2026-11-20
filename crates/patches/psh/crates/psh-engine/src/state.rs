@@ -276,7 +276,7 @@ pub(crate) struct Code {
     pub ast: Arc<Ast>,
     pub lines: Rc<LineIndex>,
     /// Added to line numbers: a backquote body parsed on its own counts from the
-    /// line of its command.
+    /// line of its command. Added wrapping, so it can count back (`command_subst`).
     pub line_base: u32,
     /// The arithmetic words of this chunk that are literal text, parsed
     /// (`arith::literal`), by the word's span.
@@ -295,7 +295,8 @@ impl Code {
         } else {
             offset
         };
-        self.lines.line(offset) + self.line_base
+        // Wrapping: a `$(…)` body that starts below its command counts back.
+        self.lines.line(offset).wrapping_add(self.line_base)
     }
 }
 

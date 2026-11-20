@@ -3669,7 +3669,25 @@ pub(crate) async fn command_subst(
     code: &Rc<Code>,
     list: ListId,
 ) -> Result<(Vec<u8>, i32), Unwind> {
-    subst(vp, code.clone(), list).await
+    // Bash runs the body as text printed again from its parse, starting at the line
+    // of the command it is in: its first command counts as that line, wherever the
+    // body starts (`x=$(<newline>cmd<newline>)` runs cmd at line 3).
+    let start = code.ast.list(list).items.first().map(|i| i.span.start);
+    let delta = match start {
+        Some(start) if vp.line > 0 => vp.line.wrapping_sub(code.line(start)),
+        _ => 0,
+    };
+    if delta == 0 {
+        return subst(vp, code.clone(), list).await;
+    }
+    let shifted = Rc::new(Code {
+        ast: code.ast.clone(),
+        lines: code.lines.clone(),
+        line_base: code.line_base.wrapping_add(delta),
+        arith: Default::default(),
+        flat: Default::default(),
+    });
+    subst(vp, shifted, list).await
 }
 
 /// The trailing newlines a command substitution drops. On a host whose programs end

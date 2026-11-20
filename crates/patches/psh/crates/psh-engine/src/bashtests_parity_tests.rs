@@ -142,3 +142,11 @@ fn integer_assignment_arith_error_ends_the_shell() {
     assert_eq!(run("declare -i i\ni=0#4\necho no\n").0, 1);
     assert_eq!(out("declare -i i\ni=0#4\necho no\n"), "");
 }
+
+#[test]
+fn command_substitution_body_lines_count_from_its_command() {
+    assert_eq!(
+        out("x=$(echo $LINENO\n)\necho $x\nx=$(\n\necho $LINENO\n)\necho $x\necho a \\\n$(echo $LINENO)\n:\necho $(echo 'a\nb' $LINENO)\n"),
+        "2\n7\na 9\na b 14\n"
+    );
+}
