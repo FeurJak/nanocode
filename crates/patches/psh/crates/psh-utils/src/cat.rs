@@ -120,12 +120,13 @@ pub async fn run(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
                     break;
                 }
             };
-            let out = if st.plain() {
-                buf[..n].to_vec()
+            let written = if st.plain() {
+                ctx.write(&buf[..n]).await
             } else {
-                format(&st, &mut state, &buf[..n])
+                let out = format(&st, &mut state, &buf[..n]);
+                ctx.write(&out).await
             };
-            if let Err(e) = ctx.write(&out).await {
+            if let Err(e) = written {
                 return common::write_failed(ctx, &e).await;
             }
             ctx.check().await;
