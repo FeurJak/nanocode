@@ -61,6 +61,10 @@ pub(super) static NUM_LOCALES: &[NumLocale] = &[
     NumLocale { tag: "ca", dec: ",", grp: ".", min2: false, indian: false, minus: "-", cur: "#\u{a0}\u{a4}", neg_cur: "-#\u{a0}\u{a4}", acct: "(#\u{a0}\u{a4})", pct: "#\u{a0}%", neg_pct: "-#\u{a0}%", nan: "NaN" },
     NumLocale { tag: "th", dec: ".", grp: ",", min2: false, indian: false, minus: "-", cur: "\u{a4}#", neg_cur: "-\u{a4}#", acct: "(\u{a4}#)", pct: "#%", neg_pct: "-#%", nan: "NaN" },
     NumLocale { tag: "fi", dec: ",", grp: "\u{a0}", min2: false, indian: false, minus: "\u{2212}", cur: "#\u{a0}\u{a4}", neg_cur: "-#\u{a0}\u{a4}", acct: "-#\u{a0}\u{a4}", pct: "#\u{a0}%", neg_pct: "-#\u{a0}%", nan: "ep\u{e4}luku" },
+    NumLocale { tag: "fa", dec: ".", grp: ",", min2: false, indian: false, minus: "\u{200e}\u{2212}", cur: "\u{200e}\u{a4}\u{a0}#", neg_cur: "-\u{200e}\u{a4}\u{a0}#", acct: "\u{200e}(\u{a4}\u{a0}#)", pct: "#%", neg_pct: "-#%", nan: "\u{646}\u{627}\u{639}\u{62f}\u{62f}" },
+    NumLocale { tag: "fa-arabext", dec: "\u{66b}", grp: "\u{66c}", min2: false, indian: false, minus: "\u{200e}\u{2212}", cur: "\u{200e}\u{a4}#", neg_cur: "-\u{200e}\u{a4}#", acct: "\u{200e}(\u{a4}\u{a0}#)", pct: "#%", neg_pct: "-#%", nan: "\u{646}\u{627}\u{639}\u{62f}\u{62f}" },
+    NumLocale { tag: "fa-AF", dec: ".", grp: ",", min2: false, indian: false, minus: "\u{200e}\u{2212}", cur: "\u{a4}\u{a0}#", neg_cur: "-\u{a4}\u{a0}#", acct: "\u{200e}(\u{a4}\u{a0}#)", pct: "#%", neg_pct: "-#%", nan: "\u{646}\u{627}\u{639}\u{62f}\u{62f}" },
+    NumLocale { tag: "fa-AF-arabext", dec: "\u{66b}", grp: "\u{66c}", min2: false, indian: false, minus: "\u{200e}\u{2212}", cur: "\u{a4}\u{a0}#", neg_cur: "-\u{a4}\u{a0}#", acct: "\u{200e}(\u{a4}\u{a0}#)", pct: "#%", neg_pct: "-#%", nan: "\u{646}\u{627}\u{639}\u{62f}\u{62f}" },
 ];
 pub(super) static CURRENCIES: &[Currency] = &[
     Currency { code: "USD", symbol: "$", narrow: "$", digits: 2 },

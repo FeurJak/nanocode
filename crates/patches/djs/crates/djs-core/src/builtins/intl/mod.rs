@@ -285,9 +285,9 @@ const SEGMENTER: i32 = 18;
 pub(crate) const LANGS: [&str; 11] = ["en", "de", "fr", "es", "it", "pt", "nl", "ja", "zh", "ko", "ru"];
 
 /// The languages NumberFormat, PluralRules, ListFormat and RelativeTimeFormat have data for.
-pub(crate) const NUM_LANGS: [&str; 37] = [
+pub(crate) const NUM_LANGS: [&str; 38] = [
     "en", "de", "fr", "es", "it", "pt", "nl", "ja", "zh", "ko", "ru", "pl", "tr", "ar", "hi", "id", "vi", "hu", "nb", "no", "he", "ta", "sr", "cs", "uk", "sv",
-    "da", "ms", "ro", "bn", "el", "sw", "ur", "fil", "ca", "th", "fi",
+    "da", "ms", "ro", "bn", "el", "sw", "ur", "fil", "ca", "fa", "th", "fi",
 ];
 
 fn canonical_list(tags: &str) -> Result<Vec<String>, Fault> {

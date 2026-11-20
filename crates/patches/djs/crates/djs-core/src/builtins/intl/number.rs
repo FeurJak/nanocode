@@ -120,7 +120,7 @@ static FA_ARABEXT_SPACED: NumLocale = NumLocale {
 static BN_PERCENT: NumLocale = NumLocale { tag: "bn", dec: ".", grp: ",", min2: false, indian: false, minus: "-", cur: "#\u{a4}", neg_cur: "-#\u{a4}", acct: "(#\u{a4})", pct: "#%", neg_pct: "-#%", nan: "NaN" };
 
 fn pct_sign(loc: &NumLocale) -> &'static str {
-    if is_arab(loc) || loc.tag == "fa-arabext" { "\u{66a}" } else { "%" }
+    if is_arab(loc) || loc.tag == "fa-arabext" || loc.tag == "fa-AF-arabext" { "\u{66a}" } else { "%" }
 }
 
 fn is_arab(loc: &NumLocale) -> bool {
@@ -146,6 +146,10 @@ pub(super) fn num_locale_nu(locale: &str, nu: &str) -> &'static NumLocale {
     let ar = locale.split('-').next() == Some("ar");
     match nu {
         "arab" if ar => num_locale("ar-EG"),
+        // fa writes arabext with its own symbols
+        "arabext" if locale.split('-').next() == Some("fa") => {
+            num_locale(if locale.split('-').any(|s| s == "AF") { "fa-AF-arabext" } else { "fa-arabext" })
+        }
         "arabext" if !ar => &ROOT_ARABEXT,
         "arab" if !ar => {
             let own = num_locale(locale);
@@ -1219,7 +1223,7 @@ fn format_full(
     }
     // fa's compact symbol is spaced only for a compacted or negative number, or by ICU's currency
     // spacing (a symbol ending in a letter before a digit: $MX ۰)
-    let fa_ext = spec.get("locale").is_some_and(|l| l.split('-').next() == Some("fa")) && nu == "arabext";
+    let fa_ext = spec.get("locale").is_some_and(|l| l.split('-').next() == Some("fa") && !l.split('-').any(|s| s == "AF")) && nu == "arabext";
     let bare = spec.get("notation") == Some("compact")
         && spec.get("currencySign") != Some("accounting")
         && !items.iter().any(|p| p.0 == "compact");
@@ -1368,7 +1372,7 @@ fn format_full_latn(
                     zero = r.dec.is_zero();
                     plural = plural_exp(lang, &r, e, e);
                     digits_parts(&r, loc, grouping, &mut body);
-                    body.push("exponentSeparator", if loc.tag == "ar-arab" { "\u{623}\u{633}" } else if loc.tag == "arab" { "\u{627}\u{633}" } else if loc.tag == "arabext" || loc.tag == "fa-arabext" { "\u{d7}\u{6f1}\u{6f0}^" } else { exp_sep(lang) });
+                    body.push("exponentSeparator", if loc.tag == "ar-arab" { "\u{623}\u{633}" } else if loc.tag == "arab" { "\u{627}\u{633}" } else if loc.tag == "arabext" || loc.tag == "fa-arabext" || loc.tag == "fa-AF-arabext" { "\u{d7}\u{6f1}\u{6f0}^" } else { exp_sep(lang) });
                     if e < 0 {
                         let (mark, minus) = sign_mark(loc);
                         if !mark.is_empty() {

@@ -86,6 +86,8 @@ pub(super) fn numbering_system(locale: &str) -> &'static str {
         "arab"
     } else if lang == Some("bn") {
         "beng"
+    } else if lang == Some("fa") {
+        "arabext"
     } else {
         "latn"
     }
