@@ -438,6 +438,10 @@ impl HandCalls for Router {
         false
     }
 
+    fn auto(&self, tool: &str) -> bool {
+        self.workspace.runs(tool) && !sim::mutated(Mutation::AutoOff)
+    }
+
     fn call<'a>(
         &'a self,
         hand: &'a str,

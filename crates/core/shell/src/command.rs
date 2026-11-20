@@ -19,6 +19,9 @@ use std::{
 
 pub trait Commands {
     fn has(&self, name: &[u8]) -> bool;
+    fn names(&self) -> Vec<Vec<u8>> {
+        Vec::new()
+    }
     fn run(&self, call: Call) -> Pin<Box<dyn Future<Output = i32>>>;
 }
 

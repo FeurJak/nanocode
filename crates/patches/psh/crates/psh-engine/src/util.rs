@@ -23,6 +23,10 @@ pub use crate::host::Access;
 
 mod blocking;
 mod nested;
+
+pub fn shells() -> &'static [&'static str] {
+    nested::ENTRY.names
+}
 pub use blocking::{
     BlockingOptions, IN_FLIGHT, INLINE_INPUT_LIMIT, INLINE_OUTPUT_LIMIT, Stderr, Stdin, Stdout,
     SyncCtx, SyncFile, SyncFiles, SyncFn, SyncWriter,

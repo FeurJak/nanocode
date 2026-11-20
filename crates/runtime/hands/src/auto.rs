@@ -8,7 +8,7 @@ use crate::{
     sim::{self, Mutation},
 };
 
-pub const AUTO: &str = "auto";
+pub const AUTO: &str = nanocode_code_mode::embedded::AUTO;
 
 const DEFINED_FUNCTION: &str = "calls a function defined in the script";
 const DYNAMIC_NAME: &str = "the command name is dynamic";

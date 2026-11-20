@@ -62,6 +62,12 @@ impl Commands for Command {
         NAMES.contains(&name) || self.rest.has(name)
     }
 
+    fn names(&self) -> Vec<Vec<u8>> {
+        let mut names: Vec<Vec<u8>> = NAMES.iter().map(|name| name.to_vec()).collect();
+        names.extend(self.rest.names());
+        names
+    }
+
     fn run(&self, call: Call) -> Pin<Box<dyn Future<Output = i32>>> {
         if !call
             .argv

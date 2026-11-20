@@ -165,6 +165,9 @@ default_table='
 1 canary_workspace_stack_sha_unchecked canary:200 --scenario workspace_stack --mutation sha_unchecked
 1 canary_workspace_stack_puts_in_place canary:200 --scenario workspace_stack --mutation puts_in_place
 1 canary_workspace_stack_answers_now canary:200 --scenario workspace_stack --mutation answers_now
+1 canary_workspace_stack_has_nothing canary:200 --scenario workspace_stack --mutation has_nothing
+1 canary_workspace_stack_has_everything canary:200 --scenario workspace_stack --mutation has_everything
+1 canary_workspace_stack_auto_off canary:200 --scenario workspace_stack --mutation auto_off
 1 canary_executor_skip_abort canary --scenario executor --mutation skip_abort
 1 canary_executor_leak_cancelled canary --scenario executor --mutation leak_cancelled
 1 canary_executor_uncounted_polls canary:100 --scenario executor --mutation uncounted_polls

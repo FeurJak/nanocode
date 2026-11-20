@@ -19,4 +19,4 @@ pub use fs::{
 pub use machine::{Identity, Machine};
 pub use mem::MemFs;
 pub use psh_engine::host::HostInfo;
-pub use shell::{Changes, Config, Ended, Limit, Limits, Ran, Run, Script, Shell, Step};
+pub use shell::{Changes, Config, Ended, Limit, Limits, Ran, Run, Script, Shell, Step, has};

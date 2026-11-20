@@ -15,7 +15,7 @@ use nanocode_shell::{
 use nanocode_sync::{Stream, StreamExt, oneshot, stream::FuturesUnordered, unbounded};
 
 use crate::{
-    Command, Config, Finished,
+    Command, Config, Finished, Found,
     sim::{self, Mutation},
 };
 
@@ -72,21 +72,28 @@ impl FileUpload for Buffered {
 }
 
 #[cfg(not(target_family = "wasm"))]
-pub fn start(config: Config, jobs: unbounded::Receiver<Job>) -> io::Result<()> {
+pub fn start(config: Config, jobs: unbounded::Receiver<Job>) -> io::Result<Found> {
     let handle = nanocode_platform::Handle::try_current().ok();
+    let (told, found) = oneshot::channel();
     std::thread::Builder::new()
         .name("workspace".to_owned())
         .spawn(move || {
             let _entered = handle.as_ref().map(nanocode_platform::Handle::enter);
-            nanocode_sync::block_on(serve(config, jobs));
-        })
-        .map(drop)
+            let kept = Kept::new(config);
+            if told.send(kept.offers()).is_ok() {
+                nanocode_sync::block_on(serve(Rc::new(kept), jobs));
+            }
+        })?;
+    nanocode_sync::block_on(found)
+        .map_err(|_| io::Error::other("the workspace's worker stopped before it started"))
 }
 
 #[cfg(target_family = "wasm")]
-pub fn start(config: Config, jobs: unbounded::Receiver<Job>) -> io::Result<()> {
-    nanocode_platform::spawn_local(serve(config, jobs));
-    Ok(())
+pub fn start(config: Config, jobs: unbounded::Receiver<Job>) -> io::Result<Found> {
+    let kept = Kept::new(config);
+    let found = kept.offers();
+    nanocode_platform::spawn_local(serve(Rc::new(kept), jobs));
+    Ok(found)
 }
 
 struct Kept {
@@ -101,18 +108,30 @@ struct Kept {
     slice: u32,
 }
 
-async fn serve(config: Config, mut jobs: unbounded::Receiver<Job>) {
-    let kept = Rc::new(Kept {
-        files: (config.files)(),
-        machine: (config.machine)(),
-        commands: (config.commands)(),
-        fetch: config.fetch.as_ref().map(|fetch| fetch()),
-        credentials: config.credentials.as_ref().map(|credentials| credentials()),
-        identity: config.identity,
-        limits: config.limits,
-        env: config.env,
-        slice: config.slice,
-    });
+impl Kept {
+    fn new(config: Config) -> Self {
+        Self {
+            files: (config.files)(),
+            machine: (config.machine)(),
+            commands: (config.commands)(),
+            fetch: config.fetch.as_ref().map(|fetch| fetch()),
+            credentials: config.credentials.as_ref().map(|credentials| credentials()),
+            identity: config.identity,
+            limits: config.limits,
+            env: config.env,
+            slice: config.slice,
+        }
+    }
+
+    fn offers(&self) -> Found {
+        Found {
+            network: self.fetch.is_some(),
+            commands: self.commands.names(),
+        }
+    }
+}
+
+async fn serve(kept: Rc<Kept>, mut jobs: unbounded::Receiver<Job>) {
     let mut running: FuturesUnordered<Pin<Box<dyn Future<Output = ()>>>> = FuturesUnordered::new();
     let mut open = true;
     poll_fn(|context| {

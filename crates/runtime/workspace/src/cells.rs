@@ -9,7 +9,10 @@ use nanocode_code_mode::{
 use nanocode_hands::{ChunkError, Chunks, Fetch, GetError, PutError, Sha256Digest, Stored};
 use serde_json::Value;
 
-use crate::Workspace;
+use crate::{
+    Workspace,
+    sim::{self, Mutation},
+};
 
 #[derive(Clone)]
 pub struct WorkspaceHost {
@@ -196,6 +199,11 @@ impl HandCalls for WorkspaceHost {
 impl nanocode_hands::Workspace for WorkspaceHost {
     fn runs(&self, tool: &str) -> bool {
         Self::runs(self, tool)
+    }
+
+    fn has(&self, command: &str) -> bool {
+        (self.files.has(command) || sim::mutated(Mutation::HasEverything))
+            && !sim::mutated(Mutation::HasNothing)
     }
 
     fn run<'a>(

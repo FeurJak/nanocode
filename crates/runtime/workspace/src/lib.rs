@@ -49,16 +49,30 @@ pub struct Finished {
 pub struct Workspace {
     jobs: unbounded::Sender<Job>,
     env: Arc<[(Vec<u8>, Vec<u8>)]>,
+    found: Arc<Found>,
+}
+
+pub(crate) struct Found {
+    pub(crate) network: bool,
+    pub(crate) commands: Vec<Vec<u8>>,
 }
 
 impl Workspace {
     pub fn start(config: Config) -> io::Result<Self> {
         let (jobs, received) = unbounded::channel();
-        worker::start(config, received)?;
+        let found = worker::start(config, received)?;
         Ok(Self {
             jobs,
             env: Arc::from(Vec::new()),
+            found: Arc::new(found),
         })
+    }
+
+    #[must_use]
+    pub fn has(&self, command: &str) -> bool {
+        let name = command.as_bytes();
+        nanocode_shell::has(name, self.found.network)
+            || self.found.commands.iter().any(|known| known == name)
     }
 
     #[must_use]
@@ -68,6 +82,7 @@ impl Workspace {
         Self {
             jobs: self.jobs.clone(),
             env: Arc::from(merged),
+            found: Arc::clone(&self.found),
         }
     }
 

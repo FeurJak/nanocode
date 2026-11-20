@@ -1580,6 +1580,10 @@ impl HandCalls for Redispatch {
         self.0.here(hand)
     }
 
+    fn auto(&self, tool: &str) -> bool {
+        self.0.auto(tool)
+    }
+
     fn call<'a>(
         &'a self,
         hand: &'a str,

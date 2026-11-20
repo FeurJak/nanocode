@@ -48,6 +48,21 @@ fn utilities_without_git() -> &'static [UtilEntry] {
     ALL.get_or_init(|| with_host(psh_utils::WITHOUT_GIT))
 }
 
+#[must_use]
+pub fn has(name: &[u8], network: bool) -> bool {
+    let named = |known: &&str| known.as_bytes() == name;
+    let offline = !network
+        && crate::net::UTILITIES
+            .iter()
+            .any(|entry| entry.names.iter().any(named));
+    !offline
+        && (psh_engine::is_builtin(name)
+            || psh_engine::util::shells().iter().any(named)
+            || utilities()
+                .iter()
+                .any(|entry| entry.names.iter().any(named)))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     pub fuel: u64,

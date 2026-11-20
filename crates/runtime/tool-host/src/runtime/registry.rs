@@ -331,7 +331,7 @@ impl ToolRegistry {
             return refused;
         }
         let (input, hand) = match &self.hand_calls {
-            Some(calls) => match take_hand(self.declares_hand(name), input) {
+            Some(calls) => match take_hand(self.declares_hand(name), calls.auto(name), input) {
                 Ok((input, hand)) => (
                     input,
                     hand.filter(|hand| !calls.here(hand)).zip(Some(calls)),
@@ -441,7 +441,7 @@ impl ToolRegistry {
         context: ToolContext<'a>,
     ) -> Option<crate::embedded::HostFuture<'a, Option<ToolOutput>>> {
         let input = match &self.hand_calls {
-            Some(calls) => match take_hand(self.declares_hand(name), input) {
+            Some(calls) => match take_hand(self.declares_hand(name), calls.auto(name), input) {
                 Ok((_, Some(hand))) if !calls.here(&hand) => {
                     return Some(Box::pin(async move { calls.recover(&hand, context).await }));
                 }

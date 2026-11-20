@@ -15,12 +15,15 @@ use std::{
     time::Duration,
 };
 
-use nanocode_code_mode::{ToolContext, ToolOutput, ToolOutputBody};
+use nanocode_code_mode::{
+    ToolContext, ToolOutput, ToolOutputBody,
+    embedded::{HandCalls, take_hand},
+};
 use nanocode_durability_core::StoreFuture;
 use nanocode_hands::{
-    ChunkError, Chunks, Clock as RouterClock, CopyError, Fetch, GetError, HandError, HandHost,
-    HandPhase, HandRef, HandStatus, HostFuture, Placement, Placements, Policy, PutError, Router,
-    Sha256Digest, StepOutcome, Stored, Target, Workspace as HandWorkspace, receive,
+    AUTO, Auto, ChunkError, Chunks, Clock as RouterClock, CopyError, Fetch, GetError, HandError,
+    HandHost, HandPhase, HandRef, HandStatus, HostFuture, Placement, Placements, Policy, PutError,
+    Router, Sha256Digest, Shell, StepOutcome, Stored, Target, Workspace as HandWorkspace, receive,
     sim::{self as hands_sim, Mutation as HandRule},
 };
 use nanocode_shell::{Commands, FileSystem, HostInfo, Identity, Limits, Machine, NoCommands};
@@ -39,6 +42,14 @@ use crate::rng::{FNV_OFFSET, Rng, fnv};
 
 const ROOT: &str = "/w";
 const NAME: &str = "workspace";
+const BASH: &str = "Bash";
+const SCRIPT: &str = "command";
+const SHELLS: &[Shell] = &[Shell {
+    tool: BASH,
+    script: SCRIPT,
+}];
+const HAND_ONLY: &str = "cargo build";
+const HAND_SAYS: &str = "this Hand runs no";
 const SESSION: &str = "session";
 const STORE_KEY: &str = "stack";
 const FILES: [&str; 4] = ["a.txt", "b.txt", "d/c.txt", "d/e/f.txt"];
@@ -83,16 +94,22 @@ pub enum WorkspaceStackMutation {
     ShaUnchecked,
     PutsInPlace,
     AnswersNow,
+    HasNothing,
+    HasEverything,
+    AutoOff,
 }
 
 impl WorkspaceStackMutation {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 9] = [
         Self::None,
         Self::TornCommit,
         Self::VisibleBeforeCommit,
         Self::ShaUnchecked,
         Self::PutsInPlace,
         Self::AnswersNow,
+        Self::HasNothing,
+        Self::HasEverything,
+        Self::AutoOff,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -109,6 +126,9 @@ impl WorkspaceStackMutation {
             Self::ShaUnchecked => "sha_unchecked",
             Self::PutsInPlace => "puts_in_place",
             Self::AnswersNow => "answers_now",
+            Self::HasNothing => "has_nothing",
+            Self::HasEverything => "has_everything",
+            Self::AutoOff => "auto_off",
         }
     }
 
@@ -133,6 +153,9 @@ impl WorkspaceStackMutation {
             Self::ShaUnchecked => (FsRule::None, HandRule::ShaUnchecked, WorkspaceRule::None),
             Self::PutsInPlace => (FsRule::None, HandRule::None, WorkspaceRule::PutsInPlace),
             Self::AnswersNow => (FsRule::AnswersNow, HandRule::None, WorkspaceRule::None),
+            Self::HasNothing => (FsRule::None, HandRule::None, WorkspaceRule::HasNothing),
+            Self::HasEverything => (FsRule::None, HandRule::None, WorkspaceRule::HasEverything),
+            Self::AutoOff => (FsRule::None, HandRule::AutoOff, WorkspaceRule::None),
         }
     }
 }
@@ -145,6 +168,8 @@ pub struct WorkspaceStackStats {
     pub reads: u64,
     pub scripts: u64,
     pub routed: u64,
+    pub auto: u64,
+    pub auto_hand: u64,
     pub copies: u64,
     pub copies_corrupt: u64,
     pub copies_cut: u64,
@@ -161,6 +186,8 @@ impl WorkspaceStackStats {
         self.reads += other.reads;
         self.scripts += other.scripts;
         self.routed += other.routed;
+        self.auto += other.auto;
+        self.auto_hand += other.auto_hand;
         self.copies += other.copies;
         self.copies_corrupt += other.copies_corrupt;
         self.copies_cut += other.copies_cut;
@@ -339,6 +366,10 @@ impl HandWorkspace for Wire {
         self.host.runs(tool)
     }
 
+    fn has(&self, command: &str) -> bool {
+        HandWorkspace::has(&self.host, command)
+    }
+
     fn run<'a>(
         &'a self,
         session: &'a str,
@@ -386,7 +417,7 @@ impl HandHost for Hand {
         Box::pin(async move {
             Ok(vec![HandStatus {
                 hand: HandRef::Hosted,
-                tools: Vec::new(),
+                tools: vec![BASH.into()],
                 phase: HandPhase::Running { since_ms: 0 },
             }])
         })
@@ -403,7 +434,7 @@ impl HandHost for Hand {
     ) -> HostFuture<'a, StepOutcome> {
         Box::pin(async move {
             StepOutcome::Refused {
-                reason: format!("this Hand runs no {tool}").into(),
+                reason: format!("{HAND_SAYS} {tool}").into(),
             }
         })
     }
@@ -549,12 +580,27 @@ fn open(
         Arc::new(Still),
         Arc::new(Unplaced),
         Policy { idle_ms: IDLE_MS },
-    );
+    )
+    .with_auto(Auto { shells: SHELLS });
     Ok(Stack {
         files,
         host,
         router,
     })
+}
+
+async fn auto(
+    router: &Router,
+    input: Value,
+    context: ToolContext<'_>,
+) -> Result<ToolOutput, String> {
+    match take_hand(false, router.auto(BASH), input) {
+        Ok((input, Some(hand))) if hand == AUTO => {
+            Ok(router.route(&hand, BASH, input, context).await)
+        }
+        Ok((_, hand)) => Err(format!("a {BASH} call without a hand went out as {hand:?}")),
+        Err(refused) => Err(text(&refused)),
+    }
 }
 
 fn text(output: &ToolOutput) -> String {
@@ -783,12 +829,36 @@ fn simulate(seed: u64, mutation: WorkspaceStackMutation) -> WorkspaceStackOutcom
                         };
                         lines.push(line);
                     }
-                    let input = json!({"command": lines.join("\n")});
-                    let output = match rng.pick(2) {
-                        0 => stack.host.call("Bash", input, context).await,
-                        _ => {
+                    let input = json!({SCRIPT: lines.join("\n")});
+                    let output = match rng.pick(3) {
+                        0 => stack.host.call(BASH, input, context).await,
+                        1 => {
                             stats.routed += 1;
-                            stack.router.route(NAME, "Bash", input, context).await
+                            stack.router.route(NAME, BASH, input, context).await
+                        }
+                        _ => {
+                            stats.auto += 1;
+                            let built = format!("{}; {HAND_ONLY}", lines.join("; "));
+                            let away = format!("{step}-hand");
+                            let elsewhere = ToolContext::new("", SESSION, &away, &[], usize::MAX);
+                            let sent = auto(&stack.router, json!({SCRIPT: built}), elsewhere)
+                                .await
+                                .map_err(|error| format!("op {op}: {error}"))?;
+                            if !text(&sent).contains(HAND_SAYS) {
+                                return Err(format!(
+                                    "op {op}: auto {HAND_ONLY} stayed off the Hand: {}",
+                                    text(&sent)
+                                ));
+                            }
+                            stats.auto_hand += 1;
+                            let script = format!(
+                                "ls {ROOT}; cat {}\n{}",
+                                absolute(".keep"),
+                                lines.join("\n")
+                            );
+                            auto(&stack.router, json!({SCRIPT: script}), context)
+                                .await
+                                .map_err(|error| format!("op {op}: {error}"))?
                         }
                     };
                     stats.scripts += 1;

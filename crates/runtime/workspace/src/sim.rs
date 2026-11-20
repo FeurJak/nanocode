@@ -9,6 +9,8 @@ pub enum Mutation {
     ExitIgnored,
     WriteSkipsParents,
     PutsInPlace,
+    HasNothing,
+    HasEverything,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);
