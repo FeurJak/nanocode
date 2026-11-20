@@ -81,6 +81,11 @@ const WAIT_PPM: u64 = 600_000;
 /// that call's commit, when the probe saw one: only a crash there makes the next process ask
 /// the hand for a reply it was told to keep.
 const RESUMED_PPM: u64 = 700_000;
+/// Share of the remaining aimed crashes in a fleet that land while an admitted call's request
+/// waits for its hand, when the probe saw one: only a crash there makes recovery ask a hand
+/// that never restarted about a call it was never sent, which must come back as not
+/// dispatched. A single hand keeps its old aim, which its own checks were tuned against.
+const UNSENT_PPM: u64 = 700_000;
 /// Share of aimed seeds that also move one of a hand's socket drops next to a call: dispatch to
 /// a connected hand takes almost no simulated time, so a call only waits for its hand (the
 /// window where recovery must answer that nothing was sent) while that hand redials.
@@ -326,6 +331,10 @@ impl Script {
             .map(|_| {
                 if !marks.resumed.is_empty() && rng.chance(RESUMED_PPM) {
                     let (from, to) = marks.resumed[rng.pick(marks.resumed.len())];
+                    return rng.range(from + 1, to).max(MS);
+                }
+                if !marks.unsent.is_empty() && rng.chance(UNSENT_PPM) {
+                    let (from, to) = marks.unsent[rng.pick(marks.unsent.len())];
                     return rng.range(from + 1, to).max(MS);
                 }
                 if !marks.waits.is_empty() && rng.chance(WAIT_PPM) {
@@ -1936,6 +1945,9 @@ fn simulate(seed: u64, mutation: HandsMutation, options: HandsOptions) -> HandsO
             marks = play(seed, mutation, options, probe).1;
             marks.settle();
         }
+        if options.fleet <= 1 {
+            marks.unsent.clear();
+        }
         script.aim(&mut rng, &marks);
     }
     play(seed, mutation, options, script).0
@@ -1951,6 +1963,9 @@ struct Marks {
     replies: Vec<(usize, u64, usize)>,
     commits: BTreeMap<usize, u64>,
     waits: Vec<(u64, u64)>,
+    /// The windows from a call's admission until its request reached a hand, or until its
+    /// commit when the request never reached one.
+    unsent: Vec<(u64, u64)>,
     /// Each resume that named a reply the hand retains and this brain process already read,
     /// with that reply's call.
     reread: Vec<(u64, usize)>,
@@ -1970,11 +1985,19 @@ impl Marks {
             && now > from + 1
         {
             self.waits.push((from, now));
+            self.unsent.push((from, now));
         }
     }
 
     /// Adds the window from each sent reply to its call's commit, once the run ended.
     fn settle(&mut self) {
+        for (index, from) in &self.admitted {
+            if let Some(commit) = self.commits.get(index)
+                && *commit > from + 1
+            {
+                self.unsent.push((*from, *commit));
+            }
+        }
         for (_, at, index) in &self.replies {
             if let Some(commit) = self.commits.get(index)
                 && *commit > at + 1
