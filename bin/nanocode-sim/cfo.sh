@@ -255,6 +255,12 @@ default_table='
 1 canary_partitions_replays_in_flight canary:64 --scenario partitions --mutation replays_in_flight
 1 canary_partitions_double_claim canary:64 --scenario partitions --mutation double_claim
 1 canary_partitions_lost_claim canary:64 --scenario partitions --mutation lost_claim
+4 scale pass --scenario scale
+1 scale_twice pass --scenario scale --twice
+1 canary_scale_global_lock canary:16 --scenario scale --mutation global_lock
+1 canary_scale_row_per_record canary:16 --scenario scale --mutation row_per_record
+1 canary_scale_one_node canary:16 --scenario scale --mutation one_node
+1 canary_scale_double_claim canary:16 --scenario scale --mutation double_claim
 '
 default_known='
 '

@@ -44,6 +44,7 @@ mod plog;
 mod repocache;
 mod requestclose;
 mod rng;
+mod scale;
 mod scripted;
 mod server;
 mod simulate;
@@ -93,6 +94,7 @@ use crate::{
     plog::{PlogMutation, PlogStats},
     repocache::{RepoCacheMutation, RepoCacheStats},
     requestclose::RequestCloseStats,
+    scale::{ScaleMutation, ScaleStats},
     simulate::{Options, run_seed},
     store::Mutation,
     streams::{StreamsMutation, StreamsStats},
@@ -148,6 +150,7 @@ enum Scenario {
     GitRemote,
     WorkspaceStack,
     Partitions,
+    Scale,
     HandAuto,
 }
 
@@ -191,6 +194,7 @@ struct Args {
     git_remote: GitRemoteMutation,
     workspace_stack: WorkspaceStackMutation,
     partitions: PartitionsMutation,
+    scale: ScaleMutation,
     hand_auto: HandAutoMutation,
     #[cfg(unix)]
     alloc: alloc::AllocMutation,
@@ -206,7 +210,7 @@ type Caught = BTreeMap<Invariant, (u64, u64, (u64, u64))>;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|inbox_stress|capture|executor|dns|board|board_shards|controlplane|cost|plog|hand_router|workspace_host|board_sync|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|live|partitions] [--ops N] [--twice] [--seed-lines] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
+        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|inbox_stress|capture|executor|dns|board|board_shards|controlplane|cost|plog|hand_router|workspace_host|board_sync|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|live|partitions|scale] [--ops N] [--twice] [--seed-lines] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
        websocket: [--mutation {}]
        http_server: [--mutation {}]
        alloc: [--mutation overstate_size|forget_free|scribble]
@@ -233,6 +237,7 @@ fn usage() -> ExitCode {
        git_remote: [--mutation {}]
        workspace_stack: [--mutation {}]
        partitions: [--mutation {}]
+       scale: [--mutation {}]
        hand_auto: [--mutation {}]",
         Mutation::names(),
         TurnMutation::names(),
@@ -262,6 +267,7 @@ fn usage() -> ExitCode {
         GitRemoteMutation::names(),
         WorkspaceStackMutation::names(),
         PartitionsMutation::names(),
+        ScaleMutation::names(),
         HandAutoMutation::names()
     );
     ExitCode::from(2)
@@ -335,6 +341,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
     let mut git_remote = GitRemoteMutation::None;
     let mut workspace_stack = WorkspaceStackMutation::None;
     let mut partitions = PartitionsMutation::None;
+    let mut scale = ScaleMutation::None;
     let mut hand_auto = HandAutoMutation::None;
     #[cfg(unix)]
     let mut capture = capture::CaptureMutation::None;
@@ -415,6 +422,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
                     "git_remote" => Scenario::GitRemote,
                     "workspace_stack" => Scenario::WorkspaceStack,
                     "partitions" => Scenario::Partitions,
+                    "scale" => Scenario::Scale,
                     "hand_auto" => Scenario::HandAuto,
                     #[cfg(unix)]
                     "capture" => Scenario::Capture,
@@ -470,6 +478,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         (Scenario::BoardShards, Some(name)) => board_shards = ShardsMutation::parse(name)?,
         (Scenario::HandRouter, Some(name)) => hand_router = HandRouterMutation::parse(name)?,
         (Scenario::Partitions, Some(name)) => partitions = PartitionsMutation::parse(name)?,
+        (Scenario::Scale, Some(name)) => scale = ScaleMutation::parse(name)?,
         (Scenario::WorkspaceHost, Some(name)) => {
             workspace_host = WorkspaceHostMutation::parse(name)?
         }
@@ -546,6 +555,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         git_remote,
         workspace_stack,
         partitions,
+        scale,
         hand_auto,
         #[cfg(unix)]
         alloc,
@@ -645,6 +655,9 @@ fn replay(seed: u64, args: &Args) -> String {
     }
     if args.scenario == Scenario::Partitions {
         return partitions::replay(seed, args.partitions);
+    }
+    if args.scenario == Scenario::Scale {
+        return scale::replay(seed, args.scale);
     }
     if args.scenario == Scenario::HandAuto {
         return handauto::replay(seed, args.hand_auto);
@@ -1017,6 +1030,7 @@ fn mutations() -> ExitCode {
     add("git_remote", GitRemoteMutation::names());
     add("workspace_stack", WorkspaceStackMutation::names());
     add("partitions", PartitionsMutation::names());
+    add("scale", ScaleMutation::names());
     add("hand_auto", HandAutoMutation::names());
     #[cfg(unix)]
     {
@@ -1120,6 +1134,7 @@ fn main() -> ExitCode {
         || (args.scenario == Scenario::BoardShards && args.board_shards != ShardsMutation::None)
         || (args.scenario == Scenario::HandRouter && args.hand_router != HandRouterMutation::None)
         || (args.scenario == Scenario::Partitions && args.partitions != PartitionsMutation::None)
+        || (args.scenario == Scenario::Scale && args.scale != ScaleMutation::None)
         || (args.scenario == Scenario::WorkspaceHost
             && args.workspace_host != WorkspaceHostMutation::None)
         || (args.scenario == Scenario::BoardSync && args.board_sync != BoardSyncMutation::None)
@@ -1168,6 +1183,7 @@ fn main() -> ExitCode {
     let mut git_remote_totals = GitRemoteStats::default();
     let mut workspace_stack_totals = WorkspaceStackStats::default();
     let mut partitions_totals = PartitionsStats::default();
+    let mut scale_totals = ScaleStats::default();
     let mut hand_auto_totals = HandAutoStats::default();
     #[cfg(unix)]
     let mut capture_totals = capture::CaptureStats::default();
@@ -1383,6 +1399,13 @@ fn main() -> ExitCode {
                 args.twice,
                 args.options.verbose,
                 &mut partitions_totals,
+            ),
+            Scenario::Scale => scale::judge(
+                seed,
+                args.scale,
+                args.twice,
+                args.options.verbose,
+                &mut scale_totals,
             ),
             Scenario::HandAuto => handauto::judge(
                 seed,
@@ -1686,6 +1709,16 @@ fn main() -> ExitCode {
             args.twice,
             args.workspace_stack,
             &workspace_stack_totals,
+        );
+    }
+    if args.scenario == Scenario::Scale {
+        return scale::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.scale,
+            &scale_totals,
         );
     }
     if args.scenario == Scenario::Partitions {
