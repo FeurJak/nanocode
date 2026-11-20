@@ -220,6 +220,19 @@ async fn owned<'a>(
     }
 }
 
+/// Takes a session's cache out of its slot for one write, leaving the slot
+/// unread until the caller puts the cache back after the write succeeds. A
+/// commit can reach the store and still fail its caller (the caller's future is
+/// dropped while the shared store runs it, or the store reports an error after
+/// applying it), so a cache kept after a failed or abandoned write holds a
+/// revision and cells the store has moved past: every later write of the session
+/// conflicts, including the forget that keeps a restart from resuming the cell
+/// from an older journal and repeating its effects. The next write re-reads the
+/// head instead.
+fn writing(slot: &mut Session) -> Session {
+    std::mem::replace(slot, Session::Unread)
+}
+
 async fn replace(
     store: &SharedStore,
     session_id: &str,
@@ -302,56 +315,64 @@ impl CellJournalSink for DurableCellJournals {
             Settle::Durable
         };
         Box::pin(async move {
-            let mut session = session.acquire().await;
-            let (owned, cells, catalogs, stored) =
-                owned(&store, &update.session_id, &mut session).await?;
-            let mut records = Vec::new();
-            let (mut keys, catalog) = match catalog {
-                Some(catalog) => {
-                    if let Some(replaced) = cells.remove(&update.cell_id) {
-                        records.extend(blanked(update.cell_id, replaced));
+            let mut slot = session.acquire().await;
+            let mut session = writing(&mut slot);
+            let saved = async {
+                let (owned, cells, catalogs, stored) =
+                    owned(&store, &update.session_id, &mut session).await?;
+                let mut records = Vec::new();
+                let (mut keys, catalog) = match catalog {
+                    Some(catalog) => {
+                        if let Some(replaced) = cells.remove(&update.cell_id) {
+                            records.extend(blanked(update.cell_id, replaced));
+                        }
+                        let mut catalog = catalog?;
+                        if catalogs.insert(catalog.key().to_owned()) {
+                            let mut pooled = Vec::new();
+                            catalog.stage(&mut pooled);
+                            store
+                                .pool(&state_id(&update.session_id), pooled)
+                                .await
+                                .map_err(|error| error.to_string())?;
+                        }
+                        (Vec::new(), Some(catalog.key().to_owned()))
                     }
-                    let mut catalog = catalog?;
-                    if catalogs.insert(catalog.key().to_owned()) {
-                        let mut pooled = Vec::new();
-                        catalog.stage(&mut pooled);
-                        store
-                            .pool(&state_id(&update.session_id), pooled)
-                            .await
-                            .map_err(|error| error.to_string())?;
-                    }
-                    (Vec::new(), Some(catalog.key().to_owned()))
-                }
-                None => match cells.remove(&update.cell_id) {
-                    Some(Cell::Chained(keys)) => (keys, None),
-                    Some(Cell::Numbered(_)) | None => {
-                        return Err(format!(
-                            "cell {} has no journal to continue",
-                            update.cell_id
-                        ));
-                    }
-                },
-            };
-            let (session_id, cell_id) = (update.session_id.clone(), update.cell_id);
-            let mut link = EncodedPayload::encode(&Link {
-                previous: keys.last().cloned(),
-                catalog,
-                update,
-            })
-            .map_err(|error| error.to_string())?;
-            keys.push(link.key().to_owned());
-            link.stage(&mut records);
-            cells.insert(cell_id, Cell::Chained(keys));
-            replace(
-                &store,
-                &session_id,
-                owned,
-                cells,
-                stored.as_deref(),
-                &records,
-                settle,
-            )
-            .await
+                    None => match cells.remove(&update.cell_id) {
+                        Some(Cell::Chained(keys)) => (keys, None),
+                        Some(Cell::Numbered(_)) | None => {
+                            return Err(format!(
+                                "cell {} has no journal to continue",
+                                update.cell_id
+                            ));
+                        }
+                    },
+                };
+                let (session_id, cell_id) = (update.session_id.clone(), update.cell_id);
+                let mut link = EncodedPayload::encode(&Link {
+                    previous: keys.last().cloned(),
+                    catalog,
+                    update,
+                })
+                .map_err(|error| error.to_string())?;
+                keys.push(link.key().to_owned());
+                link.stage(&mut records);
+                cells.insert(cell_id, Cell::Chained(keys));
+                replace(
+                    &store,
+                    &session_id,
+                    owned,
+                    cells,
+                    stored.as_deref(),
+                    &records,
+                    settle,
+                )
+                .await
+            }
+            .await;
+            if saved.is_ok() {
+                *slot = session;
+            }
+            saved
         })
     }
 
@@ -360,7 +381,8 @@ impl CellJournalSink for DurableCellJournals {
         let session = self.session(session_id);
         let session_id = session_id.to_owned();
         Box::pin(async move {
-            let mut session = session.acquire().await;
+            let mut slot = session.acquire().await;
+            let mut session = writing(&mut slot);
             let forgotten = async {
                 let (owned, cells, _, stored) = owned(&store, &session_id, &mut session).await?;
                 let Some(cell) = cells.remove(&cell_id) else {
@@ -378,8 +400,11 @@ impl CellJournalSink for DurableCellJournals {
                 )
                 .await
             };
-            if let Err(error) = forgotten.await {
-                nanocode_trace::warn!(cell_id, %error, "a Code Mode cell journal could not be forgotten");
+            match forgotten.await {
+                Ok(()) => *slot = session,
+                Err(error) => {
+                    nanocode_trace::warn!(cell_id, %error, "a Code Mode cell journal could not be forgotten");
+                }
             }
         })
     }
@@ -456,33 +481,41 @@ impl CellJournalSink for DurableCellJournals {
         let session = self.session(session_id);
         let session_id = session_id.to_owned();
         Box::pin(async move {
-            let mut session = session.acquire().await;
-            let (owned, cells, _, saved) = owned(&store, &session_id, &mut session).await?;
-            let mut payload = EncodedPayload::from_json(stored.into());
-            if saved.as_deref() == Some(payload.key()) {
-                return Ok(());
+            let mut slot = session.acquire().await;
+            let mut session = writing(&mut slot);
+            let written = async {
+                let (owned, cells, _, saved) = owned(&store, &session_id, &mut session).await?;
+                let mut payload = EncodedPayload::from_json(stored.into());
+                if saved.as_deref() == Some(payload.key()) {
+                    return Ok(());
+                }
+                let mut records = Vec::new();
+                if let Some(previous) = saved.clone() {
+                    records.push(StoreRecord {
+                        key: previous,
+                        value: Arc::default(),
+                    });
+                }
+                let key = payload.key().to_owned();
+                payload.stage(&mut records);
+                replace(
+                    &store,
+                    &session_id,
+                    owned,
+                    cells,
+                    Some(&key),
+                    &records,
+                    Settle::Ordered,
+                )
+                .await?;
+                *saved = Some(key);
+                Ok(())
             }
-            let mut records = Vec::new();
-            if let Some(previous) = saved.clone() {
-                records.push(StoreRecord {
-                    key: previous,
-                    value: Arc::default(),
-                });
+            .await;
+            if written.is_ok() {
+                *slot = session;
             }
-            let key = payload.key().to_owned();
-            payload.stage(&mut records);
-            replace(
-                &store,
-                &session_id,
-                owned,
-                cells,
-                Some(&key),
-                &records,
-                Settle::Ordered,
-            )
-            .await?;
-            *saved = Some(key);
-            Ok(())
+            written
         })
     }
 
