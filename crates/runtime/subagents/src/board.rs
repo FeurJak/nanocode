@@ -204,6 +204,15 @@ struct Inner {
     changes: watch::Sender<u64>,
     brief: Option<nanocode_board::brief::BriefPolicy>,
     hosts: Arc<hosting::Hosts>,
+    held: Option<Held>,
+}
+
+struct Held {
+    session: String,
+    task: TaskId,
+    key: String,
+    write: Write,
+    last: Option<String>,
 }
 
 struct Desk {
@@ -216,6 +225,7 @@ impl Desk {
         while let Ok(letter) = self.letters.try_recv() {
             letter(&mut self.inner).await;
         }
+        self.inner.settle().await;
     }
 }
 
@@ -301,6 +311,7 @@ impl BoardCoordination {
                     changes,
                     brief: None,
                     hosts,
+                    held: None,
                 },
                 letters: received,
             })),
@@ -348,6 +359,7 @@ impl BoardCoordination {
         let (reply, replied) = oneshot::channel();
         let spawned = self.send(Box::new(move |inner| {
             Box::pin(async move {
+                inner.settle().await;
                 let output = job(inner).await;
                 drop(reply.send(output));
             })
@@ -563,7 +575,73 @@ impl Inner {
         }
     }
 
+    async fn settle(&mut self) {
+        let Some(held) = self.held.take() else {
+            return;
+        };
+        if !self.workers.contains_key(&held.session) {
+            match open(&self.host, &self.scope, Some(&profile_of(&held.session))).await {
+                Ok(Some(board)) => {
+                    self.workers.insert(held.session.clone(), board);
+                }
+                Ok(None) => return,
+                Err(error) => {
+                    self.fail(format!("open worker {}: {error}", held.session));
+                    return;
+                }
+            }
+        }
+        let Some(board) = self.workers.get_mut(&held.session) else {
+            return;
+        };
+        let _ = board.refresh().await;
+        let before = board.fold().next();
+        let submitted = board
+            .submit_keyed(&held.key, held.write.at_ms, held.write.op.clone())
+            .await;
+        self.finished(held, submitted, before);
+    }
+
+    fn finished(&mut self, held: Held, submitted: Result<Applied, BoardError>, before: u64) {
+        let Held {
+            session,
+            task,
+            key,
+            last,
+            ..
+        } = held;
+        match submitted {
+            Ok(applied) => {
+                if applied.seq < before {
+                    self.stats.finish_replays += 1;
+                } else {
+                    self.stats.finishes += 1;
+                }
+                if let Some(state) = self.sessions.get_mut(&session) {
+                    state.last_output = Some(last);
+                    state.claim = None;
+                    state.heard = None;
+                }
+            }
+            Err(BoardError::Rejected(Rejection::NotHolder)) => {
+                self.stats.fenced += 1;
+                self.fail(format!(
+                    "finish {task}: fenced, {session} no longer holds the claim"
+                ));
+            }
+            Err(error) => self.fail(format!("finish {task} ({key}): {error}")),
+        }
+    }
+
+    async fn unhold(&mut self, held: Option<Held>) {
+        if held.is_some() {
+            self.held = held;
+            self.settle().await;
+        }
+    }
+
     async fn dispatcher_board(&mut self) -> Option<&mut Board> {
+        self.settle().await;
         if self.dispatcher.is_none() {
             match open(&self.host, &self.scope, None).await {
                 Ok(Some(mut board)) => {
@@ -697,6 +775,7 @@ impl Inner {
     }
 
     async fn worker(&mut self, session: &str) -> Option<&mut Board> {
+        self.settle().await;
         if !self.workers.contains_key(session) {
             match open(&self.host, &self.scope, Some(&profile_of(session))).await {
                 Ok(Some(board)) => {
@@ -781,6 +860,7 @@ impl Inner {
     /// retry of either path replays rather than doubles. Returns None, having written nothing,
     /// when the task is already on the board (a restore or replay): the caller then takes the
     /// two-step path, which reads the task's phase before claiming.
+    #[allow(clippy::too_many_arguments)]
     async fn post_claim(
         &mut self,
         root: &str,
@@ -789,20 +869,29 @@ impl Inner {
         parent: &TaskId,
         k: u64,
         spec: &str,
+        held: Option<Held>,
     ) -> Option<Option<ClaimId>> {
         let id = task_of(session, k);
         let task = session_task(root, session, agent, parent, k, spec);
         let worker = worker_of(session);
-        self.worker(session).await?;
+        if self.worker(session).await.is_none() {
+            self.unhold(held).await;
+            return None;
+        }
         let post_at = self.tick();
         let claim_at = self.tick();
-        let board = self.dispatcher_board().await?;
+        let Some(board) = self.dispatcher_board().await else {
+            self.unhold(held).await;
+            return None;
+        };
         let _ = board.refresh().await;
         if board.fold().task(&id).is_some() {
+            self.unhold(held).await;
             return None;
         }
         let before = board.fold().next();
-        let writes = vec![
+        let mut writes: Vec<Write> = held.iter().map(|held| held.write.clone()).collect();
+        writes.extend([
             Write {
                 by: None,
                 key: Some(format!("post:{id}")),
@@ -820,10 +909,11 @@ impl Inner {
                     cap: None,
                 },
             },
-        ];
+        ]);
         let (mut verdicts, _) = board.submit_group(writes).await;
         let claimed = verdicts.pop();
         let posted = verdicts.pop();
+        let finished = verdicts.pop();
         let claim = match &claimed {
             Some(Ok(_)) => board.fold().entries().iter().rev().find_map(|entry| {
                 match &entry.change {
@@ -841,6 +931,11 @@ impl Inner {
             Some(Ok(applied)) if applied.seq >= before => self.stats.posts += 1,
             Some(Ok(_)) | None => {}
             Some(Err(error)) => self.fail(format!("post {id}: {error}")),
+        }
+        if let Some(held) = held {
+            let verdict =
+                finished.unwrap_or_else(|| Err(BoardError::Dropped("unsettled".into())));
+            self.finished(held, verdict, before);
         }
         match claimed {
             Some(Ok(_)) => self.stats.claims += 1,
@@ -984,7 +1079,7 @@ impl Inner {
         if !restored {
             k = 1;
             grouped = self
-                .post_claim(root, session, id, &parent_task, k, spec)
+                .post_claim(root, session, id, &parent_task, k, spec, None)
                 .await;
             if grouped.is_none() {
                 self.post(root, session, id, &parent_task, k, spec).await;
@@ -1009,7 +1104,9 @@ impl Inner {
     }
 
     async fn session_of(&mut self, root: &str, id: AgentId) -> Option<String> {
-        let _ = self.dispatcher_board().await;
+        if self.dispatcher.is_none() {
+            let _ = self.dispatcher_board().await;
+        }
         self.agents.get(&(root.to_owned(), id)).cloned()
     }
 
@@ -1020,19 +1117,31 @@ impl Inner {
         let current = state.task(session);
         let parent = state.parent.clone();
         let k = state.k;
-        match self.phase(&current).await {
-            Some(Phase::Cancelled { .. }) => {
-                self.stats.late += 1;
-                return;
+        let held = self
+            .held
+            .take_if(|held| held.session == session && held.task == current);
+        let mut grouped = match held {
+            Some(held) => {
+                self.post_claim(root, session, id, &parent, k + 1, "reused", Some(held))
+                    .await
             }
-            Some(phase) if phase.terminal() => {}
-            _ => return,
-        }
-        let grouped = self
-            .post_claim(root, session, id, &parent, k + 1, "reused")
-            .await;
+            None => None,
+        };
         if grouped.is_none() {
-            self.post(root, session, id, &parent, k + 1, "reused").await;
+            match self.phase(&current).await {
+                Some(Phase::Cancelled { .. }) => {
+                    self.stats.late += 1;
+                    return;
+                }
+                Some(phase) if phase.terminal() => {}
+                _ => return,
+            }
+            grouped = self
+                .post_claim(root, session, id, &parent, k + 1, "reused", None)
+                .await;
+            if grouped.is_none() {
+                self.post(root, session, id, &parent, k + 1, "reused").await;
+            }
         }
         self.stats.reuses += 1;
         if let Some(state) = self.sessions.get_mut(session) {
@@ -1136,43 +1245,25 @@ impl Inner {
             Outcome::Failed(_) => None,
         };
         let at = self.tick();
-        let Some(board) = self.worker(session).await else {
+        if self.worker(session).await.is_none() {
             return;
-        };
-        let _ = board.refresh().await;
-        let before = board.fold().next();
-        let submitted = board
-            .submit_keyed(
-                &key,
-                at,
-                Op::Finish {
-                    task: task.clone(),
+        }
+        self.held = Some(Held {
+            session: session.to_owned(),
+            task: task.clone(),
+            write: Write {
+                by: Some(worker_of(session)),
+                key: Some(key.clone()),
+                at_ms: at,
+                op: Op::Finish {
+                    task,
                     claim,
                     outcome,
                 },
-            )
-            .await;
-        match submitted {
-            Ok(applied) => {
-                if applied.seq < before {
-                    self.stats.finish_replays += 1;
-                } else {
-                    self.stats.finishes += 1;
-                }
-                if let Some(state) = self.sessions.get_mut(session) {
-                    state.last_output = Some(last);
-                    state.claim = None;
-                    state.heard = None;
-                }
-            }
-            Err(BoardError::Rejected(Rejection::NotHolder)) => {
-                self.stats.fenced += 1;
-                self.fail(format!(
-                    "finish {task}: fenced, {session} no longer holds the claim"
-                ));
-            }
-            Err(error) => self.fail(format!("finish {task} ({key}): {error}")),
-        }
+            },
+            key,
+            last,
+        });
     }
 
     async fn reply(&mut self, session: &str, key: &str, body: String, steer: bool) {
