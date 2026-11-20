@@ -37,6 +37,8 @@ ours = [json.loads(l) for l in mine.stdout.splitlines()]
 BASE = sys.argv[6] if len(sys.argv) > 6 else None
 bases = [json.loads(l) for l in subprocess.run([BASE], input="".join(json.dumps(x) + "\n" for x in srcs), capture_output=True, text=True).stdout.splitlines()] if BASE else None
 reg, fix, rex = {}, {}, []
+# DIFF_REG_OUT=FILE writes every regression there, one JSON line [zone, field, instant, node's, ours]
+REG_OUT = open(os.environ["DIFF_REG_OUT"], "w") if os.environ.get("DIFF_REG_OUT") else None
 if BASE:
     for (z, ts), r, o, b in zip(cases, refs, ours, bases):
         for x, y, w in zip(r.split("\n"), o.split("\n"), b.split("\n")):
@@ -45,6 +47,7 @@ if BASE:
                 if ws[k] == xs[k] and ys[k] != xs[k]:
                     reg[k] = reg.get(k, 0) + 1
                     if sum(1 for e in rex if e[1] == k) < 4: rex.append((z, k, x.split(" ")[0], xs[k], ys[k], ws[k]))
+                    if REG_OUT: REG_OUT.write(json.dumps([z, k, x.split(" ")[0], xs[k], ys[k]], ensure_ascii=False) + "\n")
                 elif ws[k] != xs[k] and ys[k] == xs[k]:
                     fix[k] = fix.get(k, 0) + 1
 assert len(refs) == len(srcs) == len(ours), (len(refs), len(srcs), len(ours), ref.stderr[-500:], mine.stderr[-500:])

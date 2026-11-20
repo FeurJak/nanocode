@@ -6,14 +6,19 @@ import fs from "node:fs";
 // [short, long, shortGeneric, longGeneric].
 // DATE_LOCALES' first tags, in order (each locale's zone names table, DateLocale.zones)
 const LOC_RS = new URL("../../crates/djs-core/src/builtins/intl/date/locales.rs", import.meta.url);
-const LOCALES = [...fs.readFileSync(LOC_RS, "utf8").matchAll(/tags: &\["([^"]+)"/g)].map(m => m[1]);
+export const LOCALES = [...fs.readFileSync(LOC_RS, "utf8").matchAll(/tags: &\["([^"]+)"/g)].map(m => m[1]);
+// PROBE_LOCALES=de,fr probes only those locales and PROBE_ZONES=a,b only those zones (encode.py merges
+// its LOC.json files per zone and locale, later files winning)
+const ONLY = process.env.PROBE_LOCALES ? process.env.PROBE_LOCALES.split(",") : LOCALES;
+const ZONES = process.env.PROBE_ZONES ? new Set(process.env.PROBE_ZONES.split(",")) : null;
 const [pin, out, shard = "0", nsh = "1"] = process.argv.slice(2);
+if (import.meta.url !== "file://" + process.argv[1]) { /* imported for LOCALES */ } else {
 const probe = JSON.parse(fs.readFileSync(pin));
 const res = {};
-Object.keys(probe).filter((_, i) => i % +nsh === +shard).forEach(z => {
+Object.keys(probe).filter(z => !ZONES || ZONES.has(z)).filter((_, i) => i % +nsh === +shard).forEach(z => {
   res[z] = {};
   const P = probe[z];
-  for (const L of LOCALES) {
+  for (const L of ONLY) {
     const fn = ["short", "long", "shortGeneric", "longGeneric"].map(k => new Intl.DateTimeFormat(L, { timeZone: z, timeZoneName: k, year: "numeric" }));
     const at = t => fn.map(f => f.formatToParts(t * 1000).find(x => x.type === "timeZoneName").value);
     res[z][L] = P.map((p, j) => {
@@ -24,3 +29,4 @@ Object.keys(probe).filter((_, i) => i % +nsh === +shard).forEach(z => {
   }
 });
 fs.writeFileSync(out, JSON.stringify(res));
+}
