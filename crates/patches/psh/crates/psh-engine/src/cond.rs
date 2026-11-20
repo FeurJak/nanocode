@@ -78,6 +78,16 @@ async fn single(vp: &mut Vp, code: &Rc<Code>, w: &Word) -> Result<Vec<u8>, Unwin
 }
 
 async fn unary(vp: &mut Vp, op: UnaryTest, op_text: &[u8], v: &[u8]) -> R {
+    if op_text == b"-v"
+        && let Some(msg) = bracketed_subscript_error(vp, v).await
+    {
+        vp.error(&msg).await;
+        if vp.opts.dash_c {
+            vp.sub_fatal = false;
+            return Err(Unwind::Exit(1));
+        }
+        return Err(Unwind::Abort(1));
+    }
     let t = match op {
         UnaryTest::StringHasZeroLength => v.is_empty(),
         UnaryTest::StringHasNonZeroLength => !v.is_empty(),
@@ -102,6 +112,34 @@ async fn unary(vp: &mut Vp, op: UnaryTest, op_text: &[u8], v: &[u8]) -> R {
         },
     };
     Ok(i32::from(!t))
+}
+
+/// bash expands a `-v` operand's subscript with its brackets and `'` backslashed, so an
+/// indexed array's subscript holding a `[` never evaluates: `[[ -v m[a[1]] ]]` reports
+/// `a\[1\]` as an invalid operator. An associative array's key is taken as it is.
+async fn bracketed_subscript_error(vp: &mut Vp, v: &[u8]) -> Option<String> {
+    let open = v.iter().position(|&b| b == b'[')?;
+    if v.last() != Some(&b']') || open == 0 {
+        return None;
+    }
+    let sub = &v[open + 1..v.len() - 1];
+    if !sub.contains(&b'[') {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&v[..open]).into_owned();
+    if vp.var_ref(&name).is_some_and(|x| x.is_assoc()) {
+        return None;
+    }
+    let mut text = Vec::with_capacity(sub.len() + 4);
+    for &b in sub {
+        if matches!(b, b'[' | b']' | b'\'') {
+            text.push(b'\\');
+        }
+        text.push(b);
+    }
+    let r = crate::arith::expanding!(vp, |vp| crate::arith::eval(vp, &text));
+    crate::arith::notes(vp).await;
+    r.ok()?.err()
 }
 
 /// bash expands a `-v` operand's subscript with its quoted `]` and `'` backslashed, so
