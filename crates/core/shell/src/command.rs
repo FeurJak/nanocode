@@ -126,6 +126,21 @@ impl Session {
         Arc::new(move || control.as_ref().is_some_and(ControlHandle::cancelled))
     }
 
+    /// Runs `child` over the file system `over` builds on top of this
+    /// shell's own, for a caller that holds its own copy of some files, such
+    /// as Python copying them in from a file system that answers later.
+    pub fn run_over(
+        &self,
+        child: Child,
+        over: impl FnOnce(Rc<dyn FileSystem>) -> Rc<dyn FileSystem>,
+    ) -> io::Result<Exited> {
+        let files = over(self.0.fs());
+        let kept = self.0.fs.replace(files);
+        let exited = self.run(child);
+        self.0.fs.replace(kept);
+        exited
+    }
+
     pub fn run(&self, child: Child) -> io::Result<Exited> {
         let vfs = &self.0;
         let mut argv = child.argv;
@@ -258,7 +273,7 @@ impl FileSystem for Tracked {
     }
 
     fn answers_now(&self) -> bool {
-        self.0.fs.answers_now()
+        self.0.fs().answers_now()
     }
 }
 

@@ -236,6 +236,10 @@ def mkdir(path, mode=0o777, *, dir_fd=None):
 
 
 def rmdir(path, *, dir_fd=None):
+    name = fspath(path)
+    tail = name.rstrip(b'/' if isinstance(name, bytes) else '/').rsplit(b'/' if isinstance(name, bytes) else '/', 1)[-1]
+    if tail in ('.', b'.'):
+        raise _fail(_errno.EINVAL, path)
     _host.remove(_abs(path), True)
 
 
@@ -254,7 +258,7 @@ replace = rename
 
 
 def chmod(path, mode, *, dir_fd=None, follow_symlinks=True):
-    _host.stat(_abs(path))
+    _host.chmod(_abs(path), mode)
 
 
 def utime(path, times=None, *, ns=None, dir_fd=None, follow_symlinks=True):

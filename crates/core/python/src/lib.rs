@@ -99,6 +99,10 @@ pub trait Files {
         Ok(data[start..end].to_vec())
     }
 
+    fn set_mode(&self, _path: &[u8], _mode: u32) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
     fn ranged(&self) -> bool {
         false
     }

@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use nanocode_bytes::Bytes;
 use nanocode_shell::{Call, Commands, FileSystem, Reply, Session, join};
 
 use crate::{
@@ -140,13 +141,27 @@ impl Kept {
         let files = call.shell.files();
         let ran = match (files.answers_now(), files.stat(&call.cwd, true)) {
             (true, Reply::Now(_)) => {
-                self.interpret(python, run, Rc::new(Direct(files, call.shell.clone())))
+                let direct = Direct {
+                    files,
+                    shell: call.shell.clone(),
+                    copied: None,
+                };
+                self.interpret(python, run, Rc::new(direct))
             }
             (_, asked) => {
                 asked.get().await?;
-                let copied = Rc::new(copy(&files, &call.cwd, shell.file).await?);
-                let ran = self.interpret(python, run, copied.clone());
-                apply(&copied, &files).await?;
+                let tree = Rc::new(copy(&files, &call.cwd, shell.file).await?);
+                let mixed = Mixed {
+                    tree: tree.clone(),
+                    real: files.clone(),
+                };
+                let direct = Direct {
+                    files: Rc::new(mixed),
+                    shell: call.shell.clone(),
+                    copied: Some(tree.clone()),
+                };
+                let ran = self.interpret(python, run, Rc::new(direct));
+                apply(&tree, &files).await?;
                 ran
             }
         };
@@ -237,6 +252,34 @@ const fn stat(stat: nanocode_shell::Stat) -> Stat {
     }
 }
 
+const fn unstat(stat: Stat) -> nanocode_shell::Stat {
+    nanocode_shell::Stat {
+        kind: match stat.kind {
+            Kind::File => nanocode_shell::Kind::File,
+            Kind::Dir => nanocode_shell::Kind::Dir,
+            Kind::Symlink => nanocode_shell::Kind::Symlink,
+        },
+        size: stat.size,
+        mode: stat.mode,
+        mtime_ns: stat.mtime_ns,
+    }
+}
+
+const fn unhow(how: nanocode_shell::Write) -> Write {
+    match how {
+        nanocode_shell::Write::Replace => Write::Replace,
+        nanocode_shell::Write::Append => Write::Append,
+        nanocode_shell::Write::New => Write::New,
+    }
+}
+
+const fn unwhat(what: nanocode_shell::Remove) -> Remove {
+    match what {
+        nanocode_shell::Remove::File => Remove::File,
+        nanocode_shell::Remove::Dir => Remove::Dir,
+    }
+}
+
 const fn how(how: Write) -> nanocode_shell::Write {
     match how {
         Write::Replace => nanocode_shell::Write::Replace,
@@ -252,35 +295,121 @@ const fn what(what: Remove) -> nanocode_shell::Remove {
     }
 }
 
-struct Direct(Rc<dyn FileSystem>, Session);
+/// The files Python copied in, answered at once, over the file system they
+/// came from for every path outside them. Python and the commands it starts
+/// both work on it, so a command sees what Python wrote before starting it.
+struct Mixed {
+    tree: Rc<Tree>,
+    real: Rc<dyn FileSystem>,
+}
+
+impl FileSystem for Mixed {
+    fn stat(&self, path: &[u8], follow: bool) -> Reply<nanocode_shell::Stat> {
+        if self.tree.holds(path) {
+            Reply::Now(self.tree.stat(path).map(unstat))
+        } else {
+            self.real.stat(path, follow)
+        }
+    }
+
+    fn read(&self, path: &[u8], limit: u64) -> Reply<Bytes> {
+        if self.tree.holds(path) {
+            Reply::Now(self.tree.read(path, limit).map(Bytes::from))
+        } else {
+            self.real.read(path, limit)
+        }
+    }
+
+    fn write(&self, path: &[u8], data: &[u8], how: nanocode_shell::Write) -> Reply<()> {
+        if self.tree.holds(path) {
+            Reply::Now(self.tree.write(path, data, unhow(how)))
+        } else {
+            self.real.write(path, data, how)
+        }
+    }
+
+    fn list(&self, path: &[u8]) -> Reply<Vec<Vec<u8>>> {
+        if self.tree.holds(path) {
+            Reply::Now(self.tree.list(path))
+        } else {
+            self.real.list(path)
+        }
+    }
+
+    fn mkdir(&self, path: &[u8], mode: u32) -> Reply<()> {
+        if self.tree.holds(path) {
+            Reply::Now(self.tree.mkdir(path, mode))
+        } else {
+            self.real.mkdir(path, mode)
+        }
+    }
+
+    fn remove(&self, path: &[u8], what: nanocode_shell::Remove) -> Reply<()> {
+        if self.tree.holds(path) {
+            Reply::Now(self.tree.remove(path, unwhat(what)))
+        } else {
+            self.real.remove(path, what)
+        }
+    }
+
+    fn rename(&self, from: &[u8], to: &[u8]) -> Reply<()> {
+        match (self.tree.holds(from), self.tree.holds(to)) {
+            (true, true) => Reply::Now(self.tree.rename(from, to)),
+            (false, false) => self.real.rename(from, to),
+            _ => Reply::Now(Err(io::ErrorKind::CrossesDevices.into())),
+        }
+    }
+
+    fn set_mode(&self, path: &[u8], mode: u32) -> Reply<()> {
+        if self.tree.holds(path) {
+            Reply::Now(self.tree.set_mode(path, mode))
+        } else {
+            self.real.set_mode(path, mode)
+        }
+    }
+
+    fn answers_now(&self) -> bool {
+        false
+    }
+}
+
+struct Direct {
+    files: Rc<dyn FileSystem>,
+    shell: Session,
+    copied: Option<Rc<Tree>>,
+}
 
 impl Files for Direct {
     fn stat(&self, path: &[u8]) -> io::Result<Stat> {
-        now(self.0.stat(path, true)).map(stat)
+        now(self.files.stat(path, true)).map(stat)
     }
 
     fn read(&self, path: &[u8], limit: u64) -> io::Result<Vec<u8>> {
-        now(self.0.read(path, limit)).map(|data| data.to_vec())
+        now(self.files.read(path, limit)).map(|data| data.to_vec())
     }
 
     fn write(&self, path: &[u8], data: &[u8], write: Write) -> io::Result<()> {
-        now(self.0.write(path, data, how(write)))
+        now(self.files.write(path, data, how(write)))
     }
 
     fn list(&self, path: &[u8]) -> io::Result<Vec<Vec<u8>>> {
-        now(self.0.list(path))
+        now(self.files.list(path))
     }
 
     fn mkdir(&self, path: &[u8], mode: u32) -> io::Result<()> {
-        now(self.0.mkdir(path, mode))
+        now(self.files.mkdir(path, mode))
     }
 
     fn remove(&self, path: &[u8], remove: Remove) -> io::Result<()> {
-        now(self.0.remove(path, what(remove)))
+        now(self.files.remove(path, what(remove)))
     }
 
     fn rename(&self, from: &[u8], to: &[u8]) -> io::Result<()> {
-        now(self.0.rename(from, to))
+        now(self.files.rename(from, to))
+    }
+
+    fn set_mode(&self, path: &[u8], mode: u32) -> io::Result<()> {
+        now(self.files.set_mode(path, mode))
     }
 
     fn spawns(&self) -> bool {
@@ -288,13 +417,22 @@ impl Files for Direct {
     }
 
     fn spawn(&self, child: Child) -> io::Result<Exited> {
-        let exited = self.1.run(nanocode_shell::Child {
+        let child = nanocode_shell::Child {
             argv: child.argv,
             env: child.env,
             cwd: child.cwd,
             stdin: child.stdin.into(),
             merged: child.merged,
-        })?;
+        };
+        let exited = match &self.copied {
+            Some(tree) => self.shell.run_over(child, |real| {
+                Rc::new(Mixed {
+                    tree: tree.clone(),
+                    real,
+                })
+            }),
+            None => self.shell.run(child),
+        }?;
         Ok(Exited {
             status: exited.status,
             stdout: exited.stdout,
@@ -345,6 +483,9 @@ async fn apply(tree: &Tree, files: &Rc<dyn FileSystem>) -> io::Result<()> {
         let data = tree.take(path).unwrap_or_default();
         let write = nanocode_shell::Write::Replace;
         files.write(path, &data, write).get().await?;
+    }
+    for (path, mode) in &delta.modes {
+        files.set_mode(path, *mode).get().await?;
     }
     Ok(())
 }

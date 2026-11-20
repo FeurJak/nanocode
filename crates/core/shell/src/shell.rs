@@ -220,7 +220,7 @@ impl Shell {
             without.extend(unanswered);
         }
         let vfs = Rc::new(Vfs {
-            fs: config.fs,
+            fs: RefCell::new(config.fs),
             commands: config.commands,
             machine: config.machine,
             identity: config.identity,

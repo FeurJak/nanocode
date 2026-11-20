@@ -18,6 +18,7 @@ pub struct Delta {
     pub removed: Vec<Vec<u8>>,
     pub made: Vec<(Vec<u8>, u32)>,
     pub written: Vec<Vec<u8>>,
+    pub modes: Vec<(Vec<u8>, u32)>,
 }
 
 enum Node {
@@ -26,6 +27,7 @@ enum Node {
         mode: u32,
         mtime_ns: i64,
         changed: bool,
+        moded: bool,
     },
     Dir {
         mode: u32,
@@ -64,6 +66,12 @@ fn under(path: &[u8], dir: &[u8]) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with(b"/") || dir == b"/")
 }
 
+fn now() -> i64 {
+    nanocode_platform::system_time()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| i64::try_from(since.as_nanos()).unwrap_or(i64::MAX))
+}
+
 fn missing() -> io::Error {
     io::ErrorKind::NotFound.into()
 }
@@ -88,6 +96,7 @@ impl Tree {
                 mode,
                 mtime_ns,
                 changed: false,
+                moded: false,
             },
             Entry::Dir { mode } => Node::Dir { mode },
         };
@@ -109,8 +118,18 @@ impl Tree {
                 Node::Dir { mode } if first.get(path) != Some(&Kind::Dir) => {
                     delta.made.push((path.clone(), *mode));
                 }
-                Node::File { changed: true, .. } => delta.written.push(path.clone()),
                 _ => {}
+            }
+            if let Node::File {
+                changed, moded, mode, ..
+            } = node
+            {
+                if *changed {
+                    delta.written.push(path.clone());
+                }
+                if *moded {
+                    delta.modes.push((path.clone(), *mode));
+                }
             }
         }
         delta
@@ -123,8 +142,12 @@ impl Tree {
         }
     }
 
+    pub fn holds(&self, path: &[u8]) -> bool {
+        self.roots.iter().any(|root| under(path, root))
+    }
+
     fn within(&self, path: &[u8]) -> io::Result<()> {
-        if self.roots.iter().any(|root| under(path, root)) {
+        if self.holds(path) {
             Ok(())
         } else {
             Err(io::Error::new(
@@ -178,26 +201,63 @@ impl Files for Tree {
         match (nodes.get_mut(path), write) {
             (Some(Node::Dir { .. }), _) => Err(io::ErrorKind::IsADirectory.into()),
             (Some(Node::File { .. }), Write::New) => Err(io::ErrorKind::AlreadyExists.into()),
-            (Some(Node::File { data, changed, .. }), Write::Append) => {
+            (
+                Some(Node::File {
+                    data,
+                    changed,
+                    mtime_ns,
+                    ..
+                }),
+                Write::Append,
+            ) => {
                 data.extend_from_slice(more);
                 *changed = true;
+                *mtime_ns = now();
                 Ok(())
             }
-            (Some(Node::File { data, changed, .. }), Write::Replace) => {
+            (
+                Some(Node::File {
+                    data,
+                    changed,
+                    mtime_ns,
+                    ..
+                }),
+                Write::Replace,
+            ) => {
                 *data = more.to_vec();
                 *changed = true;
+                *mtime_ns = now();
                 Ok(())
             }
             (None, _) => {
                 let node = Node::File {
                     data: more.to_vec(),
                     mode: 0o644,
-                    mtime_ns: 0,
+                    mtime_ns: now(),
                     changed: true,
+                    moded: false,
                 };
                 nodes.insert(path.to_vec(), node);
                 Ok(())
             }
+        }
+    }
+
+    fn set_mode(&self, path: &[u8], mode: u32) -> io::Result<()> {
+        self.within(path)?;
+        match self.nodes.borrow_mut().get_mut(path) {
+            Some(Node::File {
+                mode: kept, moded, ..
+            }) => {
+                *kept = mode & 0o7777;
+                *moded = true;
+                Ok(())
+            }
+            Some(Node::Dir { mode: kept }) => {
+                *kept = mode & 0o7777;
+                Ok(())
+            }
+            None => Err(missing()),
         }
     }
 
@@ -240,6 +300,9 @@ impl Files for Tree {
                 return Err(io::ErrorKind::NotADirectory.into());
             }
             (Some(Node::Dir { .. }), Remove::Dir) => {
+                if self.roots.iter().any(|root| root == path) {
+                    return Err(io::ErrorKind::ResourceBusy.into());
+                }
                 if nodes
                     .keys()
                     .any(|other| other.len() > path.len() && parent(other) == path)

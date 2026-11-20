@@ -29,7 +29,7 @@ const SYMLINK_HOPS: u32 = 40;
 const DEVICES: &[u8] = b"/dev";
 
 pub(crate) struct Vfs {
-    pub(crate) fs: Rc<dyn FileSystem>,
+    pub(crate) fs: RefCell<Rc<dyn FileSystem>>,
     pub(crate) commands: Rc<dyn Commands>,
     pub(crate) machine: Rc<dyn Machine>,
     pub(crate) identity: Identity,
@@ -51,6 +51,10 @@ pub(crate) struct Vfs {
 }
 
 impl Vfs {
+    pub(crate) fn fs(&self) -> Rc<dyn FileSystem> {
+        self.fs.borrow().clone()
+    }
+
     pub(crate) fn refuse(&self, limit: Limit) {
         if self.refused.get().is_none() {
             self.refused.set(Some(limit));
@@ -96,7 +100,7 @@ impl Vfs {
 
     pub(crate) fn stat(&self, path: &[u8], follow: bool) -> Reply<Stat> {
         match self.charge() {
-            Ok(()) => self.fs.stat(path, follow),
+            Ok(()) => self.fs().stat(path, follow),
             Err(error) => Reply::Now(Err(error)),
         }
     }
@@ -104,7 +108,7 @@ impl Vfs {
     pub(crate) fn read(&self, path: &[u8]) -> Reply<Bytes> {
         let limit = self.limits.file;
         match self.charge() {
-            Ok(()) => self.fs.read(path, limit).map(move |result| {
+            Ok(()) => self.fs().read(path, limit).map(move |result| {
                 result.and_then(|data| {
                     if data.len() as u64 > limit {
                         Err(io::ErrorKind::FileTooLarge.into())
@@ -120,7 +124,7 @@ impl Vfs {
     pub(crate) fn write(self: &Rc<Self>, path: &[u8], data: &[u8], how: Write) -> Reply<()> {
         match self.charge() {
             Ok(()) => {
-                let reply = self.fs.write(path, data, how);
+                let reply = self.fs().write(path, data, how);
                 if self.changes.borrow().written.contains(path) {
                     return reply;
                 }
@@ -134,7 +138,7 @@ impl Vfs {
     pub(crate) fn set_mode(self: &Rc<Self>, path: &[u8], mode: u32) -> Reply<()> {
         match self.charge() {
             Ok(()) => {
-                let reply = self.fs.set_mode(path, mode);
+                let reply = self.fs().set_mode(path, mode);
                 let path = path.to_vec();
                 self.change(reply, move |changes| {
                     changes.modes.insert(path);
@@ -147,7 +151,7 @@ impl Vfs {
     pub(crate) fn mkdir(self: &Rc<Self>, path: Vec<u8>, mode: u32) -> Reply<()> {
         match self.charge() {
             Ok(()) => {
-                let reply = self.fs.mkdir(&path, mode);
+                let reply = self.fs().mkdir(&path, mode);
                 self.change(reply, move |changes| {
                     changes.removed.remove(&path);
                     changes.made.insert(path);
@@ -160,7 +164,7 @@ impl Vfs {
     pub(crate) fn remove(self: &Rc<Self>, path: Vec<u8>, what: Remove) -> Reply<()> {
         match self.charge() {
             Ok(()) => {
-                let reply = self.fs.remove(&path, what);
+                let reply = self.fs().remove(&path, what);
                 self.change(reply, move |changes| changes.removed(path))
             }
             Err(error) => Reply::Now(Err(error)),
@@ -170,7 +174,7 @@ impl Vfs {
     pub(crate) fn rename(self: &Rc<Self>, from: Vec<u8>, to: Vec<u8>) -> Reply<()> {
         match self.charge() {
             Ok(()) => {
-                let reply = self.fs.rename(&from, &to);
+                let reply = self.fs().rename(&from, &to);
                 self.change(reply, move |changes| changes.moved(from, to))
             }
             Err(error) => Reply::Now(Err(error)),
@@ -180,7 +184,7 @@ impl Vfs {
     pub(crate) fn symlink(self: &Rc<Self>, target: &[u8], link: Vec<u8>) -> Reply<()> {
         match self.charge() {
             Ok(()) => {
-                let reply = self.fs.symlink(target, &link);
+                let reply = self.fs().symlink(target, &link);
                 self.change(reply, move |changes| {
                     changes.removed.remove(&link);
                     changes.linked.insert(link);
@@ -192,7 +196,7 @@ impl Vfs {
 
     pub(crate) fn set_mtime(&self, path: &[u8], mtime_ns: i64) -> Reply<()> {
         match self.charge() {
-            Ok(()) => self.fs.set_mtime(path, mtime_ns),
+            Ok(()) => self.fs().set_mtime(path, mtime_ns),
             Err(error) => Reply::Now(Err(error)),
         }
     }
@@ -206,14 +210,14 @@ impl Vfs {
 
     pub(crate) fn list(&self, path: &[u8]) -> Reply<Vec<Vec<u8>>> {
         match self.charge() {
-            Ok(()) => self.fs.list(path),
+            Ok(()) => self.fs().list(path),
             Err(error) => Reply::Now(Err(error)),
         }
     }
 
     pub(crate) fn read_link(&self, path: &[u8]) -> Reply<Vec<u8>> {
         match self.charge() {
-            Ok(()) => self.fs.read_link(path),
+            Ok(()) => self.fs().read_link(path),
             Err(error) => Reply::Now(Err(error)),
         }
     }

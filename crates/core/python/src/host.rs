@@ -400,6 +400,8 @@ mod _host {
             io::ErrorKind::ReadOnlyFilesystem => (exceptions.os_error, "EROFS", 30),
             io::ErrorKind::InvalidInput => (exceptions.os_error, "EINVAL", 22),
             io::ErrorKind::Unsupported => (exceptions.os_error, "ENOTSUP", 95),
+            io::ErrorKind::ResourceBusy => (exceptions.os_error, "EBUSY", 16),
+            io::ErrorKind::CrossesDevices => (exceptions.os_error, "EXDEV", 18),
             _ => (exceptions.os_error, "EIO", 5),
         };
         let code = vm
@@ -598,6 +600,17 @@ mod _host {
             state.changes.made.remove(&*path);
             state.changes.removed.insert(path.to_vec());
             Ok(())
+        })
+    }
+
+    #[pyfunction]
+    fn chmod(path: ArgBytesLike, mode: u32, vm: &VirtualMachine) -> PyResult<()> {
+        let path = path.borrow_buf();
+        files(vm, &path, |state| match state.files.set_mode(&path, mode) {
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                state.files.stat(&path).map(|_| ())
+            }
+            done => done,
         })
     }
 
