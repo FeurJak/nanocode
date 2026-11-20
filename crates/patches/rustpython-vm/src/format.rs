@@ -69,7 +69,7 @@ impl IntoPyException for FormatSpecError {
                 let msg = format!("{s} not allowed with integer format specifier 'c'");
                 vm.new_value_error(msg)
             }
-            Self::UnableToConvert => vm.new_value_error("Unable to convert int to float"),
+            Self::UnableToConvert => vm.new_overflow_error("int too large to convert to float"),
             Self::CodeNotInRange => vm.new_overflow_error("%c arg not in range(0x110000)"),
             Self::IntTooLargeForCLong => {
                 vm.new_overflow_error("Python int too large to convert to C long")

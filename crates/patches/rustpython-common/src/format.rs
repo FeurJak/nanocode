@@ -1,10 +1,10 @@
 // spell-checker:ignore ddfe DTSF
+use crate::wtf8::iteration::{Itertools, PeekingNext};
 use core::ops::Deref;
 use core::{cmp, str::FromStr};
-use crate::wtf8::iteration::{Itertools, PeekingNext};
-use nanocode_numeric::{BigInt, Sign};
 use nanocode_numeric::Complex64;
 use nanocode_numeric::FromPrimitive;
+use nanocode_numeric::{BigInt, Sign};
 use nanocode_numeric::{Signed, ToPrimitive};
 use rustpython_literal::float;
 use rustpython_literal::format::Case;
@@ -1058,7 +1058,8 @@ impl FormatSpec {
                 | FormatType::Exponent(_)
                 | FormatType::Percentage,
             ) => match num.to_f64() {
-                Some(float) => return self.format_float(float),
+                // An int past f64's range converts to inf; CPython raises instead of formatting it.
+                Some(float) if float.is_finite() => return self.format_float(float),
                 _ => Err(FormatSpecError::UnableToConvert),
             },
             Some(FormatType::Unknown(c)) => Err(FormatSpecError::UnknownFormatCode(c, "int")),
@@ -1145,22 +1146,24 @@ impl FormatSpec {
 
     fn format_complex_re_im(&self, num: &Complex64) -> Result<(String, String), FormatSpecError> {
         // Format real part
-        let formatted_re =
-            if num.re != 0.0 || (num.re == 0.0 && num.re.is_sign_negative()) || self.format_type.is_some() {
-                let re = self.format_complex_float(num.re)?;
-                let sign_re = if self.is_negative_after_zero_coercion(num.re, &re) {
-                    "-"
-                } else {
-                    match self.sign.unwrap_or(FormatSign::Minus) {
-                        FormatSign::Plus => "+",
-                        FormatSign::Minus => "",
-                        FormatSign::MinusOrSpace => " ",
-                    }
-                };
-                format!("{sign_re}{re}")
+        let formatted_re = if num.re != 0.0
+            || (num.re == 0.0 && num.re.is_sign_negative())
+            || self.format_type.is_some()
+        {
+            let re = self.format_complex_float(num.re)?;
+            let sign_re = if self.is_negative_after_zero_coercion(num.re, &re) {
+                "-"
             } else {
-                String::new()
+                match self.sign.unwrap_or(FormatSign::Minus) {
+                    FormatSign::Plus => "+",
+                    FormatSign::Minus => "",
+                    FormatSign::MinusOrSpace => " ",
+                }
             };
+            format!("{sign_re}{re}")
+        } else {
+            String::new()
+        };
 
         // Format imaginary part
         let im = self.format_complex_float(num.im)?;
