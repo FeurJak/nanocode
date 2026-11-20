@@ -149,7 +149,7 @@ fn inner_divmod(v1: f64, v2: f64, vm: &VirtualMachine) -> PyResult<(f64, f64)> {
 pub(crate) fn float_pow(v1: f64, v2: f64, vm: &VirtualMachine) -> PyResult {
     if v1.is_zero() && v2.is_sign_negative() {
         Err(vm.new_zero_division_error("0.0 cannot be raised to a negative power"))
-    } else if v1 < 0.0 && v2.is_finite() && v2.floor() != v2 {
+    } else if v1 < 0.0 && v1.is_finite() && v2.is_finite() && v2.floor() != v2 {
         let v1 = Complex64::new(v1, 0.);
         let v2 = Complex64::new(v2, 0.);
         Ok(super::complex::complex_pow(v1, v2, vm)?.to_pyobject(vm))
