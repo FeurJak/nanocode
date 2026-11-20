@@ -34,3 +34,11 @@ fn bracket_invalid_class_name_matches_nothing() {
         "ok\nok\nx\n"
     );
 }
+
+#[test]
+fn pattern_substitution_on_an_empty_value() {
+    assert_eq!(
+        out("var=\necho \"${var/#/x}\" \"${var/*/x}\" \"${var//*/x}\" \"${var/%/y}\" \"[${var/a*/x}]\"\n"),
+        "x x x y []\n"
+    );
+}

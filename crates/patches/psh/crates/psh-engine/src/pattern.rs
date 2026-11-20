@@ -755,6 +755,14 @@ pub(crate) fn replace_with(
             }
             text.to_vec()
         }
+        // bash: an empty value is replaced whole when the pattern matches the empty string.
+        ReplaceMode::First | ReplaceMode::All if n == 0 => {
+            let mut out = Vec::new();
+            if !pat.is_empty() && p.matches_units(&[]) {
+                put(&mut out, rep, b"");
+            }
+            out
+        }
         ReplaceMode::First | ReplaceMode::All => {
             let mut out = Vec::new();
             let mut i = 0;
