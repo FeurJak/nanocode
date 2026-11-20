@@ -2073,6 +2073,14 @@ async fn param(
                     {
                         None
                     }
+                    // `${!1}` with $1 unset expands to nothing (bash 5.2).
+                    Val::Unset if p.name == ParamName::Positional => {
+                        if vp.opts.get(SetOpt::Nounset) && !matches!(p.op, ParamOp::Default { .. }) {
+                            return unbound(vp, &format!("!{}", String::from_utf8_lossy(name_text)))
+                                .await;
+                        }
+                        None
+                    }
                     Val::Unset => {
                         vp.error(&format!(
                             "{}: invalid indirect expansion",

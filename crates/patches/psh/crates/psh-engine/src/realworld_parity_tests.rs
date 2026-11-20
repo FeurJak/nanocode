@@ -66,3 +66,12 @@ fn bind_without_line_editing_warns_and_succeeds() {
     assert_eq!((st, o.as_str()), (0, "rc=0\nrc=0\n"));
     assert_eq!(e.matches("bind: warning: line editing not enabled").count(), 2, "{e}");
 }
+
+#[test]
+fn indirect_expansion_of_an_unset_positional_is_empty() {
+    let (st, o, e) = all("f(){ echo \"[${!1}]\"; }; f; echo rc=$?; set --; echo \"[${!1}]\"");
+    assert_eq!((st, o.as_str(), e.as_str()), (0, "[]\nrc=0\n[]\n", ""));
+    let (_, o, e) = all("set -u; f(){ echo \"[${!1}]\"; }; f; echo rc=$?");
+    assert_eq!(o, "");
+    assert!(e.contains("!1: unbound variable"), "{e}");
+}
