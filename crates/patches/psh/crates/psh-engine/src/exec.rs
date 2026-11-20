@@ -664,6 +664,7 @@ async fn run_pipeline_stages(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
             Err(sig) => return Ok(128 + sig),
         }
     }
+    notice_done_jobs(vp);
     if let Some(r) = last_here {
         statuses.push(r?);
     }
@@ -1230,7 +1231,18 @@ async fn run_subshell(vp: &mut Vp, code: &Rc<Code>, list: ListId) -> R {
     if vp.top {
         vp.sigs.child_ended(&vp.core);
     }
+    notice_done_jobs(vp);
     Ok(status)
+}
+
+/// A non-interactive bash without `set -m` drops the background jobs that have finished
+/// from its table each time it waits for a foreground child (a program, pipeline,
+/// subshell or substitution): `jobs` no longer lists them and `%1` no longer names
+/// one, while `wait PID` still answers their status.
+pub(crate) fn notice_done_jobs(vp: &Vp) {
+    if !vp.opts.interactive && !vp.opts.get(SetOpt::Monitor) {
+        vp.jobs.borrow_mut().drop_done();
+    }
 }
 
 async fn run_if(vp: &mut Vp, code: &Rc<Code>, c: &psh_syntax::IfCommand) -> R {
@@ -2810,6 +2822,7 @@ pub(crate) async fn run_external_with(
             }
         }
     };
+    notice_done_jobs(vp);
     let st = match (waited, stop_text) {
         (Waited::Exited(st), _) => st,
         (Waited::Stopped(sig), Some(text)) => {
@@ -3766,6 +3779,7 @@ async fn subst(vp: &mut Vp, code: Rc<Code>, list: ListId) -> Result<(Vec<u8>, i3
     if vp.top {
         vp.sigs.child_ended(&vp.core);
     }
+    notice_done_jobs(vp);
     vp.status = status;
     if out.contains(&0) {
         vp.error("warning: command substitution: ignored null byte in input")

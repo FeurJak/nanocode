@@ -81,6 +81,9 @@ pub enum Limit {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ended {
+    /// The script's exit status, or minus the signal whose default action ended it
+    /// (`kill -USR1 $$` untrapped): a process running the script would have died by
+    /// that signal, which a wait status reads as Python's `returncode` does.
     Exited(i32),
     Cancelled,
     Refused(Limit),
@@ -373,7 +376,7 @@ impl Shell {
             (Some(what), _) => Ended::Unanswered(what),
             (None, Some(limit)) => Ended::Refused(limit),
             (None, None) if self.cancelled => Ended::Cancelled,
-            (None, None) => Ended::Exited(status),
+            (None, None) => Ended::Exited(self.engine.killed_by().map_or(status, |sig| -sig)),
         };
         Ran {
             ended,
