@@ -171,9 +171,6 @@ pub(crate) fn prepare_continuation(
     })
 }
 
-static LOADED: nanocode_sync::SwapOption<(ResponseHistory, SequenceLog)> =
-    nanocode_sync::SwapOption::const_empty();
-
 fn loaded_history(
     base: &ResponseHistory,
     log: &mut SequenceLog,
@@ -191,7 +188,6 @@ fn loaded_history(
     } else {
         base.extended_loaded(keep, entries)
     };
-    LOADED.store(Some(Arc::new((history.clone(), log.clone()))));
     Ok(history)
 }
 
@@ -200,6 +196,17 @@ pub(crate) struct HydratedSnapshot {
     pub(crate) snapshot: SessionSnapshot,
     history: SequenceLog,
     prefix: Option<Vec<EncodedPayload>>,
+}
+
+impl HydratedSnapshot {
+    fn into_resumed(self) -> (SessionSnapshot, ContinuationCache) {
+        let cache = ContinuationCache {
+            history: self.snapshot.shared_history().clone(),
+            history_log: self.history,
+            ..ContinuationCache::default()
+        };
+        (self.snapshot, cache)
+    }
 }
 
 pub(crate) struct AdvancedSnapshot {
@@ -322,14 +329,6 @@ impl ContinuationCache {
     }
 
     fn sync_history(&mut self, history: &ResponseHistory) -> Result<()> {
-        if self.history_log.is_empty()
-            && let Some(loaded) = LOADED.load_full()
-            && !loaded.0.is_empty()
-            && loaded.0.shared_prefix_len(history) == loaded.0.len()
-        {
-            LOADED.store(None);
-            (self.history, self.history_log) = Arc::unwrap_or_clone(loaded);
-        }
         let unchanged = self
             .history
             .shared_prefix_len(history)
@@ -521,14 +520,17 @@ pub(crate) fn preloaded_snapshot(
     records: Option<Arc<HashSet<String>>>,
     hydrated: Option<nanocode_durability::Hydrated>,
     key: &str,
-) -> Option<(SessionSnapshot, HashSet<String>)> {
-    let snapshot = match hydrated.and_then(nanocode_durability::Hydrated::take::<HydratedSnapshot>)
-    {
-        Some(hydrated) => hydrated.snapshot,
-        None => SessionSnapshot::deserialize(checkpoint).ok()?,
-    };
+) -> Option<(SessionSnapshot, HashSet<String>, ContinuationCache)> {
+    let (snapshot, cache) =
+        match hydrated.and_then(nanocode_durability::Hydrated::take::<HydratedSnapshot>) {
+            Some(hydrated) => hydrated.into_resumed(),
+            None => (
+                SessionSnapshot::deserialize(checkpoint).ok()?,
+                ContinuationCache::default(),
+            ),
+        };
     if let Some(records) = records {
-        return Some((snapshot, Arc::unwrap_or_clone(records)));
+        return Some((snapshot, Arc::unwrap_or_clone(records), cache));
     }
     let (head, history, prefix) = snapshot.into_context_parts();
     let known = HashSet::new();
@@ -546,7 +548,11 @@ pub(crate) fn preloaded_snapshot(
     if !prepared.payload.matches_key(key) {
         return None;
     }
-    Some((saved.head.with_context(history, prefix), prepared.keys))
+    Some((
+        saved.head.with_context(history, prefix),
+        prepared.keys,
+        cache,
+    ))
 }
 
 pub(crate) async fn load_snapshot_with_keys(
@@ -556,6 +562,15 @@ pub(crate) async fn load_snapshot_with_keys(
     load_hydrated_with_keys(reader, saved)
         .await
         .map(|(hydrated, keys)| (hydrated.snapshot, keys))
+}
+
+pub(crate) async fn load_resumed(
+    reader: PayloadReader<'_>,
+    saved: Snapshot,
+) -> Result<(SessionSnapshot, HashSet<String>, ContinuationCache)> {
+    let (hydrated, keys) = load_hydrated_with_keys(reader, saved).await?;
+    let (snapshot, cache) = hydrated.into_resumed();
+    Ok((snapshot, keys, cache))
 }
 
 pub(crate) async fn load_hydrated_with_keys(

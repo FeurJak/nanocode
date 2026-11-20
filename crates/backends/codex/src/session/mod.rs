@@ -358,6 +358,10 @@ impl fmt::Debug for SessionSnapshot {
 }
 
 impl SessionSnapshot {
+    pub(crate) const fn shared_history(&self) -> &ResponseHistory {
+        &self.history
+    }
+
     pub(crate) fn history_len(&self) -> usize {
         self.history.len()
     }
