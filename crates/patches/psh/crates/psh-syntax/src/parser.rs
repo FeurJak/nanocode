@@ -596,6 +596,7 @@ impl<'a> P<'a> {
                 message: String::from("script too large"),
                 incomplete: false,
                 resume: None,
+                keeps_status: false,
                 warnings: Vec::new(),
                 alias_text: None,
             });
@@ -722,6 +723,7 @@ impl<'a> P<'a> {
             message,
             incomplete: false,
             resume: None,
+            keeps_status: false,
             warnings: Vec::new(),
             alias_text: None,
         }
@@ -737,15 +739,19 @@ impl<'a> P<'a> {
             message,
             incomplete: true,
             resume: None,
+            keeps_status: false,
             warnings: Vec::new(),
             alias_text: None,
         }
     }
 
     fn unterminated(&self, what: &str) -> ParseError {
-        self.eof_error(format!(
-            "unexpected EOF while looking for matching `{what}'"
-        ))
+        ParseError {
+            keeps_status: true,
+            ..self.eof_error(format!(
+                "unexpected EOF while looking for matching `{what}'"
+            ))
+        }
     }
 
     fn unterminated_from(&self, what: &str, start: usize) -> ParseError {
@@ -766,7 +772,10 @@ impl<'a> P<'a> {
 
     fn eof_from(&self, opener: Opener) -> ParseError {
         if opener.matching {
-            self.unterminated(opener.what)
+            ParseError {
+                keeps_status: false,
+                ..self.unterminated(opener.what)
+            }
         } else {
             self.eof_error(format!(
                 "syntax error: unexpected end of file from `{}' command on line {}",
@@ -2428,7 +2437,19 @@ impl<'a> P<'a> {
         self.read_word(Ctx::Word, true)
     }
 
+    /// A compound array value `( … )`. Bash reports an error inside one and goes on
+    /// with status 1 rather than ending the script with 2: at the end of the input
+    /// too, where the status is then 1 (`arr=(x 'y`).
     fn parse_array_lit(&mut self) -> R<ArrayLit> {
+        self.array_lit().map_err(|mut e| {
+            if e.incomplete && e.resume.is_none() {
+                e.resume = Some(self.end);
+            }
+            e
+        })
+    }
+
+    fn array_lit(&mut self) -> R<ArrayLit> {
         let start = self.pos;
         self.pos += 1;
         let mut elems = Vec::new();
@@ -3782,5 +3803,28 @@ fn default_kind(c: u8) -> DefaultKind {
         b'=' => DefaultKind::Assign,
         b'?' => DefaultKind::Error,
         _ => DefaultKind::Alternative,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse;
+
+    #[test]
+    fn an_unterminated_quote_keeps_the_status() {
+        for s in ["echo 'a", "echo \"a", "echo ${a", "true\necho 'a"] {
+            let e = parse(s).unwrap_err();
+            assert!(e.incomplete && e.keeps_status, "{s}");
+        }
+        for s in ["if true; then", "{ echo"] {
+            assert!(!parse(s).unwrap_err().keeps_status, "{s}");
+        }
+    }
+
+    #[test]
+    fn an_unterminated_array_value_goes_on() {
+        for s in ["arr=(x 'y)", "arr+=(\"x-'d\"q'\")", "arr=(x"] {
+            assert!(parse(s).unwrap_err().resume.is_some(), "{s}");
+        }
     }
 }

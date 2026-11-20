@@ -1112,7 +1112,14 @@ async fn define_function(
         vp.error(&format!("{name}: readonly function")).await;
         return Ok(1);
     }
-    let source = vp.msg_name();
+    // Its file, which its messages and `BASH_SOURCE` name: outside any function or
+    // sourced file, the script's own, else bash's `environment` for `-c` and
+    // `main` for a script read from stdin.
+    let source = match (vp.calls.is_empty(), vp.opts.dash_c, vp.opts.stdin) {
+        (true, true, _) => "environment".to_string(),
+        (true, false, true) => "main".to_string(),
+        _ => vp.msg_name(),
+    };
     Rc::make_mut(&mut vp.funcs).insert(
         name,
         Rc::new(Func {
@@ -2982,13 +2989,17 @@ async fn redirect_fd(vp: &mut Vp, code: &Rc<Code>, r: &Redirect, fd: u32) -> Res
                     return Ok(false);
                 }
                 match Box::pin(expand::expand_heredoc(vp, code, &doc.body)).await {
-                    Err(Unwind::Exit(_)) => return Ok(false),
+                    // An arithmetic error in the body fails the redirection, as bash
+                    // does, rather than the whole command line (`cat <<EOF || …`).
+                    Err(Unwind::Exit(_) | Unwind::Abort(1)) => return Ok(false),
                     r => r?,
                 }
             };
             if !doc.terminated {
-                // The input ended before the delimiter: the last line gets its newline.
-                if !body.is_empty() && !body.ends_with(b"\n") {
+                // The input ended before the delimiter: the last line gets its newline,
+                // whatever its expansion ends with (`$a` with a value that ends in one).
+                let text = code.ast.bytes(doc.body.span);
+                if !text.is_empty() && !text.ends_with(b"\n") {
                     body.push(b'\n');
                 }
             }

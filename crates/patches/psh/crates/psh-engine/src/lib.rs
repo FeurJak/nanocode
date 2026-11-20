@@ -1247,8 +1247,11 @@ async fn run_chunk(
                 vp.status = 1;
                 return None;
             }
-            vp.status = 2;
-            Some(2)
+            // An unterminated quote keeps a failing status (a failed command, then `echo 'a`).
+            if !(e.keeps_status && vp.status != 0) {
+                vp.status = 2;
+            }
+            Some(vp.status)
         }
     }
 }
@@ -1289,4 +1292,78 @@ pub fn run_on_test_host(source: &str) -> (i32, Vec<u8>, Vec<u8>) {
         }
     };
     (status, host.stdout(), host.stderr())
+}
+
+#[cfg(test)]
+mod parity_tests {
+    use super::run_on_test_host as run;
+
+    fn err(s: &str) -> String {
+        String::from_utf8_lossy(&run(s).2).into_owned()
+    }
+
+    #[test]
+    fn an_unterminated_quote_keeps_a_failing_status() {
+        assert_eq!(run("false\necho 'a").0, 1);
+        assert_eq!(run("(exit 3)\necho \"a").0, 3);
+        assert_eq!(run("true\necho 'a").0, 2);
+        assert_eq!(run("false\nif true; then").0, 2);
+    }
+
+    #[test]
+    fn an_unterminated_array_value_goes_on_with_status_1() {
+        assert_eq!(run("arr=(x 'y)").0, 1);
+        assert_eq!(run("arr+=(\"x-'d\"q'\")").0, 1);
+    }
+
+    #[test]
+    fn an_arithmetic_error_in_a_here_document_fails_only_its_command() {
+        let (status, out, _) = run("! cat <<EOF\n$((1/0))\nEOF\necho after $?");
+        assert_eq!((status, &out[..]), (0, &b"after 0\n"[..]));
+        let (_, out, _) = run("cat <<EOF || echo or $?\n$((1/0))\nEOF");
+        assert_eq!(out, b"or 1\n");
+    }
+
+    #[test]
+    fn an_unterminated_here_document_ends_in_a_newline_after_expansion() {
+        let (_, out, _) = run("a='end\n'\ncat <<EOF\n$a");
+        assert_eq!(out, b"end\n\n");
+    }
+
+    #[test]
+    fn a_function_from_dash_c_names_its_messages_environment() {
+        assert!(err("f() { cd /nonexistent; }; f").starts_with("environment: line 1: cd:"));
+        assert!(err("f() { eval \"echo 'q\"; }; f").starts_with("environment: eval: line 1:"));
+    }
+
+    #[test]
+    fn messages_are_worded_as_bash_5_2_does() {
+        assert!(err("let n=n + 1").contains("let: +: syntax error: operand expected"));
+        assert!(err("[ 1 -eq x ]").contains("[: x: integer expression expected"));
+        assert!(err(".").contains(".: usage: . filename [arguments]"));
+    }
+
+    #[test]
+    fn a_dead_arithmetic_branch_refuses_a_negative_exponent() {
+        let (status, out, e) = run("echo $(( 1 ? 1 : 2 ** -3 ))");
+        assert_eq!((status, &out[..]), (1, &b""[..]));
+        assert!(String::from_utf8_lossy(&e).contains("exponent less than 0"));
+    }
+
+    #[test]
+    fn a_pre_increment_followed_by_another_fails_after_its_change() {
+        let (_, out, e) = run("let n=--n++; echo $n");
+        assert_eq!(out, b"-1\n");
+        assert!(String::from_utf8_lossy(&e)
+            .contains("let: n=--n++: ++: assignment requires lvalue (error token is \"++\")"));
+        assert_eq!(run("n=5; echo $((--n++))").0, 1);
+    }
+
+    #[test]
+    fn a_let_word_with_parens_is_one_pattern() {
+        let (_, out, _) = run("shopt -s nullglob\nlet n=(1 ? 1 : 1); echo \"[$n]\"");
+        assert_eq!(out, b"[]\n");
+        let (_, out, _) = run("let n=(1 * 2); echo $n");
+        assert_eq!(out, b"2\n");
+    }
 }

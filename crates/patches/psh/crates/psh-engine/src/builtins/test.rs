@@ -210,10 +210,10 @@ fn int(v: &[u8]) -> Result<i64, String> {
         .trim_matches(|c| c == ' ' || c == '\t' || c == '\n');
     let digits = t.strip_prefix(['-', '+']).unwrap_or(t);
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(format!("{}: integer expected", s(v)));
+        return Err(format!("{}: integer expression expected", s(v)));
     }
     t.parse::<i64>()
-        .map_err(|_| format!("{}: integer expected", s(v)))
+        .map_err(|_| format!("{}: integer expression expected", s(v)))
 }
 
 /// A unary test (`op` is `-f` and so on), for `test` and `[[ ]]`.

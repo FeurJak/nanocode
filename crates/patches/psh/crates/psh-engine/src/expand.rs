@@ -1318,9 +1318,11 @@ async fn expand_part(
                 .first()
                 .is_some_and(|w| w.text == b"let" || w.text == b"eval") =>
         {
-            // For `let` the word is one arithmetic expression: no splitting or
-            // globbing of its items (`let n=(1 * 1)`, bash).
-            let (items, st) = if f.out.first().is_some_and(|w| w.text == b"let") {
+            // For `let` the word is one arithmetic expression: its items are not
+            // split, and the whole word is one pattern (`let n=(1 * 1)` stays as it
+            // is unless nullglob or failglob is on, bash).
+            let is_let = f.out.first().is_some_and(|w| w.text == b"let");
+            let (items, st) = if is_let {
                 let mut items = Vec::new();
                 let mut st = None;
                 for e in &lit.elems {
@@ -1354,7 +1356,11 @@ async fn expand_part(
                 text.extend_from_slice(&item.value);
             }
             text.push(b')');
-            f.quoted(&text);
+            if is_let {
+                f.literal(&text);
+            } else {
+                f.quoted(&text);
+            }
         }
         Part::Array(_) => {
             for op in *b"=+" {

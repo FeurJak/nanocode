@@ -866,6 +866,7 @@ impl<'c> Compiler<'c> {
                     value: self.arith(value, text)?,
                 }
             }
+            ArithKind::Fail { .. } => return None,
         };
         self.exprs.push(node);
         Some((self.exprs.len() - 1) as u32)
