@@ -447,7 +447,8 @@ declare -fx {n}
             o.indexed = o.indexed.or(Some(true));
         }
         let raw = a.name();
-        if !is_name(raw) {
+        // `export -f a::b`: a function's name need not be a variable name.
+        if !is_name(raw) && !(o.funcs && matches!(a, DeclArg::Word(_))) {
             vp.error(&format!("{bname}: `{}': not a valid identifier", a.shown()))
                 .await;
             vp.bad_assign = true;

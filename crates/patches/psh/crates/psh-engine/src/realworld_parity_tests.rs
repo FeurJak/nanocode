@@ -75,3 +75,9 @@ fn indirect_expansion_of_an_unset_positional_is_empty() {
     assert_eq!(o, "");
     assert!(e.contains("!1: unbound variable"), "{e}");
 }
+
+#[test]
+fn export_f_takes_function_names_that_are_not_identifiers() {
+    let (st, o, e) = all("a::b(){ echo hi; }; export -f a::b; echo rc=$?; export -nf a::b; echo rc=$?");
+    assert_eq!((st, o.as_str(), e.as_str()), (0, "rc=0\nrc=0\n", ""));
+}
