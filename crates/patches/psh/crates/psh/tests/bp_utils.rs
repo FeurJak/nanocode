@@ -122,3 +122,9 @@ fn expand_joins_every_tab_list_and_wants_them_ascending() {
         ("a b   c d\nexpand: tab sizes must be ascending\n1\nunexpand: tab sizes must be ascending\n1\n".into(), 0)
     );
 }
+
+#[test]
+fn tail_of_nothing_prints_no_headers() {
+    let src = "echo x > a; echo y > b; tail -n 0 a b; tail -c 0 -v a; tail -n +2 a b; echo $?";
+    assert_eq!(sh(src), ("==> a <==\n\n==> b <==\n0\n".into(), 0));
+}

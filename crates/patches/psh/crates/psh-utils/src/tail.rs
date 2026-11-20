@@ -125,7 +125,10 @@ pub async fn run(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
     }
     let delim = if zero { 0 } else { b'\n' };
     let files = common::operands_or_stdin(&p);
-    let headers = verbose || (files.len() > 1 && !quiet);
+    // GNU prints nothing at all, not even the headers, for none of the last lines or
+    // bytes when it is not following.
+    let nothing = !follow && matches!(amount, Amount::LastLines(0) | Amount::LastBytes(0));
+    let headers = (verbose || (files.len() > 1 && !quiet)) && !nothing;
     let mut status = 0;
     // Files to follow, with how much of each was printed.
     let mut followed: Vec<(Vec<u8>, usize)> = Vec::new();
