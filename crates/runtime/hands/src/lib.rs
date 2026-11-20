@@ -1,5 +1,4 @@
 mod auto;
-mod copy;
 mod host;
 mod provider;
 mod receive;
@@ -9,7 +8,6 @@ mod target;
 mod values;
 
 pub use auto::{AUTO, Auto, Decision, Origin, Reason, Shell, decide};
-pub use copy::CopyError;
 pub use host::{HandHost, Workspace};
 pub use nanocode_code_mode::embedded::HostFuture;
 pub use nanocode_cost_fold::Placement;

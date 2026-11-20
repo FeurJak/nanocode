@@ -11,8 +11,6 @@ pub enum Mutation {
     ReleasesBusy,
     ReleasesEarly,
     NeverReleases,
-    CommitsPartial,
-    ShaUnchecked,
     PlacementSkipsUncertain,
     StopsUnknown,
     ListKeepsStopped,

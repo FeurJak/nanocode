@@ -248,16 +248,10 @@ impl Kept {
         if reply.send(Ok(())).is_err() {
             return;
         }
-        let mut how = Write::Replace;
         while let Some(part) = parts.next().await {
             match part {
                 Part::Chunk(chunk, reply) => {
-                    let mut pushed = upload.push(&chunk).map_err(|error| said(&path, &error));
-                    if pushed.is_ok() && sim::mutated(Mutation::PutsInPlace) {
-                        let written = self.files.write(&path, &chunk, how).get().await;
-                        pushed = written.map_err(|error| said(&path, &error));
-                        how = Write::Append;
-                    }
+                    let pushed = upload.push(&chunk).map_err(|error| said(&path, &error));
                     let _ = reply.send(pushed);
                 }
                 Part::Seal(reply) => {

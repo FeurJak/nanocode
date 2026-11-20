@@ -8,7 +8,6 @@ pub enum Mutation {
     RunsTwice,
     ExitIgnored,
     WriteSkipsParents,
-    PutsInPlace,
     HasNothing,
     HasEverything,
 }

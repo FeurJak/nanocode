@@ -65,8 +65,8 @@ type UseKey = (Box<str>, HandRef);
 type StepKey = (Box<str>, Box<str>);
 
 pub struct Router {
-    pub(crate) workspace: Arc<dyn Workspace>,
-    pub(crate) host: Arc<dyn HandHost>,
+    workspace: Arc<dyn Workspace>,
+    host: Arc<dyn HandHost>,
     clock: Arc<dyn Clock>,
     placements: Arc<dyn Placements>,
     policy: Policy,
@@ -359,7 +359,7 @@ impl Router {
             .update(|map| map.retain(|(owner, _), _| owner.as_ref() != session));
     }
 
-    pub(crate) async fn hold(&self, session: &str, hand: &HandRef) {
+    async fn hold(&self, session: &str, hand: &HandRef) {
         let use_key: UseKey = (session.into(), hand.clone());
         loop {
             let mut notified = pin!(self.released.notified());
@@ -380,7 +380,7 @@ impl Router {
         }
     }
 
-    pub(crate) fn unhold(&self, session: &str, hand: &HandRef) {
+    fn unhold(&self, session: &str, hand: &HandRef) {
         let use_key: UseKey = (session.into(), hand.clone());
         let now_ms = self.clock.now_ms();
         self.uses.update(|map| {

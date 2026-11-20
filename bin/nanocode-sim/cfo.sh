@@ -172,8 +172,6 @@ default_table='
 2 workspace_stack_twice pass --scenario workspace_stack --twice
 1 canary_workspace_stack_torn_commit canary:200 --scenario workspace_stack --mutation torn_commit
 1 canary_workspace_stack_visible_before_commit canary:200 --scenario workspace_stack --mutation visible_before_commit
-1 canary_workspace_stack_sha_unchecked canary:200 --scenario workspace_stack --mutation sha_unchecked
-1 canary_workspace_stack_puts_in_place canary:200 --scenario workspace_stack --mutation puts_in_place
 1 canary_workspace_stack_answers_now canary:200 --scenario workspace_stack --mutation answers_now
 1 canary_workspace_stack_has_nothing canary:200 --scenario workspace_stack --mutation has_nothing
 1 canary_workspace_stack_has_everything canary:200 --scenario workspace_stack --mutation has_everything
