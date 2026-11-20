@@ -2205,11 +2205,12 @@ fn many(
     Ok(())
 }
 
+type Tracking = BTreeMap<&'static str, (Option<String>, String)>;
+
 /// A crash while git push writes the remote-tracking refs, after the server
 /// took the push: each ref must hold its old commit or the pushed one,
-/// pushing again must leave the server on every pushed commit (and each ref
-/// on its old commit or the pushed one), and fetching then must leave every
-/// ref on its branch's commit.
+/// pushing again must leave the server and each ref on every pushed commit,
+/// and fetching then must leave every ref on its branch's commit.
 fn push(
     rng: &mut Rng,
     stats: &mut WorkspaceCrashStats,
@@ -2256,7 +2257,7 @@ fn push(
     let origin: Rc<std::cell::RefCell<Option<Origin>>> = Rc::default();
     // Each branch's remote-tracking ref before the push (None for a new
     // branch) and the commit the push sends, both as their files hold them.
-    let refs: Rc<std::cell::RefCell<BTreeMap<&'static str, (Option<String>, String)>>> = Rc::default();
+    let refs: Rc<std::cell::RefCell<Tracking>> = Rc::default();
     let network = {
         let origin = origin.clone();
         move || {
@@ -2336,9 +2337,9 @@ fn push(
     let heads = origin.borrow().as_ref().map(Origin::heads).unwrap_or_default();
     for (branch, (old, new)) in &refs {
         let held = lossy(again.get(&tracking(branch)));
-        if held != *old && held.as_ref() != Some(new) {
+        if held.as_ref() != Some(new) {
             return Err(format!(
-                "{when}: after pushing again the remote-tracking ref of {branch} holds {held:?}, not {old:?} or {new:?}"
+                "{when}: after pushing again the remote-tracking ref of {branch} holds {held:?}, not {new:?} (was {old:?})"
             ));
         }
         if heads.get(*branch).map(String::as_str) != Some(new.trim_end()) {
