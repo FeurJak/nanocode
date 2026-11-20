@@ -46,6 +46,12 @@ pub mod group;
 pub mod messages;
 
 pub use compact::Spread;
+
+/// The version a board writes its fold checkpoints under, and the only one it reopens from: the
+/// snapshot format and a hash of the fold's source, so a build whose fold changed replays the
+/// whole log once instead of trusting a fold an older build made. Bump the format when the
+/// fold's state changes in a way no source hash sees.
+pub const CHECKPOINT_VERSION: &str = concat!("board-fold/1/", env!("NANOCODE_BOARD_FOLD_SOURCE"));
 pub use messages::{MessageId, Say};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

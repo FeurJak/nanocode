@@ -473,6 +473,7 @@ dependencies = [
  "nanocode-durability-core",
  "nanocode-partitions",
  "nanocode-sync",
+ "nanocode-sys",
  "nanocode-turnlog",
  "serde_json",
 ]

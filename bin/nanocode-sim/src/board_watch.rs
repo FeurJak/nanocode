@@ -16,7 +16,7 @@ use nanocode_board::{
     watch::{self, Attempt, Filter, Handled, Handler, Key, Kind, Lease, Plan, Policy, Registered, Step},
 };
 use nanocode_durability_core::{StoreError, StoreFuture};
-use nanocode_turnlog::LogHost;
+use nanocode_turnlog::{LogHost, StoredCheckpoint};
 
 use super::{MS, World};
 use crate::{
@@ -275,6 +275,21 @@ impl LogHost for Early {
             return Box::pin(async move { Err(StoreError::Backend(early)) });
         }
         self.inner.append(scope, rows)
+    }
+
+    fn checkpoint<'a>(
+        &'a self,
+        scope: &'a str,
+    ) -> Option<StoreFuture<'a, Result<Option<StoredCheckpoint>, StoreError>>> {
+        self.inner.checkpoint(scope)
+    }
+
+    fn save_checkpoint<'a>(
+        &'a self,
+        scope: &'a str,
+        checkpoint: &'a StoredCheckpoint,
+    ) -> Option<StoreFuture<'a, Result<(), StoreError>>> {
+        self.inner.save_checkpoint(scope, checkpoint)
     }
 }
 
