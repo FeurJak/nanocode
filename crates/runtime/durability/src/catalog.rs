@@ -584,6 +584,10 @@ mod store {
             }
         }
 
+        pub fn clear_transcript(&mut self) {
+            self.transcript = Transcript::Read(Vec::new());
+        }
+
         pub fn into_transcript(self) -> Result<Vec<TranscriptItem>> {
             match self.transcript {
                 Transcript::Read(items) => Ok(items),
