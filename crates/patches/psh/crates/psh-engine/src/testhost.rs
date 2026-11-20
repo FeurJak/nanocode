@@ -185,6 +185,10 @@ pub struct MemFs {
     next_ino: Cell<u64>,
     /// The file system changes of D1150 answer `Unsupported` (a host without them).
     unsupported: Cell<bool>,
+    /// `set_times` and `set_mode` answer `PermissionDenied` (a file the user does
+    /// not own), for the utilities that report a failed time or mode change.
+    deny_times: Cell<bool>,
+    deny_mode: Cell<bool>,
 }
 
 fn parent(path: &[u8]) -> &[u8] {
@@ -228,6 +232,8 @@ impl MemFs {
             clock: Cell::new(1),
             next_ino: Cell::new(2),
             unsupported: Cell::new(false),
+            deny_times: Cell::new(false),
+            deny_mode: Cell::new(false),
         }
     }
 
@@ -309,6 +315,16 @@ impl MemFs {
     /// them does.
     pub fn set_unsupported(&self, on: bool) {
         self.unsupported.set(on);
+    }
+
+    /// Makes `set_times` answer `PermissionDenied`.
+    pub fn set_deny_times(&self, on: bool) {
+        self.deny_times.set(on);
+    }
+
+    /// Makes `set_mode` answer `PermissionDenied`.
+    pub fn set_deny_mode(&self, on: bool) {
+        self.deny_mode.set(on);
     }
 
     fn tick(&self) -> i64 {
@@ -690,6 +706,9 @@ impl MemFs {
 
     fn set_mode(&self, path: &[u8], new: u32) -> io::Result<()> {
         self.check()?;
+        if self.deny_mode.get() {
+            return err(io::ErrorKind::PermissionDenied);
+        }
         let p = self.resolve(path, true)?;
         match self.nodes.borrow_mut().get_mut(&p) {
             Some(Node::File { mode, .. } | Node::Dir { mode, .. }) => {
@@ -708,6 +727,9 @@ impl MemFs {
         follow: bool,
     ) -> io::Result<()> {
         self.check()?;
+        if self.deny_times.get() {
+            return err(io::ErrorKind::PermissionDenied);
+        }
         let p = self.resolve(path, follow)?;
         match self.nodes.borrow_mut().get_mut(&p) {
             Some(Node::File { mtime, atime, .. }) => {

@@ -798,6 +798,25 @@ fn members(data: &[u8]) -> Result<Vec<(Entry, std::ops::Range<usize>)>, &'static
     Ok(out)
 }
 
+/// GNU tar's words for a failed chmod: the nine permission characters of `ls -l`.
+fn mode_failed(shown: &str, mode: u32, e: &std::io::Error) -> String {
+    let text = crate::modes::mode_string(FileKind::File, mode);
+    format!(
+        "{shown}: Cannot change mode to {}: {}",
+        &text[1..],
+        error_text(e)
+    )
+}
+
+/// A directory member's name as GNU tar's messages show it: without its last slash.
+fn dir_shown(shown: &str) -> String {
+    match shown.trim_end_matches('/') {
+        "" if shown.starts_with('/') => "/".to_string(),
+        "" => ".".to_string(),
+        name => name.to_string(),
+    }
+}
+
 fn mode_text(entry: &Entry) -> String {
     let kind = match entry.kind {
         b'5' => 'd',
@@ -964,7 +983,7 @@ impl Tar<'_, '_> {
         }
         let wildcards = self.o.wildcards;
         let umask = self.ctx.umask();
-        let mut dirs: Vec<(Vec<u8>, i64, u32)> = Vec::new();
+        let mut dirs: Vec<(Vec<u8>, String, i64, u32)> = Vec::new();
         for (entry, body) in &list {
             self.ctx.check().await;
             let plain = entry.name.strip_suffix(b"/").unwrap_or(&entry.name);
@@ -1065,8 +1084,28 @@ impl Tar<'_, '_> {
             };
             if entry.kind == b'5' {
                 self.mkdirs(&path).await;
-                let _ = self.ctx.set_mode(&path, mode).await;
-                dirs.push((path, entry.mtime, mode));
+                match self.ctx.stat(&path, true).await {
+                    Ok(meta) if meta.kind == FileKind::Dir => {
+                        // As GNU tar: a directory keeps a mode its owner can write
+                        // into while members land in it, and gets its own mode (and
+                        // time) after the last member.
+                        if meta.mode & 0o700 != 0o700 {
+                            let _ = self.ctx.set_mode(&path, meta.mode | 0o700).await;
+                        }
+                        dirs.push((path, dir_shown(&shown), entry.mtime, mode));
+                    }
+                    _ => {
+                        let e = match self.ctx.mkdir(&path, 0o777 & !umask).await {
+                            Err(e) => e,
+                            Ok(()) => {
+                                dirs.push((path, dir_shown(&shown), entry.mtime, mode));
+                                continue;
+                            }
+                        };
+                        self.fail(&format!("{shown}: Cannot mkdir: {}", error_text(&e)))
+                            .await;
+                    }
+                }
                 continue;
             }
             if self.o.to_stdout {
@@ -1097,8 +1136,25 @@ impl Tar<'_, '_> {
                         .await;
                     continue;
                 }
-                if old.kind != FileKind::Dir {
-                    let _ = self.ctx.remove_file(&path).await;
+                if old.kind != FileKind::Dir
+                    && let Err(e) = self.ctx.remove_file(&path).await
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    // GNU tar then creates the member with O_EXCL, which finds the
+                    // old file still there.
+                    let what = match entry.kind {
+                        b'2' => format!(
+                            "Cannot create symlink to '{}'",
+                            String::from_utf8_lossy(&entry.link)
+                        ),
+                        b'1' => format!(
+                            "Cannot hard link to '{}'",
+                            String::from_utf8_lossy(&entry.link)
+                        ),
+                        _ => "Cannot open".to_string(),
+                    };
+                    self.fail(&format!("{shown}: {what}: File exists")).await;
+                    continue;
                 }
             }
             match entry.kind {
@@ -1118,12 +1174,17 @@ impl Tar<'_, '_> {
                     }
                     // The file was made with its mode, unless a directory's entry
                     // of that name kept an old file in its place.
-                    if existing.is_some_and(|old| old.kind == FileKind::Dir) {
-                        let _ = self.ctx.set_mode(&path, mode).await;
+                    if existing.is_some_and(|old| old.kind == FileKind::Dir)
+                        && let Err(e) = self.ctx.set_mode(&path, mode).await
+                    {
+                        self.fail(&mode_failed(&shown, mode, &e)).await;
                     }
                     if !self.o.touch {
                         let t = entry.mtime * 1_000_000_000;
-                        let _ = self.ctx.set_times(&path, Some(t), Some(t), true).await;
+                        if let Err(e) = self.ctx.set_times(&path, Some(t), Some(t), true).await {
+                            self.fail(&format!("{shown}: Cannot utime: {}", error_text(&e)))
+                                .await;
+                        }
                     }
                 }
                 b'2' => {
@@ -1175,10 +1236,22 @@ impl Tar<'_, '_> {
                 }
             }
         }
-        if !self.o.touch {
-            for (path, mtime, _) in dirs.iter().rev() {
+        // Each directory's time and mode, deepest last-listed first, as GNU tar sets
+        // them after the last member.
+        for (path, shown, mtime, mode) in dirs.iter().rev() {
+            if !self.o.touch {
                 let t = mtime * 1_000_000_000;
-                let _ = self.ctx.set_times(path, Some(t), Some(t), true).await;
+                if let Err(e) = self.ctx.set_times(path, Some(t), Some(t), true).await {
+                    self.fail(&format!("{shown}: Cannot utime: {}", error_text(&e)))
+                        .await;
+                }
+            }
+            let now = self.ctx.stat(path, true).await.map(|m| m.mode & 0o7777);
+            if now.as_ref().is_ok_and(|m| m == mode) {
+                continue;
+            }
+            if let Err(e) = self.ctx.set_mode(path, *mode).await {
+                self.fail(&mode_failed(&shown, *mode, &e)).await;
             }
         }
         for (want, found) in &wanted {
@@ -1244,5 +1317,90 @@ pub async fn run(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
         tar.create().await
     } else {
         tar.read_or_list().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use psh_engine::testhost::TestHost;
+    use psh_engine::{Script, Shell, Step};
+    use std::rc::Rc;
+
+    /// Status, stdout and stderr of `src` on a memory fs with `/tmp/a.tar` holding
+    /// `d/` and `d/f`, after `setup` arms the host's faults.
+    fn extract(src: &str, setup: impl Fn(&TestHost)) -> (i32, String, String) {
+        let host = Rc::new(TestHost::new());
+        let mut cfg = host.config();
+        cfg.utilities = crate::policy(true);
+        let mut shell = Shell::new(cfg);
+        let mut run = |src: &str| {
+            shell.start(Script::command(src));
+            loop {
+                match shell.step(1000) {
+                    Step::Done(s) => break s,
+                    Step::Yield | Step::Blocked => {}
+                    Step::Idle => break 0,
+                }
+            }
+        };
+        assert_eq!(
+            run("cd /tmp && mkdir -p s/d && echo hi > s/d/f && tar cf a.tar -C s d"),
+            0
+        );
+        setup(&host);
+        let status = run(src);
+        let text = |b: Vec<u8>| String::from_utf8_lossy(&b).into_owned();
+        (status, text(host.stdout()), text(host.stderr()))
+    }
+
+    #[test]
+    fn a_failed_utime_is_reported_and_extraction_goes_on() {
+        let (status, _, err) = extract("cd /tmp && mkdir x && tar xf a.tar -C x; cat x/d/f", |h| {
+            h.fs.set_deny_times(true)
+        });
+        assert_eq!(status, 0, "cat after tar");
+        assert_eq!(
+            err,
+            "tar: d/f: Cannot utime: Permission denied\n\
+             tar: d: Cannot utime: Permission denied\n\
+             tar: Exiting with failure status due to previous errors\n"
+        );
+        let (status, out, _) = extract(
+            "cd /tmp && mkdir x && tar xf a.tar -C x; echo $?; cat x/d/f",
+            |h| h.fs.set_deny_times(true),
+        );
+        assert_eq!((status, out.as_str()), (0, "2\nhi\n"));
+    }
+
+    #[test]
+    fn touch_skips_the_times_and_their_errors() {
+        let (_, out, err) = extract("cd /tmp && mkdir x && tar xmf a.tar -C x; echo $?", |h| {
+            h.fs.set_deny_times(true)
+        });
+        assert_eq!((out.as_str(), err.as_str()), ("0\n", ""));
+    }
+
+    #[test]
+    fn a_failed_directory_chmod_is_reported_with_its_mode() {
+        let (_, out, err) = extract(
+            "cd /tmp && mkdir x && umask 077 && tar xpmf a.tar -C x; echo $?",
+            |h| h.fs.set_deny_mode(true),
+        );
+        assert_eq!(out, "2\n");
+        assert!(
+            err.starts_with("tar: d: Cannot change mode to rwx")
+                && err.contains(": Permission denied\n")
+                && err.ends_with("tar: Exiting with failure status due to previous errors\n"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_directory_mode_is_not_set_again() {
+        // GNU tar leaves a directory whose mode is already the member's alone.
+        let (_, out, err) = extract("cd /tmp && tar xmf a.tar -C s; echo $?", |h| {
+            h.fs.set_deny_mode(true)
+        });
+        assert_eq!((out.as_str(), err.as_str()), ("0\n", ""));
     }
 }
