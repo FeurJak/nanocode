@@ -572,15 +572,24 @@ impl Inner {
                     .into());
                 }
                 let held = self.blob(&digest).await?;
-                match self.tail.borrow_mut().take() {
-                    Some((last, state)) if last == digest => hasher = state,
-                    _ => hasher.update(&held),
-                }
-                hasher.update(data);
-                let mut bytes = BytesMut::with_capacity(held.len() + data.len());
-                bytes.extend_from_slice(&held);
-                bytes.extend_from_slice(data);
-                (bytes.freeze(), mode)
+                let bytes = match self.tail.borrow_mut().take() {
+                    // The blob the last append wrote: carry its hash on, and grow its
+                    // buffer in place.
+                    Some((last, mut state)) if last == digest => {
+                        state.update(data);
+                        hasher = state;
+                        held.appended(data)
+                    }
+                    _ => {
+                        hasher.update(&held);
+                        hasher.update(data);
+                        let mut bytes = BytesMut::with_capacity(held.len() + data.len());
+                        bytes.extend_from_slice(&held);
+                        bytes.extend_from_slice(data);
+                        bytes.freeze()
+                    }
+                };
+                (bytes, mode)
             }
             (None, _) => {
                 hasher.update(data);
