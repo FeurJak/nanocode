@@ -39,7 +39,7 @@ pub const ABSENT_GLOBALS: &[&str] = &[
 
 /// The globals of the builtins only `embed` builds have (`// @embed-only`, D3175): full
 /// builds without `embed` (the wasm modules) name them like [`ABSENT_GLOBALS`].
-pub const EMBED_GLOBALS: &[&str] = &["TextDecoder", "TextEncoder"];
+pub const EMBED_GLOBALS: &[&str] = &["TextDecoder", "TextEncoder", "WebAssembly"];
 
 /// The realm slots of the families the slim build leaves out (D2411): `undefined` there.
 const SLIM_LEAVES_OUT: &[Intrinsic] = &[

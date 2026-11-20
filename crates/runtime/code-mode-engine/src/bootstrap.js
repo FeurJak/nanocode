@@ -51,7 +51,7 @@
       random: (length) => nativeBytes.random(length).buffer,
     };
   }
-  for (const name of ["console", "WebAssembly"]) delete globalThis[name];
+  for (const name of ["console"]) delete globalThis[name];
   const OriginalDate = Date;
   const clockNow = () => nativeValue(0);
   function JournaledDate(...args) {

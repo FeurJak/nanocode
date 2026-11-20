@@ -4601,3 +4601,12 @@ GlobalAtob: reentrant (atob)
   builtins/web.ts:129:34  Get (intrinsic)
   builtins/web.ts:129:25  ToString (builtin)
   builtins/web.ts:131:11  NewDOMException (builtin)
+
+WebAssemblyObject: leaf (value WebAssembly)
+
+WebAssemblyToStringTag: reentrant (value WebAssembly[Symbol.toStringTag])
+  builtins/webassembly.ts:23:21  Get (intrinsic)
+  builtins/webassembly.ts:25:23  Call (intrinsic)
+  builtins/webassembly.ts:26:3  Call (intrinsic)
+
+WebAssemblyRuntimeSource: leaf
