@@ -77,6 +77,10 @@ const AIM_US_MAX: u64 = 8_000;
 /// Share of aimed crashes that land inside a window the probe saw (a call's wait for its hand,
 /// or a stored reply's wait for its commit), when it saw one.
 const WAIT_PPM: u64 = 600_000;
+/// Share of aimed crashes that land between a resume naming a reply the brain already read and
+/// that call's commit, when the probe saw one: only a crash there makes the next process ask
+/// the hand for a reply it was told to keep.
+const RESUMED_PPM: u64 = 700_000;
 /// Share of aimed seeds that also move one of a hand's socket drops next to a call: dispatch to
 /// a connected hand takes almost no simulated time, so a call only waits for its hand (the
 /// window where recovery must answer that nothing was sent) while that hand redials.
@@ -320,6 +324,10 @@ impl Script {
             .crashes
             .iter()
             .map(|_| {
+                if !marks.resumed.is_empty() && rng.chance(RESUMED_PPM) {
+                    let (from, to) = marks.resumed[rng.pick(marks.resumed.len())];
+                    return rng.range(from + 1, to).max(MS);
+                }
                 if !marks.waits.is_empty() && rng.chance(WAIT_PPM) {
                     let (from, to) = marks.waits[rng.pick(marks.waits.len())];
                     return rng.range(from + 1, to).max(MS);
@@ -1225,9 +1233,17 @@ impl World {
                         let _ = out.send(self.callback(id, *index));
                     }
                 }
+                let read = slot.read.read(BTreeSet::clone);
+                for id in &pending {
+                    if let Some((label, _)) = hand.retained.get(id)
+                        && read.contains(id)
+                    {
+                        let index = labelled(label);
+                        self.marks.borrow_mut().reread.push((self.now(), index));
+                    }
+                }
                 let mut pending = pending;
                 if self.store.mutation == HandsMutation::ResumeWaitingOnly {
-                    let read = slot.read.read(BTreeSet::clone);
                     pending.retain(|id| !(hand.retained.contains_key(id) && read.contains(id)));
                 }
                 hand.retained.retain(|id, _| pending.contains(id));
@@ -1935,6 +1951,11 @@ struct Marks {
     replies: Vec<(usize, u64, usize)>,
     commits: BTreeMap<usize, u64>,
     waits: Vec<(u64, u64)>,
+    /// Each resume that named a reply the hand retains and this brain process already read,
+    /// with that reply's call.
+    reread: Vec<(u64, usize)>,
+    /// The window from each such resume to its call's commit.
+    resumed: Vec<(u64, u64)>,
 }
 
 impl Marks {
@@ -1961,7 +1982,23 @@ impl Marks {
                 self.waits.push((*at, *commit));
             }
         }
+        for (at, index) in &self.reread {
+            if let Some(commit) = self.commits.get(index)
+                && *commit > at + 1
+            {
+                self.resumed.push((*at, *commit));
+            }
+        }
     }
+}
+
+/// The call an execution label (`call {index} run {n}`) belongs to.
+fn labelled(label: &str) -> usize {
+    label
+        .split(' ')
+        .nth(1)
+        .and_then(|index| index.parse().ok())
+        .expect("an execution label names its call")
 }
 
 /// Runs one seed's script, returning its outcome and what it reached.
