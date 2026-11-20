@@ -405,51 +405,48 @@ class PurePath:
 
     def with_name(self, name):
         """Return a new path with the file name changed."""
+        # nanocode: CPython 3.12 semantics (an empty-name path is checked first, and '.' is a valid name).
+        if not self.name:
+            raise ValueError("%r has an empty name" % (self,))
         p = self.parser
         if not name or p.sep in name or (p.altsep and p.altsep in name) or name == '.':
-            raise ValueError(f"Invalid name {name!r}")
-        tail = self._tail.copy()
-        if not tail:
-            raise ValueError(f"{self!r} has an empty name")
-        tail[-1] = name
-        return self._from_parsed_parts(self.drive, self.root, tail)
+            raise ValueError("Invalid name %r" % (name))
+        return self._from_parsed_parts(self.drive, self.root, self._tail[:-1] + [name])
 
     def with_stem(self, stem):
         """Return a new path with the stem changed."""
-        suffix = self.suffix
-        if not suffix:
-            return self.with_name(stem)
-        elif not stem:
-            # If the suffix is non-empty, we can't make the stem empty.
-            raise ValueError(f"{self!r} has a non-empty suffix")
-        else:
-            return self.with_name(stem + suffix)
+        return self.with_name(stem + self.suffix)
 
     def with_suffix(self, suffix):
         """Return a new path with the file suffix changed.  If the path
         has no suffix, add given suffix.  If the given suffix is an empty
         string, remove the suffix from the path.
         """
-        stem = self.stem
-        if not stem:
-            # If the stem is empty, we can't make the suffix non-empty.
-            raise ValueError(f"{self!r} has an empty name")
-        elif suffix and not suffix.startswith('.'):
-            raise ValueError(f"Invalid suffix {suffix!r}")
+        p = self.parser
+        if p.sep in suffix or p.altsep and p.altsep in suffix:
+            raise ValueError("Invalid suffix %r" % (suffix,))
+        if suffix and not suffix.startswith('.') or suffix == '.':
+            raise ValueError("Invalid suffix %r" % (suffix))
+        name = self.name
+        if not name:
+            raise ValueError("%r has an empty name" % (self,))
+        old_suffix = self.suffix
+        if not old_suffix:
+            name = name + suffix
         else:
-            return self.with_name(stem + suffix)
+            name = name[:-len(old_suffix)] + suffix
+        return self._from_parsed_parts(self.drive, self.root, self._tail[:-1] + [name])
 
     @property
     def stem(self):
         """The final path component, minus its last suffix."""
+        # nanocode: CPython 3.12 semantics: a trailing dot is part of the stem ('c.' has no suffix).
         name = self.name
         i = name.rfind('.')
-        if i != -1:
-            stem = name[:i]
-            # Stem must contain at least one non-dot character.
-            if stem.lstrip('.'):
-                return stem
-        return name
+        if 0 < i < len(name) - 1:
+            return name[:i]
+        else:
+            return name
 
     @property
     def suffix(self):
@@ -458,11 +455,12 @@ class PurePath:
 
         This includes the leading period. For example: '.txt'
         """
-        name = self.name.lstrip('.')
+        name = self.name
         i = name.rfind('.')
-        if i != -1:
+        if 0 < i < len(name) - 1:
             return name[i:]
-        return ''
+        else:
+            return ''
 
     @property
     def suffixes(self):
@@ -471,9 +469,13 @@ class PurePath:
 
         These include the leading periods. For example: ['.tar', '.gz']
         """
-        return ['.' + ext for ext in self.name.lstrip('.').split('.')[1:]]
+        name = self.name
+        if name.endswith('.'):
+            return []
+        name = name.lstrip('.')
+        return ['.' + suffix for suffix in name.split('.')[1:]]
 
-    def relative_to(self, other, *, walk_up=False):
+    def relative_to(self, other, /, *_deprecated, walk_up=False):
         """Return the relative path to another path identified by the passed
         arguments.  If the operation is not possible (because this is not
         related to the other path), raise ValueError.
@@ -481,7 +483,14 @@ class PurePath:
         The *walk_up* parameter controls whether `..` may be used to resolve
         the path.
         """
-        if not hasattr(other, 'with_segments'):
+        if _deprecated:
+            import warnings
+            msg = ("support for supplying more than one positional argument "
+                   "to pathlib.PurePath.relative_to() is deprecated and "
+                   "scheduled for removal in Python 3.14")
+            warnings.warn(msg, DeprecationWarning, stacklevel=2)
+            other = self.with_segments(other, *_deprecated)
+        elif not hasattr(other, 'with_segments'):
             other = self.with_segments(other)
         for step, path in enumerate(chain([other], other.parents)):
             if path == self or path in self.parents:
@@ -495,10 +504,17 @@ class PurePath:
         parts = ['..'] * step + self._tail[len(path._tail):]
         return self._from_parsed_parts('', '', parts)
 
-    def is_relative_to(self, other):
+    def is_relative_to(self, other, /, *_deprecated):
         """Return True if the path is relative to another path or False.
         """
-        if not hasattr(other, 'with_segments'):
+        if _deprecated:
+            import warnings
+            msg = ("support for supplying more than one argument to "
+                   "pathlib.PurePath.is_relative_to() is deprecated and "
+                   "scheduled for removal in Python 3.14")
+            warnings.warn(msg, DeprecationWarning, stacklevel=2)
+            other = self.with_segments(other, *_deprecated)
+        elif not hasattr(other, 'with_segments'):
             other = self.with_segments(other)
         return other == self or other in self.parents
 
