@@ -30,6 +30,7 @@ pub struct Machine {
     pub expires_ms: Option<u64>,
     pub pin: Pin,
     pub placement: Placement,
+    pub kinds: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -47,9 +48,23 @@ pub struct Lease {
     pub machine: String,
     pub first_cpu: u32,
     pub cores: u32,
+    pub kind: String,
     pub label: String,
     pub taken_ms: u64,
     pub until_ms: u64,
+}
+
+pub const DEFAULT_KIND: &str = "build";
+
+pub const RESERVED_KIND: &str = "reserved";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Want {
+    pub cores: u32,
+    pub kind: String,
+    pub label: String,
+    pub only: Option<String>,
+    pub ttl_ms: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -57,6 +72,7 @@ pub struct State {
     pub observations: BTreeMap<String, Observation>,
     pub leases: Vec<Lease>,
     pub next: u64,
+    pub boxes: Option<Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,6 +101,11 @@ impl Lease {
             "cores": self.cores,
             "cpus": self.cpus(),
             "prefix": prefix,
+            "kind": self.kind,
+            "env": format!(
+                "export NC_BUILD_LEASE={} NC_BUILD_LEASE_CORES={} CARGO_BUILD_JOBS={} NC_BUILD_PREFIX='{prefix}'",
+                self.id, self.cores, self.cores
+            ),
             "label": self.label,
             "taken_ms": self.taken_ms,
             "until_ms": self.until_ms,
@@ -126,6 +147,7 @@ impl State {
                 machine: text(lease, "machine")?,
                 first_cpu: u32::try_from(number(lease, "first_cpu")?).ok()?,
                 cores: u32::try_from(number(lease, "cores")?).ok()?,
+                kind: text(lease, "kind").unwrap_or_else(|| DEFAULT_KIND.to_owned()),
                 label: text(lease, "label")?,
                 taken_ms: number(lease, "taken_ms")?,
                 until_ms: number(lease, "until_ms")?,
@@ -135,6 +157,7 @@ impl State {
             observations,
             leases,
             next: number(&value, "next")?,
+            boxes: value.get("boxes").filter(|boxes| !boxes.is_null()).cloned(),
         })
     }
 
@@ -164,6 +187,7 @@ impl State {
                     "machine": lease.machine,
                     "first_cpu": lease.first_cpu,
                     "cores": lease.cores,
+                    "kind": lease.kind,
                     "label": lease.label,
                     "taken_ms": lease.taken_ms,
                     "until_ms": lease.until_ms,
@@ -174,6 +198,7 @@ impl State {
             "observations": observations,
             "leases": leases,
             "next": self.next,
+            "boxes": self.boxes,
         }))
         .unwrap_or_default()
     }
@@ -231,49 +256,104 @@ impl State {
         (start + want <= cores).then_some(start)
     }
 
-    pub fn take(
-        &mut self,
-        machines: &[Machine],
-        want: u32,
-        label: &str,
-        only: Option<&str>,
-        now_ms: u64,
-        ttl_ms: u64,
-    ) -> Option<Lease> {
+    pub fn take(&mut self, machines: &[Machine], want: &Want, now_ms: u64) -> Option<Lease> {
         self.expire(now_ms);
+        if let Some(held) = self.leases.iter_mut().find(|lease| {
+            lease.kind == RESERVED_KIND
+                && lease.label == want.label
+                && lease.cores >= want.cores
+                && want
+                    .only
+                    .as_deref()
+                    .is_none_or(|name| name == lease.machine)
+        }) {
+            held.kind.clone_from(&want.kind);
+            held.taken_ms = now_ms;
+            held.until_ms = now_ms + want.ttl_ms;
+            return Some(held.clone());
+        }
+        let mut best: Option<(u32, &Machine, u32)> = None;
         for machine in machines {
-            if only.is_some_and(|name| name != machine.name)
+            if want
+                .only
+                .as_deref()
+                .is_some_and(|name| name != machine.name)
+                || machine
+                    .kinds
+                    .as_ref()
+                    .is_some_and(|kinds| !kinds.contains(&want.kind))
                 || machine
                     .expires_ms
-                    .is_some_and(|expires| expires <= now_ms + ttl_ms.min(10 * 60 * 1000))
+                    .is_some_and(|expires| expires <= now_ms + want.ttl_ms.min(10 * 60 * 1000))
             {
                 continue;
             }
             let usage = self.usage(machine, now_ms);
             if !usage.memory_ok
-                || usage.busy + want > usage.cores
+                || usage.busy + want.cores > usage.cores
                 || (machine.placement == Placement::LastResort && !usage.observed)
-                || (machine.placement == Placement::Named && only.is_none())
+                || (machine.placement == Placement::Named && want.only.is_none())
             {
                 continue;
             }
-            let Some(first_cpu) = self.gap(machine, usage.cores, want) else {
+            let Some(first_cpu) = self.gap(machine, usage.cores, want.cores) else {
                 continue;
             };
-            self.next += 1;
-            let lease = Lease {
-                id: format!("{now_ms}-{}", self.next),
-                machine: machine.name.clone(),
-                first_cpu,
-                cores: want,
-                label: label.to_owned(),
-                taken_ms: now_ms,
-                until_ms: now_ms + ttl_ms,
-            };
-            self.leases.push(lease.clone());
-            return Some(lease);
+            let same_kind = self
+                .leases
+                .iter()
+                .filter(|lease| lease.machine == machine.name && lease.kind == want.kind)
+                .map(|lease| lease.cores)
+                .sum();
+            if best.is_none_or(|(least, _, _)| same_kind < least) {
+                best = Some((same_kind, machine, first_cpu));
+            }
         }
-        None
+        let (_, machine, first_cpu) = best?;
+        Some(self.add(&machine.name, first_cpu, want, now_ms, now_ms + want.ttl_ms))
+    }
+
+    fn add(
+        &mut self,
+        machine: &str,
+        first_cpu: u32,
+        want: &Want,
+        now_ms: u64,
+        until_ms: u64,
+    ) -> Lease {
+        self.next += 1;
+        let lease = Lease {
+            id: format!("{now_ms}-{}", self.next),
+            machine: machine.to_owned(),
+            first_cpu,
+            cores: want.cores,
+            kind: want.kind.clone(),
+            label: want.label.clone(),
+            taken_ms: now_ms,
+            until_ms,
+        };
+        self.leases.push(lease.clone());
+        lease
+    }
+
+    pub fn reserve(
+        &mut self,
+        machine: &str,
+        first_cpu: u32,
+        want: &Want,
+        now_ms: u64,
+        until_ms: u64,
+        overlap: bool,
+    ) -> Option<Lease> {
+        self.expire(now_ms);
+        let end = first_cpu + want.cores;
+        let overlaps = !overlap
+            && self.leases.iter().any(|lease| {
+                lease.machine == machine
+                    && lease.first_cpu < end
+                    && first_cpu < lease.first_cpu + lease.cores
+            });
+        (!overlaps).then(|| self.add(machine, first_cpu, want, now_ms, until_ms))
     }
 
     pub fn give(&mut self, id: &str) -> Option<Lease> {
@@ -328,6 +408,12 @@ pub fn machines_from_boxes(
                     .and_then(|expires| parse_local_minutes(&expires, -8 * 60)),
                 pin: Pin::Taskset,
                 placement: Placement::Fill,
+                kinds: entry.get("kinds").and_then(Value::as_array).map(|kinds| {
+                    kinds
+                        .iter()
+                        .filter_map(|kind| kind.as_str().map(str::to_owned))
+                        .collect()
+                }),
             })
         })
         .collect();

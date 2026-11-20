@@ -1,9 +1,10 @@
 use std::{
     collections::BTreeSet,
     fs::OpenOptions,
-    io::{self, BufRead, Read, Seek, Write},
-    path::PathBuf,
-    process::{Command, ExitCode},
+    io::{self, BufRead, BufReader, Read, Seek, Write},
+    net::{TcpListener, TcpStream},
+    path::{Path, PathBuf},
+    process::{Command, ExitCode, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -12,7 +13,7 @@ use nanocode_build_opt::{
     graph::Graph,
     plan::{self, Rules, Scope},
     schedule::{self, Job, Shard},
-    slots::{self, Machine, Observation, Pin, Placement, Pool, State},
+    slots::{self, Machine, Observation, Pin, Placement, Pool, State, Want},
 };
 
 const USAGE: &str = "usage:
@@ -20,22 +21,38 @@ const USAGE: &str = "usage:
   nc-build analyze [--timings DIR|FILE] [--since 30.days] [--manifest-path M] [--top 10]
                                       ranks structural build changes by predicted seconds saved, from cargo metadata, git log and cargo --timings
   nc-build shard K/N [--durations F]  reads job keys on stdin and prints this shard's keys, longest first (F: lines of key and milliseconds)
-  nc-build slots take --cores N --label L [--pool large|small] [--machine M] [--minutes T] [--wait S]
-                                      takes N cores on the first machine with room, filling machines in order, and prints the lease as JSON;
-                                      the large pool (default, nanocode work) fills the largest boxes first, the small pool (pyramid2 work)
-                                      the smaller boxes and dev-georgios first; gak-9 only with --machine gak-9
+  nc-build slots take --cores N --label L [--kind K] [--pool large|small] [--machine M] [--minutes T] [--wait S] [--env]
+                                      takes N cores on a machine with room and prints the lease as JSON, whose env (all --env prints) is a line to eval
+                                      (NC_BUILD_LEASE, NC_BUILD_LEASE_CORES and CARGO_BUILD_JOBS, which caps rustc at N, and NC_BUILD_PREFIX); among machines with room it picks
+                                      the one with the fewest cores leased to kind K (default build), so kinds mix and boxes stay full, then
+                                      the pool order: the large pool (default, nanocode work) the largest boxes first, the small pool
+                                      (pyramid2 work) the smaller boxes and dev-georgios first; gak-9 only with --machine gak-9
   nc-build slots give LEASE | slots renew LEASE [--minutes T]
-  nc-build slots observe MACHINE [--local]
-                                      reads the output of 'nproc; cat /proc/loadavg /proc/meminfo; ps -eLo policy=,stat=' from that machine
+  nc-build slots reserve --machine M --cpus FIRST-LAST --until 'YYYY-MM-DD HH:MM' --label L [--kind reserved] [--overlap]
+                                      holds those cpus until that time (PST) so other takes never place there; with --kind reserved the
+                                      first take with the same label (and fitting --cores) gets that lease, which give then frees;
+                                      --overlap places it over leases that hold those cpus now, which keep them until they end
+  nc-build slots observe MACHINE [--local] [--check]
+                                      reads the output of 'nproc --all; cat /proc/loadavg /proc/meminfo; ps -eLo policy=,stat=' from that machine
                                       on stdin (--local runs it here); busy cores are its runnable threads outside SCHED_IDLE, so preemptible
-                                      filler never blocks a take; without the ps lines, the 1-minute load average
+                                      filler never blocks a take, or without the ps lines the 1-minute load average; appends a sample line
+                                      to machines.log, and an alarm line when busy exceeds cores, which --check turns into exit status 2
   nc-build slots list                 each machine's busy cores, load, memory and expiry, also appended to machines.log
+  nc-build slots boxes [--set]        the machines placement uses; --set stores the boxes.json array read on stdin in the state;
+                                      an entry with a kinds list, such as [bench], takes only leases of those kinds
+  nc-build slots serve ADDR [--path P]
+                                      serves the state over HTTP for clients that set $NC_BUILD_SLOTS_URL
   nc-build ab --a CMD --b CMD [--runs N] [--setup CMD] [--label L] [--post TASK [--proposal TEXT] [--board-dir D] [--board-as A]]
                                       runs A and B interleaved N times (default 5) with setup before each run, prints medians, min, max,
                                       the delta and a verdict (faster when the ranges do not overlap, else noise) as text and a JSON line,
                                       and appends it to $NC_BUILD_AB_LOG (~/swarm/ab.jsonl); --post files the winner as a board task
                                       through $NC_BOARD_BIN (nc-board) and posts nothing on noise
-  state: $NC_BUILD_SLOTS (~/swarm/slots.json); machines: $NC_BUILD_BOXES (~/swarm/boxes.json), dev-georgios only with a fresh observation, gak-9 by name";
+  state: $NC_BUILD_SLOTS_URL or ~/.config/nc-build/slots-url (an nc-build slots serve endpoint, reached with curl); else
+  $NC_BUILD_SLOTS_GIT or ~/.config/nc-build/slots-git, a git remote whose branch $NC_BUILD_SLOTS_BRANCH (nc-build-slots) holds
+  slots.json as one parentless commit, replaced by a push with --force-with-lease on the fetched commit that retries when
+  another push won; else the file $NC_BUILD_SLOTS
+  (~/swarm/slots.json); machines: the stored boxes, else $NC_BUILD_BOXES (~/swarm/boxes.json), each until it expires;
+  dev-georgios only with a fresh observation, gak-9 by name; log: $NC_BUILD_MACHINES_LOG (~/swarm/machines.log)";
 
 pub fn main() -> ExitCode {
     let started = std::time::Instant::now();
@@ -285,6 +302,10 @@ fn git_head() -> Option<(String, String)> {
     Some((commit, name.to_owned()))
 }
 
+fn print(value: &serde_json::Value) -> Result<(), String> {
+    writeln!(io::stdout().lock(), "{value}").map_err(|error| error.to_string())
+}
+
 fn home() -> PathBuf {
     std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from)
 }
@@ -297,16 +318,26 @@ fn now_ms() -> u64 {
         })
 }
 
-fn machines(pool: Pool) -> Vec<Machine> {
-    let path = std::env::var_os("NC_BUILD_BOXES")
-        .map_or_else(|| home().join("swarm/boxes.json"), PathBuf::from);
-    let boxes = std::fs::read_to_string(path).unwrap_or_default();
+const NO_ROOM: &str = "no machine has";
+
+const PST_OFFSET_MINUTES: i64 = -8 * 60;
+
+fn machines(pool: Pool, state: &State, now: u64) -> Vec<Machine> {
+    let boxes = match &state.boxes {
+        Some(boxes) => boxes.to_string(),
+        None => std::fs::read_to_string(
+            std::env::var_os("NC_BUILD_BOXES")
+                .map_or_else(|| home().join("swarm/boxes.json"), PathBuf::from),
+        )
+        .unwrap_or_default(),
+    };
     let gak = Machine {
         name: "gak-9".to_owned(),
         cores: 6,
         expires_ms: None,
         pin: Pin::Nice,
         placement: Placement::Named,
+        kinds: None,
     };
     let dev = Machine {
         name: "dev-georgios".to_owned(),
@@ -314,11 +345,126 @@ fn machines(pool: Pool) -> Vec<Machine> {
         expires_ms: None,
         pin: Pin::Taskset,
         placement: Placement::LastResort,
+        kinds: None,
     };
-    slots::machines_from_boxes(&boxes, pool, &[gak], &[dev])
+    let mut machines = slots::machines_from_boxes(&boxes, pool, &[gak], &[dev]);
+    machines.retain(|machine| machine.expires_ms.is_none_or(|expires| expires > now));
+    machines
 }
 
-fn with_state<T>(change: impl FnOnce(&mut State) -> T) -> Result<T, String> {
+fn config(name: &str, file: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .or_else(|| std::fs::read_to_string(home().join(".config/nc-build").join(file)).ok())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn run_input(program: &str, args: &[&str], input: &str) -> Result<String, String> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("{program}: {error}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| format!("{program}: no stdin"))?
+        .write_all(input.as_bytes())
+        .map_err(|error| format!("{program}: {error}"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("{program}: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{program} {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    String::from_utf8(output.stdout).map_err(|error| format!("{program}: {error}"))
+}
+
+fn with_git_state<T>(remote: &str, mut change: impl FnMut(&mut State) -> T) -> Result<T, String> {
+    let branch = config("NC_BUILD_SLOTS_BRANCH", "slots-branch")
+        .unwrap_or_else(|| "nc-build-slots".to_owned());
+    let dir = home().join(".cache/nc-build/slots.git");
+    let dir = dir.to_str().ok_or("cache path is not UTF-8")?.to_owned();
+    std::fs::create_dir_all(&dir).map_err(|error| format!("{dir}: {error}"))?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(Path::new(&dir).join("nc-build.lock"))
+        .map_err(|error| format!("{dir}: {error}"))?;
+    lock.lock().map_err(|error| error.to_string())?;
+    if !Path::new(&dir).join("HEAD").exists() {
+        run("git", &["init", "-q", "--bare", &dir])?;
+    }
+    let git = |args: &[&str], input: &str| {
+        let mut all = vec![
+            "--git-dir",
+            dir.as_str(),
+            "-c",
+            "user.name=nc-build",
+            "-c",
+            "user.email=nc-build@localhost",
+        ];
+        all.extend_from_slice(args);
+        run_input("git", &all, input)
+    };
+    loop {
+        let parent = match git(&["fetch", "-q", "--depth", "1", remote, &branch], "") {
+            Ok(_) => Some(git(&["rev-parse", "FETCH_HEAD"], "")?.trim().to_owned()),
+            Err(error) if error.contains("couldn't find remote ref") => None,
+            Err(error) => return Err(error),
+        };
+        let json = match &parent {
+            Some(parent) => git(&["show", &format!("{parent}:slots.json")], "")?,
+            None => String::new(),
+        };
+        let mut state = State::from_json(&json)
+            .ok_or_else(|| format!("{remote} {branch}: not a slots state"))?;
+        let before = state.to_json();
+        let result = change(&mut state);
+        let after = state.to_json();
+        if parent.is_some() && after == before {
+            return Ok(result);
+        }
+        let blob = git(&["hash-object", "-w", "--stdin"], &after)?;
+        let tree = git(
+            &["mktree"],
+            &format!("100644 blob {}\tslots.json\n", blob.trim()),
+        )?;
+        let commit = git(&["commit-tree", tree.trim(), "-m", "slots"], "")?;
+        let lease = format!(
+            "--force-with-lease=refs/heads/{branch}:{}",
+            parent.as_deref().unwrap_or_default()
+        );
+        match git(
+            &[
+                "push",
+                "-q",
+                &lease,
+                remote,
+                &format!("{}:refs/heads/{branch}", commit.trim()),
+            ],
+            "",
+        ) {
+            Ok(_) => return Ok(result),
+            Err(error) if error.contains("stale info") || error.contains("rejected") => {
+                std::thread::sleep(std::time::Duration::from_millis(now_ms() % 500));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn with_state<T>(mut change: impl FnMut(&mut State) -> T) -> Result<T, String> {
+    if let Some(remote) = config("NC_BUILD_SLOTS_GIT", "slots-git") {
+        return with_git_state(&remote, change);
+    }
     let path = std::env::var_os("NC_BUILD_SLOTS")
         .map_or_else(|| home().join("swarm/slots.json"), PathBuf::from);
     let mut file = OpenOptions::new()
@@ -343,10 +489,6 @@ fn with_state<T>(change: impl FnOnce(&mut State) -> T) -> Result<T, String> {
     Ok(result)
 }
 
-fn print(value: &serde_json::Value) -> Result<(), String> {
-    writeln!(io::stdout().lock(), "{value}").map_err(|error| error.to_string())
-}
-
 fn minutes(args: &[String], default: u64) -> Result<u64, String> {
     option(args, "--minutes")
         .map_or(Ok(default), str::parse)
@@ -354,93 +496,373 @@ fn minutes(args: &[String], default: u64) -> Result<u64, String> {
         .map_err(|error| format!("--minutes: {error}"))
 }
 
+fn without(args: &[String], flag: &str, takes_value: bool) -> Vec<String> {
+    let mut kept = Vec::new();
+    let mut skip = false;
+    for arg in args {
+        if skip {
+            skip = false;
+        } else if arg == flag {
+            skip = takes_value;
+        } else {
+            kept.push(arg.clone());
+        }
+    }
+    kept
+}
+
+fn read_stdin() -> Result<String, String> {
+    let mut input = String::new();
+    io::stdin()
+        .read_to_string(&mut input)
+        .map_err(|error| error.to_string())?;
+    Ok(input)
+}
+
 fn slots_command(args: &[String]) -> Result<(), String> {
+    if args.first().map(String::as_str) == Some("serve") {
+        return serve(&args[1..]);
+    }
+    let url = config("NC_BUILD_SLOTS_URL", "slots-url");
+    let command = args.first().map(String::as_str);
+    let local = args.iter().any(|arg| arg == "--local");
+    let input = match command {
+        Some("observe") if local => run("sh", &["-c", PROBE])?,
+        Some("observe") => read_stdin()?,
+        Some("boxes") if args.iter().any(|arg| arg == "--set") => read_stdin()?,
+        _ => String::new(),
+    };
+    let wait_ms = option(args, "--wait")
+        .map_or(Ok(0), str::parse::<u64>)
+        .map_err(|error| format!("--wait: {error}"))?
+        * 1000;
+    let args = without(&without(args, "--local", false), "--wait", true);
+    let once = || match &url {
+        Some(url) => remote(url, &args, &input),
+        None => slots_once(&args, &input),
+    };
+    let started = now_ms();
+    loop {
+        match once() {
+            Ok(out) => {
+                return io::stdout()
+                    .lock()
+                    .write_all(out.as_bytes())
+                    .map_err(|error| error.to_string());
+            }
+            Err(message)
+                if message.starts_with(NO_ROOM) && now_ms().saturating_sub(started) < wait_ms =>
+            {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
+            Err(message) => return Err(message),
+        }
+    }
+}
+
+fn remote(url: &str, args: &[String], input: &str) -> Result<String, String> {
+    let request = serde_json::json!({ "args": args, "stdin": input }).to_string();
+    let mut child = Command::new("curl")
+        .args([
+            "-sS",
+            "--fail-with-body",
+            "--data-binary",
+            "@-",
+            "-H",
+            "content-type: application/json",
+            url,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("curl: {error}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or("curl: no stdin")?
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("curl: {error}"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("curl: {error}"))?;
+    let body = String::from_utf8_lossy(&output.stdout);
+    let reply: serde_json::Value = serde_json::from_str(&body).map_err(|_| {
+        format!(
+            "slots server {url}: {}{body}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })?;
+    let out = reply["out"].as_str().unwrap_or_default().to_owned();
+    if reply["ok"].as_bool() == Some(true) {
+        Ok(out)
+    } else {
+        Err(out)
+    }
+}
+
+fn serve(args: &[String]) -> Result<(), String> {
+    let listen = args.first().ok_or("serve ADDR [--path P]")?;
+    let path = option(args, "--path").unwrap_or("/").to_owned();
+    let listener = TcpListener::bind(listen).map_err(|error| format!("{listen}: {error}"))?;
+    writeln!(io::stderr(), "nc-build slots serving on {listen}")
+        .map_err(|error| error.to_string())?;
+    for stream in listener.incoming() {
+        let Ok(stream) = stream else { continue };
+        let path = path.clone();
+        std::thread::spawn(move || {
+            let _ = answer(stream, &path);
+        });
+    }
+    Ok(())
+}
+
+fn answer(stream: TcpStream, path: &str) -> io::Result<()> {
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let target = line
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or_default()
+        .to_owned();
+    let mut length = 0;
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 || line.trim().is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            length = value.trim().parse().unwrap_or(0);
+        }
+    }
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body)?;
+    let (status, reply) = if target != path {
+        (
+            "404 Not Found",
+            serde_json::json!({ "ok": false, "out": "not found" }),
+        )
+    } else {
+        let request: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+        let args: Vec<String> = request["args"]
+            .as_array()
+            .map(|args| {
+                args.iter()
+                    .filter_map(|arg| arg.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let input = request["stdin"].as_str().unwrap_or_default();
+        let result = if args.first().map(String::as_str) == Some("serve") {
+            Err(USAGE.to_owned())
+        } else {
+            slots_once(&args, input)
+        };
+        let (ok, out) = match result {
+            Ok(out) => (true, out),
+            Err(out) => (false, out),
+        };
+        ("200 OK", serde_json::json!({ "ok": ok, "out": out }))
+    };
+    let reply = reply.to_string();
+    let mut stream = stream;
+    write!(
+        stream,
+        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+        reply.len()
+    )
+}
+
+fn want(args: &[String], cores: u32, ttl_ms: u64) -> Result<Want, String> {
+    Ok(Want {
+        cores,
+        kind: option(args, "--kind")
+            .unwrap_or(slots::DEFAULT_KIND)
+            .to_owned(),
+        label: option(args, "--label").ok_or("--label L")?.to_owned(),
+        only: option(args, "--machine").map(str::to_owned),
+        ttl_ms,
+    })
+}
+
+fn slots_once(args: &[String], input: &str) -> Result<String, String> {
     let pool = match option(args, "--pool") {
         None | Some("large" | "nanocode") => Pool::Large,
         Some("small" | "pyramid2") => Pool::Small,
         Some(other) => return Err(format!("--pool {other}: large or small")),
     };
-    let machines = machines(pool);
+    let now = now_ms();
     match args.first().map(String::as_str) {
         Some("take") => {
             let cores: u32 = option(args, "--cores")
                 .ok_or("--cores N")?
                 .parse()
                 .map_err(|error| format!("--cores: {error}"))?;
-            let label = option(args, "--label").ok_or("--label L")?;
-            let ttl = minutes(args, 60)?;
-            let wait_ms = option(args, "--wait")
-                .map_or(Ok(0), str::parse::<u64>)
-                .map_err(|error| format!("--wait: {error}"))?
-                * 1000;
-            let only = option(args, "--machine");
-            let started = now_ms();
-            loop {
-                let now = now_ms();
-                let lease =
-                    with_state(|state| state.take(&machines, cores, label, only, now, ttl))?;
-                if let Some(lease) = lease {
+            let want = want(args, cores, minutes(args, 60)?)?;
+            let taken = with_state(|state| {
+                let machines = machines(pool, state, now);
+                state.take(&machines, &want, now).map(|lease| {
                     let machine = machines
                         .iter()
                         .find(|machine| machine.name == lease.machine);
-                    log_line(&format!(
-                        "take {} {} {} cores {} cpus {}",
-                        lease.id,
-                        lease.machine,
-                        lease.cores,
-                        lease.label,
-                        lease.cpus()
-                    ));
-                    return print(&lease.to_json(machine));
-                }
-                if now.saturating_sub(started) >= wait_ms {
-                    return Err(format!("no machine has {cores} free cores"));
-                }
-                std::thread::sleep(std::time::Duration::from_secs(5));
+                    (lease.to_json(machine), lease)
+                })
+            })?;
+            let (json, lease) = taken.ok_or_else(|| format!("{NO_ROOM} {cores} free cores"))?;
+            log_line(&format!(
+                "take {} {} {} cores {} {} cpus {}",
+                lease.id,
+                lease.machine,
+                lease.cores,
+                lease.kind,
+                lease.label,
+                lease.cpus()
+            ));
+            if args.iter().any(|arg| arg == "--env") {
+                return Ok(format!("{}\n", json["env"].as_str().unwrap_or_default()));
             }
+            Ok(format!("{json}\n"))
+        }
+        Some("reserve") => {
+            let machine = option(args, "--machine").ok_or("--machine M")?;
+            let (first, last) = option(args, "--cpus")
+                .and_then(|cpus| cpus.split_once('-'))
+                .and_then(|(first, last)| {
+                    Some((first.parse::<u32>().ok()?, last.parse::<u32>().ok()?))
+                })
+                .filter(|(first, last)| first <= last)
+                .ok_or("--cpus FIRST-LAST")?;
+            let until = option(args, "--until")
+                .and_then(|until| slots::parse_local_minutes(until, PST_OFFSET_MINUTES))
+                .ok_or("--until 'YYYY-MM-DD HH:MM' (PST)")?;
+            let want = want(args, last - first + 1, until.saturating_sub(now))?;
+            let overlap = args.iter().any(|arg| arg == "--overlap");
+            let lease =
+                with_state(|state| state.reserve(machine, first, &want, now, until, overlap))?
+                    .ok_or("those cpus overlap a lease")?;
+            log_line(&format!(
+                "reserve {} {} cpus {} {} until {}",
+                lease.id,
+                lease.machine,
+                lease.cpus(),
+                lease.label,
+                lease.until_ms / 1000
+            ));
+            Ok(format!("{}\n", lease.to_json(None)))
         }
         Some("give") => {
             let id = args.get(1).ok_or("give LEASE")?;
             let lease = with_state(|state| state.give(id))?.ok_or("no such lease")?;
             log_line(&format!(
-                "give {} {} {} cores {} after {}s",
+                "give {} {} {} cores {} {} after {}s",
                 lease.id,
                 lease.machine,
                 lease.cores,
+                lease.kind,
                 lease.label,
-                now_ms().saturating_sub(lease.taken_ms) / 1000
+                now.saturating_sub(lease.taken_ms) / 1000
             ));
-            Ok(())
+            Ok(String::new())
         }
         Some("renew") => {
             let id = args.get(1).ok_or("renew LEASE")?;
-            let until = now_ms() + minutes(args, 60)?;
-            let lease =
-                with_state(|state| state.renew(id, until).cloned())?.ok_or("no such lease")?;
-            let machine = machines
-                .iter()
-                .find(|machine| machine.name == lease.machine);
-            print(&lease.to_json(machine))
+            let until = now + minutes(args, 60)?;
+            let renewed = with_state(|state| {
+                let machines = machines(pool, state, now);
+                let lease = state.renew(id, until).cloned()?;
+                let machine = machines
+                    .iter()
+                    .find(|machine| machine.name == lease.machine);
+                Some(lease.to_json(machine))
+            })?
+            .ok_or("no such lease")?;
+            Ok(format!("{renewed}\n"))
         }
         Some("observe") => {
             let name = args.get(1).ok_or("observe MACHINE")?;
-            let input = if args.iter().any(|arg| arg == "--local") {
-                run("sh", &["-c", PROBE])?
-            } else {
-                let mut input = String::new();
-                io::stdin()
-                    .read_to_string(&mut input)
-                    .map_err(|error| error.to_string())?;
-                input
-            };
-            let observation = parse_observation(&input, now_ms())
+            let observation = parse_observation(input, now)
                 .ok_or("expected nproc, /proc/loadavg, /proc/meminfo and optionally ps -eLo policy=,stat= on stdin")?;
-            with_state(|state| {
-                state.observations.insert(name.clone(), observation);
+            let state = with_state(|state| {
+                state.observations.insert(name.clone(), observation.clone());
+                state.expire(now);
+                state.clone()
             })?;
-            list(&machines)
+            let machines = machines(pool, &state, now);
+            let mut out = list(&machines, &state, now);
+            let leased: u32 = state
+                .leases
+                .iter()
+                .filter(|lease| &lease.machine == name)
+                .map(|lease| lease.cores)
+                .sum();
+            let nearest = state
+                .leases
+                .iter()
+                .map(|lease| lease.until_ms)
+                .min()
+                .map_or("none".to_owned(), |until| {
+                    format!("{}s", until.saturating_sub(now) / 1000)
+                });
+            let sample = format!(
+                "sample {name} load {:.0}/{} cores, mem {}% free, slots {leased}/{} leased here, {} leases in all, nearest lease expiry {nearest}",
+                observation.load,
+                observation.cores,
+                observation.mem_available_kb * 100 / observation.mem_total_kb.max(1),
+                observation.cores,
+                state.leases.len()
+            );
+            log_line(&sample);
+            out.push_str(&sample);
+            out.push('\n');
+            if observation.load > f64::from(observation.cores) {
+                let alarm = format!(
+                    "alarm {name} load {:.0} exceeds {} cores",
+                    observation.load, observation.cores
+                );
+                log_line(&alarm);
+                out.push_str(&alarm);
+                out.push('\n');
+                if args.iter().any(|arg| arg == "--check") {
+                    return Err(out);
+                }
+            }
+            Ok(out)
         }
-        Some("list") => list(&machines),
+        Some("boxes") => {
+            if args.iter().any(|arg| arg == "--set") {
+                let boxes: serde_json::Value =
+                    serde_json::from_str(input).map_err(|error| format!("boxes: {error}"))?;
+                if !boxes.is_array() {
+                    return Err("boxes: expected a JSON array like boxes.json".to_owned());
+                }
+                with_state(|state| state.boxes = Some(boxes.clone()))?;
+            }
+            let state = with_state(|state| state.clone())?;
+            Ok(machines(pool, &state, now)
+                .iter()
+                .map(|machine| {
+                    format!(
+                        "{} {} cores{}\n",
+                        machine.name,
+                        machine.cores,
+                        machine.expires_ms.map_or(String::new(), |expires| format!(
+                            ", expires in {}m",
+                            expires.saturating_sub(now) / 60_000
+                        ))
+                    )
+                })
+                .collect())
+        }
+        Some("list") => {
+            let state = with_state(|state| {
+                state.expire(now);
+                state.clone()
+            })?;
+            Ok(list(&machines(pool, &state, now), &state, now))
+        }
         _ => Err(USAGE.to_owned()),
     }
 }
@@ -478,7 +900,7 @@ fn parse_observation(input: &str, at_ms: u64) -> Option<Observation> {
 
 const POLICIES: [&str; 7] = ["TS", "FF", "RR", "B", "ISO", "IDL", "DLN"];
 
-const PROBE: &str = "nproc; cat /proc/loadavg /proc/meminfo; ps -eLo policy=,stat=";
+const PROBE: &str = "nproc --all; cat /proc/loadavg /proc/meminfo; ps -eLo policy=,stat=";
 
 fn log_line(line: &str) {
     let path = std::env::var_os("NC_BUILD_MACHINES_LOG")
@@ -488,13 +910,8 @@ fn log_line(line: &str) {
     }
 }
 
-fn list(machines: &[Machine]) -> Result<(), String> {
-    let now = now_ms();
-    let state = with_state(|state| {
-        state.expire(now);
-        state.clone()
-    })?;
-    let mut out = io::stdout().lock();
+fn list(machines: &[Machine], state: &State, now: u64) -> String {
+    let mut out = String::new();
     let (mut busy_total, mut cores_total) = (0, 0);
     for machine in machines {
         let usage = state.usage(machine, now);
@@ -521,7 +938,8 @@ fn list(machines: &[Machine]) -> Result<(), String> {
             "{} {}/{} cores busy, {} leased, {load}, {memory}, {expires}",
             machine.name, usage.busy, usage.cores, usage.leased
         );
-        writeln!(out, "{line}").map_err(|error| error.to_string())?;
+        out.push_str(&line);
+        out.push('\n');
         log_line(&format!("machine {line}"));
         busy_total += usage.busy;
         cores_total += usage.cores;
@@ -529,18 +947,19 @@ fn list(machines: &[Machine]) -> Result<(), String> {
     let total = format!("total {busy_total}/{cores_total} cores busy");
     log_line(&total);
     for lease in &state.leases {
-        writeln!(
-            out,
-            "lease {} {} cpus {} {} until {}s",
+        out.push_str(&format!(
+            "lease {} {} cpus {} {} {} until {}s\n",
             lease.id,
             lease.machine,
             lease.cpus(),
+            lease.kind,
             lease.label,
             lease.until_ms.saturating_sub(now) / 1000
-        )
-        .map_err(|error| error.to_string())?;
+        ));
     }
-    writeln!(out, "{total}").map_err(|error| error.to_string())
+    out.push_str(&total);
+    out.push('\n');
+    out
 }
 
 fn shell(command: &str) -> Result<std::time::Duration, String> {
