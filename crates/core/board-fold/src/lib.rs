@@ -4,6 +4,7 @@ use nanocode_durability_core::StoreError;
 use serde::{Deserialize, Serialize};
 
 pub mod access;
+pub mod brief;
 pub mod intent;
 pub mod mirror;
 pub mod schedule;

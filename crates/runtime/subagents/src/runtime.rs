@@ -3180,6 +3180,16 @@ impl Registry {
         }
     }
 
+    pub(super) async fn briefed(&self, session_id: &str, task: &str) -> std::io::Result<String> {
+        let Some(coordination) = Option::clone(&self.coordination.get()) else {
+            return Ok(task.to_owned());
+        };
+        match coordination.brief(session_id).await {
+            Ok(brief) => Ok(brief.unwrap_or_else(|| task.to_owned())),
+            Err(error) => Err(std::io::Error::other(error)),
+        }
+    }
+
     async fn board_agents(
         &self,
         root_session_id: &str,

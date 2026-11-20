@@ -113,6 +113,9 @@ pub enum Mutation {
     GoalClaimedByAnyone,
     ReportsDropped,
     RetryPostsTwice,
+    BriefOverBudget,
+    BriefDropsSteer,
+    BriefLeaksParentHistory,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

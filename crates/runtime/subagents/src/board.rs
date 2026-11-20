@@ -15,6 +15,9 @@ use nanocode_turnlog::LogHost;
 
 use crate::model::{AgentId, AgentStatus, AgentUpdate, MessageSender};
 
+#[path = "brief.rs"]
+mod brief;
+
 #[cfg(not(target_family = "wasm"))]
 pub type ReadFuture<'a, T> = nanocode_sync::future::BoxFuture<'a, T>;
 
@@ -30,6 +33,9 @@ pub trait Coordination: Send + Sync {
         &'a self,
         root_session_id: &'a str,
     ) -> ReadFuture<'a, Result<BoardAgents, String>>;
+    fn brief<'a>(&'a self, _session: &'a str) -> ReadFuture<'a, Result<Option<String>, String>> {
+        Box::pin(std::future::ready(Ok(None)))
+    }
 }
 
 pub const LEASE_MS: u64 = 1 << 30;
@@ -141,6 +147,7 @@ struct Inner {
     stats: BoardStats,
     errors: Vec<String>,
     changes: watch::Sender<u64>,
+    brief: Option<nanocode_board::brief::BriefPolicy>,
 }
 
 pub struct BoardCoordination {
@@ -187,6 +194,7 @@ impl BoardCoordination {
                 stats: BoardStats::default(),
                 errors: Vec::new(),
                 changes,
+                brief: None,
             }),
         })
     }
@@ -931,5 +939,9 @@ impl Coordination for BoardCoordination {
     fn agents<'a>(&'a self, root: &'a str) -> ReadFuture<'a, Result<BoardAgents, String>> {
         let root = root.to_owned();
         Box::pin(self.inner.call(move |inner| inner.agents(&root)))
+    }
+
+    fn brief<'a>(&'a self, session: &'a str) -> ReadFuture<'a, Result<Option<String>, String>> {
+        self.briefed(session)
     }
 }
