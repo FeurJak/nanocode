@@ -649,6 +649,20 @@ name = "nanocode-flags"
 version = "0.7.0"
 
 [[package]]
+name = "nanocode-fuzz"
+version = "0.7.0"
+dependencies = [
+ "nanocode-board",
+ "nanocode-board-sync",
+ "nanocode-live-fold",
+ "nanocode-partitions",
+ "nanocode-sync",
+ "nanocode-turnlog",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nanocode-gif"
 version = "0.7.0"
 

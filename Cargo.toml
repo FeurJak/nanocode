@@ -102,6 +102,7 @@ members = [
     "crates/runtime/build-opt",
     "bin/nanocode-python",
     "bin/nanocode-sim",
+    "bin/nanocode-fuzz",
 ]
 default-members = ["crates/nanocode"]
 exclude = ["crates/patches", "bin/nanocode-front"]
