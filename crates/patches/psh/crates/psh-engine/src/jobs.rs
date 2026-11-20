@@ -43,6 +43,9 @@ pub(crate) struct Job {
     pub forgotten: Cell<bool>,
     /// The signal that ended the job's last external, if one did.
     last_signal: Cell<Option<Signal>>,
+    /// The job's task ran: bash's child ignores INT and QUIT only once it started,
+    /// so a `kill -INT $!` right after `cmd &` ends it.
+    begun: Cell<bool>,
     /// The job is one simple command: its external is the job's process.
     direct: bool,
     /// The job's task (`Sched::drop_task`), while it runs.
@@ -193,7 +196,10 @@ impl Job {
             }
             return;
         }
-        let ignored = sig == crate::host::SIGINT || sig == crate::host::SIGQUIT;
+        // A compound job ignores them at once (bash's async subshell); a simple one only
+        // once its command starts.
+        let ignored = (self.begun.get() || !self.direct)
+            && (sig == crate::host::SIGINT || sig == crate::host::SIGQUIT);
         if ignored || crate::signals::harmless(sig) || crate::signals::stops(sig) {
             return;
         }
@@ -228,8 +234,11 @@ impl Job {
     /// A signal reached the job after it finished, before the shell noticed: it ends
     /// as killed by it, as a bash child would that was still starting.
     pub(crate) fn killed_late(&self, sig: Signal) {
-        // A background job ignores INT and QUIT, as `signal` does.
-        if sig == crate::host::SIGINT || sig == crate::host::SIGQUIT {
+        // bash's child is still starting, before it ignores INT and QUIT; the first
+        // signal that ends it is the one it died of.
+        if self.died_of().is_some()
+            || (!self.direct && (sig == crate::host::SIGINT || sig == crate::host::SIGQUIT))
+        {
             return;
         }
         self.last_signal.set(Some(sig));
@@ -238,6 +247,10 @@ impl Job {
 
     /// `disown`: hidden from `jobs` and `wait`, and its externals leave the shell's run
     /// (when their wait ends; later ones start detached).
+    pub(crate) fn begin(&self) {
+        self.begun.set(true);
+    }
+
     pub(crate) fn disown(&self) {
         self.disowned.set(true);
     }
@@ -311,6 +324,7 @@ impl JobTable {
             disowned: Cell::new(false),
             forgotten: Cell::new(false),
             last_signal: Cell::new(None),
+            begun: Cell::new(false),
             direct,
             task: Cell::new(None),
             coproc: RefCell::new(None),

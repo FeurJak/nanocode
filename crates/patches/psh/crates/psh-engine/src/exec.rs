@@ -127,6 +127,7 @@ async fn run_background(vp: &mut Vp, code: &Rc<Code>, list: ListId, item: usize)
     let j = job.clone();
     let parent = vp.top.then(|| vp.sigs.clone());
     let id = vp.core.sched.spawn_task(Box::pin(async move {
+        j.begin();
         if forks
             && !direct
             && let Some(status) = fork_job(&mut sub).await
