@@ -272,7 +272,8 @@ pub(crate) async fn unary(vp: &mut Vp, op: &[u8], arg: &[u8]) -> T {
         b'S' => m.kind == FileKind::Socket,
         b'b' => m.kind == FileKind::BlockDevice,
         b'c' => m.kind == FileKind::CharDevice,
-        b's' => m.size > 0,
+        // A directory always has a size on a real file system (a block, at least).
+        b's' => m.size > 0 || m.kind == FileKind::Dir,
         b'g' => m.mode & 0o2000 != 0,
         b'u' => m.mode & 0o4000 != 0,
         b'k' => m.mode & 0o1000 != 0,
