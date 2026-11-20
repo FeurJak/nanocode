@@ -368,10 +368,24 @@ declare function DateTimezoneOffset(t: f64): f64;
 declare function ArrayBufferCreate(proto: Obj, byteLength: f64, max: Value): Obj;
 /**
  * A field of an ArrayBuffer: 0 byteLength, 1 maxByteLength, 2 resizable, 3 detached,
- * 4 immutable (D1970).
+ * 4 immutable (D1970), 5 shared (a SharedArrayBuffer), 6 a SharedArrayBuffer's waiter
+ * list (undefined for any other buffer).
  * TypeError "ArrayBuffer object expected" for anything else. @leaf
  */
 declare function BufferInfo(b: Value, field: i32): Value;
+/**
+ * A SharedArrayBuffer of byteLength zero bytes (growable up to max when max is a Number)
+ * with prototype proto; waiters (a Record [head]) is its Atomics waiter list. @leaf
+ */
+declare function SharedArrayBufferCreate(proto: Obj, byteLength: f64, max: Value, waiters: Obj): Obj;
+/**
+ * An atomic operation on element i of an integer typed array: op 0 add, 1 and, 2
+ * exchange, 3 or, 4 sub, 5 xor, 6 compareExchange (v expected, w the replacement), 7
+ * load; the operands are integral Numbers or BigInts, taken modulo 2^bits, and the
+ * result is the old element. Op 8: whether the element equals v (Atomics.wait).
+ * RangeError if i is not a valid index. @leaf
+ */
+declare function AtomicOp(o: Obj, i: f64, op: i32, v: Value, w: Value): Value;
 /** DetachArrayBuffer. @leaf */
 declare function BufferDetach(b: Obj): void;
 /** Resizes a resizable buffer in place (new bytes are 0). @leaf */
@@ -870,7 +884,7 @@ declare function RecordSet(r: Obj, i: i32, v: Value): void;
  * ProxyRevokeFunction, 16 FromAsyncFulfilled, 17 FromAsyncRejected, 18
  * AsyncDisposeFulfilled, 19 AsyncDisposeRejected, 20 DecoratorAddInitializer, 21
  * DecoratorAccessGet, 22 DecoratorAccessSet, 23 DecoratorAccessHas, 24 DecoratorParamCall, 25 IntlBoundFormat, 26
- * IntlBoundCompare) with `this` = data and its own
+ * IntlBoundCompare, 27 AtomicsWaitTimeout) with `this` = data and its own
  * arguments.
  * @leaf
  */

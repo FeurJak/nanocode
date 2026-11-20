@@ -324,6 +324,7 @@
   const typedArrays = [Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array, Int32Array, Uint32Array,
     Float32Array, Float64Array, BigInt64Array, BigUint64Array, globalThis.Float16Array].filter(Boolean);
   const plainKinds = new Set(["Object", "Array", "Arguments"]);
+  const SharedBuffer = globalThis.SharedArrayBuffer;
   function structuredClone(value, options = undefined) {
     requireArgs(arguments.length, 1, "structuredClone");
     const memory = new Map();
@@ -337,6 +338,8 @@
       if (typeof input === "symbol" || typeof input === "function") throw cloneError(input);
       if (!isObject(input)) return input;
       if (memory.has(input)) return memory.get(input);
+      // One agent: the clone of a SharedArrayBuffer is the buffer itself, sharing its memory.
+      if (SharedBuffer && input instanceof SharedBuffer) return input;
       let out;
       if (input instanceof Blob) {
         out = input instanceof File

@@ -390,13 +390,13 @@ ToIndex: reentrant
 ThisArrayBuffer: leaf
 
 AllocateArrayBuffer: reentrant
-  builtins/arraybuffer.ts:24:22  GetPrototypeFromConstructor (builtin)
+  builtins/arraybuffer.ts:26:22  GetPrototypeFromConstructor (builtin)
 
 ArrayBufferConstructor: reentrant (constructor ArrayBuffer)
-  builtins/arraybuffer.ts:37:27  ToIndex (builtin)
-  builtins/arraybuffer.ts:40:22  Get (intrinsic)
-  builtins/arraybuffer.ts:42:13  ToIndex (builtin)
-  builtins/arraybuffer.ts:45:10  AllocateArrayBuffer (builtin)
+  builtins/arraybuffer.ts:39:27  ToIndex (builtin)
+  builtins/arraybuffer.ts:42:22  Get (intrinsic)
+  builtins/arraybuffer.ts:44:13  ToIndex (builtin)
+  builtins/arraybuffer.ts:47:10  AllocateArrayBuffer (builtin)
 
 ArrayBufferIsView: leaf (ArrayBuffer.isView)
 
@@ -419,29 +419,29 @@ IsDetached: leaf
 BufferLength: leaf
 
 ArrayBufferPrototypeResize: reentrant (ArrayBuffer.prototype.resize)
-  builtins/arraybuffer.ts:128:30  ToIndex (builtin)
+  builtins/arraybuffer.ts:130:30  ToIndex (builtin)
 
 ArrayBufferPrototypeSlice: reentrant (ArrayBuffer.prototype.slice)
-  builtins/arraybuffer.ts:148:22  RelativeIndex (builtin)
-  builtins/arraybuffer.ts:149:20  RelativeIndex (builtin)
-  builtins/arraybuffer.ts:151:23  SpeciesConstructor (builtin)
-  builtins/arraybuffer.ts:152:24  Construct (intrinsic)
+  builtins/arraybuffer.ts:150:22  RelativeIndex (builtin)
+  builtins/arraybuffer.ts:151:20  RelativeIndex (builtin)
+  builtins/arraybuffer.ts:153:23  SpeciesConstructor (builtin)
+  builtins/arraybuffer.ts:154:24  Construct (intrinsic)
 
 ArrayBufferCopyAndDetach: reentrant
-  builtins/arraybuffer.ts:187:21  ToIndex (builtin)
+  builtins/arraybuffer.ts:189:21  ToIndex (builtin)
 
 ArrayBufferPrototypeTransfer: reentrant (ArrayBuffer.prototype.transfer)
-  builtins/arraybuffer.ts:214:10  ArrayBufferCopyAndDetach (builtin)
+  builtins/arraybuffer.ts:216:10  ArrayBufferCopyAndDetach (builtin)
 
 ArrayBufferPrototypeTransferToFixedLength: reentrant (ArrayBuffer.prototype.transferToFixedLength)
-  builtins/arraybuffer.ts:222:10  ArrayBufferCopyAndDetach (builtin)
+  builtins/arraybuffer.ts:224:10  ArrayBufferCopyAndDetach (builtin)
 
 ArrayBufferPrototypeTransferToImmutable: reentrant (ArrayBuffer.prototype.transferToImmutable)
-  builtins/arraybuffer.ts:230:10  ArrayBufferCopyAndDetach (builtin)
+  builtins/arraybuffer.ts:232:10  ArrayBufferCopyAndDetach (builtin)
 
 ArrayBufferPrototypeSliceToImmutable: reentrant (ArrayBuffer.prototype.sliceToImmutable)
-  builtins/arraybuffer.ts:244:22  RelativeIndex (builtin)
-  builtins/arraybuffer.ts:245:20  RelativeIndex (builtin)
+  builtins/arraybuffer.ts:246:22  RelativeIndex (builtin)
+  builtins/arraybuffer.ts:247:20  RelativeIndex (builtin)
 
 ArrayBufferPrototypeToStringTag: leaf (value ArrayBuffer.prototype[Symbol.toStringTag])
 
@@ -532,6 +532,92 @@ AsyncFromSyncIteratorThrow: reentrant (%AsyncFromSyncIteratorPrototype%.throw)
   builtins/asyncgen.ts:354:7  IteratorClose (builtin)
   builtins/asyncgen.ts:357:14  CallWithArray (intrinsic)
   builtins/asyncgen.ts:365:10  AsyncFromSyncIteratorContinuation (builtin)
+
+AtomicsObject: leaf (value Atomics)
+
+AtomicsToStringTag: leaf (value Atomics[Symbol.toStringTag])
+
+ValidateIntegerTypedArray: leaf
+
+ValidateAtomicAccess: reentrant
+  builtins/atomics.ts:44:18  ToIndex (builtin)
+
+AtomicOperand: reentrant
+  builtins/atomics.ts:54:12  ToBigInt (builtin)
+  builtins/atomics.ts:56:10  ToIntegerOrInfinity (builtin)
+
+RevalidateAtomicAccess: leaf
+
+AtomicReadModifyWrite: reentrant
+  builtins/atomics.ts:69:18  ValidateAtomicAccess (builtin)
+  builtins/atomics.ts:70:20  AtomicOperand (builtin)
+
+AtomicsAdd: reentrant (Atomics.add)
+  builtins/atomics.ts:80:10  AtomicReadModifyWrite (builtin)
+
+AtomicsAnd: reentrant (Atomics.and)
+  builtins/atomics.ts:88:10  AtomicReadModifyWrite (builtin)
+
+AtomicsCompareExchange: reentrant (Atomics.compareExchange)
+  builtins/atomics.ts:97:18  ValidateAtomicAccess (builtin)
+  builtins/atomics.ts:98:20  AtomicOperand (builtin)
+  builtins/atomics.ts:99:20  AtomicOperand (builtin)
+
+AtomicsExchange: reentrant (Atomics.exchange)
+  builtins/atomics.ts:109:10  AtomicReadModifyWrite (builtin)
+
+AtomicsIsLockFree: reentrant (Atomics.isLockFree)
+  builtins/atomics.ts:117:18  ToIntegerOrInfinity (builtin)
+
+AtomicsLoad: reentrant (Atomics.load)
+  builtins/atomics.ts:127:18  ValidateAtomicAccess (builtin)
+
+AtomicsOr: reentrant (Atomics.or)
+  builtins/atomics.ts:137:10  AtomicReadModifyWrite (builtin)
+
+AtomicsStore: reentrant (Atomics.store)
+  builtins/atomics.ts:146:18  ValidateAtomicAccess (builtin)
+  builtins/atomics.ts:147:18  AtomicOperand (builtin)
+
+AtomicsSub: reentrant (Atomics.sub)
+  builtins/atomics.ts:161:10  AtomicReadModifyWrite (builtin)
+
+AtomicsXor: reentrant (Atomics.xor)
+  builtins/atomics.ts:169:10  AtomicReadModifyWrite (builtin)
+
+DoWaitCheck: reentrant
+  builtins/atomics.ts:183:18  ValidateAtomicAccess (builtin)
+  builtins/atomics.ts:186:9  ToBigInt (builtin)
+  builtins/atomics.ts:188:9  ToIntegerOrInfinity (builtin)
+  builtins/atomics.ts:190:18  ToNumber (builtin)
+
+AtomicsWait: reentrant (Atomics.wait)
+  builtins/atomics.ts:219:18  DoWaitCheck (builtin)
+
+WaitAsyncResult: reentrant
+  builtins/atomics.ts:233:3  CreateDataPropertyOrThrow (intrinsic)
+  builtins/atomics.ts:234:3  CreateDataPropertyOrThrow (intrinsic)
+
+AtomicsWaitAsync: reentrant (Atomics.waitAsync)
+  builtins/atomics.ts:245:18  DoWaitCheck (builtin)
+  builtins/atomics.ts:248:12  WaitAsyncResult (builtin)
+  builtins/atomics.ts:260:31  Get (intrinsic)
+  builtins/atomics.ts:265:7  Call (intrinsic)
+  builtins/atomics.ts:268:10  WaitAsyncResult (builtin)
+
+AppendWaiter: leaf
+
+RemoveWaiter: leaf
+
+AtomicsWaitTimeout: reentrant (%AtomicsWaitTimeout)
+  builtins/atomics.ts:316:3  ResolvePromise (builtin)
+
+AtomicsNotify: reentrant (Atomics.notify)
+  builtins/atomics.ts:326:18  ValidateAtomicAccess (builtin)
+  builtins/atomics.ts:329:9  ToIntegerOrInfinity (builtin)
+  builtins/atomics.ts:347:7  ResolvePromise (builtin)
+
+AtomicsPause: leaf (Atomics.pause)
 
 ToBigInt: reentrant (%ToBigInt)
   builtins/bigint.ts:9:28  ToPrimitive (builtin)
@@ -3662,6 +3748,36 @@ SetPrototypeIsDisjointFrom: reentrant (Set.prototype.isDisjointFrom)
   builtins/set.ts:404:10  KeysNext (builtin)
   builtins/set.ts:405:26  Get (intrinsic)
   builtins/set.ts:406:7  IteratorClose (builtin)
+
+ThisSharedArrayBuffer: leaf
+
+AllocateSharedArrayBuffer: reentrant
+  builtins/sharedarraybuffer.ts:19:22  GetPrototypeFromConstructor (builtin)
+
+SharedArrayBufferConstructor: reentrant (constructor SharedArrayBuffer)
+  builtins/sharedarraybuffer.ts:34:27  ToIndex (builtin)
+  builtins/sharedarraybuffer.ts:37:22  Get (intrinsic)
+  builtins/sharedarraybuffer.ts:39:13  ToIndex (builtin)
+  builtins/sharedarraybuffer.ts:42:10  AllocateSharedArrayBuffer (builtin)
+
+SharedArrayBufferSpecies: leaf (get SharedArrayBuffer[Symbol.species])
+
+SharedArrayBufferPrototypeByteLength: leaf (get SharedArrayBuffer.prototype.byteLength)
+
+SharedArrayBufferPrototypeGrow: reentrant (SharedArrayBuffer.prototype.grow)
+  builtins/sharedarraybuffer.ts:70:30  ToIndex (builtin)
+
+SharedArrayBufferPrototypeGrowable: leaf (get SharedArrayBuffer.prototype.growable)
+
+SharedArrayBufferPrototypeMaxByteLength: leaf (get SharedArrayBuffer.prototype.maxByteLength)
+
+SharedArrayBufferPrototypeSlice: reentrant (SharedArrayBuffer.prototype.slice)
+  builtins/sharedarraybuffer.ts:103:22  RelativeIndex (builtin)
+  builtins/sharedarraybuffer.ts:104:20  RelativeIndex (builtin)
+  builtins/sharedarraybuffer.ts:106:23  SpeciesConstructor (builtin)
+  builtins/sharedarraybuffer.ts:107:24  Construct (intrinsic)
+
+SharedArrayBufferPrototypeToStringTag: leaf (value SharedArrayBuffer.prototype[Symbol.toStringTag])
 
 ArraySpread: reentrant (%ArraySpread)
   builtins/spread.ts:10:25  GetIterator (builtin)

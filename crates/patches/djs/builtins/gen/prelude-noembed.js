@@ -1081,11 +1081,13 @@ function ToIndex(v) {
 
 // builtins/arraybuffer.ts:14
 function ThisArrayBuffer(v) {
-  %BufferInfo(v, 0);
+  if (%AsBool(%BufferInfo(v, 5))) {
+    throw %NewTypeError("ArrayBuffer expected, got a SharedArrayBuffer");
+  }
   return %AsObj(v);
 }
 
-// builtins/arraybuffer.ts:20
+// builtins/arraybuffer.ts:22
 function AllocateArrayBuffer(newTarget, byteLength, max) {
   if (max !== undefined && byteLength > %AsNumber(max)) {
     throw %NewRangeError("invalid array buffer max length");
@@ -1094,7 +1096,7 @@ function AllocateArrayBuffer(newTarget, byteLength, max) {
   return %ArrayBufferCreate(proto, byteLength, max);
 }
 
-// builtins/arraybuffer.ts:33 constructor ArrayBuffer
+// builtins/arraybuffer.ts:35 constructor ArrayBuffer
 function ArrayBufferConstructor(length, options) {
   if (new.target === undefined) {
     throw %NewTypeError("must be called with new");
@@ -1110,59 +1112,59 @@ function ArrayBufferConstructor(length, options) {
   return AllocateArrayBuffer(new.target, byteLength, max);
 }
 
-// builtins/arraybuffer.ts:52 ArrayBuffer.isView
+// builtins/arraybuffer.ts:54 ArrayBuffer.isView
 function ArrayBufferIsView(arg) {
   return %IsTypedArray(arg) || %IsDataView(arg);
 }
 
-// builtins/arraybuffer.ts:60 get ArrayBuffer[Symbol.species]
+// builtins/arraybuffer.ts:62 get ArrayBuffer[Symbol.species]
 function ArrayBufferSpecies() {
   return this;
 }
 
-// builtins/arraybuffer.ts:68 get ArrayBuffer.prototype.byteLength
+// builtins/arraybuffer.ts:70 get ArrayBuffer.prototype.byteLength
 function ArrayBufferPrototypeByteLength() {
-  return %BufferInfo(this, 0);
+  return %BufferInfo(((%AsBool(%BufferInfo(this, 5))) ? %Throw(%NewTypeError("ArrayBuffer expected, got a SharedArrayBuffer")) : %AsObj(this)), 0);
 }
 
-// builtins/arraybuffer.ts:76 get ArrayBuffer.prototype.maxByteLength
+// builtins/arraybuffer.ts:78 get ArrayBuffer.prototype.maxByteLength
 function ArrayBufferPrototypeMaxByteLength() {
-  return %BufferInfo(this, 1);
+  return %BufferInfo(((%AsBool(%BufferInfo(this, 5))) ? %Throw(%NewTypeError("ArrayBuffer expected, got a SharedArrayBuffer")) : %AsObj(this)), 1);
 }
 
-// builtins/arraybuffer.ts:84 get ArrayBuffer.prototype.resizable
+// builtins/arraybuffer.ts:86 get ArrayBuffer.prototype.resizable
 function ArrayBufferPrototypeResizable() {
-  return %BufferInfo(this, 2);
+  return %BufferInfo(((%AsBool(%BufferInfo(this, 5))) ? %Throw(%NewTypeError("ArrayBuffer expected, got a SharedArrayBuffer")) : %AsObj(this)), 2);
 }
 
-// builtins/arraybuffer.ts:92 get ArrayBuffer.prototype.detached
+// builtins/arraybuffer.ts:94 get ArrayBuffer.prototype.detached
 function ArrayBufferPrototypeDetached() {
-  return %BufferInfo(this, 3);
+  return %BufferInfo(((%AsBool(%BufferInfo(this, 5))) ? %Throw(%NewTypeError("ArrayBuffer expected, got a SharedArrayBuffer")) : %AsObj(this)), 3);
 }
 
-// builtins/arraybuffer.ts:100 get ArrayBuffer.prototype.immutable
+// builtins/arraybuffer.ts:102 get ArrayBuffer.prototype.immutable
 function ArrayBufferPrototypeImmutable() {
-  return %BufferInfo(this, 4);
+  return %BufferInfo(((%AsBool(%BufferInfo(this, 5))) ? %Throw(%NewTypeError("ArrayBuffer expected, got a SharedArrayBuffer")) : %AsObj(this)), 4);
 }
 
-// builtins/arraybuffer.ts:105
+// builtins/arraybuffer.ts:107
 function IsImmutableBuffer(b) {
   return %AsBool(%BufferInfo(b, 4));
 }
 
-// builtins/arraybuffer.ts:110
+// builtins/arraybuffer.ts:112
 function IsDetached(b) {
   return %AsBool(%BufferInfo(b, 3));
 }
 
-// builtins/arraybuffer.ts:115
+// builtins/arraybuffer.ts:117
 function BufferLength(b) {
   return %AsNumber(%BufferInfo(b, 0));
 }
 
-// builtins/arraybuffer.ts:123 ArrayBuffer.prototype.resize
+// builtins/arraybuffer.ts:125 ArrayBuffer.prototype.resize
 function ArrayBufferPrototypeResize(newLength) {
-  const o = ((%BufferInfo(this, 0), %AsObj(this)));
+  const o = ((%AsBool(%BufferInfo(this, 5))) ? %Throw(%NewTypeError("ArrayBuffer expected, got a SharedArrayBuffer")) : %AsObj(this));
   if (!%AsBool(%BufferInfo(o, 2))) {
     throw %NewTypeError("array buffer is not resizable");
   }
@@ -1176,9 +1178,9 @@ function ArrayBufferPrototypeResize(newLength) {
   %BufferResize(o, newByteLength);
 }
 
-// builtins/arraybuffer.ts:142 ArrayBuffer.prototype.slice
+// builtins/arraybuffer.ts:144 ArrayBuffer.prototype.slice
 function ArrayBufferPrototypeSlice(start, end) {
-  const o = ((%BufferInfo(this, 0), %AsObj(this)));
+  const o = ((%AsBool(%BufferInfo(this, 5))) ? %Throw(%NewTypeError("ArrayBuffer expected, got a SharedArrayBuffer")) : %AsObj(this));
   if ((%AsBool(%BufferInfo(o, 3)))) {
     throw %NewTypeError("ArrayBuffer is detached");
   }
@@ -1188,7 +1190,7 @@ function ArrayBufferPrototypeSlice(start, end) {
   const newLen = fin > first ? fin - first : 0;
   const ctor = SpeciesConstructor(o, %RealmConstructor("ArrayBuffer"));
   const created = %Construct(ctor, newLen);
-  %BufferInfo(created, 0);
+  ((%AsBool(%BufferInfo(created, 5))) ? %Throw(%NewTypeError("ArrayBuffer expected, got a SharedArrayBuffer")) : %AsObj(created));
   if ((%AsBool(%BufferInfo(created, 3)))) {
     throw %NewTypeError("ArrayBuffer is detached");
   }
@@ -1212,9 +1214,9 @@ function ArrayBufferPrototypeSlice(start, end) {
   return created;
 }
 
-// builtins/arraybuffer.ts:181
+// builtins/arraybuffer.ts:183
 function ArrayBufferCopyAndDetach(thisValue, newLength, mode) {
-  const o = ((%BufferInfo(thisValue, 0), %AsObj(thisValue)));
+  const o = ((%AsBool(%BufferInfo(thisValue, 5))) ? %Throw(%NewTypeError("ArrayBuffer expected, got a SharedArrayBuffer")) : %AsObj(thisValue));
   let newByteLength = 0;
   if (newLength === undefined) {
     newByteLength = (%AsNumber(%BufferInfo(o, 0)));
@@ -1240,24 +1242,24 @@ function ArrayBufferCopyAndDetach(thisValue, newLength, mode) {
   return %BufferTransfer(o, newByteLength, max);
 }
 
-// builtins/arraybuffer.ts:213 ArrayBuffer.prototype.transfer
+// builtins/arraybuffer.ts:215 ArrayBuffer.prototype.transfer
 function ArrayBufferPrototypeTransfer(newLength) {
   return ArrayBufferCopyAndDetach(this, newLength, 1);
 }
 
-// builtins/arraybuffer.ts:221 ArrayBuffer.prototype.transferToFixedLength
+// builtins/arraybuffer.ts:223 ArrayBuffer.prototype.transferToFixedLength
 function ArrayBufferPrototypeTransferToFixedLength(newLength) {
   return ArrayBufferCopyAndDetach(this, newLength, 0);
 }
 
-// builtins/arraybuffer.ts:229 ArrayBuffer.prototype.transferToImmutable
+// builtins/arraybuffer.ts:231 ArrayBuffer.prototype.transferToImmutable
 function ArrayBufferPrototypeTransferToImmutable(newLength) {
   return ArrayBufferCopyAndDetach(this, newLength, 2);
 }
 
-// builtins/arraybuffer.ts:238 ArrayBuffer.prototype.sliceToImmutable
+// builtins/arraybuffer.ts:240 ArrayBuffer.prototype.sliceToImmutable
 function ArrayBufferPrototypeSliceToImmutable(start, end) {
-  const o = ((%BufferInfo(this, 0), %AsObj(this)));
+  const o = ((%AsBool(%BufferInfo(this, 5))) ? %Throw(%NewTypeError("ArrayBuffer expected, got a SharedArrayBuffer")) : %AsObj(this));
   if ((%AsBool(%BufferInfo(o, 3)))) {
     throw %NewTypeError("ArrayBuffer is detached");
   }
@@ -1276,7 +1278,7 @@ function ArrayBufferPrototypeSliceToImmutable(start, end) {
   return created;
 }
 
-// builtins/arraybuffer.ts:263 value ArrayBuffer.prototype[Symbol.toStringTag]
+// builtins/arraybuffer.ts:265 value ArrayBuffer.prototype[Symbol.toStringTag]
 function ArrayBufferPrototypeToStringTag() {
   return "ArrayBuffer";
 }
@@ -1574,6 +1576,307 @@ function AsyncFromSyncIteratorThrow(...args) {
     return promise;
   }
   return AsyncFromSyncIteratorContinuation(%AsObj(result), iterator, true);
+}
+
+// builtins/atomics.ts:12 value Atomics
+function AtomicsObject() {
+  return %ObjectCreate(%RealmIntrinsic("ObjectPrototype"));
+}
+
+// builtins/atomics.ts:21 value Atomics[Symbol.toStringTag]
+function AtomicsToStringTag() {
+  return "Atomics";
+}
+
+// builtins/atomics.ts:29
+function ValidateIntegerTypedArray(v, waitable) {
+  let $1;
+  const o = ((%TypedArrayField(v, 0), ($1 = %AsObj(v), ((%AsBool(%TypedArrayField($1, 5)))) ? %Throw(%NewTypeError("ArrayBuffer is detached or resized")) : $1)));
+  const kind = (%F64ToI32(%AsNumber(%TypedArrayField(o, 0))));
+  if (waitable) {
+    if (kind !== 5 && kind !== 10) {
+      throw %NewTypeError("Atomics operation needs an Int32Array or BigInt64Array");
+    }
+  } else if (kind === 2 || kind === 7 || kind === 8 || kind === 9) {
+    throw %NewTypeError("Atomics operation needs an integer typed array");
+  }
+  return o;
+}
+
+// builtins/atomics.ts:43
+function ValidateAtomicAccess(o, requestIndex) {
+  const i = ToIndex(requestIndex);
+  if (i >= (%AsNumber(%TypedArrayField(o, 3)))) {
+    throw %NewRangeError("Invalid atomic access index");
+  }
+  return i;
+}
+
+// builtins/atomics.ts:52
+function AtomicOperand(o, v) {
+  if ((%F64ToI32(%AsNumber(%TypedArrayField(o, 0)))) >= 10) {
+    return (%ToBigIntPrimitive(ToPrimitive(v, "number")));
+  }
+  return (%ToIntegerOrInfinityNumber(((%IsObject(v)) ? %ToNumberPrimitive(ToPrimitive(v, "number")) : %ToNumberPrimitive(v))));
+}
+
+// builtins/atomics.ts:60
+function RevalidateAtomicAccess(o) {
+  if ((%AsBool(%TypedArrayField(o, 5)))) {
+    throw %NewTypeError("ArrayBuffer is detached or resized");
+  }
+}
+
+// builtins/atomics.ts:67
+function AtomicReadModifyWrite(ta, index, value, op) {
+  let $1;
+  const o = ValidateIntegerTypedArray(ta, false);
+  const i = (($1 = ToIndex(index), ($1 >= (%AsNumber(%TypedArrayField(o, 3)))) ? %Throw(%NewRangeError("Invalid atomic access index")) : $1));
+  const v = AtomicOperand(o, value);
+  (((%AsBool(%TypedArrayField(o, 5)))) ? %Throw(%NewTypeError("ArrayBuffer is detached or resized")) : undefined);
+  return %AtomicOp(o, i, op, v, undefined);
+}
+
+// builtins/atomics.ts:79 Atomics.add
+function AtomicsAdd(ta, index, value) {
+  return AtomicReadModifyWrite(ta, index, value, 0);
+}
+
+// builtins/atomics.ts:87 Atomics.and
+function AtomicsAnd(ta, index, value) {
+  return AtomicReadModifyWrite(ta, index, value, 1);
+}
+
+// builtins/atomics.ts:95 Atomics.compareExchange
+function AtomicsCompareExchange(ta, index, expected, replacement) {
+  let $1;
+  const o = ValidateIntegerTypedArray(ta, false);
+  const i = (($1 = ToIndex(index), ($1 >= (%AsNumber(%TypedArrayField(o, 3)))) ? %Throw(%NewRangeError("Invalid atomic access index")) : $1));
+  const e = AtomicOperand(o, expected);
+  const r = AtomicOperand(o, replacement);
+  (((%AsBool(%TypedArrayField(o, 5)))) ? %Throw(%NewTypeError("ArrayBuffer is detached or resized")) : undefined);
+  return %AtomicOp(o, i, 6, e, r);
+}
+
+// builtins/atomics.ts:108 Atomics.exchange
+function AtomicsExchange(ta, index, value) {
+  return AtomicReadModifyWrite(ta, index, value, 2);
+}
+
+// builtins/atomics.ts:116 Atomics.isLockFree
+function AtomicsIsLockFree(size) {
+  const n = (%ToIntegerOrInfinityNumber(((%IsObject(size)) ? %ToNumberPrimitive(ToPrimitive(size, "number")) : %ToNumberPrimitive(size))));
+  return n === 1 || n === 2 || n === 4 || n === 8;
+}
+
+// builtins/atomics.ts:125 Atomics.load
+function AtomicsLoad(ta, index) {
+  let $1;
+  const o = ValidateIntegerTypedArray(ta, false);
+  const i = (($1 = ToIndex(index), ($1 >= (%AsNumber(%TypedArrayField(o, 3)))) ? %Throw(%NewRangeError("Invalid atomic access index")) : $1));
+  (((%AsBool(%TypedArrayField(o, 5)))) ? %Throw(%NewTypeError("ArrayBuffer is detached or resized")) : undefined);
+  return %AtomicOp(o, i, 7, undefined, undefined);
+}
+
+// builtins/atomics.ts:136 Atomics.or
+function AtomicsOr(ta, index, value) {
+  return AtomicReadModifyWrite(ta, index, value, 3);
+}
+
+// builtins/atomics.ts:144 Atomics.store
+function AtomicsStore(ta, index, value) {
+  let $1;
+  const o = ValidateIntegerTypedArray(ta, false);
+  const i = (($1 = ToIndex(index), ($1 >= (%AsNumber(%TypedArrayField(o, 3)))) ? %Throw(%NewRangeError("Invalid atomic access index")) : $1));
+  let v = AtomicOperand(o, value);
+  if ((%F64ToI32(%AsNumber(%TypedArrayField(o, 0)))) < 10) {
+    v = %AsNumber(v) + 0;
+  }
+  (((%AsBool(%TypedArrayField(o, 5)))) ? %Throw(%NewTypeError("ArrayBuffer is detached or resized")) : undefined);
+  %AtomicOp(o, i, 2, v, undefined);
+  return v;
+}
+
+// builtins/atomics.ts:160 Atomics.sub
+function AtomicsSub(ta, index, value) {
+  return AtomicReadModifyWrite(ta, index, value, 4);
+}
+
+// builtins/atomics.ts:168 Atomics.xor
+function AtomicsXor(ta, index, value) {
+  return AtomicReadModifyWrite(ta, index, value, 5);
+}
+
+// builtins/atomics.ts:177
+function DoWaitCheck(ta, index, value, timeout) {
+  let $1;
+  const o = ValidateIntegerTypedArray(ta, true);
+  const buffer = %AsObj(%TypedArrayField(o, 1));
+  if (!%AsBool(%BufferInfo(buffer, 5))) {
+    throw %NewTypeError("Atomics.wait needs a shared typed array");
+  }
+  const i = (($1 = ToIndex(index), ($1 >= (%AsNumber(%TypedArrayField(o, 3)))) ? %Throw(%NewRangeError("Invalid atomic access index")) : $1));
+  let v = undefined;
+  if ((%F64ToI32(%AsNumber(%TypedArrayField(o, 0)))) === 10) {
+    v = (%ToBigIntPrimitive(ToPrimitive(value, "number")));
+  } else {
+    v = (%ToIntegerOrInfinityNumber(((%IsObject(value)) ? %ToNumberPrimitive(ToPrimitive(value, "number")) : %ToNumberPrimitive(value))));
+  }
+  const q = ((%IsObject(timeout)) ? %ToNumberPrimitive(ToPrimitive(timeout, "number")) : %ToNumberPrimitive(timeout));
+  let t = q;
+  if (q !== q) {
+    t = 1 / 0;
+  } else if (q < 0) {
+    t = 0;
+  }
+  const r = %NewRecord(4);
+  %RecordSet(r, 1, %BufferInfo(buffer, 6));
+  %RecordSet(r, 2, i);
+  %RecordSet(r, 3, t);
+  (((%AsBool(%TypedArrayField(o, 5)))) ? %Throw(%NewTypeError("ArrayBuffer is detached or resized")) : undefined);
+  if (!%AsBool(%AtomicOp(o, i, 8, v, undefined))) {
+    %RecordSet(r, 0, "not-equal");
+  } else if (t === 0) {
+    %RecordSet(r, 0, "timed-out");
+  } else {
+    %RecordSet(r, 0, undefined);
+  }
+  return r;
+}
+
+// builtins/atomics.ts:218 Atomics.wait
+function AtomicsWait(ta, index, value, timeout) {
+  const r = DoWaitCheck(ta, index, value, timeout);
+  const result = %RecordGet(r, 0);
+  if (result !== undefined) {
+    return %AsStr(result);
+  }
+  if (%AsNumber(%RecordGet(r, 3)) === 1 / 0) {
+    throw %NewTypeError("Atomics.wait cannot be called in this context");
+  }
+  return "timed-out";
+}
+
+// builtins/atomics.ts:231
+function WaitAsyncResult(isAsync, value) {
+  const o = %ObjectCreate(%RealmIntrinsic("ObjectPrototype"));
+  %CreateDataPropertyOrThrow(o, "async", isAsync);
+  %CreateDataPropertyOrThrow(o, "value", value);
+  return o;
+}
+
+// builtins/atomics.ts:244 Atomics.waitAsync
+function AtomicsWaitAsync(ta, index, value, timeout) {
+  const r = DoWaitCheck(ta, index, value, timeout);
+  const result = %RecordGet(r, 0);
+  if (result !== undefined) {
+    return WaitAsyncResult(false, result);
+  }
+  const list = %AsObj(%RecordGet(r, 1));
+  const promise = %PromiseCreate(%RealmIntrinsic("PromisePrototype"));
+  const waiter = %NewRecord(4);
+  %RecordSet(waiter, 0, %RecordGet(r, 2));
+  %RecordSet(waiter, 1, promise);
+  %RecordSet(waiter, 2, undefined);
+  %RecordSet(waiter, 3, false);
+  AppendWaiter(list, waiter);
+  const t = %AsNumber(%RecordGet(r, 3));
+  if (t !== 1 / 0) {
+    const setTimeout = %Get(%GlobalObject(), "setTimeout");
+    if (%IsCallable(setTimeout)) {
+      const data = %NewRecord(2);
+      %RecordSet(data, 0, list);
+      %RecordSet(data, 1, waiter);
+      %Call(setTimeout, undefined, %NewBuiltinClosure(27, data, 0), t);
+    }
+  }
+  return WaitAsyncResult(true, promise);
+}
+
+// builtins/atomics.ts:272
+function AppendWaiter(list, waiter) {
+  let cur = %RecordGet(list, 0);
+  if (cur === undefined) {
+    %RecordSet(list, 0, waiter);
+    return;
+  }
+  while (%RecordGet(%AsObj(cur), 2) !== undefined) {
+    cur = %RecordGet(%AsObj(cur), 2);
+  }
+  %RecordSet(%AsObj(cur), 2, waiter);
+}
+
+// builtins/atomics.ts:285
+function RemoveWaiter(list, waiter) {
+  let prev = undefined;
+  let cur = %RecordGet(list, 0);
+  while (cur !== undefined) {
+    const next = %RecordGet(%AsObj(cur), 2);
+    if (cur === waiter) {
+      if (prev === undefined) {
+        %RecordSet(list, 0, next);
+      } else {
+        %RecordSet(%AsObj(prev), 2, next);
+      }
+      return;
+    }
+    prev = cur;
+    cur = next;
+  }
+}
+
+// builtins/atomics.ts:308 %AtomicsWaitTimeout
+function AtomicsWaitTimeout() {
+  const data = %AsObj(this);
+  const waiter = %AsObj(%RecordGet(data, 1));
+  if (%AsBool(%RecordGet(waiter, 3))) {
+    return;
+  }
+  %RecordSet(waiter, 3, true);
+  RemoveWaiter(%AsObj(%RecordGet(data, 0)), waiter);
+  ResolvePromise(%AsObj(%RecordGet(waiter, 1)), "timed-out");
+}
+
+// builtins/atomics.ts:324 Atomics.notify
+function AtomicsNotify(ta, index, count) {
+  let $1;
+  const o = ValidateIntegerTypedArray(ta, true);
+  const i = (($1 = ToIndex(index), ($1 >= (%AsNumber(%TypedArrayField(o, 3)))) ? %Throw(%NewRangeError("Invalid atomic access index")) : $1));
+  let c = 1 / 0;
+  if (count !== undefined) {
+    c = (%ToIntegerOrInfinityNumber(((%IsObject(count)) ? %ToNumberPrimitive(ToPrimitive(count, "number")) : %ToNumberPrimitive(count))));
+    if (c < 0) {
+      c = 0;
+    }
+  }
+  const buffer = %AsObj(%TypedArrayField(o, 1));
+  if (!%AsBool(%BufferInfo(buffer, 5))) {
+    return 0;
+  }
+  const list = %AsObj(%BufferInfo(buffer, 6));
+  let n = 0;
+  let cur = %RecordGet(list, 0);
+  while (cur !== undefined && n < c) {
+    const w = %AsObj(cur);
+    cur = %RecordGet(w, 2);
+    if (%AsNumber(%RecordGet(w, 0)) === i) {
+      RemoveWaiter(list, w);
+      %RecordSet(w, 3, true);
+      ResolvePromise(%AsObj(%RecordGet(w, 1)), "ok");
+      n = n + 1;
+    }
+  }
+  return n;
+}
+
+// builtins/atomics.ts:359 Atomics.pause
+function AtomicsPause(n) {
+  let $1;
+  if (n !== undefined) {
+    if (!%IsNumber(n) || !($1 = %AsNumber(n), $1 === $1 && $1 !== 1 / 0 && $1 !== -1 / 0) || %ToIntegerOrInfinityNumber(%AsNumber(n)) !== %AsNumber(n)) {
+      throw %NewTypeError("Atomics.pause needs an integral Number");
+    }
+  }
 }
 
 // builtins/bigint.ts:8 %ToBigInt
@@ -9914,6 +10217,104 @@ function SetPrototypeIsDisjointFrom(other) {
   return true;
 }
 
+// builtins/sharedarraybuffer.ts:7
+function ThisSharedArrayBuffer(v) {
+  if (!%AsBool(%BufferInfo(v, 5))) {
+    throw %NewTypeError("SharedArrayBuffer expected");
+  }
+  return %AsObj(v);
+}
+
+// builtins/sharedarraybuffer.ts:15
+function AllocateSharedArrayBuffer(newTarget, byteLength, max) {
+  if (max !== undefined && byteLength > %AsNumber(max)) {
+    throw %NewRangeError("invalid array buffer max length");
+  }
+  const proto = GetPrototypeFromConstructor(newTarget, "SharedArrayBufferPrototype");
+  const waiters = %NewRecord(1);
+  %RecordSet(waiters, 0, undefined);
+  return %SharedArrayBufferCreate(proto, byteLength, max, waiters);
+}
+
+// builtins/sharedarraybuffer.ts:30 constructor SharedArrayBuffer
+function SharedArrayBufferConstructor(length, options) {
+  if (new.target === undefined) {
+    throw %NewTypeError("must be called with new");
+  }
+  const byteLength = ToIndex(length);
+  let max = undefined;
+  if (%IsObject(options)) {
+    const m = %Get(%AsObj(options), "maxByteLength");
+    if (m !== undefined) {
+      max = ToIndex(m);
+    }
+  }
+  return AllocateSharedArrayBuffer(new.target, byteLength, max);
+}
+
+// builtins/sharedarraybuffer.ts:49 get SharedArrayBuffer[Symbol.species]
+function SharedArrayBufferSpecies() {
+  return this;
+}
+
+// builtins/sharedarraybuffer.ts:57 get SharedArrayBuffer.prototype.byteLength
+function SharedArrayBufferPrototypeByteLength() {
+  return %BufferInfo(((!%AsBool(%BufferInfo(this, 5))) ? %Throw(%NewTypeError("SharedArrayBuffer expected")) : %AsObj(this)), 0);
+}
+
+// builtins/sharedarraybuffer.ts:65 SharedArrayBuffer.prototype.grow
+function SharedArrayBufferPrototypeGrow(newLength) {
+  const o = ((!%AsBool(%BufferInfo(this, 5))) ? %Throw(%NewTypeError("SharedArrayBuffer expected")) : %AsObj(this));
+  if (!%AsBool(%BufferInfo(o, 2))) {
+    throw %NewTypeError("SharedArrayBuffer is not growable");
+  }
+  const newByteLength = ToIndex(newLength);
+  if (newByteLength > %AsNumber(%BufferInfo(o, 1))) {
+    throw %NewRangeError("invalid array buffer length");
+  }
+  if (newByteLength < (%AsNumber(%BufferInfo(o, 0)))) {
+    throw %NewRangeError("SharedArrayBuffer cannot shrink");
+  }
+  %BufferResize(o, newByteLength);
+}
+
+// builtins/sharedarraybuffer.ts:84 get SharedArrayBuffer.prototype.growable
+function SharedArrayBufferPrototypeGrowable() {
+  return %BufferInfo(((!%AsBool(%BufferInfo(this, 5))) ? %Throw(%NewTypeError("SharedArrayBuffer expected")) : %AsObj(this)), 2);
+}
+
+// builtins/sharedarraybuffer.ts:92 get SharedArrayBuffer.prototype.maxByteLength
+function SharedArrayBufferPrototypeMaxByteLength() {
+  return %BufferInfo(((!%AsBool(%BufferInfo(this, 5))) ? %Throw(%NewTypeError("SharedArrayBuffer expected")) : %AsObj(this)), 1);
+}
+
+// builtins/sharedarraybuffer.ts:100 SharedArrayBuffer.prototype.slice
+function SharedArrayBufferPrototypeSlice(start, end) {
+  const o = ((!%AsBool(%BufferInfo(this, 5))) ? %Throw(%NewTypeError("SharedArrayBuffer expected")) : %AsObj(this));
+  const len = (%AsNumber(%BufferInfo(o, 0)));
+  const first = RelativeIndex(start, len, 0);
+  const fin = RelativeIndex(end, len, len);
+  const newLen = fin > first ? fin - first : 0;
+  const ctor = SpeciesConstructor(o, %RealmConstructor("SharedArrayBuffer"));
+  const created = %Construct(ctor, newLen);
+  ((!%AsBool(%BufferInfo(created, 5))) ? %Throw(%NewTypeError("SharedArrayBuffer expected")) : %AsObj(created));
+  if (created === o) {
+    throw %NewTypeError("cannot use identical SharedArrayBuffer");
+  }
+  if ((%AsNumber(%BufferInfo(created, 0))) < newLen) {
+    throw %NewTypeError("new SharedArrayBuffer is too small");
+  }
+  if (newLen > 0) {
+    %BufferCopy(o, first, created, 0, newLen);
+  }
+  return created;
+}
+
+// builtins/sharedarraybuffer.ts:126 value SharedArrayBuffer.prototype[Symbol.toStringTag]
+function SharedArrayBufferPrototypeToStringTag() {
+  return "SharedArrayBuffer";
+}
+
 // builtins/spread.ts:9 %ArraySpread
 function ArraySpread(arr, src) {
   const iterator = GetIterator(src);
@@ -12388,6 +12789,7 @@ function GlobalAtob(...args) {
 %InstallMethod("ArrayBuffer", "isView", ArrayBufferIsView, 1);
 %InstallAccessor("ArrayBuffer", %WellKnownSymbol("species"), ArrayBufferSpecies, false);
 %InstallPrototype("globalThis", "ArrayBuffer", undefined);
+%InstallValue("globalThis", "Atomics", AtomicsObject(), 5);
 %InstallConstructor("globalThis", "BigInt", BigIntConstructor, 1, undefined);
 %InstallMethod("BigInt", "asUintN", BigIntAsUintNBuiltin, 2);
 %InstallMethod("BigInt", "asIntN", BigIntAsIntNBuiltin, 2);
@@ -12532,6 +12934,9 @@ function GlobalAtob(...args) {
 %InstallConstructor("globalThis", "Set", SetConstructor, 0, undefined);
 %InstallAccessor("Set", %WellKnownSymbol("species"), SetSpecies, false);
 %InstallPrototype("globalThis", "Set", undefined);
+%InstallConstructor("globalThis", "SharedArrayBuffer", SharedArrayBufferConstructor, 1, undefined);
+%InstallAccessor("SharedArrayBuffer", %WellKnownSymbol("species"), SharedArrayBufferSpecies, false);
+%InstallPrototype("globalThis", "SharedArrayBuffer", undefined);
 %InstallConstructor("globalThis", "String", StringConstructor, 1, undefined);
 %InstallMethod("String", "fromCharCode", StringFromCharCode, 1);
 %InstallMethod("String", "fromCodePoint", StringFromCodePoint, 1);
@@ -12674,6 +13079,21 @@ function GlobalAtob(...args) {
 %InstallMethod("%AsyncFromSyncIteratorPrototype%", "next", AsyncFromSyncIteratorNext, 1);
 %InstallMethod("%AsyncFromSyncIteratorPrototype%", "return", AsyncFromSyncIteratorReturn, 1);
 %InstallMethod("%AsyncFromSyncIteratorPrototype%", "throw", AsyncFromSyncIteratorThrow, 1);
+%InstallValue("Atomics", %WellKnownSymbol("toStringTag"), AtomicsToStringTag(), 4);
+%InstallMethod("Atomics", "add", AtomicsAdd, 3);
+%InstallMethod("Atomics", "and", AtomicsAnd, 3);
+%InstallMethod("Atomics", "compareExchange", AtomicsCompareExchange, 4);
+%InstallMethod("Atomics", "exchange", AtomicsExchange, 3);
+%InstallMethod("Atomics", "isLockFree", AtomicsIsLockFree, 1);
+%InstallMethod("Atomics", "load", AtomicsLoad, 2);
+%InstallMethod("Atomics", "or", AtomicsOr, 3);
+%InstallMethod("Atomics", "store", AtomicsStore, 3);
+%InstallMethod("Atomics", "sub", AtomicsSub, 3);
+%InstallMethod("Atomics", "xor", AtomicsXor, 3);
+%InstallMethod("Atomics", "wait", AtomicsWait, 4);
+%InstallMethod("Atomics", "waitAsync", AtomicsWaitAsync, 4);
+%InstallMethod("Atomics", "notify", AtomicsNotify, 3);
+%InstallMethod("Atomics", "pause", AtomicsPause, 0);
 %InstallMethod("BigInt.prototype", "toString", BigIntPrototypeToString, 0);
 %InstallMethod("BigInt.prototype", "toLocaleString", BigIntPrototypeToLocaleString, 0);
 %InstallMethod("BigInt.prototype", "valueOf", BigIntPrototypeValueOf, 0);
@@ -13000,6 +13420,12 @@ function GlobalAtob(...args) {
 %InstallMethod("Set.prototype", "entries", SetPrototypeEntries, 0);
 %InstallPrototypeConstructor("Set");
 %InstallMethod("Set.prototype", %WellKnownSymbol("iterator"), SetPrototypeValues, 0);
+%InstallAccessor("SharedArrayBuffer.prototype", "byteLength", SharedArrayBufferPrototypeByteLength, false);
+%InstallMethod("SharedArrayBuffer.prototype", "grow", SharedArrayBufferPrototypeGrow, 1);
+%InstallAccessor("SharedArrayBuffer.prototype", "growable", SharedArrayBufferPrototypeGrowable, false);
+%InstallAccessor("SharedArrayBuffer.prototype", "maxByteLength", SharedArrayBufferPrototypeMaxByteLength, false);
+%InstallMethod("SharedArrayBuffer.prototype", "slice", SharedArrayBufferPrototypeSlice, 2);
+%InstallValue("SharedArrayBuffer.prototype", %WellKnownSymbol("toStringTag"), SharedArrayBufferPrototypeToStringTag(), 4);
 %InstallMethod("String.prototype", "charCodeAt", StringPrototypeCharCodeAt, 1);
 %InstallMethod("String.prototype", "charAt", StringPrototypeCharAt, 1);
 %InstallMethod("String.prototype", "concat", StringPrototypeConcat, 1);
@@ -13162,6 +13588,7 @@ function GlobalAtob(...args) {
 %InstallPrototypeConstructor("Promise");
 %InstallMethod("RegExp.prototype", %WellKnownSymbol("split"), RegExpPrototypeSplit, 2);
 %InstallValue("Set.prototype", %WellKnownSymbol("toStringTag"), SetPrototypeToStringTag(), 4);
+%InstallPrototypeConstructor("SharedArrayBuffer");
 %InstallMethod("String.prototype", %WellKnownSymbol("iterator"), StringPrototypeIterator, 0);
 %InstallValue("Symbol.prototype", %WellKnownSymbol("toStringTag"), SymbolPrototypeToStringTag(), 4);
 %InstallAccessor("%TypedArray%.prototype", %WellKnownSymbol("toStringTag"), TypedArrayPrototypeToStringTag, false);
@@ -13199,6 +13626,7 @@ function GlobalAtob(...args) {
 %InstallIntrinsic("AsyncIteratorCloseThrow", AsyncIteratorCloseThrow);
 %InstallIntrinsic("AsyncFromSyncIteratorUnwrap", AsyncFromSyncIteratorUnwrap);
 %InstallIntrinsic("AsyncFromSyncIteratorCloseThrow", AsyncFromSyncIteratorCloseThrow);
+%InstallIntrinsic("AtomicsWaitTimeout", AtomicsWaitTimeout);
 %InstallIntrinsic("ToBigInt", ToBigInt);
 %InstallIntrinsic("ToPrimitive", ToPrimitive);
 %InstallIntrinsic("ToNumber", ToNumber);
