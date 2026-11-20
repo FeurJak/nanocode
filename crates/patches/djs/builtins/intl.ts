@@ -204,13 +204,83 @@ function IntlParts(encoded: Value, unit: Value): Obj {
   return out;
 }
 
+/**
+ * A data property of o or its prototypes, without running getters or proxy traps
+ * (V8's JSReceiver::GetDataProperty): undefined for an accessor or behind a proxy.
+ */
+function IntlDataProperty(o: Obj, key: Value): Value {
+  let cur: Value = o;
+  while (IsObject(cur)) {
+    if (IsProxy(cur)) {
+      return undefined;
+    }
+    const d: Value = GetOwnPropertyDescriptorObject(AsObj(cur), key);
+    if (d !== undefined) {
+      return HasOwnProperty(AsObj(d), "value") ? Get(AsObj(d), "value") : undefined;
+    }
+    cur = GetPrototypeOf(AsObj(cur));
+  }
+  return undefined;
+}
+
+/**
+ * How V8 shows a value in an error message without side effects (NoSideEffectsToString):
+ * a function's source, "Error: message", "#<Ctor>" for an object whose toString is
+ * Object.prototype.toString, else "[object Tag]".
+ */
+function IntlShow(v: Value): Str {
+  if (IsSymbol(v)) {
+    return SymbolDescriptiveString(AsSym(v));
+  }
+  if (!IsObject(v)) {
+    return ToString(v);
+  }
+  const o: Obj = AsObj(v);
+  if (IsProxy(o)) {
+    return IsArray(o) ? "[object Array]" : "#<Object>";
+  }
+  if (IsCallable(o)) {
+    return FunctionToString(o);
+  }
+  const toStr: Value = IntlDataProperty(o, "toString");
+  const errorProto: Obj = AsObj(Get(RealmConstructor("Error"), "prototype"));
+  if (ObjectClassTag(o) === "Error" || toStr === IntlDataProperty(errorProto, "toString")) {
+    const n: Value = IntlDataProperty(o, "name");
+    const m: Value = IntlDataProperty(o, "message");
+    const name: Str = IsString(n) ? AsStr(n) : "Error";
+    const msg: Str = IsString(m) ? AsStr(m) : "";
+    if (name === "") {
+      return msg;
+    }
+    return msg === "" ? name : name + ": " + msg;
+  }
+  const objectProto: Obj = AsObj(Get(RealmConstructor("Object"), "prototype"));
+  if (toStr !== undefined && toStr === IntlDataProperty(objectProto, "toString")) {
+    const ctor: Value = IntlDataProperty(o, "constructor");
+    if (IsCallable(ctor)) {
+      const n: Value = IntlDataProperty(AsObj(ctor), "name");
+      if (IsString(n) && StrLength(AsStr(n)) > 0) {
+        return "#<" + AsStr(n) + ">";
+      }
+    }
+  }
+  const tag: Value = IntlDataProperty(o, WellKnownSymbol("toStringTag"));
+  return "[object " + (IsString(tag) ? AsStr(tag) : ObjectClassTag(o)) + "]";
+}
+
 /** The resolved options of an Intl object of kind, else TypeError naming method. */
 function IntlThis(v: Value, kind: i32, method: Str): Str {
   const spec: Value = IntlSpec(v, kind);
   if (spec === undefined) {
-    let shown: Str = "#<Object>";
-    if (!IsObject(v)) {
-      shown = IsSymbol(v) ? "Symbol()" : ToString(v);
+    let shown: Str = IntlShow(v);
+    // The format getter and resolvedOptions of NumberFormat and DateTimeFormat go through
+    // UnwrapNumberFormat / UnwrapDateTimeFormat, which name themselves for an object; V8's
+    // NumberFormat shows the legacy fallback slot it read, undefined.
+    if (IsObject(v) && (kind === 0 || kind === 1) && (StrIndexOf(method, "get ", 0) === 0 || StrIndexOf(method, ".resolvedOptions", 0) > 0)) {
+      method = kind === 0 ? "UnwrapNumberFormat" : "UnwrapDateTimeFormat";
+      if (kind === 0) {
+        shown = "undefined";
+      }
     }
     throw NewTypeError("Method " + method + " called on incompatible receiver " + shown);
   }
@@ -321,11 +391,32 @@ function IntlCaseMode(locales: Value, upper: i32): i32 {
   if (locales === undefined) {
     return upper;
   }
-  const tags: Str = IntlLocales(IntlLocaleTags(locales), 0);
+  // V8 reads only the first present element of a list (TransformLocaleForCaseMapping): later
+  // elements are never read or validated.
+  let first: Value = locales;
+  if (!IsString(locales) && IntlSpec(locales, 16) === undefined) {
+    const o: Obj = ToObject(locales);
+    const len: f64 = LengthOfArrayLike(o);
+    let k: f64 = 0;
+    while (k < len && !HasProperty(o, ToString(k))) {
+      k = k + 1;
+    }
+    if (k >= len) {
+      return upper;
+    }
+    first = Get(o, ToString(k));
+    if (!IsString(first) && !IsObject(first)) {
+      throw NewTypeError("Language ID should be string or object.");
+    }
+    if (IntlSpec(first, 16) === undefined) {
+      first = ToString(first);
+    }
+  }
+  const tags: Str = IntlLocales(IntlLocaleTags(first), 0);
   const nl: f64 = StrIndexOf(tags, "\n", 0);
-  const first: Str = nl < 0 ? tags : StrSubstring(tags, 0, nl);
-  const n: u32 = StrLength(first);
-  const lang: Str = n >= 2 && (n === 2 || StrCharCodeAt(first, 2) === 45) ? StrSubstring(first, 0, 2) : "";
+  const tag: Str = nl < 0 ? tags : StrSubstring(tags, 0, nl);
+  const n: u32 = StrLength(tag);
+  const lang: Str = n >= 2 && (n === 2 || StrCharCodeAt(tag, 2) === 45) ? StrSubstring(tag, 0, 2) : "";
   if (lang === "tr" || lang === "az") {
     return upper + 2;
   }
@@ -489,7 +580,7 @@ function IntlNumberFormatToStringTag(): Str {
  */
 function IntlNewDateTimeFormat(newTarget: Value, locales: Value, options: Value, required: Str, defaults: Str): Obj {
   const tags: Str = IntlRequested(locales);
-  let raw: Str = IntlReadOptions(options, IntlDtfOptions());
+  let raw: Str = IntlReadOptions(IntlNoNull(locales, options, "Intl.DateTimeFormat called on null or undefined"), IntlDtfOptions());
   raw = IntlWith(raw, "@required", required);
   raw = IntlWith(raw, "@defaults", defaults);
   raw = IntlWith(raw, "@offset", NumberToString(0 - DateTimezoneOffset(0), 10));
@@ -604,7 +695,7 @@ function IntlDateTimeFormatToStringTag(): Str {
 /** A new Collator. */
 function IntlNewCollator(newTarget: Value, locales: Value, options: Value): Obj {
   const tags: Str = IntlRequested(locales);
-  return IntlConstruct(newTarget, "Collator", 2, tags, IntlReadOptions(options, IntlCollatorOptions()));
+  return IntlConstruct(newTarget, "Collator", 2, tags, IntlReadOptions(IntlNoNull(locales, options, "Intl.Collator called on null or undefined"), IntlCollatorOptions()));
 }
 
 /**
@@ -758,7 +849,7 @@ function IntlStringList(iterable: Value): Str {
   while (i < len) {
     const v: Value = Get(list, i);
     if (!IsString(v)) {
-      throw NewTypeError("Iterable yielded " + (IsSymbol(v) ? "Symbol()" : ToString(v)) + " which is not a string");
+      throw NewTypeError("Iterable yielded " + IntlShow(v) + " which is not a string");
     }
     out = i === 0 ? AsStr(v) : out + "\u0001" + AsStr(v);
     i += 1;
@@ -830,7 +921,20 @@ function IntlRelativeTimeFormatSupportedLocalesOf(locales?: Value, options?: Val
  */
 function IntlRelativeTimeFormatPrototypeFormat(this: Value, value?: Value, unit?: Value): Str {
   const spec: Str = IntlThis(this, 5, "Intl.RelativeTimeFormat.prototype.format");
-  return AsStr(IntlFormat(5, spec, ToNumber(value), ToString(unit), false));
+  const x: f64 = ToNumber(value);
+  return AsStr(IntlRelativeTimeFormatRun(spec, x, ToString(unit), false, "Intl.RelativeTimeFormat.prototype.format()"));
+}
+
+/** PartitionRelativeTimePattern, with V8's errors naming method. */
+function IntlRelativeTimeFormatRun(spec: Str, x: f64, u: Str, parts: boolean, method: Str): Value {
+  if (x !== x || x === 1 / 0 || x === -1 / 0) {
+    throw NewRangeError("Value need to be finite number for " + method);
+  }
+  try {
+    return IntlFormat(5, spec, x, u, parts);
+  } catch (e) {
+    throw IntlRename(e, "for format() ", "for " + method + " ");
+  }
 }
 
 /**
@@ -839,8 +943,9 @@ function IntlRelativeTimeFormatPrototypeFormat(this: Value, value?: Value, unit?
  */
 function IntlRelativeTimeFormatPrototypeFormatToParts(this: Value, value?: Value, unit?: Value): Obj {
   const spec: Str = IntlThis(this, 5, "Intl.RelativeTimeFormat.prototype.formatToParts");
+  const x: f64 = ToNumber(value);
   const u: Str = ToString(unit);
-  const parts: Value = IntlFormat(5, spec, ToNumber(value), u, true);
+  const parts: Value = IntlRelativeTimeFormatRun(spec, x, u, true, "Intl.RelativeTimeFormat.prototype.formatToParts()");
   const singular: Str = StrLength(u) > 1 && StrCharCodeAt(u, StrLength(u) - 1) === 115 ? StrSubstring(u, 0, StrLength(u) - 1) : u;
   return IntlParts(parts, singular);
 }
@@ -1336,10 +1441,45 @@ function IntlSegmentIteratorToStringTag(): Str {
 
 // ---- the locale-sensitive methods of other builtins (ECMA-402 chapters 19 to 21) -------
 
+/**
+ * An Intl option or null-options error thrown on behalf of a built-in (toLocaleString and
+ * friends) names that built-in in V8: rethrow e with from replaced by to.
+ */
+function IntlRename(e: Value, from: Str, to: Str): Value {
+  if (!IsObject(e)) {
+    return e;
+  }
+  const m: Value = IntlDataProperty(AsObj(e), "message");
+  const n: Value = IntlDataProperty(AsObj(e), "name");
+  if (!IsString(m)) {
+    return e;
+  }
+  const msg: Str = AsStr(m);
+  const at: f64 = StrIndexOf(msg, from, 0);
+  if (at < 0) {
+    return e;
+  }
+  const fromLen: f64 = StrLength(from);
+  const msgLen: f64 = StrLength(msg);
+  const out: Str = StrSubstring(msg, 0, at) + to + StrSubstring(msg, at + fromLen, msgLen);
+  if (n === "RangeError") {
+    return NewRangeError(out);
+  }
+  if (n === "TypeError") {
+    return NewTypeError(out);
+  }
+  return e;
+}
+
 /** Number.prototype.toLocaleString and BigInt.prototype.toLocaleString with Intl. */
 function IntlNumberToLocaleString(x: Value, locales: Value, options: Value): Str {
-  const nf: Obj = IntlNewNumberFormat(undefined, locales, options);
-  return AsStr(IntlFormat(0, AsStr(IntlSpec(nf, 0)), IntlNumeric(x), undefined, false));
+  let nf: Value = undefined;
+  try {
+    nf = IntlNewNumberFormat(undefined, locales, options);
+  } catch (e) {
+    throw IntlRename(IntlRename(e, "Intl.NumberFormat() ", IsBigInt(x) ? "BigInt.prototype.toLocaleString() " : "Number.prototype.toLocaleString() "), "Intl.NumberFormat ", IsBigInt(x) ? "BigInt.prototype.toLocaleString " : "Number.prototype.toLocaleString ");
+  }
+  return AsStr(IntlFormat(0, AsStr(IntlSpec(AsObj(nf), 0)), IntlNumeric(x), undefined, false));
 }
 
 /** Date.prototype.toLocale(Date|Time)String with Intl: "Invalid Date" for NaN. */
@@ -1347,12 +1487,22 @@ function IntlDateToLocaleString(t: f64, locales: Value, options: Value, required
   if (t !== t) {
     return "Invalid Date";
   }
-  const dtf: Obj = IntlNewDateTimeFormat(undefined, locales, options, required, defaults);
-  return AsStr(IntlFormat(1, AsStr(IntlSpec(dtf, 1)), t, undefined, false));
+  let dtf: Value = undefined;
+  try {
+    dtf = IntlNewDateTimeFormat(undefined, locales, options, required, defaults);
+  } catch (e) {
+    throw IntlRename(e, "Intl.DateTimeFormat ", required === "date" ? "Date.prototype.toLocaleDateString " : required === "time" ? "Date.prototype.toLocaleTimeString " : "Date.prototype.toLocaleString ");
+  }
+  return AsStr(IntlFormat(1, AsStr(IntlSpec(AsObj(dtf), 1)), t, undefined, false));
 }
 
 /** String.prototype.localeCompare with Intl. */
 function IntlLocaleCompare(s: Str, that: Str, locales: Value, options: Value): f64 {
-  const c: Obj = IntlNewCollator(undefined, locales, options);
-  return AsNumber(IntlFormat(2, AsStr(IntlSpec(c, 2)), s, that, false));
+  let c: Value = undefined;
+  try {
+    c = IntlNewCollator(undefined, locales, options);
+  } catch (e) {
+    throw IntlRename(e, "Intl.Collator ", "String.prototype.localeCompare ");
+  }
+  return AsNumber(IntlFormat(2, AsStr(IntlSpec(AsObj(c), 2)), s, that, false));
 }
