@@ -290,13 +290,15 @@ struct Bound {
     adopted: HashMap<String, (RemoteContext, Vec<Arc<dyn Tool>>)>,
 }
 
+type EncodedCatalog = (Arc<RemoteCatalog>, Arc<str>);
+
 pub struct Acceptor {
     pub(super) options: AcceptorOptions,
     pub(super) authorize: Authorize,
     pub(super) admit: Admit,
     requests: Arc<dyn HandRequests>,
     runtimes: Atom<HashMap<String, Runtime>>,
-    encoded: Atom<HashMap<String, (Arc<RemoteCatalog>, Arc<str>)>>,
+    encoded: Atom<HashMap<String, EncodedCatalog>>,
     pub(super) catalogs: RemoteCatalogs,
     sockets: AtomicU64,
     changes: Arc<Changes>,
