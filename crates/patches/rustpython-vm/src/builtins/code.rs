@@ -402,10 +402,16 @@ impl ConstantBag for PyVmBag<'_> {
                 // failing, so only a budget that stopped could refuse here: a code
                 // object is built whole whatever the budget left.
                 let elements: Vec<_> = elements.collect();
-                vm.unmetered(|| PyFrozenSet::from_iter(vm, elements))
-                    .expect("a frozenset constant's elements hash")
-                    .into_ref(ctx)
-                    .into()
+                // CPython's compiler builds the constant from a tuple, then
+                // merge_consts_recursive rebuilds it from its own iteration
+                // order, so keys that collide land as that second pass puts them.
+                vm.unmetered(|| {
+                    let first = PyFrozenSet::from_iter(vm, elements)?;
+                    PyFrozenSet::from_iter(vm, first.elements())
+                })
+                .expect("a frozenset constant's elements hash")
+                .into_ref(ctx)
+                .into()
             }
             BorrowedConstant::None => ctx.none(),
             BorrowedConstant::Ellipsis => ctx.ellipsis.clone().into(),

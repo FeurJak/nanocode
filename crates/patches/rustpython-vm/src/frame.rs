@@ -5505,10 +5505,7 @@ impl ExecutingFrame<'_> {
                     // SAFETY: compiler guarantees correct type
                     obj.downcast_unchecked_ref()
                 };
-                let iter = PyIter::try_from_object(vm, iterable)?;
-                while let PyIterReturn::Return(item) = iter.next(vm)? {
-                    set.add(item, vm)?;
-                }
+                set.update_from(iterable, vm)?;
                 Ok(None)
             }
             Instruction::PushExcInfo => {

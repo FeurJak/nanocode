@@ -1493,6 +1493,12 @@ impl PySet {
     flags(BASETYPE, _MATCH_SELF, HAS_WEAKREF)
 )]
 impl Py<PySet> {
+    /// `_PySet_Update`, which `SET_UPDATE` runs: a set or dict operand merges
+    /// its table, so a folded frozenset constant lands in CPython's order.
+    pub(crate) fn update_from(&self, iterable: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
+        self.inner.update_internal(iterable, vm)
+    }
+
     #[pymethod(coexist)]
     fn __contains__(&self, object: PyObjectRef, vm: &VirtualMachine) -> PyResult<bool> {
         self.contains(&object, vm)
