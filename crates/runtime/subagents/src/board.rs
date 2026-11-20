@@ -746,6 +746,7 @@ impl Inner {
                                 task: id.clone(),
                                 lease_ms: LEASE_MS,
                                 fence: None,
+                                cap: None,
                             },
                         )
                         .await

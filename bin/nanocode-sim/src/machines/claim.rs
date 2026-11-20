@@ -355,6 +355,7 @@ impl Model for Folded {
                     task: task(index),
                     lease_ms: if lapsed { 0 } else { LEASE_MS },
                     fence: None,
+                    cap: None,
                 },
             ),
             Step::Renew {

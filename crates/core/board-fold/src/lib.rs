@@ -82,6 +82,8 @@ pub enum Op {
         lease_ms: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fence: Option<Fence>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cap: Option<u32>,
     },
     Renew {
         task: TaskId,
@@ -240,6 +242,7 @@ pub enum Rejection {
     Steer(steer::Refusal),
     Illegal { from: String, to: String },
     Stale { fence: Fence },
+    Full { cap: u32 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -594,9 +597,12 @@ impl Fold {
                     None => Ok(()),
                 }
             }
-            Op::Claim { task, fence, .. } => {
+            Op::Claim {
+                task, fence, cap, ..
+            } => {
                 self.fenced(fence.as_ref())?;
-                self.claimable(task, at_ms).map(drop)
+                self.claimable(task, at_ms)?;
+                self.room(task, *cap, at_ms)
             }
             Op::Finish { task, .. } if mutated(Mutation::FinishIgnoresClaim) => {
                 match self.tasks.get(task).map(|task| &task.phase) {
@@ -652,6 +658,41 @@ impl Fold {
             Ok(())
         } else {
             Err(Rejection::Stale { fence: held })
+        }
+    }
+
+    pub fn held(&self, at_ms: u64) -> usize {
+        let now = self.now_ms.max(at_ms);
+        self.live
+            .iter()
+            .filter(|id| {
+                self.tasks
+                    .get(*id)
+                    .is_some_and(|task| task.stage(now) == Stage::Held)
+            })
+            .count()
+    }
+
+    fn room(&self, task: &TaskId, cap: Option<u32>, at_ms: u64) -> Result<(), Rejection> {
+        let Some(cap) = cap else {
+            return Ok(());
+        };
+        let now = self.now_ms.max(at_ms);
+        let others = self
+            .live
+            .iter()
+            .filter(|id| *id != task)
+            .filter(|id| {
+                self.tasks
+                    .get(*id)
+                    .is_some_and(|held| held.stage(now) == Stage::Held)
+            })
+            .take(cap as usize)
+            .count();
+        if others < cap as usize || mutated(Mutation::ClaimCapIgnored) {
+            Ok(())
+        } else {
+            Err(Rejection::Full { cap })
         }
     }
 

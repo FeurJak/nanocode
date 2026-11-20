@@ -274,6 +274,7 @@ pub async fn intruder(world: &World, epoch: u64) {
                         task,
                         lease_ms: world.shape.lease_ms,
                         fence: None,
+                        cap: None,
                     }
                 } else {
                     Op::Cancel {

@@ -1235,6 +1235,7 @@ async fn worker(world: &World, index: u64, epoch: u64) {
                 task: task.clone(),
                 lease_ms: world.shape.lease_ms,
                 fence: None,
+                cap: None,
             })
             .await
         else {

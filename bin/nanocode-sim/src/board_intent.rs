@@ -181,6 +181,7 @@ fn claim(
             task: task.clone(),
             lease_ms: LEASE,
             fence: None,
+            cap: None,
         },
     )?;
     Ok(

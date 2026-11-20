@@ -281,6 +281,7 @@ fn step(
                 task: id.clone(),
                 lease_ms: LEASE,
                 fence: None,
+                cap: None,
             },
         )? {
             continue;
@@ -426,6 +427,7 @@ async fn waits(seed: u64) -> Result<u64, String> {
                     task: id.clone(),
                     lease_ms: LEASE,
                     fence: None,
+                    cap: None,
                 },
             )
             .await

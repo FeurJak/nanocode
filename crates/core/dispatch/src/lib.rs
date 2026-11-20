@@ -487,6 +487,7 @@ fn start(intent: &TaskId, attempts: u64, policy: &Policy) -> (String, Op) {
             task: intent.clone(),
             lease_ms: policy.start_timeout_ms,
             fence: None,
+            cap: None,
         },
     )
 }

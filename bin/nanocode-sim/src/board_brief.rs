@@ -158,6 +158,7 @@ fn claim(host: &mut Host, now: u64, task: &TaskId) -> Result<ClaimId, String> {
         task: task.clone(),
         lease_ms: LEASE,
         fence: None,
+        cap: None,
     };
     let (id, _) = host.append(WORKER, now, op)?;
     Ok(ClaimId(id.0))

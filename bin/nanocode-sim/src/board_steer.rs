@@ -422,6 +422,7 @@ fn step(
                 task: task.clone(),
                 lease_ms: LEASE,
                 fence: None,
+                cap: None,
             },
         )?;
         if verdict.is_ok() {

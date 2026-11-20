@@ -148,6 +148,7 @@ impl Board {
                     task: task.clone(),
                     lease_ms,
                     fence: None,
+                    cap: None,
                 },
             )
             .await?;

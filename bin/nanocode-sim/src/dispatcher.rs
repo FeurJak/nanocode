@@ -297,6 +297,7 @@ impl World {
             task: task.clone(),
             lease_ms: LEASE_MS,
             fence: None,
+            cap: None,
         };
         if board.submit(now, claim).await.is_err() {
             return Ok(());

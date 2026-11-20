@@ -63,10 +63,11 @@ pub enum ShardsMutation {
     CrossMoveSkipsUnmark,
     CrossMoveIngestsFirst,
     EpochFenceIgnored,
+    ClaimCapIgnored,
 }
 
 impl ShardsMutation {
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 14] = [
         Self::None,
         Self::GroupSkipsSeq,
         Self::GroupVerdictFromPlan,
@@ -80,6 +81,7 @@ impl ShardsMutation {
         Self::CrossMoveSkipsUnmark,
         Self::CrossMoveIngestsFirst,
         Self::EpochFenceIgnored,
+        Self::ClaimCapIgnored,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -103,6 +105,7 @@ impl ShardsMutation {
             Self::CrossMoveSkipsUnmark => "cross_move_skips_unmark",
             Self::CrossMoveIngestsFirst => "cross_move_ingests_first",
             Self::EpochFenceIgnored => "epoch_fence_ignored",
+            Self::ClaimCapIgnored => "claim_cap_ignored",
         }
     }
 
@@ -130,6 +133,7 @@ impl ShardsMutation {
             Self::CrossMoveSkipsUnmark => BoardRule::CrossMoveSkipsUnmark,
             Self::CrossMoveIngestsFirst => BoardRule::CrossMoveIngestsFirst,
             Self::EpochFenceIgnored => BoardRule::EpochFenceIgnored,
+            Self::ClaimCapIgnored => BoardRule::ClaimCapIgnored,
         }
     }
 }
@@ -228,6 +232,7 @@ struct Shape {
     audit: bool,
     epochs: u64,
     fence_ppm: u64,
+    cap: Option<u32>,
 }
 
 impl Shape {
@@ -264,6 +269,7 @@ impl Shape {
             audit: true,
             epochs: rng.range(0, 24),
             fence_ppm: rng.range(0, 1_000_000),
+            cap: rng.chance(500_000).then(|| rng.range(1, 6) as u32),
         }
     }
 
@@ -819,6 +825,7 @@ async fn writer(world: &World, index: u64) {
             task: task.clone(),
             lease_ms: world.shape.lease_ms,
             fence,
+            cap: world.shape.cap,
         };
         let (partition, verdict) = world.submit(&by, key.clone(), claim).await;
         let event = EventId(format!("{by}#{key}"));
@@ -999,14 +1006,25 @@ async fn run(world: &World) {
 /// One fold of every partition's rows, interleaved by each partition's clock after the row (the
 /// running max of event times), so the serial fold's clock at every row equals the clock its own
 /// partition's fold had there.
-fn serial(logs: &[Vec<(u64, String)>]) -> Result<Fold, String> {
+fn serial(logs: &[Vec<(u64, String)>], folds: &[Fold]) -> Result<Fold, String> {
     let mut rows = Vec::new();
     for (partition, log) in logs.iter().enumerate() {
         let mut clock = 0;
         for (position, (_, body)) in log.iter().enumerate() {
-            let event: nanocode_board::Event = serde_json::from_str(body)
+            let mut event: nanocode_board::Event = serde_json::from_str(body)
                 .map_err(|error| format!("partition {partition} row {position}: {error}"))?;
             clock = clock.max(event.at_ms);
+            if let Op::Claim { cap, .. } = &mut event.op {
+                if matches!(
+                    folds[partition].outcome(&event.id),
+                    Some(Err(Rejection::Full { .. }))
+                ) {
+                    continue;
+                }
+                *cap = None;
+            }
+            let body = serde_json::to_string(&event)
+                .map_err(|error| format!("partition {partition} row {position}: {error}"))?;
             rows.push((clock, partition, position, body));
         }
     }
@@ -1014,7 +1032,7 @@ fn serial(logs: &[Vec<(u64, String)>]) -> Result<Fold, String> {
     let mut fold = Fold::new();
     let first = fold.next();
     for (seq, (_, _, _, body)) in (first..).zip(rows) {
-        fold.apply(seq, body)
+        fold.apply(seq, &body)
             .map_err(|error| format!("serial fold: {error}"))?;
     }
     Ok(fold)
@@ -1043,11 +1061,12 @@ fn check(world: &World, logs: &[Vec<(u64, String)>]) -> Result<ShardsStats, Stri
         for (seq, body) in log {
             let event: nanocode_board::Event = serde_json::from_str(body)
                 .map_err(|error| format!("partition {index} row {seq}: {error}"))?;
-            let fence = match &event.op {
-                Op::Claim {
-                    fence: Some(fence), ..
-                } => Some((*fence, fold.epoch(fence.partition))),
-                _ => None,
+            let (fence, cap) = match &event.op {
+                Op::Claim { fence, cap, .. } => (
+                    fence.map(|fence| (fence, fold.epoch(fence.partition))),
+                    *cap,
+                ),
+                _ => (None, None),
             };
             fold.apply(*seq, body)
                 .map_err(|error| format!("partition {index} does not fold: {error}"))?;
@@ -1058,6 +1077,16 @@ fn check(world: &World, logs: &[Vec<(u64, String)>]) -> Result<ShardsStats, Stri
                 return Err(format!(
                     "partition {index} row {seq}: claim {} landed fenced at epoch {} while partition {} was at epoch {held}",
                     event.id, fence.epoch, fence.partition
+                ));
+            }
+            if let Some(cap) = cap
+                && fold.outcome(&event.id) == Some(&Ok(*seq))
+                && fold.held(event.at_ms) > cap as usize
+            {
+                return Err(format!(
+                    "partition {index} row {seq}: claim {} landed over its cap of {cap} with {} live claims",
+                    event.id,
+                    fold.held(event.at_ms)
                 ));
             }
         }
@@ -1116,7 +1145,10 @@ fn check(world: &World, logs: &[Vec<(u64, String)>]) -> Result<ShardsStats, Stri
                     ));
                 }
                 match rejection {
-                    Rejection::Held { .. } | Rejection::Terminal | Rejection::Stale { .. } => {
+                    Rejection::Held { .. }
+                    | Rejection::Terminal
+                    | Rejection::Stale { .. }
+                    | Rejection::Full { .. } => {
                         stats.raced += 1;
                     }
                     other if world.shape.committers == 1 => {
@@ -1130,7 +1162,7 @@ fn check(world: &World, logs: &[Vec<(u64, String)>]) -> Result<ShardsStats, Stri
         }
     }
     let merged = Merged::new(folds.iter().collect());
-    let serial = serial(logs)?;
+    let serial = serial(logs, &folds)?;
     let ids: BTreeSet<&TaskId> = merged.tasks().keys().copied().collect();
     let serial_ids: BTreeSet<&TaskId> = serial.tasks().keys().collect();
     if ids != serial_ids {
@@ -1473,6 +1505,7 @@ pub fn bench(partitions: &[u32], writers: &[u64], batch: usize, cost: Cost) {
                 audit: false,
                 epochs: 0,
                 fence_ppm: 0,
+                cap: None,
             };
             let mut walls = Vec::new();
             for _ in 0..BENCH_ROUNDS {

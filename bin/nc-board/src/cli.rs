@@ -321,6 +321,7 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
                 task: task.clone(),
                 lease_ms,
                 fence: None,
+                cap: None,
             };
             match board.submit(at_ms, claim(&task)).await {
                 Err(BoardError::Rejected(Rejection::Held { .. } | Rejection::Terminal))
@@ -375,6 +376,7 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
                     task: id(&task),
                     lease_ms,
                     fence: None,
+                    cap: None,
                 },
             )
             .await?;
