@@ -284,17 +284,17 @@ class DirEntry:
             self._stat = _stat_result(_mode(kind, mode), self._abs, size, mtime_ns)
         return self._stat
 
-    def _is(self, kind):
+    def _is(self, kind, follow_symlinks):
         try:
-            return self.stat().st_mode & 0o170000 == kind
+            return self.stat(follow_symlinks=follow_symlinks).st_mode & 0o170000 == kind
         except OSError:
             return False
 
     def is_dir(self, *, follow_symlinks=True):
-        return self._is(0o040000)
+        return self._is(0o040000, follow_symlinks)
 
     def is_file(self, *, follow_symlinks=True):
-        return self._is(0o100000)
+        return self._is(0o100000, follow_symlinks)
 
     def is_symlink(self):
         try:
