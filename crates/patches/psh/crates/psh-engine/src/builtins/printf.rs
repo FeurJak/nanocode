@@ -1,9 +1,10 @@
 //! `printf [-v var] format [arguments]`: the format is reused until the arguments are
-//! consumed; conversions `d i o u x X c s b q f F e E g G %`.
+//! consumed; conversions `d i o u x X c s b q f F e E g G a A %`.
 
 use crate::escape::{Dialect, decode};
 use crate::state::{R, Vp, is_name};
 
+use super::ldouble::{self, Ld};
 use super::{out, shell_quote};
 
 fn s(b: &[u8]) -> std::borrow::Cow<'_, str> {
@@ -68,6 +69,7 @@ pub(super) async fn printf(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         next: 0,
         out: Vec::new(),
         errors: Vec::new(),
+        failed: false,
         stop: false,
         utf8: vp.utf8(),
     };
@@ -78,7 +80,7 @@ pub(super) async fn printf(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     loop {
         let before = f.next;
         f.run(format);
-        status |= i32::from(!f.errors.is_empty());
+        status |= i32::from(std::mem::take(&mut f.failed));
         for e in std::mem::take(&mut f.errors) {
             vp.error(&format!("printf: {e}")).await;
         }
@@ -199,6 +201,8 @@ struct Formatter<'a> {
     next: usize,
     out: Vec<u8>,
     errors: Vec<String>,
+    /// An error (not only a warning) was reported in this pass.
+    failed: bool,
     stop: bool,
     utf8: bool,
 }
@@ -232,7 +236,7 @@ impl Formatter<'_> {
         };
         let n = parse_num(&a, self.utf8);
         if !n.ok {
-            self.errors.push(format!("{}: invalid number", s(&a)));
+            self.fail(invalid_number(&a));
         }
         let limit = if n.neg {
             1u128 << 63
@@ -240,8 +244,9 @@ impl Formatter<'_> {
             (1u128 << 63) - 1
         };
         if n.overflow || n.mag > limit {
-            self.errors
-                .push(format!("{}: Numerical result out of range", s(&a)));
+            if n.ok {
+                self.warn_range(&a);
+            }
             return if n.neg { i64::MIN } else { i64::MAX };
         }
         if n.neg {
@@ -259,44 +264,50 @@ impl Formatter<'_> {
         };
         let n = parse_num(&a, self.utf8);
         if !n.ok {
-            self.errors.push(format!("{}: invalid number", s(&a)));
+            self.fail(invalid_number(&a));
         }
         if n.overflow {
-            self.errors
-                .push(format!("{}: Numerical result out of range", s(&a)));
+            if n.ok {
+                self.warn_range(&a);
+            }
             return u64::MAX;
         }
         let v = n.mag as u64;
         if n.neg { v.wrapping_neg() } else { v }
     }
 
-    fn float_arg(&mut self) -> f64 {
-        match self.arg() {
-            None => 0.0,
-            Some(a) => {
-                let a = a.to_vec();
-                if let Some(v) = char_code(&a, self.utf8) {
-                    return f64::from(v);
-                }
-                let t = s(&a);
-                let t = t.trim();
-                match t.parse::<f64>() {
-                    Ok(v) => v,
-                    Err(_) => {
-                        if a.is_empty() {
-                            return 0.0;
-                        }
-                        // What strtold converts of it, with an error for the rest
-                        // (`2228e9x` is 2228e9).
-                        let (v, used) = float_prefix(t.as_bytes()).unwrap_or((0.0, 0));
-                        if used < t.len() {
-                            self.errors.push(format!("{}: invalid number", s(&a)));
-                        }
-                        v
-                    }
-                }
-            }
+    /// A floating-point argument, converted as `strtold` does: a `long double`.
+    fn float_arg(&mut self) -> Ld {
+        let zero = Ld::Fin(false, 0, 0);
+        let Some(a) = self.arg().map(<[u8]>::to_vec) else {
+            return zero;
+        };
+        if let Some(v) = char_code(&a, self.utf8) {
+            return Ld::from_u64(u64::from(v));
         }
+        if a.is_empty() {
+            return zero;
+        }
+        // What strtold converts of it, with an error for the rest (`2228e9x` is
+        // 2228e9), or a warning when it is out of range.
+        let p = ldouble::strtold(&a);
+        if p.used < a.len() {
+            self.fail(invalid_number(&a));
+        } else if p.erange {
+            self.warn_range(&a);
+        }
+        p.value
+    }
+
+    fn fail(&mut self, msg: String) {
+        self.failed = true;
+        self.errors.push(msg);
+    }
+
+    /// bash's warning for a number out of range: reported, but not an error.
+    fn warn_range(&mut self, a: &[u8]) {
+        self.errors
+            .push(format!("warning: {}: Numerical result out of range", s(a)));
     }
 
     fn run(&mut self, fmt: &[u8]) {
@@ -390,8 +401,7 @@ impl Formatter<'_> {
             if fmt.get(i) == Some(&b'(') {
                 // `%(strftime format)T`
                 let Some(close) = fmt[i..].iter().position(|&b| b == b')') else {
-                    self.errors
-                        .push(format!("`{}': missing format character", s(&fmt[start..])));
+                    self.fail(format!("`{}': missing format character", s(&fmt[start..])));
                     self.stop = true;
                     break;
                 };
@@ -405,8 +415,7 @@ impl Formatter<'_> {
                     let shown = fmt
                         .get(i)
                         .map_or(String::new(), |&c| (c as char).to_string());
-                    self.errors
-                        .push(format!("`{shown}': invalid format character"));
+                    self.fail(format!("`{shown}': invalid format character"));
                     self.stop = true;
                     break;
                 }
@@ -419,8 +428,7 @@ impl Formatter<'_> {
                 i += 1;
             }
             let Some(&conv) = fmt.get(i) else {
-                self.errors
-                    .push(format!("`{}': missing format character", s(&fmt[start..])));
+                self.fail(format!("`{}': missing format character", s(&fmt[start..])));
                 self.stop = true;
                 break;
             };
@@ -438,7 +446,7 @@ impl Formatter<'_> {
             Some(a) => {
                 let n = parse_num(&a, self.utf8);
                 if !n.ok {
-                    self.errors.push(format!("{}: invalid number", s(&a)));
+                    self.fail(invalid_number(&a));
                 }
                 let v = if n.neg { -(n.mag as i64) } else { n.mag as i64 };
                 if v == -1 || v == -2 { self.now } else { v }
@@ -469,10 +477,11 @@ impl Formatter<'_> {
             self.out.extend(std::iter::repeat_n(b' ', fill));
         } else if spec.zero && numeric {
             // Zeros go after the sign or 0x prefix.
-            let split = if body.starts_with(b"0x") || body.starts_with(b"0X") {
-                2
+            let sign = usize::from(matches!(body.first(), Some(b'-' | b'+' | b' ')));
+            let split = if body[sign..].starts_with(b"0x") || body[sign..].starts_with(b"0X") {
+                sign + 2
             } else {
-                usize::from(matches!(body.first(), Some(b'-' | b'+' | b' ')))
+                sign
             };
             self.out.extend_from_slice(&body[..split]);
             self.out.extend(std::iter::repeat_n(b'0', fill));
@@ -576,92 +585,25 @@ impl Formatter<'_> {
                 let numeric = spec.prec.is_none();
                 self.pad(digits.as_bytes(), spec, numeric);
             }
-            b'f' | b'F' | b'e' | b'E' | b'g' | b'G' => {
+            b'f' | b'F' | b'e' | b'E' | b'g' | b'G' | b'a' | b'A' => {
                 let v = self.float_arg();
-                let prec = spec.prec.unwrap_or(6);
-                let mut body = match conv {
-                    // `#` keeps the point even without decimals.
-                    b'f' | b'F' if spec.alt && prec == 0 && v.is_finite() => format!("{v:.0}."),
-                    b'f' | b'F' => format!("{v:.prec$}"),
-                    b'e' | b'E' if spec.alt && prec == 0 && v.is_finite() => {
-                        fmt_e(v, 0).replacen('e', ".e", 1)
-                    }
-                    b'e' | b'E' => fmt_e(v, prec),
-                    _ => fmt_g(v, prec, spec.alt),
-                };
-                if conv.is_ascii_uppercase() {
-                    body = body.to_uppercase();
+                let mut body = ldouble::format(v, conv, spec.prec, spec.alt);
+                if v.neg() {
+                    body.insert(0, '-');
+                } else if spec.plus {
+                    body.insert(0, '+');
+                } else if spec.space {
+                    body.insert(0, ' ');
                 }
-                if v >= 0.0 && !body.starts_with('-') {
-                    if spec.plus {
-                        body.insert(0, '+');
-                    } else if spec.space {
-                        body.insert(0, ' ');
-                    }
-                }
-                self.pad(body.as_bytes(), spec, true);
+                // inf and nan are padded with blanks, never zeros.
+                self.pad(body.as_bytes(), spec, v.is_finite());
             }
             other => {
-                self.errors
-                    .push(format!("`{}': invalid format character", other as char));
+                self.fail(format!("`{}': invalid format character", other as char));
                 self.stop = true;
             }
         }
     }
-}
-
-/// C's `%e`: `d.dddddde+XX`.
-fn fmt_e(v: f64, prec: usize) -> String {
-    if !v.is_finite() {
-        return if v.is_nan() {
-            "nan".into()
-        } else if v > 0.0 {
-            "inf".into()
-        } else {
-            "-inf".into()
-        };
-    }
-    let s = format!("{v:.prec$e}");
-    let (mant, exp) = s.split_once('e').unwrap_or((&s, "0"));
-    let exp: i32 = exp.parse().unwrap_or(0);
-    let sign = if exp < 0 { '-' } else { '+' };
-    format!("{mant}e{sign}{:02}", exp.abs())
-}
-
-/// C's `%g`: the shorter of `%e` and `%f` with `prec` significant digits, trailing
-/// zeros removed unless `#`.
-fn fmt_g(v: f64, prec: usize, alt: bool) -> String {
-    if !v.is_finite() {
-        return fmt_e(v, 0);
-    }
-    let p = if prec == 0 { 1 } else { prec };
-    let exp = if v == 0.0 {
-        0
-    } else {
-        let e = format!("{v:.*e}", p - 1);
-        e.split_once('e')
-            .and_then(|(_, x)| x.parse::<i32>().ok())
-            .unwrap_or(0)
-    };
-    let mut out = if exp < -4 || exp >= p as i32 {
-        fmt_e(v, p - 1)
-    } else {
-        let decimals = (p as i32 - 1 - exp).max(0) as usize;
-        format!("{v:.decimals$}")
-    };
-    if !alt {
-        let (num, suffix) = match out.find('e') {
-            Some(i) => (out[..i].to_string(), out[i..].to_string()),
-            None => (out.clone(), String::new()),
-        };
-        let num = if num.contains('.') {
-            num.trim_end_matches('0').trim_end_matches('.').to_string()
-        } else {
-            num
-        };
-        out = format!("{num}{suffix}");
-    }
-    out
 }
 
 struct Num {
@@ -746,112 +688,14 @@ fn parse_num(a: &[u8], utf8: bool) -> Num {
     }
 }
 
-/// The value of the longest prefix of `t` that C's `strtod` converts: a decimal or
-/// hexadecimal number with its exponent, or `inf`, `infinity` or `nan`. None when it
-/// converts nothing (`-n`, `e3`). The second value is how many bytes it converted.
-fn float_prefix(t: &[u8]) -> Option<(f64, usize)> {
-    let (neg, body) = match t.first() {
-        Some(b'-') => (true, &t[1..]),
-        Some(b'+') => (false, &t[1..]),
-        _ => (false, t),
+/// bash's `sh_invalidnum`: what kind of number the argument looked like.
+fn invalid_number(a: &[u8]) -> String {
+    let kind = match a {
+        [b'0', d, ..] if d.is_ascii_digit() => "invalid octal number",
+        [b'0', b'x', ..] => "invalid hex number",
+        _ => "invalid number",
     };
-    let sign = t.len() - body.len();
-    let lower = body.to_ascii_lowercase();
-    let (v, used) = if lower.starts_with(b"infinity") {
-        (f64::INFINITY, 8)
-    } else if lower.starts_with(b"inf") {
-        (f64::INFINITY, 3)
-    } else if lower.starts_with(b"nan") {
-        (f64::NAN, 3)
-    } else if let Some((v, n)) = lower.strip_prefix(b"0x").and_then(hex_float) {
-        (v, n + 2)
-    } else {
-        let digits = |i: &mut usize| {
-            let start = *i;
-            while body.get(*i).is_some_and(u8::is_ascii_digit) {
-                *i += 1;
-            }
-            *i - start
-        };
-        let mut i = 0;
-        let mut n = digits(&mut i);
-        if body.get(i) == Some(&b'.') {
-            i += 1;
-            n += digits(&mut i);
-        }
-        if n == 0 {
-            return None;
-        }
-        let mantissa = i;
-        if matches!(body.get(i), Some(b'e' | b'E')) {
-            let mut j = i + 1;
-            if matches!(body.get(j), Some(b'+' | b'-')) {
-                j += 1;
-            }
-            if digits(&mut j) > 0 {
-                i = j;
-            }
-        }
-        match std::str::from_utf8(&body[..i]).ok()?.parse::<f64>() {
-            Ok(v) => (v, i),
-            Err(_) => (
-                std::str::from_utf8(&body[..mantissa]).ok()?.parse().ok()?,
-                mantissa,
-            ),
-        }
-    };
-    Some((if neg { -v } else { v }, sign + used))
-}
-
-/// A hexadecimal float's value after its `0x` (digits, a fraction and a `p` exponent),
-/// and how many bytes it takes.
-fn hex_float(b: &[u8]) -> Option<(f64, usize)> {
-    let mut i = 0;
-    let mut v = 0f64;
-    let mut n = 0;
-    while let Some(d) = b.get(i).and_then(|c| (*c as char).to_digit(16)) {
-        v = v * 16.0 + f64::from(d);
-        i += 1;
-        n += 1;
-    }
-    if b.get(i) == Some(&b'.') {
-        i += 1;
-        let mut scale = 1.0 / 16.0;
-        while let Some(d) = b.get(i).and_then(|c| (*c as char).to_digit(16)) {
-            v += f64::from(d) * scale;
-            scale /= 16.0;
-            i += 1;
-            n += 1;
-        }
-    }
-    if n == 0 {
-        return None;
-    }
-    if matches!(b.get(i), Some(b'p' | b'P')) {
-        let mut j = i + 1;
-        let neg = match b.get(j) {
-            Some(b'-') => {
-                j += 1;
-                true
-            }
-            Some(b'+') => {
-                j += 1;
-                false
-            }
-            _ => false,
-        };
-        let start = j;
-        let mut e: i32 = 0;
-        while let Some(d) = b.get(j).filter(|c| c.is_ascii_digit()) {
-            e = e.saturating_mul(10).saturating_add(i32::from(d - b'0'));
-            j += 1;
-        }
-        if j > start {
-            v *= 2f64.powi(if neg { -e } else { e });
-            i = j;
-        }
-    }
-    Some((v, i))
+    format!("{}: {kind}", s(a))
 }
 
 #[cfg(test)]

@@ -71,6 +71,25 @@ fn a_command_word_starting_with_a_percent_resumes_a_job() {
 }
 
 #[test]
+fn printf_floats_are_long_doubles() {
+    // bash converts with strtold, so values past f64's range keep their digits, and
+    // nan and inf print in lowercase (uppercase for F E G A).
+    let (_, o, e) = run(
+        "printf '%e|%g|%.20f|%a\\n' 1e400 1e-4950 0.1 0.1; \
+         printf '%f|%F|%E|%g|%+G|%5.1f|%-5e|%A\\n' nan -nan inf -inf nan inf -inf nan; \
+         printf -v v '%.0f' 1e400; echo ${#v}; printf '%.2f\\n' -n",
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&o),
+        "1.000000e+400|1.09356e-4950|0.10000000000000000000|0xc.ccccccccccccccdp-7\n\
+         nan|-NAN|INF|-inf|+NAN|  inf|-inf |NAN\n401\n0.00\n"
+    );
+    let e = String::from_utf8_lossy(&e);
+    assert!(e.contains("warning: 1e-4950: Numerical result out of range"));
+    assert!(e.contains("-n: invalid number"));
+}
+
+#[test]
 fn printf_floats_take_what_strtod_converts() {
     let (_, o, e) = run("printf '%.2f\\n' 2228e9x 12e3abc 1.5x 0x1Ap1 1e e3 -n");
     assert_eq!(

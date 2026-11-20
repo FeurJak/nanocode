@@ -10,6 +10,7 @@ mod eval;
 pub(crate) mod hash;
 mod help;
 mod jobs;
+mod ldouble;
 mod mapfile;
 mod printf;
 pub(crate) mod read;
