@@ -57,8 +57,27 @@ def _named(fn):
             path = args[0] if args else kwargs.get('path')
             if error.errno is None or error.filename is None or path is None or isinstance(path, int):
                 raise
+            if error.errno == _errno.ENOENT and _under_file(path):
+                raise _fail(_errno.ENOTDIR, fspath(path)) from None
             raise type(error)(error.errno, error.strerror, fspath(path)) from None
     return _rename_function(call, fn)
+
+
+def _under_file(path):
+    # Whether a directory the path passes through is a file, as ENOTDIR reports.
+    try:
+        target = _abs(path)
+    except (OSError, TypeError, ValueError):
+        return False
+    parent = target.rsplit(b'/', 1)[0]
+    while parent:
+        try:
+            kind = _host.stat(parent)[0]
+        except OSError:
+            parent = parent.rsplit(b'/', 1)[0]
+            continue
+        return kind != 1
+    return False
 
 
 def _named2(fn):
@@ -365,7 +384,11 @@ def remove(path, *, dir_fd=None):
 
 @_named2
 def rename(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
-    _host.rename(_abs(src), _abs(dst))
+    source, target = _abs(src), _abs(dst)
+    if target.startswith(source + b'/'):
+        # A directory cannot move into itself.
+        raise _fail(_errno.EINVAL, src)
+    _host.rename(source, target)
 
 
 @_named2
@@ -497,7 +520,7 @@ def open(path, flags, mode=0o777, *, dir_fd=None):
             kind, size, _, _ = _host.stat(target)
         except FileNotFoundError:
             if not flags & O_CREAT:
-                raise _fail(_errno.ENOENT, path) from None
+                raise _fail(_errno.ENOTDIR if _under_file(path) else _errno.ENOENT, path) from None
             _host.write(target, b'', 2)
             file.data = bytearray()
         else:
