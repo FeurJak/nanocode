@@ -91,6 +91,8 @@ pub enum BoardMutation {
     DueFiresTwice,
     RecurrenceSkipsOnRestart,
     AttemptsNotCounted,
+    WakeIgnoresDue,
+    CronNamesShifted,
     EditsByAnyone,
     TombstonesEditable,
     RepliesNest,
@@ -115,7 +117,7 @@ pub enum BoardMutation {
 }
 
 impl BoardMutation {
-    const ALL: [Self; 67] = [
+    const ALL: [Self; 69] = [
         Self::None,
         Self::ClaimIgnoresLease,
         Self::ClaimIgnoresNeeds,
@@ -163,6 +165,8 @@ impl BoardMutation {
         Self::DueFiresTwice,
         Self::RecurrenceSkipsOnRestart,
         Self::AttemptsNotCounted,
+        Self::WakeIgnoresDue,
+        Self::CronNamesShifted,
         Self::EditsByAnyone,
         Self::TombstonesEditable,
         Self::RepliesNest,
@@ -241,6 +245,8 @@ impl BoardMutation {
             Self::DueFiresTwice => "due_fires_twice",
             Self::RecurrenceSkipsOnRestart => "recurrence_skips_on_restart",
             Self::AttemptsNotCounted => "attempts_not_counted",
+            Self::WakeIgnoresDue => "wake_ignores_due",
+            Self::CronNamesShifted => "cron_names_shifted",
             Self::EditsByAnyone => "edits_by_anyone",
             Self::TombstonesEditable => "tombstones_editable",
             Self::RepliesNest => "replies_nest",
@@ -322,6 +328,8 @@ impl BoardMutation {
             Self::DueFiresTwice => BoardRule::DueFiresTwice,
             Self::RecurrenceSkipsOnRestart => BoardRule::RecurrenceSkipsOnRestart,
             Self::AttemptsNotCounted => BoardRule::AttemptsNotCounted,
+            Self::WakeIgnoresDue => BoardRule::WakeIgnoresDue,
+            Self::CronNamesShifted => BoardRule::CronNamesShifted,
             Self::EditsByAnyone => BoardRule::EditsByAnyone,
             Self::TombstonesEditable => BoardRule::TombstonesEditable,
             Self::RepliesNest => BoardRule::RepliesNest,

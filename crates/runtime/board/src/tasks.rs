@@ -74,6 +74,27 @@ impl Board {
         Ok(placed.into_iter().map(|task| task.id).collect())
     }
 
+    pub async fn post_due(
+        &mut self,
+        at_ms: u64,
+        task: NewTask,
+        terms: Terms,
+    ) -> Result<Applied, BoardError> {
+        let task = NewTask { terms, ..task };
+        let key = format!("post/{}", task.id);
+        let applied = self
+            .submit_keyed(&key, at_ms, Op::Post { task: task.clone() })
+            .await?;
+        if self
+            .fold
+            .task(&task.id)
+            .is_none_or(|landed| landed.spec != task)
+        {
+            return Err(BoardError::Rejected(Rejection::Tasks(Refusal::Duplicate)));
+        }
+        Ok(applied)
+    }
+
     pub async fn run<W, F>(
         &mut self,
         task: &TaskId,

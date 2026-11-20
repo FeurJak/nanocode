@@ -67,6 +67,8 @@ pub enum Mutation {
     DueFiresTwice,
     RecurrenceSkipsOnRestart,
     AttemptsNotCounted,
+    WakeIgnoresDue,
+    CronNamesShifted,
     EditsByAnyone,
     TombstonesEditable,
     RepliesNest,

@@ -40,6 +40,40 @@ pub struct Terms {
 }
 
 impl Terms {
+    pub fn due(due_at_ms: u64) -> Self {
+        Self {
+            due_at_ms: Some(due_at_ms),
+            ..Self::default()
+        }
+    }
+
+    pub fn every(self, every_ms: u64) -> Self {
+        Self {
+            recur: Some(Recur::Every { every_ms }),
+            ..self
+        }
+    }
+
+    pub fn cron(self, cron: &str, offset_minutes: i16) -> Self {
+        Self {
+            recur: Some(Recur::Cron {
+                cron: cron.to_owned(),
+                offset_minutes,
+            }),
+            ..self
+        }
+    }
+
+    pub fn retry(self, max_attempts: u64, backoff_ms: u64) -> Self {
+        Self {
+            retry: Some(Retry {
+                max_attempts,
+                backoff_ms,
+            }),
+            ..self
+        }
+    }
+
     pub fn is_default(&self) -> bool {
         *self == Self::default()
     }
