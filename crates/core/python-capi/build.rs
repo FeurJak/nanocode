@@ -1,5 +1,8 @@
 use std::{
-    env, fs,
+    env,
+    ffi::OsStr,
+    fs,
+    hash::{DefaultHasher, Hasher},
     path::{Path, PathBuf},
     process::Command,
     sync::atomic::{AtomicUsize, Ordering},
@@ -302,6 +305,158 @@ fn is_cxx(path: &Path) -> bool {
         .is_some_and(|extension| extension == "cpp" || extension == "cc" || extension == "cxx")
 }
 
+/// A 128-bit key over everything the archive is built from.
+struct Key([DefaultHasher; 2]);
+
+impl Key {
+    fn new() -> Self {
+        let mut hashers = [DefaultHasher::new(), DefaultHasher::new()];
+        hashers[1].write(b"nanocode-python-capi");
+        Self(hashers)
+    }
+
+    fn add(&mut self, bytes: &[u8]) {
+        for hasher in &mut self.0 {
+            hasher.write_usize(bytes.len());
+            hasher.write(bytes);
+        }
+    }
+
+    /// Adds every file below dir by its path under root and its content, in sorted order.
+    fn tree(&mut self, root: &Path, dir: &Path) {
+        let mut paths: Vec<PathBuf> = fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        paths.sort();
+        for path in paths {
+            let name = path.strip_prefix(root).unwrap_or(&path).to_owned();
+            self.add(name.as_os_str().as_encoded_bytes());
+            match fs::symlink_metadata(&path) {
+                Ok(meta) if meta.is_dir() => {
+                    self.add(b"/");
+                    self.tree(root, &path);
+                }
+                Ok(meta) if meta.is_symlink() => {
+                    let to = fs::read_link(&path).unwrap_or_default();
+                    self.add(to.as_os_str().as_encoded_bytes());
+                }
+                _ => self.add(&fs::read(&path).unwrap_or_default()),
+            }
+        }
+    }
+
+    fn finish(&self) -> String {
+        format!("{:016x}{:016x}", self.0[0].finish(), self.0[1].finish())
+    }
+}
+
+const CACHED: [&str; 2] = ["libnanocode_python_capi_ext.a", "extensions.rs"];
+
+/// Where a build with these inputs keeps its archive and extension table: a directory under
+/// $NANOCODE_CAPI_CACHE (default ~/.cache/nanocode/capi) named by a hash of the sources, this
+/// script, the compiler's path and version, the target and the variables the compiler reads.
+/// None when caching is off (NANOCODE_CAPI_CACHE=0) or the compiler can't say its version.
+fn cache_entry(
+    root: &Path,
+    compiler: &OsStr,
+    target: &str,
+    host: &str,
+    families: &[&str],
+    apple: Option<&(String, PathBuf)>,
+) -> Option<PathBuf> {
+    let base = match env::var_os("NANOCODE_CAPI_CACHE") {
+        Some(dir) if dir.is_empty() || dir == "0" => return None,
+        Some(dir) => PathBuf::from(dir),
+        None => env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?
+            .join("nanocode")
+            .join("capi"),
+    };
+    let version = Command::new(compiler)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?
+        .stdout;
+    let mut key = Key::new();
+    key.add(target.as_bytes());
+    key.add(host.as_bytes());
+    key.add(families.join(",").as_bytes());
+    key.add(compiler.as_encoded_bytes());
+    key.add(&version);
+    if let Some((triple, sysroot)) = apple {
+        key.add(triple.as_bytes());
+        key.add(sysroot.as_os_str().as_encoded_bytes());
+    }
+    for name in [
+        "CPATH",
+        "C_INCLUDE_PATH",
+        "CPLUS_INCLUDE_PATH",
+        "SDKROOT",
+        "CCC_OVERRIDE_OPTIONS",
+    ] {
+        key.add(env::var_os(name).unwrap_or_default().as_encoded_bytes());
+    }
+    key.add(&fs::read(root.join("build.rs")).ok()?);
+    for dir in ["c", "lib", "ext", "cxx", "include"] {
+        key.add(dir.as_bytes());
+        key.tree(root, &root.join(dir));
+    }
+    Some(base.join(key.finish()))
+}
+
+/// Copies a cached archive and table into out; Some(whether it needs the C++ runtime) on a hit.
+fn restore(entry: &Path, out: &Path) -> Option<bool> {
+    let cxx = fs::read(entry.join("cxx")).ok()?;
+    for name in CACHED {
+        fs::copy(entry.join(name), out.join(name)).ok()?;
+    }
+    Some(cxx == b"1")
+}
+
+/// Saves the archive and table built in out under entry: written beside it, then renamed into
+/// place, so a reader sees a whole entry or none.
+fn save(entry: &Path, out: &Path, cxx_runtime: bool) {
+    let (Some(parent), Some(name)) = (entry.parent(), entry.file_name()) else {
+        return;
+    };
+    let staging = parent.join(format!(
+        ".{}-{}",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    let written = fs::create_dir_all(&staging).is_ok()
+        && CACHED
+            .iter()
+            .all(|name| fs::copy(out.join(name), staging.join(name)).is_ok())
+        && fs::write(staging.join("cxx"), if cxx_runtime { "1" } else { "0" }).is_ok();
+    if !written || fs::rename(&staging, entry).is_err() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+}
+
+/// Tells cargo to link the archive in out, and the C++ and Windows libraries it needs.
+fn link(out: &Path, cxx_runtime: bool, wasm: bool, windows: bool) {
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=nanocode_python_capi_ext");
+    if cxx_runtime && !wasm {
+        if env::var("CARGO_CFG_TARGET_VENDOR").is_ok_and(|vendor| vendor == "apple") {
+            println!("cargo:rustc-link-lib=c++");
+        } else if !windows {
+            println!("cargo:rustc-link-lib=stdc++");
+        }
+    }
+    if env::var("CARGO_CFG_TARGET_ENV").is_ok_and(|target_env| target_env == "msvc") {
+        println!("cargo:rustc-link-lib=oldnames");
+        println!("cargo:rustc-link-lib=gdi32");
+        println!("cargo:rustc-link-lib=user32");
+    }
+}
+
 fn main() {
     let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
@@ -341,6 +496,15 @@ fn main() {
     let runtime = root.join("cxx");
     println!("cargo:rerun-if-changed=cxx");
     let apple = apple(&target);
+    // About 500 C and C++ files compile below. What they make depends only on the inputs
+    // cache_entry hashes, so a build whose inputs another build already compiled copies its
+    // archive and table instead.
+    println!("cargo:rerun-if-env-changed=NANOCODE_CAPI_CACHE");
+    let entry = cache_entry(&root, &compiler, &target, &host, &families, apple.as_ref());
+    if let Some(cxx_runtime) = entry.as_deref().and_then(|entry| restore(entry, &out)) {
+        link(&out, cxx_runtime, wasm, windows);
+        return;
+    }
     let compile = |source: &Path, object: &Path, defines: &[String]| {
         let mut command = Command::new(&compiler);
         if let Some((triple, sysroot)) = &apple {
@@ -639,18 +803,8 @@ fn main() {
         format!("unsafe extern \"C\" {{\n{table}{arities}}}\n\npub static EXTENSIONS: &[Extension] = &[\n{entries}];\n\npub fn arity_tables() -> Vec<*const usize> {{\n    vec![\n{tables}    ]\n}}\n"),
     )
     .expect("the extension table");
-    println!("cargo:rustc-link-search=native={}", out.display());
-    println!("cargo:rustc-link-lib=static=nanocode_python_capi_ext");
-    if cxx_runtime && !wasm {
-        if env::var("CARGO_CFG_TARGET_VENDOR").is_ok_and(|vendor| vendor == "apple") {
-            println!("cargo:rustc-link-lib=c++");
-        } else if !windows {
-            println!("cargo:rustc-link-lib=stdc++");
-        }
+    if let Some(entry) = &entry {
+        save(entry, &out, cxx_runtime);
     }
-    if env::var("CARGO_CFG_TARGET_ENV").is_ok_and(|target_env| target_env == "msvc") {
-        println!("cargo:rustc-link-lib=oldnames");
-        println!("cargo:rustc-link-lib=gdi32");
-        println!("cargo:rustc-link-lib=user32");
-    }
+    link(&out, cxx_runtime, wasm, windows);
 }
