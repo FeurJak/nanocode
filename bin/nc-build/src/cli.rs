@@ -90,7 +90,7 @@ const USAGE: &str = "usage:
   $NC_BUILD_SLOTS_GIT or ~/.config/nc-build/slots-git, a git remote whose branch $NC_BUILD_SLOTS_BRANCH (nc-build-slots) holds
   slots.json as one parentless commit, replaced by a push with --force-with-lease on the fetched commit that retries when
   another push won, through one lock per machine waited on for at most $NC_BUILD_SLOTS_LOCK_WAIT seconds (180), pruning
-  unreachable objects older than a minute after each write; else the file $NC_BUILD_SLOTS
+  unreachable objects older than a minute on each call; else the file $NC_BUILD_SLOTS
   (~/swarm/slots.json); lane caps live apart from it, where clients older than caps never write: caps.json on the branch
   NC_BUILD_SLOTS_BRANCH-caps (nc-build-slots-caps), else slots.caps.json beside the file; caps still found in slots.json
   move there on first use; machines: the stored boxes, else $NC_BUILD_BOXES (~/swarm/boxes.json), each until it expires;
@@ -525,6 +525,9 @@ fn with_git_file<T>(
         all.extend_from_slice(args);
         run_input("git", &all, input)
     };
+    // Every fetch and write leaves objects no ref reaches; drop those a
+    // minute old, so reads as well as writes keep the cache small.
+    let _ = git(&["prune", "--expire=1.minute.ago"], "");
     loop {
         let parent = match git(&["fetch", "-q", "--depth", "1", remote, branch], "") {
             Ok(_) => Some(git(&["rev-parse", "FETCH_HEAD"], "")?.trim().to_owned()),
@@ -559,10 +562,7 @@ fn with_git_file<T>(
             ],
             "",
         ) {
-            Ok(_) => {
-                let _ = git(&["prune", "--expire=1.minute.ago"], "");
-                return Ok(result);
-            }
+            Ok(_) => return Ok(result),
             Err(error) if error.contains("stale info") || error.contains("rejected") => {
                 std::thread::sleep(std::time::Duration::from_millis(now_ms() % 500));
             }
