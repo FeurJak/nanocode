@@ -9504,7 +9504,7 @@ impl ExecutingFrame<'_> {
         if let (Some(av), Some(bv)) = (a.try_to_i64_fast(), b.try_to_i64_fast())
             && let Some(result) = checked(av, bv)
         {
-            return vm.ctx.new_int(result).into();
+            return vm.ctx.new_int_i64(result).into();
         }
         vm.ctx
             .new_int(fallback(a.as_bigint(), b.as_bigint()))
@@ -9543,7 +9543,7 @@ impl ExecutingFrame<'_> {
     ) -> Option<PyObjectRef> {
         use nanocode_numeric::ToPrimitive;
         let (av, bv) = (a.to_i64()?, b.to_i64()?);
-        compute(av, bv).map(|r| vm.ctx.new_int(r).into())
+        compute(av, bv).map(|r| vm.ctx.new_int_i64(r).into())
     }
 
     /// Floor division of two i64 values with floor (toward negative infinity)
