@@ -289,7 +289,7 @@ pub(crate) fn intrinsic(heap: &mut Heap, k: u16, a: [Value; 5]) -> Result<Option
             let raw = Spec::parse(&raw);
             let spec = match kind {
                 0 => number::resolve(&locale, &raw)?,
-                1 => date::resolve(&locale, &raw)?,
+                1 => date::resolve(&locale, &tags, &raw)?,
                 2 => collate::resolve(&locale, &tags, &raw)?,
                 DISPLAY_NAMES => displaynames::resolve(&locale, &raw)?,
                 SEGMENTER => segmenter::resolve(&locale, &raw)?,

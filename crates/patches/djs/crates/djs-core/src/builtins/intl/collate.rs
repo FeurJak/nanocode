@@ -306,7 +306,7 @@ pub(super) fn compare(spec: &Spec, a: &[u16], b: &[u16]) -> i32 {
 }
 
 /// The Unicode extension keywords (`-u-kn-true`) of a language tag, with their values.
-fn unicode_keywords(tag: &str) -> Vec<(&str, String)> {
+pub(super) fn unicode_keywords(tag: &str) -> Vec<(&str, String)> {
     let mut out: Vec<(&str, String)> = Vec::new();
     let subtags = tag.split('-').skip_while(|s| !s.eq_ignore_ascii_case("u")).skip(1);
     for s in subtags.take_while(|s| s.len() != 1) {

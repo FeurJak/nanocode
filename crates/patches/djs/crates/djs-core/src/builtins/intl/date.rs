@@ -50,6 +50,23 @@ fn date_locale(locale: &str) -> Option<usize> {
 
 const ARAB_DIGIT_REGIONS: [&str; 21] = ["BH", "DJ", "EG", "ER", "IL", "IQ", "JO", "KM", "KW", "LB", "MR", "OM", "PS", "QA", "SA", "SD", "SO", "SS", "SY", "TD", "YE"];
 
+/// The decimal numbering systems ICU formats dates in (Intl.supportedValuesOf('numberingSystem')) with
+/// the code point of their zero; every one but hanidec runs on contiguously from it.
+const NU_ZEROS: [(&str, u32); 77] = [("adlm", 0x1e950), ("ahom", 0x11730), ("arab", 0x660), ("arabext", 0x6f0), ("bali", 0x1b50), ("beng", 0x9e6), ("bhks", 0x11c50), ("brah", 0x11066), ("cakm", 0x11136), ("cham", 0xaa50), ("deva", 0x966), ("diak", 0x11950), ("fullwide", 0xff10), ("gara", 0x10d40), ("gong", 0x11da0), ("gonm", 0x11d50), ("gujr", 0xae6), ("gukh", 0x16130), ("guru", 0xa66), ("hmng", 0x16b50), ("hmnp", 0x1e140), ("java", 0xa9d0), ("kali", 0xa900), ("kawi", 0x11f50), ("khmr", 0x17e0), ("knda", 0xce6), ("krai", 0x16d70), ("lana", 0x1a80), ("lanatham", 0x1a90), ("laoo", 0xed0), ("latn", 0x30), ("lepc", 0x1c40), ("limb", 0x1946), ("mathbold", 0x1d7ce), ("mathdbl", 0x1d7d8), ("mathmono", 0x1d7f6), ("mathsanb", 0x1d7ec), ("mathsans", 0x1d7e2), ("mlym", 0xd66), ("modi", 0x11650), ("mong", 0x1810), ("mroo", 0x16a60), ("mtei", 0xabf0), ("mymr", 0x1040), ("mymrepka", 0x116da), ("mymrpao", 0x116d0), ("mymrshan", 0x1090), ("mymrtlng", 0xa9f0), ("nagm", 0x1e4f0), ("newa", 0x11450), ("nkoo", 0x7c0), ("olck", 0x1c50), ("onao", 0x1e5f1), ("orya", 0xb66), ("osma", 0x104a0), ("outlined", 0x1ccf0), ("rohg", 0x10d30), ("saur", 0xa8d0), ("segment", 0x1fbf0), ("shrd", 0x111d0), ("sind", 0x112f0), ("sinh", 0xde6), ("sora", 0x110f0), ("sund", 0x1bb0), ("sunu", 0x11bf0), ("takr", 0x116c0), ("talu", 0x19d0), ("tamldec", 0xbe6), ("telu", 0xc66), ("thai", 0xe50), ("tibt", 0xf20), ("tirh", 0x114d0), ("tnsa", 0x16ac0), ("tols", 0x11de0), ("vaii", 0xa620), ("wara", 0x118e0), ("wcho", 0x1e2f0),];
+const HANIDEC: [char; 10] = ['\u{3007}', '\u{4e00}', '\u{4e8c}', '\u{4e09}', '\u{56db}', '\u{4e94}', '\u{516d}', '\u{4e03}', '\u{516b}', '\u{4e5d}'];
+
+fn nu_supported(nu: &str) -> bool {
+    nu == "hanidec" || NU_ZEROS.iter().any(|z| z.0 == nu)
+}
+
+/// ASCII digit `d` written in numbering system `nu`.
+fn nu_digit(nu: &str, d: u32) -> char {
+    if nu == "hanidec" {
+        return HANIDEC[d as usize];
+    }
+    NU_ZEROS.iter().find(|z| z.0 == nu).and_then(|z| char::from_u32(z.1 + d)).unwrap_or(char::from(b'0' + d as u8))
+}
+
 fn numbering_system(locale: &str) -> &'static str {
     let mut sub = locale.split('-');
     if sub.next() == Some("ar") && sub.any(|s| ARAB_DIGIT_REGIONS.contains(&s)) {
@@ -168,6 +185,26 @@ fn pos(values: &[&str], v: Option<&str>) -> usize {
     values.iter().position(|x| Some(*x) == v).unwrap_or(0)
 }
 
+/// tzdata's POSIX-style US zones, which ICU keeps as their own IDs and names only by offset (GMT-5).
+const US_POSIX_ZONES: [(&str, &str); 4] =
+    [("CST6CDT", "CST6CDT,M3.2.0,M11.1.0"), ("EST5EDT", "EST5EDT,M3.2.0,M11.1.0"), ("MST7MDT", "MST7MDT,M3.2.0,M11.1.0"), ("PST8PDT", "PST8PDT,M3.2.0,M11.1.0")];
+
+/// The hours east of UTC of an Etc/GMT±N zone (case-insensitive; POSIX signs, so Etc/GMT+5 is UTC-5),
+/// for N in 1..=12 west and 1..=14 east, as ICU has them. Etc/GMT±0 is an alias of UTC instead.
+fn etc_gmt_hours(name: &str) -> Option<i64> {
+    let rest = name.get(..7).filter(|p| p.eq_ignore_ascii_case("Etc/GMT")).map(|_| &name[7..])?;
+    let (sign, digits) = (rest.as_bytes().first()?, &rest[1..]);
+    if digits.is_empty() || digits.len() > 2 || digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n: i64 = digits.parse().ok()?;
+    match sign {
+        b'+' if n <= 12 => Some(-n),
+        b'-' if n <= 14 => Some(n),
+        _ => None,
+    }
+}
+
 /// The zone's canonical name, from a case-insensitive IANA name, alias or offset.
 fn canonical_zone(name: &str) -> Option<String> {
     let b = name.as_bytes();
@@ -185,13 +222,20 @@ fn canonical_zone(name: &str) -> Option<String> {
         }
         return Some(format!("{}{h}:{m}", &name[..1]));
     }
+    // An alias first: ICU resolves GMT, Etc/GMT and Etc/UTC to UTC though ZONES lists them for their names.
+    if let Some(a) = ZONE_ALIASES.iter().find(|a| a.0.eq_ignore_ascii_case(name)) {
+        return Some(a.1.to_string());
+    }
     if let Some(z) = ZONES.iter().find(|z| z.0.eq_ignore_ascii_case(name)) {
         return Some(z.0.to_string());
     }
-    ZONE_ALIASES
-        .iter()
-        .find(|a| a.0.eq_ignore_ascii_case(name))
-        .map(|a| a.1.to_string())
+    if let Some(z) = US_POSIX_ZONES.iter().find(|z| z.0.eq_ignore_ascii_case(name)) {
+        return Some(z.0.to_string());
+    }
+    if let Some(h) = etc_gmt_hours(name) {
+        return Some(format!("Etc/GMT{}{}", if h < 0 { '+' } else { '-' }, h.abs()));
+    }
+    None
         .or_else(|| {
             let upper = name.to_ascii_uppercase();
             let etc = upper.strip_prefix("ETC/").unwrap_or(&upper);
@@ -200,8 +244,26 @@ fn canonical_zone(name: &str) -> Option<String> {
         })
 }
 
-pub(super) fn resolve(locale: &str, raw: &Spec) -> Result<Spec, Fault> {
+/// ResolveLocale for Intl.DateTimeFormat: `tags` are the requested locales, `locale` the one chosen from them.
+pub(super) fn resolve(locale: &str, tags: &[String], raw: &Spec) -> Result<Spec, Fault> {
     let n = "Intl.DateTimeFormat";
+    // numberingSystem: a supported option wins, else a supported -u-nu- keyword (which the locale keeps
+    // unless an option overrode it), else the locale's own.
+    let lang = locale.split('-').next();
+    let keywords = tags.iter().find(|t| t.split('-').next() == lang).map(|t| super::collate::unicode_keywords(t)).unwrap_or_default();
+    let nu_key = keywords.iter().find(|(k, _)| *k == "nu").map(|(_, v)| v.as_str()).filter(|v| nu_supported(v));
+    let nu_opt = raw.get("numberingSystem");
+    if let Some(v) = nu_opt
+        && (v.is_empty() || !v.split('-').all(|p| (3..=8).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_alphanumeric())))
+    {
+        return range(&format!("Invalid numberingSystem : {v}"));
+    }
+    let (nu, nu_kept): (String, Option<String>) = match (nu_opt.filter(|v| nu_supported(v)), nu_key) {
+        (Some(o), Some(k)) if o != k => (o.to_string(), None),
+        (Some(o), _) => (o.to_string(), nu_key.map(|k| format!("-u-nu-{k}"))),
+        (None, Some(k)) => (k.to_string(), Some(format!("-u-nu-{k}"))),
+        (None, None) => (numbering_system(locale).to_string(), None),
+    };
     let hour12 = raw.get("hour12").map(|v| v == "true");
     let hc_opt = raw.choose_opt("hourCycle", &CYCLES, n)?;
     let zone = match raw.get("timeZone") {
@@ -309,9 +371,9 @@ pub(super) fn resolve(locale: &str, raw: &Spec) -> Result<Spec, Fault> {
         }
     };
     let mut out = Spec::default();
-    out.put("locale", locale);
+    out.put("locale", &format!("{locale}{}", nu_kept.unwrap_or_default()));
     out.put("calendar", "gregory");
-    out.put("numberingSystem", numbering_system(locale));
+    out.put("numberingSystem", &nu);
     out.put("timeZone", &zone);
     let has = |c: char| field_width(&pattern, c) != 0;
     if has('j') {
@@ -380,7 +442,7 @@ fn local_pattern(l: &LocaleDates, f: &[usize; 10], fsd: usize, custom: bool) -> 
     }
 }
 
-/// The longest run of a field's letter outside quotes (\`j\`: any hour letter).
+/// The longest run of a field's letter outside quotes (`j`: any hour letter).
 fn field_width(p: &str, letter: char) -> usize {
     let mut best = 0;
     let mut quoted = false;
@@ -627,7 +689,7 @@ fn trans_local(t: Trans, y: i64) -> i64 {
     day * 86_400 + t.secs
 }
 
-/// (offset in seconds, in daylight time) at UTC seconds \`t\`.
+/// (offset in seconds, in daylight time) at UTC seconds `t`.
 fn zone_offset(zone: &str, t: i64) -> (i64, bool, Option<&'static ZoneEntry>) {
     if let Some(rest) = zone.strip_prefix(['+', '-']) {
         let h: i64 = rest[..2].parse().unwrap_or(0);
@@ -635,14 +697,21 @@ fn zone_offset(zone: &str, t: i64) -> (i64, bool, Option<&'static ZoneEntry>) {
         let off = (h * 3600 + m * 60) * if zone.starts_with('-') { -1 } else { 1 };
         return (off, false, None);
     }
-    let Some(z) = ZONES.iter().find(|z| z.0 == zone) else { return (0, false, None) };
-    let r = rule(z.1);
-    let Some((dst, a, b)) = r.dst else { return (r.std, false, Some(z)) };
+    if let Some(h) = etc_gmt_hours(zone) {
+        return (h * 3600, false, None);
+    }
+    let (posix, z) = match (ZONES.iter().find(|z| z.0 == zone), US_POSIX_ZONES.iter().find(|z| z.0 == zone)) {
+        (Some(z), _) => (z.1, Some(z)),
+        (None, Some(p)) => (p.1, None),
+        (None, None) => return (0, false, None),
+    };
+    let r = rule(posix);
+    let Some((dst, a, b)) = r.dst else { return (r.std, false, z) };
     let (y, _, _) = civil((t + r.std).div_euclid(86_400));
     let start = trans_local(a, y) - r.std;
     let end = trans_local(b, y) - dst;
     let in_dst = if start < end { t >= start && t < end } else { !(t >= end && t < start) };
-    (if in_dst { dst } else { r.std }, in_dst, Some(z))
+    (if in_dst { dst } else { r.std }, in_dst, z)
 }
 
 fn offset_name(minutes: i64, long: bool, bare: bool) -> String {
@@ -901,17 +970,20 @@ pub(super) fn format(spec: &Spec, t: f64) -> Result<Parts, Fault> {
             _ => {}
         }
     }
-    if spec.get("numberingSystem") == Some("arab") {
+    let nu = spec.get("numberingSystem").unwrap_or("latn");
+    if matches!(nu, "arab" | "arabext") {
         for i in 1..out.items.len() {
-            if out.items[i].0 == "fractionalSecond" && out.items[i - 1].0 == "literal" && out.items[i - 1].1.ends_with('.') {
+            if out.items[i].0 == "fractionalSecond" && out.items[i - 1].0 == "literal" && out.items[i - 1].1.ends_with(['.', ',']) {
                 let lit = &mut out.items[i - 1].1;
                 lit.pop();
                 lit.push('\u{66b}');
             }
         }
+    }
+    if nu != "latn" {
         for (_, v) in out.items.iter_mut() {
             if v.bytes().any(|b| b.is_ascii_digit()) {
-                *v = v.chars().map(|c| c.to_digit(10).and_then(|d| char::from_u32(0x660 + d)).unwrap_or(c)).collect();
+                *v = v.chars().map(|c| c.to_digit(10).map(|d| nu_digit(nu, d)).unwrap_or(c)).collect();
             }
         }
     }
