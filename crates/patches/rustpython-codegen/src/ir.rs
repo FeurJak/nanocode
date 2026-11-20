@@ -4741,11 +4741,9 @@ fn const_folding_safe_power(left: &ConstantData, right: &ConstantData) -> Option
                 if !base.is_finite() {
                     return None;
                 }
-                let result = if let Some(exp) = r.to_i32() {
-                    base.powi(exp)
-                } else {
-                    base.powf(r.to_f64()?)
-                };
+                // powf, as float_pow does at run time: powi divides by base**-exp,
+                // which flushes results such as 2**-1074 to zero.
+                let result = base.powf(r.to_f64()?);
                 if !result.is_finite() {
                     return None;
                 }
