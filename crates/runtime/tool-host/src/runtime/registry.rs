@@ -367,19 +367,41 @@ impl ToolRegistry {
             return execution;
         }
         let queued_at = nanocode_platform::now();
-        let exclusive = self.policies.iter().any(|policy| policy.exclusive(name));
-        let origin = (!exclusive)
-            .then(|| context.call_id().rsplit_once('/').map(|(origin, _)| origin))
-            .flatten();
-        let _admission = self
-            .nested_gate
-            .admit(exclusive, origin)
-            .instrument(span.clone())
-            .await;
+        let mut paths = std::collections::BTreeMap::<String, bool>::new();
+        for access in self
+            .policies
+            .iter()
+            .flat_map(|policy| policy.file_access(name, &input))
+        {
+            let (path, writes) = match access {
+                crate::FileAccess::Read(path) => (path, false),
+                crate::FileAccess::Write(path) => (path, true),
+            };
+            *paths.entry(path).or_default() |= writes;
+        }
         span.record(
             "tool.admission",
-            if exclusive { "exclusive" } else { "shared" },
+            match paths.values().max() {
+                None => "free",
+                Some(false) => "shared",
+                Some(true) => "exclusive",
+            },
         );
+        let origin = context.call_id().rsplit_once('/').map(|(origin, _)| origin);
+        let mut admissions = Vec::with_capacity(paths.len());
+        for (path, writes) in paths {
+            let access = if writes {
+                crate::FileAccess::Write(path)
+            } else {
+                crate::FileAccess::Read(path)
+            };
+            admissions.push(
+                self.nested_gate
+                    .admit(access, origin)
+                    .instrument(span.clone())
+                    .await,
+            );
+        }
         span.record(
             "tool.admission.wait_ns",
             u64::try_from(nanocode_platform::elapsed(queued_at).as_nanos()).unwrap_or(u64::MAX),
