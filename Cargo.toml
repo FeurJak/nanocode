@@ -55,6 +55,7 @@ members = [
     "crates/core/python-data",
     "crates/core/python-capi",
     "crates/core/schema",
+    "crates/core/repo-cache",
     "crates/core/shell",
     "crates/core/workspace-fs",
     "crates/core/tool-provider",
@@ -161,6 +162,7 @@ nanocode-executor = { version = "0.7.0", path = "crates/core/executor" }
 nanocode-sys = { version = "0.7.0", path = "crates/core/sys" }
 nanocode-tempo = { version = "0.7.0", path = "crates/core/tempo" }
 nanocode-schema = { version = "0.7.0", path = "crates/core/schema" }
+nanocode-repo-cache = { version = "0.7.0", path = "crates/core/repo-cache" }
 nanocode-shell = { version = "0.7.0", path = "crates/core/shell" }
 nanocode-workspace-fs = { version = "0.7.0", path = "crates/core/workspace-fs" }
 nanocode-durability = { version = "0.7.0", path = "crates/runtime/durability" }

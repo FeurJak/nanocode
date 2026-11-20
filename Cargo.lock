@@ -965,6 +965,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocode-repo-cache"
+version = "0.7.0"
+dependencies = [
+ "nanocode-bytes",
+ "nanocode-digest",
+ "nanocode-shell",
+]
+
+[[package]]
 name = "nanocode-sandbox"
 version = "0.7.0"
 dependencies = [
@@ -1035,6 +1044,7 @@ dependencies = [
  "nanocode-process",
  "nanocode-process-contracts",
  "nanocode-python",
+ "nanocode-repo-cache",
  "nanocode-sandbox",
  "nanocode-shell",
  "nanocode-subagents",

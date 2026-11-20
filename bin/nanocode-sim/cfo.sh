@@ -191,6 +191,13 @@ default_table='
 2 cell_calls_twice pass --scenario cell_calls --twice
 1 canary_cell_calls_cross_results canary:8 --scenario cell_calls --mutation cross_results
 1 canary_cell_calls_root_recovery_unbound canary:8 --scenario cell_calls --mutation root_recovery_unbound
+8 repo_cache pass --scenario repo_cache
+2 repo_cache_twice pass --scenario repo_cache --twice
+1 canary_repo_cache_shared_head canary:8 --scenario repo_cache --mutation shared_head
+1 canary_repo_cache_fetch_moves_heads canary:8 --scenario repo_cache --mutation fetch_moves_heads
+1 canary_repo_cache_refs_before_objects canary:8 --scenario repo_cache --mutation refs_before_objects
+1 canary_repo_cache_resend_held canary:8 --scenario repo_cache --mutation resend_held
+1 canary_repo_cache_shared_lock canary:8 --scenario repo_cache --mutation shared_lock
 '
 default_known='
 '

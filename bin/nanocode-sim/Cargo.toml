@@ -39,6 +39,7 @@ nanocode-sandbox = { path = "../../crates/integrations/sandbox" }
 nanocode-subagents.workspace = true
 rustls.workspace = true
 nanocode-sync.workspace = true
+nanocode-repo-cache.workspace = true
 nanocode-shell.workspace = true
 nanocode-workspace-fs.workspace = true
 nanocode-sys.workspace = true
