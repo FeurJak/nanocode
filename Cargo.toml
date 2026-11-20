@@ -28,6 +28,7 @@ members = [
     "crates/core/partitions",
     "crates/runtime/board",
     "crates/runtime/board-sync",
+    "crates/runtime/live",
     "crates/runtime/hands",
     "crates/backends/claude",
     "crates/backends/claude/client",
@@ -170,6 +171,7 @@ nanocode-live-fold = { version = "0.7.0", path = "crates/core/live-fold" }
 nanocode-partitions = { version = "0.7.0", path = "crates/core/partitions" }
 nanocode-board = { version = "0.7.0", path = "crates/runtime/board" }
 nanocode-board-sync = { version = "0.7.0", path = "crates/runtime/board-sync" }
+nanocode-live = { version = "0.7.0", path = "crates/runtime/live" }
 nanocode-hands = { version = "0.7.0", path = "crates/runtime/hands" }
 nanocode-code-mode = { version = "0.7.0", path = "crates/runtime/code-mode"  }
 nanocode-workspace = { version = "0.7.0", path = "crates/runtime/workspace" }

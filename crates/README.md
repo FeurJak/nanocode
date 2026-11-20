@@ -52,6 +52,7 @@
 | `nanocode-durability` | Session drivers, the `SessionStore` catalog, `SharedStore`, `MemoryStore`, branches, the record cache |
 | `nanocode-tool-host` | The `Tools` builder, tool selection, admission, `FunctionTool`, description pins |
 | `nanocode-hands` | Per-call Code Mode targets (workspace, hosted, pool, native, mac), the `HandHost` contract, lazy start and idle release, sha-checked atomic copies |
+| `nanocode-live` | Live views over a partitioned log: one follower and one fold per view instance per node, diffs encoded once per access level and shared by every subscribed socket |
 
 ## backends
 
