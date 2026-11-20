@@ -84,6 +84,10 @@ const DROP_PPM: u64 = 850_000;
 /// Share of moved drops that land just after a stored reply instead of just before a call.
 const REPLY_PPM: u64 = 500_000;
 const DROP_US_MAX: u64 = 2_000;
+/// Separates an execution's label from the send count in a reply's value.
+const SEND: &str = " send ";
+/// Share of seeds whose hands drop retained replies the store holds without restarting.
+const EVICT_PPM: u64 = 500_000;
 const UNSENT: [&str; 3] = [
     "not dispatched",
     "never dispatched",
@@ -267,6 +271,7 @@ struct Script {
     schedules: Vec<Schedule>,
     reopen: Option<u64>,
     cancels: Vec<u64>,
+    evicts: bool,
 }
 
 struct Schedule {
@@ -285,6 +290,7 @@ fn times(rng: &mut Rng, count: u64) -> Vec<u64> {
 impl Script {
     fn of(seed: u64, options: HandsOptions) -> Self {
         let mut script = Self::drawn(seed, options.fleet);
+        script.evicts = Rng::derive(seed, "hands evict script").chance(EVICT_PPM);
         if options.reopen {
             let mut rng = Rng::derive(seed, "hands reopen script");
             script.reopen = Some(rng.range(1, REOPEN_MS_MAX) * MS);
@@ -391,6 +397,7 @@ impl Script {
             schedules: vec![Schedule { restarts, drops }],
             reopen: None,
             cancels: Vec::new(),
+            evicts: false,
         }
     }
 
@@ -437,6 +444,7 @@ impl Script {
             schedules,
             reopen: None,
             cancels: Vec::new(),
+            evicts: false,
         }
     }
 
@@ -483,6 +491,8 @@ struct Store {
     orphaned: AtomicU64,
     stalling: AtomicBool,
     stalled: AtomicU64,
+    /// Every stored reply a later reply replaced: a stored reply is final.
+    overwrites: Atom<Vec<String>>,
     seed: u64,
     mutation: HandsMutation,
 }
@@ -556,15 +566,32 @@ impl Store {
         } else {
             runtime
         };
+        let mut replaced = Vec::new();
         self.rows.update(|rows| {
             for row in rows.values_mut() {
                 let same = row.key == key && row.runtime == runtime;
                 let open = row.reply.is_none() || overwrite;
                 if same && open && (row.id == id || cross) {
+                    if let Some(stored) = row.reply.as_ref().filter(|stored| *stored != reply) {
+                        replaced.push(format!(
+                            "request {} replaced its stored reply {stored:?} with {reply:?}",
+                            row.id
+                        ));
+                    }
                     row.reply = Some(reply.clone());
                 }
             }
         });
+        if !replaced.is_empty() {
+            self.overwrites.update(|overwrites| overwrites.extend(replaced.iter().cloned()));
+        }
+    }
+
+    fn answered(&self, key: &str, id: u64) -> bool {
+        self.rows.read(|rows| {
+            rows.values()
+                .any(|row| row.key == key && row.id == id && row.reply.is_some())
+        })
     }
 
     fn unanswered(&self, key: &str, id: u64) -> bool {
@@ -965,8 +992,10 @@ struct Call {
 #[derive(Default)]
 struct Hand {
     runtime: u64,
-    running: BTreeMap<u64, (usize, u64, Value)>,
-    retained: BTreeMap<u64, Value>,
+    running: BTreeMap<u64, (usize, u64, String)>,
+    /// Each finished request's execution label and how many times the hand sent its reply:
+    /// every send carries that count, so a resend differs from the reply it repeats.
+    retained: BTreeMap<u64, (String, u64)>,
     executions: BTreeMap<usize, Vec<Value>>,
     callbacks: BTreeMap<u64, usize>,
     held: Vec<u64>,
@@ -1123,8 +1152,8 @@ impl World {
                 operation: RemoteOperation::Call { context, .. },
                 ..
             } => {
-                if let Some(value) = hand.retained.get(&id) {
-                    let _ = out.send(Self::reply(id, value.clone()));
+                if let Some(text) = self.resend(&mut hand, id) {
+                    let _ = out.send(text);
                     return;
                 }
                 if hand.running.contains_key(&id) {
@@ -1147,15 +1176,9 @@ impl World {
                 let runs = hand.executions.entry(index).or_default();
                 let label = format!("call {index} run {}", runs.len());
                 runs.push(json!(label));
-                let value = if self.fleet() {
-                    output_to_wire(ToolOutput::text(label), false)
-                        .expect("a simulated output encodes")
-                } else {
-                    json!(label)
-                };
                 let done = self.now() + self.script.runs[index];
                 hand.seen.insert(id);
-                hand.running.insert(id, (index, done, value));
+                hand.running.insert(id, (index, done, label));
                 self.marks.borrow_mut().reached(index, self.now());
                 self.note(format!("{} runs call {index} as request {id}", slot.key));
             }
@@ -1209,8 +1232,8 @@ impl World {
                 }
                 hand.retained.retain(|id, _| pending.contains(id));
                 for id in pending {
-                    if let Some(value) = hand.retained.get(&id) {
-                        let _ = out.send(Self::reply(id, value.clone()));
+                    if let Some(text) = self.resend(&mut hand, id) {
+                        let _ = out.send(text);
                     } else if !hand.running.contains_key(&id) {
                         if !hand.seen.contains(&id)
                             && self.store.mutation == HandsMutation::ReopenUnprobed
@@ -1292,12 +1315,51 @@ impl World {
             .map(|(id, _)| *id)
             .collect();
         for id in done {
-            let Some((index, _, value)) = hand.running.remove(&id) else {
+            let Some((index, _, label)) = hand.running.remove(&id) else {
                 continue;
             };
             self.marks.borrow_mut().replies.push((at, now, index));
-            hand.retained.insert(id, value.clone());
+            let value = self.sent(&label, 0);
+            hand.retained.insert(id, (label, 1));
             let _ = out.send(Self::reply(id, value));
+        }
+        if self.script.evicts {
+            self.evict(at, &mut hand);
+        }
+    }
+
+    /// The value of send number `send` of an execution's reply: its label and the count, which
+    /// check strips again to compare with what ran.
+    fn sent(&self, label: &str, send: u64) -> Value {
+        let text = format!("{label}{SEND}{send}");
+        if self.fleet() {
+            output_to_wire(ToolOutput::text(text), false).expect("a simulated output encodes")
+        } else {
+            json!(text)
+        }
+    }
+
+    /// Sends a retained reply again, numbered past every earlier send of it.
+    fn resend(&self, hand: &mut Hand, id: u64) -> Option<String> {
+        let (label, sends) = hand.retained.get_mut(&id)?;
+        let value = self.sent(label, *sends);
+        *sends += 1;
+        Some(Self::reply(id, value))
+    }
+
+    /// Drops retained replies the store already holds, within one runtime: a resume that still
+    /// names one then gets not-received, which must never replace the stored reply.
+    fn evict(&self, at: usize, hand: &mut Hand) {
+        let key = &self.slots[at].key;
+        let stored: Vec<u64> = hand
+            .retained
+            .keys()
+            .copied()
+            .filter(|id| self.store.answered(key, *id))
+            .collect();
+        for id in stored {
+            hand.retained.remove(&id);
+            self.note(format!("{key} evicts its retained reply to request {id}"));
         }
     }
 
@@ -1614,6 +1676,9 @@ impl World {
     }
 
     fn check(&self) {
+        for overwrite in self.store.overwrites.read(Vec::clone) {
+            self.fail("stored", overwrite);
+        }
         for (index, call) in self.calls.borrow().iter().enumerate() {
             for (at, slot) in self.slots.iter().enumerate() {
                 if at != call.hand && slot.hand.borrow().executions.contains_key(&index) {
@@ -1632,7 +1697,7 @@ impl World {
                 self.fail("once", format!("call {index} ran {} times", runs.len()));
             }
             match &call.state {
-                CallState::Committed(Outcome::Value(value)) if runs != [value.clone()] => {
+                CallState::Committed(Outcome::Value(value)) if runs != [executed(value)] => {
                     self.fail(
                         "real",
                         format!("call {index} committed {value} but ran {runs:?}"),
@@ -1682,6 +1747,14 @@ impl HandCalls for Redispatch {
     ) -> HostFuture<'a, ToolOutput> {
         self.0.call(hand, name, input, context)
     }
+}
+
+/// The execution a reply value names, without the send count `World::sent` added.
+fn executed(value: &Value) -> Value {
+    value
+        .as_str()
+        .and_then(|text| text.rsplit_once(SEND))
+        .map_or_else(|| value.clone(), |(label, _)| json!(label))
 }
 
 fn numbered(call_id: &str) -> usize {
@@ -1934,6 +2007,7 @@ fn play(
         rows: Atom::default(),
         writes: AtomicU64::new(0),
         abandoned: Atom::default(),
+        overwrites: Atom::default(),
         orphaned: AtomicU64::new(0),
         stalling: AtomicBool::new(false),
         stalled: AtomicU64::new(0),
