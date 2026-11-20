@@ -1903,7 +1903,7 @@ impl VirtualMachine {
 
         if counted_too_deep || self.check_c_stack_overflow() {
             return Err(
-                self.new_recursion_error(format!("maximum recursion depth exceeded {_where}"))
+                self.new_recursion_error(format!("maximum recursion depth exceeded {_where}").trim_end().to_owned())
             );
         }
 
@@ -2353,7 +2353,7 @@ impl VirtualMachine {
     // To be called right before raising the recursion depth.
     fn check_recursive_call(&self, _where: &str) -> PyResult<()> {
         if self.recursion_depth.get() >= self.recursion_limit.get() {
-            Err(self.new_recursion_error(format!("maximum recursion depth exceeded {_where}")))
+            Err(self.new_recursion_error(format!("maximum recursion depth exceeded {_where}").trim_end().to_owned()))
         } else {
             Ok(())
         }

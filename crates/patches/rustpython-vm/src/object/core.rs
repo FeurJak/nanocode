@@ -2086,11 +2086,8 @@ impl PyObject {
 
                 let del_method = zelf.get_class_attr(identifier!(vm, __del__)).unwrap();
                 if let Err(e) = slot_del(zelf, vm) {
-                    let msg = del_method
-                        .repr(vm)
-                        .ok()
-                        .map(|r| format!("Exception ignored while calling deallocator {r}"));
-                    vm.run_unraisable(e, msg, del_method);
+                    // CPython 3.12 reports a failing __del__ as "Exception ignored in: <repr>".
+                    vm.run_unraisable(e, None, del_method);
                 }
 
                 // Undo the temporary resurrection. Always remove both
@@ -2257,11 +2254,8 @@ impl PyObject {
                 if let Err(e) = slot_del(self, vm)
                     && let Some(del_method) = self.get_class_attr(identifier!(vm, __del__))
                 {
-                    let msg = del_method
-                        .repr(vm)
-                        .ok()
-                        .map(|r| format!("Exception ignored while calling deallocator {r}"));
-                    vm.run_unraisable(e, msg, del_method);
+                    // CPython 3.12 reports a failing __del__ as "Exception ignored in: <repr>".
+                    vm.run_unraisable(e, None, del_method);
                 }
             });
             let _ = result;
