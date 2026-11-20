@@ -23,7 +23,7 @@ use nanocode_turnlog::{LogHost, StoredCheckpoint};
 use super::{MS, World};
 use crate::{
     executor::Clock,
-    rng::{FNV_OFFSET, Rng, fnv},
+    rng::{FNV_OFFSET, PPM, Rng, fnv},
 };
 
 pub const ALL: [BoardRule; 14] = [
@@ -189,9 +189,44 @@ impl Shape {
         )
     }
 
-    pub const fn slack_ms(&self) -> u64 {
+    pub fn slack_ms(&self, step_ms: u64, poll_ms: u64, latency_ms: u64, others: u64) -> u64 {
         let retries = self.policy.backoff_cap_ms.saturating_add(self.lease_ms) * self.policy.tries;
-        self.span_ms * 2 + retries * 8 + 2_000
+        self.span_ms * 2 + retries * 8 + self.drain_ms(step_ms, poll_ms, latency_ms, others) + 2_000
+    }
+
+    fn drain_ms(&self, step_ms: u64, poll_ms: u64, latency_ms: u64, others: u64) -> u64 {
+        let rows = self.fired_max(poll_ms) + others;
+        let run = step_ms + latency_ms * 4 + (self.lease_ms * 2 * self.stall_ppm).div_ceil(PPM);
+        let ladder = (1..self.policy.tries)
+            .map(|tries| self.policy.backoff(tries))
+            .sum::<u64>()
+            + run * self.policy.tries;
+        let mut chance = self.flaky_ppm;
+        let mut flaky = 0;
+        for tries in 1..self.policy.tries {
+            flaky += (chance * (self.policy.backoff(tries) + run)).div_ceil(PPM);
+            chance = chance * self.flaky_ppm / PPM;
+        }
+        let batches = rows.div_ceil(watch::BATCH as u64) * (self.policy.backoff(1) + run);
+        rows * (run + flaky) + (rows * self.poison_ppm).div_ceil(PPM) * ladder + batches
+    }
+
+    fn fired_max(&self, poll_ms: u64) -> u64 {
+        let late = self.span_ms.max(poll_ms) * 2;
+        self.schedules
+            .iter()
+            .map(|every| match (every.every_ms, every.times) {
+                (None, _) => 1,
+                (Some(_), Some(times)) => times,
+                (Some(gap), None) => {
+                    let end = every
+                        .until_ms
+                        .or(every.cancel_ms.map(|at| at + late))
+                        .unwrap_or(every.first_ms);
+                    end.saturating_sub(every.first_ms) / gap.max(1) + 1
+                }
+            })
+            .sum()
     }
 
     fn poison(&self, seq: u64) -> bool {

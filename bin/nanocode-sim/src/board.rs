@@ -2239,8 +2239,14 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
     loop {
         let crash_at = crashes.get(number as usize).map(|ms| ms * MS);
         let last = crash_at.is_none();
-        let deadline =
-            clock.now_ns() + (world.shape.deadline_ms + world.watched.shape.slack_ms()) * MS;
+        let replies = world.shape.plan.len() as u64 * 2 + world.shape.hooks.len() as u64 * 2 + 32;
+        let slack_ms = world.watched.shape.slack_ms(
+            world.shape.step_ms,
+            world.shape.poll_ms,
+            world.shape.latency_ms,
+            replies,
+        );
+        let deadline = clock.now_ns() + (world.shape.deadline_ms + slack_ms) * MS;
         let mut executor = Executor::new(
             Arc::clone(&clock),
             Rng::derive(seed, &format!("board scheduler {number}")),
