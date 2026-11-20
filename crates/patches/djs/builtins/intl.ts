@@ -13,7 +13,14 @@ function IntlLocaleTags(locales: Value): Str {
     return "";
   }
   if (IsString(locales)) {
+    if (AsStr(locales) === "") {
+      throw NewRangeError("Incorrect locale information provided");
+    }
     return AsStr(locales);
+  }
+  const one: Value = IntlSpec(locales, 16);
+  if (one !== undefined) {
+    return AsStr(one);
   }
   const o: Obj = ToObject(locales);
   const len: f64 = LengthOfArrayLike(o);
@@ -25,7 +32,12 @@ function IntlLocaleTags(locales: Value): Str {
       if (!IsString(v) && !IsObject(v)) {
         throw NewTypeError("Language ID should be string or object.");
       }
-      out = out === "" ? ToString(v) : out + "\n" + ToString(v);
+      const own: Value = IntlSpec(v, 16);
+      const t: Str = own !== undefined ? AsStr(own) : ToString(v);
+      if (t === "") {
+        throw NewRangeError("Incorrect locale information provided");
+      }
+      out = out === "" ? t : out + "\n" + t;
     }
     i += 1;
   }
@@ -281,6 +293,7 @@ function IntlToStringTag(): Str {
 /**
  * Intl.getCanonicalLocales ( locales ).
  * @builtin Intl.getCanonicalLocales
+ * @length 1
  */
 function IntlGetCanonicalLocales(locales?: Value): Obj {
   return IntlSplit(IntlLocales(IntlLocaleTags(locales), false), "\n", 0);
@@ -734,6 +747,255 @@ function IntlRelativeTimeFormatPrototypeResolvedOptions(this: Value): Obj {
 function IntlRelativeTimeFormatToStringTag(): Str {
   return "Intl.RelativeTimeFormat";
 }
+
+// ---- Locale (ECMA-402 14) ---------------------------------------------------------------
+// A Locale's spec (kind 16) is its canonical tag; IntlFormat(16, tag, what) reads a getter
+// (locale.rs). Kind 15 is Intl.supportedValuesOf's lists.
+
+/**
+ * Intl.Locale ( tag [ , options ] ).
+ * @constructor Intl.Locale
+ * @length 1
+ */
+function IntlLocaleConstructor(tag?: Value, options?: Value): Obj {
+  IntlRequireNew(new.target, "Locale");
+  if (!IsString(tag) && !IsObject(tag)) {
+    throw NewTypeError("First argument to Intl.Locale constructor can't be empty or missing");
+  }
+  const own: Value = IntlSpec(tag, 16);
+  const s: Str = own !== undefined ? AsStr(own) : ToString(tag);
+  if (s === "") {
+    throw NewRangeError("First argument to Intl.Locale constructor can't be empty or missing");
+  }
+  if (options === null) {
+    throw NewTypeError("Intl.Locale called on null or undefined");
+  }
+  const raw: Str = IntlReadOptions(options, "language:s,script:s,region:s,calendar:s,collation:s,hourCycle:s,caseFirst:s,numeric:b,numberingSystem:s");
+  return IntlConstruct(new.target, "Locale", 16, s, raw);
+}
+
+/** A Locale getter's value: what of the Locale v, named method in its TypeError. */
+function IntlLocaleGet(v: Value, what: Str, method: Str): Value {
+  const spec: Str = IntlThis(v, 16, method);
+  const r: Value = IntlFormat(16, spec, what, undefined, false);
+  if (r === undefined) {
+    return undefined;
+  }
+  const s: Str = AsStr(r);
+  if (s === "!t") {
+    return true;
+  }
+  if (s === "!f") {
+    return false;
+  }
+  if (StrLength(s) > 0 && StrSubstring(s, 0, 1) === "@") {
+    return IntlSplit(s, ",", 1);
+  }
+  return s;
+}
+
+/** A new Locale of the canonical tag t. */
+function IntlNewLocale(t: Str): Obj {
+  return IntlCreate(AsObj(Get(IntlConstructor("Locale"), "prototype")), 16, t);
+}
+
+/**
+ * Intl.Locale.prototype.maximize ( ).
+ * @builtin Intl.Locale.prototype.maximize
+ */
+function IntlLocalePrototypeMaximize(this: Value): Obj {
+  return IntlNewLocale(AsStr(IntlLocaleGet(this, "maximize", "Intl.Locale.prototype.maximize")));
+}
+
+/**
+ * Intl.Locale.prototype.minimize ( ).
+ * @builtin Intl.Locale.prototype.minimize
+ */
+function IntlLocalePrototypeMinimize(this: Value): Obj {
+  return IntlNewLocale(AsStr(IntlLocaleGet(this, "minimize", "Intl.Locale.prototype.minimize")));
+}
+
+/**
+ * Intl.Locale.prototype.toString ( ).
+ * @builtin Intl.Locale.prototype.toString
+ */
+function IntlLocalePrototypeToString(this: Value): Str {
+  return IntlThis(this, 16, "Intl.Locale.prototype.toString");
+}
+
+/**
+ * get Intl.Locale.prototype.baseName.
+ * @getter Intl.Locale.prototype.baseName
+ */
+function IntlLocalePrototypeBaseName(this: Value): Value {
+  return IntlLocaleGet(this, "baseName", "Intl.Locale.prototype.baseName");
+}
+
+/**
+ * get Intl.Locale.prototype.calendar.
+ * @getter Intl.Locale.prototype.calendar
+ */
+function IntlLocalePrototypeCalendar(this: Value): Value {
+  return IntlLocaleGet(this, "calendar", "Intl.Locale.prototype.calendar");
+}
+
+/**
+ * get Intl.Locale.prototype.caseFirst.
+ * @getter Intl.Locale.prototype.caseFirst
+ */
+function IntlLocalePrototypeCaseFirst(this: Value): Value {
+  return IntlLocaleGet(this, "caseFirst", "Intl.Locale.prototype.caseFirst");
+}
+
+/**
+ * get Intl.Locale.prototype.collation.
+ * @getter Intl.Locale.prototype.collation
+ */
+function IntlLocalePrototypeCollation(this: Value): Value {
+  return IntlLocaleGet(this, "collation", "Intl.Locale.prototype.collation");
+}
+
+/**
+ * get Intl.Locale.prototype.hourCycle.
+ * @getter Intl.Locale.prototype.hourCycle
+ */
+function IntlLocalePrototypeHourCycle(this: Value): Value {
+  return IntlLocaleGet(this, "hourCycle", "Intl.Locale.prototype.hourCycle");
+}
+
+/**
+ * get Intl.Locale.prototype.numeric.
+ * @getter Intl.Locale.prototype.numeric
+ */
+function IntlLocalePrototypeNumeric(this: Value): Value {
+  return IntlLocaleGet(this, "numeric", "Intl.Locale.prototype.numeric");
+}
+
+/**
+ * get Intl.Locale.prototype.numberingSystem.
+ * @getter Intl.Locale.prototype.numberingSystem
+ */
+function IntlLocalePrototypeNumberingSystem(this: Value): Value {
+  return IntlLocaleGet(this, "numberingSystem", "Intl.Locale.prototype.numberingSystem");
+}
+
+/**
+ * get Intl.Locale.prototype.language.
+ * @getter Intl.Locale.prototype.language
+ */
+function IntlLocalePrototypeLanguage(this: Value): Value {
+  return IntlLocaleGet(this, "language", "Intl.Locale.prototype.language");
+}
+
+/**
+ * get Intl.Locale.prototype.script.
+ * @getter Intl.Locale.prototype.script
+ */
+function IntlLocalePrototypeScript(this: Value): Value {
+  return IntlLocaleGet(this, "script", "Intl.Locale.prototype.script");
+}
+
+/**
+ * get Intl.Locale.prototype.region.
+ * @getter Intl.Locale.prototype.region
+ */
+function IntlLocalePrototypeRegion(this: Value): Value {
+  return IntlLocaleGet(this, "region", "Intl.Locale.prototype.region");
+}
+
+/**
+ * get Intl.Locale.prototype.calendars.
+ * @getter Intl.Locale.prototype.calendars
+ */
+function IntlLocalePrototypeCalendars(this: Value): Value {
+  return IntlLocaleGet(this, "calendars", "Intl.Locale.prototype.calendars");
+}
+
+/**
+ * get Intl.Locale.prototype.collations.
+ * @getter Intl.Locale.prototype.collations
+ */
+function IntlLocalePrototypeCollations(this: Value): Value {
+  return IntlLocaleGet(this, "collations", "Intl.Locale.prototype.collations");
+}
+
+/**
+ * get Intl.Locale.prototype.hourCycles.
+ * @getter Intl.Locale.prototype.hourCycles
+ */
+function IntlLocalePrototypeHourCycles(this: Value): Value {
+  return IntlLocaleGet(this, "hourCycles", "Intl.Locale.prototype.hourCycles");
+}
+
+/**
+ * get Intl.Locale.prototype.numberingSystems.
+ * @getter Intl.Locale.prototype.numberingSystems
+ */
+function IntlLocalePrototypeNumberingSystems(this: Value): Value {
+  return IntlLocaleGet(this, "numberingSystems", "Intl.Locale.prototype.numberingSystems");
+}
+
+/**
+ * get Intl.Locale.prototype.timeZones.
+ * @getter Intl.Locale.prototype.timeZones
+ */
+function IntlLocalePrototypeTimeZones(this: Value): Value {
+  return IntlLocaleGet(this, "timeZones", "Intl.Locale.prototype.timeZones");
+}
+
+/**
+ * get Intl.Locale.prototype.textInfo.
+ * @getter Intl.Locale.prototype.textInfo
+ */
+function IntlLocalePrototypeTextInfo(this: Value): Obj {
+  const d: Value = IntlLocaleGet(this, "textInfo", "Intl.Locale.prototype.textInfo");
+  const o: Obj = ObjectCreate(RealmIntrinsic("ObjectPrototype"));
+  CreateDataPropertyOrThrow(o, "direction", d);
+  return o;
+}
+
+/**
+ * get Intl.Locale.prototype.weekInfo.
+ * @getter Intl.Locale.prototype.weekInfo
+ */
+function IntlLocalePrototypeWeekInfo(this: Value): Obj {
+  // firstDay:weekend:minimalDays
+  const s: Str = AsStr(IntlLocaleGet(this, "weekInfo", "Intl.Locale.prototype.weekInfo"));
+  const a: f64 = StrIndexOf(s, ":", 0);
+  const b: f64 = StrIndexOf(s, ":", a + 1);
+  const o: Obj = ObjectCreate(RealmIntrinsic("ObjectPrototype"));
+  CreateDataPropertyOrThrow(o, "firstDay", ToNumber(StrSubstring(s, 0, a)));
+  const weekend: Obj = ArrayCreate(0);
+  const days: Obj = IntlSplit(StrSubstring(s, a + 1, b), ",", 0);
+  let i: f64 = 0;
+  const n: f64 = LengthOfArrayLike(days);
+  while (i < n) {
+    ArrayPushDense(weekend, ToNumber(Get(days, i)));
+    i += 1;
+  }
+  CreateDataPropertyOrThrow(o, "weekend", weekend);
+  CreateDataPropertyOrThrow(o, "minimalDays", ToNumber(StrSubstring(s, b + 1, StrLength(s))));
+  return o;
+}
+
+/**
+ * Intl.Locale.prototype [ %Symbol.toStringTag% ].
+ * @value Intl.Locale.prototype[Symbol.toStringTag]
+ * @attributes configurable
+ */
+function IntlLocaleToStringTag(): Str {
+  return "Intl.Locale";
+}
+
+/**
+ * Intl.supportedValuesOf ( key ).
+ * @builtin Intl.supportedValuesOf
+ * @length 1
+ */
+function IntlSupportedValuesOf(key?: Value): Obj {
+  return IntlSplit(AsStr(IntlFormat(15, ToString(key), undefined, undefined, false)), ",", 0);
+}
+
 
 // ---- the locale-sensitive methods of other builtins (ECMA-402 chapters 19 to 21) -------
 

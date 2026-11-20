@@ -1,6 +1,8 @@
 mod collate;
 mod data;
 mod date;
+mod locale;
+mod locdata;
 mod number;
 mod numdata;
 mod text;
@@ -202,39 +204,11 @@ pub(crate) fn plural_categories(lang: &str, ordinal: bool) -> &'static str {
     }
 }
 
-pub(crate) const LANGS: [&str; 11] = ["en", "de", "fr", "es", "it", "pt", "nl", "ja", "zh", "ko", "ru"];
+/// The Intl kinds of Locale (its spec is its tag) and of Intl.supportedValuesOf's lists.
+const LOCALE: i32 = 16;
+const SUPPORTED_VALUES: i32 = 15;
 
-fn canonical_tag(tag: &str) -> Option<String> {
-    let subtags: Vec<&str> = tag.split('-').collect();
-    let lang = subtags.first()?;
-    let alpha = |s: &str| s.bytes().all(|b| b.is_ascii_alphabetic());
-    if !alpha(lang) || !(lang.len() == 2 || lang.len() == 3 || (5..=8).contains(&lang.len())) {
-        return None;
-    }
-    let mut out = lang.to_ascii_lowercase();
-    let mut ext = false;
-    for (i, s) in subtags.iter().enumerate().skip(1) {
-        if s.is_empty() || s.len() > 8 || !s.bytes().all(|b| b.is_ascii_alphanumeric()) {
-            return None;
-        }
-        out.push('-');
-        if s.len() == 1 {
-            ext = true;
-        }
-        if !ext && i == 1 && s.len() == 4 && alpha(s) {
-            out.push_str(&s[..1].to_ascii_uppercase());
-            out.push_str(&s[1..].to_ascii_lowercase());
-        } else if !ext && s.len() == 2 && alpha(s) {
-            out.push_str(&s.to_ascii_uppercase());
-        } else {
-            out.push_str(&s.to_ascii_lowercase());
-        }
-    }
-    if subtags.last().is_some_and(|s| s.len() == 1) {
-        return None;
-    }
-    Some(out)
-}
+pub(crate) const LANGS: [&str; 11] = ["en", "de", "fr", "es", "it", "pt", "nl", "ja", "zh", "ko", "ru"];
 
 fn canonical_list(tags: &str) -> Result<Vec<String>, Fault> {
     let mut out: Vec<String> = Vec::new();
@@ -242,9 +216,7 @@ fn canonical_list(tags: &str) -> Result<Vec<String>, Fault> {
         return Ok(out);
     }
     for t in tags.split('\n') {
-        let Some(c) = canonical_tag(t) else {
-            return range("Incorrect locale information provided");
-        };
+        let c = locale::canonicalize(t)?;
         if !out.contains(&c) {
             out.push(c);
         }
@@ -303,6 +275,9 @@ pub(crate) fn intrinsic(heap: &mut Heap, k: u16, a: [Value; 5]) -> Result<Option
             let (Some(kind), Some(raw)) = (a[0].as_int(), str_arg(heap, a[2])) else {
                 return Ok(None);
             };
+            if kind == LOCALE {
+                return Ok(Some(string_value(heap, &locale::construct(&str_arg(heap, a[1]).unwrap_or_default(), &Spec::parse(&raw))?)?));
+            }
             let tags = canonical_list(&str_arg(heap, a[1]).unwrap_or_default())?;
             let locale = resolve_locale(&tags);
             let raw = Spec::parse(&raw);
@@ -318,6 +293,16 @@ pub(crate) fn intrinsic(heap: &mut Heap, k: u16, a: [Value; 5]) -> Result<Option
             let (Some(kind), Some(spec)) = (a[0].as_int(), str_arg(heap, a[1])) else {
                 return Ok(None);
             };
+            if kind == LOCALE {
+                let what = str_arg(heap, a[2]).unwrap_or_default();
+                return Ok(Some(match locale::get(&spec, &what)? {
+                    Some(v) => string_value(heap, &v)?,
+                    None => Value::UNDEFINED,
+                }));
+            }
+            if kind == SUPPORTED_VALUES {
+                return Ok(Some(string_value(heap, locale::supported_values(&spec)?)?));
+            }
             let spec = Spec::parse(&spec);
             let parts = a[4] == Value::TRUE;
             let out = match kind {
