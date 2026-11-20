@@ -176,7 +176,7 @@ fn inner_pow(int1: &BigInt, int2: &BigInt, vm: &VirtualMachine) -> PyResult {
 
 fn inner_mod(int1: &BigInt, int2: &BigInt, vm: &VirtualMachine) -> PyResult {
     if int2.is_zero() {
-        Err(vm.new_zero_division_error("division by zero"))
+        Err(vm.new_zero_division_error("integer modulo by zero"))
     } else {
         Ok(vm.ctx.new_int(int1.mod_floor(int2)).into())
     }
@@ -184,7 +184,7 @@ fn inner_mod(int1: &BigInt, int2: &BigInt, vm: &VirtualMachine) -> PyResult {
 
 fn inner_floordiv(int1: &BigInt, int2: &BigInt, vm: &VirtualMachine) -> PyResult {
     if int2.is_zero() {
-        Err(vm.new_zero_division_error("division by zero"))
+        Err(vm.new_zero_division_error("integer division or modulo by zero"))
     } else {
         Ok(vm.ctx.new_int(int1.div_floor(int2)).into())
     }
@@ -192,7 +192,7 @@ fn inner_floordiv(int1: &BigInt, int2: &BigInt, vm: &VirtualMachine) -> PyResult
 
 fn inner_divmod(int1: &BigInt, int2: &BigInt, vm: &VirtualMachine) -> PyResult {
     if int2.is_zero() {
-        return Err(vm.new_zero_division_error("division by zero"));
+        return Err(vm.new_zero_division_error("integer division or modulo by zero"));
     }
     let (div, modulo) = int1.div_mod_floor(int2);
     Ok(vm.new_tuple((div, modulo)).into())

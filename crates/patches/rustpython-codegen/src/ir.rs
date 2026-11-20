@@ -4814,30 +4814,7 @@ fn const_folding_safe_mod(left: &ConstantData, right: &ConstantData) -> Option<C
 }
 
 fn float_div_mod(left: f64, right: f64) -> Option<(f64, f64)> {
-    if right == 0.0 {
-        return None;
-    }
-
-    let mut modulo = left % right;
-    let div = (left - modulo) / right;
-    let floordiv = if modulo != 0.0 {
-        let div = if (right < 0.0) != (modulo < 0.0) {
-            modulo += right;
-            div - 1.0
-        } else {
-            div
-        };
-        let mut floordiv = div.floor();
-        if div - floordiv > 0.5 {
-            floordiv += 1.0;
-        }
-        floordiv
-    } else {
-        modulo = 0.0f64.copysign(right);
-        0.0f64.copysign(left / right)
-    };
-
-    Some((floordiv, modulo))
+    rustpython_common::float_ops::divmod(left, right)
 }
 
 /// flowgraph.c eval_const_binop complex result construction

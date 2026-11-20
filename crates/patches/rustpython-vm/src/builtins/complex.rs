@@ -285,7 +285,7 @@ fn recovered_quot(r: Complex64, a: Complex64, b: Complex64) -> Complex64 {
 }
 
 fn inner_div(v1: Complex64, v2: Complex64, vm: &VirtualMachine) -> PyResult<Complex64> {
-    quot(v1, v2).ok_or_else(|| vm.new_zero_division_error("division by zero"))
+    quot(v1, v2).ok_or_else(|| vm.new_zero_division_error("complex division by zero"))
 }
 
 /// Raise to a non-negative integer power by repeated squaring.
@@ -713,14 +713,14 @@ impl AsNumber for PyComplex {
                     |a, b| inner_div(a, b, vm),
                     |a_complex, b_real| {
                         if b_real == 0.0 {
-                            Err(vm.new_zero_division_error("division by zero"))
+                            Err(vm.new_zero_division_error("complex division by zero"))
                         } else {
                             Ok(Complex64::new(a_complex.re / b_real, a_complex.im / b_real))
                         }
                     },
                     |a_real, b_complex| {
                         rc_quot(a_real, b_complex)
-                            .ok_or_else(|| vm.new_zero_division_error("division by zero"))
+                            .ok_or_else(|| vm.new_zero_division_error("complex division by zero"))
                     },
                     vm,
                 )
