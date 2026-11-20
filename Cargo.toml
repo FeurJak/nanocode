@@ -106,6 +106,7 @@ members = [
     "bin/nanocode-sim",
     "bin/nanocode-fuzz",
     "examples/claims-pg",
+    "examples/dispatch-pg",
 ]
 default-members = ["crates/nanocode"]
 exclude = ["crates/patches", "bin/nanocode-front"]

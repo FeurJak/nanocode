@@ -630,6 +630,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocode-dispatch-pg"
+version = "0.7.0"
+dependencies = [
+ "nanocode-board",
+ "nanocode-dispatch",
+ "nanocode-dispatcher",
+ "nanocode-durability-core",
+ "nanocode-executor",
+ "nanocode-partitions",
+ "nanocode-store-sql",
+ "nanocode-turnlog",
+]
+
+[[package]]
 name = "nanocode-dispatcher"
 version = "0.7.0"
 dependencies = [
