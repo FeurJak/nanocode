@@ -1039,6 +1039,8 @@ dependencies = [
  "nanocode-hands",
  "nanocode-http",
  "nanocode-io",
+ "nanocode-live",
+ "nanocode-live-fold",
  "nanocode-mpp",
  "nanocode-partitions",
  "nanocode-platform",

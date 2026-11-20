@@ -206,6 +206,26 @@ default_table='
 1 canary_plog_snapshot_skipped canary:50 --scenario plog --mutation snapshot_skipped
 1 canary_plog_prune_ignores_cursors canary:400 --scenario plog --mutation prune_ignores_cursors
 1 canary_plog_lost_ack_rejected canary:100 --scenario plog --mutation lost_ack_rejected
+8 live pass --scenario live
+2 live_twice pass --scenario live --twice
+1 canary_live_settle_drops_deletes canary:20 --scenario live --mutation settle_drops_deletes
+1 canary_live_settle_keeps_start canary:20 --scenario live --mutation settle_keeps_start
+1 canary_live_resume_skips_first canary:50 --scenario live --mutation resume_skips_first
+1 canary_live_floor_ignored canary:20 --scenario live --mutation floor_ignored
+1 canary_live_rebase_skipped canary:20 --scenario live --mutation rebase_skipped
+1 canary_live_snapshot_skips_row canary:20 --scenario live --mutation snapshot_skips_row
+1 canary_live_snapshot_at_head canary:20 --scenario live --mutation snapshot_at_head
+1 canary_live_outline_leaks canary:20 --scenario live --mutation outline_leaks
+1 canary_live_encode_every_frame canary:20 --scenario live --mutation encode_every_frame
+1 canary_live_rebase_drops_touched canary:100 --scenario live --mutation rebase_drops_touched
+1 canary_live_repeats_reapplied canary:20 --scenario live --mutation repeats_reapplied
+1 canary_live_ack_before_commit canary:20 --scenario live --mutation ack_before_commit
+1 canary_live_drop_on_ack canary:20 --scenario live --mutation drop_on_ack
+1 canary_live_unknown_refuses canary:20 --scenario live --mutation unknown_refuses
+1 canary_live_ack_early canary:20 --scenario live --mutation ack_early
+1 canary_live_instance_per_socket canary:20 --scenario live --mutation instance_per_socket
+1 canary_live_coalesce_drops_frame canary:20 --scenario live --mutation coalesce_drops_frame
+1 canary_live_rebuild_skips_first canary:20 --scenario live --mutation rebuild_skips_first
 '
 default_known='
 '

@@ -28,6 +28,7 @@ mod host;
 mod httpd;
 mod httpserver;
 mod inboxstress;
+mod live;
 mod log;
 mod longthread;
 mod memory;
@@ -35,8 +36,8 @@ mod model;
 mod mpp;
 mod network;
 mod onelog;
-mod repocache;
 mod plog;
+mod repocache;
 mod requestclose;
 mod rng;
 mod scripted;
@@ -77,12 +78,13 @@ use crate::{
     httpd::WireMutation,
     httpserver::{HttpServerMutation, HttpServerStats},
     inboxstress::InboxStressStats,
+    live::{LiveMutation, LiveStats},
     longthread::{LongThreadMutation, LongThreadStats},
     model::Stats,
     mpp::{MppMutation, MppStats},
     onelog::{LiveSeqs, Protections},
-    repocache::{RepoCacheMutation, RepoCacheStats},
     plog::{PlogMutation, PlogStats},
+    repocache::{RepoCacheMutation, RepoCacheStats},
     requestclose::RequestCloseStats,
     simulate::{Options, run_seed},
     store::Mutation,
@@ -116,6 +118,7 @@ enum Scenario {
     Streams,
     Hands,
     CellCalls,
+    Live,
     LongThread,
     RequestClose,
     InboxStress,
@@ -159,6 +162,7 @@ struct Args {
     reopen: bool,
     cancel: bool,
     cell_calls: CellCallsMutation,
+    live: LiveMutation,
     long_thread: LongThreadMutation,
     tasks: TasksMutation,
     board: BoardMutation,
@@ -189,7 +193,7 @@ type Caught = BTreeMap<Invariant, (u64, u64, (u64, u64))>;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|inbox_stress|capture|executor|dns|board|cost|plog|hand_router|workspace_host|board_sync|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack] [--ops N] [--twice] [--seed-lines] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
+        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|inbox_stress|capture|executor|dns|board|cost|plog|hand_router|workspace_host|board_sync|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|live] [--ops N] [--twice] [--seed-lines] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
        websocket: [--mutation {}]
        http_server: [--mutation {}]
        alloc: [--mutation overstate_size|forget_free|scribble]
@@ -199,6 +203,7 @@ fn usage() -> ExitCode {
        streams: [--mutation {}]
        hands: [--mutation {}] [--fleet N] [--reopen] [--cancel]
        cell_calls: [--mutation {}]
+       live: [--mutation {}] [--trace-dir DIR]
        long_thread: [--mutation {}]
        capture: [--mutation skip_trim|drop_chunk|skip_redact|redact_then_trim]
        executor: [--mutation {}]
@@ -227,6 +232,7 @@ fn usage() -> ExitCode {
         StreamsMutation::names(),
         HandsMutation::names(),
         CellCallsMutation::names(),
+        LiveMutation::names(),
         LongThreadMutation::names(),
         TasksMutation::names(),
         BoardMutation::names(),
@@ -293,6 +299,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
     let mut reopen = false;
     let mut cancel = false;
     let mut cell_calls = CellCallsMutation::None;
+    let mut live = LiveMutation::None;
     let mut long_thread = LongThreadMutation::None;
     let mut tasks = TasksMutation::None;
     let mut board = BoardMutation::None;
@@ -322,6 +329,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         match flag.as_str() {
             "--twice" => twice = true,
             "--seed-lines" => seed_lines = true,
+            "--trace-dir" => live::trace_to(rest.next()?),
             "--subagents-board" => boardagents::enable(),
             "--verbose" => options.verbose = true,
             "--calm" => turns.calm = true,
@@ -366,6 +374,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
                     "streams" => Scenario::Streams,
                     "hands" => Scenario::Hands,
                     "cell_calls" => Scenario::CellCalls,
+                    "live" => Scenario::Live,
                     "long_thread" => Scenario::LongThread,
                     "request_close" => Scenario::RequestClose,
                     "inbox_stress" => Scenario::InboxStress,
@@ -424,6 +433,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         (Scenario::Streams, Some(name)) => streams = StreamsMutation::parse(name)?,
         (Scenario::Hands, Some(name)) => hands = HandsMutation::parse(name)?,
         (Scenario::CellCalls, Some(name)) => cell_calls = CellCallsMutation::parse(name)?,
+        (Scenario::Live, Some(name)) => live = LiveMutation::parse(name)?,
         (Scenario::LongThread, Some(name)) => long_thread = LongThreadMutation::parse(name)?,
         (Scenario::Executor, Some(name)) => tasks = TasksMutation::parse(name)?,
         (Scenario::RequestClose, Some(_)) => return None,
@@ -489,6 +499,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         reopen,
         cancel,
         cell_calls,
+        live,
         long_thread,
         tasks,
         board,
@@ -546,6 +557,9 @@ fn replay(seed: u64, args: &Args) -> String {
     }
     if args.scenario == Scenario::CellCalls {
         return cellcalls::replay(seed, args.cell_calls);
+    }
+    if args.scenario == Scenario::Live {
+        return live::replay(seed, args.live);
     }
     if args.scenario == Scenario::LongThread {
         return longthread::replay(seed, args.long_thread);
@@ -940,6 +954,7 @@ fn mutations() -> ExitCode {
     add("streams", StreamsMutation::names());
     add("hands", HandsMutation::names());
     add("cell_calls", CellCallsMutation::names());
+    add("live", LiveMutation::names());
     add("long_thread", LongThreadMutation::names());
     add("executor", TasksMutation::names());
     add("board", BoardMutation::names());
@@ -1030,6 +1045,7 @@ fn main() -> ExitCode {
         || (args.scenario == Scenario::Streams && args.streams != StreamsMutation::None)
         || (args.scenario == Scenario::Hands && args.hands != HandsMutation::None)
         || (args.scenario == Scenario::CellCalls && args.cell_calls != CellCallsMutation::None)
+        || (args.scenario == Scenario::Live && args.live != LiveMutation::None)
         || (args.scenario == Scenario::LongThread && args.long_thread != LongThreadMutation::None)
         || (args.scenario == Scenario::Executor && args.tasks != TasksMutation::None)
         || (args.scenario == Scenario::Board && args.board != BoardMutation::None)
@@ -1063,6 +1079,7 @@ fn main() -> ExitCode {
     let mut streams_totals = StreamsStats::default();
     let mut hands_totals = HandsStats::default();
     let mut cell_calls_totals = CellCallsStats::default();
+    let mut live_totals = LiveStats::default();
     let mut long_thread_totals = LongThreadStats::default();
     let mut request_close_totals = RequestCloseStats::default();
     let mut inbox_stress_totals = InboxStressStats::default();
@@ -1130,6 +1147,13 @@ fn main() -> ExitCode {
                 args.twice,
                 args.options.verbose,
                 &mut cell_calls_totals,
+            ),
+            Scenario::Live => live::judge(
+                seed,
+                args.live,
+                args.twice,
+                args.options.verbose,
+                &mut live_totals,
             ),
             Scenario::LongThread => longthread::judge(
                 seed,
@@ -1381,6 +1405,16 @@ fn main() -> ExitCode {
             args.twice,
             args.cell_calls,
             &cell_calls_totals,
+        );
+    }
+    if args.scenario == Scenario::Live {
+        return live::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.live,
+            &live_totals,
         );
     }
     if args.scenario == Scenario::LongThread {
