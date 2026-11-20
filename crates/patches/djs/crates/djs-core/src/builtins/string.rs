@@ -277,6 +277,26 @@ fn push_code_point(out: &mut Vec<u16>, c: u32) {
     }
 }
 
+/// StrToCase's `mode`: 0 lower, 1 upper, plus 2 for tr/az, 4 for lt and 6 for el rules
+/// (toLocaleUpperCase / toLocaleLowerCase).
+pub(crate) fn to_case_mode(heap: &mut Heap, s: Str, mode: i32) -> Result<Str, Fault> {
+    use crate::unicode::locale_case::{self, Lang};
+    let upper = mode & 1 == 1;
+    let lang = match mode >> 1 {
+        1 => Lang::Turkic,
+        2 => Lang::Lithuanian,
+        3 => Lang::Greek,
+        _ => return to_case(heap, s, upper),
+    };
+    let u = units(heap, s)?;
+    let cps: Vec<u32> = code_points_of(&u).into_iter().map(|(_, c)| c).collect();
+    let mut out = crate::buf::vec_with_capacity(u.len());
+    for c in locale_case::map(&cps, upper, lang) {
+        push_code_point(&mut out, c);
+    }
+    Ok(heap.alloc_utf16(&out)?)
+}
+
 /// toUpperCase / toLowerCase: the full Unicode mappings (SpecialCasing without
 /// language-specific rules) and Final_Sigma for lowercase.
 pub(crate) fn to_case(heap: &mut Heap, s: Str, upper: bool) -> Result<Str, Fault> {

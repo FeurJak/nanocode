@@ -1,5 +1,5 @@
 // Made by crates/patches/djs/scripts/base.sh with base.img: do not edit.
 
 /// The base image's builtin prefix (`Roots::BASE_END`).
-pub const BASE_END: u32 = 531968;
-const BUILT_BY: u32 = 0x84486691;
+pub const BASE_END: u32 = 532312;
+const BUILT_BY: u32 = 0xc4f5f29f;

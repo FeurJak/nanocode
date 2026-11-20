@@ -614,8 +614,11 @@ declare function StrSubstring(s: Str, start: f64, end: f64): Str;
 declare function StrIndexOf(s: Str, search: Str, from: f64): f64;
 /** The last index ≤ from where search occurs, or -1. @leaf */
 declare function StrLastIndexOf(s: Str, search: Str, from: f64): f64;
-/** Full Unicode upper- or lowercase (SpecialCasing, Final_Sigma; no locales). @leaf */
-declare function StrToCase(s: Str, upper: boolean): Str;
+/**
+ * Full Unicode upper- or lowercase (SpecialCasing, Final_Sigma). `mode` is 0 for
+ * lower, 1 for upper, plus 2, 4 or 6 for the tr/az, lt or el rules. @leaf
+ */
+declare function StrToCase(s: Str, mode: i32): Str;
 /** Trims WhiteSpace and LineTerminators: where 0 both ends, 1 start, 2 end. @leaf */
 declare function StrTrim(s: Str, where: i32): Str;
 /** IsStringWellFormedUnicode. @leaf */
@@ -1009,7 +1012,7 @@ declare function Utf8Decode(decoder: Obj, buffer: Value, offset: Value, length: 
 // Kinds: 0 NumberFormat, 1 DateTimeFormat, 2 Collator, 3 PluralRules, 4 ListFormat, 5
 // RelativeTimeFormat. Option lists are name \u0002 value pairs joined by \u0001.
 
-/** Whether this build has Intl's locale data (djs-core's \`embed\`). @leaf */
+/** Whether this build has Intl's locale data (djs-core's `embed`). @leaf */
 declare function IntlEnabled(): boolean;
 /** A new Intl object of kind with its resolved options spec. @leaf */
 declare function IntlCreate(proto: Obj, kind: i32, spec: Str): Obj;

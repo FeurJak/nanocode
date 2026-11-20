@@ -2246,7 +2246,11 @@ impl Exec<'_> {
                         )?)
                     }
                     STR_TO_CASE => {
-                        Value::string(string::to_case(self.heap, s, a1.as_bool() == Some(true))?)
+                        Value::string(string::to_case_mode(
+                            self.heap,
+                            s,
+                            a1.as_bool().map_or_else(|| a1.as_int().unwrap_or(0), i32::from),
+                        )?)
                     }
                     STR_TRIM => {
                         Value::string(string::trim(self.heap, s, a1.as_int().unwrap_or(0))?)

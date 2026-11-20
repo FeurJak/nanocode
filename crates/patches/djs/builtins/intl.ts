@@ -294,6 +294,31 @@ function IntlToStringTag(): Str {
 }
 
 /**
+ * TransformCase's language for StrToCase (0 lower, 1 upper): V8 takes the first requested
+ * locale's language and applies ICU's rules only for tr, az, lt and el.
+ */
+function IntlCaseMode(locales: Value, upper: i32): i32 {
+  if (locales === undefined) {
+    return upper;
+  }
+  const tags: Str = IntlLocales(IntlLocaleTags(locales), false);
+  const nl: f64 = StrIndexOf(tags, "\n", 0);
+  const first: Str = nl < 0 ? tags : StrSubstring(tags, 0, nl);
+  const n: u32 = StrLength(first);
+  const lang: Str = n >= 2 && (n === 2 || StrCharCodeAt(first, 2) === 45) ? StrSubstring(first, 0, 2) : "";
+  if (lang === "tr" || lang === "az") {
+    return upper + 2;
+  }
+  if (lang === "lt") {
+    return upper + 4;
+  }
+  if (lang === "el") {
+    return upper + 6;
+  }
+  return upper;
+}
+
+/**
  * Intl.getCanonicalLocales ( locales ).
  * @builtin Intl.getCanonicalLocales
  * @length 1
