@@ -845,6 +845,10 @@ async fn declare_one(
             vp.assign_array(&target, items.clone(), *append)?;
         }
     }
+    // Elements a compound assignment skipped, with their warnings.
+    if !vp.arith_notes.is_empty() {
+        crate::arith::notes(vp).await;
+    }
     // `set -a`: a declaration that gives a value exports it, as an assignment does.
     if !matches!(a, DeclArg::Word(_))
         && !o.unexport

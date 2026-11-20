@@ -16,6 +16,8 @@ pub(crate) struct ArrayItem {
     pub key: Option<Vec<u8>>,
     pub value: Vec<u8>,
     pub append: bool,
+    /// The element as bash shows it in a warning (`[""]=1`), when it has a key.
+    pub src: Option<Vec<u8>>,
 }
 
 impl Vp {
@@ -183,6 +185,19 @@ impl Vp {
             let mut pending_key: Option<Vec<u8>> = None;
             for item in items {
                 let (key, value, app) = match item.key {
+                    // An empty key skips its element with a warning (bash).
+                    Some(k) if k.is_empty() => {
+                        let src = item.src.unwrap_or_else(|| {
+                            let mut t = b"[]=".to_vec();
+                            t.extend_from_slice(&item.value);
+                            t
+                        });
+                        self.arith_notes.push(format!(
+                            "{}: bad array subscript",
+                            String::from_utf8_lossy(&src)
+                        ));
+                        continue;
+                    }
                     Some(k) => (k, item.value, item.append),
                     None if !pairs => {
                         return Err(format!(

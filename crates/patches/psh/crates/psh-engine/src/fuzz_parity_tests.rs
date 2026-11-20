@@ -200,3 +200,26 @@ fn bash_fuzz6_heredoc_continuations_join_names() {
     assert_eq!(out("a=v\ncat <<E\n$\\\n\"dq $a\"\nE"), "$\"dq v\"\n");
 }
 
+
+#[test]
+fn bash_fuzz6_arrays() {
+    let o = |s: &str| String::from_utf8_lossy(&run(s).1).into_owned();
+    // An empty associative key in a compound assignment warns and skips the element.
+    assert_eq!(o("declare -A q; q+=([\"\"]=1); echo $? ${#q[@]}"), "0 0\n");
+    assert_eq!(o("declare -A w=([\"\"]=1 [x]=2); echo $? ${!w[@]}"), "0 x\n");
+    assert!(err("declare -A w; w=([\"\"]=1 [y]=3)").contains("[\"\"]=1: bad array subscript"));
+    assert!(err("declare -A w=([\"\"]=1)").contains("['']='1': bad array subscript"));
+    // -v on an unset name evaluates the subscript as arithmetic.
+    assert_eq!(o("[[ -v m[k=5] ]]; echo $? $k"), "1 5\n");
+    assert_eq!(o("[[ -v m[\"q z\"] ]] || echo same; echo no\necho next"), "next\n");
+    assert_eq!(run("a='*.t'\n[[ -v m[\"$a\"] ]] || echo unset").0, 1);
+    assert!(!err("[[ -v m[1+] ]]").contains("[[: "));
+    assert_eq!(o("m[x]+=v\n[[ -v m[$k] ]] && echo set || echo unset"), "unset\n");
+    // On an associative array @ and * are keys.
+    assert_eq!(o("declare -A m=([a]=1); [[ -v m[*] ]]; echo $?"), "1\n");
+    assert_eq!(o("declare -A m=([@]=1); [[ -v m[@] ]]; echo $?"), "0\n");
+    // A scalar sliced past its end as [@] gives no word.
+    assert_eq!(o("a=''; b=(\"${a[@]:1}\"); echo ${#b[@]}"), "0\n");
+    assert_eq!(o("a='xy'; b=(\"${a[@]:2}\"); echo ${#b[@]}"), "1\n");
+    assert_eq!(o("a='xy'; b=(\"${a[*]:5}\"); echo ${#b[@]}"), "1\n");
+}

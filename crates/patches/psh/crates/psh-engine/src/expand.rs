@@ -601,6 +601,19 @@ pub(crate) async fn expand_heredoc(
     Ok(f.joined())
 }
 
+/// `'v'`, with each quote inside as `'\''`.
+fn single_quote(v: &[u8]) -> Vec<u8> {
+    let mut out = vec![b'\''];
+    for &b in v {
+        match b {
+            b'\'' => out.extend_from_slice(b"'\\''"),
+            _ => out.push(b),
+        }
+    }
+    out.push(b'\'');
+    out
+}
+
 /// A value's length in characters (bytes without UTF-8).
 fn str_len(s: &[u8], utf8: bool) -> i64 {
     match utf8 {
@@ -1460,6 +1473,7 @@ async fn expand_part(
                         key,
                         value,
                         append: e.append,
+                        src: None,
                     });
                 }
                 (items, st)
@@ -3311,6 +3325,7 @@ pub(crate) async fn expand_array_lit(
                     key: Some(key),
                     value,
                     append: e.append,
+                    src: Some(code.ast.bytes(e.span).to_vec()),
                 });
             }
             None => {
@@ -3321,6 +3336,7 @@ pub(crate) async fn expand_array_lit(
                         key: None,
                         value: field.text,
                         append: false,
+                        src: None,
                     });
                 }
             }
@@ -3378,8 +3394,18 @@ pub(crate) async fn expand_decl_args(
                 Some(l) => (l.to_vec(), true),
                 None => (lhs, false),
             };
-            let (items, st) = expand_array_lit(vp, code, &lit).await?;
+            let (mut items, st) = expand_array_lit(vp, code, &lit).await?;
             status = st.or(status);
+            // declare gets the elements as words, which bash quotes when it warns.
+            for item in &mut items {
+                if let Some(k) = &item.key {
+                    let mut t = b"[".to_vec();
+                    t.extend_from_slice(&single_quote(k));
+                    t.extend_from_slice(if item.append { b"]+=" } else { b"]=" });
+                    t.extend_from_slice(&single_quote(&item.value));
+                    item.src = Some(t);
+                }
+            }
             args.push(DeclArg::Array {
                 name: lhs,
                 append,
