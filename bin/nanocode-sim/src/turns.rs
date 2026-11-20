@@ -38,10 +38,6 @@ pub const THINK_MS_MAX: u64 = 3_000;
 pub const CANCEL_PPM: u64 = 150_000;
 pub const POISON_PPM: u64 = 80_000;
 pub const CRASH_BEFORE_COMMIT_PPM_MAX: u64 = 80_000;
-/// Chance of a crash at the first writing commit after one that sealed, or would have sealed, a
-/// restarted scope's floor: the events numbered past that floor are live but may still be only
-/// buffered, so only a crash there makes the next incarnation number from the floor again.
-const SEALED_CRASH_PPM: u64 = 500_000;
 pub const CRASH_AFTER_COMMIT_PPM_MAX: u64 = 40_000;
 pub const TIMED_CRASHES_MAX: u64 = 3;
 pub const LIVENESS_RESTARTS: u64 = 16;
@@ -1656,9 +1652,11 @@ impl Sim {
             self.release(tick.outputs, true);
             return true;
         }
-        let aimed = std::mem::take(&mut self.sealed)
-            && self.shape.crash_before_ppm > 0
-            && self.rng.crash.chance(SEALED_CRASH_PPM);
+        // Crash at the first writing commit after one that sealed, or would have sealed, a
+        // restarted scope's floor whenever the shape crashes at all: the events numbered past
+        // that floor are live but may still be only buffered, so only a crash there makes the
+        // next incarnation number from the floor again.
+        let aimed = std::mem::take(&mut self.sealed) && self.shape.crash_before_ppm > 0;
         if aimed || self.rng.crash.chance(self.shape.crash_before_ppm) {
             self.drop_tick(tick, "crash before commit");
             return false;
