@@ -31,6 +31,9 @@ struct Inner {
     machine: Rc<dyn Machine>,
     manifest: RefCell<Manifest>,
     blobs: RefCell<BTreeMap<Digest, Blob>>,
+    /// The hash state over the bytes of the blob `write` made last, with its digest,
+    /// so that appending to that blob hashes only the new bytes.
+    tail: RefCell<Option<(Digest, Sha256)>>,
     gate: Semaphore,
 }
 
@@ -254,6 +257,7 @@ impl WorkspaceFs {
                 machine,
                 manifest: RefCell::new(manifest),
                 blobs: RefCell::new(BTreeMap::new()),
+                tail: RefCell::new(None),
                 gate: Semaphore::new(1),
             }),
         })
@@ -541,6 +545,7 @@ impl Inner {
             return Err(io::ErrorKind::IsADirectory.into());
         }
         dir_exists(&self.manifest.borrow(), &path)?;
+        let mut hasher = Sha256::new();
         let (bytes, mode) = match (entry, how) {
             (Some(Entry::Dir { .. }), _) => return Err(io::ErrorKind::IsADirectory.into()),
             (Some(Entry::Symlink { .. }), _) => return missing(),
@@ -548,6 +553,7 @@ impl Inner {
                 return Err(io::ErrorKind::AlreadyExists.into());
             }
             (Some(Entry::File { mode, .. }), Write::Replace) => {
+                hasher.update(data);
                 (Bytes::copy_from_slice(data), mode)
             }
             (
@@ -566,14 +572,23 @@ impl Inner {
                     .into());
                 }
                 let held = self.blob(&digest).await?;
+                match self.tail.borrow_mut().take() {
+                    Some((last, state)) if last == digest => hasher = state,
+                    _ => hasher.update(&held),
+                }
+                hasher.update(data);
                 let mut bytes = BytesMut::with_capacity(held.len() + data.len());
                 bytes.extend_from_slice(&held);
                 bytes.extend_from_slice(data);
                 (bytes.freeze(), mode)
             }
-            (None, _) => (Bytes::copy_from_slice(data), FILE_MODE),
+            (None, _) => {
+                hasher.update(data);
+                (Bytes::copy_from_slice(data), FILE_MODE)
+            }
         };
-        let blob = Blob::new(bytes);
+        let blob = Blob::hashed(Digest(hasher.finalize()), bytes);
+        *self.tail.borrow_mut() = Some((*blob.digest(), hasher));
         let now = self.now();
         let mut ops = vec![Op::Put {
             path: path.clone(),
@@ -1041,5 +1056,32 @@ mod tests {
         assert!(refused.is_err());
         assert_eq!(fs.version(), version);
         assert!(reply(fs.stat(b"/a", false)).is_err());
+    }
+
+    #[test]
+    fn appends_hash_to_the_digest_of_the_whole_file() {
+        let fs = workspace(64);
+        let digest = |fs: &WorkspaceFs, path: &str| match fs.manifest().get(path) {
+            Some(Entry::File { digest, .. }) => *digest,
+            other => panic!("{path} is not a file: {other:?}"),
+        };
+        reply(fs.write(b"/a", b"one", Write::Replace)).expect("a");
+        reply(fs.write(b"/b", b"two", Write::Replace)).expect("b");
+        for chunk in [&b"-x"[..], b"-yy", b"", b"-zzz"] {
+            reply(fs.write(b"/a", chunk, Write::Append)).expect("append a");
+            reply(fs.write(b"/a", chunk, Write::Append)).expect("append a again");
+            reply(fs.write(b"/b", chunk, Write::Append)).expect("append b");
+        }
+        reply(fs.write(b"/c", b"new", Write::Append)).expect("append makes c");
+        reply(fs.write(b"/c", b"!", Write::Append)).expect("append c");
+        for (path, want) in [
+            ("a", &b"one-x-x-yy-yy-zzz-zzz"[..]),
+            ("b", b"two-x-yy-zzz"),
+            ("c", b"new!"),
+        ] {
+            assert_eq!(digest(&fs, path), Digest::of(want));
+            let read = reply(fs.read(format!("/{path}").as_bytes(), 64)).expect("read");
+            assert_eq!(&read[..], want);
+        }
     }
 }
