@@ -2,7 +2,7 @@ use core::hash::{BuildHasher, Hash, Hasher};
 use nanocode_numeric::BigInt;
 use nanocode_numeric::ToPrimitive;
 
-use crate::siphash::SipHasher24;
+use crate::siphash::{SipHasher13, SipHasher24};
 
 pub type PyHash = i64;
 pub type PyUHash = u64;
@@ -19,9 +19,9 @@ pub const MODULUS: PyUHash = (1 << BITS) - 1;
 pub const INF: PyHash = 314_159;
 pub const NAN: PyHash = 0;
 pub const IMAG: PyHash = MULTIPLIER;
-pub const ALGO: &str = "siphash24";
+pub const ALGO: &str = "siphash13";
 pub const HASH_BITS: usize = core::mem::size_of::<PyHash>() * 8;
-// SipHasher24 takes 2 u64s as a seed
+// SipHash takes 2 u64s as a seed
 pub const SEED_BITS: usize = core::mem::size_of::<u64>() * 2 * 8;
 
 // pub const CUTOFF: usize = 7;
@@ -43,6 +43,11 @@ impl BuildHasher for HashSecret {
 impl HashSecret {
     #[must_use]
     pub fn new(seed: u32) -> Self {
+        // As CPython's _Py_HashRandomization_Init: seed 0 (PYTHONHASHSEED=0) turns
+        // randomization off with an all-zero secret, so hashes match CPython's.
+        if seed == 0 {
+            return Self { k0: 0, k1: 0 };
+        }
         let mut buf = [0u8; 16];
         lcg_urandom(seed, &mut buf);
         let (left, right) = buf.split_at(8);
@@ -78,16 +83,49 @@ impl HashSecret {
 
     #[must_use]
     pub fn hash_bytes(&self, value: &[u8]) -> PyHash {
+        // CPython's _Py_HashBytes: SipHash-1-3 of the bytes, unreduced, 0 when empty.
         if value.is_empty() {
-            0
-        } else {
-            self.hash_value(value)
+            return 0;
         }
+        let mut hasher = SipHasher13::new_with_keys(self.k0, self.k1);
+        hasher.write(value);
+        fix_sentinel(hasher.finish() as PyHash)
+    }
+
+    /// A str's hash as CPython's: SipHash-1-3 over its PEP 393 buffer, one, two or
+    /// four little-endian bytes per code point by the widest one.
+    #[must_use]
+    pub fn hash_code_points<I: Iterator<Item = u32> + Clone>(&self, code_points: I) -> PyHash {
+        let Some(widest) = code_points.clone().max() else {
+            return 0;
+        };
+        let mut hasher = SipHasher13::new_with_keys(self.k0, self.k1);
+        if widest < 0x100 {
+            code_points.for_each(|c| hasher.write_u8(c as u8));
+        } else if widest < 0x1_0000 {
+            code_points.for_each(|c| hasher.write_u16(c as u16));
+        } else {
+            code_points.for_each(|c| hasher.write_u32(c));
+        }
+        fix_sentinel(hasher.finish() as PyHash)
     }
 
     #[must_use]
     pub fn hash_str(&self, value: &str) -> PyHash {
-        self.hash_bytes(value.as_bytes())
+        if value.is_ascii() {
+            self.hash_bytes(value.as_bytes())
+        } else {
+            self.hash_code_points(value.chars().map(u32::from))
+        }
+    }
+
+    #[must_use]
+    pub fn hash_wtf8(&self, value: &rustpython_wtf8::Wtf8) -> PyHash {
+        if value.is_ascii() {
+            self.hash_bytes(value.as_bytes())
+        } else {
+            self.hash_code_points(value.code_points().map(|c| c.to_u32()))
+        }
     }
 }
 

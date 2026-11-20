@@ -1843,7 +1843,7 @@ impl DictKey for Wtf8 {
     #[inline]
     fn key_hash(&self, _vm: &VirtualMachine) -> PyResult<HashValue> {
         // follow a similar route as the hashing of PyStrRef
-        Ok(crate::vm::hash_secret().hash_bytes(self.as_bytes()))
+        Ok(crate::vm::hash_secret().hash_wtf8(self))
     }
 
     #[inline(always)]

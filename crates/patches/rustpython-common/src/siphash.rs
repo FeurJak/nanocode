@@ -6,21 +6,25 @@ const INITIALIZATION: [u64; 4] = [
     0x6c79_6765_6e65_7261,
     0x7465_6462_7974_6573,
 ];
-const COMPRESSION_ROUNDS: usize = 2;
-const FINALIZATION_ROUNDS: usize = 4;
 const FINALIZATION_MARKER: u64 = 0xff;
 const WORD_BYTES: usize = 8;
 const LENGTH_SHIFT_BITS: u32 = 56;
 
+/// SipHash-2-4, the keyed hash of hash_iter and keyed_hash.
+pub type SipHasher24 = SipHasher<2, 4>;
+/// SipHash-1-3, CPython's str and bytes hash since 3.11 (Py_HASH_ALGORITHM siphash13).
+pub type SipHasher13 = SipHasher<1, 3>;
+
+/// SipHash-C-D: C compression rounds per word, D finalization rounds.
 #[derive(Clone, Copy, Debug)]
-pub struct SipHasher24 {
+pub struct SipHasher<const C: usize, const D: usize> {
     state: [u64; 4],
     tail: u64,
     tail_bytes: usize,
     length_bytes: usize,
 }
 
-impl SipHasher24 {
+impl<const C: usize, const D: usize> SipHasher<C, D> {
     #[inline]
     #[must_use]
     pub const fn new_with_keys(key0: u64, key1: u64) -> Self {
@@ -48,7 +52,7 @@ impl SipHasher24 {
             self.tail_bytes += size;
             return;
         }
-        absorb(&mut self.state, self.tail);
+        absorb::<C>(&mut self.state, self.tail);
         self.tail_bytes = size - needed;
         self.tail = if needed < WORD_BYTES {
             value >> (8 * needed)
@@ -58,7 +62,7 @@ impl SipHasher24 {
     }
 }
 
-impl Hasher for SipHasher24 {
+impl<const C: usize, const D: usize> Hasher for SipHasher<C, D> {
     #[inline]
     fn write_u8(&mut self, value: u8) {
         self.short_write(u64::from(value), size_of::<u8>());
@@ -96,11 +100,11 @@ impl Hasher for SipHasher24 {
             if self.tail_bytes < WORD_BYTES {
                 return;
             }
-            absorb(&mut self.state, self.tail);
+            absorb::<C>(&mut self.state, self.tail);
         }
         let (words, rest) = bytes.as_chunks::<WORD_BYTES>();
         for word in words {
-            absorb(&mut self.state, u64::from_le_bytes(*word));
+            absorb::<C>(&mut self.state, u64::from_le_bytes(*word));
         }
         self.tail = little_endian(rest);
         self.tail_bytes = rest.len();
@@ -110,9 +114,9 @@ impl Hasher for SipHasher24 {
     fn finish(&self) -> u64 {
         let mut state = self.state;
         let last = ((self.length_bytes as u64) << LENGTH_SHIFT_BITS) | self.tail;
-        absorb(&mut state, last);
+        absorb::<C>(&mut state, last);
         state[2] ^= FINALIZATION_MARKER;
-        for _ in 0..FINALIZATION_ROUNDS {
+        for _ in 0..D {
             round(&mut state);
         }
         state[0] ^ state[1] ^ state[2] ^ state[3]
@@ -129,9 +133,9 @@ fn little_endian(bytes: &[u8]) -> u64 {
 }
 
 #[inline]
-fn absorb(state: &mut [u64; 4], word: u64) {
+fn absorb<const C: usize>(state: &mut [u64; 4], word: u64) {
     state[3] ^= word;
-    for _ in 0..COMPRESSION_ROUNDS {
+    for _ in 0..C {
         round(state);
     }
     state[0] ^= word;
