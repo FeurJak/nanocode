@@ -1020,7 +1020,7 @@ impl World {
     fn check_writers(&self) -> Result<(), String> {
         for (index, (workspace, fs)) in self.writers.iter().enumerate() {
             let shown = fs.manifest();
-            if self.history[*workspace].get(&shown.version()) != Some(shown.entries()) {
+            if !self.history[*workspace].get(&shown.version()).is_some_and(|tree| tree.iter().eq(shown.entries().iter())) {
                 return Err(format!(
                     "writer {index} shows {} version {} that the store never committed",
                     WORKSPACES[*workspace],
@@ -1039,7 +1039,7 @@ impl World {
         let name = WORKSPACES[workspace];
         let head = self.seen.version(name);
         let shown = reopened.manifest();
-        if shown.version() != head || self.history[workspace].get(&head) != Some(shown.entries()) {
+        if shown.version() != head || !self.history[workspace].get(&head).is_some_and(|tree| tree.iter().eq(shown.entries().iter())) {
             return Err(format!(
                 "reopening {name} gave version {} instead of the whole head {head}",
                 shown.version()

@@ -1,5 +1,6 @@
 use crate::sim::{Mutation, mutated};
 use nanocode_digest::Sha256;
+use nanocode_sync::OrdMap;
 use std::{collections::BTreeMap, fmt, io};
 
 pub const DIGEST_BYTES: usize = Sha256::OUTPUT_BYTES;
@@ -298,13 +299,13 @@ pub struct Change {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Manifest {
     version: u64,
-    entries: BTreeMap<String, Entry>,
+    entries: OrdMap<String, Entry>,
     bytes: u64,
-    refs: BTreeMap<Digest, u64>,
+    refs: OrdMap<Digest, u64>,
 }
 
 struct Draft<'a> {
-    base: &'a BTreeMap<String, Entry>,
+    base: &'a OrdMap<String, Entry>,
     changes: BTreeMap<String, Option<Entry>>,
     caps: &'a Caps,
 }
@@ -330,7 +331,7 @@ impl Draft<'_> {
     fn below<'b>(&'b self, prefix: &'b str) -> impl Iterator<Item = &'b String> + 'b {
         let held = self
             .base
-            .range::<str, _>((
+            .range::<_, str>((
                 std::ops::Bound::Included(prefix),
                 std::ops::Bound::Unbounded,
             ))
@@ -614,7 +615,7 @@ impl Manifest {
             });
         }
         let mut bytes: u64 = 0;
-        let mut refs = BTreeMap::new();
+        let mut refs = OrdMap::new();
         for (path, entry) in &entries {
             let corrupt = |why| {
                 Err(Corrupt {
@@ -640,7 +641,7 @@ impl Manifest {
         }
         Ok(Self {
             version,
-            entries,
+            entries: entries.into_iter().collect(),
             bytes,
             refs,
         })
@@ -657,7 +658,7 @@ impl Manifest {
     }
 
     #[must_use]
-    pub const fn entries(&self) -> &BTreeMap<String, Entry> {
+    pub const fn entries(&self) -> &OrdMap<String, Entry> {
         &self.entries
     }
 
