@@ -9,7 +9,7 @@
 #   64 with --full), --no-sim.
 # Jobs come from bin/nanocode-sim/cfo.sh's table, with its flags; scenarios it doesn't list get a
 # pass job and a --twice job. A canary passes once a seed catches it, trying seeds 0, then 1..8,
-# then the rest of its budget (canary:N, default 400).
+# then the rest of its budget (canary:N, default 400) in units of 16 seeds across all cores.
 # Logs: output/check/<check>.log.
 set -uo pipefail
 root=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
@@ -147,31 +147,69 @@ else
   skip check "$detail"; skip check-wasm "$detail"
 fi
 
-simrun() {
-  local name=$1 kind=$2 to=$3; shift 3
-  local out rc from=0 upto
+# Sim units: a pass job runs its seeds in units of 8; a canary runs seed 0, then 1..8, then the
+# rest of its budget in units of $chunk seeds, and its later units are skipped once one catches it.
+# Seeds 0..8 start first, longest first by the last run's times (target/check-sim/sim-times.txt),
+# then the rest by lowest seed, so a canary that's caught early costs a few units at most.
+chunk=16
+simunits() {
+  awk -v chunk="$chunk" '{
+    flags = ""; for (i = 4; i <= NF; i++) flags = flags " " $i
+    to = $3; from = 0
+    for (k = 0; from < to; k++) {
+      if ($2 == "pass") upto = from + 8; else upto = k == 0 ? 1 : k == 1 ? 8 : from + chunk
+      if (upto > to) upto = to
+      print $1, $2, from, upto flags; from = upto
+    }
+  }' "$logs/sim-jobs.txt" | awk -v times="$target/check-sim/sim-times.txt" '
+    BEGIN { while ((getline l < times) > 0) { split(l, f, " "); t[f[1] " " f[2] " " f[3]] = f[4]; n++ } }
+    { k = $1 " " $3 " " $4; s = (k in t) ? t[k] : n ? 0 : 1e9; if ($3 >= 8 && $2 == "canary") s = -$3; printf "%s\t%s\n", s, $0 }' |
+    sort -t "$(printf '\t')" -k1,1gr -s | cut -f2-
+}
+simunit() {
+  local name=$1 kind=$2 from=$3 upto=$4 out rc t0 t1
+  shift 4
+  [ "$kind" = canary ] && [ -e "$SIM_UNITS/$name.caught" ] && return
+  t0=$(date +%s%N 2>/dev/null)
+  out=$($SIM_TIMEOUT "$SIM_BIN" --seeds "$from..$upto" "$@" 2>&1); rc=$?
+  [ $rc = 124 ] && [ -n "$SIM_TIMEOUT" ] && out="FAIL hung: no result after ${NANOCODE_CHECK_UNIT_TIMEOUT:-120} s
+$out"
+  t1=$(date +%s%N 2>/dev/null)
+  case "$t0$t1" in *N*) t0=0 t1=0 ;; esac
+  printf 'TIME %s %s %s %s\n' "$name" "$from" "$upto" "$(( (t1 - t0) / 1000000 ))"
   if [ "$kind" = pass ]; then
-    out=$("$SIM_BIN" --seeds "0..$to" "$@" 2>&1); rc=$?
-    if [ $rc = 0 ]; then echo "PASSJOB $name"; else echo "FAILJOB $name exit=$rc :: nanocode-sim --seeds 0..$to $*"; echo "$out" | grep -m3 '^FAIL\|panicked'; fi
-    return
+    if [ $rc = 0 ]; then echo "PASSUNIT $name $from..$upto"; else printf 'FAILJOB %s exit=%s :: nanocode-sim --seeds %s..%s %s\n%s\n' "$name" "$rc" "$from" "$upto" "$*" "$(echo "$out" | grep -m3 '^FAIL\|panicked')"; fi
+  elif [ $rc = 0 ] && echo "$out" | grep -q '^MUTATION .* caught by'; then
+    touch "$SIM_UNITS/$name.caught"; echo "CAUGHTUNIT $name $from..$upto"
+  else
+    echo "MISSEDUNIT $name $from..$upto exit=$rc"
   fi
-  for upto in 1 8 "$to"; do
-    [ "$upto" -gt "$to" ] && upto=$to
-    [ "$upto" -le "$from" ] && continue
-    out=$("$SIM_BIN" --seeds "$from..$upto" "$@" 2>&1); rc=$?
-    if [ $rc = 0 ] && echo "$out" | grep -q '^MUTATION .* caught by'; then echo "CAUGHTJOB $name seeds=$from..$upto"; return; fi
-    from=$upto
-  done
-  echo "MISSEDJOB $name exit=$rc :: nanocode-sim --seeds 0..$to $*"
 }
 simall() {
-  export -f simrun
-  xargs -P "$jobs" -L 1 bash -c 'simrun "$@"' _ <"$logs/sim-jobs.txt" >"$logs/sim.out" 2>&1
-  cat "$logs/sim.out"
+  export -f simunit
+  export SIM_UNITS=$logs/sim-units SIM_TIMEOUT=""
+  # A hung unit fails after NANOCODE_CHECK_UNIT_TIMEOUT seconds (default 120; units take ~1 s).
+  command -v timeout >/dev/null && SIM_TIMEOUT="timeout ${NANOCODE_CHECK_UNIT_TIMEOUT:-120}"
+  mkdir -p "$SIM_UNITS"
+  simunits >"$logs/sim-units.txt"
+  xargs -P "$jobs" -L 1 bash -c 'simunit "$@"' _ <"$logs/sim-units.txt" >"$logs/sim.out" 2>&1
+  grep '^TIME ' "$logs/sim.out" | cut -d' ' -f2- >"$target/check-sim/sim-times.txt"
+  # One line per job, as before: PASSJOB, FAILJOB (above, per unit), CAUGHTJOB or MISSEDJOB.
+  while read -r name kind to flags; do
+    if [ "$kind" = pass ]; then
+      grep -q "^FAILJOB $name " "$logs/sim.out" || echo "PASSJOB $name"
+    elif first=$(grep "^CAUGHTUNIT $name " "$logs/sim.out" | cut -d' ' -f3 | sort -n | head -1) && [ -n "$first" ]; then
+      echo "CAUGHTJOB $name seeds=$first"
+    else
+      echo "MISSEDJOB $name $(grep "^MISSEDUNIT $name " "$logs/sim.out" | tail -1 | cut -d' ' -f4) :: nanocode-sim --seeds 0..$to $flags"
+    fi
+  done <"$logs/sim-jobs.txt" >"$logs/sim-jobs.out"
+  grep -v '^TIME \|^PASSUNIT \|^CAUGHTUNIT \|^MISSEDUNIT ' "$logs/sim.out"
+  cat "$logs/sim-jobs.out"
   local p f c m
-  p=$(grep -c '^PASSJOB' "$logs/sim.out"); f=$(grep -c '^FAILJOB' "$logs/sim.out")
-  c=$(grep -c '^CAUGHTJOB' "$logs/sim.out"); m=$(grep -c '^MISSEDJOB' "$logs/sim.out")
-  echo "SIM pass_jobs=$p failed_jobs=$f canaries_caught=$c missed=$m"
+  p=$(grep -c '^PASSJOB' "$logs/sim-jobs.out"); f=$(grep -c '^FAILJOB' "$logs/sim.out")
+  c=$(grep -c '^CAUGHTJOB' "$logs/sim-jobs.out"); m=$(grep -c '^MISSEDJOB' "$logs/sim-jobs.out")
+  echo "SIM pass_jobs=$p failed_units=$f canaries_caught=$c missed=$m units=$(grep -c . "$logs/sim-units.txt")"
   [ "$f" = 0 ] && [ "$m" = 0 ] && [ $((p + c)) -gt 0 ]
 }
 if [ $sim = 1 ]; then
