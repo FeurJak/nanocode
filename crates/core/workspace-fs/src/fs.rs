@@ -84,6 +84,33 @@ fn key(path: &[u8]) -> io::Result<String> {
 }
 
 fn resolve(manifest: &Manifest, path: &str, follow: bool) -> io::Result<String> {
+    if plain(manifest, path) {
+        return Ok(path.to_owned());
+    }
+    resolve_links(manifest, path, follow)
+}
+
+/// Whether `path` already names itself: every part a plain name and no symlink on
+/// the way, so resolving it walks no link and changes nothing.
+fn plain(manifest: &Manifest, path: &str) -> bool {
+    if path.is_empty() {
+        return true;
+    }
+    let mut end = 0;
+    for part in path.split('/') {
+        if matches!(part, "" | "." | "..") {
+            return false;
+        }
+        end += part.len();
+        if let Some(Entry::Symlink { .. }) = manifest.get(&path[..end]) {
+            return false;
+        }
+        end += 1;
+    }
+    true
+}
+
+fn resolve_links(manifest: &Manifest, path: &str, follow: bool) -> io::Result<String> {
     let mut rest: Vec<String> = path
         .split('/')
         .filter(|part| !part.is_empty())
