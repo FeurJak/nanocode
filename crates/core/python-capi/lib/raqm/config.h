@@ -1,2 +1,0 @@
-#define RAQM_SHEENBIDI 1
-#define RAQM_SHEENBIDI_GT_2_9 1

@@ -1,3 +1,0 @@
-#ifndef _INTERNAL_SYSCALL_H
-#define _INTERNAL_SYSCALL_H
-#endif

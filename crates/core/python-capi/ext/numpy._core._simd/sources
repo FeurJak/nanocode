@@ -1,3 +1,0 @@
-_simd.c
-_simd.dispatch.c
-../numpy._core._multiarray_umath/common/npy_cpu_features.c
