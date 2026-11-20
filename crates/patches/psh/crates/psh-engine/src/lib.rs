@@ -1368,3 +1368,6 @@ mod parity_tests {
         assert_eq!(out, b"2\n");
     }
 }
+
+#[cfg(test)]
+mod fuzz_parity_tests;

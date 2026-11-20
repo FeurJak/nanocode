@@ -3151,9 +3151,23 @@ pub(crate) async fn expand_decl_args(
                 items,
             });
         } else if assignment_like(code, w) {
-            // Brace expansion applies (`local a={1..3}` is `local a=1 a=2 a=3`, bash);
-            // each word is then an assignment.
-            for pieces in brace_expand(code, &w.parts) {
+            // Brace expansion applies (`local a={1..3}` is `local a=1 a=2 a=3`, bash).
+            // The words it makes are no longer assignments, so they expand as command
+            // words do (`"${a[@]}"` splits) before each is read as an argument.
+            let expanded = brace_expand(code, &w.parts);
+            if expanded.len() > 1 {
+                let mut f = Fields::new(vp, true);
+                f.word = w.span;
+                for pieces in expanded {
+                    expand_pieces(vp, code, &pieces, false, &mut f, Ctx::Word).await?;
+                    f.finish_word();
+                }
+                glob_fields(vp, &mut f).await?;
+                status = f.subst_status.or(status);
+                args.extend(f.out.into_iter().map(|f| DeclArg::from_word(f.text)));
+                continue;
+            }
+            for pieces in expanded {
                 let mut f = Fields::new(vp, false);
                 f.assign = true;
                 f.text_only = true;
