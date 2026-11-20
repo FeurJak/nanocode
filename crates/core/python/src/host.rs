@@ -28,6 +28,9 @@ pub struct State {
     grace: bool,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    /// Which stream each held write went to, in order, as (fd, length) runs, so a
+    /// caller can replay stdout and stderr interleaved as the program wrote them.
+    pub order: Vec<(u8, usize)>,
     pub changes: Changes,
     pub refused: Option<Limit>,
     pub cancelled: bool,
@@ -55,6 +58,7 @@ impl State {
             grace: false,
             stdout: Vec::new(),
             stderr: Vec::new(),
+            order: Vec::new(),
             changes: Changes::default(),
             refused: None,
             cancelled: false,
@@ -96,8 +100,19 @@ impl State {
             .written
             .saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX));
         match (&self.stdio, fd) {
-            (Stdio::Held(_), 2) => self.stderr.extend_from_slice(data),
-            (Stdio::Held(_), _) => self.stdout.extend_from_slice(data),
+            (Stdio::Held(_), _) => {
+                let fd = if fd == 2 { 2 } else { 1 };
+                if fd == 2 {
+                    self.stderr.extend_from_slice(data);
+                } else {
+                    self.stdout.extend_from_slice(data);
+                }
+                match self.order.last_mut() {
+                    Some((last, len)) if *last == fd => *len += data.len(),
+                    _ if data.is_empty() => {}
+                    _ => self.order.push((fd, data.len())),
+                }
+            }
             (Stdio::Process, 2) => {
                 let mut stderr = io::stderr().lock();
                 stderr.write_all(data)?;

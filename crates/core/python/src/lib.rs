@@ -237,10 +237,40 @@ pub struct Ran {
     pub ended: Ended,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    /// The order the program wrote stdout and stderr in, as (fd, length) runs over
+    /// them; empty when unknown, which segments reads as all stdout then all stderr.
+    pub order: Vec<(u8, usize)>,
     pub changes: Changes,
     pub steps: u64,
     pub held: Held,
     pub kept: Kept,
+}
+
+impl Ran {
+    /// stdout and stderr as (fd, bytes) runs in the order the program wrote them, so
+    /// 2>&1 keeps CPython's order (stderr line-buffered, stdout flushed later).
+    #[must_use]
+    pub fn segments(&self) -> Vec<(u8, &[u8])> {
+        let mut out = Vec::new();
+        let (mut at_out, mut at_err) = (0_usize, 0_usize);
+        for &(fd, len) in &self.order {
+            let (bytes, at) = if fd == 2 {
+                (&self.stderr, &mut at_err)
+            } else {
+                (&self.stdout, &mut at_out)
+            };
+            let end = (*at).saturating_add(len).min(bytes.len());
+            out.push((fd, &bytes[*at..end]));
+            *at = end;
+        }
+        if at_out < self.stdout.len() {
+            out.push((1, &self.stdout[at_out..]));
+        }
+        if at_err < self.stderr.len() {
+            out.push((2, &self.stderr[at_err..]));
+        }
+        out
+    }
 }
 
 enum Program {
@@ -372,6 +402,7 @@ impl Python {
             ended: Ended::Exited(2),
             stdout: Vec::new(),
             stderr: format!("python3: {message}\n").into_bytes(),
+            order: Vec::new(),
             changes: Changes::default(),
             steps: 0,
             held: Held::default(),
@@ -416,6 +447,7 @@ impl Python {
             },
             stdout: state.stdout,
             stderr: state.stderr,
+            order: state.order,
             changes: state.changes,
             steps,
             held: state.held_at_refusal,
@@ -584,6 +616,11 @@ impl Python {
     fn exit(&self, vm: &VirtualMachine, error: Option<PyBaseExceptionRef>) -> i32 {
         let stopped = host::ending();
         vm.set_limiter(Some(PyRc::new(host::Budget) as PyRc<dyn Limiter>));
+        // CPython flushes sys.stdout before it prints an uncaught exception, so a
+        // traceback follows what the program printed before it in 2>&1 output.
+        if error.is_some() && !stopped {
+            let _ = self.call(vm, "_flush", ());
+        }
         let code = match error {
             Some(_) if stopped => 0,
             Some(error) if error.fast_isinstance(vm.ctx.exceptions.keyboard_interrupt) => {

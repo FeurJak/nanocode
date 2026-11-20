@@ -217,8 +217,13 @@ impl Kept {
     }
 
     async fn report(&self, call: &Call, ran: Ran) -> io::Result<i32> {
-        call.stdout.write_all(&ran.stdout).await?;
-        call.stderr.write_all(&ran.stderr).await?;
+        for (fd, bytes) in ran.segments() {
+            if fd == 2 {
+                call.stderr.write_all(bytes).await?;
+            } else {
+                call.stdout.write_all(bytes).await?;
+            }
+        }
         let (status, said) = match ran.ended {
             Ended::Exited(status) => return Ok(status),
             Ended::Cancelled => return Ok(128 + 15),
