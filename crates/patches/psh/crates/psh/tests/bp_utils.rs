@@ -75,3 +75,11 @@ fn wc_writes_each_count_before_the_next_inputs_error() {
         )
     );
 }
+
+#[test]
+fn xargs_reports_a_missing_command_in_its_own_words() {
+    assert_eq!(
+        sh("echo a | xargs nosuchcmd 2>&1; echo $?"),
+        ("xargs: nosuchcmd: No such file or directory\n127\n".into(), 0)
+    );
+}

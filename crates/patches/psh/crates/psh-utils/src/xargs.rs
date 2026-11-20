@@ -12,7 +12,7 @@
 
 use std::task::Poll;
 
-use psh_engine::util::{SpawnEnv, UtilChild, UtilCtx};
+use psh_engine::util::{STANDALONE_BUILTINS, SpawnEnv, UtilChild, UtilCtx};
 
 use crate::common;
 use crate::opts::{Spec, both, flag, long};
@@ -783,6 +783,20 @@ async fn launch(
         return;
     }
     let name = String::from_utf8_lossy(&argv[0]).into_owned();
+    // GNU xargs reports a command it cannot find in its own words and ends with 127,
+    // rather than as a shell's "command not found".
+    if !argv[0].contains(&b'/')
+        && !STANDALONE_BUILTINS
+            .iter()
+            .any(|b| b.as_bytes() == argv[0].as_slice())
+        && !ctx.is_utility(&argv[0]).await
+        && let Some(path) = ctx.var(b"PATH").map(<[u8]>::to_vec)
+        && ctx.search_path(&argv[0], &path).await.is_empty()
+    {
+        ctx.error(&format!("{name}: No such file or directory")).await;
+        runner.record(ctx, &name, 127).await;
+        return;
+    }
     let env = SpawnEnv {
         stdin: runner.stdin.clone(),
         ..SpawnEnv::default()
