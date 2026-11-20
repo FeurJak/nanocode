@@ -13,7 +13,6 @@ description = "Plans, shards and places builds, checks, tests and simulator runs
 [[bin]]
 name = "nc-build"
 path = "src/main.rs"
-test = false
 bench = false
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]

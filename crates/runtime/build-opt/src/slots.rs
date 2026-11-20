@@ -40,6 +40,7 @@ pub struct Observation {
     pub mem_total_kb: u64,
     pub mem_available_kb: u64,
     pub at_ms: u64,
+    pub runnable_cpus: Option<Vec<u32>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,6 +138,16 @@ impl State {
                     mem_total_kb: number(observation, "mem_total_kb")?,
                     mem_available_kb: number(observation, "mem_available_kb")?,
                     at_ms: number(observation, "at_ms")?,
+                    runnable_cpus: match observation.get("runnable_cpus") {
+                        None | Some(Value::Null) => None,
+                        Some(counts) => Some(
+                            counts
+                                .as_array()?
+                                .iter()
+                                .map(|count| u32::try_from(count.as_u64()?).ok())
+                                .collect::<Option<Vec<u32>>>()?,
+                        ),
+                    },
                 },
             );
         }
@@ -174,6 +185,7 @@ impl State {
                         "mem_total_kb": observation.mem_total_kb,
                         "mem_available_kb": observation.mem_available_kb,
                         "at_ms": observation.at_ms,
+                        "runnable_cpus": observation.runnable_cpus,
                     }),
                 )
             })
@@ -213,17 +225,32 @@ impl State {
     }
 
     pub fn usage(&self, machine: &Machine, now_ms: u64) -> Usage {
-        let leased = self
+        let leases: Vec<&Lease> = self
             .leases
             .iter()
             .filter(|lease| lease.machine == machine.name)
-            .map(|lease| lease.cores)
-            .sum();
+            .collect();
+        let leased = leases.iter().map(|lease| lease.cores).sum();
         let fresh = self
             .observations
             .get(&machine.name)
             .filter(|observation| now_ms.saturating_sub(observation.at_ms) <= FRESH_MS);
-        let load = fresh.map_or(0, |observation| observation.load.ceil() as u32);
+        let unleased = fresh.map_or(0, |observation| {
+            match (machine.pin, &observation.runnable_cpus) {
+                (Pin::Taskset, Some(counts)) => (0..)
+                    .zip(counts)
+                    .filter(|(cpu, _)| {
+                        !leases.iter().any(|lease| {
+                            lease.taken_ms < observation.at_ms
+                                && lease.first_cpu <= *cpu
+                                && *cpu < lease.first_cpu + lease.cores
+                        })
+                    })
+                    .map(|(_, count)| count)
+                    .sum(),
+                _ => (observation.load.ceil() as u32).saturating_sub(leased),
+            }
+        });
         let memory_ok = fresh.is_none_or(|observation| {
             observation.mem_available_kb.saturating_mul(10) >= observation.mem_total_kb
         });
@@ -232,7 +259,7 @@ impl State {
                 observation.cores.min(machine.cores)
             }),
             leased,
-            busy: load.max(leased),
+            busy: leased + unleased,
             memory_ok,
             observed: fresh.is_some(),
         }

@@ -23,7 +23,10 @@ const USAGE: &str = "usage:
                                       ranks structural build changes by predicted seconds saved, from cargo metadata, git log and cargo --timings
   nc-build shard K/N [--durations F]  reads job keys on stdin and prints this shard's keys, longest first (F: lines of key and milliseconds)
   nc-build slots take --cores N --label L [--kind K] [--pool large|small] [--machine M] [--minutes T] [--wait S] [--env]
-                                      takes N cores on a machine with room and prints the lease as JSON, whose env (all --env prints) is a line to eval
+                                      takes N cores on a machine with room and prints the lease as JSON, whose env (all --env prints) is a line to eval;
+                                      room means leased cores + unleased busy cores (the latest observation's runnable threads outside SCHED_IDLE
+                                      on cpus no lease holds) + N <= the machine's cores, so a take never over-commits: without room it fails, or
+                                      with --wait S retries for S seconds
                                       (NC_BUILD_LEASE, NC_BUILD_LEASE_CORES and CARGO_BUILD_JOBS, which caps rustc at N, and NC_BUILD_PREFIX); among machines with room it picks
                                       the one with the fewest cores leased to kind K (default build), so kinds mix and boxes stay full, then
                                       the pool order: the large pool (default, nanocode work) the largest boxes first, the small pool
@@ -34,7 +37,7 @@ const USAGE: &str = "usage:
                                       first take with the same label (and fitting --cores) gets that lease, which give then frees;
                                       --overlap places it over leases that hold those cpus now, which keep them until they end
   nc-build slots observe MACHINE [--local] [--check] [--idle-below P --idle-samples N]
-                                      reads the output of 'nproc --all; cat /proc/loadavg /proc/meminfo; ps -eLo policy=,stat=' from that machine
+                                      reads the output of 'nproc --all; cat /proc/loadavg /proc/meminfo; ps -eLo policy=,stat=,psr=' from that machine
                                       on stdin (--local runs it here); busy cores are its runnable threads outside SCHED_IDLE, so preemptible
                                       filler never blocks a take, or without the ps lines the 1-minute load average; appends a sample line
                                       to machines.log, and an alarm line when busy exceeds cores, which --check turns into exit status 2
@@ -866,7 +869,7 @@ fn slots_once(args: &[String], input: &str) -> Result<String, String> {
         Some("observe") => {
             let name = args.get(1).ok_or("observe MACHINE")?;
             let observation = parse_observation(input, now)
-                .ok_or("expected nproc, /proc/loadavg, /proc/meminfo and optionally ps -eLo policy=,stat= on stdin")?;
+                .ok_or("expected nproc, /proc/loadavg, /proc/meminfo and optionally ps -eLo policy=,stat=[,psr=] on stdin")?;
             let state = with_state(|state| {
                 state.observations.insert(name.clone(), observation.clone());
                 state.expire(now);
@@ -953,6 +956,7 @@ fn parse_observation(input: &str, at_ms: u64) -> Option<Observation> {
     let mut cores = None;
     let mut load = None;
     let mut runnable = None;
+    let mut per_cpu: Option<Vec<u32>> = None;
     let mut total = None;
     let mut available = None;
     for line in input.lines() {
@@ -968,6 +972,18 @@ fn parse_observation(input: &str, at_ms: u64) -> Option<Observation> {
                     *count += 1;
                 }
             }
+            [policy, stat, cpu] if POLICIES.contains(policy) => {
+                let cpu: usize = cpu.parse().ok()?;
+                let count = runnable.get_or_insert(0_u32);
+                let counts = per_cpu.get_or_insert_with(Vec::new);
+                if counts.len() <= cpu {
+                    counts.resize(cpu + 1, 0);
+                }
+                if *policy != "IDL" && stat.starts_with('R') {
+                    *count += 1;
+                    counts[cpu] += 1;
+                }
+            }
             _ => {}
         }
     }
@@ -977,12 +993,13 @@ fn parse_observation(input: &str, at_ms: u64) -> Option<Observation> {
         mem_total_kb: total?,
         mem_available_kb: available?,
         at_ms,
+        runnable_cpus: per_cpu,
     })
 }
 
 const POLICIES: [&str; 7] = ["TS", "FF", "RR", "B", "ISO", "IDL", "DLN"];
 
-const PROBE: &str = "nproc --all; cat /proc/loadavg /proc/meminfo; ps -eLo policy=,stat=";
+const PROBE: &str = "nproc --all; cat /proc/loadavg /proc/meminfo; ps -eLo policy=,stat=,psr=";
 
 fn log_line(line: &str) {
     let path = std::env::var_os("NC_BUILD_MACHINES_LOG")
@@ -1168,4 +1185,141 @@ fn post(
     let posted = run(&board, &words)?;
     let _ = writeln!(io::stderr(), "posted {task}: {}", posted.trim());
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_observation, slots};
+    use nanocode_build_opt::slots::{Lease, Machine, Pin, Placement, State, Want};
+
+    const NOW: u64 = 1_000_000;
+
+    fn probe(threads: &[(&str, &str, u32)]) -> String {
+        let mut input =
+            "48\n1.00 1.00 1.00 1/100 1\nMemTotal: 1000 kB\nMemAvailable: 900 kB\n".to_owned();
+        for (policy, stat, cpu) in threads {
+            input.push_str(&format!("{policy} {stat} {cpu}\n"));
+        }
+        input
+    }
+
+    fn running(
+        policy: &'static str,
+        cpus: std::ops::Range<u32>,
+    ) -> Vec<(&'static str, &'static str, u32)> {
+        cpus.map(|cpu| (policy, "R", cpu)).collect()
+    }
+
+    fn machine() -> Machine {
+        Machine {
+            name: "m".to_owned(),
+            cores: 48,
+            expires_ms: None,
+            pin: Pin::Taskset,
+            placement: Placement::Fill,
+            kinds: None,
+        }
+    }
+
+    fn want(cores: u32) -> Want {
+        Want {
+            cores,
+            kind: slots::DEFAULT_KIND.to_owned(),
+            label: "t".to_owned(),
+            only: None,
+            ttl_ms: 60_000,
+        }
+    }
+
+    fn state(threads: &[(&str, &str, u32)], leased: &[(u32, u32)]) -> State {
+        let mut state = State::default();
+        state.observations.insert(
+            "m".to_owned(),
+            parse_observation(&probe(threads), NOW).unwrap(),
+        );
+        for (index, (first_cpu, cores)) in leased.iter().enumerate() {
+            state.leases.push(Lease {
+                id: format!("l{index}"),
+                machine: "m".to_owned(),
+                first_cpu: *first_cpu,
+                cores: *cores,
+                kind: slots::DEFAULT_KIND.to_owned(),
+                label: "held".to_owned(),
+                taken_ms: NOW - 1_000,
+                until_ms: NOW + 3_600_000,
+            });
+        }
+        state
+    }
+
+    #[test]
+    fn observation_counts_runnable_threads_outside_sched_idle_per_cpu() {
+        let observation = parse_observation(
+            &probe(&[
+                ("TS", "R", 3),
+                ("TS", "S", 3),
+                ("IDL", "R", 3),
+                ("B", "R+", 5),
+                ("IDL", "R", 7),
+            ]),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(observation.load, 2.0);
+        assert_eq!(
+            observation.runnable_cpus,
+            Some(vec![0, 0, 0, 1, 0, 1, 0, 0])
+        );
+    }
+
+    #[test]
+    fn take_refuses_when_leased_plus_unleased_busy_plus_want_exceeds_cores() {
+        let threads = running("TS", 12..42);
+        let mut state = state(&threads, &[(0, 12)]);
+        assert_eq!(state.usage(&machine(), NOW).busy, 42);
+        assert!(state.take(&[machine()], &want(7), NOW).is_none());
+        assert!(state.take(&[machine()], &want(6), NOW).is_some());
+        assert!(state.take(&[machine()], &want(1), NOW).is_none());
+    }
+
+    #[test]
+    fn take_counts_idle_leases_and_unleased_threads_together() {
+        let threads = running("TS", 24..48);
+        let mut state = state(&threads, &[(0, 24)]);
+        assert!(state.take(&[machine()], &want(1), NOW).is_none());
+    }
+
+    #[test]
+    fn threads_inside_a_lease_count_once_as_that_lease() {
+        let mut threads = running("TS", 0..12);
+        threads.extend(running("TS", 0..12));
+        threads.extend(running("TS", 12..32));
+        let mut state = state(&threads, &[(0, 12)]);
+        assert_eq!(state.usage(&machine(), NOW).busy, 32);
+        assert!(state.take(&[machine()], &want(16), NOW).is_some());
+    }
+
+    #[test]
+    fn sched_idle_filler_never_blocks_a_take() {
+        let mut threads = running("IDL", 0..48);
+        threads.extend(running("IDL", 0..48));
+        let mut state = state(&threads, &[]);
+        assert_eq!(state.usage(&machine(), NOW).busy, 0);
+        assert!(state.take(&[machine()], &want(48), NOW).is_some());
+    }
+
+    #[test]
+    fn runnable_cpus_survive_the_state_round_trip() {
+        let state = state(&running("TS", 2..4), &[]);
+        assert_eq!(State::from_json(&state.to_json()), Some(state));
+    }
+
+    #[test]
+    fn an_observation_without_cpus_counts_load_beyond_leased_cores() {
+        let mut state = state(&[], &[(0, 12)]);
+        state.observations.get_mut("m").unwrap().load = 40.0;
+        assert_eq!(state.usage(&machine(), NOW).busy, 40);
+        assert!(state.take(&[machine()], &want(9), NOW).is_none());
+        assert!(state.take(&[machine()], &want(8), NOW).is_some());
+    }
 }

@@ -30,7 +30,7 @@ if [ -z "${CARGO_BUILD_JOBS:-}" ] && command -v nc-build >/dev/null 2>&1 &&
   if read -r lease cores cpus < <(printf '%s' "$out" | python3 -I -c 'import json, sys; l = json.load(sys.stdin); print(l["lease"], l["cores"], l["cpus"])' 2>/dev/null); then
     trap give EXIT
     trap 'give; exit 130' INT TERM
-    export CARGO_BUILD_JOBS=$cores
+    export CARGO_BUILD_JOBS=$cores NC_BUILD_LEASE=$lease NC_BUILD_LEASE_CORES=$cores
     prefix=(taskset -c "$cpus")
   else
     lease=""
