@@ -3,12 +3,18 @@
 //! nanocode_durability_core::Sql host. Every write first locks its partition's fence row, so one
 //! partition's transactions commit one at a time and positions follow commit order within it.
 
-use std::{collections::HashSet, num::NonZeroU32, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashSet},
+    future::Future,
+    num::NonZeroU32,
+    sync::Arc,
+};
 
 use nanocode_durability_core::{
     Settle, Sql, SqlDialect, SqlRow, SqlStatement, StoreError, StoreFuture,
 };
 use nanocode_partitions::{Partition, Row};
+use nanocode_sync::{Atom, Notify};
 
 use super::{Append, Entry, PartStore, Rows, Verdict};
 use crate::host::{Compaction, Extension};
@@ -93,18 +99,106 @@ const CURSOR: Dialects = [
 pub struct SqlParts<H: ?Sized> {
     host: Arc<H>,
     notify: bool,
+    outbox: Arc<Outbox>,
+}
+
+/// Heads committed but not yet notified, for the notifier task to send in one unsynced
+/// transaction, so a commit's answer never waits on its NOTIFY round trip.
+#[derive(Default)]
+struct Outbox {
+    pending: Atom<Pending>,
+    ready: Notify,
+}
+
+#[derive(Clone, Default)]
+struct Pending {
+    heads: BTreeMap<String, u64>,
+    driven: bool,
+    closed: bool,
+}
+
+/// Marks the outbox undriven when the notifier future ends or is dropped, so commits fall back
+/// to notifying inline instead of queueing heads nobody sends.
+struct Driving(Arc<Outbox>);
+
+impl Drop for Driving {
+    fn drop(&mut self) {
+        self.0.pending.update(|pending| pending.driven = false);
+    }
+}
+
+impl<H: ?Sized> Drop for SqlParts<H> {
+    fn drop(&mut self) {
+        self.outbox.pending.update(|pending| pending.closed = true);
+        self.outbox.ready.notify_one();
+    }
+}
+
+fn notify_payloads<'a>(heads: impl Iterator<Item = (&'a str, u64)>) -> Result<String, StoreError> {
+    let payloads: Vec<String> = heads.map(|(scope, head)| format!("{scope}:{head}")).collect();
+    serde_json::to_string(&payloads)
+        .map_err(|error| StoreError::Backend(format!("encode notify: {error}")))
+}
+
+async fn send_notify<H: Sql + ?Sized>(host: &H, payloads: &str) {
+    // The appends are committed; a lost wake only delays followers, so its error is dropped.
+    let _ = host
+        .write(
+            Settle::Ordered,
+            "plog_notify",
+            &[SqlStatement {
+                sql: NOTIFY_PG,
+                params: vec![payloads],
+            }],
+        )
+        .await;
 }
 
 impl<H: Sql + ?Sized> SqlParts<H> {
-    /// Postgres notifies CHANNEL inside every commit; with_notify(false) turns it off.
-    pub const fn new(host: Arc<H>) -> Self {
-        Self { host, notify: true }
+    /// Postgres notifies CHANNEL after every commit (see notifier); with_notify(false) turns it off.
+    pub fn new(host: Arc<H>) -> Self {
+        Self {
+            host,
+            notify: true,
+            outbox: Arc::new(Outbox::default()),
+        }
     }
 
     #[must_use]
     pub const fn with_notify(mut self, notify: bool) -> Self {
         self.notify = notify;
         self
+    }
+
+    /// Sends committed heads' NOTIFY off the commit path: run it on an executor for as long as
+    /// the store lives. Each pass sends every head queued meanwhile in one unsynced transaction,
+    /// so commits on every partition share notify transactions and never wait on them. Without
+    /// it running, commit notifies inline after the append lands.
+    pub fn notifier(&self) -> impl Future<Output = ()> + use<H>
+    where
+        H: Send + Sync + 'static,
+    {
+        let host = Arc::clone(&self.host);
+        let outbox = Arc::clone(&self.outbox);
+        outbox.pending.update(|pending| pending.driven = true);
+        async move {
+            let _driving = Driving(Arc::clone(&outbox));
+            loop {
+                outbox.ready.notified().await;
+                let (heads, closed) = outbox
+                    .pending
+                    .update(|pending| (std::mem::take(&mut pending.heads), pending.closed));
+                if !heads.is_empty()
+                    && let Ok(payloads) =
+                        notify_payloads(heads.iter().map(|(scope, head)| (scope.as_str(), *head)))
+                {
+                    send_notify(&*host, &payloads).await;
+                }
+                if closed {
+                    return;
+                }
+            }
+        }
     }
 
     pub const fn host(&self) -> &Arc<H> {
@@ -264,24 +358,20 @@ impl<H: Sql + Send + Sync + ?Sized> PartStore for SqlParts<H> {
                 landed.insert((scope.to_owned(), seq));
             }
             if self.notify && self.postgres() && !heads.is_empty() {
-                let payloads: Vec<String> = heads
-                    .iter()
-                    .map(|(scope, head)| format!("{scope}:{head}"))
-                    .collect();
-                let payloads = serde_json::to_string(&payloads)
-                    .map_err(|error| StoreError::Backend(format!("encode notify: {error}")))?;
-                // The append is committed; a lost wake only delays followers, so its error is dropped.
-                let _ = self
-                    .host
-                    .write(
-                        Settle::Ordered,
-                        "plog_notify",
-                        &[SqlStatement {
-                            sql: NOTIFY_PG,
-                            params: vec![payloads.as_str()],
-                        }],
-                    )
-                    .await;
+                let queued = self.outbox.pending.update(|pending| {
+                    if pending.driven {
+                        for (scope, head) in &heads {
+                            let queued = pending.heads.entry((*scope).to_owned()).or_insert(*head);
+                            *queued = (*queued).max(*head);
+                        }
+                    }
+                    pending.driven
+                });
+                if queued {
+                    self.outbox.ready.notify_one();
+                } else {
+                    send_notify(&*self.host, &notify_payloads(heads.into_iter())?).await;
+                }
             }
             Ok(batch
                 .iter()
