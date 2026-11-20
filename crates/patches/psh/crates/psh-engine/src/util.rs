@@ -194,6 +194,7 @@ pub(crate) async fn job_is_program(vp: &Vp, name: &[u8]) -> bool {
 }
 
 pub(crate) use nested::start as start_nested;
+pub(crate) use nested::set_ppid;
 
 /// Whether `entry` is the shell psh runs for `bash` and `sh` (D1410).
 pub(crate) fn is_nested_shell(entry: &UtilEntry) -> bool {
@@ -1021,6 +1022,8 @@ impl UtilCtx<'_> {
                     }
                 }
                 sub.foreign_env = Rc::new(Vec::new());
+                // Exported functions are environment entries too (`BASH_FUNC_f%%`).
+                sub.exported_funcs = Rc::new(Vec::new());
             } else {
                 for (k, v) in &self.env {
                     if let Ok(name) = std::str::from_utf8(k)

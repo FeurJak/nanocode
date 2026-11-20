@@ -3089,8 +3089,9 @@ async fn spawn_program(
             fds.push((n as u32, ChildFd::Closed));
         }
     }
-    // Kept for a script psh runs itself (D1300).
+    // Kept for a script psh runs itself (D1300), which starts from this environment.
     let script_argv = argv.clone();
+    let script_env = env.clone();
     let spec = SpawnSpec {
         program,
         argv,
@@ -3137,7 +3138,7 @@ async fn spawn_program(
             Err(Ok(126))
         }
         Err(e) if crate::host::RunInShell::is(&e) => {
-            Err(Box::pin(run_in_shell(vp, &program, script_argv, &shown)).await)
+            Err(Box::pin(run_in_shell(vp, &program, script_argv, script_env, &shown)).await)
         }
         // Spawning a directory fails with EACCES; bash says what it is.
         Err(_) if matches!(vp.host().stat(&program, true).await, Ok(m) if m.kind == crate::host::FileKind::Dir) =>
@@ -3186,8 +3187,15 @@ fn shebang(source: &[u8]) -> Option<Vec<Vec<u8>>> {
 /// file `execve` rejects: in a subshell that starts afresh, as if a new shell ran the
 /// file (only exported variables, no functions, aliases, traps or options of ours), with
 /// `$0` the name as written and `$@` the arguments; the descriptors, cwd and environment
-/// are the command's. A file that looks binary is refused, as bash does.
-async fn run_in_shell(vp: &mut Vp, program: &[u8], argv: Vec<Vec<u8>>, shown: &str) -> R {
+/// (`env`, with the command's prefix assignments) are the command's. A file that looks
+/// binary is refused, as bash does.
+async fn run_in_shell(
+    vp: &mut Vp,
+    program: &[u8],
+    argv: Vec<Vec<u8>>,
+    env: Vec<(Vec<u8>, Vec<u8>)>,
+    shown: &str,
+) -> R {
     let file = match vp.host().open(program, OpenOptions::read()).await {
         Ok(f) => FdObj::File(f),
         Err(e) => {
@@ -3224,10 +3232,22 @@ async fn run_in_shell(vp: &mut Vp, program: &[u8], argv: Vec<Vec<u8>>, shown: &s
         .await;
         return Ok(126);
     }
+    let parent = vp.shell_pid;
     let mut sub = enter(vp).await?;
-    start_afresh(&mut sub);
+    start_afresh_from(&mut sub, env);
+    // Its parent is the shell that runs it, as for `bash script`.
+    if let Some(pid) = parent {
+        crate::util::set_ppid(&mut sub, Some(pid.to_string().into_bytes()));
+    }
+    // `$0` is the path the kernel passes: the name as written when it has a slash,
+    // else where the `PATH` search found it (`abs_dirname "$0"` in pyenv, rbenv).
     let mut argv = argv.into_iter();
-    sub.arg0 = argv.next().unwrap_or_default();
+    let name = argv.next().unwrap_or_default();
+    sub.arg0 = if name.contains(&b'/') {
+        name
+    } else {
+        shown.as_bytes().to_vec()
+    };
     sub.args = argv.collect();
     let (status, _) = Box::pin(crate::run_script(sub, crate::Input::Text(source))).await;
     Ok(status)
@@ -3241,6 +3261,20 @@ async fn run_in_shell(vp: &mut Vp, program: &[u8], argv: Vec<Vec<u8>>, shown: &s
 /// it, D1413). Descriptors, cwd, umask and limits stay.
 pub(crate) fn start_afresh(sub: &mut Vp) {
     let env = sub.env(&[]);
+    start_afresh_from(sub, env);
+}
+
+/// [`start_afresh`] from the environment a program would get (`env`): a prefix
+/// assignment (`V=x ./script`) is the new shell's, and `env -i` leaves it nothing.
+/// Exported functions come from their `BASH_FUNC_name%%` entries in it.
+fn start_afresh_from(sub: &mut Vp, mut env: Vec<(Vec<u8>, Vec<u8>)>) {
+    let func_key = |k: &[u8]| k.starts_with(b"BASH_FUNC_") && k.ends_with(b"%%");
+    let passed: std::collections::HashSet<Vec<u8>> = env
+        .iter()
+        .filter(|(k, _)| func_key(k))
+        .map(|(k, _)| k[10..k.len() - 2].to_vec())
+        .collect();
+    env.retain(|(k, _)| !func_key(k));
     let (mut vars, foreign) = crate::initial_vars(&*sub.core.host.clone(), &env, &sub.cwd);
     vars.insert(
         "BASH",
@@ -3255,7 +3289,9 @@ pub(crate) fn start_afresh(sub: &mut Vp) {
     let kept: std::collections::HashMap<String, Rc<Func>> = sub
         .funcs
         .iter()
-        .filter(|(name, _)| sub.exported_funcs.contains(name))
+        .filter(|(name, _)| {
+            sub.exported_funcs.contains(name) && passed.contains(name.as_bytes())
+        })
         .map(|(name, f)| (name.clone(), f.clone()))
         .collect();
     sub.funcs = Rc::new(kept);

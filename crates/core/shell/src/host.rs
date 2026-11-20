@@ -619,8 +619,14 @@ impl psh_engine::Host for Host {
         })
     }
 
+    /// The configured facts; a shell always has a parent (bash's `$PPID`), so a
+    /// configuration without one gets a stable id just below the shell's own.
     fn info(&self) -> HostInfo {
-        self.0.identity.info.clone()
+        let mut info = self.0.identity.info.clone();
+        if info.ppid.is_none() {
+            info.ppid = Some(self.0.identity.pid.saturating_sub(1).max(1));
+        }
+        info
     }
 
     fn rlimit(&self, resource: Rlimit) -> Option<(psh_engine::host::Limit, psh_engine::host::Limit)> {

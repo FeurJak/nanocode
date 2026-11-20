@@ -243,7 +243,7 @@ async fn shell(mut sub: Vp, argv: Vec<Vec<u8>>, ignore: Vec<Signal>, caller: Cal
 }
 
 /// `$PPID`, a readonly integer; unset when there is no such process.
-fn set_ppid(sub: &mut Vp, value: Option<Vec<u8>>) {
+pub(crate) fn set_ppid(sub: &mut Vp, value: Option<Vec<u8>>) {
     match value {
         Some(v) => {
             let ppid = sub.vars.entry("PPID");

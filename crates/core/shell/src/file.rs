@@ -691,6 +691,26 @@ mod tests {
     }
 
     #[test]
+    fn a_script_the_shell_runs_gets_the_command_environment() {
+        let make = "printf '#!/usr/bin/env bash\\necho \"[$V][$W]\"\\n' > s; chmod +x s; ";
+        assert_eq!(out(&format!("{make}V=x W=y ./s; ./s")), "[x][y]\n[][]\n");
+        assert_eq!(out(&format!("{make}export V=e; ./s; V=p ./s; echo \"$V\"")), "[e][]\n[p][]\ne\n");
+        assert_eq!(out(&format!("{make}V=x; ./s")), "[][]\n");
+        let zero = "mkdir -p bin; printf '#!/bin/bash\\necho $0\\n' > bin/z; chmod +x bin/z; ";
+        assert_eq!(out(&format!("{zero}PATH=/bin:$PATH z; bin/z; ./bin/z")), "/bin/z\nbin/z\n./bin/z\n");
+        let fun = "printf '#!/bin/bash\\nf 2>/dev/null || echo none\\n' > t; chmod +x t; f() { echo fn; }; ";
+        assert_eq!(out(&format!("{fun}./t; export -f f; ./t; export -nf f; ./t")), "none\nfn\nnone\n");
+        assert_eq!(out(&format!("{fun}export -f f; env -i ./t; env ./t")), "none\nfn\n");
+    }
+
+    #[test]
+    fn ppid_is_set_and_readonly() {
+        assert_eq!(out("echo $PPID; readonly -p | grep -c ' PPID='"), "1\n1\n");
+        let script = "printf '#!/bin/bash\\necho $PPID\\n' > p; chmod +x p; ";
+        assert_eq!(out(&format!("{script}./p; bash ./p; echo $$")), "2\n2\n2\n");
+    }
+
+    #[test]
     fn reading_a_directory() {
         assert_eq!(out("let n=1 < .; echo $n"), "1\n");
         let (stdout, stderr) = run("cat < .; echo $?");
