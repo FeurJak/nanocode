@@ -1251,7 +1251,7 @@ impl Tar<'_, '_> {
                 continue;
             }
             if let Err(e) = self.ctx.set_mode(path, *mode).await {
-                self.fail(&mode_failed(&shown, *mode, &e)).await;
+                self.fail(&mode_failed(shown, *mode, &e)).await;
             }
         }
         for (want, found) in &wanted {
