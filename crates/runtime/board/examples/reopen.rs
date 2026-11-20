@@ -102,7 +102,7 @@ async fn fill(board: &mut Board, events: u64, behind: Option<u64>) {
                 )
                 .await
                 .expect("a renew lands");
-            if (swarm * 21 + index as u64) % 50 == 0 {
+            if (swarm * 21 + index as u64).is_multiple_of(50) {
                 let send = Op::Steer(SteerOp::Send {
                     task: id.clone(),
                     claim: Some(claim.clone()),
