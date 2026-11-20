@@ -15,8 +15,8 @@ use crate::{
 
 use core::cell::Cell;
 use core::ptr::NonNull;
-use nanocode_numeric::{BigInt, ToBigInt};
 use nanocode_numeric::Complex64;
+use nanocode_numeric::{BigInt, ToBigInt};
 use nanocode_numeric::{Signed, ToPrimitive, Zero};
 use rustpython_common::int::float_to_ratio;
 
@@ -139,7 +139,8 @@ pub fn try_to_bigint(value: f64, vm: &VirtualMachine) -> PyResult<BigInt> {
 }
 
 fn inner_floordiv(v1: f64, v2: f64, vm: &VirtualMachine) -> PyResult<f64> {
-    float_ops::floordiv(v1, v2).ok_or_else(|| vm.new_zero_division_error("float floor division by zero"))
+    float_ops::floordiv(v1, v2)
+        .ok_or_else(|| vm.new_zero_division_error("float floor division by zero"))
 }
 
 fn inner_divmod(v1: f64, v2: f64, vm: &VirtualMachine) -> PyResult<(f64, f64)> {
@@ -147,7 +148,8 @@ fn inner_divmod(v1: f64, v2: f64, vm: &VirtualMachine) -> PyResult<(f64, f64)> {
 }
 
 pub(crate) fn float_pow(v1: f64, v2: f64, vm: &VirtualMachine) -> PyResult {
-    if v1.is_zero() && v2.is_sign_negative() {
+    // 0.0 ** -inf is inf, as C's pow gives it; only a finite negative power divides by zero.
+    if v1.is_zero() && v2.is_sign_negative() && v2.is_finite() {
         Err(vm.new_zero_division_error("0.0 cannot be raised to a negative power"))
     } else if v1 < 0.0 && v1.is_finite() && v2.is_finite() && v2.floor() != v2 {
         let v1 = Complex64::new(v1, 0.);
