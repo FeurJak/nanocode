@@ -3455,7 +3455,14 @@ impl<'a> P<'a> {
                     kind: Part::AnsiC,
                 });
             }
-            Some(b'"') if !dq || matches!(ctx, Ctx::Arith { .. } | Ctx::ArithBracket) => {
+            // `$"…"` too, as in a double-quoted `${…}` operand.
+            Some(b'"')
+                if !dq
+                    || matches!(
+                        ctx,
+                        Ctx::Operand { dq: true, .. } | Ctx::Arith { .. } | Ctx::ArithBracket
+                    ) =>
+            {
                 self.pos += 2;
                 let mut inner = Vec::new();
                 self.parse_parts(Ctx::Double, &mut inner)?;
