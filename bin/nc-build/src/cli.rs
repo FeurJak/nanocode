@@ -11,6 +11,7 @@ use std::{
 use nanocode_build_opt::{
     ab::{Comparison, Side, Verdict},
     graph::Graph,
+    idle,
     plan::{self, Rules, Scope},
     schedule::{self, Job, Shard},
     slots::{self, Machine, Observation, Pin, Placement, Pool, State, Want},
@@ -32,11 +33,14 @@ const USAGE: &str = "usage:
                                       holds those cpus until that time (PST) so other takes never place there; with --kind reserved the
                                       first take with the same label (and fitting --cores) gets that lease, which give then frees;
                                       --overlap places it over leases that hold those cpus now, which keep them until they end
-  nc-build slots observe MACHINE [--local] [--check]
+  nc-build slots observe MACHINE [--local] [--check] [--idle-below P --idle-samples N]
                                       reads the output of 'nproc --all; cat /proc/loadavg /proc/meminfo; ps -eLo policy=,stat=' from that machine
                                       on stdin (--local runs it here); busy cores are its runnable threads outside SCHED_IDLE, so preemptible
                                       filler never blocks a take, or without the ps lines the 1-minute load average; appends a sample line
                                       to machines.log, and an alarm line when busy exceeds cores, which --check turns into exit status 2
+                                      with --local, --idle-below and --idle-samples, a lease on MACHINE whose cpus were under P% busy
+                                      (/proc/stat deltas between observations) for N observations in a row gets a WARN idle-lease line,
+                                      and unless its kind is reserved is given back
   nc-build slots list                 each machine's busy cores, load, memory and expiry, also appended to machines.log
   nc-build slots boxes [--set]        the machines placement uses; --set stores the boxes.json array read on stdin in the state;
                                       an entry with a kinds list, such as [bench], takes only leases of those kinds
@@ -511,6 +515,81 @@ fn without(args: &[String], flag: &str, takes_value: bool) -> Vec<String> {
     kept
 }
 
+fn idle_leases(args: &[String], url: Option<&str>) -> Result<(), String> {
+    let (Some(below), Some(samples)) =
+        (option(args, "--idle-below"), option(args, "--idle-samples"))
+    else {
+        return Ok(());
+    };
+    let below: u64 = below
+        .parse()
+        .map_err(|error| format!("--idle-below: {error}"))?;
+    let samples: u32 = samples
+        .parse()
+        .map_err(|error| format!("--idle-samples: {error}"))?;
+    let name = args.get(1).ok_or("observe MACHINE")?;
+    let stat =
+        std::fs::read_to_string("/proc/stat").map_err(|error| format!("/proc/stat: {error}"))?;
+    let dir = home().join(".cache/nc-build");
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let stat_path = dir.join(format!("stat.{name}"));
+    let runs_path = dir.join(format!("idle-runs.{name}"));
+    let before = std::fs::read_to_string(&stat_path).unwrap_or_default();
+    std::fs::write(&stat_path, &stat).map_err(|error| error.to_string())?;
+    if before.is_empty() {
+        return Ok(());
+    }
+    let call = |words: &[&str]| {
+        let words: Vec<String> = words.iter().map(|word| (*word).to_owned()).collect();
+        match url {
+            Some(url) => remote(url, &words, ""),
+            None => slots_once(&words, ""),
+        }
+    };
+    let leases = idle::leases_on(&call(&["list"])?, name);
+    let mut runs: std::collections::BTreeMap<String, u32> = std::fs::read_to_string(&runs_path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let (id, run) = line.split_once(' ')?;
+            Some((id.to_owned(), run.parse().ok()?))
+        })
+        .collect();
+    let idle = idle::idle_step(
+        &mut runs,
+        &leases,
+        &idle::cpu_times(&before),
+        &idle::cpu_times(&stat),
+        below,
+        samples,
+        slots::RESERVED_KIND,
+    );
+    for lease in idle {
+        log_line(&format!(
+            "WARN idle-lease {} {name} {}% busy for {} observations{}",
+            lease.id,
+            lease.busy_percent,
+            lease.samples,
+            if lease.give { "" } else { ", reserved, kept" }
+        ));
+        if lease.give {
+            match call(&["give", &lease.id]) {
+                Ok(_) => log_line(&format!("give {} {name} (idle lease, observe)", lease.id)),
+                Err(error) => log_line(&format!(
+                    "WARN idle-lease give {} failed: {error}",
+                    lease.id
+                )),
+            }
+            runs.remove(&lease.id);
+        }
+    }
+    let runs: String = runs
+        .iter()
+        .map(|(id, run)| format!("{id} {run}\n"))
+        .collect();
+    std::fs::write(&runs_path, runs).map_err(|error| error.to_string())
+}
+
 fn read_stdin() -> Result<String, String> {
     let mut input = String::new();
     io::stdin()
@@ -526,6 +605,9 @@ fn slots_command(args: &[String]) -> Result<(), String> {
     let url = config("NC_BUILD_SLOTS_URL", "slots-url");
     let command = args.first().map(String::as_str);
     let local = args.iter().any(|arg| arg == "--local");
+    if command == Some("observe") && local {
+        idle_leases(args, url.as_deref())?;
+    }
     let input = match command {
         Some("observe") if local => run("sh", &["-c", PROBE])?,
         Some("observe") => read_stdin()?,
