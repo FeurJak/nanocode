@@ -919,7 +919,11 @@ fn clone(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 fn touch(path: &Path) -> io::Result<()> {
-    fs::File::options().write(true).open(path)?.set_modified(SystemTime::now())
+    stamp(path, SystemTime::now())
+}
+
+fn stamp(path: &Path, time: SystemTime) -> io::Result<()> {
+    fs::File::options().write(true).open(path)?.set_modified(time)
 }
 
 struct Roots(Vec<(Vec<u8>, &'static [u8])>);
@@ -1033,6 +1037,9 @@ fn restore(
     roots: &Roots,
     command: &[u8],
 ) -> io::Result<()> {
+    // Restored outputs carry the time this rustc invocation started, as a real compile's
+    // outputs would relative to its dependencies, not the time each file finished copying.
+    let started = SystemTime::now();
     let entry = &fs::canonicalize(entry)?;
     if kind == Kind::Workspace
         && (fs::read(entry.join("inputs"))? != inputs || !sources_match(&fs::read(entry.join("sources"))?, roots))
@@ -1067,13 +1074,12 @@ fn restore(
         if name.as_bytes().ends_with(b".d") {
             fs::write(&destination, roots.show(&fs::read(file.path())?))?;
         } else {
-            if fs::symlink_metadata(&destination).is_ok() {
-                fs::remove_file(&destination)?;
-            }
-            if fs::hard_link(file.path(), &destination).is_err() {
-                fs::copy(file.path(), &destination)?;
-            }
-            touch(&destination)?;
+            // A private copy, never a hard link: cargo compares output mtimes across units, and a
+            // link shares its mtime with the cache entry and every other target directory that
+            // restored it, so another build's restore would make this one's outputs look newer
+            // than their dependents and turn the next no-op build into a rebuild.
+            clone(&file.path(), &destination)?;
+            stamp(&destination, started)?;
         }
     }
     for name in &lazy {
