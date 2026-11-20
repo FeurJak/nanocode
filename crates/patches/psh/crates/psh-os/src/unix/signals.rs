@@ -324,6 +324,7 @@ pub fn catch_only(wants: u64) {
 /// Ends the process by `sig` with its default action, so the parent sees the signal
 /// (as bash does when a signal ends it); exits with `128 + sig` if that fails.
 pub fn die_by(sig: Signal) -> ! {
+    super::file::sync_read_ahead();
     let os = super::signum::to_os(sig).unwrap_or(libc::SIGTERM);
     // SAFETY: plain calls with valid arguments; the process ends here.
     unsafe {

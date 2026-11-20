@@ -35,13 +35,14 @@ use psh_engine::host::{
 };
 
 pub use crate::Leftovers;
-pub use file::UnixFile;
+pub use file::{UnixFile, sync_read_ahead};
 pub use spawn::{Placement, settle};
 
 /// Ends the process now with `status`, running nothing registered for its exit: how a
 /// forked copy of the shell ends (`UnixConfig::fork_jobs`), where only this thread
 /// exists and what the others held at the fork is never released.
 pub fn exit_now(status: i32) -> ! {
+    file::sync_read_ahead();
     // SAFETY: plain call; the process ends here.
     unsafe { libc::_exit(status & 0xff) }
 }

@@ -6,7 +6,8 @@ use nanocode_sys::libc;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::task::{Context, Poll};
 
 use psh_engine::HostFile;
@@ -29,9 +30,52 @@ extern "C" fn record_closed() {
     }
 }
 
+/// What the `read` builtin took from regular files past its lines and gave back
+/// (`HostFile::unread`), by descriptor: each file's offset is that far past what the
+/// shell has read, until [`sync_read_ahead`] moves it back.
+static KEPT: Mutex<Vec<Kept>> = Mutex::new(Vec::new());
+
+struct Kept {
+    fd: RawFd,
+    buf: Vec<u8>,
+    /// What is kept: `buf[at..]`.
+    at: usize,
+}
+
+/// The block a read that keeps what is past its line takes from a regular file.
+const BLOCK: usize = 4096;
+
+fn kept() -> std::sync::MutexGuard<'static, Vec<Kept>> {
+    KEPT.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn seek_back(k: &Kept) {
+    let n = k.buf.len() - k.at;
+    if n > 0 {
+        // SAFETY: plain call on a descriptor the entry's file holds open.
+        unsafe { libc::lseek(k.fd, -(n as libc::off_t), libc::SEEK_CUR) };
+    }
+}
+
+/// Moves the offset of every file that keeps bytes read ahead back over them, so that
+/// another process sharing it reads on where the shell stopped: before a fork or a
+/// spawn, and before the process ends.
+pub fn sync_read_ahead() {
+    let Ok(mut kept) = KEPT.try_lock() else {
+        // Held across a fork by a thread the copy does not have: nothing is kept for
+        // this thread's files then (a read holds it only while it copies).
+        return;
+    };
+    for k in kept.drain(..) {
+        seek_back(&k);
+    }
+}
+
 /// An open descriptor of the host.
 pub struct UnixFile {
     file: File,
+    /// Bytes read ahead are kept for this descriptor in [`KEPT`].
+    kept: AtomicBool,
     /// A pipe, FIFO, socket or character device: I/O on it may wait. Regular files,
     /// directories and block devices never wait for another process.
     stream: bool,
@@ -59,6 +103,7 @@ impl UnixFile {
         let device = kind.is_some_and(|ft| ft.is_char_device());
         UnixFile {
             file,
+            kept: AtomicBool::new(false),
             stream,
             nonblocking: false,
             terminal,
@@ -77,6 +122,7 @@ impl UnixFile {
         ready::set_nonblocking(fd.as_raw_fd())?;
         Ok(UnixFile {
             file: File::from(fd),
+            kept: AtomicBool::new(false),
             stream: true,
             nonblocking: true,
             terminal: false,
@@ -122,6 +168,40 @@ impl UnixFile {
         ready::WRITE_CHUNK
     }
 
+    /// Copies what is kept for this descriptor into `buf`, if anything.
+    fn take_kept(&self, buf: &mut [u8]) -> Option<usize> {
+        if !self.kept.load(Ordering::Relaxed) {
+            return None;
+        }
+        let fd = self.raw_fd();
+        let mut kept = kept();
+        let Some(i) = kept.iter().position(|k| k.fd == fd) else {
+            self.kept.store(false, Ordering::Relaxed);
+            return None;
+        };
+        let k = &mut kept[i];
+        let n = buf.len().min(k.buf.len() - k.at);
+        buf[..n].copy_from_slice(&k.buf[k.at..k.at + n]);
+        k.at += n;
+        if k.at == k.buf.len() {
+            kept.swap_remove(i);
+            self.kept.store(false, Ordering::Relaxed);
+        }
+        Some(n)
+    }
+
+    /// Moves the offset back over what is kept, before the offset is used.
+    fn sync(&self) {
+        if !self.kept.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        let fd = self.raw_fd();
+        let mut kept = kept();
+        if let Some(i) = kept.iter().position(|k| k.fd == fd) {
+            seek_back(&kept.swap_remove(i));
+        }
+    }
+
     fn wait(&self, cx: &mut Context<'_>, events: i16) -> Poll<io::Result<usize>> {
         match ready::watch(self.raw_fd(), events, cx.waker()) {
             Ok(()) => Poll::Pending,
@@ -138,6 +218,8 @@ fn is_dev_null(m: &std::fs::Metadata) -> bool {
 
 impl Drop for UnixFile {
     fn drop(&mut self) {
+        // Another descriptor or process may share the offset.
+        self.sync();
         if self.stream {
             ready::forget(self.raw_fd());
         }
@@ -167,6 +249,9 @@ impl HostFile for UnixFile {
     }
 
     fn poll_read(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
+        if let Some(n) = self.take_kept(buf) {
+            return Poll::Ready(Ok(n));
+        }
         loop {
             if self.stream && !self.nonblocking {
                 match ready::now(self.raw_fd(), ready::READ) {
@@ -186,6 +271,7 @@ impl HostFile for UnixFile {
     }
 
     fn poll_write(&self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        self.sync();
         let mut buf = buf;
         loop {
             if self.write_waits && !self.nonblocking {
@@ -217,7 +303,70 @@ impl HostFile for UnixFile {
 
     fn seek(&self, pos: io::SeekFrom) -> Option<io::Result<u64>> {
         use std::io::Seek;
+        self.sync();
         (!self.stream).then(|| (&self.file).seek(pos))
+    }
+
+    fn reads_ahead(&self) -> bool {
+        !self.stream
+    }
+
+    fn poll_read_ahead(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
+        if self.stream || buf.len() >= BLOCK {
+            return self.poll_read(cx, buf);
+        }
+        if let Some(n) = self.take_kept(buf) {
+            return Poll::Ready(Ok(n));
+        }
+        let mut block = vec![0u8; BLOCK];
+        let got = loop {
+            match (&self.file).read(&mut block) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                r => break r,
+            }
+        };
+        let n = match got {
+            Ok(n) => n,
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+        let given = n.min(buf.len());
+        buf[..given].copy_from_slice(&block[..given]);
+        if n > given {
+            block.truncate(n);
+            kept().push(Kept {
+                fd: self.raw_fd(),
+                buf: block,
+                at: given,
+            });
+            self.kept.store(true, Ordering::Relaxed);
+        }
+        Poll::Ready(Ok(given))
+    }
+
+    fn unread(&self, bytes: &[u8]) {
+        if bytes.is_empty() || self.stream {
+            return;
+        }
+        let fd = self.raw_fd();
+        let mut kept = kept();
+        match kept.iter_mut().find(|k| k.fd == fd) {
+            // What was just read from the block: its place is still there.
+            Some(k) if k.at >= bytes.len() && k.buf[k.at - bytes.len()..k.at] == *bytes => {
+                k.at -= bytes.len();
+            }
+            Some(k) => {
+                let mut buf = bytes.to_vec();
+                buf.extend_from_slice(&k.buf[k.at..]);
+                k.buf = buf;
+                k.at = 0;
+            }
+            None => kept.push(Kept {
+                fd,
+                buf: bytes.to_vec(),
+                at: 0,
+            }),
+        }
+        self.kept.store(true, Ordering::Relaxed);
     }
 
     fn identity(&self) -> Option<(u64, u64, u64)> {

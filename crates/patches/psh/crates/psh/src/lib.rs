@@ -467,6 +467,9 @@ fn run_script(
     let status = psh_engine::std_host::drive_parking(&mut shell, psh_os::unix::signals::watch);
     #[cfg(not(unix))]
     let status = psh_engine::std_host::drive(&mut shell);
+    // What `read` kept of a file another process shares is given back to it.
+    #[cfg(unix)]
+    psh_os::unix::sync_read_ahead();
     // A forked copy that ran a background job: this thread is all of it.
     #[cfg(unix)]
     if shell.forked() {

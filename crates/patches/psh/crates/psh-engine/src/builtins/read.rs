@@ -227,7 +227,14 @@ pub(super) async fn read(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         }
         // A signal for the shell runs its trap while the read goes on (bash outside
         // POSIX mode); a fatal one ends the shell (D1306).
-        let got = crate::signals::or_signal(vp, crate::signals::Gives::Trapped, input.next()).await;
+        // What is already read needs no wait: a signal that came meanwhile is taken at
+        // the next one.
+        let got = match input.buffered() {
+            Some(b) => Ok(Got::Byte(b)),
+            None => {
+                crate::signals::or_signal(vp, crate::signals::Gives::Trapped, input.next()).await
+            }
+        };
         let b = match got.unwrap_or(Got::Signal) {
             Got::Signal => {
                 input.give_back();
@@ -521,9 +528,21 @@ struct Input {
     back: Option<u8>,
     buf: Vec<u8>,
     pos: usize,
-    ahead: Option<bool>,
+    ahead: Option<Ahead>,
     size: usize,
     delim: u8,
+}
+
+/// How a read takes more than a byte at a time.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ahead {
+    /// A byte at a time: what is read cannot be given back.
+    No,
+    /// Read ahead, and give back what is past the line: to the shell's pipe, or by
+    /// seeking back.
+    Back,
+    /// A file that keeps what is past the line for its next read (`HostFile::unread`).
+    Keep,
 }
 
 impl Input {
@@ -532,13 +551,19 @@ impl Input {
             // An OS pipe is read a byte at a time, as bash reads any pipe: what a
             // read-ahead gave back would sit in front of what an external reading
             // the OS end takes next.
-            crate::fd::FdObj::PipeRead(r) => !r.is_os(),
+            crate::fd::FdObj::PipeRead(r) if r.is_os() => Ahead::No,
+            crate::fd::FdObj::PipeRead(_) => Ahead::Back,
+            crate::fd::FdObj::File(f) if f.reads_ahead() => Ahead::Keep,
             crate::fd::FdObj::File(f) => {
-                matches!(f.seek(std::io::SeekFrom::Current(0)), Some(Ok(_)))
+                if matches!(f.seek(std::io::SeekFrom::Current(0)), Some(Ok(_))) {
+                    Ahead::Back
+                } else {
+                    Ahead::No
+                }
             }
-            crate::fd::FdObj::PipeWrite(_) => false,
+            crate::fd::FdObj::PipeWrite(_) => Ahead::No,
         });
-        if !ahead {
+        if ahead == Ahead::No {
             return 1;
         }
         if let crate::fd::FdObj::PipeRead(r) = &*self.fd
@@ -562,11 +587,22 @@ impl Input {
         }
         match &*self.fd {
             crate::fd::FdObj::PipeRead(r) => r.unread(&rest),
+            crate::fd::FdObj::File(f) if self.ahead == Some(Ahead::Keep) => f.unread(&rest),
             crate::fd::FdObj::File(f) => {
                 let _ = f.seek(std::io::SeekFrom::Current(-(rest.len() as i64)));
             }
             crate::fd::FdObj::PipeWrite(_) => {}
         }
+    }
+
+    /// The next byte when it is already read.
+    fn buffered(&mut self) -> Option<u8> {
+        if let Some(b) = self.back.take() {
+            return Some(b);
+        }
+        let b = *self.buf.get(self.pos)?;
+        self.pos += 1;
+        Some(b)
     }
 
     async fn next(&mut self) -> Got {
@@ -583,6 +619,7 @@ impl Input {
         self.pos = 0;
         let buf = &mut self.buf;
         let fd = &self.fd;
+        let keep = self.ahead == Some(Ahead::Keep);
         let timer = &mut self.timer;
         let got = poll_fn(|cx| {
             // The pipe may have become an OS pipe while this read waited.
@@ -590,7 +627,11 @@ impl Input {
                 crate::fd::FdObj::PipeRead(r) if r.is_os() => 1,
                 _ => buf.len(),
             };
-            if let Poll::Ready(r) = fd.poll_read(cx, &mut buf[..n]) {
+            let got = match &**fd {
+                crate::fd::FdObj::File(f) if keep => f.poll_read_ahead(cx, &mut buf[..n]),
+                _ => fd.poll_read(cx, &mut buf[..n]),
+            };
+            if let Poll::Ready(r) = got {
                 return Poll::Ready(Some(r));
             }
             if let Some(t) = timer

@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use crate::host::{
     Access, ChildFd, DirEntry, ExitStatus, ExtProc, ExtraMetadata, FileKind, Host, HostFile,
-    HostFuture, Metadata, OpenOptions, Signal, SpawnSpec, Spawned,
+    HostFuture, KnownEntry, Metadata, OpenOptions, Signal, SpawnSpec, Spawned,
 };
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -405,6 +405,31 @@ fn ready<T: 'static>(v: T) -> HostFuture<T> {
     Box::pin(std::future::ready(v))
 }
 
+/// What a directory entry or file is.
+fn file_kind(ft: std::fs::FileType) -> FileKind {
+    if ft.is_symlink() {
+        return FileKind::Symlink;
+    } else if ft.is_dir() {
+        return FileKind::Dir;
+    } else if ft.is_file() {
+        return FileKind::File;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        if ft.is_fifo() {
+            return FileKind::Fifo;
+        } else if ft.is_socket() {
+            return FileKind::Socket;
+        } else if ft.is_block_device() {
+            return FileKind::BlockDevice;
+        } else if ft.is_char_device() {
+            return FileKind::CharDevice;
+        }
+    }
+    FileKind::Other
+}
+
 pub(crate) fn metadata(m: &std::fs::Metadata) -> Metadata {
     let ft = m.file_type();
     let mut kind = if ft.is_symlink() {
@@ -633,6 +658,22 @@ impl Host for StdHost {
             it.filter_map(Result::ok)
                 .map(|e| DirEntry {
                     name: bytes(&e.file_name()),
+                })
+                .collect()
+        });
+        ready(r)
+    }
+
+    fn read_dir_kinds(&self, p: &[u8]) -> HostFuture<io::Result<Vec<KnownEntry>>> {
+        // The kind as listing the directory told it (`d_type`), so that a walk such as
+        // `find` stats nothing it needs no more about; std asks `lstat` where the file
+        // system does not record it there.
+        let r = std::fs::read_dir(path(p)).map(|it| {
+            it.filter_map(Result::ok)
+                .map(|e| {
+                    let kind = e.file_type().ok().map(file_kind);
+                    let name = bytes(&e.file_name());
+                    (DirEntry { name }, kind)
                 })
                 .collect()
         });

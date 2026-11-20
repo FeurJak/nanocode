@@ -359,6 +359,8 @@ fn dup_above(fd: RawFd, floor: RawFd) -> io::Result<OwnedFd> {
 }
 
 pub(crate) fn spawn(shared: &Arc<Shared>, mut spec: SpawnSpec) -> io::Result<Spawned> {
+    // The child reads on where the shell stopped.
+    super::file::sync_read_ahead();
     let exec = Exec::new(&spec.program, &spec.argv, &spec.env, &spec.cwd)?;
     let mut sources: Vec<Src> = Vec::new();
     // (child fd, index into `sources`)
@@ -938,6 +940,8 @@ pub(crate) fn prepare(shared: &Arc<Shared>) -> Prepared {
 
 impl psh_engine::host::PreparedFork for Prepared {
     fn fork(mut self: Box<Self>) -> io::Result<psh_engine::host::Forked> {
+        // Both copies would serve what is kept; the offset is the one they share.
+        super::file::sync_read_ahead();
         let old = super::signals::block_all_in_thread();
         // SAFETY: fork has no arguments. The copy runs on with this thread alone; what
         // the other threads share is held here and reset there before it is used.

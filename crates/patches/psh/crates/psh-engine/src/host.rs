@@ -68,6 +68,22 @@ pub trait HostFile: Any {
     fn is_null(&self) -> bool {
         false
     }
+    /// The file keeps what [`HostFile::poll_read_ahead`] reads past what was asked for
+    /// the next read of it: the `read` builtin then reads a regular file a block at a
+    /// time and gives back what lies past its line with [`HostFile::unread`], instead of
+    /// seeking back after every line. The host moves the offset back over what is kept
+    /// before anyone else can see it: a child, a seek or write, the end of the process.
+    fn reads_ahead(&self) -> bool {
+        false
+    }
+    /// [`HostFile::poll_read`] that may take a block from the file and keep what does
+    /// not fit in `buf` (see [`HostFile::reads_ahead`]).
+    fn poll_read_ahead(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
+        self.poll_read(cx, buf)
+    }
+    /// Gives back `bytes`, the end of what the last read returned: the next read of the
+    /// file returns them first. Only where [`HostFile::reads_ahead`].
+    fn unread(&self, _bytes: &[u8]) {}
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -229,7 +245,9 @@ pub enum ChildFd {
     /// A new pipe: the child gets one end, the engine the other (in
     /// [`Spawned::pipes`]), which it pumps to or from an engine object. `input` is a
     /// pipe the child reads from.
-    Pipe { input: bool },
+    Pipe {
+        input: bool,
+    },
     /// The same as an earlier descriptor of the list (`|&`, `2>&1` into a pipe: one
     /// pipe, so the order of the writes survives).
     Dup(u32),

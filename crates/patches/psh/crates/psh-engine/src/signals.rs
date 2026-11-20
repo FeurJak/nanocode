@@ -99,7 +99,6 @@ pub(crate) fn stops(n: Signal) -> bool {
     )
 }
 
-
 /// Which pending signals end a wait of the shell's own vproc (D1903).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Gives {
@@ -137,6 +136,9 @@ pub(crate) fn breaking_in(
 ) -> Option<Signal> {
     use crate::builtins::trap::{TrapKey, shell_ignores, terminates};
     let pending = sigs.peek(core);
+    if pending == 0 {
+        return None;
+    }
     let gives = if sigs.group() { Gives::Trapped } else { gives };
     (1..64).filter(|s| pending & (1u64 << s) != 0).find(|&sig| {
         match traps.action(TrapKey::Signal(sig)) {
