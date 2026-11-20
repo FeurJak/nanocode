@@ -9663,22 +9663,9 @@ impl ExecutingFrame<'_> {
         // Check that the iterator is exhausted.
         match iter.next(vm)? {
             PyIterReturn::Return(_) => {
-                // For exact dict types, show "got N" using the container's
-                // size (PyDict_Size). Exact tuple/list are handled by the
-                // fast path above and never reach here.
-                let msg = if value.class().is(vm.ctx.types.dict_type) {
-                    if let Ok(got) = value.length(vm) {
-                        if got > size {
-                            format!("too many values to unpack (expected {size}, got {got})")
-                        } else {
-                            format!("too many values to unpack (expected {size})")
-                        }
-                    } else {
-                        format!("too many values to unpack (expected {size})")
-                    }
-                } else {
-                    format!("too many values to unpack (expected {size})")
-                };
+                // CPython 3.12 text: "too many" never reports a count ("got N"
+                // is 3.14+).
+                let msg = format!("too many values to unpack (expected {size})");
                 Err(vm.new_value_error(msg))
             }
             PyIterReturn::StopIteration(_) => {
@@ -9707,8 +9694,7 @@ impl ExecutingFrame<'_> {
                 Ok(None)
             }
             core::cmp::Ordering::Greater => Err(vm.new_value_error(format!(
-                "too many values to unpack (expected {size}, got {})",
-                elements.len()
+                "too many values to unpack (expected {size})"
             ))),
             core::cmp::Ordering::Less => Err(vm.new_value_error(format!(
                 "not enough values to unpack (expected {size}, got {})",
