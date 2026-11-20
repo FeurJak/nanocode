@@ -637,7 +637,9 @@ impl Inner {
     fn checkpoint(&self) -> SessionCheckpoint {
         let state = self.load();
         let payload = json!({
-            "format": "antigravity.v1",
+            "format": crate::durability::FORMAT,
+            "model": self.config.model.as_str(),
+            "thinking": self.config.thinking,
             "contents": state.contents.iter().map(|content| serde_json::to_value(content).unwrap_or(Value::Null)).collect::<Vec<_>>(),
             "step": state.step,
             "calls": state.calls,
@@ -675,6 +677,41 @@ impl Driver {
                 noticed: AtomicBool::new(false),
             }),
         }
+    }
+
+    pub fn restore(self, checkpoint: &SessionCheckpoint) -> Result<Self> {
+        let payload: Value = checkpoint
+            .payload()
+            .decode()
+            .map_err(|error| NanocodeError::InvalidCheckpoint(error.to_string()))?;
+        let contents: Vec<Content> = payload
+            .get("contents")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| NanocodeError::InvalidCheckpoint(error.to_string()))?
+            .unwrap_or_default();
+        let number = |field: &str| payload.get(field).and_then(Value::as_u64).unwrap_or(0);
+        let requests = payload
+            .get("requests")
+            .and_then(Value::as_array)
+            .map(|requests| {
+                requests
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Ok(mut state) = self.inner.state.lock() {
+            state.settings_sent = !contents.is_empty();
+            state.transcript = contents.clone();
+            state.contents = contents;
+            state.step = number("step");
+            state.calls = number("calls");
+            state.requests = requests;
+        }
+        Ok(self)
     }
 
     fn start(&self, prompt: BackendPrompt) -> BackendTurn {

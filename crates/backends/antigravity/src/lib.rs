@@ -1,4 +1,5 @@
 mod driver;
+mod durability;
 mod harness;
 mod nanotools;
 mod profile;
@@ -6,6 +7,7 @@ mod prompts;
 mod request;
 mod search;
 
+pub use durability::AntigravityCheckpointFormat;
 pub use harness::{AntigravityHarness, DEFAULT_MODEL, FAMILY};
 pub use nanocode_backend_antigravity_client::{
     Auth, AuthMethod, CacheConfig, Client, ClientError, Discovery, Endpoint, Failure, GoogleAuth,

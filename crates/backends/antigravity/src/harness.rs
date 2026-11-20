@@ -145,7 +145,7 @@ impl RuntimeBackend for AntigravityHarness {
     }
 
     fn checkpoint_format(&self) -> Option<Arc<dyn CheckpointFormat>> {
-        None
+        Some(Arc::new(crate::durability::AntigravityCheckpointFormat))
     }
 
     fn build(&self, request: RuntimeRequest) -> BackendFuture<AgentResult> {
@@ -177,13 +177,22 @@ impl AntigravityHarness {
         } = request;
         let settings = settings.or(&defaults);
         let model = spec.model.clone();
-        let session = spec.options.session_id.clone().unwrap_or_else(|| {
-            new_id(&format!(
-                "{}{:?}",
-                model.as_str(),
-                nanocode_platform::system_time()
-            ))
-        });
+        let session = spec
+            .options
+            .session_id
+            .clone()
+            .or_else(|| {
+                spec.durable_state
+                    .as_ref()
+                    .map(|state| state.state_id().to_owned())
+            })
+            .unwrap_or_else(|| {
+                new_id(&format!(
+                    "{}{:?}",
+                    model.as_str(),
+                    nanocode_platform::system_time()
+                ))
+            });
         let mut fresh = false;
         let connection = self
             .connection
@@ -304,6 +313,7 @@ impl AntigravityHarness {
             cascade: session.clone(),
             trajectory: new_id(&format!("trajectory{session}")),
         };
+        let checkpoint = spec.checkpoint.clone();
         let (runtime, events) = BackendRuntime::new(session.clone());
         let driver = Driver::new(Config {
             client,
@@ -319,6 +329,10 @@ impl AntigravityHarness {
             logs: brain.join(".system_generated").join("logs"),
             notice,
         });
+        let driver = match checkpoint {
+            Some(checkpoint) => driver.restore(&checkpoint)?,
+            None => driver,
+        };
         Ok((runtime.bind(driver), events))
     }
 }

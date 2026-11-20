@@ -6,7 +6,7 @@ pub const MAX_BYTES: usize = 46_080;
 
 fn absolute(path: &str) -> Result<&Path, String> {
     let candidate = Path::new(path);
-    match candidate.is_absolute() {
+    match candidate.has_root() {
         true => Ok(candidate),
         false => Err(format!(
             "declaring permissions: failed to parse path: {path} must be an absolute path: path is not absolute"
