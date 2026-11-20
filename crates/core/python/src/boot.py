@@ -249,6 +249,23 @@ _stdlib = set(sys.stdlib_module_names)
 _stdlib.update(('_ast_unparse', '_hmac', '_py_warnings', '_remote_debugging', '_types', '_zstd', 'annotationlib', 'compression'))
 
 
+def _archive(base):
+    # The zip archive that holds base: the archive itself (an app.pyz on sys.path)
+    # or a directory inside one (a zipped package's __path__, lib.zip/pkg), as
+    # zipimport finds it. None for a directory, or a path that is in no archive.
+    while base:
+        try:
+            kind = posix.stat(base).st_mode & 0o170000
+        except OSError:
+            parent = base.rpartition('/')[0]
+            if parent == base:
+                return None
+            base = parent
+            continue
+        return base if kind == 0o100000 else None
+    return None
+
+
 class _Finder:
     @staticmethod
     def find_spec(name, path=None, target=None):
@@ -259,12 +276,8 @@ class _Finder:
         for base in sys.path if path is None else path:
             if not isinstance(base, str):
                 continue
-            # A zip archive on the path (an app.pyz run by name) imports through zipimport.
-            try:
-                archive = bool(base) and posix.stat(base).st_mode & 0o170000 == 0o100000
-            except OSError:
-                archive = False
-            if archive:
+            # A zip archive on the path, or a package inside one, imports through zipimport.
+            if _archive(base) is not None:
                 try:
                     import zipimport
                     spec = zipimport.zipimporter(base).find_spec(name)
@@ -349,6 +362,18 @@ class _Entry:
 
 
 sys.path_hooks.append(_Entry)
+
+
+def _zipped(path):
+    # The path hook for an archive or a directory inside one, so pkgutil and
+    # importlib.resources reach a zipped package as CPython's zipimporter hook does.
+    if _archive(path) is None:
+        raise ImportError('not a zip archive', path=path)
+    import zipimport
+    return zipimport.zipimporter(path)
+
+
+sys.path_hooks.append(_zipped)
 
 
 def _load_unlocked(spec, load=_frozen_importlib._load_unlocked):
