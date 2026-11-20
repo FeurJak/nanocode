@@ -10780,7 +10780,7 @@ pub(super) static PER_PATTERNS: &[(&str, &str, u8, &str)] = &[
     ("sr-Latn", "week", 2, "{0}/n"),
     ("sr-Latn", "year", 2, "{0}/god"),
 ];
-// The X-per-Y compounds that the per rule does not give (261360 checked).
+// The X-per-Y compounds that the per rule does not give (267300 checked).
 pub(super) static COMPOUND_PATTERNS: &[(&str, &str, u8, [&str; 6])] = &[
     ("en", "mile-per-gallon", 0, ["", "", "", "", "", "{0} mpg"]),
     ("en", "mile-per-hour", 0, ["", "", "", "", "", "{0} mph"]),
@@ -27370,6 +27370,19 @@ pub(super) static CURRENCY_NAMES: &[(&str, &str, [&str; 6])] = &[
     ("sr-Latn", "ZMW", ["", "{0} zambijska kva\u{10d}a", "", "{0} zambijske kva\u{10d}e", "", "{0} zambijskih kva\u{10d}a"]),
     ("sr-Latn", "ZWG", ["", "", "", "", "", "{0} zimbabveansko zlato"]),
     ("sr-Latn", "ZWL", ["", "{0} zimbabvejski dolar (2009)", "", "{0} zimbabvejska dolara (2009)", "", "{0} zimbabvejskih dolara (2009)"]),
+    ("fa-AF", "AUD", ["", "", "", "", "", "{0} \u{62f}\u{627}\u{644}\u{631} \u{622}\u{633}\u{62a}\u{631}\u{627}\u{644}\u{6cc}\u{627}"]),
+    ("fa-AF", "BND", ["", "", "", "", "", "{0} \u{62f}\u{627}\u{644}\u{631} \u{628}\u{631}\u{648}\u{646}\u{6cc}"]),
+    ("fa-AF", "BYN", ["", "", "", "", "", "{0} \u{631}\u{648}\u{628}\u{644} \u{631}\u{648}\u{633}\u{6cc}\u{647}\u{654} \u{633}\u{641}\u{6cc}\u{62f}"]),
+    ("fa-AF", "CAD", ["", "", "", "", "", "{0} \u{62f}\u{627}\u{644}\u{631} \u{6a9}\u{627}\u{646}\u{627}\u{62f}\u{627}"]),
+    ("fa-AF", "CHF", ["", "", "", "", "", "{0} \u{641}\u{631}\u{627}\u{646}\u{6a9} \u{633}\u{648}\u{6cc}\u{633}"]),
+    ("fa-AF", "DKK", ["", "", "", "", "", "{0} \u{6a9}\u{631}\u{648}\u{646} \u{62f}\u{646}\u{645}\u{627}\u{631}\u{6a9}"]),
+    ("fa-AF", "JPY", ["", "", "", "", "", "{0} \u{6cc}\u{646} \u{62c}\u{627}\u{67e}\u{627}\u{646}"]),
+    ("fa-AF", "MXN", ["", "", "", "", "", "{0} \u{67e}\u{632}\u{648}\u{6cc} \u{645}\u{6a9}\u{633}\u{6cc}\u{6a9}\u{648}"]),
+    ("fa-AF", "NOK", ["", "", "", "", "", "{0} \u{6a9}\u{631}\u{648}\u{646} \u{646}\u{627}\u{631}\u{648}\u{6cc}"]),
+    ("fa-AF", "SEK", ["", "", "", "", "", "{0} \u{6a9}\u{631}\u{648}\u{646} \u{633}\u{648}\u{6cc}\u{62f}\u{646}"]),
+    ("fa-AF", "SGD", ["", "", "", "", "", "{0} \u{62f}\u{627}\u{644}\u{631} \u{633}\u{6cc}\u{646}\u{6af}\u{627}\u{67e}\u{648}\u{631}"]),
+    ("fa-AF", "TJS", ["", "", "", "", "", "{0} \u{633}\u{627}\u{645}\u{627}\u{646}\u{6cc} \u{62a}\u{627}\u{62c}\u{6a9}\u{633}\u{62a}\u{627}\u{646}"]),
+    ("fa-AF", "USD", ["", "", "", "", "", "{0} \u{62f}\u{627}\u{644}\u{631} \u{627}\u{645}\u{631}\u{6cc}\u{6a9}\u{627}"]),
 ];
 // (language, code, symbol, narrow symbol)
 pub(super) static CURRENCY_SYMBOLS_L: &[(&str, &str, &str, &str)] = &[

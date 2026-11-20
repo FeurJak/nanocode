@@ -44,6 +44,7 @@ pub(super) fn data_key(locale: &str) -> Option<&'static str> {
         "es" if has("MX") => "es-MX",
         "fr" if has("CA") => "fr-CA",
         "sr" if has("Latn") => "sr-Latn",
+        "fa" if has("AF") => "fa-AF",
         "zh" if has("TW") || (has("Hant") && !has("HK") && !has("MO")) => "zh-Hant",
         _ => return None,
     })

@@ -11,7 +11,7 @@ const J = (f) => JSON.parse(fs.readFileSync(path.join(DIR, f), "utf8"));
 const esc = (s) => '"' + [...s].map((c) => { const u = c.codePointAt(0); return c === '"' ? '\\"' : c === "\\" ? "\\\\" : c === "\n" ? "\\n" : u < 0x20 || u > 0x7e ? "\\u{" + u.toString(16) + "}" : c; }).join("") + '"';
 const LOCALES = ["en", "de", "fr", "es", "it", "pt", "nl", "ja", "zh", "ko", "ru", "pl", "tr", "ar", "hi", "id", "vi", "th", "sv", "da", "nb", "fi", "cs", "el", "he", "uk", "ro", "hu", "bn", "fa", "ms", "ta", "ca", "sk", "bg", "hr", "sr", "lt", "lv", "et", "sl", "fil", "sw", "ur"];
 // Regional variants with their own names, kept as their differences from the language's.
-const OVERLAYS = ["zh-Hant", "pt-PT", "en-GB", "es-419", "es-MX", "fr-CA", "de-AT"];
+const OVERLAYS = ["zh-Hant", "pt-PT", "en-GB", "es-419", "es-MX", "fr-CA", "de-AT", "sr-Latn"];
 const names = (f, k) => Object.keys(Object.values(J("names/" + f + ".json").main)[0].localeDisplayNames[k]);
 const langs = [...new Set(names("languages", "languages").map((k) => k.split("-alt-")[0]))];
 const regions = [...new Set(names("territories", "territories").map((k) => k.split("-alt-")[0]))];
@@ -83,7 +83,9 @@ for (const loc of [...LOCALES, ...OVERLAYS]) {
   out.push(");");
 }
 out.push("/// The languages with their own names.");
-out.push("pub(super) const LANGS: [&str; " + LOCALES.length + "] = [" + LOCALES.map((l) => JSON.stringify(l)).join(", ") + "];");
+// no resolves as itself (ICU aliases it to nb), so DisplayNames negotiates it.
+const NEGOTIATED = [...LOCALES, "no"];
+out.push("pub(super) const LANGS: [&str; " + NEGOTIATED.length + "] = [" + NEGOTIATED.map((l) => JSON.stringify(l)).join(", ") + "];");
 out.push("/// The overlay (or \"\") and the language's table for a resolved locale.");
 out.push("pub(super) fn tables(locale: &str) -> (&'static str, &'static str) {");
 out.push("    let mut p = locale.split('-');");
@@ -93,6 +95,8 @@ out.push("    let script = rest.iter().find(|s| s.len() == 4).copied().unwrap_or
 out.push("    let region = rest.iter().find(|s| s.len() == 2 || s.len() == 3).copied().unwrap_or(\"\");");
 out.push("    let base = match lang {");
 for (const l of LOCALES.slice(1)) out.push("        " + JSON.stringify(l) + " => " + l.toUpperCase() + ",");
+// no is nb (ICU aliases it).
+out.push("        \"no\" => NB,");
 out.push("        _ => EN,");
 out.push("    };");
 out.push("    let overlay = match (lang, script, region) {");
@@ -103,6 +107,7 @@ out.push("        (\"pt\", _, r) if !r.is_empty() && r != \"BR\" => PT_PT,");
 out.push("        (\"en\", _, r) if !r.is_empty() && !matches!(r, \"US\" | \"AS\" | \"GU\" | \"MH\" | \"MP\" | \"PR\" | \"UM\" | \"VI\") => EN_GB,");
 out.push("        (\"es\", _, r) if !r.is_empty() && !matches!(r, \"ES\" | \"EA\" | \"IC\" | \"GQ\" | \"PH\") => ES_419,");
 out.push("        (\"fr\", _, \"CA\") => FR_CA,");
+out.push("        (\"sr\", \"Latn\", _) => SR_LATN,");
 out.push("        _ => \"\",");
 out.push("    };");
 out.push("    (overlay, base)");

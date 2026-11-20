@@ -7,16 +7,31 @@
 // "" means the same as other.
 const LANGS = ["en", "de", "fr", "es", "it", "pt", "nl", "ja", "zh", "ko", "ru", "pl", "tr", "ar", "hi", "id", "vi",
   "hu", "nb", "no", "he", "ta", "sr", "cs", "uk", "sv", "da", "ms", "ro", "bn", "el", "sw", "ur", "fil", "ca", "fa", "th", "fi",
-  "en-GB", "en-IN", "es-MX", "fr-CA", "zh-Hant", "sr-Latn"];
+  "en-GB", "en-IN", "es-MX", "fr-CA", "zh-Hant", "sr-Latn", "fa-AF"];
 // Regional data: its rows are kept only where they differ from its language's (djs reads a
 // regional row first, then the language's).
-const REGIONAL = { "en-GB": "en", "en-IN": "en", "es-MX": "es", "fr-CA": "fr", "zh-Hant": "zh", "sr-Latn": "sr" };
+const REGIONAL = { "en-GB": "en", "en-IN": "en", "es-MX": "es", "fr-CA": "fr", "zh-Hant": "zh", "sr-Latn": "sr", "fa-AF": "fa" };
 const SIMPLE = ["acre", "bit", "byte", "celsius", "centimeter", "day", "degree", "fahrenheit", "fluid-ounce",
   "foot", "gallon", "gigabit", "gigabyte", "gram", "hectare", "hour", "inch", "kilobit",
   "kilobyte", "kilogram", "kilometer", "liter", "megabit", "megabyte", "meter", "microsecond",
   "mile", "mile-scandinavian", "milliliter", "millimeter", "millisecond", "minute", "month",
   "nanosecond", "ounce", "percent", "petabyte", "pound", "second", "stone", "terabit",
   "terabyte", "week", "yard", "year"];
+// Regional locales with their own RelativeTimeFormat text in ICU, appended to RELATIVE and
+// RELATIVE_AUTO by gen-rtf-region.js (text.rs reads zh-HK's rows for zh-HK, zh-MO and zh-Hant-HK).
+const RTF_REGIONS = ["zh-HK"];
+const rtfRegion = Object.fromEntries(RTF_REGIONS.map((l) => [l, require("./gen-rtf-region.js").rows(l)]));
+// Table lines ([locale, line]) with each RTF_REGIONS locale's rows after its script's (zh-Hant).
+const RTF_AFTER = { "zh-HK": "zh-Hant" };
+function withRegions(rows, table) {
+  const lines = rows.map((r) => r[1]);
+  for (const l of RTF_REGIONS) {
+    let at = rows.length;
+    for (let i = rows.length - 1; i >= 0; i--) if (rows[i][0] === RTF_AFTER[l]) { at = i + 1; break; }
+    lines.splice(at, 0, "    // " + l + " (scripts/intl-num/gen-rtf-region.js " + l + ")", ...rtfRegion[l][table]);
+  }
+  return lines;
+}
 const CATS = ["zero", "one", "two", "few", "many", "other"];
 const DISP = ["short", "long", "narrow"];
 const CUR = process.argv[2] ? process.argv[2].split(",") : null;
@@ -240,10 +255,10 @@ for (const [l, g] of gaps) o.push("    (" + esc(l) + ", " + esc(g) + "),");
 o.push("];");
 o.push("// Styles are long, short, narrow; past is 1 for a negative value.");
 o.push("pub(super) static RELATIVE: &[(&str, u8, u8, u8, &str, &str)] = &[");
-for (const [l, u, s, p, c, t] of rel) o.push("    (" + esc(l) + ", " + u + ", " + s + ", " + p + ", " + esc(c) + ", " + esc(t) + "),");
+o.push(...withRegions(rel.map(([l, u, s, p, c, t]) => [l, "    (" + esc(l) + ", " + u + ", " + s + ", " + p + ", " + esc(c) + ", " + esc(t) + "),"]), "rel"));
 o.push("];");
 o.push("pub(super) static RELATIVE_AUTO: &[(&str, u8, u8, i8, &str)] = &[");
-for (const [l, u, s, v, t] of relAuto) o.push("    (" + esc(l) + ", " + u + ", " + s + ", " + v + ", " + esc(t) + "),");
+o.push(...withRegions(relAuto.map(([l, u, s, v, t]) => [l, "    (" + esc(l) + ", " + u + ", " + s + ", " + v + ", " + esc(t) + "),"]), "auto"));
 o.push("];");
 o.push("// Types are conjunction, disjunction, unit.");
 o.push("pub(super) static LISTS: &[(&str, u8, u8, [&str; 4])] = &[");
