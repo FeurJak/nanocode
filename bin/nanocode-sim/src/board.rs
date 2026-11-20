@@ -92,6 +92,7 @@ pub enum BoardMutation {
     AckSkipsFold,
     ResumeSkipsRows,
     SnapshotSkipsRows,
+    SnapshotLosesDedupe,
     DueIgnored,
     DueFiresTwice,
     RecurrenceSkipsOnRestart,
@@ -123,7 +124,7 @@ pub enum BoardMutation {
 }
 
 impl BoardMutation {
-    const ALL: [Self; 70] = [
+    const ALL: [Self; 71] = [
         Self::None,
         Self::ClaimIgnoresLease,
         Self::ClaimIgnoresNeeds,
@@ -168,6 +169,7 @@ impl BoardMutation {
         Self::AckSkipsFold,
         Self::ResumeSkipsRows,
         Self::SnapshotSkipsRows,
+        Self::SnapshotLosesDedupe,
         Self::DueIgnored,
         Self::DueFiresTwice,
         Self::RecurrenceSkipsOnRestart,
@@ -251,6 +253,7 @@ impl BoardMutation {
             Self::AckSkipsFold => "ack_skips_fold",
             Self::ResumeSkipsRows => "resume_skips_rows",
             Self::SnapshotSkipsRows => "snapshot_skips_rows",
+            Self::SnapshotLosesDedupe => "snapshot_loses_dedupe",
             Self::DueIgnored => "due_ignored",
             Self::DueFiresTwice => "due_fires_twice",
             Self::RecurrenceSkipsOnRestart => "recurrence_skips_on_restart",
@@ -341,6 +344,7 @@ impl BoardMutation {
             Self::AckSkipsFold => BoardRule::AckSkipsFold,
             Self::ResumeSkipsRows => BoardRule::ResumeSkipsRows,
             Self::SnapshotSkipsRows => BoardRule::SnapshotSkipsRows,
+            Self::SnapshotLosesDedupe => BoardRule::SnapshotLosesDedupe,
             Self::DueIgnored => BoardRule::DueIgnored,
             Self::DueFiresTwice => BoardRule::DueFiresTwice,
             Self::RecurrenceSkipsOnRestart => BoardRule::RecurrenceSkipsOnRestart,
@@ -1714,8 +1718,16 @@ fn resumes(rows: &[(u64, String)]) -> Result<(), String> {
     for cut in [0, rows.len() / 3, rows.len() / 2, rows.len()] {
         let held = fold(&rows[..cut])?;
         let held = if cut % 2 == 0 {
-            nanocode_board::Fold::restore(&held.snapshot())
-                .map_err(|error| format!("restore a snapshot of {cut} rows: {error}"))?
+            let compact = nanocode_board::Fold::restore(&held.snapshot())
+                .map_err(|error| format!("restore a compact snapshot of {cut} rows: {error}"))?;
+            let json = nanocode_board::Fold::restore(held.snapshot_json().as_bytes())
+                .map_err(|error| format!("restore a JSON snapshot of {cut} rows: {error}"))?;
+            if compact != json {
+                return Err(format!(
+                    "compact and JSON snapshots of {cut} rows restore different folds"
+                ));
+            }
+            compact
         } else {
             held
         };

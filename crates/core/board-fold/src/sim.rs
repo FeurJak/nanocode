@@ -63,6 +63,7 @@ pub enum Mutation {
     AckSkipsFold,
     ResumeSkipsRows,
     SnapshotSkipsRows,
+    SnapshotLosesDedupe,
     RootEditsIgnored,
     DueIgnored,
     DueFiresTwice,

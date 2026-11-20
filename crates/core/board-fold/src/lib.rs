@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod access;
 pub mod brief;
+mod compact;
 pub mod deliver;
 pub mod delivery;
 pub mod intent;
@@ -657,19 +658,30 @@ impl Fold {
         posted
     }
 
-    pub fn snapshot(&self) -> String {
+    pub fn snapshot(&self) -> Vec<u8> {
+        compact::snapshot(self).expect("a fold encodes")
+    }
+
+    pub fn snapshot_json(&self) -> String {
         serde_json::to_string(self).expect("a fold serializes")
     }
 
-    pub fn restore(snapshot: &str) -> Result<Self, BoardError> {
-        let mut fold: Self =
-            serde_json::from_str(snapshot).map_err(|error| BoardError::Corrupt {
-                seq: 0,
-                detail: format!("fold snapshot: {error}"),
-            })?;
+    pub fn restore(snapshot: &[u8]) -> Result<Self, BoardError> {
+        let corrupt = |detail: String| BoardError::Corrupt {
+            seq: 0,
+            detail: format!("fold snapshot: {detail}"),
+        };
+        let mut fold: Self = if snapshot.starts_with(compact::MAGIC) {
+            compact::restore(snapshot).map_err(|error| corrupt(error.to_string()))?
+        } else {
+            serde_json::from_slice(snapshot).map_err(|error| corrupt(error.to_string()))?
+        };
         fold.posted = fold.posted_order();
         if mutated(Mutation::SnapshotSkipsRows) {
             fold.next += 1;
+        }
+        if mutated(Mutation::SnapshotLosesDedupe) {
+            fold.seen.retain(|_, verdict| verdict.is_ok());
         }
         Ok(fold)
     }
