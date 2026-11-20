@@ -1054,6 +1054,71 @@ pub(crate) fn words_now(
     Ok(f.out.into_iter().map(|x| x.text).collect())
 }
 
+/// Whether the assignment value `w` starts with a plain `$name` (or `"$name…`) of the
+/// variable it assigns, with no `$@` or `$*` after it: then `name=$name…` is
+/// `name+=…`, which `single_now_after` expands without copying the old value.
+pub(crate) fn leads_with_self(code: &Code, name: &str, w: &Word) -> bool {
+    let lead = |p: &WordPart| {
+        matches!(&p.kind, Part::Param(pp) if pp.name == ParamName::Var
+            && pp.index.is_none()
+            && pp.prefix == ParamPrefix::None
+            && matches!(pp.op, ParamOp::None)
+            && code.ast.text(pp.name_span) == name)
+    };
+    let at = |p: &WordPart| matches!(&p.kind, Part::Param(pp) if matches!(pp.name, ParamName::Special(b'@' | b'*')));
+    let Some((p, rest)) = w.parts.split_first() else {
+        return false;
+    };
+    let inner: &[WordPart] = match &p.kind {
+        _ if lead(p) => &[],
+        Part::Double(inner) if inner.first().is_some_and(lead) => &inner[1..],
+        _ => return false,
+    };
+    !inner.iter().any(at)
+        && !rest
+            .iter()
+            .any(|p| at(p) || matches!(&p.kind, Part::Double(i) if i.iter().any(at)))
+}
+
+/// `single_now` of an assignment value, without its leading `$name` when `skip`
+/// (`leads_with_self`).
+pub(crate) fn single_now_after(
+    vp: &mut Vp,
+    code: &Rc<Code>,
+    w: &Word,
+    skip: bool,
+) -> Result<Vec<u8>, String> {
+    if !skip {
+        return single_now(vp, code, w);
+    }
+    let mut f = Fields {
+        out: Vec::new(),
+        cur: Field::default(),
+        pending: Pending::None,
+        ifs: Vec::new(),
+        ifs_mb: Vec::new(),
+        split: false,
+        subst_status: None,
+        rep: false,
+        assign: true,
+        text_only: true,
+        word: w.span,
+        extglob: false,
+        tilde_cut: false,
+    };
+    let (p, rest) = w.parts.split_first().expect("leads_with_self");
+    if let Part::Double(inner) = &p.kind {
+        for p in &inner[1..] {
+            part_sync(vp, code, p, true, &mut f, Ctx::Word, false)?;
+        }
+    }
+    for p in rest {
+        part_sync(vp, code, p, false, &mut f, Ctx::Assign, false)?;
+    }
+    f.finish_word();
+    Ok(f.joined())
+}
+
 pub(crate) fn single_now(vp: &mut Vp, code: &Rc<Code>, w: &Word) -> Result<Vec<u8>, String> {
     let mut f = Fields {
         out: Vec::new(),

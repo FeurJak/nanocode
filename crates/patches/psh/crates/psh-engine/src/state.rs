@@ -988,6 +988,20 @@ impl Vp {
         self.assign_with(name, value, false)
     }
 
+    /// Whether `name+=value` appends to the variable's own string in place: a set,
+    /// plain scalar that no attribute, reference or computed value changes.
+    pub(crate) fn appends_in_place(&self, name: &str) -> bool {
+        self.vars.get(name).is_some_and(|v| {
+            !v.nameref
+                && !v.readonly
+                && !v.integer
+                && v.case == Case::None
+                && !v.declared_only
+                && v.dynamic.is_none()
+                && matches!(v.value, crate::vars::Value::Str(_))
+        })
+    }
+
     /// `name=value` or `name+=value`.
     pub(crate) fn assign_with(
         &mut self,
@@ -1006,10 +1020,9 @@ impl Vp {
         };
         // `name+=value` on a plain string: append in place rather than copying the old
         // value, so building a string in a loop stays linear.
-        if own && plain && append {
+        if append && self.appends_in_place(name) {
             let allexport = self.opts.get(crate::options::SetOpt::Allexport);
             if let Some(var) = self.vars.get_mut(name)
-                && var.dynamic.is_none()
                 && let crate::vars::Value::Str(s) = &mut var.value
             {
                 s.extend_from_slice(&value);
