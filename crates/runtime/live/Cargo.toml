@@ -10,6 +10,8 @@ repository.workspace = true
 description = "Live views over a partitioned log: follow, fold once per view, fan encoded diffs out to sockets"
 
 [dependencies]
+nanocode-live-fold.workspace = true
+nanocode-sync.workspace = true
 
 [lints]
 workspace = true

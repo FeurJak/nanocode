@@ -742,6 +742,10 @@ dependencies = [
 [[package]]
 name = "nanocode-live"
 version = "0.7.0"
+dependencies = [
+ "nanocode-live-fold",
+ "nanocode-sync",
+]
 
 [[package]]
 name = "nanocode-live-fold"
