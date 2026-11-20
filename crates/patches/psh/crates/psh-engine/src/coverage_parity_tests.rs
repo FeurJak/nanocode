@@ -32,3 +32,8 @@ fn quoted_prefix_names_with_no_match_give_no_word() {
     assert_eq!(out(r#"set -- "${!zzq_@}"; echo $#; set -- "${!zzq_*}"; echo $#"#), "0\n1\n");
     assert_eq!(out(r#"zq_a=1 zq_b=2; set -- "${!zq_@}"; echo $# $2"#), "2 zq_b\n");
 }
+
+#[test]
+fn printf_empty_time_format_is_the_locale_time() {
+    assert_eq!(out("TZ=UTC printf '%()T\\n' 3661"), "01:01:01\n");
+}

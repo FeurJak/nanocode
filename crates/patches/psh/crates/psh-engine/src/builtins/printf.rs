@@ -395,7 +395,11 @@ impl Formatter<'_> {
                     self.stop = true;
                     break;
                 };
-                let tfmt = fmt[i + 1..i + close].to_vec();
+                // An empty format is `%X` (bash).
+                let tfmt = match &fmt[i + 1..i + close] {
+                    [] => b"%X".to_vec(),
+                    t => t.to_vec(),
+                };
                 i += close + 1;
                 if fmt.get(i) != Some(&b'T') {
                     let shown = fmt
