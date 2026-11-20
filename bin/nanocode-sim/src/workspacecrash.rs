@@ -34,6 +34,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fmt::Write as _,
     future::Future,
+    io::ErrorKind,
     ops::Range,
     pin::Pin,
     process::ExitCode,
@@ -49,9 +50,10 @@ use std::{
 use nanocode_code_mode_engine::{CellTools, EmbeddedHost, Interrupt, RuntimeEvent};
 use nanocode_durability_core::StoreFuture;
 use nanocode_shell::{
-    Commands, Config as ShellConfig, Ended, FileSystem, HostInfo, Identity, Limits, Machine,
+    Commands, Config as ShellConfig, Ended, FileSystem, HostInfo, Identity, Kind, Limits, Machine,
     NoCommands, Remove, Script, Shell, Write,
 };
+use nanocode_sys::base64::STANDARD;
 use nanocode_workspace_fs::{
     Batch, Blob, Caps, Digest, Failure, Manifest, MemStore, Store, WorkspaceFs,
     sim::{self as fs_sim, Mutation as FsRule},
@@ -95,6 +97,15 @@ const PLAN_AFTER: u8 = 2;
 const RUNTIMES: [Runtime; 3] = [Runtime::Psh, Runtime::Python, Runtime::Cell];
 const PIECES_MIN: u64 = 2;
 const PIECES_MAX: u64 = 7;
+/// The files a many-file job starts from, moves to, and writes.
+const OLD: [&str; 5] = ["o0.txt", "o1.txt", "d/o2.txt", "d/o3.txt", "d/o4.txt"];
+const MOVED: [&str; 2] = ["mv/m0.txt", "d/m1.txt"];
+const NEW: [&str; 12] = [
+    "n/f0.txt", "n/f1.txt", "n/m/f2.txt", "n/f3.txt", "n/m/f4.txt", "n/m/k/f5.txt",
+    "f6.txt", "n/f7.txt", "d/f8.txt", "n/m/f9.txt", "n/m/k/f10.txt", "n/f11.txt",
+];
+const MANY_MIN: u64 = 6;
+const MANY_MAX: u64 = 12;
 const REPO: &str = "g";
 const REPO_PATHS: [&str; 4] = ["a.txt", "b.txt", "d/c.txt", "e.txt"];
 const TRACKED_PPM: u64 = 700_000;
@@ -172,6 +183,7 @@ pub struct WorkspaceCrashStats {
     pub points_append: u64,
     pub points_checkout: u64,
     pub points_rename: u64,
+    pub points_many: u64,
 }
 
 impl WorkspaceCrashStats {
@@ -189,6 +201,7 @@ impl WorkspaceCrashStats {
         self.points_append += other.points_append;
         self.points_checkout += other.points_checkout;
         self.points_rename += other.points_rename;
+        self.points_many += other.points_many;
     }
 }
 
@@ -600,9 +613,111 @@ async fn answer(files: &Rc<dyn FileSystem>, input: &Value) -> Result<Value, Stri
         .map_err(|error| error.to_string())
 }
 
+/// Makes path and every directory above it that is missing.
+async fn mkdir_all(files: &Rc<dyn FileSystem>, path: &[u8]) -> std::io::Result<()> {
+    let mut at = Vec::with_capacity(path.len());
+    for part in path.split(|&byte| byte == b'/').filter(|part| !part.is_empty()) {
+        at.push(b'/');
+        at.extend_from_slice(part);
+        match files.stat(&at, true).get().await {
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                files.mkdir(&at, 0o755).get().await?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn under(dir: &[u8], name: &[u8]) -> Vec<u8> {
+    let mut path = dir.to_vec();
+    if !path.ends_with(b"/") {
+        path.push(b'/');
+    }
+    path.extend_from_slice(name);
+    path
+}
+
+/// Removes path and everything under it; a missing path is fine.
+async fn remove_all(files: &Rc<dyn FileSystem>, path: &[u8]) -> std::io::Result<()> {
+    let mut stack = vec![(path.to_vec(), false)];
+    while let Some((at, listed)) = stack.pop() {
+        let stat = match files.stat(&at, false).get().await {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if stat.kind != Kind::Dir {
+            files.remove(&at, Remove::File).get().await?;
+        } else if listed {
+            files.remove(&at, Remove::Dir).get().await?;
+        } else {
+            let names = files.list(&at).get().await?;
+            stack.push((at.clone(), true));
+            stack.extend(names.iter().map(|name| (under(&at, name), false)));
+        }
+    }
+    Ok(())
+}
+
+/// Answers one call a cell's node:fs makes to its connected workspace (the
+/// protocol node:internal/workspace documents) over files, as a host's
+/// synchronous provider does.
+async fn bridge(files: &Rc<dyn FileSystem>, input: &Value) -> Result<Value, String> {
+    let field = |name: &str| input.get(name).and_then(Value::as_str).unwrap_or_default();
+    let failed = |error: std::io::Error| error.to_string();
+    let path = field("path").as_bytes();
+    match field("op") {
+        "info" => Ok(json!({ "cwd": ROOT, "env": {} })),
+        "read" => match files.stat(path, true).get().await {
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(json!({ "kind": "none" })),
+            Err(error) => Err(failed(error)),
+            Ok(stat) if stat.kind == Kind::Dir => Ok(json!({ "kind": "dir" })),
+            Ok(_) => {
+                let bytes = files.read(path, u64::MAX).get().await.map_err(failed)?;
+                Ok(json!({ "kind": "file", "data": STANDARD.encode(&bytes) }))
+            }
+        },
+        "list" => {
+            let mut entries = Vec::new();
+            for name in files.list(path).get().await.map_err(failed)? {
+                let stat = files.stat(&under(path, &name), true).get().await.map_err(failed)?;
+                let kind = if stat.kind == Kind::Dir { "dir" } else { "file" };
+                entries.push(json!([String::from_utf8_lossy(&name), kind]));
+            }
+            Ok(json!({ "entries": entries }))
+        }
+        "write" => {
+            let data = STANDARD.decode(field("data")).map_err(|error| error.to_string())?;
+            files.write(path, &data, Write::Replace).get().await.map_err(failed)?;
+            Ok(json!({}))
+        }
+        "mkdir" => mkdir_all(files, path).await.map(|()| json!({})).map_err(failed),
+        "remove" => remove_all(files, path).await.map(|()| json!({})).map_err(failed),
+        "rename" => files
+            .rename(field("from").as_bytes(), field("to").as_bytes())
+            .get()
+            .await
+            .map(|()| json!({}))
+            .map_err(failed),
+        other => Err(format!("no workspace op {other}")),
+    }
+}
+
 /// Runs code as a Code Mode cell whose tools.w calls write through files;
 /// each call's ack field names what it acknowledges when it succeeds.
 async fn cell(files: Rc<dyn FileSystem>, code: String) -> Said {
+    cell_with(files, code, None).await
+}
+
+/// The prelude that connects a cell's node:fs to the workspace through the
+/// synchronous host call BRIDGE, as a host connects it.
+const BRIDGED: &str = "globalThis.__nanocodeNodeWorkspace = (request) => callSync(\"ws\", request);";
+
+/// Runs code as a Code Mode cell, with prelude when given: its tools.w calls go
+/// to answer and its node:fs workspace calls (tool ws) to bridge, both over files.
+async fn cell_with(files: Rc<dyn FileSystem>, code: String, prelude: Option<&str>) -> Said {
     let tools = CellTools::encode(&[json!({ "kind": "function", "name": "w", "tool_name": "w" })])
         .expect("the cell tool encodes");
     let mut said = Said::default();
@@ -618,7 +733,7 @@ async fn cell(files: Rc<dyn FileSystem>, code: String) -> Said {
         &code,
         HashMap::new(),
         Arc::new(tools),
-        None,
+        prelude.map(Arc::from),
         None,
         Interrupt::new(),
     ) {
@@ -628,8 +743,12 @@ async fn cell(files: Rc<dyn FileSystem>, code: String) -> Said {
     let mut failed = false;
     loop {
         match host.read_event().await {
-            Ok(RuntimeEvent::ToolCall { id, input, .. }) => {
-                let answered = answer(&files, &input).await;
+            Ok(RuntimeEvent::ToolCall { id, name, input, .. }) => {
+                let answered = if name == "ws" {
+                    bridge(&files, &input).await
+                } else {
+                    answer(&files, &input).await
+                };
                 let ok = answered.is_ok();
                 if let (true, Some(ack)) = (ok, input.get("ack").and_then(Value::as_str)) {
                     said.acked.push(ack.to_owned());
@@ -1600,6 +1719,192 @@ fn checkout(
     Ok(())
 }
 
+/// One job that writes many files at once: whole files (some new, in new
+/// directories, some replacing old ones), old files moved and old files removed.
+#[derive(Clone)]
+struct ManyFiles {
+    initial: Vec<(&'static str, String)>,
+    writes: Vec<(&'static str, String)>,
+    moves: Vec<(&'static str, &'static str)>,
+    removes: Vec<&'static str>,
+}
+
+#[derive(Clone, Copy)]
+enum Author {
+    /// A Python program, whose writes reach the workspace together when it exits.
+    Python,
+    /// A Code Mode cell writing through node:fs, connected to the workspace.
+    Bridge,
+}
+
+impl Author {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Python => "python",
+            Self::Bridge => "bridge",
+        }
+    }
+}
+
+fn parent(path: &str) -> String {
+    path.rsplit_once('/').map_or_else(|| ROOT.to_owned(), |(dir, _)| dir.to_owned())
+}
+
+impl ManyFiles {
+    fn new(rng: &mut Rng) -> Self {
+        let initial: Vec<(&'static str, String)> = OLD.iter().map(|&path| (path, words(rng, 4))).collect();
+        let mut free = OLD.to_vec();
+        let mut take = |rng: &mut Rng| free.remove(rng.pick(free.len()));
+        let replaced: Vec<&'static str> = (0..rng.range(1, 2)).map(|_| take(rng)).collect();
+        let moves = (0..rng.range(1, 2)).map(|at| (take(rng), MOVED[at as usize])).collect();
+        let removes = if rng.chance(HALF_PPM) { vec![take(rng)] } else { Vec::new() };
+        let fresh = rng.range(MANY_MIN, MANY_MAX) as usize - replaced.len();
+        let writes = replaced
+            .into_iter()
+            .chain(NEW[..fresh].iter().copied())
+            .enumerate()
+            .map(|(at, path)| (path, format!("<w{at}{}>", words(rng, 3))))
+            .collect();
+        Self {
+            initial,
+            writes,
+            moves,
+            removes,
+        }
+    }
+
+    fn initial(&self, path: &str) -> Option<&String> {
+        self.initial.iter().find(|(at, _)| *at == path).map(|(_, content)| content)
+    }
+
+    /// What each path the job touches may hold after a crash part of the way
+    /// through it, and what it holds once the job finished.
+    fn allowed(&self, path: &str) -> (Vec<Option<&String>>, Option<&String>) {
+        if let Some((_, content)) = self.writes.iter().find(|(at, _)| *at == path) {
+            return (vec![self.initial(path), Some(content)], Some(content));
+        }
+        if let Some(&(from, _)) = self.moves.iter().find(|(_, to)| *to == path) {
+            return (vec![None, self.initial(from)], self.initial(from));
+        }
+        if self.moves.iter().any(|(from, _)| *from == path) || self.removes.contains(&path) {
+            return (vec![self.initial(path), None], None);
+        }
+        (vec![self.initial(path)], self.initial(path))
+    }
+
+    fn paths(&self) -> BTreeSet<&'static str> {
+        let mut paths: BTreeSet<&'static str> = OLD.iter().copied().collect();
+        paths.extend(self.writes.iter().map(|(path, _)| *path));
+        paths.extend(self.moves.iter().map(|(_, to)| *to));
+        paths
+    }
+
+    /// The job, written so running it again after a crash finishes it.
+    fn code(&self, writer: Author) -> String {
+        let writes: Vec<(String, String, String)> = self
+            .writes
+            .iter()
+            .map(|(path, content)| (absolute(path), parent(&absolute(path)), content.clone()))
+            .collect();
+        let moves: Vec<(String, String, String)> = self
+            .moves
+            .iter()
+            .map(|(from, to)| (absolute(from), absolute(to), parent(&absolute(to))))
+            .collect();
+        let removes: Vec<String> = self.removes.iter().map(|path| absolute(path)).collect();
+        match writer {
+            Author::Python => {
+                let program = format!(
+                    "import os\nfor p, d, s in {writes:?}:\n    os.makedirs(d, exist_ok=True)\n    open(p, 'w').write(s)\nfor a, b, d in {moves:?}:\n    if os.path.exists(a):\n        os.makedirs(d, exist_ok=True)\n        os.rename(a, b)\nfor p in {removes:?}:\n    if os.path.exists(p):\n        os.remove(p)\n"
+                );
+                format!("python3 -c {}", quoted(&program))
+            }
+            Author::Bridge => format!(
+                "const fs = require(\"node:fs\");\nfor (const [p, d, s] of {}) {{ fs.mkdirSync(d, {{ recursive: true }}); fs.writeFileSync(p, s); }}\nfor (const [a, b, d] of {}) if (fs.existsSync(a)) {{ fs.mkdirSync(d, {{ recursive: true }}); fs.renameSync(a, b); }}\nfor (const p of {}) if (fs.existsSync(p)) fs.unlinkSync(p);\n",
+                json!(writes),
+                json!(moves),
+                json!(removes)
+            ),
+        }
+    }
+}
+
+async fn write_many(writer: Author, files: Rc<dyn FileSystem>, code: String) -> Said {
+    match writer {
+        Author::Python => psh(files, code).await,
+        Author::Bridge => cell_with(files, code, Some(BRIDGED)).await,
+    }
+}
+
+/// A crash part of the way through one job's writes to many files, from a
+/// Python program's write-back or a cell's node:fs: every file holds its old
+/// content or its whole new one, a moved file is under one of its names or
+/// both but never neither, and running the job again finishes it.
+fn many(
+    rng: &mut Rng,
+    stats: &mut WorkspaceCrashStats,
+    digest: &mut u64,
+    shape: &mut String,
+) -> Result<(), String> {
+    let writer = [Author::Python, Author::Bridge][rng.pick(2)];
+    let job = ManyFiles::new(rng);
+    let code = job.code(writer);
+    let initial = job.initial.clone();
+    let setup_fn: SetupFn = Box::new(move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
+        Box::pin(setup(files, initial.clone()))
+    });
+    let ran = code.clone();
+    let job_fn: JobFn = Box::new(move |files: Rc<dyn FileSystem>| -> Boxed<'static, Said> {
+        Box::pin(write_many(writer, files, ran.clone()))
+    });
+    let label = format!("many:{}", writer.name());
+    let _ = write!(shape, " files={}", job.writes.len());
+    let Some(died) = die_during(rng, stats, digest, shape, &label, &setup_fn, &job_fn)? else {
+        return Ok(());
+    };
+    stats.points_many += 1;
+    let when = died.when;
+    let paths = job.paths();
+    if let Some(stray) = died.contents.keys().find(|key| !paths.iter().any(|path| keyed(path) == **key)) {
+        return Err(format!("{when}: the store holds {stray}, which the job never wrote"));
+    }
+    for path in &paths {
+        let held = died.contents.get(&keyed(path)).map(|bytes| String::from_utf8_lossy(bytes).into_owned());
+        let (may, _) = job.allowed(path);
+        if !may.iter().any(|content| content.cloned() == held) {
+            return Err(format!("{when}: {path} holds {held:?}, not one of {may:?}"));
+        }
+    }
+    if let Some((from, to)) = job
+        .moves
+        .iter()
+        .find(|(from, to)| !died.contents.contains_key(&keyed(from)) && !died.contents.contains_key(&keyed(to)))
+    {
+        return Err(format!("{when}: moving {from} to {to} left it under neither name"));
+    }
+    let files = one(open(Dying::new(died.inner.clone(), None)), rng)??;
+    let resumed = one(write_many(writer, Rc::new(files), code), rng)?;
+    if !resumed.ok {
+        return Err(format!("{when}: running the job again failed: {}", resumed.output));
+    }
+    stats.resumed += 1;
+    let again = reopened(&died.inner, rng, digest).map_err(|error| format!("{when}: {error}"))?;
+    for path in &paths {
+        let held = again.get(&keyed(path)).map(|bytes| String::from_utf8_lossy(bytes).into_owned());
+        let (_, done) = job.allowed(path);
+        if held.as_ref() != done {
+            return Err(format!("{when}: after running the job again, {path} holds {held:?}, not {done:?}"));
+        }
+    }
+    if again.len() != paths.iter().filter(|path| job.allowed(path).1.is_some()).count() {
+        return Err(format!(
+            "{when}: after running the job again the store holds {:?}",
+            again.keys().collect::<Vec<_>>()
+        ));
+    }
+    Ok(())
+}
+
 /// One crash point per seed: mid-append, mid-checkout or across a rename.
 fn points(
     rng: &mut Rng,
@@ -1629,6 +1934,10 @@ fn simulate(seed: u64, mutation: WorkspaceCrashMutation) -> WorkspaceCrashOutcom
         .and_then(|()| {
             let mut rng = Rng::derive(seed, "workspace_crash_points");
             points(&mut rng, &mut stats, &mut digest, &mut shape)
+        })
+        .and_then(|()| {
+            let mut rng = Rng::derive(seed, "workspace_crash_many");
+            many(&mut rng, &mut stats, &mut digest, &mut shape)
         })
         .err();
     fs_sim::mutate(FsRule::None);
