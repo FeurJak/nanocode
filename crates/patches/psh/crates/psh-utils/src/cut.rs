@@ -194,7 +194,10 @@ pub async fn run(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
     if p.has(&SPEC, "complement") {
         ranges = complement(&ranges);
     }
-    let out_delim: Option<Vec<u8>> = p.last(&SPEC, "output-delimiter").map(<[u8]>::to_vec);
+    // GNU cut takes an empty --output-delimiter as the NUL byte.
+    let out_delim: Option<Vec<u8>> = p
+        .last(&SPEC, "output-delimiter")
+        .map(|d| if d.is_empty() { vec![0] } else { d.to_vec() });
     let only_delimited = p.has(&SPEC, "only-delimited");
     let eol = if p.has(&SPEC, "zero-terminated") {
         0

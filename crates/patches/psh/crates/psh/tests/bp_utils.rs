@@ -134,3 +134,9 @@ fn grep_quiet_wins_over_count_and_file_lists() {
     let src = "echo x > a; grep -q -L y a; echo $?; grep -q -c y a; echo $?; grep -q -l x a; echo $?";
     assert_eq!(sh(src), ("1\n1\n0\n".into(), 0));
 }
+
+#[test]
+fn cut_empty_output_delimiter_is_nul() {
+    let src = "echo 'a b c' | cut -d' ' -f1,3 --output-delimiter='' | od -An -c";
+    assert_eq!(sh(src), ("   a  \\0   c  \\n\n".into(), 0));
+}
