@@ -1,8 +1,115 @@
-use super::data::{DATE_PATTERNS, LOCALE_DATES, PATTERNS, STYLE_PATTERNS, TIME_PATTERNS, ZONE_ALIASES, ZONE_NAMES, ZONES};
+use super::data::{DATE_PATTERNS, LOCALE_DATES, LocaleDates, PATTERNS, STYLE_PATTERNS, TIME_PATTERNS, ZONE_ALIASES, ZONE_NAMES, ZONES};
 use super::{Parts, Spec, range, type_err};
 use crate::interp::conv::Fault;
 use alloc::format;
 use alloc::string::{String, ToString};
+use locales::{DATE_LOCALES, DTF_PATTERNS, DTF_STRINGS};
+
+mod locales;
+
+/// A locale's date and time data, generated from Node's ICU by intl-dtf/emit.js.
+/// Name arrays: months and days are [format long, short, narrow, standalone long, short, narrow];
+/// eras and periods are [long, short, narrow]; periods hold 24 hours then exact midnight and noon.
+/// Pattern tables index DTF_PATTERNS (u16::MAX: none) by date key and by time key with seven
+/// hour-cycle options (none, hour12 true/false, h12, h23, h11, h24).
+pub(super) struct DateLocale {
+    tags: &'static [&'static str],
+    months: [[&'static str; 12]; 6],
+    days: [[&'static str; 7]; 6],
+    eras: [[&'static str; 2]; 3],
+    ampm: [&'static str; 2],
+    periods: [[&'static str; 26]; 3],
+    date: &'static [u16; 864],
+    datez: &'static [u16; 864],
+    time: &'static [u16; 3024],
+    timez: &'static [u16; 3024],
+    timez_ex: [&'static [(u16, u16)]; 6],
+    weekday_ex: &'static [(u16, u16)],
+    style_date: [u16; 4],
+    style_time: [[u16; 4]; 7],
+    style_glue: [&'static str; 4],
+    glue: [&'static str; 4],
+    zones: &'static [u16],
+    gmt: [&'static str; 2],
+}
+
+fn date_locale(locale: &str) -> Option<usize> {
+    DATE_LOCALES.iter().position(|l| l.tags.contains(&locale))
+}
+
+fn dtf_pattern(i: u16) -> Option<&'static str> {
+    (i != u16::MAX).then(|| DTF_PATTERNS[usize::from(i)])
+}
+
+/// Replaces each unquoted run of `z` with the letters for the requested zone name.
+fn sub_zone(p: &str, letters: &str) -> String {
+    let mut out = String::new();
+    let mut quoted = false;
+    let mut prev = '\0';
+    for c in p.chars() {
+        if c == '\'' {
+            quoted = !quoted;
+        }
+        if !quoted && c == 'z' {
+            if prev != 'z' {
+                out.push_str(letters);
+            }
+        } else {
+            out.push(c);
+        }
+        prev = if quoted { '\0' } else { c };
+    }
+    out
+}
+
+fn locale_pattern(l: &DateLocale, f: &[usize; 10], fsd: usize, cy: usize, styles: (Option<&str>, Option<&str>), tzn: Option<&str>) -> String {
+    let (ds, ts) = styles;
+    if ds.is_some() || ts.is_some() {
+        let di = ds.map(|s| pos(&STYLES, Some(s)));
+        let dp = di.and_then(|i| dtf_pattern(l.style_date[i]));
+        let tp = ts.and_then(|s| dtf_pattern(l.style_time[cy][pos(&STYLES, Some(s))]));
+        return match (dp, tp) {
+            (Some(d), Some(t)) => format!("{d}{}{t}", l.style_glue[di.unwrap_or(3)]),
+            (Some(d), None) => d.to_string(),
+            (None, Some(t)) => t.to_string(),
+            (None, None) => String::new(),
+        };
+    }
+    let dk = (((f[0] * 4 + f[1]) * 3 + f[2]) * 6 + f[3]) * 3 + f[4];
+    let tk = ((((f[6] * 3 + f[7]) * 3 + f[8]) * 7 + cy) * 4 + f[5]) * 4 + fsd;
+    let has_t = f[5] != 0 || f[6] != 0 || f[7] != 0 || f[8] != 0 || fsd != 0;
+    let kind = tzn.map(|z| pos(&TZ_NAMES, Some(z)));
+    let find = |t: &[(u16, u16)], k: usize| t.iter().find(|e| usize::from(e.0) == k).map(|e| DTF_PATTERNS[usize::from(e.1)]);
+    let p: String = if !has_t {
+        dtf_pattern(if kind.is_some() { l.datez[dk] } else { l.date[dk] }).unwrap_or("").to_string()
+    } else {
+        let t = match kind {
+            Some(k) => find(l.timez_ex[k], tk).or_else(|| dtf_pattern(l.timez[tk])),
+            None => dtf_pattern(l.time[tk]),
+        }
+        .unwrap_or("");
+        let weekday_only = f[0] != 0 && f[1] == 0 && f[2] == 0 && f[3] == 0 && f[4] == 0;
+        let only_era = f[1] != 0 && f[0] == 0 && f[2] == 0 && f[3] == 0 && f[4] == 0;
+        if dk == 0 {
+            t.to_string()
+        } else if let Some(w) = (kind.is_none() && weekday_only).then(|| find(l.weekday_ex, f[0] * 3024 + tk)).flatten() {
+            w.to_string()
+        } else {
+            let d = if only_era { ["", "GGGG", "G", "GGGGG"][f[1]] } else { dtf_pattern(l.date[dk]).unwrap_or("") };
+            let glue = match f[3] {
+                3 if f[0] != 0 => l.glue[0],
+                3 => l.glue[1],
+                4 => l.glue[2],
+                _ => l.glue[3],
+            };
+            format!("{d}{glue}{t}")
+        }
+    };
+    match kind {
+        Some(k) => sub_zone(&p, TZ_LETTERS[k]),
+        None => p,
+    }
+}
 
 const WIDTHS: [&str; 4] = ["", "long", "short", "narrow"];
 const NUMS: [&str; 3] = ["", "numeric", "2-digit"];
@@ -134,12 +241,20 @@ pub(super) fn resolve(locale: &str, raw: &Spec) -> Result<Spec, Fault> {
         .iter()
         .find(|l| l.0 == locale)
         .or_else(|| LOCALE_DATES.iter().find(|l| locale.split('-').next() == Some(l.0)));
-    let pattern = match (ds, ts) {
-        (None, None) => match local.and_then(|l| local_pattern(l, &fields, fsd, hour12.is_some() || hc_opt.is_some() || tzn.is_some())) {
+    let dl = date_locale(locale);
+    let cy = match (hour12, hc_opt) {
+        (Some(true), _) => 1,
+        (Some(false), _) => 2,
+        (None, Some(c)) => 3 + pos(&CYCLES, Some(c)),
+        (None, None) => 0,
+    };
+    let pattern = match (dl, ds, ts) {
+        (Some(i), _, _) => locale_pattern(&DATE_LOCALES[i], &fields, fsd, cy, (ds, ts), tzn),
+        (None, None, None) => match local.and_then(|l| local_pattern(l, &fields, fsd, hour12.is_some() || hc_opt.is_some() || tzn.is_some())) {
             Some(p) => p,
             None => compose(&fields, fsd, cycle, tzn),
         },
-        (d, t) => {
+        (None, d, t) => {
             let dp = d.map(|s| PATTERNS[usize::from(STYLE_PATTERNS[pos(&STYLES, Some(s))])]);
             let tp = t.map(|s| PATTERNS[usize::from(STYLE_PATTERNS[4 + cycle * 4 + pos(&STYLES, Some(s))])]);
             match (dp, tp) {
@@ -194,12 +309,15 @@ pub(super) fn resolve(locale: &str, raw: &Spec) -> Result<Spec, Fault> {
     if let Some(l) = local {
         out.put("@ampm", &format!("{},{}", l.5[0], l.5[1]));
     }
+    if let Some(i) = dl {
+        out.put("@dl", &i.to_string());
+    }
     out.put("@pattern", &pattern);
     Ok(out)
 }
 
 /// A locale's own pattern for numeric dates and times (the few locales with data), else None.
-fn local_pattern(l: &(&str, &str, &str, &str, &str, [&str; 2]), f: &[usize; 10], fsd: usize, custom: bool) -> Option<String> {
+fn local_pattern(l: &LocaleDates, f: &[usize; 10], fsd: usize, custom: bool) -> Option<String> {
     if custom || fsd != 0 || f[0] != 0 || f[1] != 0 || f[5] != 0 {
         return None;
     }
@@ -238,6 +356,8 @@ fn field_width(p: &str, letter: char) -> usize {
         let hit = !quoted
             && (c == letter
                 || (letter == 'j' && matches!(c, 'h' | 'H' | 'k' | 'K'))
+                || (letter == 'E' && c == 'c')
+                || (letter == 'M' && c == 'L')
                 || (letter == 'z' && matches!(c, 'z' | 'O' | 'v')));
         run = if hit && (run == 0 || c == prev) { run + 1 } else if hit { 1 } else { 0 };
         best = best.max(run);
@@ -261,11 +381,12 @@ fn compose(f: &[usize; 10], fsd: usize, cycle: usize, tzn: Option<&str>) -> Stri
     let mut t = lookup(TIME_PATTERNS[tk]).map(String::from);
     let only_era = f[1] != 0 && f[0] == 0 && f[2] == 0 && f[3] == 0 && f[4] == 0;
     if let Some(time) = &mut t {
-        if d.is_some() && f[6] == 0 {
-            if let Some(i) = time.find("' \u{251c}AM/PM: '") {
-                let end = time[i..].find('\u{2524}').map_or(time.len(), |j| i + j + '\u{2524}'.len_utf8());
-                time.replace_range(i..end, "");
-            }
+        if d.is_some()
+            && f[6] == 0
+            && let Some(i) = time.find("' \u{251c}AM/PM: '")
+        {
+            let end = time[i..].find('\u{2524}').map_or(time.len(), |j| i + j + '\u{2524}'.len_utf8());
+            time.replace_range(i..end, "");
         }
         if tzn.is_some() && let Some(i) = time.find(" B") {
             time.replace_range(i..i + 1, "\u{202f}");
@@ -300,6 +421,8 @@ fn compose(f: &[usize; 10], fsd: usize, cycle: usize, tzn: Option<&str>) -> Stri
 }
 
 // ---- time zones ----
+
+type ZoneEntry = (&'static str, &'static str, [u16; 6]);
 
 struct Rule {
     std: i64,
@@ -465,7 +588,7 @@ fn trans_local(t: Trans, y: i64) -> i64 {
 }
 
 /// (offset in seconds, in daylight time) at UTC seconds \`t\`.
-fn zone_offset(zone: &str, t: i64) -> (i64, bool, Option<&'static (&'static str, &'static str, [u16; 6])>) {
+fn zone_offset(zone: &str, t: i64) -> (i64, bool, Option<&'static ZoneEntry>) {
     if let Some(rest) = zone.strip_prefix(['+', '-']) {
         let h: i64 = rest[..2].parse().unwrap_or(0);
         let m: i64 = rest[3..].parse().unwrap_or(0);
@@ -517,6 +640,35 @@ fn zone_name(kind: usize, off: i64, dst: bool, entry: Option<&(&str, &str, [u16;
     }
 }
 
+fn locale_offset(l: &DateLocale, minutes: i64, long: bool) -> String {
+    let sign = if minutes < 0 { l.gmt[1] } else { "+" };
+    let (h, m) = (minutes.abs() / 60, minutes.abs() % 60);
+    if long {
+        format!("{}{sign}{h:02}:{m:02}", l.gmt[0])
+    } else if m == 0 {
+        format!("{}{sign}{h}", l.gmt[0])
+    } else {
+        format!("{}{sign}{h}:{m:02}", l.gmt[0])
+    }
+}
+
+fn locale_zone_name(l: &DateLocale, kind: usize, off: i64, dst: bool, zone: &str) -> String {
+    let minutes = off / 60;
+    if kind == 2 || kind == 3 {
+        return locale_offset(l, minutes, kind == 3);
+    }
+    let slot = match kind {
+        0 => usize::from(dst),
+        1 => 2 + usize::from(dst),
+        4 => 4,
+        _ => 5,
+    };
+    match ZONES.iter().position(|z| z.0 == zone).and_then(|i| l.zones.get(i * 6 + slot)) {
+        Some(&s) if s != u16::MAX => DTF_STRINGS[usize::from(s)].to_string(),
+        _ => locale_offset(l, minutes, kind == 1 || kind == 5),
+    }
+}
+
 // ---- formatting ----
 
 pub(super) fn format(spec: &Spec, t: f64) -> Result<Parts, Fault> {
@@ -534,6 +686,13 @@ pub(super) fn format(spec: &Spec, t: f64) -> Result<Parts, Fault> {
     let wd = (days + 4).rem_euclid(7) as usize;
     let (h, mi, s, frac) = (in_day / 3_600_000, in_day / 60_000 % 60, in_day / 1000 % 60, in_day % 1000);
     let pattern = spec.get("@pattern").unwrap_or("");
+    let dl = spec.get("@dl").and_then(|i| i.parse::<usize>().ok()).and_then(|i| DATE_LOCALES.get(i));
+    let exact = (field_width(pattern, 'm') == 0 || mi == 0) && (field_width(pattern, 's') == 0 || s == 0);
+    let width = |n: usize| match n {
+        4 => 0,
+        5 => 2,
+        _ => 1,
+    };
     let mut out = Parts::default();
     let chars: alloc::vec::Vec<char> = pattern.chars().collect();
     let mut i = 0;
@@ -575,6 +734,39 @@ pub(super) fn format(spec: &Spec, t: f64) -> Result<Parts, Fault> {
         }
         i += n;
         let era_year = if y <= 0 { 1 - y } else { y };
+        if let Some(l) = dl {
+            let standalone = usize::from(c == 'c' || c == 'L') * 3;
+            let v = match c {
+                'E' | 'c' => Some(("weekday", l.days[standalone + width(n)][wd].to_string())),
+                'M' | 'L' if n >= 3 => Some(("month", l.months[standalone + width(n)][(mo - 1) as usize].to_string())),
+                'G' => Some(("era", l.eras[width(n)][usize::from(y > 0)].to_string())),
+                'a' => Some(("dayPeriod", l.ampm[usize::from(h >= 12)].to_string())),
+                'B' => {
+                    let k = match h {
+                        0 if exact => 24,
+                        12 if exact => 25,
+                        _ => h as usize,
+                    };
+                    Some(("dayPeriod", l.periods[width(n)][k].to_string()))
+                }
+                'z' | 'O' | 'v' => {
+                    let kind = match (c, n) {
+                        ('z', 4) => 1,
+                        ('z', _) => 0,
+                        ('O', 4) => 3,
+                        ('O', _) => 2,
+                        ('v', 4) => 5,
+                        _ => 4,
+                    };
+                    Some(("timeZoneName", locale_zone_name(l, kind, off, dst, zone)))
+                }
+                _ => None,
+            };
+            if let Some((ty, v)) = v {
+                out.push(ty, &v);
+                continue;
+            }
+        }
         match c {
             'E' => {
                 let name = DAY_NAMES[wd];

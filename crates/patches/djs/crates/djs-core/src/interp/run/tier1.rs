@@ -10,7 +10,9 @@ use crate::value::Value;
 use alloc::vec::Vec;
 use core::cell::Cell;
 
-fn body(b: &[u8], head: u32, end: u32) -> Result<(u32, i64, Option<(u32, u32)>), u8> {
+type Scan = (u32, i64, Option<(u32, u32)>);
+
+fn body(b: &[u8], head: u32, end: u32) -> Result<Scan, u8> {
     let (mut at, mut fuel, mut site, mut prev, mut call, mut field) = (head, 0, None, head, false, false);
     while at < end {
         let w = word(b, at);

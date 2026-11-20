@@ -168,8 +168,8 @@ pub(crate) fn plural_en_like(lang: &str, i: u64, v: u32, f: u64, ordinal: bool) 
     }
     match lang {
         "ja" | "zh" | "ko" => "other",
-        "fr" | "pt" => if i <= 1 { "one" } else if v == 0 && i != 0 && i % 1_000_000 == 0 { "many" } else { "other" },
-        "es" | "it" => if i == 1 && (v == 0 || (lang == "es" && f == 0)) { "one" } else if v == 0 && i != 0 && i % 1_000_000 == 0 { "many" } else { "other" },
+        "fr" | "pt" => if i <= 1 { "one" } else if v == 0 && i != 0 && i.is_multiple_of(1_000_000) { "many" } else { "other" },
+        "es" | "it" => if i == 1 && (v == 0 || (lang == "es" && f == 0)) { "one" } else if v == 0 && i != 0 && i.is_multiple_of(1_000_000) { "many" } else { "other" },
         "ru" => {
             if v != 0 {
                 return "other";

@@ -3215,7 +3215,8 @@ pub(super) static ZONE_NAMES: &[&str] = &[
     "Wake Island Time",
     "Wallis & Futuna Time",
 ];
-pub(super) static LOCALE_DATES: &[(&str, &str, &str, &str, &str, [&str; 2])] = &[
+pub(super) type LocaleDates = (&'static str, &'static str, &'static str, &'static str, &'static str, [&'static str; 2]);
+pub(super) static LOCALE_DATES: &[LocaleDates] = &[
     ("en-GB", "dd/MM/y", "HH:mm:ss", ", ", "HH:mm", ["am", "pm"]),
     ("en-IN", "d/M/y", "h:mm:ss\u{202f}a", ", ", "h:mm\u{202f}a", ["am", "pm"]),
     ("en-CA", "y-MM-dd", "h:mm:ss\u{202f}a", ", ", "h:mm\u{202f}a", ["a.m.", "p.m."]),
