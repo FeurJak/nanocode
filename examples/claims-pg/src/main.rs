@@ -8,7 +8,8 @@
 //! Options are key=value: parts (board partitions, 16), log_parts (log partitions, = parts),
 //! claimers (64), tasks (20000), batch (committer group, 256), conns (pool, 64), threads (4),
 //! max_rows (rows per log commit, 512), pipeline (1: send each finish with the next claim rather
-//! than before it, so both can share a log commit; 0), sync_notify (1: the NOTIFY transaction is
+//! than before it, so both can share a log commit; 1, the default; 0 for the old
+//! claim-then-finish order), sync_notify (1: the NOTIFY transaction is
 //! durable, as the bench always ran it; 0: unsynced, as a node sends it through PgSql), prof (1:
 //! print PHASE lines at the claim phase's start and end and PROF lines with pool wait and
 //! transaction time per operation and the client's CPU per thread). The board must be fresh: give
@@ -230,7 +231,7 @@ impl Options {
             conns: get("conns", 64),
             threads: get("threads", 4).max(1),
             max_rows: get("max_rows", 512),
-            pipeline: get("pipeline", 0) != 0,
+            pipeline: get("pipeline", 1) != 0,
             sync_notify: get("sync_notify", 1) != 0,
             prof: get("prof", 0) != 0,
         })
