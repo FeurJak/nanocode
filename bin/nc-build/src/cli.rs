@@ -471,6 +471,9 @@ fn slots_branch() -> String {
     config("NC_BUILD_SLOTS_BRANCH", "slots-branch").unwrap_or_else(|| "nc-build-slots".to_owned())
 }
 
+/// How many times a slots write fetches, changes and pushes before giving up on a busy branch.
+const CAS_ATTEMPTS: u64 = 10;
+
 fn lock_within(lock: &std::fs::File, path: &str) -> Result<(), String> {
     let wait = config("NC_BUILD_SLOTS_LOCK_WAIT", "slots-lock-wait")
         .and_then(|value| value.parse::<u64>().ok())
@@ -505,7 +508,8 @@ fn with_git_file<T>(
         .append(true)
         .open(Path::new(&dir).join("nc-build.lock"))
         .map_err(|error| format!("{dir}: {error}"))?;
-    lock_within(&lock, &format!("{dir}/nc-build.lock"))?;
+    let lock_path = format!("{dir}/nc-build.lock");
+    lock_within(&lock, &lock_path)?;
     if !Path::new(&dir).join("HEAD").exists() {
         run("git", &["init", "-q", "--bare", &dir])?;
     }
@@ -528,7 +532,11 @@ fn with_git_file<T>(
     // Every fetch and write leaves objects no ref reaches; drop those a
     // minute old, so reads as well as writes keep the cache small.
     let _ = git(&["prune", "--expire=1.minute.ago"], "");
+    let mut attempt = 0u64;
     loop {
+        if attempt > 0 {
+            lock_within(&lock, &lock_path)?;
+        }
         let parent = match git(&["fetch", "-q", "--depth", "1", remote, branch], "") {
             Ok(_) => Some(git(&["rev-parse", "FETCH_HEAD"], "")?.trim().to_owned()),
             Err(error) if error.contains("couldn't find remote ref") => None,
@@ -564,7 +572,20 @@ fn with_git_file<T>(
         ) {
             Ok(_) => return Ok(result),
             Err(error) if error.contains("stale info") || error.contains("rejected") => {
-                std::thread::sleep(std::time::Duration::from_millis(now_ms() % 500));
+                // Another machine pushed first: let other calls on this machine have the lock,
+                // back off with jitter that grows with each lost race (up to about 4 s), so
+                // pushers spread out instead of colliding again, and give up after CAS_ATTEMPTS.
+                let _ = lock.unlock();
+                attempt += 1;
+                if attempt >= CAS_ATTEMPTS {
+                    return Err(format!(
+                        "slot service busy: lost {attempt} races to push {remote} {branch} to other machines; nothing was changed, so retry"
+                    ));
+                }
+                let span = 250 * (1u64 << attempt.min(4));
+                std::thread::sleep(std::time::Duration::from_millis(
+                    span / 2 + (now_ms() ^ u64::from(std::process::id())) % span,
+                ));
             }
             Err(error) => return Err(error),
         }
@@ -1260,7 +1281,29 @@ fn slots_once(args: &[String], input: &str) -> Result<String, String> {
             let observation = parse_observation(input, now)
                 .ok_or("expected nproc, /proc/loadavg, /proc/meminfo and optionally ps -eLo policy=,stat=[,psr=] on stdin")?;
             let (state, gone) = with_state(|state| {
-                state.observations.insert(name.clone(), observation.clone());
+                // Rewrite the shared state only when this machine's load changed materially or
+                // its last observation is a minute old, and drop observations of machines no
+                // longer in the stored boxes, so samplers do not race every write.
+                if !state
+                    .observations
+                    .get(name.as_str())
+                    .is_some_and(|last| observation.same_as(last))
+                {
+                    state.observations.insert(name.clone(), observation.clone());
+                }
+                if let Some(boxes) = state.boxes.as_ref().and_then(serde_json::Value::as_array) {
+                    let listed: Vec<&str> = boxes
+                        .iter()
+                        .filter_map(|entry| {
+                            entry.get("hand_name").and_then(serde_json::Value::as_str)
+                        })
+                        .collect();
+                    if !listed.is_empty() {
+                        state.observations.retain(|machine, _| {
+                            machine == name || listed.contains(&machine.as_str())
+                        });
+                    }
+                }
                 state.expire(now);
                 let gone = reap_gone(state, &machines(pool, state, now));
                 (state.clone(), gone)

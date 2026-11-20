@@ -17,8 +17,19 @@ pub const WAITER_GONE_MS: u64 = 2 * 60_000;
 pub const RESERVATION_IDLE_MS: u64 = 15 * 60_000;
 
 /// Standing reservations under these label prefixes are never given back for being idle.
-pub const IDLE_EXEMPT_PREFIXES: [&str; 4] =
-    ["p2live-", "nf-deploy-", "lander-p2live", "boardrel-red-"];
+pub const IDLE_EXEMPT_PREFIXES: [&str; 7] = [
+    "p2live-",
+    "nf-deploy-",
+    "lander-p2live",
+    "boardrel-red-",
+    "nf-fan-",
+    "boardrel-nf-",
+    "claims-nf-",
+];
+
+/// A standing reservation's last use is rewritten only once it is this old, so reads and takes
+/// inside a busy reservation do not each rewrite the shared state.
+pub const USE_REFRESH_MS: u64 = 60_000;
 
 /// Whether a standing reservation with label prefix P is kept however long it sits idle.
 pub fn idle_exempt(prefix: &str) -> bool {
@@ -54,6 +65,36 @@ pub struct Machine {
     pub pin: Pin,
     pub placement: Placement,
     pub kinds: Option<Vec<String>>,
+}
+
+/// A machine's new observation replaces its last one only when the last is this old or the new
+/// one differs materially, so samplers do not rewrite the shared state on every tick.
+pub const OBSERVATION_REFRESH_MS: u64 = 60_000;
+
+impl Observation {
+    /// Whether this observation says nothing a recent one does not: at most
+    /// OBSERVATION_REFRESH_MS newer, same cores, load and runnable cpu count within an eighth of
+    /// the cores (at least 1), and available memory within 5%.
+    pub fn same_as(&self, last: &Self) -> bool {
+        let slack = f64::from(self.cores.max(8)) / 8.0;
+        let runnable = |observation: &Self| {
+            observation
+                .runnable_cpus
+                .as_ref()
+                .map(|cpus| f64::from(u32::try_from(cpus.len()).unwrap_or(u32::MAX)))
+        };
+        let close = match (runnable(self), runnable(last)) {
+            (Some(now), Some(then)) => (now - then).abs() <= slack,
+            (None, None) => true,
+            _ => false,
+        };
+        self.at_ms.saturating_sub(last.at_ms) < OBSERVATION_REFRESH_MS
+            && self.cores == last.cores
+            && close
+            && (self.load - last.load).abs() <= slack
+            && self.mem_available_kb.abs_diff(last.mem_available_kb) * 20
+                <= last.mem_total_kb.max(1)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -466,8 +507,11 @@ impl State {
             .map(|outer| outer.id.clone())
             .collect();
         for lease in &mut self.leases {
+            let stale = lease
+                .used_ms
+                .is_none_or(|used| now_ms.saturating_sub(used) >= USE_REFRESH_MS);
             if lease.label_prefix().is_some()
-                && (lease.used_ms.is_none() || in_use.contains(&lease.id))
+                && (lease.used_ms.is_none() || (stale && in_use.contains(&lease.id)))
             {
                 lease.used_ms = Some(now_ms);
             }
@@ -891,6 +935,18 @@ impl State {
     ) -> Option<Lease> {
         self.expire(now_ms);
         let end = first_cpu + want.cores;
+        // The same reservation again (machine, cpus and label) renews the one there instead of
+        // stacking a duplicate, so a caller that retries after a timeout cannot pile them up.
+        if let Some(same) = self.leases.iter_mut().find(|lease| {
+            lease.machine == machine
+                && lease.first_cpu == first_cpu
+                && lease.cores == want.cores
+                && lease.label == want.label
+                && lease.kind == want.kind
+        }) {
+            same.until_ms = same.until_ms.max(until_ms);
+            return Some(same.clone());
+        }
         let overlaps = !overlap
             && self.leases.iter().any(|lease| {
                 lease.machine == machine
