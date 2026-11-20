@@ -844,6 +844,7 @@ impl Inner {
         }
         match claimed {
             Some(Ok(_)) => self.stats.claims += 1,
+            Some(Err(BoardError::Rejected(Rejection::Terminal))) => {}
             Some(Err(error)) => self.fail(format!("claim {id} for {session}: {error}")),
             None => {}
         }
@@ -918,6 +919,9 @@ impl Inner {
                                 }
                             })
                         }
+                        // A refresh that failed leaves a stale fold: the task can have finished
+                        // since, and a finished task has nothing to claim.
+                        Err(BoardError::Rejected(Rejection::Terminal)) => None,
                         Err(error) => {
                             failure = Some(format!("claim {id} for {session}: {error}"));
                             None

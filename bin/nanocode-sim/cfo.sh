@@ -152,6 +152,7 @@ default_table='
 1 canary_child_adopts_turn canary:400 --scenario runtime --children remote --mutation child-adopts-turn
 4 runtime_log pass --scenario runtime --store log
 4 runtime_log_board pass --scenario runtime --store log --subagents-board
+1 runtime_board_pinned_claim_terminal pass --scenario runtime --subagents-board --seed 1795172135120000028
 4 agents_board pass --scenario agents --subagents-board
 4 hands_fleet pass --scenario hands --fleet 4
 1 canary_coordinator_forgets_spawns canary:200 --scenario runtime --children remote --mutation coordinator-forgets-spawns
