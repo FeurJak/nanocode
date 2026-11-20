@@ -4,6 +4,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod golden;
+pub mod live;
+pub mod replica;
+pub mod seal;
+pub mod sim;
+pub mod table;
+
+pub use live::{Batch, Entry, Live, Resume, Ring, View};
+pub use replica::{Gap, Replica};
+pub use seal::{Encoded, Open, Seal, outline_ops, outline_rows, snapshot_frame};
+pub use table::Table;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Cursor {
