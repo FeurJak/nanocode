@@ -1,6 +1,7 @@
 //! ICU 78's dictionary break engines (dictbe.cpp) for Intl.Segmenter's words: the
-//! CjkBreakEngine for Han, Hiragana and Katakana over the word list of ICU 78.3's cjdict,
-//! which scripts/intl-seg/gendict.py front codes into segdict/cj.dict.
+//! CjkBreakEngine for Han, Hiragana and Katakana and the Thai, Lao, Burmese and Khmer
+//! engines, over the word lists of ICU 78.3's cjdict, thaidict, laodict, burmesedict and
+//! khmerdict, which scripts/intl-seg/gendict.py front codes into segdict/*.dict.
 //!
 //! Each engine gets one run of the characters its set holds, as ICU's
 //! DictionaryBreakEngine::findBreaks hands it, pushes the UTF-16 offsets of the breaks it
@@ -10,6 +11,10 @@ use crate::unicode::normalize::{self, Compositions, Form};
 use alloc::vec::Vec;
 
 static CJ: &[u8] = include_bytes!("segdict/cj.dict");
+static TH: &[u8] = include_bytes!("segdict/th.dict");
+static LO: &[u8] = include_bytes!("segdict/lo.dict");
+static MY: &[u8] = include_bytes!("segdict/my.dict");
+static KM: &[u8] = include_bytes!("segdict/km.dict");
 
 /// One front-coded word list (see gendict.py for the format).
 struct Dict {
@@ -158,21 +163,248 @@ struct Matches {
     prefix: usize,
 }
 
-/// A run of one engine's characters: code points, their UTF-16 offsets and the offset
-/// after the run.
+/// A run of one engine's characters: code points, their UTF-16 offsets, whether each is
+/// in the engine's mark set, and the offset after the run.
 pub(super) struct Run<'a> {
     pub cps: &'a [u32],
     pub at: &'a [usize],
+    pub marks: &'a [bool],
     pub end: usize,
 }
 
-/// The engine segdata numbers engine (1 CJ; 2 Thai, 3 Lao, 4 Myanmar and 5 Khmer find no
-/// breaks yet) on run.
+/// The engine segdata numbers engine (1 CJ, 2 Thai, 3 Lao, 4 Myanmar, 5 Khmer) on run.
 pub(super) fn find_breaks(engine: u32, run: &Run, breaks: &mut Vec<usize>) -> usize {
     match engine {
         1 => cjk(run, breaks),
+        2 => sa(Lang::Thai, &Dict::new(TH, Some(0x0E00)), run, breaks),
+        3 => sa(Lang::Lao, &Dict::new(LO, Some(0x0E80)), run, breaks),
+        4 => sa(Lang::Burmese, &Dict::new(MY, Some(0x1000)), run, breaks),
+        5 => sa(Lang::Khmer, &Dict::new(KM, Some(0x1780)), run, breaks),
         _ => 0,
     }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Lang {
+    Thai,
+    Lao,
+    Burmese,
+    Khmer,
+}
+
+const LOOKAHEAD: usize = 3;
+const ROOT_COMBINE_THRESHOLD: usize = 3;
+const PREFIX_COMBINE_THRESHOLD: usize = 3;
+const MIN_WORD_SPAN: usize = 4;
+const PAIYANNOI: u32 = 0x0E2F;
+const MAIYAMOK: u32 = 0x0E46;
+
+/// ICU's PossibleWord: the dictionary words at one offset, longest last. Offsets are
+/// code point indexes into the run, which are UTF-16 offsets too as SA runs are all BMP.
+#[derive(Default)]
+struct PossibleWord {
+    count: usize,
+    prefix: usize,
+    offset: Option<usize>,
+    mark: usize,
+    current: usize,
+    cu: Vec<usize>,
+    cp: Vec<usize>,
+}
+
+impl PossibleWord {
+    fn candidates(&mut self, d: &Dict, text: &[u32], pos: &mut usize) -> usize {
+        let start = *pos;
+        if self.offset != Some(start) {
+            self.offset = Some(start);
+            let m = d.matches(text, start, text.len() - start, 20);
+            self.count = m.cu.len();
+            self.prefix = m.prefix;
+            self.cu = m.cu;
+            self.cp = m.cp;
+        }
+        if self.count > 0 {
+            *pos = start + self.cu[self.count - 1];
+        }
+        self.current = self.count.wrapping_sub(1);
+        self.mark = self.current;
+        self.count
+    }
+    fn accept_marked(&self, pos: &mut usize) -> usize {
+        *pos = self.offset.unwrap_or(0) + self.cu[self.mark];
+        self.cu[self.mark]
+    }
+    fn marked_cp_length(&self) -> usize {
+        self.cp[self.mark]
+    }
+    fn back_up(&mut self, pos: &mut usize) -> bool {
+        if self.count > 0 && self.current > 0 {
+            self.current -= 1;
+            *pos = self.offset.unwrap_or(0) + self.cu[self.current];
+            return true;
+        }
+        false
+    }
+    fn mark_current(&mut self) {
+        self.mark = self.current;
+    }
+}
+
+/// fEndWordSet: the engine's set (every character of a run) less these.
+fn end_word(lang: Lang, c: u32) -> bool {
+    match lang {
+        Lang::Thai => c != 0x0E31 && !(0x0E40..=0x0E44).contains(&c),
+        Lang::Lao => !(0x0EC0..=0x0EC4).contains(&c),
+        Lang::Burmese => true,
+        Lang::Khmer => c != 0x17D2,
+    }
+}
+
+/// fBeginWordSet.
+fn begin_word(lang: Lang, c: u32) -> bool {
+    match lang {
+        Lang::Thai => (0x0E01..=0x0E2E).contains(&c) || (0x0E40..=0x0E44).contains(&c),
+        Lang::Lao => {
+            (0x0E81..=0x0EAE).contains(&c)
+                || (0x0EDC..=0x0EDD).contains(&c)
+                || (0x0EC0..=0x0EC4).contains(&c)
+        }
+        Lang::Burmese => (0x1000..=0x102A).contains(&c),
+        Lang::Khmer => (0x1780..=0x17B3).contains(&c),
+    }
+}
+
+/// ThaiBreakEngine (and the Lao, Burmese and Khmer engines, which lack Thai's suffixes)
+/// ::divideUpDictionaryRange.
+fn sa(lang: Lang, d: &Dict, run: &Run, breaks: &mut Vec<usize>) -> usize {
+    let text = run.cps;
+    let range_end = text.len();
+    // Thai wants more than four code points, the others four code units or more.
+    if (lang == Lang::Thai && range_end <= MIN_WORD_SPAN) || range_end < MIN_WORD_SPAN {
+        return 0;
+    }
+    let mut found: Vec<usize> = Vec::new();
+    let mut words_found: usize = 0;
+    let mut words: [PossibleWord; LOOKAHEAD] = Default::default();
+    let mut pos = 0usize;
+    while pos < range_end {
+        let current = pos;
+        let mut cp_word_length = 0usize;
+        let mut cu_word_length = 0usize;
+        let w0 = words_found % LOOKAHEAD;
+        let (w1, w2) = ((words_found + 1) % LOOKAHEAD, (words_found + 2) % LOOKAHEAD);
+        let candidates = words[w0].candidates(d, text, &mut pos);
+        if candidates == 1 {
+            cu_word_length = words[w0].accept_marked(&mut pos);
+            cp_word_length = words[w0].marked_cp_length();
+            words_found += 1;
+        } else if candidates > 1 {
+            // The candidate that the most following words fit after.
+            'best: {
+                if pos >= range_end {
+                    break 'best;
+                }
+                loop {
+                    if words[w1].candidates(d, text, &mut pos) > 0 {
+                        words[w0].mark_current();
+                        if pos >= range_end {
+                            break 'best;
+                        }
+                        loop {
+                            if words[w2].candidates(d, text, &mut pos) > 0 {
+                                words[w0].mark_current();
+                                break 'best;
+                            }
+                            if !words[w1].back_up(&mut pos) {
+                                break;
+                            }
+                        }
+                    }
+                    if !words[w0].back_up(&mut pos) {
+                        break;
+                    }
+                }
+            }
+            cu_word_length = words[w0].accept_marked(&mut pos);
+            cp_word_length = words[w0].marked_cp_length();
+            words_found += 1;
+        }
+        // No word, or a short one followed by no word: take characters up to where a word
+        // may begin.
+        if pos < range_end && cp_word_length < ROOT_COMBINE_THRESHOLD {
+            let wn = words_found % LOOKAHEAD;
+            if words[wn].candidates(d, text, &mut pos) == 0
+                && (cu_word_length == 0 || words[wn].prefix < PREFIX_COMBINE_THRESHOLD)
+            {
+                let mut remaining = range_end - (current + cu_word_length);
+                let mut chars = 0usize;
+                loop {
+                    let pc = text[pos];
+                    pos += 1;
+                    chars += 1;
+                    remaining -= 1;
+                    if remaining == 0 {
+                        break;
+                    }
+                    let uc = text[pos];
+                    if end_word(lang, pc) && begin_word(lang, uc) {
+                        let n = words[(words_found + 1) % LOOKAHEAD].candidates(d, text, &mut pos);
+                        pos = current + cu_word_length + chars;
+                        if n > 0 {
+                            break;
+                        }
+                    }
+                }
+                if cu_word_length == 0 {
+                    words_found += 1;
+                }
+                cu_word_length += chars;
+            } else {
+                pos = current + cu_word_length;
+            }
+        }
+        // Marks join the word before them.
+        while pos < range_end && run.marks[pos] {
+            pos += 1;
+            cu_word_length += 1;
+        }
+        // Thai's PAIYANNOI and MAIYAMOK join the word before them too.
+        if lang == Lang::Thai && pos < range_end && cu_word_length > 0 {
+            let wn = words_found % LOOKAHEAD;
+            if words[wn].candidates(d, text, &mut pos) == 0
+                && (text[pos] == PAIYANNOI || text[pos] == MAIYAMOK)
+            {
+                let mut uc = text[pos];
+                if uc == PAIYANNOI {
+                    let prev = text[pos - 1];
+                    if prev != PAIYANNOI && prev != MAIYAMOK {
+                        pos += 1;
+                        cu_word_length += 1;
+                        uc = text.get(pos).copied().unwrap_or(0);
+                    }
+                }
+                if uc == MAIYAMOK && text[pos - 1] != MAIYAMOK {
+                    pos += 1;
+                    cu_word_length += 1;
+                }
+            } else {
+                pos = current + cu_word_length;
+            }
+        }
+        if cu_word_length > 0 {
+            found.push(current + cu_word_length);
+        }
+    }
+    if found.last().is_some_and(|&b| b >= range_end) {
+        found.pop();
+        words_found = words_found.saturating_sub(1);
+    }
+    breaks.extend(
+        found
+            .into_iter()
+            .map(|i| if i < run.at.len() { run.at[i] } else { run.end }),
+    );
+    words_found
 }
 
 /// ICU's isKatakana.

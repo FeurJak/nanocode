@@ -4,8 +4,8 @@
 //!
 //! Word segments that hold Han, kana or Line_Break=SA characters go on through ICU's
 //! dictionary break engines (segdict.rs) as ICU's DictionaryCache::populateDictionary
-//! hands them over: Chinese and Japanese by cjdict, every piece keeping its segment's
-//! status. Line_Break=SA runs (Thai, Lao, Burmese, Khmer) stay whole.
+//! hands them over: Chinese and Japanese by cjdict, Thai, Lao, Burmese and Khmer by
+//! their dictionaries, every piece keeping its segment's status.
 
 use super::segdata::{PROPS, RANGES};
 use super::segdict;
@@ -64,6 +64,9 @@ impl Ch {
     /// The dictionary break engine whose set holds it (segdata.js).
     fn engine(&self) -> u32 {
         self.p >> 19 & 7
+    }
+    fn mark(&self) -> bool {
+        self.p >> 22 & 1 == 1
     }
     fn common(&self) -> bool {
         self.p >> 23 & 1 == 1
@@ -393,7 +396,8 @@ fn dictionary_words(cs: &[Ch], b: &[usize], end: usize) -> (Vec<usize>, Vec<bool
                 }
                 let cps: Vec<u32> = cs[i..j].iter().map(|c| c.c).collect();
                 let ats: Vec<usize> = cs[i..j].iter().map(|c| c.at).collect();
-                let run = segdict::Run { cps: &cps, at: &ats, end: at(j) };
+                let marks: Vec<bool> = cs[i..j].iter().map(|c| engine >= 2 && c.mark()).collect();
+                let run = segdict::Run { cps: &cps, at: &ats, marks: &marks, end: at(j) };
                 found += segdict::find_breaks(engine, &run, &mut breaks);
             } else {
                 // ICU's UnhandledEngine skips the run of the character's script.

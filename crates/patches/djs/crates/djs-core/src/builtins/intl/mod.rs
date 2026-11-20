@@ -350,11 +350,14 @@ pub(crate) fn intrinsic(heap: &mut Heap, k: u16, a: [Value; 5]) -> Result<Option
             }
             let tags = canonical_list(&str_arg(heap, a[1]).unwrap_or_default())?;
             let collator_langs: Vec<&str> = LANGS.iter().chain(collate::TAILORED.iter()).copied().collect();
+            // Segmenter resolves among the languages its supportedLocalesOf accepts.
+            let segmenter_langs: Vec<&str> = locdata_avail::AVAILABLE.iter().filter(|e| e.1 & 1 << 7 != 0).map(|e| e.0).collect();
             let locale = resolve_locale(&tags, match kind {
                 1 => &date::LANGS[..],
                 2 => &collator_langs[..],
                 0 | 3 | 4 | 5 => &NUM_LANGS[..],
                 DISPLAY_NAMES => &dndata::LANGS[..],
+                SEGMENTER => &segmenter_langs[..],
                 _ => &LANGS[..],
             });
             let raw = Spec::parse(&raw);
