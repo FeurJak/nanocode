@@ -17,3 +17,19 @@ fn a_brace_expanded_declaration_argument_splits_like_a_command_word() {
     assert_eq!(out("a=(x 'y z'); export E=\"${a[@]}\"; echo \"$E\""), "x y z\n");
     assert_eq!(out("f() { local a={1..3}; echo $a; }; f"), "3\n");
 }
+
+fn err(s: &str) -> String {
+    String::from_utf8_lossy(&run(s).2).into_owned()
+}
+
+#[test]
+fn a_simple_command_takes_the_line_its_second_token_ends_on() {
+    assert_eq!(out("echo 'a\nb' $LINENO"), "a\nb 2\n");
+    assert_eq!(out("echo $LINENO 'a\nb'"), "1 a\nb\n");
+    assert!(err("nosuch 'a\nb'").contains("line 2: nosuch"));
+    assert!(err("nosuch \\\nb").contains("line 2: nosuch"));
+    assert!(err("{ nosuch 'a\nb'; }").contains("line 2: nosuch"));
+    assert!(err("x=1 nosuch 'a\nb'").contains("line 1: nosuch"));
+    assert!(err("nosuch a 'b\nc'").contains("line 1: nosuch"));
+    assert!(err("nosuch\necho").contains("line 1: nosuch"));
+}

@@ -1998,16 +1998,23 @@ fn compound_text(items: &[crate::arrays::ArrayItem]) -> Vec<u8> {
 }
 
 pub(crate) fn simple_line(code: &Code, cmd: &Command, s: &SimpleCommand) -> u32 {
-    let first = [
-        s.assigns.first().map(|a| a.span),
-        s.words.first().map(|w| w.span),
-        cmd.redirects.first().map(|r| r.span),
-    ]
-    .into_iter()
-    .flatten()
-    .min_by_key(|sp| sp.start);
-    match first {
-        Some(sp) if sp.end > sp.start => code.line(sp.end - 1),
+    // Bash stamps a simple command with its line number when it reduces the first
+    // element, which is once the next token has been read: the line where the second
+    // element's first token ends (`nosuch 'a<newline>b'` is line 2, while
+    // `echo $LINENO 'a<newline>b'` is line 1).
+    // A redirection's first token is its operator.
+    let mut elems: Vec<(psh_syntax::Span, bool)> = s
+        .assigns
+        .iter()
+        .map(|a| (a.span, false))
+        .chain(s.words.iter().map(|w| (w.span, false)))
+        .chain(cmd.redirects.iter().map(|r| (r.span, true)))
+        .collect();
+    elems.sort_by_key(|(sp, _)| sp.start);
+    match (elems.first(), elems.get(1)) {
+        (_, Some((sp, true))) => code.line(sp.start),
+        (_, Some((sp, false))) if sp.end > sp.start => code.line(sp.end - 1),
+        (Some((sp, _)), _) if sp.end > sp.start => code.line(sp.end - 1),
         _ => code.line(cmd.span.start),
     }
 }
