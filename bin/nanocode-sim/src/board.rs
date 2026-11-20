@@ -2186,11 +2186,11 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
     // Boards save checkpoints as they go and reopen from them after a crash: every few events
     // on most seeds, never on some, so a reopen meets both.
     let mut cadence = Rng::derive(seed, "checkpoint cadence");
-    nanocode_board::checkpoint::checkpoint_every(if cadence.chance(250_000) {
+    nanocode_board::checkpoint::checkpoint_every_here(Some(if cadence.chance(250_000) {
         0
     } else {
         cadence.range(1, 33)
-    });
+    }));
     let mut crashes = world.shape.crashes.clone();
     crashes.sort_unstable();
     let mut number = 0;
@@ -2269,7 +2269,7 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
     let intended = intent::run(seed).map(|_| ());
     let delivered = deliver::run(seed);
     board_sim::mutate(BoardRule::None);
-    nanocode_board::checkpoint::checkpoint_every(nanocode_board::checkpoint::CHECKPOINT_EVERY);
+    nanocode_board::checkpoint::checkpoint_every_here(None);
     for wrong in [live, indexed, resumed, checkpointed, kept, intended]
         .into_iter()
         .filter_map(Result::err)

@@ -9,9 +9,12 @@
 //! still in the log as hashed; anything else replays the whole log. A checkpoint is only ever a
 //! shortcut: losing one, failing to save one or failing to read one costs a full replay.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
+use std::{
+    cell::Cell,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use nanocode_sync::Slot;
@@ -34,6 +37,22 @@ static EVERY: AtomicU64 = AtomicU64::new(CHECKPOINT_EVERY);
 /// every board in the process; 0 saves none on its own.
 pub fn checkpoint_every(events: u64) {
     EVERY.store(events, Ordering::Relaxed);
+}
+
+thread_local! {
+    static HERE: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+/// Sets [`checkpoint_every`] for boards driven on this thread alone, or with `None` goes back to
+/// the process's setting. A simulation runs each seed on one thread, several at once, and a
+/// seed must not save checkpoints at another seed's cadence.
+pub fn checkpoint_every_here(events: Option<u64>) {
+    HERE.with(|here| here.set(events));
+}
+
+fn every() -> u64 {
+    HERE.with(Cell::get)
+        .unwrap_or_else(|| EVERY.load(Ordering::Relaxed))
 }
 
 /// FNV-1a over a row's body: what a checkpoint holds of the row before its seq, so a log that
@@ -164,7 +183,7 @@ impl Board {
     /// as the last checkpoint covered, past it. Skipped while the last save still runs; a failed
     /// save only means the next reopen folds more.
     pub(crate) fn keep_checkpoint(&mut self) {
-        let every = EVERY.load(Ordering::Relaxed);
+        let every = every();
         let next = self.fold.next();
         let wait = if mutated(Mutation::CheckpointEveryFixed) {
             every
