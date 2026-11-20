@@ -424,3 +424,12 @@ def getstatusoutput(cmd, *, encoding=None, errors=None):
 
 def getoutput(cmd, *, encoding=None, errors=None):
     return getstatusoutput(cmd, encoding=encoding, errors=errors)[1]
+
+
+# CPython keeps unreaped children in _active and reaps them in _cleanup(); test.support calls it.
+# Every Popen here waits for its child, so there is never one to reap.
+_active = []
+
+
+def _cleanup():
+    pass
