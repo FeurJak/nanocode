@@ -2280,7 +2280,16 @@ fn run_simple<'a>(
         }
 
         let saved = vp.fds.clone();
-        match Box::pin(apply_redirects(vp, code, &cmd.redirects)).await {
+        // Bash performs an external command's redirections in the child it forks, so
+        // what expanding them sets (`$((n++))` in a here-document, `${x:=f}`, `{fd}>`)
+        // does not reach the shell.
+        let vars = forks_for(vp, &argv).then(|| vp.vars.clone());
+        let applied = Box::pin(apply_redirects(vp, code, &cmd.redirects)).await;
+        if let Some(vars) = vars {
+            vp.vars = vars;
+            vp.var_fds.clear();
+        }
+        match applied {
             Ok(true) => {}
             Ok(false) => {
                 restore_fds(vp, saved);
@@ -2308,6 +2317,32 @@ fn run_simple<'a>(
         restore_fds(vp, saved);
         r
     })
+}
+
+/// Whether bash forks to run `argv`: it is neither a function nor a builtin, also
+/// behind `command` (`command cat`), and including a name that is not found.
+fn forks_for(vp: &Vp, argv: &[Vec<u8>]) -> bool {
+    let mut i = 0;
+    while argv.get(i).is_some_and(|a| a == b"command")
+        && !vp.funcs.contains_key("command")
+        && builtins::get(vp, b"command").is_some()
+    {
+        i += 1;
+        while argv.get(i).is_some_and(|a| a == b"-p" || a == b"--") {
+            i += 1;
+        }
+        if argv.get(i).is_some_and(|a| a.starts_with(b"-")) {
+            return false;
+        }
+    }
+    let Some(name) = argv.get(i) else {
+        return false;
+    };
+    let function = i == 0
+        && std::str::from_utf8(name)
+            .ok()
+            .is_some_and(|n| vp.funcs.contains_key(n));
+    !function && !builtins::is_special(vp, name) && builtins::get(vp, name).is_none()
 }
 
 /// Runs an expanded command: a builtin or an external.

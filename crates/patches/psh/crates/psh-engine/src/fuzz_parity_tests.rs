@@ -33,3 +33,17 @@ fn a_simple_command_takes_the_line_its_second_token_ends_on() {
     assert!(err("nosuch a 'b\nc'").contains("line 1: nosuch"));
     assert!(err("nosuch\necho").contains("line 1: nosuch"));
 }
+
+#[test]
+fn an_external_commands_redirections_expand_in_its_child() {
+    assert_eq!(out("n=0; cat >/dev/null <<E\n$((n++))\nE\necho \"$n\""), "0\n");
+    assert_eq!(out("n=0; cat <<< $((n++)); echo \"$n\""), "0\n0\n");
+    assert_eq!(out("cat >${x:=g} </dev/null; echo \"[$x]\""), "[]\n");
+    assert_eq!(out("cat {fd}>/dev/null </dev/null; echo \"[$fd]\""), "[]\n");
+    assert_eq!(out("n=0; command cat >/dev/null <<< $((n++)); echo \"$n\""), "0\n");
+    assert_eq!(out("n=0; nosuch >/dev/null <<< $((n++)) 2>/dev/null; echo \"$n\""), "0\n");
+    // Builtins and functions run in the shell, so theirs do.
+    assert_eq!(out("n=0; true <<< $((n++)); echo \"$n\""), "1\n");
+    assert_eq!(out("n=0; f() { :; }; f <<< $((n++)); echo \"$n\""), "1\n");
+    assert_eq!(out("exec {fd}>/dev/null; echo \"[$fd]\""), "[10]\n");
+}
