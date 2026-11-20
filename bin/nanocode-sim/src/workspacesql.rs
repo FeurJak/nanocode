@@ -734,6 +734,15 @@ impl World {
                     "{name} version {after} is no whole change on version {before}: a partial or lost update"
                 ));
             }
+            let cap = self.caps.file_bytes;
+            if let Some((path, size)) = tree.iter().find_map(|(path, entry)| match entry {
+                Entry::File { size, .. } if *size > cap => Some((path, *size)),
+                _ => None,
+            }) {
+                return Err(format!(
+                    "{name} version {after} holds {path} of {size} bytes over the file cap {cap}"
+                ));
+            }
             if let Err(corrupt) = Manifest::from_entries(after, tree.clone()) {
                 return Err(format!(
                     "{name} version {after} is no valid tree: {corrupt:?}"
@@ -925,13 +934,10 @@ impl World {
             _ => Write::New,
         };
         let mut whole = data.clone();
-        if how == Write::Append {
-            if let Ok(held) = reply(fs.read(path.as_bytes(), u64::MAX))? {
-                whole = [&held[..], &data[..]].concat();
-            }
-            if whole.len() as u64 > self.caps.file_bytes {
-                flight.expect = Expect::TooLarge;
-            }
+        if how == Write::Append
+            && let Ok(held) = reply(fs.read(path.as_bytes(), u64::MAX))?
+        {
+            whole = [&held[..], &data[..]].concat();
         }
         let future = flying(fs.write(path.as_bytes(), &data, how));
         flight.written = Some((path, whole));
