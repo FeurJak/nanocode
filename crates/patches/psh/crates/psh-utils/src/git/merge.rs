@@ -72,6 +72,89 @@ pub fn merge_trees(
     theirs: Option<&Oid>,
     labels: (&str, &str),
 ) -> Res<Merged> {
+    merge_trees_at(repo, base, ours, theirs, labels, 0)
+}
+
+/// [merge_trees] at a depth of git's recursion over merge bases: below the top a
+/// conflict leaves no stages and no messages, only its file as the virtual base
+/// takes it (conflict markers two longer per level, or the base's version).
+fn merge_trees_at(
+    repo: &Repo<'_>,
+    base: Option<&Oid>,
+    ours: Option<&Oid>,
+    theirs: Option<&Oid>,
+    labels: (&str, &str),
+    depth: usize,
+) -> Res<Merged> {
+    let mut merged = merge_level(repo, base, ours, theirs, labels, depth)?;
+    if depth > 0 {
+        let conflicts = std::mem::take(&mut merged.conflicts);
+        merged.notes.clear();
+        merged
+            .files
+            .retain(|(path, _, _)| !conflicts.iter().any(|c| &c.path == path));
+        for conflict in conflicts {
+            let entry = match (conflict.text, conflict.stages) {
+                (Some(text), [_, Some(o), _]) => Some((o.0, repo.odb.write(Kind::Blob, text)?)),
+                (_, [base, _, _]) => base,
+            };
+            if let Some((mode, oid)) = entry {
+                merged.files.push((conflict.path, mode, oid));
+            }
+        }
+        merged.files.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+    Ok(merged)
+}
+
+/// The tree of a merge's files.
+fn tree_of(repo: &Repo<'_>, files: &[(Vec<u8>, u32, Oid)]) -> Res<Oid> {
+    let entries: Vec<IndexEntry> = files
+        .iter()
+        .map(|(path, mode, oid)| IndexEntry::new(path.clone(), *mode, *oid))
+        .collect();
+    let refs: Vec<&IndexEntry> = entries.iter().collect();
+    Ok(write_tree(repo, &refs, 0, b"", None)?.oid)
+}
+
+/// The tree git's ort strategy merges against when there are several merge bases
+/// (newest first): the bases merged into one, oldest first, each pair against its own
+/// merge bases, recursively.
+fn virtual_base(repo: &Repo<'_>, bases: &[Oid], depth: usize) -> Res<Oid> {
+    let mut order = bases.to_vec();
+    order.reverse();
+    let mut tree = repo.commit(&order[0])?.tree;
+    let mut merged_from = vec![order[0]];
+    for next in &order[1..] {
+        let inner = rev::merge_bases(repo, *next, &merged_from)?;
+        let base = match inner.len() {
+            0 => None,
+            1 => Some(repo.commit(&inner[0])?.tree),
+            _ => Some(virtual_base(repo, &inner, depth + 1)?),
+        };
+        let next_tree = repo.commit(next)?.tree;
+        let merged = merge_trees_at(
+            repo,
+            base.as_ref(),
+            Some(&tree),
+            Some(&next_tree),
+            ("Temporary merge branch 1", "Temporary merge branch 2"),
+            depth,
+        )?;
+        tree = tree_of(repo, &merged.files)?;
+        merged_from.push(*next);
+    }
+    Ok(tree)
+}
+
+fn merge_level(
+    repo: &Repo<'_>,
+    base: Option<&Oid>,
+    ours: Option<&Oid>,
+    theirs: Option<&Oid>,
+    labels: (&str, &str),
+    depth: usize,
+) -> Res<Merged> {
     let (b_files, o_files, t_files) = (
         files_of(repo, base)?,
         files_of(repo, ours)?,
@@ -144,7 +227,13 @@ pub fn merge_trees(
                     });
                     continue;
                 }
-                let (text, clean) = merge_text(&base_text, &ours_text, &theirs_text, labels);
+                let (text, clean) = merge_text(
+                    &base_text,
+                    &ours_text,
+                    &theirs_text,
+                    labels,
+                    7 + 2 * depth,
+                );
                 if clean {
                     let oid = repo.odb.write(Kind::Blob, text)?;
                     merged.files.push((path.clone(), mode, oid));
@@ -230,7 +319,14 @@ fn push_closed(out: &mut Vec<u8>, lines: &[&[u8]]) {
 
 /// A line by line three-way merge (git's merge style, zealous): the text, and whether
 /// it merged without conflicts.
-pub fn merge_text(base: &[u8], ours: &[u8], theirs: &[u8], labels: (&str, &str)) -> (Vec<u8>, bool) {
+/// `marker` is the conflict markers' length: 7, longer in a virtual merge base.
+fn merge_text(
+    base: &[u8],
+    ours: &[u8],
+    theirs: &[u8],
+    labels: (&str, &str),
+    marker: usize,
+) -> (Vec<u8>, bool) {
     let b: Vec<&[u8]> = lines(base).collect();
     let o: Vec<&[u8]> = lines(ours).collect();
     let t: Vec<&[u8]> = lines(theirs).collect();
@@ -309,11 +405,11 @@ pub fn merge_text(base: &[u8], ours: &[u8], theirs: &[u8], labels: (&str, &str))
         }
         clean = false;
         push_lines(&mut out, &so[..head]);
-        out.extend_from_slice(format!("<<<<<<< {}\n", labels.0).as_bytes());
+        out.extend_from_slice(format!("{} {}\n", "<".repeat(marker), labels.0).as_bytes());
         push_closed(&mut out, &so[head..so.len() - tail]);
-        out.extend_from_slice(b"=======\n");
+        out.extend_from_slice(format!("{}\n", "=".repeat(marker)).as_bytes());
         push_closed(&mut out, &st[head..st.len() - tail]);
-        out.extend_from_slice(format!(">>>>>>> {}\n", labels.1).as_bytes());
+        out.extend_from_slice(format!("{} {}\n", ">".repeat(marker), labels.1).as_bytes());
         push_lines(&mut out, &so[so.len() - tail..]);
     }
     push_lines(&mut out, &b[copied.min(b.len())..]);
@@ -330,13 +426,7 @@ fn apply(
 ) -> Res<Result<Oid, String>> {
     let repo = &git.repo;
     let root = git.work_tree()?.to_vec();
-    let entries: Vec<IndexEntry> = merged
-        .files
-        .iter()
-        .map(|(path, mode, oid)| IndexEntry::new(path.clone(), *mode, *oid))
-        .collect();
-    let refs: Vec<&IndexEntry> = entries.iter().collect();
-    let tree = write_tree(repo, &refs, 0, b"", None)?.oid;
+    let tree = tree_of(repo, &merged.files)?;
     let work = Work::new(repo, &root)?;
     let mut index = edit(&work)?;
     if let Some(refusal) = two_way(git, &work, &mut index, Some(ours), Some(&tree), true)? {
@@ -379,17 +469,12 @@ pub struct Options<'o> {
 pub fn three_way(git: &Git<'_>, io: &mut Io<'_>, head: Oid, theirs: Oid, opts: Options<'_>) -> Res<i32> {
     let repo = &git.repo;
     let bases = rev::merge_bases(repo, head, &[theirs])?;
-    if bases.len() > 1 {
-        return Err(Error::Lacks(
-            "a merge with more than one merge base".to_string(),
-            "git's recursive merge of merge bases",
-        ));
-    }
-    let base_tree = match bases.first() {
-        Some(base) => Some(repo.commit(base)?.tree),
-        None => {
+    let base_tree = match bases.as_slice() {
+        [] => {
             return Err(Error::Fatal("refusing to merge unrelated histories".to_string()));
         }
+        [base] => Some(repo.commit(base)?.tree),
+        _ => Some(virtual_base(repo, &bases, 1)?),
     };
     let ours = repo.commit(&head)?.tree;
     let their_tree = repo.commit(&theirs)?.tree;
