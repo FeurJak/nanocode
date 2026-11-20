@@ -381,6 +381,7 @@ impl Shell {
             fork_job: false,
             bg_simple: false,
             job_own: false,
+            job_shell: false,
             debug_skip: None,
             stage_simple: false,
             own_simple: None,

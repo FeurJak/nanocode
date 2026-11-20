@@ -109,6 +109,7 @@ async fn run_background(vp: &mut Vp, code: &Rc<Code>, list: ListId, item: usize)
     sub.fork_job = forks && direct;
     sub.bg_simple = direct;
     sub.job_own = direct;
+    sub.job_shell = !direct;
     // The job's vproc is the subshell of a job that is one `( … )`, as bash forks once
     // for it: its commands are the job's own, and a signal sent to the job ends them.
     sub.stage_subshell = ao.rest.is_empty()

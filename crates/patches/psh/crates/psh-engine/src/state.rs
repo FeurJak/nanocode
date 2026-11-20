@@ -508,6 +508,9 @@ pub(crate) struct Vp {
     /// bash's does; a program a compound job runs gets them back (bash forks again
     /// and restores them).
     pub job_own: bool,
+    /// This vproc is a compound background job's own shell, not a subshell inside it:
+    /// only there does `trap` show the INT the job ignores, as bash's.
+    pub job_shell: bool,
     /// A pipeline stage's command whose DEBUG trap the parent already ran (functrace).
     pub debug_skip: Option<usize>,
     /// This vproc is a pipeline stage of one simple command that has not run it yet:
@@ -589,6 +592,7 @@ impl Vp {
         sub.fork_job = false;
         sub.bg_simple = false;
         sub.job_own = false;
+        sub.job_shell = false;
         sub.debug_skip = None;
         sub.stage_simple = false;
         sub.own_simple = None;

@@ -517,11 +517,12 @@ pub(crate) async fn trap(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     }
     if rest.is_empty() || print {
         // A compound background job ignores INT (bash's async subshell): listing traps
-        // there records it as ignored from the start, so `trap` shows it and the
-        // job's programs keep it ignored.
+        // in the job's own shell records it as ignored from the start, so `trap` shows
+        // it there and in subshells it starts after, and the job's programs keep it
+        // ignored. A subshell inside the job lists nothing before that.
         let int = TrapKey::Signal(crate::host::SIGINT);
         if vp.job.is_some()
-            && !vp.job_own
+            && vp.job_shell
             && !vp.opts.get(crate::options::SetOpt::Monitor)
             && !vp.traps.map.contains_key(&int)
         {
