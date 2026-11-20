@@ -142,7 +142,7 @@ pub struct Work {
 }
 
 impl Work {
-    pub fn key(&self) -> (bool, Option<u64>, usize) {
+    pub const fn key(&self) -> (bool, Option<u64>, usize) {
         (self.rank.is_none(), self.rank, self.order)
     }
 }
