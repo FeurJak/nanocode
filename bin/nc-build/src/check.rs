@@ -21,7 +21,7 @@ use nanocode_build_opt::{
 
 const USAGE: &str = "usage: nc-build check [--full] [--base REF] [-j N] [--seeds N] [--no-sim] [--plan]
   changed scope: the crates the diff since REF (merge-base with the upstream, or HEAD~1 when nothing differs) and untracked files touch,
-  with their dependents (cargo check --locked --lib, native and wasm32), the simulator's --tidy, and the pass jobs and canaries of
+  with their dependents (cargo check --locked --lib, native and wasm32), the simulator's --tidy and --machines walks, and the pass jobs and canaries of
   bin/nanocode-sim/cfo.sh's table for every scenario that reaches them; --full: the whole workspace and every scenario and canary
   -j N: parallel jobs (default: CARGO_BUILD_JOBS, else the cores this process may run on); --seeds N: seeds per pass job (default 8, 64 with --full)
   a canary passes once a seed catches it, trying seeds 0, then 1..8, then the rest of its budget in units of 16 seeds;
@@ -453,6 +453,8 @@ enum SimBuild {
     Built {
         done: Instant,
         tidy: Step,
+        machines: Step,
+        canaries: Step,
         sim: Step,
     },
 }
@@ -498,6 +500,14 @@ fn simulate(target: &Path, logs: &Path, options: &Options, jobs: &[SimJob]) -> S
             command.arg("--tidy");
             logged("tidy", logs, command)
         });
+        let machines = scope.spawn(|| {
+            let mut command = Command::new(&bin);
+            command.args(["--machines", "--deep"]);
+            let walk = logged("machines", logs, command);
+            let mut command = Command::new(&bin);
+            command.args(["--machines", "--canaries"]);
+            (walk, logged("machine-canaries", logs, command))
+        });
         let started = Instant::now();
         let finished = run_units(&bin, jobs, &units, options.jobs, timeout);
         let report = gate::report(&SIM, jobs, &finished, units.len());
@@ -513,7 +523,21 @@ fn simulate(target: &Path, logs: &Path, options: &Options, jobs: &[SimJob]) -> S
             exit: SPAWN_EXIT,
             secs: 0.0,
         });
-        SimBuild::Built { done, tidy, sim }
+        let (machines, canaries) = machines.join().unwrap_or_else(|_| {
+            let failed = |name: &str| Step {
+                name: name.to_owned(),
+                exit: SPAWN_EXIT,
+                secs: 0.0,
+            };
+            (failed("machines"), failed("machine-canaries"))
+        });
+        SimBuild::Built {
+            done,
+            tidy,
+            machines,
+            canaries,
+            sim,
+        }
     })
 }
 
@@ -766,7 +790,19 @@ pub fn main(args: &[String]) -> u8 {
         sim.map(|handle| (checked, handle.join()))
     });
     match (outcome, &jobs) {
-        (Some((checked, Ok(SimBuild::Built { done, tidy, sim }))), Some(jobs)) => {
+        (
+            Some((
+                checked,
+                Ok(SimBuild::Built {
+                    done,
+                    tidy,
+                    machines,
+                    canaries,
+                    sim,
+                }),
+            )),
+            Some(jobs),
+        ) => {
             ui.line(
                 Status::Ok,
                 "sim-build",
@@ -777,6 +813,8 @@ pub fn main(args: &[String]) -> u8 {
                 ),
             );
             ui.step(&tidy, "nanocode-sim --tidy");
+            ui.step(&machines, "nanocode-sim --machines --deep");
+            ui.step(&canaries, "nanocode-sim --machines --canaries");
             let passes = jobs.iter().filter(|job| job.kind == Kind::Pass).count();
             ui.step(
                 &sim,

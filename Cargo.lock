@@ -1043,6 +1043,7 @@ dependencies = [
  "nanocode-io",
  "nanocode-live",
  "nanocode-live-fold",
+ "nanocode-machine",
  "nanocode-mpp",
  "nanocode-partitions",
  "nanocode-platform",

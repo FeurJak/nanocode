@@ -33,6 +33,7 @@ mod inboxstress;
 mod live;
 mod log;
 mod longthread;
+mod machines;
 mod memory;
 mod model;
 mod mpp;
@@ -1077,6 +1078,9 @@ fn main() -> ExitCode {
     }
     if args.first().map(String::as_str) == Some("--repo-cache-disk") {
         return repocache::disk(&args[1..]);
+    }
+    if args.first().is_some_and(|flag| flag == "--machines") {
+        return machines::main(&args);
     }
     log::install();
     if let Err(error) = host::install() {
