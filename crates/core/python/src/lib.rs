@@ -474,6 +474,20 @@ impl Python {
                 if vm.stopped.borrow().is_some() {
                     return Ended::Exited(1);
                 }
+                // A module that is no package of the standard library is missing as
+                // CPython says it is (status 1), not a gap of this shell.
+                if !missing.is_empty() && missing.iter().all(|missing| missing.why == Why::Package) {
+                    let said = if module.contains('.') {
+                        format!(
+                            "/usr/bin/python3: Error while finding module specification for {module:?} (ModuleNotFoundError: {})\n",
+                            missing[0].error
+                        )
+                    } else {
+                        format!("/usr/bin/python3: No module named {module}\n")
+                    };
+                    host::print(&said);
+                    return Ended::Exited(1);
+                }
                 if !missing.is_empty() {
                     return Ended::Needs(missing);
                 }
