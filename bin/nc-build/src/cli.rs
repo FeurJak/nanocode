@@ -32,6 +32,7 @@ const USAGE: &str = "usage:
 pub fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
+        Some("check") => return crate::check::main(&args[1..]),
         Some("affected") => affected(&args[1..]),
         Some("shard") => shard(&args[1..]),
         Some("slots") => slots_command(&args[1..]),
