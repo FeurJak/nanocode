@@ -531,10 +531,21 @@ pub mod array {
     }
 
     macro_rules! impl_int_element {
-        ($($t:ty,)*) => {$(
+        ($(($t:ty, $name:expr),)*) => {$(
             impl ArrayElement for $t {
                 fn try_into_from_object(vm: &VirtualMachine, obj: PyObjectRef) -> PyResult<Self> {
-                    obj.try_index(vm)?.try_to_primitive_in_range(vm)
+                    let int = obj.try_index(vm)?;
+                    // CPython's per-typecode range messages for the C-sized codes.
+                    let name: Option<&str> = $name;
+                    if let (Some(name), Some(v)) = (name, int.as_bigint().to_i128()) {
+                        if v < i128::from(<$t>::MIN) {
+                            return Err(vm.new_overflow_error(format!("{name} is less than minimum")));
+                        }
+                        if v > i128::from(<$t>::MAX) {
+                            return Err(vm.new_overflow_error(format!("{name} is greater than maximum")));
+                        }
+                    }
+                    int.try_to_primitive_in_range(vm)
                 }
                 fn exact_search_item(obj: &PyObject, vm: &VirtualMachine) -> Option<Option<Self>> {
                     obj.class().is(vm.ctx.types.int_type).then(|| {
@@ -574,7 +585,16 @@ pub mod array {
         )*};
     }
 
-    impl_int_element!(i8, u8, i16, u16, i32, u32, i64, u64,);
+    impl_int_element!(
+        (i8, Some("signed char")),
+        (u8, Some("unsigned byte integer")),
+        (i16, Some("signed short integer")),
+        (u16, Some("unsigned short")),
+        (i32, Some("signed integer")),
+        (u32, Some("unsigned int")),
+        (i64, None),
+        (u64, None),
+    );
     impl_float_element!(
         (
             f32,
