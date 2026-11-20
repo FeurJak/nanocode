@@ -128,3 +128,9 @@ fn tail_of_nothing_prints_no_headers() {
     let src = "echo x > a; echo y > b; tail -n 0 a b; tail -c 0 -v a; tail -n +2 a b; echo $?";
     assert_eq!(sh(src), ("==> a <==\n\n==> b <==\n0\n".into(), 0));
 }
+
+#[test]
+fn grep_quiet_wins_over_count_and_file_lists() {
+    let src = "echo x > a; grep -q -L y a; echo $?; grep -q -c y a; echo $?; grep -q -l x a; echo $?";
+    assert_eq!(sh(src), ("1\n1\n0\n".into(), 0));
+}

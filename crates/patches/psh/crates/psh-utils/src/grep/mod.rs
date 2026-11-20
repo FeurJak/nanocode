@@ -463,6 +463,12 @@ pub async fn run(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
         }
     }
     cfg.discard = ctx.discards(1);
+    // -q prints nothing and wins over -c, -l and -L: the status says only whether a line
+    // matched (GNU grep).
+    if cfg.quiet {
+        cfg.list = None;
+        cfg.count = false;
+    }
     let shows_lines = !cfg.quiet && !cfg.discard && cfg.list.is_none() && !cfg.count;
     let opts = MatchOptions {
         syntax,
