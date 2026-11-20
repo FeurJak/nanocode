@@ -285,6 +285,8 @@ impl Shell {
             nested_shells: cfg.nested_shells,
             own_program: cfg.own_program.clone(),
             rng: Cell::new(0),
+            rseed: Cell::new(None),
+            last_random: Cell::new(0),
             seconds_base: Cell::new(cfg.host.now().as_nanos() as i128),
             forked: Cell::new(None),
             catch: cfg.catch.clone(),
@@ -409,6 +411,8 @@ impl Shell {
         self.before = None;
         self.core.jobs.set(0);
         self.core.rng.set(0);
+        self.core.rseed.set(None);
+        self.core.last_random.set(0);
         self.core
             .seconds_base
             .set(self.core.host.now().as_nanos() as i128);
@@ -1369,5 +1373,7 @@ mod parity_tests {
     }
 }
 
+#[cfg(test)]
+mod coverage_parity_tests;
 #[cfg(test)]
 mod fuzz_parity_tests;

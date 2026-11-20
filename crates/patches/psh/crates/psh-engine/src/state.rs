@@ -38,6 +38,10 @@ pub(crate) struct Core {
     pub own_program: Option<Vec<u8>>,
     /// `$RANDOM`'s state (shared by subshells, which bash reseeds; close enough).
     pub rng: Cell<u64>,
+    /// `$RANDOM`'s seed for bash's own generator, once seeded or first read.
+    pub rseed: Cell<Option<u32>>,
+    /// The last `$RANDOM`: bash never returns the same value twice in a row.
+    pub last_random: Cell<u32>,
     /// `$SECONDS` counts from this time: nanoseconds since the epoch; may be before it (`SECONDS=100` on a host whose
     /// clock reads the epoch).
     pub seconds_base: Cell<i128>,
@@ -575,7 +579,7 @@ impl Vp {
         };
         let now = self.core.host.now();
         let v = match d {
-            Dynamic::Random => (self.next_random() & 0x7fff).to_string(),
+            Dynamic::Random => self.bash_random().to_string(),
             Dynamic::Srandom => ((self.next_random() >> 16) as u32).to_string(),
             Dynamic::Seconds => ((now.as_nanos() as i128 - self.core.seconds_base.get()).max(0)
                 / 1_000_000_000)
@@ -703,6 +707,23 @@ impl Vp {
         out
     }
 
+    /// `$RANDOM`: bash's generator (5.1+), so a seeded sequence matches bash's.
+    fn bash_random(&self) -> u32 {
+        let mut seed = self.core.rseed.get().unwrap_or_else(|| {
+            let now = self.core.host.now();
+            (now.as_secs() as u32) ^ now.subsec_micros() ^ self.core.host.pid()
+        });
+        loop {
+            seed = park_miller(seed);
+            let rv = ((seed >> 16) ^ (seed & 0xffff)) & 0x7fff;
+            if rv != self.core.last_random.get() {
+                self.core.rseed.set(Some(seed));
+                self.core.last_random.set(rv);
+                return rv;
+            }
+        }
+    }
+
     fn next_random(&self) -> u64 {
         // xorshift64*: any well-mixed sequence will do; bash's own is not reproduced.
         let mut x = self.core.rng.get();
@@ -730,10 +751,13 @@ impl Vp {
             .and_then(|v| std::str::from_utf8(v).ok()?.trim().parse().ok())
             .unwrap_or(0);
         match var.dynamic {
-            Some(Dynamic::Random) => self
-                .core
-                .rng
-                .set((n as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1),
+            Some(Dynamic::Random) => {
+                self.core
+                    .rng
+                    .set((n as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+                self.core.rseed.set(Some(n as u32));
+                self.core.last_random.set(0);
+            }
             Some(Dynamic::BashArgv0) => {
                 if let Some(v) = var.get() {
                     self.arg0 = v.to_vec();
@@ -1184,6 +1208,14 @@ impl Vp {
             out
         }
     }
+}
+
+/// One step of bash's `intrand32`: Park–Miller's minimal standard, by Schrage's method.
+fn park_miller(last: u32) -> u32 {
+    let last = if last == 0 { 123_459_876 } else { i64::from(last) };
+    let (h, l) = (last / 127_773, last % 127_773);
+    let t = 16_807 * l - 2_836 * h;
+    (if t < 0 { t + 0x7fff_ffff } else { t }) as u32
 }
 
 /// `C:/x` or `C:\x`.

@@ -1453,7 +1453,7 @@ fn expand_text(
         Part::AnsiC => {
             let open = text.iter().position(|&b| b == b'\'').unwrap_or(1);
             let inner = &text[open + 1..text.len() - 1];
-            let mut v = psh_syntax::decode_ansi_c(inner);
+            let mut v = psh_syntax::decode_ansi_c_in(inner, vp.utf8());
             if let Some(nul) = v.iter().position(|&b| b == 0) {
                 v.truncate(nul);
             }
@@ -2189,16 +2189,30 @@ async fn param(
             let op = *op;
             let any = Pattern::new(b"?", utf8);
             match op {
-                b'Q' | b'E' | b'U' | b'L' | b'u' | b'P' => {
+                b'P' => {
+                    // Decoded, then expanded like a prompt under `promptvars`.
+                    let val = match val {
+                        Val::Unset => Val::Unset,
+                        Val::Str(s) => Val::Str(crate::builtins::set::prompt(vp, &s).await),
+                        Val::List(l, star) => {
+                            let mut out = Vec::with_capacity(l.len());
+                            for s in &l {
+                                out.push(crate::builtins::set::prompt(vp, s).await);
+                            }
+                            Val::List(out, star)
+                        }
+                    };
+                    emit_val(vp, f, val, quoted)
+                }
+                b'Q' | b'E' | b'U' | b'L' | b'u' => {
                     let val = match (&val, op) {
                         // `@Q` of nothing is nothing, not `''`.
                         (Val::Unset, _) => Val::Unset,
                         _ => map_val(val, |s| match op {
                             b'Q' => quote(s, utf8),
-                            b'E' => psh_syntax::decode_ansi_c(s),
+                            b'E' => psh_syntax::decode_ansi_c_in(s, utf8),
                             b'U' => change_case(s, CaseKind::UpperAll, &any, utf8),
                             b'L' => change_case(s, CaseKind::LowerAll, &any, utf8),
-                            b'P' => prompt(vp, s),
                             _ => change_case(s, CaseKind::UpperFirst, &any, utf8),
                         }),
                     };
@@ -2375,6 +2389,17 @@ pub(crate) fn prompt(vp: &Vp, s: &[u8]) -> Vec<u8> {
                 }
             }
             b'[' | b']' => {}
+            b'0'..=b'7' => {
+                // `\nnn`: up to three octal digits.
+                let mut n = u32::from(c - b'0');
+                let mut k = 1;
+                while k < 3 && i < s.len() && (b'0'..=b'7').contains(&s[i]) {
+                    n = n * 8 + u32::from(s[i] - b'0');
+                    i += 1;
+                    k += 1;
+                }
+                out.push((n & 0xff) as u8);
+            }
             _ => {
                 out.push(b'\\');
                 out.push(c);
