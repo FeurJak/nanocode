@@ -14,6 +14,18 @@
 //! print PHASE lines at the claim phase's start and end and PROF lines with pool wait and
 //! transaction time per operation and the client's CPU per thread). The board must be fresh: give
 //! each run its own database.
+//!
+//! Several nodes on one database, as production runs them: nodes (1) and node (0) give this
+//! process the node-th of nodes contiguous ranges of the parts board partitions. It claims only
+//! those partitions' fence rows (its own epochs, as node{node}), opens only their boards, and posts
+//! and claims tasks (tasks per node) homed there; examples/claims-pg/run.sh starts every node of an
+//! argument set with nodes=N. start_ms (a unix time in ms, 0) holds the claim phase until then so
+//! the nodes start together. race (1): race claimers of a partition walk the same tasks in the same
+//! order, so every claim races race ways and the losers' refusals count as lost, not as failures.
+//! adopt (a node index, off) with adopt_ms (unix ms): at adopt_ms, take that node's partitions as
+//! when it died (fence rows with a dead holder, then the boards from the store) and claim what it
+//! left, skipping tasks it finished or holds; a node that loses its partitions stops its claimers
+//! at the first fenced write and counts them as fenced.
 //! Prints one METRIC line: claims/s over the whole claim phase and over its first 90% (before the
 //! tail where only some partitions still have tasks), claim latency, Postgres transactions per
 //! claim, board writes per log append and log appends per Postgres commit.
@@ -29,7 +41,7 @@ use std::{
 };
 
 use nanocode_board::{
-    BoardError, ClaimId, NewTask, Op, Outcome, TaskId, Write,
+    Board, BoardError, ClaimId, NewTask, Op, Outcome, TaskId, Write,
     access::{Can, Grant, Identity, Verifier, Who},
     shards::{self, Committer},
 };
@@ -187,6 +199,12 @@ struct Options {
     pipeline: bool,
     sync_notify: bool,
     prof: bool,
+    node: u32,
+    nodes: u32,
+    race: usize,
+    start_ms: u64,
+    adopt: Option<u32>,
+    adopt_ms: u64,
 }
 
 impl Options {
@@ -214,12 +232,35 @@ impl Options {
             "pipeline",
             "sync_notify",
             "prof",
+            "node",
+            "nodes",
+            "race",
+            "start_ms",
+            "adopt",
+            "adopt_ms",
         ];
         if let Some(key) = values.keys().find(|key| !known.contains(&key.as_str())) {
             return Err(format!("unknown option {key}"));
         }
         let get = |key: &str, default: usize| values.get(key).copied().unwrap_or(default);
         let parts = u32::try_from(get("parts", 16)).map_err(|_| "parts too large")?;
+        let nodes = u32::try_from(get("nodes", 1).max(1)).map_err(|_| "nodes too large")?;
+        let node = u32::try_from(get("node", 0)).map_err(|_| "node too large")?;
+        if node >= nodes || nodes > parts {
+            return Err(format!(
+                "node={node} nodes={nodes} parts={parts}: need node < nodes <= parts"
+            ));
+        }
+        let adopt = match values.get("adopt") {
+            Some(adopt) => {
+                let adopt = u32::try_from(*adopt).map_err(|_| "adopt too large")?;
+                if adopt >= nodes || adopt == node {
+                    return Err(format!("adopt={adopt} must be another node below nodes"));
+                }
+                Some(adopt)
+            }
+            None => None,
+        };
         Ok(Self {
             url,
             parts,
@@ -234,6 +275,12 @@ impl Options {
             pipeline: get("pipeline", 1) != 0,
             sync_notify: get("sync_notify", 1) != 0,
             prof: get("prof", 0) != 0,
+            node,
+            nodes,
+            race: get("race", 1).max(1),
+            start_ms: get("start_ms", 0) as u64,
+            adopt,
+            adopt_ms: get("adopt_ms", 0) as u64,
         })
     }
 }
@@ -313,38 +360,112 @@ fn task(index: usize) -> NewTask {
     }
 }
 
+/// The board partitions node owns of parts, split into nodes contiguous ranges.
+fn range_of(node: u32, nodes: u32, parts: u32) -> std::ops::Range<u32> {
+    let share = |n: u32| u32::try_from(u64::from(n) * u64::from(parts) / u64::from(nodes)).unwrap_or(parts);
+    share(node)..share(node + 1)
+}
+
+/// The log partitions the board partitions of range land on.
+fn log_parts_of(
+    log: &PartedLog<SqlParts<Counted>>,
+    count: NonZeroU32,
+    range: std::ops::Range<u32>,
+) -> Vec<Partition> {
+    let mut parts: Vec<Partition> = range
+        .map(|part| log.partition(&shards::scope_of(SCOPE, count, Partition(part))))
+        .collect();
+    parts.sort_unstable_by_key(|part| part.0);
+    parts.dedup();
+    parts
+}
+
+/// The first tasks task indices homed in range, as the board routes a root task without labels,
+/// per partition of range. With one node these are 0..tasks.
+fn homes_of(range: std::ops::Range<u32>, count: NonZeroU32, tasks: usize) -> Vec<Vec<usize>> {
+    let mut homes: Vec<Vec<usize>> = vec![Vec::new(); range.len()];
+    let (mut found, mut index) = (0, 0);
+    while found < tasks {
+        let home = partition_of(format!("t{index}").as_bytes(), count).0;
+        if range.contains(&home) {
+            homes[(home - range.start) as usize].push(index);
+            found += 1;
+        }
+        index += 1;
+    }
+    homes
+}
+
+/// The tasks claimer rank of a partition's peers walks: with race 1 a disjoint share; with race
+/// K, groups of K claimers share one list in the same order, so each claim races K ways.
+fn share_of(home: &[usize], rank: usize, peers: usize, race: usize) -> Vec<usize> {
+    let groups = (peers / race).max(1);
+    home.iter()
+        .copied()
+        .skip(rank % groups)
+        .step_by(groups)
+        .collect()
+}
+
+const fn fenced(error: &BoardError) -> bool {
+    matches!(
+        error,
+        BoardError::Store(StoreError::Fenced)
+            | BoardError::Unsettled {
+                error: StoreError::Fenced,
+                ..
+            }
+    )
+}
+
 /// What one claimer measured.
 #[derive(Default)]
 struct Claimed {
     latencies: Vec<u64>,
     done_at: Vec<u64>,
     refused: u64,
+    /// Claims another claimer won (race) or a dead node left finished or held (adopt).
+    lost: u64,
+    /// Claimers stopped because this node lost the partition's fence.
+    fenced: u64,
 }
 
-async fn finish(committer: Committer, by: String, index: usize, claim: ClaimId) -> bool {
+impl Claimed {
+    fn merge(&mut self, other: Self) {
+        self.latencies.extend(other.latencies);
+        self.done_at.extend(other.done_at);
+        self.refused += other.refused;
+        self.lost += other.lost;
+        self.fenced += other.fenced;
+    }
+}
+
+async fn finish(
+    committer: Committer,
+    by: String,
+    index: usize,
+    claim: ClaimId,
+) -> Result<(), BoardError> {
     let finish = Op::Finish {
         task: TaskId(format!("t{index}")),
         claim,
         outcome: Outcome::Done(String::new()),
     };
-    match committer
+    committer
         .submit(write(&by, format!("finish:{index}"), finish))
         .await
-    {
-        Ok(_) => true,
-        Err(error) => {
-            note(&error);
-            false
-        }
-    }
+        .map(drop)
 }
 
+/// One claimer's loop. tolerant: a rejected claim is lost to another claimer (race, adopt)
+/// rather than a failure.
 async fn claimer(
     committer: Committer,
     by: String,
     tasks: Vec<usize>,
     started: Instant,
     pipeline: bool,
+    tolerant: bool,
 ) -> Claimed {
     let mut claimed = Claimed::default();
     let mut finishing = None;
@@ -361,6 +482,14 @@ async fn claimer(
             .await
         {
             Ok(applied) => applied,
+            Err(error) if fenced(&error) => {
+                claimed.fenced += 1;
+                break;
+            }
+            Err(BoardError::Rejected(_)) if tolerant => {
+                claimed.lost += 1;
+                continue;
+            }
             Err(error) => {
                 note(&error);
                 claimed.refused += 1;
@@ -368,8 +497,10 @@ async fn claimer(
             }
         };
         claimed.latencies.push(micros(began));
-        if let Some(previous) = finishing.take() {
-            claimed.settle(previous, started).await;
+        if let Some(previous) = finishing.take()
+            && !claimed.settle(previous, started).await
+        {
+            break;
         }
         let finish = finish(
             committer.clone(),
@@ -379,10 +510,11 @@ async fn claimer(
         );
         if pipeline {
             finishing = Some(nanocode_executor::spawn(finish));
-        } else {
-            claimed
-                .settle(nanocode_executor::spawn(finish), started)
-                .await;
+        } else if !claimed
+            .settle(nanocode_executor::spawn(finish), started)
+            .await
+        {
+            break;
         }
     }
     if let Some(previous) = finishing {
@@ -392,11 +524,26 @@ async fn claimer(
 }
 
 impl Claimed {
-    async fn settle(&mut self, finish: nanocode_executor::JoinHandle<bool>, started: Instant) {
-        if !finish.await.unwrap_or(false) {
-            self.refused += 1;
+    /// Waits for a finish; false when the node lost the partition and the claimer should stop.
+    async fn settle(
+        &mut self,
+        finish: nanocode_executor::JoinHandle<Result<(), BoardError>>,
+        started: Instant,
+    ) -> bool {
+        match finish.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) if fenced(&error) => {
+                self.fenced += 1;
+                return false;
+            }
+            Ok(Err(error)) => {
+                note(&error);
+                self.refused += 1;
+            }
+            Err(_) => self.refused += 1,
         }
         self.done_at.push(micros(started));
+        true
     }
 }
 
@@ -405,10 +552,106 @@ fn fail(what: &str) -> std::process::ExitCode {
     std::process::ExitCode::FAILURE
 }
 
+/// Opens the boards of range and starts a committer on each.
+async fn open_boards(
+    host: &Arc<dyn LogHost>,
+    count: NonZeroU32,
+    range: std::ops::Range<u32>,
+    identity: &Identity,
+    batch: usize,
+) -> Result<(Vec<Committer>, Vec<nanocode_executor::JoinHandle<shards::Stats>>), BoardError> {
+    let mut committers = Vec::new();
+    let mut drives = Vec::new();
+    for part in range {
+        let scope = shards::scope_of(SCOPE, count, Partition(part));
+        let board = Board::open(Arc::clone(host), &scope, identity.clone()).await?;
+        let (committer, drive) = Committer::start(board, batch);
+        committers.push(committer);
+        drives.push(nanocode_executor::spawn(async move { drive.await.1 }));
+    }
+    Ok((committers, drives))
+}
+
+/// What taking a dead node's partitions cost and claimed.
+struct Adopted {
+    claimed: Claimed,
+    takeover_ms: f64,
+    seconds: f64,
+    stats: Vec<shards::Stats>,
+}
+
+/// Waits until adopt_ms, takes victim's partitions as from a dead node (fence rows first, so the
+/// victim's later appends are fenced, then the boards from the store), and claims what it left.
+async fn adopt(
+    log: Arc<PartedLog<SqlParts<Counted>>>,
+    options: Arc<Options>,
+    count: NonZeroU32,
+    victim: u32,
+    identity: Identity,
+) -> Result<Adopted, String> {
+    let wait = options.adopt_ms.saturating_sub(now_ms());
+    nanocode_executor::sleep(std::time::Duration::from_millis(wait)).await;
+    let began = Instant::now();
+    let range = range_of(victim, options.nodes, options.parts);
+    for part in log_parts_of(&log, count, range.clone()) {
+        log.claim(part, now_ms(), u64::MAX / 4, false)
+            .await
+            .map_err(|error| format!("adopt fence {}: {error}", part.0))?;
+    }
+    let host: Arc<dyn LogHost> = Arc::clone(&log) as Arc<dyn LogHost>;
+    let (committers, drives) = open_boards(&host, count, range.clone(), &identity, options.batch)
+        .await
+        .map_err(|error| format!("adopt open: {error:?}"))?;
+    let takeover_ms = began.elapsed().as_secs_f64() * 1e3;
+    let homes = homes_of(range.clone(), count, options.tasks);
+    let mine = range_of(options.node, options.nodes, options.parts).len().max(1);
+    let per_part = (options.claimers / mine).max(1);
+    let race = options.race;
+    let started = Instant::now();
+    let handles: Vec<_> = homes
+        .iter()
+        .enumerate()
+        .flat_map(|(local, home)| {
+            (0..per_part).map(move |rank| (local, share_of(home, rank, per_part, race)))
+        })
+        .enumerate()
+        .map(|(index, (local, tasks))| {
+            nanocode_executor::spawn(claimer(
+                committers[local].clone(),
+                format!("agent:n{}a{index}", options.node),
+                tasks,
+                started,
+                options.pipeline,
+                true,
+            ))
+        })
+        .collect();
+    let mut claimed = Claimed::default();
+    for handle in handles {
+        if let Ok(one) = handle.await {
+            claimed.merge(one);
+        }
+    }
+    let seconds = started.elapsed().as_secs_f64();
+    drop(committers);
+    let mut stats = Vec::new();
+    for drive in drives {
+        if let Ok(one) = drive.await {
+            stats.push(one);
+        }
+    }
+    Ok(Adopted {
+        claimed,
+        takeover_ms,
+        seconds,
+        stats,
+    })
+}
+
 #[allow(clippy::too_many_lines)]
 fn main() -> std::process::ExitCode {
     let options = match Options::parse() {
-        Ok(options) => options,
+        Ok(options) => Arc::new(options),
         Err(error) => return fail(&error),
     };
     let (Some(count), Some(log_count)) = (
@@ -439,13 +682,35 @@ fn main() -> std::process::ExitCode {
     });
     let store = Arc::new(SqlParts::new(Arc::clone(&sql)));
     runtime.spawn(store.notifier());
+    let name = if options.nodes == 1 {
+        "bench".to_owned()
+    } else {
+        format!("node{}", options.node)
+    };
     let log = Arc::new(
-        PartedLog::fenced(Arc::clone(&store), log_count, "bench").with_max_rows(options.max_rows),
+        PartedLog::fenced(Arc::clone(&store), log_count, &name).with_max_rows(options.max_rows),
     );
+    let range = range_of(options.node, options.nodes, options.parts);
+    // Each node fences only the log partitions its boards land on, which must be its own.
+    let fences: Vec<Partition> = if options.nodes == 1 {
+        (0..options.log_parts).map(Partition).collect()
+    } else {
+        let mine = log_parts_of(&log, count, range.clone());
+        for other in (0..options.nodes).filter(|other| *other != options.node) {
+            let theirs = log_parts_of(&log, count, range_of(other, options.nodes, options.parts));
+            if let Some(shared) = mine.iter().find(|part| theirs.contains(part)) {
+                return fail(&format!(
+                    "log partition {} holds boards of node {} and node {other}: use log_parts = parts",
+                    shared.0, options.node
+                ));
+            }
+        }
+        mine
+    };
     let setup = runtime.block_on(async {
         log.prepare().await?;
-        for part in 0..options.log_parts {
-            log.claim(Partition(part), 0, u64::MAX / 4, false).await?;
+        for part in &fences {
+            log.claim(*part, 0, u64::MAX / 4, false).await?;
         }
         Ok::<(), StoreError>(())
     });
@@ -453,40 +718,43 @@ fn main() -> std::process::ExitCode {
         return fail(&format!("log setup: {error}"));
     }
     let host: Arc<dyn LogHost> = Arc::clone(&log) as Arc<dyn LogHost>;
-    let identity = match Identity::verify(&Tokens, "token:agent:node0") {
+    let identity = match Identity::verify(&Tokens, &format!("token:agent:node{}", options.node)) {
         Ok(identity) => identity,
         Err(error) => return fail(&format!("identity: {error:?}")),
     };
-    let boards = match runtime.block_on(shards::open(&host, SCOPE, count, &identity)) {
-        Ok(boards) => boards,
+    let opened = runtime.block_on(open_boards(
+        &host,
+        count,
+        range.clone(),
+        &identity,
+        options.batch,
+    ));
+    let (committers, drives) = match opened {
+        Ok(opened) => opened,
         Err(error) => return fail(&format!("open board: {error:?}")),
     };
-    let mut committers = Vec::new();
-    let mut drives = Vec::new();
-    for board in boards {
-        let (committer, drive) = Committer::start(board, options.batch);
-        committers.push(committer);
-        drives.push(runtime.spawn(async move { drive.await.1 }));
-    }
 
-    // Every task's home partition, as the board routes a root task without labels.
-    let mut homes: Vec<Vec<usize>> = vec![Vec::new(); options.parts as usize];
-    for index in 0..options.tasks {
-        homes[partition_of(format!("t{index}").as_bytes(), count).0 as usize].push(index);
-    }
+    // This node's tasks per partition of its range.
+    let homes = homes_of(range.clone(), count, options.tasks);
     // Post every task, many posts in flight so they group-commit.
     let posted = runtime.block_on(async {
         charter(&committers).await?;
-        let posters = 256.min(options.tasks.max(1));
+        let all: Arc<Vec<(usize, usize)>> = Arc::new(
+            homes
+                .iter()
+                .enumerate()
+                .flat_map(|(local, home)| home.iter().map(move |index| (local, *index)))
+                .collect(),
+        );
+        let posters = 256.min(all.len().max(1));
         let handles: Vec<_> = (0..posters)
             .map(|poster| {
                 let committers = committers.clone();
-                let tasks = options.tasks;
+                let all = Arc::clone(&all);
                 runtime.spawn(async move {
-                    for index in (poster..tasks).step_by(posters) {
-                        let home = partition_of(format!("t{index}").as_bytes(), count);
+                    for &(local, index) in all.iter().skip(poster).step_by(posters) {
                         let post = Op::Post { task: task(index) };
-                        committers[home.0 as usize]
+                        committers[local]
                             .submit(write(OWNER, format!("post:t{index}"), post))
                             .await?;
                     }
@@ -505,7 +773,27 @@ fn main() -> std::process::ExitCode {
         return fail(&format!("posting: {error:?}"));
     }
 
-    // Claimer i works partition i % parts, splitting its tasks with that partition's other
+    let adopting = options.adopt.map(|victim| {
+        runtime.spawn(adopt(
+            Arc::clone(&log),
+            Arc::clone(&options),
+            count,
+            victim,
+            identity.clone(),
+        ))
+    });
+
+    // Hold the claim phase until start_ms, so several nodes start together.
+    let late_ms = if options.start_ms == 0 {
+        0
+    } else {
+        now_ms().saturating_sub(options.start_ms)
+    };
+    if options.start_ms > now_ms() {
+        std::thread::sleep(std::time::Duration::from_millis(options.start_ms - now_ms()));
+    }
+
+    // Claimer i works local partition i % parts, splitting its tasks with that partition's other
     // claimers: claim a task, finish it, take the next.
     let trips_before = sql.trips.load(Ordering::Relaxed);
     let log_before = log.stats();
@@ -516,24 +804,27 @@ fn main() -> std::process::ExitCode {
     } else {
         BTreeMap::new()
     };
+    let start_unix_ms = now_ms();
     let started = Instant::now();
-    let parts = options.parts as usize;
+    let parts = range.len();
+    let tolerant = options.race > 1;
     let handles: Vec<_> = (0..options.claimers)
         .map(|index| {
             let part = index % parts;
             let peers = options.claimers / parts + usize::from(part < options.claimers % parts);
-            let mine: Vec<usize> = homes[part]
-                .iter()
-                .copied()
-                .skip(index / parts)
-                .step_by(peers.max(1))
-                .collect();
+            let mine = share_of(&homes[part], index / parts, peers, options.race);
+            let by = if options.nodes == 1 {
+                format!("agent:w{index}")
+            } else {
+                format!("agent:n{}w{index}", options.node)
+            };
             runtime.spawn(claimer(
                 committers[part].clone(),
-                format!("agent:w{index}"),
+                by,
                 mine,
                 started,
                 options.pipeline,
+                tolerant,
             ))
         })
         .collect();
@@ -541,13 +832,12 @@ fn main() -> std::process::ExitCode {
     runtime.block_on(async {
         for handle in handles {
             if let Ok(claimed) = handle.await {
-                all.latencies.extend(claimed.latencies);
-                all.done_at.extend(claimed.done_at);
-                all.refused += claimed.refused;
+                all.merge(claimed);
             }
         }
     });
     let elapsed = started.elapsed().as_secs_f64();
+    let end_unix_ms = now_ms();
     if options.prof {
         println!("PHASE claim_end unix_ms={}", now_ms());
         print_profile(options.tasks as f64, elapsed, &ticks_before);
@@ -564,10 +854,18 @@ fn main() -> std::process::ExitCode {
             }
         }
     });
+    let adopted = adopting.map(|handle| {
+        runtime
+            .block_on(handle)
+            .map_err(|error| format!("adopt task: {error}"))
+            .and_then(|adopted| adopted)
+    });
     let Claimed {
         mut latencies,
         mut done_at,
         refused,
+        lost,
+        fenced,
     } = all;
     latencies.sort_unstable();
     done_at.sort_unstable();
@@ -579,7 +877,7 @@ fn main() -> std::process::ExitCode {
     let commits = stats.commits - log_before.commits;
     let appends = stats.appends - log_before.appends;
     println!(
-        "METRIC parts={} log_parts={} claimers={} tasks={} batch={} pipeline={} claims_per_s={:.0} steady_per_s={steady:.0} p50_ms={:.2} p99_ms={:.2} max_ms={:.2} pg_txns_per_claim={:.2} writes_per_append={:.2} appends_per_commit={:.2} refused={refused} seconds={elapsed:.2} first_error={:?}",
+        "METRIC parts={} log_parts={} claimers={} tasks={} batch={} pipeline={} claims_per_s={:.0} steady_per_s={steady:.0} p50_ms={:.2} p99_ms={:.2} max_ms={:.2} pg_txns_per_claim={:.2} writes_per_append={:.2} appends_per_commit={:.2} refused={refused} seconds={elapsed:.2} first_error={:?} node={} nodes={} race={} claims={} trips={trips} lost={lost} fenced={fenced} late_ms={late_ms} start_unix_ms={start_unix_ms} end_unix_ms={end_unix_ms}",
         options.parts,
         options.log_parts,
         options.claimers,
@@ -597,9 +895,45 @@ fn main() -> std::process::ExitCode {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take(),
+        options.node,
+        options.nodes,
+        options.race,
+        latencies.len(),
     );
-    if refused > 0 || latencies.len() != options.tasks {
-        return std::process::ExitCode::FAILURE;
+    let mut ok = refused == 0 && (fenced > 0 || latencies.len() == options.tasks);
+    if let Some(adopted) = adopted {
+        match adopted {
+            Ok(Adopted {
+                claimed,
+                takeover_ms,
+                seconds,
+                stats,
+            }) => {
+                let mut latencies = claimed.latencies;
+                latencies.sort_unstable();
+                println!(
+                    "ADOPT node={} from={} takeover_ms={takeover_ms:.1} claims={} claims_per_s={:.0} p99_ms={:.2} lost={} refused={} fenced={} seconds={seconds:.2} appends={}",
+                    options.node,
+                    options.adopt.unwrap_or_default(),
+                    latencies.len(),
+                    latencies.len() as f64 / seconds.max(1e-9),
+                    percentile(&latencies, 0.99),
+                    claimed.lost,
+                    claimed.refused,
+                    claimed.fenced,
+                    stats.iter().map(|one| one.appends).sum::<u64>(),
+                );
+                ok &= claimed.refused == 0 && claimed.fenced == 0;
+            }
+            Err(error) => {
+                eprintln!("claims-pg: {error}");
+                ok = false;
+            }
+        }
     }
-    std::process::ExitCode::SUCCESS
+    if ok {
+        std::process::ExitCode::SUCCESS
+    } else {
+        std::process::ExitCode::FAILURE
+    }
 }
