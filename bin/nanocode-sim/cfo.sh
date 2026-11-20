@@ -175,6 +175,10 @@ default_table='
 1 canary_runtime_kv_power_loss_drops_acceptance canary:100 --scenario runtime --store kv --mutation power_loss_drops_acceptance
 1 canary_runtime_kv_record_insert_drops canary:100 --scenario runtime --store kv --mutation record_insert_drops
 1 canary_capture_redact_then_trim canary:4000 --scenario capture --mutation redact_then_trim
+8 cell_calls pass --scenario cell_calls
+2 cell_calls_twice pass --scenario cell_calls --twice
+1 canary_cell_calls_cross_results canary:8 --scenario cell_calls --mutation cross_results
+1 canary_cell_calls_root_recovery_unbound canary:8 --scenario cell_calls --mutation root_recovery_unbound
 '
 default_known='
 '
