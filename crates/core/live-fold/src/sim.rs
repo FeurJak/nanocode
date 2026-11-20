@@ -13,6 +13,7 @@ pub enum Mutation {
     SnapshotAtHead,
     OutlineLeaks,
     EncodeEveryFrame,
+    RebaseDropsTouched,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

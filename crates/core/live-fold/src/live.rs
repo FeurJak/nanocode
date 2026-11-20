@@ -1,4 +1,5 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::mem;
 use std::sync::{Arc, OnceLock};
 
 use crate::seal::{Encoded, Seal, outline_ops};
@@ -17,14 +18,20 @@ pub trait View {
 #[derive(Debug)]
 pub struct Entry {
     diff: Diff,
+    unchanged: Vec<Op>,
     full: OnceLock<Arc<Encoded>>,
     outline: OnceLock<Arc<Encoded>>,
 }
 
 impl Entry {
     pub const fn new(diff: Diff) -> Self {
+        Self::folded(diff, Vec::new())
+    }
+
+    pub const fn folded(diff: Diff, unchanged: Vec<Op>) -> Self {
         Self {
             diff,
+            unchanged,
             full: OnceLock::new(),
             outline: OnceLock::new(),
         }
@@ -32,6 +39,23 @@ impl Entry {
 
     pub const fn diff(&self) -> &Diff {
         &self.diff
+    }
+
+    pub fn unchanged(&self) -> &[Op] {
+        &self.unchanged
+    }
+
+    pub fn rebase(&self, from: Cursor) -> Self {
+        let mut ops = self.diff.ops.clone();
+        if !mutated(Mutation::RebaseDropsTouched) {
+            ops.extend(self.unchanged.iter().cloned());
+        }
+        Self::new(Diff {
+            view: self.diff.view.clone(),
+            from,
+            to: self.diff.to,
+            ops,
+        })
     }
 
     pub fn frame<S: Seal + ?Sized>(&self, access: Access, seal: &S) -> Option<Arc<Encoded>> {
@@ -149,10 +173,7 @@ impl Ring {
         }
         match diffs.first_mut() {
             Some(first) if first.diff.from != *cursor && !mutated(Mutation::RebaseSkipped) => {
-                *first = Arc::new(Entry::new(Diff {
-                    from: *cursor,
-                    ..first.diff.clone()
-                }));
+                *first = Arc::new(first.rebase(*cursor));
             }
             Some(_) => {}
             None => diffs.push(Arc::new(Entry::new(Diff {
@@ -174,6 +195,7 @@ pub struct Live<V> {
     head: Cursor,
     ring: Ring,
     scratch: Vec<Op>,
+    unchanged: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl<V: View> Live<V> {
@@ -187,6 +209,7 @@ impl<V: View> Live<V> {
             head: at,
             ring,
             scratch: Vec::new(),
+            unchanged: BTreeMap::new(),
         }
     }
 
@@ -223,14 +246,43 @@ impl<V: View> Live<V> {
         if tip == self.head {
             return None;
         }
-        let entry = Arc::new(Entry::new(Diff {
-            view: self.key.clone(),
-            from: tip,
-            to: self.head,
-            ops: Vec::new(),
-        }));
+        let unchanged = self.unchanged(&[]);
+        let entry = Arc::new(Entry::folded(
+            Diff {
+                view: self.key.clone(),
+                from: tip,
+                to: self.head,
+                ops: Vec::new(),
+            },
+            unchanged,
+        ));
         self.ring.push(Arc::clone(&entry));
         Some(entry)
+    }
+
+    fn unchanged(&mut self, ops: &[Op]) -> Vec<Op> {
+        for op in ops {
+            if let Some(keys) = self.unchanged.get_mut(op.table()) {
+                keys.remove(op.key());
+            }
+        }
+        let mut unchanged = Vec::new();
+        for (table, keys) in mem::take(&mut self.unchanged) {
+            for key in keys {
+                unchanged.push(match self.table.get(&table, &key) {
+                    Some(value) => Op::Upsert {
+                        table: table.clone(),
+                        key,
+                        value: value.clone(),
+                    },
+                    None => Op::Delete {
+                        table: table.clone(),
+                        key,
+                    },
+                });
+            }
+        }
+        unchanged
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -284,16 +336,20 @@ impl<V: View> Batch<'_, V> {
 
     pub fn finish(self) -> Option<Arc<Entry>> {
         let live = self.live;
-        let ops = live.table.settle();
+        let ops = live.table.settle(&mut live.unchanged);
         if ops.is_empty() {
             return None;
         }
-        let entry = Arc::new(Entry::new(Diff {
-            view: live.key.clone(),
-            from: live.tip(),
-            to: live.head,
-            ops,
-        }));
+        let unchanged = live.unchanged(&ops);
+        let entry = Arc::new(Entry::folded(
+            Diff {
+                view: live.key.clone(),
+                from: live.tip(),
+                to: live.head,
+                ops,
+            },
+            unchanged,
+        ));
         live.ring.push(Arc::clone(&entry));
         Some(entry)
     }

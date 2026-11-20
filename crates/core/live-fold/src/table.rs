@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
 
 use serde_json::Value;
@@ -95,16 +95,19 @@ impl Table {
         !self.start.is_empty()
     }
 
-    pub fn settle(&mut self) -> Vec<Op> {
+    pub fn settle(&mut self, unchanged: &mut BTreeMap<String, BTreeSet<String>>) -> Vec<Op> {
         let mut ops = Vec::new();
         for ((table, key), before) in mem::take(&mut self.start) {
             let Some(now) = self.get(&table, &key) else {
-                if before.is_some() && !mutated(Mutation::SettleDropsDeletes) {
+                if before.is_none() {
+                    unchanged.entry(table).or_default().insert(key);
+                } else if !mutated(Mutation::SettleDropsDeletes) {
                     ops.push(Op::Delete { table, key });
                 }
                 continue;
             };
             if before.as_ref() == Some(now) {
+                unchanged.entry(table).or_default().insert(key);
                 continue;
             }
             let value = match before {
