@@ -272,8 +272,8 @@ pub async fn load_sequence<T: DeserializeOwned>(
 ) -> Result<Vec<T>> {
     load_sequence_payloads(reader, sequence, keys)
         .await?
-        .iter()
-        .map(EncodedPayload::decode)
+        .into_iter()
+        .map(|payload| payload.decode())
         .collect()
 }
 
