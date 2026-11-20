@@ -16,7 +16,7 @@ pub(super) fn resolve(kind: i32, locale: &str, raw: &Spec) -> Result<Spec, Fault
         3 => {
             // ICU's plural data is per language (pt-PT has its own): the region is dropped.
             let mut out2 = Spec::default();
-            let supported = super::LANGS.contains(&lang);
+            let supported = super::NUM_LANGS.contains(&lang);
             out2.put(
                 "locale",
                 if !supported || locale == "pt-PT" {
@@ -59,7 +59,7 @@ pub(super) fn resolve(kind: i32, locale: &str, raw: &Spec) -> Result<Spec, Fault
             let nu = raw.choose("numeric", &["always", "auto"], "always", n)?;
             out.put("style", st);
             out.put("numeric", nu);
-            out.put("numberingSystem", "latn");
+            out.put("numberingSystem", if number::arab_digits(locale) { "arab" } else { "latn" });
         }
         _ => {
             let g = raw.choose(
@@ -149,9 +149,7 @@ pub(super) fn format(
             };
             let ty = index(&["conjunction", "disjunction", "unit"], spec.get("type"));
             let st = index(&["long", "short", "narrow"], spec.get("style"));
-            let row = LISTS
-                .iter()
-                .find(|r| r.0 == lang && r.1 == ty && r.2 == st)
+            let row = number::find_row(LISTS, locale, |r, k| r.0 == k && r.1 == ty && r.2 == st)
                 .or_else(|| LISTS.iter().find(|r| r.0 == "en" && r.1 == ty && r.2 == st))
                 .map_or([", "; 4], |r| r.3);
             // Spanish: y is e before an i sound (i…, hi… but not hia…, hie…), o is u before an
@@ -216,10 +214,11 @@ pub(super) fn format(
             let st = index(&["long", "short", "narrow"], spec.get("style"));
             let st_l = st;
             let neg = v < 0.0 || (v == 0.0 && v.is_sign_negative());
+            let auto_key = number::table_key(locale, "relative_auto", |k| RELATIVE_AUTO.iter().any(|r| r.0 == k));
             if spec.get("numeric") == Some("auto")
                 && v == (v as i64) as f64
                 && let Some(r) = RELATIVE_AUTO.iter().find(|r| {
-                    r.0 == lang && usize::from(r.1) == ui && r.2 == st_l && f64::from(r.3) == v
+                    r.0 == auto_key && usize::from(r.1) == ui && r.2 == st_l && f64::from(r.3) == v
                 })
             {
                 out.push("literal", r.4);
@@ -248,31 +247,25 @@ pub(super) fn format(
                 }
             };
             let dir = u8::from(neg);
-            let pick = |l: &str| {
-                RELATIVE
-                    .iter()
-                    .find(|r| {
-                        r.0 == l
-                            && usize::from(r.1) == ui
-                            && r.2 == st_l
-                            && r.3 == dir
-                            && r.4 == plural
-                    })
-                    .or_else(|| {
-                        RELATIVE.iter().find(|r| {
-                            r.0 == l
-                                && usize::from(r.1) == ui
-                                && r.2 == st_l
-                                && r.3 == dir
-                                && r.4 == "other"
-                        })
-                    })
+            let pick = |l: &str, cat: &str| {
+                number::find_row(RELATIVE, l, |r, k| {
+                    r.0 == k && usize::from(r.1) == ui && r.2 == st_l && r.3 == dir && r.4 == cat
+                })
             };
-            let pat = pick(lang).or_else(|| pick("en")).map_or("{0}", |r| r.5);
-            let (pre, post) = pat.split_once("{0}").unwrap_or((pat, ""));
-            out.push("literal", pre);
-            out.extend(&f.parts);
-            out.push("literal", post);
+            let pat = pick(locale, plural)
+                .or_else(|| pick(locale, "other"))
+                .or_else(|| pick("en", plural))
+                .or_else(|| pick("en", "other"))
+                .map_or("{0}", |r| r.5);
+            match pat.split_once("{0}") {
+                Some((pre, post)) => {
+                    out.push("literal", pre);
+                    out.extend(&f.parts);
+                    out.push("literal", post);
+                }
+                // ar names one and two without the number (قبل يوم).
+                None => out.push("literal", pat),
+            }
         }
         _ => return type_err("unsupported Intl kind"),
     }

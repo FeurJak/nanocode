@@ -161,20 +161,68 @@ impl Parts {
     }
 }
 
-pub(crate) fn plural_en_like(lang: &str, i: u64, v: u32, f: u64, ordinal: bool) -> &'static str {
+/// i, v and f are CLDR's operands, n the whole value as ICU holds it (a double).
+pub(crate) fn plural_en_like(lang: &str, i: u64, v: u32, f: u64, n: f64, ordinal: bool) -> &'static str {
+    // n is the whole value: an integer when its visible fraction is zero.
+    let n_int = f == 0;
     if ordinal {
-        if lang != "en" || v != 0 {
-            return if lang == "fr" && v == 0 && i == 1 { "one" } else { "other" };
+        if !n_int {
+            return "other";
         }
-        return match (i % 10, i % 100) {
-            (1, m) if m != 11 => "one",
-            (2, m) if m != 12 => "two",
-            (3, m) if m != 13 => "few",
+        return match lang {
+            "fr" | "vi" => if i == 1 { "one" } else { "other" },
+            "it" => if matches!(i, 8 | 11 | 80 | 800) { "many" } else { "other" },
+            "hi" => match i {
+                1 => "one",
+                2 | 3 => "two",
+                4 => "few",
+                6 => "many",
+                _ => "other",
+            },
+            "en" if v == 0 => en_ordinal(i),
             _ => "other",
         };
     }
     match lang {
-        "ja" | "zh" | "ko" => "other",
+        "ja" | "zh" | "ko" | "id" | "vi" => "other",
+        "ar" if n_int => match n {
+            0.0 => "zero",
+            1.0 => "one",
+            2.0 => "two",
+            _ if (3.0..=10.0).contains(&(n % 100.0)) => "few",
+            _ if (11.0..=99.0).contains(&(n % 100.0)) => "many",
+            _ => "other",
+        },
+        "ar" => "other",
+        "hi" => if i == 0 || (i == 1 && n_int) { "one" } else { "other" },
+        "tr" => if i == 1 && n_int { "one" } else { "other" },
+        "pl" => {
+            if v != 0 {
+                return "other";
+            }
+            match (i, i % 10, i % 100) {
+                (1, _, _) => "one",
+                (_, 2..=4, m) if !(12..=14).contains(&m) => "few",
+                _ => "many",
+            }
+        }
+        _ => plural_other_langs(lang, i, v, f),
+    }
+}
+
+fn en_ordinal(i: u64) -> &'static str {
+    {
+        match (i % 10, i % 100) {
+            (1, m) if m != 11 => "one",
+            (2, m) if m != 12 => "two",
+            (3, m) if m != 13 => "few",
+            _ => "other",
+        }
+    }
+}
+
+fn plural_other_langs(lang: &str, i: u64, v: u32, f: u64) -> &'static str {
+    match lang {
         "fr" | "pt" => if i <= 1 { "one" } else if v == 0 && i != 0 && i.is_multiple_of(1_000_000) { "many" } else { "other" },
         "es" | "it" => if i == 1 && (v == 0 || (lang == "es" && f == 0)) { "one" } else if v == 0 && i != 0 && i.is_multiple_of(1_000_000) { "many" } else { "other" },
         "ru" => {
@@ -196,14 +244,17 @@ pub(crate) fn plural_categories(lang: &str, ordinal: bool) -> &'static str {
     if ordinal {
         return match lang {
             "en" => "few,one,two,other",
-            "fr" => "one,other",
+            "fr" | "vi" => "one,other",
+            "it" => "many,other",
+            "hi" => "few,many,one,two,other",
             _ => "other",
         };
     }
     match lang {
-        "ja" | "zh" | "ko" => "other",
+        "ja" | "zh" | "ko" | "id" | "vi" => "other",
         "fr" | "pt" | "es" | "it" => "many,one,other",
-        "ru" => "few,many,one,other",
+        "ru" | "pl" => "few,many,one,other",
+        "ar" => "few,many,one,two,zero,other",
         _ => "one,other",
     }
 }
@@ -215,6 +266,9 @@ const DISPLAY_NAMES: i32 = 17;
 const SEGMENTER: i32 = 18;
 
 pub(crate) const LANGS: [&str; 11] = ["en", "de", "fr", "es", "it", "pt", "nl", "ja", "zh", "ko", "ru"];
+
+/// The languages NumberFormat, PluralRules, ListFormat and RelativeTimeFormat have data for.
+pub(crate) const NUM_LANGS: [&str; 17] = ["en", "de", "fr", "es", "it", "pt", "nl", "ja", "zh", "ko", "ru", "pl", "tr", "ar", "hi", "id", "vi"];
 
 fn canonical_list(tags: &str) -> Result<Vec<String>, Fault> {
     let mut out: Vec<String> = Vec::new();
@@ -286,7 +340,12 @@ pub(crate) fn intrinsic(heap: &mut Heap, k: u16, a: [Value; 5]) -> Result<Option
             }
             let tags = canonical_list(&str_arg(heap, a[1]).unwrap_or_default())?;
             let collator_langs: Vec<&str> = LANGS.iter().chain(collate::TAILORED.iter()).copied().collect();
-            let locale = resolve_locale(&tags, if kind == 1 { &date::LANGS } else if kind == 2 { &collator_langs } else { &LANGS });
+            let locale = resolve_locale(&tags, match kind {
+                1 => &date::LANGS[..],
+                2 => &collator_langs[..],
+                0 | 3 | 4 | 5 => &NUM_LANGS[..],
+                _ => &LANGS[..],
+            });
             let raw = Spec::parse(&raw);
             // Every constructor reads localeMatcher first and accepts only its two values.
             let ctor = match kind {
@@ -403,7 +462,7 @@ pub(crate) fn intrinsic(heap: &mut Heap, k: u16, a: [Value; 5]) -> Result<Option
                 s.push_str(t);
             }
             if a[1] == Value::TRUE {
-                let supported: Vec<&String> = tags.iter().filter(|t| LANGS.contains(&t.split('-').next().unwrap_or(""))).collect();
+                let supported: Vec<&String> = tags.iter().filter(|t| NUM_LANGS.contains(&t.split('-').next().unwrap_or(""))).collect();
                 s = supported.iter().map(|t| t.as_str()).collect::<Vec<_>>().join("\n");
             }
             string_value(heap, &s)?

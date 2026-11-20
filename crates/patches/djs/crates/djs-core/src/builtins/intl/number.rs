@@ -31,8 +31,69 @@ pub(crate) struct Currency {
     pub digits: u8,
 }
 
+/// The regional data a locale reads ahead of its language's: the generated tables keep a
+/// regional row only where it differs from its language's.
+pub(super) fn data_key(locale: &str) -> Option<&'static str> {
+    let mut it = locale.split('-');
+    let lang = it.next()?;
+    let rest: Vec<&str> = it.take_while(|s| s.len() != 1).collect();
+    let has = |s: &str| rest.contains(&s);
+    Some(match lang {
+        "en" if has("GB") => "en-GB",
+        "en" if has("IN") => "en-IN",
+        "es" if has("MX") => "es-MX",
+        "fr" if has("CA") => "fr-CA",
+        "zh" if has("TW") || (has("Hant") && !has("HK") && !has("MO")) => "zh-Hant",
+        _ => return None,
+    })
+}
+
+/// The keys a locale's rows are looked up by: its regional data's, then its language's.
+pub(super) fn keys(locale: &str) -> [&str; 2] {
+    let lang = locale.split('-').next().unwrap_or("en");
+    [data_key(locale).unwrap_or(lang), lang]
+}
+
+/// A locale's row: its regional one, else its language's.
+pub(super) fn find_row<'a, T>(rows: &'a [T], locale: &str, f: impl Fn(&T, &str) -> bool) -> Option<&'a T> {
+    keys(locale).iter().find_map(|k| rows.iter().find(|r| f(r, k)))
+}
+
+/// The key of a table whose regional rows replace its language's as a whole (a missing row
+/// means something there): the locale's regional data where REGIONAL_TABLES names it, else its
+/// language's when it has rows, else en.
+pub(super) fn table_key<'a>(locale: &'a str, table: &str, has: impl Fn(&str) -> bool) -> &'a str {
+    let [k, lang] = keys(locale);
+    if super::numdata::REGIONAL_TABLES.contains(&(table, k)) {
+        k
+    } else if has(lang) || table != "compact" {
+        // A language without compound or auto rows composes its own; compact falls to en's.
+        lang
+    } else {
+        "en"
+    }
+}
+
+/// Whether a locale writes Arabic-Indic digits (ar in most Arab League regions, as ICU).
+pub(super) fn arab_digits(locale: &str) -> bool {
+    super::date::numbering_system(locale) == "arab"
+}
+
+/// A minus or plus sign's leading bidi mark (ar's LRM, ALM), which ICU gives as a literal.
+fn sign_mark(loc: &NumLocale) -> (&'static str, &'static str) {
+    match loc.minus.char_indices().nth(1) {
+        Some((i, _)) => (&loc.minus[..i], &loc.minus[i..]),
+        None => ("", loc.minus),
+    }
+}
+
+fn pct_sign(loc: &NumLocale) -> &'static str {
+    if loc.tag == "ar-arab" { "\u{66a}" } else { "%" }
+}
+
 pub(super) fn num_locale(tag: &str) -> &'static NumLocale {
     let lang = tag.split('-').next().unwrap_or("en");
+    let tag = if arab_digits(tag) { "ar-arab" } else { data_key(tag).unwrap_or(tag) };
     NUM_LOCALES
         .iter()
         .find(|l| l.tag == tag)
@@ -300,6 +361,9 @@ pub(super) fn digit_options(
     out.later("roundingIncrement", &format!("#{inc}"));
     out.later("roundingMode", mode);
     out.later("roundingPriority", d.priority);
+    // As node 22: resolvedOptions says auto for weeks, which still strip (V8 reads it off the
+    // skeleton, where duration-week's /w is the stripIfInteger stem's).
+    let tzd = if out.get("unit") == Some("week") { "auto" } else { tzd };
     out.later("trailingZeroDisplay", tzd);
     Ok(d)
 }
@@ -307,7 +371,7 @@ pub(super) fn digit_options(
 pub(super) fn resolve(locale: &str, raw: &Spec) -> Result<Spec, Fault> {
     let mut out = Spec::default();
     out.put("locale", locale);
-    out.put("numberingSystem", "latn");
+    out.put("numberingSystem", if arab_digits(locale) { "arab" } else { "latn" });
     let n = "Intl.NumberFormat";
     let style = raw.choose(
         "style",
@@ -557,12 +621,7 @@ fn round_at(d: &Dec, keep: i32, mode: &str) -> Dec {
     r
 }
 
-/// The plural category of r × 10^e, as ICU takes it for scientific and compact numbers.
-fn plural_scaled(lang: &str, r: &Rounded, e: i32) -> &'static str {
-    plural_exp(lang, r, e, 0)
-}
-
-/// As plural_scaled, with ICU's exponent operand: CLDR's many for fr, es, pt, it and ca
+/// The plural category of r × 10^e, with ICU's exponent operand: CLDR's many for fr, es, pt, it and ca
 /// holds for an exponent outside 0..5, ahead of their other rules.
 fn plural_exp(lang: &str, r: &Rounded, e: i32, exp: i32) -> &'static str {
     if matches!(lang, "fr" | "es" | "pt" | "it" | "ca") && !(0..=5).contains(&exp) {
@@ -744,12 +803,22 @@ fn digits_parts(r: &Rounded, loc: &NumLocale, grouping: &str, out: &mut Parts) {
         if i > 0 {
             out.push("group", loc.grp);
         }
-        out.push("integer", g);
+        out.push("integer", &digits_of(loc, g));
     }
     if !frac.is_empty() {
         out.push("decimal", loc.dec);
-        out.push("fraction", &frac);
+        out.push("fraction", &digits_of(loc, &frac));
     }
+}
+
+/// ASCII digits in the locale's numbering system.
+fn digits_of(loc: &NumLocale, s: &str) -> String {
+    if loc.tag != "ar-arab" {
+        return s.to_string();
+    }
+    s.chars()
+        .map(|c| c.to_digit(10).and_then(|d| char::from_u32(0x660 + d)).unwrap_or(c))
+        .collect()
 }
 
 pub(super) fn plural_of(lang: &str, r: &Rounded, ordinal: bool) -> &'static str {
@@ -770,7 +839,15 @@ pub(super) fn plural_of(lang: &str, r: &Rounded, ordinal: bool) -> &'static str 
         };
         fraction = fraction * 10 + u64::from(c);
     }
-    plural_en_like(lang, int, visible, fraction, ordinal)
+    // ICU evaluates the rules on doubles: past 2^53 i loses its low digits.
+    let int = int as f64 as u64;
+    let n: f64 = if d.digits.is_empty() {
+        0.0
+    } else {
+        let ds: String = d.digits.iter().map(|g| (b'0' + g) as char).collect();
+        format!("{ds}e{}", d.exp - d.digits.len() as i32).parse().unwrap_or(0.0)
+    };
+    plural_en_like(lang, int, visible, fraction, n, ordinal)
 }
 
 pub(super) struct Formatted {
@@ -829,19 +906,27 @@ fn affix_parts(
                 out.extend(body);
             }
             '-' => {
+                let (mark, minus) = sign_mark(loc);
                 flush(&mut lit, out);
                 if let Some(a) = approx {
                     out.push("approximatelySign", a);
                 }
+                if sign.is_some() && !mark.is_empty() {
+                    out.push("literal", mark);
+                }
                 match sign {
-                    Some(true) => out.push("minusSign", loc.minus),
+                    Some(true) => out.push("minusSign", minus),
                     Some(false) => out.push("plusSign", "+"),
                     None => {}
                 }
             }
             '%' => {
                 flush(&mut lit, out);
-                out.push("percentSign", "%");
+                out.push("percentSign", pct_sign(loc));
+            }
+            '\u{66a}' => {
+                flush(&mut lit, out);
+                out.push("percentSign", "\u{66a}");
             }
             '\u{a4}' => {
                 flush(&mut lit, out);
@@ -892,8 +977,17 @@ fn format_full(
 ) -> (Formatted, &'static str) {
     let locale = spec.get("locale").unwrap_or("en-US");
     let lang = locale.split('-').next().unwrap_or("en");
-    let loc = num_locale(locale);
     let style = spec.get("style").unwrap_or("decimal");
+    // en-IN's accounting pattern groups in threes ($100,000.00), its others (and names) as Indian.
+    let loc = if locale.starts_with("en-IN")
+        && style == "currency"
+        && spec.get("currencySign") == Some("accounting")
+        && spec.get("currencyDisplay") != Some("name")
+    {
+        num_locale("en")
+    } else {
+        num_locale(locale)
+    };
     let notation = spec.get("notation").unwrap_or("standard");
     let grouping = spec.get("useGrouping").unwrap_or("auto");
     // ICU groups compact numbers as min2 under auto.
@@ -966,21 +1060,21 @@ fn format_full(
                     zero = r.dec.is_zero();
                     plural = plural_exp(lang, &r, e, e);
                     digits_parts(&r, loc, grouping, &mut body);
-                    body.push("exponentSeparator", "E");
+                    body.push("exponentSeparator", if loc.tag == "ar-arab" { "\u{623}\u{633}" } else { "E" });
                     if e < 0 {
-                        body.push("exponentMinusSign", loc.minus);
+                        let (mark, minus) = sign_mark(loc);
+                        if !mark.is_empty() {
+                            body.push("literal", mark);
+                        }
+                        body.push("exponentMinusSign", minus);
                     }
-                    body.push("exponentInteger", &e.unsigned_abs().to_string());
+                    body.push("exponentInteger", &digits_of(loc, &e.unsigned_abs().to_string()));
                 }
                 "compact" => {
                     // ICU has no long compact form for a currency's symbol or code.
                     let long = spec.get("compactDisplay") == Some("long")
                         && (style != "currency" || spec.get("currencyDisplay") == Some("name"));
-                    let tl = if COMPACT_PATTERNS.iter().any(|t| t.0 == lang) {
-                        lang
-                    } else {
-                        "en"
-                    };
+                    let tl = table_key(locale, "compact", |k| COMPACT_PATTERNS.iter().any(|t| t.0 == k));
                     let row = |mag: i32| {
                         COMPACT_PATTERNS
                             .iter()
@@ -1014,9 +1108,14 @@ fn format_full(
                     }
                     zero = r.dec.is_zero();
                     // ICU picks the compact pattern by the shown number's category, and a
-                    // unit's or currency's name by the whole value's (1K is 1000).
+                    // unit's or currency's name by the whole value's, rounded as the unscaled
+                    // value would be (pl 1,2 mln funty for 1200001.6, funtów for 1200001.4).
                     let shown = plural_of(lang, &r, false);
-                    plural = plural_scaled(lang, &r, scale);
+                    plural = if scale > 0 {
+                        plural_of(lang, &round(&d, &g, mode, strip), false)
+                    } else {
+                        shown
+                    };
                     if let Some(t) = pat {
                         let exactly_one = r.dec.digits == [1] && r.dec.exp == 1 && !d.neg;
                         compact_affix = Some(
@@ -1074,9 +1173,7 @@ fn format_full(
         sign_of(sd, neg, zero)
     };
     let ap = if approx {
-        RANGES
-            .iter()
-            .find(|r| r.0 == lang)
+        find_row(RANGES, locale, |r, k| r.0 == k)
             .or(RANGES.first())
             .map(|r| r.2)
     } else {
@@ -1086,15 +1183,23 @@ fn format_full(
     let own_plural = plural;
     let plural = plural_of_range.unwrap_or(plural);
     let mut out = Parts::default();
-    match style {
+    // ICU lays out a compact percent unit as a compact percent (tr %-0,001, ar 1.2 ألف٪).
+    let layout = if style == "unit"
+        && spec.get("unit") == Some("percent")
+        && notation == "compact"
+        && spec.get("unitDisplay") != Some("long")
+    {
+        "percent"
+    } else {
+        style
+    };
+    match layout {
         "currency" => {
             let code = spec.get("currency").unwrap_or("USD");
             let cd = spec.get("currencyDisplay").unwrap_or("symbol");
             let entry = CURRENCIES.iter().find(|c| c.code == code);
             if cd == "name" {
-                let row = CURRENCY_NAMES
-                    .iter()
-                    .find(|(l, c, _)| *l == lang && *c == code)
+                let row = find_row(CURRENCY_NAMES, locale, |(l, c, _), k| *l == k && *c == code)
                     .or_else(|| {
                         CURRENCY_NAMES
                             .iter()
@@ -1117,9 +1222,7 @@ fn format_full(
                 wrap_pattern(&pattern, &num, "currency", &mut out);
                 return (Formatted { parts: out }, own_plural);
             }
-            let by_lang = CURRENCY_SYMBOLS_L
-                .iter()
-                .find(|(l, c, _, _)| *l == lang && *c == code)
+            let by_lang = find_row(CURRENCY_SYMBOLS_L, locale, |(l, c, _, _), k| *l == k && *c == code)
                 .or_else(|| {
                     CURRENCY_SYMBOLS_L
                         .iter()
@@ -1141,8 +1244,16 @@ fn format_full(
             };
             let acct = spec.get("currencySign") == Some("accounting");
             let pat = match sign {
-                // ICU's compact patterns have no accounting form.
-                Some(true) if acct && !compacted => loc.acct.to_string(),
+                // ICU's compact patterns have no accounting form, and sign them ahead of
+                // everything (nl -US$ 1,2K, where its own negative pattern is US$ -1,2).
+                _ if compacted && signed => with_sign(loc.cur),
+                Some(true) if acct => loc.acct.to_string(),
+                // An accounting pattern in parentheses has its own positive form (ar ؜5₩), which
+                // a plus sign leads (en +€1.00, nl +€ 1,00).
+                None | Some(false) if acct && !compacted && loc.acct.starts_with('(') => {
+                    let pos = &loc.acct[1..loc.acct.len() - 1];
+                    if sign.is_some() { format!("-{pos}") } else { pos.to_string() }
+                }
                 None if !signed => loc.cur.to_string(),
                 _ => loc.neg_cur.to_string(),
             };
@@ -1164,7 +1275,12 @@ fn format_full(
             );
         }
         "percent" => {
-            let pat = if signed {
+            let pat = if notation == "compact" {
+                // ICU signs a compact percent next to its number (tr %-50), and ar's has
+                // neither its marks nor its own sign (0٪).
+                let p = if lang == "ar" { "#\u{66a}" } else { loc.pct };
+                if signed { p.replacen('#', "-#", 1) } else { p.to_string() }
+            } else if signed {
                 with_sign(loc.neg_pct)
             } else {
                 loc.pct.to_string()
@@ -1173,19 +1289,19 @@ fn format_full(
             // ICU marks a compact percent's sign as a unit.
             // ICU marks a compact percent's sign as a unit, spaced its own way.
             if notation == "compact" {
-                let gap = COMPACT_PERCENT_GAP
-                    .iter()
-                    .find(|r| r.0 == lang)
-                    .map(|r| r.1);
+                let gap = find_row(COMPACT_PERCENT_GAP, locale, |r, k| r.0 == k).map(|r| r.1);
                 for i in 0..out.items.len() {
                     if out.items[i].0 == "percentSign" {
                         out.items[i].0 = "unit";
-                        if let Some(gap) = gap
-                            && i > 0
-                            && out.items[i - 1].0 == "literal"
-                            && out.items[i - 1].1.trim().is_empty()
-                        {
-                            out.items[i - 1].1 = gap.to_string();
+                        let spaced = i > 0 && out.items[i - 1].0 == "literal" && out.items[i - 1].1.trim().is_empty();
+                        match gap {
+                            Some(gap) if spaced => out.items[i - 1].1 = gap.to_string(),
+                            // es-MX spaces it though its percent pattern doesn't (0 %).
+                            Some(gap) if !gap.is_empty() && i > 0 && out.items[i - 1].0 != "literal" => {
+                                out.items.insert(i, ("literal", gap.to_string()));
+                                break;
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -1198,12 +1314,17 @@ fn format_full(
                 Some("narrow") => 2,
                 _ => 0,
             };
-            let pattern = unit_pattern(lang, unit, disp, plural);
+            let pattern = unit_pattern(locale, unit, disp, plural);
             let mut num = Parts::default();
+            // ICU signs a percent unit ahead of its sign (tr -%5), as the percent style.
+            let lead = signed && (unit == "percent" || unit.starts_with("percent-per-")) && disp != 1 && notation != "compact" && !pattern.starts_with("{0}");
+            if lead {
+                affix_parts("-", sign, ap, &body, None, loc, &mut out);
+            }
             affix_parts(
-                if signed { "-#" } else { "#" },
-                sign,
-                ap,
+                if signed && !lead { "-#" } else { "#" },
+                if lead { None } else { sign },
+                if lead { None } else { ap },
                 &body,
                 None,
                 loc,
@@ -1212,14 +1333,11 @@ fn format_full(
             wrap_pattern(&pattern, &num, "unit", &mut out);
             // A compact percent unit is spaced as a compact percent.
             if notation == "compact"
-                && let Some(gap) = COMPACT_PERCENT_GAP
-                    .iter()
-                    .find(|r| r.0 == lang)
-                    .map(|r| r.1)
+                && let Some(gap) = find_row(COMPACT_PERCENT_GAP, locale, |r, k| r.0 == k).map(|r| r.1)
             {
                 for i in 1..out.items.len() {
                     if out.items[i].0 == "unit"
-                        && out.items[i].1 == "%"
+                        && out.items[i].1 == pct_sign(loc)
                         && out.items[i - 1].0 == "literal"
                         && out.items[i - 1].1.trim().is_empty()
                     {
@@ -1363,6 +1481,7 @@ pub(super) fn format_range(
     } else {
         "en"
     };
+    let range_row = find_row(RANGES, locale, |r, k| r.0 == k).filter(|_| lang_r == lang);
     let pl = plural_range(lang_r, pa, pb);
     let (bo, _) = format_full(spec, y, false, Some(pl));
     let (l1, l2, lo) = (
@@ -1378,9 +1497,8 @@ pub(super) fn format_range(
         && text_of(&l1.middle_post) == text_of(&l2.middle_post)
         && middle_len(&m1, style, num_locale(locale)) > 1;
     let repeat = l1.inner_len > 0 || (!collapse_middle && !m1.is_empty());
-    let mut sep = RANGES
-        .iter()
-        .find(|r| r.0 == lang_r)
+    let mut sep = range_row
+        .or_else(|| RANGES.iter().find(|r| r.0 == "en"))
         .map_or("–", |r| r.1)
         .to_string();
     if repeat {
@@ -1404,21 +1522,72 @@ pub(super) fn format_range(
         put(&l1.middle_pre, "shared", &mut out);
     }
     for (l, src) in [(&l1, "startRange"), (&l2, "endRange")] {
+        let mut pre = &l.middle_pre[..];
         if src == "endRange" {
-            out.push(("literal", sep.clone(), "shared"));
+            // ICU's end span starts after a leading right-to-left mark (ar 3.00 € – ‏5.00 €).
+            let mut s = sep.clone();
+            if !collapse_middle && let Some((("literal", m), rest)) = pre.split_first().map(|(a, r)| ((a.0, a.1.as_str()), r)) && !m.is_empty() && m.chars().all(|c| matches!(c, '\u{200e}' | '\u{200f}' | '\u{61c}')) {
+                s.push_str(m);
+                pre = rest;
+            }
+            out.push(("literal", s, "shared"));
         }
         if !collapse_middle {
-            put(&l.middle_pre, src, &mut out);
+            put(pre, src, &mut out);
         }
         put(&l.number, src, &mut out);
         if !collapse_middle {
-            put(&l.middle_post, src, &mut out);
+            // ...and the start's ends before a trailing bidi mark (ar 5‎%‎ – 2.5‎%‎), which
+            // joins the separator.
+            let post = &l.middle_post[..];
+            match post.split_last() {
+                Some((("literal", m), rest)) if src == "startRange" && matches!(m.as_str(), "\u{200e}" | "\u{61c}") => {
+                    put(rest, src, &mut out);
+                    sep.insert_str(0, m);
+                }
+                _ => put(post, src, &mut out),
+            }
         }
     }
     if collapse_middle {
         put(&l1.middle_post, "shared", &mut out);
     }
     put(&lo.outer_post, "shared", &mut out);
+    // A collapsed currency whose spacing ICU inserts (es-MX EUR 3.00-5.00) leaves its spans one
+    // character early, as node reports them: a part belongs to a span it lies wholly in.
+    let loc = num_locale(locale);
+    if collapse_middle
+        && style == "currency"
+        && loc.cur.contains("\u{a4}#")
+        && l1.middle_pre.last().is_some_and(|(t, v)| *t == "literal" && v == "\u{a0}")
+    {
+        let mut spans: [(usize, usize); 2] = [(usize::MAX, 0); 2];
+        let mut at = 0;
+        for (_, v, src) in &out {
+            let n = v.chars().count();
+            let k = match *src {
+                "startRange" => 0,
+                "endRange" => 1,
+                _ => 2,
+            };
+            if k < 2 {
+                spans[k].0 = spans[k].0.min(at);
+                spans[k].1 = at + n;
+            }
+            at += n;
+        }
+        let mut at = 0;
+        for part in out.iter_mut() {
+            let n = part.1.chars().count();
+            part.2 = "shared";
+            for (k, (a, b)) in spans.iter().enumerate() {
+                if *a != usize::MAX && *a >= 1 && at + 1 >= *a && at + n < *b {
+                    part.2 = if k == 0 { "startRange" } else { "endRange" };
+                }
+            }
+            at += n;
+        }
+    }
     out
 }
 
@@ -1437,16 +1606,20 @@ fn plural_pick<'a>(row: &[&'a str; 6], plural: &str) -> &'a str {
 /// Splits a "{0}" pattern around the formatted number: the text around it is a part of type
 /// `ty` with its outer spaces as literals.
 fn wrap_pattern(pattern: &str, num: &Parts, ty: &'static str, out: &mut Parts) {
+    // ar names one and two without the number (متر, متران).
+    let numberless = !pattern.contains("{0}");
     let (pre, post) = pattern.split_once("{0}").unwrap_or(("", pattern));
     for (s, is_pre) in [(pre, true), (post, false)] {
-        if !is_pre {
+        if !is_pre && !numberless {
             out.extend(num);
         }
         if s.is_empty() {
             continue;
         }
-        let core = s.trim_matches(|c: char| c.is_whitespace());
-        let ws_l = s.len() - s.trim_start_matches(|c: char| c.is_whitespace()).len();
+        // ICU gives the spaces and bidi marks around a unit's text as literals (ar ‎%‎).
+        let edge = |c: char| c.is_whitespace() || matches!(c, '\u{200e}' | '\u{200f}' | '\u{61c}');
+        let core = s.trim_matches(edge);
+        let ws_l = s.len() - s.trim_start_matches(edge).len();
         if ws_l > 0 {
             out.push("literal", &s[..ws_l]);
         }
@@ -1459,38 +1632,46 @@ fn wrap_pattern(pattern: &str, num: &Parts, ty: &'static str, out: &mut Parts) {
     }
 }
 
-fn unit_pattern(lang: &str, unit: &str, disp: usize, plural: &str) -> String {
-    let lang = if UNIT_PATTERNS.iter().any(|r| r.0 == lang) {
-        lang
+fn unit_pattern(locale: &str, unit: &str, disp: usize, plural: &str) -> String {
+    let lang = locale.split('-').next().unwrap_or("en");
+    let locale = if UNIT_PATTERNS.iter().any(|r| r.0 == lang) {
+        locale
     } else {
         "en"
     };
     let d = disp as u8;
     let simple = |u: &str| {
-        UNIT_PATTERNS
-            .iter()
-            .find(|r| r.0 == lang && r.1 == u && r.2 == d)
+        find_row(UNIT_PATTERNS, locale, |r, k| r.0 == k && r.1 == u && r.2 == d)
             .map(|r| plural_pick(&r.3, plural))
     };
     if let Some(p) = simple(unit) {
+        // ar's Arabic-Indic percent unit has its own sign and mark (٥٪؜).
+        if unit == "percent" && arab_digits(locale) {
+            return p.replace("\u{200e}%\u{200e}", "\u{66a}\u{61c}");
+        }
         return p.to_string();
     }
+    let ck = table_key(locale, "compound", |k| COMPOUND_PATTERNS.iter().any(|r| r.0 == k));
     if let Some(r) = COMPOUND_PATTERNS
         .iter()
-        .find(|r| r.0 == lang && r.1 == unit && r.2 == d)
+        .find(|r| r.0 == ck && r.1 == unit && r.2 == d)
     {
         return plural_pick(&r.3, plural).to_string();
     }
     if let Some((a, b)) = unit.split_once("-per-") {
         if a == "percent"
-            && let Some(r) = PERCENT_PER.iter().find(|r| r.0 == lang && r.1 == d)
+            && let Some(r) = PERCENT_PER
+                .iter()
+                .find(|r| r.0 == table_key(locale, "percent_per", |k| PERCENT_PER.iter().any(|r| r.0 == k)) && r.1 == d)
         {
-            return plural_pick(&r.2, plural).to_string();
+            let p = plural_pick(&r.2, plural);
+            if arab_digits(locale) {
+                return p.replace("\u{200e}%\u{200e}", "\u{66a}\u{61c}");
+            }
+            return p.to_string();
         }
         if let Some(x) = simple(a)
-            && let Some(per) = PER_PATTERNS
-                .iter()
-                .find(|r| r.0 == lang && r.1 == b && r.2 == d)
+            && let Some(per) = find_row(PER_PATTERNS, locale, |r, k| r.0 == k && r.1 == b && r.2 == d)
         {
             return per.3.replacen("{0}", x, 1);
         }

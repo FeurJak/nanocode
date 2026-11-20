@@ -16,6 +16,18 @@ pub(super) static NUM_LOCALES: &[NumLocale] = &[
     NumLocale { tag: "zh", dec: ".", grp: ",", min2: false, indian: false, minus: "-", cur: "\u{a4}#", neg_cur: "-\u{a4}#", acct: "(\u{a4}#)", pct: "#%", neg_pct: "-#%", nan: "NaN" },
     NumLocale { tag: "ko", dec: ".", grp: ",", min2: false, indian: false, minus: "-", cur: "\u{a4}#", neg_cur: "-\u{a4}#", acct: "(\u{a4}#)", pct: "#%", neg_pct: "-#%", nan: "NaN" },
     NumLocale { tag: "ru", dec: ",", grp: "\u{a0}", min2: false, indian: false, minus: "-", cur: "#\u{a0}\u{a4}", neg_cur: "-#\u{a0}\u{a4}", acct: "-#\u{a0}\u{a4}", pct: "#\u{a0}%", neg_pct: "-#\u{a0}%", nan: "\u{43d}\u{435}\u{a0}\u{447}\u{438}\u{441}\u{43b}\u{43e}" },
+    NumLocale { tag: "zh-Hant", dec: ".", grp: ",", min2: false, indian: false, minus: "-", cur: "\u{a4}#", neg_cur: "-\u{a4}#", acct: "(\u{a4}#)", pct: "#%", neg_pct: "-#%", nan: "\u{975e}\u{6578}\u{503c}" },
+    NumLocale { tag: "es-MX", dec: ".", grp: ",", min2: false, indian: false, minus: "-", cur: "\u{a4}#", neg_cur: "-\u{a4}#", acct: "-\u{a4}#", pct: "#%", neg_pct: "-#%", nan: "NaN" },
+    NumLocale { tag: "fr-CA", dec: ",", grp: "\u{a0}", min2: false, indian: false, minus: "-", cur: "#\u{a0}\u{a4}", neg_cur: "-#\u{a0}\u{a4}", acct: "(#\u{a0}\u{a4})", pct: "#\u{a0}%", neg_pct: "-#\u{a0}%", nan: "NaN" },
+    NumLocale { tag: "pl", dec: ",", grp: "\u{a0}", min2: true, indian: false, minus: "-", cur: "#\u{a0}\u{a4}", neg_cur: "-#\u{a0}\u{a4}", acct: "(#\u{a0}\u{a4})", pct: "#%", neg_pct: "-#%", nan: "NaN" },
+    NumLocale { tag: "tr", dec: ",", grp: ".", min2: false, indian: false, minus: "-", cur: "\u{a4}#", neg_cur: "-\u{a4}#", acct: "(\u{a4}#)", pct: "%#", neg_pct: "-%#", nan: "NaN" },
+    NumLocale { tag: "hi", dec: ".", grp: ",", min2: false, indian: true, minus: "-", cur: "\u{a4}#", neg_cur: "-\u{a4}#", acct: "-\u{a4}#", pct: "#%", neg_pct: "-#%", nan: "NaN" },
+    NumLocale { tag: "id", dec: ",", grp: ".", min2: false, indian: false, minus: "-", cur: "\u{a4}#", neg_cur: "-\u{a4}#", acct: "-\u{a4}#", pct: "#%", neg_pct: "-#%", nan: "NaN" },
+    NumLocale { tag: "vi", dec: ",", grp: ".", min2: false, indian: false, minus: "-", cur: "#\u{a0}\u{a4}", neg_cur: "-#\u{a0}\u{a4}", acct: "-#\u{a0}\u{a4}", pct: "#%", neg_pct: "-#%", nan: "NaN" },
+    // ar's signs carry a bidi mark that ICU gives as a literal: LRM with Latin digits, ALM with
+    // Arabic-Indic ones (ar-arab: ar in the regions that write them).
+    NumLocale { tag: "ar", dec: ".", grp: ",", min2: false, indian: false, minus: "\u{200e}-", cur: "\u{200f}#\u{a0}\u{a4}", neg_cur: "\u{200f}-#\u{a0}\u{a4}", acct: "(\u{61c}#\u{a4})", pct: "#\u{200e}%\u{200e}", neg_pct: "-#\u{200e}%\u{200e}", nan: "\u{644}\u{64a}\u{633}\u{a0}\u{631}\u{642}\u{645}\u{64b}\u{627}" },
+    NumLocale { tag: "ar-arab", dec: "\u{66b}", grp: "\u{66c}", min2: false, indian: false, minus: "\u{61c}-", cur: "\u{200f}#\u{a0}\u{a4}", neg_cur: "-\u{200f}#\u{a0}\u{a4}", acct: "-\u{200f}#\u{a0}\u{a4}", pct: "#%\u{61c}", neg_pct: "-#%\u{61c}", nan: "\u{644}\u{64a}\u{633}\u{a0}\u{631}\u{642}\u{645}\u{64b}\u{627}" },
 ];
 pub(super) static CURRENCIES: &[Currency] = &[
     Currency { code: "USD", symbol: "$", narrow: "$", digits: 2 },

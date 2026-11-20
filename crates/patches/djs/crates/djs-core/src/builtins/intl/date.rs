@@ -67,7 +67,7 @@ fn nu_digit(nu: &str, d: u32) -> char {
     NU_ZEROS.iter().find(|z| z.0 == nu).and_then(|z| char::from_u32(z.1 + d)).unwrap_or(char::from(b'0' + d as u8))
 }
 
-fn numbering_system(locale: &str) -> &'static str {
+pub(super) fn numbering_system(locale: &str) -> &'static str {
     let mut sub = locale.split('-');
     if sub.next() == Some("ar") && sub.any(|s| ARAB_DIGIT_REGIONS.contains(&s)) {
         "arab"
