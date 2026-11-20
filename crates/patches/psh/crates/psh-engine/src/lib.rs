@@ -1386,6 +1386,8 @@ mod parity_tests {
 }
 
 #[cfg(test)]
+mod bashtests_parity_tests;
+#[cfg(test)]
 mod coverage_parity_tests;
 #[cfg(test)]
 mod fuzz_parity_tests;
