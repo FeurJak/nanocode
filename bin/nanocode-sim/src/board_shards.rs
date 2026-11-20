@@ -157,6 +157,7 @@ pub struct ShardsStats {
     pub elapsed_ms: u64,
     pub contended: u64,
     pub ranked: u64,
+    pub ranked_away: u64,
     pub picks: u64,
     pub moved: u64,
     pub crashes: u64,
@@ -183,6 +184,7 @@ impl ShardsStats {
         self.elapsed_ms += other.elapsed_ms;
         self.contended += other.contended;
         self.ranked += other.ranked;
+        self.ranked_away += other.ranked_away;
         self.picks += other.picks;
         self.moved += other.moved;
         self.crashes += other.crashes;
@@ -807,7 +809,14 @@ async fn writer(world: &World, index: u64) {
                 .1
                 .is_ok()
             {
-                world.oracle.borrow_mut().stats.ranked += 1;
+                let away = world.merged(|merged| {
+                    merged.parent(&task).is_some_and(|parent| {
+                        merged.home(&parent).is_some_and(|at| Some(at) != merged.home(&task))
+                    })
+                });
+                let mut oracle = world.oracle.borrow_mut();
+                oracle.stats.ranked += 1;
+                oracle.stats.ranked_away += u64::from(away);
             }
             continue;
         }
