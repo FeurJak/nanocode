@@ -579,7 +579,8 @@ async fn run_pipeline_stages(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
     // expanded before it, and `tee out` in `ls | tee out | comm - f > out` writes
     // after the last stage truncated `out`.
     let gate = Rc::new(StageGate {
-        left: std::cell::Cell::new(n),
+        arrived: std::cell::RefCell::new(vec![false; n]),
+        passed: std::cell::RefCell::new(vec![false; n]),
         waiters: Default::default(),
     });
     let mut ready: Vec<Vp> = Vec::with_capacity(n);
@@ -603,6 +604,7 @@ async fn run_pipeline_stages(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
             }
             vp.stage_gate = Some(GateTicket::new(
                 &gate,
+                i,
                 next_watch.take().into_iter().collect(),
             ));
             let r = run_command_unchecked(vp, code, stage.cmd).await;
@@ -646,7 +648,7 @@ async fn run_pipeline_stages(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
             }
             next_in = Some(Rc::new(FdObj::PipeRead(r)));
         }
-        sub.stage_gate = Some(GateTicket::new(&gate, pipes));
+        sub.stage_gate = Some(GateTicket::new(&gate, i, pipes));
         ready.push(sub);
     }
     start(&mut ready, &mut joins);
@@ -687,11 +689,34 @@ async fn run_pipeline_stages(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
     check_failure(vp, status).await
 }
 
-/// The start gate of a pipeline's stages: how many have not reached it, and the
-/// stages waiting there.
+/// How many stages, its own included, a stage's command waits for at the gate: bash
+/// forks the stages one after another, and a stage forked three or more forks later
+/// usually opens its files after the first one's program has started (`> out` in
+/// `ls | xargs … | sort | grep … > out` is not there yet for `ls`, while it is in
+/// `ls | cat > out`).
+const STAGE_REACH: usize = 3;
+
+/// The start gate of a pipeline's stages: which have reached it and which went on
+/// past it, and the stages waiting there.
 pub(crate) struct StageGate {
-    left: std::cell::Cell<usize>,
+    arrived: std::cell::RefCell<Vec<bool>>,
+    passed: std::cell::RefCell<Vec<bool>>,
     waiters: std::cell::RefCell<Vec<std::task::Waker>>,
+}
+
+impl StageGate {
+    fn wake_all(&self) {
+        for w in self.waiters.borrow_mut().drain(..) {
+            w.wake();
+        }
+    }
+
+    fn register(&self, cx: &std::task::Context<'_>) {
+        let mut waiters = self.waiters.borrow_mut();
+        if !waiters.iter().any(|w| w.will_wake(cx.waker())) {
+            waiters.push(cx.waker().clone());
+        }
+    }
 }
 
 /// A stage's place at its pipeline's [`StageGate`]: it arrives once, when its command
@@ -699,35 +724,59 @@ pub(crate) struct StageGate {
 /// the stage and its neighbours.
 pub(crate) struct GateTicket {
     gate: Rc<StageGate>,
-    arrived: std::cell::Cell<bool>,
+    index: usize,
     pipes: Vec<pipe::Watch>,
 }
 
 impl GateTicket {
-    fn new(gate: &Rc<StageGate>, pipes: Vec<pipe::Watch>) -> Rc<GateTicket> {
+    fn new(gate: &Rc<StageGate>, index: usize, pipes: Vec<pipe::Watch>) -> Rc<GateTicket> {
         Rc::new(GateTicket {
             gate: gate.clone(),
-            arrived: std::cell::Cell::new(false),
+            index,
             pipes,
         })
     }
 
     fn arrive(&self) {
-        if !self.arrived.replace(true) {
-            let left = self.gate.left.get() - 1;
-            self.gate.left.set(left);
-            if left == 0 {
-                for w in self.gate.waiters.borrow_mut().drain(..) {
-                    w.wake();
-                }
-            }
+        if !std::mem::replace(&mut self.gate.arrived.borrow_mut()[self.index], true) {
+            self.gate.wake_all();
         }
+    }
+
+    fn pass(&self) {
+        self.arrive();
+        if !std::mem::replace(&mut self.gate.passed.borrow_mut()[self.index], true) {
+            self.gate.wake_all();
+        }
+    }
+
+    /// Whether the stages this one's command waits for reached the gate.
+    fn open(&self) -> bool {
+        let arrived = self.gate.arrived.borrow();
+        let end = (self.index + STAGE_REACH).min(arrived.len());
+        arrived[..end].iter().all(|a| *a)
+    }
+
+    /// A stage starts once the stage `STAGE_REACH` places before it went past the
+    /// gate (its program started) or ended, as bash forks it that much later.
+    pub(crate) async fn wait_turn(&self) {
+        let Some(before) = self.index.checked_sub(STAGE_REACH) else {
+            return;
+        };
+        std::future::poll_fn(|cx| {
+            if self.gate.passed.borrow()[before] {
+                return std::task::Poll::Ready(());
+            }
+            self.gate.register(cx);
+            std::task::Poll::Pending
+        })
+        .await;
     }
 }
 
 impl Drop for GateTicket {
     fn drop(&mut self) {
-        self.arrive();
+        self.pass();
     }
 }
 
@@ -743,15 +792,16 @@ pub(crate) async fn pass_gate(vp: &mut Vp) {
     };
     ticket.arrive();
     let mut yielded = false;
+    let ticket_ref = &ticket;
     std::future::poll_fn(move |cx| {
+        let ticket = ticket_ref;
         // Every stage yields once, so the stages' commands start in pipeline order
         // even when the last one to reach the gate opens it.
         if !std::mem::replace(&mut yielded, true) {
             cx.waker().wake_by_ref();
             return std::task::Poll::Pending;
         }
-        let gate = &ticket.gate;
-        if gate.left.get() == 0 {
+        if ticket.open() {
             return std::task::Poll::Ready(());
         }
         // Every watch registers, so a neighbour that starts waiting wakes this one.
@@ -762,13 +812,11 @@ pub(crate) async fn pass_gate(vp: &mut Vp) {
         if waited_on {
             return std::task::Poll::Ready(());
         }
-        let mut waiters = gate.waiters.borrow_mut();
-        if !waiters.iter().any(|w| w.will_wake(cx.waker())) {
-            waiters.push(cx.waker().clone());
-        }
+        ticket.gate.register(cx);
         std::task::Poll::Pending
     })
     .await;
+    ticket.pass();
 }
 
 /// Clones the state for a subshell, or fails past the nesting limit (D1050).
@@ -814,6 +862,9 @@ pub(crate) fn spawn_sub(sub: Vp, code: Rc<Code>, body: Body) -> Join<i32> {
                 r
             }
             Body::Stage(c) => {
+                if let Some(ticket) = sub.stage_gate.clone() {
+                    ticket.wait_turn().await;
+                }
                 let cmd = code.ast.cmd(c);
                 // bash runs an `if`, loop or `case` stage without the subshell's exit
                 // processing: an EXIT trap set there fires only on `exit`.

@@ -49,3 +49,12 @@ fn a_stage_that_reads_its_input_before_its_command_still_gets_it() {
         ("1,2,3,\n".into(), 0)
     );
 }
+
+#[test]
+fn a_stage_three_forks_later_opens_its_output_after_the_first_program_ran() {
+    // bash forks `grep` three stages after `ls`, which usually lists the directory
+    // before `> out` exists; two stages on (`cat > out`) it is already there.
+    let src = "ls | cat | sort | grep -o '[a-z]' > out; cat out; echo; \
+               ls | cat | cat > out2; cat out2";
+    assert_eq!(sh("reach", src), ("\nout\nout2\n".into(), 0));
+}
