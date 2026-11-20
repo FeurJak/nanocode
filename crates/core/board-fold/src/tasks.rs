@@ -37,6 +37,8 @@ pub struct Terms {
     pub recur: Option<Recur>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<Retry>,
+    #[serde(default, skip_serializing_if = "crate::intent::Intent::is_task")]
+    pub intent: crate::intent::Intent,
 }
 
 impl Terms {
@@ -316,6 +318,7 @@ impl Fold {
             if !labels
                 .iter()
                 .all(|(key, value)| task.spec.labels.get(key) == Some(value))
+                || task.spec.terms.intent.is_goal()
                 || self.claimable(&entry.task, at_ms).is_err()
                 || self.admits(&entry.task, actor).is_err()
                 || !self.access.may(&me, &entry.task.0, Can::Label)

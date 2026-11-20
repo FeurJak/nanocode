@@ -4,6 +4,7 @@ use nanocode_durability_core::StoreError;
 use serde::{Deserialize, Serialize};
 
 pub mod access;
+pub mod intent;
 pub mod mirror;
 pub mod schedule;
 pub mod sim;
@@ -213,6 +214,7 @@ pub enum Rejection {
     Access(access::Denied),
     Tasks(Refusal),
     Sync(mirror::Refusal),
+    Intent(intent::Refusal),
     Said(messages::Refusal),
     Watch(watch::Refusal),
     Steer(steer::Refusal),
@@ -257,6 +259,10 @@ pub enum Change {
     },
     Synced(mirror::Synced),
     Steered(steer::Steered),
+    Reported {
+        child: TaskId,
+        report: intent::Report,
+    },
 }
 
 impl Change {
@@ -333,6 +339,8 @@ pub struct Fold {
     marks: watch::Marks,
     #[serde(default)]
     steers: steer::Steers,
+    #[serde(default)]
+    intents: intent::Intents,
 }
 
 impl Default for Fold {
@@ -358,6 +366,7 @@ impl Fold {
             said: messages::Said::new(),
             marks: watch::Marks::new(),
             steers: steer::Steers::new(),
+            intents: intent::Intents::new(),
         }
     }
 
@@ -533,7 +542,10 @@ impl Fold {
     pub fn check(&self, at_ms: u64, op: &Op) -> Result<(), Rejection> {
         match op {
             Op::Post { task } => {
-                if self.tasks.contains_key(&task.id) && !mutated(Mutation::PostOverwrites) {
+                if self.tasks.contains_key(&task.id)
+                    && !mutated(Mutation::PostOverwrites)
+                    && !self.reposted(task)
+                {
                     return Err(Rejection::Exists);
                 }
                 if let Some(parent) = &task.parent
@@ -657,11 +669,16 @@ impl Fold {
             return Ok(());
         }
         self.now_ms = self.now_ms.max(event.at_ms);
+        if let Some(original) = self.repost(&event) {
+            self.seen.insert(event.id, Ok(original));
+            return Ok(());
+        }
         let verdict = self.judge(&event).map(|()| seq);
         self.seen.insert(event.id.clone(), verdict.clone());
         if verdict.is_ok() {
             self.access.record(&event.by, &event.id, &event.op);
             self.transition(seq, &event);
+            self.intend(seq, &event);
             self.hear(seq, &event);
             self.index_marks();
         }
@@ -673,6 +690,7 @@ impl Fold {
         if !mutated(Mutation::ReadyIndexStale) {
             self.reindex(task);
         }
+        let terminal = change.terminal().then(|| change.clone());
         self.entries.push(Entry {
             seq,
             event: event.id.clone(),
@@ -680,6 +698,9 @@ impl Fold {
             task: task.clone(),
             change,
         });
+        if let Some(change) = terminal {
+            self.reported(seq, event, task, &change);
+        }
     }
 
     fn transition(&mut self, seq: u64, event: &Event) {
@@ -992,7 +1013,9 @@ impl Pending {
                 Err(_) => {}
             }
         }
-        fold.judge(&self.event).map_err(BoardError::Rejected)?;
+        if fold.repost(&self.event).is_none() {
+            fold.judge(&self.event).map_err(BoardError::Rejected)?;
+        }
         Ok(Step::Append {
             seq: fold.next,
             body: self.body.clone(),
@@ -1003,7 +1026,9 @@ impl Pending {
         if fold.outcome(&self.event.id).is_some() {
             return None;
         }
-        fold.judge(&self.event).ok()?;
+        if fold.repost(&self.event).is_none() {
+            fold.judge(&self.event).ok()?;
+        }
         Some(Step::Append {
             seq: fold.next,
             body: self.body.clone(),

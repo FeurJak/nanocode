@@ -110,6 +110,9 @@ pub enum Mutation {
     SteerByClaimFollows,
     SteerToTerminal,
     FinishIgnoresSteers,
+    GoalClaimedByAnyone,
+    ReportsDropped,
+    RetryPostsTwice,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

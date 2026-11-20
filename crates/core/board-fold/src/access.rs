@@ -19,10 +19,11 @@ pub enum Can {
     Sync,
     Rank,
     Manage,
+    Plan,
 }
 
 impl Can {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Read,
         Self::Post,
         Self::React,
@@ -30,13 +31,17 @@ impl Can {
         Self::Sync,
         Self::Rank,
         Self::Manage,
+        Self::Plan,
     ];
 
     pub const fn implies(self, other: Self) -> bool {
         self as u8 == other as u8
             || matches!(self, Self::Manage)
             || (matches!(other, Self::Read)
-                && matches!(self, Self::React | Self::Label | Self::Sync | Self::Rank))
+                && matches!(
+                    self,
+                    Self::React | Self::Label | Self::Sync | Self::Rank | Self::Plan
+                ))
     }
 }
 
@@ -400,6 +405,7 @@ impl Fold {
     pub fn admit(&self, by: &str, at_ms: u64, op: &Op) -> Result<(), Rejection> {
         self.authorize(by, op)?;
         self.check(at_ms, op)?;
+        self.intended(by, op)?;
         self.assigned(by, op)
     }
 

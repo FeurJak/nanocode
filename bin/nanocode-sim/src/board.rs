@@ -29,6 +29,8 @@ use crate::{
 mod access;
 #[path = "board_due.rs"]
 mod due;
+#[path = "board_intent.rs"]
+mod intent;
 #[path = "board_messages.rs"]
 mod messages;
 #[path = "board_tasks.rs"]
@@ -193,6 +195,7 @@ impl BoardMutation {
         Self::ALL
             .into_iter()
             .chain(watching::ALL.map(Self::Watch))
+            .chain(intent::ALL.map(Self::Watch))
             .find(|mutation| mutation.name() == name)
     }
 
@@ -267,7 +270,10 @@ impl BoardMutation {
             Self::CursorInclusive => "cursor_inclusive",
             Self::SaysUnchecked => "says_unchecked",
             Self::MessagesLeak => "messages_leak",
-            Self::Watch(rule) => watching::name(rule),
+            Self::Watch(rule) => match intent::name(rule) {
+                Some(name) => name,
+                None => watching::name(rule),
+            },
         }
     }
 
@@ -277,6 +283,7 @@ impl BoardMutation {
             .skip(1)
             .copied()
             .chain(watching::ALL.map(Self::Watch))
+            .chain(intent::ALL.map(Self::Watch))
             .map(|mutation| mutation.name())
             .collect::<Vec<_>>()
             .join("|")
@@ -1252,6 +1259,7 @@ impl Expect {
 
 struct Reference {
     tasks: BTreeMap<String, (Option<String>, Vec<String>, Expect)>,
+    posts: BTreeMap<String, NewTask>,
     grants: BTreeMap<String, Vec<(u64, String)>>,
     finishes: BTreeMap<String, u64>,
     replies: BTreeMap<String, Vec<String>>,
@@ -1309,8 +1317,10 @@ impl Reference {
         match op {
             Op::Post { task } => {
                 let known = |id: &TaskId| self.tasks.contains_key(&id.0);
-                if self.tasks.contains_key(&task.id.0)
-                    || task.parent.as_ref().is_some_and(|parent| !known(parent))
+                if self.tasks.contains_key(&task.id.0) {
+                    return self.posts.get(&task.id.0) == Some(&task);
+                }
+                if task.parent.as_ref().is_some_and(|parent| !known(parent))
                     || task.needs.iter().any(|need| !known(need))
                 {
                     return false;
@@ -1321,6 +1331,7 @@ impl Reference {
                     .chain(&task.needs)
                     .any(|above| self.dooms(&above.0));
                 self.terms(&task);
+                self.posts.insert(task.id.0.clone(), task.clone());
                 self.tasks.insert(
                     task.id.0.clone(),
                     (
@@ -1499,6 +1510,7 @@ impl Reference {
     fn of(rows: &[(u64, String)]) -> Result<Self, String> {
         let mut model = Self {
             tasks: BTreeMap::new(),
+            posts: BTreeMap::new(),
             grants: BTreeMap::new(),
             finishes: BTreeMap::new(),
             replies: BTreeMap::new(),
@@ -1738,14 +1750,23 @@ fn check(world: &World, rows: &[(u64, String)]) -> Result<BoardStats, String> {
         }
     }
     let mut landed = BTreeMap::new();
+    let mut posts = BTreeMap::new();
     for (seq, body) in rows {
         let event: nanocode_board::Event = serde_json::from_str(body)
             .map_err(|error| format!("row {seq} is not an event: {error}"))?;
+        if let Op::Post { task } = &event.op {
+            posts.insert(*seq, task.clone());
+        }
         landed.entry(event.id.0).or_insert(*seq);
     }
     for (id, sent) in &oracle.sent {
         match (sent, landed.get(id)) {
             (Sent::Applied(seq), Some(at)) if seq == at => {}
+            (Sent::Applied(seq), Some(at))
+                if seq < at
+                    && posts
+                        .get(seq)
+                        .is_some_and(|task| posts.get(at) == Some(task)) => {}
             (Sent::Applied(seq), at) => {
                 return Err(format!(
                     "{id} was applied at row {seq} but the log holds it at {at:?}"
@@ -1897,8 +1918,12 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
     let indexed = indexes(&rows);
     let resumed = resumes(&rows);
     let due = due::run(seed);
+    let intended = intent::run(seed).map(|_| ());
     board_sim::mutate(BoardRule::None);
-    for wrong in [live, indexed, resumed].into_iter().filter_map(Result::err) {
+    for wrong in [live, indexed, resumed, intended]
+        .into_iter()
+        .filter_map(Result::err)
+    {
         world.oracle.borrow_mut().wrong.push(wrong);
     }
     let mut digest = fnv(FNV_OFFSET, described.as_bytes());

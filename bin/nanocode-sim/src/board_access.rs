@@ -914,7 +914,9 @@ impl Gate {
                 self.grants.remove(&grant.0);
             }
             Op::Post { task } => {
-                self.posters.insert(task.id.0.clone(), by.to_owned());
+                self.posters
+                    .entry(task.id.0.clone())
+                    .or_insert_with(|| by.to_owned());
             }
             Op::Claim { task, .. } => {
                 self.holders.insert(task.0.clone(), by.to_owned());
