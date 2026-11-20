@@ -63,3 +63,11 @@ fn declare_f_names_show_readonly_functions() {
         "declare -fr f\ndeclare -f g\ndeclare -fr f\n"
     );
 }
+
+#[test]
+fn assignment_before_export_of_that_name_persists() {
+    assert_eq!(
+        out("foo=\"\" export foo\ndeclare -p foo\nbar=1 export baz\necho \"[$bar]\"\n"),
+        "declare -x foo=\"\"\n[]\n"
+    );
+}

@@ -2277,6 +2277,21 @@ fn run_simple<'a>(
                     .iter()
                     .map(|(n, _)| (n.clone(), vp.vars.get(n).cloned()))
                     .collect();
+                // `v=x export v`: bash exports the temporary binding and copies it to the
+                // shell's own variable, so it outlives the command.
+                let promoted: Vec<String> = match which.name() {
+                    "export" => args
+                        .iter()
+                        .filter_map(|a| match a {
+                            builtins::declare::DeclArg::Word(w) => {
+                                old.iter().find(|(n, _)| n.as_bytes() == w.as_slice())
+                            }
+                            _ => None,
+                        })
+                        .map(|(n, _)| n.clone())
+                        .collect(),
+                    _ => Vec::new(),
+                };
                 for (n, v) in assigns {
                     vp.set_var(&n, v);
                     vp.vars.entry(&n).exported = true;
@@ -2307,7 +2322,7 @@ fn run_simple<'a>(
                 restore_fds(vp, saved);
                 for (n, v) in old {
                     match v {
-                        _ if special => {}
+                        _ if special || promoted.contains(&n) => {}
                         Some(v) => vp.vars.insert(&n, v),
                         None => {
                             vp.vars.remove(&n);
