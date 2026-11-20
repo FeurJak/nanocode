@@ -11,7 +11,7 @@ use psh_engine::{
     ControlHandle, HostFile,
     host::{
         Access, ChildFd, DirEntry, ExitStatus, ExtProc, ExtraMetadata, FileKind, HostFuture, HostInfo, Metadata,
-        OpenOptions, RunInShell, SIGKILL, Signal, SpawnSpec, Spawned,
+        OpenOptions, Rlimit, RunInShell, SIGKILL, Signal, SpawnSpec, Spawned,
     },
 };
 use std::{
@@ -377,6 +377,20 @@ fn device(path: &[u8]) -> Metadata {
 
 pub(crate) struct Host(pub(crate) Rc<Vfs>);
 
+/// The limits a stock Linux machine gives a process, for the ones every such machine
+/// shares (no core dumps by default, the rest unlimited), so `ulimit -f` and `ulimit -c`
+/// work as there; the machine-dependent ones (open files, processes, stack) are absent.
+/// What `ulimit` sets stays in the shell, as nothing here enforces it.
+const fn sandbox_rlimit(resource: Rlimit) -> Option<(psh_engine::host::Limit, psh_engine::host::Limit)> {
+    match resource {
+        Rlimit::Core => Some((Some(0), None)),
+        Rlimit::FileSize | Rlimit::Data | Rlimit::Rss | Rlimit::As | Rlimit::Cpu | Rlimit::Locks => {
+            Some((None, None))
+        }
+        _ => None,
+    }
+}
+
 impl psh_engine::Host for Host {
     fn open(&self, path: &[u8], opts: OpenOptions) -> HostFuture<io::Result<Rc<dyn HostFile>>> {
         let path = normalize(path);
@@ -578,6 +592,10 @@ impl psh_engine::Host for Host {
 
     fn info(&self) -> HostInfo {
         self.0.identity.info.clone()
+    }
+
+    fn rlimit(&self, resource: Rlimit) -> Option<(psh_engine::host::Limit, psh_engine::host::Limit)> {
+        sandbox_rlimit(resource)
     }
 
     fn mkdir(&self, path: &[u8], mode: u32) -> HostFuture<io::Result<()>> {
