@@ -384,6 +384,20 @@ impl ShardLog {
         self.wait(rows.as_ref().map_or(0, Vec::len)).await;
         rows
     }
+
+    /// Every scope's rows from its seq on in one round trip, as SqlLog reads them: one fault fails them all.
+    async fn reads(&self, scans: &[(&str, u64)]) -> Result<Vec<Vec<(u64, String)>>, StoreError> {
+        self.wait(0).await;
+        if self.roll(|rng| rng.chance(self.read_ppm)) {
+            return Err(self.injected("read"));
+        }
+        let mut rows = Vec::with_capacity(scans.len());
+        for (scope, from) in scans {
+            rows.push(self.inner.scan(scope, *from, END).await?);
+        }
+        self.wait(rows.iter().map(Vec::len).sum()).await;
+        Ok(rows)
+    }
 }
 
 impl LogHost for ShardLog {
@@ -394,6 +408,13 @@ impl LogHost for ShardLog {
         to: u64,
     ) -> StoreFuture<'a, Result<Vec<(u64, String)>, StoreError>> {
         Box::pin(self.read(scope, from, to))
+    }
+
+    fn scans<'a>(
+        &'a self,
+        scans: &'a [(&'a str, u64)],
+    ) -> StoreFuture<'a, Result<Vec<Vec<(u64, String)>>, StoreError>> {
+        Box::pin(self.reads(scans))
     }
 
     fn load<'a>(
@@ -565,14 +586,23 @@ impl World {
     }
 
     async fn refresh(&self) -> bool {
-        for index in 0..self.count.get() {
-            let partition = Partition(index);
-            let from = self.view.borrow()[index as usize].next();
-            let Ok(rows) = self.host.scan(&self.scope(partition), from, END).await else {
-                return false;
-            };
+        let scopes: Vec<String> = (0..self.count.get())
+            .map(|index| self.scope(Partition(index)))
+            .collect();
+        let scans: Vec<(&str, u64)> = {
+            let view = self.view.borrow();
+            scopes
+                .iter()
+                .zip(view.iter())
+                .map(|(scope, fold)| (scope.as_str(), fold.next()))
+                .collect()
+        };
+        let Ok(scanned) = self.host.scans(&scans).await else {
+            return false;
+        };
+        for (index, rows) in scanned.into_iter().enumerate() {
             let mut view = self.view.borrow_mut();
-            let fold = &mut view[index as usize];
+            let fold = &mut view[index];
             for (seq, body) in rows {
                 if seq == fold.next()
                     && let Err(error) = fold.apply(seq, &body)
