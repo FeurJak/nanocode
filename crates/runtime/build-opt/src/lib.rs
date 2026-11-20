@@ -1,4 +1,5 @@
 pub mod ab;
+pub mod analyze;
 pub mod check;
 pub mod graph;
 pub mod plan;

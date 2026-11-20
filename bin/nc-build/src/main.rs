@@ -1,4 +1,6 @@
 #[cfg(not(target_family = "wasm"))]
+mod analyze;
+#[cfg(not(target_family = "wasm"))]
 mod check;
 #[cfg(not(target_family = "wasm"))]
 mod cli;

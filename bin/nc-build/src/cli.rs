@@ -17,6 +17,8 @@ use nanocode_build_opt::{
 
 const USAGE: &str = "usage:
   nc-build affected [--base REF]      crates the diff since REF (and untracked files) touches, with their dependents; all when a manifest, the lockfile or .cargo changed
+  nc-build analyze [--timings DIR|FILE] [--since 30.days] [--manifest-path M] [--top 10]
+                                      ranks structural build changes by predicted seconds saved, from cargo metadata, git log and cargo --timings
   nc-build shard K/N [--durations F]  reads job keys on stdin and prints this shard's keys, longest first (F: lines of key and milliseconds)
   nc-build slots take --cores N --label L [--pool large|small] [--machine M] [--minutes T] [--wait S]
                                       takes N cores on the first machine with room, filling machines in order, and prints the lease as JSON;
@@ -53,6 +55,7 @@ pub fn main() -> ExitCode {
         Some("shard") => shard(&args[1..]),
         Some("slots") => slots_command(&args[1..]),
         Some("ab") => ab_command(&args[1..]),
+        Some("analyze") => crate::analyze::analyze(&args[1..]),
         _ => Err(USAGE.to_owned()),
     };
     let code = match result {
