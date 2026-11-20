@@ -51,3 +51,13 @@ fn sandbox_utilities_and_builtins_stand_in_for_programs_in_usr_bin() {
     );
     assert_eq!(sandbox_out("PATH=/nowhere; type -P echo; echo $?"), "1\n");
 }
+
+#[test]
+fn break_and_continue_give_their_loop_status_zero() {
+    assert_eq!(out("while true; do false || break; done; echo $?"), "0\n");
+    assert_eq!(out("for i in 1; do false; break; done; echo $?"), "0\n");
+    assert_eq!(out("for i in 1 2; do false; continue; done; echo $?"), "0\n");
+    assert_eq!(out("until false; do (exit 4) || break; done; echo $?"), "0\n");
+    assert_eq!(out("for a in 1; do for b in 1; do false; break 2; done; done; echo $?"), "0\n");
+    assert_eq!(out("set -- a b c; while (( $# )); do shift 2 || break; done; echo $?"), "0\n");
+}

@@ -1445,6 +1445,8 @@ async fn run_with<'p>(
                             Op::Break(..) => Unwind::Break(*n),
                             _ => Unwind::Continue(*n),
                         };
+                        // `break` and `continue` succeed, as their builtins do.
+                        vp.status = 0;
                         match land(vp, &mut ex, *lp, *in_cond, u) {
                             Landing::Jump(to) => {
                                 pc = to;

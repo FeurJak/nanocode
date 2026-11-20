@@ -830,6 +830,9 @@ async fn loop_control(vp: &mut Vp, args: &[Vec<u8>], name: &str) -> R {
         },
     };
     let n = n.min(i64::from(vp.loops)) as u32;
+    // The loop it leaves (or goes on with) has the status of the builtin: 0, not that of
+    // the command before it.
+    vp.status = 0;
     Err(if name == "break" {
         Unwind::Break(n)
     } else {
