@@ -60,6 +60,19 @@ pub enum Remove {
     Dir,
 }
 
+pub const SHA256_BYTES: usize = 32;
+
+pub struct FileDownload {
+    pub bytes: Bytes,
+    pub sha256: [u8; SHA256_BYTES],
+}
+
+pub trait FileUpload {
+    fn push(&mut self, chunk: &[u8]) -> io::Result<()>;
+    fn sha256(&self) -> [u8; SHA256_BYTES];
+    fn commit(self: Box<Self>) -> Reply<()>;
+}
+
 pub trait FileSystem {
     fn stat(&self, path: &[u8], follow: bool) -> Reply<Stat>;
     fn read(&self, path: &[u8], limit: u64) -> Reply<Bytes>;
@@ -86,6 +99,16 @@ pub trait FileSystem {
 
     fn set_mtime(&self, path: &[u8], mtime_ns: i64) -> Reply<()> {
         let _ = (path, mtime_ns);
+        Reply::Now(Err(io::ErrorKind::Unsupported.into()))
+    }
+
+    fn upload(&self, path: &[u8], sha256: [u8; SHA256_BYTES]) -> Reply<Box<dyn FileUpload>> {
+        let _ = (path, sha256);
+        Reply::Now(Err(io::ErrorKind::Unsupported.into()))
+    }
+
+    fn download(&self, path: &[u8], limit: u64) -> Reply<FileDownload> {
+        let _ = (path, limit);
         Reply::Now(Err(io::ErrorKind::Unsupported.into()))
     }
 }

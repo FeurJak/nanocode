@@ -2,6 +2,7 @@ mod cells;
 mod host;
 mod machine;
 pub mod sim;
+mod stream;
 mod worker;
 
 use std::{io, rc::Rc, sync::Arc, time::Duration};
@@ -12,6 +13,7 @@ use nanocode_sync::{oneshot, unbounded};
 pub use cells::WorkspaceHost;
 pub use machine::Platform;
 pub use nanocode_shell::{Changes, Ended, Limit, Ran};
+pub use stream::Uploading;
 
 use worker::Job;
 

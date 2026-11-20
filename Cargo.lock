@@ -1310,7 +1310,9 @@ dependencies = [
 name = "nanocode-workspace"
 version = "0.7.0"
 dependencies = [
+ "nanocode-bytes",
  "nanocode-code-mode",
+ "nanocode-digest",
  "nanocode-hands",
  "nanocode-platform",
  "nanocode-process-contracts",

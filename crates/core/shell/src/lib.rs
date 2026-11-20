@@ -12,7 +12,10 @@ mod shell;
 pub use answers::Answers;
 pub use command::{Call, Child, Commands, Exited, NoCommands, Session, Stream};
 pub use fetch::{Credential, Credentials, Failure, Fetch, Request, Response};
-pub use fs::{FileSystem, Kind, Remove, Reply, Stat, Write, join, normalize, parent};
+pub use fs::{
+    FileDownload, FileSystem, FileUpload, Kind, Remove, Reply, SHA256_BYTES, Stat, Write, join,
+    normalize, parent,
+};
 pub use machine::{Identity, Machine};
 pub use mem::MemFs;
 pub use psh_engine::host::HostInfo;

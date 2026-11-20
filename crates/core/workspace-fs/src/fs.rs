@@ -5,7 +5,10 @@ use crate::{
 };
 use nanocode_bytes::{Bytes, BytesMut};
 use nanocode_digest::Sha256;
-use nanocode_shell::{FileSystem, Kind, Machine, Remove, Reply, Stat, Write, normalize};
+use nanocode_shell::{
+    FileDownload, FileSystem, FileUpload, Kind, Machine, Remove, Reply, SHA256_BYTES, Stat, Write,
+    normalize,
+};
 use nanocode_sync::Semaphore;
 use std::{cell::RefCell, collections::BTreeMap, io, num::NonZeroUsize, rc::Rc, sync::Arc};
 
@@ -33,7 +36,7 @@ pub struct Upload {
     fs: WorkspaceFs,
     path: Vec<u8>,
     expected: Digest,
-    mode: u32,
+    mode: Option<u32>,
     hasher: Sha256,
     data: BytesMut,
     size: u64,
@@ -230,7 +233,7 @@ impl WorkspaceFs {
             fs: self.clone(),
             path: path.to_vec(),
             expected,
-            mode,
+            mode: Some(mode),
             hasher: Sha256::new(),
             data: BytesMut::new(),
             size: 0,
@@ -280,8 +283,13 @@ impl Upload {
         self.size
     }
 
+    #[must_use]
+    pub fn digest(&self) -> Digest {
+        Digest(self.hasher.finalize())
+    }
+
     pub async fn finish(self) -> io::Result<u64> {
-        let digest = Digest(self.hasher.finalize());
+        let digest = self.digest();
         if digest != self.expected {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -303,14 +311,17 @@ impl Upload {
                 return Err(io::ErrorKind::IsADirectory.into());
             }
             dir_exists(&manifest, &path)?;
-            if manifest.get(&path).is_some_and(Entry::is_dir) {
-                return Err(io::ErrorKind::IsADirectory.into());
-            }
+            let mode = match (self.mode, manifest.get(&path)) {
+                (_, Some(Entry::Dir { .. })) => return Err(io::ErrorKind::IsADirectory.into()),
+                (Some(mode), _) => mode,
+                (None, Some(Entry::File { mode, .. })) => *mode,
+                (None, _) => FILE_MODE,
+            };
             let mut ops = vec![Op::Put {
                 path: path.clone(),
                 digest,
                 size: self.size,
-                mode: self.mode & MODE_BITS,
+                mode: mode & MODE_BITS,
                 mtime_ns: now,
             }];
             touch(&mut ops, &path, now);
@@ -318,6 +329,20 @@ impl Upload {
         };
         let blob = Blob::verified(digest, self.data.freeze())?;
         inner.commit(&ops, vec![blob]).await
+    }
+}
+
+impl FileUpload for Upload {
+    fn push(&mut self, chunk: &[u8]) -> io::Result<()> {
+        Self::push(self, chunk)
+    }
+
+    fn sha256(&self) -> [u8; SHA256_BYTES] {
+        self.digest().0
+    }
+
+    fn commit(self: Box<Self>) -> Reply<()> {
+        Reply::Later(Box::pin(async move { self.finish().await.map(drop) }))
     }
 }
 
@@ -687,6 +712,29 @@ impl FileSystem for WorkspaceFs {
         let path = path.to_vec();
         later(&self.inner, async move |inner: &Inner| {
             inner.set_mtime(&path, mtime_ns).await
+        })
+    }
+
+    fn upload(&self, path: &[u8], sha256: [u8; SHA256_BYTES]) -> Reply<Box<dyn FileUpload>> {
+        let mut upload = Self::upload(self, path, Digest(sha256), FILE_MODE);
+        upload.mode = None;
+        Reply::Now(Ok(Box::new(upload)))
+    }
+
+    fn download(&self, path: &[u8], limit: u64) -> Reply<FileDownload> {
+        let path = path.to_vec();
+        later(&self.inner, async move |inner: &Inner| {
+            let (entry, bytes) = inner.file(&path).await?;
+            let Entry::File { digest, size, .. } = entry else {
+                unreachable!("file() answers files only");
+            };
+            if size > limit {
+                return Err(io::ErrorKind::FileTooLarge.into());
+            }
+            Ok(FileDownload {
+                bytes,
+                sha256: digest.0,
+            })
         })
     }
 }

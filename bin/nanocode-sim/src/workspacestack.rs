@@ -10,7 +10,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -25,7 +25,10 @@ use nanocode_hands::{
 };
 use nanocode_shell::{Commands, FileSystem, HostInfo, Identity, Limits, Machine, NoCommands};
 use nanocode_sync::{Atom, block_on};
-use nanocode_workspace::{Config, Workspace, WorkspaceHost};
+use nanocode_workspace::{
+    Config, Workspace, WorkspaceHost,
+    sim::{self as workspace_sim, Mutation as WorkspaceRule},
+};
 use nanocode_workspace_fs::{
     Batch, Blob, Caps, Digest, Failure, Manifest, MemStore, Store, WorkspaceFs,
     sim::{self as fs_sim, Mutation as FsRule},
@@ -50,6 +53,8 @@ const CHUNK_MAX: u64 = 6;
 const KINDS: usize = 7;
 const CRASH_IN: usize = 4;
 const CORRUPT_IN: usize = 3;
+const CUT_IN: usize = 2;
+const UNCUT: usize = usize::MAX;
 const IDLE_MS: u64 = 1_000;
 const CAPS: Caps = Caps {
     file_bytes: 1 << 16,
@@ -68,14 +73,16 @@ pub enum WorkspaceStackMutation {
     TornCommit,
     VisibleBeforeCommit,
     ShaUnchecked,
+    PutsInPlace,
 }
 
 impl WorkspaceStackMutation {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::None,
         Self::TornCommit,
         Self::VisibleBeforeCommit,
         Self::ShaUnchecked,
+        Self::PutsInPlace,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -90,6 +97,7 @@ impl WorkspaceStackMutation {
             Self::TornCommit => "torn_commit",
             Self::VisibleBeforeCommit => "visible_before_commit",
             Self::ShaUnchecked => "sha_unchecked",
+            Self::PutsInPlace => "puts_in_place",
         }
     }
 
@@ -102,12 +110,17 @@ impl WorkspaceStackMutation {
             .join("|")
     }
 
-    const fn rules(self) -> (FsRule, HandRule) {
+    const fn rules(self) -> (FsRule, HandRule, WorkspaceRule) {
         match self {
-            Self::None => (FsRule::None, HandRule::None),
-            Self::TornCommit => (FsRule::TornCommit, HandRule::None),
-            Self::VisibleBeforeCommit => (FsRule::VisibleBeforeCommit, HandRule::None),
-            Self::ShaUnchecked => (FsRule::None, HandRule::ShaUnchecked),
+            Self::None => (FsRule::None, HandRule::None, WorkspaceRule::None),
+            Self::TornCommit => (FsRule::TornCommit, HandRule::None, WorkspaceRule::None),
+            Self::VisibleBeforeCommit => (
+                FsRule::VisibleBeforeCommit,
+                HandRule::None,
+                WorkspaceRule::None,
+            ),
+            Self::ShaUnchecked => (FsRule::None, HandRule::ShaUnchecked, WorkspaceRule::None),
+            Self::PutsInPlace => (FsRule::None, HandRule::None, WorkspaceRule::PutsInPlace),
         }
     }
 }
@@ -122,6 +135,7 @@ pub struct WorkspaceStackStats {
     pub routed: u64,
     pub copies: u64,
     pub copies_corrupt: u64,
+    pub copies_cut: u64,
     pub restarts: u64,
     pub crashes_before: u64,
     pub crashes_after: u64,
@@ -137,6 +151,7 @@ impl WorkspaceStackStats {
         self.routed += other.routed;
         self.copies += other.copies;
         self.copies_corrupt += other.copies_corrupt;
+        self.copies_cut += other.copies_cut;
         self.restarts += other.restarts;
         self.crashes_before += other.crashes_before;
         self.crashes_after += other.crashes_after;
@@ -255,6 +270,39 @@ impl Chunks for Corrupt<'_> {
     }
 }
 
+struct Cut<'a> {
+    inner: Box<dyn Chunks + 'a>,
+    left: usize,
+}
+
+impl Chunks for Cut<'_> {
+    fn next(&mut self) -> HostFuture<'_, Result<Option<Vec<u8>>, ChunkError>> {
+        Box::pin(async move {
+            if self.left == 0 {
+                return Err(ChunkError::Lost {
+                    reason: "the Hand died mid-stream".into(),
+                });
+            }
+            self.left -= 1;
+            self.inner.next().await
+        })
+    }
+}
+
+fn cut<'a>(fetch: Fetch<'a>, after: &AtomicUsize) -> Fetch<'a> {
+    match after.swap(UNCUT, Ordering::SeqCst) {
+        UNCUT => fetch,
+        left => Fetch {
+            size_bytes: fetch.size_bytes,
+            sha256: fetch.sha256,
+            chunks: Box::new(Cut {
+                inner: fetch.chunks,
+                left,
+            }),
+        },
+    }
+}
+
 fn damaged<'a>(fetch: Fetch<'a>, corrupt: &AtomicBool) -> Fetch<'a> {
     match corrupt.swap(false, Ordering::SeqCst) {
         false => fetch,
@@ -315,6 +363,7 @@ impl HandWorkspace for Wire {
 struct Hand {
     files: Atom<BTreeMap<String, Vec<u8>>>,
     corrupt: AtomicBool,
+    cut: AtomicUsize,
 }
 
 impl HandHost for Hand {
@@ -385,7 +434,7 @@ impl HandHost for Hand {
                     size: chunk_bytes.get(),
                 }),
             };
-            Ok(damaged(fetch, &self.corrupt))
+            Ok(cut(damaged(fetch, &self.corrupt), &self.cut))
         })
     }
 
@@ -604,9 +653,10 @@ fn simulate(seed: u64, mutation: WorkspaceStackMutation) -> WorkspaceStackOutcom
     let hand = Arc::new(Hand {
         files: Atom::new(BTreeMap::new()),
         corrupt: AtomicBool::new(false),
+        cut: AtomicUsize::new(UNCUT),
     });
     let corrupt = Arc::new(AtomicBool::new(false));
-    let (fs_rule, hand_rule) = mutation.rules();
+    let (fs_rule, hand_rule, workspace_rule) = mutation.rules();
     let wrong = block_on(async {
         let mut stack = open(&store, &hand, &corrupt)?;
         stack
@@ -616,6 +666,7 @@ fn simulate(seed: u64, mutation: WorkspaceStackMutation) -> WorkspaceStackOutcom
             .map_err(|error| format!("setup: {error}"))?;
         fs_sim::mutate(fs_rule);
         hands_sim::mutate(hand_rule);
+        workspace_sim::mutate(workspace_rule);
         let mut model: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         let mut on_hand: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         for op in 0..ops {
@@ -772,7 +823,11 @@ fn simulate(seed: u64, mutation: WorkspaceStackMutation) -> WorkspaceStackOutcom
                         Some(sent) => {
                             let to = COPIES[rng.pick(COPIES.len())];
                             let back_corrupt = rng.pick(CORRUPT_IN) == 0;
+                            let pieces = sent.len().div_ceil(chunk.get());
+                            let back_cut = (!back_corrupt && pieces > 0 && rng.pick(CUT_IN) == 0)
+                                .then(|| rng.pick(pieces));
                             hand.corrupt.store(back_corrupt, Ordering::SeqCst);
+                            hand.cut.store(back_cut.unwrap_or(UNCUT), Ordering::SeqCst);
                             store.plan.store(crash, Ordering::SeqCst);
                             let back = stack
                                 .router
@@ -784,10 +839,25 @@ fn simulate(seed: u64, mutation: WorkspaceStackMutation) -> WorkspaceStackOutcom
                                 )
                                 .await;
                             hand.corrupt.store(false, Ordering::SeqCst);
+                            hand.cut.store(UNCUT, Ordering::SeqCst);
                             stats.copies += 1;
                             let before = model.get(to).cloned();
-                            let after = match back_corrupt {
-                                true => {
+                            let after = match (back_corrupt, back_cut) {
+                                (false, Some(after)) => {
+                                    stats.copies_cut += 1;
+                                    let lost = matches!(
+                                        back,
+                                        Err(CopyError::Put(PutError::Source(ChunkError::Lost { .. })))
+                                    );
+                                    let crashed = store.fired.load(Ordering::SeqCst) != PLAN_NONE;
+                                    if !lost && !(crashed && back.is_err()) {
+                                        return Err(format!(
+                                            "op {op}: hand {parked} -> {to} died after {after} of {pieces} chunks, yet the copy gave {back:?}"
+                                        ));
+                                    }
+                                    before.clone()
+                                }
+                                (true, _) => {
                                     stats.copies_corrupt += 1;
                                     if back.is_ok() {
                                         return Err(format!(
@@ -796,7 +866,7 @@ fn simulate(seed: u64, mutation: WorkspaceStackMutation) -> WorkspaceStackOutcom
                                     }
                                     before.clone()
                                 }
-                                false => Some(sent),
+                                (false, None) => Some(sent),
                             };
                             touched = Some((to.to_owned(), before, after));
                             format!("{out:?} {back:?}")
@@ -840,6 +910,7 @@ fn simulate(seed: u64, mutation: WorkspaceStackMutation) -> WorkspaceStackOutcom
     .err();
     fs_sim::mutate(FsRule::None);
     hands_sim::mutate(HandRule::None);
+    workspace_sim::mutate(WorkspaceRule::None);
     WorkspaceStackOutcome {
         digest,
         wrong,
@@ -852,6 +923,7 @@ fn run_seed(seed: u64, mutation: WorkspaceStackMutation) -> WorkspaceStackOutcom
     std::panic::catch_unwind(|| simulate(seed, mutation)).unwrap_or_else(|panic| {
         fs_sim::mutate(FsRule::None);
         hands_sim::mutate(HandRule::None);
+        workspace_sim::mutate(WorkspaceRule::None);
         let message = panic
             .downcast_ref::<String>()
             .cloned()
