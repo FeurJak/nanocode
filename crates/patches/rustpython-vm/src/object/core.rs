@@ -1419,6 +1419,37 @@ impl<T: PyPayload> FreeList<T> {
     }
 }
 
+impl<T: PyPayload> FreeList<T> {
+    /// Push `obj` onto the thread-local list in `cell` unless it already
+    /// holds `max` entries. Works on the list in place: moving the `Vec` out
+    /// of the `Cell` and back on every call cost more than the push.
+    ///
+    /// # Safety
+    /// `obj` must be a dead husk of `T` as `PyPayload::freelist_push`
+    /// requires. Nothing here can reenter the interpreter, so no other access
+    /// to `cell` overlaps this one.
+    #[inline(always)]
+    pub(crate) unsafe fn push_in(cell: &core::cell::Cell<Self>, obj: *mut PyObject, max: usize) -> bool {
+        let list = unsafe { &mut *cell.as_ptr() };
+        if list.items.len() < max {
+            list.items.push(obj);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Pop a husk from the thread-local list in `cell`, in place.
+    ///
+    /// # Safety
+    /// As for `push_in`.
+    #[inline(always)]
+    pub(crate) unsafe fn pop_in(cell: &core::cell::Cell<Self>) -> Option<NonNull<PyObject>> {
+        let list = unsafe { &mut *cell.as_ptr() };
+        list.items.pop().map(|p| unsafe { NonNull::new_unchecked(p) })
+    }
+}
+
 impl<T: PyPayload> Default for FreeList<T> {
     fn default() -> Self {
         Self::new()
