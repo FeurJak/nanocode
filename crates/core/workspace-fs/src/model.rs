@@ -304,51 +304,70 @@ pub struct Manifest {
 }
 
 struct Draft<'a> {
-    entries: BTreeMap<String, Entry>,
-    before: BTreeMap<String, Option<Entry>>,
+    base: &'a BTreeMap<String, Entry>,
+    changes: BTreeMap<String, Option<Entry>>,
     caps: &'a Caps,
 }
 
 impl Draft<'_> {
+    fn get(&self, path: &str) -> Option<&Entry> {
+        match self.changes.get(path) {
+            Some(entry) => entry.as_ref(),
+            None => self.base.get(path),
+        }
+    }
+
     fn insert(&mut self, path: String, entry: Entry) {
-        let old = self.entries.insert(path.clone(), entry);
-        self.before.entry(path).or_insert(old);
+        self.changes.insert(path, Some(entry));
     }
 
     fn remove(&mut self, path: &str) -> Option<Entry> {
-        let old = self.entries.remove(path);
-        if !self.before.contains_key(path) {
-            self.before.insert(path.to_owned(), old.clone());
-        }
+        let old = self.get(path).cloned();
+        self.changes.insert(path.to_owned(), None);
         old
+    }
+
+    fn below<'b>(&'b self, prefix: &'b str) -> impl Iterator<Item = &'b String> + 'b {
+        let held = self
+            .base
+            .range::<str, _>((
+                std::ops::Bound::Included(prefix),
+                std::ops::Bound::Unbounded,
+            ))
+            .map(|(key, _)| key)
+            .take_while(move |key| key.starts_with(prefix))
+            .filter(|key| !matches!(self.changes.get(key.as_str()), Some(None)));
+        let added = self
+            .changes
+            .range::<str, _>((
+                std::ops::Bound::Included(prefix),
+                std::ops::Bound::Unbounded,
+            ))
+            .take_while(move |(key, _)| key.starts_with(prefix))
+            .filter(|(key, entry)| entry.is_some() && !self.base.contains_key(key.as_str()))
+            .map(|(key, _)| key);
+        held.chain(added)
     }
 
     fn subtree(&self, path: &str) -> Vec<String> {
         let prefix = format!("{path}/");
+        let mut below: Vec<String> = self.below(&prefix).cloned().collect();
+        below.sort_unstable();
         let mut paths = vec![path.to_owned()];
-        paths.extend(
-            self.entries
-                .range(prefix.clone()..)
-                .map(|(key, _)| key)
-                .take_while(|key| key.starts_with(&prefix))
-                .cloned(),
-        );
+        paths.extend(below);
         paths
     }
 
     fn has_children(&self, path: &str) -> bool {
         let prefix = format!("{path}/");
-        self.entries
-            .range(prefix.clone()..)
-            .next()
-            .is_some_and(|(key, _)| key.starts_with(&prefix))
+        self.below(&prefix).next().is_some()
     }
 
     fn make_parents(&mut self, path: &str, mtime_ns: i64) -> Result<(), Refusal> {
         let mut at = 0;
         while let Some(slash) = path[at..].find('/') {
             let dir = &path[..at + slash];
-            match self.entries.get(dir) {
+            match self.get(dir) {
                 Some(Entry::Dir { .. }) => {}
                 Some(_) => {
                     return Err(Refusal::NotADirectory {
@@ -369,7 +388,7 @@ impl Draft<'_> {
     }
 
     fn not_a_dir(&self, path: &str) -> Result<(), Refusal> {
-        match self.entries.get(path) {
+        match self.get(path) {
             Some(Entry::Dir { .. }) => Err(Refusal::IsADirectory {
                 path: path.to_owned(),
             }),
@@ -453,7 +472,7 @@ impl Draft<'_> {
         let path = self.path(path)?;
         Self::mode(&path, mode)?;
         self.make_parents(&path, mtime_ns)?;
-        match self.entries.get(&path) {
+        match self.get(&path) {
             Some(Entry::Dir { .. }) => Ok(()),
             None => {
                 self.insert(path, Entry::Dir { mode, mtime_ns });
@@ -485,7 +504,7 @@ impl Draft<'_> {
 
     fn remove_path(&mut self, path: &str, recursive: bool) -> Result<(), Refusal> {
         let path = self.path(path)?;
-        if !self.entries.contains_key(&path) {
+        if !self.get(&path).is_some() {
             return Err(Refusal::NotFound { path });
         }
         if !recursive && self.has_children(&path) {
@@ -500,7 +519,7 @@ impl Draft<'_> {
     fn move_path(&mut self, from: &str, to: &str) -> Result<(), Refusal> {
         let from = self.path(from)?;
         let to = self.path(to)?;
-        let Some(moving) = self.entries.get(&from) else {
+        let Some(moving) = self.get(&from) else {
             return Err(Refusal::NotFound { path: from });
         };
         if from == to {
@@ -514,7 +533,7 @@ impl Draft<'_> {
         }
         let moving_dir = moving.is_dir();
         let mtime_ns = moving.mtime_ns();
-        match self.entries.get(&to) {
+        match self.get(&to) {
             Some(Entry::Dir { .. }) if !moving_dir => {
                 return Err(Refusal::IsADirectory { path: to });
             }
@@ -544,7 +563,7 @@ impl Draft<'_> {
     fn set_mode(&mut self, path: &str, mode: u32) -> Result<(), Refusal> {
         let path = self.path(path)?;
         Self::mode(&path, mode)?;
-        match self.entries.get(&path).cloned() {
+        match self.get(&path).cloned() {
             Some(Entry::File {
                 digest,
                 size,
@@ -573,7 +592,7 @@ impl Draft<'_> {
 
     fn set_mtime(&mut self, path: &str, mtime_ns: i64) -> Result<(), Refusal> {
         let path = self.path(path)?;
-        let Some(mut entry) = self.entries.get(&path).cloned() else {
+        let Some(mut entry) = self.get(&path).cloned() else {
             return Err(Refusal::NotFound { path });
         };
         match &mut entry {
@@ -671,7 +690,7 @@ impl Manifest {
             .map(move |key| &key[skip..])
     }
 
-    pub fn apply(&self, base: u64, ops: &[Op], caps: &Caps) -> Result<(Self, Change), Refusal> {
+    pub fn apply(&self, base: u64, ops: &[Op], caps: &Caps) -> Result<Change, Refusal> {
         if base != self.version {
             return Err(Refusal::Stale {
                 base,
@@ -685,50 +704,102 @@ impl Manifest {
             });
         }
         let mut draft = Draft {
-            entries: self.entries.clone(),
-            before: BTreeMap::new(),
+            base: &self.entries,
+            changes: BTreeMap::new(),
             caps,
         };
         for op in ops {
             draft.apply(op)?;
         }
-        if draft.entries.len() > caps.paths {
+        let Draft { changes, .. } = draft;
+        let delta: BTreeMap<String, Option<Entry>> = changes
+            .into_iter()
+            .filter(|(path, new)| self.entries.get(path) != new.as_ref())
+            .collect();
+        let mut paths = self.entries.len();
+        let mut bytes = self.bytes;
+        let mut counts: BTreeMap<Digest, i128> = BTreeMap::new();
+        for (path, new) in &delta {
+            if let Some(old) = self.entries.get(path) {
+                paths -= 1;
+                bytes -= old.size();
+                if let Some(digest) = old.digest() {
+                    *counts.entry(digest).or_insert(0) -= 1;
+                }
+            }
+            if let Some(new) = new {
+                paths += 1;
+                bytes = bytes.saturating_add(new.size());
+                if let Some(digest) = new.digest() {
+                    *counts.entry(digest).or_insert(0) += 1;
+                }
+            }
+        }
+        if paths > caps.paths {
             return Err(Refusal::TooManyPaths {
-                count: draft.entries.len(),
+                count: paths,
                 max: caps.paths,
             });
         }
-        let Draft {
-            entries, before, ..
-        } = draft;
-        let delta: BTreeMap<String, Option<Entry>> = before
-            .into_iter()
-            .filter_map(|(path, old)| {
-                let new = entries.get(&path).cloned();
-                (new != old).then_some((path, new))
-            })
-            .collect();
-        let mut next = self.clone();
-        let (added, dropped) = next.replay(&delta);
-        if next.bytes > caps.workspace_bytes {
+        if bytes > caps.workspace_bytes {
             return Err(Refusal::WorkspaceFull {
-                bytes: next.bytes,
+                bytes,
                 max: caps.workspace_bytes,
             });
         }
-        assert!(next.entries == entries, "a change replays to its draft");
-        next.version = base + 1;
-        next.assert_valid();
-        let change = Change {
+        let mut added = Vec::new();
+        let mut dropped = Vec::new();
+        for (digest, count) in counts {
+            let before = self.refs.get(&digest).copied().unwrap_or(0);
+            let after = i128::from(before) + count;
+            match (before > 0, after > 0) {
+                (false, true) => added.push(digest),
+                (true, false) => dropped.push(digest),
+                _ => {}
+            }
+        }
+        self.assert_valid_delta(&delta);
+        Ok(Change {
             base,
-            version: next.version,
-            bytes: next.bytes,
-            paths: next.entries.len(),
+            version: base + 1,
+            bytes,
+            paths,
             entries: delta,
             added,
             dropped,
+        })
+    }
+
+    fn assert_valid_delta(&self, delta: &BTreeMap<String, Option<Entry>>) {
+        let held = |path: &str| match delta.get(path) {
+            Some(entry) => entry.as_ref(),
+            None => self.entries.get(path),
         };
-        Ok((next, change))
+        for (path, entry) in delta {
+            assert!(normalized(path), "manifest paths are normalized");
+            if entry.is_some()
+                && let Some(dir) = parent(path)
+            {
+                assert!(
+                    held(dir).is_some_and(Entry::is_dir),
+                    "a manifest entry's parent is a directory"
+                );
+            }
+            if !entry.as_ref().is_some_and(Entry::is_dir) {
+                let prefix = format!("{path}/");
+                let child = self
+                    .entries
+                    .range(prefix.clone()..)
+                    .map(|(key, _)| key)
+                    .take_while(|key| key.starts_with(&prefix))
+                    .any(|key| held(key).is_some())
+                    || delta
+                        .range(prefix.clone()..)
+                        .take_while(|(key, _)| key.starts_with(&prefix))
+                        .any(|(_, entry)| entry.is_some());
+                assert!(!child, "a manifest entry's parent is a directory");
+            }
+        }
     }
 
     pub fn advance(&mut self, change: &Change) {
@@ -799,17 +870,5 @@ impl Manifest {
             }
         }
         (added, dropped)
-    }
-
-    fn assert_valid(&self) {
-        for path in self.entries.keys() {
-            assert!(normalized(path), "manifest paths are normalized");
-            if let Some(dir) = parent(path) {
-                assert!(
-                    self.entries.get(dir).is_some_and(Entry::is_dir),
-                    "a manifest entry's parent is a directory"
-                );
-            }
-        }
     }
 }

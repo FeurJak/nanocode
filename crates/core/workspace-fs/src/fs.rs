@@ -1,5 +1,5 @@
 use crate::{
-    model::{Caps, Digest, Entry, MODE_BITS, Manifest, Op, Refusal, parent},
+    model::{Caps, Change, Digest, Entry, MODE_BITS, Manifest, Op, Refusal, parent},
     sim::{Mutation, mutated},
     store::{Batch, Blob, Failure, Store},
 };
@@ -362,7 +362,7 @@ impl Inner {
     }
 
     async fn commit(&self, ops: &[Op], fresh: Vec<Blob>) -> io::Result<u64> {
-        let (next, change) = {
+        let change = {
             let manifest = self.manifest.borrow();
             manifest.apply(manifest.version(), ops, &self.caps)?
         };
@@ -379,20 +379,26 @@ impl Inner {
         };
         match self.store.commit(&self.workspace, &batch).await {
             Ok(version) => {
-                assert_eq!(version, next.version(), "a store commits the next version");
-                let mut blobs = self.blobs.borrow_mut();
-                for blob in batch.blobs() {
-                    blobs.insert(*blob.digest(), blob.clone());
+                assert_eq!(
+                    version,
+                    batch.change().version,
+                    "a store commits the next version"
+                );
+                {
+                    let mut blobs = self.blobs.borrow_mut();
+                    for blob in batch.blobs() {
+                        blobs.insert(*blob.digest(), blob.clone());
+                    }
+                    for digest in &batch.change().dropped {
+                        blobs.remove(digest);
+                    }
                 }
-                for digest in &batch.change().dropped {
-                    blobs.remove(digest);
-                }
-                *self.manifest.borrow_mut() = next;
+                self.advance(batch.change()).await;
                 Ok(version)
             }
             Err(failure) => {
                 if mutated(Mutation::VisibleBeforeCommit) {
-                    *self.manifest.borrow_mut() = next;
+                    self.advance(batch.change()).await;
                     return Err(failure.into());
                 }
                 if let Failure::Refused(Refusal::Stale { .. }) | Failure::Backend(_) = &failure {
@@ -400,6 +406,15 @@ impl Inner {
                 }
                 Err(failure.into())
             }
+        }
+    }
+
+    async fn advance(&self, change: &Change) {
+        let current = self.manifest.borrow().version() == change.base;
+        if current {
+            self.manifest.borrow_mut().advance(change);
+        } else {
+            let _ = self.reload().await;
         }
     }
 
