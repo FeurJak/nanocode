@@ -445,14 +445,19 @@ pub mod array {
                     }
                 }
 
-                fn repr(&self, class_name: &str, _vm: &VirtualMachine) -> PyResult<String> {
-                    // we don't need ReprGuard here
+                fn repr(&self, class_name: &str, vm: &VirtualMachine) -> PyResult<String> {
+                    // we don't need ReprGuard here; elements use Python's repr so
+                    // floats print as 1.0 rather than Rust's 1
                     let s = match self {
                         $(ArrayContentType::$n(v) => {
                             if v.is_empty() {
                                 format!("{}('{}')", class_name, $c)
                             } else {
-                                format!("{}('{}', [{}])", class_name, $c, v.iter().format(", "))
+                                let mut parts = Vec::with_capacity(v.len());
+                                for x in v.iter() {
+                                    parts.push(x.to_object(vm).repr(vm)?.to_string());
+                                }
+                                format!("{}('{}', [{}])", class_name, $c, parts.join(", "))
                             }
                         })*
                     };
@@ -1643,6 +1648,12 @@ pub mod array {
                 vm.new_buffer_error("cannot resize an array that is exporting buffers")
             })
         }
+    }
+
+    /// The typecodes CPython 3.12 lists (it accepts 'w' too, but does not list it).
+    #[pyattr]
+    fn typecodes(vm: &VirtualMachine) -> PyRef<PyStr> {
+        vm.ctx.new_str("bBuhHiIlLqQfd")
     }
 
     #[pyattr]
