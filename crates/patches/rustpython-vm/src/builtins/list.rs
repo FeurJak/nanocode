@@ -537,7 +537,7 @@ impl Py<PyList> {
         if let Some(index) = index.into() {
             Ok(index)
         } else {
-            Err(vm.new_value_error(format!("'{}' is not in list", value.str(vm)?)))
+            Err(vm.new_value_error(format!("{} is not in list", value.repr(vm)?)))
         }
     }
 
@@ -570,7 +570,7 @@ impl Py<PyList> {
             drop(removed);
             Ok(())
         } else {
-            Err(vm.new_value_error(format!("'{}' is not in list", value.str(vm)?)))
+            Err(vm.new_value_error("list.remove(x): x not in list"))
         }
     }
 
