@@ -89,7 +89,8 @@ const USAGE: &str = "usage:
   state: $NC_BUILD_SLOTS_URL or ~/.config/nc-build/slots-url (an nc-build slots serve endpoint, reached with curl); else
   $NC_BUILD_SLOTS_GIT or ~/.config/nc-build/slots-git, a git remote whose branch $NC_BUILD_SLOTS_BRANCH (nc-build-slots) holds
   slots.json as one parentless commit, replaced by a push with --force-with-lease on the fetched commit that retries when
-  another push won; else the file $NC_BUILD_SLOTS
+  another push won, through one lock per machine waited on for at most $NC_BUILD_SLOTS_LOCK_WAIT seconds (180), pruning
+  unreachable objects older than a minute after each write; else the file $NC_BUILD_SLOTS
   (~/swarm/slots.json); lane caps live apart from it, where clients older than caps never write: caps.json on the branch
   NC_BUILD_SLOTS_BRANCH-caps (nc-build-slots-caps), else slots.caps.json beside the file; caps still found in slots.json
   move there on first use; machines: the stored boxes, else $NC_BUILD_BOXES (~/swarm/boxes.json), each until it expires;
@@ -470,6 +471,26 @@ fn slots_branch() -> String {
     config("NC_BUILD_SLOTS_BRANCH", "slots-branch").unwrap_or_else(|| "nc-build-slots".to_owned())
 }
 
+fn lock_within(lock: &std::fs::File, path: &str) -> Result<(), String> {
+    let wait = config("NC_BUILD_SLOTS_LOCK_WAIT", "slots-lock-wait")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(180);
+    let started = std::time::Instant::now();
+    loop {
+        match lock.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(std::fs::TryLockError::Error(error)) => return Err(format!("{path}: {error}")),
+        }
+        if started.elapsed().as_secs() >= wait {
+            return Err(format!(
+                "slot service busy: waited {wait}s for {path}, held by other nc-build slots calls on this machine; nothing was changed, so retry (raise $NC_BUILD_SLOTS_LOCK_WAIT to wait longer)"
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
 fn with_git_file<T>(
     remote: &str,
     branch: &str,
@@ -484,7 +505,7 @@ fn with_git_file<T>(
         .append(true)
         .open(Path::new(&dir).join("nc-build.lock"))
         .map_err(|error| format!("{dir}: {error}"))?;
-    lock.lock().map_err(|error| error.to_string())?;
+    lock_within(&lock, &format!("{dir}/nc-build.lock"))?;
     if !Path::new(&dir).join("HEAD").exists() {
         run("git", &["init", "-q", "--bare", &dir])?;
     }
@@ -496,6 +517,10 @@ fn with_git_file<T>(
             "user.name=nc-build",
             "-c",
             "user.email=nc-build@localhost",
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
         ];
         all.extend_from_slice(args);
         run_input("git", &all, input)
@@ -534,7 +559,10 @@ fn with_git_file<T>(
             ],
             "",
         ) {
-            Ok(_) => return Ok(result),
+            Ok(_) => {
+                let _ = git(&["prune", "--expire=1.minute.ago"], "");
+                return Ok(result);
+            }
             Err(error) if error.contains("stale info") || error.contains("rejected") => {
                 std::thread::sleep(std::time::Duration::from_millis(now_ms() % 500));
             }
