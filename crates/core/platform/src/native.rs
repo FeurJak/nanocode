@@ -26,6 +26,32 @@ pub trait Host: Send + Sync + 'static {
     fn uuid_stamps(&self) -> Option<&std::sync::atomic::AtomicU64> {
         None
     }
+    /// This thread's share of the host, for a thread that works for this one while this one
+    /// waits on it (such as the thread that keeps the native Python interpreter). None when the
+    /// host keeps nothing per thread.
+    fn lend(&self) -> Option<Lent> {
+        None
+    }
+}
+
+/// A thread's share of the host, carried to a thread that works for it while it waits.
+pub struct Lent(Box<dyn FnOnce() -> Box<dyn std::any::Any> + Send>);
+
+impl Lent {
+    pub fn new(enter: impl FnOnce() -> Box<dyn std::any::Any> + Send + 'static) -> Self {
+        Self(Box::new(enter))
+    }
+
+    /// Takes on the lending thread's share on this thread until the returned guard drops.
+    #[must_use]
+    pub fn enter(self) -> Box<dyn std::any::Any> {
+        (self.0)()
+    }
+}
+
+/// This thread's share of the installed host, when the host keeps one per thread.
+pub fn lend() -> Option<Lent> {
+    host().and_then(Host::lend)
 }
 
 static HOST: OnceLock<&'static dyn Host> = OnceLock::new();

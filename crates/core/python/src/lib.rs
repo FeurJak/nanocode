@@ -377,6 +377,11 @@ impl Python {
     pub fn new() -> io::Result<Self> {
         let mut seed = [0; 4];
         nanocode_platform::fill_random(&mut seed)?;
+        Self::seeded(u32::from_le_bytes(seed))
+    }
+
+    /// An interpreter whose string hashes use hash_seed, drawing none from the host.
+    pub(crate) fn seeded(hash_seed: u32) -> io::Result<Self> {
         let mut settings = Settings::default();
         settings.install_signal_handlers = false;
         settings.import_site = false;
@@ -384,7 +389,7 @@ impl Python {
         settings.write_bytecode = false;
         settings.ignore_environment = true;
         settings.isolated = true;
-        settings.hash_seed = Some(u32::from_le_bytes(seed));
+        settings.hash_seed = Some(hash_seed);
         rustpython_vm::import::set_external_frozen(rustpython_vm::import::ExternalFrozen {
             find: nanocode_python_data::find_module,
             load: nanocode_python_data::load_module,

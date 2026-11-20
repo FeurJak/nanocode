@@ -34,8 +34,9 @@ pub use zone::{
 mod native;
 #[cfg(not(target_family = "wasm"))]
 pub use native::{
-    Handle, Host, HostFuture, Sleep, TryCurrentError, host, install, now, sleep, sleep_until,
-    spawn, spawn_blocking, spawn_joined, spawn_on, spawn_task, system_time, timeout, timeout_at,
+    Handle, Host, HostFuture, Lent, Sleep, TryCurrentError, host, install, lend, now, sleep,
+    sleep_until, spawn, spawn_blocking, spawn_joined, spawn_on, spawn_task, system_time, timeout,
+    timeout_at,
 };
 
 #[cfg(not(target_family = "wasm"))]

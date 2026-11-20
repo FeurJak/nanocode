@@ -46,6 +46,7 @@ enum Said {
 
 struct Job {
     run: Run,
+    lent: Option<nanocode_platform::Lent>,
     ranged: bool,
     spawns: bool,
     said: mpsc::Sender<Said>,
@@ -137,6 +138,7 @@ pub fn run(run: Run, files: &dyn Files) -> io::Result<Ran> {
     let (answer, answers) = mpsc::channel();
     let job = Job {
         run,
+        lent: nanocode_platform::lend(),
         ranged: files.ranged(),
         spawns: files.spawns(),
         said,
@@ -173,14 +175,22 @@ fn start() -> Option<mpsc::Sender<Job>> {
     let (jobs, queue) = mpsc::channel::<Job>();
     let owner = move || {
         let mut python: Option<Python> = None;
-        for job in queue {
+        for mut job in queue {
+            // A simulated host keeps its clock and randomness per thread: take on the caller's
+            // while it waits, so the run reads the same time and draws as it would on its own thread.
+            // The one interpreter outlives every simulated seed, so there it draws no hash seed: the
+            // seed that happens to start it would otherwise draw what no other seed does.
+            let simulated = job.lent.is_some();
+            let entered = job.lent.take().map(nanocode_platform::Lent::enter);
             let kept = match python.take() {
                 Some(kept) => Ok(kept),
+                None if simulated => Python::seeded(0),
                 None => Python::new(),
             };
             let kept = match kept {
                 Ok(kept) => kept,
                 Err(error) => {
+                    drop(entered);
                     let _ = job.said.send(Said::Failed(error));
                     continue;
                 }
@@ -192,6 +202,7 @@ fn start() -> Option<mpsc::Sender<Job>> {
                 spawns: job.spawns,
             };
             let ran = kept.run(job.run, Rc::new(remote));
+            drop(entered);
             let _ = job.said.send(Said::Ran(ran));
             python = Some(kept);
         }

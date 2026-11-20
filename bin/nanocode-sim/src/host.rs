@@ -1,10 +1,10 @@
 use std::{
     cell::RefCell,
-    sync::Arc,
+    sync::{Arc, Mutex, PoisonError, atomic::AtomicU64},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use nanocode_platform::{Host, HostFuture};
+use nanocode_platform::{Host, HostFuture, Lent};
 
 use crate::{executor::Clock, rng::Rng};
 
@@ -15,20 +15,34 @@ struct Simulation {
     random: Rng,
     spawned: Vec<(HostFuture, String)>,
     started: Instant,
+    stamps: &'static AtomicU64,
 }
 
+type Shared = Arc<Mutex<Simulation>>;
+
 thread_local! {
-    static CURRENT: RefCell<Option<Simulation>> = const { RefCell::new(None) };
+    // Shared so a thread that works for this one while it waits (the native Python
+    // interpreter's) reads the same clock and draws from the same stream; the two never run at once.
+    static CURRENT: RefCell<Option<Shared>> = const { RefCell::new(None) };
 }
 
 fn with<R>(use_simulation: impl FnOnce(&mut Simulation) -> R) -> R {
-    CURRENT.with_borrow_mut(|current| {
-        use_simulation(
-            current
-                .as_mut()
-                .expect("the platform host is used only inside a simulated seed"),
-        )
+    CURRENT.with_borrow(|current| {
+        let simulation = current
+            .as_ref()
+            .expect("the platform host is used only inside a simulated seed");
+        use_simulation(&mut simulation.lock().unwrap_or_else(PoisonError::into_inner))
     })
+}
+
+/// Gives the borrowing thread back the simulation it had before it took on a lent one.
+struct Restore(Option<Shared>);
+
+impl Drop for Restore {
+    fn drop(&mut self) {
+        let kept = self.0.take();
+        CURRENT.with_borrow_mut(|current| *current = kept);
+    }
 }
 
 struct SimulatedHost;
@@ -38,8 +52,7 @@ static HOST: SimulatedHost = SimulatedHost;
 thread_local! {
     // Each worker thread of --jobs runs its own seeds, so the UUID stamps and the pass flag are
     // per thread. The stamps are leaked once per thread because Host hands out a reference.
-    static UUID_STAMPS: &'static std::sync::atomic::AtomicU64 =
-        Box::leak(Box::new(std::sync::atomic::AtomicU64::new(0)));
+    static UUID_STAMPS: &'static AtomicU64 = Box::leak(Box::new(AtomicU64::new(0)));
     static SECOND_PASS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -88,8 +101,16 @@ impl Host for SimulatedHost {
         Ok(())
     }
 
-    fn uuid_stamps(&self) -> Option<&std::sync::atomic::AtomicU64> {
-        Some(UUID_STAMPS.with(|stamps| *stamps))
+    fn uuid_stamps(&self) -> Option<&AtomicU64> {
+        Some(with(|simulation| simulation.stamps))
+    }
+
+    fn lend(&self) -> Option<Lent> {
+        let simulation = CURRENT.with_borrow(Option::clone)?;
+        Some(Lent::new(move || {
+            let kept = CURRENT.with_borrow_mut(|current| current.replace(simulation));
+            Box::new(Restore(kept))
+        }))
     }
 
     fn spawn(&self, future: HostFuture) {
@@ -118,22 +139,31 @@ pub fn install() -> std::io::Result<()> {
 }
 
 pub fn enter(seed: u64, clock: &Arc<Clock>) {
-    UUID_STAMPS.with(|stamps| stamps.store(0, std::sync::atomic::Ordering::Relaxed));
+    let stamps = UUID_STAMPS.with(|stamps| *stamps);
+    stamps.store(0, std::sync::atomic::Ordering::Relaxed);
     CURRENT.with_borrow_mut(|current| {
-        *current = Some(Simulation {
+        *current = Some(Arc::new(Mutex::new(Simulation {
             clock: Arc::clone(clock),
             random: Rng::derive(seed, "host"),
             spawned: Vec::new(),
             started: origin(),
-        });
+            stamps,
+        })));
     });
 }
 
 pub fn spawned() -> Vec<(HostFuture, String)> {
-    CURRENT.with_borrow_mut(|current| {
+    CURRENT.with_borrow(|current| {
         current
-            .as_mut()
-            .map(|simulation| std::mem::take(&mut simulation.spawned))
+            .as_ref()
+            .map(|simulation| {
+                std::mem::take(
+                    &mut simulation
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .spawned,
+                )
+            })
             .unwrap_or_default()
     })
 }
