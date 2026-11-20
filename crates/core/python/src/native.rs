@@ -16,7 +16,7 @@ use std::{
 use crate::{Child, Exited, Files, Python, Ran, Remove, Run, Stat, Stdio, Write};
 
 /// Packages that import the compiled-in extensions without one of their own.
-const DEPENDENTS: [&str; 2] = ["pylab", "mpl_toolkits"];
+const DEPENDENTS: [&str; 3] = ["pylab", "mpl_toolkits", "sqlite3"];
 
 enum Op {
     Stat(Vec<u8>),
