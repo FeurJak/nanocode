@@ -257,6 +257,26 @@ pub async fn fold(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
     }
 }
 
+/// Every -t of the command line as one list, as GNU joins them: -t2,6 -t8 is 2,6,8.
+fn all_tabs(p: &crate::opts::Parsed, spec: &Spec) -> Option<Vec<u8>> {
+    let mut all: Option<Vec<u8>> = None;
+    for (k, v) in p.iter(spec) {
+        if k == "tabs" {
+            let list = all.get_or_insert_with(Vec::new);
+            if !list.is_empty() {
+                list.push(b',');
+            }
+            list.extend_from_slice(v.unwrap_or_default());
+        }
+    }
+    all
+}
+
+/// Whether a list of tab stops goes up strictly, as GNU requires.
+fn ascending(stops: &[usize]) -> bool {
+    stops.windows(2).all(|w| w[0] < w[1])
+}
+
 fn tab_stops(spec: Option<&[u8]>) -> Option<(Vec<usize>, usize)> {
     let Some(spec) = spec else {
         return Some((Vec::new(), 8));
@@ -295,9 +315,13 @@ pub async fn expand(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
         Ok(p) => p,
         Err(st) => return st,
     };
-    let Some((stops, every)) = tab_stops(p.last(&EXPAND, "tabs")) else {
+    let Some((stops, every)) = tab_stops(all_tabs(&p, &EXPAND).as_deref()) else {
         return common::usage(ctx, "tab size cannot be 0").await;
     };
+    if !ascending(&stops) {
+        ctx.error("tab sizes must be ascending").await;
+        return 1;
+    }
     let initial = p.has(&EXPAND, "initial");
     let data = match read_all(ctx, &p.operands).await {
         Ok(data) => data,
@@ -351,9 +375,13 @@ pub async fn unexpand(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
         Ok(p) => p,
         Err(st) => return st,
     };
-    let Some((stops, every)) = tab_stops(p.last(&UNEXPAND, "tabs")) else {
+    let Some((stops, every)) = tab_stops(all_tabs(&p, &UNEXPAND).as_deref()) else {
         return common::usage(ctx, "tab size cannot be 0").await;
     };
+    if !ascending(&stops) {
+        ctx.error("tab sizes must be ascending").await;
+        return 1;
+    }
     let all =
         (p.has(&UNEXPAND, "all") || p.has(&UNEXPAND, "tabs")) && !p.has(&UNEXPAND, "first-only");
     let data = match read_all(ctx, &p.operands).await {

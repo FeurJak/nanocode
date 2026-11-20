@@ -113,3 +113,12 @@ fn wc_pads_redirected_stdin_to_its_size() {
     let src = "printf 'a b\\nc\\n' > f; wc < f; wc -l -c < f; printf 'x\\n' | wc -l -c";
     assert_eq!(sh(src), ("2 3 6\n2 6\n      1       2\n".into(), 0));
 }
+
+#[test]
+fn expand_joins_every_tab_list_and_wants_them_ascending() {
+    let src = "printf 'a\\tb\\tc\\td\\n' > f; expand -t2,6 -t8 f; expand -t4 -t2 f 2>&1; echo $?; unexpand -t2,6 -t4 f 2>&1; echo $?";
+    assert_eq!(
+        sh(src),
+        ("a b   c d\nexpand: tab sizes must be ascending\n1\nunexpand: tab sizes must be ascending\n1\n".into(), 0)
+    );
+}
