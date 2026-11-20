@@ -503,6 +503,33 @@ impl<'c, 'v> Interp<'c, 'v> {
         }
     }
 
+    /// `other` and $i joined (`$i other` when `field_first`), the field read where
+    /// it lies in the record: no value is made for it. A field past NF is "".
+    fn concat_field(&mut self, i: usize, other: &[u8], field_first: bool) -> S {
+        let join = |field: &[u8]| -> S {
+            if field_first {
+                field.iter().chain(other).copied().collect()
+            } else {
+                other.iter().chain(field).copied().collect()
+            }
+        };
+        if i == 0 {
+            return join(&self.rec);
+        }
+        let at = match self.field_at(i) {
+            Some(at) => at,
+            None => {
+                self.ensure_fields();
+                match self.fields.get(i - 1) {
+                    None => None,
+                    Some(&Field::At(from, to)) => Some((from, to)),
+                    Some(Field::Is(v)) => return join(&self.to_str(v)),
+                }
+            }
+        };
+        join(at.map_or(&[][..], |(from, to)| &self.rec[from..to]))
+    }
+
     /// The characters in a field, counted where it lies in the record.
     fn field_length(&mut self, i: usize) -> usize {
         if i == 0 {
@@ -1107,6 +1134,12 @@ impl<'c, 'v> Interp<'c, 'v> {
                     let (l, r) = (self.to_str(&l), self.to_str(&r));
                     // Collected straight into one allocation of the joined length.
                     let out: S = l.iter().chain(r.iter()).copied().collect();
+                    self.push(Value::Str(out));
+                }
+                Op::ConcatField(i, field_first) => {
+                    let v = self.pop();
+                    let other = self.to_str(&v);
+                    let out = self.concat_field(*i as usize, &other, *field_first);
                     self.push(Value::Str(out));
                 }
                 Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod | Op::Pow => {

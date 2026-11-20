@@ -102,6 +102,9 @@ pub enum Op {
     /// n values -> joined with SUBSEP
     IndexMulti(u32),
     ConcatMulti(u32),
+    /// value -> value $N joined (`$N value` when the bool is set), read from where the
+    /// field lies in the record: one allocation, for the joined text.
+    ConcatField(u32, bool),
     Add,
     Sub,
     Mul,
@@ -825,6 +828,23 @@ impl Compiler<'_> {
                 BinOp::Concat => {
                     let mut values = Vec::new();
                     flatten_concat(e, &mut values);
+                    // A field joined to one other value is read as it is joined. It
+                    // stays read after the value before it, and is read first only
+                    // when the value after it cannot change it.
+                    if let [l, r] = values[..] {
+                        if let Some(i) = constant_field(r) {
+                            self.expr(l)?;
+                            self.add(Op::ConcatField(i, false));
+                            return Ok(());
+                        }
+                        if let Some(i) = constant_field(l)
+                            && reads_only(r)
+                        {
+                            self.expr(r)?;
+                            self.add(Op::ConcatField(i, true));
+                            return Ok(());
+                        }
+                    }
                     for v in &values {
                         self.expr(v)?;
                     }
