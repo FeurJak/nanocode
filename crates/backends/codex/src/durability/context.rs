@@ -183,7 +183,7 @@ fn loaded_history(
     let keep = log.len();
     for payload in payloads {
         log.push(payload.reference())?;
-        entries.push((payload.decode()?, payload.shared()?));
+        entries.push(payload.decode::<ResponseItem>()?);
     }
     log.release();
     let history = if keep == 0 {
@@ -334,16 +334,9 @@ impl ContinuationCache {
             .history
             .shared_prefix_len(history)
             .min(self.history_log.len());
-        let stored = history.stored_from(unchanged);
         self.history_log.sync(
             unchanged,
-            history
-                .iter_from(unchanged)
-                .zip(stored)
-                .map(|(item, stored)| match stored {
-                    Some(stored) => Ok(EncodedPayload::from_shared(stored)),
-                    None => EncodedPayload::encode(item),
-                }),
+            history.iter_from(unchanged).map(EncodedPayload::encode),
         )?;
         self.history = history.clone();
         Ok(())
