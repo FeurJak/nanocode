@@ -71,6 +71,17 @@ fn a_command_word_starting_with_a_percent_resumes_a_job() {
 }
 
 #[test]
+fn a_percent_command_word_that_is_its_own_pipeline_stage_is_a_plain_name() {
+    // bash looks a `%job` up only in a shell that has not forked for the command.
+    let (_, o, e) = run("echo x | %1; echo \"r=$?\"");
+    assert_eq!(String::from_utf8_lossy(&o), "r=127\n");
+    assert!(String::from_utf8_lossy(&e).contains("%1: command not found"));
+    // A stage that runs it from a group or a function still resumes it.
+    assert!(err("{ %1; } | cat").contains("fg: no job control"));
+    assert!(err("f() { %1; }; f | cat").contains("fg: no job control"));
+}
+
+#[test]
 fn printf_time_of_an_empty_or_unrepresentable_argument_is_the_epoch() {
     // Only a missing argument is now; an empty one is 0 and a time past what
     // localtime can represent falls back to 0 (out of range ones only warn).

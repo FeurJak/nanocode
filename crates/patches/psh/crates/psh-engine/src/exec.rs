@@ -899,6 +899,7 @@ pub(crate) fn spawn_sub(sub: Vp, code: Rc<Code>, body: Body) -> Join<i32> {
                     .values()
                     .any(|t| t.active && !t.action.is_empty());
                 if matches!(cmd.kind, CommandKind::Simple(_)) {
+                    sub.stage_simple = true;
                     sub.own_simple = Some(std::ptr::from_ref(cmd) as usize);
                     if !traps {
                         sub.exec_tail = sub.own_simple;
@@ -2426,7 +2427,8 @@ fn run_argv(
     // A command word that starts with `%` is a job: bash resumes it with `fg`, or
     // `bg` when run with `&`, ahead of functions and the PATH.
     let bg = std::mem::take(&mut vp.bg_simple);
-    if argv[0].starts_with(b"%") {
+    let stage = std::mem::take(&mut vp.stage_simple);
+    if argv[0].starts_with(b"%") && !stage {
         vp.fork_job = false;
         let resume = if bg {
             "bg"

@@ -377,6 +377,7 @@ impl Shell {
             top: true,
             fork_job: false,
             bg_simple: false,
+            stage_simple: false,
             own_simple: None,
             parent_exit: false,
             sigs: state::Sigs::Shell,

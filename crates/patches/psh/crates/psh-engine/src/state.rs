@@ -494,6 +494,10 @@ pub(crate) struct Vp {
     /// This vproc is a background job of one simple command that has not run it yet:
     /// a `%job` command word there is `bg`, not `fg`.
     pub bg_simple: bool,
+    /// This vproc is a pipeline stage of one simple command that has not run it yet:
+    /// bash looks up a `%job` command word only in a shell that has not forked for
+    /// it, so there it is a plain command name.
+    pub stage_simple: bool,
     /// A forked simple command's own address (a pipeline stage or `cmd &`): bash's child
     /// holds the EXIT trap it inherited until it runs the command, so an expansion error
     /// in the command's own words runs that trap there.
@@ -568,6 +572,7 @@ impl Vp {
         sub.own_sigs = Cell::new(0);
         sub.fork_job = false;
         sub.bg_simple = false;
+        sub.stage_simple = false;
         sub.own_simple = None;
         sub.parent_exit = self
             .traps
