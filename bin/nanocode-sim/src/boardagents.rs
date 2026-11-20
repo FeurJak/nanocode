@@ -245,6 +245,32 @@ pub fn mutate(name: &str) -> bool {
     true
 }
 
+/// The flags that turn the subagent board on as this run has it, for a replay line: a seed that
+/// fails under the board can pass without it, so the line must carry them.
+pub fn replay_flags() -> String {
+    if !enabled() {
+        return String::new();
+    }
+    let mutation = *lock(&MUTATION);
+    let lagging = LAGGING.load(Ordering::Relaxed);
+    if mutation != HostMutation::None {
+        let mut flags = String::new();
+        if lagging && mutation != HostMutation::RefreshOnce {
+            flags.push_str(" --subagents-board-lagging");
+        }
+        flags.push_str(" --subagents-board-mutation ");
+        flags.push_str(mutation.name());
+        return flags;
+    }
+    if lagging {
+        " --subagents-board-lagging".to_owned()
+    } else if DELAYED.load(Ordering::Relaxed) {
+        " --subagents-board-delayed".to_owned()
+    } else {
+        " --subagents-board".to_owned()
+    }
+}
+
 pub fn mutation() -> Option<String> {
     let mutation = *lock(&MUTATION);
     (mutation != HostMutation::None).then(|| format!("subagents_board_{}", mutation.name()))

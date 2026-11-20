@@ -622,6 +622,12 @@ fn controlplane_agents(args: &Args) -> Option<u64> {
 }
 
 fn replay(seed: u64, args: &Args) -> String {
+    let mut command = scenario_replay(seed, args);
+    command.push_str(&boardagents::replay_flags());
+    command
+}
+
+fn scenario_replay(seed: u64, args: &Args) -> String {
     let options = args.options;
     if args.scenario == Scenario::Websocket {
         return websocket::replay(seed, args.websocket);
