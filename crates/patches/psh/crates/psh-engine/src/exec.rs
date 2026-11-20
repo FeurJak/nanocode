@@ -36,6 +36,11 @@ pub(crate) fn run_list<'a>(
         let mut status = vp.status;
         for (i, item) in list.items.iter().enumerate() {
             let p = &item.first;
+            // A signal that came during the last item is taken before this one starts,
+            // also when it is a pipeline or a job (bash dies at once on a fatal one).
+            if (vp.top && vp.sigs.peek(&vp.core) != 0) || vp.own_sigs.get() != 0 {
+                trap::take_signals(vp).await?;
+            }
             status = if item.background {
                 background(vp, code, id, i).await?
             } else if item.rest.is_empty()
