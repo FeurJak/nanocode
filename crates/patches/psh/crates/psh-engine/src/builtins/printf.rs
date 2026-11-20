@@ -71,6 +71,7 @@ pub(super) async fn printf(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         errors: Vec::new(),
         failed: false,
         stop: false,
+        huge: false,
         utf8: vp.utf8(),
     };
     // bash reports a pass's errors as they happen and writes its output at the end of
@@ -83,6 +84,10 @@ pub(super) async fn printf(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         status |= i32::from(std::mem::take(&mut f.failed));
         for e in std::mem::take(&mut f.errors) {
             vp.error(&format!("printf: {e}")).await;
+        }
+        if f.huge {
+            vp.error("printf: cannot allocate memory").await;
+            return Err(crate::state::Unwind::Exit(2));
         }
         if var.is_none() && !f.out.is_empty() && write_st == 0 {
             write_st = out(vp, "printf", &std::mem::take(&mut f.out)).await?;
@@ -114,23 +119,6 @@ pub(super) async fn printf(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         }
         None => Ok(if write_st != 0 { write_st } else { status }),
     }
-}
-
-/// `%#q`: always single quotes (`'it'\''s'`), unless control characters need `$'…'`.
-fn single_quote(v: &[u8], utf8: bool) -> Vec<u8> {
-    if super::set::needs_ansi(v, utf8) {
-        return shell_quote(v, utf8);
-    }
-    let mut out = vec![b'\''];
-    for &b in v {
-        if b == b'\'' {
-            out.extend_from_slice(b"'\\''");
-        } else {
-            out.push(b);
-        }
-    }
-    out.push(b'\'');
-    out
 }
 
 /// `-v`'s target: a name, or a name with a non-empty subscript ending the word.
@@ -204,6 +192,8 @@ struct Formatter<'a> {
     /// An error (not only a warning) was reported in this pass.
     failed: bool,
     stop: bool,
+    /// A width or precision too large to format: bash runs out of memory and exits.
+    huge: bool,
     utf8: bool,
 }
 
@@ -216,6 +206,10 @@ struct Spec {
     alt: bool,
     width: Option<usize>,
     prec: Option<usize>,
+    /// The precision was `*`, taken from an argument.
+    prec_star: bool,
+    /// The precision was a bare `.`, with no digits.
+    prec_bare: bool,
 }
 
 impl Formatter<'_> {
@@ -253,6 +247,17 @@ impl Formatter<'_> {
             (n.mag as i128).wrapping_neg() as i64
         } else {
             n.mag as i64
+        }
+    }
+
+    /// A `*` width or precision: an `int`. bash clamps it to `int`'s range, except
+    /// when it is the last argument, which it truncates instead.
+    fn star_arg(&mut self) -> i64 {
+        let v = self.num_arg();
+        if self.next >= self.args.len() {
+            i64::from(v as i32)
+        } else {
+            v.clamp(i32::MIN.into(), i32::MAX.into())
         }
     }
 
@@ -337,7 +342,7 @@ impl Formatter<'_> {
                     }
                 }
                 self.out
-                    .extend_from_slice(&decode(&fmt[i..j], Dialect::Printf).bytes);
+                    .extend_from_slice(&decode(&fmt[i..j], Dialect::Printf, self.utf8).bytes);
                 i = j;
                 continue;
             }
@@ -370,7 +375,7 @@ impl Formatter<'_> {
                 i += 1;
             }
             if i < fmt.len() && fmt[i] == b'*' {
-                let w = self.num_arg();
+                let w = self.star_arg();
                 if w < 0 {
                     spec.left = true;
                 }
@@ -388,15 +393,25 @@ impl Formatter<'_> {
             if i < fmt.len() && fmt[i] == b'.' {
                 i += 1;
                 if i < fmt.len() && fmt[i] == b'*' {
-                    spec.prec = Some(self.num_arg().max(0) as usize);
+                    // A negative `*` precision is as if none were given.
+                    let p = self.star_arg();
+                    spec.prec = usize::try_from(p).ok();
+                    spec.prec_star = true;
                     i += 1;
                 } else {
                     let st = i;
                     while i < fmt.len() && fmt[i].is_ascii_digit() {
                         i += 1;
                     }
+                    spec.prec_bare = i == st;
                     spec.prec = Some(s(&fmt[st..i]).parse().unwrap_or(0));
                 }
+            }
+            const HUGE: usize = i32::MAX as usize;
+            if spec.width.unwrap_or(0) >= HUGE || spec.prec.unwrap_or(0) >= HUGE {
+                self.huge = true;
+                self.stop = true;
+                return;
             }
             if fmt.get(i) == Some(&b'(') {
                 // `%(strftime format)T`
@@ -495,30 +510,30 @@ impl Formatter<'_> {
         match conv {
             b's' | b'b' | b'q' | b'Q' => {
                 let mut a = self.arg().map(<[u8]>::to_vec).unwrap_or_default();
-                // `%Q`: the precision cuts the argument, before it is quoted.
+                // `%Q` (bash 5.2): a precision of digits cuts the argument before it
+                // is quoted and the quoted text is printed whole; a bare `.` prints
+                // nothing; a `*` precision is read but ignored. `#` changes nothing.
                 if conv == b'Q'
+                    && !spec.prec_star
+                    && !spec.prec_bare
                     && let Some(p) = spec.prec
                 {
                     a.truncate(p);
                 }
                 let utf8 = self.utf8;
-                let quote = |a: &[u8]| {
-                    if spec.alt {
-                        single_quote(a, utf8)
-                    } else {
-                        shell_quote(a, utf8)
-                    }
-                };
                 let mut body = match conv {
                     b's' => a,
-                    b'q' => quote(&a),
+                    b'q' => shell_quote(&a, utf8),
                     b'Q' => {
-                        let q = quote(&a);
+                        let mut q = shell_quote(&a, utf8);
+                        if spec.prec_bare {
+                            q.clear();
+                        }
                         self.pad(&q, spec, false);
                         return;
                     }
                     _ => {
-                        let d = decode(&a, Dialect::PercentB);
+                        let d = decode(&a, Dialect::PercentB, utf8);
                         if d.stop {
                             self.stop = true;
                         }

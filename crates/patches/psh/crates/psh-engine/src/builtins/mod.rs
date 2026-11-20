@@ -352,7 +352,7 @@ async fn echo(vp: &mut Vp, args: &[Vec<u8>]) -> R {
             buf.push(b' ');
         }
         if escapes {
-            let d = decode(a, Dialect::Echo);
+            let d = decode(a, Dialect::Echo, vp.utf8());
             buf.extend_from_slice(&d.bytes);
             if d.stop {
                 return out(vp, "echo", &buf).await;
