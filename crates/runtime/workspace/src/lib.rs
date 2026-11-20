@@ -6,7 +6,7 @@ mod worker;
 
 use std::{io, rc::Rc, sync::Arc, time::Duration};
 
-use nanocode_shell::{Commands, Fetch, FileSystem, Identity, Limits, Machine};
+use nanocode_shell::{Commands, Credentials, Fetch, FileSystem, Identity, Limits, Machine};
 use nanocode_sync::{oneshot, unbounded};
 
 pub use cells::WorkspaceHost;
@@ -22,6 +22,7 @@ pub struct Config {
     pub files: Make<dyn FileSystem>,
     pub machine: Make<dyn Machine>,
     pub fetch: Option<Make<dyn Fetch>>,
+    pub credentials: Option<Make<dyn Credentials>>,
     pub identity: Identity,
     pub limits: Limits,
     pub commands: Make<dyn Commands>,

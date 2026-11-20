@@ -7,8 +7,8 @@ use std::{
 };
 
 use nanocode_shell::{
-    Commands, Config as ShellConfig, Fetch, FileSystem, Identity, Kind, Limits, Machine, Remove,
-    Script, Shell, Step, Write,
+    Commands, Config as ShellConfig, Credentials, Fetch, FileSystem, Identity, Kind, Limits,
+    Machine, Remove, Script, Shell, Step, Write,
 };
 use nanocode_sync::{Stream, oneshot, stream::FuturesUnordered, unbounded};
 
@@ -49,6 +49,7 @@ struct Kept {
     machine: Rc<dyn Machine>,
     commands: Rc<dyn Commands>,
     fetch: Option<Rc<dyn Fetch>>,
+    credentials: Option<Rc<dyn Credentials>>,
     identity: Identity,
     limits: Limits,
     env: Vec<(Vec<u8>, Vec<u8>)>,
@@ -61,6 +62,7 @@ async fn serve(config: Config, mut jobs: unbounded::Receiver<Job>) {
         machine: (config.machine)(),
         commands: (config.commands)(),
         fetch: config.fetch.as_ref().map(|fetch| fetch()),
+        credentials: config.credentials.as_ref().map(|credentials| credentials()),
         identity: config.identity,
         limits: config.limits,
         env: config.env,
@@ -183,6 +185,9 @@ impl Kept {
         });
         if let Some(fetch) = &self.fetch {
             shell.set_fetch(fetch.clone());
+        }
+        if let Some(credentials) = &self.credentials {
+            shell.set_credentials(credentials.clone());
         }
         shell.start(Script {
             source: command.script.into_bytes(),

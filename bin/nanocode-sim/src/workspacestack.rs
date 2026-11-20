@@ -442,6 +442,7 @@ fn open(
         }),
         machine: Arc::new(clock),
         fetch: None,
+        credentials: None,
         commands: Arc::new(|| -> Rc<dyn Commands> { Rc::new(NoCommands) }),
         identity: Identity {
             info: HostInfo::default(),

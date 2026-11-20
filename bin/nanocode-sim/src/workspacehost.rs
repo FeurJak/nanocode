@@ -190,6 +190,7 @@ fn start(seed: u64) -> Workspace {
         files: Arc::new(move || -> Rc<dyn FileSystem> { Rc::new(MemFs::new(clock())) }),
         machine: Arc::new(move || -> Rc<dyn Machine> { clock() }),
         fetch: None,
+        credentials: None,
         commands: Arc::new(|| -> Rc<dyn Commands> { Rc::new(NoCommands) }),
         identity: Identity {
             info: HostInfo::default(),
