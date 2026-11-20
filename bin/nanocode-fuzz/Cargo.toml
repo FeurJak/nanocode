@@ -26,5 +26,8 @@ nanocode-turnlog.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+nanocode-sys.workspace = true
+
 [lints]
 workspace = true

@@ -14,7 +14,7 @@ mod rng;
 
 use std::cell::RefCell;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rng::Rng;
@@ -165,12 +165,45 @@ fn one(seed: u64, target: Target, iteration: u64) -> Checked {
     checked.unwrap_or_else(|_| Err(PANICKED.with(|panicked| panicked.take())))
 }
 
+// SIGTERM or SIGINT stops the workers after their current iteration, and the run still prints its summary, so a
+// shard stopped early (a box over its cores, an outer timeout) keeps its execs and failures.
+#[cfg(unix)]
+fn catch_stop() {
+    use nanocode_sys::unix::signal;
+    for number in [signal::SIGTERM, signal::SIGINT] {
+        if let Err(error) = signal::listen(number) {
+            eprintln!("nanocode-fuzz: cannot catch signal {number}: {error}");
+        }
+    }
+}
+
+#[cfg(not(unix))]
+const fn catch_stop() {}
+
+#[cfg(unix)]
+fn stop_signal() -> Option<&'static str> {
+    use nanocode_sys::unix::signal;
+    if signal::take_pending(signal::SIGTERM) {
+        Some("SIGTERM")
+    } else if signal::take_pending(signal::SIGINT) {
+        Some("SIGINT")
+    } else {
+        None
+    }
+}
+
+#[cfg(not(unix))]
+const fn stop_signal() -> Option<&'static str> {
+    None
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(run) = parse(&args) else {
         return usage();
     };
     record_panics();
+    catch_stop();
     let (first, total) = match run.count {
         Count::Iterations(n) => (0, n),
         Count::One(i) => (i, 1),
@@ -181,13 +214,15 @@ fn main() -> ExitCode {
     let done = AtomicU64::new(0);
     let started = Instant::now();
     let due = run.deadline.map(|deadline| started + deadline);
+    let stop = AtomicBool::new(false);
+    let mut stopped_by = None;
     let failures: Vec<String> = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..run.jobs.min(usize::try_from(work).unwrap_or(usize::MAX)).max(1))
             .map(|_| {
                 scope.spawn(|| {
                     let mut failed = Vec::new();
                     loop {
-                        if due.is_some_and(|due| Instant::now() >= due) {
+                        if stop.load(Ordering::Relaxed) || due.is_some_and(|due| Instant::now() >= due) {
                             return failed;
                         }
                         let at = cursor.fetch_add(1, Ordering::Relaxed);
@@ -214,6 +249,18 @@ fn main() -> ExitCode {
                 })
             })
             .collect();
+        while !workers
+            .iter()
+            .all(std::thread::ScopedJoinHandle::is_finished)
+        {
+            if stopped_by.is_none()
+                && let Some(name) = stop_signal()
+            {
+                stopped_by = Some(name);
+                stop.store(true, Ordering::Relaxed);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
         workers
             .into_iter()
             .flat_map(|worker| worker.join().expect("a fuzz worker catches its panics"))
@@ -222,6 +269,9 @@ fn main() -> ExitCode {
     let seconds = started.elapsed().as_secs_f64();
     let work = done.into_inner();
     let names: Vec<&str> = run.targets.iter().map(|target| target.name()).collect();
+    if let Some(name) = stopped_by {
+        eprintln!("nanocode-fuzz: stopped by {name} after {seconds:.3}s");
+    }
     println!(
         "FUZZ iterations={work} failed={} seed={} seconds={seconds:.3} iterations_per_s={:.0} targets=[{}]",
         failures.len(),

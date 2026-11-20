@@ -699,6 +699,7 @@ dependencies = [
  "nanocode-live-fold",
  "nanocode-partitions",
  "nanocode-sync",
+ "nanocode-sys",
  "nanocode-turnlog",
  "serde",
  "serde_json",
