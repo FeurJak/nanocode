@@ -199,9 +199,6 @@ pub(crate) fn build(patterns: &[Vec<u8>], o: MatchOptions) -> Result<Matchers, P
             for p in patterns {
                 let s = std::str::from_utf8(p).map_err(|_| PatternError::Unsupported)?;
                 if let Some(look) = Look::split(s) {
-                    if o.word || o.line {
-                        return Err(PatternError::Unsupported);
-                    }
                     let look = look.build(o).ok_or(PatternError::Unsupported)?;
                     let pats = || Pats {
                         pats: vec![Pat::Look(look.clone())],
@@ -403,15 +400,18 @@ enum Pat {
 
 /// A `-P` pattern whose lookarounds the regex crate does not take, split where they
 /// are at its ends: lookbehinds before the body, `(?<=X)` and `(?<!X)`, and one
-/// positive lookahead after it, `(?=Z)`. A lookbehind only tests the position the
-/// body starts at, and a trailing lookahead matched as part of the regex (`(B)Z`)
-/// keeps Perl's backtracking order, so both match as PCRE does.
+/// lookahead after it, `(?=Z)` or `(?!Z)`. A lookbehind only tests the position the
+/// body starts at, and a trailing positive lookahead matched as part of the regex
+/// (`(B)Z`) keeps Perl's backtracking order, so both match as PCRE does. A negative
+/// lookahead (and any lookahead under `-x`) tests where the body ends. `-x` and `-w`
+/// wrap the whole pattern, as GNU grep's `^(?:P)$` and `(?<!\w)(?:P)(?!\w)` do.
 #[derive(Debug, PartialEq, Eq)]
 struct Look<'p> {
     /// `(X, negated)`.
     behind: Vec<(&'p str, bool)>,
     body: &'p str,
-    ahead: Option<&'p str>,
+    /// `(Z, negated)`.
+    ahead: Option<(&'p str, bool)>,
 }
 
 #[derive(Clone)]
@@ -419,6 +419,15 @@ struct BuiltLook {
     /// `(?:B)`, or `(B)(?:Z)` with a lookahead: the match is group 1.
     body: Regex,
     ahead: bool,
+    /// `\A(?:Z)` tested where the body ends, and whether it must not match.
+    after: Option<(Regex, bool)>,
+    /// `-x`: the body is anchored to the whole line.
+    line: bool,
+    /// `-w`: `\w\z` and `\A\w`, which must not match around the match.
+    word: Option<(Regex, Regex)>,
+    /// `\A(?:B)\z`, to try shorter ends of the body when the checks after it fail, as
+    /// Perl backtracks into it.
+    exact: Option<Regex>,
     /// `(?:X)\z`, matched against the text before the body.
     behind: Vec<(Regex, bool)>,
 }
@@ -443,9 +452,11 @@ impl<'p> Look<'p> {
         if rest.ends_with(')') {
             let mut at = 0;
             while at < rest.len() {
-                if rest[at..].starts_with("(?=") && group_end(&rest[at..]) == Some(rest.len() - at - 1)
+                let negated = rest[at..].starts_with("(?!");
+                if (negated || rest[at..].starts_with("(?="))
+                    && group_end(&rest[at..]) == Some(rest.len() - at - 1)
                 {
-                    ahead = Some(&rest[at + 3..rest.len() - 1]);
+                    ahead = Some((&rest[at + 3..rest.len() - 1], negated));
                     rest = &rest[..at];
                     break;
                 }
@@ -463,17 +474,45 @@ impl<'p> Look<'p> {
     }
 
     fn build(&self, o: MatchOptions) -> Option<BuiltLook> {
+        let (line, word) = (o.line, o.word);
+        let o = MatchOptions {
+            word: false,
+            line: false,
+            ..o
+        };
+        let combined = matches!(self.ahead, Some((_, false))) && !line;
         let body = match self.ahead {
-            Some(z) => format!("({})(?:{z})", self.body),
-            None => format!("(?:{})", self.body),
+            Some((z, _)) if combined => format!("({})(?:{z})", self.body),
+            _ if line => format!(r"\A(?:{})\z", self.body),
+            _ => format!("(?:{})", self.body),
+        };
+        let after = match self.ahead {
+            Some((z, negated)) if !combined => {
+                Some((rust_regex(&format!(r"\A(?:{z})"), o)?, negated))
+            }
+            _ => None,
+        };
+        let word = if word {
+            Some((rust_regex(r"\w\z", o)?, rust_regex(r"\A\w", o)?))
+        } else {
+            None
         };
         let mut behind = Vec::with_capacity(self.behind.len());
         for (x, negated) in &self.behind {
             behind.push((rust_regex(&format!(r"(?:{x})\z"), o)?, *negated));
         }
+        let exact = if (after.is_some() || word.is_some()) && !line && !combined {
+            Some(rust_regex(&format!(r"\A(?:{})\z", self.body), o)?)
+        } else {
+            None
+        };
         Some(BuiltLook {
+            exact,
             body: rust_regex(&body, o)?,
-            ahead: self.ahead.is_some(),
+            ahead: combined,
+            after,
+            line,
+            word,
             behind,
         })
     }
@@ -486,15 +525,35 @@ impl BuiltLook {
         loop {
             self.body.captures_read_at(&mut caps, line, from)?;
             let (s, e) = caps.get(usize::from(self.ahead))?;
-            let ok = self
+            let ends_ok = |e: usize| {
+                self.after
+                    .as_ref()
+                    .is_none_or(|(re, negated)| re.is_match(&line[e..]) != *negated)
+                    && self.word.as_ref().is_none_or(|(before, after)| {
+                        !before.is_match(&line[..s]) && !after.is_match(&line[e..])
+                    })
+            };
+            if self
                 .behind
                 .iter()
-                .all(|(re, negated)| re.is_match(&line[..s]) != *negated);
-            if ok {
-                return Some((s, e));
+                .all(|(re, negated)| re.is_match(&line[..s]) != *negated)
+            {
+                if ends_ok(e) {
+                    return Some((s, e));
+                }
+                if let Some(exact) = &self.exact {
+                    let shorter = (s..e).rev().find(|&end| {
+                        (!utf8 || std::str::from_utf8(&line[s..end]).is_ok())
+                            && exact.is_match(&line[s..end])
+                            && ends_ok(end)
+                    });
+                    if let Some(end) = shorter {
+                        return Some((s, end));
+                    }
+                }
             }
             from = s + char_len(line, s, utf8);
-            if from > line.len() {
+            if self.line || from > line.len() {
                 return None;
             }
         }
@@ -723,6 +782,22 @@ mod tests {
         assert_eq!(all(r"(?<!x)\d", "x1 2"), ["2"]);
         assert_eq!(all(r"\w+(?=\d)", "abc1 de"), ["abc"]);
         assert_eq!(all(r"(?<=\()[^)]+(?=\))", "f(a, b) g(c)"), ["a, b", "c"]);
+        assert_eq!(all(r"o(?!o)", "foo boo ox"), ["o", "o", "o"]);
+        assert_eq!(all(r"\d+(?!px)", "12px 7em"), ["1", "7"]);
+        let find = |p: &str, word: bool, line: bool, s: &str| {
+            let o = MatchOptions {
+                word,
+                line,
+                ..opts(true)
+            };
+            let pats = build(&[p.as_bytes().to_vec()], o).unwrap().spans.unwrap();
+            pats.find_at(s.as_bytes(), 0)
+        };
+        assert_eq!(find(r"o(?!o)", false, true, "o"), Some((0, 1)));
+        assert_eq!(find(r"o(?!o)", false, true, "oo"), None);
+        assert_eq!(find(r"foo(?=bar)", false, true, "foobar"), None);
+        assert_eq!(find(r"(?<=x)ab(?!c)", true, false, "xab xab"), None);
+        assert_eq!(find(r"ab(?!c)", true, false, "xab ab"), Some((4, 6)));
         assert_eq!(
             Look::split(r"a(?=b)c"),
             None,
