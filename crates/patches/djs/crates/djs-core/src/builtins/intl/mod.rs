@@ -10,6 +10,7 @@ mod locdata;
 mod locdata_avail;
 mod number;
 mod numdata;
+mod numsys;
 mod text;
 mod tzdata;
 
@@ -78,6 +79,12 @@ impl Spec {
     }
     pub fn put(&mut self, k: &str, v: &str) {
         self.pairs.push((k.to_string(), v.to_string()));
+    }
+    /// Keeps k but hides it from resolvedOptions (its name gains a leading @).
+    pub fn hide(&mut self, k: &str) {
+        for (n, _) in self.pairs.iter_mut().filter(|(n, _)| n == k) {
+            n.insert(0, '@');
+        }
     }
     pub fn num(&mut self, k: &str, v: u32) {
         self.put(k, &format!("#{v}"));
@@ -363,12 +370,12 @@ pub(crate) fn intrinsic(heap: &mut Heap, k: u16, a: [Value; 5]) -> Result<Option
             };
             raw.choose("localeMatcher", &["lookup", "best fit"], "best fit", &format!("Intl.{ctor}"))?;
             let spec = match kind {
-                0 => number::resolve(&locale, &raw)?,
+                0 => number::resolve(&locale, &tags, &raw)?,
                 1 => date::resolve(&locale, &tags, &raw)?,
                 2 => collate::resolve(&locale, &tags, &raw)?,
                 DISPLAY_NAMES => displaynames::resolve(&locale, &raw)?,
                 SEGMENTER => segmenter::resolve(&locale, &raw)?,
-                _ => text::resolve(kind, &locale, &raw)?,
+                _ => text::resolve(kind, &locale, &tags, &raw)?,
             };
             string_value(heap, &spec.encode())?
         }
@@ -403,7 +410,7 @@ pub(crate) fn intrinsic(heap: &mut Heap, k: u16, a: [Value; 5]) -> Result<Option
             let out = match kind {
                 0 => {
                     let num = |v: Value| match (v.as_string(), v.as_number()) {
-                        (Some(s), _) => Some(number::parse_decimal(&heap.str_to_string(s))),
+                        (Some(s), _) => Some(number::parse_intl_string(&heap.str_to_string(s))),
                         (None, Some(n)) => Some(number::from_f64(n)),
                         _ => None,
                     };
@@ -411,9 +418,15 @@ pub(crate) fn intrinsic(heap: &mut Heap, k: u16, a: [Value; 5]) -> Result<Option
                     if a[3] != Value::UNDEFINED {
                         // formatRange: parts are type \u{3} source.
                         let Some(y) = num(a[3]) else { return Ok(None) };
-                        for (n, which) in [(&x, "start"), (&y, "end")] {
+                        // As V8: the message shows the value as given ("Invalid start : abc").
+                        for (n, v, which) in [(&x, a[2], "start"), (&y, a[3], "end")] {
                             if matches!(n, number::Num::Nan) {
-                                return range(&format!("Invalid {which}Range : NaN"));
+                                let shown = match v.as_string() {
+                                    Some(s) => heap.str_to_string(s),
+                                    None if v.as_object().is_some() => "#<Object>".to_string(),
+                                    None => "NaN".to_string(),
+                                };
+                                return range(&format!("Invalid {which} : {shown}"));
                             }
                         }
                         let items = number::format_range(&spec, x, y);

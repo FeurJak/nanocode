@@ -68,6 +68,16 @@ function IntlSplit(s: Str, sep: Str, from: f64): Obj {
  * a string, b a boolean, n a number, g useGrouping's boolean or string) that is not
  * undefined, converted.
  */
+/** options, refusing null with V8's TypeError for the constructor. */
+function IntlNoNull(locales: Value, options: Value, message: Str): Value {
+  if (options === null) {
+    // The locales are read (and refused) first.
+    IntlLocales(IntlLocaleTags(locales), 0);
+    throw NewTypeError(message);
+  }
+  return options;
+}
+
 function IntlReadOptions(options: Value, names: Str): Str {
   if (options === undefined) {
     return "";
@@ -349,7 +359,7 @@ function IntlSupportedLocales(locales: Value, options: Value, kind: i32, ctor: S
 
 /** A new NumberFormat. */
 function IntlNewNumberFormat(newTarget: Value, locales: Value, options: Value): Obj {
-  return IntlConstruct(newTarget, "NumberFormat", 0, locales, IntlReadOptions(options, IntlNfOptions()));
+  return IntlConstruct(newTarget, "NumberFormat", 0, locales, IntlReadOptions(IntlNoNull(locales, options, "Intl.NumberFormat called on null or undefined"), IntlNfOptions()));
 }
 
 /**
@@ -403,9 +413,14 @@ function IntlNumberFormatPrototypeFormatToParts(this: Value, x?: Value): Obj {
 /** formatRange's two values, read as the spec reads them. */
 function IntlRangeValue(v: Value, which: Str): Value {
   if (v === undefined) {
-    throw NewTypeError("Invalid " + which + "Range : undefined");
+    throw NewTypeError("Invalid " + which + " : undefined");
   }
-  return IntlNumeric(v);
+  const n: Value = IntlNumeric(v);
+  // An object that reads as NaN shows as V8 shows it in the RangeError ("Invalid start : #<Object>").
+  if (IsObject(v) && n !== n) {
+    return "#<Object>";
+  }
+  return n;
 }
 
 /**
@@ -632,7 +647,7 @@ function IntlCollatorToStringTag(): Str {
  */
 function IntlPluralRulesConstructor(locales?: Value, options?: Value): Obj {
   IntlRequireNew(new.target, "PluralRules");
-  return IntlConstruct(new.target, "PluralRules", 3, locales, IntlReadOptions(options, IntlPluralOptions()));
+  return IntlConstruct(new.target, "PluralRules", 3, locales, IntlReadOptions(IntlNoNull(locales, options, "Intl.PluralRules called on null or undefined"), IntlPluralOptions()));
 }
 
 /**
@@ -704,7 +719,7 @@ function IntlPluralRulesToStringTag(): Str {
  */
 function IntlListFormatConstructor(locales?: Value, options?: Value): Obj {
   IntlRequireNew(new.target, "ListFormat");
-  return IntlConstruct(new.target, "ListFormat", 4, locales, IntlReadOptions(options, "localeMatcher:s,type:s,style:s"));
+  return IntlConstruct(new.target, "ListFormat", 4, locales, IntlReadOptions(IntlNoNull(locales, options, "invalid_argument"), "localeMatcher:s,type:s,style:s"));
 }
 
 /**
@@ -780,7 +795,7 @@ function IntlListFormatToStringTag(): Str {
  */
 function IntlRelativeTimeFormatConstructor(locales?: Value, options?: Value): Obj {
   IntlRequireNew(new.target, "RelativeTimeFormat");
-  const raw: Str = IntlReadOptions(options, "localeMatcher:s,numberingSystem:s,style:s,numeric:s");
+  const raw: Str = IntlReadOptions(IntlNoNull(locales, options, "Intl.RelativeTimeFormat called on null or undefined"), "localeMatcher:s,numberingSystem:s,style:s,numeric:s");
   return IntlConstruct(new.target, "RelativeTimeFormat", 5, locales, raw);
 }
 

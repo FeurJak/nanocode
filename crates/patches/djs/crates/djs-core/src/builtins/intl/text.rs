@@ -8,18 +8,22 @@ const UNITS: [&str; 8] = [
     "second", "minute", "hour", "day", "week", "month", "quarter", "year",
 ];
 
-pub(super) fn resolve(kind: i32, locale: &str, raw: &Spec) -> Result<Spec, Fault> {
+pub(super) fn resolve(kind: i32, locale: &str, tags: &[alloc::string::String], raw: &Spec) -> Result<Spec, Fault> {
     let mut out = Spec::default();
-    out.put("locale", locale);
+    // RelativeTimeFormat keeps a -u-nu- keyword it formats in.
+    let nus = if kind == 5 { Some(super::numsys::resolve(locale, tags, raw)?) } else { None };
+    out.put("locale", nus.as_ref().map_or(locale, |n| n.1.as_str()));
     let lang = locale.split('-').next().unwrap_or("en");
     match kind {
         3 => {
             // ICU's plural data is per language (pt-PT has its own): the region is dropped.
             let mut out2 = Spec::default();
             let supported = super::NUM_LANGS.contains(&lang);
+            // The default locale (no requested one has data) stays en-US.
+            let default = !tags.iter().any(|t| super::NUM_LANGS.contains(&t.split('-').next().unwrap_or("")));
             out2.put(
                 "locale",
-                if !supported || locale == "pt-PT" {
+                if !supported || locale == "pt-PT" || default {
                     locale
                 } else {
                     lang
@@ -34,6 +38,11 @@ pub(super) fn resolve(kind: i32, locale: &str, raw: &Spec) -> Result<Spec, Fault
             )?;
             out.put("type", ty);
             number::digit_options(raw, &mut out, (0, 3), false)?;
+            // As V8: with a roundingPriority, resolvedOptions shows no fraction digits.
+            if raw.get("roundingPriority").is_some_and(|p| p != "auto") {
+                out.hide("minimumFractionDigits");
+                out.hide("maximumFractionDigits");
+            }
             out.put(
                 "pluralCategories",
                 &format!("@{}", plural_categories(lang, ty == "ordinal")),
@@ -59,7 +68,7 @@ pub(super) fn resolve(kind: i32, locale: &str, raw: &Spec) -> Result<Spec, Fault
             let nu = raw.choose("numeric", &["always", "auto"], "always", n)?;
             out.put("style", st);
             out.put("numeric", nu);
-            out.put("numberingSystem", if number::arab_digits(locale) { "arab" } else { "latn" });
+            out.put("numberingSystem", nus.as_ref().map_or("latn", |n| n.0.as_str()));
         }
         _ => {
             let g = raw.choose(
@@ -78,6 +87,29 @@ fn index(values: &[&str], v: Option<&str>) -> u8 {
     values.iter().position(|x| Some(*x) == v).unwrap_or(0) as u8
 }
 
+/// Regions whose English inherits en-001 (British usage, such as no serial comma in lists).
+const EN_001: &[&str] = &["001", "150", "AG", "AI", "AT", "AU", "BB", "BE", "BM", "BS", "BW", "BZ", "CA", "CC", "CH", "CK", "CM", "CX", "CY", "DE", "DG", "DK", "DM", "ER", "FI", "FJ", "FK", "FM", "GB", "GD", "GG", "GH", "GI", "GM", "GY", "HK", "IE", "IL", "IM", "IN", "IO", "JE", "JM", "KE", "KI", "KN", "KY", "LC", "LR", "LS", "MG", "MO", "MS", "MT", "MU", "MV", "MW", "MY", "NA", "NF", "NG", "NL", "NR", "NU", "NZ", "PG", "PK", "PN", "PW", "RW", "SB", "SC", "SD", "SE", "SG", "SH", "SI", "SL", "SS", "SX", "SZ", "TC", "TK", "TO", "TT", "TV", "TZ", "UG", "VC", "VG", "VU", "WS", "ZA", "ZM", "ZW"];
+
+/// The data key of a locale's lists: en-GB's for English that inherits en-001, else its own.
+fn list_key(locale: &str) -> &str {
+    let mut it = locale.split('-');
+    let own = |r: &str| LISTS.iter().any(|row| row.0 == format!("en-{r}"));
+    if it.next() == Some("en") && it.take_while(|s| s.len() != 1).any(|s| EN_001.contains(&s) && !own(s)) {
+        "en-GB"
+    } else {
+        locale
+    }
+}
+
+/// Whether a Chinese locale takes Hong Kong's RelativeTimeFormat text (zh-HK, zh-MO, zh-Hant-HK).
+fn zh_hk(locale: &str) -> bool {
+    let mut it = locale.split('-');
+    it.next() == Some("zh") && {
+        let rest: alloc::vec::Vec<&str> = it.take_while(|s| s.len() != 1).collect();
+        (rest.contains(&"HK") || rest.contains(&"MO")) && !rest.contains(&"Hans")
+    }
+}
+
 fn unit_index(u: &str) -> Option<usize> {
     let u = u.strip_suffix('s').unwrap_or(u);
     UNITS.iter().position(|x| *x == u)
@@ -90,7 +122,7 @@ pub(super) fn format(
     s: Option<&str>,
     y: Option<&str>,
 ) -> Result<Parts, Fault> {
-    let locale = spec.get("locale").unwrap_or("en-US");
+    let locale = super::numsys::base_locale(spec.get("locale").unwrap_or("en-US"));
     let lang = locale.split('-').next().unwrap_or("en");
     let mut out = Parts::default();
     match kind {
@@ -103,8 +135,8 @@ pub(super) fn format(
                 Num::Dec(d) => {
                     let g = number::Digits {
                         min_int: 1,
-                        min_fd: spec.int("minimumFractionDigits", 0),
-                        max_fd: spec.int("maximumFractionDigits", 3),
+                        min_fd: spec.int("minimumFractionDigits", spec.int("@minimumFractionDigits", 0)),
+                        max_fd: spec.int("maximumFractionDigits", spec.int("@maximumFractionDigits", 3)),
                         min_sd: spec.int("minimumSignificantDigits", 1),
                         max_sd: spec.int("maximumSignificantDigits", 21),
                         kind: if spec.get("minimumSignificantDigits").is_some() {
@@ -149,7 +181,7 @@ pub(super) fn format(
             };
             let ty = index(&["conjunction", "disjunction", "unit"], spec.get("type"));
             let st = index(&["long", "short", "narrow"], spec.get("style"));
-            let row = number::find_row(LISTS, locale, |r, k| r.0 == k && r.1 == ty && r.2 == st)
+            let row = number::find_row(LISTS, list_key(locale), |r, k| r.0 == k && r.1 == ty && r.2 == st)
                 .or_else(|| LISTS.iter().find(|r| r.0 == "en" && r.1 == ty && r.2 == st))
                 .map_or([", "; 4], |r| r.3);
             // Spanish: y is e before an i sound (i…, hi… but not hia…, hie…), o is u before an
@@ -214,7 +246,8 @@ pub(super) fn format(
             let st = index(&["long", "short", "narrow"], spec.get("style"));
             let st_l = st;
             let neg = v < 0.0 || (v == 0.0 && v.is_sign_negative());
-            let auto_key = number::table_key(locale, "relative_auto", |k| RELATIVE_AUTO.iter().any(|r| r.0 == k));
+            let hk = zh_hk(locale);
+            let auto_key = if hk { "zh-HK" } else { number::table_key(locale, "relative_auto", |k| RELATIVE_AUTO.iter().any(|r| r.0 == k)) };
             if spec.get("numeric") == Some("auto")
                 && v == (v as i64) as f64
                 && let Some(r) = RELATIVE_AUTO.iter().find(|r| {
@@ -226,6 +259,7 @@ pub(super) fn format(
             }
             let mut nspec = Spec::default();
             nspec.put("locale", locale);
+            nspec.put("numberingSystem", spec.get("numberingSystem").unwrap_or("latn"));
             let f = number::format(&nspec, number::from_f64(v.abs()));
             let plural = {
                 let d = number::from_f64(v.abs());
@@ -248,9 +282,14 @@ pub(super) fn format(
             };
             let dir = u8::from(neg);
             let pick = |l: &str, cat: &str| {
-                number::find_row(RELATIVE, l, |r, k| {
+                let hit = |r: &&(&str, u8, u8, u8, &str, &str), k: &str| {
                     r.0 == k && usize::from(r.1) == ui && r.2 == st_l && r.3 == dir && r.4 == cat
-                })
+                };
+                if hk && l == locale {
+                    RELATIVE.iter().find(|r| hit(r, "zh-HK"))
+                } else {
+                    number::find_row(RELATIVE, l, |r, k| hit(&r, k))
+                }
             };
             let pat = pick(locale, plural)
                 .or_else(|| pick(locale, "other"))

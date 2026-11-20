@@ -88,7 +88,45 @@ fn sign_mark(loc: &NumLocale) -> (&'static str, &'static str) {
 }
 
 fn pct_sign(loc: &NumLocale) -> &'static str {
-    if loc.tag == "ar-arab" { "\u{66a}" } else { "%" }
+    if is_arab(loc) { "\u{66a}" } else { "%" }
+}
+
+fn is_arab(loc: &NumLocale) -> bool {
+    loc.tag == "ar-arab" || loc.tag == "arab" || loc.tag == "arabext"
+}
+
+/// Arabic-Indic symbols and patterns outside ar (en-u-nu-arab), which ICU takes from root but
+/// for a few languages' own (zh's currency pattern, ko's and zh-Hant's minus).
+const ROOT_ARAB: NumLocale = NumLocale { tag: "arab", dec: "\u{66b}", grp: "\u{66c}", min2: false, indian: false, minus: "\u{61c}-", cur: "#\u{a0}\u{a4}", neg_cur: "-#\u{a0}\u{a4}", acct: "-#\u{a0}\u{a4}", pct: "#%\u{61c}", neg_pct: "-#%\u{61c}", nan: "NaN" };
+/// Extended Arabic-Indic (arabext) outside ar: the arab separators with LRM-wrapped signs.
+static ROOT_ARABEXT: NumLocale = NumLocale { tag: "arabext", minus: "\u{200e}-\u{200e}", pct: "#\u{a0}%", neg_pct: "-#\u{a0}%", ..ROOT_ARAB };
+static ARAB_ROWS: [(&str, NumLocale); 5] = [
+    ("min2", NumLocale { min2: true, ..ROOT_ARAB }),
+    ("nl", NumLocale { pct: "#\u{a0}%\u{61c}", neg_pct: "-#\u{a0}%\u{61c}", ..ROOT_ARAB }),
+    ("ko", NumLocale { minus: "\u{200f}-", ..ROOT_ARAB }),
+    ("zh", NumLocale { cur: "\u{a4}#", neg_cur: "-\u{a4}#", acct: "-\u{a4}#", ..ROOT_ARAB }),
+    ("zh-Hant", NumLocale { minus: "-", nan: "\u{975e}\u{6578}\u{503c}", ..ROOT_ARAB }),
+];
+
+/// The symbols a locale formats with in numbering system nu: Arabic-Indic ones for arab, else
+/// the locale's (Latin ones in ar-EG when nu is latn), whose ASCII digits map to nu afterwards.
+pub(super) fn num_locale_nu(locale: &str, nu: &str) -> &'static NumLocale {
+    let ar = locale.split('-').next() == Some("ar");
+    match nu {
+        "arab" if ar => num_locale("ar-EG"),
+        "arabext" if !ar => &ROOT_ARABEXT,
+        "arab" if !ar => {
+            let own = num_locale(locale);
+            let key = if own.tag == "zh-Hant" || own.tag == "ko" || own.tag == "nl" { own.tag } else { own.tag.split('-').next().unwrap_or("") };
+            ARAB_ROWS
+                .iter()
+                .find(|r| r.0 == key)
+                .or_else(|| ARAB_ROWS.iter().find(|r| r.0 == "min2" && own.min2))
+                .map_or(&ROOT_ARAB, |r| &r.1)
+        }
+        _ if arab_digits(locale) => num_locale("ar"),
+        _ => num_locale(locale),
+    }
 }
 
 pub(super) fn num_locale(tag: &str) -> &'static NumLocale {
@@ -169,7 +207,14 @@ fn is_unit(u: &str) -> bool {
     }
 }
 
+/// Currencies whose amounts don't have two fraction digits in ICU (node 22's resolvedOptions for
+/// every Intl.supportedValuesOf('currency'), with CLF and UYW, which it leaves out).
+const CURRENCY_DIGITS: [(&str, u8); 41] = [("AFN", 0), ("ALL", 0), ("BHD", 3), ("BIF", 0), ("CLF", 4), ("CLP", 0), ("COP", 0), ("DJF", 0), ("GNF", 0), ("HUF", 0), ("IDR", 0), ("IQD", 0), ("IRR", 0), ("ISK", 0), ("JOD", 3), ("JPY", 0), ("KMF", 0), ("KPW", 0), ("KRW", 0), ("KWD", 3), ("LAK", 0), ("LBP", 0), ("LYD", 3), ("MGA", 0), ("MMK", 0), ("OMR", 3), ("PKR", 0), ("PYG", 0), ("RWF", 0), ("SLL", 0), ("SOS", 0), ("SYP", 0), ("TND", 3), ("UGX", 0), ("UYW", 4), ("VND", 0), ("VUV", 0), ("XAF", 0), ("XOF", 0), ("XPF", 0), ("YER", 0)];
+
 fn currency_digits(code: &str) -> u32 {
+    if let Some(d) = CURRENCY_DIGITS.iter().find(|c| c.0 == code) {
+        return u32::from(d.1);
+    }
     CURRENCIES
         .iter()
         .find(|c| c.code == code)
@@ -343,7 +388,7 @@ pub(super) fn digit_options(
     }
     if inc != 1.0 {
         if d.kind != "fractionDigits" {
-            return type_err("roundingIncrement is only valid with fraction digits rounding");
+            return type_err("RoundingType is not fractionDigits");
         }
         if d.max_fd != d.min_fd {
             return range("maximumFractionDigits value is out of range.");
@@ -368,10 +413,14 @@ pub(super) fn digit_options(
     Ok(d)
 }
 
-pub(super) fn resolve(locale: &str, raw: &Spec) -> Result<Spec, Fault> {
+pub(super) fn resolve(locale: &str, tags: &[String], raw: &Spec) -> Result<Spec, Fault> {
     let mut out = Spec::default();
-    out.put("locale", locale);
-    out.put("numberingSystem", if arab_digits(locale) { "arab" } else { "latn" });
+    let (nu, shown, range_nu) = super::numsys::resolve(locale, tags, raw)?;
+    out.put("locale", &shown);
+    out.put("numberingSystem", &nu);
+    if let Some(r) = range_nu {
+        out.put("@rnu", r);
+    }
     let n = "Intl.NumberFormat";
     let style = raw.choose(
         "style",
@@ -404,6 +453,13 @@ pub(super) fn resolve(locale: &str, raw: &Spec) -> Result<Spec, Fault> {
         ));
     }
     let ud = raw.choose("unitDisplay", &["short", "narrow", "long"], "short", n)?;
+    // A missing currency or unit is refused before notation is read, as V8 does.
+    if style == "currency" && currency.is_none() {
+        return type_err("Currency code is required with currency style.");
+    }
+    if style == "unit" && unit.is_none() {
+        return type_err("Invalid unit argument for Intl.NumberFormat() ''");
+    }
     out.put("style", style);
     let notation = raw.choose(
         "notation",
@@ -479,6 +535,19 @@ pub(super) fn resolve(locale: &str, raw: &Spec) -> Result<Spec, Fault> {
     Ok(out)
 }
 
+fn same_double(x: &Num, y: &Num) -> bool {
+    let f = |d: &Dec| {
+        let mut s = String::from(if d.neg { "-0." } else { "0." });
+        s.extend(d.digits.iter().map(|x| char::from(b'0' + x)));
+        s.push_str(&format!("e{}", d.exp));
+        s.parse::<f64>().ok()
+    };
+    match (x, y) {
+        (Num::Dec(a), Num::Dec(b)) => a.digits != b.digits && f(a).is_some_and(|v| Some(v) == f(b) && v != 0.0),
+        _ => false,
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct Dec {
     pub neg: bool,
@@ -538,6 +607,97 @@ pub(super) fn parse_decimal(s: &str) -> Num {
         exp: ip.len() as i32 + e,
     };
     d.trim();
+    Num::Dec(d)
+}
+
+/// JS StrWhiteSpaceChar: WhiteSpace and LineTerminator.
+fn js_space(c: char) -> bool {
+    matches!(c, '\t' | '\n' | '\u{b}' | '\u{c}' | '\r' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}')
+}
+
+/// ToIntlMathematicalValue of a string, as V8 reads it: a StringNumericLiteral (whitespace, 0x/0o/0b
+/// integers, Infinity) whose decimal value stays exact, except that one past the double range is ±∞.
+pub(super) fn parse_intl_string(s: &str) -> Num {
+    let t = s.trim_matches(js_space);
+    if t.is_empty() {
+        return Num::Dec(Dec { neg: false, digits: Vec::new(), exp: 0 });
+    }
+    let b = t.as_bytes();
+    if b.len() > 2 && b[0] == b'0' {
+        let radix = match b[1] {
+            b'x' | b'X' => 16,
+            b'o' | b'O' => 8,
+            b'b' | b'B' => 2,
+            _ => 0,
+        };
+        if radix != 0 {
+            // Exact integer: decimal digits, least significant first.
+            let mut dec: Vec<u8> = Vec::new();
+            for c in t[2..].chars() {
+                let Some(v) = c.to_digit(radix) else { return Num::Nan };
+                let mut carry = v;
+                for d in dec.iter_mut() {
+                    let x = u32::from(*d) * radix + carry;
+                    *d = (x % 10) as u8;
+                    carry = x / 10;
+                }
+                while carry > 0 {
+                    dec.push((carry % 10) as u8);
+                    carry /= 10;
+                }
+            }
+            dec.reverse();
+            let mut d = Dec { neg: false, exp: dec.len() as i32, digits: dec };
+            d.trim();
+            return Num::Dec(d);
+        }
+    }
+    let (neg, body) = match b[0] {
+        b'-' => (true, &t[1..]),
+        b'+' => (false, &t[1..]),
+        _ => (false, t),
+    };
+    if body == "Infinity" {
+        return Num::Inf(neg);
+    }
+    let (mant, ex) = match body.find(['e', 'E']) {
+        Some(i) => (&body[..i], Some(&body[i + 1..])),
+        None => (body, None),
+    };
+    let e: i64 = match ex {
+        None => 0,
+        Some(x) => {
+            let (en, ed) = match x.as_bytes().first() {
+                Some(b'-') => (true, &x[1..]),
+                Some(b'+') => (false, &x[1..]),
+                _ => (false, x),
+            };
+            if ed.is_empty() || !ed.bytes().all(|c| c.is_ascii_digit()) {
+                return Num::Nan;
+            }
+            let mut v: i64 = 0;
+            for c in ed.bytes() {
+                v = (v * 10 + i64::from(c - b'0')).min(1 << 40);
+            }
+            if en { -v } else { v }
+        }
+    };
+    let (ip, fp) = mant.split_once('.').unwrap_or((mant, ""));
+    if (ip.is_empty() && fp.is_empty()) || !ip.bytes().chain(fp.bytes()).all(|c| c.is_ascii_digit()) {
+        return Num::Nan;
+    }
+    let exp = (ip.len() as i64 + e).clamp(-(1 << 30), 1 << 30) as i32;
+    let mut d = Dec { neg, digits: ip.bytes().chain(fp.bytes()).map(|c| c - b'0').collect(), exp };
+    d.trim();
+    if !d.is_zero() && d.exp > 300 {
+        // Past the double range, V8 reads ±∞: decide with a correctly rounded parse.
+        let mut s = String::from("0.");
+        s.extend(d.digits.iter().map(|x| char::from(b'0' + x)));
+        s.push_str(&format!("e{}", d.exp));
+        if s.parse::<f64>().map_or(true, |v| v.is_infinite()) {
+            return Num::Inf(neg);
+        }
+    }
     Num::Dec(d)
 }
 
@@ -778,7 +938,16 @@ fn group(int: &str, loc: &NumLocale, mode: &str) -> Vec<String> {
     groups
 }
 
+/// Locales whose currency amounts use other separators than their numbers (decimal, group).
+const CURRENCY_SEPARATORS: [(&str, &str, &str); 2] = [("de-AT", ",", "."), ("fr-CH", ".", "'")];
+
 fn digits_parts(r: &Rounded, loc: &NumLocale, grouping: &str, out: &mut Parts) {
+    digits_parts_sep(r, loc, grouping, None, out);
+}
+
+fn digits_parts_sep(r: &Rounded, loc: &NumLocale, grouping: &str, cur: Option<&str>, out: &mut Parts) {
+    let seps = cur.and_then(|_| CURRENCY_SEPARATORS.iter().find(|c| c.0 == loc.tag));
+    let (dec, grp) = seps.map_or((loc.dec, loc.grp), |c| (c.1, c.2));
     let d = &r.dec;
     let mut int = String::new();
     let mut frac = String::new();
@@ -801,19 +970,19 @@ fn digits_parts(r: &Rounded, loc: &NumLocale, grouping: &str, out: &mut Parts) {
     let groups = group(&int, loc, grouping);
     for (i, g) in groups.iter().enumerate() {
         if i > 0 {
-            out.push("group", loc.grp);
+            out.push("group", grp);
         }
         out.push("integer", &digits_of(loc, g));
     }
     if !frac.is_empty() {
-        out.push("decimal", loc.dec);
+        out.push("decimal", dec);
         out.push("fraction", &digits_of(loc, &frac));
     }
 }
 
 /// ASCII digits in the locale's numbering system.
 fn digits_of(loc: &NumLocale, s: &str) -> String {
-    if loc.tag != "ar-arab" {
+    if !is_arab(loc) {
         return s.to_string();
     }
     s.chars()
@@ -914,10 +1083,18 @@ fn affix_parts(
                 if sign.is_some() && !mark.is_empty() {
                     out.push("literal", mark);
                 }
+                // A mark on both sides (arabext's LRM-wrapped minus) closes after the sign too.
+                let (minus, after) = match minus.char_indices().nth(1) {
+                    Some((i, _)) => (&minus[..i], &minus[i..]),
+                    None => (minus, ""),
+                };
                 match sign {
                     Some(true) => out.push("minusSign", minus),
                     Some(false) => out.push("plusSign", "+"),
                     None => {}
+                }
+                if sign.is_some() && !after.is_empty() {
+                    out.push("literal", after);
                 }
             }
             '%' => {
@@ -975,7 +1152,42 @@ fn format_full(
     approx: bool,
     plural_of_range: Option<&'static str>,
 ) -> (Formatted, &'static str) {
-    let locale = spec.get("locale").unwrap_or("en-US");
+    let (mut f, pl) = format_full_latn(spec, x, approx, plural_of_range);
+    let nu = spec.get("numberingSystem").unwrap_or("latn");
+    if nu != "latn" && nu != "arab" {
+        for (t, v) in f.parts.items.iter_mut() {
+            if matches!(*t, "integer" | "fraction" | "exponentInteger") {
+                *v = super::numsys::map_digits(nu, v);
+            }
+        }
+    }
+    // Han digits aren't decimal digits to ICU's currency spacing, so no space joins them to a code.
+    // (A space the locale's own pattern has, as de's "# ¤", stays.)
+    let loc = num_locale_nu(super::numsys::base_locale(spec.get("locale").unwrap_or("en-US")), nu);
+    let own_space = [loc.cur, loc.neg_cur, loc.acct].iter().any(|p| p.contains("\u{a0}\u{a4}") || p.contains("\u{a4}\u{a0}"));
+    if nu == "hanidec" && !own_space {
+        let items = &mut f.parts.items;
+        let mut i = 1;
+        while i + 1 < items.len() {
+            let pair = |a: &str, b: &str| (a == "currency" && b == "integer") || (a == "integer" && b == "currency");
+            if items[i].0 == "literal" && items[i].1 == "\u{a0}" && pair(items[i - 1].0, items[i + 1].0) {
+                items.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+    (f, pl)
+}
+
+fn format_full_latn(
+    spec: &Spec,
+    x: Num,
+    approx: bool,
+    plural_of_range: Option<&'static str>,
+) -> (Formatted, &'static str) {
+    let locale = super::numsys::base_locale(spec.get("locale").unwrap_or("en-US"));
+    let nu = spec.get("numberingSystem").unwrap_or("latn");
     let lang = locale.split('-').next().unwrap_or("en");
     let style = spec.get("style").unwrap_or("decimal");
     // en-IN's accounting pattern groups in threes ($100,000.00), its others (and names) as Indian.
@@ -984,9 +1196,9 @@ fn format_full(
         && spec.get("currencySign") == Some("accounting")
         && spec.get("currencyDisplay") != Some("name")
     {
-        num_locale("en")
+        num_locale_nu("en", nu)
     } else {
-        num_locale(locale)
+        num_locale_nu(locale, nu)
     };
     let notation = spec.get("notation").unwrap_or("standard");
     let grouping = spec.get("useGrouping").unwrap_or("auto");
@@ -1060,7 +1272,7 @@ fn format_full(
                     zero = r.dec.is_zero();
                     plural = plural_exp(lang, &r, e, e);
                     digits_parts(&r, loc, grouping, &mut body);
-                    body.push("exponentSeparator", if loc.tag == "ar-arab" { "\u{623}\u{633}" } else { "E" });
+                    body.push("exponentSeparator", if loc.tag == "ar-arab" { "\u{623}\u{633}" } else if loc.tag == "arab" { "\u{627}\u{633}" } else if loc.tag == "arabext" { "\u{d7}\u{6f1}\u{6f0}^" } else { "E" });
                     if e < 0 {
                         let (mark, minus) = sign_mark(loc);
                         if !mark.is_empty() {
@@ -1133,7 +1345,8 @@ fn format_full(
                     let r = round(&d, &g, mode, strip);
                     zero = r.dec.is_zero();
                     plural = plural_of(lang, &r, false);
-                    digits_parts(&r, loc, grouping, &mut body);
+                    let cur = (style == "currency" && spec.get("currencyDisplay") != Some("name")).then_some("");
+                    digits_parts_sep(&r, loc, grouping, cur, &mut body);
                 }
             }
         }
@@ -1172,7 +1385,9 @@ fn format_full(
     } else {
         sign_of(sd, neg, zero)
     };
-    let ap = if approx {
+    let ap = if approx && (loc.tag == "arab" || loc.tag == "arabext") {
+        Some("~")
+    } else if approx {
         find_row(RANGES, locale, |r, k| r.0 == k)
             .or(RANGES.first())
             .map(|r| r.2)
@@ -1454,7 +1669,25 @@ pub(super) fn format_range(
     x: Num,
     y: Num,
 ) -> Vec<(&'static str, String, &'static str)> {
-    let locale = spec.get("locale").unwrap_or("en-US");
+    let mut out = format_range_parts(spec, x, y);
+    // As V8: a range in a locale whose own digits the option replaced with latn keeps its own.
+    if let Some(nu) = spec.get("@rnu") {
+        for (t, v, _) in out.iter_mut() {
+            if matches!(*t, "integer" | "fraction") {
+                *v = super::numsys::map_digits(nu, v);
+            }
+        }
+    }
+    out
+}
+
+fn format_range_parts(
+    spec: &Spec,
+    x: Num,
+    y: Num,
+) -> Vec<(&'static str, String, &'static str)> {
+    let locale = super::numsys::base_locale(spec.get("locale").unwrap_or("en-US"));
+    let nu = spec.get("numberingSystem").unwrap_or("latn");
     let lang = locale.split('-').next().unwrap_or("en");
     let style = spec.get("style").unwrap_or("decimal");
     // A unit's or currency name's text is ICU's outer modifier; so is a compact percent's sign,
@@ -1467,7 +1700,9 @@ pub(super) fn format_range(
             && spec.get("notation") == Some("compact"));
     let (a, pa) = format_full(spec, x.clone(), false, None);
     let (b, pb) = format_full(spec, y.clone(), false, None);
-    if a.parts.text() == b.parts.text() {
+    // As V8: two values that are the same double are one value (approximately) even when
+    // their exact decimals differ.
+    if a.parts.text() == b.parts.text() || same_double(&x, &y) {
         let (p, _) = format_full(spec, x, true, None);
         return p
             .parts
@@ -1495,7 +1730,7 @@ pub(super) fn format_range(
     let m1 = text_of(&l1.middle_pre) + &text_of(&l1.middle_post);
     let collapse_middle = text_of(&l1.middle_pre) == text_of(&l2.middle_pre)
         && text_of(&l1.middle_post) == text_of(&l2.middle_post)
-        && middle_len(&m1, style, num_locale(locale)) > 1;
+        && middle_len(&m1, style, num_locale_nu(locale, nu)) > 1;
     let repeat = l1.inner_len > 0 || (!collapse_middle && !m1.is_empty());
     let mut sep = range_row
         .or_else(|| RANGES.iter().find(|r| r.0 == "en"))
@@ -1555,7 +1790,7 @@ pub(super) fn format_range(
     put(&lo.outer_post, "shared", &mut out);
     // A collapsed currency whose spacing ICU inserts (es-MX EUR 3.00-5.00) leaves its spans one
     // character early, as node reports them: a part belongs to a span it lies wholly in.
-    let loc = num_locale(locale);
+    let loc = num_locale_nu(locale, nu);
     if collapse_middle
         && style == "currency"
         && loc.cur.contains("\u{a4}#")
