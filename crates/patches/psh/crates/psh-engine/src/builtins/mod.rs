@@ -732,6 +732,10 @@ async fn unset(vp: &mut Vp, args: &[Vec<u8>]) -> R {
             continue;
         }
         vp.vars.remove(&n);
+        // Unsetting POSIXLY_CORRECT leaves POSIX mode (bash's sv_strict_posix).
+        if n == "POSIXLY_CORRECT" {
+            vp.opts.set(crate::options::SetOpt::Posix, false);
+        }
     }
     Ok(status)
 }

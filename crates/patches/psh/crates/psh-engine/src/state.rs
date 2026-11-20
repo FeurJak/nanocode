@@ -1091,6 +1091,10 @@ impl Vp {
         if var.dynamic.is_some() {
             self.assigned_dynamic(name);
         }
+        // Assigning POSIXLY_CORRECT turns on POSIX mode (bash's sv_strict_posix).
+        if name == "POSIXLY_CORRECT" {
+            self.opts.set(crate::options::SetOpt::Posix, true);
+        }
         Ok(())
     }
 
