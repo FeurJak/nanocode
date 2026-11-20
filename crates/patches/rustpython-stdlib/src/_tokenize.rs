@@ -396,8 +396,10 @@ mod _tokenize {
         let (em_line, em_col, em_line_str): (usize, isize, &str) = if extra_tokens {
             (last_line + 1, 0, "")
         } else {
-            let last_line_text =
-                source.full_line_str(TextSize::from(source.len().saturating_sub(1) as u32));
+            // The last character's start, not len - 1: a source ending in a multibyte
+            // character (U+00A0) would otherwise put the offset inside it and panic.
+            let last_char_start = source.char_indices().next_back().map_or(0, |(i, _)| i);
+            let last_line_text = source.full_line_str(TextSize::from(last_char_start as u32));
             (last_line, -1, last_line_text)
         };
 
