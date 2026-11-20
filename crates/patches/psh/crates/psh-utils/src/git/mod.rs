@@ -17,6 +17,7 @@ mod cmd;
 mod commit;
 mod diff;
 mod extra;
+mod graph;
 mod index;
 mod line_diff;
 mod log;

@@ -1,10 +1,13 @@
 //! log, show, diff, rev-list and ls-files: the commands that walk history or compare
 //! trees.
 
+use std::collections::HashSet;
 use std::io::Write;
+use std::rc::Rc;
 
 use super::cmd::{quote_path, shorten};
 use super::diff::{Change, DiffOpts, Printer, detect_renames, reversed, trees};
+use super::graph::{Graph, topo_sort};
 use super::pretty::{DateMode, Decorations, Format, Pretty, tag_header};
 use super::repo::{Commit, Ident, Repo};
 use super::rev::{self, Walk, Walker};
@@ -125,6 +128,10 @@ struct Revs {
     named: Vec<(String, Oid)>,
     /// A...B was given: its two sides, for rev-list --left-right.
     symmetric: Option<(Oid, Oid)>,
+    graph: bool,
+    topo: bool,
+    /// With graph: every commit the walk shows, before -n and --skip.
+    shown: HashSet<Oid>,
 }
 
 impl Revs {
@@ -141,6 +148,9 @@ impl Revs {
             no_walk: false,
             named: Vec::new(),
             symmetric: None,
+            graph: false,
+            topo: false,
+            shown: HashSet::new(),
         }
     }
 
@@ -209,9 +219,12 @@ impl Revs {
             | "--no-graph"
             | "--no-follow"
             | "--end-of-options" => {}
-            "--graph"
-            | "--follow"
-            | "--topo-order"
+            "--graph" => {
+                self.graph = true;
+                self.topo = true;
+            }
+            "--topo-order" => self.topo = true,
+            "--follow"
             | "--author-date-order"
             | "--ancestry-path"
             | "--left-right"
@@ -434,15 +447,38 @@ impl Revs {
                 }
             }
         }
+        let first_parent = walk.first_parent;
         let mut walker = Walker::new(&git.repo, walk)?;
+        // In topological order the whole list is sorted before -n and --skip apply.
+        let mut sorted = None;
+        if self.topo {
+            let mut all = Vec::new();
+            while let Some(commit) = walker.next()? {
+                if self.matches(&commit)? {
+                    all.push(commit);
+                }
+            }
+            self.shown = all.iter().map(|c| c.id).collect();
+            sorted = Some(topo_sort(all, first_parent).into_iter());
+        }
+        let mut next = || -> Res<Option<Rc<Commit>>> {
+            match &mut sorted {
+                Some(list) => Ok(list.next()),
+                None => loop {
+                    let Some(commit) = walker.next()? else {
+                        return Ok(None);
+                    };
+                    if self.matches(&commit)? {
+                        return Ok(Some(commit));
+                    }
+                },
+            }
+        };
         let mut skip = self.skip;
         let mut left = self.max_count;
         let mut held = Vec::new();
         while left != Some(0) {
-            let Some(commit) = walker.next()? else { break };
-            if !self.matches(&commit)? {
-                continue;
-            }
+            let Some(commit) = next()? else { break };
             if skip > 0 {
                 skip -= 1;
                 continue;
@@ -767,6 +803,9 @@ pub fn log(git: &Git<'_>, io: &mut Io<'_>, args: &[String]) -> Res<i32> {
         Merges::Skip
     };
     let pretty = shape.pretty(git)?;
+    if revs.graph {
+        return log_graph(io, &pretty, &shape, &opts, &mut revs, git);
+    }
     let mut first = true;
     revs.commits(git, &mut |commit| {
         print_commit(
@@ -774,6 +813,66 @@ pub fn log(git: &Git<'_>, io: &mut Io<'_>, args: &[String]) -> Res<i32> {
         )?;
         Ok(true)
     })?;
+    Ok(0)
+}
+
+/// log --graph: each commit's text beside the history graph, as git's log-tree.c
+/// prints it.
+fn log_graph(
+    io: &mut Io<'_>,
+    pretty: &Pretty<'_, '_>,
+    shape: &Shape,
+    opts: &DiffOpts,
+    revs: &mut Revs,
+    git: &Git<'_>,
+) -> Res<i32> {
+    if revs.reverse {
+        return Err(Error::Fatal(
+            "options '--reverse' and '--graph' cannot be used together".to_string(),
+        ));
+    }
+    if opts.any() || !revs.paths.is_empty() {
+        return Err(Error::Lacks(
+            "log --graph with a diff or paths".to_string(),
+            "git that draws those graphs",
+        ));
+    }
+    let terminates = shape.terminates();
+    let first_parent = revs.walk.first_parent;
+    let mut list = Vec::new();
+    revs.commits(git, &mut |commit| {
+        list.push(commit.id);
+        Ok(true)
+    })?;
+    let mut graph = Graph::new(std::mem::take(&mut revs.shown), first_parent);
+    // Whether the last commit's text ended without a newline.
+    let mut missing_newline = true;
+    let mut out = Vec::new();
+    for (n, oid) in list.iter().enumerate() {
+        let commit = git.repo.commit(oid)?;
+        graph.update(&commit);
+        if n > 0 && !terminates {
+            if !missing_newline {
+                out.extend_from_slice(&graph.padding_line());
+            }
+            out.push(b'\n');
+        }
+        graph.show_commit(&mut out);
+        let mut msg = pretty.commit(&commit)?;
+        if !terminates && !matches!(shape.format, Format::Oneline) && msg.last() != Some(&b'\n') {
+            msg.push(b'\n');
+        }
+        missing_newline = msg.last() != Some(&b'\n');
+        graph.show_message(&mut out, &msg);
+        if terminates && !matches!(&shape.format, Format::User(format, _) if format.is_empty()) {
+            if !missing_newline {
+                out.extend_from_slice(&graph.padding_line());
+            }
+            out.push(b'\n');
+        }
+        io.out.write_all(&out)?;
+        out.clear();
+    }
     Ok(0)
 }
 
