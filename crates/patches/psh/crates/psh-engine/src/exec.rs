@@ -625,20 +625,23 @@ async fn run_pipeline_stages(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
             break;
         }
         let cmd = code.ast.cmd(stage.cmd);
-        if vp.traps.live()
-            && !vp.opts.get(SetOpt::Functrace)
+        // bash runs a simple stage's DEBUG trap before it forks, also under functrace
+        // (where the stage's copy would run it again: it skips that one).
+        let functrace = vp.opts.get(SetOpt::Functrace);
+        let parent_debug = vp.traps.live()
             && !vp.opts.shopt(Shopt::Extdebug)
-            && matches!(
-                cmd.kind,
-                CommandKind::Simple(_)
-                    | CommandKind::Arith(_)
-                    | CommandKind::Cond(_)
-                    | CommandKind::Case(_)
-            )
-        {
+            && match cmd.kind {
+                CommandKind::Simple(_) => true,
+                CommandKind::Arith(_) | CommandKind::Cond(_) | CommandKind::Case(_) => !functrace,
+                _ => false,
+            };
+        if parent_debug {
             debug_trap(vp, code, cmd).await?;
         }
         let mut sub = enter(vp).await?;
+        if parent_debug && functrace {
+            sub.debug_skip = Some(std::ptr::from_ref(cmd) as usize);
+        }
         sub.jobs = Rc::new(std::cell::RefCell::new(vp.jobs.borrow().for_stage()));
         sub.stage_subshell = matches!(code.ast.cmd(stage.cmd).kind, CommandKind::Subshell(_));
         if !matches!(code.ast.cmd(stage.cmd).kind, CommandKind::Simple(_)) {
@@ -1018,7 +1021,12 @@ fn before_command<'a>(
     cmd: &'a Command,
 ) -> Option<LocalBoxFuture<'a, Result<bool, Unwind>>> {
     let signals = (vp.top && vp.sigs.peek(&vp.core) != 0) || vp.own_sigs.get() != 0;
-    let debug = vp.traps.live()
+    let skip = vp.debug_skip.is_some_and(|p| p == std::ptr::from_ref(cmd) as usize);
+    if skip {
+        vp.debug_skip = None;
+    }
+    let debug = !skip
+        && vp.traps.live()
         && matches!(
             cmd.kind,
             CommandKind::Simple(_)
