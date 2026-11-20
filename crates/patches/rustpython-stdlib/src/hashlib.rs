@@ -43,6 +43,8 @@ pub(crate) mod _hashlib {
         "sha256",
         "sha384",
         "sha512",
+        "sha512_224",
+        "sha512_256",
         "sha3_224",
         "sha3_256",
         "sha3_384",
@@ -808,6 +810,13 @@ pub(crate) mod _hashlib {
             "sha256" => Ok(new_fixed_hasher("sha256", data).into_pyobject(vm)),
             "sha384" => Ok(new_fixed_hasher("sha384", data).into_pyobject(vm)),
             "sha512" => Ok(new_fixed_hasher("sha512", data).into_pyobject(vm)),
+            // OpenSSL also names the truncated SHA-512 digests with a dash or as SHA-512/t.
+            "sha512_224" | "sha512-224" | "sha-512/224" => {
+                Ok(new_fixed_hasher("sha512_224", data).into_pyobject(vm))
+            }
+            "sha512_256" | "sha512-256" | "sha-512/256" => {
+                Ok(new_fixed_hasher("sha512_256", data).into_pyobject(vm))
+            }
             "sha3_224" => Ok(new_fixed_hasher("sha3_224", data).into_pyobject(vm)),
             "sha3_256" => Ok(new_fixed_hasher("sha3_256", data).into_pyobject(vm)),
             "sha3_384" => Ok(new_fixed_hasher("sha3_384", data).into_pyobject(vm)),
