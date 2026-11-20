@@ -544,7 +544,12 @@ fn main() {
                 command.arg("-D_GNU_SOURCE");
             }
         }
+        // Objects name their sources through __FILE__ and debug info; mapping the crate and
+        // OUT_DIR to fixed names makes them the same from any checkout, so a cached archive
+        // never carries another worktree's paths.
         command
+            .arg(format!("-ffile-prefix-map={}=/nanocode/python-capi", root.display()))
+            .arg(format!("-ffile-prefix-map={}=/nanocode/out", out.display()))
             .args([
                 "-O2",
                 "-DNDEBUG",
