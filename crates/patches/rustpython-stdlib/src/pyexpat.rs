@@ -1197,9 +1197,19 @@ mod _pyexpat {
         }
 
         /// Construct element name with namespace if separator is set
-        fn make_name(&self, name: &QualifiedName) -> String {
+        fn make_name(&self, vm: &VirtualMachine, name: &QualifiedName) -> String {
             match (&self.namespace_separator, &name.namespace) {
-                (Some(sep), Some(ns)) => format!("{}{}{}", ns, sep, name.local_name),
+                (Some(sep), Some(ns)) => {
+                    // With namespace_prefixes on, libexpat appends the
+                    // prefix as a third part: "uri local prefix".
+                    let with_prefix = name.prefix.as_deref().filter(|prefix| !prefix.is_empty()).filter(|_| {
+                        self.namespace_prefixes.read().clone().is_true(vm).unwrap_or(false)
+                    });
+                    match with_prefix {
+                        Some(prefix) => format!("{ns}{sep}{}{sep}{prefix}", name.local_name),
+                        None => format!("{}{}{}", ns, sep, name.local_name),
+                    }
+                }
                 _ => name.local_name.clone(),
             }
         }
@@ -1258,7 +1268,7 @@ mod _pyexpat {
                     let attrs: PyObjectRef = if ordered {
                         let mut items = Vec::with_capacity(attributes.len() * 2);
                         for attribute in attributes {
-                            let key = self.intern_name(vm, self.make_name(&attribute.name));
+                            let key = self.intern_name(vm, self.make_name(vm, &attribute.name));
                             items.push(key.into());
                             items.push(vm.ctx.new_str(attribute.value).into());
                         }
@@ -1266,7 +1276,7 @@ mod _pyexpat {
                     } else {
                         let dict = vm.ctx.new_dict();
                         for attribute in attributes {
-                            let key = self.intern_name(vm, self.make_name(&attribute.name));
+                            let key = self.intern_name(vm, self.make_name(vm, &attribute.name));
                             dict.set_item(
                                 AsRef::<str>::as_ref(&key),
                                 vm.ctx.new_str(attribute.value).into(),
@@ -1277,11 +1287,11 @@ mod _pyexpat {
                         dict.into()
                     };
 
-                    let name_str = self.intern_name(vm, self.make_name(&name));
+                    let name_str = self.intern_name(vm, self.make_name(vm, &name));
                     invoke_handler(vm, &self.start_element, (name_str, attrs))
                 }
                 XmlEvent::EndElement { name, .. } => {
-                    let name_str = self.intern_name(vm, self.make_name(&name));
+                    let name_str = self.intern_name(vm, self.make_name(vm, &name));
                     invoke_handler(vm, &self.end_element, (name_str,))
                 }
                 XmlEvent::Characters(chars) => {

@@ -1683,7 +1683,16 @@ pub(crate) mod _elementtree {
             if event.is_none() {
                 return Ok(());
             }
-            let parcel = vm.ctx.new_tuple(vec![prefix, uri]);
+            // Like CPython's accelerator, the default namespace's prefix
+            // (and a missing URI) is reported as ''.
+            let empty = |value: PyObjectRef| -> PyObjectRef {
+                if vm.is_none(&value) {
+                    vm.ctx.new_str("").into()
+                } else {
+                    value
+                }
+            };
+            let parcel = vm.ctx.new_tuple(vec![empty(prefix), empty(uri)]);
             self.append_event(event, parcel.into(), vm)
         }
 

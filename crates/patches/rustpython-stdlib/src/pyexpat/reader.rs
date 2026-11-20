@@ -59,6 +59,7 @@ impl TextPosition {
 pub(crate) struct QualifiedName {
     pub(crate) local_name: String,
     pub(crate) namespace: Option<String>,
+    pub(crate) prefix: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -902,6 +903,7 @@ impl Name {
         QualifiedName {
             local_name: self.local_name,
             namespace: self.namespace,
+            prefix: self.prefix,
         }
     }
 }
