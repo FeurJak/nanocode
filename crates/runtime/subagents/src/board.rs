@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use nanocode_board::access::{Identity, Verifier};
@@ -10,7 +11,7 @@ use nanocode_board::{
     Applied, Board, BoardError, Change, ClaimId, EventId, NewTask, Op, Outcome, Phase, Rejection,
     TaskId,
 };
-use nanocode_sync::{Mailbox, watch};
+use nanocode_sync::{Owned, mpsc, oneshot, watch};
 use nanocode_turnlog::LogHost;
 
 use crate::model::{AgentId, AgentStatus, AgentUpdate, MessageSender};
@@ -23,6 +24,8 @@ pub type ReadFuture<'a, T> = nanocode_sync::future::BoxFuture<'a, T>;
 
 #[cfg(target_family = "wasm")]
 pub type ReadFuture<'a, T> = nanocode_sync::future::LocalBoxFuture<'a, T>;
+
+type Letter = Box<dyn for<'a> FnOnce(&'a mut Inner) -> ReadFuture<'a, ()> + Send>;
 
 pub type BoardAgents = BTreeMap<AgentId, Option<AgentStatus>>;
 
@@ -156,12 +159,27 @@ struct Inner {
     brief: Option<nanocode_board::brief::BriefPolicy>,
 }
 
+struct Desk {
+    inner: Inner,
+    letters: mpsc::UnboundedReceiver<Letter>,
+}
+
+impl Desk {
+    async fn drain(&mut self) {
+        while let Ok(letter) = self.letters.try_recv() {
+            letter(&mut self.inner).await;
+        }
+    }
+}
+
 pub struct BoardCoordination {
-    inner: Mailbox<Inner>,
+    desk: Arc<Owned<Desk>>,
+    letters: mpsc::UnboundedSender<Letter>,
+    draining: Arc<AtomicBool>,
     changes: watch::Sender<u64>,
 }
 
-fn ready<F: Future>(future: F) -> Option<F::Output> {
+fn polled_once<F: Future>(future: F) -> Option<F::Output> {
     let mut future = std::pin::pin!(future);
     let mut context = Context::from_waker(Waker::noop());
     match future.as_mut().poll(&mut context) {
@@ -170,62 +188,132 @@ fn ready<F: Future>(future: F) -> Option<F::Output> {
     }
 }
 
-fn open(
+async fn open(
     host: &Arc<dyn LogHost>,
     scope: &str,
     profile: Option<&str>,
 ) -> Result<Option<Board>, String> {
     let identity = identity(profile)?;
-    match ready(Board::open(Arc::clone(host), scope, identity)) {
-        Some(Ok(board)) => Ok(Some(board)),
-        Some(Err(error)) => Err(error.to_string()),
-        None => Ok(None),
-    }
+    let opening = Board::open(Arc::clone(host), scope, identity);
+    let opened = if mutated(Mutation::BoardPolledOnce) && profile != Some("auditor") {
+        match polled_once(opening) {
+            Some(opened) => opened,
+            None => return Ok(None),
+        }
+    } else {
+        opening.await
+    };
+    opened.map(Some).map_err(|error| error.to_string())
 }
 
 impl BoardCoordination {
     pub fn new(host: Arc<dyn LogHost>, scope: &str) -> Arc<Self> {
         let changes = watch::Sender::new(0);
+        let (letters, received) = mpsc::unbounded_channel();
         Arc::new(Self {
             changes: changes.clone(),
-            inner: Mailbox::new(Inner {
-                host,
-                scope: scope.to_owned(),
-                clock: 0,
-                dispatcher: None,
-                workers: BTreeMap::new(),
-                sessions: BTreeMap::new(),
-                agents: BTreeMap::new(),
-                roots: BTreeSet::new(),
-                stats: BoardStats::default(),
-                errors: Vec::new(),
-                changes,
-                brief: None,
-            }),
+            letters,
+            draining: Arc::new(AtomicBool::new(false)),
+            desk: Arc::new(Owned::new(Desk {
+                inner: Inner {
+                    host,
+                    scope: scope.to_owned(),
+                    clock: 0,
+                    dispatcher: None,
+                    workers: BTreeMap::new(),
+                    sessions: BTreeMap::new(),
+                    agents: BTreeMap::new(),
+                    roots: BTreeSet::new(),
+                    stats: BoardStats::default(),
+                    errors: Vec::new(),
+                    changes,
+                    brief: None,
+                },
+                letters: received,
+            })),
         })
     }
 
+    fn send(&self, letter: Letter) -> bool {
+        if self.letters.send(letter).is_err() {
+            return true;
+        }
+        if self.draining.swap(true, Ordering::AcqRel) {
+            return true;
+        }
+        let desk = Arc::clone(&self.desk);
+        let draining = Arc::clone(&self.draining);
+        let drained = async move {
+            let mut desk = desk.acquire_owned().await;
+            draining.store(false, Ordering::Release);
+            desk.drain().await;
+        };
+        self.spawn(drained)
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn spawn(&self, drained: impl Future<Output = ()> + Send + 'static) -> bool {
+        let Ok(runtime) = nanocode_platform::Handle::try_current() else {
+            self.draining.store(false, Ordering::Release);
+            return false;
+        };
+        runtime.spawn(drained);
+        true
+    }
+
+    #[cfg(target_family = "wasm")]
+    fn spawn(&self, drained: impl Future<Output = ()> + 'static) -> bool {
+        nanocode_platform::spawn_local(drained);
+        true
+    }
+
+    async fn call<R, F>(&self, job: F) -> Option<R>
+    where
+        R: Send + 'static,
+        F: for<'a> FnOnce(&'a mut Inner) -> ReadFuture<'a, R> + Send + 'static,
+    {
+        let (reply, replied) = oneshot::channel();
+        let spawned = self.send(Box::new(move |inner| {
+            Box::pin(async move {
+                let output = job(inner).await;
+                drop(reply.send(output));
+            })
+        }));
+        if !spawned {
+            self.desk.acquire().await.drain().await;
+        }
+        replied.await.ok()
+    }
+
     pub async fn stats(&self) -> BoardStats {
-        self.inner.call(|inner| inner.stats()).await
+        self.call(|inner| Box::pin(async move { inner.stats() }))
+            .await
+            .unwrap_or_default()
     }
 
     pub async fn errors(&self) -> Vec<String> {
-        self.inner.call(|inner| inner.errors()).await
+        self.call(|inner| Box::pin(async move { inner.errors() }))
+            .await
+            .unwrap_or_else(|| vec!["the board coordination task stopped".to_owned()])
     }
 
     pub async fn terminal_after(&self, cursor: u64) -> (Vec<(TaskId, Phase)>, u64) {
-        self.inner
-            .call(move |inner| inner.terminal_after(cursor))
+        self.call(move |inner| Box::pin(inner.terminal_after(cursor)))
             .await
+            .unwrap_or((Vec::new(), cursor))
     }
 
     pub async fn children(&self, parent: &str) -> Vec<String> {
         let parent = parent.to_owned();
-        self.inner.call(move |inner| inner.children(&parent)).await
+        self.call(move |inner| Box::pin(async move { inner.children(&parent).await }))
+            .await
+            .unwrap_or_default()
     }
 
     pub async fn audit(&self) -> Result<BoardStats, String> {
-        self.inner.call(|inner| inner.audit()).await
+        self.call(|inner| Box::pin(inner.audit()))
+            .await
+            .unwrap_or_else(|| Err("the board coordination task stopped".to_owned()))
     }
 }
 
@@ -238,11 +326,11 @@ impl Inner {
         self.errors.clone()
     }
 
-    fn terminal_after(&mut self, cursor: u64) -> (Vec<(TaskId, Phase)>, u64) {
-        let Some(board) = self.dispatcher_board() else {
+    async fn terminal_after(&mut self, cursor: u64) -> (Vec<(TaskId, Phase)>, u64) {
+        let Some(board) = self.dispatcher_board().await else {
             return (Vec::new(), cursor);
         };
-        let _ = ready(board.refresh());
+        let _ = board.refresh().await;
         let fold = board.fold();
         let terminal = fold
             .entries()
@@ -256,11 +344,11 @@ impl Inner {
         (terminal, fold.next().saturating_sub(1))
     }
 
-    fn children(&mut self, parent: &str) -> Vec<String> {
-        let Some(board) = self.dispatcher_board() else {
+    async fn children(&mut self, parent: &str) -> Vec<String> {
+        let Some(board) = self.dispatcher_board().await else {
             return Vec::new();
         };
-        let _ = ready(board.refresh());
+        let _ = board.refresh().await;
         let prefix = format!("{parent}/");
         let root = root_task(parent);
         board
@@ -279,11 +367,11 @@ impl Inner {
             .collect()
     }
 
-    fn agents(&mut self, root: &str) -> Result<BoardAgents, String> {
-        let Some(board) = self.dispatcher_board() else {
+    async fn agents(&mut self, root: &str) -> Result<BoardAgents, String> {
+        let Some(board) = self.dispatcher_board().await else {
             return Err("the subagent board is not open".to_owned());
         };
-        let _ = ready(board.refresh());
+        let _ = board.refresh().await;
         let fold = board.fold();
         let mut latest = BTreeMap::<AgentId, (u64, &Phase)>::new();
         for (id, task) in fold.tasks() {
@@ -314,11 +402,11 @@ impl Inner {
             .collect()
     }
 
-    fn audit(&self) -> Result<BoardStats, String> {
+    async fn audit(&self) -> Result<BoardStats, String> {
         if let Some(error) = self.errors.first() {
             return Err(format!("board coordination error: {error}"));
         }
-        let board = match open(&self.host, &self.scope, Some("auditor")) {
+        let board = match open(&self.host, &self.scope, Some("auditor")).await {
             Ok(Some(board)) => board,
             Ok(None) => return Err("board audit open is pending".to_owned()),
             Err(error) => return Err(format!("board audit open: {error}")),
@@ -345,6 +433,14 @@ impl Inner {
                 && fold.task(parent).is_none()
             {
                 return Err(format!("board task {id} has no parent {parent}"));
+            }
+        }
+        for (session, state) in &self.sessions {
+            let id = state.task(session);
+            if fold.task(&id).is_none() {
+                return Err(format!(
+                    "board has no task {id} for session {session}, which the registry added"
+                ));
             }
         }
         for (session, state) in &self.sessions {
@@ -394,36 +490,29 @@ impl Inner {
         }
     }
 
-    fn dispatcher_board(&mut self) -> Option<&mut Board> {
+    async fn dispatcher_board(&mut self) -> Option<&mut Board> {
         if self.dispatcher.is_none() {
-            match open(&self.host, &self.scope, None) {
+            match open(&self.host, &self.scope, None).await {
                 Ok(Some(mut board)) => {
                     let now = board.fold().now_ms();
                     let start = if now > 0 { now + LEASE_MS + 1 } else { 0 };
                     self.clock = self.clock.max(start) + 1;
                     if board.fold().access().owner().is_none() {
-                        match ready(board.charter(self.clock)) {
-                            Some(Ok(_) | Err(BoardError::Rejected(Rejection::Exists))) => {}
-                            Some(Err(error)) => {
+                        match board.charter(self.clock).await {
+                            Ok(_) | Err(BoardError::Rejected(Rejection::Exists)) => {}
+                            Err(error) => {
                                 self.fail(format!("charter: {error}"));
-                                return None;
-                            }
-                            None => {
-                                self.stats.deferred += 1;
                                 return None;
                             }
                         }
                     }
                     self.dispatcher = Some(board);
-                    self.reopen();
+                    self.reopen().await;
                     if let Err(error) = self.restored() {
                         self.fail(error);
                     }
                 }
-                Ok(None) => {
-                    self.stats.deferred += 1;
-                    return None;
-                }
+                Ok(None) => return None,
                 Err(error) => {
                     self.fail(format!("open dispatcher: {error}"));
                     return None;
@@ -471,14 +560,14 @@ impl Inner {
         Ok(())
     }
 
-    fn reopen(&mut self) {
+    async fn reopen(&mut self) {
         if mutated(Mutation::ReopenForgetsAgents) {
             return;
         }
         let Some(board) = self.dispatcher.as_mut() else {
             return;
         };
-        let _ = ready(board.refresh());
+        let _ = board.refresh().await;
         let mut roots = Vec::new();
         let mut attempts = Vec::new();
         let mut errors = Vec::new();
@@ -531,16 +620,13 @@ impl Inner {
         }
     }
 
-    fn worker(&mut self, session: &str) -> Option<&mut Board> {
+    async fn worker(&mut self, session: &str) -> Option<&mut Board> {
         if !self.workers.contains_key(session) {
-            match open(&self.host, &self.scope, Some(&profile_of(session))) {
+            match open(&self.host, &self.scope, Some(&profile_of(session))).await {
                 Ok(Some(board)) => {
                     self.workers.insert(session.to_owned(), board);
                 }
-                Ok(None) => {
-                    self.stats.deferred += 1;
-                    return None;
-                }
+                Ok(None) => return None,
                 Err(error) => {
                     self.fail(format!("open worker {session}: {error}"));
                     return None;
@@ -550,28 +636,25 @@ impl Inner {
         self.workers.get_mut(session)
     }
 
-    fn dispatch(&mut self, key: &str, op: Op) -> Option<Result<(Applied, bool), BoardError>> {
+    async fn dispatch(&mut self, key: &str, op: Op) -> Option<Result<(Applied, bool), BoardError>> {
         let at = self.tick();
-        let board = self.dispatcher_board()?;
-        let _ = ready(board.refresh());
+        let board = self.dispatcher_board().await?;
+        let _ = board.refresh().await;
         let before = board.fold().next();
-        if let Some(result) = ready(board.submit_keyed(key, at, op)) {
-            return Some(result.map(|applied| {
-                let replay = applied.seq < before;
-                (applied, replay)
-            }));
-        }
-        self.stats.deferred += 1;
-        None
+        let result = board.submit_keyed(key, at, op).await;
+        Some(result.map(|applied| {
+            let replay = applied.seq < before;
+            (applied, replay)
+        }))
     }
 
-    fn phase(&mut self, task: &TaskId) -> Option<Phase> {
-        let board = self.dispatcher_board()?;
-        let _ = ready(board.refresh());
+    async fn phase(&mut self, task: &TaskId) -> Option<Phase> {
+        let board = self.dispatcher_board().await?;
+        let _ = board.refresh().await;
         board.fold().task(task).map(|task| task.phase.clone())
     }
 
-    fn ensure_root(&mut self, root: &str) -> TaskId {
+    async fn ensure_root(&mut self, root: &str) -> TaskId {
         let id = root_task(root);
         if self.roots.insert(root.to_owned()) {
             let task = NewTask {
@@ -582,7 +665,10 @@ impl Inner {
                 needs: Vec::new(),
                 terms: Terms::default(),
             };
-            match self.dispatch(&format!("post:{id}"), Op::Post { task }) {
+            match self
+                .dispatch(&format!("post:{id}"), Op::Post { task })
+                .await
+            {
                 Some(Ok((_, false))) => self.stats.posts += 1,
                 Some(Ok((_, true))) | None => {}
                 Some(Err(error)) => self.fail(format!("post {id}: {error}")),
@@ -591,7 +677,7 @@ impl Inner {
         id
     }
 
-    fn post(
+    async fn post(
         &mut self,
         root: &str,
         session: &str,
@@ -613,24 +699,27 @@ impl Inner {
             needs: Vec::new(),
             terms: Terms::default(),
         };
-        match self.dispatch(&format!("post:{id}"), Op::Post { task }) {
+        match self
+            .dispatch(&format!("post:{id}"), Op::Post { task })
+            .await
+        {
             Some(Ok((_, false))) => self.stats.posts += 1,
             Some(Ok((_, true))) | None => {}
             Some(Err(error)) => self.fail(format!("post {id}: {error}")),
         }
     }
 
-    fn claim(&mut self, session: &str, restored: bool) {
+    async fn claim(&mut self, session: &str, restored: bool) {
         let Some(state) = self.sessions.get(session) else {
             return;
         };
         let id = state.task(session);
         let at = self.tick();
         let worker = worker_of(session);
-        let Some(board) = self.worker(session) else {
+        let Some(board) = self.worker(session).await else {
             return;
         };
-        let _ = ready(board.refresh());
+        let _ = board.refresh().await;
         let (phase, attempts) = board
             .fold()
             .task(&id)
@@ -649,15 +738,18 @@ impl Inner {
                 Some(phase) if phase.terminal() => None,
                 Some(_) => {
                     let key = format!("claim:{id}:{}", attempts.unwrap_or(0) + 1);
-                    match ready(board.submit_keyed(
-                        &key,
-                        at,
-                        Op::Claim {
-                            task: id.clone(),
-                            lease_ms: LEASE_MS,
-                        },
-                    )) {
-                        Some(Ok(_)) => {
+                    match board
+                        .submit_keyed(
+                            &key,
+                            at,
+                            Op::Claim {
+                                task: id.clone(),
+                                lease_ms: LEASE_MS,
+                            },
+                        )
+                        .await
+                    {
+                        Ok(_) => {
                             claims = 1;
                             board.fold().entries().iter().rev().find_map(|entry| {
                                 match &entry.change {
@@ -674,12 +766,8 @@ impl Inner {
                                 }
                             })
                         }
-                        Some(Err(error)) => {
+                        Err(error) => {
                             failure = Some(format!("claim {id} for {session}: {error}"));
-                            None
-                        }
-                        None => {
-                            failure = Some(format!("claim {id} for {session} is pending"));
                             None
                         }
                     }
@@ -704,7 +792,7 @@ impl Inner {
         }
     }
 
-    fn added(
+    async fn added(
         &mut self,
         root: &str,
         id: AgentId,
@@ -716,18 +804,18 @@ impl Inner {
             .insert((root.to_owned(), id), session.to_owned());
         if let Some(state) = self.sessions.get(session) {
             if state.claim.is_none() {
-                self.claim(session, true);
+                self.claim(session, true).await;
             }
             return;
         }
-        let root_id = self.ensure_root(root);
+        let root_id = self.ensure_root(root).await;
         let parent_task = parent
             .and_then(|parent| self.agents.get(&(root.to_owned(), parent)).cloned())
             .and_then(|parent| self.sessions.get(&parent).map(|state| state.task(&parent)))
             .unwrap_or(root_id);
         let mut k = 0;
-        if let Some(board) = self.dispatcher_board() {
-            let _ = ready(board.refresh());
+        if let Some(board) = self.dispatcher_board().await {
+            let _ = board.refresh().await;
             while board.fold().task(&task_of(session, k + 1)).is_some() {
                 k += 1;
             }
@@ -735,7 +823,7 @@ impl Inner {
         let restored = k > 0;
         if !restored {
             k = 1;
-            self.post(root, session, id, &parent_task, k, spec);
+            self.post(root, session, id, &parent_task, k, spec).await;
         }
         self.sessions.insert(
             session.to_owned(),
@@ -746,22 +834,22 @@ impl Inner {
                 last_output: None,
             },
         );
-        self.claim(session, restored);
+        self.claim(session, restored).await;
     }
 
-    fn session_of(&mut self, root: &str, id: AgentId) -> Option<String> {
-        let _ = self.dispatcher_board();
+    async fn session_of(&mut self, root: &str, id: AgentId) -> Option<String> {
+        let _ = self.dispatcher_board().await;
         self.agents.get(&(root.to_owned(), id)).cloned()
     }
 
-    fn running(&mut self, root: &str, id: AgentId, session: &str) {
+    async fn running(&mut self, root: &str, id: AgentId, session: &str) {
         let Some(state) = self.sessions.get(session) else {
             return;
         };
         let current = state.task(session);
         let parent = state.parent.clone();
         let k = state.k;
-        match self.phase(&current) {
+        match self.phase(&current).await {
             Some(Phase::Cancelled { .. }) => {
                 self.stats.late += 1;
                 return;
@@ -769,17 +857,17 @@ impl Inner {
             Some(phase) if phase.terminal() => {}
             _ => return,
         }
-        self.post(root, session, id, &parent, k + 1, "reused");
+        self.post(root, session, id, &parent, k + 1, "reused").await;
         self.stats.reuses += 1;
         if let Some(state) = self.sessions.get_mut(session) {
             state.k = k + 1;
             state.claim = None;
             state.last_output = None;
         }
-        self.claim(session, false);
+        self.claim(session, false).await;
     }
 
-    fn finish(
+    async fn finish(
         &mut self,
         root: &str,
         id: AgentId,
@@ -801,24 +889,27 @@ impl Inner {
         };
         let event = EventId(format!("{}#{key}", worker_of(session)));
         let current = self.sessions.get(session).map(|state| state.task(session));
-        let replayed = self.dispatcher_board().and_then(|board| {
-            let _ = ready(board.refresh());
-            let fold = board.fold();
-            let seq = match fold.outcome(&event)? {
-                Ok(seq) => Some(*seq),
-                Err(_) => None,
-            };
-            let reopened = seq
-                .and_then(|seq| fold.entries().iter().find(|entry| entry.seq == seq))
-                .zip(current.as_ref())
-                .is_some_and(|(entry, current)| {
-                    entry.task != *current
-                        && fold
-                            .task(current)
-                            .is_some_and(|task| !task.phase.terminal())
-                });
-            Some(reopened)
-        });
+        let replayed = match self.dispatcher_board().await {
+            Some(board) => {
+                let _ = board.refresh().await;
+                let fold = board.fold();
+                fold.outcome(&event).map(|outcome| {
+                    let seq = match outcome {
+                        Ok(seq) => Some(*seq),
+                        Err(_) => None,
+                    };
+                    seq.and_then(|seq| fold.entries().iter().find(|entry| entry.seq == seq))
+                        .zip(current.as_ref())
+                        .is_some_and(|(entry, current)| {
+                            entry.task != *current
+                                && fold
+                                    .task(current)
+                                    .is_some_and(|task| !task.phase.terminal())
+                        })
+                })
+            }
+            None => None,
+        };
         match replayed {
             Some(true) => {
                 key = format!(
@@ -833,25 +924,25 @@ impl Inner {
             None => {}
         }
         if let Some(current) = self.sessions.get(session).map(|state| state.task(session))
-            && matches!(self.phase(&current), Some(Phase::Cancelled { .. }))
+            && matches!(self.phase(&current).await, Some(Phase::Cancelled { .. }))
         {
             self.stats.late += 1;
             return;
         }
-        self.running(root, id, session);
+        self.running(root, id, session).await;
         if self
             .sessions
             .get(session)
             .is_some_and(|state| state.claim.is_none())
         {
-            self.claim(session, false);
+            self.claim(session, false).await;
         }
         let Some(state) = self.sessions.get(session) else {
             return;
         };
         let task = state.task(session);
         let Some(claim) = state.claim.clone() else {
-            let phase = self.phase(&task);
+            let phase = self.phase(&task).await;
             self.fail(format!(
                 "finish {task} ({key}): {session} holds no claim, the task is {phase:?}"
             ));
@@ -862,22 +953,24 @@ impl Inner {
             Outcome::Failed(_) => None,
         };
         let at = self.tick();
-        let Some(board) = self.worker(session) else {
+        let Some(board) = self.worker(session).await else {
             return;
         };
-        let _ = ready(board.refresh());
+        let _ = board.refresh().await;
         let before = board.fold().next();
-        let submitted = ready(board.submit_keyed(
-            &key,
-            at,
-            Op::Finish {
-                task: task.clone(),
-                claim,
-                outcome,
-            },
-        ));
+        let submitted = board
+            .submit_keyed(
+                &key,
+                at,
+                Op::Finish {
+                    task: task.clone(),
+                    claim,
+                    outcome,
+                },
+            )
+            .await;
         match submitted {
-            Some(Ok(applied)) => {
+            Ok(applied) => {
                 if applied.seq < before {
                     self.stats.finish_replays += 1;
                 } else {
@@ -888,23 +981,22 @@ impl Inner {
                     state.claim = None;
                 }
             }
-            Some(Err(BoardError::Rejected(Rejection::NotHolder))) => {
+            Err(BoardError::Rejected(Rejection::NotHolder)) => {
                 self.stats.fenced += 1;
                 self.fail(format!(
                     "finish {task}: fenced, {session} no longer holds the claim"
                 ));
             }
-            Some(Err(error)) => self.fail(format!("finish {task} ({key}): {error}")),
-            None => self.stats.deferred += 1,
+            Err(error) => self.fail(format!("finish {task} ({key}): {error}")),
         }
     }
 
-    fn reply(&mut self, session: &str, key: &str, body: String, steer: bool) {
+    async fn reply(&mut self, session: &str, key: &str, body: String, steer: bool) {
         let Some(state) = self.sessions.get(session) else {
             return;
         };
         let task = state.task(session);
-        match self.dispatch(key, Op::Reply { task, body }) {
+        match self.dispatch(key, Op::Reply { task, body }).await {
             Some(Ok((_, false))) if steer => self.stats.steers += 1,
             Some(Ok((_, false))) => self.stats.replies += 1,
             Some(Ok((_, true))) | None => {}
@@ -912,22 +1004,25 @@ impl Inner {
         }
     }
 
-    fn cancel(&mut self, session: &str) {
+    async fn cancel(&mut self, session: &str) {
         let Some(state) = self.sessions.get(session) else {
             return;
         };
         let task = state.task(session);
-        if self.phase(&task).is_none_or(|phase| phase.terminal()) {
+        if self.phase(&task).await.is_none_or(|phase| phase.terminal()) {
             return;
         }
         let key = format!("cancel:{task}");
-        match self.dispatch(
-            &key,
-            Op::Cancel {
-                task,
-                reason: "closed".to_owned(),
-            },
-        ) {
+        match self
+            .dispatch(
+                &key,
+                Op::Cancel {
+                    task,
+                    reason: "closed".to_owned(),
+                },
+            )
+            .await
+        {
             Some(Ok((_, false))) => self.stats.cancels += 1,
             Some(Ok((_, true)) | Err(BoardError::Rejected(Rejection::Terminal))) | None => {}
             Some(Err(error)) => self.fail(format!("{key}: {error}")),
@@ -1001,9 +1096,9 @@ impl Seen {
 }
 
 impl Inner {
-    fn reconcile(&mut self, root: &str, finished: Vec<(AgentId, AgentStatus, Option<u64>)>) {
+    async fn reconcile(&mut self, root: &str, finished: Vec<(AgentId, AgentStatus, Option<u64>)>) {
         for (id, status, revision) in finished {
-            let Some(session) = self.session_of(root, id) else {
+            let Some(session) = self.session_of(root, id).await else {
                 continue;
             };
             let Some(task) = self
@@ -1013,26 +1108,30 @@ impl Inner {
             else {
                 continue;
             };
-            if self.phase(&task).is_some_and(|phase| !phase.terminal()) {
-                self.finish(root, id, &session, &status, revision);
+            if self
+                .phase(&task)
+                .await
+                .is_some_and(|phase| !phase.terminal())
+            {
+                self.finish(root, id, &session, &status, revision).await;
             }
         }
     }
 
-    fn seen(&mut self, root: &str, seen: Seen) {
+    async fn seen(&mut self, root: &str, seen: Seen) {
         match seen {
             Seen::Added {
                 id,
                 session,
                 parent,
                 task,
-            } => self.added(root, id, &session, parent, &task),
+            } => self.added(root, id, &session, parent, &task).await,
             Seen::Status { id, status } => {
-                let Some(session) = self.session_of(root, id) else {
+                let Some(session) = self.session_of(root, id).await else {
                     return;
                 };
                 match &status {
-                    AgentStatus::Running => self.running(root, id, &session),
+                    AgentStatus::Running => self.running(root, id, &session).await,
                     AgentStatus::Interrupted => {
                         let seq = self.tick();
                         self.reply(
@@ -1040,11 +1139,12 @@ impl Inner {
                             &format!("steer:{session}:{seq}"),
                             "interrupt".to_owned(),
                             true,
-                        );
+                        )
+                        .await;
                     }
-                    AgentStatus::Closed => self.cancel(&session),
+                    AgentStatus::Closed => self.cancel(&session).await,
                     AgentStatus::Completed { .. } | AgentStatus::Failed { .. } => {
-                        self.finish(root, id, &session, &status, None);
+                        self.finish(root, id, &session, &status, None).await;
                     }
                     AgentStatus::Pending | AgentStatus::Closing => {}
                 }
@@ -1054,20 +1154,22 @@ impl Inner {
                 status,
                 revision,
             } => {
-                let Some(session) = self.session_of(root, id) else {
+                let Some(session) = self.session_of(root, id).await else {
                     return;
                 };
-                self.finish(root, id, &session, &status, Some(revision));
+                self.finish(root, id, &session, &status, Some(revision))
+                    .await;
             }
             Seen::Message { message_id, agents } => {
                 for agent_id in agents {
-                    if let Some(session) = self.session_of(root, agent_id) {
+                    if let Some(session) = self.session_of(root, agent_id).await {
                         self.reply(
                             &session,
                             &format!("reply:{root}:{message_id}:{agent_id}"),
                             format!("message {message_id}"),
                             false,
-                        );
+                        )
+                        .await;
                     }
                 }
             }
@@ -1081,10 +1183,12 @@ impl Coordination for BoardCoordination {
             return;
         };
         let root = root.to_owned();
-        self.inner.send(move |inner| {
-            inner.seen(&root, seen);
-            inner.changes.send_modify(|revision| *revision += 1);
-        });
+        self.send(Box::new(move |inner| {
+            Box::pin(async move {
+                inner.seen(&root, seen).await;
+                inner.changes.send_modify(|revision| *revision += 1);
+            })
+        }));
     }
 
     fn changes(&self) -> watch::Receiver<u64> {
@@ -1093,15 +1197,21 @@ impl Coordination for BoardCoordination {
 
     fn reconcile(&self, root: &str, finished: Vec<(AgentId, AgentStatus, Option<u64>)>) {
         let root = root.to_owned();
-        self.inner.send(move |inner| {
-            inner.reconcile(&root, finished);
-            inner.changes.send_modify(|revision| *revision += 1);
-        });
+        self.send(Box::new(move |inner| {
+            Box::pin(async move {
+                inner.reconcile(&root, finished).await;
+                inner.changes.send_modify(|revision| *revision += 1);
+            })
+        }));
     }
 
     fn agents<'a>(&'a self, root: &'a str) -> ReadFuture<'a, Result<BoardAgents, String>> {
         let root = root.to_owned();
-        Box::pin(self.inner.call(move |inner| inner.agents(&root)))
+        Box::pin(async move {
+            self.call(move |inner| Box::pin(async move { inner.agents(&root).await }))
+                .await
+                .unwrap_or_else(|| Err("the board coordination task stopped".to_owned()))
+        })
     }
 
     fn brief<'a>(&'a self, session: &'a str) -> ReadFuture<'a, Result<Option<String>, String>> {

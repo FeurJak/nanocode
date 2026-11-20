@@ -312,6 +312,9 @@ async fn judge(
     }
     if let Some(plane) = &run.plane {
         board_agrees(run, plane, true).await?;
+        if let Some(error) = crate::boardagents::audit().await {
+            return Err(error);
+        }
     }
     Ok(())
 }

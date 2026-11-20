@@ -119,12 +119,13 @@ pub enum BoardMutation {
     CursorInclusive,
     SaysUnchecked,
     MessagesLeak,
+    FencedUnsettled,
     Watch(BoardRule),
     Deliver(BoardRule),
 }
 
 impl BoardMutation {
-    const ALL: [Self; 71] = [
+    const ALL: [Self; 72] = [
         Self::None,
         Self::ClaimIgnoresLease,
         Self::ClaimIgnoresNeeds,
@@ -196,6 +197,7 @@ impl BoardMutation {
         Self::CursorInclusive,
         Self::SaysUnchecked,
         Self::MessagesLeak,
+        Self::FencedUnsettled,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -280,6 +282,7 @@ impl BoardMutation {
             Self::CursorInclusive => "cursor_inclusive",
             Self::SaysUnchecked => "says_unchecked",
             Self::MessagesLeak => "messages_leak",
+            Self::FencedUnsettled => "fenced_unsettled",
             Self::Watch(rule) => match intent::name(rule) {
                 Some(name) => name,
                 None => watching::name(rule),
@@ -371,6 +374,7 @@ impl BoardMutation {
             Self::CursorInclusive => BoardRule::CursorInclusive,
             Self::SaysUnchecked => BoardRule::SaysUnchecked,
             Self::MessagesLeak => BoardRule::MessagesLeak,
+            Self::FencedUnsettled => BoardRule::FencedUnsettled,
             Self::Watch(rule) | Self::Deliver(rule) => rule,
             Self::None | Self::CursorBeforeEffect | Self::EffectBeforeCursor => BoardRule::None,
         }
@@ -630,6 +634,7 @@ pub(crate) struct FaultLog {
     pub(crate) latency_ms: u64,
     pub(crate) faults: AtomicU64,
     pub(crate) conflicts: AtomicU64,
+    pub(crate) fenced: AtomicU64,
 }
 
 impl FaultLog {
@@ -693,6 +698,10 @@ impl LogHost for FaultLog {
         Box::pin(async move {
             self.clock.sleep(self.delay()).await;
             if self.roll(|rng| rng.chance(self.before_ppm)) {
+                if self.fenced.fetch_add(1, Ordering::SeqCst) % 2 == 1 {
+                    self.faults.fetch_add(1, Ordering::SeqCst);
+                    return Err(StoreError::Fenced);
+                }
                 return Err(self.injected("append before"));
             }
             let appended = self.inner.append(scope, rows).await;
@@ -846,6 +855,15 @@ impl World {
             }
             Ok(applied) => Sent::Applied(applied.seq),
             Err(BoardError::Rejected(_) | BoardError::Dropped(_)) => Sent::Rejected,
+            Err(BoardError::Unsettled {
+                error: StoreError::Fenced,
+                ..
+            }) => {
+                oracle.wrong.push(format!(
+                    "{id} was fenced, which writes nothing, but the board reported it unsettled"
+                ));
+                Sent::Unsettled
+            }
             Err(BoardError::Unsettled { .. } | BoardError::Corrupt { .. }) => Sent::Unsettled,
             Err(BoardError::Store(_)) => Sent::Failed,
         };
@@ -1902,6 +1920,7 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
         latency_ms: shape.latency_ms,
         faults: AtomicU64::new(0),
         conflicts: AtomicU64::new(0),
+        fenced: AtomicU64::new(0),
     });
     let world = World {
         mutation,

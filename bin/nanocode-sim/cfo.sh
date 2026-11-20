@@ -233,6 +233,12 @@ default_table='
 1 canary_agents_shutdown_hangs canary:200 --scenario agents --mutation shutdown_hangs
 1 canary_agents_shutdown_keeps_harness canary:200 --scenario agents --mutation shutdown_keeps_harness
 1 canary_agents_pool_retire_keeps_agent canary:40 --scenario agents --mutation pool_retire_keeps_agent
+4 agents_subagents_board_delayed pass --scenario agents --subagents-board-delayed
+4 runtime_subagents_board_delayed pass --scenario runtime --subagents-board-delayed
+1 canary_subagents_board_polled_once canary:40 --scenario agents --subagents-board-mutation polled_once
+1 canary_subagents_board_append_unflushed canary:40 --scenario agents --subagents-board-mutation append_unflushed
+1 canary_subagents_board_reopen_lost canary:100 --scenario runtime --subagents-board-mutation reopen_lost
+1 canary_board_fenced_unsettled canary:40 --scenario board --mutation fenced_unsettled
 1 canary_runtime_kv_power_loss_drops_acked canary:100 --scenario runtime --store kv --mutation power_loss_drops_acked
 1 canary_runtime_kv_power_loss_drops_acceptance canary:100 --scenario runtime --store kv --mutation power_loss_drops_acceptance
 1 canary_runtime_kv_record_insert_drops canary:100 --scenario runtime --store kv --mutation record_insert_drops

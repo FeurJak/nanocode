@@ -369,6 +369,12 @@ fn parse_args(args: &[String]) -> Option<Args> {
             "--jobs" => jobs = rest.next()?.parse().ok().filter(|&jobs| jobs > 0)?,
             "--trace-dir" => live::trace_to(rest.next()?),
             "--subagents-board" => boardagents::enable(),
+            "--subagents-board-delayed" => boardagents::enable_delayed(),
+            "--subagents-board-mutation" => {
+                if !boardagents::mutate(rest.next()?) {
+                    return None;
+                }
+            }
             "--verbose" => options.verbose = true,
             "--calm" => turns.calm = true,
             "--store" => whole.store = Some(StoreKind::parse(rest.next()?)?),
@@ -840,7 +846,7 @@ fn judge(seed: u64, args: &Args, totals: &mut Stats) -> Option<String> {
 }
 
 fn judge_agents(seed: u64, args: &Args, totals: &mut AgentStats) -> Option<String> {
-    boardagents::begin();
+    boardagents::begin(seed);
     let mut first = agents::run_seed(seed, args.agents);
     if let Some(error) = boardagents::finish() {
         first.wrong.get_or_insert(error);
@@ -855,7 +861,7 @@ fn judge_agents(seed: u64, args: &Args, totals: &mut AgentStats) -> Option<Strin
             .map(|message| format!("{} :: {message}", first.shape));
     }
     let second = crate::host::second_pass(|| {
-        boardagents::begin();
+        boardagents::begin(seed);
         let mut second = agents::run_seed(seed, args.agents);
         if let Some(error) = boardagents::finish() {
             second.wrong.get_or_insert(error);
@@ -871,7 +877,7 @@ fn judge_agents(seed: u64, args: &Args, totals: &mut AgentStats) -> Option<Strin
 }
 
 fn judge_whole(seed: u64, args: &Args, totals: &mut WholeStats) -> Option<String> {
-    boardagents::begin();
+    boardagents::begin(seed);
     let mut first = whole::run_seed(seed, args.whole);
     if let Some(error) = boardagents::finish() {
         first.wrong.get_or_insert(error);
@@ -890,7 +896,7 @@ fn judge_whole(seed: u64, args: &Args, totals: &mut WholeStats) -> Option<String
         ..args.whole
     };
     let second = crate::host::second_pass(|| {
-        boardagents::begin();
+        boardagents::begin(seed);
         let mut second = whole::run_seed(seed, quiet);
         if let Some(error) = boardagents::finish() {
             second.wrong.get_or_insert(error);
@@ -2074,6 +2080,14 @@ fn main() -> ExitCode {
             mutation_name(&args.whole),
             args.twice
         );
+        if let Some(name) = boardagents::mutation() {
+            if failed > 0 {
+                println!("MUTATION {name} caught by {failed} seeds");
+                return ExitCode::SUCCESS;
+            }
+            println!("MUTATION {name} NOT caught");
+            return ExitCode::FAILURE;
+        }
         if args.whole.mutation != WireMutation::None
             || args.whole.child_mutation != ChildMutation::None
             || args.whole.store_mutation != Mutation::None
@@ -2102,6 +2116,14 @@ fn main() -> ExitCode {
             args.agents.name(),
             args.twice
         );
+        if let Some(name) = boardagents::mutation() {
+            if failed > 0 {
+                println!("MUTATION {name} caught by {failed} seeds");
+                return ExitCode::SUCCESS;
+            }
+            println!("MUTATION {name} NOT caught");
+            return ExitCode::FAILURE;
+        }
         if args.agents != AgentsMutation::None {
             if failed > 0 {
                 println!("MUTATION {} caught by {failed} seeds", args.agents.name());

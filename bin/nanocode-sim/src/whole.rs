@@ -1224,7 +1224,10 @@ pub fn simulate(seed: u64, options: WholeOptions) -> WholeOutcome {
                 remote.as_ref(),
             )
             .await;
-            result.replace(Some(outcome));
+            let audit = crate::boardagents::audit().await;
+            result.replace(Some(
+                outcome.and_then(|listing| audit.map_or(Ok(listing), Err)),
+            ));
         });
         let crash_at = crashes.pop_front();
         world.begin_epoch(number);
@@ -1281,7 +1284,8 @@ pub fn simulate(seed: u64, options: WholeOptions) -> WholeOutcome {
                     before,
                 )
                 .await;
-                result.replace(Some(outcome));
+                let audit = crate::boardagents::audit().await;
+                result.replace(Some(outcome.and_then(|()| audit.map_or(Ok(()), Err))));
             });
             let ended = executor.run(vec![task], None);
             drop(executor);

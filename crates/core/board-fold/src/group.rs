@@ -215,7 +215,13 @@ impl Group {
                     if member.verdict.is_some() {
                         continue;
                     }
-                    member.verdict = Some(Err(if landed.contains(&index) {
+                    let fenced = landing.as_ref().is_some_and(|landing| {
+                        matches!(landing.error, StoreError::Fenced)
+                            && !mutated(Mutation::FencedUnsettled)
+                    });
+                    member.verdict = Some(Err(if fenced && landed.contains(&index) {
+                        BoardError::Store(StoreError::Fenced)
+                    } else if landed.contains(&index) {
                         BoardError::Unsettled {
                             event: member.event.id.clone(),
                             error: error.clone(),
@@ -255,11 +261,17 @@ impl Group {
             });
         }
         if fold.next <= landing.first {
+            let fenced =
+                matches!(landing.error, StoreError::Fenced) && !mutated(Mutation::FencedUnsettled);
             for index in open {
                 let member = &mut self.members[index];
-                member.verdict = Some(Err(BoardError::Unsettled {
-                    event: member.event.id.clone(),
-                    error: landing.error.clone(),
+                member.verdict = Some(Err(if fenced {
+                    BoardError::Store(StoreError::Fenced)
+                } else {
+                    BoardError::Unsettled {
+                        event: member.event.id.clone(),
+                        error: landing.error.clone(),
+                    }
                 }));
             }
         }

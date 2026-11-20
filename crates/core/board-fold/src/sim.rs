@@ -127,6 +127,8 @@ pub enum Mutation {
     DeliveryIngestedTwice,
     DeliveryLost,
     ReopenForgetsAgents,
+    BoardPolledOnce,
+    FencedUnsettled,
     GroupSkipsSeq,
     GroupVerdictFromPlan,
     GroupSplits,

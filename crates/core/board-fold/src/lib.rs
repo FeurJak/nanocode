@@ -1029,6 +1029,15 @@ impl Pending {
         let attempt = std::mem::replace(&mut self.attempt, Attempt::Fresh);
         let rows = match (rows, &attempt) {
             (Ok(rows), _) => rows,
+            (
+                Err(_),
+                Attempt::Appended {
+                    result: Err(StoreError::Fenced),
+                    ..
+                },
+            ) if !mutated(Mutation::FencedUnsettled) => {
+                return Err(BoardError::Store(StoreError::Fenced));
+            }
             (Err(error), Attempt::Appended { .. }) => {
                 return Err(BoardError::Unsettled {
                     event: self.event.id.clone(),
@@ -1061,6 +1070,11 @@ impl Pending {
                             self.event.id
                         ),
                     });
+                }
+                Err(StoreError::Fenced)
+                    if fold.next <= seq && !mutated(Mutation::FencedUnsettled) =>
+                {
+                    return Err(BoardError::Store(StoreError::Fenced));
                 }
                 Err(error) if fold.next <= seq => {
                     return Err(BoardError::Unsettled {
