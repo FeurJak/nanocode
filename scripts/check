@@ -29,7 +29,11 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$seeds" ] || { [ $full = 1 ] && seeds=64 || seeds=8; }
 export CARGO_BUILD_JOBS=$jobs SHIPPY_REMOTE_BUILD=0 CARGO_TERM_COLOR=never
-target=${CARGO_TARGET_DIR:-$root/target}
+# Build output goes where cargo puts it (CARGO_TARGET_DIR, else the box's cargo shim's shared
+# ~/target-<repo>, else ./target): never one dir per worktree, so every worktree shares one cache.
+# RUSTC_WRAPPER is left as the caller has it: blank would turn the configured compiler cache off.
+target=$(cargo metadata --format-version 1 --no-deps --offline 2>/dev/null | python3 -I -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])') || target=""
+[ -n "$target" ] || target=${CARGO_TARGET_DIR:-$root/target}
 logs=$root/output/check
 rm -rf "$logs"; mkdir -p "$logs"
 if [ -t 1 ]; then green=$'\e[32m' red=$'\e[31m' yellow=$'\e[33m' off=$'\e[0m'; else green="" red="" yellow="" off=""; fi
@@ -55,6 +59,9 @@ run() {
   return $rc
 }
 skip() { line "$yellow" skip "$1" "0.0" "$2"; }
+# cargo-shippy's wrapper runs cargo with a scrubbed environment: plant secrets, fail if any reaches it.
+if command -v cargo-shippy >/dev/null 2>&1; then run shippy-scrub "cargo-shippy --self-test: no secret reaches cargo" cargo-shippy --self-test
+else skip shippy-scrub "no cargo-shippy on this machine"; fi
 
 # Scope. Line 1: "all" or the changed workspace library crates plus their dependents.
 # Line 2: "all" or the simulator scenarios whose modules changed or whose crates (by the
@@ -217,7 +224,9 @@ simall() {
 }
 if [ $sim = 1 ]; then
   t0=$(now); wait $sim_pid; rc=$(cat "$logs/sim-build.rc")
-  export SIM_BIN=$target/check-sim/$simprofile/nanocode-sim
+  # A copy, since other worktrees share the target dir and may relink it while the sim runs.
+  export SIM_BIN=$logs/nanocode-sim
+  [ "$rc" = 0 ] && { cp "$target/check-sim/$simprofile/nanocode-sim" "$SIM_BIN" || rc=1; }
   if [ "$rc" = 0 ]; then
     line "$green" ok sim-build "$(secs $t0)" "$simprofile nanocode-sim (time left after the checks)"
     run tidy "nanocode-sim --tidy" "$SIM_BIN" --tidy
