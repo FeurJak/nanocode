@@ -14,6 +14,7 @@ use nanocode_board::{
     Applied, Board, BoardError, ClaimId, EventId, NewTask, Op, Outcome, Phase, Rejection, Say,
     TaskId,
     sim::{self as board_sim, Mutation as BoardRule},
+    stage::Stage,
     watch::Step,
 };
 use nanocode_durability_core::{StoreError, StoreFuture};
@@ -766,6 +767,9 @@ impl World {
     }
 
     async fn nap(&self, ms: u64) {
+        if !self.oracle.borrow().wrong.is_empty() {
+            std::future::pending::<()>().await;
+        }
         self.clock.sleep(Duration::from_nanos(ms * MS)).await;
     }
 
@@ -1169,6 +1173,18 @@ async fn worker(world: &World, index: u64, epoch: u64) {
             continue;
         }
         if world.planned(&worker.board) {
+            return;
+        }
+        let now = world.now_ms();
+        let fold = worker.board.fold();
+        if let Some(id) = fold.tasks().iter().find_map(|(id, task)| {
+            (matches!(task.stage(now), Stage::Lapsed)
+                && matches!(fold.claimable(id, now), Err(Rejection::Held { .. })))
+            .then(|| id.clone())
+        }) {
+            world.oracle.borrow_mut().wrong.push(format!(
+                "{id} lapsed by {now} ms but the board still refuses its claim as held"
+            ));
             return;
         }
         let mode = world.shape.tasks.modes[index as usize];
@@ -1992,7 +2008,9 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
             }
             Ended::Crashed => world.oracle.borrow_mut().stats.crashes += 1,
             Ended::Stuck => {
-                wrong = Some(format!("epoch {number} got stuck"));
+                if world.oracle.borrow().wrong.is_empty() {
+                    wrong = Some(format!("epoch {number} got stuck"));
+                }
                 break;
             }
         }

@@ -187,6 +187,7 @@ default_table='
 1 canary_board_steer_lost_on_move canary:40 --scenario board_steer --mutation steer_lost_on_move
 1 canary_board_steer_redelivered_after_heed canary:40 --scenario board_steer --mutation steer_redelivered_after_heed
 1 canary_board_heed_from_stale_claim canary:40 --scenario board_steer --mutation heed_from_stale_claim
+1 canary_board_leases_never_expire canary:50 --scenario board --mutation leases_never_expire
 1 canary_board_steer_by_claim_follows canary:40 --scenario board_steer --mutation steer_by_claim_follows
 1 canary_board_steer_to_terminal canary:40 --scenario board_steer --mutation steer_to_terminal
 1 canary_board_finish_ignores_steers canary:40 --scenario board_steer --mutation finish_ignores_steers
