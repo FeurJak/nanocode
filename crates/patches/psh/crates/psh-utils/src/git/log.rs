@@ -10,7 +10,7 @@ use super::repo::{Commit, Ident, Repo};
 use super::rev::{self, Walk, Walker};
 use super::store::{Kind, Oid, join};
 use super::wild::Pathspec;
-use super::worktree::{State, Untracked, Work, untracked};
+use super::worktree::{State, Untracked, Work, scan_untracked};
 use super::{Error, Git, Io, Res, option};
 use crate::timefmt::days_from_civil;
 
@@ -1117,9 +1117,6 @@ pub fn ls_files(git: &Git<'_>, io: &mut Io<'_>, args: &[String]) -> Res<i32> {
     if !(modified || deleted || others) {
         cached = true;
     }
-    if others && !standard {
-        return Err(option("ls-files", "--others without --exclude-standard"));
-    }
     let root = git.work_tree()?.to_vec();
     let own = if paths.is_empty() && !git.prefix.is_empty() {
         vec![".".to_string()]
@@ -1148,7 +1145,7 @@ pub fn ls_files(git: &Git<'_>, io: &mut Io<'_>, args: &[String]) -> Res<i32> {
                 .find(|(k, _)| k == key)
                 .map(|(_, v)| v.clone())
         };
-        for path in untracked(&work, Untracked::All, &spec, &env)? {
+        for path in scan_untracked(&work, Untracked::All, &spec, &env, standard)? {
             let line = name(&path);
             lines.push((path, line));
         }
@@ -1208,6 +1205,98 @@ pub fn ls_files(git: &Git<'_>, io: &mut Io<'_>, args: &[String]) -> Res<i32> {
     for (_, line) in lines {
         io.out.write_all(&line)?;
         io.out.write_all(end)?;
+    }
+    Ok(0)
+}
+
+/// git shortlog: commits grouped by author (or committer), with their subjects or
+/// (-s) only how many there are.
+pub fn shortlog(git: &Git<'_>, io: &mut Io<'_>, args: &[String]) -> Res<i32> {
+    let mut revs = Revs::new();
+    let mut summary = false;
+    let mut numbered = false;
+    let mut email = false;
+    let mut committer = false;
+    let mut rest = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--" {
+            rest.extend(args[i..].iter().cloned());
+            break;
+        }
+        match arg {
+            "-s" | "--summary" => summary = true,
+            "-n" | "--numbered" => numbered = true,
+            "-e" | "--email" => email = true,
+            "-c" | "--committer" => committer = true,
+            _ if !arg.starts_with('-') => rest.push(arg.to_string()),
+            _ if arg.len() > 2 && !arg.starts_with("--") => {
+                for flag in arg[1..].chars() {
+                    match flag {
+                        's' => summary = true,
+                        'n' => numbered = true,
+                        'e' => email = true,
+                        'c' => committer = true,
+                        _ => return Err(option("shortlog", arg)),
+                    }
+                }
+            }
+            _ => {
+                if !revs.option(git, "shortlog", args, &mut i)? {
+                    return Err(option("shortlog", arg));
+                }
+            }
+        }
+        i += 1;
+    }
+    if rest.iter().all(|a| a == "--" || a.starts_with('-')) {
+        rest.insert(0, "HEAD".to_string());
+    }
+    revs.positional(git, &rest)?;
+    // Each person's subjects, newest first as the walk meets them.
+    let mut people: Vec<(Vec<u8>, Vec<Vec<u8>>)> = Vec::new();
+    revs.commits(git, &mut |commit| {
+        let ident = Ident::parse(if committer {
+            &commit.committer
+        } else {
+            &commit.author
+        });
+        let mut who = ident.name.to_vec();
+        if email {
+            who.extend_from_slice(b" <");
+            who.extend_from_slice(ident.email);
+            who.push(b'>');
+        }
+        let line = super::pretty::subject(commit.message());
+        match people.iter_mut().find(|(name, _)| *name == who) {
+            Some((_, lines)) => lines.push(line),
+            None => people.push((who, vec![line])),
+        }
+        Ok(true)
+    })?;
+    people.sort_by(|a, b| {
+        if numbered {
+            b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0))
+        } else {
+            a.0.cmp(&b.0)
+        }
+    });
+    for (who, lines) in &people {
+        if summary {
+            write!(io.out, "{:6}\t", lines.len())?;
+            io.out.write_all(who)?;
+            io.out.write_all(b"\n")?;
+            continue;
+        }
+        io.out.write_all(who)?;
+        writeln!(io.out, " ({}):", lines.len())?;
+        for line in lines.iter().rev() {
+            io.out.write_all(b"      ")?;
+            io.out.write_all(line)?;
+            io.out.write_all(b"\n")?;
+        }
+        io.out.write_all(b"\n")?;
     }
     Ok(0)
 }
