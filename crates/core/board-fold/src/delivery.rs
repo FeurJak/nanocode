@@ -150,7 +150,7 @@ impl Slot {
     }
 
     #[must_use]
-    pub fn plan(self, action: &Action, limit: u64) -> Plan {
+    pub const fn plan(self, action: &Action, limit: u64) -> Plan {
         let counted = self.counted();
         match action {
             Action::Orphan => Plan::Orphan,

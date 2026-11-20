@@ -5,6 +5,7 @@ use std::{
     time::Instant,
 };
 
+mod claim;
 mod delivery;
 
 pub struct Part {
@@ -362,11 +363,15 @@ pub struct Entry {
 }
 
 fn models() -> Vec<Entry> {
-    delivery::models()
+    let mut models = delivery::models();
+    models.extend(claim::models());
+    models
 }
 
 fn canaries() -> Vec<Canary> {
-    delivery::canaries()
+    let mut canaries = delivery::canaries();
+    canaries.extend(claim::canaries());
+    canaries
 }
 
 pub struct Options {

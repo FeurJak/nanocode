@@ -25,7 +25,7 @@ fn stays() -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
-fn resting(stage: Stage) -> bool {
+const fn resting(stage: Stage) -> bool {
     matches!(stage, Stage::Removed | Stage::GivenUp)
 }
 
