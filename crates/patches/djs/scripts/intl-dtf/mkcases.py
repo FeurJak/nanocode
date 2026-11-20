@@ -4,7 +4,7 @@ L = ["de", "fr", "es", "ja", "zh", "pt-BR", "en-US"]
 D = ["2024-03-10T09:59:59Z", "2024-03-31T01:00:00Z", "2024-10-27T00:59:59Z", "2024-11-03T09:00:00Z", "2024-06-15T12:34:56.789Z", "2025-01-01T00:00:00Z", "1990-04-05T12:00:00Z"]
 Z = ["UTC", "America/Los_Angeles", "Europe/Berlin", "Asia/Tokyo", "Asia/Kolkata"]
 def case(name, body):
-    return {"id": "intl-dtf-" + name.replace("/", "-"), "kind": "js", "src": "const D=" + json.dumps(D) + ".map(s=>new Date(s));const out=[];" + body + "text(out.join('\\n'))"}
+    return {"id": "intl-dtf-" + name.replace("/", "-"), "kind": "js", "src": "const D=" + json.dumps(D) + ".map(s=>new Date(s));const out=[];" + body + ";text(out.join('\\n'))"}
 L2 = ["ko", "it", "ru", "nl", "pl", "tr", "ar", "ar-EG", "hi", "id", "vi", "zh-TW", "zh-Hant", "en-GB", "en-IN", "es-MX", "fr-CA"]
 FIVE = ("/styles", "/month-names", "/weekday-names", "/parts", "/mixed")
 cases = []
