@@ -193,9 +193,6 @@ impl<E: ArithEnv> Evaluator<'_, E> {
     /// The value of a variable: its text, evaluated as arithmetic.
     fn load(&mut self, lv: &LValue, text: &[u8]) -> Result<i64, EvalError<E::Error>> {
         let index = self.index(lv, text)?;
-        if self.depth + 1 >= ARITH_RECURSION_LIMIT {
-            return Err(err(ArithErrorKind::RecursionLevel, lv.span.start, text));
-        }
         let value = self
             .env
             .load(&text[lv.name.range()], index)
@@ -206,6 +203,11 @@ impl<E: ArithEnv> Evaluator<'_, E> {
             ArithValue::Num(n) => return Ok(n),
             ArithValue::Text(value) => value,
         };
+        // Only a value to evaluate takes a level: an unset `a` in `a/b` reads as 0, so
+        // the error names the `b` that recursed.
+        if self.depth + 1 >= ARITH_RECURSION_LIMIT {
+            return Err(err(ArithErrorKind::RecursionLevel, lv.span.start, text));
+        }
         self.depth += 1;
         let r = self.text(&value);
         self.depth -= 1;
@@ -374,7 +376,8 @@ impl<E: ArithEnv> Evaluator<'_, E> {
                     None => v,
                 }
             }
-            ArithKind::Fail { error, .. } => {
+            ArithKind::Fail { expr, error } => {
+                self.skipped(expr, text)?;
                 return Err(EvalError::Arith {
                     error: error.clone(),
                     text: text.to_vec(),
@@ -506,6 +509,29 @@ mod tests {
             e.bash_text().as_deref(),
             Some("1 +: syntax error: operand expected (error token is \"+\")")
         );
+    }
+
+    #[test]
+    fn what_bash_read_before_a_syntax_error_runs_first() {
+        let kind = |s: &str| match eval(s) {
+            Err(EvalError::Arith { error, .. }) => Some(error.kind),
+            _ => None,
+        };
+        assert_eq!(kind("1/0/c.txt"), Some(ArithErrorKind::DivisionByZero));
+        assert_eq!(kind("1/1/c.txt"), Some(ArithErrorKind::InvalidOperator));
+        assert_eq!(kind("2 ** -1 .x"), Some(ArithErrorKind::InvalidOperator));
+        assert_eq!(kind("1 && 1/0 .x"), Some(ArithErrorKind::InvalidOperator));
+        assert_eq!(kind("(1/0 .x)"), Some(ArithErrorKind::InvalidOperator));
+        assert_eq!(kind("1 + (1/0 + c.txt)"), Some(ArithErrorKind::DivisionByZero));
+        assert_eq!(kind("1 / (0 + c.txt)"), Some(ArithErrorKind::InvalidOperator));
+        assert_eq!(kind("0 && 1/0 + c.txt"), Some(ArithErrorKind::InvalidOperator));
+        assert_eq!(kind("1 ? 2 : 1/0 + c.txt"), Some(ArithErrorKind::InvalidOperator));
+        assert_eq!(kind("0 ? 1/0 + c.txt : 1"), Some(ArithErrorKind::InvalidOperator));
+        assert_eq!(kind("1 ? 1/0 + c.txt : 1"), Some(ArithErrorKind::DivisionByZero));
+        assert_eq!(kind("1 ? 1 : 2 ** -3 .x"), Some(ArithErrorKind::InvalidOperator));
+        assert_eq!(kind("1 ? 1 : 2 ** -3"), Some(ArithErrorKind::NegativeExponent));
+        assert_eq!(kind("1/0 1"), Some(ArithErrorKind::DivisionByZero));
+        assert_eq!(kind("n=5 .x"), Some(ArithErrorKind::InvalidOperator));
     }
 
     #[test]

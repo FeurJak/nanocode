@@ -5,7 +5,7 @@ use std::io::Write;
 use std::rc::Rc;
 
 use psh_syntax::{
-    ArithEnv, ArithExpr, ArithIndex, ArithValue, EvalError, Part, Word, eval_arith,
+    ArithEnv, ArithExpr, ArithIndex, ArithKind, ArithValue, EvalError, Part, Word, eval_arith,
     eval_arith_expr, parse_arith, plain_decimal,
 };
 
@@ -486,6 +486,14 @@ pub(crate) fn literal(code: &Code, word: &Word) -> Option<Rc<Literal>> {
         return None;
     }
     let expr = parse_arith(&text).ok()?;
+    // An expression that fails takes the usual path, which reports it.
+    if let Some(ArithExpr {
+        kind: ArithKind::Fail { .. },
+        ..
+    }) = expr
+    {
+        return None;
+    }
     let lit = Rc::new(Literal { text, expr });
     code.arith.borrow_mut().insert(key, lit.clone());
     Some(lit)

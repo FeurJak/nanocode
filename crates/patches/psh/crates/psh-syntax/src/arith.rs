@@ -56,8 +56,9 @@ pub enum ArithKind {
         op: Option<BinOp>,
         value: Box<ArithExpr>,
     },
-    /// `expr`, then `error`: `--n++` decrements n before bash's lexer rejects the
-    /// `++` after it.
+    /// `expr`, then `error`. Bash evaluates as it parses, so what it read before a
+    /// syntax error has run when the error is reported: `a/b/c.txt` divides by `b`
+    /// first, and `--n++` decrements n before the lexer rejects the `++` after it.
     Fail {
         expr: Box<ArithExpr>,
         error: ArithError,
@@ -250,21 +251,39 @@ pub fn parse_arith(text: &[u8]) -> Result<Option<ArithExpr>, ArithError> {
         },
         prev_start: 0,
         depth: 0,
-        fail: None,
+        partial: None,
     };
     p.bump(0)?;
     if p.tok.kind == TK::Eof {
         return Ok(None);
     }
-    let e = p.comma();
-    if let Some(fail) = p.fail {
-        return Ok(Some(fail));
-    }
-    let e = e?;
+    let e = match p.comma() {
+        Ok(e) => e,
+        Err(error) => {
+            return match p.partial.take() {
+                Some(done) => Ok(Some(fail(done, error))),
+                None => Err(error),
+            };
+        }
+    };
     if p.tok.kind != TK::Eof {
-        return Err(p.err(ArithErrorKind::SyntaxError));
+        // The whole expression has run when bash finds the tokens left after it.
+        let error = p.err(ArithErrorKind::SyntaxError);
+        return Ok(Some(fail(e, error)));
     }
     Ok(Some(e))
+}
+
+fn fail(expr: ArithExpr, error: ArithError) -> ArithExpr {
+    let (span, last) = (expr.span, expr.last);
+    ArithExpr {
+        kind: ArithKind::Fail {
+            expr: Box::new(expr),
+            error,
+        },
+        span,
+        last,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -307,8 +326,8 @@ struct ArithParser<'a> {
     /// Start of the token before `tok`: an error at the end names it.
     prev_start: u32,
     depth: u32,
-    /// A `--x++`: what runs before bash's lexer stops the whole expression.
-    fail: Option<ArithExpr>,
+    /// After an error: what bash evaluated before reaching it, in its order.
+    partial: Option<ArithExpr>,
 }
 
 fn digit_value(c: u8, base: u32) -> Option<u32> {
@@ -397,7 +416,17 @@ impl ArithParser<'_> {
     /// Reads the token starting at or after `from`.
     fn bump(&mut self, from: usize) -> Result<(), ArithError> {
         self.prev_start = self.tok.start;
+        let after_operand = matches!(self.tok.kind, TK::Num(_) | TK::RParen);
         self.tok = self.lex(from)?;
+        if after_operand && self.tok.kind == TK::Invalid {
+            // Bash reads the token after an operand before it applies the operator
+            // waiting on it, so `1/0 .x` reports `.x`, not the division.
+            return Err(ArithError::new(
+                ArithErrorKind::InvalidOperator,
+                self.tok.start,
+                None,
+            ));
+        }
         if let TK::Ident { .. } = self.tok.kind {
             // Bash reads one token past a name before going on, so a malformed number
             // or subscript, or a char that starts no token, right after it is reported
@@ -534,6 +563,51 @@ impl ArithParser<'_> {
         }
     }
 
+    /// On an error, records `done` as evaluated before what the failed call had done.
+    fn kept<T>(&mut self, r: Result<T, ArithError>, done: &ArithExpr) -> Result<T, ArithError> {
+        if r.is_err() {
+            let p = match self.partial.take() {
+                None => done.clone(),
+                Some(p) => self.binary(BinOp::Comma, done.clone(), p),
+            };
+            self.partial = Some(p);
+        }
+        r
+    }
+
+    fn zero(&self, at: u32) -> ArithExpr {
+        self.node(at, at, at, ArithKind::Num(0))
+    }
+
+    /// On an error in a branch of `cond ? then : otherwise`: the condition and the
+    /// branches read so far, with the failed one's partial, so a dead branch stays dead.
+    fn kept_cond<T>(
+        &mut self,
+        r: Result<T, ArithError>,
+        c: &ArithExpr,
+        then: Option<&ArithExpr>,
+    ) -> Result<T, ArithError> {
+        if r.is_err() {
+            let at = self.tok.start;
+            let p = self.partial.take();
+            let (then, otherwise) = match then {
+                None => (p.unwrap_or_else(|| self.zero(at)), self.zero(at)),
+                Some(t) => (t.clone(), p.unwrap_or_else(|| self.zero(at))),
+            };
+            self.partial = Some(self.node(
+                c.span.start,
+                at,
+                at,
+                ArithKind::Cond {
+                    cond: Box::new(c.clone()),
+                    then: Box::new(then),
+                    otherwise: Box::new(otherwise),
+                },
+            ));
+        }
+        r
+    }
+
     fn binary(&self, op: BinOp, lhs: ArithExpr, rhs: ArithExpr) -> ArithExpr {
         let (start, end, last) = (lhs.span.start, rhs.span.end, rhs.last);
         self.node(
@@ -551,8 +625,10 @@ impl ArithParser<'_> {
     fn comma(&mut self) -> Result<ArithExpr, ArithError> {
         let mut lhs = self.assign()?;
         while self.tok.kind == TK::Comma {
-            self.next()?;
-            let rhs = self.assign()?;
+            let r = self.next();
+            self.kept(r, &lhs)?;
+            let r = self.assign();
+            let rhs = self.kept(r, &lhs)?;
             lhs = self.binary(BinOp::Comma, lhs, rhs);
         }
         Ok(lhs)
@@ -565,10 +641,17 @@ impl ArithParser<'_> {
             let target = match lhs.kind {
                 // A parenthesized name is not a variable any more: `(x) = 1` fails.
                 ArithKind::Var(lv) if lv.span == lhs.span => lv,
-                _ => return Err(self.err(ArithErrorKind::NotAVariable)),
+                _ => {
+                    let e = Err(self.err(ArithErrorKind::NotAVariable));
+                    return self.kept(e, &lhs);
+                }
             };
-            self.next()?;
-            let value = self.assign()?;
+            // `x op= v` reads x first; `x = v` does not.
+            let r = self.next();
+            let r = if op.is_some() { self.kept(r, &lhs) } else { r };
+            r?;
+            let r = self.assign();
+            let value = if op.is_some() { self.kept(r, &lhs) } else { r }?;
             Ok(self.node(
                 lhs.span.start,
                 value.span.end,
@@ -591,19 +674,26 @@ impl ArithParser<'_> {
         if self.tok.kind != TK::Question {
             return Ok(c);
         }
-        self.next()?;
+        let r = self.next();
+        self.kept(r, &c)?;
         if matches!(self.tok.kind, TK::Colon | TK::Eof) {
-            return Err(self.err(ArithErrorKind::ExpressionExpected));
+            let e = Err(self.err(ArithErrorKind::ExpressionExpected));
+            return self.kept(e, &c);
         }
-        let then = self.comma()?;
+        let r = self.comma();
+        let then = self.kept_cond(r, &c, None)?;
         if self.tok.kind != TK::Colon {
-            return Err(self.err(ArithErrorKind::ColonExpected));
+            let e = Err(self.err(ArithErrorKind::ColonExpected));
+            return self.kept_cond(e, &c, Some(&then));
         }
-        self.next()?;
+        let r = self.next();
+        self.kept_cond(r, &c, Some(&then))?;
         if self.tok.kind == TK::Eof {
-            return Err(self.err(ArithErrorKind::ExpressionExpected));
+            let e = Err(self.err(ArithErrorKind::ExpressionExpected));
+            return self.kept_cond(e, &c, Some(&then));
         }
-        let otherwise = self.cond()?;
+        let r = self.cond();
+        let otherwise = self.kept_cond(r, &c, Some(&then))?;
         Ok(self.node(
             c.span.start,
             otherwise.span.end,
@@ -624,7 +714,8 @@ impl ArithParser<'_> {
             // After an operand that is not a variable, `++` is `+` and a unary `+`,
             // unless a name follows (then it is `++name`, which cannot follow an operand).
             if matches!(self.tok.kind, TK::Inc | TK::Dec) {
-                if matches!(self.lex(self.tok.end as usize)?.kind, TK::Ident { .. }) {
+                let r = self.lex(self.tok.end as usize);
+                if matches!(self.kept(r, &lhs)?.kind, TK::Ident { .. }) {
                     return Ok(lhs);
                 }
                 self.tok.kind = TK::Bin(if self.tok.kind == TK::Inc {
@@ -653,8 +744,21 @@ impl ArithParser<'_> {
             if level < min {
                 return Ok(lhs);
             }
-            self.next()?;
-            let rhs = self.binary_level(level + 1)?;
+            let r = self.next();
+            self.kept(r, &lhs)?;
+            let rhs = match self.binary_level(level + 1) {
+                Ok(rhs) => rhs,
+                // `&&` and `||` keep their short circuit: a dead operand stays dead.
+                Err(e) if matches!(op, BinOp::And | BinOp::Or) => {
+                    let p = match self.partial.take() {
+                        Some(p) => self.binary(op, lhs, p),
+                        None => lhs,
+                    };
+                    self.partial = Some(p);
+                    return Err(e);
+                }
+                Err(e) => return self.kept(Err(e), &lhs),
+            };
             lhs = self.binary(op, lhs, rhs);
         }
     }
@@ -664,9 +768,12 @@ impl ArithParser<'_> {
         if self.tok.kind != TK::Bin(BinOp::Pow) {
             return Ok(base);
         }
-        self.next()?;
-        self.enter()?;
-        let exp = self.power()?;
+        let r = self.next();
+        self.kept(r, &base)?;
+        let r = self.enter();
+        self.kept(r, &base)?;
+        let r = self.power();
+        let exp = self.kept(r, &base)?;
         self.depth -= 1;
         Ok(self.binary(BinOp::Pow, base, exp))
     }
@@ -686,7 +793,7 @@ impl ArithParser<'_> {
                 if let TK::Ident { name_end, index } = self.tok.kind {
                     let lv = self.lvalue(name_end, index);
                     let last = self.tok.start;
-                    self.next()?;
+                    let r = self.next();
                     let node = self.node(
                         start,
                         lv.span.end,
@@ -697,6 +804,7 @@ impl ArithParser<'_> {
                             post: false,
                         },
                     );
+                    self.kept(r, &node)?;
                     // `--x++`: bash changes x, then fails on the second operator.
                     if let TK::Inc | TK::Dec = self.tok.kind {
                         let kind = match self.tok.kind {
@@ -704,16 +812,7 @@ impl ArithParser<'_> {
                             _ => ArithErrorKind::DecRequiresLvalue,
                         };
                         let error = ArithError::new(kind, self.tok.start, None);
-                        let (span, last) = (node.span, node.last);
-                        self.fail = Some(ArithExpr {
-                            kind: ArithKind::Fail {
-                                expr: Box::new(node),
-                                error: error.clone(),
-                            },
-                            span,
-                            last,
-                        });
-                        return Err(error);
+                        return self.kept(Err(error), &node);
                     }
                     return Ok(node);
                 }
@@ -761,8 +860,8 @@ impl ArithParser<'_> {
                 if matches!(self.tok.kind, TK::Inc | TK::Dec) {
                     let inc = self.tok.kind == TK::Inc;
                     let (last, end) = (self.tok.start, self.tok.end);
-                    self.next()?;
-                    return Ok(self.node(
+                    let r = self.next();
+                    let node = self.node(
                         start,
                         end,
                         last,
@@ -771,7 +870,9 @@ impl ArithParser<'_> {
                             inc,
                             post: true,
                         },
-                    ));
+                    );
+                    self.kept(r, &node)?;
+                    return Ok(node);
                 }
                 Ok(self.node(start, lv.span.end, start, ArithKind::Var(lv)))
             }
@@ -781,11 +882,13 @@ impl ArithParser<'_> {
                 let mut inner = self.comma()?;
                 self.depth -= 1;
                 if self.tok.kind != TK::RParen {
-                    return Err(self.err(ArithErrorKind::MissingParen));
+                    let e = Err(self.err(ArithErrorKind::MissingParen));
+                    return self.kept(e, &inner);
                 }
                 inner.span = Span::new(start, self.tok.end);
                 inner.last = self.tok.start;
-                self.next()?;
+                let r = self.next();
+                self.kept(r, &inner)?;
                 Ok(inner)
             }
             _ => Err(self.err(ArithErrorKind::OperandExpected)),
