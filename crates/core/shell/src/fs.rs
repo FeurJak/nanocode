@@ -108,6 +108,15 @@ pub trait FileSystem {
     fn read(&self, path: &[u8], limit: u64) -> Reply<Bytes>;
     fn write(&self, path: &[u8], data: &[u8], how: Write) -> Reply<()>;
     fn list(&self, path: &[u8]) -> Reply<Vec<Vec<u8>>>;
+
+    /// The names in the directory at `path`, each with its kind where the listing
+    /// knows it (what `stat` without following says), so a walk needs no `stat` per
+    /// name. The default knows no kind.
+    fn list_kinds(&self, path: &[u8]) -> Reply<Vec<(Vec<u8>, Option<Kind>)>> {
+        self.list(path)
+            .map(|names| Ok(names?.into_iter().map(|name| (name, None)).collect()))
+    }
+
     fn mkdir(&self, path: &[u8], mode: u32) -> Reply<()>;
     fn remove(&self, path: &[u8], what: Remove) -> Reply<()>;
     fn rename(&self, from: &[u8], to: &[u8]) -> Reply<()>;

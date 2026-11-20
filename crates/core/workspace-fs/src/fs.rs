@@ -913,6 +913,26 @@ impl FileSystem for WorkspaceFs {
         }))
     }
 
+    fn list_kinds(&self, path: &[u8]) -> Reply<Vec<(Vec<u8>, Option<Kind>)>> {
+        Reply::Now(self.inner.lookup(path, true).and_then(|(path, entry)| {
+            match entry {
+                Some(Entry::Dir { .. }) => {}
+                None if path.is_empty() => {}
+                Some(_) => return Err(io::ErrorKind::NotADirectory.into()),
+                None => return missing(),
+            }
+            // The directory resolved, so each child's own entry is what lstat finds.
+            Ok(self
+                .inner
+                .manifest
+                .borrow()
+                .child_entries(&path)
+                .into_iter()
+                .map(|(name, entry)| (name.as_bytes().to_vec(), Some(stat_of(entry).kind)))
+                .collect())
+        }))
+    }
+
     fn mkdir(&self, path: &[u8], mode: u32) -> Reply<()> {
         let path = path.to_vec();
         later(&self.inner, async move |inner: &Inner| {
@@ -1074,6 +1094,32 @@ mod tests {
             data: data.as_bytes(),
             mode,
         }
+    }
+
+    #[test]
+    fn lists_children_with_their_kinds_past_each_subtree() {
+        let fs = workspace(64);
+        for path in ["/d/b/x/y", "/d/b-c", "/d/b.c", "/d/b0", "/d/a/z"] {
+            reply(fs.write_files(&[file(path, "1", 0o644)], 0o755)).expect("a file");
+        }
+        reply(fs.symlink(b"b", b"/d/l")).expect("a link");
+        let want: Vec<(Vec<u8>, Option<Kind>)> = [
+            ("a", Kind::Dir),
+            ("b", Kind::Dir),
+            ("b-c", Kind::File),
+            ("b.c", Kind::File),
+            ("b0", Kind::File),
+            ("l", Kind::Symlink),
+        ]
+        .into_iter()
+        .map(|(name, kind)| (name.as_bytes().to_vec(), Some(kind)))
+        .collect();
+        assert_eq!(reply(fs.list_kinds(b"/d")).expect("a listing"), want);
+        let names: Vec<Vec<u8>> = want.into_iter().map(|(name, _)| name).collect();
+        assert_eq!(reply(fs.list(b"/d")).expect("names"), names);
+        assert_eq!(reply(fs.list_kinds(b"/d/l")).expect("through the link").len(), 1);
+        assert_eq!(reply(fs.list(b"/")).expect("the root"), vec![b"d".to_vec()]);
+        assert!(reply(fs.list_kinds(b"/d/b0")).is_err());
     }
 
     #[test]

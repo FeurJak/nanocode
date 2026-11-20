@@ -1,7 +1,7 @@
 use crate::{
     answers,
     file::{Capture, Source},
-    fs::{FileSystem, Links, Remove, Reply, Stat, Write, normalize},
+    fs::{FileSystem, Kind, Links, Remove, Reply, Stat, Write, normalize},
     host::{Host, Vfs},
     shell::{Limit, Limits},
 };
@@ -321,6 +321,10 @@ impl FileSystem for Tracked {
 
     fn list(&self, path: &[u8]) -> Reply<Vec<Vec<u8>>> {
         self.0.list(&normalize(path))
+    }
+
+    fn list_kinds(&self, path: &[u8]) -> Reply<Vec<(Vec<u8>, Option<Kind>)>> {
+        self.0.list_kinds(&normalize(path))
     }
 
     fn mkdir(&self, path: &[u8], mode: u32) -> Reply<()> {

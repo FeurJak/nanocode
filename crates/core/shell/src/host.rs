@@ -10,7 +10,7 @@ use nanocode_bytes::Bytes;
 use psh_engine::{
     ControlHandle, HostFile,
     host::{
-        Access, ChildFd, DirEntry, ExitStatus, ExtProc, ExtraMetadata, FileKind, HostFuture, HostInfo, Metadata,
+        Access, ChildFd, DirEntry, ExitStatus, ExtProc, ExtraMetadata, FileKind, HostFuture, HostInfo, KnownEntry, Metadata,
         OpenOptions, Rlimit, RunInShell, SIGKILL, Signal, SpawnSpec, Spawned,
     },
 };
@@ -284,6 +284,13 @@ impl Vfs {
         }
     }
 
+    pub(crate) fn list_kinds(&self, path: &[u8]) -> Reply<Vec<(Vec<u8>, Option<Kind>)>> {
+        match self.charge() {
+            Ok(()) => self.fs().list_kinds(path),
+            Err(error) => Reply::Now(Err(error)),
+        }
+    }
+
     pub(crate) fn read_link(&self, path: &[u8]) -> Reply<Vec<u8>> {
         match self.charge() {
             Ok(()) => self.fs().read_link(path),
@@ -345,13 +352,17 @@ fn shared_inode(links: Links) -> u64 {
     inode(format!("\0link {}", links.group).as_bytes())
 }
 
+const fn file_kind(kind: Kind) -> FileKind {
+    match kind {
+        Kind::File => FileKind::File,
+        Kind::Dir => FileKind::Dir,
+        Kind::Symlink => FileKind::Symlink,
+    }
+}
+
 fn metadata(path: &[u8], stat: Stat, links: Option<Links>, info: &HostInfo) -> Metadata {
     Metadata {
-        kind: match stat.kind {
-            Kind::File => FileKind::File,
-            Kind::Dir => FileKind::Dir,
-            Kind::Symlink => FileKind::Symlink,
-        },
+        kind: file_kind(stat.kind),
         size: stat.size,
         mode: stat.mode,
         mtime_ns: stat.mtime_ns,
@@ -488,6 +499,24 @@ impl psh_engine::Host for Host {
                     names.dedup();
                 }
                 Ok(names.into_iter().map(|name| DirEntry { name }).collect())
+            })
+            .boxed()
+    }
+
+    fn read_dir_kinds(&self, path: &[u8]) -> HostFuture<io::Result<Vec<KnownEntry>>> {
+        let path = normalize(path);
+        if path == DEVICES {
+            // Devices are not in the file system's listing; read_dir adds them.
+            let listed = self.read_dir(&path);
+            return Box::pin(async move { Ok(listed.await?.into_iter().map(|e| (e, None)).collect()) });
+        }
+        self.0
+            .list_kinds(&path)
+            .map(|result| {
+                Ok(result?
+                    .into_iter()
+                    .map(|(name, kind)| (DirEntry { name }, kind.map(file_kind)))
+                    .collect())
             })
             .boxed()
     }
