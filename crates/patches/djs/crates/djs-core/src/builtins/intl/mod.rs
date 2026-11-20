@@ -307,7 +307,7 @@ pub(crate) fn intrinsic(heap: &mut Heap, k: u16, a: [Value; 5]) -> Result<Option
             let spec = match kind {
                 0 => number::resolve(&locale, &raw)?,
                 1 => date::resolve(&locale, &raw)?,
-                2 => collate::resolve(&locale, &raw)?,
+                2 => collate::resolve(&locale, &tags, &raw)?,
                 _ => text::resolve(kind, &locale, &raw)?,
             };
             string_value(heap, &spec.encode())?

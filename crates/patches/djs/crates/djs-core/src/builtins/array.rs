@@ -126,6 +126,26 @@ pub(crate) fn sort_by_key(heap: &mut Heap, list: Obj, comparefn: Value) -> Resul
         for (k, v) in keyed {
             strings.push_out((heap.contiguous(k.as_string().unwrap_or(Str(0)))?, v));
         }
+        if matches!(comparator, Comparator::Locale(_)) && crate::EMBED {
+            // localeCompare is Intl's collation, not code-unit order.
+            let mut units: Vec<(Vec<u16>, Value)> = crate::buf::vec_with_capacity(strings.len());
+            for &(s, v) in &strings {
+                match heap.str_view(s) {
+                    Some(StrView::Latin1(x)) => units.push_out((x.iter().map(|&b| u16::from(b)).collect(), v)),
+                    _ => return Ok(false),
+                }
+            }
+            let cmp = crate::builtins::intl::locale_compare;
+            if descending {
+                crate::sort::sort_by(&mut units, |a, b| cmp(&b.0, &a.0) < 0);
+            } else {
+                crate::sort::sort_by(&mut units, |a, b| cmp(&a.0, &b.0) < 0);
+            }
+            for (i, (_, v)) in (0..).zip(units) {
+                heap.set_element_fast(list, i, v)?;
+            }
+            return Ok(true);
+        }
         let mut views: Vec<(StrView, Value)> = crate::buf::vec_with_capacity(strings.len());
         for &(s, v) in &strings {
             match heap.str_view(s) {
