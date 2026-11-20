@@ -1878,6 +1878,40 @@ async fn param(
                     emit(f, n.to_string().as_bytes(), quoted);
                     return Ok(());
                 }
+                // `${#a[-9]}` before the start of an indexed array or scalar abandons the
+                // command line (bash), where `${a[-9]}` only warns.
+                if p.prefix == ParamPrefix::Length
+                    && matches!(p.op, ParamOp::None)
+                    && let Some(Subscript::Expr(w)) = &p.index
+                    && matches!(
+                        vp.vars.get(&name).map(|v| &v.value),
+                        Some(crate::vars::Value::Indexed(_) | crate::vars::Value::Str(_))
+                    )
+                {
+                    let (sub, _) = expand_single(vp, code, w, Ctx::Arith).await?;
+                    match crate::arith::expanding!(vp, |vp| vp.resolve_read(&name, &sub))? {
+                        Ok(Some(i)) => {
+                            let utf8 = vp.utf8();
+                            let n = vp
+                                .elem(&name, i)
+                                .map_or(0, |s| pattern::units(&s, utf8).0.len());
+                            emit(f, n.to_string().as_bytes(), quoted);
+                            return Ok(());
+                        }
+                        Ok(None) => {
+                            let msg = format!("{}]: bad array subscript", code.ast.text(w.span));
+                            vp.error(&msg).await;
+                            return Err(Unwind::Abort(1));
+                        }
+                        Err(msg) => {
+                            vp.error(&msg).await;
+                            return Err(match std::mem::take(&mut vp.sub_fatal) {
+                                true => Unwind::Exit(1),
+                                false => Unwind::Abort(1),
+                            });
+                        }
+                    }
+                }
                 lookup_var(vp, code, &name, &p.index).await?
             }
             Err(msg) => {
@@ -2536,7 +2570,11 @@ async fn element(vp: &mut Vp, name: &str, sub: &[u8]) -> Result<Val, Unwind> {
         }
         Err(msg) => {
             vp.error(&msg).await;
-            Err(Unwind::Abort(1))
+            // A subscript that is not arithmetic ends the script (bash).
+            match std::mem::take(&mut vp.sub_fatal) {
+                true => Err(Unwind::Exit(1)),
+                false => Err(Unwind::Abort(1)),
+            }
         }
     }
 }

@@ -1987,6 +1987,11 @@ async fn prefix_assigns(
             (Some(idx), AssignValue::Scalar(w)) => {
                 let ctx = expand::subscript_ctx(vp, name);
                 let (sub, st1) = Box::pin(expand::expand_single(vp, code, idx, ctx)).await?;
+                if ctx == Ctx::Word && sub.is_empty() {
+                    let msg = format!("{name}[{}]: bad array subscript", code.ast.text(idx.span));
+                    vp.error(&msg).await;
+                    return Err(Unwind::Abort(1));
+                }
                 let (v, st2) = Box::pin(expand::assign_value(vp, code, w)).await?;
                 *subst_status = st2.or(st1).or(*subst_status);
                 if argv.is_empty() && vp.opts.get(SetOpt::Xtrace) {
@@ -2004,8 +2009,12 @@ async fn prefix_assigns(
                 code.ast.text(idx.span)
             )),
         };
+        crate::arith::notes(vp).await;
         if let Err(msg) = r {
             vp.error(&msg).await;
+            if std::mem::take(&mut vp.sub_fatal) {
+                return Err(Unwind::Exit(1));
+            }
             if (vp.opts.get(SetOpt::Posix) || vp.opts.get(SetOpt::Errexit))
                 && argv.first().is_none_or(|n| builtins::is_special(vp, n))
             {

@@ -190,7 +190,7 @@ async fn is_set(vp: &mut Vp, name: &str) -> T {
                 return Ok(vp.is_set(&format!("{target}[{}]", s(&key))));
             }
             Some(false) => {
-                return match vp.resolve_index(&target, sub.as_bytes())? {
+                return match vp.resolve_read(&target, sub.as_bytes())? {
                     Some(i) => Ok(vp.is_set(&format!("{target}[{i}]"))),
                     None => {
                         vp.error(&format!("{target}: bad array subscript")).await;

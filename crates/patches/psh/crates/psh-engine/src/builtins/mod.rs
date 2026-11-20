@@ -632,6 +632,10 @@ async fn unset(vp: &mut Vp, args: &[Vec<u8>]) -> R {
             let name = String::from_utf8_lossy(&a[..open]).into_owned();
             let sub = crate::expand::expand_sub_text(vp, &a[open + 1..a.len() - 1]).await?;
             if let Err(msg) = vp.unset_elem(&name, &sub) {
+                if std::mem::take(&mut vp.sub_fatal) {
+                    vp.error(&msg).await;
+                    return Err(Unwind::Exit(1));
+                }
                 vp.error(&format!("unset: {msg}")).await;
                 status = 1;
             }

@@ -158,3 +158,36 @@ fn an_unset_parameter_error_in_a_forked_simple_command_exits_127() {
     assert_eq!(out("set -u; echo hi | while read l; do echo $zz; done 2>/dev/null; echo ${PIPESTATUS[@]}"), "0 1\n");
     assert_eq!(out("set -e; : ${u?x} 2>/dev/null | cat; echo ${PIPESTATUS[@]}"), "1 0\n");
 }
+
+#[test]
+fn a_negative_subscript_counts_from_the_end_of_an_indexed_array_only() {
+    let o = |s: &str| String::from_utf8_lossy(&run(s).1).into_owned();
+    // On a scalar a negative reference points nowhere; an assignment sets element 0.
+    assert_eq!(o("a=x; echo \"[${a[-1]}]\" $?"), "[] 0\n");
+    assert!(err("a=x; echo \"${a[-1]}\"").contains("a: bad array subscript"));
+    assert_eq!(o("a=foo; a[-1]=x; declare -p a"), "declare -a a=([0]=\"x\")\n");
+    assert_eq!(o("a=foo; unset 'a[-1]'; echo $? $a"), "1 foo\n");
+    assert!(err("a=foo; unset 'a[-1]'").contains("unset: a: not an array variable"));
+    assert_eq!(o("a=foo; unset 'a[0]'; echo ${a-gone}"), "gone\n");
+    assert_eq!(o("unset 'z[-1]'; echo $?"), "0\n");
+    // `${#a[-9]}` abandons the line.
+    assert_eq!(o("a=(foo); echo ${#a[-2]}; echo no\necho next"), "next\n");
+    assert!(err("a=(foo); echo ${#a[-2]}").contains("-2]: bad array subscript"));
+    assert_eq!(o("a=(foo bar); echo ${#a[-1]}"), "3\n");
+}
+
+#[test]
+fn a_subscript_that_is_not_arithmetic_ends_the_script() {
+    let o = |s: &str| String::from_utf8_lossy(&run(s).1).into_owned();
+    assert_eq!(run("m=(1); m[\"x y\"]=3\necho next").0, 1);
+    assert_eq!(o("m=(1); m[\"x y\"]=3\necho next"), "");
+    assert_eq!(o("a=(1); echo ${a[1+]}\necho next"), "");
+    assert_eq!(o("m=(1); unset 'm[x y]'\necho next"), "");
+    assert_eq!(o("( m[\"x y\"]=3; echo in ); echo $?"), "1\n");
+    // A bad compound element only warns and is skipped.
+    assert_eq!(o("m=(1); m+=([-5]=v [\"\"]=w); echo $?; declare -p m"), "0\ndeclare -a m=([0]=\"1\")\n");
+    assert!(err("m=(1); m+=([-5]=v)").contains("[-5]=v: bad array subscript"));
+    // An empty associative key in an assignment abandons the line.
+    assert_eq!(o("declare -A m; m[\"\"]=v; echo no\necho next"), "next\n");
+    assert!(err("declare -A m; m[\"\"]=v").contains("m[\"\"]: bad array subscript"));
+}

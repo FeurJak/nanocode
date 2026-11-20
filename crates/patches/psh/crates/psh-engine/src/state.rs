@@ -439,6 +439,12 @@ pub(crate) struct Vp {
     /// The last arithmetic evaluation failed on an unset variable under `set -u`: the
     /// error ends the shell, as an unbound variable in a word does.
     pub arith_unbound: bool,
+    /// The last arithmetic error was in the expression itself (syntax, division by 0),
+    /// not from a variable it read.
+    pub arith_syntax: bool,
+    /// An array subscript failed to evaluate as arithmetic: bash abandons the whole
+    /// script (or subshell) with status 1, not only the command line.
+    pub sub_fatal: bool,
     /// The names of the functions `export -f` marked: a `bash` psh runs itself starts
     /// with them, and a program gets them as bash passes them (`BASH_FUNC_name%%`).
     pub exported_funcs: Rc<Vec<String>>,

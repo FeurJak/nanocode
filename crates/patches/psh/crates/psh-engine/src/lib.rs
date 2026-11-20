@@ -351,6 +351,8 @@ impl Shell {
             last_args: Vec::new(),
             subshell_level: 0,
             arith_unbound: false,
+            arith_syntax: false,
+            sub_fatal: false,
             exported_funcs: Rc::new(Vec::new()),
             traced_funcs: Rc::new(Vec::new()),
             readonly_funcs: Rc::new(Vec::new()),

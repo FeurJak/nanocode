@@ -438,10 +438,14 @@ pub(crate) async fn notes(vp: &mut Vp) {
 /// Evaluates `text`; the error is bash's message without the `line N:` prefix.
 pub(crate) fn eval(vp: &mut Vp, text: &[u8]) -> Result<i64, String> {
     vp.arith_unbound = false;
+    vp.arith_syntax = false;
     match eval_arith(text, &mut Env { vp }) {
         Ok(v) => Ok(v),
         Err(EvalError::Env(msg)) => Err(msg),
-        Err(e) => Err(e.bash_text().unwrap_or_default()),
+        Err(e) => {
+            vp.arith_syntax = true;
+            Err(e.bash_text().unwrap_or_default())
+        }
     }
 }
 
