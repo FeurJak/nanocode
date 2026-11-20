@@ -483,13 +483,8 @@ fn validate_unicode_label(label: &str) -> bool {
         previous = Some(current);
     }
 
-    if (has_katakana_middle_dot && !has_hiragana_katakana_han)
-        || (has_arabic_indic_digits && has_extended_arabic_indic_digits)
-    {
-        return false;
-    }
-
-    true
+    !((has_katakana_middle_dot && !has_hiragana_katakana_han)
+        || (has_arabic_indic_digits && has_extended_arabic_indic_digits))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -734,9 +729,5 @@ pub(crate) fn is_valid_duration(duration: &str) -> bool {
     let has_time_h = seen_units & (1 << 4) != 0;
     let has_time_m = seen_units & (1 << 5) != 0;
     let has_time_s = seen_units & (1 << 6) != 0;
-    if has_time_h && has_time_s && !has_time_m {
-        return false;
-    }
-
-    true
+    !(has_time_h && has_time_s && !has_time_m)
 }
