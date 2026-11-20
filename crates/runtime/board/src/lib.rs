@@ -104,6 +104,16 @@ impl Board {
         self.fold_rows(rows)
     }
 
+    /// The log scope this board reads and appends.
+    pub fn scope(&self) -> &str {
+        &self.scope
+    }
+
+    /// The host this board reads and appends through.
+    pub fn host(&self) -> &Arc<dyn LogHost> {
+        &self.host
+    }
+
     pub async fn submit(&mut self, at_ms: u64, op: Op) -> Result<Applied, BoardError> {
         self.minted += 1;
         let id = EventId(format!("{}.{}", self.writer, self.minted));

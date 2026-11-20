@@ -153,6 +153,13 @@ impl LogHost for Notifying {
         self.inner.scan(scope, from, to)
     }
 
+    fn scans<'a>(
+        &'a self,
+        scans: &'a [(&'a str, u64)],
+    ) -> StoreFuture<'a, Result<Vec<Vec<(u64, String)>>, StoreError>> {
+        self.inner.scans(scans)
+    }
+
     fn load<'a>(
         &'a self,
         scope: &'a str,

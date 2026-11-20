@@ -1,6 +1,6 @@
 use std::{ops::Range, sync::Arc};
 
-use nanocode_durability_core::{Sql, SqlStatement, StoreError, StoreFuture};
+use nanocode_durability_core::{Sql, SqlAccess, SqlStatement, StoreError, StoreFuture};
 use nanocode_sync::Atom;
 
 #[derive(Clone)]
@@ -40,6 +40,21 @@ pub trait LogHost: Send + Sync {
         to: u64,
     ) -> StoreFuture<'a, Result<Vec<(u64, String)>, StoreError>>;
 
+    /// The rows of each scope from its seq on, in the order asked: what a partitioned reader catches up on at once.
+    /// A host that can answers them all in one read; the default scans one scope after another.
+    fn scans<'a>(
+        &'a self,
+        scans: &'a [(&'a str, u64)],
+    ) -> StoreFuture<'a, Result<Vec<Vec<(u64, String)>>, StoreError>> {
+        Box::pin(async move {
+            let mut rows = Vec::with_capacity(scans.len());
+            for (scope, from) in scans {
+                rows.push(self.scan(scope, *from, SCAN_END).await?);
+            }
+            Ok(rows)
+        })
+    }
+
     fn load<'a>(
         &'a self,
         scope: &'a str,
@@ -77,6 +92,9 @@ pub trait LogHost: Send + Sync {
         None
     }
 }
+
+/// The exclusive end that scans every row from a seq on.
+pub const SCAN_END: u64 = i64::MAX as u64;
 
 type Dialects = [&'static str; 2];
 
@@ -242,12 +260,54 @@ impl<H: Sql + Send + Sync + ?Sized> LogHost for SqlLog<H> {
                 sql: self.pick(&SCAN),
                 params: vec![scope, &from, &to],
             }];
-            let rows = self.host.transaction("turn_log_scan", &statements).await?;
+            // A read: on SQLite it shares the file with writers instead of taking the write lock.
+            let rows = self
+                .host
+                .run(SqlAccess::Read, "turn_log_scan", &statements)
+                .await?;
             rows.into_iter()
                 .next()
                 .ok_or_else(|| invalid("scan returned no result"))?
                 .into_iter()
                 .map(row)
+                .collect()
+        })
+    }
+
+    fn scans<'a>(
+        &'a self,
+        scans: &'a [(&'a str, u64)],
+    ) -> StoreFuture<'a, Result<Vec<Vec<(u64, String)>>, StoreError>> {
+        Box::pin(async move {
+            if scans.is_empty() {
+                return Ok(Vec::new());
+            }
+            let bounds: Vec<(String, String)> = scans
+                .iter()
+                .map(|(_, from)| (from.to_string(), SCAN_END.to_string()))
+                .collect();
+            let statements: Vec<SqlStatement<'_>> = scans
+                .iter()
+                .zip(&bounds)
+                .map(|((scope, _), (from, to))| SqlStatement {
+                    sql: self.pick(&SCAN),
+                    params: vec![*scope, from.as_str(), to.as_str()],
+                })
+                .collect();
+            let results = self
+                .host
+                .run(SqlAccess::Read, "turn_log_scans", &statements)
+                .await?;
+            if results.len() != scans.len() {
+                return Err(invalid(format!(
+                    "{} scans returned {} results",
+                    scans.len(),
+                    results.len()
+                )));
+            }
+            results
+                .into_iter()
+                .map(|rows| rows.into_iter().map(row).collect())
                 .collect()
         })
     }

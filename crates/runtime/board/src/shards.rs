@@ -580,6 +580,30 @@ pub struct Stats {
     pub largest: u64,
 }
 
+/// Catches every partition's board up with its log in one read where they share a host (one round trip and one
+/// snapshot, rather than a scan per partition); boards on other hosts refresh one by one.
+pub async fn refresh(boards: &mut [Board]) -> Result<(), BoardError> {
+    let Some(host) = boards.first().map(|board| Arc::clone(board.host())) else {
+        return Ok(());
+    };
+    if boards.iter().any(|board| !Arc::ptr_eq(board.host(), &host)) {
+        for board in boards.iter_mut() {
+            board.refresh().await?;
+        }
+        return Ok(());
+    }
+    let scans: Vec<(&str, u64)> = boards
+        .iter()
+        .map(|board| (board.scope(), board.fold().next()))
+        .collect();
+    let rows = host.scans(&scans).await?;
+    drop(scans);
+    for (board, rows) in boards.iter_mut().zip(rows) {
+        board.fold_rows(rows)?;
+    }
+    Ok(())
+}
+
 /// Opens the board for every partition of `scope` on one host.
 pub async fn open(
     host: &Arc<dyn LogHost>,
