@@ -246,6 +246,7 @@ fn nfd_of(s: &str) -> Vec<u32> {
 
 /// Whether want (NFD) starts at cps[i], its first code point in either case, with no further
 /// combining mark on it; the case of the match (0 lower, 2 upper).
+#[allow(clippy::if_same_then_else)]
 fn tail_match(cps: &[u32], used: &[bool], i: usize, want: &[u32]) -> Option<u8> {
     if i + want.len() > cps.len() || used[i..i + want.len()].iter().any(|u| *u) {
         return None;

@@ -1,5 +1,6 @@
 // Made by crates/patches/djs/scripts/intl-loc/gen.js from node v22.23.5 (ICU 78.3, CLDR 48.0): do not edit.
 #![cfg_attr(rustfmt, rustfmt::skip)]
+#![allow(clippy::useless_concat)]
 
 /// und-S-R (S or R may be empty) whose minimize() is itself.
 pub(super) const MIN_KEEP: &str = concat!(

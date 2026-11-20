@@ -68,16 +68,14 @@ impl Names {
             'f' => Some('M'),
             _ => None,
         };
-        if self.style == "narrow" {
-            if let Some(n) = narrow.and_then(|c| find(&key(c))) {
+        if self.style == "narrow"
+            && let Some(n) = narrow.and_then(|c| find(&key(c))) {
                 return Some(n);
             }
-        }
-        if self.style != "long" {
-            if let Some(s) = short.and_then(|c| find(&key(c))) {
+        if self.style != "long"
+            && let Some(s) = short.and_then(|c| find(&key(c))) {
                 return Some(s);
             }
-        }
         find(&key(k))
     }
 }
@@ -159,13 +157,12 @@ fn language(names: &Names, dialect: bool, fallback: bool, code: &str) -> Result<
             (true, false) => format!("{l}-{r}"),
             (true, true) => String::new(),
         };
-        if !key.is_empty() {
-            if let Some(n) = names.get('d', &key) {
+        if !key.is_empty()
+            && let Some(n) = names.get('d', &key) {
                 name = Some(n);
                 used_s = true;
                 used_r = true;
             }
-        }
     }
     let mut missing = false;
     let base = match name.or_else(|| names.get('l', l)) {

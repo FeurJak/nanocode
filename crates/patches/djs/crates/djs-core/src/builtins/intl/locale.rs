@@ -352,12 +352,11 @@ fn canonical_language_id(tag: &mut Tag) {
                 hit = Some((i, r));
                 break;
             }
-            if tag.lang != "und" {
-                if let Some(r) = lookup(d::LANG_ALIAS, &format!("und-{v}")) {
+            if tag.lang != "und"
+                && let Some(r) = lookup(d::LANG_ALIAS, &format!("und-{v}")) {
                     hit = Some((i, r));
                     break;
                 }
-            }
         }
         if let Some((i, r)) = hit {
             tag.variants.remove(i);
@@ -374,14 +373,13 @@ fn canonical_language_id(tag: &mut Tag) {
             apply_lang(tag, r, false);
             changed = true;
         }
-        if !tag.script.is_empty() {
-            if let Some(r) = lookup(d::SCRIPT_ALIAS, &tag.script) {
+        if !tag.script.is_empty()
+            && let Some(r) = lookup(d::SCRIPT_ALIAS, &tag.script) {
                 tag.script = r.to_string();
                 changed = true;
             }
-        }
-        if !tag.region.is_empty() {
-            if let Some(r) = lookup(d::REGION_ALIAS, &tag.region) {
+        if !tag.region.is_empty()
+            && let Some(r) = lookup(d::REGION_ALIAS, &tag.region) {
                 let opts: Vec<&str> = r.split(' ').collect();
                 let mut pick = opts[0];
                 if opts.len() > 1 {
@@ -394,7 +392,6 @@ fn canonical_language_id(tag: &mut Tag) {
                 tag.region = pick.to_string();
                 changed = true;
             }
-        }
         for v in tag.variants.iter_mut() {
             if let Some(r) = lookup(d::VARIANT_ALIAS, v) {
                 *v = r.to_string();
@@ -434,12 +431,11 @@ fn canonical_tag(mut tag: Tag) -> Tag {
         tag.keys[i].1 = ext_type("u", &k, &v);
     }
     tag.keys.sort_by(|a, b| a.0.cmp(&b.0));
-    if !tag.tlang.is_empty() {
-        if let Some(mut t) = parse(&tag.tlang) {
+    if !tag.tlang.is_empty()
+        && let Some(mut t) = parse(&tag.tlang) {
             canonical_language_id(&mut t);
             tag.tlang = t.base_name().to_ascii_lowercase();
         }
-    }
     for i in 0..tag.tfields.len() {
         let (k, v) = tag.tfields[i].clone();
         tag.tfields[i].1 = ext_type("t", &k, &v);
@@ -635,7 +631,7 @@ pub(super) fn construct(tag: &str, raw: &super::Spec) -> Result<String, Fault> {
         t.set_key(key, &v);
     }
     // ICU canonicalizes again after the options (an option can be an alias).
-    Ok(canonicalize(&t.to_tag())?)
+    canonicalize(&t.to_tag())
 }
 
 fn split_list(s: &str) -> Vec<&str> {
@@ -644,21 +640,19 @@ fn split_list(s: &str) -> Vec<&str> {
 
 fn region_for_data(tag: &Tag, max: &Tag) -> String {
     for k in ["rg", "sd"] {
-        if let Some(v) = tag.key(k) {
-            if v.len() >= 3 {
+        if let Some(v) = tag.key(k)
+            && v.len() >= 3 {
                 return v[..2].to_ascii_uppercase();
             }
-        }
     }
     max.region.clone()
 }
 
 fn region_data(tag: &Tag, max: &Tag, locale_table: &'static str, region_table: &'static str, default: &'static str) -> &'static str {
-    if tag.key("rg").is_none() && tag.key("sd").is_none() {
-        if let Some(v) = lookup(locale_table, &format!("{}-{}-{}", max.lang, max.script, max.region)) {
+    if tag.key("rg").is_none() && tag.key("sd").is_none()
+        && let Some(v) = lookup(locale_table, &format!("{}-{}-{}", max.lang, max.script, max.region)) {
             return v;
         }
-    }
     lookup(region_table, &region_for_data(tag, max)).unwrap_or(default)
 }
 

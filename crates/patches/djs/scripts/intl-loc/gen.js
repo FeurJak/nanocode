@@ -163,5 +163,5 @@ for (const k of ["calendar", "collation", "currency", "numberingSystem", "timeZo
 
 process.stdout.write(
   "// Made by crates/patches/djs/scripts/intl-loc/gen.js from node " + process.version + " (ICU " + process.versions.icu + ", CLDR " + process.versions.cldr + "): do not edit.\n" +
-  "#![cfg_attr(rustfmt, rustfmt::skip)]\n\n" + out.join("\n") + "\n");
+  "#![cfg_attr(rustfmt, rustfmt::skip)]\n#![allow(clippy::useless_concat)]\n\n" + out.join("\n") + "\n");
 

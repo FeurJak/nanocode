@@ -92,6 +92,8 @@ const INCB_CONSONANT: u32 = 2;
 const INCB_EXTEND: u32 = 3;
 
 /// The grapheme cluster boundaries (indexes into cs, with 0 and cs.len()).
+// One branch per UAX #29 rule, so several give the same answer.
+#[allow(clippy::if_same_then_else)]
 fn graphemes(cs: &[Ch]) -> Vec<usize> {
     let mut b = alloc::vec![0];
     let mut ri = 0usize; // regional indicators in a row before i
@@ -110,7 +112,7 @@ fn graphemes(cs: &[Ch]) -> Vec<usize> {
             (INCB_EXTEND, Some(l)) => Some(l),
             _ => None,
         };
-        pict = if a.ep() { true } else if pict && ga == G_EXTEND { true } else { pict && ga == G_ZWJ && false };
+        pict = a.ep() || (pict && ga == G_EXTEND);
         let pict_zwj = ga == G_ZWJ && i >= 2 && {
             // ExtPict Extend* ZWJ
             let mut j = i - 1;
