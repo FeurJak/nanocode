@@ -43,7 +43,8 @@ const USAGE: &str = "usage:
                                       a take whose label and kind a lane cap covers is refused (and with --wait retried) when that lane's
                                       leased cores across all machines plus N would exceed the cap; takes placed inside a standing
                                       --label-prefix reservation neither count nor are refused
-  (a take refuses a box whose lease would run into its last 15 minutes before expiry; use a shorter --minutes or another box)
+  (a take refuses a box whose lease would run into its last 15 minutes before expiry, saying when the box closes (PST);
+   use a shorter --minutes or another box; a take --wait without --machine, on this box by default, moves to the other boxes then)
   (fair queue: a take --wait is recorded in the state as a waiter with its request time, cores and --machine while it waits;
    the oldest live waiter on each machine holds the window of its N contiguous cpus that frees soonest, and every other
    take sees that window's free cpus as busy, except takes inside a standing reservation matching their label and a
@@ -841,9 +842,80 @@ fn local_take(args: &[String], local: Option<&str>) -> Vec<String> {
     if let Some(local) = local
         && option(&args, "--machine").is_none()
     {
-        args.extend(["--machine".to_owned(), local.to_owned()]);
+        args.extend([
+            "--machine".to_owned(),
+            local.to_owned(),
+            "--machine-default".to_owned(),
+        ]);
     }
     args
+}
+
+/// HH:MM of a time in ms, in PST.
+fn clock(ms: u64) -> String {
+    let minutes =
+        (i64::try_from(ms / 60_000).unwrap_or(0) + PST_OFFSET_MINUTES).rem_euclid(24 * 60);
+    format!("{:02}:{:02}", minutes / 60, minutes % 60)
+}
+
+/// Takes a lease on the machines whose close window it fits before. A take on a box whose lease
+/// would run into its last 15 minutes is refused with the time the box closes, so callers
+/// re-target; a take --wait on this box by default (no --machine given) moves to the other boxes
+/// instead, as a waiter for any machine.
+fn take_fitting(
+    state: &mut State,
+    mut machines: Vec<Machine>,
+    want: &Want,
+    implicit: bool,
+    now: u64,
+) -> Result<(serde_json::Value, slots::Lease), String> {
+    let mut closing = None;
+    machines.retain(|machine| {
+        let fits = fits_before_close(machine.expires_ms, now, want.ttl_ms);
+        if !fits && want.only.as_deref() == Some(machine.name.as_str()) {
+            closing = machine.expires_ms;
+        }
+        fits
+    });
+    let moved;
+    let want = match (closing, implicit, &want.queue) {
+        (Some(_), true, Some(_)) => {
+            moved = Want {
+                only: None,
+                ..want.clone()
+            };
+            closing = None;
+            &moved
+        }
+        _ => want,
+    };
+    let cores = want.cores;
+    let taken = state.take(&machines, want, now);
+    if let (Err(_), Some(expires), Some(name)) = (&taken, closing, &want.only) {
+        if let Some(queue) = &want.queue {
+            state.waiters.retain(|waiter| waiter.id != queue.id);
+        }
+        let left = expires.saturating_sub(now) / 60_000;
+        let room = expires.saturating_sub(now + CLOSE_WINDOW_MS) / 60_000;
+        return Err(format!(
+            "{name} box closes at {} PST (expires at {} PST, in {left}m) and no lease may run into its last {}m; ask for --minutes {room} or less, or take on another box",
+            clock(expires.saturating_sub(CLOSE_WINDOW_MS)),
+            clock(expires),
+            CLOSE_WINDOW_MS / 60_000
+        ));
+    }
+    let lease = taken.map_err(|refusal| match (refusal, &want.only) {
+        (Refusal::NoRoom, Some(name)) => format!("{NO_ROOM} {cores} free cores on {name}{KILL_RULE}"),
+        (Refusal::NoRoom, None) => format!("{NO_ROOM} {cores} free cores{KILL_RULE}"),
+        (Refusal::OverCap { lane, held, cap }, _) => format!(
+            "{OVER_CAP} lane {lane} holds {held}/{cap} cores across the fleet, so --label {} cannot take {cores} more",
+            want.label
+        ),
+    })?;
+    let machine = machines
+        .iter()
+        .find(|machine| machine.name == lease.machine);
+    Ok((lease.to_json(machine), lease))
 }
 
 fn placement_warning(machine: &str, hosts: &[&str]) -> Option<String> {
@@ -1039,42 +1111,14 @@ fn slots_once(args: &[String], input: &str) -> Result<String, String> {
                     want.label
                 ));
             }
-            let mut closing = None;
+            let implicit = args.iter().any(|arg| arg == "--machine-default");
             let (taken, gone) = with_state(|state| {
-                let mut machines = machines(pool, state, now);
+                let machines = machines(pool, state, now);
                 let gone = reap_gone(state, &machines);
-                machines.retain(|machine| {
-                    let fits = fits_before_close(machine.expires_ms, now, ttl);
-                    if !fits && want.only.as_deref() == Some(machine.name.as_str()) {
-                        closing = machine.expires_ms;
-                    }
-                    fits
-                });
-                let taken = state.take(&machines, &want, now).map(|lease| {
-                    let machine = machines
-                        .iter()
-                        .find(|machine| machine.name == lease.machine);
-                    (lease.to_json(machine), lease)
-                });
-                (taken, gone)
+                (take_fitting(state, machines, &want, implicit, now), gone)
             })?;
             log_gone(&gone);
-            if let (Err(_), Some(expires), Some(name)) = (&taken, closing, &want.only) {
-                let left = expires.saturating_sub(now) / 60_000;
-                let room = expires.saturating_sub(now + CLOSE_WINDOW_MS) / 60_000;
-                return Err(format!(
-                    "{name} expires in {left}m and no lease may run into its last {}m; ask for --minutes {room} or less, or take on another box",
-                    CLOSE_WINDOW_MS / 60_000
-                ));
-            }
-            let (json, lease) = taken.map_err(|refusal| match (refusal, &want.only) {
-                (Refusal::NoRoom, Some(name)) => format!("{NO_ROOM} {cores} free cores on {name}{KILL_RULE}"),
-                (Refusal::NoRoom, None) => format!("{NO_ROOM} {cores} free cores{KILL_RULE}"),
-                (Refusal::OverCap { lane, held, cap }, _) => format!(
-                    "{OVER_CAP} lane {lane} holds {held}/{cap} cores across the fleet, so --label {} cannot take {cores} more",
-                    want.label
-                ),
-            })?;
+            let (json, lease) = taken?;
             log_line(&format!(
                 "take {} {} {} cores {} {} cpus {}",
                 lease.id,
@@ -1919,7 +1963,16 @@ mod tests {
         let take = words(&["take", "--cores", "8", "--label", "t"]);
         assert_eq!(
             local_take(&take, Some("b1")),
-            words(&["take", "--cores", "8", "--label", "t", "--machine", "b1"])
+            words(&[
+                "take",
+                "--cores",
+                "8",
+                "--label",
+                "t",
+                "--machine",
+                "b1",
+                "--machine-default"
+            ])
         );
         assert_eq!(local_take(&take, None), take);
     }
@@ -2164,5 +2217,67 @@ mod tests {
         assert_eq!((queue.since_ms, queue.wait_ms), (5, 9_000));
         assert!(queue.id.starts_with("h-"));
         assert_eq!(super::want(&take, 16, MIN).unwrap().queue, None);
+    }
+
+    #[test]
+    fn a_waiter_on_a_closing_box_by_default_moves_to_another_box() {
+        let mut closing = machine();
+        closing.name = "c".to_owned();
+        closing.expires_ms = Some(NOW + 30 * MIN);
+        let mut other = machine();
+        other.name = "o".to_owned();
+        let mut state = State::default();
+        let mut on_closing = waiting(8, "w", NOW, 60 * MIN, 60 * MIN);
+        on_closing.only = Some("c".to_owned());
+        let machines = vec![closing, other];
+        // By default (no --machine given), a take --wait moves to the box with room.
+        let (_, lease) =
+            super::take_fitting(&mut state, machines.clone(), &on_closing, true, NOW).unwrap();
+        assert_eq!(lease.machine, "o");
+        assert!(state.waiters.is_empty());
+        // With no room anywhere it waits for any machine, not for the closing box.
+        let mut full = State::default();
+        full.leases.push(lease_on("o", 48));
+        let error =
+            super::take_fitting(&mut full, machines.clone(), &on_closing, true, NOW).unwrap_err();
+        assert!(error.starts_with(super::NO_ROOM), "{error}");
+        assert_eq!(full.waiters.len(), 1);
+        assert_eq!(full.waiters[0].machine, None);
+        // An explicit --machine is refused at once, with when the box closes.
+        let mut explicit = State::default();
+        let error = super::take_fitting(&mut explicit, machines.clone(), &on_closing, false, NOW)
+            .unwrap_err();
+        assert!(!error.starts_with(super::NO_ROOM), "{error}");
+        assert!(
+            error.contains(&format!(
+                "box closes at {} PST",
+                super::clock(NOW + 15 * MIN)
+            )),
+            "{error}"
+        );
+        assert!(error.contains("--minutes 15 or less"), "{error}");
+        assert!(explicit.waiters.is_empty());
+        // A take without --wait on this box by default is refused the same way.
+        let mut once = on_closing.clone();
+        once.queue = None;
+        assert!(
+            super::take_fitting(&mut State::default(), machines, &once, true, NOW)
+                .unwrap_err()
+                .contains("box closes at")
+        );
+    }
+
+    fn lease_on(machine: &str, cores: u32) -> Lease {
+        let mut held = lease("f", 0, cores, "build", "full");
+        held.machine = machine.to_owned();
+        held
+    }
+
+    #[test]
+    fn clock_prints_pst() {
+        // 20:05 UTC is 12:05 PST; 03:00 UTC is 19:00 PST the day before.
+        let day = 20_000 * 86_400_000;
+        assert_eq!(super::clock(day + 20 * 3_600_000 + 5 * 60_000), "12:05");
+        assert_eq!(super::clock(day + 3 * 3_600_000), "19:00");
     }
 }

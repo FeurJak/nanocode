@@ -631,6 +631,10 @@ impl State {
         let Some(queue) = &want.queue else { return };
         let until_ms = queue.since_ms.saturating_add(queue.wait_ms);
         if let Some(waiter) = self.waiters.iter_mut().find(|waiter| waiter.id == queue.id) {
+            // A waiter moved off a closing box waits for any machine from then on.
+            if waiter.machine != want.only {
+                waiter.machine.clone_from(&want.only);
+            }
             // Refresh at most every 30s, so a waiter's 5s retries don't rewrite the state each time.
             if now_ms >= waiter.seen_ms + WAITER_GONE_MS / 4 {
                 waiter.seen_ms = now_ms;
