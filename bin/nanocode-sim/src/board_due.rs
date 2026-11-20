@@ -7,6 +7,7 @@ use std::{
 use nanocode_board::{
     Board, BoardError, ClaimId, Event, EventId, Fold, NewTask, Op, Outcome, Phase, TaskId,
     schedule::{Cron, Recur, Retry},
+    stage::Stage,
     tasks::Terms,
     wake::{Napping, Timer, Wake},
 };
@@ -18,6 +19,9 @@ const WRITER: &str = "agent:due";
 const MINUTE: u64 = 60_000;
 const HOUR: u64 = 60 * MINUTE;
 const LEASE: u64 = 5 * MINUTE;
+// A backstop for a drain that spins in virtual time without the lapsed-lease
+// check catching it; passing seeds have needed just over a day.
+const DRAIN: u64 = 7 * 24 * HOUR;
 const CRONS: [&str; 7] = [
     "*/5 * * * *",
     "*/30 8-18 * JAN-JUN,sep MON-FRI",
@@ -515,9 +519,20 @@ pub fn run(seed: u64) -> Result<DueStats, String> {
         }
         let mut owed = false;
         for (id, task) in host.fold.tasks() {
-            owed |= !task.finished() && oracle.due(&host.fold, id)?.1 <= cut;
+            let open = !task.finished() && oracle.due(&host.fold, id)?.1 <= cut;
+            if open && task.stage(now) == Stage::Lapsed && host.fold.claimable(id, now).is_err() {
+                return Err(format!(
+                    "{id}'s lease lapsed but it cannot be claimed at {now}"
+                ));
+            }
+            owed |= open;
         }
         match host.fold.next_due() {
+            Some(due_ms) if owed && due_ms > cut + DRAIN => {
+                return Err(format!(
+                    "due tasks owed before {cut} were still open at {due_ms}"
+                ));
+            }
             Some(due_ms) if owed => now = due_ms,
             _ if owed => {
                 return Err(format!(
