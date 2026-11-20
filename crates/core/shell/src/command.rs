@@ -15,6 +15,7 @@ use std::{
     rc::Rc,
     sync::Arc,
     task::{Context, Poll, Waker},
+    time::Duration,
 };
 
 pub trait Commands {
@@ -185,33 +186,10 @@ impl Session {
         });
         let known = vfs.missing.borrow().len();
         let mut charged = 0;
-        let status = loop {
-            let left = vfs.left.get();
-            let slice =
-                u32::try_from(left).map_or(vfs.slice.get(), |left| left.min(vfs.slice.get()));
-            if left == 0 {
-                vfs.refuse(Limit::Fuel);
-            }
-            if slice == 0 || vfs.control.get().is_some_and(ControlHandle::cancelled) {
-                return Err(io::ErrorKind::Interrupted.into());
-            }
-            let step = engine.step(slice);
-            let spent = engine.spent();
-            vfs.children.set(vfs.children.get() + spent - charged);
-            vfs.left.set(left.saturating_sub(spent - charged));
-            charged = spent;
-            match step {
-                psh_engine::Step::Done(status) => break status,
-                psh_engine::Step::Yield => {}
-                psh_engine::Step::Blocked | psh_engine::Step::Idle => {
-                    vfs.lacks(&name);
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        "this shell cannot wait for a command that Python starts",
-                    ));
-                }
-            }
-        };
+        let outer = vfs.timers.replace(Some(Vec::new()));
+        let status = self.drive(&mut engine, &name, &mut charged);
+        vfs.timers.replace(outer);
+        let status = status?;
         if status == NOT_FOUND && vfs.missing.borrow()[known..].contains(&name) {
             return Err(io::ErrorKind::NotFound.into());
         }
@@ -223,6 +201,93 @@ impl Session {
             stderr,
         })
     }
+
+    fn drive(
+        &self,
+        engine: &mut psh_engine::Shell,
+        name: &[u8],
+        charged: &mut u64,
+    ) -> io::Result<i32> {
+        let vfs = &self.0;
+        loop {
+            let left = vfs.left.get();
+            let slice =
+                u32::try_from(left).map_or(vfs.slice.get(), |left| left.min(vfs.slice.get()));
+            if left == 0 {
+                vfs.refuse(Limit::Fuel);
+            }
+            if slice == 0 || vfs.control.get().is_some_and(ControlHandle::cancelled) {
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            let step = engine.step(slice);
+            let spent = engine.spent();
+            vfs.children.set(vfs.children.get() + spent - *charged);
+            vfs.left.set(left.saturating_sub(spent - *charged));
+            *charged = spent;
+            match step {
+                psh_engine::Step::Done(status) => return Ok(status),
+                psh_engine::Step::Yield => {}
+                psh_engine::Step::Blocked if self.wait_timers() => {}
+                psh_engine::Step::Blocked | psh_engine::Step::Idle => {
+                    vfs.lacks(name);
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "this shell cannot wait for a command that Python starts",
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Waits until the soonest sleep of a blocked command is due and wakes
+    /// the sleeps that are, or returns false when nothing but a timer could
+    /// unblock it (or this platform cannot wait in place).
+    fn wait_timers(&self) -> bool {
+        let vfs = &self.0;
+        let timers = vfs
+            .timers
+            .borrow_mut()
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default();
+        let Some(soonest) = timers.iter().map(|(until, _)| *until).min() else {
+            return false;
+        };
+        if !wait_until(&*vfs.machine, soonest, || {
+            vfs.control.get().is_some_and(ControlHandle::cancelled)
+        }) {
+            return false;
+        }
+        let now = vfs.machine.now();
+        for (until, waker) in timers {
+            if until <= now {
+                waker.wake();
+            } else if let Some(left) = vfs.timers.borrow_mut().as_mut() {
+                left.push((until, waker));
+            }
+        }
+        true
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn wait_until(machine: &dyn crate::machine::Machine, until: Duration, stop: impl Fn() -> bool) -> bool {
+    const POLL: Duration = Duration::from_millis(20);
+    loop {
+        if stop() {
+            return true;
+        }
+        let left = until.saturating_sub(machine.now());
+        if left.is_zero() {
+            return true;
+        }
+        std::thread::sleep(left.min(POLL));
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn wait_until(_: &dyn crate::machine::Machine, _: Duration, _: impl Fn() -> bool) -> bool {
+    false
 }
 
 struct Tracked(Rc<Vfs>);

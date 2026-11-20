@@ -48,6 +48,10 @@ pub(crate) struct Vfs {
     pub(crate) left: Cell<u64>,
     pub(crate) slice: Cell<u32>,
     pub(crate) utilities: &'static [psh_engine::util::UtilEntry],
+    /// While a command Python started runs to completion inside one call, its
+    /// sleeps are deadlines the run loop waits out itself (see
+    /// [`crate::command::Session::run`]), since no executor drives timers then.
+    pub(crate) timers: RefCell<Option<Vec<(Duration, Waker)>>>,
 }
 
 impl Vfs {
@@ -538,7 +542,20 @@ impl psh_engine::Host for Host {
     }
 
     fn sleep(&self, duration: Duration) -> HostFuture<()> {
-        self.0.machine.sleep(duration)
+        if self.0.timers.borrow().is_none() {
+            return self.0.machine.sleep(duration);
+        }
+        let vfs = self.0.clone();
+        let until = vfs.machine.now().saturating_add(duration);
+        Box::pin(std::future::poll_fn(move |cx| {
+            if vfs.machine.now() >= until {
+                return Poll::Ready(());
+            }
+            if let Some(timers) = vfs.timers.borrow_mut().as_mut() {
+                timers.push((until, cx.waker().clone()));
+            }
+            Poll::Pending
+        }))
     }
 
     fn pid(&self) -> u32 {
