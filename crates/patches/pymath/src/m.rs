@@ -26,12 +26,12 @@ pub fn atan2(y: f64, x: f64) -> f64 {
 
 #[inline(always)]
 pub fn cos(n: f64) -> f64 {
-    unsafe { m_sys::cos(n) }
+    crate::glibc::cos(n)
 }
 
 #[inline(always)]
 pub fn sin(n: f64) -> f64 {
-    unsafe { m_sys::sin(n) }
+    crate::glibc::sin(n)
 }
 
 #[inline(always)]
