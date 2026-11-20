@@ -31,7 +31,7 @@ stateDiagram-v2
 
 ## Fences, caps, steers
 
-`Op::Epoch` raises a partition's epoch, only upward (`Fold::advances`). A claim may carry a `Fence`, and `Fold::fenced` answers `Rejection::Stale` unless the epoch is still current, so a worker from an old epoch cannot claim. `Op::Claim { cap }` bounds concurrency: `Fold::room` counts the other Held tasks in that fold and answers `Rejection::Full` at the cap. The count covers one partition's fold.
+`Op::Epoch` raises a partition's epoch, only upward (`Fold::advances`). A claim may carry a `Fence`, and `Fold::fenced` answers `Rejection::Stale` unless the epoch is still current, so a worker from an old epoch cannot claim. `Op::Claim { cap }` bounds concurrency: `Fold::room` counts the other Held tasks in that fold and answers `Rejection::Full` at the cap. A `Cap` is either `Cap::Partition(max)`, which counts every Held task and encodes as a bare number (`"cap":32`, the original shape), or `Cap::Label { max, key, value }`, which counts only Held tasks whose `labels[key]` equals `value` (`"cap":{"max":32,"key":"pool","value":"lent"}`). A label cap bounds the claim that carries it, whatever the claimed task's own labels. `Fold::held(&cap, at_ms)` gives the same count. Either way the count covers one partition's fold.
 
 `Op::Steer` (`steer.rs`) queues a message for a task. The holder reads it with `Fold::steers_for` and acknowledges it with a heed up to a seq. `Fold::unheeded` refuses a finish with `Refusal::Unheeded` while a steer is unheeded. `Board::boundary` (`crates/runtime/board/src/steer.rs`) heeds, then fetches new steers.
 
@@ -74,4 +74,4 @@ stateDiagram-v2
 - The fold never evaluates a write earlier than the log's latest event: `Fold::apply` keeps `now_ms` as the largest `at_ms` seen, and `claimable`, `room` and `held` use `now_ms.max(at_ms)`, so an older `atMs` cannot revive an expired lease.
 - Reads come from the local fold until `refresh()`: `ready`, `task` and `tasks` in `src/wasm/board.rs` read `Merged` over folds already in memory.
 - An identical unkeyed repost is a no-op: `Fold::repost` matches a post by id and digest and records the original seq. Another spec under the same id gets `Rejection::Exists`.
-- `Task.worker` is only reported while a task is claimed: `view` in `src/wasm/board.rs` sets it from `Phase::Claimed`, so Open, Done and Failed tasks omit it.
+- The fold keeps the finishing worker: an `Op::Finish` that lands under a claim records `Phase::Done { result, worker }` or `Phase::Failed { error, worker }` with that claim's worker. `worker` is absent on tasks settled by a mirror and in logs written before it existed. `Task.worker` in `src/wasm/board.rs` reports it only once that `view` reads these phases; until then Open, Done and Failed tasks omit it.
