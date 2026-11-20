@@ -46,6 +46,11 @@ const OWNER: &str = "user:lead";
 const LEAD: &str = "user:lead+lead";
 const SYNC: &str = "agent:sync";
 const ATTEMPTS: u64 = 5;
+/// Share of 429 storms that open with a burst: each platform answers its first few posts, edits
+/// and deletes with 429s while letting lookups through, so the delivery at the head of its queue
+/// is throttled again and again. Only such a run of throttled attempts can spend a delivery's
+/// attempts when throttles are counted as failures.
+const BURST_PPM: u64 = 600_000;
 const MS: u64 = 1_000_000;
 const BOT: &str = "agent";
 const MEMBERS: [&str; 4] = ["ann", "bob", "cat", "dan"];
@@ -361,6 +366,8 @@ struct Shape {
     limit_ppm: u64,
     retry_ms: u64,
     storm: bool,
+    /// How many posts, edits and deletes each platform throttles before its faults run as drawn.
+    burst: u64,
     channels: BTreeMap<Target, Mode>,
     identity: BTreeMap<(String, String), String>,
     lead: Vec<Planned>,
@@ -1037,6 +1044,11 @@ impl Shape {
             0
         };
         let retry_ms = limits.range(1, 4 * poll_ms + 20);
+        let burst = if storm && limits.chance(BURST_PPM) {
+            limits.range(ATTEMPTS, 4 * ATTEMPTS)
+        } else {
+            0
+        };
         let (refuse_ppm, lose_ppm, poison) = if storm {
             (0, 0, None)
         } else {
@@ -1053,6 +1065,7 @@ impl Shape {
             limit_ppm,
             retry_ms,
             storm,
+            burst,
             channels,
             identity,
             lead,
@@ -1066,7 +1079,7 @@ impl Shape {
 
     fn describe(&self) -> String {
         format!(
-            "lead_steps={} hooks={} channels={:?} poll_ms={} latency_ms={} faults_ppm={}/{}/{} refuse_ppm={} lose_ppm={} limit_ppm={} retry_ms={} storm={} poison={} crashes={:?}",
+            "lead_steps={} hooks={} channels={:?} poll_ms={} latency_ms={} faults_ppm={}/{}/{} refuse_ppm={} lose_ppm={} limit_ppm={} retry_ms={} storm={} burst={} poison={} crashes={:?}",
             self.lead.len(),
             self.hooks.len(),
             self.channels.values().collect::<Vec<_>>(),
@@ -1080,6 +1093,7 @@ impl Shape {
             self.limit_ppm,
             self.retry_ms,
             self.storm,
+            self.burst,
             self.poison.as_deref().unwrap_or("none"),
             self.crashes
         )
@@ -1143,7 +1157,12 @@ fn faults(
         shape.limit_ppm,
         shape.retry_ms,
     );
-    move |_call: &str, _to: &Target| {
+    let mut burst = shape.burst;
+    move |call: &str, _to: &Target| {
+        if burst > 0 && call != "find" {
+            burst -= 1;
+            return Fault::Limit(rng.range(1, retry_ms));
+        }
         if rng.chance(refuse_ppm) {
             Fault::Refuse
         } else if rng.chance(lose_ppm) {
