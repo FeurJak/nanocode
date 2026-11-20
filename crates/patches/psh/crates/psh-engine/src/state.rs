@@ -423,6 +423,9 @@ pub(crate) struct Vp {
     /// This vproc is a pipeline stage that is a `( … )`: the subshell is the stage
     /// itself (bash counts it once in `BASH_SUBSHELL`).
     pub stage_subshell: bool,
+    /// A pipeline stage's place at the stages' start gate, until its command runs
+    /// (`exec::pass_gate`); a subshell of the stage has none.
+    pub stage_gate: Option<Rc<crate::exec::GateTicket>>,
     pub time_subshell: Option<bool>,
     /// The last words of the simple commands running, innermost last: `$_` once each
     /// completes.
@@ -558,6 +561,7 @@ impl Vp {
         sub.jobs = Default::default();
         sub.subshell_level += 1;
         sub.stage_subshell = false;
+        sub.stage_gate = None;
         sub.time_subshell = None;
         sub.bashpid = None;
         sub

@@ -571,16 +571,21 @@ async fn run_pipeline_stages(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
     // `shopt -s lastpipe`: the last command runs in this shell (no job control here).
     let lastpipe = vp.opts.shopt(Shopt::Lastpipe);
     let mut joins: Vec<Join<i32>> = Vec::with_capacity(n);
-    // The stages start last first: a later stage's redirections (`ls | cat > out`)
-    // are usually in place before an earlier stage runs, as with bash's processes.
+    // The stages start first to last, as bash forks them, and each expands its words
+    // and opens its own redirections before the gate; its command runs once every
+    // stage got that far (`pass_gate`). So a later stage's `> out` is there for
+    // `ls` (`ls | cat > out`), while `echo *` expanded before it, and a file a
+    // later stage's program creates (`ls | tee out`) is not.
+    let gate = Rc::new(StageGate {
+        left: std::cell::Cell::new(n),
+    });
     let mut ready: Vec<Vp> = Vec::with_capacity(n);
     let start = |ready: &mut Vec<Vp>, joins: &mut Vec<Join<i32>>| {
         let first = joins.len();
-        for (k, sub) in ready.drain(..).enumerate().rev() {
+        for (k, sub) in ready.drain(..).enumerate() {
             let cmd = p.stages[first + k].cmd;
             joins.push(spawn_sub(sub, code.clone(), Body::Stage(cmd)));
         }
-        joins[first..].reverse();
     };
     let mut next_in: Option<Fd> = None;
     let mut last_here = None;
@@ -591,7 +596,9 @@ async fn run_pipeline_stages(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
             if let Some(r) = next_in.take() {
                 vp.fds.set(0, r);
             }
+            vp.stage_gate = Some(GateTicket::new(&gate));
             let r = run_command_unchecked(vp, code, stage.cmd).await;
+            vp.stage_gate = None;
             restore_fds(vp, saved);
             last_here = Some(r);
             break;
@@ -619,6 +626,7 @@ async fn run_pipeline_stages(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
         if let Some(r) = next_in.take() {
             sub.fds.set(0, r);
         }
+        sub.stage_gate = Some(GateTicket::new(&gate));
         if i + 1 < n {
             let (r, w) = pipe::pipe();
             let w: Fd = Rc::new(FdObj::PipeWrite(w));
@@ -666,6 +674,70 @@ async fn run_pipeline_stages(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
         check_failure(vp, last).await?;
     }
     check_failure(vp, status).await
+}
+
+/// The start gate of a pipeline's stages: how many have not reached it.
+pub(crate) struct StageGate {
+    left: std::cell::Cell<usize>,
+}
+
+/// A stage's place at its pipeline's [`StageGate`]: it arrives once, when its command
+/// is about to run or when the stage ends before that.
+pub(crate) struct GateTicket {
+    gate: Rc<StageGate>,
+    arrived: std::cell::Cell<bool>,
+}
+
+impl GateTicket {
+    fn new(gate: &Rc<StageGate>) -> Rc<GateTicket> {
+        Rc::new(GateTicket {
+            gate: gate.clone(),
+            arrived: std::cell::Cell::new(false),
+        })
+    }
+
+    fn arrive(&self) {
+        if !self.arrived.replace(true) {
+            self.gate.left.set(self.gate.left.get() - 1);
+        }
+    }
+}
+
+impl Drop for GateTicket {
+    fn drop(&mut self) {
+        self.arrive();
+    }
+}
+
+/// How often a stage looks again for the others at the gate before it goes on: a
+/// stage that waits on this one before its gate (`echo x | echo "$(cat)"`) must not
+/// hold the pipeline forever.
+const GATE_TRIES: u32 = 256;
+
+/// A pipeline stage's command waits here, after its words and redirections, until
+/// every stage got that far, as bash's stage processes have all started and opened
+/// their files by the time the first one's program runs. It goes on early when no
+/// other task can run (a later stage waits on this one) or after [`GATE_TRIES`].
+pub(crate) async fn pass_gate(vp: &mut Vp) {
+    let Some(ticket) = vp.stage_gate.take() else {
+        return;
+    };
+    ticket.arrive();
+    let gate = ticket.gate.clone();
+    drop(ticket);
+    let sched = vp.core.sched.clone();
+    let mut tries = 0;
+    std::future::poll_fn(move |cx| {
+        // Every stage yields once, so the stages' commands start in pipeline order
+        // even when the last one to reach the gate opens it.
+        if tries > 0 && (gate.left.get() == 0 || tries >= GATE_TRIES || !sched.has_ready()) {
+            return std::task::Poll::Ready(());
+        }
+        tries += 1;
+        cx.waker().wake_by_ref();
+        std::task::Poll::Pending
+    })
+    .await;
 }
 
 /// Clones the state for a subshell, or fails past the nesting limit (D1050).
@@ -802,7 +874,9 @@ fn run_command_with<'a>(
                 vp.line = code.line(cmd.span.start);
                 run_coproc(vp, code, cmd.span, cp).await
             }
-            _ if cmd.redirects.is_empty() => run_compound(vp, code, cmd).await,
+            _ if cmd.redirects.is_empty() && vp.stage_gate.is_none() => {
+                run_compound(vp, code, cmd).await
+            }
             _ => Box::pin(with_redirects(vp, code, cmd)).await,
         };
         // Process substitutions of this command are closed when it completes.
@@ -964,6 +1038,9 @@ async fn with_redirects(vp: &mut Vp, code: &Rc<Code>, cmd: &Command) -> R {
         }
         Some(saved)
     };
+    if vp.stage_gate.is_some() {
+        Box::pin(pass_gate(vp)).await;
+    }
     let r = run_compound(vp, code, cmd).await;
     if let Some(saved) = saved {
         restore_fds(vp, saved);
@@ -2100,6 +2177,9 @@ fn run_simple<'a>(
                 let r = if cmd.redirects.is_empty()
                     || Box::pin(apply_redirects(vp, code, &cmd.redirects)).await?
                 {
+                    if vp.stage_gate.is_some() {
+                        Box::pin(pass_gate(vp)).await;
+                    }
                     Box::pin(builtins::declare::run(vp, which, args)).await
                 } else if !via && builtins::is_special(vp, which.name().as_bytes()) {
                     restore_fds(vp, saved.clone());
@@ -2135,6 +2215,9 @@ fn run_simple<'a>(
             vp.fg_text = Some(String::from_utf8_lossy(&command_text(code, cmd)).into_owned());
         }
         if cmd.redirects.is_empty() {
+            if vp.stage_gate.is_some() {
+                Box::pin(pass_gate(vp)).await;
+            }
             vp.exec_now = tail;
             return run_argv(vp, argv, assigns).await;
         }
@@ -2147,6 +2230,9 @@ fn run_simple<'a>(
                 || !vp.funcs.contains_key("exec"))
         {
             let ok = Box::pin(apply_redirects(vp, code, &cmd.redirects)).await;
+            if vp.stage_gate.is_some() {
+                Box::pin(pass_gate(vp)).await;
+            }
             // Nothing is restored, so nothing to apply again.
             vp.var_fds.clear();
             return match ok? {
@@ -2171,6 +2257,9 @@ fn run_simple<'a>(
                 restore_fds(vp, saved);
                 return Err(u);
             }
+        }
+        if vp.stage_gate.is_some() {
+            Box::pin(pass_gate(vp)).await;
         }
         if tail {
             // The vproc ends with this command: nothing to restore, and the saved

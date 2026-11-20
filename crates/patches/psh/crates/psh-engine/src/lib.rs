@@ -338,6 +338,7 @@ impl Shell {
             last_procsub: None,
             var_fds: Vec::new(),
             stage_subshell: false,
+            stage_gate: None,
             time_subshell: None,
             last_args: Vec::new(),
             subshell_level: 0,
