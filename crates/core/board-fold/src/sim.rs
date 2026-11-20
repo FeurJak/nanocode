@@ -56,6 +56,7 @@ pub enum Mutation {
     ReadRegresses,
     RankUnchecked,
     NextIgnoresRank,
+    SpreadIgnoresTier,
     SubagentFailuresUnread,
     ReadyIndexStale,
     LabelIndexStale,

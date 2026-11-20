@@ -1,4 +1,8 @@
-use std::collections::BTreeMap;
+use std::{
+    cmp::Ordering,
+    collections::BTreeMap,
+    hash::{DefaultHasher, Hash, Hasher},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -307,6 +311,16 @@ impl Fold {
         labels: &BTreeMap<String, String>,
         at_ms: u64,
     ) -> Option<&TaskId> {
+        self.spread(actor, labels, at_ms, 1)
+    }
+
+    pub fn spread(
+        &self,
+        actor: &str,
+        labels: &BTreeMap<String, String>,
+        at_ms: u64,
+        width: usize,
+    ) -> Option<&TaskId> {
         let me = Actor::parse(actor).ok()?;
         let sets = labels
             .iter()
@@ -316,7 +330,8 @@ impl Fold {
             .into_iter()
             .min_by_key(|ids| ids.len())
             .unwrap_or(&self.live);
-        let mut best = None;
+        let mut tier = None;
+        let mut head: Vec<(usize, &TaskId)> = Vec::new();
         for id in candidates {
             let (Some(task), Some(posted)) = (self.tasks.get(id), self.posted.get(id)) else {
                 continue;
@@ -336,13 +351,34 @@ impl Fold {
                 rank.is_none(),
                 rank,
                 task.assignee.is_none() && !mutated(Mutation::NextIgnoresAssignee),
-                *posted,
             );
-            if best.as_ref().is_none_or(|(_, held)| key < *held) {
-                best = Some((id, key));
+            let key = if width > 1 && mutated(Mutation::SpreadIgnoresTier) {
+                (false, None, false)
+            } else {
+                key
+            };
+            match tier.as_ref().map(|held| key.cmp(held)) {
+                Some(Ordering::Greater) => continue,
+                Some(Ordering::Equal) => {}
+                _ => {
+                    tier = Some(key);
+                    head.clear();
+                }
+            }
+            let at = head.partition_point(|(held, _)| held < posted);
+            if at < width {
+                head.insert(at, (*posted, id));
+                head.truncate(width);
             }
         }
-        best.map(|(id, _)| id)
+        let salt = |id: &TaskId| {
+            let mut hasher = DefaultHasher::new();
+            (actor, id).hash(&mut hasher);
+            hasher.finish()
+        };
+        head.into_iter()
+            .map(|(_, id)| id)
+            .min_by_key(|id| if width > 1 { salt(id) } else { 0 })
     }
 
     pub(crate) fn check_tasks(&self, at_ms: u64, op: &TaskOp) -> Result<(), Rejection> {

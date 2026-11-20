@@ -16,6 +16,7 @@ use crate::rng::Rng;
 
 const STEPS: [&str; 6] = ["goal", "lane", "fix", "verify", "consolidate", "review"];
 const TRIES: u64 = 3;
+const SPREAD: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -173,7 +174,9 @@ pub async fn junk(world: &World, board: &mut Board) {
     }
 }
 
-fn expected(board: &Board, labels: &BTreeMap<String, String>, now: u64) -> Option<TaskId> {
+type Tier = (bool, Option<u64>, bool);
+
+fn candidates(board: &Board, labels: &BTreeMap<String, String>, now: u64) -> Vec<(Tier, TaskId)> {
     let fold = board.fold();
     let me = board.writer().split('+').next().unwrap_or_default();
     let at = fold.now_ms().max(now);
@@ -211,13 +214,13 @@ fn expected(board: &Board, labels: &BTreeMap<String, String>, now: u64) -> Optio
                 .all(|(key, value)| task.spec.labels.get(key) == Some(value))
     };
     order
-        .iter()
+        .into_iter()
         .filter(|id| fits(id, true) || fits(id, false))
-        .min_by_key(|id| {
+        .map(|id| {
             let rank = fold.task(id).and_then(|task| task.rank);
-            (rank.is_none(), rank, !fits(id, true))
+            ((rank.is_none(), rank, !fits(id, true)), id.clone())
         })
-        .map(|id| (*id).clone())
+        .collect()
 }
 
 pub fn pick(world: &World, board: &Board, rng: &mut Rng) -> Option<TaskId> {
@@ -228,12 +231,37 @@ pub fn pick(world: &World, board: &Board, rng: &mut Rng) -> Option<TaskId> {
     }
     for filter in [labels, BTreeMap::new()] {
         let got = board.fold().pick(board.writer(), &filter, now).cloned();
-        let want = expected(board, &filter, now);
+        let all = candidates(board, &filter, now);
+        let best = all.iter().map(|(tier, _)| *tier).min();
+        let want = all
+            .iter()
+            .find(|(tier, _)| Some(*tier) == best)
+            .map(|(_, id)| id.clone());
+        let width = 1 + rng.pick(SPREAD);
+        let spread = board
+            .fold()
+            .spread(board.writer(), &filter, now, width)
+            .cloned();
+        let head = all
+            .iter()
+            .filter(|(tier, _)| Some(*tier) == best)
+            .take(width)
+            .map(|(_, id)| id)
+            .collect::<Vec<_>>();
         let mut oracle = world.oracle.borrow_mut();
         oracle.stats.picks += 1;
         if got != want {
             oracle.wrong.push(format!(
                 "{} picked {got:?} for {filter:?}, the best-ranked ready task for it is {want:?}",
+                board.writer()
+            ));
+        }
+        if spread
+            .as_ref()
+            .map_or(!head.is_empty(), |id| !head.contains(&id))
+        {
+            oracle.wrong.push(format!(
+                "{} spread to {spread:?} for {filter:?} across {width}, the oldest ready tasks of the best tier are {head:?}",
                 board.writer()
             ));
         }

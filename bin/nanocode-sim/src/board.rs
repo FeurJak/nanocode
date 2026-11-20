@@ -83,6 +83,7 @@ pub enum BoardMutation {
     RelabelKeepsUnset,
     RankUnchecked,
     NextIgnoresRank,
+    SpreadIgnoresTier,
     MoveUnchecked,
     MoveAllowsCycle,
     MoveKeepsChildren,
@@ -122,7 +123,7 @@ pub enum BoardMutation {
 }
 
 impl BoardMutation {
-    const ALL: [Self; 69] = [
+    const ALL: [Self; 70] = [
         Self::None,
         Self::ClaimIgnoresLease,
         Self::ClaimIgnoresNeeds,
@@ -158,6 +159,7 @@ impl BoardMutation {
         Self::RelabelKeepsUnset,
         Self::RankUnchecked,
         Self::NextIgnoresRank,
+        Self::SpreadIgnoresTier,
         Self::MoveUnchecked,
         Self::MoveAllowsCycle,
         Self::MoveKeepsChildren,
@@ -240,6 +242,7 @@ impl BoardMutation {
             Self::RelabelKeepsUnset => "relabel_keeps_unset",
             Self::RankUnchecked => "rank_unchecked",
             Self::NextIgnoresRank => "next_ignores_rank",
+            Self::SpreadIgnoresTier => "spread_ignores_tier",
             Self::MoveUnchecked => "move_unchecked",
             Self::MoveAllowsCycle => "move_allows_cycle",
             Self::MoveKeepsChildren => "move_keeps_children",
@@ -329,6 +332,7 @@ impl BoardMutation {
             Self::RelabelKeepsUnset => BoardRule::RelabelKeepsUnset,
             Self::RankUnchecked => BoardRule::RankUnchecked,
             Self::NextIgnoresRank => BoardRule::NextIgnoresRank,
+            Self::SpreadIgnoresTier => BoardRule::SpreadIgnoresTier,
             Self::MoveUnchecked => BoardRule::MoveUnchecked,
             Self::MoveAllowsCycle => BoardRule::MoveAllowsCycle,
             Self::MoveKeepsChildren => BoardRule::MoveKeepsChildren,
