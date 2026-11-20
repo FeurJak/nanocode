@@ -109,3 +109,26 @@ fn syntax_error_names_the_whole_quoted_word() {
     assert_eq!(st, 2);
     assert!(e.contains("syntax error near unexpected token `\"x y\"'"), "{e}");
 }
+
+#[test]
+fn enable_f_fails_like_a_missing_loadable_so_scripts_take_their_fallback() {
+    // pyenv: `if enable -f .../pyenv-realpath.dylib realpath 2>/dev/null; then ... else`
+    let (st, o, e) = all(
+        "set -euo pipefail; if enable -f /x/y.dylib realpath 2>/dev/null; then echo y; else echo n; fi; set +e; \
+         enable -f /x/y.dylib realpath; echo rc=$?; enable -f nope a b; echo rc=$?; \
+         enable -d echo nosuch; echo rc=$?; enable -f; echo rc=$?",
+    );
+    assert_eq!((st, o.as_str()), (0, "n
+rc=1
+rc=1
+rc=1
+rc=2
+"));
+    assert!(e.contains("enable: cannot open shared object /x/y.dylib: /x/y.dylib: cannot open shared object file: No such file or directory"), "{e}");
+    assert!(e.contains("enable: cannot open shared object nope: nope: cannot open shared object file: No such file or directory"), "{e}");
+    assert!(e.contains("enable: echo: not dynamically loaded"), "{e}");
+    assert!(e.contains("enable: nosuch: not a shell builtin"), "{e}");
+    assert!(e.contains("enable: -f: option requires an argument\nenable: usage: enable [-a] [-dnps] [-f filename] [name ...]\n"), "{e}");
+    let (st, o, _) = all("set -e; enable -f /x/y q 2>/dev/null; echo notreached");
+    assert_eq!((st, o.as_str()), (1, ""));
+}

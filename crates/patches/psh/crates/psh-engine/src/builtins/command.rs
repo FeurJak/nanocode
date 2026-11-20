@@ -509,15 +509,72 @@ pub(super) async fn exec_(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     Err(Unwind::Exit(st))
 }
 
+const ENABLE_USAGE: &[u8] = b"enable: usage: enable [-a] [-dnps] [-f filename] [name ...]\n";
+
+/// Why `dlopen` refuses `file`, as glibc words it; `None` for what looks like a real
+/// shared object, which psh can't load.
+async fn load_failure(vp: &Vp, file: &[u8]) -> Option<String> {
+    let mut path = None;
+    if !file.contains(&b'/') {
+        // bash looks in BASH_LOADABLES_PATH first; dlopen's own library search would
+        // find only system libraries, which hold no builtins.
+        if let Some(dirs) = vp.var("BASH_LOADABLES_PATH").map(<[u8]>::to_vec) {
+            for d in dirs.split(|&c| c == b':').filter(|d| !d.is_empty()) {
+                let mut cand = d.to_vec();
+                cand.push(b'/');
+                cand.extend_from_slice(file);
+                let cand = vp.abs_path(&cand);
+                if vp.host().stat(&cand, true).await.is_ok() {
+                    path = Some(cand);
+                    break;
+                }
+            }
+        }
+    } else {
+        path = Some(vp.abs_path(file));
+    }
+    let Some(path) = path else {
+        return Some("cannot open shared object file: No such file or directory".into());
+    };
+    let m = match vp.host().stat(&path, true).await {
+        Ok(m) => m,
+        Err(e) => return Some(format!("cannot open shared object file: {}", crate::host::error_text(&e))),
+    };
+    if m.kind == FileKind::Dir {
+        return Some("cannot read file data: Is a directory".into());
+    }
+    let head = match vp.host().open(&path, crate::host::OpenOptions::read()).await {
+        Ok(f) => {
+            let fd = Rc::new(crate::fd::FdObj::File(f));
+            let mut buf = Vec::new();
+            if let Err(e) = fd.read_to_end(&mut buf).await {
+                return Some(format!("cannot read file data: {}", crate::host::error_text(&e)));
+            }
+            buf
+        }
+        Err(e) => return Some(format!("cannot open shared object file: {}", crate::host::error_text(&e))),
+    };
+    if head.len() < 64 {
+        Some("file too short".into())
+    } else if !head.starts_with(b"\x7fELF") {
+        Some("invalid ELF header".into())
+    } else {
+        None
+    }
+}
+
 const EXEC_USAGE: &[u8] =
     b"exec: usage: exec [-cl] [-a name] [command [argument ...]] [redirection ...]\n";
 
-/// `enable [-a] [-nps] [name ...]`: lists builtins, turns them off (`-n`) and on;
-/// loading builtins from files (`-f`, `-d`) is not supported.
+/// `enable [-a] [-dnps] [-f file] [name ...]`: lists builtins, turns them off (`-n`)
+/// and on. No builtin is ever dynamically loaded: `-f` fails the way bash's `dlopen`
+/// does on a missing or non-ELF file (scripts such as pyenv's try a loadable and fall
+/// back), and `-d` finds nothing to delete.
 pub(super) async fn enable(vp: &mut Vp, args: &[Vec<u8>]) -> R {
-    let (mut all, mut off, mut special) = (false, false, false);
+    let (mut all, mut off, mut special, mut delete) = (false, false, false, false);
+    let mut file: Option<Vec<u8>> = None;
     let mut i = 1;
-    while let Some(a) = args.get(i) {
+    'opts: while let Some(a) = args.get(i) {
         if a == b"--" {
             i += 1;
             break;
@@ -525,20 +582,33 @@ pub(super) async fn enable(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         if a.len() < 2 || a[0] != b'-' {
             break;
         }
-        for &c in &a[1..] {
+        for (j, &c) in a.iter().enumerate().skip(1) {
             match c {
                 b'a' => all = true,
                 b'n' => off = true,
                 b'p' => {}
                 b's' => special = true,
-                b'f' | b'd' => {
-                    return crate::expand::unsupported(vp, &format!("enable -{}", c as char)).await;
+                b'd' => delete = true,
+                b'f' => {
+                    let arg = if j + 1 < a.len() {
+                        Some(a[j + 1..].to_vec())
+                    } else {
+                        i += 1;
+                        args.get(i).cloned()
+                    };
+                    let Some(arg) = arg else {
+                        vp.error("enable: -f: option requires an argument").await;
+                        vp.error_raw(ENABLE_USAGE).await;
+                        return Ok(2);
+                    };
+                    file = Some(arg);
+                    i += 1;
+                    continue 'opts;
                 }
                 _ => {
                     vp.error(&format!("enable: -{}: invalid option", c as char))
                         .await;
-                    vp.error_raw(b"enable: usage: enable [-a] [-dnps] [-f filename] [name ...]\n")
-                        .await;
+                    vp.error_raw(ENABLE_USAGE).await;
                     return Ok(2);
                 }
             }
@@ -546,6 +616,31 @@ pub(super) async fn enable(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         i += 1;
     }
     let names = &args[i..];
+    if let Some(file) = file
+        && !names.is_empty()
+    {
+        let why = match load_failure(vp, &file).await {
+            Some(why) => why,
+            None => return crate::expand::unsupported(vp, "enable -f").await,
+        };
+        vp.error(&format!(
+            "enable: cannot open shared object {f}: {f}: {why}",
+            f = s(&file)
+        ))
+        .await;
+        return Ok(1);
+    }
+    if delete && !names.is_empty() {
+        for n in names {
+            let why = if super::find(n).is_some() || BASH_BUILTINS.contains(&n.as_slice()) {
+                "not dynamically loaded"
+            } else {
+                "not a shell builtin"
+            };
+            vp.error(&format!("enable: {}: {why}", s(n))).await;
+        }
+        return Ok(1);
+    }
     if !names.is_empty() {
         let mut status = 0;
         for n in names {

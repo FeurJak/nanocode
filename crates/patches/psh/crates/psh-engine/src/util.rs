@@ -96,6 +96,20 @@ pub struct UtilPolicy {
 
 /// The utility that runs for `name`, if any: off switches and modes applied.
 pub(crate) async fn lookup(vp: &Vp, name: &[u8]) -> Option<&'static UtilEntry> {
+    // In a sandbox, the /usr/bin path `type -P` and `command -v` give for a utility
+    // (`awk="$(type -P gawk)"; "$awk" ...`) runs it while no file is there.
+    if vp.core.utilities.sandbox
+        && let Some(base) = name.strip_prefix(b"/usr/bin/")
+        && !base.is_empty()
+        && !base.contains(&b'/')
+        && vp.host().stat(name, true).await.is_err()
+    {
+        return lookup_name(vp, base).await;
+    }
+    lookup_name(vp, name).await
+}
+
+async fn lookup_name(vp: &Vp, name: &[u8]) -> Option<&'static UtilEntry> {
     // A path, or a name bound to a path with `hash -p` (or remembered from running the
     // program), names the program; `bash` and `sh` run in psh before utilities (D1410).
     if crate::builtins::hash::names_program(vp, name).await {

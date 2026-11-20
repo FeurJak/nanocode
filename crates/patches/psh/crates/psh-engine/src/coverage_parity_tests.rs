@@ -53,6 +53,15 @@ fn sandbox_utilities_and_builtins_stand_in_for_programs_in_usr_bin() {
 }
 
 #[test]
+fn sandbox_runs_a_utility_by_the_usr_bin_path_type_gives() {
+    // rbenv-help: `awk="$(type -P gawk)" || awk="$(type -P awk)"; "$awk" '...'`
+    assert_eq!(
+        sandbox_out("t=$(type -P nctool); \"$t\" x; echo $?; /usr/bin/nctool; echo $?; /usr/bin/nosuch 2>/dev/null; echo $?"),
+        "0\n0\n127\n"
+    );
+}
+
+#[test]
 fn break_and_continue_give_their_loop_status_zero() {
     assert_eq!(out("while true; do false || break; done; echo $?"), "0\n");
     assert_eq!(out("for i in 1; do false; break; done; echo $?"), "0\n");
