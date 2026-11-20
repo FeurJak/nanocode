@@ -167,7 +167,7 @@ macro_rules! create_bool_property {
 
 #[pymodule(name = "pyexpat")]
 mod _pyexpat {
-    use super::reader::{EventReader, QualifiedName, TextPosition, XmlEvent};
+    use super::reader::{EventReader, QualifiedName, ReaderError, TextPosition, XmlEvent};
     use crate::vm::{
         AsObject, Context, Py, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject,
         VirtualMachine,
@@ -190,6 +190,17 @@ mod _pyexpat {
         let model = super::_model::module_def(&vm.ctx).create_module(vm)?;
         let errors = super::_errors::module_def(&vm.ctx).create_module(vm)?;
 
+        let codes = vm.ctx.new_dict();
+        let messages = vm.ctx.new_dict();
+        for (code, (name, message)) in ERRORS.iter().enumerate().skip(1) {
+            let message = vm.ctx.new_str(*message);
+            errors.set_attr(*name, message.clone(), vm)?;
+            codes.set_item(message.as_object(), vm.ctx.new_int(code).into(), vm)?;
+            messages.set_item(vm.ctx.new_int(code).as_object(), message.into(), vm)?;
+        }
+        errors.set_attr("codes", codes, vm)?;
+        errors.set_attr("messages", messages, vm)?;
+
         extend_module!(vm, module, {
             "model" => model,
             "errors" => errors,
@@ -202,6 +213,103 @@ mod _pyexpat {
 
     #[pyattr(name = "version_info")]
     pub(super) const VERSION_INFO: (u32, u32, u32) = (2, 7, 1);
+
+    #[pyattr(name = "EXPAT_VERSION")]
+    const EXPAT_VERSION: &str = "expat_2.7.1";
+
+    #[pyattr(name = "native_encoding")]
+    const NATIVE_ENCODING: &str = "UTF-8";
+
+    /// libexpat's `enum XML_Error`, indexed by code: the `errors` submodule
+    /// constant name and the `XML_ErrorString` text.
+    const ERRORS: [(&str, &str); 44] = [
+        ("XML_ERROR_NONE", ""),
+        ("XML_ERROR_NO_MEMORY", "out of memory"),
+        ("XML_ERROR_SYNTAX", "syntax error"),
+        ("XML_ERROR_NO_ELEMENTS", "no element found"),
+        ("XML_ERROR_INVALID_TOKEN", "not well-formed (invalid token)"),
+        ("XML_ERROR_UNCLOSED_TOKEN", "unclosed token"),
+        ("XML_ERROR_PARTIAL_CHAR", "partial character"),
+        ("XML_ERROR_TAG_MISMATCH", "mismatched tag"),
+        ("XML_ERROR_DUPLICATE_ATTRIBUTE", "duplicate attribute"),
+        ("XML_ERROR_JUNK_AFTER_DOC_ELEMENT", "junk after document element"),
+        ("XML_ERROR_PARAM_ENTITY_REF", "illegal parameter entity reference"),
+        ("XML_ERROR_UNDEFINED_ENTITY", "undefined entity"),
+        ("XML_ERROR_RECURSIVE_ENTITY_REF", "recursive entity reference"),
+        ("XML_ERROR_ASYNC_ENTITY", "asynchronous entity"),
+        ("XML_ERROR_BAD_CHAR_REF", "reference to invalid character number"),
+        ("XML_ERROR_BINARY_ENTITY_REF", "reference to binary entity"),
+        ("XML_ERROR_ATTRIBUTE_EXTERNAL_ENTITY_REF", "reference to external entity in attribute"),
+        ("XML_ERROR_MISPLACED_XML_PI", "XML or text declaration not at start of entity"),
+        ("XML_ERROR_UNKNOWN_ENCODING", "unknown encoding"),
+        ("XML_ERROR_INCORRECT_ENCODING", "encoding specified in XML declaration is incorrect"),
+        ("XML_ERROR_UNCLOSED_CDATA_SECTION", "unclosed CDATA section"),
+        ("XML_ERROR_EXTERNAL_ENTITY_HANDLING", "error in processing external entity reference"),
+        ("XML_ERROR_NOT_STANDALONE", "document is not standalone"),
+        ("XML_ERROR_UNEXPECTED_STATE", "unexpected parser state - please send a bug report"),
+        ("XML_ERROR_ENTITY_DECLARED_IN_PE", "entity declared in parameter entity"),
+        ("XML_ERROR_FEATURE_REQUIRES_XML_DTD", "requested feature requires XML_DTD support in Expat"),
+        ("XML_ERROR_CANT_CHANGE_FEATURE_ONCE_PARSING", "cannot change setting once parsing has begun"),
+        ("XML_ERROR_UNBOUND_PREFIX", "unbound prefix"),
+        ("XML_ERROR_UNDECLARING_PREFIX", "must not undeclare prefix"),
+        ("XML_ERROR_INCOMPLETE_PE", "incomplete markup in parameter entity"),
+        ("XML_ERROR_XML_DECL", "XML declaration not well-formed"),
+        ("XML_ERROR_TEXT_DECL", "text declaration not well-formed"),
+        ("XML_ERROR_PUBLICID", "illegal character(s) in public id"),
+        ("XML_ERROR_SUSPENDED", "parser suspended"),
+        ("XML_ERROR_NOT_SUSPENDED", "parser not suspended"),
+        ("XML_ERROR_ABORTED", "parsing aborted"),
+        ("XML_ERROR_FINISHED", "parsing finished"),
+        ("XML_ERROR_SUSPEND_PE", "cannot suspend in external parameter entity"),
+        ("XML_ERROR_RESERVED_PREFIX_XML", "reserved prefix (xml) must not be undeclared or bound to another namespace name"),
+        ("XML_ERROR_RESERVED_PREFIX_XMLNS", "reserved prefix (xmlns) must not be declared or undeclared"),
+        ("XML_ERROR_RESERVED_NAMESPACE_URI", "prefix must not be bound to one of the reserved namespace names"),
+        ("XML_ERROR_INVALID_ARGUMENT", "invalid argument"),
+        ("XML_ERROR_NO_BUFFER", "a successful prior call to function XML_GetBuffer is required"),
+        ("XML_ERROR_AMPLIFICATION_LIMIT_BREACH", "limit on input amplification factor (from DTD and entities) breached"),
+    ];
+
+    /// The libexpat error code closest to a reader error.
+    fn expat_code(error: ReaderError) -> usize {
+        match error {
+            ReaderError::Io | ReaderError::LimitExceeded => 1,
+            ReaderError::NoRootElement
+            | ReaderError::UnexpectedEndOfDocument
+            | ReaderError::UnbalancedRootElement => 3,
+            ReaderError::UnterminatedMarkup => 5,
+            ReaderError::TruncatedCharacter => 6,
+            ReaderError::MismatchedClosingTag => 7,
+            ReaderError::RedefinedAttribute => 8,
+            ReaderError::UnexpectedTokenOutsideRoot | ReaderError::UnexpectedOpeningTag => 9,
+            ReaderError::UndefinedEntity => 11,
+            ReaderError::InvalidCharacterReference => 14,
+            ReaderError::UnsupportedEncoding => 18,
+            ReaderError::ConflictingEncoding => 19,
+            ReaderError::UnclosedCData => 20,
+            ReaderError::UnboundPrefix => 27,
+            ReaderError::InvalidVersion | ReaderError::InvalidStandalone => 30,
+            ReaderError::InvalidNamespaceDeclaration => 40,
+            ReaderError::EntityTooBig => 43,
+            ReaderError::Decode
+            | ReaderError::UnexpectedMarkup
+            | ReaderError::InvalidCharacter
+            | ReaderError::UnexpectedToken
+            | ReaderError::InvalidQualifiedName
+            | ReaderError::InvalidNamePrefix
+            | ReaderError::EmptyEntity
+            | ReaderError::InvalidProcessingInstruction
+            | ReaderError::UnknownMarkupDeclaration => 4,
+        }
+    }
+
+    #[pyfunction(name = "ErrorString")]
+    fn error_string(code: i64) -> Option<&'static str> {
+        usize::try_from(code)
+            .ok()
+            .filter(|&c| c > 0)
+            .and_then(|c| ERRORS.get(c))
+            .map(|(_, message)| *message)
+    }
 
     #[pyattr]
     const XML_PARAM_ENTITY_PARSING_NEVER: i32 = 0;
@@ -228,6 +336,18 @@ mod _pyexpat {
         current_column: PyRwLock<i64>,
         #[pytraverse(skip)]
         current_byte_index: PyRwLock<i64>,
+        // The first parse error (libexpat's XML_GetErrorCode and the
+        // position it was found at), exposed as ErrorCode / ErrorLineNumber /
+        // ErrorColumnNumber / ErrorByteIndex.
+        #[pytraverse(skip)]
+        error_code: PyRwLock<i64>,
+        #[pytraverse(skip)]
+        error_line: PyRwLock<i64>,
+        #[pytraverse(skip)]
+        error_column: PyRwLock<i64>,
+        #[pytraverse(skip)]
+        error_byte_index: PyRwLock<i64>,
+        buffer_size: MutableObject,
         // Incremental-parsing state: Parse()/ParseFile() may be called
         // multiple times with successive chunks of the same document (e.g.
         // xml.etree.ElementTree and genshi both feed input in ~64KB chunks).
@@ -548,10 +668,10 @@ mod _pyexpat {
         Event(PreparedEvent),
         /// `EndDocument` was reached; the parser thread has exited.
         Finished,
-        /// The reader reported a parse error. Mirrors the previous
-        /// whole-buffer implementation, which silently stopped dispatching
-        /// on the first parse error rather than raising `ExpatError`.
-        Error,
+        /// The reader reported a parse error at the given line, column and
+        /// byte index; the parser thread has exited. Raised as `ExpatError`
+        /// once every event before it has been dispatched.
+        Error(ReaderError, i64, i64, i64),
     }
 
     /// Set, once and permanently, by a `pthread_atfork` child hook the
@@ -723,8 +843,15 @@ mod _pyexpat {
                         break;
                     }
                 }
-                Err(_) => {
-                    let _ = tx.send(ParserMsg::Error);
+                Err(error) => {
+                    let pos = parser.position();
+                    let byte_index = tracker.borrow_mut().byte_index_for(pos);
+                    let _ = tx.send(ParserMsg::Error(
+                        error,
+                        pos.row() as i64 + 1,
+                        pos.column() as i64,
+                        byte_index,
+                    ));
                     break;
                 }
             }
@@ -818,6 +945,11 @@ mod _pyexpat {
                 current_line: PyRwLock::new(1),
                 current_column: PyRwLock::new(0),
                 current_byte_index: PyRwLock::new(-1),
+                error_code: PyRwLock::new(0),
+                error_line: PyRwLock::new(1),
+                error_column: PyRwLock::new(0),
+                error_byte_index: PyRwLock::new(-1),
+                buffer_size: MutableObject::new(vm.ctx.new_int(8192).into()),
                 backend: PyRwLock::new(None),
                 busy: AtomicBool::new(false),
                 finished: AtomicBool::new(false),
@@ -910,6 +1042,23 @@ mod _pyexpat {
                 class,
                 current_byte_index
             );
+            create_readonly_int_property!(ctx, attributes, "ErrorCode", class, error_code);
+            create_readonly_int_property!(ctx, attributes, "ErrorLineNumber", class, error_line);
+            create_readonly_int_property!(
+                ctx,
+                attributes,
+                "ErrorColumnNumber",
+                class,
+                error_column
+            );
+            create_readonly_int_property!(
+                ctx,
+                attributes,
+                "ErrorByteIndex",
+                class,
+                error_byte_index
+            );
+            create_property!(ctx, attributes, "buffer_size", class, buffer_size);
             // Additional handlers (stubs for compatibility)
             create_property!(
                 ctx,
@@ -1137,6 +1286,41 @@ mod _pyexpat {
         /// simply drops the accumulated buffer. Called once the document is
         /// finished, or (for the threaded backend) a handler raised and we
         /// choose not to keep the stream around (see `pump`).
+        /// Record a parse error like libexpat (ErrorCode and its position)
+        /// and build the `ExpatError` CPython raises for it: the message
+        /// "<text>: line L, column C" with `code`, `lineno` and `offset`.
+        fn parse_error(
+            &self,
+            vm: &VirtualMachine,
+            error: ReaderError,
+            line: i64,
+            column: i64,
+            byte_index: i64,
+        ) -> crate::vm::builtins::PyBaseExceptionRef {
+            let code = expat_code(error);
+            // The reader stops at the start of a mismatched `</name>`;
+            // libexpat reports the name itself.
+            let column = if matches!(error, ReaderError::MismatchedClosingTag) {
+                column + 2
+            } else {
+                column
+            };
+            *self.error_code.write() = code as i64;
+            *self.error_line.write() = line;
+            *self.error_column.write() = column;
+            *self.error_byte_index.write() = byte_index;
+            let message = format!("{}: line {line}, column {column}", ERRORS[code].1);
+            let exc = vm.new_exception_msg(
+                PyExpatError::class(&vm.ctx).to_owned(),
+                message.into(),
+            );
+            let obj = exc.as_object();
+            let _ = obj.set_attr("code", vm.ctx.new_int(code), vm);
+            let _ = obj.set_attr("lineno", vm.ctx.new_int(line), vm);
+            let _ = obj.set_attr("offset", vm.ctx.new_int(column), vm);
+            exc
+        }
+
         fn teardown_backend(&self) {
             let mut guard = self.backend.write();
             *guard = None;
@@ -1191,9 +1375,10 @@ mod _pyexpat {
                         self.teardown_backend();
                         return Ok(());
                     }
-                    ParserMsg::Error => {
+                    ParserMsg::Error(error, line, column, byte_index) => {
+                        self.finished.store(true, Ordering::SeqCst);
                         self.teardown_backend();
-                        return Ok(());
+                        return Err(self.parse_error(vm, error, line, column, byte_index));
                     }
                     ParserMsg::Event(ev) => {
                         *self.current_line.write() = ev.line;
@@ -1288,6 +1473,17 @@ mod _pyexpat {
                     // mirrors `ParserMsg::Error`, which is silently
                     // swallowed for compatibility rather than raising
                     // `ExpatError`.
+                    Err(error) if isfinal => {
+                        let pos = parser.position();
+                        let byte_index = tracker.borrow_mut().byte_index_for(pos);
+                        break Err(self.parse_error(
+                            vm,
+                            error,
+                            pos.row() as i64 + 1,
+                            pos.column() as i64,
+                            byte_index,
+                        ));
+                    }
                     Err(_) => break Ok(()),
                 }
             };

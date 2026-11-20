@@ -603,7 +603,7 @@ pub(crate) mod _elementtree {
                 i += 1;
             }
             let Some(i) = found else {
-                return Err(vm.new_value_error("Element.remove(x): element not found"));
+                return Err(vm.new_value_error("list.remove(x): x not in list"));
             };
             let _recycle = {
                 let mut inner = zelf.inner.write();
