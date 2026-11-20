@@ -691,16 +691,11 @@ impl PySetInner {
         vm: &VirtualMachine,
     ) -> PyResult<T> {
         match result {
-            Err(cause) if cause.fast_isinstance(vm.ctx.exceptions.type_error) => {
-                let message = cause.as_object().str(vm)?;
-                let err = vm.new_type_error(format!(
-                    "cannot use '{}' as a set element ({message})",
-                    item.class().name()
-                ));
-                err.set_cause(Some(cause));
-                Err(err)
+            // CPython 3.12 (the parity reference) raises the hash error unchanged.
+            result => {
+                let _ = (item, vm);
+                result
             }
-            result => result,
         }
     }
 }
