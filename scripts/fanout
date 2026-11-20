@@ -1,0 +1,368 @@
+#!/usr/bin/env python3
+"""fanout: run nanocode-sim's check table as independent tasks on every core of every machine, then print one verdict.
+
+  fanout manifest --bin BIN [--table FILE] [--seeds N] [--history FILE]
+                                       the table's jobs as tasks JSONL: a pass job per seed, a canary as its seed ladder
+  fanout work --bin BIN --tasks FILE [--hosts FILE --host NAME] [--ids A,B] [--history FILE] [--jobs J] [--timeout S]
+                                       run this host's share of the plan; one JSONL result per task on stdout
+  fanout merge --tasks FILE RESULTS... verdict line (exit 1 when red), then each failure with its replay command
+  fanout run --bin BIN --hosts FILE [--via 'ssh {host}'] [--tasks FILE] [--history FILE] [--out FILE]
+                                       ship BIN once per host, run every share at once, hand what is still missing
+                                       when half the hosts are idle (a dead or slow host's tasks) to them, merge;
+                                       a host's "via" overrides --via, and "local" is this machine
+
+The table is cfo.sh's default_table (weight name pass|canary[:N] flags...), with a pass and a --twice job for every
+scenario it leaves out, as scripts/check builds it. A task is {"id", "runs": [argv, ...], "must"?: regex} and passes
+when one of its runs exits 0 with output matching must, tried in order (a canary: the seed that caught it last time,
+then seeds 0..1, 1..8, 8..N). Every host computes the same plan from the same files: tasks longest first (durations
+from --history, a former run's results, scaled by each host's measured speed, else their job's mean), each onto the
+host that finishes it soonest for its jobs and speed. A host file is a JSON list of {"name", "cores"}; "jobs", "cpus"
+(a taskset list) and "nice" narrow a shared host. Results stream as they finish: {"id", "host", "ok", "exit", "ms",
+"start", "end", "run", "line", "replay"?}; a run's results are the next run's --history.
+"""
+import argparse, concurrent.futures, hashlib, io, json, os, re, shlex, statistics, subprocess, sys, tarfile
+import queue, tempfile, threading, time
+
+MARKS = ("FAIL", "CAUGHT", "MUTATION", "SWEEP", "RESULT")
+CAUGHT = r"^MUTATION .* caught by"
+DEFAULT_MS = 1000.0
+
+
+def jsonl(path):
+    if not path:
+        return []
+    with sys.stdin if path == "-" else open(path) as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def kind(task_id):
+    return task_id.rsplit("/", 1)[0]
+
+
+def jobs_of(host):
+    return host.get("jobs") or len(cpus(host.get("cpus"))) or host.get("cores") or 1
+
+
+def cpus(spec):
+    out = []
+    for part in (spec or "").split(","):
+        if part:
+            low, _, high = part.partition("-")
+            out += range(int(low), int(high or low) + 1)
+    return out
+
+
+def costs(tasks, history):
+    by_kind = {}
+    for r in history:
+        by_kind.setdefault(kind(r["id"]), {}).setdefault(r["host"], []).append(r["ms"])
+    ratios = {}
+    for per_host in by_kind.values():
+        medians = {h: statistics.median(v) for h, v in per_host.items()}
+        fastest = min(medians.values())
+        for h, ms in medians.items():
+            ratios.setdefault(h, []).append(ms / fastest if fastest > 0 else 1.0)
+    slow = {h: statistics.median(v) for h, v in ratios.items()}
+    on = {}
+    for r in history:
+        on.setdefault(r["id"], []).append(r["ms"] / slow[r["host"]])
+    known = {i: statistics.median(v) for i, v in on.items()}
+    kinds = {}
+    for i, ms in known.items():
+        kinds.setdefault(kind(i), []).append(ms)
+    means = {k: statistics.mean(v) for k, v in kinds.items()}
+    return {t["id"]: known.get(t["id"], means.get(kind(t["id"]), DEFAULT_MS)) for t in tasks}, slow
+
+
+def plan(tasks, hosts, history):
+    cost, slow = costs(tasks, history)
+    order = sorted(tasks, key=lambda t: (-cost[t["id"]], t["id"]))
+    speed = [jobs_of(h) / max(slow.get(h["name"], 1.0), 0.05) for h in hosts]
+    load, share = [0.0] * len(hosts), {h["name"]: [] for h in hosts}
+    for t in order:
+        c = cost[t["id"]]
+        i = min(range(len(hosts)), key=lambda i: (max(load[i] + c, c * jobs_of(hosts[i])) / speed[i], i))
+        load[i] += c
+        share[hosts[i]["name"]].append(t)
+    return share
+
+
+def pick(text):
+    lines = [line for line in text.splitlines() if line.strip()]
+    marked = [line for line in lines if line.startswith(MARKS) or "panicked" in line]
+    return (marked or lines or [""])[0][:500]
+
+
+def run_task(binary, task, host, timeout, shown):
+    start = time.time()
+    must = task.get("must")
+    for index, argv in enumerate(task["runs"]):
+        p = subprocess.Popen([binary, *argv], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            out, code = p.communicate(timeout=timeout)[0], p.returncode
+        except subprocess.TimeoutExpired:
+            os.killpg(p.pid, 9)
+            out, code = p.stdout.read(), "timeout"
+            out = b"timed out after %gs: " % timeout + out[-300:]
+        text = out.decode(errors="replace")
+        if code == 0 and must and not re.search(must, text, re.M):
+            code, text = "missed", "no output line matched %s\n%s" % (must, text)
+        if code == 0:
+            break
+    end = time.time()
+    row = {"id": task["id"], "host": host, "ok": code == 0, "exit": code, "ms": round((end - start) * 1000, 1),
+           "start": round(start, 4), "end": round(end, 4), "run": index, "line": pick(text)[:500 if code else 120]}
+    if code != 0:
+        row["replay"] = shlex.join([shown or binary, *argv])
+    return row
+
+
+def work(a):
+    tasks = jsonl(a.tasks)
+    if a.ids:
+        wanted = set(a.ids.split(","))
+        tasks = [t for t in tasks if t["id"] in wanted]
+    history = jsonl(a.history)
+    hosts = json.load(open(a.hosts)) if a.hosts else [{"name": a.host}]
+    me = next((h for h in hosts if h["name"] == a.host), {})
+    if me.get("cpus") and hasattr(os, "sched_setaffinity"):
+        os.sched_setaffinity(0, cpus(me["cpus"]))
+    if me.get("nice"):
+        os.nice(me["nice"])
+    mine = plan(tasks, hosts, history)[a.host]
+    jobs = a.jobs or me.get("jobs") or (len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count())
+    lock = threading.Lock()
+
+    def one(task):
+        result = run_task(a.bin, task, a.host, a.timeout, a.replay_as)
+        with lock:
+            print(json.dumps(result), flush=True)
+        return result["ok"]
+
+    with concurrent.futures.ThreadPoolExecutor(jobs) as pool:
+        ok = all(list(pool.map(one, mine)))
+    return 0 if ok else 1
+
+
+def manifest(a):
+    here = os.path.dirname(os.path.abspath(__file__))
+    text = open(a.table or os.path.join(here, "..", "bin", "nanocode-sim", "cfo.sh")).read()
+    if "default_table='" in text:
+        text = text.split("default_table='", 1)[1].split("\n'", 1)[0]
+    rows = [line.split() for line in text.splitlines() if len(line.split()) >= 3]
+    usage = subprocess.run([a.bin], capture_output=True, text=True)
+    listed = re.search(r"--scenario ([a-z_|]+)", usage.stdout + usage.stderr)
+
+    def has(row, scenario):
+        return any(row[i:i + 2] == ["--scenario", scenario] for i in range(3, len(row)))
+
+    for scenario in listed.group(1).split("|") if listed else []:
+        if not any(has(row, scenario) for row in rows):
+            rows += [["8", scenario, "pass", "--scenario", scenario],
+                     ["2", scenario + "_twice", "pass", "--scenario", scenario, "--twice"]]
+    caught = {}
+    for r in jsonl(a.history):
+        seed = re.match(r"CAUGHT seed=(\d+)", r.get("line", ""))
+        if r["ok"] and r["id"].startswith("canary/") and seed:
+            caught[r["id"]] = int(seed.group(1))
+    tasks = []
+    for _, name, job, *flags in rows:
+        if job == "pass":
+            tasks += [{"id": "pass/%s/%d" % (name, s), "seeds": 1, "runs": [["--seeds", "%d..%d" % (s, s + 1), *flags]]}
+                      for s in range(a.seeds)]
+        elif job.startswith("canary"):
+            budget = int(job.partition(":")[2] or a.canary_seeds)
+            bounds = sorted({0, *[b for b in (1, 8) if b < budget], budget})
+            runs = [["--seeds", "%d..%d" % (low, high), *flags] for low, high in zip(bounds, bounds[1:])]
+            seed = caught.get("canary/" + name)
+            if seed is not None and seed < budget:
+                runs.insert(0, ["--seeds", "%d..%d" % (seed, seed + 1), *flags])
+            tasks.append({"id": "canary/" + name, "runs": runs, "must": CAUGHT})
+    for t in tasks:
+        print(json.dumps(t))
+    return 0
+
+
+def verdict(tasks, results, wall=None):
+    by_id = {}
+    for r in results:
+        if r["id"] not in by_id or not r["ok"]:
+            by_id[r["id"]] = r
+    ids = [t["id"] for t in tasks]
+    got = [by_id[i] for i in ids if i in by_id]
+    failed = [r for r in got if not r["ok"]]
+    missing = [i for i in ids if i not in by_id]
+    if wall is None:
+        wall = max((r["end"] for r in got), default=0) - min((r["start"] for r in got), default=0)
+    seeds = sum(t.get("seeds", 0) for t in tasks if t["id"] in by_id)
+    cpu = sum(r["ms"] for r in got) / 1000
+    hosts = sorted({r["host"] for r in got})
+    green = not failed and not missing and bool(tasks)
+    lines = ["%s fanout %d/%d tasks (%d seeds) on %d hosts: wall %.2fs, cpu %.1fs, %.0f seeds/s, %d failed, %d missing"
+             % ("GREEN" if green else "RED", len(got), len(ids), seeds, len(hosts), wall, cpu, seeds / max(wall, 1e-9),
+                len(failed), len(missing))]
+    lines += ["FAIL %s host=%s exit=%s %.0fms :: %s :: replay: %s" % (r["id"], r["host"], r["exit"], r["ms"], r["line"], r.get("replay"))
+              for r in sorted(failed, key=lambda r: r["id"])]
+    lines += ["MISSING " + i for i in missing]
+    return green, lines
+
+
+def merge(a):
+    results = [r for path in a.results for r in jsonl(path)]
+    green, lines = verdict(jsonl(a.tasks), results)
+    print("\n".join(lines))
+    return 0 if green else 1
+
+
+def run(a):
+    hosts = json.load(open(a.hosts))
+    here = os.path.abspath(__file__)
+    with open(a.bin, "rb") as f, open(here, "rb") as g:
+        digest = hashlib.sha256(f.read() + g.read()).hexdigest()[:16]
+    tmp = tempfile.mkdtemp(prefix="fanout-")
+    tasks_path = a.tasks or os.path.join(tmp, "tasks.jsonl")
+    if not a.tasks:
+        with open(tasks_path, "w") as out:
+            sys.stdout, saved = out, sys.stdout
+            manifest(argparse.Namespace(bin=a.bin, table=a.table, seeds=a.seeds, canary_seeds=a.canary_seeds, history=a.history))
+            sys.stdout = saved
+    tasks = jsonl(tasks_path)
+    remote = "$HOME/.cache/fanout/" + digest
+    lock, exe = threading.Lock(), []
+
+    def argv_for(host, command):
+        how = host.get("via", a.via)
+        return ["sh", "-c", command] if how == "local" else shlex.split(how.format(host=host["name"])) + [command]
+
+    def tar(files):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as t:
+            for name, path in files.items():
+                t.add(path, arcname=name)
+        return buf.getvalue()
+
+    def ship(host):
+        def call(command, data=b""):
+            return subprocess.run(argv_for(host, command), input=data, capture_output=True, timeout=a.host_timeout)
+        try:
+            have = call("test -x %s/sim && echo have || echo need" % remote).stdout.strip()
+            if have != b"need":
+                return have == b"have"
+            with lock:
+                exe or exe.append(tar({"sim": a.bin, "fanout": here}))
+            return call("mkdir -p %s && tar xzf - -C %s" % (remote, remote), exe[0]).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+
+    events, running, dead, rows, issued = queue.Queue(), {}, set(), [], [0]
+
+    def read(name, p):
+        for line in p.stdout:
+            try:
+                events.put(("row", name, json.loads(line)))
+            except ValueError:
+                pass
+        events.put(("exit", name, p.wait()))
+
+    def issue(names, ids):
+        issued[0] += 1
+        group = [h for h in hosts if h["name"] in names]
+        hosts_path = os.path.join(tmp, "hosts-%d.json" % issued[0])
+        with open(hosts_path, "w") as f:
+            json.dump(group, f)
+        files = {"tasks.jsonl": tasks_path, "hosts.json": hosts_path}
+        if a.history:
+            files["history.jsonl"] = a.history
+        if ids is not None:
+            with open(os.path.join(tmp, "ids-%d" % issued[0]), "w") as f:
+                f.write(",".join(ids))
+            files["ids"] = f.name
+        run_dir = "%s/run-%d-%d" % (remote, os.getpid(), issued[0])
+        for host in group:
+            cmd = ("mkdir -p {r} && tar xzf - -C {r} && exec python3 {d}/fanout work --bin {d}/sim --tasks {r}/tasks.jsonl "
+                   "--hosts {r}/hosts.json --host {h} --timeout {t} --replay-as {shown}{hist}{ids}").format(
+                r=run_dir, d=remote, h=shlex.quote(host["name"]), t=a.timeout, shown=shlex.quote(shlex.quote(a.bin)),
+                hist=" --history %s/history.jsonl" % run_dir if a.history else "",
+                ids=' --ids "$(cat %s/ids)"' % run_dir if ids is not None else "")
+            try:
+                p = subprocess.Popen(argv_for(host, cmd), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.DEVNULL, start_new_session=True)
+                p.stdin.write(tar(files))
+                p.stdin.close()
+            except OSError:
+                dead.add(host["name"])
+                continue
+            running[host["name"]] = p
+            threading.Thread(target=read, args=(host["name"], p), daemon=True).start()
+
+    t0 = time.time()
+    with concurrent.futures.ThreadPoolExecutor(len(hosts)) as pool:
+        alive = [h["name"] for h, ok in zip(hosts, pool.map(ship, hosts)) if ok]
+    shipped, t1 = time.time() - t0, time.time()
+    done, ids = set(), [t["id"] for t in tasks]
+    if alive:
+        issue(alive, None)
+    while running and len(done) < len(ids):
+        try:
+            what, name, value = events.get(timeout=max(0.0, t1 + a.host_timeout - time.time()))
+        except queue.Empty:
+            break
+        if what == "row":
+            rows.append(value)
+            done.add(value["id"])
+            continue
+        running.pop(name, None)
+        if value not in (0, 1):
+            dead.add(name)
+        idle = [n for n in alive if n not in running and n not in dead]
+        missing = [i for i in ids if i not in done]
+        if missing and idle and len(idle) * 2 >= len(alive) - len(dead) and issued[0] <= a.retries:
+            issue(idle, missing)
+    for p in running.values():
+        try:
+            os.killpg(p.pid, 9)
+        except OSError:
+            pass
+    green, lines = verdict(tasks, rows, wall=time.time() - t1)
+    if a.out:
+        with open(a.out, "w") as f:
+            f.writelines(json.dumps(r) + "\n" for r in rows)
+    print(lines[0] + ", ship %.2fs, %d rounds, dead: %s" % (shipped, issued[0], ",".join(sorted(dead | {h["name"] for h in hosts} - set(alive))) or "none"))
+    print("\n".join(lines[1:]))
+    return 0 if green else 1
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    m = sub.add_parser("manifest")
+    w = sub.add_parser("work")
+    g = sub.add_parser("merge")
+    r = sub.add_parser("run")
+    for s in (m, w, r):
+        s.add_argument("--bin", required=True)
+        s.add_argument("--history")
+    for s in (m, r):
+        s.add_argument("--table", help="cfo.sh or a file of its table rows")
+        s.add_argument("--seeds", type=int, default=8, help="seeds per pass job")
+        s.add_argument("--canary-seeds", type=int, default=400, help="a canary's budget unless its row says canary:N")
+    for s in (w, r):
+        s.add_argument("--hosts")
+        s.add_argument("--timeout", type=float, default=120)
+    for s in (w, g, r):
+        s.add_argument("--tasks", required=s is not r)
+    w.add_argument("--host", default="local")
+    w.add_argument("--ids")
+    w.add_argument("--jobs", type=int)
+    w.add_argument("--replay-as", help="the binary's name in replay commands")
+    g.add_argument("results", nargs="+")
+    r.add_argument("--via", default="ssh -o BatchMode=yes {host}")
+    r.add_argument("--host-timeout", type=float, default=900)
+    r.add_argument("--retries", type=int, default=3, help="times the missing tasks are handed again to idle hosts")
+    r.add_argument("--out")
+    a = p.parse_args()
+    return {"manifest": manifest, "work": work, "merge": merge, "run": run}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
