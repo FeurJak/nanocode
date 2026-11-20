@@ -72,8 +72,18 @@ const REOPEN_MS_MAX: u64 = START_MS_MAX + RUN_MS_MAX;
 /// Share of seeds whose host crashes land next to a call's start, reply or commit instead of
 /// anywhere in EVENT_MS_MAX: the windows between a durable step, the stored request and the
 /// stored reply are a few milliseconds wide, so uniform crashes almost never hit them.
-const AIM_PPM: u64 = 500_000;
+const AIM_PPM: u64 = 800_000;
 const AIM_US_MAX: u64 = 8_000;
+/// Share of aimed crashes that land inside a window the probe saw (a call's wait for its hand,
+/// or a stored reply's wait for its commit), when it saw one.
+const WAIT_PPM: u64 = 600_000;
+/// Share of aimed seeds that also move one of a hand's socket drops next to a call: dispatch to
+/// a connected hand takes almost no simulated time, so a call only waits for its hand (the
+/// window where recovery must answer that nothing was sent) while that hand redials.
+const DROP_PPM: u64 = 850_000;
+/// Share of moved drops that land just after a stored reply instead of just before a call.
+const REPLY_PPM: u64 = 500_000;
+const DROP_US_MAX: u64 = 2_000;
 const UNSENT: [&str; 3] = [
     "not dispatched",
     "never dispatched",
@@ -294,15 +304,21 @@ impl Script {
     /// seed reached (a call admitted, its request run on a hand, its reply, its commit): the
     /// windows between a durable start, the stored request, the stored reply and the commit
     /// are a few milliseconds wide, so crashes drawn across EVENT_MS_MAX almost never hit one.
-    fn aim(&mut self, rng: &mut Rng, marks: &[u64]) {
-        if marks.is_empty() {
+    /// Most crashes land instead inside a window the probe saw (between a call's durable
+    /// admission and its request reaching a hand, or between a stored reply and its commit).
+    fn aim(&mut self, rng: &mut Rng, marks: &Marks) {
+        if marks.around.is_empty() {
             return;
         }
         let mut crashes: Vec<u64> = self
             .crashes
             .iter()
             .map(|_| {
-                let mark = marks[rng.pick(marks.len())];
+                if !marks.waits.is_empty() && rng.chance(WAIT_PPM) {
+                    let (from, to) = marks.waits[rng.pick(marks.waits.len())];
+                    return rng.range(from + 1, to).max(MS);
+                }
+                let mark = marks.around[rng.pick(marks.around.len())];
                 let jitter = rng.range(0, 2 * AIM_US_MAX) * 1_000;
                 (mark + jitter).saturating_sub(AIM_US_MAX * 1_000).max(MS)
             })
@@ -310,6 +326,38 @@ impl Script {
         crashes.sort_unstable();
         crashes.dedup();
         self.crashes = crashes;
+    }
+
+    /// Moves one of a hand's socket drops (or adds one when it has none) to the instant given.
+    fn drop_at(&mut self, rng: &mut Rng, slot: usize, at: u64) {
+        let drops = &mut self.schedules[slot].drops;
+        let at = at.max(MS);
+        if drops.is_empty() {
+            drops.push(at);
+        } else {
+            let index = rng.pick(drops.len());
+            drops[index] = at;
+        }
+        drops.sort_unstable();
+        drops.dedup();
+    }
+
+    /// Moves a drop next to a moment the crash-free probe reached: just before a call's
+    /// admission, so its hand is away when the call dispatches, or just after a reply the
+    /// hand sent, so it redials while that reply waits for its commit. Returns whether it moved.
+    fn aim_drop(&mut self, rng: &mut Rng, marks: &Marks) -> bool {
+        let jitter = rng.range(0, DROP_US_MAX + 1) * 1_000;
+        if !marks.replies.is_empty() && rng.chance(REPLY_PPM) {
+            let (slot, at, _) = marks.replies[rng.pick(marks.replies.len())];
+            self.drop_at(rng, slot, at + jitter);
+            return true;
+        }
+        if marks.admissions.is_empty() {
+            return false;
+        }
+        let (slot, at) = marks.admissions[rng.pick(marks.admissions.len())];
+        self.drop_at(rng, slot, at.saturating_sub(jitter));
+        true
     }
 
     fn drawn(seed: u64, fleet: usize) -> Self {
@@ -990,14 +1038,14 @@ struct World {
     rng: RefCell<Rng>,
     clock: Arc<Clock>,
     trace: RefCell<Vec<String>>,
-    marks: RefCell<Vec<u64>>,
+    marks: RefCell<Marks>,
     wrong: RefCell<Vec<String>>,
     stats: RefCell<HandsStats>,
 }
 
 impl World {
     fn note(&self, line: String) {
-        self.marks.borrow_mut().push(self.now());
+        self.marks.borrow_mut().around.push(self.now());
         self.trace.borrow_mut().push(line);
     }
 
@@ -1108,6 +1156,7 @@ impl World {
                 let done = self.now() + self.script.runs[index];
                 hand.seen.insert(id);
                 hand.running.insert(id, (index, done, value));
+                self.marks.borrow_mut().reached(index, self.now());
                 self.note(format!("{} runs call {index} as request {id}", slot.key));
             }
             RemoteFrame::Request {
@@ -1243,9 +1292,10 @@ impl World {
             .map(|(id, _)| *id)
             .collect();
         for id in done {
-            let Some((_, _, value)) = hand.running.remove(&id) else {
+            let Some((index, _, value)) = hand.running.remove(&id) else {
                 continue;
             };
+            self.marks.borrow_mut().replies.push((at, now, index));
             hand.retained.insert(id, value.clone());
             let _ = out.send(Self::reply(id, value));
         }
@@ -1544,6 +1594,9 @@ impl World {
                 if !self.admit(log, index).await {
                     return;
                 }
+                self.marks
+                    .borrow_mut()
+                    .admit(index, self.calls.borrow()[index].hand, self.now());
                 self.calls.borrow_mut()[index].state = CallState::Admitted;
                 self.dispatch(via, index).await
             }
@@ -1555,6 +1608,7 @@ impl World {
         if !self.step(log, index, ANSWERED).await {
             return;
         }
+        self.marks.borrow_mut().commits.insert(index, self.now());
         self.note(format!("call {index} commits {outcome:?}"));
         self.calls.borrow_mut()[index].state = CallState::Committed(outcome);
     }
@@ -1782,19 +1836,68 @@ fn simulate(seed: u64, mutation: HandsMutation, options: HandsOptions) -> HandsO
     if !script.crashes.is_empty() && rng.chance(AIM_PPM) {
         let mut probe = Script::of(seed, options);
         probe.crashes.clear();
-        let (_, marks) = play(seed, mutation, options, probe);
+        let (_, mut marks) = play(seed, mutation, options, probe);
+        marks.settle();
+        if rng.chance(DROP_PPM) && script.aim_drop(&mut rng, &marks) {
+            let mut probe = Script::of(seed, options);
+            probe.crashes.clear();
+            for (at, schedule) in probe.schedules.iter_mut().enumerate() {
+                schedule.drops.clone_from(&script.schedules[at].drops);
+            }
+            marks = play(seed, mutation, options, probe).1;
+            marks.settle();
+        }
         script.aim(&mut rng, &marks);
     }
     play(seed, mutation, options, script).0
 }
 
-/// Runs one seed's script, returning its outcome and the instants its trace noted.
+/// What a run reached: the instant of every trace note, each call's admission and each reply
+/// a hand sent (with its hand slot), each commit, and the windows a crash is aimed into.
+#[derive(Default)]
+struct Marks {
+    around: Vec<u64>,
+    admitted: BTreeMap<usize, u64>,
+    admissions: Vec<(usize, u64)>,
+    replies: Vec<(usize, u64, usize)>,
+    commits: BTreeMap<usize, u64>,
+    waits: Vec<(u64, u64)>,
+}
+
+impl Marks {
+    fn admit(&mut self, index: usize, slot: usize, now: u64) {
+        self.admitted.entry(index).or_insert(now);
+        self.admissions.push((slot, now));
+    }
+
+    /// Notes the wait from a call's admission to its request reaching a hand, when it waited.
+    fn reached(&mut self, index: usize, now: u64) {
+        if let Some(from) = self.admitted.remove(&index)
+            && now > from + 1
+        {
+            self.waits.push((from, now));
+        }
+    }
+
+    /// Adds the window from each sent reply to its call's commit, once the run ended.
+    fn settle(&mut self) {
+        for (_, at, index) in &self.replies {
+            if let Some(commit) = self.commits.get(index)
+                && *commit > at + 1
+            {
+                self.waits.push((*at, *commit));
+            }
+        }
+    }
+}
+
+/// Runs one seed's script, returning its outcome and what it reached.
 fn play(
     seed: u64,
     mutation: HandsMutation,
     options: HandsOptions,
     script: Script,
-) -> (HandsOutcome, Vec<u64>) {
+) -> (HandsOutcome, Marks) {
     let fleet = options.fleet;
     let shape = script.describe();
     let clock = Clock::new();
@@ -1857,7 +1960,7 @@ fn play(
         rng: RefCell::new(Rng::derive(seed, "hands world")),
         clock: Arc::clone(&clock),
         trace: RefCell::new(Vec::new()),
-        marks: RefCell::new(Vec::new()),
+        marks: RefCell::new(Marks::default()),
         wrong: RefCell::new(Vec::new()),
         stats: RefCell::new(HandsStats {
             seeds: 1,
@@ -1911,7 +2014,7 @@ fn play(
     let wrong = world.wrong.borrow().first().cloned();
     let stats = std::mem::take(&mut *world.stats.borrow_mut());
     let trace = trace.clone();
-    let marks = world.marks.borrow().clone();
+    let marks = std::mem::take(&mut *world.marks.borrow_mut());
     (
         HandsOutcome {
             digest,

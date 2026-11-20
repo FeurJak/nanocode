@@ -158,7 +158,7 @@ default_table='
 1 canary_acks_unflushed canary:400 --scenario runtime --store log --mutation acks-unflushed
 1 canary_reopen_forgets_agents canary:100 --scenario runtime --store log --subagents-board --mutation reopen-forgets-agents
 1 canary_board_failures_unread canary:100 --scenario agents --subagents-board --mutation board_failures_unread
-1 canary_fleet_swallow_unsent canary:4000 --scenario hands --fleet 4 --mutation fleet_swallow_unsent
+1 canary_fleet_swallow_unsent canary:2000 --scenario hands --fleet 4 --mutation fleet_swallow_unsent
 1 canary_child_forgets_notice canary:100 --scenario runtime --children remote --mutation child-forgets-notice
 1 canary_child_respawns_fresh canary:400 --scenario runtime --children remote --mutation child-respawns-fresh
 1 canary_child_settles_lazily canary:100 --scenario runtime --children remote --mutation child-settles-lazily
