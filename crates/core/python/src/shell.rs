@@ -33,6 +33,9 @@ struct Kept {
     budget: Budget,
     python: OnceCell<Python>,
     running: Cell<bool>,
+    /// A run here needed the compiled-in extensions, so every later one goes where they are.
+    #[cfg(not(target_family = "wasm"))]
+    native: Cell<bool>,
 }
 
 const MIB: u64 = 1 << 20;
@@ -50,6 +53,8 @@ impl Command {
             budget,
             python: OnceCell::new(),
             running: Cell::new(false),
+            #[cfg(not(target_family = "wasm"))]
+            native: Cell::new(false),
         };
         Self {
             kept: Rc::new(kept),
@@ -113,13 +118,6 @@ impl Kept {
         if call.stdin.read_to_end(&mut stdin).await.is_err() {
             stdin.clear();
         }
-        let python = match self.python.get() {
-            Some(python) => python,
-            None => {
-                let python = Python::new()?;
-                self.python.get_or_init(|| python)
-            }
-        };
         let shell = call.shell.limits();
         let fuel = call.shell.fuel();
         let run = Run {
@@ -146,7 +144,7 @@ impl Kept {
                     shell: call.shell.clone(),
                     copied: None,
                 };
-                self.interpret(python, run, Rc::new(direct))
+                self.interpret(run, Rc::new(direct))?
             }
             (_, asked) => {
                 asked.get().await?;
@@ -160,7 +158,7 @@ impl Kept {
                     shell: call.shell.clone(),
                     copied: Some(tree.clone()),
                 };
-                let ran = self.interpret(python, run, Rc::new(direct));
+                let ran = self.interpret(run, Rc::new(direct))?;
                 apply(&tree, &files).await?;
                 ran
             }
@@ -169,11 +167,27 @@ impl Kept {
         self.report(call, ran).await
     }
 
-    fn interpret(&self, python: &Python, run: Run, files: Rc<dyn Files>) -> Ran {
+    fn interpret(&self, run: Run, files: Rc<dyn Files>) -> io::Result<Ran> {
         self.running.set(true);
-        let ran = python.run(run, files);
+        let ran = self.interpret_where(run, files);
         self.running.set(false);
         ran
+    }
+
+    fn interpret_where(&self, run: Run, files: Rc<dyn Files>) -> io::Result<Ran> {
+        #[cfg(not(target_family = "wasm"))]
+        if self.native.get() || crate::native::wanted(&run, &*files) {
+            self.native.set(true);
+            return crate::native::run(run, &*files);
+        }
+        let python = match self.python.get() {
+            Some(python) => python,
+            None => {
+                let python = Python::new()?;
+                self.python.get_or_init(|| python)
+            }
+        };
+        Ok(python.run(run, files))
     }
 
     async fn report(&self, call: &Call, ran: Ran) -> io::Result<i32> {

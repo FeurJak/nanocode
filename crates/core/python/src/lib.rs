@@ -3,6 +3,8 @@ mod host;
 mod imports;
 mod kiwisolver;
 mod matplotlib;
+#[cfg(not(target_family = "wasm"))]
+mod native;
 mod psh;
 mod shell;
 mod sitedata;

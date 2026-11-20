@@ -107,6 +107,11 @@ fn execute(run: Run, files: SyncFiles) -> io::Result<Ran> {
 
     static IDLE: LazyLock<Slot<mpsc::Sender<Job>>> = LazyLock::new(Slot::default);
 
+    let shell = Shell(files);
+    if crate::native::wanted(&run, &shell) {
+        return crate::native::run(run, &shell);
+    }
+    let Shell(files) = shell;
     let Some(native) = files.native() else {
         return kept(run, files);
     };
