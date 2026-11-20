@@ -2,7 +2,6 @@ use crate::postgres::{PgConnection, PgError, PgPool};
 use nanocode_durability_core::{
     Settle, Sql, SqlAccess, SqlDialect, SqlRow, SqlStatement, StoreError, StoreFuture,
 };
-use nanocode_platform::Instant;
 use nanocode_sync::Owned;
 use std::{sync::Arc, time::Duration};
 
@@ -41,9 +40,9 @@ impl PgSql {
         settle: Settle,
         statements: &[SqlStatement<'_>],
     ) -> Result<Vec<Vec<SqlRow>>, StoreError> {
-        let started = Instant::now();
+        let started = nanocode_platform::now();
         let mut connection = pool.acquire().await.map_err(backend)?;
-        let acquired = Instant::now();
+        let acquired = nanocode_platform::now();
         let result = connection
             .transaction(settle, statements)
             .await
@@ -53,7 +52,7 @@ impl PgSql {
                 operation,
                 PgTimes {
                     waited: acquired - started,
-                    ran: acquired.elapsed(),
+                    ran: nanocode_platform::elapsed(acquired),
                 },
             );
         }
