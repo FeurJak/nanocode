@@ -1336,7 +1336,6 @@ static PyType_Slot cursor_slots[] = {
     {Py_tp_iternext, pysqlite_cursor_iternext},
     {Py_tp_methods, cursor_methods},
     {Py_tp_members, cursor_members},
-    {Py_tp_new, PyType_GenericNew},
     {Py_tp_init, pysqlite_cursor_init},
     {Py_tp_traverse, cursor_traverse},
     {Py_tp_clear, cursor_clear},
