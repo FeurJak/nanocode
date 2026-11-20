@@ -856,7 +856,7 @@ fn locale_zone_name(l: &DateLocale, kind: usize, z: &ZoneAt, zone: &str) -> Stri
     if kind == 2 || kind == 3 {
         return locale_offset(l, z.off, kind == 3);
     }
-    let zi = ZONES.iter().position(|e| e.0 == zone);
+    let long = kind == 1 || kind == 5;
     let overlap = kind >= 4 && z.overlap;
     let slot = match kind {
         0 => usize::from(z.dst),
@@ -866,39 +866,36 @@ fn locale_zone_name(l: &DateLocale, kind: usize, z: &ZoneAt, zone: &str) -> Stri
         _ if overlap => 7,
         _ => 5,
     };
-    let slot = if z.tuple == 0 {
-        Some(slot)
-    } else {
-        let t = tzdata::tuple(z.tuple);
-        let id = t[[0, 0, 1, 1, 2, 3, 4, 5][slot]];
-        if id < 2 {
-            return locale_offset(l, z.off, kind == 1 || kind == 5);
-        }
-        let en = tzdata::name(id, z.off);
-        let today = |s: usize| match s {
-            0..=5 => z.entry.map(|e| ZONE_NAMES[usize::from(e.2[s])]),
-            _ => zi
-                .and_then(|i| EN_GENERIC_ALT.iter().find(|a| usize::from(a.0) == i))
-                .map(|a| dtf_str(DTF_STRINGS_TEXT, DTF_STRINGS_ENDS, if s == 6 { a.1 } else { a.2 })),
-        };
-        let same: &[usize] = match kind {
-            0 => &[0, 1],
-            1 => &[2, 3],
-            4 => &[4, 6],
-            _ => &[5, 7],
-        };
-        core::iter::once(slot)
-            .chain(same.iter().copied())
-            .find(|s| today(*s) == Some(en.as_str()))
-            .or((kind >= 4 && t[2] == t[3]).then_some(4))
-            .or((kind < 2 && z.dst).then_some(slot))
-    };
     let at = |i: usize, slot: usize| l.zones.get(i * 8 + slot).copied().filter(|s| *s != u16::MAX);
-    match slot.zip(zi).and_then(|(slot, i)| at(i, slot).or_else(|| at(i, if slot >= 6 { slot - 2 } else { slot }))) {
-        Some(s) => dtf_str(DTF_STRINGS_TEXT, DTF_STRINGS_ENDS, s).to_string(),
-        None => locale_offset(l, z.off, kind == 1 || kind == 5),
+    let read = |i: usize, slot: usize| {
+        at(i, slot)
+            .or_else(|| at(i, if slot >= 6 { slot - 2 } else { slot }))
+            .map_or_else(|| locale_offset(l, z.off, long), |s| dtf_str(DTF_STRINGS_TEXT, DTF_STRINGS_ENDS, s).to_string())
+    };
+    let own = || match ZONES.iter().position(|e| e.0 == zone) {
+        Some(i) => read(i, slot),
+        None => locale_offset(l, z.off, long),
+    };
+    // a historical period: its metazone's names, as the encoder picked them for this locale (a locale
+    // added since keeps the zone's own current names)
+    let li = tzdata::TZ_LOCALES.iter().position(|t| *t == l.tags[0]);
+    if let (true, Some(li)) = (z.tuple != 0, li) {
+        let (src, suffix) = tzdata::locale_src(z.tuple, li, [0, 0, 1, 1, 2, 3, 4, 5][slot]);
+        let mut name = match src {
+            tzdata::Src::Slot(r, k) => Some(read(r, k)),
+            tzdata::Src::Gmt => Some(locale_offset(l, z.off, long)),
+            tzdata::Src::Str(id) => Some(tzdata::name(id, z.off)),
+            tzdata::Src::Own => None,
+        }
+        .unwrap_or_else(own);
+        if let Some(id) = suffix {
+            name.push_str(&tzdata::name(id, z.off));
+        }
+        return name;
     }
+    own()
 }
+
 
 // ---- formatting ----
 

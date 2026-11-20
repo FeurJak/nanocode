@@ -88,8 +88,12 @@ pub(super) fn at(zone: usize, t: i64) -> At {
 }
 
 pub(super) fn tuple(n: u16) -> [u16; 6] {
+    tuple_at(n).0
+}
+
+fn tuple_at(n: u16) -> ([u16; 6], usize) {
     let b = &TZ_TUPLES[..];
-    let mut i = usize::from(TZ_TUPLE_AT[usize::from(n) - 1]);
+    let mut i = TZ_TUPLE_AT[usize::from(n) - 1] as usize;
     let h = b[i];
     i += 1;
     let mut next = || varint(b, &mut i) as u16;
@@ -105,7 +109,51 @@ pub(super) fn tuple(n: u16) -> [u16; 6] {
         r[4] = next();
         r[5] = next();
     }
-    r
+    (r, i)
+}
+
+/// Where a locale reads element e (short, long, shortGeneric, longGeneric, the repeated-hour pair) of
+/// tuple n's names from.
+pub(super) enum Src {
+    /// Slot k of zone R's current names (DateLocale.zones).
+    Slot(usize, usize),
+    /// The locale's GMT format.
+    Gmt,
+    /// The zone's own current names.
+    Own,
+    /// String id s, as name reads it.
+    Str(u16),
+}
+
+/// The source of element e of tuple n's names in locale TZ_LOCALES[locale], and the string id of a suffix
+/// to append (a partial location such as " (Tunesien)").
+pub(super) fn locale_src(n: u16, locale: usize, e: usize) -> (Src, Option<u16>) {
+    let (en, mut i) = tuple_at(n);
+    let b = &TZ_TUPLES[..];
+    let r = varint(b, &mut i) as usize;
+    let dflt = u64::from((b[i + e / 2] >> (4 * (e % 2))) & 15);
+    let mut code = dflt;
+    i += 3;
+    for _ in 0..varint(b, &mut i) {
+        let k = varint(b, &mut i) as usize;
+        let c = varint(b, &mut i);
+        if k == locale * 6 + e {
+            code = c;
+        }
+    }
+    let mut suffix = None;
+    if code >= 11 && (code - 11) % 2 == 1 {
+        suffix = Some(((code - 11) / 2) as u16);
+        code = dflt;
+    }
+    let src = match code {
+        0..=7 if r > 0 => Src::Slot(r - 1, code as usize),
+        0..=8 => Src::Gmt,
+        9 => Src::Own,
+        10 => Src::Str(en[e]),
+        _ => Src::Str(((code - 11) / 2) as u16),
+    };
+    (src, suffix)
 }
 
 pub(super) fn gmt(off: i64, long: bool) -> String {
@@ -130,13 +178,11 @@ pub(super) fn name(id: u16, off: i64) -> String {
         0 | 1 => gmt(off, id == 1),
         _ => {
             let k = usize::from(id) - 2;
-            let start = if k == 0 {
-                0
-            } else {
-                usize::from(TZ_STR_ENDS[k - 1])
-            };
+            let block = k / 32 * 32;
+            let start = TZ_STR_AT[k / 32] as usize + TZ_STR_LEN[block..k].iter().map(|n| usize::from(*n)).sum::<usize>();
+            let end = start + usize::from(TZ_STR_LEN[k]);
             let mut out = String::new();
-            for ch in TZ_STR_TEXT[start..usize::from(TZ_STR_ENDS[k])].chars() {
+            for ch in TZ_STR_TEXT[start..end].chars() {
                 match TZ_WORDS.get((ch as usize).wrapping_sub(1)) {
                     Some(w) if (ch as u32) < 32 => out.push_str(w),
                     _ => out.push(ch),
