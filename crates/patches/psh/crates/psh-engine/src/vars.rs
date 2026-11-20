@@ -186,7 +186,7 @@ impl Var {
         }
     }
 
-    /// The attribute letters of `declare -p` (`-` when there are none).
+    /// The attribute letters of `declare -p` (`-` when there are none), in bash's order.
     pub(crate) fn flags(&self) -> String {
         let mut f = String::new();
         match self.value {
@@ -194,14 +194,8 @@ impl Var {
             Value::Assoc(_) => f.push('A'),
             _ => {}
         }
-        if self.case == Case::Capitalize {
-            f.push('c');
-        }
         if self.integer {
             f.push('i');
-        }
-        if self.case == Case::Lower {
-            f.push('l');
         }
         if self.nameref {
             f.push('n');
@@ -212,11 +206,15 @@ impl Var {
         if self.trace {
             f.push('t');
         }
-        if self.case == Case::Upper {
-            f.push('u');
-        }
         if self.exported {
             f.push('x');
+        }
+        // bash 5.2 puts the case attributes last.
+        match self.case {
+            Case::Capitalize => f.push('c'),
+            Case::Lower => f.push('l'),
+            Case::Upper => f.push('u'),
+            Case::None => {}
         }
         if f.is_empty() {
             f.push('-');
