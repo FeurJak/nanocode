@@ -165,15 +165,15 @@ mod _csv {
         } else {
             match_class!(match obj.to_owned() {
                 s @ PyStr => {
-                    parse_single_char(&s, |len| {
+                    parse_single_char(&s, |_len| {
                         vm.new_type_error(format!(
-                            r#""delimiter" must be a unicode character, not a string of length {len}"#
+                            r#""delimiter" must be a 1-character string"#
                         ))
                     })
                 }
                 attr => {
                     Err(vm.new_type_error(format!(
-                        r#""delimiter" must be a unicode character, not {}"#,
+                        r#""delimiter" must be string, not {}"#,
                         attr.class().name()
                     )))
                 }
@@ -184,11 +184,11 @@ mod _csv {
     fn parse_quotechar_from_obj(vm: &VirtualMachine, obj: &PyObject) -> PyResult<Option<u8>> {
         match_class!(match obj.get_attr("quotechar", vm)? {
             s @ PyStr => {
-                Ok(Some(parse_single_char(&s, |len| {
+                Ok(Some(parse_single_char(&s, |_len| {
                     new_csv_error(
                         vm,
                         format!(
-                            r#""quotechar" must be a unicode character or None, not a string of length {len}"#
+                            r#""quotechar" must be a 1-character string"#
                         ),
                     )
                 })?))
@@ -200,7 +200,7 @@ mod _csv {
                 Err(new_csv_error(
                     vm,
                     format!(
-                        r#""quotechar" must be a unicode character or None, not {}"#,
+                        r#""quotechar" must be string or None, not {}"#,
                         attr.class().name()
                     ),
                 ))
@@ -211,11 +211,11 @@ mod _csv {
     fn parse_escapechar_from_obj(vm: &VirtualMachine, obj: &PyObject) -> PyResult<Option<u8>> {
         match_class!(match obj.get_attr("escapechar", vm)? {
             s @ PyStr => {
-                Ok(Some(parse_single_char(&s, |len| {
+                Ok(Some(parse_single_char(&s, |_len| {
                     new_csv_error(
                         vm,
                         format!(
-                            r#""escapechar" must be a unicode character or None, not a string of length {len}"#
+                            r#""escapechar" must be a 1-character string"#
                         ),
                     )
                 })?))
@@ -225,7 +225,7 @@ mod _csv {
             }
             attr => {
                 Err(vm.new_type_error(format!(
-                    r#""escapechar" must be a unicode character or None, not {}"#,
+                    r#""escapechar" must be string or None, not {}"#,
                     attr.class().name()
                 )))
             }
@@ -248,10 +248,7 @@ mod _csv {
                 Ok(value.to_owned())
             }
             attr => {
-                Err(vm.new_type_error(format!(
-                    r#""lineterminator" must be a string, not {}"#,
-                    attr.class().name()
-                )))
+                Err(vm.new_type_error(format!(r#""lineterminator" must be a string"#)))
             }
         })
     }
@@ -544,7 +541,7 @@ mod _csv {
                 Ok(DialectItem::Str(s.as_str().to_owned()))
             }
             PyNone => {
-                Err(ArgumentError::InvalidKeywordArgument("dialect".to_string()))
+                Ok(DialectItem::None)
             }
             t @ PyType => {
                 let temp = t
@@ -609,10 +606,7 @@ mod _csv {
 
             if let Some(lineterminator) = args.kwargs.swap_remove("lineterminator") {
                 let s = lineterminator.downcast_ref::<PyStr>().ok_or_else(|| {
-                    vm.new_type_error(format!(
-                        r#""lineterminator" must be a string, not {}"#,
-                        lineterminator.class().name()
-                    ))
+                    vm.new_type_error(format!(r#""lineterminator" must be a string"#))
                 })?;
                 let value = parse_lineterminator(vm, s)?;
                 res.lineterminator = Some(value.to_owned());
@@ -1246,7 +1240,7 @@ mod _csv {
     fn field_needs_quotes(data: &[u8], dialect: &PyDialect) -> bool {
         data.iter().any(|&byte| {
             byte == dialect.delimiter
-                || dialect.quotechar == Some(byte)
+                || (dialect.doublequote && dialect.quotechar == Some(byte))
                 || matches!(byte, b'\r' | b'\n')
         }) || data_contains_lineterminator_char(data, dialect)
     }

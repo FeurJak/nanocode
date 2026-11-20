@@ -358,12 +358,14 @@ def _partial_new(cls, func, /, *args, **keywords):
 
 def _partial_repr(self):
     cls = type(self)
-    module = cls.__module__
     qualname = cls.__qualname__
     args = [repr(self.func)]
     args.extend(map(repr, self.args))
     args.extend(f"{k}={v!r}" for k, v in self.keywords.items())
-    return f"{module}.{qualname}({', '.join(args)})"
+    # CPython 3.12 qualifies only functools' own classes by module.
+    if cls.__module__ == "functools":
+        return f"functools.{qualname}({', '.join(args)})"
+    return f"{qualname}({', '.join(args)})"
 
 # Purely functional, no descriptor behaviour
 class partial:
@@ -519,6 +521,22 @@ def _unwrap_partialmethod(func):
 
 _CacheInfo = namedtuple("CacheInfo", ["hits", "misses", "maxsize", "currsize"])
 
+class _HashedSeq(list):
+    """ This class guarantees that hash() will be called no more than once
+        per element.  This is important because the lru_cache() will hash
+        the key multiple times on a cache miss.
+
+    """
+
+    __slots__ = 'hashvalue'
+
+    def __init__(self, tup, hash=hash):
+        self[:] = tup
+        self.hashvalue = hash(tup)
+
+    def __hash__(self):
+        return self.hashvalue
+
 def _make_key(args, kwds, typed,
              kwd_mark = (object(),),
              fasttypes = {int, str},
@@ -548,7 +566,7 @@ def _make_key(args, kwds, typed,
             key += tuple(type(v) for v in kwds.values())
     elif len(key) == 1 and type(key[0]) in fasttypes:
         return key[0]
-    return key
+    return _HashedSeq(key)
 
 def lru_cache(maxsize=128, typed=False):
     """Least-recently-used cache decorator.
@@ -935,8 +953,8 @@ def singledispatch(func):
                     f"Invalid first argument to `register()`. "
                     f"{cls!r} is not a class or union type."
                 )
-            ann = getattr(cls, '__annotate__', None)
-            if ann is None:
+            ann = getattr(cls, '__annotations__', None)
+            if not ann:
                 raise TypeError(
                     f"Invalid first argument to `register()`: {cls!r}. "
                     f"Use either `@register(some_class)` or plain `@register` "

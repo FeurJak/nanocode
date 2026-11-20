@@ -646,7 +646,8 @@ mod _functools {
                 let mut result = Wtf8Buf::new();
                 if let Ok(module_str) = module.downcast::<crate::builtins::PyStr>() {
                     let module_name = module_str.as_wtf8();
-                    if module_name != "builtins" && !module_name.is_empty() {
+                    // CPython 3.12 qualifies only functools' own classes by module.
+                    if module_name == "functools" {
                         result.push_wtf8(module_name);
                         result.push_char('.');
                     }

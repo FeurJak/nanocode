@@ -75,10 +75,10 @@ from io import StringIO
 
 __all__ = ["QUOTE_MINIMAL", "QUOTE_ALL", "QUOTE_NONNUMERIC", "QUOTE_NONE",
            "QUOTE_STRINGS", "QUOTE_NOTNULL",
-           "Error", "Dialect", "excel", "excel_tab",
+           "Error", "Dialect", "__doc__", "excel", "excel_tab",
            "field_size_limit", "reader", "writer",
            "register_dialect", "get_dialect", "list_dialects", "Sniffer",
-           "unregister_dialect", "DictReader", "DictWriter",
+           "unregister_dialect", "__version__", "DictReader", "DictWriter",
            "unix_dialect"]
 
 __version__ = "1.0"
