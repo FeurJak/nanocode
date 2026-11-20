@@ -2153,8 +2153,15 @@ async fn param(
                     } else {
                         String::from_utf8_lossy(&msg).into_owned()
                     };
+                    // bash names the parameter as written, subscript and all (`a[0]`).
+                    let sub = match &p.index {
+                        None => String::new(),
+                        Some(Subscript::At) => "[@]".into(),
+                        Some(Subscript::Star) => "[*]".into(),
+                        Some(Subscript::Expr(w)) => format!("[{}]", code.ast.text(w.span)),
+                    };
                     vp.error(&format!(
-                        "{}{}: {msg}",
+                        "{}{}{sub}: {msg}",
                         if via.is_some() { "!" } else { "" },
                         String::from_utf8_lossy(name_text)
                     ))

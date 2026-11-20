@@ -61,3 +61,42 @@ fn break_and_continue_give_their_loop_status_zero() {
     assert_eq!(out("for a in 1; do for b in 1; do false; break 2; done; done; echo $?"), "0\n");
     assert_eq!(out("set -- a b c; while (( $# )); do shift 2 || break; done; echo $?"), "0\n");
 }
+
+#[test]
+fn unset_error_names_the_subscript_as_written() {
+    let e = |s: &str| String::from_utf8_lossy(&run(s).2).into_owned();
+    assert!(e("a=(); : ${a[0]:?no elem}").ends_with("a[0]: no elem\n"));
+    assert!(e("i=1; : ${a[$i]?}").ends_with("a[$i]: parameter not set\n"));
+}
+
+#[test]
+fn prompt_transform_decodes_octal_and_expands_like_a_prompt() {
+    assert_eq!(out(r"x='a\101b'; echo ${x@P}"), "aAb\n");
+    assert_eq!(out(r"y='$((1+2)) $HOME'; HOME=/h; echo ${y@P}"), "3 /h\n");
+    assert_eq!(out(r"a=('\101' '$((2*2))'); echo ${a[@]@P}"), "A 4\n");
+}
+
+#[test]
+fn seeded_random_follows_bash_sequence() {
+    assert_eq!(out("RANDOM=42; echo $RANDOM $RANDOM $RANDOM"), "17772 26794 1435\n");
+    assert_eq!(out("RANDOM=0; a=$RANDOM; RANDOM=0; [ $a = $RANDOM ] && echo same"), "same\n");
+}
+
+#[test]
+fn unicode_escapes_stay_escaped_outside_utf8_locales() {
+    // bash decodes `$'…'` as it parses a line, so the locale is set a line before.
+    assert_eq!(out("LC_ALL=C\necho $'\\u0043\\u00e9\\U0001F600'"), "C\\u00E9\\U0001F600\n");
+    assert_eq!(out("LC_ALL=C.UTF-8\necho $'\\u00e9'"), "\u{e9}\n");
+    assert_eq!(out(r"LC_ALL=C; x='\u00e9'; echo ${x@E}"), "\\u00E9\n");
+}
+
+#[test]
+fn quoted_prefix_names_with_no_match_give_no_word() {
+    assert_eq!(out(r#"set -- "${!zzq_@}"; echo $#; set -- "${!zzq_*}"; echo $#"#), "0\n1\n");
+    assert_eq!(out(r#"zq_a=1 zq_b=2; set -- "${!zq_@}"; echo $# $2"#), "2 zq_b\n");
+}
+
+#[test]
+fn printf_empty_time_format_is_the_locale_time() {
+    assert_eq!(out("TZ=UTC printf '%()T\\n' 3661"), "01:01:01\n");
+}
