@@ -19,6 +19,14 @@ struct Placed {
     id: AgentId,
     agent: Agent,
     idle_since_ms: Option<u64>,
+    ended: Option<Ended>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ended {
+    Completed(String),
+    Failed(String),
+    Stopped,
 }
 
 impl Placed {
@@ -46,13 +54,27 @@ impl SubagentPool {
         session: impl Into<String>,
         now_ms: impl Fn() -> u64 + Send + Sync + 'static,
     ) -> Self {
+        Self::clocked(parent, &registry, session, Arc::new(now_ms))
+    }
+
+    pub fn clocked(
+        parent: AgentHandle,
+        registry: &Arc<Registry>,
+        session: impl Into<String>,
+        now_ms: PoolClock,
+    ) -> Self {
         Self {
             parent,
-            registry: Arc::downgrade(&registry),
+            registry: Arc::downgrade(registry),
             session: session.into(),
-            now_ms: Arc::new(now_ms),
+            now_ms,
             placed: Atom::new(BTreeMap::new()),
         }
+    }
+
+    pub fn ended(&self, agent: &str) -> Option<Ended> {
+        self.placed
+            .read(|placed| placed.get(agent).and_then(|placed| placed.ended.clone()))
     }
 
     pub fn session(&self) -> &str {
@@ -97,6 +119,7 @@ impl SubagentPool {
             id: report.agent_id,
             agent,
             idle_since_ms: None,
+            ended: None,
         };
         self.placed.update(|all| {
             all.insert(start.agent.clone(), placed.clone());
@@ -124,15 +147,23 @@ impl SubagentPool {
                 AgentStatus::Pending => AgentPhase::Starting,
                 AgentStatus::Running => {
                     placed.idle_since_ms = None;
+                    placed.ended = None;
                     AgentPhase::Busy
                 }
                 AgentStatus::Closing => AgentPhase::Retiring,
                 AgentStatus::Closed => return false,
-                AgentStatus::Completed { .. }
-                | AgentStatus::Interrupted
-                | AgentStatus::Failed { .. } => AgentPhase::Idle {
-                    since_ms: *placed.idle_since_ms.get_or_insert(now),
-                },
+                AgentStatus::Completed { output } => {
+                    placed.ended = Some(Ended::Completed(output.to_string()));
+                    idle(placed, now)
+                }
+                AgentStatus::Failed { error } => {
+                    placed.ended = Some(Ended::Failed(error.clone()));
+                    idle(placed, now)
+                }
+                AgentStatus::Interrupted => {
+                    placed.ended = Some(Ended::Stopped);
+                    idle(placed, now)
+                }
             };
             true
         });
@@ -154,6 +185,12 @@ impl SubagentPool {
             placed.remove(agent);
         });
         Ok(())
+    }
+}
+
+fn idle(placed: &mut Placed, now: u64) -> AgentPhase {
+    AgentPhase::Idle {
+        since_ms: *placed.idle_since_ms.get_or_insert(now),
     }
 }
 

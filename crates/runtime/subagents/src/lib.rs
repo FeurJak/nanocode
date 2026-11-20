@@ -15,7 +15,7 @@ mod model;
 mod platform;
 mod policy;
 mod pool;
-pub use pool::SubagentPool;
+pub use pool::{Ended, PoolClock, SubagentPool};
 mod roster;
 mod routing;
 mod runtime;
