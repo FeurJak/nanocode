@@ -11,6 +11,7 @@ mod capture;
 mod cellcalls;
 mod cells;
 mod children;
+mod controlplane;
 mod cost;
 mod disk;
 #[cfg(target_os = "linux")]
@@ -70,6 +71,7 @@ use crate::{
     board_sync::{SyncMutation as BoardSyncMutation, SyncStats as BoardSyncStats},
     cellcalls::{CellCallsMutation, CellCallsStats},
     children::ChildMutation,
+    controlplane::{ControlplaneMutation, ControlplaneStats},
     cost::{CostMutation, CostStats},
     gitremote::{GitRemoteMutation, GitRemoteStats},
     handauto::{HandAutoMutation, HandAutoStats},
@@ -126,6 +128,7 @@ enum Scenario {
     Executor,
     Dns,
     Board,
+    Controlplane,
     Cost,
     Plog,
     HandRouter,
@@ -166,6 +169,7 @@ struct Args {
     long_thread: LongThreadMutation,
     tasks: TasksMutation,
     board: BoardMutation,
+    controlplane: ControlplaneMutation,
     cost: CostMutation,
     plog: PlogMutation,
     hand_router: HandRouterMutation,
@@ -193,7 +197,7 @@ type Caught = BTreeMap<Invariant, (u64, u64, (u64, u64))>;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|inbox_stress|capture|executor|dns|board|cost|plog|hand_router|workspace_host|board_sync|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|live] [--ops N] [--twice] [--seed-lines] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
+        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|inbox_stress|capture|executor|dns|board|controlplane|cost|plog|hand_router|workspace_host|board_sync|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|live] [--ops N] [--twice] [--seed-lines] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
        websocket: [--mutation {}]
        http_server: [--mutation {}]
        alloc: [--mutation overstate_size|forget_free|scribble]
@@ -303,6 +307,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
     let mut long_thread = LongThreadMutation::None;
     let mut tasks = TasksMutation::None;
     let mut board = BoardMutation::None;
+    let mut controlplane = ControlplaneMutation::None;
     let mut cost = CostMutation::None;
     let mut plog = PlogMutation::None;
     let mut hand_router = HandRouterMutation::None;
@@ -380,6 +385,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
                     "inbox_stress" => Scenario::InboxStress,
                     "executor" => Scenario::Executor,
                     "board" => Scenario::Board,
+                    "controlplane" => Scenario::Controlplane,
                     "cost" => Scenario::Cost,
                     "plog" => Scenario::Plog,
                     "hand_router" => Scenario::HandRouter,
@@ -439,6 +445,9 @@ fn parse_args(args: &[String]) -> Option<Args> {
         (Scenario::RequestClose, Some(_)) => return None,
         (Scenario::InboxStress, Some(_)) => return None,
         (Scenario::Board, Some(name)) => board = BoardMutation::parse(name)?,
+        (Scenario::Controlplane, Some(name)) => {
+            controlplane = ControlplaneMutation::parse(name)?;
+        }
         (Scenario::Cost, Some(name)) => cost = CostMutation::parse(name)?,
         (Scenario::Plog, Some(name)) => plog = PlogMutation::parse(name)?,
         (Scenario::HandRouter, Some(name)) => hand_router = HandRouterMutation::parse(name)?,
@@ -503,6 +512,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         long_thread,
         tasks,
         board,
+        controlplane,
         cost,
         plog,
         hand_router,
@@ -525,6 +535,10 @@ fn parse_args(args: &[String]) -> Option<Args> {
         #[cfg(target_os = "linux")]
         dns,
     })
+}
+
+fn controlplane_agents(args: &Args) -> Option<u64> {
+    (args.options.ops != DEFAULT_OPS).then_some(args.options.ops)
 }
 
 fn replay(seed: u64, args: &Args) -> String {
@@ -583,6 +597,9 @@ fn replay(seed: u64, args: &Args) -> String {
     }
     if args.scenario == Scenario::Board {
         return board::replay(seed, args.board);
+    }
+    if args.scenario == Scenario::Controlplane {
+        return controlplane::replay(seed, controlplane_agents(args), args.controlplane);
     }
     if args.scenario == Scenario::Cost {
         return cost::replay(seed, args.cost);
@@ -958,6 +975,7 @@ fn mutations() -> ExitCode {
     add("long_thread", LongThreadMutation::names());
     add("executor", TasksMutation::names());
     add("board", BoardMutation::names());
+    add("controlplane", ControlplaneMutation::names());
     add("cost", CostMutation::names());
     add("plog", plog::names());
     add("hand_router", HandRouterMutation::names());
@@ -1049,6 +1067,8 @@ fn main() -> ExitCode {
         || (args.scenario == Scenario::LongThread && args.long_thread != LongThreadMutation::None)
         || (args.scenario == Scenario::Executor && args.tasks != TasksMutation::None)
         || (args.scenario == Scenario::Board && args.board != BoardMutation::None)
+        || (args.scenario == Scenario::Controlplane
+            && args.controlplane != ControlplaneMutation::None)
         || (args.scenario == Scenario::Cost && args.cost != CostMutation::None)
         || (args.scenario == Scenario::Plog && args.plog != PlogMutation::None)
         || (args.scenario == Scenario::HandRouter && args.hand_router != HandRouterMutation::None)
@@ -1085,6 +1105,7 @@ fn main() -> ExitCode {
     let mut inbox_stress_totals = InboxStressStats::default();
     let mut tasks_totals = TasksStats::default();
     let mut board_totals = BoardStats::default();
+    let mut controlplane_totals = ControlplaneStats::default();
     let mut cost_totals = CostStats::default();
     let mut plog_totals = PlogStats::default();
     let mut hand_router_totals = HandRouterStats::default();
@@ -1206,6 +1227,14 @@ fn main() -> ExitCode {
                 args.twice,
                 args.options.verbose,
                 &mut board_totals,
+            ),
+            Scenario::Controlplane => controlplane::judge(
+                seed,
+                controlplane_agents(&args),
+                args.controlplane,
+                args.twice,
+                args.options.verbose,
+                &mut controlplane_totals,
             ),
             Scenario::Cost => cost::judge(
                 seed,
@@ -1463,6 +1492,16 @@ fn main() -> ExitCode {
             args.twice,
             args.plog,
             &plog_totals,
+        );
+    }
+    if args.scenario == Scenario::Controlplane {
+        return controlplane::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.controlplane,
+            &controlplane_totals,
         );
     }
     if args.scenario == Scenario::Cost {

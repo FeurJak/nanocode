@@ -226,6 +226,15 @@ default_table='
 1 canary_live_instance_per_socket canary:20 --scenario live --mutation instance_per_socket
 1 canary_live_coalesce_drops_frame canary:20 --scenario live --mutation coalesce_drops_frame
 1 canary_live_rebuild_skips_first canary:20 --scenario live --mutation rebuild_skips_first
+8 controlplane pass --scenario controlplane --ops 2000
+2 controlplane_twice pass --scenario controlplane --ops 1500 --twice
+1 canary_controlplane_claim_ignores_lease canary:32 --scenario controlplane --ops 300 --mutation claim_ignores_lease
+1 canary_controlplane_post_overwrites canary:32 --scenario controlplane --ops 300 --mutation post_overwrites
+1 canary_controlplane_next_ignores_rank canary:32 --scenario controlplane --ops 300 --mutation next_ignores_rank
+1 canary_controlplane_budget_skips_inflight canary:64 --scenario controlplane --ops 300 --mutation budget_skips_inflight
+1 canary_controlplane_wake_dropped canary:32 --scenario controlplane --ops 300 --mutation wake_dropped
+1 canary_controlplane_goal_finished_early canary:32 --scenario controlplane --ops 300 --mutation goal_finished_early
+1 canary_controlplane_spawn_retry_renames canary:32 --scenario controlplane --ops 300 --mutation spawn_retry_renames
 '
 default_known='
 '
