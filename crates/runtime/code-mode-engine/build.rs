@@ -14,6 +14,7 @@ fn main() {
         "src/code-tools.mjs",
         "src/code-values.mjs",
         "src/web.js",
+        "src/node",
     ] {
         println!("cargo:rerun-if-changed={source}");
     }

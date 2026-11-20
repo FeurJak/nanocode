@@ -145,7 +145,7 @@ fn build(
             format!("globalThis.__nanocodePrelude = function (tools, call, callSync) {{\n{source}\n}};\n"),
         ))
         .source(crate::setup::bootstrap(&definitions).map_err(bootstrap_error)?);
-    stored(builder)
+    stored(crate::setup::node(builder))
 }
 
 fn bootstrap_error(message: String) -> Unprepared {
