@@ -6181,7 +6181,8 @@ def _parse_format_specifier(format_spec, _localeconv=None):
     """
     m = _parse_format_specifier_regex.match(format_spec)
     if m is None:
-        raise ValueError("Invalid format specifier: " + format_spec)
+        # As CPython's C decimal module does, every malformed specifier gives one message.
+        raise ValueError("invalid format string")
 
     # get the dictionary
     format_dict = m.groupdict()
@@ -6193,11 +6194,9 @@ def _parse_format_specifier(format_spec, _localeconv=None):
     format_dict['zeropad'] = (format_dict['zeropad'] is not None)
     if format_dict['zeropad']:
         if fill is not None:
-            raise ValueError("Fill character conflicts with '0'"
-                             " in format specifier: " + format_spec)
+            raise ValueError("invalid format string")
         if align is not None:
-            raise ValueError("Alignment conflicts with '0' in "
-                             "format specifier: " + format_spec)
+            raise ValueError("invalid format string")
     format_dict['fill'] = fill or ' '
     # PEP 3101 originally specified that the default alignment should
     # be left;  it was later agreed that right-aligned makes more sense
