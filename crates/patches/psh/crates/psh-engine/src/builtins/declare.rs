@@ -897,6 +897,9 @@ async fn functions(
         };
         if names_only && print_flag {
             buf.extend_from_slice(b"declare -f");
+            if vp.readonly_funcs.iter().any(|n| n == name) {
+                buf.push(b'r');
+            }
             if vp.traced_funcs.iter().any(|n| n == name) {
                 buf.push(b't');
             }
@@ -924,11 +927,18 @@ async fn functions(
         for n in all {
             let traced = vp.traced_funcs.contains(n);
             let exported = vp.exported_funcs.contains(n);
-            if (filter.contains(&b't') && !traced) || (filter.contains(&b'x') && !exported) {
+            let readonly = vp.readonly_funcs.contains(n);
+            if (filter.contains(&b't') && !traced)
+                || (filter.contains(&b'x') && !exported)
+                || (filter.contains(&b'r') && !readonly)
+            {
                 continue;
             }
             if names_only {
                 buf.extend_from_slice(b"declare -f");
+                if readonly {
+                    buf.push(b'r');
+                }
                 if traced {
                     buf.push(b't');
                 }

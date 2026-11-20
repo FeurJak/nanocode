@@ -55,3 +55,11 @@ fn file_comparisons_with_an_empty_name_are_false() {
 fn bash_cmds_is_an_empty_associative_array() {
     assert_eq!(out("declare -A\n"), "declare -A BASH_ALIASES=()\ndeclare -A BASH_CMDS=()\n");
 }
+
+#[test]
+fn declare_f_names_show_readonly_functions() {
+    assert_eq!(
+        out("f() { :; }\ng() { :; }\nreadonly -f f\ndeclare -F\ndeclare -Fr\n"),
+        "declare -fr f\ndeclare -f g\ndeclare -fr f\n"
+    );
+}
