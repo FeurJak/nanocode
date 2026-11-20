@@ -5,8 +5,9 @@ use nanocode_agent_core::{
     session::{ToolOutcome, TranscriptItem},
 };
 use nanocode_durability::{
-    AdmittedTurn, Advanced, CheckpointFormat, EncodedPayload, Error, FormatFuture, Hydrated,
-    PayloadReader, Previous, Result, Sequence, SessionRecord, load_sequence, sequence_references,
+    AdmittedTurn, Advanced, Checkpoint, CheckpointFormat, EncodedPayload, Error, FormatFuture,
+    Hydrated, PayloadReader, Previous, Result, Sequence, SessionRecord, load_sequence,
+    sequence_references,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -456,10 +457,10 @@ impl CheckpointFormat for ClaudeCheckpointFormat {
         reader: PayloadReader<'a>,
         stored: Value,
         read: &'a mut HashSet<String>,
-    ) -> FormatFuture<'a, Result<(Value, Option<Hydrated>)>> {
+    ) -> FormatFuture<'a, Result<(Checkpoint, Option<Hydrated>)>> {
         Box::pin(async move {
             let (value, hydrated, _) = advance_snapshot(reader, stored, read, None).await?;
-            Ok((value, hydrated.map(Hydrated::new)))
+            Ok((value.into(), hydrated.map(Hydrated::new)))
         })
     }
 
@@ -471,12 +472,16 @@ impl CheckpointFormat for ClaudeCheckpointFormat {
         previous: Previous,
     ) -> FormatFuture<'a, Result<Advanced>> {
         Box::pin(async move {
-            let earlier = previous
+            let earlier = match previous
                 .hydrated
                 .and_then(Hydrated::take::<HydratedConversation>)
-                .map(|keys| (keys, previous.checkpoint));
+            {
+                Some(keys) => Some((keys, previous.checkpoint.into_value()?)),
+                None => None,
+            };
             let (checkpoint, hydrated, reuse) =
                 advance_snapshot(reader, stored, read, earlier).await?;
+            let checkpoint = Checkpoint::from(checkpoint);
             let hydrated = hydrated.map(Hydrated::new);
             Ok(match reuse {
                 Some(reuse) if reuse.reused > 0 => Advanced {
@@ -500,7 +505,11 @@ impl CheckpointFormat for ClaudeCheckpointFormat {
         reader: PayloadReader<'a>,
         continuation: Value,
     ) -> FormatFuture<'a, Result<Option<Value>>> {
-        Box::pin(async move { hydrate_cursor(reader, continuation, &mut HashSet::new()).await.map(Some) })
+        Box::pin(async move {
+            hydrate_cursor(reader, continuation, &mut HashSet::new())
+                .await
+                .map(Some)
+        })
     }
 
     fn hydrate_continuation<'a>(
@@ -509,7 +518,8 @@ impl CheckpointFormat for ClaudeCheckpointFormat {
         continuation: Value,
     ) -> FormatFuture<'a, Result<Option<Value>>> {
         Box::pin(async move {
-            let mut continuation = hydrate_cursor(reader, continuation, &mut HashSet::new()).await?;
+            let mut continuation =
+                hydrate_cursor(reader, continuation, &mut HashSet::new()).await?;
             let Some(mut snapshot) = continuation
                 .get_mut("snapshot")
                 .map(Value::take)

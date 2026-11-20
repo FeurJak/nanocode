@@ -2863,14 +2863,14 @@ pub struct DurableSession {
 pub(crate) type LoadedCheckpoint = (EncodedPayload, Arc<HashSet<String>>);
 
 type HydratedPreload = (
-    serde_json::Value,
+    crate::Checkpoint,
     Option<Arc<HashSet<String>>>,
     Option<crate::Hydrated>,
 );
 
 struct CheckpointPreload {
     key: String,
-    checkpoint: serde_json::Value,
+    checkpoint: crate::Checkpoint,
     hydrated: Option<crate::Hydrated>,
     loaded: Option<LoadedCheckpoint>,
 }
@@ -3070,7 +3070,7 @@ impl DurableSession {
     pub(crate) fn preload_checkpoint(
         &self,
         key: String,
-        checkpoint: serde_json::Value,
+        checkpoint: crate::Checkpoint,
         loaded: Option<LoadedCheckpoint>,
         hydrated: Option<crate::Hydrated>,
     ) {
@@ -3093,7 +3093,7 @@ impl DurableSession {
         key: &str,
     ) -> Option<(serde_json::Value, Option<Arc<HashSet<String>>>)> {
         self.take_checkpoint_preload_hydrated(key)
-            .map(|(checkpoint, records, _)| (checkpoint, records))
+            .and_then(|(checkpoint, records, _)| Some((checkpoint.into_value().ok()?, records)))
     }
 
     pub fn take_checkpoint_preload_hydrated(&self, key: &str) -> Option<HydratedPreload> {
