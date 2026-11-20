@@ -971,14 +971,7 @@ impl<T: DictValue> Dict<T> {
         }
     }
 
-    pub(crate) fn delete_if_exists<K>(&self, vm: &VirtualMachine, key: &K) -> PyResult<bool>
-    where
-        K: DictKey + ?Sized,
-    {
-        self.remove_if_exists(vm, key).map(|opt| opt.is_some())
-    }
-
-    /// [`Self::delete_if_exists`] with a known hash. Same contract as
+    /// Delete `key` if present, using its known hash. Same contract as
     /// [`Self::insert_known_hash`].
     pub(crate) fn delete_if_exists_known_hash<K>(
         &self,
@@ -1045,40 +1038,6 @@ impl<T: DictValue> Dict<T> {
             }
         };
         Ok(removed.map(|entry| entry.value))
-    }
-
-    /// Delete an existing key or insert a missing key using its known hash.
-    /// Same contract as [`Self::insert_known_hash`].
-    pub(crate) fn delete_or_insert_known_hash(
-        &self,
-        vm: &VirtualMachine,
-        key: &PyObject,
-        hash: HashValue,
-        value: T,
-    ) -> PyResult<()> {
-        let track = self.gc_needs_track(key, &value);
-        let _removed = loop {
-            let lookup = self.lookup(vm, key, hash, None)?;
-            let (entry, index_index) = lookup;
-            if entry.index().is_some() {
-                match self.pop_inner(lookup) {
-                    ControlFlow::Break(Some(entry)) => break Some(entry),
-                    _ => continue,
-                }
-            }
-
-            let mut inner = self.write();
-            if inner.indices.get(index_index) != Some(&entry) {
-                continue;
-            }
-            self.invalidate_keys_version();
-            inner.unchecked_push(index_index, hash, key.to_owned(), value, entry);
-            break None;
-        };
-        if track {
-            self.gc_track_lazily();
-        }
-        Ok(())
     }
 
     pub(crate) fn setdefault<K, F>(&self, vm: &VirtualMachine, key: &K, default: F) -> PyResult<T>
@@ -1300,18 +1259,6 @@ impl<T: DictValue> Dict<T> {
             .iter()
             .filter_map(|v| v.as_ref().map(|v| (v.key.clone(), v.value.clone())))
             .collect()
-    }
-
-    /// Fold stored hashes under the read lock; the callback must not run Python.
-    pub(crate) fn fold_hashes<Acc, Fold>(&self, init: Acc, f: Fold) -> Acc
-    where
-        Fold: FnMut(Acc, HashValue) -> Acc,
-    {
-        self.read()
-            .entries
-            .iter()
-            .filter_map(|v| v.as_ref().map(|v| v.hash.get()))
-            .fold(init, f)
     }
 
     /// Lookup the index for the given key.
