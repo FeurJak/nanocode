@@ -2666,6 +2666,17 @@ async fn spawn_program(
     let program = vp.abs_path(&spec.program);
     match vp.host().spawn(spec) {
         Ok(s) => Ok(s),
+        // A file without execute permission is refused as `execve` refuses it.
+        Err(e)
+            if crate::host::RunInShell::is(&e)
+                && matches!(
+                    vp.host().access(&program, crate::host::Access::Execute).await,
+                    Ok(false)
+                ) =>
+        {
+            vp.error(&format!("{shown}: Permission denied")).await;
+            Err(Ok(126))
+        }
         Err(e) if crate::host::RunInShell::is(&e) => {
             Err(Box::pin(run_in_shell(vp, &program, script_argv, &shown)).await)
         }

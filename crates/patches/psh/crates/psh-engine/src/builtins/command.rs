@@ -42,7 +42,8 @@ enum Kind {
     Keyword,
     Function(Rc<Func>),
     Builtin,
-    /// An in-process utility (D1080).
+    /// An in-process utility (D1080). Scripts that ask `type -t`, `type -P` or
+    /// `command -v` see a program in /usr/bin, where the tool would be on a real system.
     Utility,
     /// A program: its path, and whether the hash table had it.
     File(Vec<u8>, bool),
@@ -108,6 +109,8 @@ async fn lookup(vp: &Vp, name: &[u8], o: Lookup) -> Vec<Kind> {
             found.push(Kind::File(p, true));
         } else if let Some(p) = hash::search(vp, name, None).await {
             found.push(Kind::File(p, false));
+        } else if crate::util::lookup(vp, name).await.is_some() {
+            found.push(Kind::Utility);
         }
         return found;
     }
@@ -134,6 +137,11 @@ async fn lookup(vp: &Vp, name: &[u8], o: Lookup) -> Vec<Kind> {
         }
     }
     found
+}
+
+/// Where a utility's program would be on a real system.
+fn utility_path(name: &[u8]) -> Vec<u8> {
+    [b"/usr/bin/".as_slice(), name].concat()
 }
 
 async fn is_executable(vp: &Vp, p: &[u8]) -> bool {
@@ -229,6 +237,7 @@ pub(super) async fn command(vp: &mut Vp, args: &[Vec<u8>]) -> R {
                         continue;
                     }
                     Kind::File(p, _) => buf.extend_from_slice(&p),
+                    Kind::Utility => buf.extend_from_slice(&utility_path(name)),
                     _ => buf.extend_from_slice(name),
                 }
                 buf.push(b'\n');
@@ -345,14 +354,16 @@ pub(super) async fn type_(vp: &mut Vp, args: &[Vec<u8>]) -> R {
                     Kind::Alias(_) => b"alias\n".as_slice(),
                     Kind::Keyword => b"keyword\n",
                     Kind::Function(_) => b"function\n",
-                    Kind::Builtin | Kind::Utility => b"builtin\n",
-                    Kind::File(..) => b"file\n",
+                    Kind::Builtin => b"builtin\n",
+                    Kind::File(..) | Kind::Utility => b"file\n",
                 });
             } else if path || force_path {
-                if let Kind::File(p, _) = k {
-                    buf.extend_from_slice(p);
-                    buf.push(b'\n');
+                match k {
+                    Kind::File(p, _) => buf.extend_from_slice(p),
+                    Kind::Utility => buf.extend_from_slice(&utility_path(name)),
+                    _ => continue,
                 }
+                buf.push(b'\n');
             } else {
                 describe(&mut buf, name, k);
             }
@@ -466,6 +477,12 @@ pub(super) async fn exec_(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         return Err(Unwind::Exit(st));
     }
     if !name.contains(&b'/') && hash::find(vp, name, None, false).await.is_none() {
+        // `exec echo` runs /bin/echo on a real system; without that program the
+        // builtin stands in for it, and the shell still ends.
+        if let Some(b) = super::get(vp, name) {
+            let st = super::call(vp, b, rest).await?;
+            return Err(Unwind::Exit(st));
+        }
         vp.error(&format!("exec: {}: not found", s(name))).await;
         return Err(Unwind::Exit(127));
     }
