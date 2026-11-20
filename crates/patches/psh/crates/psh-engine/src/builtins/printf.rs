@@ -72,6 +72,9 @@ pub(super) async fn printf(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         failed: false,
         stop: false,
         huge: false,
+        bstop: false,
+        var: var.is_some(),
+        conv: 0,
         utf8: vp.utf8(),
     };
     // bash reports a pass's errors as they happen and writes its output at the end of
@@ -95,6 +98,11 @@ pub(super) async fn printf(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         if f.stop || f.next >= f.args.len() || f.next == before {
             break;
         }
+    }
+    // %b's \c returns at once with the status so far, before invalid numbers
+    // count (bash).
+    if f.bstop {
+        status = 0;
     }
     match var {
         Some(n) => {
@@ -194,6 +202,12 @@ struct Formatter<'a> {
     stop: bool,
     /// A width or precision too large to format: bash runs out of memory and exits.
     huge: bool,
+    /// %b met \c.
+    bstop: bool,
+    /// Formatting for -v.
+    var: bool,
+    /// The conversion being formatted.
+    conv: u8,
     utf8: bool,
 }
 
@@ -205,6 +219,8 @@ struct Spec {
     space: bool,
     alt: bool,
     width: Option<usize>,
+    /// The width was a * of INT_MIN, which C can't negate.
+    width_min: bool,
     prec: Option<usize>,
     /// The precision was `*`, taken from an argument.
     prec_star: bool,
@@ -379,7 +395,12 @@ impl Formatter<'_> {
                 if w < 0 {
                     spec.left = true;
                 }
-                spec.width = Some(w.unsigned_abs() as usize);
+                if w == i64::from(i32::MIN) {
+                    spec.width_min = true;
+                    spec.width = Some(0);
+                } else {
+                    spec.width = Some(w.unsigned_abs() as usize);
+                }
                 i += 1;
             } else {
                 let st = i;
@@ -440,6 +461,7 @@ impl Formatter<'_> {
                     break;
                 }
                 i += 1;
+                self.conv = b'T';
                 self.time(&tfmt, &spec);
                 continue;
             }
@@ -453,6 +475,7 @@ impl Formatter<'_> {
                 break;
             };
             i += 1;
+            self.conv = conv;
             self.convert(conv, &spec);
         }
     }
@@ -485,6 +508,17 @@ impl Formatter<'_> {
     }
 
     fn pad(&mut self, body: &[u8], spec: &Spec, numeric: bool) {
+        if spec.width_min {
+            // bash pads %b, %q, %Q and %(...)T itself and gives no padding; the rest
+            // go to printf(3), which fails with EOVERFLOW and writes nothing, and
+            // under -v its -1 length takes back the last byte.
+            if matches!(self.conv, b'b' | b'q' | b'Q' | b'T') {
+                self.out.extend_from_slice(body);
+            } else if self.var {
+                self.out.pop();
+            }
+            return;
+        }
         let w = spec.width.unwrap_or(0);
         if body.len() >= w {
             self.out.extend_from_slice(body);
@@ -541,6 +575,7 @@ impl Formatter<'_> {
                         let d = decode(&a, Dialect::PercentB, utf8);
                         if d.stop {
                             self.stop = true;
+                            self.bstop = true;
                         }
                         d.bytes
                     }

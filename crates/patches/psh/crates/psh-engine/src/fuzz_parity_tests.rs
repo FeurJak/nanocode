@@ -225,3 +225,29 @@ fn bash_fuzz6_arrays() {
     assert_eq!(o("a='xy'; b=(\"${a[@]:2}\"); echo ${#b[@]}"), "1\n");
     assert_eq!(o("a='xy'; b=(\"${a[*]:5}\"); echo ${#b[@]}"), "1\n");
 }
+
+#[test]
+fn printf_star_width_of_int_min_and_percent_b_stop() {
+    // A * width of INT_MIN: %b and %q print unpadded, printf(3) conversions
+    // print nothing, and under -v take back the last byte.
+    let o = |s: &str| String::from_utf8_lossy(&run(s).1).into_owned();
+    assert_eq!(
+        o("printf '%.5i\\q%#x%*.0b\\n' '' 20 '-9223372036854775809' 1 '9223372036854775807' 20 'abcdefghij' '\"b'; echo \"rc=$?\""),
+        "00000\\q0x14\n9223372036854775807\\q0x14\nrc=1\n"
+    );
+    assert_eq!(
+        o("printf '%-f\\c%+-*.q%*c' '\\08' '-9223372036854775809' '1e3' $'\\xff\\xfe' -1; echo \"rc=$?\""),
+        "0.000000\\c-rc=1\n"
+    );
+    assert_eq!(
+        o("printf -v v '% *X%*.1X' '\\x4' 9 '-9223372036854775809' -1 $'tab\\x09here'; echo \"rc=$?\" \"$v\""),
+        "rc=1 00\n"
+    );
+    assert_eq!(
+        o("printf -v arr[2] '%-02.3q%*.q%.u' 2 '-9223372036854775809' ' 12' '\\177\\200' '1e3'; echo \"rc=$?\" \"${arr[2]}\""),
+        "rc=1 2 1e3\n"
+    );
+    // %b's \c returns before invalid numbers make the status 1.
+    assert_eq!(o("printf '%*.o% +u%.b' '3.7' '\\c' 2 'x\\cy'; echo \"rc=$?\""), "   2rc=0\n");
+    assert_eq!(o("printf '%d%b' x 'a\\cb'; echo \" rc=$?\""), "0a rc=0\n");
+}
