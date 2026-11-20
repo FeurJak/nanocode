@@ -185,23 +185,24 @@ pub(crate) fn plural_en_like(lang: &str, i: u64, v: u32, f: u64, ordinal: bool) 
     }
 }
 
+/// The categories PluralRules' resolvedOptions lists, in ICU's order (sorted, other last).
 pub(crate) fn plural_categories(lang: &str, ordinal: bool) -> &'static str {
     if ordinal {
         return match lang {
-            "en" => "one,two,few,other",
+            "en" => "few,one,two,other",
             "fr" => "one,other",
             _ => "other",
         };
     }
     match lang {
         "ja" | "zh" | "ko" => "other",
-        "fr" | "pt" | "es" | "it" => "one,many,other",
-        "ru" => "one,few,many,other",
+        "fr" | "pt" | "es" | "it" => "many,one,other",
+        "ru" => "few,many,one,other",
         _ => "one,other",
     }
 }
 
-const LANGS: [&str; 11] = ["en", "de", "fr", "es", "it", "pt", "nl", "ja", "zh", "ko", "ru"];
+pub(crate) const LANGS: [&str; 11] = ["en", "de", "fr", "es", "it", "pt", "nl", "ja", "zh", "ko", "ru"];
 
 fn canonical_tag(tag: &str) -> Option<String> {
     let subtags: Vec<&str> = tag.split('-').collect();

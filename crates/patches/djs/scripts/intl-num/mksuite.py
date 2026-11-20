@@ -33,6 +33,13 @@ for loc in L:
     for g, os_ in G.items():
         cases.append({"id": f"intl-number-{tag}-{g}", "kind": "js", "src": H + "const L=" + json.dumps(loc) + ";run(L," + json.dumps(os_) + ");text(out.join('\\n'))"})
     cases.append({"id": f"intl-number-{tag}-range", "kind": "js", "src": H + "const L=" + json.dumps(loc) + ";" + RANGE + ";text(out.join('\\n'))"})
+# PluralRules, ListFormat and RelativeTimeFormat: the matrix's misc case without the APIs djs lacks.
+src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "matrix.py")).read()
+MISC = src.split('MISC = r"""')[1].split('"""')[0]
+MISC = "\n".join(l for l in MISC.split("\n") if not l.startswith(("r.push('ex|", "r.push('dn|", "r.push('loc", "r.push('svo|", "r.push('seg|", "for(const v of")))
+PRE = "const P=(a)=>a.map(p=>p.type+':'+p.value).join('|');const tryf=(f)=>{try{return f()}catch(e){return 'E:'+e.name}};"
+for loc in L:
+    cases.append({"id": f"intl-number-{loc.lower()}-plural-list-relative", "kind": "js", "src": "const LOC=" + json.dumps(loc) + ";" + PRE + MISC})
 TLS = r"""const out=[];for(const L of ['en-US','de','fr','es','ja','zh','pt-BR',undefined]){for(const v of [0,-1234.5,1234567.891,0.000123,NaN,-Infinity,1e21,12.345])out.push(L+' '+v.toLocaleString(L)+' | '+v.toLocaleString(L,{style:'currency',currency:'EUR'})+' | '+v.toLocaleString(L,{maximumFractionDigits:1,notation:'compact'}));
 for(const v of [0n,-1234n,1234567n,12345678901234567890n])out.push(L+' '+v.toLocaleString(L)+' | '+v.toLocaleString(L,{style:'currency',currency:'JPY'})+' | '+v.toLocaleString(L,{notation:'scientific'}))}text(out.join('\n'))"""
 cases.append({"id": "intl-number-tolocalestring", "kind": "js", "src": TLS})

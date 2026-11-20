@@ -4990,29 +4990,50 @@ function IntlPluralRulesPrototypeSelect(value) {
   return %AsStr(%IntlFormat(3, spec, ((%IsObject(value)) ? %ToNumberPrimitive(ToPrimitive(value, "number")) : %ToNumberPrimitive(value)), undefined, false));
 }
 
-// builtins/intl.ts:564 Intl.PluralRules.prototype.resolvedOptions
+// builtins/intl.ts:565 Intl.PluralRules.prototype.selectRange
+function IntlPluralRulesPrototypeSelectRange(start, end) {
+  const spec = IntlThis(this, 3, "Intl.PluralRules.prototype.selectRange");
+  if (start === undefined) {
+    throw %NewTypeError("Invalid startRange : undefined");
+  }
+  if (end === undefined) {
+    throw %NewTypeError("Invalid endRange : undefined");
+  }
+  const x = ((%IsObject(start)) ? %ToNumberPrimitive(ToPrimitive(start, "number")) : %ToNumberPrimitive(start));
+  const y = ((%IsObject(end)) ? %ToNumberPrimitive(ToPrimitive(end, "number")) : %ToNumberPrimitive(end));
+  if (x !== x) {
+    throw %NewRangeError("Invalid startRange : NaN");
+  }
+  if (y !== y) {
+    throw %NewRangeError("Invalid endRange : NaN");
+  }
+  const b = %AsStr(%IntlFormat(3, spec, y, undefined, false));
+  return %AsStr(%IntlFormat(3, spec, x, b, false));
+}
+
+// builtins/intl.ts:589 Intl.PluralRules.prototype.resolvedOptions
 function IntlPluralRulesPrototypeResolvedOptions() {
   return IntlResolvedObject(IntlThis(this, 3, "Intl.PluralRules.prototype.resolvedOptions"));
 }
 
-// builtins/intl.ts:573 value Intl.PluralRules.prototype[Symbol.toStringTag]
+// builtins/intl.ts:598 value Intl.PluralRules.prototype[Symbol.toStringTag]
 function IntlPluralRulesToStringTag() {
   return "Intl.PluralRules";
 }
 
-// builtins/intl.ts:584 constructor Intl.ListFormat
+// builtins/intl.ts:609 constructor Intl.ListFormat
 function IntlListFormatConstructor(locales, options) {
   let $1;
   ($1 = new.target, ($1 === undefined) ? %Throw(%NewTypeError("Constructor Intl." + "ListFormat" + " requires 'new'")) : undefined);
   return IntlConstruct(new.target, "ListFormat", 4, locales, IntlReadOptions(options, "localeMatcher:s,type:s,style:s"));
 }
 
-// builtins/intl.ts:594 Intl.ListFormat.supportedLocalesOf
+// builtins/intl.ts:619 Intl.ListFormat.supportedLocalesOf
 function IntlListFormatSupportedLocalesOf(locales) {
   return (IntlSplit(%IntlLocales(IntlLocaleTags(locales), true), "\n", 0));
 }
 
-// builtins/intl.ts:599
+// builtins/intl.ts:624
 function IntlStringList(iterable) {
   if (iterable === undefined) {
     return "";
@@ -5032,29 +5053,29 @@ function IntlStringList(iterable) {
   return out;
 }
 
-// builtins/intl.ts:622 Intl.ListFormat.prototype.format
+// builtins/intl.ts:647 Intl.ListFormat.prototype.format
 function IntlListFormatPrototypeFormat(list) {
   const spec = IntlThis(this, 4, "Intl.ListFormat.prototype.format");
   return %AsStr(%IntlFormat(4, spec, IntlStringList(list), undefined, false));
 }
 
-// builtins/intl.ts:631 Intl.ListFormat.prototype.formatToParts
+// builtins/intl.ts:656 Intl.ListFormat.prototype.formatToParts
 function IntlListFormatPrototypeFormatToParts(list) {
   const spec = IntlThis(this, 4, "Intl.ListFormat.prototype.formatToParts");
   return IntlParts(%IntlFormat(4, spec, IntlStringList(list), undefined, true), undefined);
 }
 
-// builtins/intl.ts:640 Intl.ListFormat.prototype.resolvedOptions
+// builtins/intl.ts:665 Intl.ListFormat.prototype.resolvedOptions
 function IntlListFormatPrototypeResolvedOptions() {
   return IntlResolvedObject(IntlThis(this, 4, "Intl.ListFormat.prototype.resolvedOptions"));
 }
 
-// builtins/intl.ts:649 value Intl.ListFormat.prototype[Symbol.toStringTag]
+// builtins/intl.ts:674 value Intl.ListFormat.prototype[Symbol.toStringTag]
 function IntlListFormatToStringTag() {
   return "Intl.ListFormat";
 }
 
-// builtins/intl.ts:660 constructor Intl.RelativeTimeFormat
+// builtins/intl.ts:685 constructor Intl.RelativeTimeFormat
 function IntlRelativeTimeFormatConstructor(locales, options) {
   let $1;
   ($1 = new.target, ($1 === undefined) ? %Throw(%NewTypeError("Constructor Intl." + "RelativeTimeFormat" + " requires 'new'")) : undefined);
@@ -5062,18 +5083,18 @@ function IntlRelativeTimeFormatConstructor(locales, options) {
   return IntlConstruct(new.target, "RelativeTimeFormat", 5, locales, raw);
 }
 
-// builtins/intl.ts:671 Intl.RelativeTimeFormat.supportedLocalesOf
+// builtins/intl.ts:696 Intl.RelativeTimeFormat.supportedLocalesOf
 function IntlRelativeTimeFormatSupportedLocalesOf(locales) {
   return (IntlSplit(%IntlLocales(IntlLocaleTags(locales), true), "\n", 0));
 }
 
-// builtins/intl.ts:679 Intl.RelativeTimeFormat.prototype.format
+// builtins/intl.ts:704 Intl.RelativeTimeFormat.prototype.format
 function IntlRelativeTimeFormatPrototypeFormat(value, unit) {
   const spec = IntlThis(this, 5, "Intl.RelativeTimeFormat.prototype.format");
   return %AsStr(%IntlFormat(5, spec, ((%IsObject(value)) ? %ToNumberPrimitive(ToPrimitive(value, "number")) : %ToNumberPrimitive(value)), ToString(unit), false));
 }
 
-// builtins/intl.ts:688 Intl.RelativeTimeFormat.prototype.formatToParts
+// builtins/intl.ts:713 Intl.RelativeTimeFormat.prototype.formatToParts
 function IntlRelativeTimeFormatPrototypeFormatToParts(value, unit) {
   const spec = IntlThis(this, 5, "Intl.RelativeTimeFormat.prototype.formatToParts");
   const u = ToString(unit);
@@ -5082,23 +5103,23 @@ function IntlRelativeTimeFormatPrototypeFormatToParts(value, unit) {
   return IntlParts(parts, singular);
 }
 
-// builtins/intl.ts:700 Intl.RelativeTimeFormat.prototype.resolvedOptions
+// builtins/intl.ts:725 Intl.RelativeTimeFormat.prototype.resolvedOptions
 function IntlRelativeTimeFormatPrototypeResolvedOptions() {
   return IntlResolvedObject(IntlThis(this, 5, "Intl.RelativeTimeFormat.prototype.resolvedOptions"));
 }
 
-// builtins/intl.ts:709 value Intl.RelativeTimeFormat.prototype[Symbol.toStringTag]
+// builtins/intl.ts:734 value Intl.RelativeTimeFormat.prototype[Symbol.toStringTag]
 function IntlRelativeTimeFormatToStringTag() {
   return "Intl.RelativeTimeFormat";
 }
 
-// builtins/intl.ts:716
+// builtins/intl.ts:741
 function IntlNumberToLocaleString(x, locales, options) {
   const nf = (IntlConstruct(undefined, "NumberFormat", 0, locales, IntlReadOptions(options, IntlNfOptions())));
   return %AsStr(%IntlFormat(0, %AsStr(%IntlSpec(nf, 0)), IntlNumeric(x), undefined, false));
 }
 
-// builtins/intl.ts:722
+// builtins/intl.ts:747
 function IntlDateToLocaleString(t, locales, options, required, defaults) {
   if (t !== t) {
     return "Invalid Date";
@@ -5107,7 +5128,7 @@ function IntlDateToLocaleString(t, locales, options, required, defaults) {
   return %AsStr(%IntlFormat(1, %AsStr(%IntlSpec(dtf, 1)), t, undefined, false));
 }
 
-// builtins/intl.ts:731
+// builtins/intl.ts:756
 function IntlLocaleCompare(s, that, locales, options) {
   const c = IntlNewCollator(undefined, locales, options);
   return %AsNumber(%IntlFormat(2, %AsStr(%IntlSpec(c, 2)), s, that, false));
@@ -13799,6 +13820,7 @@ function WebAssemblyRuntimeSource() {
 %InstallMethod("Intl.Collator.prototype", "resolvedOptions", IntlCollatorPrototypeResolvedOptions, 0);
 %InstallValue("Intl.Collator.prototype", %WellKnownSymbol("toStringTag"), IntlCollatorToStringTag(), 4);
 %InstallMethod("Intl.PluralRules.prototype", "select", IntlPluralRulesPrototypeSelect, 0);
+%InstallMethod("Intl.PluralRules.prototype", "selectRange", IntlPluralRulesPrototypeSelectRange, 2);
 %InstallMethod("Intl.PluralRules.prototype", "resolvedOptions", IntlPluralRulesPrototypeResolvedOptions, 0);
 %InstallValue("Intl.PluralRules.prototype", %WellKnownSymbol("toStringTag"), IntlPluralRulesToStringTag(), 4);
 %InstallMethod("Intl.ListFormat.prototype", "format", IntlListFormatPrototypeFormat, 0);

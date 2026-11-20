@@ -132,6 +132,36 @@ for (const lang of LANGS) for (const long of [false, true]) {
     compact.push([lang, long, m, div, CATS.map((c) => pats[c] ?? null), exact]);
   }
 }
+// RelativeTimeFormat: (language, unit, style, past, plural category, pattern) and numeric auto's
+// words (language, unit, style, value, text); ListFormat: (language, type, style, [pair, start,
+// middle, end]).
+const RUNITS = ["second", "minute", "hour", "day", "week", "month", "quarter", "year"];
+const rel = [], relAuto = [], lists = [];
+for (const lang of LANGS) {
+  const sm = samples(lang), nf = new Intl.NumberFormat(lang);
+  for (let s = 0; s < 3; s++) {
+    const f = new Intl.RelativeTimeFormat(lang, { style: DISP[s === 0 ? 1 : s === 1 ? 0 : 2] });
+    const fa = new Intl.RelativeTimeFormat(lang, { style: DISP[s === 0 ? 1 : s === 1 ? 0 : 2], numeric: "auto" });
+    RUNITS.forEach((u, ui) => {
+      for (const past of [0, 1]) for (const c of CATS) {
+        if (!(c in sm)) continue;
+        const n = sm[c], t = f.format(past ? -n : n, u), num = nf.format(n);
+        if (!t.includes(num)) throw new Error("rtf " + lang + u + t);
+        rel.push([lang, ui, s, past, c, t.replace(num, "{0}")]);
+      }
+      for (const v of [-3, -2, -1, 0, 1, 2, 3]) {
+        const t = fa.format(v, u);
+        if (t !== f.format(v, u)) relAuto.push([lang, ui, s, v, t]);
+      }
+    });
+  }
+  for (let t = 0; t < 3; t++) for (let s = 0; s < 3; s++) {
+    const f = new Intl.ListFormat(lang, { type: ["conjunction", "disjunction", "unit"][t], style: DISP[s === 0 ? 1 : s === 1 ? 0 : 2] });
+    const between = (x, a, b) => { const i = x.indexOf(a) + a.length; return x.slice(i, x.indexOf(b, i)); };
+    const two = f.format(["A", "B"]), three = f.format(["A", "B", "C"]), four = f.format(["A", "B", "C", "D"]);
+    lists.push([lang, t, s, [between(two, "A", "B"), between(three, "A", "B"), between(four, "B", "C"), between(three, "B", "C")]]);
+  }
+}
 const arr = (a) => "[" + a.map(esc).join(", ") + "]";
 const o = [];
 o.push("#![allow(clippy::type_complexity)]");
@@ -163,6 +193,17 @@ for (const lang of LANGS) {
   const i = p.findIndex((x) => x.type === "unit");
   o.push("    (" + esc(lang) + ", " + esc(i > 0 && p[i - 1].type === "literal" ? p[i - 1].value : "") + "),");
 }
+o.push("];");
+o.push("// Styles are long, short, narrow; past is 1 for a negative value.");
+o.push("pub(super) static RELATIVE: &[(&str, u8, u8, u8, &str, &str)] = &[");
+for (const [l, u, s, p, c, t] of rel) o.push("    (" + esc(l) + ", " + u + ", " + s + ", " + p + ", " + esc(c) + ", " + esc(t) + "),");
+o.push("];");
+o.push("pub(super) static RELATIVE_AUTO: &[(&str, u8, u8, i8, &str)] = &[");
+for (const [l, u, s, v, t] of relAuto) o.push("    (" + esc(l) + ", " + u + ", " + s + ", " + v + ", " + esc(t) + "),");
+o.push("];");
+o.push("// Types are conjunction, disjunction, unit.");
+o.push("pub(super) static LISTS: &[(&str, u8, u8, [&str; 4])] = &[");
+for (const [l, t, s, p] of lists) o.push("    (" + esc(l) + ", " + t + ", " + s + ", " + arr(p) + "),");
 o.push("];");
 o.push("// (language, range separator, approximately sign)");
 o.push("pub(super) static RANGES: &[(&str, &str, &str)] = &[");

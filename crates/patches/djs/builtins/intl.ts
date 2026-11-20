@@ -558,6 +558,31 @@ function IntlPluralRulesPrototypeSelect(this: Value, value?: Value): Str {
 }
 
 /**
+ * Intl.PluralRules.prototype.selectRange ( start, end ).
+ * @builtin Intl.PluralRules.prototype.selectRange
+ * @length 2
+ */
+function IntlPluralRulesPrototypeSelectRange(this: Value, start?: Value, end?: Value): Str {
+  const spec: Str = IntlThis(this, 3, "Intl.PluralRules.prototype.selectRange");
+  if (start === undefined) {
+    throw NewTypeError("Invalid startRange : undefined");
+  }
+  if (end === undefined) {
+    throw NewTypeError("Invalid endRange : undefined");
+  }
+  const x: f64 = ToNumber(start);
+  const y: f64 = ToNumber(end);
+  if (x !== x) {
+    throw NewRangeError("Invalid startRange : NaN");
+  }
+  if (y !== y) {
+    throw NewRangeError("Invalid endRange : NaN");
+  }
+  const b: Str = AsStr(IntlFormat(3, spec, y, undefined, false));
+  return AsStr(IntlFormat(3, spec, x, b, false));
+}
+
+/**
  * Intl.PluralRules.prototype.resolvedOptions ( ).
  * @builtin Intl.PluralRules.prototype.resolvedOptions
  */

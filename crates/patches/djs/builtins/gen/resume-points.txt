@@ -1709,73 +1709,78 @@ IntlPluralRulesPrototypeSelect: reentrant (Intl.PluralRules.prototype.select)
   builtins/intl.ts:556:21  IntlThis (builtin)
   builtins/intl.ts:557:36  ToNumber (builtin)
 
+IntlPluralRulesPrototypeSelectRange: reentrant (Intl.PluralRules.prototype.selectRange)
+  builtins/intl.ts:566:21  IntlThis (builtin)
+  builtins/intl.ts:573:18  ToNumber (builtin)
+  builtins/intl.ts:574:18  ToNumber (builtin)
+
 IntlPluralRulesPrototypeResolvedOptions: reentrant (Intl.PluralRules.prototype.resolvedOptions)
-  builtins/intl.ts:565:29  IntlThis (builtin)
-  builtins/intl.ts:565:10  IntlResolvedObject (builtin)
+  builtins/intl.ts:590:29  IntlThis (builtin)
+  builtins/intl.ts:590:10  IntlResolvedObject (builtin)
 
 IntlPluralRulesToStringTag: leaf (value Intl.PluralRules.prototype[Symbol.toStringTag])
 
 IntlListFormatConstructor: reentrant (constructor Intl.ListFormat)
-  builtins/intl.ts:586:62  IntlReadOptions (builtin)
-  builtins/intl.ts:586:10  IntlConstruct (builtin)
+  builtins/intl.ts:611:62  IntlReadOptions (builtin)
+  builtins/intl.ts:611:10  IntlConstruct (builtin)
 
 IntlListFormatSupportedLocalesOf: reentrant (Intl.ListFormat.supportedLocalesOf)
-  builtins/intl.ts:595:10  IntlSupportedLocales (builtin)
+  builtins/intl.ts:620:10  IntlSupportedLocales (builtin)
 
 IntlStringList: reentrant
-  builtins/intl.ts:603:21  IterableToList (builtin)
-  builtins/intl.ts:604:20  LengthOfArrayLike (builtin)
-  builtins/intl.ts:608:22  Get (intrinsic)
-  builtins/intl.ts:610:76  ToString (builtin)
+  builtins/intl.ts:628:21  IterableToList (builtin)
+  builtins/intl.ts:629:20  LengthOfArrayLike (builtin)
+  builtins/intl.ts:633:22  Get (intrinsic)
+  builtins/intl.ts:635:76  ToString (builtin)
 
 IntlListFormatPrototypeFormat: reentrant (Intl.ListFormat.prototype.format)
-  builtins/intl.ts:623:21  IntlThis (builtin)
-  builtins/intl.ts:624:36  IntlStringList (builtin)
+  builtins/intl.ts:648:21  IntlThis (builtin)
+  builtins/intl.ts:649:36  IntlStringList (builtin)
 
 IntlListFormatPrototypeFormatToParts: reentrant (Intl.ListFormat.prototype.formatToParts)
-  builtins/intl.ts:632:21  IntlThis (builtin)
-  builtins/intl.ts:633:40  IntlStringList (builtin)
-  builtins/intl.ts:633:10  IntlParts (builtin)
+  builtins/intl.ts:657:21  IntlThis (builtin)
+  builtins/intl.ts:658:40  IntlStringList (builtin)
+  builtins/intl.ts:658:10  IntlParts (builtin)
 
 IntlListFormatPrototypeResolvedOptions: reentrant (Intl.ListFormat.prototype.resolvedOptions)
-  builtins/intl.ts:641:29  IntlThis (builtin)
-  builtins/intl.ts:641:10  IntlResolvedObject (builtin)
+  builtins/intl.ts:666:29  IntlThis (builtin)
+  builtins/intl.ts:666:10  IntlResolvedObject (builtin)
 
 IntlListFormatToStringTag: leaf (value Intl.ListFormat.prototype[Symbol.toStringTag])
 
 IntlRelativeTimeFormatConstructor: reentrant (constructor Intl.RelativeTimeFormat)
-  builtins/intl.ts:662:20  IntlReadOptions (builtin)
-  builtins/intl.ts:663:10  IntlConstruct (builtin)
+  builtins/intl.ts:687:20  IntlReadOptions (builtin)
+  builtins/intl.ts:688:10  IntlConstruct (builtin)
 
 IntlRelativeTimeFormatSupportedLocalesOf: reentrant (Intl.RelativeTimeFormat.supportedLocalesOf)
-  builtins/intl.ts:672:10  IntlSupportedLocales (builtin)
+  builtins/intl.ts:697:10  IntlSupportedLocales (builtin)
 
 IntlRelativeTimeFormatPrototypeFormat: reentrant (Intl.RelativeTimeFormat.prototype.format)
-  builtins/intl.ts:680:21  IntlThis (builtin)
-  builtins/intl.ts:681:36  ToNumber (builtin)
-  builtins/intl.ts:681:53  ToString (builtin)
+  builtins/intl.ts:705:21  IntlThis (builtin)
+  builtins/intl.ts:706:36  ToNumber (builtin)
+  builtins/intl.ts:706:53  ToString (builtin)
 
 IntlRelativeTimeFormatPrototypeFormatToParts: reentrant (Intl.RelativeTimeFormat.prototype.formatToParts)
-  builtins/intl.ts:689:21  IntlThis (builtin)
-  builtins/intl.ts:690:18  ToString (builtin)
-  builtins/intl.ts:691:44  ToNumber (builtin)
-  builtins/intl.ts:693:10  IntlParts (builtin)
+  builtins/intl.ts:714:21  IntlThis (builtin)
+  builtins/intl.ts:715:18  ToString (builtin)
+  builtins/intl.ts:716:44  ToNumber (builtin)
+  builtins/intl.ts:718:10  IntlParts (builtin)
 
 IntlRelativeTimeFormatPrototypeResolvedOptions: reentrant (Intl.RelativeTimeFormat.prototype.resolvedOptions)
-  builtins/intl.ts:701:29  IntlThis (builtin)
-  builtins/intl.ts:701:10  IntlResolvedObject (builtin)
+  builtins/intl.ts:726:29  IntlThis (builtin)
+  builtins/intl.ts:726:10  IntlResolvedObject (builtin)
 
 IntlRelativeTimeFormatToStringTag: leaf (value Intl.RelativeTimeFormat.prototype[Symbol.toStringTag])
 
 IntlNumberToLocaleString: reentrant
-  builtins/intl.ts:717:19  IntlNewNumberFormat (builtin)
-  builtins/intl.ts:718:54  IntlNumeric (builtin)
+  builtins/intl.ts:742:19  IntlNewNumberFormat (builtin)
+  builtins/intl.ts:743:54  IntlNumeric (builtin)
 
 IntlDateToLocaleString: reentrant
-  builtins/intl.ts:726:20  IntlNewDateTimeFormat (builtin)
+  builtins/intl.ts:751:20  IntlNewDateTimeFormat (builtin)
 
 IntlLocaleCompare: reentrant
-  builtins/intl.ts:732:18  IntlNewCollator (builtin)
+  builtins/intl.ts:757:18  IntlNewCollator (builtin)
 
 GetIterator: reentrant (%GetIterator)
   builtins/iter.ts:11:25  GetV (intrinsic)
