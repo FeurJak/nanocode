@@ -30,6 +30,7 @@ const USAGE: &str = "usage:
   state: $NC_BUILD_SLOTS (~/swarm/slots.json); machines: $NC_BUILD_BOXES (~/swarm/boxes.json), dev-georgios only with a fresh observation, gak-9 by name";
 
 pub fn main() -> ExitCode {
+    let started = std::time::Instant::now();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("check") => return crate::check::main(&args[1..]),
@@ -38,12 +39,64 @@ pub fn main() -> ExitCode {
         Some("slots") => slots_command(&args[1..]),
         _ => Err(USAGE.to_owned()),
     };
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
+    let code = match result {
+        Ok(()) => 0,
         Err(message) => {
             let _ = writeln!(io::stderr(), "{message}");
-            ExitCode::from(2)
+            2
         }
+    };
+    metric(&args, started.elapsed().as_millis(), code);
+    ExitCode::from(code)
+}
+
+/// Appends one point for this invocation to the swarm dashboard's feed, in its ingest format:
+/// `$NC_METRICS_LOG` (`off`: none), else ~/swarm/dash/feeds/BUILD.jsonl where that directory
+/// exists, else ~/swarm/metrics/BUILD.jsonl. Best effort: it reads HEAD from .git without
+/// running git, and ignores any error, so it never changes the result.
+fn metric(args: &[String], wall_ms: u128, exit: u8) {
+    let started = std::time::Instant::now();
+    let path = match std::env::var_os("NC_METRICS_LOG") {
+        Some(path) if path == "off" => return,
+        Some(path) => PathBuf::from(path),
+        None if home().join("swarm/dash/feeds").is_dir() => {
+            home().join("swarm/dash/feeds/BUILD.jsonl")
+        }
+        None => home().join("swarm/metrics/BUILD.jsonl"),
+    };
+    let cmd = match args {
+        [] => return,
+        [group, sub, ..] if group == "slots" => format!("nc-build slots {sub}"),
+        [sub, ..] => format!("nc-build {sub}"),
+    };
+    let (commit, repo) = git_head().unwrap_or_default();
+    let host = std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .or_else(|_| std::fs::read_to_string("/etc/hostname"))
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let point = serde_json::json!({
+        "name": format!("build {repo} {cmd}"),
+        "value": wall_ms,
+        "unit": "ms",
+        "better": "down",
+        "source": "measured",
+        "at": now_ms(),
+        "commit": commit,
+        "note": format!("{host} exit={exit}"),
+        "repo": repo,
+        "cmd": cmd,
+        "box": host,
+        "exit": exit,
+        "noop": false,
+        "cached": null,
+        "metric_us": started.elapsed().as_micros(),
+    });
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = file.write_all(format!("{point}\n").as_bytes());
     }
 }
 
@@ -131,6 +184,50 @@ fn shard(args: &[String]) -> Result<(), String> {
         .iter()
         .try_for_each(|job| writeln!(out, "{}", job.key))
         .map_err(|error| error.to_string())
+}
+
+/// The current directory's checkout: HEAD's commit (12 hex digits) and the repository's name,
+/// read from .git (a worktree's gitdir, its commondir, loose refs and packed-refs) without running
+/// git, which costs more than the rest of the point.
+fn git_head() -> Option<(String, String)> {
+    let cwd = std::env::current_dir().ok()?;
+    let dot = cwd
+        .ancestors()
+        .map(|dir| dir.join(".git"))
+        .find(|dot| dot.exists())?;
+    let gitdir = if dot.is_file() {
+        let text = std::fs::read_to_string(&dot).ok()?;
+        dot.parent()?.join(text.trim().strip_prefix("gitdir: ")?)
+    } else {
+        dot
+    };
+    let common = std::fs::read_to_string(gitdir.join("commondir"))
+        .map_or_else(|_| gitdir.clone(), |text| gitdir.join(text.trim()));
+    let head = std::fs::read_to_string(gitdir.join("HEAD")).ok()?;
+    let head = head.trim();
+    let commit = match head.strip_prefix("ref: ") {
+        None => head.to_owned(),
+        Some(name) => std::fs::read_to_string(gitdir.join(name))
+            .or_else(|_| std::fs::read_to_string(common.join(name)))
+            .ok()
+            .or_else(|| {
+                let packed = std::fs::read_to_string(common.join("packed-refs")).ok()?;
+                packed.lines().find_map(|line| {
+                    let (sha, reference) = line.split_once(' ')?;
+                    (reference == name).then(|| sha.to_owned())
+                })
+            })?,
+    };
+    let commit: String = commit.trim().chars().take(12).collect();
+    let common = std::fs::canonicalize(&common).unwrap_or(common);
+    let base = if common.ends_with(".git") {
+        common.parent()?
+    } else {
+        common.as_path()
+    };
+    let name = base.file_name()?.to_str()?;
+    let name = name.strip_suffix(".git").unwrap_or(name);
+    Some((commit, name.to_owned()))
 }
 
 fn home() -> PathBuf {

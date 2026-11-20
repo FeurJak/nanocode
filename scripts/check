@@ -36,6 +36,53 @@ target=$(cargo metadata --format-version 1 --no-deps --offline 2>/dev/null | pyt
 [ -n "$target" ] || target=${CARGO_TARGET_DIR:-$root/target}
 logs=$root/output/check
 rm -rf "$logs"; mkdir -p "$logs"
+metric_repo=nanocode metric_rust=1
+# metric: one point per run for the swarm dashboard, in its ingest feed format, appended to
+# $NC_METRICS_LOG (off: none; default ~/swarm/dash/feeds/BUILD.jsonl where that directory exists,
+# else ~/swarm/metrics/BUILD.jsonl). noop: no check ran; cached: checks ran and cargo compiled nothing;
+# metric_us: what writing the point cost. Best effort: it reads HEAD from .git without running git,
+# needs bash 5, and never changes the exit status.
+metric_t0=${EPOCHREALTIME:-} metric_pid=$BASHPID
+metric() {
+  local rc=$? t f noop=false cached=null cmd=check g c h l s r sha note
+  {
+    # Background lanes are subshells that inherit this trap: only the script itself writes.
+    [ "$BASHPID" = "$metric_pid" ] || return 0
+    t=${EPOCHREALTIME:-}; [ -n "$t" ] && [ -n "$metric_t0" ] || return 0
+    f=${NC_METRICS_LOG:-$HOME/swarm/dash/feeds/BUILD.jsonl}
+    [ -n "${NC_METRICS_LOG:-}" ] || [ -d "${f%/*}" ] || f=$HOME/swarm/metrics/BUILD.jsonl
+    [ "$f" != off ] || return 0
+    [ -d "${f%/*}" ] || mkdir -p "${f%/*}" || return 0
+    [ $full = 1 ] && cmd="check --full"
+    if [ ! -e "$logs/ran.mark" ]; then noop=true
+    elif [ "$metric_rust" = 1 ]; then
+      # cargo prints its Compiling lines first; read the head of each log in bash, which is cheaper than grep
+      cached=true
+      for l in "$logs"/*.log; do
+        c=0; while [ $c -lt 40 ] && read -r s; do c=$((c + 1)); [[ $s = Compiling* ]] && { cached=false; break 2; }; done <"$l"
+      done
+    fi
+    g=$root/.git
+    if [ -f "$g" ]; then read -r l <"$g"; g=${l#gitdir: }; [[ $g = /* ]] || g=$root/$g; fi
+    c=$g; if [ -f "$g/commondir" ]; then read -r l <"$g/commondir"; [[ $l = /* ]] && c=$l || c=$g/$l; fi
+    read -r h <"$g/HEAD"
+    if [[ $h = "ref: "* ]]; then
+      l=${h#ref: } h=""
+      if [ -f "$g/$l" ]; then read -r h <"$g/$l"; elif [ -f "$c/$l" ]; then read -r h <"$c/$l"
+      else while read -r s r; do [ "$r" = "$l" ] && { h=$s; break; }; done <"$c/packed-refs"; fi
+    fi
+    # exit 0 before the last line means a signal (timeout, ^C) ended the run
+    [ $rc = 0 ] && [ -z "${metric_end:-}" ] && rc=143
+    sha=${h:0:12} note="$HOSTNAME exit=$rc"; $noop && note="$note noop"
+    s=${EPOCHREALTIME/[.,]/}; t=${t/[.,]/}; metric_t0=${metric_t0/[.,]/}
+    printf '{"name":"build %s %s","value":%d,"unit":"ms","better":"down","source":"measured","at":%d,"commit":"%s","note":"%s","repo":"%s","cmd":"%s","box":"%s","exit":%d,"noop":%s,"cached":%s,"metric_us":%d}\n' \
+      "$metric_repo" "$cmd" $(((t - metric_t0) / 1000)) $((t / 1000)) "$sha" "$note" \
+      "$metric_repo" "$cmd" "$HOSTNAME" $rc $noop $cached $((s - t)) >>"$f"
+  } 2>/dev/null
+  return 0
+}
+trap metric EXIT
+
 if [ -t 1 ]; then green=$'\e[32m' red=$'\e[31m' yellow=$'\e[33m' off=$'\e[0m'; else green="" red="" yellow="" off=""; fi
 now() { python3 -c 'import time; print(time.time())'; }
 secs() { python3 -c "print('%.1f' % ($(now) - $1))"; }
@@ -46,6 +93,7 @@ run() {
   local name=$1 detail=$2 t0 rc
   shift 2
   t0=$(now)
+  : >"$logs/ran.mark"
   "$@" >"$logs/$name.log" 2>&1
   rc=$?
   if [ $rc -eq 0 ]; then
@@ -258,5 +306,6 @@ fi
 if ls "$logs"/*.failed >/dev/null 2>&1; then
   printf '%sRED%s   nanocode %ss (%s)\n' "$red" "$off" "$(secs $started)" "$(cd "$logs" && ls *.failed | sed 's/.failed//' | tr '\n' ' ')"; exit 1
 fi
+metric_end=1
 printf '%sGREEN%s nanocode %ss\n' "$green" "$off" "$(secs $started)"
 
