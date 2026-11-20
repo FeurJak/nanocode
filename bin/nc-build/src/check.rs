@@ -22,7 +22,8 @@ use nanocode_build_opt::{
 const USAGE: &str = "usage: nc-build check [--full] [--base REF] [-j N] [--seeds N] [--no-sim] [--plan]
   changed scope: the crates the diff since REF (merge-base with the upstream, or HEAD~1 when nothing differs) and untracked files touch,
   with their dependents (cargo check --locked: --lib --bins --examples native, --lib wasm32), the simulator's --tidy and --machines walks, and the pass jobs and canaries of
-  bin/nanocode-sim/cfo.sh's table for every scenario that reaches them; --full: the whole workspace and every scenario and canary
+  bin/nanocode-sim/cfo.sh's table for every scenario that reaches them; --full: the whole workspace, every scenario and canary, and
+  cargo test --lib --bins of the crates in FULL_TESTS
   -j N: parallel jobs (default: CARGO_BUILD_JOBS, else the cores this process may run on); --seeds N: seeds per pass job (default 8, 64 with --full)
   a canary passes once a seed catches it, trying seeds 0, then 1..8, then the rest of its budget in units of 16 seeds;
   a unit that gives no result within NANOCODE_CHECK_UNIT_TIMEOUT seconds (default 120) fails; logs: output/check/<check>.log
@@ -52,6 +53,19 @@ const WASM_ALWAYS: [&str; 4] = [
     "nanocode-board-fold",
     "nanocode-partitions",
     "nanocode-turnlog",
+];
+/// Crates whose unit tests --full runs. Most set `[lib] test = false`, so a bare `cargo test -p`
+/// runs nothing for them: the step names the targets, --lib for the libraries and --bins for
+/// nc-build, a bin-only crate. rustls and serde_core are the patched crates under crates/patches.
+const FULL_TESTS: [&str; 8] = [
+    "nc-build",
+    "nanocode-tool-host",
+    "nanocode-shell",
+    "nanocode-workspace-fs",
+    "nanocode-backend-claude",
+    "serde_derive",
+    "rustls",
+    "serde_core",
 ];
 const UNIT_TIMEOUT_SECS: u64 = 120;
 const HUNG_EXIT: i32 = 124;
@@ -884,6 +898,15 @@ pub fn main(args: &[String]) -> u8 {
             {
                 Ui::print(&["     this clang can't build python-capi's wasm32 libc++: set NANOCODE_CC to the clang docs/RELEASE-CHAIN.md uses".to_owned()]);
             }
+        }
+        if options.full {
+            let mut test = cargo(options.jobs);
+            test.env("CARGO_TARGET_DIR", target)
+                .args(["test", "--locked", "--no-fail-fast"])
+                .args(FULL_TESTS.iter().flat_map(|name| ["-p", name]))
+                .args(["--lib", "--bins"]);
+            let step = logged("test", logs, test);
+            ui.step(&step, &format!("cargo test --lib --bins: {}", FULL_TESTS.join(" ")));
         }
         let checked = Instant::now();
         sim.map(|handle| (checked, handle.join()))
