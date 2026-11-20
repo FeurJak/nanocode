@@ -9,8 +9,8 @@
 //! renew, finish, reply, relabel, rank) go to the task's partition, so claims on tasks in
 //! different partitions never meet in one log, and claims on different tasks in one partition
 //! share a group commit rather than racing for a seq. Grants and revokes go to every partition. A
-//! move stays inside its partition. Reads fold each partition on its own and merge the folds into
-//! one view of the whole board.
+//! move across partitions lands through the outbox. Reads fold each partition on its own and
+//! merge the folds into one view of the whole board.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -24,6 +24,7 @@ use nanocode_turnlog::LogHost;
 
 use crate::{
     Applied, Board, BoardError, Fold, NewTask, Op, Task, TaskId, Write, access,
+    deliver::{Delivery, Key, Outbox},
     sim::{Mutation, mutated},
     tasks::TaskOp,
 };
@@ -34,6 +35,8 @@ pub const THREAD_LABEL: &str = "thread";
 pub const PROJECT_LABEL: &str = "project";
 
 pub const PARENT_LABEL: &str = "parent";
+
+pub const CHILD_LABEL: &str = "child.";
 
 /// The scope of partition `index` of the board at `scope`: one partition keeps the bare scope.
 pub fn scope_of(scope: &str, count: NonZeroU32, partition: Partition) -> String {
@@ -81,6 +84,7 @@ pub fn own_key(task: &NewTask) -> Option<Vec<u8>> {
 pub enum Route {
     One(Partition),
     Every,
+    Cross { from: Partition, to: Partition },
     Refused(String),
 }
 
@@ -223,19 +227,194 @@ impl<'a> Merged<'a> {
             ),
             Op::Move { task, parent } => {
                 let from = home(task);
-                match parent {
-                    Some(parent) if home(parent) != from => Route::Refused(format!(
-                        "{task} is in partition {} and {parent} in {}: a move stays in its partition",
-                        from.0,
-                        home(parent).0
-                    )),
-                    _ => Route::One(from),
+                let to = parent.as_ref().map_or(from, home);
+                let linked = self
+                    .task(task)
+                    .is_some_and(|task| task.spec.labels.contains_key(PARENT_LABEL));
+                if to != from || linked {
+                    Route::Cross { from, to }
+                } else {
+                    Route::One(from)
                 }
             }
             Op::Grant { .. } | Op::Revoke { .. } | Op::Charter {} => Route::Every,
             _ => Route::One(op.task().map_or(Partition(0), home)),
         }
     }
+}
+
+impl Merged<'_> {
+    pub fn moves(
+        &self,
+        by: &str,
+        seq: u64,
+        task: &TaskId,
+        parent: Option<&TaskId>,
+    ) -> Result<Vec<Delivery>, String> {
+        let from = self
+            .home(task)
+            .ok_or_else(|| format!("{task} is not on the board"))?;
+        let moving = self
+            .task(task)
+            .ok_or_else(|| format!("{task} is not on the board"))?;
+        if moving.finished() {
+            return Err(format!("{task} is finished"));
+        }
+        let to = match parent {
+            None => None,
+            Some(parent) => {
+                if self.task(parent).is_none_or(Task::finished) {
+                    return Err(format!("{parent} is not open on the board"));
+                }
+                let mut at = Some(parent.clone());
+                while let Some(id) = at {
+                    if &id == task {
+                        return Err(format!("{task} is above {parent}"));
+                    }
+                    at = self.parent(&id);
+                }
+                self.home(parent)
+            }
+        };
+        let old = self.parent(task);
+        let local_parent = moving.spec.parent.is_some();
+        let labelled = moving.spec.labels.contains_key(PARENT_LABEL);
+        let gate = |parent: Option<&TaskId>| Op::Move {
+            task: task.clone(),
+            parent: parent.cloned(),
+        };
+        let label = |set: Option<&TaskId>| Op::Relabel {
+            task: task.clone(),
+            set: set
+                .map(|parent| BTreeMap::from([(PARENT_LABEL.to_owned(), parent.0.clone())]))
+                .unwrap_or_default(),
+            unset: if set.is_some() {
+                BTreeSet::new()
+            } else {
+                BTreeSet::from([PARENT_LABEL.to_owned()])
+            },
+        };
+        let mut steps: Vec<(Partition, Op)> = Vec::new();
+        match (parent, to) {
+            (Some(parent), Some(to)) if to != from => {
+                if local_parent {
+                    steps.push((from, label(Some(parent))));
+                    if !mutated(Mutation::CrossMoveKeepsParent) {
+                        steps.push((from, gate(None)));
+                    }
+                } else {
+                    steps.push((from, gate(None)));
+                    steps.push((from, label(Some(parent))));
+                }
+            }
+            _ => {
+                steps.push((from, gate(parent)));
+                if labelled {
+                    steps.push((from, label(None)));
+                }
+            }
+        }
+        let mark = CHILD_LABEL.to_owned() + &task.0;
+        if let Some(old) = old.filter(|old| Some(old) != parent)
+            && let Some(at) = self.home(&old)
+            && at != from
+            && !mutated(Mutation::CrossMoveSkipsUnmark)
+        {
+            steps.push((
+                at,
+                Op::Relabel {
+                    task: old,
+                    set: BTreeMap::new(),
+                    unset: BTreeSet::from([mark.clone()]),
+                },
+            ));
+        }
+        if let (Some(parent), Some(to)) = (parent, to)
+            && to != from
+        {
+            steps.push((
+                to,
+                Op::Relabel {
+                    task: parent.clone(),
+                    set: BTreeMap::from([(mark, from.0.to_string())]),
+                    unset: BTreeSet::new(),
+                },
+            ));
+        }
+        let count = self.count();
+        steps
+            .into_iter()
+            .enumerate()
+            .map(|(index, (partition, op))| {
+                Ok(Delivery {
+                    key: Key {
+                        source: by.to_owned(),
+                        seq,
+                        index: u32::try_from(index).map_err(|error| error.to_string())?,
+                    },
+                    target: scope_of("", count, partition),
+                    part: partition.0,
+                    payload: serde_json::to_string(&op).map_err(|error| error.to_string())?,
+                })
+            })
+            .collect()
+    }
+}
+
+pub fn delivery_key(key: &Key) -> String {
+    format!("move:{}:{}", key.seq, key.index)
+}
+
+pub async fn deliver(
+    outbox: &mut Outbox,
+    committers: &[Committer],
+    at_ms: u64,
+    mut persist: impl FnMut(&Outbox) -> bool,
+) -> Result<u64, BoardError> {
+    let mut settled = 0;
+    while let Some(delivery) = outbox.next().cloned() {
+        let op: Op =
+            serde_json::from_str(&delivery.payload).map_err(|error| BoardError::Corrupt {
+                seq: delivery.key.seq,
+                detail: error.to_string(),
+            })?;
+        let committer = committers.get(delivery.part as usize).ok_or_else(|| {
+            BoardError::Dropped(format!("no committer for partition {}", delivery.part))
+        })?;
+        if mutated(Mutation::CrossMoveIngestsFirst) {
+            let _ = outbox.ingest(&delivery.key);
+            if !persist(outbox) {
+                return Ok(settled);
+            }
+        }
+        let verdict = committer
+            .submit(Write {
+                by: Some(delivery.key.source.clone()),
+                key: Some(delivery_key(&delivery.key)),
+                at_ms,
+                op,
+            })
+            .await;
+        match verdict {
+            Ok(_) => {}
+            Err(BoardError::Rejected(_)) => {
+                let rest: Vec<Key> = outbox
+                    .pending_of(&delivery.key.source, delivery.key.seq)
+                    .cloned()
+                    .collect();
+                for key in rest {
+                    let _ = outbox.ingest(&key);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        let _ = outbox.ingest(&delivery.key);
+        settled += 1;
+        if !persist(outbox) {
+            return Ok(settled);
+        }
+    }
+    Ok(settled)
 }
 
 #[derive(Clone, Debug, Default)]

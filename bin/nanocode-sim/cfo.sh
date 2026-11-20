@@ -216,6 +216,9 @@ default_table='
 1 canary_board_shards_merged_index_skips_rows canary:40 --scenario board_shards --mutation merged_index_skips_rows
 1 canary_board_shards_merged_index_ignores_rank canary:40 --scenario board_shards --mutation merged_index_ignores_rank
 1 canary_board_shards_child_follows_parent canary:40 --scenario board_shards --mutation child_follows_parent
+1 canary_board_shards_cross_move_keeps_parent canary:40 --scenario board_shards --mutation cross_move_keeps_parent
+1 canary_board_shards_cross_move_skips_unmark canary:40 --scenario board_shards --mutation cross_move_skips_unmark
+1 canary_board_shards_cross_move_ingests_first canary:40 --scenario board_shards --mutation cross_move_ingests_first
 1 canary_capture_skip_trim canary --scenario capture --mutation skip_trim
 1 canary_capture_drop_chunk canary --scenario capture --mutation drop_chunk
 1 canary_buffered_admission_written canary --scenario turns --policy turnlog --mutation buffered_admission_written

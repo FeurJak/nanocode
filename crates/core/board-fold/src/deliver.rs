@@ -77,6 +77,24 @@ impl Outbox {
             .collect()
     }
 
+    pub fn next(&self) -> Option<&Delivery> {
+        self.rows.values().find_map(|row| match row {
+            Row::Pending(delivery) => Some(delivery),
+            Row::Delivered(_) => None,
+        })
+    }
+
+    pub fn pending_of<'a>(
+        &'a self,
+        source: &'a str,
+        seq: u64,
+    ) -> impl Iterator<Item = &'a Key> + 'a {
+        self.rows.iter().filter_map(move |(key, row)| {
+            (matches!(row, Row::Pending(_)) && key.source == source && key.seq == seq)
+                .then_some(key)
+        })
+    }
+
     pub fn ingest(&mut self, key: &Key) -> Result<Ingest, Refusal> {
         let row = self.rows.get_mut(key).ok_or(Refusal::Unknown)?;
         let first = match row {

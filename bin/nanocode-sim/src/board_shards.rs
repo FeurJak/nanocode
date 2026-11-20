@@ -28,6 +28,7 @@ use nanocode_board::{
     Applied, Board, BoardError, ClaimId, EventId, Fold, NewTask, Op, Outcome, Rejection, TaskId,
     Write,
     access::{Can, Grant, Who},
+    deliver::Outbox,
     shards::{self, Committer, Merged, ReadyIndex, Route, Stats as CommitStats},
     sim::{self as board_sim, Mutation as BoardRule},
 };
@@ -58,10 +59,13 @@ pub enum ShardsMutation {
     MergedIndexSkipsRows,
     MergedIndexIgnoresRank,
     ChildFollowsParent,
+    CrossMoveKeepsParent,
+    CrossMoveSkipsUnmark,
+    CrossMoveIngestsFirst,
 }
 
 impl ShardsMutation {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 12] = [
         Self::None,
         Self::GroupSkipsSeq,
         Self::GroupVerdictFromPlan,
@@ -71,6 +75,9 @@ impl ShardsMutation {
         Self::MergedIndexSkipsRows,
         Self::MergedIndexIgnoresRank,
         Self::ChildFollowsParent,
+        Self::CrossMoveKeepsParent,
+        Self::CrossMoveSkipsUnmark,
+        Self::CrossMoveIngestsFirst,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -90,6 +97,9 @@ impl ShardsMutation {
             Self::MergedIndexSkipsRows => "merged_index_skips_rows",
             Self::MergedIndexIgnoresRank => "merged_index_ignores_rank",
             Self::ChildFollowsParent => "child_follows_parent",
+            Self::CrossMoveKeepsParent => "cross_move_keeps_parent",
+            Self::CrossMoveSkipsUnmark => "cross_move_skips_unmark",
+            Self::CrossMoveIngestsFirst => "cross_move_ingests_first",
         }
     }
 
@@ -113,6 +123,9 @@ impl ShardsMutation {
             Self::MergedIndexSkipsRows => BoardRule::MergedIndexSkipsRows,
             Self::MergedIndexIgnoresRank => BoardRule::MergedIndexIgnoresRank,
             Self::ChildFollowsParent => BoardRule::ChildFollowsParent,
+            Self::CrossMoveKeepsParent => BoardRule::CrossMoveKeepsParent,
+            Self::CrossMoveSkipsUnmark => BoardRule::CrossMoveSkipsUnmark,
+            Self::CrossMoveIngestsFirst => BoardRule::CrossMoveIngestsFirst,
         }
     }
 }
@@ -137,6 +150,8 @@ pub struct ShardsStats {
     pub contended: u64,
     pub ranked: u64,
     pub picks: u64,
+    pub moved: u64,
+    pub crashes: u64,
 }
 
 impl ShardsStats {
@@ -161,6 +176,8 @@ impl ShardsStats {
         self.contended += other.contended;
         self.ranked += other.ranked;
         self.picks += other.picks;
+        self.moved += other.moved;
+        self.crashes += other.crashes;
     }
 }
 
@@ -201,6 +218,8 @@ struct Shape {
     cost: Cost,
     deadline_ms: u64,
     rank_ppm: u64,
+    moves: u64,
+    crash_ppm: u64,
     pick: Pick,
     audit: bool,
 }
@@ -233,6 +252,8 @@ impl Shape {
             },
             deadline_ms: 120_000,
             rank_ppm: rng.range(0, 200_000),
+            moves: rng.range(0, 40),
+            crash_ppm: rng.range(0, 400_000),
             pick: Pick::Index,
             audit: true,
         }
@@ -406,6 +427,8 @@ struct World {
     rng: RefCell<Rng>,
     spins: std::cell::Cell<u64>,
     pick_ns: std::cell::Cell<u128>,
+    parents: RefCell<BTreeMap<TaskId, Option<TaskId>>>,
+    marked: RefCell<BTreeSet<TaskId>>,
 }
 
 fn thread_of(seed: u64, index: u64) -> String {
@@ -593,6 +616,12 @@ impl World {
                 }
                 (None, last)
             }
+            Route::Cross { .. } => (
+                None,
+                Err(BoardError::Dropped(
+                    "a cross-partition move lands through the outbox".into(),
+                )),
+            ),
             Route::Refused(why) => (None, Err(BoardError::Dropped(why))),
         }
     }
@@ -786,6 +815,107 @@ async fn writer(world: &World, index: u64) {
     }
 }
 
+async fn mover(world: &World) {
+    let by = OWNER;
+    let mut rng = Rng::derive(fnv(FNV_OFFSET, by.as_bytes()), "board shards mover");
+    let mut seq = 0_u64;
+    while seq < world.shape.moves && world.now_ms() < world.shape.deadline_ms {
+        world.nap(rng.range(1, world.shape.step_ms * 4 + 2)).await;
+        if !world.refresh().await || world.merged(|merged| merged.len()) < world.plan.len() {
+            continue;
+        }
+        let plan = world.merged(|merged| {
+            let open: Vec<&TaskId> = merged
+                .tasks()
+                .into_iter()
+                .filter(|(_, task)| !task.finished())
+                .map(|(id, _)| id)
+                .collect();
+            if open.len() < 2 {
+                return None;
+            }
+            let task = open[rng.pick(open.len())].clone();
+            let parent = (!rng.chance(200_000)).then(|| open[rng.pick(open.len())].clone());
+            if parent.as_ref() == Some(&task) {
+                return None;
+            }
+            let old = merged.parent(&task);
+            let cross = parent
+                .as_ref()
+                .is_some_and(|parent| merged.home(parent) != merged.home(&task));
+            let deliveries = merged.moves(by, seq, &task, parent.as_ref()).ok()?;
+            Some((task, parent, old, cross, deliveries))
+        });
+        let Some((task, parent, old, cross, deliveries)) = plan else {
+            continue;
+        };
+        world
+            .parents
+            .borrow_mut()
+            .entry(task.clone())
+            .or_insert(old);
+        let mut outbox = Outbox::new();
+        for delivery in &deliveries {
+            let _ = outbox.post(delivery.clone());
+        }
+        let mut saved = outbox.clone();
+        while outbox.pending() > 0 && world.now_ms() < world.shape.deadline_ms {
+            let committers: Vec<Committer> = (0..world.count.get())
+                .filter_map(|index| world.committer(Partition(index)))
+                .collect();
+            if committers.len() != world.count.get() as usize {
+                return;
+            }
+            let crash = rng.chance(world.shape.crash_ppm);
+            let before = rng.chance(500_000);
+            let mut persisted = false;
+            let delivered = shards::deliver(&mut outbox, &committers, world.now_ms(), |now| {
+                if crash && persisted {
+                    return false;
+                }
+                persisted = true;
+                if crash && before {
+                    return false;
+                }
+                saved = now.clone();
+                !crash
+            })
+            .await;
+            if crash || delivered.is_err() {
+                world.oracle.borrow_mut().stats.crashes += u64::from(crash);
+                outbox = saved.clone();
+                world.nap(world.shape.poll_ms).await;
+            }
+        }
+        while !world.refresh().await {
+            world.nap(world.shape.poll_ms).await;
+        }
+        let landed = world.merged(|merged| {
+            deliveries.iter().all(|delivery| {
+                merged
+                    .fold(Partition(delivery.part))
+                    .and_then(|fold| {
+                        fold.outcome(&EventId(format!(
+                            "{by}#{}",
+                            shards::delivery_key(&delivery.key)
+                        )))
+                    })
+                    .is_some_and(Result::is_ok)
+            })
+        });
+        if landed {
+            world.parents.borrow_mut().insert(task.clone(), parent);
+            if cross {
+                world.marked.borrow_mut().insert(task);
+            } else {
+                world.marked.borrow_mut().remove(&task);
+            }
+            world.oracle.borrow_mut().stats.moved += 1;
+        }
+        seq += 1;
+    }
+}
+
 async fn run(world: &World) {
     let hosted: Arc<dyn LogHost> = Arc::clone(&world.host) as Arc<dyn LogHost>;
     let mut boards = Vec::new();
@@ -815,7 +945,7 @@ async fn run(world: &World) {
     }
     drives.push(Box::pin(async move {
         let mut actors: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + '_>>> =
-            vec![Box::pin(lead(world))];
+            vec![Box::pin(lead(world)), Box::pin(mover(world))];
         for index in 0..world.shape.writers {
             actors.push(Box::pin(writer(world, index)));
         }
@@ -988,6 +1118,38 @@ fn check(world: &World, logs: &[Vec<(u64, String)>]) -> Result<ShardsStats, Stri
             "ready order differs: merged {merged_ready:?} serial {serial_ready:?}"
         ));
     }
+    let mut seen = BTreeSet::new();
+    for fold in &folds {
+        for id in fold.tasks().keys() {
+            if !seen.insert(id) {
+                return Err(format!("{id} is shown by more than one partition"));
+            }
+        }
+    }
+    for (id, task) in merged.tasks() {
+        for (label, home) in &task.spec.labels {
+            if let Some(child) = label.strip_prefix(shards::CHILD_LABEL) {
+                let child = TaskId(child.to_owned());
+                if merged.parent(&child).as_ref() != Some(id)
+                    || merged.home(&child).map(|home| home.0.to_string()).as_ref() != Some(home)
+                {
+                    return Err(format!(
+                        "{id} marks {child} as its child in partition {home}, but {child} has parent {:?} in {:?}",
+                        merged.parent(&child),
+                        merged.home(&child)
+                    ));
+                }
+            }
+        }
+        for child in merged.children(id) {
+            if merged.parent(child).as_ref() != Some(id) {
+                return Err(format!(
+                    "{child} is a child of {id} but has parent {:?}",
+                    merged.parent(child)
+                ));
+            }
+        }
+    }
     for task in &world.plan {
         if let Some(key) = shards::own_key(task) {
             let want = nanocode_partitions::partition_of(&key, world.count);
@@ -999,15 +1161,37 @@ fn check(world: &World, logs: &[Vec<(u64, String)>]) -> Result<ShardsStats, Stri
                 ));
             }
         }
-        if merged.task(&task.id).is_some() && merged.parent(&task.id) != task.parent {
+        let want = world
+            .parents
+            .borrow()
+            .get(&task.id)
+            .cloned()
+            .unwrap_or_else(|| task.parent.clone());
+        if merged.task(&task.id).is_some() && merged.parent(&task.id) != want {
             return Err(format!(
-                "{} has parent {:?} in the merged view, planned {:?}",
+                "{} has parent {:?} in the merged view, expected {want:?}",
                 task.id,
                 merged.parent(&task.id),
-                task.parent
             ));
         }
-        if let Some(parent) = &task.parent
+        if world.marked.borrow().contains(&task.id)
+            && let Some(parent) = &want
+            && merged.task(parent).and_then(|above| {
+                above
+                    .spec
+                    .labels
+                    .get(&format!("{}{}", shards::CHILD_LABEL, task.id))
+            }) != merged
+                .home(&task.id)
+                .map(|home| home.0.to_string())
+                .as_ref()
+        {
+            return Err(format!(
+                "{} moved under {parent} in another partition but {parent} does not mark it",
+                task.id
+            ));
+        }
+        if let Some(parent) = &want
             && merged.task(&task.id).is_some()
             && !merged.children(parent).contains(&&task.id)
         {
@@ -1069,8 +1253,9 @@ fn simulate_shape(seed: u64, shape: Shape, mutation: ShardsMutation) -> ShardsOu
         faults: AtomicU64::new(0),
         conflicts: AtomicU64::new(0),
     });
+    let planned = plan(seed, &shape);
     let world = World {
-        plan: plan(seed, &shape),
+        plan: planned,
         clock: Arc::clone(&clock),
         host: Arc::clone(&host),
         count,
@@ -1081,6 +1266,8 @@ fn simulate_shape(seed: u64, shape: Shape, mutation: ShardsMutation) -> ShardsOu
         rng: RefCell::new(Rng::derive(seed, "board shards routing")),
         spins: std::cell::Cell::new(0),
         pick_ns: std::cell::Cell::new(0),
+        parents: RefCell::new(BTreeMap::new()),
+        marked: RefCell::new(BTreeSet::new()),
         shape,
     };
     board_sim::mutate(mutation.rule());
@@ -1220,6 +1407,8 @@ pub fn bench(partitions: &[u32], writers: &[u64], batch: usize, cost: Cost) {
                 cost,
                 deadline_ms: 3_600_000,
                 rank_ppm: 0,
+                moves: 0,
+                crash_ppm: 0,
                 pick: Pick::Index,
                 audit: false,
             };

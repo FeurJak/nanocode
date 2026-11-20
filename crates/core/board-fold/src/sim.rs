@@ -148,6 +148,9 @@ pub enum Mutation {
     StepSteersTwice,
     StepHeedsUnseen,
     PoolRetireKeepsAgent,
+    CrossMoveKeepsParent,
+    CrossMoveSkipsUnmark,
+    CrossMoveIngestsFirst,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);
