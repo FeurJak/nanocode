@@ -70,7 +70,24 @@ pub(crate) struct Attribute {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum XmlEvent {
     StartDocument,
-    Doctype,
+    XmlDecl {
+        version: String,
+        encoding: Option<String>,
+        standalone: Option<bool>,
+    },
+    Doctype {
+        name: String,
+        system_id: Option<String>,
+        public_id: Option<String>,
+        has_internal_subset: bool,
+    },
+    StartNamespace {
+        prefix: String,
+        uri: String,
+    },
+    EndNamespace {
+        prefix: String,
+    },
     StartElement {
         name: QualifiedName,
         attributes: Vec<Attribute>,
@@ -915,7 +932,14 @@ struct Parser {
     attributes: Vec<(Name, String)>,
     doctype_length: usize,
     finish: Option<Finish>,
-    next_event: Option<XmlEvent>,
+    next_event: VecDeque<XmlEvent>,
+    decl_version: String,
+    decl_encoding: Option<String>,
+    decl_standalone: Option<bool>,
+    doctype_name: String,
+    doctype_system_id: Option<String>,
+    doctype_public_id: Option<String>,
+    doctype_internal_subset: bool,
     open_elements: Vec<Name>,
     position: TextPosition,
     queued_positions: VecDeque<TextPosition>,
@@ -949,7 +973,14 @@ impl Parser {
             attributes: Vec::new(),
             doctype_length: 0,
             finish: None,
-            next_event: None,
+            next_event: VecDeque::new(),
+            decl_version: String::new(),
+            decl_encoding: None,
+            decl_standalone: None,
+            doctype_name: String::new(),
+            doctype_system_id: None,
+            doctype_public_id: None,
+            doctype_internal_subset: false,
             open_elements: Vec::new(),
             position: TextPosition::START,
             queued_positions: VecDeque::with_capacity(POSITION_QUEUE_CAPACITY),
@@ -964,7 +995,7 @@ impl Parser {
             Some(Finish::Failed(error)) => return Err(error),
             None => {}
         }
-        if let Some(event) = self.next_event.take() {
+        if let Some(event) = self.next_event.pop_front() {
             return Ok(event);
         }
         if self.pop_namespace {
@@ -1045,6 +1076,27 @@ impl Parser {
             Some(Ok(XmlEvent::StartDocument))
         } else {
             None
+        }
+    }
+
+    /// Queue an `EndNamespace` for each declaration on the element being
+    /// closed, in reverse order like libexpat.
+    fn queue_end_namespaces(&mut self) {
+        if let Some(frame) = self.namespaces.last() {
+            for (prefix, _) in frame.iter().rev() {
+                self.next_event.push_back(XmlEvent::EndNamespace {
+                    prefix: prefix.clone(),
+                });
+            }
+        }
+    }
+
+    fn take_doctype(&mut self) -> XmlEvent {
+        XmlEvent::Doctype {
+            name: core::mem::take(&mut self.doctype_name),
+            system_id: self.doctype_system_id.take(),
+            public_id: self.doctype_public_id.take(),
+            has_internal_subset: core::mem::take(&mut self.doctype_internal_subset),
         }
     }
 
@@ -1375,9 +1427,10 @@ impl Parser {
         }
         if empty {
             self.pop_namespace = true;
-            self.next_event = Some(XmlEvent::EndElement {
+            self.next_event.push_back(XmlEvent::EndElement {
                 name: name.clone().qualified(),
             });
+            self.queue_end_namespaces();
         } else {
             self.open_elements.push(name.clone());
         }
@@ -1388,13 +1441,23 @@ impl Parser {
                 value,
             })
             .collect();
-        self.enter(
-            ParserState::OutsideTag,
-            Some(Ok(XmlEvent::StartElement {
-                name: name.qualified(),
-                attributes,
-            })),
-        )
+        let start = XmlEvent::StartElement {
+            name: name.qualified(),
+            attributes,
+        };
+        let declarations = self.namespaces.last().cloned().unwrap_or_default();
+        if declarations.is_empty() {
+            return self.enter(ParserState::OutsideTag, Some(Ok(start)));
+        }
+        let mut events: VecDeque<XmlEvent> = declarations
+            .into_iter()
+            .map(|(prefix, uri)| XmlEvent::StartNamespace { prefix, uri })
+            .collect();
+        events.push_back(start);
+        events.append(&mut self.next_event);
+        self.next_event = events;
+        let first = self.next_event.pop_front();
+        self.enter(ParserState::OutsideTag, first.map(Ok))
     }
 
     fn emit_end_element(&mut self) -> Step {
@@ -1410,6 +1473,7 @@ impl Parser {
         };
         if name == open {
             self.pop_namespace = true;
+            self.queue_end_namespaces();
             self.enter(
                 ParserState::OutsideTag,
                 Some(Ok(XmlEvent::EndElement {
@@ -1677,7 +1741,7 @@ impl Parser {
                     let instruction = XmlEvent::ProcessingInstruction { name, data: None };
                     match self.set_encountered(Encountered::Declaration) {
                         Some(start) => {
-                            self.next_event = Some(instruction);
+                            self.next_event.push_back(instruction);
                             self.enter(ParserState::OutsideTag, Some(start))
                         }
                         None => self.enter(ParserState::OutsideTag, Some(Ok(instruction))),
@@ -1748,6 +1812,11 @@ impl Parser {
             };
             self.lexer.decoder.encoding = encoding;
         }
+        self.next_event.push_back(XmlEvent::XmlDecl {
+            version: core::mem::take(&mut self.decl_version),
+            encoding: self.decl_encoding.take(),
+            standalone: self.decl_standalone,
+        });
         self.enter(ParserState::OutsideTag, Some(Ok(XmlEvent::StartDocument)))
     }
 
@@ -1797,6 +1866,7 @@ impl Parser {
                 ValueStep::Pending => None,
                 ValueStep::Failed(error) => Some(Err(error)),
                 ValueStep::Complete(value) => {
+                    self.decl_version = value.clone();
                     self.version = match value.as_str() {
                         "1.0" => Some(XmlVersion::Xml10),
                         "1.1" => Some(XmlVersion::Xml11),
@@ -1846,6 +1916,7 @@ impl Parser {
                 ValueStep::Pending => None,
                 ValueStep::Failed(error) => Some(Err(error)),
                 ValueStep::Complete(value) => {
+                    self.decl_encoding = Some(value.clone());
                     self.declared_encoding = Some(value);
                     self.proceed(declaration(Declaration::AfterEncodingValue))
                 }
@@ -1876,6 +1947,7 @@ impl Parser {
                 ValueStep::Pending => None,
                 ValueStep::Failed(error) => Some(Err(error)),
                 ValueStep::Complete(value) if value == "yes" || value == "no" => {
+                    self.decl_standalone = Some(value == "yes");
                     self.proceed(declaration(Declaration::AfterStandaloneValue))
                 }
                 ValueStep::Complete(_) => Some(Err(ReaderError::InvalidStandalone)),
@@ -1900,7 +1972,11 @@ impl Parser {
             }
             Token::SingleQuote | Token::DoubleQuote => {
                 self.quote = None;
-                self.text.clear();
+                let value = self.take_text();
+                match literal {
+                    Literal::System => self.doctype_system_id = Some(value),
+                    Literal::Public => self.doctype_public_id = Some(value),
+                }
                 let next = match literal {
                     Literal::System => Doctype::Outside,
                     Literal::Public => Doctype::BeforeSystemLiteral,
@@ -1956,11 +2032,12 @@ impl Parser {
             },
             Doctype::Name => match token {
                 Token::TagEnd => {
-                    self.text.clear();
-                    self.enter(ParserState::OutsideTag, Some(Ok(XmlEvent::Doctype)))
+                    self.doctype_name = self.take_text();
+                    let event = self.take_doctype();
+                    self.enter(ParserState::OutsideTag, Some(Ok(event)))
                 }
                 _ if whitespace => {
-                    self.text.clear();
+                    self.doctype_name = self.take_text();
                     self.proceed(doctype(Doctype::Outside))
                 }
                 Token::Character(character) if is_name_character(character) => {
@@ -2009,8 +2086,14 @@ impl Parser {
             Doctype::SystemLiteral => self.quoted_literal(token, Literal::System),
             Doctype::PublicId => self.quoted_literal(token, Literal::Public),
             Doctype::Outside => match token {
-                Token::TagEnd => self.enter(ParserState::OutsideTag, Some(Ok(XmlEvent::Doctype))),
-                Token::Character('[') => self.proceed(doctype(Doctype::InternalSubset)),
+                Token::TagEnd => {
+                    let event = self.take_doctype();
+                    self.enter(ParserState::OutsideTag, Some(Ok(event)))
+                }
+                Token::Character('[') => {
+                    self.doctype_internal_subset = true;
+                    self.proceed(doctype(Doctype::InternalSubset))
+                }
                 Token::Character(character @ ('S' | 'P')) => {
                     self.text.push(character);
                     self.proceed(doctype(Doctype::ExternalIdKeyword))

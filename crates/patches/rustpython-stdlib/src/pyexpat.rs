@@ -1271,6 +1271,63 @@ mod _pyexpat {
                     let comment = PyStr::from(comment).into_ref(&vm.ctx);
                     invoke_handler(vm, &self.comment, (comment,))
                 }
+                XmlEvent::XmlDecl {
+                    version,
+                    encoding,
+                    standalone,
+                } => {
+                    let encoding: PyObjectRef =
+                        encoding.map_or_else(|| vm.ctx.none(), |e| vm.ctx.new_str(e).into());
+                    let standalone: i32 = match standalone {
+                        None => -1,
+                        Some(true) => 1,
+                        Some(false) => 0,
+                    };
+                    invoke_handler(
+                        vm,
+                        &self.xml_decl,
+                        (vm.ctx.new_str(version), encoding, vm.ctx.new_int(standalone)),
+                    )
+                }
+                XmlEvent::Doctype {
+                    name,
+                    system_id,
+                    public_id,
+                    has_internal_subset,
+                } => {
+                    let text = |value: Option<String>| -> PyObjectRef {
+                        value.map_or_else(|| vm.ctx.none(), |v| vm.ctx.new_str(v).into())
+                    };
+                    invoke_handler(
+                        vm,
+                        &self.start_doctype_decl,
+                        (
+                            vm.ctx.new_str(name),
+                            text(system_id),
+                            text(public_id),
+                            vm.ctx.new_int(i32::from(has_internal_subset)),
+                        ),
+                    )?;
+                    invoke_handler(vm, &self.end_doctype_decl, ())
+                }
+                // libexpat reports namespace declarations only when namespace
+                // processing is on (a namespace_separator was given).
+                XmlEvent::StartNamespace { prefix, uri } if self.namespace_separator.is_some() => {
+                    let prefix: PyObjectRef = if prefix.is_empty() {
+                        vm.ctx.none()
+                    } else {
+                        vm.ctx.new_str(prefix).into()
+                    };
+                    invoke_handler(vm, &self.start_namespace_decl, (prefix, vm.ctx.new_str(uri)))
+                }
+                XmlEvent::EndNamespace { prefix } if self.namespace_separator.is_some() => {
+                    let prefix: PyObjectRef = if prefix.is_empty() {
+                        vm.ctx.none()
+                    } else {
+                        vm.ctx.new_str(prefix).into()
+                    };
+                    invoke_handler(vm, &self.end_namespace_decl, (prefix,))
+                }
                 XmlEvent::CData(chars) => {
                     invoke_handler(vm, &self.start_cdata_section, ())?;
                     let str = PyStr::from(chars).into_ref(&vm.ctx);
