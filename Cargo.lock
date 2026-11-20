@@ -453,6 +453,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocode-build-opt"
+version = "0.7.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "nanocode-bytes"
 version = "0.7.0"
 
@@ -1340,6 +1347,14 @@ dependencies = [
  "nanocode-board",
  "nanocode-executor",
  "nanocode-turnlog",
+ "serde_json",
+]
+
+[[package]]
+name = "nc-build"
+version = "0.7.0"
+dependencies = [
+ "nanocode-build-opt",
  "serde_json",
 ]
 

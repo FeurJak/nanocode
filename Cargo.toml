@@ -95,6 +95,8 @@ members = [
     "bin/cua-driver",
     "bin/nc-lite",
     "bin/nc-board",
+    "bin/nc-build",
+    "crates/runtime/build-opt",
     "bin/nanocode-python",
     "bin/nanocode-sim",
 ]
