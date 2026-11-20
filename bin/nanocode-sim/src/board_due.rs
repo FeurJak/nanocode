@@ -280,6 +280,7 @@ fn step(
             Op::Claim {
                 task: id.clone(),
                 lease_ms: LEASE,
+                fence: None,
             },
         )? {
             continue;
@@ -424,6 +425,7 @@ async fn waits(seed: u64) -> Result<u64, String> {
                 Op::Claim {
                     task: id.clone(),
                     lease_ms: LEASE,
+                    fence: None,
                 },
             )
             .await

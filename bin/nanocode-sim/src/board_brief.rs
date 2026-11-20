@@ -157,6 +157,7 @@ fn claim(host: &mut Host, now: u64, task: &TaskId) -> Result<ClaimId, String> {
     let op = Op::Claim {
         task: task.clone(),
         lease_ms: LEASE,
+        fence: None,
     };
     let (id, _) = host.append(WORKER, now, op)?;
     Ok(ClaimId(id.0))

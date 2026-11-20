@@ -879,6 +879,7 @@ impl Sim {
             Op::Claim {
                 task: task.clone(),
                 lease_ms,
+                fence: None,
             },
             Then::Claim(task),
         );
@@ -1168,6 +1169,7 @@ impl Sim {
             Op::Claim {
                 task: intent,
                 lease_ms,
+                fence: None,
             },
             Then::Own,
         );

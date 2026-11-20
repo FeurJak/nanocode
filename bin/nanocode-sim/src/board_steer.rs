@@ -421,6 +421,7 @@ fn step(
             Op::Claim {
                 task: task.clone(),
                 lease_ms: LEASE,
+                fence: None,
             },
         )?;
         if verdict.is_ok() {

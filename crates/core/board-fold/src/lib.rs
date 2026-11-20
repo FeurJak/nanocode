@@ -58,6 +58,12 @@ pub struct NewTask {
     pub terms: Terms,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Fence {
+    pub partition: u32,
+    pub epoch: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
 pub enum Outcome {
@@ -74,6 +80,8 @@ pub enum Op {
     Claim {
         task: TaskId,
         lease_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fence: Option<Fence>,
     },
     Renew {
         task: TaskId,
@@ -117,6 +125,10 @@ pub enum Op {
     Revoke {
         grant: EventId,
     },
+    Epoch {
+        partition: u32,
+        epoch: u64,
+    },
     Charter {},
     Tasks(TaskOp),
     Sync {
@@ -147,6 +159,7 @@ impl Op {
             Self::Steer(op) => Some(op.task()),
             Self::Grant { .. }
             | Self::Revoke { .. }
+            | Self::Epoch { .. }
             | Self::Charter {}
             | Self::Say { .. }
             | Self::Watch(_) => None,
@@ -226,6 +239,7 @@ pub enum Rejection {
     Watch(watch::Refusal),
     Steer(steer::Refusal),
     Illegal { from: String, to: String },
+    Stale { fence: Fence },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -398,6 +412,10 @@ impl Fold {
 
     pub fn task(&self, id: &TaskId) -> Option<&Task> {
         self.tasks.get(id)
+    }
+
+    pub fn epoch(&self, partition: u32) -> u64 {
+        self.access.epoch(partition)
     }
 
     pub fn outcome(&self, event: &EventId) -> Option<&Result<u64, Rejection>> {
@@ -576,7 +594,10 @@ impl Fold {
                     None => Ok(()),
                 }
             }
-            Op::Claim { task, .. } => self.claimable(task, at_ms).map(drop),
+            Op::Claim { task, fence, .. } => {
+                self.fenced(fence.as_ref())?;
+                self.claimable(task, at_ms).map(drop)
+            }
             Op::Finish { task, .. } if mutated(Mutation::FinishIgnoresClaim) => {
                 match self.tasks.get(task).map(|task| &task.phase) {
                     None => Err(Rejection::UnknownTask),
@@ -605,6 +626,7 @@ impl Fold {
                 self.tasks.get(task).map(drop).ok_or(Rejection::UnknownTask)
             }
             Op::Move { task, parent } => self.movable(task, parent.as_ref()),
+            Op::Epoch { partition, epoch } => self.advances(*partition, *epoch),
             Op::Grant { .. } | Op::Revoke { .. } | Op::Charter {} => Ok(()),
             Op::Tasks(op) => self.check_tasks(at_ms, op),
             Op::Sync { sync } => self.check_sync(sync),
@@ -616,6 +638,35 @@ impl Fold {
 
     pub fn children(&self, task: &TaskId) -> impl Iterator<Item = &TaskId> {
         self.children.get(task).into_iter().flatten()
+    }
+
+    fn fenced(&self, fence: Option<&Fence>) -> Result<(), Rejection> {
+        let Some(fence) = fence else {
+            return Ok(());
+        };
+        let held = Fence {
+            partition: fence.partition,
+            epoch: self.access.epoch(fence.partition),
+        };
+        if held == *fence || mutated(Mutation::EpochFenceIgnored) {
+            Ok(())
+        } else {
+            Err(Rejection::Stale { fence: held })
+        }
+    }
+
+    fn advances(&self, partition: u32, epoch: u64) -> Result<(), Rejection> {
+        let epoch_held = self.access.epoch(partition);
+        if epoch > epoch_held {
+            Ok(())
+        } else {
+            Err(Rejection::Stale {
+                fence: Fence {
+                    partition,
+                    epoch: epoch_held,
+                },
+            })
+        }
     }
 
     fn movable(&self, task: &TaskId, parent: Option<&TaskId>) -> Result<(), Rejection> {
@@ -943,7 +994,11 @@ impl Fold {
                     to: parent.clone(),
                 }
             }
-            Op::Grant { .. } | Op::Revoke { .. } | Op::Charter {} | Op::Watch(_) => return,
+            Op::Grant { .. }
+            | Op::Revoke { .. }
+            | Op::Epoch { .. }
+            | Op::Charter {}
+            | Op::Watch(_) => return,
             Op::Tasks(op) => {
                 self.steer(seq, event, op);
                 return;

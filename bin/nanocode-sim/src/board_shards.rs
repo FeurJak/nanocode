@@ -25,8 +25,8 @@ use std::{
 };
 
 use nanocode_board::{
-    Applied, Board, BoardError, ClaimId, EventId, Fold, NewTask, Op, Outcome, Rejection, TaskId,
-    Write,
+    Applied, Board, BoardError, ClaimId, EventId, Fence, Fold, NewTask, Op, Outcome, Rejection,
+    TaskId, Write,
     access::{Can, Grant, Who},
     deliver::Outbox,
     shards::{self, Committer, Merged, ReadyIndex, Route, Stats as CommitStats},
@@ -62,10 +62,11 @@ pub enum ShardsMutation {
     CrossMoveKeepsParent,
     CrossMoveSkipsUnmark,
     CrossMoveIngestsFirst,
+    EpochFenceIgnored,
 }
 
 impl ShardsMutation {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::None,
         Self::GroupSkipsSeq,
         Self::GroupVerdictFromPlan,
@@ -78,6 +79,7 @@ impl ShardsMutation {
         Self::CrossMoveKeepsParent,
         Self::CrossMoveSkipsUnmark,
         Self::CrossMoveIngestsFirst,
+        Self::EpochFenceIgnored,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -100,6 +102,7 @@ impl ShardsMutation {
             Self::CrossMoveKeepsParent => "cross_move_keeps_parent",
             Self::CrossMoveSkipsUnmark => "cross_move_skips_unmark",
             Self::CrossMoveIngestsFirst => "cross_move_ingests_first",
+            Self::EpochFenceIgnored => "epoch_fence_ignored",
         }
     }
 
@@ -126,6 +129,7 @@ impl ShardsMutation {
             Self::CrossMoveKeepsParent => BoardRule::CrossMoveKeepsParent,
             Self::CrossMoveSkipsUnmark => BoardRule::CrossMoveSkipsUnmark,
             Self::CrossMoveIngestsFirst => BoardRule::CrossMoveIngestsFirst,
+            Self::EpochFenceIgnored => BoardRule::EpochFenceIgnored,
         }
     }
 }
@@ -222,6 +226,8 @@ struct Shape {
     crash_ppm: u64,
     pick: Pick,
     audit: bool,
+    epochs: u64,
+    fence_ppm: u64,
 }
 
 impl Shape {
@@ -256,6 +262,8 @@ impl Shape {
             crash_ppm: rng.range(0, 400_000),
             pick: Pick::Index,
             audit: true,
+            epochs: rng.range(0, 24),
+            fence_ppm: rng.range(0, 1_000_000),
         }
     }
 
@@ -715,6 +723,26 @@ async fn lead(world: &World) {
     }
 }
 
+async fn fencer(world: &World) {
+    let mut rng = Rng::derive(world.shape.epochs, "board shards fencer");
+    for bump in 0..world.shape.epochs {
+        world.nap(rng.range(1, world.shape.lease_ms)).await;
+        if world.done() {
+            return;
+        }
+        let _ = world.refresh().await;
+        let partition = Partition(rng.below(u64::from(world.count.get())) as u32);
+        let epoch = world.view.borrow()[partition.0 as usize].epoch(partition.0) + 1;
+        let op = Op::Epoch {
+            partition: partition.0,
+            epoch,
+        };
+        world
+            .settle_in(partition, &format!("epoch:{bump}"), op)
+            .await;
+    }
+}
+
 async fn writer(world: &World, index: u64) {
     let by = format!("agent:w{index}");
     let mut rng = Rng::derive(fnv(FNV_OFFSET, by.as_bytes()), "board shards writer");
@@ -778,9 +806,19 @@ async fn writer(world: &World, index: u64) {
             continue;
         }
         let key = format!("claim:{tries}");
+        let fence = rng.chance(world.shape.fence_ppm).then(|| {
+            let home = world
+                .merged(|merged| merged.home(&task))
+                .unwrap_or(Partition(0));
+            Fence {
+                partition: home.0,
+                epoch: world.view.borrow()[home.0 as usize].epoch(home.0),
+            }
+        });
         let claim = Op::Claim {
             task: task.clone(),
             lease_ms: world.shape.lease_ms,
+            fence,
         };
         let (partition, verdict) = world.submit(&by, key.clone(), claim).await;
         let event = EventId(format!("{by}#{key}"));
@@ -944,8 +982,11 @@ async fn run(world: &World) {
         }));
     }
     drives.push(Box::pin(async move {
-        let mut actors: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + '_>>> =
-            vec![Box::pin(lead(world)), Box::pin(mover(world))];
+        let mut actors: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + '_>>> = vec![
+            Box::pin(lead(world)),
+            Box::pin(mover(world)),
+            Box::pin(fencer(world)),
+        ];
         for index in 0..world.shape.writers {
             actors.push(Box::pin(writer(world, index)));
         }
@@ -1000,8 +1041,25 @@ fn check(world: &World, logs: &[Vec<(u64, String)>]) -> Result<ShardsStats, Stri
     for (index, log) in logs.iter().enumerate() {
         let mut fold = Fold::new();
         for (seq, body) in log {
+            let event: nanocode_board::Event = serde_json::from_str(body)
+                .map_err(|error| format!("partition {index} row {seq}: {error}"))?;
+            let fence = match &event.op {
+                Op::Claim {
+                    fence: Some(fence), ..
+                } => Some((*fence, fold.epoch(fence.partition))),
+                _ => None,
+            };
             fold.apply(*seq, body)
                 .map_err(|error| format!("partition {index} does not fold: {error}"))?;
+            if let Some((fence, held)) = fence
+                && fold.outcome(&event.id) == Some(&Ok(*seq))
+                && fence.epoch != held
+            {
+                return Err(format!(
+                    "partition {index} row {seq}: claim {} landed fenced at epoch {} while partition {} was at epoch {held}",
+                    event.id, fence.epoch, fence.partition
+                ));
+            }
         }
         folds.push(fold);
     }
@@ -1058,7 +1116,9 @@ fn check(world: &World, logs: &[Vec<(u64, String)>]) -> Result<ShardsStats, Stri
                     ));
                 }
                 match rejection {
-                    Rejection::Held { .. } | Rejection::Terminal => stats.raced += 1,
+                    Rejection::Held { .. } | Rejection::Terminal | Rejection::Stale { .. } => {
+                        stats.raced += 1;
+                    }
                     other if world.shape.committers == 1 => {
                         return Err(format!(
                             "{event} on {task} was refused for {other:?}, not for its own task's claim"
@@ -1411,6 +1471,8 @@ pub fn bench(partitions: &[u32], writers: &[u64], batch: usize, cost: Cost) {
                 crash_ppm: 0,
                 pick: Pick::Index,
                 audit: false,
+                epochs: 0,
+                fence_ppm: 0,
             };
             let mut walls = Vec::new();
             for _ in 0..BENCH_ROUNDS {

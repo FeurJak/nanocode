@@ -237,6 +237,12 @@ impl<'a> Merged<'a> {
                     Route::One(from)
                 }
             }
+            Op::Epoch { partition, .. } if *partition < count.get() => {
+                Route::One(Partition(*partition))
+            }
+            Op::Epoch { partition, .. } => Route::Refused(format!(
+                "partition {partition} is not one of the board's {count}"
+            )),
             Op::Grant { .. } | Op::Revoke { .. } | Op::Charter {} => Route::Every,
             _ => Route::One(op.task().map_or(Partition(0), home)),
         }

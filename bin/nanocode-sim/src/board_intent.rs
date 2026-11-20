@@ -180,6 +180,7 @@ fn claim(
         Op::Claim {
             task: task.clone(),
             lease_ms: LEASE,
+            fence: None,
         },
     )?;
     Ok(

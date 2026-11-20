@@ -486,6 +486,7 @@ fn start(intent: &TaskId, attempts: u64, policy: &Policy) -> (String, Op) {
         Op::Claim {
             task: intent.clone(),
             lease_ms: policy.start_timeout_ms,
+            fence: None,
         },
     )
 }

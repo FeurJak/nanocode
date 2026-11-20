@@ -241,6 +241,8 @@ pub struct Access {
     posters: BTreeMap<TaskId, Actor>,
     #[serde(with = "crate::pairs")]
     holders: BTreeMap<TaskId, Actor>,
+    #[serde(default, with = "crate::pairs")]
+    epochs: BTreeMap<u32, u64>,
 }
 
 impl Access {
@@ -250,7 +252,12 @@ impl Access {
             grants: BTreeMap::new(),
             posters: BTreeMap::new(),
             holders: BTreeMap::new(),
+            epochs: BTreeMap::new(),
         }
+    }
+
+    pub fn epoch(&self, partition: u32) -> u64 {
+        self.epochs.get(&partition).copied().unwrap_or(0)
     }
 
     pub fn owner(&self) -> Option<&str> {
@@ -383,6 +390,9 @@ impl Access {
             Op::Claim { task, .. } => {
                 self.holders.insert(task.clone(), actor);
             }
+            Op::Epoch { partition, epoch } => {
+                self.epochs.insert(*partition, *epoch);
+            }
             Op::Tasks(TaskOp::Batch { name, tasks }) => {
                 for task in resolve(name, tasks) {
                     self.posters.insert(task.id, actor.clone());
@@ -431,6 +441,7 @@ impl Fold {
         }
         match op {
             Op::Charter {} => Ok(()),
+            Op::Epoch { .. } => access.need(&actor, "*", Can::Manage),
             Op::Post { task } => {
                 if let Some(parent) = &task.parent
                     && !access.reads(&actor, &parent.0)

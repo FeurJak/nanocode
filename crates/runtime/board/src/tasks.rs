@@ -147,6 +147,7 @@ impl Board {
                 Op::Claim {
                     task: task.clone(),
                     lease_ms,
+                    fence: None,
                 },
             )
             .await?;

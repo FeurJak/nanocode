@@ -67,6 +67,7 @@ fn op(rng: &mut Rng, ids: &[EventId]) -> Op {
         4 => Op::Claim {
             task: task(rng),
             lease_ms: rng.below(1_000),
+            fence: None,
         },
         5 => Op::Renew {
             task: task(rng),

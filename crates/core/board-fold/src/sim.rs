@@ -151,6 +151,7 @@ pub enum Mutation {
     CrossMoveKeepsParent,
     CrossMoveSkipsUnmark,
     CrossMoveIngestsFirst,
+    EpochFenceIgnored,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

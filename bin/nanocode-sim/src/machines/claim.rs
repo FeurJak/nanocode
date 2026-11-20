@@ -354,6 +354,7 @@ impl Model for Folded {
                 Op::Claim {
                     task: task(index),
                     lease_ms: if lapsed { 0 } else { LEASE_MS },
+                    fence: None,
                 },
             ),
             Step::Renew {

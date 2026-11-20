@@ -745,6 +745,7 @@ impl Inner {
                             Op::Claim {
                                 task: id.clone(),
                                 lease_ms: LEASE_MS,
+                                fence: None,
                             },
                         )
                         .await

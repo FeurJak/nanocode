@@ -296,6 +296,7 @@ impl World {
         let claim = Op::Claim {
             task: task.clone(),
             lease_ms: LEASE_MS,
+            fence: None,
         };
         if board.submit(now, claim).await.is_err() {
             return Ok(());

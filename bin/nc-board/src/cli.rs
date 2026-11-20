@@ -320,6 +320,7 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
             let claim = |task: &TaskId| Op::Claim {
                 task: task.clone(),
                 lease_ms,
+                fence: None,
             };
             match board.submit(at_ms, claim(&task)).await {
                 Err(BoardError::Rejected(Rejection::Held { .. } | Rejection::Terminal))
@@ -373,6 +374,7 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
                 Op::Claim {
                     task: id(&task),
                     lease_ms,
+                    fence: None,
                 },
             )
             .await?;

@@ -1234,6 +1234,7 @@ async fn worker(world: &World, index: u64, epoch: u64) {
             .submit(Op::Claim {
                 task: task.clone(),
                 lease_ms: world.shape.lease_ms,
+                fence: None,
             })
             .await
         else {
@@ -1441,7 +1442,7 @@ impl Reference {
                 }
                 true
             }
-            Op::Claim { task, lease_ms } => {
+            Op::Claim { task, lease_ms, .. } => {
                 let Some((_, needs, phase)) = self.tasks.get(&task.0) else {
                     return false;
                 };
@@ -1543,7 +1544,7 @@ impl Reference {
             | Op::Relabel { .. }
             | Op::Rank { .. }
             | Op::Sync { .. } => false,
-            Op::Grant { .. } | Op::Revoke { .. } | Op::Charter {} => true,
+            Op::Grant { .. } | Op::Revoke { .. } | Op::Epoch { .. } | Op::Charter {} => true,
             Op::Say { .. } => false,
             Op::Watch(_) | Op::Steer(_) => false,
         }
