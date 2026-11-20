@@ -225,6 +225,7 @@ fn entry_row(path: &str, entry: &Entry) -> Value {
             size,
             mode,
             mtime_ns,
+            link,
         } => Value::Array(vec![
             text(path.to_owned()),
             text(FILE.to_owned()),
@@ -232,7 +233,7 @@ fn entry_row(path: &str, entry: &Entry) -> Value {
             text(size.to_string()),
             text(mode.to_string()),
             text(mtime_ns.to_string()),
-            Value::Null,
+            link.map_or(Value::Null, |link| text(link.to_string())),
         ]),
         Entry::Dir { mode, mtime_ns } => Value::Array(vec![
             text(path.to_owned()),
@@ -268,6 +269,7 @@ fn parse_entry(row: &SqlRow) -> Result<Option<(String, Entry)>, Failure> {
             size: number(row, 4, path)?,
             mode: number(row, 5, path)?,
             mtime_ns,
+            link: column(row, 7).map(|_| number(row, 7, path)).transpose()?,
         },
         Some(DIR) => Entry::Dir {
             mode: number(row, 5, path)?,

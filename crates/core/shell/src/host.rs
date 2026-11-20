@@ -2,7 +2,7 @@ use crate::{
     answers::Answers,
     command::{Call, Commands, Session, Stream},
     file::{self, Device, bad_descriptor},
-    fs::{FileSystem, Kind, Remove, Reply, Stat, WholeFile, Write, join, normalize},
+    fs::{FileSystem, Kind, Links, Remove, Reply, Stat, WholeFile, Write, join, normalize},
     machine::{Identity, Machine},
     shell::{Changes, Limit, Limits},
 };
@@ -10,7 +10,7 @@ use nanocode_bytes::Bytes;
 use psh_engine::{
     ControlHandle, HostFile,
     host::{
-        Access, ChildFd, DirEntry, ExitStatus, ExtProc, FileKind, HostFuture, HostInfo, Metadata,
+        Access, ChildFd, DirEntry, ExitStatus, ExtProc, ExtraMetadata, FileKind, HostFuture, HostInfo, Metadata,
         OpenOptions, RunInShell, SIGKILL, Signal, SpawnSpec, Spawned,
     },
 };
@@ -252,6 +252,17 @@ impl Vfs {
         }
     }
 
+    pub(crate) fn hard_link(self: &Rc<Self>, existing: &[u8], link: Vec<u8>) -> Reply<()> {
+        match self.charge() {
+            Ok(()) => {
+                self.writes.set(self.writes.get() + 1);
+                let reply = self.fs().hard_link(existing, &link);
+                self.change(reply, move |changes| changes.wrote(link))
+            }
+            Err(error) => Reply::Now(Err(error)),
+        }
+    }
+
     pub(crate) fn set_mtime(&self, path: &[u8], mtime_ns: i64) -> Reply<()> {
         match self.charge() {
             Ok(()) => self.fs().set_mtime(path, mtime_ns),
@@ -329,7 +340,12 @@ fn inode(path: &[u8]) -> u64 {
     hash
 }
 
-fn metadata(path: &[u8], stat: Stat, info: &HostInfo) -> Metadata {
+/// The inode of a hard-linked file, the same through each of its names.
+fn shared_inode(links: Links) -> u64 {
+    inode(format!("\0link {}", links.group).as_bytes())
+}
+
+fn metadata(path: &[u8], stat: Stat, links: Option<Links>, info: &HostInfo) -> Metadata {
     Metadata {
         kind: match stat.kind {
             Kind::File => FileKind::File,
@@ -340,7 +356,7 @@ fn metadata(path: &[u8], stat: Stat, info: &HostInfo) -> Metadata {
         mode: stat.mode,
         mtime_ns: stat.mtime_ns,
         dev: 1,
-        ino: inode(path),
+        ino: links.map_or_else(|| inode(path), shared_inode),
         uid: info.uid,
         gid: info.groups.first().copied().unwrap_or(info.uid),
     }
@@ -401,7 +417,10 @@ impl psh_engine::Host for Host {
         self.0
             .stat(&path, follow)
             .map(move |result| match result {
-                Ok(stat) => Ok(metadata(&path, stat, &vfs.identity.info)),
+                Ok(stat) => {
+                    let links = vfs.fs().links(&path, follow);
+                    Ok(metadata(&path, stat, links, &vfs.identity.info))
+                }
                 Err(error) if error.kind() == io::ErrorKind::NotFound && path == DEVICES => {
                     Ok(metadata(
                         &path,
@@ -411,6 +430,7 @@ impl psh_engine::Host for Host {
                             mode: 0o755,
                             mtime_ns: 0,
                         },
+                        None,
                         &vfs.identity.info,
                     ))
                 }
@@ -578,6 +598,28 @@ impl psh_engine::Host for Host {
 
     fn symlink(&self, target: &[u8], link: &[u8]) -> HostFuture<io::Result<()>> {
         self.0.symlink(target, normalize(link)).boxed()
+    }
+
+    fn hard_link(&self, existing: &[u8], link: &[u8]) -> HostFuture<io::Result<()>> {
+        self.0.hard_link(&normalize(existing), normalize(link)).boxed()
+    }
+
+    fn stat_extra(
+        &self,
+        path: &[u8],
+        follow: bool,
+    ) -> HostFuture<io::Result<(Metadata, ExtraMetadata)>> {
+        let stat = psh_engine::Host::stat(self, path, follow);
+        let vfs = self.0.clone();
+        let path = normalize(path);
+        Box::pin(async move {
+            let metadata = stat.await?;
+            let mut extra = ExtraMetadata::derived(&metadata);
+            if let Some(links) = vfs.fs().links(&path, follow) {
+                extra.nlink = links.names;
+            }
+            Ok((metadata, extra))
+        })
     }
 
     fn read_link(&self, path: &[u8]) -> HostFuture<io::Result<Vec<u8>>> {

@@ -312,7 +312,11 @@ impl World {
             }
             6 => {
                 let (target, link) = (self.path(), self.path());
-                reply(fs.symlink(&target.as_bytes()[1..], link.as_bytes()))
+                if self.rng.chance(500_000) {
+                    reply(fs.hard_link(target.as_bytes(), link.as_bytes()))
+                } else {
+                    reply(fs.symlink(&target.as_bytes()[1..], link.as_bytes()))
+                }
             }
             7 => {
                 let path = self.path();

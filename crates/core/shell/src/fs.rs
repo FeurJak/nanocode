@@ -83,6 +83,15 @@ pub struct WholeFile<'a> {
     pub mode: u32,
 }
 
+/// The names one hard-linked file shares (see [`FileSystem::links`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Links {
+    /// Identifies the file across its names, for its inode number.
+    pub group: u64,
+    /// How many names it has.
+    pub names: u64,
+}
+
 /// What [`FileSystem::write_files`] did.
 #[derive(Default)]
 pub struct Wrote {
@@ -111,6 +120,20 @@ pub trait FileSystem {
     fn read_link(&self, path: &[u8]) -> Reply<Vec<u8>> {
         let _ = path;
         Reply::Now(Err(io::ErrorKind::Unsupported.into()))
+    }
+
+    /// Makes `link` another name of the file `existing` (not following a symlink
+    /// there), so a change through either shows through both.
+    fn hard_link(&self, existing: &[u8], link: &[u8]) -> Reply<()> {
+        let _ = (existing, link);
+        Reply::Now(Err(io::ErrorKind::Unsupported.into()))
+    }
+
+    /// The names the file at `path` shares with others through hard links, or
+    /// `None` when it has only its own: its inode then comes from its path.
+    fn links(&self, path: &[u8], follow: bool) -> Option<Links> {
+        let _ = (path, follow);
+        None
     }
 
     fn set_mode(&self, path: &[u8], mode: u32) -> Reply<()> {

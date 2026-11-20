@@ -1,7 +1,10 @@
 use crate::sim::{Mutation, mutated};
 use nanocode_digest::Sha256;
 use nanocode_sync::OrdMap;
-use std::{collections::BTreeMap, fmt, io};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt, io,
+};
 
 pub const DIGEST_BYTES: usize = Sha256::OUTPUT_BYTES;
 pub const PARENT_MODE: u32 = 0o755;
@@ -63,11 +66,14 @@ pub struct Caps {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Entry {
+    /// A file. Names that share a `link` are hard links of one file: they hold the
+    /// same content, mode and time, and a change through one shows through all.
     File {
         digest: Digest,
         size: u64,
         mode: u32,
         mtime_ns: i64,
+        link: Option<u64>,
     },
     Dir {
         mode: u32,
@@ -105,6 +111,15 @@ impl Entry {
         }
     }
 
+    /// The hard-link group a file belongs to, if it was ever linked.
+    #[must_use]
+    pub const fn link(&self) -> Option<u64> {
+        match self {
+            Self::File { link, .. } => *link,
+            Self::Dir { .. } | Self::Symlink { .. } => None,
+        }
+    }
+
     #[must_use]
     pub const fn is_dir(&self) -> bool {
         matches!(self, Self::Dir { .. })
@@ -138,6 +153,11 @@ pub enum Op {
         from: String,
         to: String,
     },
+    /// Makes `to` another name of the file at `from` (a hard link).
+    Link {
+        from: String,
+        to: String,
+    },
     SetMode {
         path: String,
         mode: u32,
@@ -161,6 +181,7 @@ pub enum Refusal {
     NotADirectory { path: String },
     IsADirectory { path: String },
     DirectoryNotEmpty { path: String },
+    Exists { path: String },
 }
 
 impl Refusal {
@@ -176,6 +197,7 @@ impl Refusal {
             Self::NotADirectory { .. } => io::ErrorKind::NotADirectory,
             Self::IsADirectory { .. } => io::ErrorKind::IsADirectory,
             Self::DirectoryNotEmpty { .. } => io::ErrorKind::DirectoryNotEmpty,
+            Self::Exists { .. } => io::ErrorKind::AlreadyExists,
         }
     }
 }
@@ -209,6 +231,7 @@ impl fmt::Display for Refusal {
             Self::NotADirectory { path } => write!(formatter, "{path}: not a directory"),
             Self::IsADirectory { path } => write!(formatter, "{path}: is a directory"),
             Self::DirectoryNotEmpty { path } => write!(formatter, "{path}: directory not empty"),
+            Self::Exists { path } => write!(formatter, "{path}: file exists"),
         }
     }
 }
@@ -302,10 +325,14 @@ pub struct Manifest {
     entries: OrdMap<String, Entry>,
     bytes: u64,
     refs: OrdMap<Digest, u64>,
+    /// Each hard-link group's names.
+    links: OrdMap<u64, BTreeSet<String>>,
 }
 
 struct Draft<'a> {
     base: &'a OrdMap<String, Entry>,
+    links: &'a OrdMap<u64, BTreeSet<String>>,
+    next_link: u64,
     changes: BTreeMap<String, Option<Entry>>,
     caps: &'a Caps,
 }
@@ -388,6 +415,37 @@ impl Draft<'_> {
         Ok(())
     }
 
+    /// The names of hard-link group `link` as the draft holds them.
+    fn members(&self, link: u64) -> Vec<String> {
+        let held = self.links.get(&link).into_iter().flatten().cloned();
+        let added = self
+            .changes
+            .iter()
+            .filter(|(_, entry)| entry.as_ref().and_then(Entry::link) == Some(link))
+            .map(|(path, _)| path.clone());
+        let names: BTreeSet<String> = held.chain(added).collect();
+        names
+            .into_iter()
+            .filter(|path| self.get(path).and_then(Entry::link) == Some(link))
+            .collect()
+    }
+
+    /// Puts `entry` at `path` and, when it is a linked file, at every other name of
+    /// its file, as one file seen through each.
+    fn put_file(&mut self, path: String, entry: Entry) {
+        match entry.link() {
+            Some(link) => {
+                for name in self.members(link) {
+                    if name != path {
+                        self.insert(name, entry.clone());
+                    }
+                }
+                self.insert(path, entry);
+            }
+            None => self.insert(path, entry),
+        }
+    }
+
     fn not_a_dir(&self, path: &str) -> Result<(), Refusal> {
         match self.get(path) {
             Some(Entry::Dir { .. }) => Err(Refusal::IsADirectory {
@@ -433,6 +491,7 @@ impl Draft<'_> {
             } => self.symlink(path, target, *mtime_ns),
             Op::Remove { path, recursive } => self.remove_path(path, *recursive),
             Op::Move { from, to } => self.move_path(from, to),
+            Op::Link { from, to } => self.link(from, to),
             Op::SetMode { path, mode } => self.set_mode(path, *mode),
             Op::SetMtime { path, mtime_ns } => self.set_mtime(path, *mtime_ns),
         }
@@ -457,15 +516,57 @@ impl Draft<'_> {
         }
         self.make_parents(&path, mtime_ns)?;
         self.not_a_dir(&path)?;
-        self.insert(
+        let link = self.get(&path).and_then(Entry::link);
+        self.put_file(
             path,
             Entry::File {
                 digest,
                 size,
                 mode,
                 mtime_ns,
+                link,
             },
         );
+        Ok(())
+    }
+
+    fn link(&mut self, from: &str, to: &str) -> Result<(), Refusal> {
+        let from = self.path(from)?;
+        let to = self.path(to)?;
+        let entry = match self.get(&from).cloned() {
+            None => return Err(Refusal::NotFound { path: from }),
+            Some(Entry::Dir { .. }) => return Err(Refusal::IsADirectory { path: from }),
+            Some(entry) => entry,
+        };
+        if self.get(&to).is_some() {
+            return Err(Refusal::Exists { path: to });
+        }
+        self.make_parents(&to, entry.mtime_ns())?;
+        let entry = match entry {
+            Entry::File {
+                digest,
+                size,
+                mode,
+                mtime_ns,
+                link,
+            } => {
+                let link = link.unwrap_or_else(|| {
+                    self.next_link += 1;
+                    self.next_link
+                });
+                let file = Entry::File {
+                    digest,
+                    size,
+                    mode,
+                    mtime_ns,
+                    link: Some(link),
+                };
+                self.insert(from, file.clone());
+                file
+            }
+            symlink => symlink,
+        };
+        self.insert(to, entry);
         Ok(())
     }
 
@@ -569,14 +670,16 @@ impl Draft<'_> {
                 digest,
                 size,
                 mtime_ns,
+                link,
                 ..
-            }) => self.insert(
+            }) => self.put_file(
                 path,
                 Entry::File {
                     digest,
                     size,
                     mode,
                     mtime_ns,
+                    link,
                 },
             ),
             Some(Entry::Dir { mtime_ns, .. }) => self.insert(path, Entry::Dir { mode, mtime_ns }),
@@ -601,7 +704,7 @@ impl Draft<'_> {
             | Entry::Dir { mtime_ns: held, .. }
             | Entry::Symlink { mtime_ns: held, .. } => *held = mtime_ns,
         }
-        self.insert(path, entry);
+        self.put_file(path, entry);
         Ok(())
     }
 }
@@ -616,6 +719,7 @@ impl Manifest {
         }
         let mut bytes: u64 = 0;
         let mut refs = OrdMap::new();
+        let mut links: OrdMap<u64, BTreeSet<String>> = OrdMap::new();
         for (path, entry) in &entries {
             let corrupt = |why| {
                 Err(Corrupt {
@@ -634,6 +738,15 @@ impl Manifest {
             if let Some(digest) = entry.digest() {
                 *refs.entry(digest).or_insert(0) += 1;
             }
+            if let Some(link) = entry.link() {
+                let names = links.entry(link).or_default();
+                if let Some(first) = names.first()
+                    && entries.get(first) != Some(entry)
+                {
+                    return corrupt("its hard links hold another file");
+                }
+                names.insert(path.clone());
+            }
             let Some(total) = bytes.checked_add(entry.size()) else {
                 return corrupt("file sizes overflow");
             };
@@ -644,6 +757,7 @@ impl Manifest {
             entries: entries.into_iter().collect(),
             bytes,
             refs,
+            links,
         })
     }
 
@@ -676,6 +790,15 @@ impl Manifest {
         self.refs.keys()
     }
 
+    /// How many names the file at `path` has: 1 for one never hard-linked.
+    #[must_use]
+    pub fn names(&self, path: &str) -> u64 {
+        self.get(path)
+            .and_then(Entry::link)
+            .and_then(|link| self.links.get(&link))
+            .map_or(1, |names| names.len() as u64)
+    }
+
     pub fn children<'a>(&'a self, dir: &str) -> impl Iterator<Item = &'a str> + 'a {
         let prefix = if dir.is_empty() {
             String::new()
@@ -706,6 +829,8 @@ impl Manifest {
         }
         let mut draft = Draft {
             base: &self.entries,
+            links: &self.links,
+            next_link: self.links.get_max().map_or(0, |(link, _)| *link),
             changes: BTreeMap::new(),
             caps,
         };
@@ -838,6 +963,20 @@ impl Manifest {
                 Some(entry) => self.entries.insert(path.clone(), entry.clone()),
                 None => self.entries.remove(path),
             };
+            if let Some(link) = old.as_ref().and_then(Entry::link)
+                && let Some(names) = self.links.get_mut(&link)
+            {
+                names.remove(path);
+                if names.is_empty() {
+                    self.links.remove(&link);
+                }
+            }
+            if let Some(link) = entry.as_ref().and_then(Entry::link) {
+                self.links
+                    .entry(link)
+                    .or_default()
+                    .insert(path.clone());
+            }
             if let Some(old) = &old {
                 self.bytes -= old.size();
                 if let Some(digest) = old.digest() {

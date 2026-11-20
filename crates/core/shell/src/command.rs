@@ -1,7 +1,7 @@
 use crate::{
     answers,
     file::{Capture, Source},
-    fs::{FileSystem, Remove, Reply, Stat, Write, normalize},
+    fs::{FileSystem, Links, Remove, Reply, Stat, Write, normalize},
     host::{Host, Vfs},
     shell::{Limit, Limits},
 };
@@ -341,6 +341,14 @@ impl FileSystem for Tracked {
 
     fn read_link(&self, path: &[u8]) -> Reply<Vec<u8>> {
         self.0.read_link(&normalize(path))
+    }
+
+    fn hard_link(&self, existing: &[u8], link: &[u8]) -> Reply<()> {
+        self.0.hard_link(&normalize(existing), normalize(link))
+    }
+
+    fn links(&self, path: &[u8], follow: bool) -> Option<Links> {
+        self.0.fs().links(&normalize(path), follow)
     }
 
     fn set_mode(&self, path: &[u8], mode: u32) -> Reply<()> {

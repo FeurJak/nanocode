@@ -6,7 +6,7 @@ use crate::{
 use nanocode_bytes::{Bytes, BytesMut};
 use nanocode_digest::Sha256;
 use nanocode_shell::{
-    FileDownload, FileSystem, FileUpload, Kind, Machine, Remove, Reply, SHA256_BYTES, Stat,
+    FileDownload, FileSystem, FileUpload, Kind, Links, Machine, Remove, Reply, SHA256_BYTES, Stat,
     WholeFile, Write, Wrote, normalize,
 };
 use nanocode_sync::Semaphore;
@@ -712,6 +712,28 @@ impl Inner {
         self.commit(&ops, Vec::new()).await.map(drop)
     }
 
+    async fn hard_link(&self, existing: &[u8], link: &[u8]) -> io::Result<()> {
+        let _turn = self.gate.acquire().await.map_err(io::Error::other)?;
+        let (from, entry) = self.lookup(existing, false)?;
+        let (to, held) = self.lookup(link, false)?;
+        match entry {
+            _ if from.is_empty() => return Err(io::ErrorKind::PermissionDenied.into()),
+            None => return missing(),
+            Some(Entry::Dir { .. }) => return Err(io::ErrorKind::PermissionDenied.into()),
+            Some(_) => {}
+        }
+        if to.is_empty() || held.is_some() {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        dir_exists(&self.manifest.borrow(), &to)?;
+        let mut ops = vec![Op::Link {
+            from,
+            to: to.clone(),
+        }];
+        touch(&mut ops, &to, self.now());
+        self.commit(&ops, Vec::new()).await.map(drop)
+    }
+
     async fn symlink(&self, target: &[u8], link: &[u8]) -> io::Result<()> {
         let _turn = self.gate.acquire().await.map_err(io::Error::other)?;
         let target = std::str::from_utf8(target)
@@ -867,6 +889,22 @@ impl FileSystem for WorkspaceFs {
         let (target, link) = (target.to_vec(), link.to_vec());
         later(&self.inner, async move |inner: &Inner| {
             inner.symlink(&target, &link).await
+        })
+    }
+
+    fn hard_link(&self, existing: &[u8], link: &[u8]) -> Reply<()> {
+        let (existing, link) = (existing.to_vec(), link.to_vec());
+        later(&self.inner, async move |inner: &Inner| {
+            inner.hard_link(&existing, &link).await
+        })
+    }
+
+    fn links(&self, path: &[u8], follow: bool) -> Option<Links> {
+        let (path, entry) = self.inner.lookup(path, follow).ok()?;
+        let group = entry?.link()?;
+        Some(Links {
+            group,
+            names: self.inner.manifest.borrow().names(&path),
         })
     }
 
@@ -1083,5 +1121,48 @@ mod tests {
             let read = reply(fs.read(format!("/{path}").as_bytes(), 64)).expect("read");
             assert_eq!(&read[..], want);
         }
+    }
+
+    #[test]
+    fn hard_links_share_one_file_until_each_name_goes() {
+        let fs = workspace(64);
+        reply(fs.write(b"/a", b"one", Write::Replace)).expect("a file");
+        reply(fs.write(b"/other", b"one", Write::Replace)).expect("a twin");
+        assert_eq!(fs.links(b"/a", true), None);
+        reply(fs.hard_link(b"/a", b"/b")).expect("a hard link");
+        let group = fs.links(b"/a", true).expect("linked").group;
+        assert_eq!(fs.links(b"/a", true), Some(Links { group, names: 2 }));
+        assert_eq!(fs.links(b"/b", true), Some(Links { group, names: 2 }));
+        assert_eq!(fs.links(b"/other", true), None);
+        reply(fs.write(b"/b", b"two", Write::Append)).expect("a write through b");
+        reply(fs.set_mode(b"/a", 0o600)).expect("a mode through a");
+        assert_eq!(&reply(fs.read(b"/a", 64)).expect("a")[..], b"onetwo");
+        assert_eq!(reply(fs.stat(b"/b", false)).expect("b").mode & MODE_BITS, 0o600);
+        assert_eq!(
+            reply(fs.hard_link(b"/a", b"/other")).map_err(|error| error.kind()),
+            Err(io::ErrorKind::AlreadyExists)
+        );
+        reply(fs.mkdir(b"/dir", 0o755)).expect("a directory");
+        assert!(reply(fs.hard_link(b"/dir", b"/d2")).is_err());
+        reply(fs.hard_link(b"/b", b"/dir/c")).expect("a third name");
+        assert_eq!(fs.links(b"/a", true).map(|links| links.names), Some(3));
+        reply(fs.remove(b"/a", Remove::File)).expect("unlink a");
+        assert_eq!(fs.links(b"/b", true).map(|links| links.names), Some(2));
+        assert_eq!(&reply(fs.read(b"/dir/c", 64)).expect("c")[..], b"onetwo");
+        reply(fs.rename(b"/dir/c", b"/c")).expect("a rename keeps the link");
+        reply(fs.write(b"/c", b"new", Write::Replace)).expect("a write through c");
+        assert_eq!(&reply(fs.read(b"/b", 64)).expect("b")[..], b"new");
+        let reopened = resolve(WorkspaceFs::open(
+            Arc::clone(&fs.inner.store),
+            "test",
+            fs.caps(),
+            Rc::new(Ticks(Cell::new(100))),
+        ))
+        .expect("a reopen");
+        assert_eq!(reopened.manifest(), fs.manifest());
+        assert_eq!(reopened.links(b"/c", true), Some(Links { group, names: 2 }));
+        reply(fs.remove(b"/b", Remove::File)).expect("unlink b");
+        assert_eq!(fs.links(b"/c", true).map(|links| links.names), Some(1));
+        assert_eq!(&reply(fs.read(b"/c", 64)).expect("c")[..], b"new");
     }
 }

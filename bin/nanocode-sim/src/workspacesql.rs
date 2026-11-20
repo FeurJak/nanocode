@@ -308,6 +308,7 @@ impl Tables {
                             .map_err(|_| format!("{path} holds a bad size"))?,
                         mode: mode?,
                         mtime_ns: row.mtime,
+                        link: row.target.as_deref().and_then(|link| link.parse().ok()),
                     },
                     DIR => Entry::Dir {
                         mode: mode?,
