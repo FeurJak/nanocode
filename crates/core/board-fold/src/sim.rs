@@ -130,6 +130,14 @@ pub enum Mutation {
     GroupSplits,
     RouteIgnoresTask,
     MergeSkipsPartition,
+    DeliveryRefusalsWrite,
+    DeliveryRemovedEdits,
+    DeliveryDeadRepeats,
+    DeliveryThrottledStuck,
+    DeliveryDeadStays,
+    DeliveryReceiptKeepsDead,
+    DeliveryAttemptUncounted,
+    DeliveryReceiptsRenote,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

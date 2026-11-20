@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub mod access;
 pub mod brief;
 pub mod deliver;
+pub mod delivery;
 pub mod intent;
 pub mod mirror;
 pub mod schedule;
@@ -709,6 +710,8 @@ impl Fold {
             self.index_marks();
         } else if mutated(Mutation::RefusalsCountAttempts) {
             self.miscount(&event.op);
+        } else if mutated(Mutation::DeliveryRefusalsWrite) {
+            self.mirror.leak(&event.op);
         }
         Ok(())
     }
