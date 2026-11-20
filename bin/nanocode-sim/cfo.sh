@@ -183,6 +183,13 @@ default_table='
 1 canary_board_brief_over_budget canary:40 --scenario board_brief --mutation brief_over_budget
 1 canary_board_brief_drops_steer canary:40 --scenario board_brief --mutation brief_drops_steer
 1 canary_board_brief_leaks_parent_history canary:40 --scenario board_brief --mutation brief_leaks_parent_history
+8 dispatcher pass --scenario dispatcher
+2 dispatcher_twice pass --scenario dispatcher --twice
+1 canary_dispatcher_starts_before_intent canary:100 --scenario dispatcher --mutation dispatcher_starts_before_intent
+1 canary_dispatcher_retire_keeps_claims canary:40 --scenario dispatcher --mutation dispatcher_retire_keeps_claims
+1 canary_dispatcher_sleeps_through_idle canary:40 --scenario dispatcher --mutation dispatcher_sleeps_through_idle
+1 canary_dispatcher_sleeps_after_acting canary:40 --scenario dispatcher --mutation dispatcher_sleeps_after_acting
+1 canary_dispatcher_never_reaps canary:40 --scenario dispatcher --mutation dispatcher_never_reaps
 1 canary_capture_skip_trim canary --scenario capture --mutation skip_trim
 1 canary_capture_drop_chunk canary --scenario capture --mutation drop_chunk
 1 canary_buffered_admission_written canary --scenario turns --policy turnlog --mutation buffered_admission_written

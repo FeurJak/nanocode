@@ -6,6 +6,7 @@ mod board_brief;
 mod board_shards;
 mod board_steer;
 mod board_sync;
+mod dispatcher;
 mod boardagents;
 #[cfg(unix)]
 mod capture;
@@ -74,6 +75,7 @@ use crate::{
     board_shards::{ShardsMutation, ShardsStats},
     board_steer::{SteerMutation as BoardSteerMutation, SteerStats as BoardSteerStats},
     board_sync::{SyncMutation as BoardSyncMutation, SyncStats as BoardSyncStats},
+    dispatcher::{DispatcherMutation, DispatcherStats},
     cellcalls::{CellCallsMutation, CellCallsStats},
     children::ChildMutation,
     controlplane::{ControlplaneMutation, ControlplaneStats},
@@ -142,6 +144,7 @@ enum Scenario {
     HandRouter,
     WorkspaceHost,
     BoardSync,
+    Dispatcher,
     BoardSteer,
     BoardBrief,
     WorkspaceFs,
@@ -186,6 +189,7 @@ struct Args {
     hand_router: HandRouterMutation,
     workspace_host: WorkspaceHostMutation,
     board_sync: BoardSyncMutation,
+    dispatcher: DispatcherMutation,
     board_steer: BoardSteerMutation,
     board_brief: BoardBriefMutation,
     workspace_fs: WorkspaceFsMutation,
@@ -210,7 +214,7 @@ type Caught = BTreeMap<Invariant, (u64, u64, (u64, u64))>;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|inbox_stress|capture|executor|dns|board|board_shards|controlplane|cost|plog|hand_router|workspace_host|board_sync|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|live|partitions|scale] [--ops N] [--twice] [--seed-lines] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
+        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|inbox_stress|capture|executor|dns|board|board_shards|controlplane|cost|plog|hand_router|workspace_host|board_sync|dispatcher|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|live|partitions|scale] [--ops N] [--twice] [--seed-lines] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
        websocket: [--mutation {}]
        http_server: [--mutation {}]
        alloc: [--mutation overstate_size|forget_free|scribble]
@@ -231,6 +235,7 @@ fn usage() -> ExitCode {
        board_shards: [--mutation {}] | --board-shards-bench [RTT_US [ROW_US [BATCH]]]
        hand_router: [--mutation {}]
        board_sync: [--mutation {}]
+       dispatcher: [--mutation {}]
        workspace_fs: [--mutation {}]
        repo_cache: [--mutation {}]
        workspace_sql: [--mutation {}]
@@ -261,6 +266,7 @@ fn usage() -> ExitCode {
         ShardsMutation::names(),
         HandRouterMutation::names(),
         BoardSyncMutation::names(),
+        DispatcherMutation::names(),
         WorkspaceFsMutation::names(),
         RepoCacheMutation::names(),
         WorkspaceSqlMutation::names(),
@@ -333,6 +339,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
     let mut hand_router = HandRouterMutation::None;
     let mut workspace_host = WorkspaceHostMutation::None;
     let mut board_sync = BoardSyncMutation::None;
+    let mut dispatcher = DispatcherMutation::NONE;
     let mut board_steer = BoardSteerMutation::None;
     let mut board_brief = BoardBriefMutation::None;
     let mut workspace_fs = WorkspaceFsMutation::None;
@@ -414,6 +421,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
                     "hand_router" => Scenario::HandRouter,
                     "workspace_host" => Scenario::WorkspaceHost,
                     "board_sync" => Scenario::BoardSync,
+                    "dispatcher" => Scenario::Dispatcher,
                     "board_steer" => Scenario::BoardSteer,
                     "board_brief" => Scenario::BoardBrief,
                     "workspace_fs" => Scenario::WorkspaceFs,
@@ -483,6 +491,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
             workspace_host = WorkspaceHostMutation::parse(name)?
         }
         (Scenario::BoardSync, Some(name)) => board_sync = BoardSyncMutation::parse(name)?,
+        (Scenario::Dispatcher, Some(name)) => dispatcher = DispatcherMutation::parse(name)?,
         (Scenario::BoardSteer, Some(name)) => board_steer = BoardSteerMutation::parse(name)?,
         (Scenario::BoardBrief, Some(name)) => board_brief = BoardBriefMutation::parse(name)?,
         (Scenario::WorkspaceFs, Some(name)) => workspace_fs = WorkspaceFsMutation::parse(name)?,
@@ -547,6 +556,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         hand_router,
         workspace_host,
         board_sync,
+        dispatcher,
         board_steer,
         board_brief,
         workspace_fs,
@@ -664,6 +674,9 @@ fn replay(seed: u64, args: &Args) -> String {
     }
     if args.scenario == Scenario::BoardSync {
         return board_sync::replay(seed, args.board_sync);
+    }
+    if args.scenario == Scenario::Dispatcher {
+        return dispatcher::replay(seed, args.dispatcher);
     }
     if args.scenario == Scenario::BoardSteer {
         return board_steer::replay(seed, args.board_steer);
@@ -1022,6 +1035,7 @@ fn mutations() -> ExitCode {
     add("hand_router", HandRouterMutation::names());
     add("workspace_host", WorkspaceHostMutation::names());
     add("board_sync", BoardSyncMutation::names());
+    add("dispatcher", DispatcherMutation::names());
     add("board_steer", BoardSteerMutation::names());
     add("board_brief", BoardBriefMutation::names());
     add("workspace_fs", WorkspaceFsMutation::names());
@@ -1138,6 +1152,7 @@ fn main() -> ExitCode {
         || (args.scenario == Scenario::WorkspaceHost
             && args.workspace_host != WorkspaceHostMutation::None)
         || (args.scenario == Scenario::BoardSync && args.board_sync != BoardSyncMutation::None)
+        || (args.scenario == Scenario::Dispatcher && args.dispatcher != DispatcherMutation::NONE)
         || (args.scenario == Scenario::BoardSteer && args.board_steer != BoardSteerMutation::None)
         || (args.scenario == Scenario::BoardBrief && args.board_brief != BoardBriefMutation::None)
         || (args.scenario == Scenario::WorkspaceFs
@@ -1175,6 +1190,7 @@ fn main() -> ExitCode {
     let mut hand_router_totals = HandRouterStats::default();
     let mut workspace_host_totals = WorkspaceHostStats::default();
     let mut board_sync_totals = BoardSyncStats::default();
+    let mut dispatcher_totals = DispatcherStats::default();
     let mut board_steer_totals = BoardSteerStats::default();
     let mut board_brief_totals = BoardBriefStats::default();
     let mut workspace_fs_totals = WorkspaceFsStats::default();
@@ -1343,6 +1359,13 @@ fn main() -> ExitCode {
                 args.twice,
                 args.options.verbose,
                 &mut board_sync_totals,
+            ),
+            Scenario::Dispatcher => dispatcher::judge(
+                seed,
+                args.dispatcher,
+                args.twice,
+                args.options.verbose,
+                &mut dispatcher_totals,
             ),
             Scenario::BoardSteer => board_steer::judge(
                 seed,
@@ -1679,6 +1702,16 @@ fn main() -> ExitCode {
             args.twice,
             args.board_brief,
             &board_brief_totals,
+        );
+    }
+    if args.scenario == Scenario::Dispatcher {
+        return dispatcher::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.dispatcher,
+            &dispatcher_totals,
         );
     }
     if args.scenario == Scenario::BoardSync {

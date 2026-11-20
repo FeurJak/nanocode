@@ -611,6 +611,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocode-dispatch"
+version = "0.7.0"
+dependencies = [
+ "nanocode-board-fold",
+]
+
+[[package]]
+name = "nanocode-dispatcher"
+version = "0.7.0"
+dependencies = [
+ "nanocode-board",
+ "nanocode-dispatch",
+]
+
+[[package]]
 name = "nanocode-durability"
 version = "0.7.0"
 dependencies = [
@@ -1058,6 +1073,8 @@ dependencies = [
  "nanocode-compression",
  "nanocode-cost-fold",
  "nanocode-digest",
+ "nanocode-dispatch",
+ "nanocode-dispatcher",
  "nanocode-durability",
  "nanocode-durability-core",
  "nanocode-executor",
