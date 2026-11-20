@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nanocode_board::{
-    ClaimId, Event, EventId, Fold, NewTask, Op, Outcome, TaskId,
+    ClaimId, Event, EventId, Fence, Fold, NewTask, Op, Outcome, TaskId,
     access::{Can, Grant, Who},
     tasks::Terms,
 };
@@ -26,7 +26,7 @@ fn claim(rng: &mut Rng, ids: &[EventId]) -> ClaimId {
 }
 
 fn op(rng: &mut Rng, ids: &[EventId]) -> Op {
-    match rng.below(13) {
+    match rng.below(14) {
         0 => Op::Charter {},
         1 => Op::Grant {
             grant: Grant {
@@ -67,8 +67,11 @@ fn op(rng: &mut Rng, ids: &[EventId]) -> Op {
         4 => Op::Claim {
             task: task(rng),
             lease_ms: rng.below(1_000),
-            fence: None,
-            cap: None,
+            fence: rng.chance(1, 2).then(|| Fence {
+                partition: rng.below(3) as u32,
+                epoch: rng.below(4),
+            }),
+            cap: rng.chance(1, 2).then(|| rng.below(4) as u32),
         },
         5 => Op::Renew {
             task: task(rng),
@@ -109,6 +112,10 @@ fn op(rng: &mut Rng, ids: &[EventId]) -> Op {
         11 => Op::Move {
             task: task(rng),
             parent: rng.chance(1, 2).then(|| task(rng)),
+        },
+        12 => Op::Epoch {
+            partition: rng.below(3) as u32,
+            epoch: rng.below(4),
         },
         _ => Op::Rank {
             task: task(rng),
@@ -233,7 +240,7 @@ pub fn check(rng: &mut Rng) -> Checked {
         resumed == fold,
         "resuming from a snapshot after {split} rows gave a different fold"
     );
-    let mangled = rng.mutate(&snapshot);
+    let mangled = rng.mutate_bytes(&snapshot);
     if let Ok(other) = Fold::restore(&mangled) {
         ensure!(
             Fold::restore(&other.snapshot()).ok().as_ref() == Some(&other),

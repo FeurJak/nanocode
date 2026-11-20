@@ -80,7 +80,11 @@ impl Rng {
     }
 
     pub fn mutate(&mut self, text: &str) -> String {
-        let mut bytes = text.as_bytes().to_vec();
+        String::from_utf8_lossy(&self.mutate_bytes(text.as_bytes())).into_owned()
+    }
+
+    pub fn mutate_bytes(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let mut bytes = bytes.to_vec();
         for _ in 0..self.range(1, 4) {
             if bytes.is_empty() {
                 bytes.push(self.next().to_le_bytes()[0]);
@@ -102,6 +106,6 @@ impl Rng {
                 _ => bytes[at] = self.next().to_le_bytes()[0],
             }
         }
-        String::from_utf8_lossy(&bytes).into_owned()
+        bytes
     }
 }
