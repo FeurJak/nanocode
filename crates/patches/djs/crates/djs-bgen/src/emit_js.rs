@@ -132,9 +132,21 @@ pub fn emit(p: &Program, sources: &Sources, omit: &[&str], slim: bool) -> String
         .filter(|i| i.is_constructor())
         .map(|i| i.path())
         .collect();
+    // Namespaces that hold constructors (Intl): all their installs go here, so that
+    // node's order of the namespace (D2072) can interleave functions and constructors.
+    let ctor_parents: Vec<String> = kept
+        .iter()
+        .flat_map(|b| &b.installs)
+        .filter(|i| i.is_constructor() && !i.on_global())
+        .map(|i| i.target.clone())
+        .collect();
+    let in_first = |i: &Install| {
+        i.on_global() || i.is_constructor() || (ctor_parents.contains(&i.target) && !i.key.starts_with('['))
+    };
+    let mut first = Vec::new();
     for &b in &kept {
-        for i in b.installs.iter().filter(|i| i.on_global() || i.is_constructor()) {
-            out.push_str(&install(b, i));
+        for i in b.installs.iter().filter(|i| in_first(i)) {
+            let mut chunk = install(b, i);
             if let InstallKind::Constructor { parent } = &i.kind {
                 let path = i.path();
                 let mut statics = Vec::new();
@@ -145,17 +157,30 @@ pub fn emit(p: &Program, sources: &Sources, omit: &[&str], slim: bool) -> String
                 }
                 // qjs's order of the statics (D2072).
                 crate::qjs_order::reorder(&mut statics);
-                for (_, _, line) in statics {
-                    out.push_str(&line);
-                }
-                out.push_str(&format!(
-                    "%InstallPrototype({}, {}, {});\n",
+                let proto = format!(
+                    "%InstallPrototype({}, {}, {});
+",
                     js_str(&i.target),
                     js_str(&i.key),
                     parent.as_deref().map(js_str).unwrap_or("undefined".into())
-                ));
+                );
+                // The Intl constructors' prototype comes before their statics, as in node.
+                if crate::qjs_order::prototype_first(&path) {
+                    chunk.push_str(&proto);
+                }
+                for (_, _, line) in statics {
+                    chunk.push_str(&line);
+                }
+                if !crate::qjs_order::prototype_first(&path) {
+                    chunk.push_str(&proto);
+                }
             }
+            first.push((i.target.clone(), i.key.clone(), chunk));
         }
+    }
+    crate::qjs_order::reorder(&mut first);
+    for (_, _, chunk) in first {
+        out.push_str(&chunk);
     }
     let mut rest = Vec::new();
     for &b in &kept {
@@ -163,7 +188,7 @@ pub fn emit(p: &Program, sources: &Sources, omit: &[&str], slim: bool) -> String
             .installs
             .iter()
             .filter(|i| {
-                !i.on_global() && !i.is_constructor() && !ctor_keys.contains(&i.target) && !on_gone(i)
+                !in_first(i) && !ctor_keys.contains(&i.target) && !on_gone(i)
             })
         {
             rest.push((i.target.clone(), i.key.clone(), install(b, i)));
