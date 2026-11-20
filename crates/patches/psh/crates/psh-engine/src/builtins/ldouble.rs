@@ -198,6 +198,55 @@ fn divmod(mut n: Big, d: &Big) -> (u128, Big) {
     (q, n)
 }
 
+/// `num / den` rounded to the nearest long double, ties to even, for the short
+/// decimal arguments printf usually gets: `num` below 2^127 and `den` below 2^62,
+/// so every shift and remainder fits in a u128 and the result is a normal value.
+/// It gives what `round_ld` gives, without its allocating bit-by-bit division.
+fn round_small(neg: bool, num: u128, den: u128) -> Ld {
+    let bits = |v: u128| 128 - i64::from(v.leading_zeros());
+    let divide = |s: i64| -> (u128, u128, u128) {
+        let (n, d) = if s >= 0 {
+            (num << s, den)
+        } else {
+            (num, den << -s)
+        };
+        (n / d, n % d, d)
+    };
+    let mut s = 64 - (bits(num) - bits(den));
+    let (mut q, mut r, mut d) = divide(s);
+    if q >= 1u128 << 64 {
+        s -= 1;
+        (q, r, d) = divide(s);
+    } else if q < 1u128 << 63 {
+        s += 1;
+        (q, r, d) = divide(s);
+    }
+    let mut exp = -s;
+    let up = match (r << 1).cmp(&d) {
+        Ordering::Greater => true,
+        Ordering::Equal => q & 1 == 1,
+        Ordering::Less => false,
+    };
+    if up {
+        q += 1;
+        if q == 1u128 << 64 {
+            q >>= 1;
+            exp += 1;
+        }
+    }
+    Ld::Fin(neg, q as u64, exp)
+}
+
+/// The value of a Big below 2^64, if it is.
+fn small(n: &Big) -> Option<u128> {
+    match n.0[..] {
+        [] => Some(0),
+        [a] => Some(u128::from(a)),
+        [a, b] => Some(u128::from(a) | (u128::from(b) << 32)),
+        _ => None,
+    }
+}
+
 /// `num / den * 2^e2` rounded to the nearest long double, ties to even, and
 /// whether that set `ERANGE`.
 fn round_ld(neg: bool, num: &Big, den: &Big, e2: i64) -> (Ld, bool) {
@@ -396,6 +445,20 @@ pub(super) fn strtold(t: &[u8]) -> Parsed {
         (Ld::Fin(neg, 0, 0), false)
     } else if hex {
         round_ld(neg, &num, &one, exp + 4 * (dropped - frac_digits))
+    } else if let Some(v) = small(&num).and_then(|v| {
+        // A short argument such as `300.5` or `12e3`: exact in u128 arithmetic.
+        let e = exp + dropped - frac_digits;
+        if (-18..0).contains(&e) {
+            Some((v, 10u128.pow((-e) as u32)))
+        } else if (0..=38).contains(&e) {
+            v.checked_mul(10u128.pow(e as u32))
+                .filter(|n| *n < 1u128 << 127)
+                .map(|n| (n, 1))
+        } else {
+            None
+        }
+    }) {
+        (round_small(neg, v.0, v.1), false)
     } else {
         let e = exp + dropped - frac_digits;
         let digits = num.to_decimal().len() as i64;
@@ -626,7 +689,7 @@ pub(super) fn format(v: Ld, conv: u8, prec: Option<usize>, alt: bool) -> String 
 
 #[cfg(test)]
 mod tests {
-    use super::{Ld, format, strtold};
+    use super::{Big, Ld, format, round_ld, round_small, strtold};
 
     fn f(conv: u8, prec: Option<usize>, alt: bool, arg: &str) -> String {
         let v = strtold(arg.as_bytes()).value;
@@ -701,6 +764,44 @@ mod tests {
             f(b'A', Some(3), false, "1.1897314953572317650e4932"),
             "0X1.000P+16384"
         );
+    }
+
+    #[test]
+    fn small_rounding_matches_big() {
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for i in 0..20_000u32 {
+            let num = match i % 4 {
+                0 => next() >> (next() % 64),
+                1 => u64::from(i),
+                2 => next() | 1 << 63,
+                _ => (next() >> 40) * 5,
+            };
+            if num == 0 {
+                continue;
+            }
+            let k = (next() % 19) as u32;
+            let den = 10u64.pow(k);
+            let mut d = Big::from_u64(1);
+            d.mul_pow(10, u64::from(k));
+            let (want, _) = round_ld(false, &Big::from_u64(num), &d, 0);
+            assert_eq!(round_small(false, u128::from(num), u128::from(den)), want, "{num}/{den}");
+            let e = (next() % 20) as u32;
+            if let Some(n) = u128::from(num).checked_mul(10u128.pow(e)).filter(|n| *n < 1 << 127) {
+                let mut b = Big::from_u64(num);
+                b.mul_pow(10, u64::from(e));
+                let (want, _) = round_ld(true, &b, &Big::from_u64(1), 0);
+                assert_eq!(round_small(true, n, 1), want, "{num}e{e}");
+            }
+        }
+        assert_eq!(f(b'f', Some(2), false, "300.5"), "300.50");
+        assert_eq!(f(b'f', Some(1), false, "0.25"), "0.2");
+        assert_eq!(f(b'f', Some(20), false, "0.1"), "0.10000000000000000000");
     }
 
     #[test]
