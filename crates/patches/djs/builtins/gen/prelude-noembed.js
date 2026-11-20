@@ -1869,16 +1869,6 @@ function AtomicsNotify(ta, index, count) {
   return n;
 }
 
-// builtins/atomics.ts:359 Atomics.pause
-function AtomicsPause(n) {
-  let $1;
-  if (n !== undefined) {
-    if (!%IsNumber(n) || !($1 = %AsNumber(n), $1 === $1 && $1 !== 1 / 0 && $1 !== -1 / 0) || %ToIntegerOrInfinityNumber(%AsNumber(n)) !== %AsNumber(n)) {
-      throw %NewTypeError("Atomics.pause needs an integral Number");
-    }
-  }
-}
-
 // builtins/bigint.ts:8 %ToBigInt
 function ToBigInt(v) {
   return %ToBigIntPrimitive(ToPrimitive(v, "number"));
@@ -13153,7 +13143,6 @@ function GlobalAtob(...args) {
 %InstallMethod("Atomics", "wait", AtomicsWait, 4);
 %InstallMethod("Atomics", "waitAsync", AtomicsWaitAsync, 4);
 %InstallMethod("Atomics", "notify", AtomicsNotify, 3);
-%InstallMethod("Atomics", "pause", AtomicsPause, 0);
 %InstallMethod("BigInt.prototype", "toString", BigIntPrototypeToString, 0);
 %InstallMethod("BigInt.prototype", "toLocaleString", BigIntPrototypeToLocaleString, 0);
 %InstallMethod("BigInt.prototype", "valueOf", BigIntPrototypeValueOf, 0);

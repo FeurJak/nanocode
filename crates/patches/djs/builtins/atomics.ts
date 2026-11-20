@@ -350,16 +350,3 @@ function AtomicsNotify(ta: Value, index: Value, count: Value): f64 {
   }
   return n;
 }
-
-/**
- * Atomics.pause ( [ N ] ), 25.4.16: a spin-wait hint, so nothing to do.
- * @builtin Atomics.pause
- * @length 0
- */
-function AtomicsPause(n?: Value): void {
-  if (n !== undefined) {
-    if (!IsNumber(n) || !IsFiniteNumber(AsNumber(n)) || ToIntegerOrInfinityNumber(AsNumber(n)) !== AsNumber(n)) {
-      throw NewTypeError("Atomics.pause needs an integral Number");
-    }
-  }
-}

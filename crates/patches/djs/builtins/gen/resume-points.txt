@@ -617,8 +617,6 @@ AtomicsNotify: reentrant (Atomics.notify)
   builtins/atomics.ts:329:9  ToIntegerOrInfinity (builtin)
   builtins/atomics.ts:347:7  ResolvePromise (builtin)
 
-AtomicsPause: leaf (Atomics.pause)
-
 ToBigInt: reentrant (%ToBigInt)
   builtins/bigint.ts:9:28  ToPrimitive (builtin)
 

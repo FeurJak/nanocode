@@ -18,9 +18,6 @@ const defineProperty = $Object.defineProperty, freeze = $Object.freeze;
 const isView = $ArrayBuffer.isView;
 const abByteLength = $Object.getOwnPropertyDescriptor($ArrayBuffer.prototype, "byteLength").get;
 const abTransfer = $ArrayBuffer.prototype.transfer;
-const abTransferFixed = $ArrayBuffer.prototype.transferToFixedLength;
-const abResize = $ArrayBuffer.prototype.resize;
-const abResizable = $Object.getOwnPropertyDescriptor($ArrayBuffer.prototype, "resizable");
 const apply = Reflect.apply;
 const PAGE = 65536;
 const MAX_PAGES = 65536;
@@ -1484,9 +1481,9 @@ const H = {
   $ci: (t, i, sig) => {
     checkTable(t, i >>> 0, 1);
     const fn = t.a[i >>> 0];
-    if (fn === null) trap("function signature mismatch");
+    if (fn === null) trap("null function or function signature mismatch");
     const info = funcInfo.get(fn);
-    if (info.sig !== sig) trap("function signature mismatch");
+    if (info.sig !== sig) trap("null function or function signature mismatch");
     return info.fn;
   },
 };
@@ -1506,25 +1503,6 @@ function makeMemoryCell(min, max, api) {
   }
   return { buf, dv: new $DataView(buf), u8: new $Uint8Array(buf), len: min * PAGE, max, listeners: [], obj: null };
 }
-function isResizable(buf) {
-  return abResizable !== undefined && apply(abResizable.get, buf, []) === true;
-}
-// Memory.prototype.toFixedLengthBuffer / toResizableBuffer: swap the memory's buffer for
-// one of the other kind holding the same bytes (the old one is detached).
-function memorySetResizable(m, resizable) {
-  if (isResizable(m.buf) === resizable) return m.buf;
-  let nb;
-  if (resizable) {
-    nb = new $ArrayBuffer(m.len, { maxByteLength: m.max * PAGE });
-    new $Uint8Array(nb).set(m.u8);
-    apply(abTransfer, m.buf, [0]);
-  } else nb = apply(abTransferFixed, m.buf, [m.len]);
-  m.buf = nb;
-  m.dv = new $DataView(nb);
-  m.u8 = new $Uint8Array(nb);
-  for (const l of m.listeners) l();
-  return nb;
-}
 function memoryGrow(m, delta) {
   const old = m.len / PAGE;
   const limit = m.max === null ? MAX_PAGES : m.max;
@@ -1532,10 +1510,7 @@ function memoryGrow(m, delta) {
   const newLen = (old + delta) * PAGE;
   let nb;
   try {
-    if (isResizable(m.buf)) {
-      apply(abResize, m.buf, [newLen]);
-      nb = m.buf;
-    } else if (abTransfer !== undefined) nb = apply(abTransfer, m.buf, [newLen]);
+    if (abTransfer !== undefined) nb = apply(abTransfer, m.buf, [newLen]);
     else {
       nb = new $ArrayBuffer(newLen);
       new $Uint8Array(nb).set(m.u8);
@@ -1673,11 +1648,11 @@ function instantiateModule(rec, importObject, api) {
   let mem = null;
   for (let k = 0; k < M.imports.length; k++) {
     const imp = M.imports[k];
-    const where = "Import #" + k + " \"" + imp.module + "\"";
+    const where = "Import #" + k + " module=\"" + imp.module + "\"";
     const ns = importObject[imp.module];
     if (!isObject(ns)) throw new $TypeError(api + where + ": module is not an object or function");
     const v = ns[imp.name];
-    const what = api + where + " \"" + imp.name + "\": ";
+    const what = api + where + " function=\"" + imp.name + "\": ";
     if (imp.kind === 0) {
       const type = M.types[M.funcs[imp.index]];
       if (typeof v !== "function") throw new LinkError(what + "function import requires a callable");
@@ -1931,14 +1906,6 @@ class Memory {
   }
   get buffer() {
     return brand(memoryCells, this, "WebAssembly.Memory").buf;
-  }
-  toFixedLengthBuffer() {
-    return memorySetResizable(brand(memoryCells, this, "WebAssembly.Memory"), false);
-  }
-  toResizableBuffer() {
-    const m = brand(memoryCells, this, "WebAssembly.Memory");
-    if (m.max === null) throw new $TypeError("WebAssembly.Memory.toResizableBuffer(): Memory must have a maximum");
-    return memorySetResizable(m, true);
   }
 }
 function memoryObject(m) {
