@@ -136,6 +136,8 @@ pub struct Stats {
     pub drops: u64,
     pub views: u64,
     pub subscribers: u64,
+    pub entries: u64,
+    pub shared: u64,
 }
 
 #[derive(Default)]
@@ -149,6 +151,8 @@ struct Counters {
     drops: AtomicU64,
     views: AtomicU64,
     subscribers: AtomicU64,
+    entries: AtomicU64,
+    shared: AtomicU64,
 }
 
 impl Counters {
@@ -167,6 +171,8 @@ impl Counters {
             drops: self.drops.load(Ordering::Relaxed),
             views: self.views.load(Ordering::Relaxed),
             subscribers: self.subscribers.load(Ordering::Relaxed),
+            entries: self.entries.load(Ordering::Relaxed),
+            shared: self.shared.load(Ordering::Relaxed),
         }
     }
 }
@@ -571,13 +577,20 @@ impl<V: ViewSet, S: SealPolicy> Core<V, S> {
         let subs = self.watchers(key);
         let mut tails: BTreeMap<Access, Option<Arc<str>>> = BTreeMap::new();
         let mut dropped = Vec::new();
+        if !subs.is_empty() {
+            Counters::add(&self.counters.entries, 1);
+        }
         for ((conn, id), access) in subs {
             let tail = if mutated(Mutation::EncodePerSubscriber) {
+                Counters::add(&self.counters.shared, 1);
                 self.encoded(entry, access)
             } else {
                 tails
                     .entry(access)
-                    .or_insert_with(|| self.encoded(entry, access))
+                    .or_insert_with(|| {
+                        Counters::add(&self.counters.shared, 1);
+                        self.encoded(entry, access)
+                    })
                     .clone()
             };
             let Some(tail) = tail else {
