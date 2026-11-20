@@ -1375,10 +1375,16 @@ async fn map_admission(
     Ok(match admission {
         Admission::Accepted => ExecutionAdmission::Execute,
         Admission::Pending => ExecutionAdmission::Resume,
+        // None: the durable head, which the live committed session holds.
         Admission::Completed { checkpoint, output } => ExecutionAdmission::Completed {
-            snapshot: context::restore_snapshot(owner.into(), checkpoint)
-                .await
-                .map_err(agent_error)?,
+            snapshot: match checkpoint {
+                Some(checkpoint) => Some(
+                    context::restore_snapshot(owner.into(), checkpoint)
+                        .await
+                        .map_err(agent_error)?,
+                ),
+                None => None,
+            },
             output: context::restore_output(owner.into(), output)
                 .await
                 .map_err(agent_error)?,

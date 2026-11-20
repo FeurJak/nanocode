@@ -768,13 +768,21 @@ impl ClaudeExecutionPolicy for ClaudeExecution {
             let reader = PayloadReader::from(&self.owner);
             let admission = match admission {
                 Admission::Completed { checkpoint, output } => ClaudeAdmission::Completed {
-                    checkpoint: hydrate(reader, checkpoint, &mut HashSet::new()).await?,
+                    // None: the durable head with nothing in flight, which the
+                    // live conversation already holds; Null tells the agent to
+                    // reuse it rather than hydrate a second full copy.
+                    checkpoint: match checkpoint {
+                        Some(checkpoint) => hydrate(reader, checkpoint, &mut HashSet::new()).await?,
+                        None => Value::Null,
+                    },
                     output: format::hydrate_output(reader, output)
                         .await
                         .map_err(agent_error)?,
                 },
-                Admission::Failed { checkpoint, error } => ClaudeAdmission::Failed {
-                    checkpoint: hydrate(reader, checkpoint, &mut HashSet::new()).await?,
+                // Nothing reads a failed request's checkpoint: replay only
+                // reports its error.
+                Admission::Failed { error, .. } => ClaudeAdmission::Failed {
+                    checkpoint: Value::Null,
                     error,
                 },
                 admission => map_admission(admission),
@@ -1475,9 +1483,10 @@ fn map_admission(admission: Admission<Value, Value>) -> ClaudeAdmission {
     match admission {
         Admission::Accepted => ClaudeAdmission::Execute,
         Admission::Pending => ClaudeAdmission::Resume,
-        Admission::Completed { checkpoint, output } => {
-            ClaudeAdmission::Completed { checkpoint, output }
-        }
+        Admission::Completed { checkpoint, output } => ClaudeAdmission::Completed {
+            checkpoint: checkpoint.unwrap_or(Value::Null),
+            output,
+        },
         Admission::Failed { checkpoint, error } => ClaudeAdmission::Failed { checkpoint, error },
         Admission::Cancelled => ClaudeAdmission::Cancelled,
     }

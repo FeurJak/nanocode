@@ -4431,6 +4431,15 @@ impl State {
     }
 
     fn replayed_boundary(&self, completed: TurnResult, checkpoint: Value) -> TurnResult {
+        // Null: the replayed request wrote the durable head and nothing is in
+        // flight, so the live boundary is its checkpoint.
+        if checkpoint.is_null() {
+            if self.boundary_stale.load(Ordering::SeqCst) {
+                return completed;
+            }
+            let boundary: Arc<Snapshot> = self.round_boundary.read(Arc::clone);
+            return self.retain_boundary(completed, boundary);
+        }
         match Snapshot::decode(checkpoint) {
             Ok(snapshot) => self.retain_boundary(completed, Arc::new(snapshot)),
             Err(_) => completed,

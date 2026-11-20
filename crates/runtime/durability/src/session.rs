@@ -31,7 +31,12 @@ pub enum Admission<C = EncodedPayload, O = EncodedPayload> {
 
     Pending,
 
-    Completed { checkpoint: C, output: O },
+    /// `checkpoint` is `None` when the operation's checkpoint is the
+    /// session's head (its latest checkpoint) and no operation is in flight:
+    /// the state the opener restored, and kept current since, is that
+    /// checkpoint, so it is neither loaded nor decoded again. Build the
+    /// replayed boundary from the live state instead.
+    Completed { checkpoint: Option<C>, output: O },
 
     Failed { checkpoint: C, error: String },
 
@@ -69,7 +74,7 @@ enum StoredAdmission {
     Accepted,
     Pending,
     Completed {
-        checkpoint: EncodedPayload,
+        checkpoint: Option<EncodedPayload>,
         output: EncodedPayload,
     },
     Failed {
@@ -99,7 +104,7 @@ impl StoredAdmission {
             Self::Accepted => Ok(Admission::Accepted),
             Self::Pending => Ok(Admission::Pending),
             Self::Completed { checkpoint, output } => Ok(Admission::Completed {
-                checkpoint: checkpoint.decode()?,
+                checkpoint: checkpoint.map(|checkpoint| checkpoint.decode()).transpose()?,
                 output: output.decode()?,
             }),
             Self::Failed { checkpoint, error } => Ok(Admission::Failed {
@@ -1768,8 +1773,21 @@ impl Driver {
                     Ok(StoredAdmission::Pending)
                 }
                 OperationStatus::Completed { checkpoint, output } => {
+                    // The head with nothing in flight: the live state is this
+                    // checkpoint, so skip loading a second full copy of it.
+                    let head = self.claimed.is_empty()
+                        && self.state.first_pending_operation_where(|_| true).is_none()
+                        && self
+                            .state
+                            .latest_checkpoint()
+                            .is_some_and(|latest| latest.key() == checkpoint.key());
+                    let checkpoint = if head {
+                        None
+                    } else {
+                        Some(checkpoint.load(&mut *self.store, &self.state_id).await?)
+                    };
                     Ok(StoredAdmission::Completed {
-                        checkpoint: checkpoint.load(&mut *self.store, &self.state_id).await?,
+                        checkpoint,
                         output: output.load(&mut *self.store, &self.state_id).await?,
                     })
                 }

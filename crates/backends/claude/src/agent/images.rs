@@ -310,7 +310,7 @@ mod tests {
         });
         let mut messages = vec![HistoryMessage::from(message)];
         assert!(omit_documents(&mut messages));
-        let text = serde_json::to_string(&messages[0].content).unwrap();
+        let text = serde_json::to_string(&messages[0]).unwrap();
         assert!(!text.contains("\"document\""), "{text}");
         assert_eq!(text.matches(DOCUMENT_OMITTED).count(), 2);
         assert!(text.contains("ephemeral"));
