@@ -5,7 +5,7 @@ use nanocode_board::{
     access::{Actor, Can, Grant, Identity, Verifier, Who},
     steer::SteerOp,
     tasks::{Need, Planned, TaskOp, Terms},
-    watch::{Key, Step},
+    watch::{self, Key, Step},
 };
 use nanocode_turnlog::LogHost;
 
@@ -420,6 +420,10 @@ pub async fn intruder(world: &World, epoch: u64) {
     reparent(world, epoch, span).await;
 }
 
+/// Share of forged moves that pick a task with children, which a move can put under one of
+/// its own descendants.
+const MOVE_PARENT_PPM: u64 = 700_000;
+
 async fn reparent(world: &World, epoch: u64, span: u64) {
     let mut rng = Rng::derive(world.shape.seed ^ epoch.rotate_left(32), "board moves");
     for round in 0..rng.range(0, 4) {
@@ -429,26 +433,28 @@ async fn reparent(world: &World, epoch: u64, span: u64) {
         if tasks.is_empty() {
             continue;
         }
-        let task = tasks[rng.pick(tasks.len())].clone();
-        let under = |id: &TaskId| {
-            let mut at = Some(id);
-            while let Some(above) = at {
-                if *above == task {
-                    return true;
-                }
-                at = fold
-                    .task(above)
-                    .and_then(|above| above.spec.parent.as_ref());
-            }
-            false
+        // Aim most moves at a task with children: only moving one under its own child or
+        // grandchild makes a cycle, and a leaf can only be moved under itself.
+        let parents = tasks
+            .iter()
+            .filter_map(|id| fold.task(id).and_then(|task| task.spec.parent.clone()))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let task = if !parents.is_empty() && rng.chance(MOVE_PARENT_PPM) {
+            parents[rng.pick(parents.len())].clone()
+        } else {
+            tasks[rng.pick(tasks.len())].clone()
         };
+        let under = |id: &TaskId| watch::under(fold.tasks(), id, &task);
         let below = tasks
             .iter()
-            .filter(|id| under(id))
+            .filter(|id| **id != task && under(id))
             .cloned()
             .collect::<Vec<_>>();
         let parent = match rng.pick(4) {
             0 => None,
+            1 if below.is_empty() => Some(task.clone()),
             1 => Some(below[rng.pick(below.len())].clone()),
             2 => Some(TaskId(format!("{LOCKED}/nowhere"))),
             _ => Some(tasks[rng.pick(tasks.len())].clone()),

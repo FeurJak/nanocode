@@ -207,6 +207,8 @@ default_table='
 1 canary_board_steer_redelivered_after_heed canary:40 --scenario board_steer --mutation steer_redelivered_after_heed
 1 canary_board_heed_from_stale_claim canary:40 --scenario board_steer --mutation heed_from_stale_claim
 1 canary_board_leases_never_expire canary:50 --scenario board --mutation leases_never_expire
+1 canary_board_move_allows_cycle canary:400 --scenario board --mutation move_allows_cycle
+1 canary_board_unschedule_ignored canary:20 --scenario board --mutation unschedule_ignored
 1 canary_board_checkpoint_version_ignored canary:20 --scenario board --mutation checkpoint_version_ignored
 1 canary_board_checkpoint_tail_unchecked canary:20 --scenario board --mutation checkpoint_tail_unchecked
 1 canary_board_checkpoint_ahead canary:20 --scenario board --mutation checkpoint_ahead
