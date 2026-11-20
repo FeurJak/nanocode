@@ -185,6 +185,8 @@ default_table='
 1 canary_workspace_crash_visible_before_commit canary:200 --scenario workspace_crash --mutation visible_before_commit
 1 canary_workspace_crash_lost_update canary:200 --scenario workspace_crash --mutation lost_update
 1 canary_workspace_crash_stale_retry_overwrites canary:200 --scenario workspace_crash --mutation stale_retry_overwrites
+1 canary_workspace_crash_seq_rename_copies canary:200 --scenario workspace_crash --mutation seq_rename_copies
+1 canary_workspace_crash_held_redirect_appends canary:200 --scenario workspace_crash --mutation held_redirect_appends
 8 workspace_sql pass --scenario workspace_sql
 1 canary_workspace_sql_stale_read_skips_reload canary:400 --scenario workspace_sql --mutation stale_read_skips_reload
 1 canary_executor_skip_abort canary --scenario executor --mutation skip_abort

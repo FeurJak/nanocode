@@ -39,13 +39,21 @@
 //! write: a Python program replaces files through a temporary file and
 //! os.replace; every target must hold its old content or its whole new one,
 //! with no temporary file left, and running it again must finish it.
+//! Sequence: a cell makes node:fs calls (writeFileSync, renameSync,
+//! unlinkSync) through the workspace bridge; the store must hold the files
+//! exactly as they were between two calls, and making the calls after those
+//! again must finish it. Held: psh redirects into a file a cell holds open
+//! read-only through node:fs; the file must hold a state it had between two
+//! operations, and running the job again must leave the redirect's output.
 //!
 //! Some canaries bend the job's file system instead of the store: a whole-file
 //! write that removes the old file first, one that empties it first, and a
 //! remote-tracking ref written in two pieces, and (only in the many-file
 //! job) a move that removes the old path before writing the new one, and
 //! (only in the atomic-write job) a write-back that removes each target
-//! before moving a temporary copy over it.
+//! before moving a temporary copy over it, and (only in the sequence job) a
+//! rename that copies the file and then removes the old name, and (only in
+//! the held job) a redirect that appends instead of truncating.
 
 use std::{
     cell::Cell,
@@ -137,6 +145,11 @@ const FRESH: &str = "t3";
 /// The files an atomic-write job starts from (the last is new, in a new
 /// directory).
 const ATOMIC: [&str; 4] = ["d/a.json", "d/b.json", "c.json", "d/n/e.json"];
+const SEQ: [&str; 4] = ["s0.txt", "s1.txt", "d/s2.txt", "d/s3.txt"];
+const SEQ_MIN: u64 = 3;
+const SEQ_MAX: u64 = 8;
+const HELD: &str = "h.txt";
+const REDIRECT_MAX: u64 = 3;
 const GIT_ENV: &str = "export GIT_AUTHOR_NAME=Agent GIT_AUTHOR_EMAIL=agent@sim GIT_COMMITTER_NAME=Agent GIT_COMMITTER_EMAIL=agent@sim";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,10 +165,12 @@ pub enum WorkspaceCrashMutation {
     TrackingRefTorn,
     ManyMoveRemovesFirst,
     AtomicReplaceRemovesTarget,
+    SeqRenameCopies,
+    HeldRedirectAppends,
 }
 
 impl WorkspaceCrashMutation {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 13] = [
         Self::None,
         Self::TornCommit,
         Self::BackendFailureAcked,
@@ -167,6 +182,8 @@ impl WorkspaceCrashMutation {
         Self::TrackingRefTorn,
         Self::ManyMoveRemovesFirst,
         Self::AtomicReplaceRemovesTarget,
+        Self::SeqRenameCopies,
+        Self::HeldRedirectAppends,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -188,6 +205,8 @@ impl WorkspaceCrashMutation {
             Self::TrackingRefTorn => "tracking_ref_torn",
             Self::ManyMoveRemovesFirst => "many_move_removes_first",
             Self::AtomicReplaceRemovesTarget => "atomic_replace_removes_target",
+            Self::SeqRenameCopies => "seq_rename_copies",
+            Self::HeldRedirectAppends => "held_redirect_appends",
         }
     }
 
@@ -211,7 +230,9 @@ impl WorkspaceCrashMutation {
             | Self::ReplaceEmptiesFirst
             | Self::TrackingRefTorn
             | Self::ManyMoveRemovesFirst
-            | Self::AtomicReplaceRemovesTarget => FsRule::None,
+            | Self::AtomicReplaceRemovesTarget
+            | Self::SeqRenameCopies
+            | Self::HeldRedirectAppends => FsRule::None,
         }
     }
 
@@ -224,6 +245,8 @@ impl WorkspaceCrashMutation {
             Self::TrackingRefTorn => Bend::TornTrackingRef,
             Self::ManyMoveRemovesFirst => Bend::MoveRemovesFirst,
             Self::AtomicReplaceRemovesTarget => Bend::ReplaceRemovesTarget,
+            Self::SeqRenameCopies => Bend::RenameCopies,
+            Self::HeldRedirectAppends => Bend::RedirectAppends,
             _ => Bend::None,
         }
     }
@@ -246,6 +269,12 @@ enum Bend {
     /// without its atomicity: it writes a temporary file, removes the target,
     /// then moves the temporary file over it.
     ReplaceRemovesTarget,
+    /// The sequence job's renames write the new path with the old one's
+    /// content, then remove the old path.
+    RenameCopies,
+    /// The held job's psh redirect appends to the file instead of
+    /// truncating it.
+    RedirectAppends,
 }
 
 /// How many pieces a bent move writes its new path in.
@@ -263,6 +292,8 @@ fn bent(files: Rc<dyn FileSystem>, label: &str) -> Rc<dyn FileSystem> {
         // Only the many-file job's moves are bent, so no other point sees it.
         Bend::MoveRemovesFirst if !label.starts_with("many") => files,
         Bend::ReplaceRemovesTarget if label != "atomic" => files,
+        Bend::RenameCopies if label != "seq" => files,
+        Bend::RedirectAppends => files,
         bend => Rc::new(Bent(files, bend)),
     }
 }
@@ -281,7 +312,8 @@ impl FileSystem for Bent {
     fn write(&self, path: &[u8], data: &[u8], how: Write) -> Reply<()> {
         let bends = how == Write::Replace
             && match self.1 {
-                Bend::None | Bend::MoveRemovesFirst => false,
+                Bend::None | Bend::MoveRemovesFirst | Bend::RenameCopies => false,
+                Bend::RedirectAppends => true,
                 Bend::TornTrackingRef => path
                     .windows(b"/.git/refs/remotes/".len())
                     .any(|part| part == b"/.git/refs/remotes/"),
@@ -292,6 +324,9 @@ impl FileSystem for Bent {
         }
         let (files, bend, path, data) = (self.0.clone(), self.1, path.to_vec(), data.to_vec());
         Reply::Later(Box::pin(async move {
+            if bend == Bend::RedirectAppends {
+                return files.write(&path, &data, Write::Append).get().await;
+            }
             if bend == Bend::TornTrackingRef {
                 let half = data.len() / 2;
                 files.write(&path, &data[..half], Write::Replace).get().await?;
@@ -331,6 +366,14 @@ impl FileSystem for Bent {
     }
 
     fn rename(&self, from: &[u8], to: &[u8]) -> Reply<()> {
+        if self.1 == Bend::RenameCopies {
+            let (files, from, to) = (self.0.clone(), from.to_vec(), to.to_vec());
+            return Reply::Later(Box::pin(async move {
+                let data = files.read(&from, u64::MAX).get().await?;
+                files.write(&to, &data, Write::Replace).get().await?;
+                files.remove(&from, Remove::File).get().await
+            }));
+        }
         if self.1 != Bend::MoveRemovesFirst {
             return self.0.rename(from, to);
         }
@@ -410,6 +453,8 @@ pub struct WorkspaceCrashStats {
     pub points_many: u64,
     pub points_push: u64,
     pub points_atomic: u64,
+    pub points_seq: u64,
+    pub points_held: u64,
 }
 
 impl WorkspaceCrashStats {
@@ -430,6 +475,8 @@ impl WorkspaceCrashStats {
         self.points_many += other.points_many;
         self.points_push += other.points_push;
         self.points_atomic += other.points_atomic;
+        self.points_seq += other.points_seq;
+        self.points_held += other.points_held;
     }
 }
 
@@ -846,6 +893,18 @@ async fn answer(files: &Rc<dyn FileSystem>, input: &Value) -> Result<Value, Stri
                     Ok(json!({"data": ""}))
                 }
                 Err(error) => Err(error.to_string()),
+            };
+        }
+        "sh" => {
+            let shell: Rc<dyn FileSystem> = match BEND.with(Cell::get) {
+                Bend::RedirectAppends => Rc::new(Bent(files.clone(), Bend::RedirectAppends)),
+                _ => files.clone(),
+            };
+            let said = Box::pin(psh(shell, field("script").to_owned())).await;
+            return if said.ok {
+                Ok(json!({"ok": true}))
+            } else {
+                Err(said.output)
             };
         }
         other => return Err(format!("no op {other}")),
@@ -2396,6 +2455,209 @@ fn atomic(
     Ok(())
 }
 
+/// One node:fs call a cell makes through the workspace bridge.
+#[derive(Clone, Debug)]
+enum NodeOp {
+    Write(&'static str, String),
+    Rename(&'static str, &'static str),
+    Unlink(&'static str),
+}
+
+impl NodeOp {
+    fn apply(&self, held: &mut BTreeMap<&'static str, String>) {
+        match self {
+            Self::Write(path, content) => {
+                held.insert(path, content.clone());
+            }
+            Self::Rename(from, to) => {
+                if let Some(content) = held.remove(from) {
+                    held.insert(to, content);
+                }
+            }
+            Self::Unlink(path) => {
+                held.remove(path);
+            }
+        }
+    }
+
+    fn line(&self) -> String {
+        let text = |path: &str| Value::from(absolute(path)).to_string();
+        match self {
+            Self::Write(path, content) => {
+                format!("fs.writeFileSync({}, {});", text(path), Value::from(content.as_str()))
+            }
+            Self::Rename(from, to) => format!("fs.renameSync({}, {});", text(from), text(to)),
+            Self::Unlink(path) => format!("fs.unlinkSync({});", text(path)),
+        }
+    }
+}
+
+fn node_code(ops: &[NodeOp]) -> String {
+    let lines: Vec<String> = ops.iter().map(NodeOp::line).collect();
+    format!("const fs = require(\"node:fs\");\n{}\n", lines.join("\n"))
+}
+
+fn texts(contents: &Contents) -> BTreeMap<&str, String> {
+    contents
+        .iter()
+        .map(|(path, bytes)| (path.as_str(), String::from_utf8_lossy(bytes).into_owned()))
+        .collect()
+}
+
+/// A crash during a cell's node:fs calls through the workspace bridge: the
+/// store holds the files exactly as they were between two calls, and making
+/// the calls after those again finishes the job.
+fn seq(
+    rng: &mut Rng,
+    stats: &mut WorkspaceCrashStats,
+    digest: &mut u64,
+    shape: &mut String,
+) -> Result<(), String> {
+    let mut initial = Vec::new();
+    for path in SEQ {
+        if rng.chance(HALF_PPM) {
+            initial.push((path, words(rng, 4)));
+        }
+    }
+    let mut held: BTreeMap<&'static str, String> = initial.iter().cloned().collect();
+    let mut states = vec![held.clone()];
+    let mut ops = Vec::new();
+    for at in 0..rng.range(SEQ_MIN, SEQ_MAX) {
+        let present: Vec<&'static str> = held.keys().copied().collect();
+        let op = match rng.pick(3) {
+            1 if !present.is_empty() => {
+                let from = present[rng.pick(present.len())];
+                let others: Vec<&'static str> = SEQ.iter().copied().filter(|path| *path != from).collect();
+                NodeOp::Rename(from, others[rng.pick(others.len())])
+            }
+            2 if !present.is_empty() => NodeOp::Unlink(present[rng.pick(present.len())]),
+            _ => NodeOp::Write(SEQ[rng.pick(SEQ.len())], format!("<n{at}{}>", words(rng, 3))),
+        };
+        op.apply(&mut held);
+        states.push(held.clone());
+        ops.push(op);
+    }
+    let code = node_code(&ops);
+    let setup_fn: SetupFn = Box::new(move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
+        Box::pin(setup(files, initial.clone()))
+    });
+    let job_fn: JobFn = Box::new(move |files: Rc<dyn FileSystem>| -> Boxed<'static, Said> {
+        Box::pin(cell_with(files, code.clone(), Some(BRIDGED)))
+    });
+    let _ = write!(shape, " calls={}", ops.len());
+    let Some(died) = die_during(rng, stats, digest, shape, "seq", &setup_fn, &job_fn)? else {
+        return Ok(());
+    };
+    stats.points_seq += 1;
+    let when = died.when;
+    let keyed_state = |state: &BTreeMap<&'static str, String>| -> Contents {
+        state
+            .iter()
+            .map(|(path, content)| (keyed(path), content.as_bytes().to_vec()))
+            .collect()
+    };
+    let landed = (0..states.len())
+        .rev()
+        .find(|&at| keyed_state(&states[at]) == died.contents)
+        .ok_or_else(|| {
+            format!(
+                "{when}: the store holds {:?}, not the files as they were between two of the calls {ops:?}",
+                texts(&died.contents)
+            )
+        })?;
+    let _ = write!(shape, " landed={landed}");
+    if landed < ops.len() {
+        let files = one(open(Dying::new(died.inner.clone(), None)), rng)??;
+        let rest = node_code(&ops[landed..]);
+        let resumed = one(cell_with(Rc::new(files), rest, Some(BRIDGED)), rng)?;
+        if !resumed.ok {
+            return Err(format!(
+                "{when}: making the calls after call {landed} again failed: {}",
+                resumed.output
+            ));
+        }
+    }
+    stats.resumed += 1;
+    let again = reopened(&died.inner, rng, digest).map_err(|error| format!("{when}: {error}"))?;
+    let done = keyed_state(&states[ops.len()]);
+    if again != done {
+        return Err(format!(
+            "{when}: after resuming at call {landed} the store holds {:?}, not {:?}",
+            texts(&again),
+            texts(&done)
+        ));
+    }
+    Ok(())
+}
+
+/// A crash while psh redirects into a file a cell holds open read-only
+/// through node:fs: the file holds a state it had between two operations
+/// (the redirect's output in whole pieces once it truncated the file), and
+/// running the job again leaves the redirect's output.
+fn held(
+    rng: &mut Rng,
+    stats: &mut WorkspaceCrashStats,
+    digest: &mut u64,
+    shape: &mut String,
+) -> Result<(), String> {
+    let first = words(rng, 4);
+    let pieces: Vec<String> = (0..rng.range(1, REDIRECT_MAX))
+        .map(|at| format!("<x{at}{}>", words(rng, 3)))
+        .collect();
+    let path = absolute(HELD);
+    let writes: Vec<String> = pieces
+        .iter()
+        .map(|piece| format!("printf '%s' {}", quoted(piece)))
+        .collect();
+    let shell = json!({ "op": "sh", "script": format!("set -e\n{{ {}; }} > {path}", writes.join("; ")) });
+    let target = Value::from(path.as_str());
+    let code = format!(
+        "const fs = require(\"node:fs\");\nconst fd = fs.openSync({target}, \"r\");\nawait tools.w({shell});\nfs.closeSync(fd);\n"
+    );
+    let mut allowed = vec![first.clone()];
+    allowed.extend((0..=pieces.len()).map(|count| pieces[..count].concat()));
+    let done = pieces.concat();
+    allowed.push(done.clone());
+    let initial = vec![(HELD, first)];
+    let setup_fn: SetupFn = Box::new(move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
+        Box::pin(setup(files, initial.clone()))
+    });
+    let job_fn: JobFn = {
+        let code = code.clone();
+        Box::new(move |files: Rc<dyn FileSystem>| -> Boxed<'static, Said> {
+            Box::pin(cell_with(files, code.clone(), Some(BRIDGED)))
+        })
+    };
+    let _ = write!(shape, " redirected={}", pieces.len());
+    let Some(died) = die_during(rng, stats, digest, shape, "held:read", &setup_fn, &job_fn)? else {
+        return Ok(());
+    };
+    stats.points_held += 1;
+    let when = died.when;
+    let key = keyed(HELD);
+    let now = lossy(died.contents.get(&key));
+    if died.contents.len() != 1 || !allowed.iter().any(|state| Some(state) == now.as_ref()) {
+        return Err(format!(
+            "{when}: the store holds {:?}, not {HELD} as one of {allowed:?}",
+            texts(&died.contents)
+        ));
+    }
+    let files = one(open(Dying::new(died.inner.clone(), None)), rng)??;
+    let resumed = one(cell_with(Rc::new(files), code, Some(BRIDGED)), rng)?;
+    if !resumed.ok {
+        return Err(format!("{when}: running the job again failed: {}", resumed.output));
+    }
+    stats.resumed += 1;
+    let again = reopened(&died.inner, rng, digest).map_err(|error| format!("{when}: {error}"))?;
+    if again.len() != 1 || lossy(again.get(&key)).as_ref() != Some(&done) {
+        return Err(format!(
+            "{when}: after running the job again the store holds {:?}, not {HELD} as {done:?}",
+            texts(&again)
+        ));
+    }
+    Ok(())
+}
+
 /// One crash point per seed: mid-append, mid-checkout or across a rename.
 fn points(
     rng: &mut Rng,
@@ -2438,6 +2700,14 @@ fn simulate(seed: u64, mutation: WorkspaceCrashMutation) -> WorkspaceCrashOutcom
         .and_then(|()| {
             let mut rng = Rng::derive(seed, "workspace_crash_atomic");
             atomic(&mut rng, &mut stats, &mut digest, &mut shape)
+        })
+        .and_then(|()| {
+            let mut rng = Rng::derive(seed, "workspace_crash_seq");
+            seq(&mut rng, &mut stats, &mut digest, &mut shape)
+        })
+        .and_then(|()| {
+            let mut rng = Rng::derive(seed, "workspace_crash_held");
+            held(&mut rng, &mut stats, &mut digest, &mut shape)
         })
         .err();
     fs_sim::mutate(FsRule::None);
