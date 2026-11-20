@@ -422,6 +422,19 @@ impl EncodedPayload {
         }
     }
 
+    /// Whether more than holders strong references hold this payload's content.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn content_held_beyond(&self, holders: usize) -> bool {
+        match &self.body {
+            Body::Content {
+                json: Text::Json(text) | Text::Record(text),
+                ..
+            } => Arc::strong_count(text) > holders,
+            Body::Reference(_) => false,
+        }
+    }
+
     pub fn shared_json(&self) -> Result<Arc<str>> {
         match &self.body {
             Body::Content {
