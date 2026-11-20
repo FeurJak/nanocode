@@ -26,7 +26,9 @@ const USAGE: &str = "usage:
                                       takes N cores on a machine with room and prints the lease as JSON, whose env (all --env prints) is a line to eval;
                                       room means leased cores + unleased busy cores (the latest observation's runnable threads outside SCHED_IDLE
                                       on cpus no lease holds) + N <= the machine's cores, so a take never over-commits: without room it fails, or
-                                      with --wait S retries for S seconds
+                                      with --wait S retries for S seconds; leased cores count cpus, each once: a cpu is leased when any live lease
+                                      or reservation covers it, so leases nested in a reservation or overlapping each other add nothing; leases
+                                      on machines no longer in 'slots boxes' (removed or expired) are given back by take, list and observe
                                       (NC_BUILD_LEASE, NC_BUILD_LEASE_CORES and CARGO_BUILD_JOBS, which caps rustc at N, and NC_BUILD_PREFIX); among machines with room it picks
                                       the one with the fewest cores leased to kind K (default build), so kinds mix and boxes stay full, then
                                       the pool order: the large pool (default, nanocode work) the largest boxes first, the small pool
@@ -62,7 +64,8 @@ const USAGE: &str = "usage:
                                       starts with one of its prefixes and whose kind is listed (without kinds, every kind but bench), and
                                       holds the cores of its live leases on every machine except kinds reserved and closed-load, labels
                                       starting box-closing- and leases inside a standing --label-prefix reservation; [] removes them all
-  nc-build slots list                 each machine's busy cores, load, memory and expiry, also appended to machines.log,
+  nc-build slots list                 each machine's busy and leased cores (counted per cpu, as take counts them), load, memory and expiry,
+                                      also appended to machines.log, a total over the machines in 'slots boxes',
                                       and a line 'lane L held X/N' per lane cap
   nc-build slots boxes [--set]        the machines placement uses; --set stores the boxes.json array read on stdin in the state;
                                       an entry with a kinds list, such as [bench], takes only leases of those kinds
@@ -384,6 +387,30 @@ fn machines(pool: Pool, state: &State, now: u64) -> Vec<Machine> {
     let mut machines = slots::machines_from_boxes(&boxes, pool, &[gak], &[dev]);
     machines.retain(|machine| machine.expires_ms.is_none_or(|expires| expires > now));
     machines
+}
+
+fn reap_gone(state: &mut State, machines: &[Machine]) -> Vec<slots::Lease> {
+    if machines
+        .iter()
+        .any(|machine| machine.placement == Placement::Fill)
+    {
+        state.reap_gone(machines)
+    } else {
+        Vec::new()
+    }
+}
+
+fn log_gone(gone: &[slots::Lease]) {
+    for lease in gone {
+        log_line(&format!(
+            "reap {} {} cpus {} {} {} (box gone)",
+            lease.id,
+            lease.machine,
+            lease.cpus(),
+            lease.kind,
+            lease.label
+        ));
+    }
 }
 
 fn config(name: &str, file: &str) -> Option<String> {
@@ -955,15 +982,18 @@ fn slots_once(args: &[String], input: &str) -> Result<String, String> {
                     want.label
                 ));
             }
-            let taken = with_state(|state| {
+            let (taken, gone) = with_state(|state| {
                 let machines = machines(pool, state, now);
-                state.take(&machines, &want, now).map(|lease| {
+                let gone = reap_gone(state, &machines);
+                let taken = state.take(&machines, &want, now).map(|lease| {
                     let machine = machines
                         .iter()
                         .find(|machine| machine.name == lease.machine);
                     (lease.to_json(machine), lease)
-                })
+                });
+                (taken, gone)
             })?;
+            log_gone(&gone);
             let (json, lease) = taken.map_err(|refusal| match (refusal, &want.only) {
                 (Refusal::NoRoom, Some(name)) => format!("{NO_ROOM} {cores} free cores on {name}"),
                 (Refusal::NoRoom, None) => format!("{NO_ROOM} {cores} free cores"),
@@ -1060,19 +1090,16 @@ fn slots_once(args: &[String], input: &str) -> Result<String, String> {
             let name = args.get(1).ok_or("observe MACHINE")?;
             let observation = parse_observation(input, now)
                 .ok_or("expected nproc, /proc/loadavg, /proc/meminfo and optionally ps -eLo policy=,stat=[,psr=] on stdin")?;
-            let state = with_state(|state| {
+            let (state, gone) = with_state(|state| {
                 state.observations.insert(name.clone(), observation.clone());
                 state.expire(now);
-                state.clone()
+                let gone = reap_gone(state, &machines(pool, state, now));
+                (state.clone(), gone)
             })?;
+            log_gone(&gone);
             let machines = machines(pool, &state, now);
             let mut out = list(&machines, &state, now);
-            let leased: u32 = state
-                .leases
-                .iter()
-                .filter(|lease| &lease.machine == name)
-                .map(|lease| lease.cores)
-                .sum();
+            let leased = state.leased_cpus(name, observation.cores);
             let nearest = state
                 .leases
                 .iter()
@@ -1143,10 +1170,12 @@ fn slots_once(args: &[String], input: &str) -> Result<String, String> {
             Ok(format!("{}\n", serde_json::Value::from(caps)))
         }
         Some("list") => {
-            let state = with_state(|state| {
+            let (state, gone) = with_state(|state| {
                 state.expire(now);
-                state.clone()
+                let gone = reap_gone(state, &machines(pool, state, now));
+                (state.clone(), gone)
             })?;
+            log_gone(&gone);
             Ok(list(&machines(pool, &state, now), &state, now))
         }
         _ => Err(USAGE.to_owned()),
@@ -1212,7 +1241,7 @@ fn log_line(line: &str) {
 
 fn list(machines: &[Machine], state: &State, now: u64) -> String {
     let mut out = String::new();
-    let (mut busy_total, mut cores_total) = (0, 0);
+    let (mut busy_total, mut leased_total, mut cores_total) = (0, 0, 0);
     for machine in machines {
         let usage = state.usage(machine, now);
         let observation = state.observations.get(&machine.name);
@@ -1242,9 +1271,10 @@ fn list(machines: &[Machine], state: &State, now: u64) -> String {
         out.push('\n');
         log_line(&format!("machine {line}"));
         busy_total += usage.busy;
+        leased_total += usage.leased;
         cores_total += usage.cores;
     }
-    let total = format!("total {busy_total}/{cores_total} cores busy");
+    let total = format!("total {busy_total}/{cores_total} cores busy, {leased_total} leased");
     log_line(&total);
     for lease in &state.leases {
         out.push_str(&format!(
@@ -1398,7 +1428,7 @@ fn post(
 
 #[cfg(test)]
 mod tests {
-    use super::{local_take, parse_observation, placement_warning, slots};
+    use super::{local_take, parse_observation, placement_warning, reap_gone, slots};
     use nanocode_build_opt::slots::{Cap, Lease, Machine, Pin, Placement, Refusal, State, Want};
 
     const NOW: u64 = 1_000_000;
@@ -1700,6 +1730,83 @@ mod tests {
         ] {
             assert!(slots::caps_from_json(&serde_json::from_str(bad).unwrap()).is_err());
         }
+    }
+
+    #[test]
+    fn a_reservation_with_nested_leases_counts_its_cpus_once() {
+        let mut state = state(&[], &[]);
+        let mut cap = lane_cap(4);
+        cap.prefixes.push("py-".to_owned());
+        state.caps.push(cap.clone());
+        state
+            .leases
+            .push(lease("r", 0, 16, slots::RESERVED_KIND, "py-*"));
+        state.leases.push(lease("a", 0, 4, "test", "py-a"));
+        state.leases.push(lease("b", 4, 8, "build", "py-b"));
+        state.leases.push(lease("o", 16, 32, "build", "other"));
+        let usage = state.usage(&machine(), NOW);
+        assert_eq!((usage.leased, usage.busy), (48, 48));
+        assert_eq!(state.held(&cap), 0);
+        assert_eq!(
+            state.take(&[machine()], &labelled(1, "build", "else"), NOW),
+            Err(Refusal::NoRoom)
+        );
+        let inside = state
+            .take(&[machine()], &labelled(4, "build", "py-c"), NOW)
+            .unwrap();
+        assert_eq!(inside.cpus(), "12-15");
+        assert_eq!(state.usage(&machine(), NOW).leased, 48);
+        assert_eq!(state.held(&cap), 0);
+    }
+
+    #[test]
+    fn overlapping_leases_count_each_cpu_once() {
+        let mut overlapping = state(&[], &[(0, 12), (8, 12)]);
+        assert_eq!(overlapping.usage(&machine(), NOW).leased, 20);
+        assert!(overlapping.take(&[machine()], &want(28), NOW).is_ok());
+        assert!(overlapping.take(&[machine()], &want(1), NOW).is_err());
+        let mut closed = state(&[], &[]);
+        closed
+            .leases
+            .push(lease("c", 0, 48, slots::CLOSED_LOAD_KIND, "closed-load"));
+        closed.leases.push(lease("n", 4, 4, "build", "nf-x"));
+        closed
+            .leases
+            .push(lease("p", 16, 8, slots::RESERVED_KIND, "py-*"));
+        closed
+            .leases
+            .push(lease("q", 44, 8, "build", "past-the-end"));
+        let usage = closed.usage(&machine(), NOW);
+        assert_eq!((usage.leased, usage.busy), (48, 48));
+    }
+
+    #[test]
+    fn a_deleted_boxs_leases_do_not_count_and_are_reaped() {
+        let mut state = state(&[], &[(0, 8)]);
+        state.caps.push(lane_cap(16));
+        let mut gone = lease("g", 0, 48, "build", "nf-gone");
+        gone.machine = "gone".to_owned();
+        state.leases.push(gone);
+        assert_eq!(state.held(&lane_cap(16)), 48);
+        assert_eq!(state.usage(&machine(), NOW).leased, 8);
+        let machines = [machine()];
+        let reaped = reap_gone(&mut state, &machines);
+        assert_eq!(reaped.len(), 1);
+        assert_eq!(reaped[0].machine, "gone");
+        assert_eq!(state.leases.len(), 1);
+        assert_eq!(state.held(&lane_cap(16)), 0);
+        assert!(
+            state
+                .take(&machines, &labelled(16, "build", "nf-a"), NOW)
+                .is_ok()
+        );
+        let mut named = machine();
+        named.placement = Placement::Named;
+        let mut unknown = state.clone();
+        unknown.leases.push(lease("k", 0, 4, "build", "kept"));
+        unknown.leases[1].machine = "elsewhere".to_owned();
+        assert!(reap_gone(&mut unknown, &[named]).is_empty());
+        assert_eq!(unknown.leases.len(), 3);
     }
 
     fn words(words: &[&str]) -> Vec<String> {

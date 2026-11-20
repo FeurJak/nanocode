@@ -340,25 +340,39 @@ impl State {
         expired
     }
 
+    pub fn leased_cpus(&self, name: &str, cores: u32) -> u32 {
+        let mut covered = vec![false; cores as usize];
+        for lease in self.leases.iter().filter(|lease| lease.machine == name) {
+            for cpu in lease.first_cpu..lease.end_cpu().min(cores) {
+                covered[cpu as usize] = true;
+            }
+        }
+        covered.iter().map(|&leased| u32::from(leased)).sum()
+    }
+
+    pub fn reap_gone(&mut self, machines: &[Machine]) -> Vec<Lease> {
+        let (gone, live) = self
+            .leases
+            .drain(..)
+            .partition(|lease| !machines.iter().any(|machine| machine.name == lease.machine));
+        self.leases = live;
+        gone
+    }
+
     pub fn usage(&self, machine: &Machine, now_ms: u64) -> Usage {
         let leases: Vec<&Lease> = self
             .leases
             .iter()
             .filter(|lease| lease.machine == machine.name)
             .collect();
-        let leased = leases
-            .iter()
-            .filter(|lease| {
-                !leases
-                    .iter()
-                    .any(|outer| outer.label_prefix().is_some() && lease.within(outer))
-            })
-            .map(|lease| lease.cores)
-            .sum();
         let fresh = self
             .observations
             .get(&machine.name)
             .filter(|observation| now_ms.saturating_sub(observation.at_ms) <= FRESH_MS);
+        let cores = fresh.map_or(machine.cores, |observation| {
+            observation.cores.min(machine.cores)
+        });
+        let leased = self.leased_cpus(&machine.name, cores);
         let unleased = fresh.map_or(0, |observation| {
             match (machine.pin, &observation.runnable_cpus) {
                 (Pin::Taskset, Some(counts)) => (0..)
@@ -379,9 +393,7 @@ impl State {
             observation.mem_available_kb.saturating_mul(10) >= observation.mem_total_kb
         });
         Usage {
-            cores: fresh.map_or(machine.cores, |observation| {
-                observation.cores.min(machine.cores)
-            }),
+            cores,
             leased,
             busy: leased + unleased,
             memory_ok,
