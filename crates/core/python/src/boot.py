@@ -5,6 +5,12 @@ import posix
 import builtins
 import time
 import _frozen_importlib
+import _frozen_importlib_external
+
+# The path-based machinery is not installed (_Finder imports), so its module has no
+# _bootstrap until set here; importlib.util.spec_from_file_location needs it.
+if getattr(_frozen_importlib_external, '_bootstrap', None) is None:
+    _frozen_importlib_external._set_bootstrap_module(_frozen_importlib)
 
 sys.builtin_module_names = tuple(sys.builtin_module_names) + ('posix',)
 
@@ -445,7 +451,7 @@ def _stdio(fd, name):
     raw = FileIO(fd, 'r' if fd == 0 else 'w', False)
     raw.name = name
     if fd == 0:
-        text = _io.TextIOWrapper(_io.BufferedReader(raw), 'utf-8', 'surrogateescape', None, False)
+        text = _io.TextIOWrapper(_io.BufferedReader(raw), 'utf-8', 'surrogateescape', '\n', False)
     else:
         text = _io.TextIOWrapper(_io.BufferedWriter(raw), 'utf-8', 'backslashreplace' if fd == 2 else 'surrogateescape', '\n', fd == 2)
     text.mode = 'r' if fd == 0 else 'w'
