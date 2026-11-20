@@ -262,6 +262,12 @@ struct Shape {
     /// Share of landed claims whose writer, under a cap, sleeps past its lease and then renews,
     /// so the renew must take a slot again while other writers may have filled the cap.
     lapse_ppm: u64,
+    /// How many lapses the whole run may take. A lapsed claim holds its cap slot for a whole
+    /// lease, so lapses under a tight cap run one lease after another: at 400k ppm of claims
+    /// lapsing a 2.4 s lease under a cap of one, 137 tasks need longer than the deadline
+    /// however the writers race (seed 1795200002000022054). The budget keeps the time
+    /// lapses hold the cap to a quarter of the deadline.
+    lapse_budget: u64,
 }
 
 impl Shape {
@@ -303,6 +309,7 @@ impl Shape {
                 .then(|| cap_of(seed, rng.range(1, 6) as u32)),
             stale_ppm: rng.range(100_000, 600_000),
             lapse_ppm: 0,
+            lapse_budget: 0,
         };
         // Drawn apart from the shape's own stream so every earlier seed keeps its shape.
         let lapse_ppm = if shape.cap.is_some() {
@@ -311,9 +318,13 @@ impl Shape {
             0
         };
         let lease_ms = shape.lease_ms.max(shape.lease_floor_ms());
+        let lapse_budget = shape.cap.as_ref().map_or(0, |cap| {
+            shape.deadline_ms / 4 * u64::from(cap.max()) / (lease_ms + shape.step_ms)
+        });
         Self {
             lease_ms,
             lapse_ppm,
+            lapse_budget,
             ..shape
         }
     }
@@ -519,6 +530,7 @@ struct World {
     oracle: RefCell<Oracle>,
     rng: RefCell<Rng>,
     spins: std::cell::Cell<u64>,
+    lapsed: std::cell::Cell<u64>,
     pick_ns: std::cell::Cell<u128>,
     parents: RefCell<BTreeMap<TaskId, Option<TaskId>>>,
     marked: RefCell<BTreeSet<TaskId>>,
@@ -979,7 +991,10 @@ async fn writer(world: &World, index: u64) {
                     task.clone(),
                     Told::Applied(applied.seq),
                 ));
-                if lapses.chance(world.shape.lapse_ppm) {
+                if lapses.chance(world.shape.lapse_ppm)
+                    && world.lapsed.get() < world.shape.lapse_budget
+                {
+                    world.lapsed.set(world.lapsed.get() + 1);
                     world
                         .nap(world.shape.lease_ms + lapses.range(1, world.shape.step_ms + 1))
                         .await;
@@ -1589,6 +1604,7 @@ fn simulate_shape(seed: u64, shape: Shape, mutation: ShardsMutation) -> ShardsOu
         oracle: RefCell::new(Oracle::default()),
         rng: RefCell::new(Rng::derive(seed, "board shards routing")),
         spins: std::cell::Cell::new(0),
+        lapsed: std::cell::Cell::new(0),
         pick_ns: std::cell::Cell::new(0),
         parents: RefCell::new(BTreeMap::new()),
         marked: RefCell::new(BTreeSet::new()),
@@ -1740,6 +1756,7 @@ pub fn bench(partitions: &[u32], writers: &[u64], batch: usize, cost: Cost) {
                 cap: None,
                 stale_ppm: 0,
                 lapse_ppm: 0,
+                lapse_budget: 0,
             };
             let mut walls = Vec::new();
             for _ in 0..BENCH_ROUNDS {
