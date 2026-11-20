@@ -436,6 +436,7 @@ name = "nanocode-board-fold"
 version = "0.7.0"
 dependencies = [
  "nanocode-durability-core",
+ "nanocode-machine",
  "nanocode-schema",
  "serde",
  "serde_json",

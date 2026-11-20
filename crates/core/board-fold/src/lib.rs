@@ -9,11 +9,13 @@ pub mod intent;
 pub mod mirror;
 pub mod schedule;
 pub mod sim;
+pub mod stage;
 pub mod steer;
 pub mod tasks;
 pub mod watch;
 
 use sim::{Mutation, mutated};
+use stage::{Act, Stage};
 use tasks::{Moved, Occurrence, Refusal, TaskOp, Terms};
 
 const FIRST: u64 = 1;
@@ -219,6 +221,7 @@ pub enum Rejection {
     Said(messages::Refusal),
     Watch(watch::Refusal),
     Steer(steer::Refusal),
+    Illegal { from: String, to: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -344,6 +347,8 @@ pub struct Fold {
     steers: steer::Steers,
     #[serde(default)]
     intents: intent::Intents,
+    #[serde(skip)]
+    refused: Option<nanocode_machine::Illegal<Stage>>,
 }
 
 impl Default for Fold {
@@ -371,6 +376,7 @@ impl Fold {
             marks: watch::Marks::new(),
             steers: steer::Steers::new(),
             intents: intent::Intents::new(),
+            refused: None,
         }
     }
 
@@ -411,31 +417,28 @@ impl Fold {
     pub fn claimable(&self, id: &TaskId, at_ms: u64) -> Result<Option<ClaimId>, Rejection> {
         let task = self.tasks.get(id).ok_or(Rejection::UnknownTask)?;
         let now = self.now_ms.max(at_ms);
-        match &task.phase {
-            Phase::Open => {}
-            Phase::Claimed {
-                claim, until_ms, ..
-            } if (*until_ms > now || mutated(Mutation::LeasesNeverExpire))
-                && !mutated(Mutation::ClaimIgnoresLease) =>
+        match task.may(Act::Claim, now) {
+            Ok(Stage::Lapsed)
+                if mutated(Mutation::LeasesNeverExpire)
+                    && !mutated(Mutation::ClaimIgnoresLease) =>
             {
-                return Err(Rejection::Held {
-                    claim: claim.clone(),
-                    until_ms: *until_ms,
-                });
+                return Err(task.refusal(Act::Claim, Stage::Held));
             }
-            Phase::Claimed { claim, .. } => return Ok(Some(claim.clone())),
-            Phase::Blocked { .. } if !mutated(Mutation::ClaimIgnoresBlock) => {
-                return Err(Rejection::Tasks(Refusal::Blocked));
+            Ok(_) => {}
+            Err(refused) => {
+                let loose = match task.stage(now) {
+                    Stage::Held => mutated(Mutation::ClaimIgnoresLease),
+                    Stage::Blocked => mutated(Mutation::ClaimIgnoresBlock),
+                    Stage::Scheduled => mutated(Mutation::DueIgnored),
+                    _ => false,
+                };
+                if !loose {
+                    return Err(refused);
+                }
             }
-            Phase::Blocked { .. } => {}
-            _ => return Err(Rejection::Terminal),
         }
-        if let Some(due_at_ms) = task.due_at_ms
-            && due_at_ms > now
-            && matches!(task.phase, Phase::Open)
-            && !mutated(Mutation::DueIgnored)
-        {
-            return Err(Rejection::Tasks(Refusal::NotDue(due_at_ms)));
+        if let Phase::Claimed { claim, .. } = &task.phase {
+            return Ok(Some(claim.clone()));
         }
         if mutated(Mutation::ClaimIgnoresNeeds) {
             return Ok(None);
@@ -533,13 +536,15 @@ impl Fold {
     }
 
     fn holder(&self, id: &TaskId, held: &ClaimId) -> Result<&Task, Rejection> {
+        self.holds(id, held, Act::Renew)
+    }
+
+    fn holds(&self, id: &TaskId, held: &ClaimId, act: Act) -> Result<&Task, Rejection> {
         let task = self.tasks.get(id).ok_or(Rejection::UnknownTask)?;
+        task.may(act, self.now_ms)?;
         match &task.phase {
             Phase::Claimed { claim, .. } if claim == held => Ok(task),
-            Phase::Claimed { .. } | Phase::Open | Phase::Blocked { .. } => {
-                Err(Rejection::NotHolder)
-            }
-            _ => Err(Rejection::Terminal),
+            _ => Err(Rejection::NotHolder),
         }
     }
 
@@ -581,18 +586,16 @@ impl Fold {
                 claim,
                 outcome,
             } => {
-                self.holder(task, claim)?;
+                self.holds(task, claim, Act::Finish)?;
                 self.unheeded(task)?;
                 self.scheduled(task, self.now_ms.max(at_ms), outcome)
                     .map(drop)
             }
-            Op::Renew { task, claim, .. } | Op::Release { task, claim, .. } => {
-                self.holder(task, claim).map(drop)
-            }
+            Op::Renew { task, claim, .. } => self.holds(task, claim, Act::Renew).map(drop),
+            Op::Release { task, claim, .. } => self.holds(task, claim, Act::Release).map(drop),
             Op::Cancel { task, .. } => match self.tasks.get(task) {
                 None => Err(Rejection::UnknownTask),
-                Some(task) if task.finished() => Err(Rejection::Terminal),
-                Some(_) => Ok(()),
+                Some(task) => task.may(Act::Cancel, self.now_ms.max(at_ms)).map(drop),
             },
             Op::Reply { task, .. } | Op::Relabel { task, .. } | Op::Rank { task, .. } => {
                 self.tasks.get(task).map(drop).ok_or(Rejection::UnknownTask)
@@ -680,7 +683,8 @@ impl Fold {
             detail: error.to_string(),
         })?;
         self.next = seq + 1;
-        if self.seen.contains_key(&event.id) || !access::owns(&event.by, &event.id) {
+        let replayed = self.seen.contains_key(&event.id) && !mutated(Mutation::ReplaysApply);
+        if replayed || !access::owns(&event.by, &event.id) {
             return Ok(());
         }
         self.now_ms = self.now_ms.max(event.at_ms);
@@ -693,9 +697,16 @@ impl Fold {
         if verdict.is_ok() {
             self.access.record(&event.by, &event.id, &event.op);
             self.transition(seq, &event);
+            if let Some(illegal) = self.refused.take() {
+                self.seen
+                    .insert(event.id.clone(), Err(stage::rejection(illegal)));
+                return Ok(());
+            }
             self.intend(seq, &event);
             self.hear(seq, &event);
             self.index_marks();
+        } else if mutated(Mutation::RefusalsCountAttempts) {
+            self.miscount(&event.op);
         }
         Ok(())
     }
@@ -766,14 +777,18 @@ impl Fold {
                     Phase::Claimed { claim, .. } => Some(claim.clone()),
                     _ => None,
                 };
-                if !mutated(Mutation::AttemptsNotCounted) {
-                    task.attempts += 1;
-                }
-                task.phase = Phase::Claimed {
+                let claimed = Phase::Claimed {
                     claim: claim.clone(),
                     worker: event.by.clone(),
                     until_ms,
                 };
+                if let Err(illegal) = task.enter(claimed, now) {
+                    self.refused = Some(illegal);
+                    return;
+                }
+                if !mutated(Mutation::AttemptsNotCounted) {
+                    task.attempts += 1;
+                }
                 Change::Claimed {
                     claim,
                     worker: event.by.clone(),
@@ -785,15 +800,20 @@ impl Fold {
                 claim, lease_ms, ..
             } => {
                 let until_ms = now.saturating_add(*lease_ms);
-                if let Some(Task {
-                    phase:
-                        Phase::Claimed {
-                            until_ms: until, ..
-                        },
-                    ..
-                }) = self.tasks.get_mut(&id)
-                {
-                    *until = until_ms;
+                let Some(task) = self.tasks.get_mut(&id) else {
+                    return;
+                };
+                let Phase::Claimed { worker, .. } = &task.phase else {
+                    return;
+                };
+                let renewed = Phase::Claimed {
+                    claim: claim.clone(),
+                    worker: worker.clone(),
+                    until_ms,
+                };
+                if let Err(illegal) = task.enter(renewed, now) {
+                    self.refused = Some(illegal);
+                    return;
                 }
                 Change::Renewed {
                     claim: claim.clone(),
@@ -801,8 +821,8 @@ impl Fold {
                 }
             }
             Op::Release { claim, note, .. } => {
-                if let Some(task) = self.tasks.get_mut(&id) {
-                    task.phase = Phase::Open;
+                if !self.enter(&id, Phase::Open, None, now) {
+                    return;
                 }
                 Change::Released {
                     claim: claim.clone(),
@@ -813,9 +833,8 @@ impl Fold {
                 if let Ok(Some(due_at_ms)) = self.scheduled(&id, now, outcome)
                     && let Outcome::Failed(error) = outcome
                 {
-                    if let Some(task) = self.tasks.get_mut(&id) {
-                        task.phase = Phase::Open;
-                        task.due_at_ms = Some(due_at_ms);
+                    if !self.enter(&id, Phase::Open, Some(Some(due_at_ms)), now) {
+                        return;
                     }
                     self.record(
                         seq,
@@ -828,15 +847,16 @@ impl Fold {
                     );
                     return;
                 }
-                if let Some(task) = self.tasks.get_mut(&id) {
-                    task.phase = match outcome {
-                        Outcome::Done(result) => Phase::Done {
-                            result: result.clone(),
-                        },
-                        Outcome::Failed(error) => Phase::Failed {
-                            error: error.clone(),
-                        },
-                    };
+                let finished = match outcome {
+                    Outcome::Done(result) => Phase::Done {
+                        result: result.clone(),
+                    },
+                    Outcome::Failed(error) => Phase::Failed {
+                        error: error.clone(),
+                    },
+                };
+                if !self.enter(&id, finished, None, now) {
+                    return;
                 }
                 self.record(seq, event, &id, Change::Finished(outcome.clone()));
                 if matches!(outcome, Outcome::Failed(_)) && self.cascades(&id) {
@@ -917,15 +937,15 @@ impl Fold {
     }
 
     pub(crate) fn cancel(&mut self, seq: u64, event: &Event, id: &TaskId, reason: String) {
-        let Some(task) = self.tasks.get_mut(id) else {
-            return;
-        };
-        if task.finished() {
+        if self.tasks.get(id).is_none_or(Task::finished) {
             return;
         }
-        task.phase = Phase::Cancelled {
+        let cancelled = Phase::Cancelled {
             reason: reason.clone(),
         };
+        if !self.enter(id, cancelled, None, self.now_ms) {
+            return;
+        }
         self.record(seq, event, id, Change::Cancelled { reason });
         self.cascade(seq, event, id);
     }

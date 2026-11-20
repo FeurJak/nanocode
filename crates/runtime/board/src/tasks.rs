@@ -158,7 +158,7 @@ impl Board {
                         lease.until.store(until, Ordering::Release);
                         wake = until.saturating_sub(lease_ms - third);
                     }
-                    None => wake = pace.now_ms() + third,
+                    None => return BoardError::Rejected(Rejection::NotHolder),
                 },
                 Err(BoardError::Rejected(_)) if mutated(Mutation::RunIgnoresLoss) => {
                     lease

@@ -7,6 +7,7 @@ use crate::{
     access::{Actor, Can},
     schedule::{Invalid, Recur, Retry},
     sim::{Mutation, mutated},
+    stage::Act,
 };
 
 pub const BATCH: usize = 100;
@@ -350,33 +351,28 @@ impl Fold {
         }
         let task = self.tasks.get(op.task()).ok_or(Rejection::UnknownTask)?;
         match op {
-            TaskOp::Block { claim, .. } => match (&task.phase, claim) {
-                (Phase::Claimed { claim: held, .. }, Some(claim)) if held == claim => Ok(()),
-                (Phase::Open | Phase::Claimed { .. }, Some(_)) => Err(Rejection::NotHolder),
-                (
-                    Phase::Claimed {
-                        claim, until_ms, ..
-                    },
-                    None,
-                ) if *until_ms > self.now_ms.max(at_ms) => Err(Rejection::Held {
-                    claim: claim.clone(),
-                    until_ms: *until_ms,
-                }),
-                (Phase::Open | Phase::Claimed { .. }, None) => Ok(()),
-                (Phase::Blocked { .. }, _) => Err(Rejection::Tasks(Refusal::Blocked)),
-                _ => Err(Rejection::Terminal),
-            },
-            TaskOp::Unblock { .. } => match task.phase {
-                Phase::Blocked { .. } => Ok(()),
-                _ if mutated(Mutation::UnblockAnything) => Ok(()),
-                _ => Err(Rejection::Tasks(Refusal::NotBlocked)),
-            },
-            TaskOp::Reopen { .. } => match task.phase {
-                Phase::Failed { .. } if !task.finished() => Ok(()),
-                _ if mutated(Mutation::ReopenAnything) => Ok(()),
-                Phase::Failed { .. } => Err(Rejection::Terminal),
-                _ => Err(Rejection::Tasks(Refusal::NotFailed)),
-            },
+            TaskOp::Block { claim, .. } => {
+                let now = self.now_ms.max(at_ms);
+                task.may(Act::Block, now)?;
+                match (&task.phase, claim) {
+                    (Phase::Claimed { claim: held, .. }, Some(claim)) if held == claim => Ok(()),
+                    (_, Some(_)) => Err(Rejection::NotHolder),
+                    (
+                        Phase::Claimed {
+                            claim, until_ms, ..
+                        },
+                        None,
+                    ) if *until_ms > now => Err(Rejection::Held {
+                        claim: claim.clone(),
+                        until_ms: *until_ms,
+                    }),
+                    (_, None) => Ok(()),
+                }
+            }
+            TaskOp::Unblock { .. } if mutated(Mutation::UnblockAnything) => Ok(()),
+            TaskOp::Reopen { .. } if mutated(Mutation::ReopenAnything) => Ok(()),
+            TaskOp::Unblock { .. } => task.may(Act::Unblock, self.now_ms.max(at_ms)).map(drop),
+            TaskOp::Reopen { .. } => task.may(Act::Reopen, self.now_ms.max(at_ms)).map(drop),
             TaskOp::Assign { .. } if task.finished() => Err(Rejection::Terminal),
             TaskOp::Assign { .. } | TaskOp::Batch { .. } => Ok(()),
         }
@@ -521,6 +517,7 @@ impl Fold {
 
     pub(crate) fn steer(&mut self, seq: u64, event: &Event, op: &TaskOp) {
         let id = op.task().clone();
+        let now = self.now_ms;
         let change = match op {
             TaskOp::Batch { name, tasks } => {
                 assert!(tasks.len() <= BATCH, "a checked batch fits one write");
@@ -551,10 +548,14 @@ impl Fold {
                     Phase::Claimed { claim, .. } => Some(claim.clone()),
                     _ => None,
                 };
-                task.phase = Phase::Blocked {
+                let blocked = Phase::Blocked {
                     kind: kind.clone(),
                     reason: reason.clone(),
                 };
+                if let Err(illegal) = task.enter(blocked, now) {
+                    self.refused = Some(illegal);
+                    return;
+                }
                 Moved::Blocked {
                     kind: kind.clone(),
                     reason: reason.clone(),
@@ -562,8 +563,8 @@ impl Fold {
                 }
             }
             TaskOp::Unblock { .. } | TaskOp::Reopen { .. } => {
-                if let Some(task) = self.tasks.get_mut(&id) {
-                    task.phase = Phase::Open;
+                if !self.enter(&id, Phase::Open, None, now) {
+                    return;
                 }
                 if matches!(op, TaskOp::Reopen { .. }) {
                     Moved::Reopened

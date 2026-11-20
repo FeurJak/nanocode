@@ -116,6 +116,11 @@ pub enum Mutation {
     BriefOverBudget,
     BriefDropsSteer,
     BriefLeaksParentHistory,
+    LifecycleUnchecked,
+    RefusalsCountAttempts,
+    ReplaysApply,
+    UnblockRefused,
+    StalledStuck,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

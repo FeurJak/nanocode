@@ -6,6 +6,7 @@ use super::{
     Change, Event, EventId, Fold, Op, Outcome, Phase, Rejection, TaskId,
     access::Can,
     sim::{Mutation, mutated},
+    stage::Act,
     tasks::Moved,
 };
 
@@ -986,9 +987,7 @@ impl Fold {
             SyncOp::Label { task, .. } => known(task),
             SyncOp::Settle { task, .. } => {
                 let state = self.tasks.get(task).ok_or(Rejection::UnknownTask)?;
-                if state.phase.terminal() {
-                    return Err(Rejection::Terminal);
-                }
+                state.may(Act::Settle, self.now_ms)?;
                 let owned = mirror
                     .links
                     .values()
@@ -1415,10 +1414,12 @@ impl Fold {
             SyncOp::Label { .. } => self.label(seq, event, op),
             SyncOp::Settle { task, outcome } => match outcome {
                 Settle::Done(result) => {
-                    if let Some(state) = self.tasks.get_mut(task) {
-                        state.phase = Phase::Done {
-                            result: result.clone(),
-                        };
+                    let now = self.now_ms;
+                    let done = Phase::Done {
+                        result: result.clone(),
+                    };
+                    if !self.enter(task, done, None, now) {
+                        return;
                     }
                     self.record(
                         seq,
