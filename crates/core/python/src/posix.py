@@ -40,6 +40,41 @@ def _fail(code, path=None):
     return kind(code, strerror(code), path)
 
 
+def _rename_function(call, fn):
+    call.__name__ = fn.__name__
+    call.__qualname__ = fn.__qualname__
+    call.__doc__ = fn.__doc__
+    return call
+
+
+def _named(fn):
+    # The host reports the absolute path it resolved; CPython's errors name
+    # the path as the caller gave it.
+    def call(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except OSError as error:
+            path = args[0] if args else kwargs.get('path')
+            if error.errno is None or error.filename is None or path is None or isinstance(path, int):
+                raise
+            raise type(error)(error.errno, error.strerror, fspath(path)) from None
+    return _rename_function(call, fn)
+
+
+def _named2(fn):
+    # Two-path calls name both paths, as CPython's "src -> dst" errors do.
+    def call(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except OSError as error:
+            src = args[0] if args else kwargs.get('src')
+            dst = args[1] if len(args) > 1 else kwargs.get('dst')
+            if error.errno is None or src is None or dst is None:
+                raise
+            raise type(error)(error.errno, error.strerror, fspath(src), None, fspath(dst)) from None
+    return _rename_function(call, fn)
+
+
 class stat_result(tuple):
     n_sequence_fields = 10
     n_fields = 10
@@ -168,6 +203,7 @@ def _stat(path):
         raise
 
 
+@_named
 def stat(path, *, dir_fd=None, follow_symlinks=True):
     if isinstance(path, int):
         return fstat(path)
@@ -178,6 +214,7 @@ def stat(path, *, dir_fd=None, follow_symlinks=True):
     return _stat_result(_mode(kind, mode), path, size, mtime_ns)
 
 
+@_named
 def lstat(path, *, dir_fd=None):
     if isinstance(path, int):
         return fstat(path)
@@ -197,6 +234,7 @@ def access(path, mode, *, dir_fd=None, effective_ids=False, follow_symlinks=True
     return True
 
 
+@_named
 def listdir(path='.'):
     names = _host.list(_abs(path))
     if isinstance(fspath(path), bytes):
@@ -272,6 +310,7 @@ class _Scan:
         self.close()
 
 
+@_named
 def scandir(path='.'):
     given = fspath(path)
     base = _abs(given)
@@ -283,10 +322,12 @@ def scandir(path='.'):
     return _Scan([DirEntry(name.decode('utf-8', 'surrogateescape'), prefix + name.decode('utf-8', 'surrogateescape'), base + b'/' + name) for name in names])
 
 
+@_named
 def mkdir(path, mode=0o777, *, dir_fd=None):
     _host.mkdir(_abs(path), mode & ~_umask & 0o777)
 
 
+@_named
 def rmdir(path, *, dir_fd=None):
     name = fspath(path)
     tail = name.rstrip(b'/' if isinstance(name, bytes) else '/').rsplit(b'/' if isinstance(name, bytes) else '/', 1)[-1]
@@ -295,6 +336,7 @@ def rmdir(path, *, dir_fd=None):
     _host.remove(_abs(path), True)
 
 
+@_named
 def unlink(path, *, dir_fd=None):
     target = _abs(path)
     _host.remove(target, False)
@@ -316,16 +358,22 @@ def _forget(file):
     file.gone = True
 
 
-remove = unlink
+@_named
+def remove(path, *, dir_fd=None):
+    return unlink(path, dir_fd=dir_fd)
 
 
+@_named2
 def rename(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
     _host.rename(_abs(src), _abs(dst))
 
 
-replace = rename
+@_named2
+def replace(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+    return rename(src, dst)
 
 
+@_named
 def chmod(path, mode, *, dir_fd=None, follow_symlinks=True):
     _host.chmod(_abs(path), mode)
 
@@ -334,10 +382,12 @@ def utime(path, times=None, *, ns=None, dir_fd=None, follow_symlinks=True):
     _host.stat(_abs(path))
 
 
+@_named
 def chown(path, uid, gid, *, dir_fd=None, follow_symlinks=True):
     _host.stat(_abs(path))
 
 
+@_named
 def readlink(path, *, dir_fd=None):
     given = fspath(path)
     target = _abs(path)
@@ -349,6 +399,7 @@ def readlink(path, *, dir_fd=None):
     return found.decode('utf-8', 'surrogateescape')
 
 
+@_named2
 def symlink(src, dst, target_is_directory=False, *, dir_fd=None):
     src = fspath(src)
     if isinstance(src, str):
@@ -361,6 +412,7 @@ def symlink(src, dst, target_is_directory=False, *, dir_fd=None):
         raise
 
 
+@_named2
 def link(src, dst, *, src_dir_fd=None, dst_dir_fd=None, follow_symlinks=True):
     raise _fail(_errno.EPERM, dst)
 
@@ -373,6 +425,7 @@ def getcwdb():
     return _cwd
 
 
+@_named
 def chdir(path):
     global _cwd
     target = _abs(path)
@@ -400,6 +453,7 @@ def _file(fd):
         raise _fail(_errno.EBADF) from None
 
 
+@_named
 def open(path, flags, mode=0o777, *, dir_fd=None):
     global _next
     target = _abs(path)
@@ -671,6 +725,15 @@ def unsetenv(name):
 
 def times():
     return (0.0, 0.0, 0.0, 0.0, 0.0)
+
+
+def waitstatus_to_exitcode(status):
+    status = status.__index__()
+    if status & 0x7f == 0:
+        return (status >> 8) & 0xff
+    if 0 < status & 0x7f < 0x7f:
+        return -(status & 0x7f)
+    raise ValueError('invalid wait status: %d' % status)
 
 
 def _exit(status):
