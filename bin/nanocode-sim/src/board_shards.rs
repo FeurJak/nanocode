@@ -25,8 +25,8 @@ use std::{
 };
 
 use nanocode_board::{
-    Applied, Board, BoardError, ClaimId, EventId, Fence, Fold, NewTask, Op, Outcome, Rejection,
-    TaskId, Write,
+    Applied, Board, BoardError, Cap, ClaimId, EventId, Fence, Fold, NewTask, Op, Outcome, Phase,
+    Rejection, TaskId, Write,
     access::{Can, Grant, Who},
     deliver::Outbox,
     shards::{self, Committer, Merged, ReadyIndex, Route, Stats as CommitStats},
@@ -47,6 +47,8 @@ const OWNER: &str = "user:lead";
 const MS: u64 = 1_000_000;
 const END: u64 = i64::MAX as u64;
 const BENCH_ROUNDS: usize = 3;
+const POOL_LABEL: &str = "pool";
+const POOL: &str = "lent";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShardsMutation {
@@ -64,10 +66,12 @@ pub enum ShardsMutation {
     CrossMoveIngestsFirst,
     EpochFenceIgnored,
     ClaimCapIgnored,
+    ClaimCapIgnoresLabel,
+    FinishForgetsWorker,
 }
 
 impl ShardsMutation {
-    const ALL: [Self; 14] = [
+    const ALL: [Self; 16] = [
         Self::None,
         Self::GroupSkipsSeq,
         Self::GroupVerdictFromPlan,
@@ -82,6 +86,8 @@ impl ShardsMutation {
         Self::CrossMoveIngestsFirst,
         Self::EpochFenceIgnored,
         Self::ClaimCapIgnored,
+        Self::ClaimCapIgnoresLabel,
+        Self::FinishForgetsWorker,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -106,6 +112,8 @@ impl ShardsMutation {
             Self::CrossMoveIngestsFirst => "cross_move_ingests_first",
             Self::EpochFenceIgnored => "epoch_fence_ignored",
             Self::ClaimCapIgnored => "claim_cap_ignored",
+            Self::ClaimCapIgnoresLabel => "claim_cap_ignores_label",
+            Self::FinishForgetsWorker => "finish_forgets_worker",
         }
     }
 
@@ -134,6 +142,8 @@ impl ShardsMutation {
             Self::CrossMoveIngestsFirst => BoardRule::CrossMoveIngestsFirst,
             Self::EpochFenceIgnored => BoardRule::EpochFenceIgnored,
             Self::ClaimCapIgnored => BoardRule::ClaimCapIgnored,
+            Self::ClaimCapIgnoresLabel => BoardRule::ClaimCapIgnoresLabel,
+            Self::FinishForgetsWorker => BoardRule::FinishForgetsWorker,
         }
     }
 }
@@ -234,7 +244,7 @@ struct Shape {
     audit: bool,
     epochs: u64,
     fence_ppm: u64,
-    cap: Option<u32>,
+    cap: Option<Cap>,
     /// Share of fenced claims a writer makes from a view one epoch behind
     /// its partition, as an agent that read the board before the last bump.
     stale_ppm: u64,
@@ -274,7 +284,9 @@ impl Shape {
             audit: true,
             epochs: rng.range(0, 24),
             fence_ppm: rng.range(0, 1_000_000),
-            cap: rng.chance(500_000).then(|| rng.range(1, 6) as u32),
+            cap: rng
+                .chance(500_000)
+                .then(|| cap_of(seed, rng.range(1, 6) as u32)),
             stale_ppm: rng.range(100_000, 600_000),
         };
         let lease_ms = shape.lease_ms.max(shape.lease_floor_ms());
@@ -472,6 +484,18 @@ fn thread_of(seed: u64, index: u64) -> String {
     format!("{high:016x}{low:016x}")
 }
 
+fn cap_of(seed: u64, max: u32) -> Cap {
+    if Rng::derive(seed, "board shards cap").chance(500_000) {
+        Cap::Label {
+            max,
+            key: POOL_LABEL.to_owned(),
+            value: POOL.to_owned(),
+        }
+    } else {
+        Cap::Partition(max)
+    }
+}
+
 fn plan(seed: u64, shape: &Shape) -> Vec<NewTask> {
     let mut rng = Rng::derive(seed, "board shards plan");
     let mut tasks = Vec::new();
@@ -509,6 +533,14 @@ fn plan(seed: u64, shape: &Shape) -> Vec<NewTask> {
                 needs: Vec::new(),
                 terms: nanocode_board::tasks::Terms::default(),
             });
+        }
+    }
+    if let Some(Cap::Label { key, value, .. }) = &shape.cap {
+        let mut pool = Rng::derive(seed, "board shards pool");
+        for task in &mut tasks {
+            if pool.chance(500_000) {
+                task.labels.insert(key.clone(), value.clone());
+            }
         }
     }
     tasks
@@ -872,7 +904,7 @@ async fn writer(world: &World, index: u64) {
             task: task.clone(),
             lease_ms: world.shape.lease_ms,
             fence,
-            cap: world.shape.cap,
+            cap: world.shape.cap.clone(),
         };
         let (partition, verdict) = world.submit(&by, key.clone(), claim).await;
         let event = EventId(format!("{by}#{key}"));
@@ -1111,9 +1143,16 @@ fn check(world: &World, logs: &[Vec<(u64, String)>]) -> Result<ShardsStats, Stri
             let (fence, cap) = match &event.op {
                 Op::Claim { fence, cap, .. } => (
                     fence.map(|fence| (fence, fold.epoch(fence.partition))),
-                    *cap,
+                    cap.clone(),
                 ),
                 _ => (None, None),
+            };
+            let finisher = match &event.op {
+                Op::Finish { task, .. } => fold.task(task).and_then(|task| match &task.phase {
+                    Phase::Claimed { worker, .. } => Some(worker.clone()),
+                    _ => None,
+                }),
+                _ => None,
             };
             fold.apply(*seq, body)
                 .map_err(|error| format!("partition {index} does not fold: {error}"))?;
@@ -1126,14 +1165,33 @@ fn check(world: &World, logs: &[Vec<(u64, String)>]) -> Result<ShardsStats, Stri
                     event.id, fence.epoch, fence.partition
                 ));
             }
-            if let Some(cap) = cap
+            if let Some(cap) = &cap {
+                let held = fold.held(cap, event.at_ms);
+                let max = cap.max() as usize;
+                match fold.outcome(&event.id) {
+                    Some(Ok(landed)) if landed == seq && held > max => {
+                        return Err(format!(
+                            "partition {index} row {seq}: claim {} landed over its cap {cap:?} with {held} live claims",
+                            event.id
+                        ));
+                    }
+                    Some(Err(Rejection::Full { .. })) if held < max => {
+                        return Err(format!(
+                            "partition {index} row {seq}: claim {} was refused as full under {cap:?} with {held} live claims",
+                            event.id
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            if let (Op::Finish { task, .. }, Some(worker)) = (&event.op, &finisher)
                 && fold.outcome(&event.id) == Some(&Ok(*seq))
-                && fold.held(event.at_ms) > cap as usize
+                && let Some(task) = fold.task(task)
+                && !matches!(&task.phase, Phase::Done { worker: Some(done), .. } if done == worker)
             {
                 return Err(format!(
-                    "partition {index} row {seq}: claim {} landed over its cap of {cap} with {} live claims",
-                    event.id,
-                    fold.held(event.at_ms)
+                    "partition {index} row {seq}: {} finished under {worker}'s claim shows {:?}",
+                    task.spec.id, task.phase
                 ));
             }
         }

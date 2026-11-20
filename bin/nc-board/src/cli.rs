@@ -196,8 +196,8 @@ fn render(board: &Board, id: &TaskId, task: &Task, at_ms: u64) -> Value {
         } => {
             json!({"claim": claim, "worker": worker, "until_ms": until_ms, "expired": *until_ms <= at_ms})
         }
-        Phase::Done { result } => json!({"result": result}),
-        Phase::Failed { error } => json!({"error": error}),
+        Phase::Done { result, .. } => json!({"result": result}),
+        Phase::Failed { error, .. } => json!({"error": error}),
         Phase::Cancelled { reason } => json!({"reason": reason}),
         Phase::Blocked { kind, reason } => json!({"kind": kind, "reason": reason}),
     };

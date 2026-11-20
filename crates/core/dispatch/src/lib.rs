@@ -192,7 +192,7 @@ pub fn intents(fold: &Fold, policy: &Policy) -> Vec<Intent> {
                     claim: claim.clone(),
                     until_ms: *until_ms,
                 },
-                Phase::Done { result } => IntentState::Live {
+                Phase::Done { result, .. } => IntentState::Live {
                     agent: result.clone(),
                 },
                 Phase::Failed { .. } | Phase::Cancelled { .. } | Phase::Blocked { .. } => {

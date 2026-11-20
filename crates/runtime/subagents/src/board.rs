@@ -523,7 +523,7 @@ impl Inner {
             let id = state.task(session);
             let phase = fold.task(&id).map(|task| &task.phase);
             let matches = match (expected, phase) {
-                (Some(output), Some(Phase::Done { result })) => result == output,
+                (Some(output), Some(Phase::Done { result, .. })) => result == output,
                 (None, Some(Phase::Failed { .. })) => true,
                 _ => false,
             };
@@ -539,11 +539,11 @@ impl Inner {
 
 fn finished(phase: &Phase) -> Result<Option<AgentStatus>, String> {
     match phase {
-        Phase::Done { result } => serde_json::from_str(result)
+        Phase::Done { result, .. } => serde_json::from_str(result)
             .map(|output| Some(AgentStatus::Completed { output }))
             .map_err(|error| format!("board result {result:?} is not JSON: {error}")),
         Phase::Failed { .. } if mutated(Mutation::SubagentFailuresUnread) => Ok(None),
-        Phase::Failed { error } => Ok(Some(AgentStatus::Failed {
+        Phase::Failed { error, .. } => Ok(Some(AgentStatus::Failed {
             error: error.clone(),
         })),
         Phase::Cancelled { .. } => Ok(Some(AgentStatus::Closed)),

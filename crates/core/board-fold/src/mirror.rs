@@ -1556,6 +1556,7 @@ impl Fold {
                     let now = self.now_ms;
                     let done = Phase::Done {
                         result: result.clone(),
+                        worker: None,
                     };
                     if !self.enter(task, done, None, now) {
                         return;

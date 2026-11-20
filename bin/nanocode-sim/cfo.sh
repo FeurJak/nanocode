@@ -226,6 +226,8 @@ default_table='
 1 canary_board_shards_cross_move_ingests_first canary:40 --scenario board_shards --mutation cross_move_ingests_first
 1 canary_board_shards_epoch_fence_ignored canary:40 --scenario board_shards --mutation epoch_fence_ignored
 1 canary_board_shards_claim_cap_ignored canary:40 --scenario board_shards --mutation claim_cap_ignored
+1 canary_board_shards_claim_cap_ignores_label canary:40 --scenario board_shards --mutation claim_cap_ignores_label
+1 canary_board_shards_finish_forgets_worker canary:40 --scenario board_shards --mutation finish_forgets_worker
 1 canary_capture_skip_trim canary --scenario capture --mutation skip_trim
 1 canary_capture_drop_chunk canary --scenario capture --mutation drop_chunk
 1 canary_buffered_admission_written canary --scenario turns --policy turnlog --mutation buffered_admission_written

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nanocode_board::{
-    ClaimId, Event, EventId, Fence, Fold, NewTask, Op, Outcome, Spread, TaskId,
+    Cap, ClaimId, Event, EventId, Fence, Fold, NewTask, Op, Outcome, Spread, TaskId,
     access::{Can, Grant, Who},
     tasks::Terms,
 };
@@ -71,7 +71,18 @@ fn op(rng: &mut Rng, ids: &[EventId]) -> Op {
                 partition: rng.below(3) as u32,
                 epoch: rng.below(4),
             }),
-            cap: rng.chance(1, 2).then(|| rng.below(4) as u32),
+            cap: rng.chance(1, 2).then(|| {
+                let max = rng.below(4) as u32;
+                if rng.chance(1, 2) {
+                    Cap::Label {
+                        max,
+                        key: rng.word(&["k", "source"]),
+                        value: rng.text(3),
+                    }
+                } else {
+                    Cap::Partition(max)
+                }
+            }),
         },
         5 => Op::Renew {
             task: task(rng),

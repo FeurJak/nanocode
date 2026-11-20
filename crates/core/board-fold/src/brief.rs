@@ -74,8 +74,8 @@ fn omitted(bytes: usize) -> String {
 
 fn outcome(task: &Task) -> Option<(&'static str, &str)> {
     match &task.phase {
-        Phase::Done { result } => Some(("done", result)),
-        Phase::Failed { error } => Some(("failed", error)),
+        Phase::Done { result, .. } => Some(("done", result)),
+        Phase::Failed { error, .. } => Some(("failed", error)),
         Phase::Cancelled { reason } => Some(("cancelled", reason)),
         Phase::Open | Phase::Claimed { .. } | Phase::Blocked { .. } => None,
     }

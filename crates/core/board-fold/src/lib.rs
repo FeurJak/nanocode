@@ -73,6 +73,32 @@ pub enum Outcome {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Cap {
+    Partition(u32),
+    Label {
+        max: u32,
+        key: String,
+        value: String,
+    },
+}
+
+impl Cap {
+    pub const fn max(&self) -> u32 {
+        match self {
+            Self::Partition(max) | Self::Label { max, .. } => *max,
+        }
+    }
+
+    pub fn covers(&self, task: &Task) -> bool {
+        match self {
+            Self::Partition(_) => true,
+            Self::Label { key, value, .. } => task.spec.labels.get(key) == Some(value),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
     Post {
@@ -84,7 +110,7 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fence: Option<Fence>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        cap: Option<u32>,
+        cap: Option<Cap>,
     },
     Renew {
         task: TaskId,
@@ -188,9 +214,13 @@ pub enum Phase {
     },
     Done {
         result: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker: Option<String>,
     },
     Failed {
         error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker: Option<String>,
     },
     Cancelled {
         reason: String,
@@ -243,7 +273,7 @@ pub enum Rejection {
     Steer(steer::Refusal),
     Illegal { from: String, to: String },
     Stale { fence: Fence },
-    Full { cap: u32 },
+    Full { cap: Cap },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -603,7 +633,7 @@ impl Fold {
             } => {
                 self.fenced(fence.as_ref())?;
                 self.claimable(task, at_ms)?;
-                self.room(task, *cap, at_ms)
+                self.room(task, cap.as_ref(), at_ms)
             }
             Op::Finish { task, .. } if mutated(Mutation::FinishIgnoresClaim) => {
                 match self.tasks.get(task).map(|task| &task.phase) {
@@ -662,38 +692,34 @@ impl Fold {
         }
     }
 
-    pub fn held(&self, at_ms: u64) -> usize {
+    pub fn held(&self, cap: &Cap, at_ms: u64) -> usize {
         let now = self.now_ms.max(at_ms);
         self.live
             .iter()
-            .filter(|id| {
-                self.tasks
-                    .get(*id)
-                    .is_some_and(|task| task.stage(now) == Stage::Held)
-            })
+            .filter_map(|id| self.tasks.get(id))
+            .filter(|task| task.stage(now) == Stage::Held && cap.covers(task))
             .count()
     }
 
-    fn room(&self, task: &TaskId, cap: Option<u32>, at_ms: u64) -> Result<(), Rejection> {
+    fn room(&self, task: &TaskId, cap: Option<&Cap>, at_ms: u64) -> Result<(), Rejection> {
         let Some(cap) = cap else {
             return Ok(());
         };
         let now = self.now_ms.max(at_ms);
+        let max = cap.max() as usize;
         let others = self
             .live
             .iter()
             .filter(|id| *id != task)
-            .filter(|id| {
-                self.tasks
-                    .get(*id)
-                    .is_some_and(|held| held.stage(now) == Stage::Held)
-            })
-            .take(cap as usize)
+            .filter_map(|id| self.tasks.get(id))
+            .filter(|held| held.stage(now) == Stage::Held)
+            .filter(|held| cap.covers(held) || mutated(Mutation::ClaimCapIgnoresLabel))
+            .take(max)
             .count();
-        if others < cap as usize || mutated(Mutation::ClaimCapIgnored) {
+        if others < max || mutated(Mutation::ClaimCapIgnored) {
             Ok(())
         } else {
-            Err(Rejection::Full { cap })
+            Err(Rejection::Full { cap: cap.clone() })
         }
     }
 
@@ -965,12 +991,22 @@ impl Fold {
                     );
                     return;
                 }
+                let worker = match self.tasks.get(&id).map(|task| &task.phase) {
+                    Some(Phase::Claimed { worker, .. })
+                        if !mutated(Mutation::FinishForgetsWorker) =>
+                    {
+                        Some(worker.clone())
+                    }
+                    _ => None,
+                };
                 let finished = match outcome {
                     Outcome::Done(result) => Phase::Done {
                         result: result.clone(),
+                        worker,
                     },
                     Outcome::Failed(error) => Phase::Failed {
                         error: error.clone(),
+                        worker,
                     },
                 };
                 if !self.enter(&id, finished, None, now) {

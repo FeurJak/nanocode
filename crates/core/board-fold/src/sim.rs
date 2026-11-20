@@ -153,6 +153,8 @@ pub enum Mutation {
     CrossMoveIngestsFirst,
     EpochFenceIgnored,
     ClaimCapIgnored,
+    ClaimCapIgnoresLabel,
+    FinishForgetsWorker,
     SteersNeverDelivered,
     SteersTakenMidTurn,
     PoolForgetsIntent,
