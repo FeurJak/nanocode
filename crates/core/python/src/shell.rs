@@ -619,15 +619,46 @@ async fn copy_dir(
     Ok(())
 }
 
-async fn apply(tree: &Tree, files: &Rc<dyn FileSystem>) -> io::Result<()> {
-    let delta = tree.delta();
-    for path in &delta.removed {
+/// Whether path is dir or lies under it.
+fn within(path: &[u8], dir: &[u8]) -> bool {
+    path.strip_prefix(dir)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(b"/"))
+}
+
+async fn remove_each(files: &Rc<dyn FileSystem>, paths: &[&Vec<u8>]) -> io::Result<()> {
+    for path in paths {
         let what = match files.stat(path, false).get().await?.kind {
             nanocode_shell::Kind::Dir => nanocode_shell::Remove::Dir,
             _ => nanocode_shell::Remove::File,
         };
         files.remove(path, what).get().await?;
     }
+    Ok(())
+}
+
+/// Writes back what Python changed. New content goes in before anything is
+/// removed, except what a new entry has to replace, so a crash part way
+/// through can leave a moved file in both places but never in neither.
+async fn apply(tree: &Tree, files: &Rc<dyn FileSystem>) -> io::Result<()> {
+    let delta = tree.delta();
+    let placed: Vec<&[u8]> = delta
+        .made
+        .iter()
+        .map(|(path, _)| path.as_slice())
+        .chain(delta.written.iter().map(Vec::as_slice))
+        .chain(delta.hard_linked.iter().map(|(_, link)| link.as_slice()))
+        .chain(delta.linked.iter().map(|(link, _)| link.as_slice()))
+        .collect();
+    let blocking: Vec<&Vec<u8>> = delta
+        .removed
+        .iter()
+        .filter(|path| placed.iter().any(|new| within(new, path)))
+        .collect();
+    let (first, last): (Vec<&Vec<u8>>, Vec<&Vec<u8>>) = delta
+        .removed
+        .iter()
+        .partition(|path| blocking.iter().any(|dir| within(path, dir)));
+    remove_each(files, &first).await?;
     for (path, mode) in &delta.made {
         files.mkdir(path, *mode).get().await?;
     }
@@ -656,5 +687,5 @@ async fn apply(tree: &Tree, files: &Rc<dyn FileSystem>) -> io::Result<()> {
             done => done?,
         }
     }
-    Ok(())
+    remove_each(files, &last).await
 }
