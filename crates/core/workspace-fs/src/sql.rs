@@ -1,5 +1,6 @@
 use crate::{
     model::{Corrupt, Digest, Entry, Manifest, Refusal},
+    sim::{Mutation, mutated},
     store::{Batch, Blob, Failure, Store},
 };
 use nanocode_bytes::Bytes;
@@ -47,6 +48,11 @@ const CLAIM_NEXT: Dialects = [
     "UPDATE nanocode_workspace_heads SET version = version + 1, token = $2::text WHERE workspace = $1::text AND version = CAST($3::text AS BIGINT)",
 ];
 
+const CLAIM_ANY: Dialects = [
+    "UPDATE nanocode_workspace_heads SET version = version + 1, token = ?2 WHERE workspace = ?1 AND ?3 IS NOT NULL",
+    "UPDATE nanocode_workspace_heads SET version = version + 1, token = $2::text WHERE workspace = $1::text AND $3::text IS NOT NULL",
+];
+
 const CLEAR: Dialects = [
     "DELETE FROM nanocode_workspace_entries WHERE workspace = ?1 AND path IN (SELECT value FROM json_each(?3)) AND EXISTS (SELECT 1 FROM nanocode_workspace_heads WHERE workspace = ?1 AND token = ?2)",
     "DELETE FROM nanocode_workspace_entries WHERE workspace = $1::text AND path IN (SELECT jsonb_array_elements_text($3::text::jsonb)) AND EXISTS (SELECT 1 FROM nanocode_workspace_heads WHERE workspace = $1::text AND token = $2::text)",
@@ -70,6 +76,16 @@ const RELEASE_BLOBS: Dialects = [
 const DROP_BLOBS: Dialects = [
     "DELETE FROM nanocode_workspace_blobs WHERE digest IN (SELECT value FROM json_each(?3)) AND refs <= 0 AND EXISTS (SELECT 1 FROM nanocode_workspace_heads WHERE workspace = ?1 AND token = ?2)",
     "DELETE FROM nanocode_workspace_blobs WHERE digest IN (SELECT jsonb_array_elements_text($3::text::jsonb)) AND refs <= 0 AND EXISTS (SELECT 1 FROM nanocode_workspace_heads WHERE workspace = $1::text AND token = $2::text)",
+];
+
+const RELEASE_EARLY: Dialects = [
+    "UPDATE nanocode_workspace_blobs SET refs = refs - 1 WHERE digest IN (SELECT value FROM json_each(?3)) AND ?1 IS NOT NULL AND ?2 IS NOT NULL",
+    "UPDATE nanocode_workspace_blobs SET refs = refs - 1 WHERE digest IN (SELECT jsonb_array_elements_text($3::text::jsonb)) AND $1::text IS NOT NULL AND $2::text IS NOT NULL",
+];
+
+const DROP_EARLY: Dialects = [
+    "DELETE FROM nanocode_workspace_blobs WHERE digest IN (SELECT value FROM json_each(?3)) AND refs <= 0 AND ?1 IS NOT NULL AND ?2 IS NOT NULL",
+    "DELETE FROM nanocode_workspace_blobs WHERE digest IN (SELECT jsonb_array_elements_text($3::text::jsonb)) AND refs <= 0 AND $1::text IS NOT NULL AND $2::text IS NOT NULL",
 ];
 
 const HEAD: Dialects = [
@@ -265,7 +281,11 @@ impl SqlStore {
             }
         } else {
             SqlStatement {
-                sql: self.pick(&CLAIM_NEXT),
+                sql: self.pick(if mutated(Mutation::SqlSkipVersionCas) {
+                    &CLAIM_ANY
+                } else {
+                    &CLAIM_NEXT
+                }),
                 params: vec![workspace, &token, &base],
             }
         });
@@ -285,7 +305,18 @@ impl SqlStore {
                 params: vec![workspace, &token, digest, data],
             });
         }
-        if !change.dropped.is_empty() {
+        let early = mutated(Mutation::SqlReleaseBeforeCommit) && !change.dropped.is_empty();
+        if early {
+            let release = [&RELEASE_EARLY, &DROP_EARLY].map(|sql| SqlStatement {
+                sql: self.pick(sql),
+                params: vec![workspace, &token, &dropped],
+            });
+            self.host
+                .run(SqlAccess::Write, "workspace_release", &release)
+                .await
+                .map_err(backend)?;
+        }
+        if !change.dropped.is_empty() && !early {
             statements.push(SqlStatement {
                 sql: self.pick(&RELEASE_BLOBS),
                 params: vec![workspace, &token, &dropped],
@@ -299,11 +330,24 @@ impl SqlStore {
             sql: self.pick(&HEAD),
             params: vec![workspace],
         });
-        let results = self
-            .host
-            .transaction("workspace_commit", &statements)
-            .await
-            .map_err(backend)?;
+        let results = if mutated(Mutation::SqlSplitTransaction) {
+            let mut results = Vec::with_capacity(statements.len());
+            for statement in &statements {
+                let one = std::slice::from_ref(statement);
+                let answered = self
+                    .host
+                    .run(SqlAccess::Write, "workspace_commit", one)
+                    .await
+                    .map_err(backend)?;
+                results.extend(answered);
+            }
+            results
+        } else {
+            self.host
+                .transaction("workspace_commit", &statements)
+                .await
+                .map_err(backend)?
+        };
         if results.len() != statements.len() {
             return Err(Failure::Backend(format!(
                 "the SQL host answered {} of {} statements",

@@ -51,6 +51,7 @@ mod whole;
 mod workload;
 mod workspacefs;
 mod workspacehost;
+mod workspacesql;
 mod workspacestack;
 mod world;
 
@@ -85,6 +86,7 @@ use crate::{
     whole::{ChildMode, StoreKind, WholeOptions, WholeStats, WireKind},
     workspacefs::{WorkspaceFsMutation, WorkspaceFsStats},
     workspacehost::{WorkspaceHostMutation, WorkspaceHostStats},
+    workspacesql::{WorkspaceSqlMutation, WorkspaceSqlStats},
     workspacestack::{WorkspaceStackMutation, WorkspaceStackStats},
 };
 
@@ -119,6 +121,7 @@ enum Scenario {
     BoardSync,
     BoardSteer,
     WorkspaceFs,
+    WorkspaceSql,
     GitRemote,
     WorkspaceStack,
 }
@@ -150,6 +153,7 @@ struct Args {
     board_sync: BoardSyncMutation,
     board_steer: BoardSteerMutation,
     workspace_fs: WorkspaceFsMutation,
+    workspace_sql: WorkspaceSqlMutation,
     git_remote: GitRemoteMutation,
     workspace_stack: WorkspaceStackMutation,
     #[cfg(unix)]
@@ -166,7 +170,7 @@ type Caught = BTreeMap<Invariant, (u64, u64, (u64, u64))>;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|inbox_stress|capture|executor|dns|board|cost|hand_router|workspace_host|board_sync|board_steer|workspace_fs|git_remote|workspace_stack] [--ops N] [--twice] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
+        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|inbox_stress|capture|executor|dns|board|cost|hand_router|workspace_host|board_sync|board_steer|workspace_fs|workspace_sql|git_remote|workspace_stack] [--ops N] [--twice] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
        websocket: [--mutation {}]
        http_server: [--mutation {}]
        alloc: [--mutation overstate_size|forget_free|scribble]
@@ -185,6 +189,7 @@ fn usage() -> ExitCode {
        hand_router: [--mutation {}]
        board_sync: [--mutation {}]
        workspace_fs: [--mutation {}]
+       workspace_sql: [--mutation {}]
        git_remote: [--mutation {}]
        workspace_stack: [--mutation {}]",
         Mutation::names(),
@@ -207,6 +212,7 @@ fn usage() -> ExitCode {
         HandRouterMutation::names(),
         BoardSyncMutation::names(),
         WorkspaceFsMutation::names(),
+        WorkspaceSqlMutation::names(),
         GitRemoteMutation::names(),
         WorkspaceStackMutation::names()
     );
@@ -270,6 +276,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
     let mut board_sync = BoardSyncMutation::None;
     let mut board_steer = BoardSteerMutation::None;
     let mut workspace_fs = WorkspaceFsMutation::None;
+    let mut workspace_sql = WorkspaceSqlMutation::None;
     let mut git_remote = GitRemoteMutation::None;
     let mut workspace_stack = WorkspaceStackMutation::None;
     #[cfg(unix)]
@@ -339,6 +346,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
                     "board_sync" => Scenario::BoardSync,
                     "board_steer" => Scenario::BoardSteer,
                     "workspace_fs" => Scenario::WorkspaceFs,
+                    "workspace_sql" => Scenario::WorkspaceSql,
                     "git_remote" => Scenario::GitRemote,
                     "workspace_stack" => Scenario::WorkspaceStack,
                     #[cfg(unix)]
@@ -394,6 +402,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         (Scenario::BoardSync, Some(name)) => board_sync = BoardSyncMutation::parse(name)?,
         (Scenario::BoardSteer, Some(name)) => board_steer = BoardSteerMutation::parse(name)?,
         (Scenario::WorkspaceFs, Some(name)) => workspace_fs = WorkspaceFsMutation::parse(name)?,
+        (Scenario::WorkspaceSql, Some(name)) => workspace_sql = WorkspaceSqlMutation::parse(name)?,
         (Scenario::GitRemote, Some(name)) => git_remote = GitRemoteMutation::parse(name)?,
         (Scenario::WorkspaceStack, Some(name)) => {
             workspace_stack = WorkspaceStackMutation::parse(name)?
@@ -449,6 +458,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         board_sync,
         board_steer,
         workspace_fs,
+        workspace_sql,
         git_remote,
         workspace_stack,
         #[cfg(unix)]
@@ -539,6 +549,9 @@ fn replay(seed: u64, args: &Args) -> String {
     }
     if args.scenario == Scenario::WorkspaceFs {
         return workspacefs::replay(seed, args.workspace_fs);
+    }
+    if args.scenario == Scenario::WorkspaceSql {
+        return workspacesql::replay(seed, args.workspace_sql);
     }
     #[cfg(unix)]
     if args.scenario == Scenario::Capture {
@@ -880,6 +893,7 @@ fn mutations() -> ExitCode {
     add("board_sync", BoardSyncMutation::names());
     add("board_steer", BoardSteerMutation::names());
     add("workspace_fs", WorkspaceFsMutation::names());
+    add("workspace_sql", WorkspaceSqlMutation::names());
     add("git_remote", GitRemoteMutation::names());
     add("workspace_stack", WorkspaceStackMutation::names());
     #[cfg(unix)]
@@ -964,6 +978,8 @@ fn main() -> ExitCode {
         || (args.scenario == Scenario::BoardSteer && args.board_steer != BoardSteerMutation::None)
         || (args.scenario == Scenario::WorkspaceFs
             && args.workspace_fs != WorkspaceFsMutation::None)
+        || (args.scenario == Scenario::WorkspaceSql
+            && args.workspace_sql != WorkspaceSqlMutation::None)
         || (args.scenario == Scenario::GitRemote && args.git_remote != GitRemoteMutation::None)
         || (args.scenario == Scenario::WorkspaceStack
             && args.workspace_stack != WorkspaceStackMutation::None)
@@ -991,6 +1007,7 @@ fn main() -> ExitCode {
     let mut board_sync_totals = BoardSyncStats::default();
     let mut board_steer_totals = BoardSteerStats::default();
     let mut workspace_fs_totals = WorkspaceFsStats::default();
+    let mut workspace_sql_totals = WorkspaceSqlStats::default();
     let mut git_remote_totals = GitRemoteStats::default();
     let mut workspace_stack_totals = WorkspaceStackStats::default();
     #[cfg(unix)]
@@ -1136,6 +1153,13 @@ fn main() -> ExitCode {
                 args.twice,
                 args.options.verbose,
                 &mut workspace_fs_totals,
+            ),
+            Scenario::WorkspaceSql => workspacesql::judge(
+                seed,
+                args.workspace_sql,
+                args.twice,
+                args.options.verbose,
+                &mut workspace_sql_totals,
             ),
             Scenario::GitRemote => gitremote::judge(
                 seed,
@@ -1310,6 +1334,16 @@ fn main() -> ExitCode {
             args.twice,
             args.hand_router,
             &hand_router_totals,
+        );
+    }
+    if args.scenario == Scenario::WorkspaceSql {
+        return workspacesql::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.workspace_sql,
+            &workspace_sql_totals,
         );
     }
     if args.scenario == Scenario::WorkspaceFs {
