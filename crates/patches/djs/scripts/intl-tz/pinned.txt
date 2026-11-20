@@ -1,0 +1,1110 @@
+# zone<TAB>node v22.23.5's formatted output: see encode.py (PINZ). From diff.py DIFF_REG_OUT and the parity intl-tz cases
+Africa/Abidjan	Dec 31, 1899, 11:43:52 PM GMT-0:16:08
+Africa/Abidjan	{"type":"timeZoneName","value":"GMT-0:16:08"}
+Africa/Algiers	1.6.1977, WESZ
+Africa/Algiers	1.6.1977, WEZ (Algier)
+Africa/Algiers	1.6.1977, Westeuropäische Sommerzeit
+Africa/Algiers	1.6.1977, Westeuropäische Zeit (Algier)
+Africa/Cairo	Oct 31, 2024, 11:30:00 PM Eastern European Time
+Africa/Cairo	{"type":"timeZoneName","value":"Eastern European Time"}
+Africa/Casablanca	01/06/1980 UTC+0
+Africa/Casablanca	01/06/1980 heure : Maroc
+Africa/Casablanca	01/06/1980 heure normale d’Europe de l’Ouest
+Africa/Casablanca	Mar 20, 2024, 12:00:00 PM GMT+0
+Africa/Casablanca	{"type":"timeZoneName","value":"GMT+0"}
+Africa/Ceuta	1985, czas środkowoeuropejski (Ceuta)
+Africa/Monrovia	Dec 31, 1959, 11:15:30 PM GMT-00:44:30
+Africa/Monrovia	{"type":"timeZoneName","value":"GMT-00:44:30"}
+Africa/Windhoek	1994 Hora de: Namíbia
+Africa/Windhoek	1994 Namibiatid
+Africa/Windhoek	1994 Namibya Saati
+Africa/Windhoek	1994 heure : Namibie
+Africa/Windhoek	1994 časové pásmo Namibie
+Africa/Windhoek	1994, Hora de Namíbia
+Africa/Windhoek	1994, Horário Namíbia
+Africa/Windhoek	1994, Namibia (Ortszeit)
+Africa/Windhoek	1994, Namibia-tid
+Africa/Windhoek	1994, Ora Namibia
+Africa/Windhoek	1994, Ora din Namibia
+Africa/Windhoek	1994, Oras sa Namibia
+Africa/Windhoek	1994, Saa za Namibia
+Africa/Windhoek	1994, Waktu Namibia
+Africa/Windhoek	1994, czas: Namibia
+Africa/Windhoek	1994, hora de Namibia
+Africa/Windhoek	1994, tidssone for Namibia
+Africa/Windhoek	1994, tijd in Namibië
+Africa/Windhoek	1994, Ώρα (Ναμίμπια)
+Africa/Windhoek	1994, Намибия
+Africa/Windhoek	1994, час: Намібія
+Africa/Windhoek	1994, שעון נמיביה
+Africa/Windhoek	1994, नामीबिया समय
+Africa/Windhoek	1994, நமீபியா நேரம்
+Africa/Windhoek	1994. Namibija
+Africa/Windhoek	1994. Namíbia idő
+Africa/Windhoek	1994. Намибија
+Africa/Windhoek	1994، توقيت ناميبيا
+Africa/Windhoek	1994، نامیبیا وقت
+Africa/Windhoek	1994年 ナミビア時間
+Africa/Windhoek	1994年 纳米比亚时间
+Africa/Windhoek	1994年 納米比亞時間
+Africa/Windhoek	1994년 나미비아 시간
+Africa/Windhoek	1995 Hora de: Namíbia
+Africa/Windhoek	1995 Namibiatid
+Africa/Windhoek	1995 Namibya Saati
+Africa/Windhoek	1995 heure : Namibie
+Africa/Windhoek	1995 časové pásmo Namibie
+Africa/Windhoek	1995, Hora de Namíbia
+Africa/Windhoek	1995, Horário Namíbia
+Africa/Windhoek	1995, Namibia (Ortszeit)
+Africa/Windhoek	1995, Namibia-tid
+Africa/Windhoek	1995, Ora Namibia
+Africa/Windhoek	1995, Ora din Namibia
+Africa/Windhoek	1995, Oras sa Namibia
+Africa/Windhoek	1995, Saa za Namibia
+Africa/Windhoek	1995, Waktu Namibia
+Africa/Windhoek	1995, czas: Namibia
+Africa/Windhoek	1995, hora de Namibia
+Africa/Windhoek	1995, tidssone for Namibia
+Africa/Windhoek	1995, tijd in Namibië
+Africa/Windhoek	1995, Ώρα (Ναμίμπια)
+Africa/Windhoek	1995, Намибия
+Africa/Windhoek	1995, час: Намібія
+Africa/Windhoek	1995, שעון נמיביה
+Africa/Windhoek	1995, नामीबिया समय
+Africa/Windhoek	1995, நமீபியா நேரம்
+Africa/Windhoek	1995. Namibija
+Africa/Windhoek	1995. Namíbia idő
+Africa/Windhoek	1995. Намибија
+Africa/Windhoek	1995، توقيت ناميبيا
+Africa/Windhoek	1995، نامیبیا وقت
+Africa/Windhoek	1995年 ナミビア時間
+Africa/Windhoek	1995年 纳米比亚时间
+Africa/Windhoek	1995年 納米比亞時間
+Africa/Windhoek	1995년 나미비아 시간
+Africa/Windhoek	1996 Hora de: Namíbia
+Africa/Windhoek	1996 Namibiatid
+Africa/Windhoek	1996 Namibya Saati
+Africa/Windhoek	1996 heure : Namibie
+Africa/Windhoek	1996 časové pásmo Namibie
+Africa/Windhoek	1996, Hora de Namíbia
+Africa/Windhoek	1996, Horário Namíbia
+Africa/Windhoek	1996, Namibia (Ortszeit)
+Africa/Windhoek	1996, Namibia-tid
+Africa/Windhoek	1996, Ora Namibia
+Africa/Windhoek	1996, Ora din Namibia
+Africa/Windhoek	1996, Oras sa Namibia
+Africa/Windhoek	1996, Saa za Namibia
+Africa/Windhoek	1996, Waktu Namibia
+Africa/Windhoek	1996, czas: Namibia
+Africa/Windhoek	1996, hora de Namibia
+Africa/Windhoek	1996, tidssone for Namibia
+Africa/Windhoek	1996, tijd in Namibië
+Africa/Windhoek	1996, Ώρα (Ναμίμπια)
+Africa/Windhoek	1996, Намибия
+Africa/Windhoek	1996, час: Намібія
+Africa/Windhoek	1996, שעון נמיביה
+Africa/Windhoek	1996, नामीबिया समय
+Africa/Windhoek	1996, நமீபியா நேரம்
+Africa/Windhoek	1996. Namibija
+Africa/Windhoek	1996. Namíbia idő
+Africa/Windhoek	1996. Намибија
+Africa/Windhoek	1996، توقيت ناميبيا
+Africa/Windhoek	1996، نامیبیا وقت
+Africa/Windhoek	1996年 ナミビア時間
+Africa/Windhoek	1996年 纳米比亚时间
+Africa/Windhoek	1996年 納米比亞時間
+Africa/Windhoek	1996년 나미비아 시간
+Africa/Windhoek	1997 Hora de: Namíbia
+Africa/Windhoek	1997 Namibiatid
+Africa/Windhoek	1997 Namibya Saati
+Africa/Windhoek	1997 heure : Namibie
+Africa/Windhoek	1997 časové pásmo Namibie
+Africa/Windhoek	1997, Hora de Namíbia
+Africa/Windhoek	1997, Horário Namíbia
+Africa/Windhoek	1997, Namibia (Ortszeit)
+Africa/Windhoek	1997, Namibia-tid
+Africa/Windhoek	1997, Ora Namibia
+Africa/Windhoek	1997, Ora din Namibia
+Africa/Windhoek	1997, Oras sa Namibia
+Africa/Windhoek	1997, Saa za Namibia
+Africa/Windhoek	1997, Waktu Namibia
+Africa/Windhoek	1997, czas: Namibia
+Africa/Windhoek	1997, hora de Namibia
+Africa/Windhoek	1997, tidssone for Namibia
+Africa/Windhoek	1997, tijd in Namibië
+Africa/Windhoek	1997, Ώρα (Ναμίμπια)
+Africa/Windhoek	1997, Намибия
+Africa/Windhoek	1997, час: Намібія
+Africa/Windhoek	1997, שעון נמיביה
+Africa/Windhoek	1997, नामीबिया समय
+Africa/Windhoek	1997, நமீபியா நேரம்
+Africa/Windhoek	1997. Namibija
+Africa/Windhoek	1997. Namíbia idő
+Africa/Windhoek	1997. Намибија
+Africa/Windhoek	1997، توقيت ناميبيا
+Africa/Windhoek	1997، نامیبیا وقت
+Africa/Windhoek	1997年 ナミビア時間
+Africa/Windhoek	1997年 纳米比亚时间
+Africa/Windhoek	1997年 納米比亞時間
+Africa/Windhoek	1997년 나미비아 시간
+Africa/Windhoek	1998 Hora de: Namíbia
+Africa/Windhoek	1998 Namibiatid
+Africa/Windhoek	1998 Namibya Saati
+Africa/Windhoek	1998 heure : Namibie
+Africa/Windhoek	1998 časové pásmo Namibie
+Africa/Windhoek	1998, Hora de Namíbia
+Africa/Windhoek	1998, Horário Namíbia
+Africa/Windhoek	1998, Namibia (Ortszeit)
+Africa/Windhoek	1998, Namibia-tid
+Africa/Windhoek	1998, Ora Namibia
+Africa/Windhoek	1998, Ora din Namibia
+Africa/Windhoek	1998, Oras sa Namibia
+Africa/Windhoek	1998, Saa za Namibia
+Africa/Windhoek	1998, Waktu Namibia
+Africa/Windhoek	1998, czas: Namibia
+Africa/Windhoek	1998, hora de Namibia
+Africa/Windhoek	1998, tidssone for Namibia
+Africa/Windhoek	1998, tijd in Namibië
+Africa/Windhoek	1998, Ώρα (Ναμίμπια)
+Africa/Windhoek	1998, Намибия
+Africa/Windhoek	1998, час: Намібія
+Africa/Windhoek	1998, שעון נמיביה
+Africa/Windhoek	1998, नामीबिया समय
+Africa/Windhoek	1998, நமீபியா நேரம்
+Africa/Windhoek	1998. Namibija
+Africa/Windhoek	1998. Namíbia idő
+Africa/Windhoek	1998. Намибија
+Africa/Windhoek	1998، توقيت ناميبيا
+Africa/Windhoek	1998، نامیبیا وقت
+Africa/Windhoek	1998年 ナミビア時間
+Africa/Windhoek	1998年 纳米比亚时间
+Africa/Windhoek	1998年 納米比亞時間
+Africa/Windhoek	1998년 나미비아 시간
+Africa/Windhoek	1999 Hora de: Namíbia
+Africa/Windhoek	1999 Namibiatid
+Africa/Windhoek	1999 Namibya Saati
+Africa/Windhoek	1999 heure : Namibie
+Africa/Windhoek	1999 časové pásmo Namibie
+Africa/Windhoek	1999, Hora de Namíbia
+Africa/Windhoek	1999, Horário Namíbia
+Africa/Windhoek	1999, Namibia (Ortszeit)
+Africa/Windhoek	1999, Namibia-tid
+Africa/Windhoek	1999, Ora Namibia
+Africa/Windhoek	1999, Ora din Namibia
+Africa/Windhoek	1999, Oras sa Namibia
+Africa/Windhoek	1999, Saa za Namibia
+Africa/Windhoek	1999, Waktu Namibia
+Africa/Windhoek	1999, czas: Namibia
+Africa/Windhoek	1999, hora de Namibia
+Africa/Windhoek	1999, tidssone for Namibia
+Africa/Windhoek	1999, tijd in Namibië
+Africa/Windhoek	1999, Ώρα (Ναμίμπια)
+Africa/Windhoek	1999, Намибия
+Africa/Windhoek	1999, час: Намібія
+Africa/Windhoek	1999, שעון נמיביה
+Africa/Windhoek	1999, नामीबिया समय
+Africa/Windhoek	1999, நமீபியா நேரம்
+Africa/Windhoek	1999. Namibija
+Africa/Windhoek	1999. Namíbia idő
+Africa/Windhoek	1999. Намибија
+Africa/Windhoek	1999، توقيت ناميبيا
+Africa/Windhoek	1999، نامیبیا وقت
+Africa/Windhoek	1999年 ナミビア時間
+Africa/Windhoek	1999年 纳米比亚时间
+Africa/Windhoek	1999年 納米比亞時間
+Africa/Windhoek	1999년 나미비아 시간
+Africa/Windhoek	2000 Hora de: Namíbia
+Africa/Windhoek	2000 Namibiatid
+Africa/Windhoek	2000 Namibya Saati
+Africa/Windhoek	2000 heure : Namibie
+Africa/Windhoek	2000 časové pásmo Namibie
+Africa/Windhoek	2000, Hora de Namíbia
+Africa/Windhoek	2000, Horário Namíbia
+Africa/Windhoek	2000, Namibia (Ortszeit)
+Africa/Windhoek	2000, Namibia-tid
+Africa/Windhoek	2000, Ora Namibia
+Africa/Windhoek	2000, Ora din Namibia
+Africa/Windhoek	2000, Oras sa Namibia
+Africa/Windhoek	2000, Saa za Namibia
+Africa/Windhoek	2000, Waktu Namibia
+Africa/Windhoek	2000, czas: Namibia
+Africa/Windhoek	2000, hora de Namibia
+Africa/Windhoek	2000, tidssone for Namibia
+Africa/Windhoek	2000, tijd in Namibië
+Africa/Windhoek	2000, Ώρα (Ναμίμπια)
+Africa/Windhoek	2000, Намибия
+Africa/Windhoek	2000, час: Намібія
+Africa/Windhoek	2000, שעון נמיביה
+Africa/Windhoek	2000, नामीबिया समय
+Africa/Windhoek	2000, நமீபியா நேரம்
+Africa/Windhoek	2000. Namibija
+Africa/Windhoek	2000. Namíbia idő
+Africa/Windhoek	2000. Намибија
+Africa/Windhoek	2000، توقيت ناميبيا
+Africa/Windhoek	2000، نامیبیا وقت
+Africa/Windhoek	2000年 ナミビア時間
+Africa/Windhoek	2000年 纳米比亚时间
+Africa/Windhoek	2000年 納米比亞時間
+Africa/Windhoek	2000년 나미비아 시간
+Africa/Windhoek	2001 Hora de: Namíbia
+Africa/Windhoek	2001 Namibiatid
+Africa/Windhoek	2001 Namibya Saati
+Africa/Windhoek	2001 heure : Namibie
+Africa/Windhoek	2001 časové pásmo Namibie
+Africa/Windhoek	2001, Hora de Namíbia
+Africa/Windhoek	2001, Horário Namíbia
+Africa/Windhoek	2001, Namibia (Ortszeit)
+Africa/Windhoek	2001, Namibia-tid
+Africa/Windhoek	2001, Ora Namibia
+Africa/Windhoek	2001, Ora din Namibia
+Africa/Windhoek	2001, Oras sa Namibia
+Africa/Windhoek	2001, Saa za Namibia
+Africa/Windhoek	2001, Waktu Namibia
+Africa/Windhoek	2001, czas: Namibia
+Africa/Windhoek	2001, hora de Namibia
+Africa/Windhoek	2001, tidssone for Namibia
+Africa/Windhoek	2001, tijd in Namibië
+Africa/Windhoek	2001, Ώρα (Ναμίμπια)
+Africa/Windhoek	2001, Намибия
+Africa/Windhoek	2001, час: Намібія
+Africa/Windhoek	2001, שעון נמיביה
+Africa/Windhoek	2001, नामीबिया समय
+Africa/Windhoek	2001, நமீபியா நேரம்
+Africa/Windhoek	2001. Namibija
+Africa/Windhoek	2001. Namíbia idő
+Africa/Windhoek	2001. Намибија
+Africa/Windhoek	2001، توقيت ناميبيا
+Africa/Windhoek	2001، نامیبیا وقت
+Africa/Windhoek	2001年 ナミビア時間
+Africa/Windhoek	2001年 纳米比亚时间
+Africa/Windhoek	2001年 納米比亞時間
+Africa/Windhoek	2001년 나미비아 시간
+Africa/Windhoek	2002 Hora de: Namíbia
+Africa/Windhoek	2002 Namibiatid
+Africa/Windhoek	2002 Namibya Saati
+Africa/Windhoek	2002 heure : Namibie
+Africa/Windhoek	2002 časové pásmo Namibie
+Africa/Windhoek	2002, Hora de Namíbia
+Africa/Windhoek	2002, Horário Namíbia
+Africa/Windhoek	2002, Namibia (Ortszeit)
+Africa/Windhoek	2002, Namibia-tid
+Africa/Windhoek	2002, Ora Namibia
+Africa/Windhoek	2002, Ora din Namibia
+Africa/Windhoek	2002, Oras sa Namibia
+Africa/Windhoek	2002, Saa za Namibia
+Africa/Windhoek	2002, Waktu Namibia
+Africa/Windhoek	2002, czas: Namibia
+Africa/Windhoek	2002, hora de Namibia
+Africa/Windhoek	2002, tidssone for Namibia
+Africa/Windhoek	2002, tijd in Namibië
+Africa/Windhoek	2002, Ώρα (Ναμίμπια)
+Africa/Windhoek	2002, Намибия
+Africa/Windhoek	2002, час: Намібія
+Africa/Windhoek	2002, שעון נמיביה
+Africa/Windhoek	2002, नामीबिया समय
+Africa/Windhoek	2002, நமீபியா நேரம்
+Africa/Windhoek	2002. Namibija
+Africa/Windhoek	2002. Namíbia idő
+Africa/Windhoek	2002. Намибија
+Africa/Windhoek	2002، توقيت ناميبيا
+Africa/Windhoek	2002، نامیبیا وقت
+Africa/Windhoek	2002年 ナミビア時間
+Africa/Windhoek	2002年 纳米比亚时间
+Africa/Windhoek	2002年 納米比亞時間
+Africa/Windhoek	2002년 나미비아 시간
+Africa/Windhoek	2003 Hora de: Namíbia
+Africa/Windhoek	2003 Namibiatid
+Africa/Windhoek	2003 Namibya Saati
+Africa/Windhoek	2003 heure : Namibie
+Africa/Windhoek	2003 časové pásmo Namibie
+Africa/Windhoek	2003, Hora de Namíbia
+Africa/Windhoek	2003, Horário Namíbia
+Africa/Windhoek	2003, Namibia (Ortszeit)
+Africa/Windhoek	2003, Namibia-tid
+Africa/Windhoek	2003, Ora Namibia
+Africa/Windhoek	2003, Ora din Namibia
+Africa/Windhoek	2003, Oras sa Namibia
+Africa/Windhoek	2003, Saa za Namibia
+Africa/Windhoek	2003, Waktu Namibia
+Africa/Windhoek	2003, czas: Namibia
+Africa/Windhoek	2003, hora de Namibia
+Africa/Windhoek	2003, tidssone for Namibia
+Africa/Windhoek	2003, tijd in Namibië
+Africa/Windhoek	2003, Ώρα (Ναμίμπια)
+Africa/Windhoek	2003, Намибия
+Africa/Windhoek	2003, час: Намібія
+Africa/Windhoek	2003, שעון נמיביה
+Africa/Windhoek	2003, नामीबिया समय
+Africa/Windhoek	2003, நமீபியா நேரம்
+Africa/Windhoek	2003. Namibija
+Africa/Windhoek	2003. Namíbia idő
+Africa/Windhoek	2003. Намибија
+Africa/Windhoek	2003، توقيت ناميبيا
+Africa/Windhoek	2003، نامیبیا وقت
+Africa/Windhoek	2003年 ナミビア時間
+Africa/Windhoek	2003年 纳米比亚时间
+Africa/Windhoek	2003年 納米比亞時間
+Africa/Windhoek	2003년 나미비아 시간
+Africa/Windhoek	2004 Hora de: Namíbia
+Africa/Windhoek	2004 Namibiatid
+Africa/Windhoek	2004 Namibya Saati
+Africa/Windhoek	2004 heure : Namibie
+Africa/Windhoek	2004 časové pásmo Namibie
+Africa/Windhoek	2004, Hora de Namíbia
+Africa/Windhoek	2004, Horário Namíbia
+Africa/Windhoek	2004, Namibia (Ortszeit)
+Africa/Windhoek	2004, Namibia-tid
+Africa/Windhoek	2004, Ora Namibia
+Africa/Windhoek	2004, Ora din Namibia
+Africa/Windhoek	2004, Oras sa Namibia
+Africa/Windhoek	2004, Saa za Namibia
+Africa/Windhoek	2004, Waktu Namibia
+Africa/Windhoek	2004, czas: Namibia
+Africa/Windhoek	2004, hora de Namibia
+Africa/Windhoek	2004, tidssone for Namibia
+Africa/Windhoek	2004, tijd in Namibië
+Africa/Windhoek	2004, Ώρα (Ναμίμπια)
+Africa/Windhoek	2004, Намибия
+Africa/Windhoek	2004, час: Намібія
+Africa/Windhoek	2004, שעון נמיביה
+Africa/Windhoek	2004, नामीबिया समय
+Africa/Windhoek	2004, நமீபியா நேரம்
+Africa/Windhoek	2004. Namibija
+Africa/Windhoek	2004. Namíbia idő
+Africa/Windhoek	2004. Намибија
+Africa/Windhoek	2004، توقيت ناميبيا
+Africa/Windhoek	2004، نامیبیا وقت
+Africa/Windhoek	2004年 ナミビア時間
+Africa/Windhoek	2004年 纳米比亚时间
+Africa/Windhoek	2004年 納米比亞時間
+Africa/Windhoek	2004년 나미비아 시간
+Africa/Windhoek	2005 Hora de: Namíbia
+Africa/Windhoek	2005 Namibiatid
+Africa/Windhoek	2005 Namibya Saati
+Africa/Windhoek	2005 heure : Namibie
+Africa/Windhoek	2005 časové pásmo Namibie
+Africa/Windhoek	2005, Hora de Namíbia
+Africa/Windhoek	2005, Horário Namíbia
+Africa/Windhoek	2005, Namibia (Ortszeit)
+Africa/Windhoek	2005, Namibia-tid
+Africa/Windhoek	2005, Ora Namibia
+Africa/Windhoek	2005, Ora din Namibia
+Africa/Windhoek	2005, Oras sa Namibia
+Africa/Windhoek	2005, Saa za Namibia
+Africa/Windhoek	2005, Waktu Namibia
+Africa/Windhoek	2005, czas: Namibia
+Africa/Windhoek	2005, hora de Namibia
+Africa/Windhoek	2005, tidssone for Namibia
+Africa/Windhoek	2005, tijd in Namibië
+Africa/Windhoek	2005, Ώρα (Ναμίμπια)
+Africa/Windhoek	2005, Намибия
+Africa/Windhoek	2005, час: Намібія
+Africa/Windhoek	2005, שעון נמיביה
+Africa/Windhoek	2005, नामीबिया समय
+Africa/Windhoek	2005, நமீபியா நேரம்
+Africa/Windhoek	2005. Namibija
+Africa/Windhoek	2005. Namíbia idő
+Africa/Windhoek	2005. Намибија
+Africa/Windhoek	2005، توقيت ناميبيا
+Africa/Windhoek	2005، نامیبیا وقت
+Africa/Windhoek	2005年 ナミビア時間
+Africa/Windhoek	2005年 纳米比亚时间
+Africa/Windhoek	2005年 納米比亞時間
+Africa/Windhoek	2005년 나미비아 시간
+Africa/Windhoek	2006 Hora de: Namíbia
+Africa/Windhoek	2006 Namibiatid
+Africa/Windhoek	2006 Namibya Saati
+Africa/Windhoek	2006 heure : Namibie
+Africa/Windhoek	2006 časové pásmo Namibie
+Africa/Windhoek	2006, Hora de Namíbia
+Africa/Windhoek	2006, Horário Namíbia
+Africa/Windhoek	2006, Namibia (Ortszeit)
+Africa/Windhoek	2006, Namibia-tid
+Africa/Windhoek	2006, Ora Namibia
+Africa/Windhoek	2006, Ora din Namibia
+Africa/Windhoek	2006, Oras sa Namibia
+Africa/Windhoek	2006, Saa za Namibia
+Africa/Windhoek	2006, Waktu Namibia
+Africa/Windhoek	2006, czas: Namibia
+Africa/Windhoek	2006, hora de Namibia
+Africa/Windhoek	2006, tidssone for Namibia
+Africa/Windhoek	2006, tijd in Namibië
+Africa/Windhoek	2006, Ώρα (Ναμίμπια)
+Africa/Windhoek	2006, Намибия
+Africa/Windhoek	2006, час: Намібія
+Africa/Windhoek	2006, שעון נמיביה
+Africa/Windhoek	2006, नामीबिया समय
+Africa/Windhoek	2006, நமீபியா நேரம்
+Africa/Windhoek	2006. Namibija
+Africa/Windhoek	2006. Namíbia idő
+Africa/Windhoek	2006. Намибија
+Africa/Windhoek	2006، توقيت ناميبيا
+Africa/Windhoek	2006، نامیبیا وقت
+Africa/Windhoek	2006年 ナミビア時間
+Africa/Windhoek	2006年 纳米比亚时间
+Africa/Windhoek	2006年 納米比亞時間
+Africa/Windhoek	2006년 나미비아 시간
+Africa/Windhoek	2007 Hora de: Namíbia
+Africa/Windhoek	2007 Namibiatid
+Africa/Windhoek	2007 Namibya Saati
+Africa/Windhoek	2007 heure : Namibie
+Africa/Windhoek	2007 časové pásmo Namibie
+Africa/Windhoek	2007, Hora de Namíbia
+Africa/Windhoek	2007, Horário Namíbia
+Africa/Windhoek	2007, Namibia (Ortszeit)
+Africa/Windhoek	2007, Namibia-tid
+Africa/Windhoek	2007, Ora Namibia
+Africa/Windhoek	2007, Ora din Namibia
+Africa/Windhoek	2007, Oras sa Namibia
+Africa/Windhoek	2007, Saa za Namibia
+Africa/Windhoek	2007, Waktu Namibia
+Africa/Windhoek	2007, czas: Namibia
+Africa/Windhoek	2007, hora de Namibia
+Africa/Windhoek	2007, tidssone for Namibia
+Africa/Windhoek	2007, tijd in Namibië
+Africa/Windhoek	2007, Ώρα (Ναμίμπια)
+Africa/Windhoek	2007, Намибия
+Africa/Windhoek	2007, час: Намібія
+Africa/Windhoek	2007, שעון נמיביה
+Africa/Windhoek	2007, नामीबिया समय
+Africa/Windhoek	2007, நமீபியா நேரம்
+Africa/Windhoek	2007. Namibija
+Africa/Windhoek	2007. Namíbia idő
+Africa/Windhoek	2007. Намибија
+Africa/Windhoek	2007، توقيت ناميبيا
+Africa/Windhoek	2007، نامیبیا وقت
+Africa/Windhoek	2007年 ナミビア時間
+Africa/Windhoek	2007年 纳米比亚时间
+Africa/Windhoek	2007年 納米比亞時間
+Africa/Windhoek	2007년 나미비아 시간
+Africa/Windhoek	2008 Hora de: Namíbia
+Africa/Windhoek	2008 Namibiatid
+Africa/Windhoek	2008 Namibya Saati
+Africa/Windhoek	2008 heure : Namibie
+Africa/Windhoek	2008 časové pásmo Namibie
+Africa/Windhoek	2008, Hora de Namíbia
+Africa/Windhoek	2008, Horário Namíbia
+Africa/Windhoek	2008, Namibia (Ortszeit)
+Africa/Windhoek	2008, Namibia-tid
+Africa/Windhoek	2008, Ora Namibia
+Africa/Windhoek	2008, Ora din Namibia
+Africa/Windhoek	2008, Oras sa Namibia
+Africa/Windhoek	2008, Saa za Namibia
+Africa/Windhoek	2008, Waktu Namibia
+Africa/Windhoek	2008, czas: Namibia
+Africa/Windhoek	2008, hora de Namibia
+Africa/Windhoek	2008, tidssone for Namibia
+Africa/Windhoek	2008, tijd in Namibië
+Africa/Windhoek	2008, Ώρα (Ναμίμπια)
+Africa/Windhoek	2008, Намибия
+Africa/Windhoek	2008, час: Намібія
+Africa/Windhoek	2008, שעון נמיביה
+Africa/Windhoek	2008, नामीबिया समय
+Africa/Windhoek	2008, நமீபியா நேரம்
+Africa/Windhoek	2008. Namibija
+Africa/Windhoek	2008. Namíbia idő
+Africa/Windhoek	2008. Намибија
+Africa/Windhoek	2008، توقيت ناميبيا
+Africa/Windhoek	2008، نامیبیا وقت
+Africa/Windhoek	2008年 ナミビア時間
+Africa/Windhoek	2008年 纳米比亚时间
+Africa/Windhoek	2008年 納米比亞時間
+Africa/Windhoek	2008년 나미비아 시간
+Africa/Windhoek	2009 Hora de: Namíbia
+Africa/Windhoek	2009 Namibiatid
+Africa/Windhoek	2009 Namibya Saati
+Africa/Windhoek	2009 heure : Namibie
+Africa/Windhoek	2009 časové pásmo Namibie
+Africa/Windhoek	2009, Hora de Namíbia
+Africa/Windhoek	2009, Horário Namíbia
+Africa/Windhoek	2009, Namibia (Ortszeit)
+Africa/Windhoek	2009, Namibia-tid
+Africa/Windhoek	2009, Ora Namibia
+Africa/Windhoek	2009, Ora din Namibia
+Africa/Windhoek	2009, Oras sa Namibia
+Africa/Windhoek	2009, Saa za Namibia
+Africa/Windhoek	2009, Waktu Namibia
+Africa/Windhoek	2009, czas: Namibia
+Africa/Windhoek	2009, hora de Namibia
+Africa/Windhoek	2009, tidssone for Namibia
+Africa/Windhoek	2009, tijd in Namibië
+Africa/Windhoek	2009, Ώρα (Ναμίμπια)
+Africa/Windhoek	2009, Намибия
+Africa/Windhoek	2009, час: Намібія
+Africa/Windhoek	2009, שעון נמיביה
+Africa/Windhoek	2009, नामीबिया समय
+Africa/Windhoek	2009, நமீபியா நேரம்
+Africa/Windhoek	2009. Namibija
+Africa/Windhoek	2009. Namíbia idő
+Africa/Windhoek	2009. Намибија
+Africa/Windhoek	2009، توقيت ناميبيا
+Africa/Windhoek	2009، نامیبیا وقت
+Africa/Windhoek	2009年 ナミビア時間
+Africa/Windhoek	2009年 纳米比亚时间
+Africa/Windhoek	2009年 納米比亞時間
+Africa/Windhoek	2009년 나미비아 시간
+Africa/Windhoek	2010 Hora de: Namíbia
+Africa/Windhoek	2010 Namibiatid
+Africa/Windhoek	2010 Namibya Saati
+Africa/Windhoek	2010 heure : Namibie
+Africa/Windhoek	2010 časové pásmo Namibie
+Africa/Windhoek	2010, Hora de Namíbia
+Africa/Windhoek	2010, Horário Namíbia
+Africa/Windhoek	2010, Namibia (Ortszeit)
+Africa/Windhoek	2010, Namibia-tid
+Africa/Windhoek	2010, Ora Namibia
+Africa/Windhoek	2010, Ora din Namibia
+Africa/Windhoek	2010, Oras sa Namibia
+Africa/Windhoek	2010, Saa za Namibia
+Africa/Windhoek	2010, Waktu Namibia
+Africa/Windhoek	2010, czas: Namibia
+Africa/Windhoek	2010, hora de Namibia
+Africa/Windhoek	2010, tidssone for Namibia
+Africa/Windhoek	2010, tijd in Namibië
+Africa/Windhoek	2010, Ώρα (Ναμίμπια)
+Africa/Windhoek	2010, Намибия
+Africa/Windhoek	2010, час: Намібія
+Africa/Windhoek	2010, שעון נמיביה
+Africa/Windhoek	2010, नामीबिया समय
+Africa/Windhoek	2010, நமீபியா நேரம்
+Africa/Windhoek	2010. Namibija
+Africa/Windhoek	2010. Namíbia idő
+Africa/Windhoek	2010. Намибија
+Africa/Windhoek	2010، توقيت ناميبيا
+Africa/Windhoek	2010، نامیبیا وقت
+Africa/Windhoek	2010年 ナミビア時間
+Africa/Windhoek	2010年 纳米比亚时间
+Africa/Windhoek	2010年 納米比亞時間
+Africa/Windhoek	2010년 나미비아 시간
+Africa/Windhoek	2011 Hora de: Namíbia
+Africa/Windhoek	2011 Namibiatid
+Africa/Windhoek	2011 Namibya Saati
+Africa/Windhoek	2011 heure : Namibie
+Africa/Windhoek	2011 časové pásmo Namibie
+Africa/Windhoek	2011, Hora de Namíbia
+Africa/Windhoek	2011, Horário Namíbia
+Africa/Windhoek	2011, Namibia (Ortszeit)
+Africa/Windhoek	2011, Namibia-tid
+Africa/Windhoek	2011, Ora Namibia
+Africa/Windhoek	2011, Ora din Namibia
+Africa/Windhoek	2011, Oras sa Namibia
+Africa/Windhoek	2011, Saa za Namibia
+Africa/Windhoek	2011, Waktu Namibia
+Africa/Windhoek	2011, czas: Namibia
+Africa/Windhoek	2011, hora de Namibia
+Africa/Windhoek	2011, tidssone for Namibia
+Africa/Windhoek	2011, tijd in Namibië
+Africa/Windhoek	2011, Ώρα (Ναμίμπια)
+Africa/Windhoek	2011, Намибия
+Africa/Windhoek	2011, час: Намібія
+Africa/Windhoek	2011, שעון נמיביה
+Africa/Windhoek	2011, नामीबिया समय
+Africa/Windhoek	2011, நமீபியா நேரம்
+Africa/Windhoek	2011. Namibija
+Africa/Windhoek	2011. Namíbia idő
+Africa/Windhoek	2011. Намибија
+Africa/Windhoek	2011، توقيت ناميبيا
+Africa/Windhoek	2011، نامیبیا وقت
+Africa/Windhoek	2011年 ナミビア時間
+Africa/Windhoek	2011年 纳米比亚时间
+Africa/Windhoek	2011年 納米比亞時間
+Africa/Windhoek	2011년 나미비아 시간
+Africa/Windhoek	2012 Hora de: Namíbia
+Africa/Windhoek	2012 Namibiatid
+Africa/Windhoek	2012 Namibya Saati
+Africa/Windhoek	2012 heure : Namibie
+Africa/Windhoek	2012 časové pásmo Namibie
+Africa/Windhoek	2012, Hora de Namíbia
+Africa/Windhoek	2012, Horário Namíbia
+Africa/Windhoek	2012, Namibia (Ortszeit)
+Africa/Windhoek	2012, Namibia-tid
+Africa/Windhoek	2012, Ora Namibia
+Africa/Windhoek	2012, Ora din Namibia
+Africa/Windhoek	2012, Oras sa Namibia
+Africa/Windhoek	2012, Saa za Namibia
+Africa/Windhoek	2012, Waktu Namibia
+Africa/Windhoek	2012, czas: Namibia
+Africa/Windhoek	2012, hora de Namibia
+Africa/Windhoek	2012, tidssone for Namibia
+Africa/Windhoek	2012, tijd in Namibië
+Africa/Windhoek	2012, Ώρα (Ναμίμπια)
+Africa/Windhoek	2012, Намибия
+Africa/Windhoek	2012, час: Намібія
+Africa/Windhoek	2012, שעון נמיביה
+Africa/Windhoek	2012, नामीबिया समय
+Africa/Windhoek	2012, நமீபியா நேரம்
+Africa/Windhoek	2012. Namibija
+Africa/Windhoek	2012. Namíbia idő
+Africa/Windhoek	2012. Намибија
+Africa/Windhoek	2012، توقيت ناميبيا
+Africa/Windhoek	2012، نامیبیا وقت
+Africa/Windhoek	2012年 ナミビア時間
+Africa/Windhoek	2012年 纳米比亚时间
+Africa/Windhoek	2012年 納米比亞時間
+Africa/Windhoek	2012년 나미비아 시간
+Africa/Windhoek	2013 Hora de: Namíbia
+Africa/Windhoek	2013 Namibiatid
+Africa/Windhoek	2013 Namibya Saati
+Africa/Windhoek	2013 heure : Namibie
+Africa/Windhoek	2013 časové pásmo Namibie
+Africa/Windhoek	2013, Hora de Namíbia
+Africa/Windhoek	2013, Horário Namíbia
+Africa/Windhoek	2013, Namibia (Ortszeit)
+Africa/Windhoek	2013, Namibia-tid
+Africa/Windhoek	2013, Ora Namibia
+Africa/Windhoek	2013, Ora din Namibia
+Africa/Windhoek	2013, Oras sa Namibia
+Africa/Windhoek	2013, Saa za Namibia
+Africa/Windhoek	2013, Waktu Namibia
+Africa/Windhoek	2013, czas: Namibia
+Africa/Windhoek	2013, hora de Namibia
+Africa/Windhoek	2013, tidssone for Namibia
+Africa/Windhoek	2013, tijd in Namibië
+Africa/Windhoek	2013, Ώρα (Ναμίμπια)
+Africa/Windhoek	2013, Намибия
+Africa/Windhoek	2013, час: Намібія
+Africa/Windhoek	2013, שעון נמיביה
+Africa/Windhoek	2013, नामीबिया समय
+Africa/Windhoek	2013, நமீபியா நேரம்
+Africa/Windhoek	2013. Namibija
+Africa/Windhoek	2013. Namíbia idő
+Africa/Windhoek	2013. Намибија
+Africa/Windhoek	2013، توقيت ناميبيا
+Africa/Windhoek	2013، نامیبیا وقت
+Africa/Windhoek	2013年 ナミビア時間
+Africa/Windhoek	2013年 纳米比亚时间
+Africa/Windhoek	2013年 納米比亞時間
+Africa/Windhoek	2013년 나미비아 시간
+Africa/Windhoek	2014 Hora de: Namíbia
+Africa/Windhoek	2014 Namibiatid
+Africa/Windhoek	2014 Namibya Saati
+Africa/Windhoek	2014 heure : Namibie
+Africa/Windhoek	2014 časové pásmo Namibie
+Africa/Windhoek	2014, Hora de Namíbia
+Africa/Windhoek	2014, Horário Namíbia
+Africa/Windhoek	2014, Namibia (Ortszeit)
+Africa/Windhoek	2014, Namibia-tid
+Africa/Windhoek	2014, Ora Namibia
+Africa/Windhoek	2014, Ora din Namibia
+Africa/Windhoek	2014, Oras sa Namibia
+Africa/Windhoek	2014, Saa za Namibia
+Africa/Windhoek	2014, Waktu Namibia
+Africa/Windhoek	2014, czas: Namibia
+Africa/Windhoek	2014, hora de Namibia
+Africa/Windhoek	2014, tidssone for Namibia
+Africa/Windhoek	2014, tijd in Namibië
+Africa/Windhoek	2014, Ώρα (Ναμίμπια)
+Africa/Windhoek	2014, Намибия
+Africa/Windhoek	2014, час: Намібія
+Africa/Windhoek	2014, שעון נמיביה
+Africa/Windhoek	2014, नामीबिया समय
+Africa/Windhoek	2014, நமீபியா நேரம்
+Africa/Windhoek	2014. Namibija
+Africa/Windhoek	2014. Namíbia idő
+Africa/Windhoek	2014. Намибија
+Africa/Windhoek	2014، توقيت ناميبيا
+Africa/Windhoek	2014، نامیبیا وقت
+Africa/Windhoek	2014年 ナミビア時間
+Africa/Windhoek	2014年 纳米比亚时间
+Africa/Windhoek	2014年 納米比亞時間
+Africa/Windhoek	2014년 나미비아 시간
+Africa/Windhoek	2015 Hora de: Namíbia
+Africa/Windhoek	2015 Namibiatid
+Africa/Windhoek	2015 Namibya Saati
+Africa/Windhoek	2015 heure : Namibie
+Africa/Windhoek	2015 časové pásmo Namibie
+Africa/Windhoek	2015, Hora de Namíbia
+Africa/Windhoek	2015, Horário Namíbia
+Africa/Windhoek	2015, Namibia (Ortszeit)
+Africa/Windhoek	2015, Namibia-tid
+Africa/Windhoek	2015, Ora Namibia
+Africa/Windhoek	2015, Ora din Namibia
+Africa/Windhoek	2015, Oras sa Namibia
+Africa/Windhoek	2015, Saa za Namibia
+Africa/Windhoek	2015, Waktu Namibia
+Africa/Windhoek	2015, czas: Namibia
+Africa/Windhoek	2015, hora de Namibia
+Africa/Windhoek	2015, tidssone for Namibia
+Africa/Windhoek	2015, tijd in Namibië
+Africa/Windhoek	2015, Ώρα (Ναμίμπια)
+Africa/Windhoek	2015, Намибия
+Africa/Windhoek	2015, час: Намібія
+Africa/Windhoek	2015, שעון נמיביה
+Africa/Windhoek	2015, नामीबिया समय
+Africa/Windhoek	2015, நமீபியா நேரம்
+Africa/Windhoek	2015. Namibija
+Africa/Windhoek	2015. Namíbia idő
+Africa/Windhoek	2015. Намибија
+Africa/Windhoek	2015، توقيت ناميبيا
+Africa/Windhoek	2015، نامیبیا وقت
+Africa/Windhoek	2015年 ナミビア時間
+Africa/Windhoek	2015年 纳米比亚时间
+Africa/Windhoek	2015年 納米比亞時間
+Africa/Windhoek	2015년 나미비아 시간
+Africa/Windhoek	2016 Hora de: Namíbia
+Africa/Windhoek	2016 Namibiatid
+Africa/Windhoek	2016 Namibya Saati
+Africa/Windhoek	2016 heure : Namibie
+Africa/Windhoek	2016 časové pásmo Namibie
+Africa/Windhoek	2016, Hora de Namíbia
+Africa/Windhoek	2016, Horário Namíbia
+Africa/Windhoek	2016, Namibia (Ortszeit)
+Africa/Windhoek	2016, Namibia-tid
+Africa/Windhoek	2016, Ora Namibia
+Africa/Windhoek	2016, Ora din Namibia
+Africa/Windhoek	2016, Oras sa Namibia
+Africa/Windhoek	2016, Saa za Namibia
+Africa/Windhoek	2016, Waktu Namibia
+Africa/Windhoek	2016, czas: Namibia
+Africa/Windhoek	2016, hora de Namibia
+Africa/Windhoek	2016, tidssone for Namibia
+Africa/Windhoek	2016, tijd in Namibië
+Africa/Windhoek	2016, Ώρα (Ναμίμπια)
+Africa/Windhoek	2016, Намибия
+Africa/Windhoek	2016, час: Намібія
+Africa/Windhoek	2016, שעון נמיביה
+Africa/Windhoek	2016, नामीबिया समय
+Africa/Windhoek	2016, நமீபியா நேரம்
+Africa/Windhoek	2016. Namibija
+Africa/Windhoek	2016. Namíbia idő
+Africa/Windhoek	2016. Намибија
+Africa/Windhoek	2016، توقيت ناميبيا
+Africa/Windhoek	2016، نامیبیا وقت
+Africa/Windhoek	2016年 ナミビア時間
+Africa/Windhoek	2016年 纳米比亚时间
+Africa/Windhoek	2016年 納米比亞時間
+Africa/Windhoek	2016년 나미비아 시간
+Africa/Windhoek	2017 Hora de: Namíbia
+Africa/Windhoek	2017 Namibiatid
+Africa/Windhoek	2017 Namibya Saati
+Africa/Windhoek	2017 heure : Namibie
+Africa/Windhoek	2017 časové pásmo Namibie
+Africa/Windhoek	2017, Hora de Namíbia
+Africa/Windhoek	2017, Horário Namíbia
+Africa/Windhoek	2017, Namibia (Ortszeit)
+Africa/Windhoek	2017, Namibia-tid
+Africa/Windhoek	2017, Ora Namibia
+Africa/Windhoek	2017, Ora din Namibia
+Africa/Windhoek	2017, Oras sa Namibia
+Africa/Windhoek	2017, Saa za Namibia
+Africa/Windhoek	2017, Waktu Namibia
+Africa/Windhoek	2017, czas: Namibia
+Africa/Windhoek	2017, hora de Namibia
+Africa/Windhoek	2017, tidssone for Namibia
+Africa/Windhoek	2017, tijd in Namibië
+Africa/Windhoek	2017, Ώρα (Ναμίμπια)
+Africa/Windhoek	2017, Намибия
+Africa/Windhoek	2017, час: Намібія
+Africa/Windhoek	2017, שעון נמיביה
+Africa/Windhoek	2017, नामीबिया समय
+Africa/Windhoek	2017, நமீபியா நேரம்
+Africa/Windhoek	2017. Namibija
+Africa/Windhoek	2017. Namíbia idő
+Africa/Windhoek	2017. Намибија
+Africa/Windhoek	2017، توقيت ناميبيا
+Africa/Windhoek	2017، نامیبیا وقت
+Africa/Windhoek	2017年 ナミビア時間
+Africa/Windhoek	2017年 纳米比亚时间
+Africa/Windhoek	2017年 納米比亞時間
+Africa/Windhoek	2017년 나미비아 시간
+Africa/Windhoek	Giờ Namibia 1994
+Africa/Windhoek	Giờ Namibia 1995
+Africa/Windhoek	Giờ Namibia 1996
+Africa/Windhoek	Giờ Namibia 1997
+Africa/Windhoek	Giờ Namibia 1998
+Africa/Windhoek	Giờ Namibia 1999
+Africa/Windhoek	Giờ Namibia 2000
+Africa/Windhoek	Giờ Namibia 2001
+Africa/Windhoek	Giờ Namibia 2002
+Africa/Windhoek	Giờ Namibia 2003
+Africa/Windhoek	Giờ Namibia 2004
+Africa/Windhoek	Giờ Namibia 2005
+Africa/Windhoek	Giờ Namibia 2006
+Africa/Windhoek	Giờ Namibia 2007
+Africa/Windhoek	Giờ Namibia 2008
+Africa/Windhoek	Giờ Namibia 2009
+Africa/Windhoek	Giờ Namibia 2010
+Africa/Windhoek	Giờ Namibia 2011
+Africa/Windhoek	Giờ Namibia 2012
+Africa/Windhoek	Giờ Namibia 2013
+Africa/Windhoek	Giờ Namibia 2014
+Africa/Windhoek	Giờ Namibia 2015
+Africa/Windhoek	Giờ Namibia 2016
+Africa/Windhoek	Giờ Namibia 2017
+Africa/Windhoek	১৯৯৪, নামিবিয়া সময়
+Africa/Windhoek	১৯৯৫, নামিবিয়া সময়
+Africa/Windhoek	১৯৯৬, নামিবিয়া সময়
+Africa/Windhoek	১৯৯৭, নামিবিয়া সময়
+Africa/Windhoek	১৯৯৮, নামিবিয়া সময়
+Africa/Windhoek	১৯৯৯, নামিবিয়া সময়
+Africa/Windhoek	২০০০, নামিবিয়া সময়
+Africa/Windhoek	২০০১, নামিবিয়া সময়
+Africa/Windhoek	২০০২, নামিবিয়া সময়
+Africa/Windhoek	২০০৩, নামিবিয়া সময়
+Africa/Windhoek	২০০৪, নামিবিয়া সময়
+Africa/Windhoek	২০০৫, নামিবিয়া সময়
+Africa/Windhoek	২০০৬, নামিবিয়া সময়
+Africa/Windhoek	২০০৭, নামিবিয়া সময়
+Africa/Windhoek	২০০৮, নামিবিয়া সময়
+Africa/Windhoek	২০০৯, নামিবিয়া সময়
+Africa/Windhoek	২০১০, নামিবিয়া সময়
+Africa/Windhoek	২০১১, নামিবিয়া সময়
+Africa/Windhoek	২০১২, নামিবিয়া সময়
+Africa/Windhoek	২০১৩, নামিবিয়া সময়
+Africa/Windhoek	২০১৪, নামিবিয়া সময়
+Africa/Windhoek	২০১৫, নামিবিয়া সময়
+Africa/Windhoek	২০১৬, নামিবিয়া সময়
+Africa/Windhoek	২০১৭, নামিবিয়া সময়
+America/Asuncion	Jan 10, 1975, 8:00:00 AM GMT-4
+America/Asuncion	Jan 10, 2024, 9:00:00 AM Paraguay Summer Time
+America/Asuncion	{"type":"timeZoneName","value":"GMT-4"}
+America/Asuncion	{"type":"timeZoneName","value":"Paraguay Summer Time"}
+America/Chicago	1960/1/15 GMT-06:00
+America/Chicago	1960/1/15 GMT-6
+America/Chicago	1960/1/15 シカゴ時間
+America/Edmonton	Jan 14, 2024, 5:00:00 PM Mountain Standard Time
+America/Edmonton	{"type":"timeZoneName","value":"Mountain Standard Time"}
+America/Indiana/Indianapolis	May 31, 1990, 7:00:00 PM Eastern Standard Time
+America/Indiana/Indianapolis	{"type":"timeZoneName","value":"Eastern Standard Time"}
+America/Mexico_City	1/1/1940, GMT-06:00
+America/Mexico_City	1/1/1940, GMT-6
+America/Mexico_City	1/1/1940, hora de Ciudad de México
+America/Montreal	01/07/1955 UTC−04:00
+America/Montreal	01/07/1955 UTC−4
+America/Montreal	01/07/1955 heure : Toronto
+America/New_York	1.7.1950, GMT-04:00
+America/New_York	1.7.1950, GMT-4
+America/New_York	1.7.1950, New York (Ortszeit)
+America/New_York	Nov 18, 1883, 7:03:58 AM GMT-4:56:02
+America/New_York	{"type":"timeZoneName","value":"GMT-4:56:02"}
+America/Sao_Paulo	Nov 30, 2018, 10:00:00 PM Brasilia Summer Time
+America/Sao_Paulo	{"type":"timeZoneName","value":"Brasilia Summer Time"}
+America/Vancouver	Jun 1, 2024, 5:00:00 AM Pacific Daylight Time
+America/Vancouver	Jun 30, 1950, 5:00:00 PM Vancouver Time
+America/Vancouver	May 31, 1900, 4:00:00 PM GMT-8
+America/Vancouver	{"type":"timeZoneName","value":"GMT-8"}
+America/Vancouver	{"type":"timeZoneName","value":"Pacific Daylight Time"}
+America/Vancouver	{"type":"timeZoneName","value":"Vancouver Time"}
+America/Winnipeg	Nov 3, 2024, 1:30:00 AM CST
+America/Winnipeg	{"type":"timeZoneName","value":"CST"}
+Asia/Almaty	Jun 1, 2023, 6:00:00 AM East Kazakhstan Time
+Asia/Almaty	Jun 1, 2025, 5:00:00 AM Kazakhstan Time
+Asia/Almaty	{"type":"timeZoneName","value":"East Kazakhstan Time"}
+Asia/Almaty	{"type":"timeZoneName","value":"Kazakhstan Time"}
+Asia/Ho_Chi_Minh	01/01/1960 UTC+08:00
+Asia/Ho_Chi_Minh	01/01/1960 UTC+8
+Asia/Ho_Chi_Minh	01/01/1960 heure : Viêt Nam
+Asia/Jerusalem	1.6.1950, GMT‎+03:00‎
+Asia/Jerusalem	1.6.1950, GMT‎+3‎
+Asia/Jerusalem	1.6.1950, שעון ישראל
+Asia/Kathmandu	Jun 1, 1985, 5:30:00 AM GMT+05:30
+Asia/Kathmandu	{"type":"timeZoneName","value":"GMT+05:30"}
+Asia/Kolkata	1.1.1943, GMT+06:30
+Asia/Kolkata	1.1.1943, GMT+6:30
+Asia/Kolkata	1.1.1943, Indien (Ortszeit)
+Asia/Kolkata	Jan 1, 1900, 5:21:10 AM GMT+05:21:10
+Asia/Kolkata	Jan 1, 1900, 5:21:10 AM GMT+5:21:10
+Asia/Kolkata	{"type":"timeZoneName","value":"GMT+05:21:10"}
+Asia/Kolkata	{"type":"timeZoneName","value":"GMT+5:21:10"}
+Asia/Qyzylorda	2004 Hora de: Qyzylorda
+Asia/Qyzylorda	2004 Kızılorda Saati
+Asia/Qyzylorda	2004 Qyzylordatid
+Asia/Qyzylorda	2004 heure : Kzyl Orda
+Asia/Qyzylorda	2004 časové pásmo Kyzylorda
+Asia/Qyzylorda	2004, Hora de Qyzylorda
+Asia/Qyzylorda	2004, Horário Qyzylorda
+Asia/Qyzylorda	2004, Kyzylorda-tid
+Asia/Qyzylorda	2004, Ora Qyzylorda
+Asia/Qyzylorda	2004, Ora din Kyzylorda
+Asia/Qyzylorda	2004, Oras sa Qyzylorda
+Asia/Qyzylorda	2004, Qysylorda (Ortszeit)
+Asia/Qyzylorda	2004, Saa za Qyzylorda
+Asia/Qyzylorda	2004, Waktu Qyzylorda
+Asia/Qyzylorda	2004, czas: Kyzyłorda
+Asia/Qyzylorda	2004, hora de Kyzylorda
+Asia/Qyzylorda	2004, tidssone for Kyzylorda
+Asia/Qyzylorda	2004, tijd in Qyzylorda
+Asia/Qyzylorda	2004, Ώρα (Κιζιλορντά)
+Asia/Qyzylorda	2004, Кызылорда
+Asia/Qyzylorda	2004, час: Кизилорда
+Asia/Qyzylorda	2004, שעון קיזילורדה
+Asia/Qyzylorda	2004, केज़ेलोर्डा समय
+Asia/Qyzylorda	2004, கிஸிலோர்டா நேரம்
+Asia/Qyzylorda	2004. Kizilorda
+Asia/Qyzylorda	2004. Kizilorda idő
+Asia/Qyzylorda	2004. Кизилорда
+Asia/Qyzylorda	2004، توقيت كيزيلوردا
+Asia/Qyzylorda	2004، کیزیلورڈا وقت
+Asia/Qyzylorda	2004年 クズロルダ時間
+Asia/Qyzylorda	2004年 克孜洛尔达时间
+Asia/Qyzylorda	2004年 克孜勒奧爾達時間
+Asia/Qyzylorda	2004년 키질로르다 시간
+Asia/Qyzylorda	2005 Hora de: Qyzylorda
+Asia/Qyzylorda	2005 Kızılorda Saati
+Asia/Qyzylorda	2005 Qyzylordatid
+Asia/Qyzylorda	2005 heure : Kzyl Orda
+Asia/Qyzylorda	2005 časové pásmo Kyzylorda
+Asia/Qyzylorda	2005, Hora de Qyzylorda
+Asia/Qyzylorda	2005, Horário Qyzylorda
+Asia/Qyzylorda	2005, Kyzylorda-tid
+Asia/Qyzylorda	2005, Ora Qyzylorda
+Asia/Qyzylorda	2005, Ora din Kyzylorda
+Asia/Qyzylorda	2005, Oras sa Qyzylorda
+Asia/Qyzylorda	2005, Qysylorda (Ortszeit)
+Asia/Qyzylorda	2005, Saa za Qyzylorda
+Asia/Qyzylorda	2005, Waktu Qyzylorda
+Asia/Qyzylorda	2005, czas: Kyzyłorda
+Asia/Qyzylorda	2005, hora de Kyzylorda
+Asia/Qyzylorda	2005, tidssone for Kyzylorda
+Asia/Qyzylorda	2005, tijd in Qyzylorda
+Asia/Qyzylorda	2005, Ώρα (Κιζιλορντά)
+Asia/Qyzylorda	2005, Кызылорда
+Asia/Qyzylorda	2005, час: Кизилорда
+Asia/Qyzylorda	2005, שעון קיזילורדה
+Asia/Qyzylorda	2005, केज़ेलोर्डा समय
+Asia/Qyzylorda	2005, கிஸிலோர்டா நேரம்
+Asia/Qyzylorda	2005. Kizilorda
+Asia/Qyzylorda	2005. Kizilorda idő
+Asia/Qyzylorda	2005. Кизилорда
+Asia/Qyzylorda	2005، توقيت كيزيلوردا
+Asia/Qyzylorda	2005، کیزیلورڈا وقت
+Asia/Qyzylorda	2005年 クズロルダ時間
+Asia/Qyzylorda	2005年 克孜洛尔达时间
+Asia/Qyzylorda	2005年 克孜勒奧爾達時間
+Asia/Qyzylorda	2005년 키질로르다 시간
+Asia/Qyzylorda	Giờ Qyzylorda 2004
+Asia/Qyzylorda	Giờ Qyzylorda 2005
+Asia/Qyzylorda	২০০৪, কিজিলর্ডা সময়
+Asia/Qyzylorda	২০০৫, কিজিলর্ডা সময়
+Asia/Shanghai	1988/7/1 GMT+9
+Asia/Shanghai	1988/7/1 中国夏時間
+Asia/Shanghai	1988/7/1 中国時間
+Asia/Shanghai	Jul 1, 1988, 9:00:00 AM China Daylight Time
+Asia/Shanghai	{"type":"timeZoneName","value":"China Daylight Time"}
+Asia/Tokyo	1949/7/1 GMT+10
+Asia/Tokyo	1949/7/1 GMT+10:00
+Asia/Tokyo	1949/7/1 日本時間
+Asia/Tokyo	Jun 1, 1948, 10:00:00 AM GMT+10:00
+Asia/Tokyo	{"type":"timeZoneName","value":"GMT+10:00"}
+Australia/Sydney	Jan 1, 1970, 10:00:00 AM Australian Eastern Standard Time
+Australia/Sydney	{"type":"timeZoneName","value":"Australian Eastern Standard Time"}
+Etc/Greenwich	Jan 1, 1900, 12:00:00 AM GMT+00:00
+Etc/Greenwich	{"type":"timeZoneName","value":"GMT+00:00"}
+Europe/Amsterdam	Jun 1, 1930, 1:00:00 AM GMT+01:00
+Europe/Amsterdam	{"type":"timeZoneName","value":"GMT+01:00"}
+Europe/Andorra	1984, czas środkowoeuropejski (Andora)
+Europe/Belgrade	1982, czas środkowoeuropejski (Serbia)
+Europe/Belgrade	1982. közép-európai idő (Szerbia)
+Europe/Berlin	1.6.1945, Deutschland (Ortszeit)
+Europe/Berlin	1.6.1945, GMT+03:00
+Europe/Berlin	1.6.1945, GMT+3
+Europe/Berlin	Jun 1, 1945, 3:00:00 AM GMT+3
+Europe/Berlin	{"type":"timeZoneName","value":"GMT+3"}
+Europe/Bratislava	1978, Ora dell’Europa centrale (Slovacchia)
+Europe/Bratislava	1978, czas środkowoeuropejski (Słowacja)
+Europe/Budapest	1980, czas środkowoeuropejski (Węgry)
+Europe/Budapest	1981, czas środkowoeuropejski (Węgry)
+Europe/Budapest	1982, czas środkowoeuropejski (Węgry)
+Europe/Budapest	1983, czas środkowoeuropejski (Węgry)
+Europe/Busingen	1980, Mitteleuropäische Zeit (Büsingen)
+Europe/Busingen	1980, czas środkowoeuropejski (Büsingen am Hochrhein)
+Europe/Busingen	1980. közép-európai idő (Büsingen)
+Europe/Dublin	Jan 1, 2024, 12:00:00 AM Greenwich Mean Time
+Europe/Dublin	Jun 1, 1960, 1:00:00 AM Irish Standard Time
+Europe/Dublin	{"type":"timeZoneName","value":"Greenwich Mean Time"}
+Europe/Dublin	{"type":"timeZoneName","value":"Irish Standard Time"}
+Europe/Gibraltar	1981, czas środkowoeuropejski (Gibraltar)
+Europe/Gibraltar	1981. közép-európai idő (Gibraltár)
+Europe/Helsinki	1980, [Ώρα Ανατολικής Ευρώπης (Φινλανδία)]
+Europe/Kaliningrad	1.2.1990, OEZ
+Europe/Kaliningrad	1.2.1990, Osteuropäische Normalzeit
+Europe/Kaliningrad	1.2.1990, Osteuropäische Zeit
+Europe/Kiev	1990, [Ώρα Ανατολικής Ευρώπης (Κίεβο)]
+Europe/Kyiv	01.01.1989, GMT+3
+Europe/Kyiv	01.01.1989, Москва
+Europe/Kyiv	01.01.1989, Москва, стандартное время
+Europe/Kyiv	01.01.1989, Украина
+Europe/Kyiv	1990, [Ώρα Ανατολικής Ευρώπης (Κίεβο)]
+Europe/Ljubljana	1982, czas środkowoeuropejski (Słowenia)
+Europe/Ljubljana	1982. közép-európai idő (Szlovénia)
+Europe/London	1970/1/1 GMT+01:00
+Europe/London	1970/1/1 GMT+1
+Europe/London	1970/1/1 イギリス時間
+Europe/London	Jun 1, 1970, 1:00:00 AM GMT+01:00
+Europe/London	{"type":"timeZoneName","value":"GMT+01:00"}
+Europe/Madrid	1977, czas środkowoeuropejski (Hiszpania)
+Europe/Malta	1977 Hora d’Europa central (Malta)
+Europe/Malta	1977, Ora dell’Europa centrale (Malta)
+Europe/Malta	1977, czas środkowoeuropejski (Malta)
+Europe/Malta	1977, hora de Europa central (Malta)
+Europe/Malta	1978, Ora dell’Europa centrale (Malta)
+Europe/Malta	1978, czas środkowoeuropejski (Malta)
+Europe/Malta	1979, Ora dell’Europa centrale (Malta)
+Europe/Malta	1979, czas środkowoeuropejski (Malta)
+Europe/Malta	1980, Mitteleuropäische Zeit (Malta)
+Europe/Malta	1980, czas środkowoeuropejski (Malta)
+Europe/Malta	1980. közép-európai idő (Málta)
+Europe/Mariehamn	1980, [Ώρα Ανατολικής Ευρώπης (Νήσοι Όλαντ)]
+Europe/Moscow	15.1.1985, GMT+3
+Europe/Moscow	15.1.1985, Moskau (Ortszeit)
+Europe/Moscow	15.1.1985, Moskauer Normalzeit
+Europe/Moscow	15.1.1985, Moskauer Zeit
+Europe/Moscow	Jul 1, 1985, 4:00:00 AM GMT+4
+Europe/Moscow	Jun 1, 2012, 4:00:00 AM Moscow Standard Time
+Europe/Moscow	{"type":"timeZoneName","value":"GMT+4"}
+Europe/Moscow	{"type":"timeZoneName","value":"Moscow Standard Time"}
+Europe/Paris	01/06/1942 UTC+02:00
+Europe/Paris	01/06/1942 UTC+2
+Europe/Paris	01/06/1942 heure : France
+Europe/Paris	Jul 1, 1940, 2:00:00 AM GMT+02:00
+Europe/Paris	{"type":"timeZoneName","value":"GMT+02:00"}
+Europe/Podgorica	1982, czas środkowoeuropejski (Czarnogóra)
+Europe/Podgorica	1982. közép-európai idő (Montenegró)
+Europe/Prague	1978, Ora dell’Europa centrale (Cechia)
+Europe/Prague	1978, czas środkowoeuropejski (Czechy)
+Europe/Rome	1977, czas środkowoeuropejski (Włochy)
+Europe/Rome	1978, czas środkowoeuropejski (Włochy)
+Europe/Rome	1979, czas środkowoeuropejski (Włochy)
+Europe/San_Marino	1977, czas środkowoeuropejski (San Marino)
+Europe/San_Marino	1978, czas środkowoeuropejski (San Marino)
+Europe/San_Marino	1979, czas środkowoeuropejski (San Marino)
+Europe/Sarajevo	1982, czas środkowoeuropejski (Bośnia i Hercegowina)
+Europe/Sarajevo	1982. közép-európai idő (Bosznia-Hercegovina)
+Europe/Skopje	1982, czas środkowoeuropejski (Macedonia Północna)
+Europe/Skopje	1982. közép-európai idő (Észak-Macedónia)
+Europe/Tirane	1978, Ora dell’Europa centrale (Albania)
+Europe/Tirane	1978, czas środkowoeuropejski (Albania)
+Europe/Tirane	1979, Ora dell’Europa centrale (Albania)
+Europe/Tirane	1979, czas środkowoeuropejski (Albania)
+Europe/Tirane	1981, czas środkowoeuropejski (Albania)
+Europe/Tirane	1981. közép-európai idő (Albánia)
+Europe/Vaduz	1980, Mitteleuropäische Zeit (Liechtenstein)
+Europe/Vaduz	1980, czas środkowoeuropejski (Liechtenstein)
+Europe/Vaduz	1980. közép-európai idő (Liechtenstein)
+Europe/Vatican	1977, czas środkowoeuropejski (Watykan)
+Europe/Vatican	1978, czas środkowoeuropejski (Watykan)
+Europe/Vatican	1979, czas środkowoeuropejski (Watykan)
+Europe/Vienna	1980, czas środkowoeuropejski (Austria)
+Europe/Vienna	1980. közép-európai idő (Ausztria)
+Europe/Warsaw	1.06.1980, CEST
+Europe/Warsaw	1.06.1980, CET
+Europe/Warsaw	1.06.1980, czas środkowoeuropejski
+Europe/Warsaw	1.06.1980, czas środkowoeuropejski letni
+Europe/Zagreb	1982, czas środkowoeuropejski (Chorwacja)
+Europe/Zagreb	1982. közép-európai idő (Horvátország)
+Europe/Zurich	1980, Mitteleuropäische Zeit (Schweiz)
+Europe/Zurich	1980, czas środkowoeuropejski (Szwajcaria)
+Europe/Zurich	1980. közép-európai idő (Svájc)
+Pacific/Apia	Dec 29, 2011, 2:00:00 AM GMT-10
+Pacific/Apia	{"type":"timeZoneName","value":"GMT-10"}
+Pacific/Saipan	১৯৭০, GMT +১০:০০
+Pacific/Saipan	১৯৭১, GMT +১০:০০
+Pacific/Saipan	১৯৭২, GMT +১০:০০
+Pacific/Saipan	১৯৭৩, GMT +১০:০০
+Pacific/Saipan	১৯৭৪, GMT +১০:০০
+Pacific/Saipan	১৯৭৫, GMT +১০:০০
+Pacific/Saipan	১৯৭৬, GMT +১০:০০
+Pacific/Saipan	১৯৭৭, GMT +১০:০০
+Pacific/Saipan	১৯৭৮, GMT +১০:০০
+Pacific/Saipan	১৯৮৩, GMT +১০:০০
+Pacific/Saipan	২০০০, GMT +১০:০০

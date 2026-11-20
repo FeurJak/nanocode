@@ -32,8 +32,18 @@ import json, os, re, sys, datetime
 probe = json.load(open(sys.argv[1]))
 LN = {}
 for f in sys.argv[2].split(","):
-    LN.update(json.load(open(f)))
+    for z, v in json.load(open(f)).items():
+        LN.setdefault(z, {}).update(v)
 sys.argv[2:3] = []
+# date/locales.rs keeps ar and fa names with ASCII digits and djs writes the locale's own digits as it
+# formats, so compare node's names in ASCII digits too (else no current name matches them)
+NATIVE = {lang: str.maketrans(d, "0123456789") for lang, d in (("ar", "٠١٢٣٤٥٦٧٨٩"), ("fa", "۰۱۲۳۴۵۶۷۸۹"))}
+def ascii_digits(x, t):
+    return x.translate(t) if isinstance(x, str) else [ascii_digits(y, t) for y in x] if isinstance(x, list) else x
+for zv in LN.values():
+    for L in zv:
+        if L.split("-")[0] in NATIVE:
+            zv[L] = ascii_digits(zv[L], NATIVE[L.split("-")[0]])
 D = sys.argv[2]
 data = open(D + "/data.rs").read()
 loc = open(D + "/date/locales.rs").read()
@@ -46,7 +56,7 @@ ENDS = [int(x) for x in re.search(r"DTF_STRINGS_ENDS: &\[u32\] = &\[([0-9, ]*)\]
 dtf = lambda i: TEXT[(ENDS[i - 1] if i else 0):ENDS[i]].decode()
 ALT = {int(m[0]): [dtf(int(m[1])), dtf(int(m[2]))] for m in re.findall(r"\((\d+), (\d+), (\d+)\)", re.search(r"EN_GENERIC_ALT: &\[\(u16, u16, u16\)\] = &\[([^\]]*)\]", loc)[1])}
 LOCALES = re.findall(r'tags: &\["([^"]+)"', loc)  # DATE_LOCALES' first tags, as probe-loc.mjs reads them
-LTAB = re.findall(r"zones: &([A-Z_]+)", loc)
+LTAB = re.findall(r"zones: &(\w+)", loc)
 LGMT = [(m[0], m[1]) for m in re.findall(r'gmt: \["([^"]*)", "([^"]*)"\]', loc)]
 assert len(LTAB) == len(LGMT) == len(LOCALES)
 LZ = [[int(x) for x in re.search(r"static " + t + r": \[u16; \d+\] = \[([0-9, ]*)\]", loc)[1].split(",")] for t in LTAB]
@@ -389,15 +399,30 @@ def stream(types, pts, c):
 
 # Strings compete for STRING_BUDGET bytes by the samples they add per byte (a string's bytes plus about
 # three per use); a type then reads the chosen ones as overrides.
-STRING_BUDGET = int(os.environ.get("TZ_STRING_BUDGET", "60000"))
+STRING_BUDGET = int(os.environ.get("TZ_STRING_BUDGET", "20000"))
 gain, uses = {}, {}
 for pk, (en_ids, sp, cand, off) in PENDING.items():
     for li, e, kind, x, g in cand:
         gain[x] = gain.get(x, 0) + g
         uses[x] = uses.get(x, 0) + 1
 cost = lambda x: (0 if x in STR else len(x.encode()) + 1) + 3 * uses[x]
+# pinned.txt lists (zone, node's formatted output) pairs, tab-separated: the outputs diff.py found the
+# zone's names regressing on (DIFF_REG_OUT) and the parity suite's intl-tz cases. Every string a type of
+# that zone could use and that appears in one of them is taken ahead of the budget: they fix periods
+# (often long ago) too short to win on samples per byte, where the names before this table were right.
+PINZ = {}
+for l in open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "pinned.txt"), encoding="utf-8").read().splitlines():
+    if l and not l.startswith("#"):
+        z, v = l.split("	", 1)
+        PINZ.setdefault(z, set()).add(v)
+PIN = sorted({x for pk, (_, _, cand, _) in PENDING.items() for _, _, _, x, _ in cand if any(x in v for v in PINZ.get(pk[0], ()))})
 chosen, spent = set(), 0
+for x in PIN:
+    chosen.add(x); spent += cost(x)
+stats["pinned"] = f"{len(PIN)} strings, {spent} bytes"
 for x in sorted(gain, key=lambda x: (-gain[x] / cost(x), x)):
+    if x in chosen:
+        continue
     if spent + cost(x) <= STRING_BUDGET:
         chosen.add(x); spent += cost(x)
 stats["strings"] = f"{len(chosen)} of {len(gain)} chosen, {spent} bytes, gain {sum(gain[x] for x in chosen)} of {sum(gain.values())}"
