@@ -959,20 +959,6 @@ impl<T: DictValue> Dict<T> {
         };
     }
 
-    /// Install an owned table, releasing the old entries after unlocking.
-    pub(crate) fn replace_contents(&self, other: Self) {
-        let replacement = other.inner.into_inner();
-        let track = self.gc_lazy.load(Relaxed) && replacement.may_hold_gc_tracked();
-        let _removed = {
-            let mut inner = self.write();
-            self.invalidate_keys_version();
-            core::mem::replace(&mut *inner, replacement)
-        };
-        if track {
-            self.gc_track_lazily();
-        }
-    }
-
     /// Delete a key
     pub(crate) fn delete<K>(&self, vm: &VirtualMachine, key: &K) -> PyResult<()>
     where
