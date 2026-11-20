@@ -31,6 +31,7 @@ enum Node {
     },
     Dir {
         mode: u32,
+        mtime_ns: i64,
     },
 }
 
@@ -98,7 +99,10 @@ impl Tree {
                 changed: false,
                 moded: false,
             },
-            Entry::Dir { mode } => Node::Dir { mode },
+            Entry::Dir { mode } => Node::Dir {
+                mode,
+                mtime_ns: now(),
+            },
         };
         self.first.borrow_mut().insert(path.clone(), node.kind());
         self.nodes.borrow_mut().insert(path, node);
@@ -115,7 +119,7 @@ impl Tree {
         }
         for (path, node) in nodes.iter() {
             match node {
-                Node::Dir { mode } if first.get(path) != Some(&Kind::Dir) => {
+                Node::Dir { mode, .. } if first.get(path) != Some(&Kind::Dir) => {
                     delta.made.push((path.clone(), *mode));
                 }
                 _ => {}
@@ -173,11 +177,11 @@ impl Files for Tree {
                 mode: *mode,
                 mtime_ns: *mtime_ns,
             }),
-            Some(Node::Dir { mode }) => Ok(Stat {
+            Some(Node::Dir { mode, mtime_ns }) => Ok(Stat {
                 kind: Kind::Dir,
                 size: 0,
                 mode: *mode,
-                mtime_ns: 0,
+                mtime_ns: *mtime_ns,
             }),
             None => Err(missing()),
         }
@@ -253,7 +257,7 @@ impl Files for Tree {
                 *moded = true;
                 Ok(())
             }
-            Some(Node::Dir { mode: kept }) => {
+            Some(Node::Dir { mode: kept, .. }) => {
                 *kept = mode & 0o7777;
                 Ok(())
             }
@@ -284,7 +288,8 @@ impl Files for Tree {
         if !matches!(nodes.get(parent(path)), Some(Node::Dir { .. })) {
             return Err(missing());
         }
-        nodes.insert(path.to_vec(), Node::Dir { mode });
+        let mtime_ns = now();
+        nodes.insert(path.to_vec(), Node::Dir { mode, mtime_ns });
         Ok(())
     }
 

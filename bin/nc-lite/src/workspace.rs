@@ -30,7 +30,7 @@ const PYTHON: nanocode_python::Budget = nanocode_python::Budget {
     time: Duration::from_secs(600),
     memory: None,
     sleep: Duration::from_secs(600),
-    depth: 256,
+    depth: 1000,
 };
 const SLICE: u32 = 4096;
 const DIRECTORY: u32 = 0o755;

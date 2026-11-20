@@ -130,11 +130,49 @@ def _mode(kind, mode):
     return (0o100000 if kind == 0 else 0o040000 if kind == 1 else 0o120000) | mode
 
 
+_BUILTINS = frozenset(
+    b'. : alias bg break builtin cd command continue declare dirs disown enable eval '
+    b'exec exit export fc fg getopts hash history jobs let local logout popd pushd '
+    b'read readonly return set shift shopt source suspend trap type typeset ulimit '
+    b'umask unalias unset wait'.split()
+)
+_programs = {}
+
+
+def _program(path):
+    # The workspace has no /usr/bin: a program the shell runs stands at each
+    # directory of PATH, as an executable file, for code that looks for it
+    # there (shutil.which, os.access) before running it.
+    head, _, name = path.rpartition(b'/')
+    if not name or name in _BUILTINS or not _host.spawns():
+        return False
+    search = environ.get(b'PATH', b'')
+    if (head or b'/') not in [dir.rstrip(b'/') or b'/' for dir in search.split(b':') if dir]:
+        return False
+    found = _programs.get(name)
+    if found is None:
+        try:
+            status, _, _ = _host.spawn([b'command', b'-v', name], [b'PATH', search], _cwd, b'', False)
+        except OSError:
+            status = 1
+        found = _programs[name] = status == 0
+    return found
+
+
+def _stat(path):
+    try:
+        return _host.stat(path)
+    except FileNotFoundError:
+        if _program(path):
+            return (0, 0, 0o755, 0)
+        raise
+
+
 def stat(path, *, dir_fd=None, follow_symlinks=True):
     if isinstance(path, int):
         return fstat(path)
     path = _abs(path)
-    kind, size, mode, mtime_ns = _host.stat(path)
+    kind, size, mode, mtime_ns = _stat(path)
     return _stat_result(_mode(kind, mode), path, size, mtime_ns)
 
 
@@ -144,7 +182,7 @@ def lstat(path, *, dir_fd=None):
 
 def access(path, mode, *, dir_fd=None, effective_ids=False, follow_symlinks=True):
     try:
-        _host.stat(_abs(path))
+        _stat(_abs(path))
     except OSError:
         return False
     return True
@@ -244,7 +282,24 @@ def rmdir(path, *, dir_fd=None):
 
 
 def unlink(path, *, dir_fd=None):
-    _host.remove(_abs(path), False)
+    target = _abs(path)
+    _host.remove(target, False)
+    for file in _files.values():
+        if file.path == target and not file.gone:
+            _forget(file)
+
+
+def _forget(file):
+    # An open file outlives its name, as on POSIX: it keeps its bytes in
+    # memory from here on and never writes them back.
+    if file.data is None:
+        file.data = bytearray()
+    elif not isinstance(file.data, bytearray):
+        file.data = bytearray(file.data)
+    if file.base >= 0:
+        file.base = -1
+        file.pos = len(file.data)
+    file.gone = True
 
 
 remove = unlink
@@ -299,7 +354,7 @@ def chdir(path):
 
 
 class _File:
-    __slots__ = ('path', 'flags', 'data', 'pos', 'base', 'dir', 'size')
+    __slots__ = ('path', 'flags', 'data', 'pos', 'base', 'dir', 'size', 'gone')
 
 
 _RANGED = 1 << 20
@@ -327,6 +382,7 @@ def open(path, flags, mode=0o777, *, dir_fd=None):
     file.pos = 0
     file.base = -1
     file.dir = False
+    file.gone = False
     if target == b'/dev/null':
         file.path = None
         file.data = bytearray()
@@ -368,6 +424,8 @@ def open(path, flags, mode=0o777, *, dir_fd=None):
 
 
 def _store(file):
+    if file.gone:
+        return
     if len(file.data) > _host.file_limit():
         raise _fail(_errno.EFBIG)
     _host.write(file.path, file.data, 0)
@@ -376,6 +434,7 @@ def _store(file):
 def _reset():
     global _cwd, _umask, _run
     _files.clear()
+    _programs.clear()
     _run += 1
     _cwd = _host.cwd()
     _umask = 0o022
@@ -449,7 +508,7 @@ def write(fd, data):
     end = len(file.data)
     if file.flags & O_APPEND:
         file.pos = end
-    if file.pos == end:
+    if file.pos == end and not file.gone:
         if end + size > _host.file_limit():
             raise _fail(_errno.EFBIG)
         _host.write(file.path, data, 1)
@@ -507,6 +566,8 @@ def fstat(fd):
     file = _file(fd)
     if file.path is None:
         return _stat_result(0o020666, b'', 0, 0)
+    if file.gone:
+        return _stat_result(0o100600, file.path, len(file.data), 0)
     kind, size, mode, mtime_ns = _host.stat(file.path)
     return _stat_result(_mode(kind, mode), file.path, size, mtime_ns)
 
