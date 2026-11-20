@@ -373,23 +373,32 @@ mod pairs {
     }
 }
 
+/// `id` and the tasks above it, nearest first. The move check keeps parent
+/// links acyclic, so a chain longer than the board has tasks means a move let
+/// a cycle in: stop there with a panic that says so rather than walk it forever.
+pub fn ancestors<'a>(
+    tasks: &'a BTreeMap<TaskId, Task>,
+    id: &'a TaskId,
+) -> impl Iterator<Item = &'a TaskId> + 'a {
+    std::iter::successors(Some(id), |at| {
+        tasks.get(*at).and_then(|task| task.spec.parent.as_ref())
+    })
+    .enumerate()
+    .map(move |(hop, at)| {
+        assert!(
+            hop <= tasks.len(),
+            "the parent links above {id} loop: a move let a cycle into the board"
+        );
+        at
+    })
+}
+
 pub fn root(tasks: &BTreeMap<TaskId, Task>, id: &TaskId) -> TaskId {
-    let mut at = id;
-    while let Some(parent) = tasks.get(at).and_then(|task| task.spec.parent.as_ref()) {
-        at = parent;
-    }
-    at.clone()
+    ancestors(tasks, id).last().unwrap_or(id).clone()
 }
 
 pub fn under(tasks: &BTreeMap<TaskId, Task>, id: &TaskId, above: &TaskId) -> bool {
-    let mut at = Some(id);
-    while let Some(id) = at {
-        if id == above {
-            return true;
-        }
-        at = tasks.get(id).and_then(|task| task.spec.parent.as_ref());
-    }
-    false
+    ancestors(tasks, id).any(|at| at == above)
 }
 
 impl Filter {

@@ -772,15 +772,8 @@ impl Fold {
         if mutated(Mutation::MoveAllowsCycle) {
             return Ok(());
         }
-        let mut at = Some(parent);
-        while let Some(id) = at {
-            if id == task {
-                return Err(Rejection::Tasks(Refusal::Cycle(task.0.clone())));
-            }
-            at = self
-                .tasks
-                .get(id)
-                .and_then(|above| above.spec.parent.as_ref());
+        if watch::under(&self.tasks, parent, task) {
+            return Err(Rejection::Tasks(Refusal::Cycle(task.0.clone())));
         }
         Ok(())
     }

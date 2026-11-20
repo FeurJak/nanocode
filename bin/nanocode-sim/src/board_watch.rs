@@ -576,7 +576,19 @@ async fn clock(world: &World, epoch: u64) {
                         if schedule.ended.is_none()
                             && every.cancel_ms.is_some_and(|at| world.now_ms() >= at) =>
                     {
-                        board.unschedule(world.now_ms(), &every.id).await.map(drop)
+                        let result = board.unschedule(world.now_ms(), &every.id).await.map(drop);
+                        let live = board
+                            .fold()
+                            .marks()
+                            .schedules()
+                            .get(&every.id)
+                            .is_some_and(|schedule| schedule.ended.is_none());
+                        if result.is_ok() && live {
+                            // Left live, it stays due and this loop unschedules it again until
+                            // the run's deadline, so stop the run here.
+                            panic!("the board applied the unschedule of {} but kept it live", every.id);
+                        }
+                        result
                     }
                     Some(_) => Ok(()),
                 };

@@ -1459,7 +1459,10 @@ impl Reference {
 
     fn under(&self, id: &str, above: &str) -> bool {
         let mut at = Some(id.to_owned());
-        while let Some(id) = at {
+        for _ in 0..=self.tasks.len() {
+            let Some(id) = at else {
+                return false;
+            };
             if id == above {
                 return true;
             }
@@ -1468,7 +1471,7 @@ impl Reference {
                 .get(&id)
                 .and_then(|(parent, _, _)| parent.clone());
         }
-        false
+        panic!("the model's parent links above {id} loop");
     }
 
     fn holds(&self, task: &TaskId, claim: &ClaimId) -> bool {

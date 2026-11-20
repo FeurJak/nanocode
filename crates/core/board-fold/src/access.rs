@@ -345,18 +345,11 @@ impl Access {
     }
 
     fn chain(&self, fold: &Fold, actor: &Actor, task: &TaskId) -> bool {
-        let mut at = Some(task);
-        while let Some(id) = at {
-            if self
-                .posters
+        crate::watch::ancestors(fold.tasks(), task).any(|id| {
+            self.posters
                 .get(id)
                 .is_some_and(|poster| actor.covers(poster))
-            {
-                return true;
-            }
-            at = fold.task(id).and_then(|task| task.spec.parent.as_ref());
-        }
-        false
+        })
     }
 
     pub(crate) fn need(&self, actor: &Actor, channel: &str, can: Can) -> Result<(), Rejection> {
