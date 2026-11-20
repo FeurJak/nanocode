@@ -1052,11 +1052,7 @@ impl Sim {
             needs: Vec::new(),
             terms: Default::default(),
         };
-        self.agent_send(
-            agent,
-            Op::Post { task: child },
-            Then::Child { goal, index },
-        );
+        self.agent_send(agent, Op::Post { task: child }, Then::Child { goal, index });
     }
 
     fn work(&mut self, agent: usize, claim: ClaimId) {
@@ -1526,7 +1522,11 @@ impl Sim {
             .any(|proc| matches!(proc.life, Life::Planning { .. }));
         let busy = self.index.ready.iter().any(|ready| !ready.is_empty())
             || !self.index.lapses.is_empty()
-            || self.index.held.keys().any(|id| !id.0.starts_with("agents/"));
+            || self
+                .index
+                .held
+                .keys()
+                .any(|id| !id.0.starts_with("agents/"));
         self.settled = self.storms_posted == self.shape.storms
             && self.index.goals_done == self.shape.goals
             && !planning
@@ -1600,7 +1600,9 @@ impl Sim {
                 break;
             }
             if self.now_ms > settle_ms_max {
-                self.fail(format!("the board did not settle within {settle_ms_max} ms"));
+                self.fail(format!(
+                    "the board did not settle within {settle_ms_max} ms"
+                ));
                 break;
             }
         }

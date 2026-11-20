@@ -426,6 +426,7 @@ dependencies = [
  "nanocode-cost-fold",
  "nanocode-digest",
  "nanocode-durability-core",
+ "nanocode-partitions",
  "nanocode-sync",
  "nanocode-turnlog",
  "serde_json",

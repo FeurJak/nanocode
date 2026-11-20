@@ -125,6 +125,11 @@ pub enum Mutation {
     DeliveryIngestedTwice,
     DeliveryLost,
     ReopenForgetsAgents,
+    GroupSkipsSeq,
+    GroupVerdictFromPlan,
+    GroupSplits,
+    RouteIgnoresTask,
+    MergeSkipsPartition,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

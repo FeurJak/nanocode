@@ -40,6 +40,7 @@ id!(ClaimId);
 id!(EventId);
 
 pub mod blocks;
+pub mod group;
 pub mod messages;
 
 pub use messages::{MessageId, Say};

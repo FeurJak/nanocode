@@ -3,6 +3,7 @@ mod agents;
 mod alloc;
 mod board;
 mod board_brief;
+mod board_shards;
 mod board_steer;
 mod board_sync;
 mod boardagents;
@@ -68,6 +69,7 @@ use crate::{
     agents::{AgentStats, AgentsMutation},
     board::{BoardMutation, BoardStats},
     board_brief::{BriefMutation as BoardBriefMutation, BriefStats as BoardBriefStats},
+    board_shards::{ShardsMutation, ShardsStats},
     board_steer::{SteerMutation as BoardSteerMutation, SteerStats as BoardSteerStats},
     board_sync::{SyncMutation as BoardSyncMutation, SyncStats as BoardSyncStats},
     cellcalls::{CellCallsMutation, CellCallsStats},
@@ -133,6 +135,7 @@ enum Scenario {
     Controlplane,
     Cost,
     Plog,
+    BoardShards,
     HandRouter,
     WorkspaceHost,
     BoardSync,
@@ -175,6 +178,7 @@ struct Args {
     controlplane: ControlplaneMutation,
     cost: CostMutation,
     plog: PlogMutation,
+    board_shards: ShardsMutation,
     hand_router: HandRouterMutation,
     workspace_host: WorkspaceHostMutation,
     board_sync: BoardSyncMutation,
@@ -201,7 +205,7 @@ type Caught = BTreeMap<Invariant, (u64, u64, (u64, u64))>;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|inbox_stress|capture|executor|dns|board|controlplane|cost|plog|hand_router|workspace_host|board_sync|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|live|partitions] [--ops N] [--twice] [--seed-lines] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
+        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|inbox_stress|capture|executor|dns|board|board_shards|controlplane|cost|plog|hand_router|workspace_host|board_sync|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|live|partitions] [--ops N] [--twice] [--seed-lines] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
        websocket: [--mutation {}]
        http_server: [--mutation {}]
        alloc: [--mutation overstate_size|forget_free|scribble]
@@ -219,6 +223,7 @@ fn usage() -> ExitCode {
        board: [--mutation {}]
        cost: [--mutation {}]
        plog: [--mutation {}]
+       board_shards: [--mutation {}] | --board-shards-bench [RTT_US [ROW_US [BATCH]]]
        hand_router: [--mutation {}]
        board_sync: [--mutation {}]
        workspace_fs: [--mutation {}]
@@ -247,6 +252,7 @@ fn usage() -> ExitCode {
         BoardMutation::names(),
         CostMutation::names(),
         plog::names(),
+        ShardsMutation::names(),
         HandRouterMutation::names(),
         BoardSyncMutation::names(),
         WorkspaceFsMutation::names(),
@@ -316,6 +322,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
     let mut controlplane = ControlplaneMutation::None;
     let mut cost = CostMutation::None;
     let mut plog = PlogMutation::None;
+    let mut board_shards = ShardsMutation::None;
     let mut hand_router = HandRouterMutation::None;
     let mut workspace_host = WorkspaceHostMutation::None;
     let mut board_sync = BoardSyncMutation::None;
@@ -395,6 +402,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
                     "controlplane" => Scenario::Controlplane,
                     "cost" => Scenario::Cost,
                     "plog" => Scenario::Plog,
+                    "board_shards" => Scenario::BoardShards,
                     "hand_router" => Scenario::HandRouter,
                     "workspace_host" => Scenario::WorkspaceHost,
                     "board_sync" => Scenario::BoardSync,
@@ -458,6 +466,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         }
         (Scenario::Cost, Some(name)) => cost = CostMutation::parse(name)?,
         (Scenario::Plog, Some(name)) => plog = PlogMutation::parse(name)?,
+        (Scenario::BoardShards, Some(name)) => board_shards = ShardsMutation::parse(name)?,
         (Scenario::HandRouter, Some(name)) => hand_router = HandRouterMutation::parse(name)?,
         (Scenario::Partitions, Some(name)) => partitions = PartitionsMutation::parse(name)?,
         (Scenario::WorkspaceHost, Some(name)) => {
@@ -524,6 +533,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         controlplane,
         cost,
         plog,
+        board_shards,
         hand_router,
         workspace_host,
         board_sync,
@@ -610,6 +620,9 @@ fn replay(seed: u64, args: &Args) -> String {
     }
     if args.scenario == Scenario::Controlplane {
         return controlplane::replay(seed, controlplane_agents(args), args.controlplane);
+    }
+    if args.scenario == Scenario::BoardShards {
+        return board_shards::replay(seed, args.board_shards);
     }
     if args.scenario == Scenario::Cost {
         return cost::replay(seed, args.cost);
@@ -991,6 +1004,7 @@ fn mutations() -> ExitCode {
     add("controlplane", ControlplaneMutation::names());
     add("cost", CostMutation::names());
     add("plog", plog::names());
+    add("board_shards", ShardsMutation::names());
     add("hand_router", HandRouterMutation::names());
     add("workspace_host", WorkspaceHostMutation::names());
     add("board_sync", BoardSyncMutation::names());
@@ -1040,6 +1054,20 @@ fn tidy() -> ExitCode {
 static HEAP: memory::Heap = nanocode_sys::alloc::Counted(std::alloc::System);
 
 fn main() -> ExitCode {
+    if let Some(at) = std::env::args().position(|arg| arg == "--board-shards-bench") {
+        let numbers: Vec<u64> = std::env::args()
+            .skip(at + 1)
+            .map_while(|arg| arg.parse().ok())
+            .collect();
+        let cost = board_shards::Cost {
+            rtt_us: numbers.first().copied().unwrap_or(1_000),
+            row_us: numbers.get(1).copied().unwrap_or(10),
+            jitter_ms: 0,
+        };
+        let batch = numbers.get(2).copied().unwrap_or(256) as usize;
+        board_shards::bench(&[1, 4, 16, 64], &[16, 256, 1_024], batch, cost);
+        return ExitCode::SUCCESS;
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args == ["--tidy"] {
         return tidy();
@@ -1085,6 +1113,7 @@ fn main() -> ExitCode {
             && args.controlplane != ControlplaneMutation::None)
         || (args.scenario == Scenario::Cost && args.cost != CostMutation::None)
         || (args.scenario == Scenario::Plog && args.plog != PlogMutation::None)
+        || (args.scenario == Scenario::BoardShards && args.board_shards != ShardsMutation::None)
         || (args.scenario == Scenario::HandRouter && args.hand_router != HandRouterMutation::None)
         || (args.scenario == Scenario::Partitions && args.partitions != PartitionsMutation::None)
         || (args.scenario == Scenario::WorkspaceHost
@@ -1123,6 +1152,7 @@ fn main() -> ExitCode {
     let mut controlplane_totals = ControlplaneStats::default();
     let mut cost_totals = CostStats::default();
     let mut plog_totals = PlogStats::default();
+    let mut shards_totals = ShardsStats::default();
     let mut hand_router_totals = HandRouterStats::default();
     let mut workspace_host_totals = WorkspaceHostStats::default();
     let mut board_sync_totals = BoardSyncStats::default();
@@ -1265,6 +1295,13 @@ fn main() -> ExitCode {
                 args.twice,
                 args.options.verbose,
                 &mut plog_totals,
+            ),
+            Scenario::BoardShards => board_shards::judge(
+                seed,
+                args.board_shards,
+                args.twice,
+                args.options.verbose,
+                &mut shards_totals,
             ),
             Scenario::HandRouter => handrouter::judge(
                 seed,
@@ -1515,6 +1552,16 @@ fn main() -> ExitCode {
             args.twice,
             args.plog,
             &plog_totals,
+        );
+    }
+    if args.scenario == Scenario::BoardShards {
+        return board_shards::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.board_shards,
+            &shards_totals,
         );
     }
     if args.scenario == Scenario::Controlplane {
