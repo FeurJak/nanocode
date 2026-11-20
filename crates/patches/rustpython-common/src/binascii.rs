@@ -269,6 +269,11 @@ pub fn a2b_base64(b: &[u8], strict_mode: bool) -> Result<Vec<u8>, Error> {
         if el == PAD {
             pads += 1;
             if quad_pos >= 2 && quad_pos + pads <= 4 {
+                // A completed pad sequence ends the input; non-strict mode
+                // ignores whatever follows, as CPython does.
+                if !strict_mode && quad_pos + pads == 4 {
+                    return Ok(decoded);
+                }
                 continue;
             }
             // RFC 4648 section-3.3: implementations MAY ignore a pad
@@ -635,7 +640,9 @@ pub fn b2a_qp(buf: &[u8], quotetabs: bool, istext: bool, header: bool) -> Vec<u8
 pub fn a2b_uu(b: &[u8]) -> Result<Vec<u8>, Error> {
     // First byte: binary data length (in bytes)
     if b.is_empty() {
-        return Err(Error::MissingLengthByte);
+        // CPython reads the string's NUL terminator as the length byte: 32
+        // bytes, all decoded from padding.
+        return Ok(vec![0; 32]);
     }
     let length = (b[0].wrapping_sub(b' ') & 0x3f) as usize;
 
