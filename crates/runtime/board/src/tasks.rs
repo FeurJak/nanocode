@@ -13,6 +13,7 @@ pub use nanocode_board_fold::tasks::*;
 use crate::{
     Applied, Board, BoardError, ClaimId, NewTask, Op, Outcome, Rejection, TaskId,
     sim::{Mutation, mutated},
+    steer::{Refusal as SteerRefusal, Steer},
 };
 
 pub trait Pace {
@@ -31,6 +32,16 @@ impl Lease {
     pub fn until_ms(&self) -> u64 {
         self.until.load(Ordering::Acquire)
     }
+}
+
+pub enum Step {
+    More,
+    Done(Outcome),
+}
+
+pub trait Steps {
+    fn step(&mut self, lease: Lease, steers: Vec<Steer>)
+    -> Pin<Box<dyn Future<Output = Step> + '_>>;
 }
 
 async fn race<A: Future>(
@@ -106,6 +117,29 @@ impl Board {
         W: FnOnce(Lease) -> F,
         F: Future<Output = Outcome>,
     {
+        let lease = self.lease(task, lease_ms, pace).await?;
+        let outcome = {
+            let work = pin!(work(lease.clone()));
+            let keep = pin!(self.keep(&lease, lease_ms, pace));
+            race(work, keep).await?
+        };
+        self.submit(
+            pace.now_ms(),
+            Op::Finish {
+                task: task.clone(),
+                claim: lease.claim.clone(),
+                outcome,
+            },
+        )
+        .await
+    }
+
+    async fn lease(
+        &mut self,
+        task: &TaskId,
+        lease_ms: u64,
+        pace: &impl Pace,
+    ) -> Result<Lease, BoardError> {
         assert!(lease_ms >= 3, "a lease renews at a third of itself");
         let claimed = self
             .submit(
@@ -121,25 +155,66 @@ impl Board {
             .fold
             .until(task, &claim)
             .ok_or(BoardError::Rejected(Rejection::NotHolder))?;
-        let lease = Lease {
+        Ok(Lease {
             task: task.clone(),
-            claim: claim.clone(),
+            claim,
             until: Arc::new(AtomicU64::new(until)),
-        };
-        let outcome = {
-            let work = pin!(work(lease.clone()));
-            let keep = pin!(self.keep(&lease, lease_ms, pace));
-            race(work, keep).await?
-        };
-        self.submit(
-            pace.now_ms(),
-            Op::Finish {
-                task: task.clone(),
-                claim,
-                outcome,
-            },
-        )
-        .await
+        })
+    }
+
+    pub async fn work(
+        &mut self,
+        task: &TaskId,
+        lease_ms: u64,
+        pace: &impl Pace,
+        steps: &mut impl Steps,
+    ) -> Result<Applied, BoardError> {
+        let lease = self.lease(task, lease_ms, pace).await?;
+        let mut heard = None;
+        let mut done = None;
+        loop {
+            if let Some(upto) = heard.take()
+                && !mutated(Mutation::StepSteersTwice)
+            {
+                let upto = if mutated(Mutation::StepHeedsUnseen) {
+                    self.refresh().await?;
+                    self.fold
+                        .steers_for(&lease.task, &lease.claim)
+                        .map_err(BoardError::Rejected)?
+                        .last()
+                        .map_or(upto, |steer| steer.seq)
+                } else {
+                    upto
+                };
+                self.heed(pace.now_ms(), &lease, upto).await?;
+            }
+            let steers = self.take_steers(&lease).await?;
+            heard = steers.last().map(|steer| steer.seq);
+            if heard.is_none()
+                && let Some(outcome) = done.take()
+            {
+                let finish = Op::Finish {
+                    task: task.clone(),
+                    claim: lease.claim.clone(),
+                    outcome: Outcome::clone(&outcome),
+                };
+                match self.submit(pace.now_ms(), finish).await {
+                    Err(BoardError::Rejected(Rejection::Steer(SteerRefusal::Unheeded { .. }))) => {
+                        done = Some(outcome);
+                        continue;
+                    }
+                    finished => return finished,
+                }
+            }
+            let step = {
+                let step = pin!(steps.step(lease.clone(), steers));
+                let keep = pin!(self.keep(&lease, lease_ms, pace));
+                race(step, keep).await?
+            };
+            if let Step::Done(outcome) = step {
+                done = Some(outcome);
+            }
+        }
     }
 
     async fn keep(&mut self, lease: &Lease, lease_ms: u64, pace: &impl Pace) -> BoardError {

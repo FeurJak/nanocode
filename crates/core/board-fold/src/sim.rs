@@ -143,6 +143,8 @@ pub enum Mutation {
     MergedIndexSkipsRows,
     MergedIndexIgnoresRank,
     ChildFollowsParent,
+    StepSteersTwice,
+    StepHeedsUnseen,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

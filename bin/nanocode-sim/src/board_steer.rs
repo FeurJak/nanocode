@@ -1,17 +1,26 @@
 use std::{
+    cell::Cell,
     collections::{BTreeMap, BTreeSet},
+    future::Future,
     ops::Range,
+    pin::Pin,
     process::ExitCode,
+    sync::Arc,
 };
 
 use nanocode_board::{
-    Change, ClaimId, Event, EventId, Fold, NewTask, Op, Outcome, Phase, Rejection, TaskId,
+    Board, Change, ClaimId, Event, EventId, Fold, NewTask, Op, Outcome, Phase, Rejection, TaskId,
     access::{Can, Grant, Who},
     sim::{self as board_sim, Mutation as BoardRule},
-    steer::{SteerOp, Steered},
+    steer::{Steer, SteerOp, Steered},
+    tasks::{Lease, Pace, Step, Steps},
 };
+use nanocode_turnlog::{LogHost, MemoryLog};
 
-use crate::rng::{FNV_OFFSET, Rng, fnv};
+use crate::{
+    board::identity,
+    rng::{FNV_OFFSET, Rng, fnv},
+};
 
 const OWNER: &str = "user:lead";
 const SECOND: u64 = 1_000;
@@ -27,10 +36,12 @@ pub enum SteerMutation {
     ToTerminal,
     FinishIgnoresSteers,
     KeptOnCancel,
+    StepTakesTwice,
+    StepLosesUnseen,
 }
 
 impl SteerMutation {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 10] = [
         Self::None,
         Self::LostOnMove,
         Self::RedeliveredAfterHeed,
@@ -39,6 +50,8 @@ impl SteerMutation {
         Self::ToTerminal,
         Self::FinishIgnoresSteers,
         Self::KeptOnCancel,
+        Self::StepTakesTwice,
+        Self::StepLosesUnseen,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -57,6 +70,8 @@ impl SteerMutation {
             Self::ToTerminal => "steer_to_terminal",
             Self::FinishIgnoresSteers => "finish_ignores_steers",
             Self::KeptOnCancel => "steer_kept_on_cancel",
+            Self::StepTakesTwice => "step_takes_steers_twice",
+            Self::StepLosesUnseen => "step_heeds_unseen_steers",
         }
     }
 
@@ -79,6 +94,8 @@ impl SteerMutation {
             Self::ToTerminal => BoardRule::SteerToTerminal,
             Self::FinishIgnoresSteers => BoardRule::FinishIgnoresSteers,
             Self::KeptOnCancel => BoardRule::SteerKeptOnCancel,
+            Self::StepTakesTwice => BoardRule::StepSteersTwice,
+            Self::StepLosesUnseen => BoardRule::StepHeedsUnseen,
         }
     }
 }
@@ -95,6 +112,8 @@ pub struct SteerStats {
     pub stale: u64,
     pub crashes: u64,
     pub restarts: u64,
+    pub steps: u64,
+    pub stepped: u64,
     pub latencies: Vec<u64>,
 }
 
@@ -110,6 +129,8 @@ impl SteerStats {
         self.stale += other.stale;
         self.crashes += other.crashes;
         self.restarts += other.restarts;
+        self.steps += other.steps;
+        self.stepped += other.stepped;
         self.latencies.extend_from_slice(&other.latencies);
     }
 
@@ -575,8 +596,154 @@ fn run(seed: u64) -> Result<(SteerStats, u64), String> {
     for body in &host.log {
         digest = fnv(digest, body.as_bytes());
     }
+    let (steps, stepped, delivered) = worked(seed)?;
+    oracle.stats.steps = steps;
+    oracle.stats.stepped = stepped;
+    for seq in delivered {
+        digest = fnv(digest, &seq.to_le_bytes());
+    }
     oracle.stats.seeds = 1;
     Ok((oracle.stats, digest))
+}
+
+struct Clock(Cell<u64>);
+
+impl Pace for Clock {
+    fn now_ms(&self) -> u64 {
+        self.0.get()
+    }
+
+    fn sleep(&self, ms: u64) -> Pin<Box<dyn Future<Output = ()> + '_>> {
+        self.0.set(self.0.get() + ms);
+        Box::pin(std::future::ready(()))
+    }
+}
+
+struct Stepper<'a> {
+    lead: Board,
+    clock: &'a Clock,
+    rng: Rng,
+    task: TaskId,
+    steps: u64,
+    left: u64,
+    send_ppm: u64,
+    sent: BTreeMap<u64, u64>,
+    seen: Vec<u64>,
+}
+
+impl Stepper<'_> {
+    async fn send(&mut self) {
+        let now = self.clock.0.get() + self.rng.range(1, SECOND);
+        self.clock.0.set(now);
+        let body = format!("steer in step {}", self.steps);
+        match self.lead.steer(now, self.task.clone(), body).await {
+            Ok(applied) => {
+                self.sent.insert(applied.seq, self.steps);
+            }
+            Err(error) => panic!("steer to the worked task failed: {error:?}"),
+        }
+    }
+
+    fn heard(&mut self, steers: &[Steer]) {
+        for steer in steers {
+            if self.seen.contains(&steer.seq) {
+                panic!("steer {} was taken twice, again in step {}", steer.seq, self.steps);
+            }
+            match self.sent.get(&steer.seq) {
+                Some(at) if *at >= self.steps => panic!(
+                    "steer {} sent during step {at} was taken mid-step by step {}",
+                    steer.seq, self.steps
+                ),
+                Some(_) => self.seen.push(steer.seq),
+                None => panic!("step {} was given steer {} nobody sent", self.steps, steer.seq),
+            }
+        }
+    }
+}
+
+impl Steps for Stepper<'_> {
+    fn step(&mut self, lease: Lease, steers: Vec<Steer>) -> Pin<Box<dyn Future<Output = Step> + '_>> {
+        Box::pin(async move {
+            self.steps += 1;
+            assert!(self.steps < 10_000, "the worked task never finished");
+            assert!(lease.task == self.task, "a step ran under another task's lease");
+            self.heard(&steers);
+            for _ in 0..self.rng.range(0, 3) {
+                if self.rng.chance(self.send_ppm) {
+                    self.send().await;
+                }
+            }
+            let now = self.clock.0.get() + self.rng.range(1, SECOND);
+            self.clock.0.set(now);
+            if self.left == 0 || !steers.is_empty() && self.rng.chance(200_000) {
+                return Step::Done(Outcome::Done(format!("worked {} steps", self.steps)));
+            }
+            self.left -= 1;
+            Step::More
+        })
+    }
+}
+
+fn worked(seed: u64) -> Result<(u64, u64, Vec<u64>), String> {
+    let mut rng = Rng::derive(seed, "board steer work");
+    let clock = Clock(Cell::new(1_700_000_000_000 + rng.range(0, 400 * 24 * 3_600 * SECOND)));
+    let host: Arc<dyn LogHost> = Arc::new(MemoryLog::new());
+    let scope = "steer-work";
+    nanocode_sync::block_on(async {
+        let shown = |error| format!("{error:?}");
+        let open = |actor: &str| Board::open(host.clone(), scope, identity(actor));
+        let mut lead = open(OWNER).await.map_err(shown)?;
+        lead.charter(clock.now_ms()).await.map_err(shown)?;
+        let grant = Grant {
+            who: vec![Who::Kind("agent".to_owned())],
+            can: BTreeMap::from([("*".to_owned(), vec![Can::Read, Can::Label])]),
+        };
+        lead.submit(clock.now_ms(), Op::Grant { grant })
+            .await
+            .map_err(shown)?;
+        let task = TaskId("worked".to_owned());
+        let new = NewTask {
+            id: task.clone(),
+            parent: None,
+            spec: "work in steps".to_owned(),
+            labels: BTreeMap::new(),
+            needs: Vec::new(),
+            terms: Default::default(),
+        };
+        lead.submit(clock.now_ms(), Op::Post { task: new })
+            .await
+            .map_err(shown)?;
+        let mut worker = open("agent:w").await.map_err(shown)?;
+        let mut stepper = Stepper {
+            lead,
+            clock: &clock,
+            task: task.clone(),
+            steps: 0,
+            left: rng.range(1, 12),
+            send_ppm: rng.range(200_000, 800_000),
+            sent: BTreeMap::new(),
+            seen: Vec::new(),
+            rng: Rng::derive(seed, "board steer stepper"),
+        };
+        for _ in 0..rng.range(0, 3) {
+            stepper.send().await;
+        }
+        let finished = worker.work(&task, LEASE, &clock, &mut stepper).await;
+        finished.map_err(|error| format!("the worked task did not finish: {error:?}"))?;
+        stepper.lead.refresh().await.map_err(shown)?;
+        let fold = stepper.lead.fold();
+        if !fold.task(&task).is_some_and(|task| task.finished()) {
+            return Err("work returned before its task finished".to_owned());
+        }
+        for (seq, at) in &stepper.sent {
+            if !stepper.seen.contains(seq) {
+                return Err(format!(
+                    "steer {seq} sent during step {at} was heeded at a step boundary without being taken"
+                ));
+            }
+        }
+        Ok((stepper.steps, stepper.seen.len() as u64, stepper.seen))
+    })
 }
 
 fn run_seed(seed: u64, mutation: SteerMutation) -> (Result<SteerStats, String>, u64) {
@@ -644,7 +811,7 @@ pub fn report(
     totals: &SteerStats,
 ) -> ExitCode {
     println!(
-        "RESULT seeds={}..{} scenario=board_steer mutation={} passed={passed} failed={failed} twice={twice} sent={} refused={} heeded={} pending={} dropped={} takeovers={} stale_heeds={} crashes={} restarts={} heed_latency_p99_ms={} (simulated)",
+        "RESULT seeds={}..{} scenario=board_steer mutation={} passed={passed} failed={failed} twice={twice} sent={} refused={} heeded={} pending={} dropped={} takeovers={} stale_heeds={} crashes={} restarts={} steps={} stepped={} heed_latency_p99_ms={} (simulated)",
         seeds.start,
         seeds.end,
         mutation.name(),
@@ -657,6 +824,8 @@ pub fn report(
         totals.stale,
         totals.crashes,
         totals.restarts,
+        totals.steps,
+        totals.stepped,
         totals.p99(),
     );
     match mutation {
