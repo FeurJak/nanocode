@@ -20,6 +20,8 @@ root=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 cd "$root"
 case " $* " in *" -h "* | *" --help "*) sed -n '2,17p' "$0"; exit 0 ;; esac
 export SHIPPY_REMOTE_BUILD=0 CARGO_TERM_COLOR=never
+# python-capi's wasm32 libc++ needs clang 22 (as scripts/pin-rebuild.sh sets); an explicit NANOCODE_CC wins.
+if [ -z "${NANOCODE_CC:-}" ] && [ -x /usr/lib/llvm-22/bin/clang ]; then export NANOCODE_CC=/usr/lib/llvm-22/bin/clang PATH=/usr/lib/llvm-22/bin:$PATH; fi
 prefix=()
 lease=""
 give() { [ -z "$lease" ] || nc-build slots give "$lease" >/dev/null 2>&1; lease=""; }
