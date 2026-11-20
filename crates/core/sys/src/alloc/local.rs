@@ -280,6 +280,7 @@ impl State {
             page.prev.set(null_mut());
             page.zero.set(os::PURGE_ZEROES && dirty & mask == 0);
             self.pages_live.set(self.pages_live.get() + 1);
+            super::stats::taken(span * SLICE_BYTES);
             if seg.free_slices.get() == 0 {
                 self.unlink_segment(segment);
                 self.link_segment_back(segment);
@@ -323,6 +324,7 @@ impl State {
             seg.dirty_slices.set(dirty | mask);
             seg.free_slices.set(seg.free_slices.get() | mask);
             (*page).block_bytes.set(0);
+            super::stats::given((*page).span.get() * SLICE_BYTES);
         }
         self.pages_live.set(self.pages_live.get() - 1);
     }

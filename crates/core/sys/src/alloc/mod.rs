@@ -7,6 +7,8 @@ mod local;
 mod os;
 #[cfg(unix)]
 mod segment;
+#[cfg(unix)]
+mod stats;
 
 use core::alloc::{GlobalAlloc, Layout};
 #[cfg(unix)]
@@ -17,6 +19,31 @@ pub use counted::{Count, Counted};
 pub use local::Census;
 
 pub struct Heap;
+
+#[cfg(unix)]
+pub use stats::Stats;
+
+#[cfg(not(unix))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stats {
+    pub allocated: usize,
+    pub retained: usize,
+}
+
+impl Heap {
+    /// The process heap's allocated and retained bytes, when Heap is the global allocator.
+    /// Zero on targets where Heap forwards to the system allocator.
+    pub fn stats() -> Stats {
+        #[cfg(unix)]
+        {
+            stats::stats()
+        }
+        #[cfg(not(unix))]
+        {
+            Stats::default()
+        }
+    }
+}
 
 #[cfg(unix)]
 unsafe impl GlobalAlloc for Heap {

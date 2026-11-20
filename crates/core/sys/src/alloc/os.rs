@@ -65,6 +65,7 @@ pub unsafe fn map_aligned(bytes: usize, align: usize) -> usize {
     if raw == libc::MAP_FAILED {
         return 0;
     }
+    super::stats::mapped(total);
     let start = raw.addr();
     let aligned = (start + align - 1) & !(align - 1);
     let tail = aligned + bytes;
@@ -83,6 +84,7 @@ pub unsafe fn map_aligned(bytes: usize, align: usize) -> usize {
 pub unsafe fn unmap(address: usize, bytes: usize) {
     let result = unsafe { libc::munmap(address as *mut c_void, bytes) };
     check(result == 0, "munmap releases a range this allocator mapped");
+    super::stats::unmapped(bytes);
 }
 
 pub unsafe fn purge(address: usize, bytes: usize) {
@@ -92,7 +94,11 @@ pub unsafe fn purge(address: usize, bytes: usize) {
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub unsafe fn grow_in_place(address: usize, bytes: usize, bytes_new: usize) -> bool {
     let moved = unsafe { libc::mremap(address as *mut c_void, bytes, bytes_new, 0) };
-    moved != libc::MAP_FAILED
+    if moved == libc::MAP_FAILED {
+        return false;
+    }
+    super::stats::mapped(bytes_new - bytes);
+    true
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]

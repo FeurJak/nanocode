@@ -363,11 +363,13 @@ pub unsafe fn large_allocate_with(bytes: usize, align: usize) -> (*mut u8, Conte
         (*segment).kind.set(KIND_LARGE);
         (*segment).mapping_bytes.set(mapping_bytes);
     }
+    super::stats::taken(mapping_bytes);
     ((base + offset) as *mut u8, contents)
 }
 
 pub unsafe fn large_free(segment: *mut Segment) {
     let bytes = unsafe { (*segment).mapping_bytes.get() };
+    super::stats::given(bytes);
     let units = bytes / os::page_bytes();
     if units < LARGE_UNITS_LIMIT {
         let before = LARGE_CACHED_BYTES.fetch_add(bytes, Ordering::Relaxed);
@@ -394,6 +396,7 @@ pub unsafe fn large_resize(segment: *mut Segment, pointer: *mut u8, bytes_new: u
     };
     if unsafe { os::grow_in_place(segment.addr(), mapping_bytes, need) } {
         unsafe { (*segment).mapping_bytes.set(need) };
+        super::stats::taken(need - mapping_bytes);
         return true;
     }
     false
