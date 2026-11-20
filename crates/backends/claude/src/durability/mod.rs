@@ -121,7 +121,7 @@ impl DurableAgentExt for ClaudeBuilder {
         };
         let mut read = preloaded_records
             .flatten()
-            .map(|records| Arc::unwrap_or_clone(records))
+            .map(Arc::unwrap_or_clone)
             .unwrap_or_default();
         let checkpoint = match (checkpoint, preloaded) {
             (Some(_), Some(preloaded)) => Some(

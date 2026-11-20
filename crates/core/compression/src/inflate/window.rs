@@ -19,7 +19,7 @@ impl Window {
         }
     }
 
-    pub(super) fn clear(&mut self) {
+    pub(super) const fn clear(&mut self) {
         self.have = 0;
         self.next = 0;
     }
