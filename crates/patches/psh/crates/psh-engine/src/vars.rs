@@ -144,6 +144,16 @@ impl Var {
         matches!(self.value, Value::Assoc(_))
     }
 
+    /// How many values [`Var::values`] holds, without copying them (`${#a[@]}`).
+    pub(crate) fn count(&self) -> usize {
+        match &self.value {
+            Value::Unset => 0,
+            Value::Str(_) => 1,
+            Value::Indexed(m) => m.len(),
+            Value::Assoc(a) => a.len(),
+        }
+    }
+
     /// The values, in order: one for a scalar, the elements of an array.
     pub(crate) fn values(&self) -> Vec<Vec<u8>> {
         match &self.value {

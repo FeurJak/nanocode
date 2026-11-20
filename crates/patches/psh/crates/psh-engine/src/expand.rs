@@ -1800,6 +1800,16 @@ async fn param(
             },
             Ok((name, None)) => {
                 vp.refresh_dynamic(&name);
+                // `${#a[@]}` counts the elements without copying them: a loop testing
+                // it against a large array was quadratic.
+                if p.prefix == ParamPrefix::Length
+                    && matches!(p.op, ParamOp::None)
+                    && matches!(p.index, Some(Subscript::At | Subscript::Star))
+                {
+                    let n = vp.vars.get(&name).map_or(0, crate::vars::Var::count);
+                    emit(f, n.to_string().as_bytes(), quoted);
+                    return Ok(());
+                }
                 lookup_var(vp, code, &name, &p.index).await?
             }
             Err(msg) => {

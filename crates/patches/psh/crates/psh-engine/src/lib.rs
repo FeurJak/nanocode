@@ -1384,3 +1384,5 @@ mod parity_tests {
 mod coverage_parity_tests;
 #[cfg(test)]
 mod fuzz_parity_tests;
+#[cfg(test)]
+mod perf_tests;
