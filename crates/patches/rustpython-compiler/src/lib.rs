@@ -1105,10 +1105,46 @@ fn skip_quoted_string(bytes: &[u8], mut index: usize) -> usize {
     let quote = bytes[index];
     let triple = bytes.get(index + 1) == Some(&quote) && bytes.get(index + 2) == Some(&quote);
     let quote_len = if triple { 3 } else { 1 };
+    // PEP 701: an f-string's replacement fields may hold any string, even one
+    // with the same quote, so they are skipped as nested code.
+    let mut prefix = index;
+    while prefix > 0
+        && matches!(
+            bytes[prefix - 1],
+            b'r' | b'R' | b'b' | b'B' | b'f' | b'F' | b'u' | b'U'
+        )
+    {
+        prefix -= 1;
+    }
+    let formatted = !identifier_continue_before(bytes, prefix)
+        && bytes[prefix..index]
+            .iter()
+            .any(|byte| matches!(byte, b'f' | b'F'));
+    let mut depth = 0usize;
     index += quote_len;
     while index < bytes.len() {
-        if bytes[index] == b'\\' {
+        if depth > 0 {
+            match bytes[index] {
+                b'\'' | b'"' => index = skip_quoted_string(bytes, index),
+                b'{' | b'[' | b'(' => {
+                    depth += 1;
+                    index += 1;
+                }
+                b'}' | b']' | b')' => {
+                    depth -= 1;
+                    index += 1;
+                }
+                _ => index += 1,
+            }
+        } else if bytes[index] == b'\\' {
             index = (index + 2).min(bytes.len());
+        } else if formatted && bytes[index] == b'{' {
+            if bytes.get(index + 1) == Some(&b'{') {
+                index += 2;
+            } else {
+                depth = 1;
+                index += 1;
+            }
         } else if triple
             && bytes.get(index) == Some(&quote)
             && bytes.get(index + 1) == Some(&quote)
