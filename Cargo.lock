@@ -1040,6 +1040,7 @@ dependencies = [
  "nanocode-http",
  "nanocode-io",
  "nanocode-mpp",
+ "nanocode-partitions",
  "nanocode-platform",
  "nanocode-process",
  "nanocode-process-contracts",
@@ -1263,6 +1264,7 @@ version = "0.7.0"
 dependencies = [
  "nanocode-compression",
  "nanocode-durability-core",
+ "nanocode-partitions",
  "nanocode-sync",
  "nanocode-sys",
  "serde",

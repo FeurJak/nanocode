@@ -27,6 +27,7 @@ nanocode-code-mode-engine.workspace = true
 nanocode-compression.workspace = true
 nanocode-digest.workspace = true
 nanocode-durability-core.workspace = true
+nanocode-partitions.workspace = true
 nanocode-durability.workspace = true
 nanocode-executor.workspace = true
 graviola.workspace = true

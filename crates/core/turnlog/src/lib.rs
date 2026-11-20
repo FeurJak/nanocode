@@ -5,6 +5,7 @@ mod file;
 mod fold;
 mod host;
 mod image;
+pub mod parted;
 mod patch;
 mod record;
 mod writer;

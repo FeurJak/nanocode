@@ -198,6 +198,14 @@ default_table='
 1 canary_repo_cache_refs_before_objects canary:8 --scenario repo_cache --mutation refs_before_objects
 1 canary_repo_cache_resend_held canary:8 --scenario repo_cache --mutation resend_held
 1 canary_repo_cache_shared_lock canary:8 --scenario repo_cache --mutation shared_lock
+1 canary_plog_unfenced canary:50 --scenario plog --mutation unfenced
+1 canary_plog_partial canary:50 --scenario plog --mutation partial
+1 canary_plog_overwrite canary:50 --scenario plog --mutation overwrite
+1 canary_plog_batch_duplicates canary:100 --scenario plog --mutation batch_duplicates
+1 canary_plog_missed_ring canary:100 --scenario plog --mutation missed_ring
+1 canary_plog_snapshot_skipped canary:50 --scenario plog --mutation snapshot_skipped
+1 canary_plog_prune_ignores_cursors canary:400 --scenario plog --mutation prune_ignores_cursors
+1 canary_plog_lost_ack_rejected canary:100 --scenario plog --mutation lost_ack_rejected
 '
 default_known='
 '
