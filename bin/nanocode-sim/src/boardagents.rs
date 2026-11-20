@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 
 use nanocode_durability_core::{StoreError, StoreFuture};
-use nanocode_subagents::{BoardCoordination, BoardStats, Coordination};
+use nanocode_subagents::{AgentId, BoardCoordination, BoardStats, Coordination};
 use nanocode_turnlog::{LogHost, MemoryLog};
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
@@ -19,14 +19,18 @@ enum HostMutation {
     PolledOnce,
     AppendUnflushed,
     ReopenLost,
+    SteersTakenMidTurn,
+    SteersNeverDelivered,
 }
 
 impl HostMutation {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 6] = [
         Self::None,
         Self::PolledOnce,
         Self::AppendUnflushed,
         Self::ReopenLost,
+        Self::SteersTakenMidTurn,
+        Self::SteersNeverDelivered,
     ];
 
     const fn name(self) -> &'static str {
@@ -35,6 +39,8 @@ impl HostMutation {
             Self::PolledOnce => "polled_once",
             Self::AppendUnflushed => "append_unflushed",
             Self::ReopenLost => "reopen_lost",
+            Self::SteersTakenMidTurn => "steers_taken_mid_turn",
+            Self::SteersNeverDelivered => "steers_never_delivered",
         }
     }
 }
@@ -49,6 +55,7 @@ struct Seed {
     terminal: BTreeMap<String, String>,
     scopes: Vec<String>,
     audits: u64,
+    sent: u64,
     stats: BoardStats,
 }
 
@@ -71,6 +78,7 @@ impl Seed {
             terminal: BTreeMap::new(),
             scopes: Vec::new(),
             audits: 0,
+            sent: 0,
             stats: BoardStats::default(),
         }
     }
@@ -198,8 +206,18 @@ pub fn enabled() -> bool {
 
 pub fn begin(seed: u64) {
     if enabled() {
-        if *lock(&MUTATION) == HostMutation::PolledOnce {
-            nanocode_board::sim::mutate(nanocode_board::sim::Mutation::BoardPolledOnce);
+        let board = match *lock(&MUTATION) {
+            HostMutation::PolledOnce => Some(nanocode_board::sim::Mutation::BoardPolledOnce),
+            HostMutation::SteersTakenMidTurn => {
+                Some(nanocode_board::sim::Mutation::SteersTakenMidTurn)
+            }
+            HostMutation::SteersNeverDelivered => {
+                Some(nanocode_board::sim::Mutation::SteersNeverDelivered)
+            }
+            _ => None,
+        };
+        if let Some(board) = board {
+            nanocode_board::sim::mutate(board);
         }
         SEED.set(Some(Seed::new(seed)));
     }
@@ -222,6 +240,21 @@ pub fn plane() -> Option<Arc<dyn Coordination>> {
         seed.planes.push(Arc::clone(&plane));
         Some(plane as Arc<dyn Coordination>)
     })
+}
+
+pub async fn steer(root: &str, id: AgentId) -> bool {
+    let Some(plane) = SEED.with_borrow(|seed| seed.as_ref()?.planes.last().cloned()) else {
+        return false;
+    };
+    let sent = plane.steer(root, id, format!("steer {id}")).await.is_ok();
+    if sent {
+        SEED.with_borrow_mut(|seed| {
+            if let Some(seed) = seed.as_mut() {
+                seed.sent += 1;
+            }
+        });
+    }
+    sent
 }
 
 pub async fn audit() -> Option<String> {
@@ -277,6 +310,18 @@ pub async fn audit() -> Option<String> {
                     ));
                 }
             }
+        }
+        if seed.planes.len() == 1 && stats.delivered + stats.unheard > seed.sent {
+            return Some(format!(
+                "board: {} steers were sent to running subagents, but {} reached a step boundary and {} were heeded at finish",
+                seed.sent, stats.delivered, stats.unheard
+            ));
+        }
+        if stats.missed > 0 {
+            return Some(format!(
+                "board: {} steers were pending at a later step boundary of their subagent and first heard at its finish",
+                stats.missed
+            ));
         }
         seed.terminal = terminal;
         seed.audits += 1;

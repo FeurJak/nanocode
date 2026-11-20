@@ -175,22 +175,9 @@ impl Board {
         let mut heard = None;
         let mut done = None;
         loop {
-            if let Some(upto) = heard.take()
-                && !mutated(Mutation::StepSteersTwice)
-            {
-                let upto = if mutated(Mutation::StepHeedsUnseen) {
-                    self.refresh().await?;
-                    self.fold
-                        .steers_for(&lease.task, &lease.claim)
-                        .map_err(BoardError::Rejected)?
-                        .last()
-                        .map_or(upto, |steer| steer.seq)
-                } else {
-                    upto
-                };
-                self.heed(pace.now_ms(), &lease, upto).await?;
-            }
-            let steers = self.take_steers(&lease).await?;
+            let steers = self
+                .boundary(pace.now_ms(), &lease.task, &lease.claim, heard.take())
+                .await?;
             heard = steers.last().map(|steer| steer.seq);
             if heard.is_none()
                 && let Some(outcome) = done.take()

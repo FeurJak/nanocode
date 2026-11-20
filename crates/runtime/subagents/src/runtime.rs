@@ -3110,6 +3110,13 @@ fn wait_mark(status: &AgentStatus, revision: u64) -> u64 {
     hasher.finish()
 }
 
+fn steerable(state: &RegistryState, root: &str, id: AgentId) -> Option<String> {
+    let scope = state.scopes.get(root)?;
+    let session = scope.sessions.get(&id)?;
+    (scope.paused == 0 && !scope.life.closing() && session.status == AgentStatus::Running)
+        .then(|| session.descriptor.session_id.clone())
+}
+
 impl Registry {
     fn shared(&self) -> Option<Arc<Self>> {
         self.this.get().and_then(Weak::upgrade)
@@ -3180,6 +3187,53 @@ impl Registry {
     pub(super) fn coordinate(&self, root_session_id: &str, update: &AgentUpdate) {
         if let Some(coordination) = Option::clone(&self.coordination.get()) {
             coordination.observe(root_session_id, update);
+        }
+    }
+
+    pub(super) async fn board_steers(
+        self: &Arc<Self>,
+        root_session_id: &str,
+        id: AgentId,
+        priority: MessagePriority,
+    ) {
+        let Some(coordination) = Option::clone(&self.coordination.get()) else {
+            return;
+        };
+        let root = root_session_id.to_owned();
+        let session = self
+            .state
+            .call(move |state| steerable(state, &root, id))
+            .await;
+        let Some(session) = session else {
+            return;
+        };
+        let Ok(steers) = coordination.steers(&session).await else {
+            return;
+        };
+        let locks = self.session_locks(root_session_id).await;
+        let _closing = locks.closing.enter().await;
+        for body in steers {
+            let root = root_session_id.to_owned();
+            if self
+                .state
+                .call(move |state| steerable(state, &root, id))
+                .await
+                .is_none()
+            {
+                return;
+            }
+            let _ = self
+                .deliver_message(
+                    root_session_id,
+                    None,
+                    id,
+                    priority,
+                    MessagePurpose::Coordinate,
+                    None,
+                    body,
+                    false,
+                )
+                .await;
         }
     }
 
@@ -8453,9 +8507,11 @@ pub(super) fn forward_events(
             let mut tracked = Vec::new();
             let mut progress = false;
             let mut completed_tool = false;
+            let mut started = false;
             let mut next = Some(first);
             while let Some(event) = next {
                 let kind = event.kind;
+                started |= kind == AgentEventKind::ModelCallStarted;
                 let boundary = matches!(
                     kind,
                     AgentEventKind::ModelCallStarted | AgentEventKind::ModelCallCompleted
@@ -8486,6 +8542,15 @@ pub(super) fn forward_events(
                 }
                 if progress {
                     registry.capture_progress(&root_session_id, id, &marks);
+                }
+                if started {
+                    let registry = Arc::clone(&registry);
+                    let root = root_session_id.clone();
+                    drop(platform::spawn(async move {
+                        registry
+                            .board_steers(&root, id, MessagePriority::Urgent)
+                            .await;
+                    }));
                 }
             }
         }

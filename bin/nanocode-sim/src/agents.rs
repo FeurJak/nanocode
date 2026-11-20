@@ -472,10 +472,29 @@ async fn pooled(run: &Run, shape: &Shape, clock: &Arc<Clock>) -> Result<Vec<Agen
             "the pool retired pooled-0 (agent {gone}) but the runtime has it {status:?}"
         ));
     }
-    if pool.agents().await.iter().any(|agent| agent.id == "pooled-0") {
+    if pool
+        .agents()
+        .await
+        .iter()
+        .any(|agent| agent.id == "pooled-0")
+    {
         return Err("the pool still lists pooled-0 after retiring it".to_owned());
     }
     Ok(vec![gone])
+}
+
+async fn steer_running(run: &Run) -> Result<(), String> {
+    let listed = run
+        .registry
+        .directory(ROOT_SESSION, true, false)
+        .await
+        .map_err(|error| format!("the directory did not answer before steering: {error}"))?;
+    for entry in listed {
+        if entry.status == AgentStatus::Running {
+            crate::boardagents::steer(ROOT_SESSION, entry.agent_id).await;
+        }
+    }
+    Ok(())
 }
 
 async fn drive(shape: &Shape, ledger: &Arc<Ledger>, clock: &Arc<Clock>) -> Result<u64, String> {
@@ -491,6 +510,10 @@ async fn drive(shape: &Shape, ledger: &Arc<Ledger>, clock: &Arc<Clock>) -> Resul
     ledger.trace("started");
     let retired = pooled(&run, shape, clock).await?;
     ledger.trace("pooled");
+    if run.plane.is_some() {
+        steer_running(&run).await?;
+        ledger.trace("steered");
+    }
     nanocode_platform::sleep(shape.stop_after).await;
     if let Some(plane) = &run.plane {
         board_agrees(&run, plane, false).await?;

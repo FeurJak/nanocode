@@ -1,6 +1,9 @@
 pub use nanocode_board_fold::steer::*;
 
-use crate::{Applied, Board, BoardError, ClaimId, Op, TaskId, tasks::Lease};
+use crate::{
+    Applied, Board, BoardError, ClaimId, Op, TaskId,
+    sim::{Mutation, mutated},
+};
 
 impl Board {
     pub async fn steer(
@@ -32,24 +35,54 @@ impl Board {
         self.submit(at_ms, Op::Steer(send)).await
     }
 
-    pub async fn take_steers(&mut self, lease: &Lease) -> Result<Vec<Steer>, BoardError> {
+    pub async fn boundary(
+        &mut self,
+        at_ms: u64,
+        task: &TaskId,
+        claim: &ClaimId,
+        heard: Option<u64>,
+    ) -> Result<Vec<Steer>, BoardError> {
+        if let Some(upto) = heard
+            && !mutated(Mutation::StepSteersTwice)
+        {
+            let upto = if mutated(Mutation::StepHeedsUnseen) {
+                self.refresh().await?;
+                self.fold
+                    .steers_for(task, claim)
+                    .map_err(BoardError::Rejected)?
+                    .last()
+                    .map_or(upto, |steer| steer.seq)
+            } else {
+                upto
+            };
+            self.heed(at_ms, task, claim, upto).await?;
+        }
+        self.take_steers(task, claim).await
+    }
+
+    async fn take_steers(
+        &mut self,
+        task: &TaskId,
+        claim: &ClaimId,
+    ) -> Result<Vec<Steer>, BoardError> {
         self.refresh().await?;
         let steers = self
             .fold
-            .steers_for(&lease.task, &lease.claim)
+            .steers_for(task, claim)
             .map_err(BoardError::Rejected)?;
         Ok(steers.cloned().collect())
     }
 
-    pub async fn heed(
+    async fn heed(
         &mut self,
         at_ms: u64,
-        lease: &Lease,
+        task: &TaskId,
+        claim: &ClaimId,
         upto: u64,
     ) -> Result<Applied, BoardError> {
         let heed = SteerOp::Heed {
-            task: lease.task.clone(),
-            claim: lease.claim.clone(),
+            task: task.clone(),
+            claim: claim.clone(),
             upto,
         };
         self.submit(at_ms, Op::Steer(heed)).await

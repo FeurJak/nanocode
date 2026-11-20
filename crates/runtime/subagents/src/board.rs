@@ -18,6 +18,8 @@ use crate::model::{AgentId, AgentStatus, AgentUpdate, MessageSender};
 
 #[path = "brief.rs"]
 mod brief;
+#[path = "steers.rs"]
+mod steers;
 
 #[cfg(not(target_family = "wasm"))]
 pub type ReadFuture<'a, T> = nanocode_sync::future::BoxFuture<'a, T>;
@@ -45,6 +47,9 @@ pub trait Coordination: Send + Sync {
         _finished: Vec<(AgentId, AgentStatus, Option<u64>)>,
     ) {
     }
+    fn steers<'a>(&'a self, _session: &'a str) -> ReadFuture<'a, Result<Vec<String>, String>> {
+        Box::pin(std::future::ready(Ok(Vec::new())))
+    }
 }
 
 pub const LEASE_MS: u64 = 1 << 30;
@@ -61,6 +66,9 @@ pub struct BoardStats {
     pub reuses: u64,
     pub replies: u64,
     pub steers: u64,
+    pub delivered: u64,
+    pub unheard: u64,
+    pub missed: u64,
     pub cancels: u64,
     pub fenced: u64,
     pub late: u64,
@@ -78,6 +86,9 @@ impl BoardStats {
         self.reuses += other.reuses;
         self.replies += other.replies;
         self.steers += other.steers;
+        self.delivered += other.delivered;
+        self.unheard += other.unheard;
+        self.missed += other.missed;
         self.cancels += other.cancels;
         self.fenced += other.fenced;
         self.late += other.late;
@@ -127,6 +138,9 @@ struct Session {
     parent: TaskId,
     k: u64,
     claim: Option<ClaimId>,
+    heard: Option<u64>,
+    boundaries: u64,
+    sends: Vec<u64>,
     last_output: Option<Option<String>>,
 }
 
@@ -611,6 +625,9 @@ impl Inner {
                 parent: parent.clone(),
                 k,
                 claim: None,
+                heard: None,
+                boundaries: 0,
+                sends: Vec::new(),
                 last_output: None,
             });
             if k > state.k {
@@ -790,6 +807,9 @@ impl Inner {
             self.fail(failure);
         }
         if let Some(state) = self.sessions.get_mut(session) {
+            if state.claim != claim {
+                state.heard = None;
+            }
             state.claim = claim;
         }
     }
@@ -833,6 +853,9 @@ impl Inner {
                 parent: parent_task,
                 k,
                 claim: None,
+                heard: None,
+                boundaries: 0,
+                sends: Vec::new(),
                 last_output: None,
             },
         );
@@ -864,6 +887,7 @@ impl Inner {
         if let Some(state) = self.sessions.get_mut(session) {
             state.k = k + 1;
             state.claim = None;
+            state.heard = None;
             state.last_output = None;
         }
         self.claim(session, false).await;
@@ -950,6 +974,9 @@ impl Inner {
             ));
             return;
         };
+        if let Err(error) = self.heed_heard(session).await {
+            self.fail(format!("finish {task} ({key}): {error}"));
+        }
         let last = match &outcome {
             Outcome::Done(output) => Some(output.clone()),
             Outcome::Failed(_) => None,
@@ -981,6 +1008,7 @@ impl Inner {
                 if let Some(state) = self.sessions.get_mut(session) {
                     state.last_output = Some(last);
                     state.claim = None;
+                    state.heard = None;
                 }
             }
             Err(BoardError::Rejected(Rejection::NotHolder)) => {
@@ -1218,5 +1246,9 @@ impl Coordination for BoardCoordination {
 
     fn brief<'a>(&'a self, session: &'a str) -> ReadFuture<'a, Result<Option<String>, String>> {
         self.briefed(session)
+    }
+
+    fn steers<'a>(&'a self, session: &'a str) -> ReadFuture<'a, Result<Vec<String>, String>> {
+        self.boundary(session)
     }
 }
