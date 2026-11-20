@@ -427,6 +427,11 @@ mod tests {
     }
 
     #[test]
+    fn a_path_that_names_no_file_is_not_found() {
+        check("a/b/c.txt 2>/dev/null; echo $?; ./nope 2>/dev/null; echo $?", b"127\n127\n");
+    }
+
+    #[test]
     fn a_writer_meets_the_pipe_its_reader_closed() {
         check(
             "set -o pipefail; for i in 1 2 3 4; do echo $i; done | { read a; echo $a; }; echo $?",

@@ -2797,6 +2797,17 @@ async fn spawn_program(
     let program = vp.abs_path(&spec.program);
     match vp.host().spawn(spec) {
         Ok(s) => Ok(s),
+        // A path that names no file is not found, as `execve` finds it (127).
+        Err(e)
+            if crate::host::RunInShell::is(&e)
+                && matches!(
+                    vp.host().stat(&program, true).await,
+                    Err(ref m) if m.kind() == std::io::ErrorKind::NotFound
+                ) =>
+        {
+            vp.error(&format!("{shown}: No such file or directory")).await;
+            Err(Ok(127))
+        }
         // A file without execute permission is refused as `execve` refuses it.
         Err(e)
             if crate::host::RunInShell::is(&e)
