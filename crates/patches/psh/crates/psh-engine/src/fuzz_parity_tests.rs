@@ -121,6 +121,7 @@ fn a_forked_simple_command_that_fails_to_expand_runs_the_inherited_exit_trap() {
     // command, so the trap's output goes down the pipe.
     let s = "trap 'echo bye' EXIT; echo $((1 % 0)) 2>/dev/null | { read -r q; echo \"got $q\"; }";
     assert_eq!(out(s), "got bye\nbye\n");
+    assert_eq!(out("trap 'echo bye $?' EXIT; : ${u?x} 2>/dev/null | cat; echo after"), "bye 127\nafter\nbye 0\n");
     assert_eq!(out("trap 'echo bye' EXIT; echo a | x=$((1/0)) 2>/dev/null | cat; echo after"), "bye\nafter\nbye\n");
     assert_eq!(out("trap 'echo bye' EXIT; echo $((1/0)) 2>/dev/null & wait; echo after"), "bye\nafter\nbye\n");
     // Not for a subshell, a group, a command substitution, a function's body, a failing
@@ -135,3 +136,14 @@ fn a_forked_simple_command_that_fails_to_expand_runs_the_inherited_exit_trap() {
     assert_eq!(out("trap 'echo bye' EXIT; (trap 'echo in' EXIT; echo $((1/0)) 2>/dev/null | cat); echo after"), "in\nin\nafter\nbye\n");
 }
 
+#[test]
+fn an_unset_parameter_error_in_a_forked_simple_command_exits_127() {
+    // bash's child for the command is a copy of the shell, so it ends as `-c` does.
+    let s = ": ${u?x} 2>/dev/null | cat; echo ${PIPESTATUS[@]}; f() { : ${u?x}; }; f 2>/dev/null | cat; echo ${PIPESTATUS[@]}";
+    assert_eq!(out(s), "127 0\n127 0\n");
+    assert_eq!(out("set -u; echo $zz 2>/dev/null & wait $!; echo $?"), "127\n");
+    // A subshell, a substitution, a compound stage and errexit end with 1.
+    assert_eq!(out("set -u; (echo $zz) 2>/dev/null; echo $?; x=$(echo $zz) 2>/dev/null; echo $?"), "1\n1\n");
+    assert_eq!(out("set -u; echo hi | while read l; do echo $zz; done 2>/dev/null; echo ${PIPESTATUS[@]}"), "0 1\n");
+    assert_eq!(out("set -e; : ${u?x} 2>/dev/null | cat; echo ${PIPESTATUS[@]}"), "1 0\n");
+}

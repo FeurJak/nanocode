@@ -1577,8 +1577,10 @@ fn is_at(p: &WordPart) -> bool {
 /// The status a fatal expansion error (`${x?}`, `set -u`) ends the shell with: 127
 /// under `-c` unless errexit is on, else 1, as bash 5.3 does.
 pub(crate) fn expansion_exit_status(vp: &Vp) -> i32 {
-    // Only the shell itself: a subshell (`( )`, `$( )`, a pipeline stage) ends with 1.
-    if vp.opts.dash_c && !vp.opts.get(SetOpt::Errexit) && vp.top {
+    // Only the shell itself, or the forked child of a pipeline stage or job that is one
+    // simple command (bash's copy of the shell): a subshell (`( )`, `$( )`, a compound
+    // stage) ends with 1.
+    if vp.opts.dash_c && !vp.opts.get(SetOpt::Errexit) && (vp.top || vp.own_simple.is_some()) {
         127
     } else {
         1
