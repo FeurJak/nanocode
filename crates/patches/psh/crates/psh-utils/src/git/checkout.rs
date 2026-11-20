@@ -502,8 +502,49 @@ pub fn track(git: &Git<'_>, name: &str, remote: &str, branch: &str) -> Res<()> {
     Ok(())
 }
 
+/// Splits clustered short options into one argument each, as git's option parser
+/// reads them: `-qb name` is `-q -b name`, and a letter in `with_value` takes the
+/// rest of its cluster as its value (`-bname`), or else the next argument whole.
+fn split_shorts(args: &[String], with_value: &str) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut value_next = false;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if std::mem::take(&mut value_next) {
+            out.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            out.push(arg.clone());
+            out.extend(rest.cloned());
+            break;
+        }
+        let Some(cluster) = arg
+            .strip_prefix('-')
+            .filter(|c| !c.is_empty() && !c.starts_with('-'))
+        else {
+            out.push(arg.clone());
+            continue;
+        };
+        for (k, c) in cluster.char_indices() {
+            out.push(format!("-{c}"));
+            if with_value.contains(c) {
+                let tail = &cluster[k + c.len_utf8()..];
+                if tail.is_empty() {
+                    value_next = true;
+                } else {
+                    out.push(tail.to_string());
+                }
+                break;
+            }
+        }
+    }
+    out
+}
+
 fn run(git: &Git<'_>, io: &mut Io<'_>, args: &[String], switch: bool) -> Res<i32> {
     let command = if switch { "switch" } else { "checkout" };
+    let args = &split_shorts(args, if switch { "cC" } else { "bB" });
     let (mut quiet, mut force, mut detach) = (false, false, false);
     let mut create: Option<(String, bool)> = None;
     let mut tracking: Option<bool> = None;
@@ -1078,6 +1119,7 @@ fn linked(git: &Git<'_>) -> Res<Vec<(Vec<u8>, Vec<u8>)>> {
 /// git worktree add: another working tree of the repository, on a branch of its own
 /// or at a commit.
 pub fn worktree_add(git: &Git<'_>, io: &mut Io<'_>, args: &[String]) -> Res<i32> {
+    let args = &split_shorts(args, "bB");
     let (mut detach, mut quiet) = (false, false);
     let mut create: Option<(String, bool)> = None;
     let mut words: Vec<&str> = Vec::new();
@@ -1352,4 +1394,29 @@ fn merge_abort(git: &Git<'_>, abort: bool) -> Res<i32> {
         git.op(Op::Remove(join(&repo.git_dir, name.as_bytes())));
     }
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_shorts;
+
+    fn split(args: &[&str], with_value: &str) -> Vec<String> {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        split_shorts(&args, with_value)
+    }
+
+    #[test]
+    fn clustered_short_options_split_as_git_reads_them() {
+        assert_eq!(split(&["-qb", "topic"], "bB"), ["-q", "-b", "topic"]);
+        assert_eq!(split(&["-qbtopic"], "bB"), ["-q", "-b", "topic"]);
+        assert_eq!(
+            split(&["-fB", "x", "main"], "bB"),
+            ["-f", "-B", "x", "main"]
+        );
+        assert_eq!(split(&["-qc", "new"], "cC"), ["-q", "-c", "new"]);
+        // A value is taken whole, and nothing after `--` is an option.
+        assert_eq!(split(&["-b", "-qx"], "bB"), ["-b", "-qx"]);
+        assert_eq!(split(&["--", "-qf"], "bB"), ["--", "-qf"]);
+        assert_eq!(split(&["-", "--quiet", "-q"], "bB"), ["-", "--quiet", "-q"]);
+    }
 }
