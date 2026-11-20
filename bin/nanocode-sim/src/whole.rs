@@ -178,7 +178,10 @@ struct Shape {
     cancel_turn: Option<(u64, u64)>,
     children: ChildMode,
     child_faults: ChildFaults,
+    lost_acks: u64,
 }
+
+const LOST_ACK_PPM_MAX: u64 = 150_000;
 
 impl Shape {
     fn of(seed: u64, options: WholeOptions) -> Self {
@@ -230,12 +233,18 @@ impl Shape {
             cancel_turn,
             children: options.children,
             child_faults: ChildFaults::of(seed, options.calm),
+            lost_acks: match store {
+                StoreKind::Log if !options.calm => {
+                    Rng::derive(seed, "whole-lost-ack").range(0, LOST_ACK_PPM_MAX)
+                }
+                _ => 0,
+            },
         }
     }
 
     fn describe(&self) -> String {
         format!(
-            "scenario=runtime wire={} children={} stop={:?} stop_after_ms={} resident<={:?} roots={} turns={} store={} crashes_ms={:?} calm_network={} cancel_turn={:?}{}",
+            "scenario=runtime wire={} children={} stop={:?} stop_after_ms={} resident<={:?} roots={} turns={} store={} crashes_ms={:?} lost_acks_ppm={} calm_network={} cancel_turn={:?}{}",
             self.wire.name(),
             self.children.name(),
             self.stop,
@@ -248,6 +257,7 @@ impl Shape {
                 .iter()
                 .map(|at| at / 1_000_000)
                 .collect::<Vec<_>>(),
+            self.lost_acks,
             match self.wire {
                 WireKind::Transport => self.faults.calm(),
                 WireKind::Http => self.http_faults.calm(),
@@ -359,6 +369,7 @@ struct Durable {
     settle_durably: bool,
     skips_clear: bool,
     deferred_start: bool,
+    lost_acks: LostAcks,
     world: Arc<World>,
 }
 
@@ -408,6 +419,7 @@ impl Durable {
                 let host: Arc<dyn nanocode::turnlog::LogHost> = Arc::new(TracedHost(
                     SimHost::new(Arc::clone(&self.disk)),
                     Arc::clone(&self.world),
+                    self.lost_acks.clone(),
                 ));
                 let policy = nanocode::turnlog::Policy {
                     effects: nanocode::turnlog::Effects::default(),
@@ -438,7 +450,23 @@ impl Durable {
     }
 }
 
-struct TracedHost(SimHost, Arc<World>);
+struct TracedHost(SimHost, Arc<World>, LostAcks);
+
+#[derive(Clone)]
+struct LostAcks {
+    ppm: u64,
+    seed: u64,
+    rolls: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl LostAcks {
+    fn roll(&self) -> bool {
+        let roll = self
+            .rolls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.ppm > 0 && Rng::derive(self.seed ^ roll, "whole-lost-ack-roll").chance(self.ppm)
+    }
+}
 
 impl nanocode::turnlog::LogHost for TracedHost {
     fn scan<'a>(
@@ -477,7 +505,18 @@ impl nanocode::turnlog::LogHost for TracedHost {
                 .collect::<Vec<_>>()
                 .join(" | ")
         ));
-        self.0.append(scope, rows)
+        let appending = self.0.append(scope, rows);
+        if !self.2.roll() {
+            return appending;
+        }
+        let world = Arc::clone(&self.1);
+        Box::pin(async move {
+            appending.await?;
+            world.trace("log append landed and its answer was lost");
+            Err(nanocode_durability_core::StoreError::Backend(
+                "injected: the append's answer was lost".to_owned(),
+            ))
+        })
     }
 }
 
@@ -1178,6 +1217,11 @@ pub fn simulate(seed: u64, options: WholeOptions) -> WholeOutcome {
         settle_durably: remote.is_some() && options.child_mutation != ChildMutation::SettlesLazily,
         skips_clear: options.child_mutation == ChildMutation::RegionSkipsClear,
         deferred_start: options.deferred_start,
+        lost_acks: LostAcks {
+            ppm: shape.lost_acks,
+            seed,
+            rolls: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        },
         kind: shape.store,
         kv: (shape.store == StoreKind::Kv).then(|| {
             let mut profile = Profile::of(seed);

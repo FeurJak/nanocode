@@ -438,6 +438,43 @@ async fn page(
     Ok(())
 }
 
+enum Written<'a> {
+    Appended(&'a [(u64, String)]),
+    Extended(Extension<'a>, usize),
+}
+
+async fn landed(
+    host: &dyn LogHost,
+    scope: &str,
+    written: Written<'_>,
+    error: StoreError,
+) -> Result<(), StoreError> {
+    let (from, to) = match &written {
+        Written::Appended(rows) => match (rows.first(), rows.last()) {
+            (Some((first, _)), Some((last, _))) => (*first, last + 1),
+            _ => return Err(error),
+        },
+        Written::Extended(extension, _) => (extension.seq, extension.seq + 1),
+    };
+    let Ok(found) = host.scan(scope, from, to).await else {
+        return Err(error);
+    };
+    let ours = match written {
+        Written::Appended(rows) => found == rows,
+        Written::Extended(extension, merged) => match found.as_slice() {
+            [(seq, body)] => {
+                *seq == extension.seq && body.len() == merged && body.ends_with(extension.tail)
+            }
+            _ => false,
+        },
+    };
+    match (found.is_empty(), ours) {
+        (true, _) => Err(error),
+        (false, true) => Ok(()),
+        (false, false) => Err(StoreError::Fenced),
+    }
+}
+
 async fn warm(
     host: &dyn LogHost,
     scope: &str,
@@ -979,6 +1016,7 @@ impl Follower {
                 buffer: Vec::new(),
                 check: snapshot,
                 collectable: BTreeSet::new(),
+                fenced: false,
                 floor,
                 fold,
                 history,
@@ -1012,6 +1050,7 @@ struct Writer {
     buffer: Vec<Record>,
     check: usize,
     collectable: BTreeSet<String>,
+    fenced: bool,
     floor: Option<u64>,
     fold: Fold,
     history: History,
@@ -1194,6 +1233,9 @@ impl TurnLog {
     ) -> Result<R, StoreError> {
         let mut writer = self.writer.acquire().await;
         let writer = &mut *writer;
+        if writer.fenced {
+            return Err(StoreError::Fenced);
+        }
         for owner in owners {
             warm(
                 &*self.host,
@@ -1420,6 +1462,9 @@ impl Lease<'_> {
         rider: Option<Rider<'_>>,
     ) -> Result<(u64, bool), StoreError> {
         let writer = &mut *self.writer;
+        if writer.fenced {
+            return Err(StoreError::Fenced);
+        }
         let revived = writer.fold.revive(&writer.buffer);
         writer.buffer.extend(revived);
         let seq = writer.next;
@@ -1726,30 +1771,41 @@ impl Lease<'_> {
                 self.host.carry(self.scope, write, rider)
             });
             let carried = carrying.is_some();
-            let extended = match carrying {
-                Some(carrying) => {
-                    let done = carrying.await;
-                    answer(rodes, done.is_ok());
-                    done?;
-                    extension.and(merged)
-                }
+            let (rodes, extended, done) = match carrying {
+                Some(carrying) => (rodes, extension.and(merged), carrying.await),
                 None => {
                     answer(rodes, false);
                     let extending =
                         extension.and_then(|extension| self.host.extend(self.scope, extension));
                     let extended = extending.is_some().then_some(merged).flatten();
-                    match extending {
-                        Some(extending) => extending.await?,
+                    let done = match extending {
+                        Some(extending) => extending.await,
                         None if archived.is_some() || !superseded.is_empty() => {
                             self.host
                                 .append_compacting(self.scope, &appended, compaction)
-                                .await?;
+                                .await
                         }
-                        None => self.host.append(self.scope, &appended).await?,
-                    }
-                    extended
+                        None => self.host.append(self.scope, &appended).await,
+                    };
+                    (Vec::new(), extended, done)
                 }
             };
+            let done = match done {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    let written = match extension.zip(extended) {
+                        Some((extension, merged)) => Written::Extended(extension, merged),
+                        None => Written::Appended(&appended[..]),
+                    };
+                    let landed = landed(self.host, self.scope, written, error).await;
+                    if matches!(landed, Err(StoreError::Fenced)) {
+                        self.writer.fenced = true;
+                    }
+                    landed
+                }
+            };
+            answer(rodes, done.is_ok());
+            done?;
             (carried, extended)
         };
         drop(appended);
