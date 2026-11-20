@@ -14,6 +14,16 @@ struct Placed {
     idle_since_ms: Option<u64>,
 }
 
+impl Placed {
+    fn listed(&self) -> Agent {
+        let mut agent = self.agent.clone();
+        if mutated(Mutation::PoolForgetsIntent) {
+            agent.intent = None;
+        }
+        agent
+    }
+}
+
 pub struct SubagentPool {
     parent: AgentHandle,
     registry: Arc<Registry>,
@@ -72,12 +82,7 @@ impl SubagentPool {
 
     async fn list(&self) -> Vec<Agent> {
         let Ok(listed) = self.registry.directory(&self.session, true, false).await else {
-            return self
-                .placed
-                .borrow()
-                .values()
-                .map(|placed| placed.agent.clone())
-                .collect();
+            return self.placed.borrow().values().map(Placed::listed).collect();
         };
         let now = (self.now_ms)();
         let mut placed = self.placed.borrow_mut();
@@ -101,7 +106,7 @@ impl SubagentPool {
             };
             true
         });
-        placed.values().map(|placed| placed.agent.clone()).collect()
+        placed.values().map(Placed::listed).collect()
     }
 
     async fn close(&self, agent: &str) -> Result<(), PoolError> {

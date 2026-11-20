@@ -155,6 +155,7 @@ pub enum Mutation {
     ClaimCapIgnored,
     SteersNeverDelivered,
     SteersTakenMidTurn,
+    PoolForgetsIntent,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

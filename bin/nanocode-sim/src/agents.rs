@@ -1,17 +1,19 @@
 use std::{cell::RefCell, sync::Arc, time::Duration};
 
 use nanocode_agent_core::AgentHandle;
-use nanocode_board::{TaskId, brief::Brief};
-use nanocode_dispatch::{Domain, Spawn};
-use nanocode_dispatcher::{Pool, Start};
+use nanocode_board::{Board, NewTask, Op, Phase, TaskId};
+use nanocode_dispatch::{Budgets, IntentState, Policy, Role};
+use nanocode_dispatcher::{BRIEF, Dispatcher, Pool};
 use nanocode_subagents::{
     AgentId, AgentStatus, AgentTask, Coordination, DEFAULT_MAX_SUBAGENTS, Registry,
     ScopedAgentUpdate, SubagentControl, SubagentPool,
 };
 use nanocode_sync::mpsc::UnboundedReceiver;
+use nanocode_turnlog::{LogHost, MemoryLog};
 use serde_json::Value;
 
 use crate::{
+    board::identity,
     executor::{Clock, Ended, Executor, Task},
     rng::Rng,
     scripted::{Counts, Ledger, Script, ScriptedFactory, ScriptedStore, simulated_model},
@@ -29,6 +31,17 @@ pub const CANCEL_PPM: u64 = 250_000;
 pub const POOLED_MAX: u64 = 4;
 pub const RUNTIME_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 const ROOT_SESSION: &str = "root";
+const POOL_SCOPE: &str = "pool";
+const POOL_OWNER: &str = "agent:sim";
+const POOL_POSTER: &str = "agent:sim+poster";
+const POOL_KIND: &str = "kind";
+const POOL_WORK: &str = "code";
+const POOL_MEMBER: &str = "member";
+const POOL_PROJECT: &str = "project";
+const POOL_CHARTER_MS: u64 = 1_000;
+const POOL_LEASE_MS: u64 = 3_600_000;
+const POOL_IDLE_RETIRE_MS: u64 = 60_000;
+const POOL_PASSES_MAX: u64 = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentsMutation {
@@ -39,10 +52,11 @@ pub enum AgentsMutation {
     TurnLeaks,
     BoardFailuresUnread,
     PoolRetireKeepsAgent,
+    PoolForgetsIntent,
 }
 
 impl AgentsMutation {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::None,
         Self::CancelIgnored,
         Self::ShutdownHangs,
@@ -50,6 +64,7 @@ impl AgentsMutation {
         Self::TurnLeaks,
         Self::BoardFailuresUnread,
         Self::PoolRetireKeepsAgent,
+        Self::PoolForgetsIntent,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -67,6 +82,7 @@ impl AgentsMutation {
             Self::TurnLeaks => "turn_leaks",
             Self::BoardFailuresUnread => "board_failures_unread",
             Self::PoolRetireKeepsAgent => "pool_retire_keeps_agent",
+            Self::PoolForgetsIntent => "pool_forgets_intent",
         }
     }
 
@@ -399,31 +415,189 @@ async fn board_agrees(
     Ok(())
 }
 
-fn start_of(index: u64) -> Start {
-    let intent = TaskId(format!("intent/pooled-{index}"));
-    let task = TaskId(format!("pooled-{index}"));
-    Start {
-        spawn: Spawn {
-            intent,
-            task: task.clone(),
-            domain: Domain {
-                role: "worker".to_owned(),
-                member: "member".to_owned(),
-                project: "project".to_owned(),
-            },
-            placement: "sim".to_owned(),
+fn pool_policy() -> Policy {
+    Policy {
+        roles: vec![Role {
+            name: "worker".to_owned(),
+            labels: [(POOL_KIND.to_owned(), POOL_WORK.to_owned())]
+                .into_iter()
+                .collect(),
             cost_nano_usd: 1,
+            placement: "sim".to_owned(),
+        }],
+        member_label: POOL_MEMBER.to_owned(),
+        project_label: POOL_PROJECT.to_owned(),
+        intent_prefix: "dispatch/".to_owned(),
+        budgets: Budgets {
+            agents_per_member_max: POOLED_MAX,
+            agents_per_project_max: POOLED_MAX,
+            nano_usd_max: POOLED_MAX,
         },
-        agent: format!("pooled-{index}"),
-        worker: format!("dispatcher+pooled-{index}"),
-        brief: Brief {
-            task,
-            text: format!("pooled task {index}"),
-            tokens: 4,
-            steers: Vec::new(),
-            omitted_bytes: 0,
-        },
+        idle_retire_ms: POOL_IDLE_RETIRE_MS,
+        start_timeout_ms: POOL_LEASE_MS,
+        start_attempts_max: 1,
     }
+}
+
+fn shown(error: impl std::fmt::Debug) -> String {
+    format!("{error:?}")
+}
+
+fn board_ms(clock: &Clock) -> u64 {
+    POOL_CHARTER_MS + clock.now_ns() / 1_000_000
+}
+
+async fn pool_board(
+    host: &Arc<dyn LogHost>,
+    shape: &Shape,
+    clock: &Clock,
+) -> Result<Dispatcher, String> {
+    let open = |actor: &str| Board::open(Arc::clone(host), POOL_SCOPE, identity(actor));
+    open(POOL_OWNER)
+        .await
+        .map_err(shown)?
+        .charter(POOL_CHARTER_MS)
+        .await
+        .map_err(shown)?;
+    let mut poster = open(POOL_POSTER).await.map_err(shown)?;
+    for index in 0..shape.pooled {
+        let labels = [
+            (POOL_KIND, POOL_WORK),
+            (POOL_MEMBER, "member"),
+            (POOL_PROJECT, "project"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect();
+        let task = NewTask {
+            id: TaskId(format!("pooled-{index}")),
+            parent: None,
+            spec: format!("pooled task {index}"),
+            labels,
+            needs: Vec::new(),
+            terms: Default::default(),
+        };
+        poster
+            .submit(board_ms(clock), Op::Post { task })
+            .await
+            .map_err(|error| format!("the poster could not post pooled-{index}: {error:?}"))?;
+    }
+    let board = open(POOL_OWNER).await.map_err(shown)?;
+    Ok(Dispatcher::new(board, pool_policy(), BRIEF))
+}
+
+async fn claim_work(
+    host: &Arc<dyn LogHost>,
+    worker: &str,
+    task: &TaskId,
+    at_ms: u64,
+) -> Result<(), String> {
+    let mut board = Board::open(Arc::clone(host), POOL_SCOPE, identity(worker))
+        .await
+        .map_err(shown)?;
+    if !matches!(
+        board.fold().task(task).map(|task| &task.phase),
+        Some(Phase::Open)
+    ) {
+        return Ok(());
+    }
+    let claim = Op::Claim {
+        task: task.clone(),
+        lease_ms: POOL_LEASE_MS,
+        fence: None,
+        cap: None,
+    };
+    board
+        .submit(at_ms, claim)
+        .await
+        .map_err(|error| format!("{worker} could not claim {task}: {error:?}"))?;
+    Ok(())
+}
+
+async fn dispatch(
+    dispatcher: &mut Dispatcher,
+    pool: &SubagentPool,
+    at_ms: u64,
+) -> Result<(), String> {
+    let pass = dispatcher
+        .pass(pool, at_ms)
+        .await
+        .map_err(|error| format!("a dispatcher pass over the pool failed: {error:?}"))?;
+    match pass.failures.first() {
+        Some(failure) => Err(format!(
+            "the dispatcher could not drive the pool: {failure:?}"
+        )),
+        None => Ok(()),
+    }
+}
+
+async fn placed(
+    host: &Arc<dyn LogHost>,
+    dispatcher: &mut Dispatcher,
+    pool: &SubagentPool,
+    shape: &Shape,
+    clock: &Clock,
+) -> Result<(), String> {
+    let policy = pool_policy();
+    for _ in 0..POOL_PASSES_MAX {
+        dispatch(dispatcher, pool, board_ms(clock)).await?;
+        let intents = nanocode_dispatch::intents(dispatcher.board().fold(), &policy);
+        let mut live = 0;
+        for agent in pool.agents().await {
+            let Some(intent) = intents
+                .iter()
+                .find(|intent| agent.intent.as_ref() == Some(&intent.id))
+            else {
+                continue;
+            };
+            let settled = IntentState::Live {
+                agent: agent.id.clone(),
+            };
+            live += u64::from(intent.state == settled);
+            let worker = dispatcher.worker_of(&agent.id);
+            claim_work(host, &worker, &intent.task, board_ms(clock)).await?;
+        }
+        if live == shape.pooled {
+            break;
+        }
+    }
+    let intents = nanocode_dispatch::intents(dispatcher.board().fold(), &policy);
+    let listed = pool.agents().await;
+    if u64::try_from(intents.len()).expect("an intent count fits in u64") != shape.pooled {
+        return Err(format!(
+            "the dispatcher recorded {} intents for {} pooled tasks",
+            intents.len(),
+            shape.pooled
+        ));
+    }
+    for intent in &intents {
+        let IntentState::Live { agent } = &intent.state else {
+            return Err(format!(
+                "intent {} for {} is {:?} after {POOL_PASSES_MAX} passes",
+                intent.id, intent.task, intent.state
+            ));
+        };
+        let Some(listed) = listed.iter().find(|listed| listed.id == *agent) else {
+            return Err(format!(
+                "the board settled {} on {agent} but the pool does not list it",
+                intent.id
+            ));
+        };
+        if listed.intent.as_ref() != Some(&intent.id) {
+            return Err(format!(
+                "the pool lists {agent} under {:?}, the board settled it for {}",
+                listed.intent, intent.id
+            ));
+        }
+    }
+    if listed.len() != intents.len() {
+        return Err(format!(
+            "the pool lists {} agents for {} intents",
+            listed.len(),
+            intents.len()
+        ));
+    }
+    Ok(())
 }
 
 async fn pooled(run: &Run, shape: &Shape, clock: &Arc<Clock>) -> Result<Vec<AgentId>, String> {
@@ -432,55 +606,61 @@ async fn pooled(run: &Run, shape: &Shape, clock: &Arc<Clock>) -> Result<Vec<Agen
         run.root.clone(),
         Arc::clone(&run.registry),
         ROOT_SESSION,
-        Box::new(move || now.now_ns() / 1_000_000),
+        Box::new(move || board_ms(&now)),
     );
-    for index in 0..shape.pooled {
-        pool.start(start_of(index))
-            .await
-            .map_err(|error| format!("the pool did not start pooled-{index}: {error:?}"))?;
-    }
-    pool.start(start_of(0))
-        .await
-        .map_err(|error| format!("the pool did not restart pooled-0: {error:?}"))?;
-    let listed = pool.agents().await;
-    for index in 0..shape.pooled {
-        let name = format!("pooled-{index}");
-        let Some(agent) = listed.iter().find(|agent| agent.id == name) else {
-            return Err(format!("the pool started {name} but does not list it"));
-        };
-        if agent.intent != Some(start_of(index).spawn.intent) {
-            return Err(format!("the pool lists {name} under {:?}", agent.intent));
-        }
-    }
-    let Some(gone) = pool.agent_id("pooled-0") else {
-        return Err("the pool forgot pooled-0 before retiring it".to_owned());
+    let host: Arc<dyn LogHost> = Arc::new(MemoryLog::new());
+    let mut dispatcher = pool_board(&host, shape, clock).await?;
+    placed(&host, &mut dispatcher, &pool, shape, clock).await?;
+    let Some(first) = pool.agents().await.first().map(|agent| agent.id.clone()) else {
+        return Err("the dispatcher placed no pooled agent".to_owned());
     };
-    pool.retire("pooled-0")
+    let Some(idled) = pool.agent_id(&first) else {
+        return Err(format!("the pool forgot {first} before retiring it"));
+    };
+    run.registry
+        .interrupt(ROOT_SESSION, idled)
         .await
-        .map_err(|error| format!("the pool did not retire pooled-0: {error:?}"))?;
+        .map_err(|error| format!("interrupting {first} failed: {error}"))?;
+    let idle = pool
+        .agents()
+        .await
+        .into_iter()
+        .filter_map(|agent| Some((pool.agent_id(&agent.id)?, agent.id)))
+        .collect::<Vec<_>>();
+    dispatch(
+        &mut dispatcher,
+        &pool,
+        board_ms(clock) + POOL_IDLE_RETIRE_MS,
+    )
+    .await?;
+    let kept = pool.agents().await;
+    let gone = idle
+        .iter()
+        .filter(|(_, name)| !kept.iter().any(|agent| agent.id == *name))
+        .map(|(id, _)| *id)
+        .collect::<Vec<_>>();
+    if !gone.contains(&idled) {
+        return Err(format!(
+            "the dispatcher left {first} (agent {idled}) idle past idle_retire_ms"
+        ));
+    }
     let directory = run
         .registry
         .directory(ROOT_SESSION, true, false)
         .await
         .map_err(|error| format!("the directory did not answer after a retire: {error}"))?;
-    let status = directory
-        .iter()
-        .find(|entry| entry.agent_id == gone)
-        .map(|entry| &entry.status);
-    if status != Some(&AgentStatus::Closed) {
-        return Err(format!(
-            "the pool retired pooled-0 (agent {gone}) but the runtime has it {status:?}"
-        ));
+    for id in &gone {
+        let status = directory
+            .iter()
+            .find(|entry| entry.agent_id == *id)
+            .map(|entry| &entry.status);
+        if status != Some(&AgentStatus::Closed) {
+            return Err(format!(
+                "the dispatcher retired agent {id} but the runtime has it {status:?}"
+            ));
+        }
     }
-    if pool
-        .agents()
-        .await
-        .iter()
-        .any(|agent| agent.id == "pooled-0")
-    {
-        return Err("the pool still lists pooled-0 after retiring it".to_owned());
-    }
-    Ok(vec![gone])
+    Ok(gone)
 }
 
 async fn steer_running(run: &Run) -> Result<(), String> {
@@ -533,6 +713,9 @@ pub fn simulate(seed: u64, mutation: AgentsMutation) -> AgentOutcome {
     }
     if mutation == AgentsMutation::PoolRetireKeepsAgent {
         nanocode_board::sim::mutate(nanocode_board::sim::Mutation::PoolRetireKeepsAgent);
+    }
+    if mutation == AgentsMutation::PoolForgetsIntent {
+        nanocode_board::sim::mutate(nanocode_board::sim::Mutation::PoolForgetsIntent);
     }
     let shape = Shape::of(seed, mutation);
     let clock = Clock::new();
