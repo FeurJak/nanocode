@@ -317,7 +317,7 @@ mod math {
             let v = try_f64_to_bigint(v?.to_f64().ceil(), vm)?;
             return Ok(vm.ctx.new_int(v).into());
         }
-        Err(vm.new_type_error(format!("must be real number, not {}", x.class().name())))
+        Err(vm.new_type_error(format!("must be real number, not {}", x.class().slot_name())))
     }
 
     #[pyfunction]
@@ -337,7 +337,7 @@ mod math {
             let v = try_f64_to_bigint(v?.to_f64().floor(), vm)?;
             return Ok(vm.ctx.new_int(v).into());
         }
-        Err(vm.new_type_error(format!("must be real number, not {}", x.class().name())))
+        Err(vm.new_type_error(format!("must be real number, not {}", x.class().slot_name())))
     }
 
     #[pyfunction]
