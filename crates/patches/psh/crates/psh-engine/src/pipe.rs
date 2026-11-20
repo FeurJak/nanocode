@@ -52,6 +52,13 @@ struct Inner {
     /// (SIGPIPE) as with bash, rather than the writer filling the buffer before the
     /// reader runs. Set while the writer waits that turn.
     yielded: bool,
+    /// Set when a program that bash forks (an in-process utility, `cat f` in
+    /// `(cat f; echo x) | head -3`) ended with bytes still in the pipe: in bash the
+    /// shell waits for that process's exit, and meanwhile the reader takes its lines
+    /// and may exit. So the next write, from another command, first lets the reader
+    /// run until it took them or left (the write then meets the closed pipe, SIGPIPE),
+    /// a bounded number of rounds in case the reader never reads.
+    handoff: Option<u32>,
     /// The stages at a pipeline's start gate that look at this pipe ([`Watch`]):
     /// woken when a reader or writer starts waiting on it.
     watchers: Vec<Waker>,
@@ -87,6 +94,7 @@ pub(crate) fn pipe() -> (PipeReader, PipeWriter) {
         read_wakers: Vec::new(),
         write_wakers: Vec::new(),
         yielded: false,
+        handoff: None,
         watchers: Vec::new(),
         os: None,
     }));
@@ -106,6 +114,7 @@ pub(crate) fn preloaded(data: &[u8]) -> PipeReader {
         read_wakers: Vec::new(),
         write_wakers: Vec::new(),
         yielded: false,
+        handoff: None,
         watchers: Vec::new(),
         os: None,
     })))
@@ -330,10 +339,22 @@ impl PipeReader {
     }
 }
 
+/// How many scheduler rounds a write after a forked program's output waits at most
+/// for the reader to take it ([`Inner::handoff`]).
+const HANDOFF_ROUNDS: u32 = 64;
+
 impl PipeWriter {
     /// See [`os_end`].
     pub(crate) fn os_end(&self, host: &dyn Host) -> Option<Rc<dyn HostFile>> {
         os_end(&self.0, false, host)
+    }
+
+    /// A program that bash forks ended writing this pipe: see [`Inner::handoff`].
+    pub(crate) fn hand_off(&self) {
+        let mut p = self.0.borrow_mut();
+        if p.readers > 0 && p.os.is_none() && !p.buf.is_empty() {
+            p.handoff = Some(0);
+        }
     }
 
     pub(crate) fn poll_write(&self, cx: &mut Context<'_>, data: &[u8]) -> Poll<io::Result<usize>> {
@@ -375,6 +396,15 @@ impl PipeWriter {
             register(&mut p.write_wakers, cx.waker());
             wake_all(&mut p.watchers);
             return Poll::Pending;
+        }
+        if let Some(rounds) = p.handoff {
+            if p.buf.is_empty() || rounds >= HANDOFF_ROUNDS {
+                p.handoff = None;
+            } else {
+                p.handoff = Some(rounds + 1);
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
         }
         if !p.buf.is_empty() && !std::mem::replace(&mut p.yielded, true) {
             cx.waker().wake_by_ref();

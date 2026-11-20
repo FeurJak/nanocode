@@ -2465,7 +2465,15 @@ fn run_argv(
         match crate::util::lookup(vp, &argv[0]).await {
             Some(e) if !reads_own_process(vp, &argv).await => {
                 vp.exec_now = false;
-                crate::util::run(vp, e, argv, assigns).await
+                let r = crate::util::run(vp, e, argv, assigns).await;
+                // Bash forks for it, and the shell waits for its exit while the
+                // pipe's reader takes what it wrote.
+                if let Some(out) = vp.fd(1)
+                    && let FdObj::PipeWrite(w) = &*out
+                {
+                    w.hand_off();
+                }
+                r
             }
             _ => run_external(vp, argv, assigns).await,
         }

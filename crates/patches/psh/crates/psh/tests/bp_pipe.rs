@@ -58,3 +58,16 @@ fn a_stage_three_forks_later_opens_its_output_after_the_first_program_ran() {
                ls | cat | cat > out2; cat out2";
     assert_eq!(sh("reach", src), ("\nout\nout2\n".into(), 0));
 }
+
+#[test]
+fn a_write_after_a_forked_program_lets_the_reader_take_its_lines_first() {
+    // bash waits for `cat`'s exit while `head` takes its lines and exits, so `echo x`
+    // usually meets the closed pipe (SIGPIPE).
+    let src = "printf '1\\n2\\n3\\n4\\n' > f; set -o pipefail; \
+               ( cat f; echo x ) 2>&1 | head -3; echo \"$? ${PIPESTATUS[*]}\"";
+    assert_eq!(sh("sigpipe", src), ("1\n2\n3\n141 141 0\n".into(), 0));
+    let src = "printf '1\\n2\\n' > f; set -o pipefail; ( cat f; echo x ) | cat; echo $?";
+    assert_eq!(sh("reader-stays", src), ("1\n2\nx\n0\n".into(), 0));
+    let src = "printf '1\\n2\\n' > f; ( cat f; echo x ) | sleep 0; echo $?";
+    assert_eq!(sh("reader-never-reads", src), ("0\n".into(), 0));
+}
