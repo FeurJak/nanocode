@@ -824,38 +824,42 @@ impl Fold {
     }
 
     pub fn apply(&mut self, seq: u64, body: &str) -> Result<(), BoardError> {
+        let event: Event = serde_json::from_str(body).map_err(|error| BoardError::Corrupt {
+            seq,
+            detail: error.to_string(),
+        })?;
+        self.apply_event(seq, &event)
+    }
+
+    pub fn apply_event(&mut self, seq: u64, event: &Event) -> Result<(), BoardError> {
         if seq != self.next {
             return Err(BoardError::Corrupt {
                 seq,
                 detail: format!("expected row {}", self.next),
             });
         }
-        let event: Event = serde_json::from_str(body).map_err(|error| BoardError::Corrupt {
-            seq,
-            detail: error.to_string(),
-        })?;
         self.next = seq + 1;
         let replayed = self.seen.contains_key(&event.id) && !mutated(Mutation::ReplaysApply);
         if replayed || !access::owns(&event.by, &event.id) {
             return Ok(());
         }
         self.now_ms = self.now_ms.max(event.at_ms);
-        if let Some(original) = self.repost(&event) {
-            self.seen.insert(event.id, Ok(original));
+        if let Some(original) = self.repost(event) {
+            self.seen.insert(event.id.clone(), Ok(original));
             return Ok(());
         }
-        let verdict = self.judge(&event).map(|()| seq);
+        let verdict = self.judge(event).map(|()| seq);
         self.seen.insert(event.id.clone(), verdict.clone());
         if verdict.is_ok() {
             self.access.record(&event.by, &event.id, &event.op);
-            self.transition(seq, &event);
+            self.transition(seq, event);
             if let Some(illegal) = self.refused.take() {
                 self.seen
                     .insert(event.id.clone(), Err(stage::rejection(illegal)));
                 return Ok(());
             }
-            self.intend(seq, &event);
-            self.hear(seq, &event);
+            self.intend(seq, event);
+            self.hear(seq, event);
             self.index_marks();
         } else if mutated(Mutation::RefusalsCountAttempts) {
             self.miscount(&event.op);

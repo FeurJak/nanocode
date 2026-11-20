@@ -157,7 +157,7 @@ impl Group {
         let planned = std::mem::take(&mut self.planned);
         self.fresh = true;
         for (offset, &index) in planned.iter().enumerate() {
-            fold.apply(first + offset as u64, &self.members[index].body)?;
+            fold.apply_event(first + offset as u64, &self.members[index].event)?;
         }
         for (offset, &index) in planned.iter().enumerate() {
             let member = &mut self.members[index];
