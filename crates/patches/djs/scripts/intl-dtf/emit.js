@@ -28,7 +28,7 @@ for (const l of LOCS) {
   const fglue = [d.glue_full, d.glue_long, d.glue_medium, d.glue_short];
   const tex = d.tex.map(ex => "&[" + Object.entries(ex).sort((a, b) => a[0] - b[0]).map(([k, p]) => "(" + k + ", " + P(p) + ")").join(", ") + "]");
   const wex = "&[" + Object.entries(d.wex || {}).sort((a, b) => a[0] - b[0]).map(([k, p]) => "(" + k + ", " + P(p) + ")").join(", ") + "]";
-  const zn = zones.flatMap(name => (z[name] || [null, null, null, null, null, null]).map(s => s === null ? 65535 : S(s)));
+  const zn = zones.flatMap(name => (z[name] || [null, null, null, null, null, null, null, null]).map(s => s === null ? 65535 : S(s)));
   out += "static " + id + "_DATE: [u16; 864] = " + arr(pat(d.date)) + ";\n";
   out += "static " + id + "_DATEZ: [u16; 864] = " + arr(pat(d.datez)) + ";\n";
   out += "static " + id + "_TIME: [u16; 3024] = " + arr(pat(d.time)) + ";\n";
@@ -52,6 +52,9 @@ for (const l of LOCS) {
     "        gmt: " + sarr(d.gmt) + ",\n" +
     "    },\n");
 }
+const ez = JSON.parse(fs.readFileSync(dir + '/z-en-US.json'));
+const alt = zones.flatMap((name, i) => ez[name] && ez[name][6] !== null ? ["(" + i + ", " + S(ez[name][6]) + ", " + S(ez[name][7]) + ")"] : []);
+out += "\n/// en-US generic zone names in the repeated hour before DST ends: (ZONES index, short, long).\npub(super) static EN_GENERIC_ALT: &[(u16, u16, u16)] = &[" + alt.join(", ") + "];\n";
 out += "\npub(super) static DTF_PATTERNS: &[&str] = &" + sarr(pool) + ";\n";
 out += "pub(super) static DTF_STRINGS: &[&str] = &" + sarr(spool) + ";\n";
 out += "\npub(super) static DATE_LOCALES: &[DateLocale] = &[\n" + locs.join("") + "];\n";

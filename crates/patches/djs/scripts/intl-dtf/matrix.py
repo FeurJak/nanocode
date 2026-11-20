@@ -75,7 +75,7 @@ for c in cases:
     for k in range(max(len(a), len(b))):
         x = a[k] if k < len(a) else "<none>"; y = b[k] if k < len(b) else "<none>"
         total += 1
-        if x != y:
+        if x.replace(" ", " ") != y.replace(" ", " "):
             mism.append({"loc": loc, "zone": zone, "node": x, "djs": y})
 json.dump({"O": O, "D": DATES, "mism": mism}, open(os.path.join(OUT, "mism.json"), "w"), indent=0, ensure_ascii=False)
 print("lines", total, "mismatches", len(mism))

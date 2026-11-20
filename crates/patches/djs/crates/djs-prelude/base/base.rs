@@ -2,4 +2,4 @@
 
 /// The base image's builtin prefix (`Roots::BASE_END`).
 pub const BASE_END: u32 = 214256;
-const BUILT_BY: u32 = 0x6f1344c8;
+const BUILT_BY: u32 = 0x73d86c75;
