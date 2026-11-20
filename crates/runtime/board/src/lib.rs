@@ -124,7 +124,6 @@ impl Board {
         if mutated(Mutation::MiddlewareRerunsLanded) {
             self.chain.vet(&id, &self.writer, &op)?;
         }
-        self.refresh().await?;
         if let Some(verdict) = self.fold.outcome(&id) {
             return verdict
                 .clone()
