@@ -736,6 +736,111 @@ async fn part(
     ctx: Ctx,
     first: bool,
 ) -> Result<(), Unwind> {
+    // In arithmetic text, an expansion inside an array subscript (`(( a[$k]++ ))`) has
+    // its `[`, `]`, `$`, quotes and backslashes quoted, so the subscript is the whole
+    // value and is not expanded again (bash 5.2's expand_array_subscript).
+    if ctx == Ctx::Arith
+        && matches!(
+            part.kind,
+            Part::Param(_)
+                | Part::CmdSubst(_)
+                | Part::FunSub { .. }
+                | Part::Backtick
+                | Part::Arith(_)
+        )
+        && in_subscript(&f.cur.text)
+    {
+        let at = f.cur.text.len();
+        Box::pin(part_inner(vp, code, part, quoted, f, ctx, first)).await?;
+        let value = f.cur.text.split_off(at.min(f.cur.text.len()));
+        for b in value {
+            if matches!(b, b'[' | b']' | b'$' | b'`' | b'~' | b'\\' | b'\'' | b'"') {
+                f.cur.text.push(b'\\');
+            }
+            f.cur.text.push(b);
+        }
+        return Ok(());
+    }
+    // `(( 'a[$k]++' ))`: arithmetic text is expanded as if in double quotes, so a
+    // single-quoted part keeps its quotes and its expansions still happen (bash).
+    // Inside a subscript (`a['$k']`) the quoted text stays as it is.
+    if ctx == Ctx::Arith
+        && !quoted
+        && matches!(part.kind, Part::Single)
+        && !in_subscript(&f.cur.text)
+    {
+        let text = code.ast.bytes(part.span);
+        if text.len() >= 2
+            && text[1..text.len() - 1]
+                .iter()
+                .any(|b| matches!(b, b'$' | b'`'))
+        {
+            let mut src = b": \"".to_vec();
+            for &b in &text[1..text.len() - 1] {
+                if b == b'"' {
+                    src.push(b'\\');
+                }
+                src.push(b);
+            }
+            src.push(b'"');
+            let parsed = psh_syntax::parse_bytes(&src, psh_syntax::Options::default())
+                .ok()
+                .and_then(|ast| {
+                    let id = ast.cmd_ids().find(|&id| ast.cmd(id).span.start == 0)?;
+                    let word = match &ast.cmd(id).kind {
+                        psh_syntax::CommandKind::Simple(sc) => sc.words.get(1).cloned()?,
+                        _ => return None,
+                    };
+                    Some((ast, word))
+                });
+            if let Some((ast, word)) = parsed {
+                let inner = Rc::new(Code {
+                    lines: Rc::new(psh_syntax::LineIndex::from_bytes(&src)),
+                    ast: std::sync::Arc::new(ast),
+                    line_base: vp.line.saturating_sub(1),
+                    arith: Default::default(),
+                    flat: Default::default(),
+                });
+                f.quoted(b"'");
+                let pieces: Vec<Piece> = word.parts.iter().map(Piece::Part).collect();
+                expand_pieces(vp, &inner, &pieces, false, f, ctx).await?;
+                f.quoted(b"'");
+                return Ok(());
+            }
+        }
+    }
+    part_inner(vp, code, part, quoted, f, ctx, first).await
+}
+
+/// Whether arithmetic text so far ends inside an array subscript: a `[` after a name
+/// with no `]` closing it, skipping backslash-quoted chars.
+fn in_subscript(text: &[u8]) -> bool {
+    let (mut depth, mut i) = (0usize, 0);
+    while i < text.len() {
+        match text[i] {
+            b'\\' => i += 1,
+            b'[' if depth > 0
+                || (i > 0 && (text[i - 1].is_ascii_alphanumeric() || text[i - 1] == b'_')) =>
+            {
+                depth += 1
+            }
+            b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        i += 1;
+    }
+    depth > 0
+}
+
+async fn part_inner(
+    vp: &mut Vp,
+    code: &Rc<Code>,
+    part: &WordPart,
+    quoted: bool,
+    f: &mut Fields,
+    ctx: Ctx,
+    first: bool,
+) -> Result<(), Unwind> {
     let now = match part.kind {
         Part::Arith(_) => crate::arith::probe(vp, |vp| {
             expand_part_now(vp, code, part, quoted, f, ctx, first)

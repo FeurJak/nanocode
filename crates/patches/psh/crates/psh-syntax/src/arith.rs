@@ -495,6 +495,9 @@ impl ArithParser<'_> {
                                     None,
                                 ));
                             }
+                            // `a[x\]]`: the expansion of a subscript in arithmetic
+                            // text quotes its `[` and `]` (bash 5.2).
+                            Some(b'\\') if self.at(k + 1).is_some() => k += 1,
                             Some(b'[') => depth += 1,
                             Some(b']') if depth == 0 => break,
                             Some(b']') => depth -= 1,

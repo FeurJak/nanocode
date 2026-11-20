@@ -82,6 +82,8 @@ pub(crate) enum Dynamic {
     BashArgv0,
     /// The aliases as an associative array; assigning an element defines one.
     BashAliases,
+    /// The command hash table as an associative array; assigning an element hashes.
+    BashCmds,
     BashMonoseconds,
     Lineno,
     /// `DIRSTACK`: the current directory, then `pushd`'s stack.
@@ -224,7 +226,7 @@ impl Var {
 }
 
 /// bash's string hash: 32-bit FNV-1.
-fn fnv1(key: &[u8]) -> u32 {
+pub(crate) fn fnv1(key: &[u8]) -> u32 {
     let mut h: u32 = 2_166_136_261;
     for &b in key {
         h = h.wrapping_mul(16_777_619);
@@ -246,6 +248,15 @@ pub(crate) struct Assoc {
 }
 
 impl Assoc {
+    /// An empty array with `n` buckets (a power of two), as bash makes the arrays
+    /// it builds from its other tables (`BASH_CMDS`, `BASH_ALIASES`).
+    pub(crate) fn with_buckets(n: usize) -> Assoc {
+        Assoc {
+            buckets: vec![Vec::new(); n],
+            len: 0,
+        }
+    }
+
     fn bucket(&self, key: &[u8]) -> usize {
         fnv1(key) as usize & (self.buckets.len() - 1)
     }

@@ -669,8 +669,19 @@ impl Vp {
                 }
                 return;
             }
+            Dynamic::BashCmds => {
+                let mut a = crate::vars::Assoc::with_buckets(256);
+                for (k, v, _) in crate::builtins::hash::bash_order(self) {
+                    a.insert(k, v);
+                }
+                if let Some(var) = self.vars.get_mut(name) {
+                    var.value = Value::Assoc(a);
+                }
+                return;
+            }
             Dynamic::BashAliases => {
-                let mut a = crate::vars::Assoc::default();
+                // bash's alias table has 64 buckets, and so does the array.
+                let mut a = crate::vars::Assoc::with_buckets(64);
                 for (k, v) in self.aliases.iter() {
                     a.insert(k.to_vec(), v.to_vec());
                 }

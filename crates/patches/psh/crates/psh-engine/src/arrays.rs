@@ -126,11 +126,15 @@ impl Vp {
             let var = self.vars.entry(&name);
             var.declared_only = false;
             let aliases = var.dynamic == Some(crate::vars::Dynamic::BashAliases);
+            let cmds = var.dynamic == Some(crate::vars::Dynamic::BashCmds);
             if let Value::Assoc(a) = &mut var.value {
                 a.insert(sub.to_vec(), v.clone());
             }
             if aliases {
                 self.aliases.set(sub, &v);
+            }
+            if cmds {
+                crate::builtins::hash::set_path(self, sub, v);
             }
             return Ok(());
         }

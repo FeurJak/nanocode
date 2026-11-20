@@ -718,6 +718,7 @@ pub(crate) fn initial_vars(host: &dyn Host, env: &[(Vec<u8>, Vec<u8>)], cwd: &[u
         ("GROUPS", vars::Dynamic::Groups),
         ("BASH_ARGV0", vars::Dynamic::BashArgv0),
         ("BASH_ALIASES", vars::Dynamic::BashAliases),
+        ("BASH_CMDS", vars::Dynamic::BashCmds),
         ("BASH_MONOSECONDS", vars::Dynamic::BashMonoseconds),
         ("LINENO", vars::Dynamic::Lineno),
         ("DIRSTACK", vars::Dynamic::Dirstack),
@@ -744,12 +745,10 @@ pub(crate) fn initial_vars(host: &dyn Host, env: &[(Vec<u8>, Vec<u8>)], cwd: &[u
         if d == vars::Dynamic::Dirstack {
             v.value = vars::Value::Indexed(Default::default());
         }
-        if d == vars::Dynamic::BashAliases {
+        if matches!(d, vars::Dynamic::BashAliases | vars::Dynamic::BashCmds) {
             v.value = vars::Value::Assoc(Default::default());
         }
     }
-    // The command hash table as an array; psh has no hash table, so it stays empty.
-    vars.entry("BASH_CMDS").value = vars::Value::Assoc(Default::default());
     // Who and where the shell runs, from the host (D1328). As in bash: UID and
     // EUID (readonly integers) and the names below give way to the environment's;
     // PPID never does; GROUPS is computed, so assignments to it do nothing.

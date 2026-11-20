@@ -65,6 +65,27 @@ impl HashTable {
     }
 }
 
+/// The entries in the order bash's table of 256 buckets walks them: by bucket, the
+/// latest first in each.
+fn walk(entries: &[(Vec<u8>, Vec<u8>, u32)]) -> Vec<(Vec<u8>, Vec<u8>, u32)> {
+    let mut v: Vec<_> = entries.iter().rev().cloned().collect();
+    v.sort_by_key(|e| crate::vars::fnv1(&e.0) & 255);
+    v
+}
+
+/// The table's entries in bash's order, for `BASH_CMDS`.
+pub(crate) fn bash_order(vp: &Vp) -> Vec<(Vec<u8>, Vec<u8>, u32)> {
+    if vp.hash.path != current_path(vp) {
+        return Vec::new();
+    }
+    walk(&vp.hash.entries)
+}
+
+/// `BASH_CMDS[name]=path`: as `hash -p path name`.
+pub(crate) fn set_path(vp: &mut Vp, name: &[u8], path: Vec<u8>) {
+    table(vp).insert(name, path, 0);
+}
+
 fn current_path(vp: &Vp) -> Vec<u8> {
     vp.var("PATH")
         .map(<[u8]>::to_vec)
@@ -405,8 +426,9 @@ pub(super) async fn hash(vp: &mut Vp, args: &[Vec<u8>]) -> R {
             return out(vp, "hash", b"hash: hash table empty\n").await;
         }
         let mut buf = Vec::new();
+        let entries = walk(&t.entries);
         if list {
-            for (n, p, _) in &t.entries {
+            for (n, p, _) in &entries {
                 buf.extend_from_slice(b"builtin hash -p ");
                 buf.extend_from_slice(&super::declare::set_quote(p, vp.utf8()));
                 buf.push(b' ');
@@ -415,7 +437,7 @@ pub(super) async fn hash(vp: &mut Vp, args: &[Vec<u8>]) -> R {
             }
         } else {
             buf.extend_from_slice(b"hits\tcommand\n");
-            for (_, p, hits) in &t.entries {
+            for (_, p, hits) in &entries {
                 buf.extend_from_slice(format!("{hits:4}\t").as_bytes());
                 buf.extend_from_slice(p);
                 buf.push(b'\n');
