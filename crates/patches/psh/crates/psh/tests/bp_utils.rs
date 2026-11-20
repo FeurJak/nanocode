@@ -149,3 +149,12 @@ fn awk_prints_integers_past_u64_with_ofmt_as_mawk() {
         ("10000000000000000000 9223372036854775808 -9223372036854775808 1e+20 -1e+19\n1e+20\n".into(), 0)
     );
 }
+
+#[test]
+fn tr_reads_repeats_in_set1_and_refuses_fill_there() {
+    let src = "echo 'x3*]' | tr '[x*3]' 'a-f'; echo ab | tr -d '[a*]' 2>&1; echo $?";
+    assert_eq!(
+        sh(src),
+        ("c3*]\ntr: the [c*] repeat construct may not appear in string1\n1\n".into(), 0)
+    );
+}

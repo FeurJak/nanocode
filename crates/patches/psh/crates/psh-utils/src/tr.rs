@@ -314,13 +314,19 @@ pub async fn run(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
         return common::usage(ctx, &msg).await;
     }
     let chars = ops.iter().any(|o| o.iter().any(|&b| b >= 0x80));
-    let set1_items = match parse_set(&ops[0], chars, false, ctx.utf8()) {
+    // GNU reads [c*n] in SET1 as n copies of c too, and refuses [c*] (fill) there.
+    let set1_items = match parse_set(&ops[0], chars, true, ctx.utf8()) {
         Ok(s) => s,
         Err(e) => {
             ctx.error(&e).await;
             return 1;
         }
     };
+    if set1_items.iter().any(|i| matches!(i, Item::Repeat(_, None))) {
+        ctx.error("the [c*] repeat construct may not appear in string1")
+            .await;
+        return 1;
+    }
     let mut set1 = expand(&set1_items, 0);
     let set2 = match ops.get(1) {
         Some(o) => {
