@@ -976,6 +976,20 @@ impl Vp {
             ),
             None => (!name.contains('['), true),
         };
+        // `name+=value` on a plain string: append in place rather than copying the old
+        // value, so building a string in a loop stays linear.
+        if own && plain && append {
+            let allexport = self.opts.get(crate::options::SetOpt::Allexport);
+            if let Some(var) = self.vars.get_mut(name)
+                && var.dynamic.is_none()
+                && let crate::vars::Value::Str(s) = &mut var.value
+            {
+                s.extend_from_slice(&value);
+                var.declared_only = false;
+                var.exported |= allexport;
+                return Ok(());
+            }
+        }
         if own {
             return self.assign_target(name, value, append, plain && !append);
         }
