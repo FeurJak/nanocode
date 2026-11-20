@@ -22,7 +22,10 @@ const USAGE: &str = "usage:
                                       the large pool (default, nanocode work) fills the largest boxes first, the small pool (pyramid2 work)
                                       the smaller boxes and dev-georgios first; gak-9 only with --machine gak-9
   nc-build slots give LEASE | slots renew LEASE [--minutes T]
-  nc-build slots observe MACHINE      reads nproc, /proc/loadavg and /proc/meminfo from that machine on stdin
+  nc-build slots observe MACHINE [--local]
+                                      reads the output of 'nproc; cat /proc/loadavg /proc/meminfo; ps -eLo policy=,stat=' from that machine
+                                      on stdin (--local runs it here); busy cores are its runnable threads outside SCHED_IDLE, so preemptible
+                                      filler never blocks a take; without the ps lines, the 1-minute load average
   nc-build slots list                 each machine's busy cores, load, memory and expiry, also appended to machines.log
   state: $NC_BUILD_SLOTS (~/swarm/slots.json); machines: $NC_BUILD_BOXES (~/swarm/boxes.json), dev-georgios only with a fresh observation, gak-9 by name";
 
@@ -268,12 +271,17 @@ fn slots_command(args: &[String]) -> Result<(), String> {
         }
         Some("observe") => {
             let name = args.get(1).ok_or("observe MACHINE")?;
-            let mut input = String::new();
-            io::stdin()
-                .read_to_string(&mut input)
-                .map_err(|error| error.to_string())?;
+            let input = if args.iter().any(|arg| arg == "--local") {
+                run("sh", &["-c", PROBE])?
+            } else {
+                let mut input = String::new();
+                io::stdin()
+                    .read_to_string(&mut input)
+                    .map_err(|error| error.to_string())?;
+                input
+            };
             let observation = parse_observation(&input, now_ms())
-                .ok_or("expected nproc, /proc/loadavg and /proc/meminfo on stdin")?;
+                .ok_or("expected nproc, /proc/loadavg, /proc/meminfo and optionally ps -eLo policy=,stat= on stdin")?;
             with_state(|state| {
                 state.observations.insert(name.clone(), observation);
             })?;
@@ -287,6 +295,7 @@ fn slots_command(args: &[String]) -> Result<(), String> {
 fn parse_observation(input: &str, at_ms: u64) -> Option<Observation> {
     let mut cores = None;
     let mut load = None;
+    let mut runnable = None;
     let mut total = None;
     let mut available = None;
     for line in input.lines() {
@@ -296,17 +305,27 @@ fn parse_observation(input: &str, at_ms: u64) -> Option<Observation> {
             [one, _, _, _, _] if load.is_none() => load = one.parse().ok(),
             ["MemTotal:", kb, ..] => total = kb.parse().ok(),
             ["MemAvailable:", kb, ..] => available = kb.parse().ok(),
+            [policy, stat] if POLICIES.contains(policy) => {
+                let count = runnable.get_or_insert(0_u32);
+                if *policy != "IDL" && stat.starts_with('R') {
+                    *count += 1;
+                }
+            }
             _ => {}
         }
     }
     Some(Observation {
-        load: load?,
+        load: runnable.map_or(load?, f64::from),
         cores: cores?,
         mem_total_kb: total?,
         mem_available_kb: available?,
         at_ms,
     })
 }
+
+const POLICIES: [&str; 7] = ["TS", "FF", "RR", "B", "ISO", "IDL", "DLN"];
+
+const PROBE: &str = "nproc; cat /proc/loadavg /proc/meminfo; ps -eLo policy=,stat=";
 
 fn log_line(line: &str) {
     let path = std::env::var_os("NC_BUILD_MACHINES_LOG")
