@@ -1,7 +1,7 @@
-pub const COMMANDS: [(&str, &str); 35] = [
+pub const COMMANDS: [(&str, &str); 36] = [
     (
         "/model",
-        "choose the model, thinking and speed for a new thread; tempo/<model> runs on the Tempo gateway",
+        "choose the model, thinking and speed for a new thread; tempo/<model> runs on the Tempo gateway; /default saves them for every new session",
     ),
     (
         "/harness",
@@ -46,6 +46,10 @@ pub const COMMANDS: [(&str, &str); 35] = [
     ("/skills", "insert a skill from this workspace"),
     ("/image", "attach an image from the clipboard"),
     ("/detach", "remove pending image attachments"),
+    (
+        "/default",
+        "show or save the harness, model, thinking and tier new sessions start with, as nc default does: /default claude opus high fast, /default reset",
+    ),
     ("/session", "show session, model and tool details"),
     ("/id", "show the session id and copy it to the clipboard"),
     (

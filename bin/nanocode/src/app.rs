@@ -2472,6 +2472,7 @@ impl App {
             "zoom" => self.zoom_pane(),
             "login" => self.login(argument),
             "fund" => self.fund(argument),
+            "default" | "defaults" => self.save_defaults(argument),
             "account" => self.account(),
             "pass" => self.pass(argument),
             "resume" | "sessions" => self.open_session_picker(),

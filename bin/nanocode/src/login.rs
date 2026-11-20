@@ -95,6 +95,26 @@ impl App {
         }
     }
 
+    pub(crate) fn save_defaults(&mut self, argument: &str) {
+        let words = argument
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let clients = self.host.config.clients.clone();
+        let home = self.home.clone();
+        let tx = self.tx.clone();
+        nanocode_platform::spawn_task(async move {
+            let notice = match crate::defaults::run(&words, &clients, &home).await {
+                Ok(report) => AppEvent::Notice(
+                    NoticeLevel::Info,
+                    format!("defaults for new sessions:\n{}", report.trim_end()),
+                ),
+                Err(error) => AppEvent::Notice(NoticeLevel::Error, format!("default: {error}")),
+            };
+            drop(tx.send(notice));
+        });
+    }
+
     pub(crate) fn account(&mut self) {
         let _span = nanocode_trace::info_span!(target: "nanocode", "nc.action", action.name = "account", session.id = self.agent.as_ref().map(|agent| agent.session_id())).entered();
         nanocode_platform::spawn_task(account(self.tx.clone()));

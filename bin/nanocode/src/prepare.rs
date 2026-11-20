@@ -26,22 +26,30 @@ pub(super) fn prepare<'a>(
                 "this binary supplies its own Codex client; --gateway is unavailable".into(),
             );
         }
-        let antigravity = match args.harness {
+        let saved = defaults::load(&home).await?;
+        let saved_harness = saved.harness()?;
+        let saved_model = saved
+            .model
+            .clone()
+            .filter(|_| args.model.is_none() && args.harness.is_none_or(|harness| Some(harness) == saved_harness));
+        let requested_model = args.model.clone().or_else(|| saved_model.clone());
+        let requested_harness = args
+            .harness
+            .or_else(|| saved_harness.filter(|_| args.model.is_none()));
+        let antigravity = match requested_harness {
             Some(harness) => harness == crate::HarnessArg::Antigravity,
-            None => args
-                .model
+            None => requested_model
                 .as_deref()
                 .is_some_and(|model| model.starts_with("gemini-")),
         };
         if !antigravity
-            && args
-                .model
+            && requested_model
                 .as_deref()
                 .is_none_or(|model| clients.resolve(model).is_err())
         {
             clients.listed().await?;
         }
-        let (route, model) = match (&args.model, args.harness) {
+        let (route, model) = match (&requested_model, requested_harness) {
             (model, _) if antigravity => (
                 host::Route::Native,
                 nanocode::antigravity::AntigravityHarness::selection(
@@ -51,7 +59,14 @@ pub(super) fn prepare<'a>(
                 ),
             ),
             (Some(model), harness) => {
-                let (route, model) = clients.resolve(model)?;
+                let (route, model) = clients.resolve(model).map_err(|error| match &saved_model {
+                    Some(_) => format!(
+                        "the default model saved in {}: {error}; change it with nc default",
+                        defaults::path(&home).display()
+                    )
+                    .into(),
+                    None => error,
+                })?;
                 let model = match harness {
                     Some(harness) if host::follows_harness(route, &model) => {
                         host::on_harness(&model, &family(harness))
@@ -92,20 +107,30 @@ pub(super) fn prepare<'a>(
         {
             gateway.check(&model)?;
         }
-        let defaulted =
-            args.model.is_none() && args.harness.is_none() && clients.codex_models().is_none();
+        let defaulted = requested_model.is_none()
+            && requested_harness.is_none()
+            && clients.codex_models().is_none();
         let capabilities = model.capabilities(nanocode::ModelTransport::Native);
-        let thinking = match &args.thinking {
-            Some(value) => host::parse_thinking(value)?,
-            None if defaulted && capabilities.supports_thinking(Thinking::Xhigh) => Thinking::Xhigh,
-            None => model.default_thinking(),
+        let saved_thinking = saved
+            .thinking()?
+            .filter(|thinking| capabilities.supports_thinking(*thinking));
+        let saved_tier = saved
+            .tier()?
+            .filter(|tier| capabilities.supports_service_tier(*tier));
+        let thinking = match (&args.thinking, saved_thinking) {
+            (Some(value), _) => host::parse_thinking(value)?,
+            (None, Some(thinking)) => thinking,
+            (None, None) if defaulted && capabilities.supports_thinking(Thinking::Xhigh) => {
+                Thinking::Xhigh
+            }
+            (None, None) => model.default_thinking(),
         };
         model
             .capabilities(nanocode::ModelTransport::Native)
             .check_thinking(thinking)?;
         let tier = match &args.tier {
             Some(value) => host::parse_tier(value)?,
-            None => ServiceTier::Standard,
+            None => saved_tier.unwrap_or(ServiceTier::Standard),
         };
         model
             .capabilities(nanocode::ModelTransport::Native)

@@ -11,6 +11,7 @@ mod commands;
 #[cfg(unix)]
 mod cua;
 mod custom_endpoint;
+mod defaults;
 mod events;
 mod exec;
 mod extras;
@@ -74,7 +75,9 @@ const TELEMETRY_SHUTDOWN: std::time::Duration = std::time::Duration::from_millis
 
 fn session_gateway(cli: &Cli) -> Option<GatewayArgs> {
     match &cli.command {
-        None | Some(Command::Models | Command::Resume { .. }) => Some(cli.session.gateway.clone()),
+        None | Some(Command::Models | Command::Resume { .. } | Command::Default { .. }) => {
+            Some(cli.session.gateway.clone())
+        }
         Some(Command::Exec(args)) => Some(args.clone().or(cli.session.clone()).gateway),
         _ => None,
     }
@@ -116,7 +119,13 @@ fn telemetry(
     let args = &cli.observability;
     let interactive = !matches!(
         cli.command,
-        Some(Command::Exec(_) | Command::Hand(_) | Command::Sessions(_) | Command::Models)
+        Some(
+            Command::Exec(_)
+                | Command::Hand(_)
+                | Command::Sessions(_)
+                | Command::Models
+                | Command::Default { .. }
+        )
     ) && !is_cua(cli);
     let output = match (args.log_filter().is_some(), interactive, local_files) {
         (false, _, _) | (true, true, false) => nanocode_observability::LogOutput::Disabled,
@@ -348,6 +357,10 @@ fn start<const EXEC: bool>(clients: ModelClients) -> ExitCode {
                 on_worker(list_sessions(args)).await
             }
             Some(Command::Models) => print_models(&clients).await,
+            Some(Command::Default { words }) => match host::home_dir(cli.session.home.as_deref()) {
+                Ok(home) => defaults::command(words, clients, home).await,
+                Err(error) => Err(error),
+            },
             Some(Command::Resume { id }) => {
                 let mut args = cli.session;
                 args.resume = Some(id.unwrap_or_default());

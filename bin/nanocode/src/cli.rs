@@ -22,6 +22,7 @@ pub enum Command {
     #[cfg(unix)]
     Cua(CuaArgs),
     Setup(SetupArgs),
+    Default { words: Vec<String> },
 }
 
 #[derive(Clone, Debug)]
@@ -85,6 +86,23 @@ pub enum HarnessArg {
 
 impl HarnessArg {
     const ALL: [Self; 3] = [Self::Codex, Self::Claude, Self::Antigravity];
+
+    pub fn named(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "codex" | "openai" | "chatgpt" => Some(Self::Codex),
+            "claude" | "anthropic" => Some(Self::Claude),
+            "antigravity" | "google" | "gemini" => Some(Self::Antigravity),
+            _ => None,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::Antigravity => "antigravity",
+        }
+    }
     const CHOICES: [Choice; 3] = [
         Choice::new("codex").help("OpenAI Codex models (ChatGPT login)"),
         Choice::new("claude").help("Anthropic Claude models (Claude Code login)"),
@@ -250,7 +268,7 @@ const SESSION: Group = Group::new(&[
         .long("model")
         .env("NANOCODE_MODEL")
         .help(
-            "Model id or alias (see 'nanocode models'); tempo/<model> runs it on the Tempo gateway, paid from your Tempo ID account; defaults to claude-opus-5-5 at xhigh thinking",
+            "Model id or alias (see 'nanocode models'); tempo/<model> runs it on the Tempo gateway, paid from your Tempo ID account; defaults to claude-opus-5-5 at xhigh thinking, or to what nc default saved",
         ),
     Argument::value("harness", "HARNESS", Parser::Choice(&HarnessArg::CHOICES))
         .long("harness")
@@ -681,6 +699,17 @@ const SETUP: arguments::Command = arguments::Command::new("setup")
             ),
         ])]);
 
+const DEFAULT: arguments::Command = arguments::Command::new("default")
+    .aliases(&[Alias::visible("defaults")])
+    .about("Show or save the harness, model, thinking and tier new sessions start with")
+    .long_about(
+        "Show or save the harness, model, thinking and tier new sessions start with. Without words, print them and where each comes from. Words in any order set them: a harness (codex, claude, antigravity, or openai, anthropic, google), a thinking level (none, low, medium, high, xhigh, max), a tier (standard, fast, ultrafast) and a model id or alias, such as 'nc default claude opus-5.5 high fast'. 'nc default model|harness|thinking|tier VALUE' sets one, 'nc default unset KEY' clears one and 'nc default reset' clears them all. --model, --harness, --thinking, --tier and NANOCODE_MODEL override them for one run.",
+    )
+    .groups(&[Group::named(
+        "Default",
+        &[Argument::trailing("words", "WORDS").help("Harness, model, thinking and tier, in any order; or model|harness|thinking|tier VALUE, unset KEY, reset")],
+    )]);
+
 pub static COMMAND: arguments::Command = arguments::Command::new("nanocode")
     .version(env!("CARGO_PKG_VERSION"))
     .about("Interactive coding agent for Codex and Claude")
@@ -711,6 +740,7 @@ pub static COMMAND: arguments::Command = arguments::Command::new("nanocode")
         #[cfg(unix)]
         CUA,
         SETUP,
+        DEFAULT,
     ]);
 
 impl Cli {
@@ -742,6 +772,9 @@ impl Command {
             #[cfg(unix)]
             "cua" => Self::Cua(CuaArgs::from_matches(matches)),
             "setup" => Self::Setup(SetupArgs::from_matches(matches)),
+            "default" => Self::Default {
+                words: matches.texts("words"),
+            },
             other => unreachable!("{other} is not a nanocode subcommand"),
         }
     }

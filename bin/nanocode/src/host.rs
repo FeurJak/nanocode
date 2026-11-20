@@ -425,7 +425,7 @@ impl ModelClients {
         {
             return Ok(ModelSelection::Codex(*model));
         }
-        if let Ok(model) = value.parse::<ClaudeModel>() {
+        if let Some(model) = claude_model(value) {
             return Ok(ModelSelection::Claude(model));
         }
         Err(unknown_model(value, self))
@@ -972,10 +972,18 @@ pub fn parse_model(value: &str) -> Result<ModelSelection> {
     if let Some(model) = Model::known(value) {
         return Ok(ModelSelection::Codex(model));
     }
-    if let Ok(model) = value.parse::<ClaudeModel>() {
+    if let Some(model) = claude_model(value) {
         return Ok(ModelSelection::Claude(model));
     }
     Err(unknown_model(value, &ModelClients::default()))
+}
+
+fn claude_model(value: &str) -> Option<ClaudeModel> {
+    let lower = value.to_ascii_lowercase();
+    lower.parse().ok().or_else(|| {
+        let name = lower.strip_prefix("claude-").unwrap_or(&lower);
+        format!("claude-{}", name.replace('.', "-")).parse().ok()
+    })
 }
 
 fn unknown_model(value: &str, clients: &ModelClients) -> Error {
