@@ -5043,7 +5043,8 @@ impl ExecutingFrame<'_> {
                 Ok(None)
             }
             Instruction::LoadName { namei: idx } => {
-                let name = self.code.names[idx.get(arg) as usize];
+                let index = idx.get(arg) as usize;
+                let name = self.code.names[index];
                 // An exact dict is read directly: the mapping protocol would
                 // go through the object hash and raise a KeyError to say a
                 // name lives in the globals instead.
@@ -5053,8 +5054,14 @@ impl ExecutingFrame<'_> {
                     .obj()
                     .downcast_ref_if_exact::<PyDict>(vm)
                 {
-                    let value = match dict.inner_getitem_opt(name, vm)? {
-                        Some(value) => value,
+                    let hint = self.code.name_hint(index);
+                    let value = match dict.get_item_opt_refresh_hint(name, hint, vm)? {
+                        Some((value, new_hint)) => {
+                            if let Some(new_hint) = new_hint {
+                                self.code.set_name_hint(index, new_hint);
+                            }
+                            value
+                        }
                         None => self.load_global_or_builtin(name, vm)?,
                     };
                     self.push_value(value);
@@ -5640,11 +5647,15 @@ impl ExecutingFrame<'_> {
                 Ok(None)
             }
             Instruction::StoreName { namei: idx } => {
-                let name = self.code.names[idx.get(arg) as usize];
+                let index = idx.get(arg) as usize;
+                let name = self.code.names[index];
                 let value = self.pop_value();
                 let locals = self.locals.get_or_create(vm).obj();
                 if let Some(dict) = locals.downcast_ref_if_exact::<PyDict>(vm) {
-                    dict.inner_setitem(name, value, vm)?;
+                    let hint = self.code.name_hint(index);
+                    if let Some(new_hint) = dict.set_item_with_hint(name, hint, value, vm)? {
+                        self.code.set_name_hint(index, new_hint);
+                    }
                     if vm.is_builtins_dict(locals) {
                         crate::stdlib::_testinternalcapi::note_builtin_dict();
                     }

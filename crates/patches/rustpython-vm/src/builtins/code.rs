@@ -17,7 +17,7 @@ use alloc::fmt;
 use core::{
     borrow::Borrow,
     ops::Deref,
-    sync::atomic::{AtomicPtr, AtomicU64, Ordering},
+    sync::atomic::{AtomicPtr, AtomicU16, AtomicU64, Ordering},
 };
 use nanocode_numeric::BigInt;
 use nanocode_numeric::Zero;
@@ -486,6 +486,10 @@ pub struct PyCode {
     /// Derived once so frame-local proxy operations do not repeatedly scan
     /// merged cell variables.
     localsplus_names: Box<[&'static PyStrInterned]>,
+    /// Entry index each name was last found at in a frame's exact-dict locals,
+    /// one per `names` slot: `LOAD_NAME` and `STORE_NAME` try it before
+    /// probing. A stale hint only costs the probe it would have saved.
+    name_hints: Box<[AtomicU16]>,
     #[pymember(name = "co_filename")]
     source_path: AtomicPtr<PyStrInterned>,
     #[pymember(name = "co_nlocals")]
@@ -666,9 +670,15 @@ impl PyCode {
                     | Instruction::InstrumentedEndAsyncFor
             )
         });
+        let name_hints = code
+            .names
+            .iter()
+            .map(|_| AtomicU16::new(u16::MAX))
+            .collect();
         Self {
             code,
             localsplus_names,
+            name_hints,
             source_path: AtomicPtr::new(sp),
             nlocals,
             instrumentation_version: AtomicU64::new(0),
@@ -678,6 +688,17 @@ impl PyCode {
             locations: crate::common::lock::OnceCell::new(),
             location_lookups: core::sync::atomic::AtomicU8::new(0),
         }
+    }
+
+    /// The cached locals entry index for `names[index]`.
+    #[inline(always)]
+    pub(crate) fn name_hint(&self, index: usize) -> u16 {
+        self.name_hints[index].load(Ordering::Relaxed)
+    }
+
+    #[inline(always)]
+    pub(crate) fn set_name_hint(&self, index: usize, hint: u16) {
+        self.name_hints[index].store(hint, Ordering::Relaxed);
     }
 
     #[inline(always)]
