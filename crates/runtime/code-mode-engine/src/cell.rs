@@ -196,6 +196,7 @@ fn compile(builder: Builder) -> Result<Snapshot, Unprepared> {
 
 pub(crate) struct Prepared {
     tools: Weak<CellTools>,
+    definitions: Box<str>,
     prelude: Option<Arc<str>>,
     snapshot: Snapshot,
     spares: Box<[Slot<Instance>]>,
@@ -292,29 +293,48 @@ pub(crate) fn prepared(
     static SNAPSHOTS: OnceLock<Atom<Snapshots>> = OnceLock::new();
     let snapshots = SNAPSHOTS.get_or_init(Atom::default);
     let find = |list: &Snapshots| {
-        list.iter()
-            .find(|prepared| {
-                std::ptr::eq(prepared.tools.as_ptr(), Arc::as_ptr(tools))
-                    && prepared.prelude.as_deref() == prelude.map(|prelude| &**prelude)
-            })
-            .cloned()
+        list.iter().position(|prepared| {
+            (std::ptr::eq(prepared.tools.as_ptr(), Arc::as_ptr(tools))
+                || *prepared.definitions == *tools.definitions)
+                && prepared.prelude.as_deref() == prelude.map(|prelude| &**prelude)
+        })
     };
-    if let Some(prepared) = snapshots.read(find) {
-        return Ok(prepared);
+    let found = snapshots.read(|list| {
+        find(list).map(|at| (at + 1 == list.len(), Arc::clone(&list[at])))
+    });
+    match found {
+        Some((true, prepared)) => return Ok(prepared),
+        Some((false, _)) => {
+            let recent = snapshots.update(|list| {
+                find(list).map(|at| {
+                    let prepared = list.remove(at);
+                    list.push(Arc::clone(&prepared));
+                    prepared
+                })
+            });
+            if let Some(prepared) = recent {
+                return Ok(prepared);
+            }
+        }
+        None => {}
     }
     let spares = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     let prepared = Arc::new(Prepared {
         tools: Arc::downgrade(tools),
+        definitions: tools.definitions.clone().into_boxed_str(),
         prelude: prelude.cloned(),
         snapshot: with_prelude(tools, prelude)?,
         spares: (0..spares).map(|_| Slot::default()).collect(),
     });
-    Ok(snapshots.update(|list| {
-        find(list).unwrap_or_else(|| {
+    Ok(snapshots.update(|list| match find(list) {
+        Some(at) => Arc::clone(&list[at]),
+        None => {
+            let recent = list.pop();
             list.retain(|prepared| prepared.tools.strong_count() > 0);
+            list.extend(recent);
             list.push(Arc::clone(&prepared));
             Arc::clone(&prepared)
-        })
+        }
     }))
 }
 
