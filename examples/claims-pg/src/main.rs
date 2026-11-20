@@ -243,6 +243,7 @@ async fn claimer(
             task: TaskId(format!("t{index}")),
             lease_ms: LEASE_MS,
             fence: None,
+            cap: None,
         };
         let applied = match committer
             .submit(write(&by, format!("claim:{index}"), claim))
