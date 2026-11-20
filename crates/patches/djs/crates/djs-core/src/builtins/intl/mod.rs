@@ -2,6 +2,7 @@ mod collate;
 mod data;
 mod date;
 mod number;
+mod numdata;
 mod text;
 
 use crate::heap::{Heap, ObjectClass};
@@ -320,11 +321,36 @@ pub(crate) fn intrinsic(heap: &mut Heap, k: u16, a: [Value; 5]) -> Result<Option
             let parts = a[4] == Value::TRUE;
             let out = match kind {
                 0 => {
-                    let x = match (a[2].as_string(), a[2].as_number()) {
-                        (Some(s), _) => number::parse_decimal(&heap.str_to_string(s)),
-                        (None, Some(n)) => number::from_f64(n),
-                        _ => return Ok(None),
+                    let num = |v: Value| match (v.as_string(), v.as_number()) {
+                        (Some(s), _) => Some(number::parse_decimal(&heap.str_to_string(s))),
+                        (None, Some(n)) => Some(number::from_f64(n)),
+                        _ => None,
                     };
+                    let Some(x) = num(a[2]) else { return Ok(None) };
+                    if a[3] != Value::UNDEFINED {
+                        // formatRange: parts are type \u{3} source.
+                        let Some(y) = num(a[3]) else { return Ok(None) };
+                        for (n, which) in [(&x, "start"), (&y, "end")] {
+                            if matches!(n, number::Num::Nan) {
+                                return range(&format!("Invalid {which}Range : NaN"));
+                            }
+                        }
+                        let items = number::format_range(&spec, x, y);
+                        let mut s = String::new();
+                        for (i, (t, v, src)) in items.iter().enumerate() {
+                            if parts {
+                                if i > 0 {
+                                    s.push('\u{1}');
+                                }
+                                s.push_str(t);
+                                s.push('\u{3}');
+                                s.push_str(src);
+                                s.push('\u{2}');
+                            }
+                            s.push_str(v);
+                        }
+                        return Ok(Some(string_value(heap, &s)?));
+                    }
                     number::format(&spec, x).parts
                 }
                 1 => {

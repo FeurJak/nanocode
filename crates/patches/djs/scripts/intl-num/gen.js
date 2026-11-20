@@ -1,0 +1,184 @@
+// Generates crates/djs-core/src/builtins/intl/numdata.rs from node's ICU (node 22):
+//   node gen.js > ../../crates/djs-core/src/builtins/intl/numdata.rs
+// Unit patterns per language x unit x display x plural category ("{0}" is the number), the
+// per-unit pattern of each unit (X-per-Y = per[Y] with {0} replaced by X's pattern), the
+// compounds ICU names itself (checked: every X-per-Y that the per rule does not give),
+// currency name patterns and symbols. Plural categories: zero one two few many other;
+// "" means the same as other.
+const LANGS = ["en", "de", "fr", "es", "it", "pt", "nl", "ja", "zh", "ko", "ru"];
+const SIMPLE = ["acre", "bit", "byte", "celsius", "centimeter", "day", "degree", "fahrenheit", "fluid-ounce",
+  "foot", "gallon", "gigabit", "gigabyte", "gram", "hectare", "hour", "inch", "kilobit",
+  "kilobyte", "kilogram", "kilometer", "liter", "megabit", "megabyte", "meter", "microsecond",
+  "mile", "mile-scandinavian", "milliliter", "millimeter", "millisecond", "minute", "month",
+  "nanosecond", "ounce", "percent", "petabyte", "pound", "second", "stone", "terabit",
+  "terabyte", "week", "yard", "year"];
+const CATS = ["zero", "one", "two", "few", "many", "other"];
+const DISP = ["short", "long", "narrow"];
+const CUR = process.argv[2] ? process.argv[2].split(",") : null;
+const SAMPLES = [1, 2, 0, 3, 5, 11, 21, 22, 100, 1000000, 0.5, 1.5, 1.25, 7, 25];
+function samples(lang, opts) {
+  const ro = opts ? new Intl.NumberFormat(lang, opts).resolvedOptions() : {};
+  const pr = new Intl.PluralRules(lang, opts ? { minimumFractionDigits: ro.minimumFractionDigits, maximumFractionDigits: ro.maximumFractionDigits } : {}), out = {};
+  for (const n of SAMPLES) { const c = pr.select(n); if (!(c in out)) out[c] = n; }
+  return out;
+}
+const esc = (s) => '"' + [...s].map((c) => { const u = c.codePointAt(0); return c === '"' ? '\\"' : c === "\\" ? "\\\\" : u < 0x20 || u > 0x7e ? "\\u{" + u.toString(16) + "}" : c; }).join("") + '"';
+function pats(lang, opts, sm) {
+  const f = new Intl.NumberFormat(lang, opts), ro = f.resolvedOptions();
+  const nf = new Intl.NumberFormat(lang, { minimumFractionDigits: ro.minimumFractionDigits, maximumFractionDigits: ro.maximumFractionDigits });
+  return CATS.map((c) => {
+    if (!(c in sm)) return null;
+    const n = sm[c], s = f.format(n), num = nf.format(n);
+    if (!s.includes(num)) throw new Error("no number in " + s);
+    return s.replace(num, "{0}");
+  });
+}
+// a category the options never reach (other for a currency without fractions in ru) takes many's
+const fill = (p) => { const o = p[5] ?? p[4] ?? p.find((x) => x !== null); return p.map((x, i) => (i === 5 ? o : x === null || x === o ? "" : x)); };
+const units = [], pers = [], comps = [], names = [], syms = [];
+let checked = 0;
+for (const lang of LANGS) {
+  const sm = samples(lang);
+  for (let d = 0; d < 3; d++) {
+    const P = {};
+    for (const u of SIMPLE) { P[u] = pats(lang, { style: "unit", unit: u, unitDisplay: DISP[d] }, sm); units.push([lang, u, d, fill(P[u])]); }
+    const per = {};
+    for (const y of SIMPLE) {
+      // the per pattern of y, from bit-per-y (or byte-per-y)
+      for (const x of ["bit", "byte", "acre"]) {
+        if (x === y) continue;
+        const c = pats(lang, { style: "unit", unit: x + "-per-" + y, unitDisplay: DISP[d] }, sm);
+        const cand = CATS.map((k, i) => (c[i] === null ? null : c[i].includes(P[x][i]) ? c[i].replace(P[x][i], "{0}") : undefined));
+        const vals = [...new Set(cand.filter((v) => v !== null))];
+        if (vals.length === 1 && vals[0] !== undefined) { per[y] = vals[0]; break; }
+      }
+      if (per[y] === undefined) throw new Error("no per pattern " + lang + " " + y + " " + d);
+      pers.push([lang, y, d, per[y]]);
+    }
+    for (const x of SIMPLE) for (const y of SIMPLE) {
+      if (x === y) continue;
+      const c = pats(lang, { style: "unit", unit: x + "-per-" + y, unitDisplay: DISP[d] }, sm);
+      checked++;
+      const ok = CATS.every((k, i) => c[i] === null || c[i] === per[y].replace("{0}", P[x][i]));
+      if (!ok) comps.push([lang, x + "-per-" + y, d, fill(c)]);
+    }
+  }
+  const codes = CUR || Intl.supportedValuesOf("currency");
+  for (const code of codes) {
+    // Names for every category: fraction digits as the sample needs them (1 Indian rupee).
+    const co = { style: "currency", currency: code, currencyDisplay: "name", minimumFractionDigits: 0, maximumFractionDigits: 3 };
+    const p = pats(lang, co, samples(lang));
+    names.push([lang, code, fill(p)]);
+    const sym = (cd) => new Intl.NumberFormat(lang, { style: "currency", currency: code, currencyDisplay: cd }).formatToParts(1).find((x) => x.type === "currency").value;
+    syms.push([lang, code, sym("symbol"), sym("narrowSymbol")]);
+  }
+}
+// ICU formats percent-per-Y as the bare percent pattern in some displays: one row per language and display.
+const pctper = [];
+for (const lang of LANGS) for (let d = 0; d < 3; d++) {
+  const rows = comps.filter((c) => c[0] === lang && c[2] === d && c[1].startsWith("percent-per-"));
+  if (!rows.length) continue;
+  const k = JSON.stringify(rows[0][3]);
+  if (rows.length !== SIMPLE.length - 1 || rows.some((r) => JSON.stringify(r[3]) !== k)) throw new Error("percent-per not uniform " + lang + d);
+  pctper.push([lang, d, rows[0][3]]);
+}
+const kept = comps.filter((c) => !c[1].startsWith("percent-per-") || !pctper.some((p) => p[0] === c[0] && p[1] === c[2]));
+comps.length = 0; comps.push(...kept);
+// Ranges: the separator of formatRange(1, 2), the approximately sign of formatRange(5, 5), and
+// PluralRules.selectRange for each pair of categories (cardinal; ordinal ranges are the same in ICU).
+const ranges = [], prange = [];
+for (const lang of LANGS) {
+  const nf = new Intl.NumberFormat(lang);
+  const sep = nf.formatRange(1, 2).slice(1, -1), approx = nf.formatRange(5, 5).replace("5", "");
+  ranges.push([lang, sep, approx]);
+  const sm = samples(lang), pr = new Intl.PluralRules(lang);
+  for (const a of CATS) for (const b of CATS) {
+    if (!(a in sm) || !(b in sm)) continue;
+    const r = pr.selectRange(sm[a], sm[b]);
+    if (r !== b) prange.push([lang, a, b, r]);
+  }
+}
+// Compact patterns: per language, display and magnitude 3..20, the power of ten the number is
+// divided by, the pattern ({0} the number) for each plural category of the shown number, and
+// the pattern for exactly 1 where CLDR names one (fr mille).
+const compact = [];
+for (const lang of LANGS) for (const long of [false, true]) {
+  const f = new Intl.NumberFormat(lang, { notation: "compact", compactDisplay: long ? "long" : "short", maximumFractionDigits: 2 });
+  const plain = new Intl.NumberFormat(lang, { maximumFractionDigits: 2, useGrouping: "min2" });
+  const pr = new Intl.PluralRules(lang, { maximumFractionDigits: 2 });
+  for (let m = 3; m <= 20; m++) {
+    const p2 = f.formatToParts(2 * 10 ** m);
+    if (!p2.some((p) => p.type === "compact")) { compact.push([lang, long, m, 0, null, ""]); continue; }
+    const shown = Number(p2.filter((p) => p.type === "integer").map((p) => p.value).join(""));
+    const div = m - Math.round(Math.log10(shown / 2));
+    const pats = {};
+    for (const k of [2, 1.5, 3, 5, 11, 21, 22, 1.25, 7, 25, 1.01, 100, 101]) {
+      const v = k * 10 ** (m - div) >= 10 ** (m - div + 1) ? null : k;
+      if (v === null) continue;
+      const n = k * 10 ** (m - div);
+      const c = pr.select(n);
+      if (c in pats) continue;
+      const s = f.format(k * 10 ** m), num = plain.format(n);
+      if (!s.includes(num)) continue;
+      pats[c] = s.replace(num, "{0}");
+    }
+    const one = f.format(10 ** m), on = plain.format(10 ** (m - div));
+    const c1 = pr.select(10 ** (m - div));
+    let exact = "";
+    if (!one.includes(on)) exact = one;
+    else if (!(c1 in pats)) pats[c1] = one.replace(on, "{0}");
+    else if (one.replace(on, "{0}") !== pats[c1]) exact = one.replace(on, "{0}");
+    if (!Object.keys(pats).length) throw new Error("no compact pattern " + lang + " " + long + " " + m + " " + div + " " + f.format(2 * 10 ** m));
+    compact.push([lang, long, m, div, CATS.map((c) => pats[c] ?? null), exact]);
+  }
+}
+const arr = (a) => "[" + a.map(esc).join(", ") + "]";
+const o = [];
+o.push("#![allow(clippy::type_complexity)]");
+o.push("// Generated by scripts/intl-num/gen.js from node " + process.version + " (ICU " + process.versions.icu + "). Do not edit.");
+o.push("// Plural forms: zero, one, two, few, many, other; \"\" is the same as other.");
+o.push("pub(super) static UNIT_PATTERNS: &[(&str, &str, u8, [&str; 6])] = &[");
+for (const [l, u, d, p] of units) o.push("    (" + esc(l) + ", " + esc(u) + ", " + d + ", " + arr(p) + "),");
+o.push("];");
+o.push("// The per pattern of a unit: X-per-Y is PER_PATTERNS[Y] with {0} replaced by X's pattern.");
+o.push("pub(super) static PER_PATTERNS: &[(&str, &str, u8, &str)] = &[");
+for (const [l, u, d, p] of pers) o.push("    (" + esc(l) + ", " + esc(u) + ", " + d + ", " + esc(p) + "),");
+o.push("];");
+o.push("// The X-per-Y compounds that the per rule does not give (" + checked + " checked).");
+o.push("pub(super) static COMPOUND_PATTERNS: &[(&str, &str, u8, [&str; 6])] = &[");
+for (const [l, u, d, p] of comps) o.push("    (" + esc(l) + ", " + esc(u) + ", " + d + ", " + arr(p) + "),");
+o.push("];");
+o.push("// Languages and displays where percent-per-Y is this pattern, whatever Y.");
+o.push("pub(super) static PERCENT_PER: &[(&str, u8, [&str; 6])] = &[");
+for (const [l, d, p] of pctper) o.push("    (" + esc(l) + ", " + d + ", " + arr(p) + "),");
+o.push("];");
+o.push("// (language, long, magnitude, power of ten shown numbers are divided by, patterns by plural, pattern of exactly 1)");
+o.push("pub(super) static COMPACT_PATTERNS: &[(&str, bool, u8, u8, [&str; 6], &str)] = &[");
+for (const [l, lg, m, d, p, e] of compact) if (p) o.push("    (" + esc(l) + ", " + lg + ", " + m + ", " + d + ", " + arr(fill(p)) + ", " + esc(e) + "),");
+o.push("];");
+o.push("// The text between a compact percent's number and its sign (ICU's own, not the percent pattern's).");
+o.push("pub(super) static COMPACT_PERCENT_GAP: &[(&str, &str)] = &[");
+for (const lang of LANGS) {
+  const p = new Intl.NumberFormat(lang, { style: "percent", notation: "compact" }).formatToParts(0.12);
+  const i = p.findIndex((x) => x.type === "unit");
+  o.push("    (" + esc(lang) + ", " + esc(i > 0 && p[i - 1].type === "literal" ? p[i - 1].value : "") + "),");
+}
+o.push("];");
+o.push("// (language, range separator, approximately sign)");
+o.push("pub(super) static RANGES: &[(&str, &str, &str)] = &[");
+for (const [l, s, a] of ranges) o.push("    (" + esc(l) + ", " + esc(s) + ", " + esc(a) + "),");
+o.push("];");
+o.push("// The plural category of a range from the categories of its ends, where it is not the end's.");
+o.push("pub(super) static PLURAL_RANGES: &[(&str, &str, &str, &str)] = &[");
+for (const [l, a, b, r] of prange) o.push("    (" + esc(l) + ", " + esc(a) + ", " + esc(b) + ", " + esc(r) + "),");
+o.push("];");
+o.push("// Currency names: the whole pattern, {0} the number.");
+o.push("pub(super) static CURRENCY_NAMES: &[(&str, &str, [&str; 6])] = &[");
+for (const [l, c, p] of names) o.push("    (" + esc(l) + ", " + esc(c) + ", " + arr(p) + "),");
+o.push("];");
+o.push("// (language, code, symbol, narrow symbol)");
+o.push("pub(super) static CURRENCY_SYMBOLS_L: &[(&str, &str, &str, &str)] = &[");
+for (const [l, c, s, n] of syms) o.push("    (" + esc(l) + ", " + esc(c) + ", " + esc(s) + ", " + esc(n) + "),");
+o.push("];");
+process.stdout.write(o.join("\n") + "\n");
+process.stderr.write("units " + units.length + " pers " + pers.length + " compounds " + comps.length + "/" + checked + " names " + names.length + "\n");

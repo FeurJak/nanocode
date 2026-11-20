@@ -157,11 +157,21 @@ function IntlParts(encoded: Value, unit: Value): Obj {
     }
     const mid: f64 = StrIndexOf(s, "\u0002", start);
     const part: Obj = ObjectCreate(RealmIntrinsic("ObjectPrototype"));
-    const ty: Str = StrSubstring(s, start, mid);
+    let ty: Str = StrSubstring(s, start, mid);
+    // A range's part: type \u0003 source.
+    const at: f64 = StrIndexOf(ty, "\u0003", 0);
+    let source: Value = undefined;
+    if (at >= 0 && at < mid - start) {
+      source = StrSubstring(ty, at + 1, StrLength(ty));
+      ty = StrSubstring(ty, 0, at);
+    }
     CreateDataPropertyOrThrow(part, "type", ty);
     CreateDataPropertyOrThrow(part, "value", StrSubstring(s, mid + 1, end));
     if (unit !== undefined && ty !== "literal") {
       CreateDataPropertyOrThrow(part, "unit", unit);
+    }
+    if (source !== undefined) {
+      CreateDataPropertyOrThrow(part, "source", source);
     }
     ArrayPushDense(out, part);
     start = end + 1;
@@ -334,6 +344,44 @@ function IntlNumberFormatPrototypeFormat(this: Value): Value {
 function IntlNumberFormatPrototypeFormatToParts(this: Value, x?: Value): Obj {
   const spec: Str = IntlThis(this, 0, "Intl.NumberFormat.prototype.formatToParts");
   return IntlParts(IntlFormat(0, spec, IntlNumeric(x), undefined, true), undefined);
+}
+
+/** formatRange's two values, read as the spec reads them. */
+function IntlRangeValue(v: Value, which: Str): Value {
+  if (v === undefined) {
+    throw NewTypeError("Invalid " + which + "Range : undefined");
+  }
+  return IntlNumeric(v);
+}
+
+/**
+ * Intl.NumberFormat.prototype.formatRange ( start, end ).
+ * @builtin Intl.NumberFormat.prototype.formatRange
+ * @length 2
+ */
+function IntlNumberFormatPrototypeFormatRange(this: Value, start?: Value, end?: Value): Str {
+  const spec: Str = IntlThis(this, 0, "Intl.NumberFormat.prototype.formatRange");
+  if (start === undefined || end === undefined) {
+    IntlRangeValue(start, "start");
+    IntlRangeValue(end, "end");
+  }
+  const x: Value = IntlRangeValue(start, "start");
+  return AsStr(IntlFormat(0, spec, x, IntlRangeValue(end, "end"), false));
+}
+
+/**
+ * Intl.NumberFormat.prototype.formatRangeToParts ( start, end ).
+ * @builtin Intl.NumberFormat.prototype.formatRangeToParts
+ * @length 2
+ */
+function IntlNumberFormatPrototypeFormatRangeToParts(this: Value, start?: Value, end?: Value): Obj {
+  const spec: Str = IntlThis(this, 0, "Intl.NumberFormat.prototype.formatRangeToParts");
+  if (start === undefined || end === undefined) {
+    IntlRangeValue(start, "start");
+    IntlRangeValue(end, "end");
+  }
+  const x: Value = IntlRangeValue(start, "start");
+  return IntlParts(IntlFormat(0, spec, x, IntlRangeValue(end, "end"), true), undefined);
 }
 
 /**

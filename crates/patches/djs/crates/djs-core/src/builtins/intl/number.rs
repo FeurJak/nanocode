@@ -1,4 +1,8 @@
-use super::data::{COMPACT, CURRENCIES, CURRENCY_SYMBOLS, NUM_LOCALES, UNIT_PER, UNIT_PER_PATTERNS, UNITS};
+use super::data::{CURRENCIES, CURRENCY_SYMBOLS, NUM_LOCALES};
+use super::numdata::{
+    COMPACT_PATTERNS, COMPACT_PERCENT_GAP, COMPOUND_PATTERNS, CURRENCY_NAMES, CURRENCY_SYMBOLS_L,
+    PER_PATTERNS, PERCENT_PER, PLURAL_RANGES, RANGES, UNIT_PATTERNS,
+};
 use super::{Parts, Spec, plural_en_like, range, type_err};
 use crate::interp::conv::Fault;
 use alloc::format;
@@ -24,8 +28,6 @@ pub(crate) struct Currency {
     pub code: &'static str,
     pub symbol: &'static str,
     pub narrow: &'static str,
-    pub one: &'static str,
-    pub other: &'static str,
     pub digits: u8,
 }
 
@@ -38,19 +40,62 @@ pub(super) fn num_locale(tag: &str) -> &'static NumLocale {
             let mut it = tag.split('-');
             let l = it.next().unwrap_or("");
             let r = it.find(|s| s.len() == 2 && s.bytes().all(|b| b.is_ascii_uppercase()));
-            r.and_then(|r| NUM_LOCALES.iter().find(|n| n.tag.len() == 5 && n.tag.starts_with(l) && n.tag.ends_with(r)))
+            r.and_then(|r| {
+                NUM_LOCALES
+                    .iter()
+                    .find(|n| n.tag.len() == 5 && n.tag.starts_with(l) && n.tag.ends_with(r))
+            })
         })
         .or_else(|| NUM_LOCALES.iter().find(|l| l.tag == lang))
         .unwrap_or(&NUM_LOCALES[0])
 }
 
 const SIMPLE_UNITS: [&str; 45] = [
-    "acre", "bit", "byte", "celsius", "centimeter", "day", "degree", "fahrenheit", "fluid-ounce",
-    "foot", "gallon", "gigabit", "gigabyte", "gram", "hectare", "hour", "inch", "kilobit",
-    "kilobyte", "kilogram", "kilometer", "liter", "megabit", "megabyte", "meter", "microsecond",
-    "mile", "mile-scandinavian", "milliliter", "millimeter", "millisecond", "minute", "month",
-    "nanosecond", "ounce", "percent", "petabyte", "pound", "second", "stone", "terabit",
-    "terabyte", "week", "yard", "year",
+    "acre",
+    "bit",
+    "byte",
+    "celsius",
+    "centimeter",
+    "day",
+    "degree",
+    "fahrenheit",
+    "fluid-ounce",
+    "foot",
+    "gallon",
+    "gigabit",
+    "gigabyte",
+    "gram",
+    "hectare",
+    "hour",
+    "inch",
+    "kilobit",
+    "kilobyte",
+    "kilogram",
+    "kilometer",
+    "liter",
+    "megabit",
+    "megabyte",
+    "meter",
+    "microsecond",
+    "mile",
+    "mile-scandinavian",
+    "milliliter",
+    "millimeter",
+    "millisecond",
+    "minute",
+    "month",
+    "nanosecond",
+    "ounce",
+    "percent",
+    "petabyte",
+    "pound",
+    "second",
+    "stone",
+    "terabit",
+    "terabyte",
+    "week",
+    "yard",
+    "year",
 ];
 
 fn is_unit(u: &str) -> bool {
@@ -101,6 +146,8 @@ pub(super) struct Digits {
     pub max_sd: u32,
     pub kind: &'static str,
     pub priority: &'static str,
+    /// roundingIncrement: rounding by fraction digits goes to multiples of inc units of the last digit.
+    pub inc: u32,
 }
 
 pub(super) fn digit_options(
@@ -110,8 +157,14 @@ pub(super) fn digit_options(
     compact: bool,
 ) -> Result<Digits, Fault> {
     let min_int = digit_option(raw, "minimumIntegerDigits", 1.0, 21.0)?.unwrap_or(1);
-    let (mnfd, mxfd) = (raw.get("minimumFractionDigits"), raw.get("maximumFractionDigits"));
-    let (mnsd, mxsd) = (raw.get("minimumSignificantDigits"), raw.get("maximumSignificantDigits"));
+    let (mnfd, mxfd) = (
+        raw.get("minimumFractionDigits"),
+        raw.get("maximumFractionDigits"),
+    );
+    let (mnsd, mxsd) = (
+        raw.get("minimumSignificantDigits"),
+        raw.get("maximumSignificantDigits"),
+    );
     let inc = match raw.get("roundingIncrement") {
         None => 1.0,
         Some(v) => {
@@ -128,12 +181,32 @@ pub(super) fn digit_options(
     };
     let mode = raw.choose(
         "roundingMode",
-        &["ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", "halfEven"],
+        &[
+            "ceil",
+            "floor",
+            "expand",
+            "trunc",
+            "halfCeil",
+            "halfFloor",
+            "halfExpand",
+            "halfTrunc",
+            "halfEven",
+        ],
         "halfExpand",
         "Intl.NumberFormat",
     )?;
-    let priority = raw.choose("roundingPriority", &["auto", "morePrecision", "lessPrecision"], "auto", "Intl.NumberFormat")?;
-    let tzd = raw.choose("trailingZeroDisplay", &["auto", "stripIfInteger"], "auto", "Intl.NumberFormat")?;
+    let priority = raw.choose(
+        "roundingPriority",
+        &["auto", "morePrecision", "lessPrecision"],
+        "auto",
+        "Intl.NumberFormat",
+    )?;
+    let tzd = raw.choose(
+        "trailingZeroDisplay",
+        &["auto", "stripIfInteger"],
+        "auto",
+        "Intl.NumberFormat",
+    )?;
     let has_sd = mnsd.is_some() || mxsd.is_some();
     let has_fd = mnfd.is_some() || mxfd.is_some();
     let mut need_sd = true;
@@ -144,10 +217,20 @@ pub(super) fn digit_options(
             need_fd = false;
         }
     }
-    let mut d = Digits { min_int, min_fd: 0, max_fd: 0, min_sd: 1, max_sd: 21, kind: "fractionDigits", priority };
+    let mut d = Digits {
+        min_int,
+        min_fd: 0,
+        max_fd: 0,
+        min_sd: 1,
+        max_sd: 21,
+        kind: "fractionDigits",
+        priority,
+        inc: 1,
+    };
     if need_sd && has_sd {
         d.min_sd = digit_option(raw, "minimumSignificantDigits", 1.0, 21.0)?.unwrap_or(1);
-        d.max_sd = digit_option(raw, "maximumSignificantDigits", f64::from(d.min_sd), 21.0)?.unwrap_or(21);
+        d.max_sd =
+            digit_option(raw, "maximumSignificantDigits", f64::from(d.min_sd), 21.0)?.unwrap_or(21);
     }
     if need_fd {
         if has_fd {
@@ -182,9 +265,18 @@ pub(super) fn digit_options(
         d.min_sd = 1;
         d.max_sd = 2;
         d.kind = "morePrecision";
-        d.priority = "morePrecision";
+        // As node 22: resolvedOptions says auto once trailingZeroDisplay strips.
+        d.priority = if tzd == "stripIfInteger" {
+            "auto"
+        } else {
+            "morePrecision"
+        };
     } else if priority == "auto" {
-        d.kind = if has_sd { "significantDigits" } else { "fractionDigits" };
+        d.kind = if has_sd {
+            "significantDigits"
+        } else {
+            "fractionDigits"
+        };
     } else {
         d.kind = priority;
     }
@@ -217,7 +309,12 @@ pub(super) fn resolve(locale: &str, raw: &Spec) -> Result<Spec, Fault> {
     out.put("locale", locale);
     out.put("numberingSystem", "latn");
     let n = "Intl.NumberFormat";
-    let style = raw.choose("style", &["decimal", "percent", "currency", "unit"], "decimal", n)?;
+    let style = raw.choose(
+        "style",
+        &["decimal", "percent", "currency", "unit"],
+        "decimal",
+        n,
+    )?;
     let currency = match raw.get("currency") {
         Some(c) => {
             if c.len() != 3 || !c.bytes().all(|b| b.is_ascii_alphabetic()) {
@@ -227,17 +324,29 @@ pub(super) fn resolve(locale: &str, raw: &Spec) -> Result<Spec, Fault> {
         }
         None => None,
     };
-    let cd = raw.choose("currencyDisplay", &["code", "symbol", "narrowSymbol", "name"], "symbol", n)?;
+    let cd = raw.choose(
+        "currencyDisplay",
+        &["code", "symbol", "narrowSymbol", "name"],
+        "symbol",
+        n,
+    )?;
     let cs = raw.choose("currencySign", &["standard", "accounting"], "standard", n)?;
     let unit = raw.get("unit").map(String::from);
     if let Some(u) = &unit
         && !is_unit(u)
     {
-        return range(&format!("Invalid unit argument for Intl.NumberFormat() '{u}'"));
+        return range(&format!(
+            "Invalid unit argument for Intl.NumberFormat() '{u}'"
+        ));
     }
     let ud = raw.choose("unitDisplay", &["short", "narrow", "long"], "short", n)?;
     out.put("style", style);
-    let notation = raw.choose("notation", &["standard", "scientific", "engineering", "compact"], "standard", n)?;
+    let notation = raw.choose(
+        "notation",
+        &["standard", "scientific", "engineering", "compact"],
+        "standard",
+        n,
+    )?;
     let fd = match style {
         "currency" => {
             let Some(c) = &currency else {
@@ -245,9 +354,13 @@ pub(super) fn resolve(locale: &str, raw: &Spec) -> Result<Spec, Fault> {
             };
             out.put("currency", c);
             out.put("currencyDisplay", cd);
-            out.put("currencySign", cs);
-            let d = if notation == "standard" { currency_digits(c) } else { 0 };
-            (d, d)
+            // As V8: a currency's name has no accounting form.
+            // As node 22: signDisplay never drops the accounting form.
+            let sd_never = raw.get("signDisplay") == Some("never");
+            out.put("currencySign", if sd_never { "standard" } else { cs });
+            // As node 22 (V8 12): the currency's digits whatever the notation (newer V8 drops
+            // them outside standard notation); compact without digit options rounds its own way.
+            (currency_digits(c), currency_digits(c))
         }
         "unit" => {
             let Some(u) = &unit else {
@@ -264,14 +377,25 @@ pub(super) fn resolve(locale: &str, raw: &Spec) -> Result<Spec, Fault> {
     digit_options(raw, &mut out, fd, compact)?;
     let cdisp = raw.choose("compactDisplay", &["short", "long"], "short", n)?;
     let grouping = match raw.get("useGrouping") {
-        None => if compact { "min2" } else { "auto" },
+        None => {
+            if compact {
+                "min2"
+            } else {
+                "auto"
+            }
+        }
         Some("false") => "!f",
         Some("true") => "always",
         Some(g) => {
             let g = ["min2", "auto", "always"].into_iter().find(|x| *x == g);
             match g {
                 Some(g) => g,
-                None => return range(&format!("Value {} out of range for {n} options property useGrouping", raw.get("useGrouping").unwrap_or(""))),
+                None => {
+                    return range(&format!(
+                        "Value {} out of range for {n} options property useGrouping",
+                        raw.get("useGrouping").unwrap_or("")
+                    ));
+                }
             }
         }
     };
@@ -280,7 +404,12 @@ pub(super) fn resolve(locale: &str, raw: &Spec) -> Result<Spec, Fault> {
     if compact {
         out.put("compactDisplay", cdisp);
     }
-    let sd = raw.choose("signDisplay", &["auto", "never", "always", "exceptZero", "negative"], "auto", n)?;
+    let sd = raw.choose(
+        "signDisplay",
+        &["auto", "never", "always", "exceptZero", "negative"],
+        "auto",
+        n,
+    )?;
     out.put("signDisplay", sd);
     out.flush_later();
     Ok(out)
@@ -293,6 +422,7 @@ pub(super) struct Dec {
     pub exp: i32,
 }
 
+#[derive(Clone)]
 pub(super) enum Num {
     Nan,
     Inf(bool),
@@ -334,7 +464,8 @@ pub(super) fn parse_decimal(s: &str) -> Num {
     };
     let Some(e) = e else { return Num::Nan };
     let (ip, fp) = mant.split_once('.').unwrap_or((mant, ""));
-    if (ip.is_empty() && fp.is_empty()) || !ip.bytes().chain(fp.bytes()).all(|b| b.is_ascii_digit()) {
+    if (ip.is_empty() && fp.is_empty()) || !ip.bytes().chain(fp.bytes()).all(|b| b.is_ascii_digit())
+    {
         return Num::Nan;
     }
     let mut d = Dec {
@@ -392,7 +523,11 @@ fn round_at(d: &Dec, keep: i32, mode: &str) -> Dec {
     if keep < 0 {
         let mut digits = alloc::vec![0u8; keep.unsigned_abs() as usize];
         digits.extend_from_slice(&d.digits);
-        let padded = Dec { neg: d.neg, digits, exp: d.exp - keep };
+        let padded = Dec {
+            neg: d.neg,
+            digits,
+            exp: d.exp - keep,
+        };
         return round_at(&padded, 0, mode);
     }
     let mut r = d.clone();
@@ -422,15 +557,108 @@ fn round_at(d: &Dec, keep: i32, mode: &str) -> Dec {
     r
 }
 
+/// The plural category of r × 10^e, as ICU takes it for scientific and compact numbers.
+fn plural_scaled(lang: &str, r: &Rounded, e: i32) -> &'static str {
+    plural_exp(lang, r, e, 0)
+}
+
+/// As plural_scaled, with ICU's exponent operand: CLDR's many for fr, es, pt, it and ca
+/// holds for an exponent outside 0..5, ahead of their other rules.
+fn plural_exp(lang: &str, r: &Rounded, e: i32, exp: i32) -> &'static str {
+    if matches!(lang, "fr" | "es" | "pt" | "it" | "ca") && !(0..=5).contains(&exp) {
+        return "many";
+    }
+    plural_exp_inner(lang, r, e)
+}
+
+fn plural_exp_inner(lang: &str, r: &Rounded, e: i32) -> &'static str {
+    let dec = Dec {
+        neg: r.dec.neg,
+        digits: r.dec.digits.clone(),
+        exp: if r.dec.is_zero() {
+            r.dec.exp
+        } else {
+            r.dec.exp + e
+        },
+    };
+    plural_of(
+        lang,
+        &Rounded {
+            dec,
+            min_frac: (r.min_frac - e).max(0),
+            min_int: r.min_int,
+        },
+        false,
+    )
+}
+
 pub(super) struct Rounded {
     pub dec: Dec,
     pub min_frac: i32,
     pub min_int: i32,
 }
 
+/// d × k, for a small k.
+fn mul_small(d: &Dec, k: u32) -> Dec {
+    let mut digits = Vec::with_capacity(d.digits.len() + 4);
+    let mut carry = 0u32;
+    for &x in d.digits.iter().rev() {
+        let v = u32::from(x) * k + carry;
+        digits.push((v % 10) as u8);
+        carry = v / 10;
+    }
+    let mut exp = d.exp;
+    while carry > 0 {
+        digits.push((carry % 10) as u8);
+        carry /= 10;
+        exp += 1;
+    }
+    digits.reverse();
+    let mut r = Dec {
+        neg: d.neg,
+        digits,
+        exp,
+    };
+    r.trim();
+    r
+}
+
+/// d rounded to a multiple of inc × 10^-fd (inc is 1, 2, 5, 10, 20, 25, 50, … 5000).
+fn round_increment_mode(d: &Dec, fd: i32, inc: u32, mode: &str) -> Dec {
+    if d.is_zero() {
+        return d.clone();
+    }
+    // d / inc = d × (10^z / inc) / 10^z, with 10^z / inc an integer for inc = a × 10^k, a in 1, 2, 5, 25.
+    let mut a = inc;
+    let mut k = 0;
+    while a.is_multiple_of(10) {
+        a /= 10;
+        k += 1;
+    }
+    let (mul, z) = match a {
+        2 => (5, 1),
+        5 => (2, 1),
+        25 => (4, 2),
+        _ => (1, 0),
+    };
+    let mut q = mul_small(d, mul);
+    q.exp += fd - z - k;
+    let q = round_at(&q, q.exp, mode);
+    if q.is_zero() {
+        return q;
+    }
+    let mut r = mul_small(&q, inc);
+    r.exp -= fd;
+    r
+}
+
 pub(super) fn round(d: &Dec, g: &Digits, mode: &str, strip: bool) -> Rounded {
     let by_fd = || {
-        let r = round_at(d, d.exp + g.max_fd as i32, mode);
+        let r = if g.inc > 1 {
+            round_increment_mode(d, g.max_fd as i32, g.inc, mode)
+        } else {
+            round_at(d, d.exp + g.max_fd as i32, mode)
+        };
         (r, g.min_fd as i32)
     };
     let by_sd = || {
@@ -452,7 +680,11 @@ pub(super) fn round(d: &Dec, g: &Digits, mode: &str, strip: bool) -> Rounded {
     if strip && dec.digits.len() as i32 <= dec.exp.max(0) {
         min_frac = 0;
     }
-    Rounded { dec, min_frac: min_frac.max(0), min_int: g.min_int as i32 }
+    Rounded {
+        dec,
+        min_frac: min_frac.max(0),
+        min_int: g.min_int as i32,
+    }
 }
 
 fn group(int: &str, loc: &NumLocale, mode: &str) -> Vec<String> {
@@ -461,7 +693,13 @@ fn group(int: &str, loc: &NumLocale, mode: &str) -> Vec<String> {
         "!f" => return alloc::vec![int.to_string()],
         "always" => 4,
         "min2" => 5,
-        _ => if loc.min2 { 5 } else { 4 },
+        _ => {
+            if loc.min2 {
+                5
+            } else {
+                4
+            }
+        }
     };
     if n < min {
         return alloc::vec![int.to_string()];
@@ -494,7 +732,11 @@ fn digits_parts(r: &Rounded, loc: &NumLocale, grouping: &str, out: &mut Parts) {
     let nfrac = (d.digits.len() as i32 - d.exp).max(r.min_frac);
     for i in 0..nfrac {
         let at = d.exp + i;
-        let c = if at < 0 { 0 } else { d.digits.get(at as usize).copied().unwrap_or(0) };
+        let c = if at < 0 {
+            0
+        } else {
+            d.digits.get(at as usize).copied().unwrap_or(0)
+        };
         frac.push((b'0' + c) as char);
     }
     let groups = group(&int, loc, grouping);
@@ -514,13 +756,18 @@ pub(super) fn plural_of(lang: &str, r: &Rounded, ordinal: bool) -> &'static str 
     let d = &r.dec;
     let visible = (d.digits.len() as i32 - d.exp).max(r.min_frac).max(0) as u32;
     let mut int: u64 = 0;
-    for i in 0..d.exp.max(0) {
-        int = int.saturating_mul(10).saturating_add(u64::from(d.digits.get(i as usize).copied().unwrap_or(0)));
+    // As ICU's operand i: the integer's lowest 18 digits.
+    for i in (d.exp - 18).max(0)..d.exp.max(0) {
+        int = int * 10 + u64::from(d.digits.get(i as usize).copied().unwrap_or(0));
     }
     let mut fraction: u64 = 0;
     for i in 0..visible.min(18) as i32 {
         let at = d.exp + i;
-        let c = if at < 0 { 0 } else { d.digits.get(at as usize).copied().unwrap_or(0) };
+        let c = if at < 0 {
+            0
+        } else {
+            d.digits.get(at as usize).copied().unwrap_or(0)
+        };
         fraction = fraction * 10 + u64::from(c);
     }
     plural_en_like(lang, int, visible, fraction, ordinal)
@@ -534,13 +781,39 @@ fn sign_of(sd: &str, neg: bool, zero: bool) -> Option<bool> {
     match sd {
         "never" => None,
         "always" => Some(neg),
-        "exceptZero" => if zero { None } else { Some(neg) },
-        "negative" => if neg && !zero { Some(true) } else { None },
-        _ => if neg { Some(true) } else { None },
+        "exceptZero" => {
+            if zero {
+                None
+            } else {
+                Some(neg)
+            }
+        }
+        "negative" => {
+            if neg && !zero {
+                Some(true)
+            } else {
+                None
+            }
+        }
+        _ => {
+            if neg {
+                Some(true)
+            } else {
+                None
+            }
+        }
     }
 }
 
-fn affix_parts(pattern: &str, sign: Option<bool>, body: &Parts, sym: Option<(&'static str, &str)>, loc: &NumLocale, out: &mut Parts) {
+fn affix_parts(
+    pattern: &str,
+    sign: Option<bool>,
+    approx: Option<&str>,
+    body: &Parts,
+    sym: Option<(&'static str, &str)>,
+    loc: &NumLocale,
+    out: &mut Parts,
+) {
     let mut lit = String::new();
     let flush = |lit: &mut String, out: &mut Parts| {
         if !lit.is_empty() {
@@ -557,6 +830,9 @@ fn affix_parts(pattern: &str, sign: Option<bool>, body: &Parts, sym: Option<(&'s
             }
             '-' => {
                 flush(&mut lit, out);
+                if let Some(a) = approx {
+                    out.push("approximatelySign", a);
+                }
                 match sign {
                     Some(true) => out.push("minusSign", loc.minus),
                     Some(false) => out.push("plusSign", "+"),
@@ -570,8 +846,13 @@ fn affix_parts(pattern: &str, sign: Option<bool>, body: &Parts, sym: Option<(&'s
             '\u{a4}' => {
                 flush(&mut lit, out);
                 if let Some((ty, s)) = sym {
-                    let next_digit = chars.get(i + 1) == Some(&'#');
-                    let prev_digit = i > 0 && chars[i - 1] == '#';
+                    // ICU's currency spacing: only next to a digit (not NaN or ∞).
+                    let text = body.text();
+                    let next_digit = chars.get(i + 1) == Some(&'#')
+                        && text.chars().next().is_some_and(|c| c.is_numeric());
+                    let prev_digit = i > 0
+                        && chars[i - 1] == '#'
+                        && text.chars().last().is_some_and(|c| c.is_numeric());
                     let letter_end = s.chars().last().is_some_and(|c| c.is_alphabetic());
                     let letter_start = s.chars().next().is_some_and(|c| c.is_alphabetic());
                     if prev_digit && letter_start {
@@ -590,16 +871,37 @@ fn affix_parts(pattern: &str, sign: Option<bool>, body: &Parts, sym: Option<(&'s
 }
 
 fn with_sign(p: &str) -> String {
-    if p.contains('-') { p.to_string() } else { format!("-{p}") }
+    if p.contains('-') {
+        p.to_string()
+    } else {
+        format!("-{p}")
+    }
 }
 
 pub(super) fn format(spec: &Spec, x: Num) -> Formatted {
+    format_full(spec, x, false, None).0
+}
+
+/// x formatted, with the approximately sign at the sign's place when approx, and the plural
+/// category of a unit or currency name taken from plural when given; with x's own category.
+fn format_full(
+    spec: &Spec,
+    x: Num,
+    approx: bool,
+    plural_of_range: Option<&'static str>,
+) -> (Formatted, &'static str) {
     let locale = spec.get("locale").unwrap_or("en-US");
     let lang = locale.split('-').next().unwrap_or("en");
     let loc = num_locale(locale);
     let style = spec.get("style").unwrap_or("decimal");
     let notation = spec.get("notation").unwrap_or("standard");
     let grouping = spec.get("useGrouping").unwrap_or("auto");
+    // ICU groups compact numbers as min2 under auto.
+    let grouping = if notation == "compact" && grouping == "auto" {
+        "min2"
+    } else {
+        grouping
+    };
     let sd = spec.get("signDisplay").unwrap_or("auto");
     let mode = spec.get("roundingMode").unwrap_or("halfExpand");
     let strip = spec.get("trailingZeroDisplay") == Some("stripIfInteger");
@@ -609,12 +911,22 @@ pub(super) fn format(spec: &Spec, x: Num) -> Formatted {
         max_fd: spec.int("maximumFractionDigits", 3),
         min_sd: spec.int("minimumSignificantDigits", 1),
         max_sd: spec.int("maximumSignificantDigits", 21),
-        kind: match (spec.get("minimumFractionDigits").is_some(), spec.get("minimumSignificantDigits").is_some()) {
-            (true, true) => if spec.get("roundingPriority") == Some("lessPrecision") { "lessPrecision" } else { "morePrecision" },
+        kind: match (
+            spec.get("minimumFractionDigits").is_some(),
+            spec.get("minimumSignificantDigits").is_some(),
+        ) {
+            (true, true) => {
+                if spec.get("roundingPriority") == Some("lessPrecision") {
+                    "lessPrecision"
+                } else {
+                    "morePrecision"
+                }
+            }
             (false, true) => "significantDigits",
             _ => "fractionDigits",
         },
         priority: "auto",
+        inc: spec.int("roundingIncrement", 1),
     };
     let mut body = Parts::default();
     let mut neg = false;
@@ -643,13 +955,16 @@ pub(super) fn format(spec: &Spec, x: Num) -> Formatted {
                     let mut m = d.clone();
                     m.exp -= e;
                     let mut r = round(&m, &g, mode, strip);
-                    if !r.dec.is_zero() && r.dec.exp - 1 > (if notation == "engineering" { 2 } else { 0 }) {
+                    if !r.dec.is_zero()
+                        && r.dec.exp - 1 > (if notation == "engineering" { 2 } else { 0 })
+                    {
                         let step = if notation == "engineering" { 3 } else { 1 };
                         e += step;
                         m.exp -= step;
                         r = round(&m, &g, mode, strip);
                     }
                     zero = r.dec.is_zero();
+                    plural = plural_exp(lang, &r, e, e);
                     digits_parts(&r, loc, grouping, &mut body);
                     body.push("exponentSeparator", "E");
                     if e < 0 {
@@ -658,43 +973,60 @@ pub(super) fn format(spec: &Spec, x: Num) -> Formatted {
                     body.push("exponentInteger", &e.unsigned_abs().to_string());
                 }
                 "compact" => {
-                    let long = spec.get("compactDisplay") == Some("long");
-                    let table = COMPACT
-                        .iter()
-                        .find(|(l, lg, _)| *l == lang && *lg == long)
-                        .or_else(|| COMPACT.iter().find(|(l, lg, _)| *l == "en" && *lg == long))
-                        .map(|t| &t.2);
+                    // ICU has no long compact form for a currency's symbol or code.
+                    let long = spec.get("compactDisplay") == Some("long")
+                        && (style != "currency" || spec.get("currencyDisplay") == Some("name"));
+                    let tl = if COMPACT_PATTERNS.iter().any(|t| t.0 == lang) {
+                        lang
+                    } else {
+                        "en"
+                    };
+                    let row = |mag: i32| {
+                        COMPACT_PATTERNS
+                            .iter()
+                            .find(|t| t.0 == tl && t.1 == long && i32::from(t.2) == mag.min(20))
+                    };
                     let mut mag = if d.is_zero() { 0 } else { d.exp - 1 };
                     let mut r;
                     let mut pat;
+                    let mut scale;
                     loop {
                         pat = None;
                         let mut m = d.clone();
                         if mag >= 3
-                            && let Some(t) = table
+                            && let Some(t) = row(mag)
                         {
-                            let i = (mag.min(14) - 3) as usize;
-                            let [one, other] = t[i];
-                            if !other.is_empty() {
-                                let zeros = other.chars().filter(|c| *c == '0').count() as i32;
-                                let shift = mag.min(14) - zeros + 1;
-                                m.exp -= shift;
-                                pat = Some((one, other));
-                            }
+                            m.exp -= i32::from(t.3);
+                            pat = Some(t);
                         }
                         r = round(&m, &g, mode, strip);
-                        let new_mag = if r.dec.is_zero() { 0 } else { r.dec.exp - 1 + (d.exp - m.exp) };
-                        if new_mag > mag && mag < 14 {
+                        scale = d.exp - m.exp;
+                        let new_mag = if r.dec.is_zero() {
+                            0
+                        } else {
+                            r.dec.exp - 1 + scale
+                        };
+                        if new_mag > mag && mag < 20 {
                             mag = new_mag;
                             continue;
                         }
                         break;
                     }
                     zero = r.dec.is_zero();
-                    plural = plural_of(lang, &r, false);
-                    if let Some((one, other)) = pat {
-                        let p = if plural == "one" { one } else { other };
-                        compact_affix = Some(p.to_string());
+                    // ICU picks the compact pattern by the shown number's category, and a
+                    // unit's or currency's name by the whole value's (1K is 1000).
+                    let shown = plural_of(lang, &r, false);
+                    plural = plural_scaled(lang, &r, scale);
+                    if let Some(t) = pat {
+                        let exactly_one = r.dec.digits == [1] && r.dec.exp == 1 && !d.neg;
+                        compact_affix = Some(
+                            if exactly_one && !t.5.is_empty() {
+                                t.5
+                            } else {
+                                plural_pick(&t.4, shown)
+                            }
+                            .to_string(),
+                        );
                     }
                     digits_parts(&r, loc, grouping, &mut body);
                 }
@@ -707,10 +1039,16 @@ pub(super) fn format(spec: &Spec, x: Num) -> Formatted {
             }
         }
     }
+    let compacted = compact_affix.is_some();
     if let Some(p) = compact_affix {
-        let first = p.find('0').unwrap_or(0);
-        let last = p.rfind('0').map_or(0, |i| i + 1);
-        let (pre, post) = (&p[..first], &p[last..]);
+        let (pre, post) = match p.split_once("{0}") {
+            Some((a, b)) => (a, b),
+            // a pattern without the number (fr mille)
+            None => {
+                body = Parts::default();
+                ("", p.as_str())
+            }
+        };
         let mut nb = Parts::default();
         let core = pre.trim_end();
         if !core.is_empty() {
@@ -729,7 +1067,24 @@ pub(super) fn format(spec: &Spec, x: Num) -> Formatted {
         }
         body = nb;
     }
-    let sign = if x_is_nan(&body) { None } else { sign_of(sd, neg, zero) };
+    // NaN is unsigned, but signDisplay always gives it a plus sign.
+    let sign = if x_is_nan(&body) {
+        if sd == "always" { Some(false) } else { None }
+    } else {
+        sign_of(sd, neg, zero)
+    };
+    let ap = if approx {
+        RANGES
+            .iter()
+            .find(|r| r.0 == lang)
+            .or(RANGES.first())
+            .map(|r| r.2)
+    } else {
+        None
+    };
+    let signed = sign.is_some() || ap.is_some();
+    let own_plural = plural;
+    let plural = plural_of_range.unwrap_or(plural);
     let mut out = Parts::default();
     match style {
         "currency" => {
@@ -737,35 +1092,104 @@ pub(super) fn format(spec: &Spec, x: Num) -> Formatted {
             let cd = spec.get("currencyDisplay").unwrap_or("symbol");
             let entry = CURRENCIES.iter().find(|c| c.code == code);
             if cd == "name" {
-                let name = entry.map_or(code, |c| if plural == "one" { c.one } else { c.other });
-                let p = if sign.is_some() { "-# \u{a4}" } else { "# \u{a4}" };
-                affix_parts(p, sign, &body, Some(("currency", name)), loc, &mut out);
-                return Formatted { parts: out };
+                let row = CURRENCY_NAMES
+                    .iter()
+                    .find(|(l, c, _)| *l == lang && *c == code)
+                    .or_else(|| {
+                        CURRENCY_NAMES
+                            .iter()
+                            .find(|(l, c, _)| *l == "en" && *c == code)
+                    });
+                let pattern = row.map_or_else(
+                    || format!("{{0}} {code}"),
+                    |r| plural_pick(&r.2, plural).to_string(),
+                );
+                let mut num = Parts::default();
+                affix_parts(
+                    if signed { "-#" } else { "#" },
+                    sign,
+                    ap,
+                    &body,
+                    None,
+                    loc,
+                    &mut num,
+                );
+                wrap_pattern(&pattern, &num, "currency", &mut out);
+                return (Formatted { parts: out }, own_plural);
             }
+            let by_lang = CURRENCY_SYMBOLS_L
+                .iter()
+                .find(|(l, c, _, _)| *l == lang && *c == code)
+                .or_else(|| {
+                    CURRENCY_SYMBOLS_L
+                        .iter()
+                        .find(|(l, c, _, _)| *l == "en" && *c == code)
+                });
             let sym: &str = match cd {
                 "code" => code,
-                "narrowSymbol" => entry.map_or(code, |c| c.narrow),
+                "narrowSymbol" => by_lang
+                    .map(|t| t.3)
+                    .or(entry.map(|c| c.narrow))
+                    .unwrap_or(code),
                 _ => CURRENCY_SYMBOLS
                     .iter()
-                    .find(|(l, c, _)| *c == code && (*l == locale || *l == lang))
+                    .find(|(l, c, _)| *c == code && *l == locale && l.contains('-'))
                     .map(|t| t.2)
+                    .or(by_lang.map(|t| t.2))
                     .or(entry.map(|c| c.symbol))
                     .unwrap_or(code),
             };
             let acct = spec.get("currencySign") == Some("accounting");
             let pat = match sign {
-                Some(true) if acct => loc.acct.to_string(),
-                Some(_) => loc.neg_cur.to_string(),
-                None => loc.cur.to_string(),
+                // ICU's compact patterns have no accounting form.
+                Some(true) if acct && !compacted => loc.acct.to_string(),
+                None if !signed => loc.cur.to_string(),
+                _ => loc.neg_cur.to_string(),
             };
-            let parenthesized = acct && sign == Some(true);
-            let pat = if sign.is_some() && !parenthesized { with_sign(&pat) } else { pat };
+            let parenthesized = acct && sign == Some(true) && pat.contains('(') && !compacted;
+            let pat = if signed && !parenthesized {
+                with_sign(&pat)
+            } else {
+                pat
+            };
             let sign = if parenthesized { None } else { sign };
-            affix_parts(&pat, sign, &body, Some(("currency", sym)), loc, &mut out);
+            affix_parts(
+                &pat,
+                sign,
+                ap,
+                &body,
+                Some(("currency", sym)),
+                loc,
+                &mut out,
+            );
         }
         "percent" => {
-            let pat = if sign.is_some() { with_sign(loc.neg_pct) } else { loc.pct.to_string() };
-            affix_parts(&pat, sign, &body, None, loc, &mut out);
+            let pat = if signed {
+                with_sign(loc.neg_pct)
+            } else {
+                loc.pct.to_string()
+            };
+            affix_parts(&pat, sign, ap, &body, None, loc, &mut out);
+            // ICU marks a compact percent's sign as a unit.
+            // ICU marks a compact percent's sign as a unit, spaced its own way.
+            if notation == "compact" {
+                let gap = COMPACT_PERCENT_GAP
+                    .iter()
+                    .find(|r| r.0 == lang)
+                    .map(|r| r.1);
+                for i in 0..out.items.len() {
+                    if out.items[i].0 == "percentSign" {
+                        out.items[i].0 = "unit";
+                        if let Some(gap) = gap
+                            && i > 0
+                            && out.items[i - 1].0 == "literal"
+                            && out.items[i - 1].1.trim().is_empty()
+                        {
+                            out.items[i - 1].1 = gap.to_string();
+                        }
+                    }
+                }
+            }
         }
         "unit" => {
             let unit = spec.get("unit").unwrap_or("");
@@ -774,50 +1198,302 @@ pub(super) fn format(spec: &Spec, x: Num) -> Formatted {
                 Some("narrow") => 2,
                 _ => 0,
             };
-            let pl = usize::from(plural != "one");
-            let pattern = unit_pattern(unit, disp, pl);
+            let pattern = unit_pattern(lang, unit, disp, plural);
             let mut num = Parts::default();
-            affix_parts(if sign.is_some() { "-#" } else { "#" }, sign, &body, None, loc, &mut num);
-            let (pre, post) = pattern.split_once("{0}").unwrap_or(("", &pattern));
-            for (s, is_pre) in [(pre, true), (post, false)] {
-                if !is_pre {
-                    out.extend(&num);
+            affix_parts(
+                if signed { "-#" } else { "#" },
+                sign,
+                ap,
+                &body,
+                None,
+                loc,
+                &mut num,
+            );
+            wrap_pattern(&pattern, &num, "unit", &mut out);
+            // A compact percent unit is spaced as a compact percent.
+            if notation == "compact"
+                && let Some(gap) = COMPACT_PERCENT_GAP
+                    .iter()
+                    .find(|r| r.0 == lang)
+                    .map(|r| r.1)
+            {
+                for i in 1..out.items.len() {
+                    if out.items[i].0 == "unit"
+                        && out.items[i].1 == "%"
+                        && out.items[i - 1].0 == "literal"
+                        && out.items[i - 1].1.trim().is_empty()
+                    {
+                        out.items[i - 1].1 = gap.to_string();
+                    }
                 }
-                if s.is_empty() {
-                    continue;
-                }
-                let ws_l = s.len() - s.trim_start().len();
-                let ws_r = s.len() - s.trim_end().len();
-                if ws_l > 0 { out.push("literal", &s[..ws_l]); }
-                let core = s.trim();
-                if !core.is_empty() { out.push("unit", core); }
-                if ws_r > 0 && core.len() + ws_l < s.len() { out.push("literal", &s[s.len() - ws_r..]); }
             }
         }
         _ => {
-            affix_parts(if sign.is_some() { "-#" } else { "#" }, sign, &body, None, loc, &mut out);
+            affix_parts(
+                if signed { "-#" } else { "#" },
+                sign,
+                ap,
+                &body,
+                None,
+                loc,
+                &mut out,
+            );
         }
     }
-    Formatted { parts: out }
+    (Formatted { parts: out }, own_plural)
+}
+
+/// A formatted number split as ICU's range formatter sees it: the outer modifier (a unit's or
+/// currency name's text), the middle one (sign, symbol, percent sign, compact suffix) on each
+/// side of the number, and the number itself with its exponent (the inner modifier).
+struct Layers {
+    outer_pre: Vec<(&'static str, String)>,
+    middle_pre: Vec<(&'static str, String)>,
+    number: Vec<(&'static str, String)>,
+    middle_post: Vec<(&'static str, String)>,
+    outer_post: Vec<(&'static str, String)>,
+    inner_len: usize,
+}
+
+fn layers(p: &Parts, has_outer: bool) -> Layers {
+    const NUMBER: [&str; 9] = [
+        "integer",
+        "group",
+        "decimal",
+        "fraction",
+        "nan",
+        "infinity",
+        "exponentSeparator",
+        "exponentMinusSign",
+        "exponentInteger",
+    ];
+    let items = &p.items;
+    let first = items
+        .iter()
+        .position(|(t, _)| NUMBER.contains(t))
+        .unwrap_or(0);
+    let last = items
+        .iter()
+        .rposition(|(t, _)| NUMBER.contains(t))
+        .map_or(0, |i| i + 1);
+    let is_outer = |t: &str| has_outer && (t == "unit" || t == "currency");
+    let (pre, number, post) = (&items[..first], &items[first..last], &items[last..]);
+    let mut split_pre = 0;
+    if let Some(k) = pre.iter().rposition(|(t, _)| is_outer(t)) {
+        split_pre = k + 1;
+        while split_pre < pre.len() && pre[split_pre].0 == "literal" {
+            split_pre += 1;
+        }
+    }
+    let mut split_post = post.len();
+    if let Some(k) = post.iter().position(|(t, _)| is_outer(t)) {
+        split_post = k;
+        while split_post > 0 && post[split_post - 1].0 == "literal" {
+            split_post -= 1;
+        }
+    }
+    let inner_len = number
+        .iter()
+        .filter(|(t, _)| t.starts_with("exponent"))
+        .map(|(_, v)| v.chars().count())
+        .sum();
+    Layers {
+        outer_pre: pre[..split_pre].to_vec(),
+        middle_pre: pre[split_pre..].to_vec(),
+        number: number.to_vec(),
+        middle_post: post[..split_post].to_vec(),
+        outer_post: post[split_post..].to_vec(),
+        inner_len,
+    }
+}
+
+fn text_of(v: &[(&'static str, String)]) -> String {
+    v.iter().map(|(_, s)| s.as_str()).collect()
+}
+
+/// The length ICU's range formatter sees of a middle modifier: a space ICU's currency spacing
+/// put next to the symbol (ja 元 1.00) is not in it, but one in the pattern (de 1,00 €) is.
+fn middle_len(m: &str, style: &str, loc: &NumLocale) -> usize {
+    let n = m.chars().count();
+    if style == "currency" && !loc.cur.contains(|c: char| c.is_whitespace()) {
+        return m.chars().filter(|c| !c.is_whitespace()).count();
+    }
+    n
+}
+
+/// The plural category of a range whose ends have categories a and b.
+pub(super) fn plural_range(lang: &str, a: &str, b: &'static str) -> &'static str {
+    PLURAL_RANGES
+        .iter()
+        .find(|r| r.0 == lang && r.1 == a && r.2 == b)
+        .map_or(b, |r| r.3)
+}
+
+/// formatRange's parts, as (type, value, source), the way ICU's range formatter with its
+/// default collapse (auto) and identity fallback (approximately) makes them.
+pub(super) fn format_range(
+    spec: &Spec,
+    x: Num,
+    y: Num,
+) -> Vec<(&'static str, String, &'static str)> {
+    let locale = spec.get("locale").unwrap_or("en-US");
+    let lang = locale.split('-').next().unwrap_or("en");
+    let style = spec.get("style").unwrap_or("decimal");
+    // A unit's or currency name's text is ICU's outer modifier; so is a compact percent's sign,
+    // but a percent unit's is a middle one.
+    let has_outer = (style == "unit"
+        && (!spec.get("unit").unwrap_or("").starts_with("percent")
+            || spec.get("unitDisplay") == Some("long")))
+        || (style == "currency" && spec.get("currencyDisplay") == Some("name"))
+        || ((style == "percent" || spec.get("unit") == Some("percent"))
+            && spec.get("notation") == Some("compact"));
+    let (a, pa) = format_full(spec, x.clone(), false, None);
+    let (b, pb) = format_full(spec, y.clone(), false, None);
+    if a.parts.text() == b.parts.text() {
+        let (p, _) = format_full(spec, x, true, None);
+        return p
+            .parts
+            .items
+            .into_iter()
+            .map(|(t, v)| (t, v, "shared"))
+            .collect();
+    }
+    let lang_r = if RANGES.iter().any(|r| r.0 == lang) {
+        lang
+    } else {
+        "en"
+    };
+    let pl = plural_range(lang_r, pa, pb);
+    let (bo, _) = format_full(spec, y, false, Some(pl));
+    let (l1, l2, lo) = (
+        layers(&a.parts, has_outer),
+        layers(&b.parts, has_outer),
+        layers(&bo.parts, has_outer),
+    );
+    // Outer modifiers name the same unit or currency, so they always collapse (with the
+    // range's plural); the middle one collapses when it is the same and longer than one
+    // character; the inner one never does.
+    let m1 = text_of(&l1.middle_pre) + &text_of(&l1.middle_post);
+    let collapse_middle = text_of(&l1.middle_pre) == text_of(&l2.middle_pre)
+        && text_of(&l1.middle_post) == text_of(&l2.middle_post)
+        && middle_len(&m1, style, num_locale(locale)) > 1;
+    let repeat = l1.inner_len > 0 || (!collapse_middle && !m1.is_empty());
+    let mut sep = RANGES
+        .iter()
+        .find(|r| r.0 == lang_r)
+        .map_or("–", |r| r.1)
+        .to_string();
+    if repeat {
+        if !sep.starts_with(char::is_whitespace) {
+            sep.insert(0, ' ');
+        }
+        if !sep.ends_with(char::is_whitespace) {
+            sep.push(' ');
+        }
+    }
+    let mut out: Vec<(&'static str, String, &'static str)> = Vec::new();
+    let put = |v: &[(&'static str, String)],
+               src: &'static str,
+               out: &mut Vec<(&'static str, String, &'static str)>| {
+        for (t, s) in v {
+            out.push((t, s.clone(), src));
+        }
+    };
+    put(&lo.outer_pre, "shared", &mut out);
+    if collapse_middle {
+        put(&l1.middle_pre, "shared", &mut out);
+    }
+    for (l, src) in [(&l1, "startRange"), (&l2, "endRange")] {
+        if src == "endRange" {
+            out.push(("literal", sep.clone(), "shared"));
+        }
+        if !collapse_middle {
+            put(&l.middle_pre, src, &mut out);
+        }
+        put(&l.number, src, &mut out);
+        if !collapse_middle {
+            put(&l.middle_post, src, &mut out);
+        }
+    }
+    if collapse_middle {
+        put(&l1.middle_post, "shared", &mut out);
+    }
+    put(&lo.outer_post, "shared", &mut out);
+    out
 }
 
 fn x_is_nan(p: &Parts) -> bool {
     p.items.iter().any(|(t, _)| *t == "nan")
 }
 
-fn unit_pattern(unit: &str, disp: usize, pl: usize) -> String {
-    let simple = |u: &str| UNITS.iter().find(|(n, _)| *n == u).map(|(_, p)| p[disp][pl]);
+const PLURALS: [&str; 6] = ["zero", "one", "two", "few", "many", "other"];
+
+/// A generated row's form for a plural category ("" in a row means the same as other).
+fn plural_pick<'a>(row: &[&'a str; 6], plural: &str) -> &'a str {
+    let i = PLURALS.iter().position(|p| *p == plural).unwrap_or(5);
+    if row[i].is_empty() { row[5] } else { row[i] }
+}
+
+/// Splits a "{0}" pattern around the formatted number: the text around it is a part of type
+/// `ty` with its outer spaces as literals.
+fn wrap_pattern(pattern: &str, num: &Parts, ty: &'static str, out: &mut Parts) {
+    let (pre, post) = pattern.split_once("{0}").unwrap_or(("", pattern));
+    for (s, is_pre) in [(pre, true), (post, false)] {
+        if !is_pre {
+            out.extend(num);
+        }
+        if s.is_empty() {
+            continue;
+        }
+        let core = s.trim_matches(|c: char| c.is_whitespace());
+        let ws_l = s.len() - s.trim_start_matches(|c: char| c.is_whitespace()).len();
+        if ws_l > 0 {
+            out.push("literal", &s[..ws_l]);
+        }
+        if !core.is_empty() {
+            out.push(ty, core);
+        }
+        if ws_l + core.len() < s.len() {
+            out.push("literal", &s[ws_l + core.len()..]);
+        }
+    }
+}
+
+fn unit_pattern(lang: &str, unit: &str, disp: usize, plural: &str) -> String {
+    let lang = if UNIT_PATTERNS.iter().any(|r| r.0 == lang) {
+        lang
+    } else {
+        "en"
+    };
+    let d = disp as u8;
+    let simple = |u: &str| {
+        UNIT_PATTERNS
+            .iter()
+            .find(|r| r.0 == lang && r.1 == u && r.2 == d)
+            .map(|r| plural_pick(&r.3, plural))
+    };
     if let Some(p) = simple(unit) {
         return p.to_string();
     }
-    if let Some((_, _, _, p)) = UNIT_PER.iter().find(|(u, d, n, _)| *u == unit && usize::from(*d) == disp && usize::from(*n) == pl) {
-        return p.to_string();
-    }
-    if let Some((a, b)) = unit.split_once("-per-")
-        && let Some(x) = simple(a)
-        && let Some((_, per)) = UNIT_PER_PATTERNS.iter().find(|(n, _)| *n == b)
+    if let Some(r) = COMPOUND_PATTERNS
+        .iter()
+        .find(|r| r.0 == lang && r.1 == unit && r.2 == d)
     {
-        return per[disp][pl].replacen("{0}", x, 1);
+        return plural_pick(&r.3, plural).to_string();
+    }
+    if let Some((a, b)) = unit.split_once("-per-") {
+        if a == "percent"
+            && let Some(r) = PERCENT_PER.iter().find(|r| r.0 == lang && r.1 == d)
+        {
+            return plural_pick(&r.2, plural).to_string();
+        }
+        if let Some(x) = simple(a)
+            && let Some(per) = PER_PATTERNS
+                .iter()
+                .find(|r| r.0 == lang && r.1 == b && r.2 == d)
+        {
+            return per.3.replacen("{0}", x, 1);
+        }
     }
     "{0}".to_string()
 }

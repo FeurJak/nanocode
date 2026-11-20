@@ -70,8 +70,9 @@ pub(super) fn format(kind: i32, spec: &Spec, n: Option<f64>, s: Option<&str>, y:
                         max_sd: spec.int("maximumSignificantDigits", 21),
                         kind: if spec.get("minimumSignificantDigits").is_some() { "significantDigits" } else { "fractionDigits" },
                         priority: "auto",
+                        inc: spec.int("roundingIncrement", 1),
                     };
-                    let r = number::round(&d, &g, "halfExpand", false);
+                    let r = number::round(&d, &g, spec.get("roundingMode").unwrap_or("halfExpand"), false);
                     number::plural_of(lang, &r, spec.get("type") == Some("ordinal"))
                 }
                 _ => "other",
@@ -126,7 +127,7 @@ pub(super) fn format(kind: i32, spec: &Spec, n: Option<f64>, s: Option<&str>, y:
                 let d = number::from_f64(v.abs());
                 match d {
                     Num::Dec(d) => {
-                        let g = number::Digits { min_int: 1, min_fd: 0, max_fd: 3, min_sd: 1, max_sd: 21, kind: "fractionDigits", priority: "auto" };
+                        let g = number::Digits { min_int: 1, min_fd: 0, max_fd: 3, min_sd: 1, max_sd: 21, kind: "fractionDigits", priority: "auto", inc: 1 };
                         number::plural_of(lang, &number::round(&d, &g, "halfExpand", false), false)
                     }
                     _ => "other",
