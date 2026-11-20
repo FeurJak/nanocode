@@ -69,6 +69,11 @@ const CELL_PPM: u64 = 500_000;
 const CELL: &str = "cell";
 const FLEET_COMMIT_MS_MAX: u64 = 200;
 const REOPEN_MS_MAX: u64 = START_MS_MAX + RUN_MS_MAX;
+/// Share of seeds whose host crashes land next to a call's start, reply or commit instead of
+/// anywhere in EVENT_MS_MAX: the windows between a durable step, the stored request and the
+/// stored reply are a few milliseconds wide, so uniform crashes almost never hit them.
+const AIM_PPM: u64 = 500_000;
+const AIM_US_MAX: u64 = 8_000;
 const UNSENT: [&str; 3] = [
     "not dispatched",
     "never dispatched",
@@ -283,6 +288,28 @@ impl Script {
             script.cancels.sort_unstable();
         }
         script
+    }
+
+    /// Moves the drawn crashes to within AIM_US_MAX of moments a crash-free probe of the same
+    /// seed reached (a call admitted, its request run on a hand, its reply, its commit): the
+    /// windows between a durable start, the stored request, the stored reply and the commit
+    /// are a few milliseconds wide, so crashes drawn across EVENT_MS_MAX almost never hit one.
+    fn aim(&mut self, rng: &mut Rng, marks: &[u64]) {
+        if marks.is_empty() {
+            return;
+        }
+        let mut crashes: Vec<u64> = self
+            .crashes
+            .iter()
+            .map(|_| {
+                let mark = marks[rng.pick(marks.len())];
+                let jitter = rng.range(0, 2 * AIM_US_MAX) * 1_000;
+                (mark + jitter).saturating_sub(AIM_US_MAX * 1_000).max(MS)
+            })
+            .collect();
+        crashes.sort_unstable();
+        crashes.dedup();
+        self.crashes = crashes;
     }
 
     fn drawn(seed: u64, fleet: usize) -> Self {
@@ -963,12 +990,14 @@ struct World {
     rng: RefCell<Rng>,
     clock: Arc<Clock>,
     trace: RefCell<Vec<String>>,
+    marks: RefCell<Vec<u64>>,
     wrong: RefCell<Vec<String>>,
     stats: RefCell<HandsStats>,
 }
 
 impl World {
     fn note(&self, line: String) {
+        self.marks.borrow_mut().push(self.now());
         self.trace.borrow_mut().push(line);
     }
 
@@ -1740,6 +1769,7 @@ async fn process(world: &World) {
 
 pub struct HandsOutcome {
     pub digest: u64,
+    pub trace: Vec<String>,
     pub wrong: Option<String>,
     pub stats: HandsStats,
     pub shape: String,
@@ -1747,8 +1777,25 @@ pub struct HandsOutcome {
 
 fn simulate(seed: u64, mutation: HandsMutation, options: HandsOptions) -> HandsOutcome {
     let options = mutation.options(options);
+    let mut script = Script::of(seed, options);
+    let mut rng = Rng::derive(seed, "hands aim");
+    if !script.crashes.is_empty() && rng.chance(AIM_PPM) {
+        let mut probe = Script::of(seed, options);
+        probe.crashes.clear();
+        let (_, marks) = play(seed, mutation, options, probe);
+        script.aim(&mut rng, &marks);
+    }
+    play(seed, mutation, options, script).0
+}
+
+/// Runs one seed's script, returning its outcome and the instants its trace noted.
+fn play(
+    seed: u64,
+    mutation: HandsMutation,
+    options: HandsOptions,
+    script: Script,
+) -> (HandsOutcome, Vec<u64>) {
     let fleet = options.fleet;
-    let script = Script::of(seed, options);
     let shape = script.describe();
     let clock = Clock::new();
     crate::host::enter(seed, &clock);
@@ -1810,6 +1857,7 @@ fn simulate(seed: u64, mutation: HandsMutation, options: HandsOptions) -> HandsO
         rng: RefCell::new(Rng::derive(seed, "hands world")),
         clock: Arc::clone(&clock),
         trace: RefCell::new(Vec::new()),
+        marks: RefCell::new(Vec::new()),
         wrong: RefCell::new(Vec::new()),
         stats: RefCell::new(HandsStats {
             seeds: 1,
@@ -1862,12 +1910,18 @@ fn simulate(seed: u64, mutation: HandsMutation, options: HandsOptions) -> HandsO
     digest = fnv(digest, &clock.now_ns().to_le_bytes());
     let wrong = world.wrong.borrow().first().cloned();
     let stats = std::mem::take(&mut *world.stats.borrow_mut());
-    HandsOutcome {
-        digest,
-        wrong,
-        stats,
-        shape,
-    }
+    let trace = trace.clone();
+    let marks = world.marks.borrow().clone();
+    (
+        HandsOutcome {
+            digest,
+            trace,
+            wrong,
+            stats,
+            shape,
+        },
+        marks,
+    )
 }
 
 pub fn run_seed(seed: u64, mutation: HandsMutation, options: HandsOptions) -> HandsOutcome {
@@ -1879,6 +1933,7 @@ pub fn run_seed(seed: u64, mutation: HandsMutation, options: HandsOptions) -> Ha
             .unwrap_or_default();
         HandsOutcome {
             digest: 0,
+            trace: Vec::new(),
             wrong: Some(format!("panic: {message}")),
             stats: HandsStats::default(),
             shape: String::new(),
@@ -1898,6 +1953,11 @@ pub fn judge_seed(
     totals.add(&first.stats);
     if verbose {
         println!("seed {seed} digest {:016x} {}", first.digest, first.shape);
+        if first.wrong.is_some() {
+            for line in &first.trace {
+                println!("  trace: {line}");
+            }
+        }
     }
     if first.wrong.is_some() || !twice {
         return first
