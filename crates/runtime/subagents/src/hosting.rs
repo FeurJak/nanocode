@@ -153,7 +153,7 @@ impl Hosts {
         let hosted = Hosted {
             pool,
             policy: dispatching.policy,
-            stop: stop.clone(),
+            stop,
         };
         let inserted = self.hosted.update(|all| {
             if all.contains_key(root) {
@@ -349,7 +349,7 @@ fn claims(
             continue;
         }
         let agent = &agent;
-        let task = intent.task.clone();
+        let task = intent.task;
         let op = match fold.task(&task).map(|task| &task.phase) {
             Some(Phase::Open) if pool.ended(agent) != Some(Ended::Stopped) => Some(Op::Claim {
                 task,
