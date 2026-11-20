@@ -348,9 +348,6 @@ nanocode_finalize_from_dealloc(PyObject *self)
 
 #define PySys_Audit(...) 0
 
-/* One thread runs every program that uses the extensions. */
-#define PyThread_get_thread_ident() 1UL
-
 static inline PyObject *
 nanocode_decode(const char *bytes, Py_ssize_t size, const char *encoding, const char *errors)
 {
