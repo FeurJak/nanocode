@@ -77,6 +77,7 @@ pub fn start(config: Config, jobs: unbounded::Receiver<Job>) -> io::Result<Found
     let (told, found) = oneshot::channel();
     std::thread::Builder::new()
         .name("workspace".to_owned())
+        .stack_size(nanocode_shell::ENGINE_STACK)
         .spawn(move || {
             let _entered = handle.as_ref().map(nanocode_platform::Handle::enter);
             let kept = Kept::new(config);

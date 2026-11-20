@@ -23,7 +23,7 @@ const LIMITS: Limits = Limits {
     output: 16 << 20,
     file: 64 << 20,
     operations: u64::MAX,
-    depth: 64,
+    depth: nanocode_shell::DEFAULT_DEPTH,
 };
 const PYTHON: nanocode_python::Budget = nanocode_python::Budget {
     steps: u64::MAX,

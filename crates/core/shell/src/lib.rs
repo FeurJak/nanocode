@@ -19,4 +19,8 @@ pub use fs::{
 pub use machine::{Identity, Machine};
 pub use mem::MemFs;
 pub use psh_engine::host::HostInfo;
+#[cfg(any(unix, windows))]
+pub use psh_engine::std_host::ENGINE_STACK;
+
+pub const DEFAULT_DEPTH: u32 = psh_engine::ShellConfig::DEFAULT_MAX_DEPTH;
 pub use shell::{Changes, Config, Ended, Limit, Limits, Ran, Run, Script, Shell, Step, has};
