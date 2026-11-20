@@ -263,7 +263,7 @@ fn warn_invalid_escape_sequences_in_format_spec(
         };
         if !valid {
             let message = vm.ctx.new_str(format!(
-                "\"\\{next}\" is an invalid escape sequence. Such sequences will not work in the future. Did you mean \"\\\\{next}\"? A raw string is also an option."
+                "invalid escape sequence '\\{next}'"
             ));
             let _ = warn::warn(
                 message.into(),

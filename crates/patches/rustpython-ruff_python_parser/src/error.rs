@@ -89,7 +89,7 @@ impl std::fmt::Display for InterpolatedStringErrorType {
             }
             Self::ConversionFlagNotImmediatelyAfterExclamation => write!(
                 f,
-                "conversion type must come right after the exclamation mark"
+                "conversion type must come right after the exclamanation mark"
             ),
             Self::NewlineInFormatSpec => {
                 write!(
