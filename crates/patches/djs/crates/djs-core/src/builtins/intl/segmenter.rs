@@ -2,11 +2,17 @@
 //! words and sentences of UAX #29 over the properties scripts/intl-loc/segdata.js takes
 //! from the UCD into segdata.rs, with ICU's word statuses for isWordLike.
 //!
-//! Gap: ICU segments Han, Hiragana, half-width Katakana and Line_Break=SA (Thai, Lao,
-//! Khmer, Myanmar) runs into words with its dictionaries; here each ideograph is a word, a
-//! Hiragana run is one word and an SA run is one word.
+//! Word segments that hold Han, kana or Line_Break=SA characters go on through ICU's
+//! dictionary break engines (segdict.rs) as ICU's DictionaryCache::populateDictionary
+//! hands them over: Chinese and Japanese by cjdict, every piece keeping its segment's
+//! status. Line_Break=SA runs (Thai, Lao, Burmese, Khmer) stay whole.
 
 use super::segdata::{PROPS, RANGES};
+use super::segdict;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+/// Whether ICU's process-wide break engine factory holds the CJ engine yet.
+static CJ_LOADED: AtomicBool = AtomicBool::new(false);
 use super::Spec;
 use crate::interp::conv::Fault;
 use alloc::string::String;
@@ -31,6 +37,8 @@ fn props(c: u32) -> u32 {
 struct Ch {
     /// UTF-16 offset.
     at: usize,
+    /// The code point.
+    c: u32,
     p: u32,
 }
 
@@ -53,6 +61,13 @@ impl Ch {
     fn class(&self) -> u32 {
         self.p >> 16 & 7
     }
+    /// The dictionary break engine whose set holds it (segdata.js).
+    fn engine(&self) -> u32 {
+        self.p >> 19 & 7
+    }
+    fn common(&self) -> bool {
+        self.p >> 23 & 1 == 1
+    }
 }
 
 fn chars(s: &[u16]) -> Vec<Ch> {
@@ -67,7 +82,7 @@ fn chars(s: &[u16]) -> Vec<Ch> {
         };
         // A lone surrogate is a Control (GCB), Other elsewhere.
         let p = if (0xd800..0xe000).contains(&c) { 3 } else { props(c) };
-        out.push(Ch { at: i, p });
+        out.push(Ch { at: i, c, p });
         i += n;
     }
     out
@@ -180,19 +195,25 @@ const W_NUMERIC: u32 = 16;
 const W_EXTENDNUMLET: u32 = 17;
 const W_WSEGSPACE: u32 = 18;
 
-/// ICU's word class of a character: the Word_Break value, with ideographs and kana
-/// (class 1, 2) and SA letters (class 3) as their own classes.
-const W_IDEO: u32 = 32;
+/// ICU's word class of a character: the Word_Break value, with Han and Hiragana (class
+/// 1, 2), Hangul syllables (4) and other ideographs (5) as their own classes. SA letters
+/// (class 3) are ALetter ($ALetterPlus).
+const W_HAN: u32 = 32;
 const W_KANA: u32 = 33;
-const W_SA: u32 = 34;
+const W_IDEO: u32 = 34;
 const W_HANGUL: u32 = 35;
+/// Han that is not Ideographic (U+3005, radicals): $KanaKanji without $Ideographic's status.
+const W_HAN_NI: u32 = 36;
 
 fn wclass(c: &Ch) -> u32 {
     match c.class() {
-        1 if c.wb() == 0 || c.wb() == W_ALETTER => W_IDEO,
+        // $Extend leaves out Han.
+        1 => W_HAN,
         2 if c.wb() == 0 => W_KANA,
-        3 if matches!(c.wb(), 0 | W_ALETTER) => W_SA,
+        3 if matches!(c.wb(), 0 | W_ALETTER) => W_ALETTER,
         4 => W_HANGUL,
+        5 if matches!(c.wb(), 0 | W_ALETTER) => W_IDEO,
+        6 => W_HAN_NI,
         _ => c.wb(),
     }
 }
@@ -308,13 +329,14 @@ fn words(cs: &[Ch]) -> Vec<usize> {
             if a == W_EXTENDNUMLET && (ahletter(x) || matches!(x, W_NUMERIC | W_KATAKANA)) {
                 return true;
             }
-            // ICU: kana and SA runs stay together.
-            // ICU: a Hangul syllable run ends at an Extend, Format or ZWJ.
+            // ICU: Hangul syllable runs and Han, Hiragana and Katakana runs ($KanaKanji)
+            // end at an Extend, Format or ZWJ.
             if a == W_HANGUL && x == W_HANGUL {
                 return ai == i - 1;
             }
-            if (a == W_KANA && x == W_KANA) || (a == W_SA && x == W_SA) {
-                return true;
+            let kana_kanji = |w: u32| matches!(w, W_HAN | W_HAN_NI | W_KANA | W_KATAKANA);
+            if kana_kanji(a) && kana_kanji(x) {
+                return ai == i - 1;
             }
             a == W_RI && x == W_RI && ri % 2 == 1
         })();
@@ -329,6 +351,74 @@ fn words(cs: &[Ch]) -> Vec<usize> {
     b
 }
 
+/// $dictionary: Line_Break=SA, Han, Hiragana, Word_Break=Katakana and Hangul syllables.
+fn dictionary(c: &Ch) -> bool {
+    matches!(c.class(), 1..=4 | 6) || c.wb() == W_KATAKANA
+}
+
+/// The word boundaries with each segment's isWordLike, the rule segments that hold
+/// dictionary characters split as ICU's DictionaryCache::populateDictionary does.
+fn dictionary_words(cs: &[Ch], b: &[usize], end: usize) -> (Vec<usize>, Vec<bool>) {
+    let at = |i: usize| if i < cs.len() { cs[i].at } else { end };
+    let mut out = alloc::vec![b[0]];
+    let mut like = Vec::new();
+    for w in b.windows(2) {
+        let (s, e) = (w[0], w[1]);
+        let status = word_like(&cs[s..e]);
+        let mut breaks: Vec<usize> = Vec::new();
+        let mut found = 0;
+        // populateDictionary leaves a segment of one code unit alone.
+        let mut i = if at(e) - at(s) <= 1 { e } else { s };
+        loop {
+            while i < e && !dictionary(&cs[i]) {
+                i += 1;
+            }
+            if i >= e {
+                break;
+            }
+            let mut engine = cs[i].engine();
+            let mut j = i + 1;
+            if engine == 1 && cs[i].common() && !CJ_LOADED.load(Ordering::Relaxed) {
+                // ICU loads an engine by the character's script, so until the process
+                // loads the CJ engine for a Han or kana character its Common characters
+                // (U+30FC, U+FF70, U+FF9E, U+FF9F) go to the unhandled engine.
+                engine = 0;
+            }
+            if engine == 1 {
+                CJ_LOADED.store(true, Ordering::Relaxed);
+            }
+            if engine != 0 {
+                while j < e && cs[j].engine() == engine {
+                    j += 1;
+                }
+                let cps: Vec<u32> = cs[i..j].iter().map(|c| c.c).collect();
+                let ats: Vec<usize> = cs[i..j].iter().map(|c| c.at).collect();
+                let run = segdict::Run { cps: &cps, at: &ats, end: at(j) };
+                found += segdict::find_breaks(engine, &run, &mut breaks);
+            } else {
+                // ICU's UnhandledEngine skips the run of the character's script.
+                let common = cs[i].common();
+                while j < e && (if common { cs[j].common() } else { !cs[j].common() && cs[j].engine() == 0 }) {
+                    j += 1;
+                }
+            }
+            i = j;
+        }
+        if found > 0 {
+            for p in breaks {
+                if p > at(out[out.len() - 1]) && p < at(e) {
+                    let k = cs.partition_point(|c| c.at < p);
+                    out.push(k);
+                    like.push(status);
+                }
+            }
+        }
+        out.push(e);
+        like.push(status);
+    }
+    (out, like)
+}
+
 /// ICU's isWordLike of a word segment: it holds a letter, number, kana or ideograph.
 fn word_like(cs: &[Ch]) -> bool {
     // ICU's statuses: ZWJ ExtPict and a Hangul syllable with Extend, Format or ZWJ are none;
@@ -339,12 +429,26 @@ fn word_like(cs: &[Ch]) -> bool {
     if cs.iter().any(|c| wclass(c) == W_HANGUL) && cs.iter().any(|c| ignorable(wclass(c))) {
         return false;
     }
+    // An ExtendNumLet with Extend or Format after it ends on a rule with no status.
+    let last_base = cs.iter().rev().map(wclass).find(|&w| !ignorable(w));
+    if last_base == Some(W_EXTENDNUMLET) && cs.last().is_some_and(|c| ignorable(wclass(c))) {
+        return false;
+    }
     if cs.len() >= 2 && cs.iter().filter(|c| wclass(c) == W_EXTENDNUMLET).count() >= 2 {
+        return true;
+    }
+    // A non-Ideographic Han has a status only from $KanaKanji $KanaKanji, which takes no
+    // Extend or Format after it.
+    let bases: Vec<u32> = cs.iter().map(wclass).filter(|&w| !ignorable(w)).collect();
+    if bases.last() == Some(&W_HAN_NI) && cs.last().is_some_and(|c| ignorable(wclass(c))) {
+        return false;
+    }
+    if bases.len() >= 2 && bases.contains(&W_HAN_NI) {
         return true;
     }
     cs.iter().any(|c| {
         let w = wclass(c);
-        ahletter(w) || matches!(w, W_NUMERIC | W_KATAKANA | W_IDEO | W_KANA | W_SA | W_HANGUL)
+        ahletter(w) || matches!(w, W_NUMERIC | W_KATAKANA | W_HAN | W_IDEO | W_KANA | W_HANGUL)
     })
 }
 
@@ -454,8 +558,13 @@ fn sentences(cs: &[Ch]) -> Vec<usize> {
 pub(super) fn segment(spec: &Spec, s: &[u16]) -> String {
     let cs = chars(s);
     let g = spec.get("granularity").unwrap_or("grapheme");
+    let mut like = Vec::new();
     let b = match g {
-        "word" => words(&cs),
+        "word" => {
+            let (b, l) = dictionary_words(&cs, &words(&cs), s.len());
+            like = l;
+            b
+        }
         "sentence" => sentences(&cs),
         _ => graphemes(&cs),
     };
@@ -469,8 +578,8 @@ pub(super) fn segment(spec: &Spec, s: &[u16]) -> String {
     }
     if g == "word" {
         out.push('|');
-        for w in b.windows(2) {
-            out.push(if word_like(&cs[w[0]..w[1]]) { '1' } else { '0' });
+        for l in &like {
+            out.push(if *l { '1' } else { '0' });
         }
     }
     out

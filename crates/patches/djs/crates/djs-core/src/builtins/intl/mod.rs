@@ -3,6 +3,7 @@ mod data;
 mod date;
 mod displaynames;
 mod segdata;
+mod segdict;
 mod segmenter;
 mod dndata;
 mod locale;
