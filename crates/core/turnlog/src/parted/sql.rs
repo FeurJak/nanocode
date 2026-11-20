@@ -57,11 +57,11 @@ const NOTIFY_PG: &str = "SELECT count(pg_notify('nanocode_log', p)) FROM json_ar
 
 const SCAN: Dialects = [
     "SELECT CAST(seq AS TEXT), body FROM nanocode_plog WHERE part = CAST(?1 AS INTEGER) AND scope = ?2 AND seq >= CAST(?3 AS INTEGER) AND seq < CAST(?4 AS INTEGER) ORDER BY seq",
-    "SELECT CAST(seq AS TEXT), body FROM nanocode_plog WHERE part = CAST($1::text AS INTEGER) AND scope = $2::text AND seq >= CAST($3::text AS BIGINT) AND seq < CAST($4::text AS BIGINT) ORDER BY seq",
+    "SELECT CAST(seq AS TEXT), body FROM nanocode_plog WHERE part = CAST($1::text AS INTEGER) AND scope = $2::text AND seq >= CAST($3::text AS BIGINT) AND seq < CAST($4::text AS BIGINT) ORDER BY nanocode_plog.seq",
 ];
 const LOAD: Dialects = [
     "SELECT CAST(seq AS TEXT), body FROM nanocode_plog WHERE part = CAST(?1 AS INTEGER) AND scope = ?2 AND seq >= COALESCE((SELECT MAX(seq) FROM nanocode_plog WHERE part = CAST(?1 AS INTEGER) AND scope = ?2 AND snap), 0) ORDER BY seq",
-    "SELECT CAST(seq AS TEXT), body FROM nanocode_plog WHERE part = CAST($1::text AS INTEGER) AND scope = $2::text AND seq >= COALESCE((SELECT max(seq) FROM nanocode_plog WHERE part = CAST($1::text AS INTEGER) AND scope = $2::text AND snap), 0) ORDER BY seq",
+    "SELECT CAST(seq AS TEXT), body FROM nanocode_plog WHERE part = CAST($1::text AS INTEGER) AND scope = $2::text AND seq >= COALESCE((SELECT max(seq) FROM nanocode_plog WHERE part = CAST($1::text AS INTEGER) AND scope = $2::text AND snap), 0) ORDER BY nanocode_plog.seq",
 ];
 const ARCHIVE: Dialects = [
     "UPDATE nanocode_plog SET body = ?4, snap = substr(?4, 1, 1) = 's' WHERE part = CAST(?1 AS INTEGER) AND scope = ?2 AND seq = CAST(?3 AS INTEGER) AND EXISTS (SELECT 1 FROM nanocode_log_fence f WHERE f.part = CAST(?1 AS INTEGER) AND (CAST(?5 AS INTEGER) < 0 OR (f.holder IS NOT NULL AND f.epoch = CAST(?5 AS INTEGER))))",
@@ -81,7 +81,7 @@ const EXTEND: Dialects = [
 ];
 const FOLLOW: Dialects = [
     "SELECT CAST(pos AS TEXT), scope, CAST(seq AS TEXT), body FROM nanocode_plog WHERE part = CAST(?1 AS INTEGER) AND pos > CAST(?2 AS INTEGER) ORDER BY pos LIMIT CAST(?3 AS INTEGER)",
-    "SELECT CAST(pos AS TEXT), scope, CAST(seq AS TEXT), body FROM nanocode_plog WHERE part = CAST($1::text AS INTEGER) AND pos > CAST($2::text AS BIGINT) ORDER BY pos LIMIT CAST($3::text AS BIGINT)",
+    "SELECT CAST(pos AS TEXT), scope, CAST(seq AS TEXT), body FROM nanocode_plog WHERE part = CAST($1::text AS INTEGER) AND pos > CAST($2::text AS BIGINT) ORDER BY nanocode_plog.pos LIMIT CAST($3::text AS BIGINT)",
 ];
 const FENCE: Dialects = [
     "SELECT CAST(epoch AS TEXT), COALESCE(holder, ''), CAST(expires_ms AS TEXT) FROM nanocode_log_fence WHERE part = CAST(?1 AS INTEGER)",
