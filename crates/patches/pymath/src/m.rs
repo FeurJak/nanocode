@@ -75,7 +75,7 @@ pub fn tanh(n: f64) -> f64 {
 
 #[inline(always)]
 pub fn exp(n: f64) -> f64 {
-    unsafe { m_sys::exp(n) }
+    crate::exp::exp(n, |x| unsafe { m_sys::exp(x) })
 }
 
 #[inline(always)]
