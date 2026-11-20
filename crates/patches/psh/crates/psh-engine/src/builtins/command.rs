@@ -111,6 +111,8 @@ async fn lookup(vp: &Vp, name: &[u8], o: Lookup) -> Vec<Kind> {
             found.push(Kind::File(p, false));
         } else if crate::util::lookup(vp, name).await.is_some() {
             found.push(Kind::Utility);
+        } else if let Some(p) = hash::stand_in(vp, name, None).await {
+            found.push(Kind::File(p, false));
         }
         return found;
     }
@@ -126,9 +128,20 @@ async fn lookup(vp: &Vp, name: &[u8], o: Lookup) -> Vec<Kind> {
     }
     for dir in vp.host().path_entries(&path) {
         let dir = &dir[..];
-        if let Some(p) = hash::search(vp, name, Some(dir)).await
-            && (is_executable(vp, &vp.abs_path(&p)).await
-                || vp.host().stat(&vp.abs_path(&p), true).await.is_err())
+        let p = match hash::search(vp, name, Some(dir)).await {
+            Some(p)
+                if is_executable(vp, &vp.abs_path(&p)).await
+                    || vp.host().stat(&vp.abs_path(&p), true).await.is_err() =>
+            {
+                Some(p)
+            }
+            Some(_) => None,
+            // A sandbox's utility (already listed as one) or builtin, as the program
+            // in /usr/bin it stands in for.
+            None if found.iter().any(|k| matches!(k, Kind::Utility)) => None,
+            None => hash::stand_in(vp, name, Some(dir)).await,
+        };
+        if let Some(p) = p
             && !found
                 .iter()
                 .any(|k| matches!(k, Kind::File(q, _) if *q == p))
@@ -208,11 +221,11 @@ pub(super) async fn command(vp: &mut Vp, args: &[Vec<u8>]) -> R {
                     .is_none_or(|k| matches!(k, Kind::File(_, false) | Kind::Utility))
             {
                 let path = vp.host().standard_path();
-                kinds = hash::search(vp, name, Some(&path))
-                    .await
-                    .map(|p| Kind::File(p, false))
-                    .into_iter()
-                    .collect();
+                let found = match hash::search(vp, name, Some(&path)).await {
+                    Some(p) => Some(p),
+                    None => hash::stand_in(vp, name, Some(&path)).await,
+                };
+                kinds = found.map(|p| Kind::File(p, false)).into_iter().collect();
             }
             let Some(k) = kinds.into_iter().next() else {
                 if verbose {
@@ -229,7 +242,7 @@ pub(super) async fn command(vp: &mut Vp, args: &[Vec<u8>]) -> R {
                     }
                     k => k,
                 };
-                describe(&mut buf, name, &k);
+                describe(&mut buf, name, &k, vp.core.utilities.sandbox);
             } else {
                 match k {
                     Kind::Alias(a) => {
@@ -271,8 +284,9 @@ async fn flush(vp: &Vp, name: &str, buf: &mut Vec<u8>) -> Result<bool, Unwind> {
     super::write_fd(vp, 1, name, &std::mem::take(buf)).await
 }
 
-/// `NAME is …` lines of `type` and `command -V`.
-fn describe(buf: &mut Vec<u8>, name: &[u8], k: &Kind) {
+/// `NAME is …` lines of `type` and `command -V`. A sandbox's utility shows as the
+/// program in /usr/bin it stands in for ([`hash::stand_in`]).
+fn describe(buf: &mut Vec<u8>, name: &[u8], k: &Kind, sandbox: bool) {
     buf.extend_from_slice(name);
     match k {
         Kind::Alias(a) => {
@@ -282,6 +296,11 @@ fn describe(buf: &mut Vec<u8>, name: &[u8], k: &Kind) {
         }
         Kind::Keyword => buf.extend_from_slice(b" is a shell keyword\n"),
         Kind::Builtin => buf.extend_from_slice(b" is a shell builtin\n"),
+        Kind::Utility if sandbox => {
+            buf.extend_from_slice(b" is ");
+            buf.extend_from_slice(&utility_path(name));
+            buf.push(b'\n');
+        }
         Kind::Utility => buf.extend_from_slice(b" is a psh utility\n"),
         Kind::Function(f) => {
             buf.extend_from_slice(b" is a function\n");
@@ -365,7 +384,7 @@ pub(super) async fn type_(vp: &mut Vp, args: &[Vec<u8>]) -> R {
                 }
                 buf.push(b'\n');
             } else {
-                describe(&mut buf, name, k);
+                describe(&mut buf, name, k, vp.core.utilities.sandbox);
             }
         }
     }

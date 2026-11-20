@@ -879,6 +879,12 @@ impl UtilCtx<'_> {
         lookup(self.vp, name).await.is_some()
     }
 
+    /// In a sandbox, the program in /usr/bin that the utility or builtin `name` stands
+    /// in for, when `path` has /usr/bin (what `type -P` shows for it).
+    pub async fn stand_in(&self, name: &[u8], path: &[u8]) -> Option<Vec<u8>> {
+        crate::builtins::hash::stand_in(self.vp, name, Some(path)).await
+    }
+
     /// Every program named `name` (no slash) in the directories of `path`, in order:
     /// what `which -a` lists. A relative directory gives a relative path, as in
     /// `type`.
