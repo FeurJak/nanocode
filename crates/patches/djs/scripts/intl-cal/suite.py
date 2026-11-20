@@ -2,9 +2,11 @@
 # suite.py > intl-dtf-cal.jsonl: tempoxyz/nanocode-rt parity cases for DateTimeFormat calendars
 # (one case per calendar x locale, default for a locale's own calendar, plus option resolution), diffed against reference node v22.23.5.
 import json, random
-CALS = {"default": ["th", "fa", "am"], "gregory": ["th", "fa", "am"], "buddhist": ["th"], "roc": ["zh-TW"], "japanese": ["ja"], "persian": ["fa"], "islamic-civil": ["ar"], "islamic-tbla": ["ar"],
-        "islamic-umalqura": ["ar"], "islamic": ["ar"], "islamic-rgsa": ["ar"], "hebrew": ["he"], "indian": ["hi"], "coptic": ["ar"],
-        "ethiopic": [], "ethioaa": [], "chinese": ["zh"], "dangi": ["ko"], "iso8601": []}
+CALS = {"default": ["th", "fa", "am"], "gregory": ["th", "fa", "am"], "buddhist": ["th", "ar", "de", "es", "fr", "ja", "zh"],
+        "roc": ["zh-TW", "ar", "de", "es", "fr", "ja", "zh"], "japanese": ["ja", "ar", "de", "es", "fr", "zh"], "persian": ["fa"],
+        "islamic-civil": ["ar", "de", "es", "fr", "ja", "zh"], "islamic-tbla": ["ar"], "islamic-umalqura": ["ar"],
+        "islamic": ["ar", "de", "es", "fr", "ja", "zh"], "islamic-rgsa": ["ar"], "hebrew": ["he", "ar", "de", "es", "fr", "ja", "zh"],
+        "indian": ["hi"], "coptic": ["ar"], "ethiopic": [], "ethioaa": [], "chinese": ["zh", "de", "fr", "ja"], "dangi": ["ko"], "iso8601": []}
 rnd = random.Random(22235)
 SPECIAL = ["1912-07-29T12:00:00Z", "1912-07-30T00:00:00Z", "1926-12-25T00:00:00Z", "1989-01-07T23:59:59Z", "1989-01-08T00:00:00Z", "2019-04-30T12:00:00Z",
            "2019-05-01T00:00:00Z", "2023-03-22T00:00:00Z", "2023-04-20T00:00:00Z", "2024-03-15T00:00:00Z", "2024-03-21T00:00:00Z", "2025-09-11T00:00:00Z", "2000-02-29T13:05:00Z"]
