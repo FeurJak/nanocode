@@ -261,33 +261,47 @@ pub fn check(rng: &mut Rng) -> Checked {
     Ok(())
 }
 
+/// A threaded spread spawns and joins an OS thread per section, nine per call,
+/// which costs several times the encoding itself, so one iteration in
+/// `THREADED_EVERY` compares one of the three calls, picked at random, threaded
+/// against inline. Every iteration still checks the inline round trip and the
+/// mangled restore.
+const THREADED_EVERY: u64 = 8;
+
 pub fn spread(rng: &mut Rng) -> Checked {
     let mut fold = Fold::new();
     for (seq, body) in &rows(rng) {
         let _ = fold.apply(*seq, body);
     }
+    let threaded = rng.chance(1, THREADED_EVERY).then(|| rng.below(3));
     let inline = fold.snapshot_spread(Spread::Inline);
-    ensure!(
-        fold.snapshot_spread(Spread::Threads) == inline,
-        "inline and threaded snapshots differ"
-    );
+    if threaded == Some(0) {
+        ensure!(
+            fold.snapshot_spread(Spread::Threads) == inline,
+            "inline and threaded snapshots differ"
+        );
+    }
     let restored = Fold::restore_spread(&inline, Spread::Inline)
         .map_err(|error| format!("inline restore refused: {error}"))?;
-    ensure!(
-        Fold::restore_spread(&inline, Spread::Threads).ok().as_ref() == Some(&restored),
-        "inline and threaded restores differ"
-    );
+    if threaded == Some(1) {
+        ensure!(
+            Fold::restore_spread(&inline, Spread::Threads).ok().as_ref() == Some(&restored),
+            "inline and threaded restores differ"
+        );
+    }
     ensure!(
         restored == fold,
         "a restored snapshot differs from its fold"
     );
     let mangled = rng.mutate_bytes(&inline);
     let inline = Fold::restore_spread(&mangled, Spread::Inline).map_err(|error| error.to_string());
-    let threaded =
-        Fold::restore_spread(&mangled, Spread::Threads).map_err(|error| error.to_string());
-    ensure!(
-        inline == threaded,
-        "inline and threaded restores of a mangled snapshot differ"
-    );
+    if threaded == Some(2) {
+        let threaded =
+            Fold::restore_spread(&mangled, Spread::Threads).map_err(|error| error.to_string());
+        ensure!(
+            inline == threaded,
+            "inline and threaded restores of a mangled snapshot differ"
+        );
+    }
     Ok(())
 }
