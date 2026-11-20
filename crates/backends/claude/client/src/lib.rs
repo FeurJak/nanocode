@@ -2828,7 +2828,7 @@ impl ClaudeClient {
                 }
             }
             let body = wire.sent_shared();
-            let adopted = if hedge || retried {
+            let adopted = if hedge || retried || !wire.streaming {
                 None
             } else {
                 self.adopt_root_region(&body).await
@@ -2836,7 +2836,7 @@ impl ClaudeClient {
             if let Some(root) = self
                 .root
                 .as_ref()
-                .filter(|_| wire.agent && !hedge && adopted.is_none())
+                .filter(|_| wire.agent && wire.streaming && !hedge && adopted.is_none())
             {
                 let mut kept = headers.clone();
                 for name in [
