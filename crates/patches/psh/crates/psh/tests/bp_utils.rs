@@ -64,3 +64,14 @@ fn numfmt_pads_and_converts_one_field() {
     let src = "printf 'a 2048\\nb 10\\n' | numfmt --field=2 --to=iec; echo 123456 | numfmt --grouping";
     assert_eq!(sh(src), ("a 2.0K\nb 10\n123456\n".into(), 0));
 }
+
+#[test]
+fn wc_writes_each_count_before_the_next_inputs_error() {
+    assert_eq!(
+        sh("printf '1\\n2\\n' > f; wc -l f nope f 2>&1; echo $?"),
+        (
+            "2 f\nwc: nope: No such file or directory\n2 f\n4 total\n1\n".into(),
+            0
+        )
+    );
+}
