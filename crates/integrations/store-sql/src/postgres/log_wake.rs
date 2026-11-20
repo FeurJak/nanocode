@@ -1,7 +1,8 @@
 //! The wake half of the partitioned log on Postgres: one LISTEN connection per node on
-//! nanocode_log, whose payloads ("scope:head") every commit sends inside its transaction, so a
-//! notification arrives only for a committed append. After every (re)connect the listener calls
-//! caught_up first, so watchers re-read what they missed while it was down.
+//! nanocode_log, whose payloads ("scope:head") every commit sends after it lands, in its own
+//! unsynced transaction, so a notification arrives only for a committed append. A writer that
+//! dies between the two loses that wake, so watchers also re-read on a timer. After every
+//! (re)connect the listener calls caught_up first, so watchers re-read what they missed.
 
 use crate::postgres::{PgConnection, PgError, PgOptions};
 

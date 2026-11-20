@@ -5,7 +5,9 @@
 
 use std::{collections::HashSet, num::NonZeroU32, sync::Arc};
 
-use nanocode_durability_core::{Sql, SqlDialect, SqlRow, SqlStatement, StoreError, StoreFuture};
+use nanocode_durability_core::{
+    Settle, Sql, SqlDialect, SqlRow, SqlStatement, StoreError, StoreFuture,
+};
 use nanocode_partitions::{Partition, Row};
 
 use super::{Append, Entry, PartStore, Rows, Verdict};
@@ -42,6 +44,11 @@ const INSERT: Dialects = [
     "WITH input AS (SELECT CAST(a.key AS INTEGER) AS app, json_extract(a.value, '$[0]') AS scope, CAST(json_extract(r.value, '$[0]') AS INTEGER) AS seq, json_extract(r.value, '$[1]') AS body, CAST(r.key AS INTEGER) AS rord FROM json_each(?3) AS a, json_each(a.value, '$[1]') AS r), keep AS (SELECT i.* FROM input i WHERE EXISTS (SELECT 1 FROM nanocode_log_fence f WHERE f.part = CAST(?1 AS INTEGER) AND (CAST(?2 AS INTEGER) < 0 OR (f.holder IS NOT NULL AND f.epoch = CAST(?2 AS INTEGER)))) AND i.app NOT IN (SELECT j.app FROM input j JOIN nanocode_plog p ON p.part = CAST(?1 AS INTEGER) AND p.scope = j.scope AND p.seq = j.seq)) INSERT INTO nanocode_plog (part, scope, seq, pos, snap, body) SELECT CAST(?1 AS INTEGER), scope, seq, (SELECT COALESCE(MAX(pos), 0) FROM nanocode_plog WHERE part = CAST(?1 AS INTEGER)) + row_number() OVER (ORDER BY app, rord), substr(body, 1, 1) = 's', body FROM keep WHERE true RETURNING scope, CAST(seq AS TEXT)",
     "WITH input AS (SELECT a.ord AS app, a.e ->> 0 AS scope, CAST(r.e ->> 0 AS BIGINT) AS seq, r.e ->> 1 AS body, r.ord AS rord FROM json_array_elements(CAST($3::text AS json)) WITH ORDINALITY AS a(e, ord) CROSS JOIN LATERAL json_array_elements(a.e -> 1) WITH ORDINALITY AS r(e, ord)), clash AS (SELECT DISTINCT i.app FROM input i WHERE (SELECT true FROM nanocode_plog p WHERE p.part = CAST($1::text AS INTEGER) AND p.scope = i.scope AND p.seq = i.seq LIMIT 1)), ins AS (INSERT INTO nanocode_plog (part, scope, seq, pos, snap, body) SELECT CAST($1::text AS INTEGER), s.scope, s.seq, nextval('nanocode_log_pos'), substr(s.body, 1, 1) = 's', s.body FROM (SELECT i.scope, i.seq, i.body FROM input i WHERE EXISTS (SELECT 1 FROM nanocode_log_fence f WHERE f.part = CAST($1::text AS INTEGER) AND (CAST($2::text AS BIGINT) < 0 OR (f.holder IS NOT NULL AND f.epoch = CAST($2::text AS BIGINT)))) AND NOT EXISTS (SELECT 1 FROM clash c WHERE c.app = i.app) ORDER BY i.app, i.rord) s RETURNING scope, seq), note AS (SELECT count(*) AS n FROM (SELECT pg_notify('nanocode_log', h.scope || ':' || h.head) FROM (SELECT scope, max(seq) AS head FROM ins GROUP BY scope) h WHERE CAST($4::text AS INTEGER) = 1) notified) SELECT ins.scope, CAST(ins.seq AS TEXT) FROM ins, note",
 ];
+/// Wakes listeners after a commit landed, in its own unsynced transaction: NOTIFY in the commit
+/// itself holds Postgres's global notify lock across the WAL flush and serialises every
+/// partition's commits (P=16, 64 claimers: 2.5k vs 13.7k claims/s with it off).
+const NOTIFY_PG: &str = "SELECT count(pg_notify('nanocode_log', p)) FROM json_array_elements_text(CAST($1::text AS json)) AS p";
+
 const SCAN: Dialects = [
     "SELECT CAST(seq AS TEXT), body FROM nanocode_plog WHERE part = CAST(?1 AS INTEGER) AND scope = ?2 AND seq >= CAST(?3 AS INTEGER) AND seq < CAST(?4 AS INTEGER) ORDER BY seq",
     "SELECT CAST(seq AS TEXT), body FROM nanocode_plog WHERE part = CAST($1::text AS INTEGER) AND scope = $2::text AND seq >= CAST($3::text AS BIGINT) AND seq < CAST($4::text AS BIGINT) ORDER BY seq",
@@ -232,10 +239,9 @@ impl<H: Sql + Send + Sync + ?Sized> PartStore for SqlParts<H> {
             let json = serde_json::to_string(&encoded)
                 .map_err(|error| StoreError::Backend(format!("encode batch: {error}")))?;
             let (part, epoch_text) = (part.0.to_string(), token(epoch));
-            let notify = if self.notify { "1" } else { "0" };
             let mut params = vec![part.as_str(), epoch_text.as_str(), json.as_str()];
             if self.postgres() {
-                params.push(notify);
+                params.push("0");
             }
             let insert = SqlStatement {
                 sql: self.pick(&INSERT),
@@ -250,8 +256,32 @@ impl<H: Sql + Send + Sync + ?Sized> PartStore for SqlParts<H> {
                 answer => answer?,
             };
             let mut landed = HashSet::new();
+            let mut heads = std::collections::BTreeMap::new();
             for cells in result(&answer, 1)? {
-                landed.insert((cell(cells, 0)?.to_owned(), number(cells, 1)?));
+                let (scope, seq) = (cell(cells, 0)?, number(cells, 1)?);
+                let head = heads.entry(scope).or_insert(seq);
+                *head = (*head).max(seq);
+                landed.insert((scope.to_owned(), seq));
+            }
+            if self.notify && self.postgres() && !heads.is_empty() {
+                let payloads: Vec<String> = heads
+                    .iter()
+                    .map(|(scope, head)| format!("{scope}:{head}"))
+                    .collect();
+                let payloads = serde_json::to_string(&payloads)
+                    .map_err(|error| StoreError::Backend(format!("encode notify: {error}")))?;
+                // The append is committed; a lost wake only delays followers, so its error is dropped.
+                let _ = self
+                    .host
+                    .write(
+                        Settle::Ordered,
+                        "plog_notify",
+                        &[SqlStatement {
+                            sql: NOTIFY_PG,
+                            params: vec![payloads.as_str()],
+                        }],
+                    )
+                    .await;
             }
             Ok(batch
                 .iter()
