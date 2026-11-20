@@ -63,6 +63,7 @@ dependencies = [
 name = "psh"
 version = "0.0.0"
 dependencies = [
+ "nanocode-sys",
  "psh-classify",
  "psh-engine",
  "psh-os",
