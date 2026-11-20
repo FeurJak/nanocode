@@ -13,6 +13,7 @@ const HOSTED_IDLE_RETIRE_MS: u64 = 24 * 60 * 60 * 1_000;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static DELAYED: AtomicBool = AtomicBool::new(false);
+static LAGGING: AtomicBool = AtomicBool::new(false);
 static MUTATION: Mutex<HostMutation> = Mutex::new(HostMutation::None);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,16 +24,19 @@ enum HostMutation {
     ReopenLost,
     SteersTakenMidTurn,
     SteersNeverDelivered,
+    /// Board reads that fail are not retried, and boards decide from the stale fold.
+    RefreshOnce,
 }
 
 impl HostMutation {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::None,
         Self::PolledOnce,
         Self::AppendUnflushed,
         Self::ReopenLost,
         Self::SteersTakenMidTurn,
         Self::SteersNeverDelivered,
+        Self::RefreshOnce,
     ];
 
     const fn name(self) -> &'static str {
@@ -43,6 +47,7 @@ impl HostMutation {
             Self::ReopenLost => "reopen_lost",
             Self::SteersTakenMidTurn => "steers_taken_mid_turn",
             Self::SteersNeverDelivered => "steers_never_delivered",
+            Self::RefreshOnce => "refresh_once",
         }
     }
 }
@@ -53,6 +58,7 @@ static TOTALS: Mutex<Option<(u64, BoardStats)>> = Mutex::new(None);
 
 struct Seed {
     host: Arc<dyn LogHost>,
+    lag: Arc<AtomicBool>,
     planes: Vec<Arc<BoardCoordination>>,
     terminal: BTreeMap<String, String>,
     scopes: Vec<String>,
@@ -64,18 +70,23 @@ struct Seed {
 impl Seed {
     fn new(seed: u64) -> Self {
         let log = MemoryLog::new();
+        let lag = Arc::new(AtomicBool::new(LAGGING.load(Ordering::Relaxed)));
         let host: Arc<dyn LogHost> = if DELAYED.load(Ordering::Relaxed) {
             Arc::new(Delayed {
                 log,
                 state: AtomicU64::new(seed | 1),
                 appends: AtomicU64::new(0),
                 mutation: *lock(&MUTATION),
+                lag: Arc::clone(&lag),
+                stale: AtomicBool::new(false),
+                failed: AtomicBool::new(false),
             })
         } else {
             Arc::new(log)
         };
         Self {
             host,
+            lag,
             planes: Vec::new(),
             terminal: BTreeMap::new(),
             scopes: Vec::new(),
@@ -107,6 +118,13 @@ struct Delayed {
     state: AtomicU64,
     appends: AtomicU64,
     mutation: HostMutation,
+    /// While set, some refreshes fail and leave their board's fold stale.
+    lag: Arc<AtomicBool>,
+    /// Whether the last call was a load or an append that landed: the next scan is a
+    /// refresh, not a write's own read.
+    stale: AtomicBool,
+    /// Whether the last scan failed.
+    failed: AtomicBool,
 }
 
 impl Delayed {
@@ -145,6 +163,18 @@ impl LogHost for Delayed {
         from: u64,
         to: u64,
     ) -> StoreFuture<'a, Result<Vec<(u64, String)>, StoreError>> {
+        // Only a scan that follows a load or an append that landed fails: a write reads
+        // after its refresh or after an append that lost, so the fault leaves stale folds
+        // rather than failed writes. The replica catches up by the next scan, so a read
+        // that is retried succeeds.
+        let stale = self.stale.swap(false, Ordering::Relaxed);
+        let failed = self.failed.swap(false, Ordering::Relaxed);
+        if self.lag.load(Ordering::Relaxed) && stale && !failed && self.yields() == 1 {
+            self.failed.store(true, Ordering::Relaxed);
+            return self.delayed(Box::pin(std::future::ready(Err(StoreError::NotCommitted(
+                "the replica is behind".to_owned(),
+            )))));
+        }
         self.delayed(self.log.scan(scope, from, to))
     }
 
@@ -152,6 +182,7 @@ impl LogHost for Delayed {
         &'a self,
         scope: &'a str,
     ) -> StoreFuture<'a, Result<Vec<(u64, String)>, StoreError>> {
+        self.stale.store(true, Ordering::Relaxed);
         self.delayed(self.log.load(scope))
     }
 
@@ -161,10 +192,17 @@ impl LogHost for Delayed {
         rows: &'a [(u64, String)],
     ) -> StoreFuture<'a, Result<(), StoreError>> {
         let appended = self.appends.fetch_add(1, Ordering::Relaxed);
+        self.stale.store(false, Ordering::Relaxed);
         if self.mutation == HostMutation::AppendUnflushed && appended % 7 == 6 {
             return self.delayed(Box::pin(std::future::ready(Ok(()))));
         }
-        self.delayed(self.log.append(scope, rows))
+        let stale = &self.stale;
+        let append = self.log.append(scope, rows);
+        self.delayed(Box::pin(async move {
+            let result = append.await;
+            stale.store(result.is_ok(), Ordering::Relaxed);
+            result
+        }))
     }
 }
 
@@ -181,6 +219,13 @@ pub fn enable_delayed() {
     DELAYED.store(true, Ordering::Relaxed);
 }
 
+/// Board reads lag behind the log: refreshes can leave stale folds, as after a
+/// failed refresh.
+pub fn enable_lagging() {
+    enable_delayed();
+    LAGGING.store(true, Ordering::Relaxed);
+}
+
 pub fn mutate(name: &str) -> bool {
     let Some(mutation) = HostMutation::ALL
         .into_iter()
@@ -193,6 +238,9 @@ pub fn mutate(name: &str) -> bool {
         return false;
     };
     enable_delayed();
+    if mutation == HostMutation::RefreshOnce {
+        enable_lagging();
+    }
     *lock(&MUTATION) = mutation;
     true
 }
@@ -216,6 +264,7 @@ pub fn begin(seed: u64) {
             HostMutation::SteersNeverDelivered => {
                 Some(nanocode_board::sim::Mutation::SteersNeverDelivered)
             }
+            HostMutation::RefreshOnce => Some(nanocode_board::sim::Mutation::RefreshOnce),
             _ => None,
         };
         if let Some(board) = board {
@@ -280,7 +329,20 @@ pub async fn steer(root: &str, id: AgentId) -> bool {
     sent
 }
 
+/// Judges the seed's board with reads that do not lag.
 pub async fn audit() -> Option<String> {
+    let lag = SEED.with_borrow(|seed| seed.as_ref().map(|seed| Arc::clone(&seed.lag)));
+    let lagging = lag
+        .as_ref()
+        .is_some_and(|lag| lag.swap(false, Ordering::Relaxed));
+    let found = judge().await;
+    if let Some(lag) = lag {
+        lag.store(lagging, Ordering::Relaxed);
+    }
+    found
+}
+
+async fn judge() -> Option<String> {
     let (plane, host, scopes) = SEED.with_borrow(|seed| {
         let seed = seed.as_ref()?;
         Some((

@@ -377,6 +377,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
             "--trace-dir" => live::trace_to(rest.next()?),
             "--subagents-board" => boardagents::enable(),
             "--subagents-board-delayed" => boardagents::enable_delayed(),
+            "--subagents-board-lagging" => boardagents::enable_lagging(),
             "--subagents-board-mutation" => {
                 if !boardagents::mutate(rest.next()?) {
                     return None;

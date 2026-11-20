@@ -159,6 +159,7 @@ pub enum Mutation {
     SteersTakenMidTurn,
     PoolForgetsIntent,
     RenewIgnoresCap,
+    RefreshOnce,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);
