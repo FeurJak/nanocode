@@ -71,3 +71,24 @@ fn a_write_after_a_forked_program_lets_the_reader_take_its_lines_first() {
     let src = "printf '1\\n2\\n' > f; ( cat f; echo x ) | sleep 0; echo $?";
     assert_eq!(sh("reader-never-reads", src), ("0\n".into(), 0));
 }
+
+#[test]
+fn a_utility_writing_a_pipe_whose_reader_left_ends_by_sigpipe() {
+    let src = "echo 2 > f; set -o pipefail; { echo 1; sleep 0.2; cat f; } | head -1; \
+               echo \"${PIPESTATUS[*]}\"";
+    assert_eq!(sh("epipe", src), ("1\n141 0\n".into(), 0));
+}
+
+#[test]
+fn a_forked_program_starting_lets_the_reader_take_its_lines_first() {
+    // bash forks the last `cat` after `echo 3`; `head` takes line 3 and exits while
+    // it starts, so its write meets the closed pipe (SIGPIPE).
+    let src = "echo 2 > f; set -o pipefail; { echo 1; cat f; echo 3; cat f; } | head -3; \
+               echo \"${PIPESTATUS[*]}\"";
+    assert_eq!(sh("start", src), ("1\n2\n3\n141 0\n".into(), 0));
+    let src = "echo 2 > f; set -o pipefail; for x in x x; do echo \"<$x>\"; : > out; cat f; \
+               done 2>&1 | head -3 > /dev/null; echo $?";
+    assert_eq!(sh("loop", src), ("141\n".into(), 0));
+    let src = "echo 2 > f; set -o pipefail; { echo 1; cat f; echo 3; cat f; } | cat; echo $?";
+    assert_eq!(sh("start-reader-stays", src), ("1\n2\n3\n2\n0\n".into(), 0));
+}

@@ -2476,19 +2476,28 @@ fn run_argv(
         match crate::util::lookup(vp, &argv[0]).await {
             Some(e) if !reads_own_process(vp, &argv).await => {
                 vp.exec_now = false;
+                // Bash forks for it: while the child starts, the pipe's reader takes
+                // what earlier commands wrote and may exit, so the utility's first
+                // write meets the closed pipe (`{ echo 1; cat f; echo 3; cat f; } |
+                // head -3` is 141). After it, the shell waits for its exit while the
+                // reader takes what it wrote.
+                hand_off_stdout(vp);
                 let r = crate::util::run(vp, e, argv, assigns).await;
-                // Bash forks for it, and the shell waits for its exit while the
-                // pipe's reader takes what it wrote.
-                if let Some(out) = vp.fd(1)
-                    && let FdObj::PipeWrite(w) = &*out
-                {
-                    w.hand_off();
-                }
+                hand_off_stdout(vp);
                 r
             }
             _ => run_external(vp, argv, assigns).await,
         }
     })
+}
+
+/// See [`crate::pipe::PipeWriter::hand_off`].
+fn hand_off_stdout(vp: &Vp) {
+    if let Some(out) = vp.fd(1)
+        && let FdObj::PipeWrite(w) = &*out
+    {
+        w.hand_off();
+    }
 }
 
 async fn reads_own_process(vp: &Vp, argv: &[Vec<u8>]) -> bool {

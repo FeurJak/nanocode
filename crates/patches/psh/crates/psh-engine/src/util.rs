@@ -293,6 +293,18 @@ async fn run_with(
             // What is still buffered goes out now; a utility that cares about a
             // failing final write flushes itself before returning.
             let _ = ctx.flush().await;
+            // A program that wrote a pipe whose reader left dies of SIGPIPE (141), as
+            // `cat f` in `{ echo 1; sleep 1; cat f; } | head -1`, unless the shell
+            // ignores the signal, which its children inherit.
+            let pipe = crate::host::SIGPIPE;
+            let ignored = ctx
+                .vp
+                .traps
+                .action(crate::builtins::trap::TrapKey::Signal(pipe))
+                .is_some_and(|a| a.is_empty());
+            if ctx.write_error == Some(io::ErrorKind::BrokenPipe) && !ignored {
+                return Ok(128 + pipe);
+            }
             Ok(status)
         }
         // The shell is ending, or the signal ended the utility as it would have ended

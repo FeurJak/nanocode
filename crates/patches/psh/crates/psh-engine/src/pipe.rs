@@ -53,11 +53,11 @@ struct Inner {
     /// reader runs. Set while the writer waits that turn.
     yielded: bool,
     /// Set when a program that bash forks (an in-process utility, `cat f` in
-    /// `(cat f; echo x) | head -3`) ended with bytes still in the pipe: in bash the
-    /// shell waits for that process's exit, and meanwhile the reader takes its lines
-    /// and may exit. So the next write, from another command, first lets the reader
-    /// run until it took them or left (the write then meets the closed pipe, SIGPIPE),
-    /// a bounded number of rounds in case the reader never reads.
+    /// `(cat f; echo x) | head -3`) starts or ends with bytes still in the pipe: in
+    /// bash the child starts, and the shell waits for its exit, while the reader takes
+    /// its lines and may exit. So the next write first lets the reader run until it
+    /// took them or left (the write then meets the closed pipe, SIGPIPE), a bounded
+    /// number of rounds in case the reader never reads.
     handoff: Option<u32>,
     /// The stages at a pipeline's start gate that look at this pipe ([`Watch`]):
     /// woken when a reader or writer starts waiting on it.
@@ -349,7 +349,8 @@ impl PipeWriter {
         os_end(&self.0, false, host)
     }
 
-    /// A program that bash forks ended writing this pipe: see [`Inner::handoff`].
+    /// A program that bash forks starts or ended writing this pipe: see
+    /// [`Inner::handoff`].
     pub(crate) fn hand_off(&self) {
         let mut p = self.0.borrow_mut();
         if p.readers > 0 && p.os.is_none() && !p.buf.is_empty() {
