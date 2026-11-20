@@ -3009,6 +3009,31 @@ async fn spawn_program(
     }
 }
 
+/// The interpreter a `#!` line names, by name (`/usr/bin/env python3 -u` gives
+/// `python3 -u`, `/usr/bin/python3` gives `python3`), with its arguments.
+fn shebang(source: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let line = source.strip_prefix(b"#!")?;
+    let line = &line[..line.iter().position(|&b| b == b'\n').unwrap_or(line.len())];
+    let mut words = line
+        .split(u8::is_ascii_whitespace)
+        .filter(|w| !w.is_empty())
+        .map(<[u8]>::to_vec);
+    let first = words.next()?;
+    let base = |w: &[u8]| w.rsplit(|&b| b == b'/').next().unwrap_or(w).to_vec();
+    let mut out = vec![base(&first)];
+    if out[0] == b"env" {
+        let mut rest: Vec<Vec<u8>> = words.filter(|w| w.as_slice() != b"-S").collect();
+        if rest.is_empty() {
+            return None;
+        }
+        rest[0] = base(&rest[0]);
+        out = rest;
+    } else {
+        out.extend(words);
+    }
+    Some(out)
+}
+
 /// Runs a program file the host cannot start as a psh script (D1300), as bash runs a
 /// file `execve` rejects: in a subshell that starts afresh, as if a new shell ran the
 /// file (only exported variables, no functions, aliases, traps or options of ours), with
@@ -3028,6 +3053,22 @@ async fn run_in_shell(vp: &mut Vp, program: &[u8], argv: Vec<Vec<u8>>, shown: &s
         return Ok(126);
     }
     drop(file);
+    // A `#!` line naming another interpreter (`#!/usr/bin/env python3`) runs the file
+    // with that program, found by its name, as the kernel runs it; a shell's own runs here.
+    if let Some(mut interp) = shebang(&source) {
+        let shell = matches!(interp[0].as_slice(), b"sh" | b"bash" | b"psh");
+        if !shell {
+            let mut argv = argv.into_iter();
+            argv.next();
+            interp.push(if shown.contains('/') {
+                shown.as_bytes().to_vec()
+            } else {
+                program.to_vec()
+            });
+            interp.extend(argv);
+            return Box::pin(run_external(vp, interp, Vec::new())).await;
+        }
+    }
     if crate::invocation::binary_file(&source) {
         vp.error(&format!(
             "{shown}: cannot execute binary file: Exec format error"
