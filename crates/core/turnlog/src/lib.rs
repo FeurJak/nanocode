@@ -15,8 +15,8 @@ pub use effect::{EffectClass, Effects};
 pub use file::{FileLog, FileOptions};
 pub use fold::{Checkpoint, Event, Fold, OpenCall, Phase, Recovered, Retry, Segment, Turn};
 pub use host::{
-    Compaction, Extension, LogHost, MemoryLog, MemoryWrites, Rider, SCAN_END, ScopeRows, SqlLog,
-    Write, host_id,
+    CHECKPOINT_PART_BYTES, Compaction, Extension, LogHost, MemoryLog, MemoryWrites, Rider,
+    SCAN_END, ScopeRows, SqlLog, StoredCheckpoint, Write, host_id,
 };
 pub use image::{FileIo, Header, Image, ImageOptions, Medium};
 pub use record::{Outcome, Record, Status, decode, encode};

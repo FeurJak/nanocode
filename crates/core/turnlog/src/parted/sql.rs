@@ -17,26 +17,30 @@ use nanocode_partitions::{Partition, Row};
 use nanocode_sync::{Atom, Notify};
 
 use super::{Append, Entry, PartStore, Rows, Verdict};
-use crate::host::{Compaction, Extension};
+use crate::host::{
+    CHECKPOINT_CREATE, Compaction, Extension, StoredCheckpoint, load_checkpoint, store_checkpoint,
+};
 
 /// The channel Postgres notifies on, with payload "scope:head" per committed scope.
 pub const CHANNEL: &str = "nanocode_log";
 
-const PREPARE_PG: [&str; 8] = [
+const PREPARE_PG: [&str; 9] = [
     "SELECT pg_advisory_xact_lock(7_061_636_192)",
     "CREATE SEQUENCE IF NOT EXISTS nanocode_log_pos",
     "CREATE TABLE IF NOT EXISTS nanocode_log_fence (part INTEGER PRIMARY KEY, epoch BIGINT NOT NULL DEFAULT 0, holder TEXT, expires_ms BIGINT NOT NULL DEFAULT 0)",
     "CREATE TABLE IF NOT EXISTS nanocode_log_cursor (part INTEGER NOT NULL, reader TEXT NOT NULL, pos BIGINT NOT NULL, PRIMARY KEY (part, reader))",
     "CREATE TABLE IF NOT EXISTS nanocode_plog (part INTEGER NOT NULL, scope TEXT NOT NULL, seq BIGINT NOT NULL, pos BIGINT NOT NULL, snap BOOLEAN NOT NULL, body TEXT COMPRESSION lz4 NOT NULL, PRIMARY KEY (part, scope, seq)) PARTITION BY LIST (part)",
     "CREATE INDEX IF NOT EXISTS nanocode_plog_pos ON nanocode_plog (part, pos)",
+    CHECKPOINT_CREATE[1],
     "CREATE OR REPLACE FUNCTION nanocode_plog_parts(n integer) RETURNS integer LANGUAGE plpgsql AS $parts$ BEGIN FOR i IN 0..n - 1 LOOP EXECUTE format('CREATE TABLE IF NOT EXISTS nanocode_plog_p%s PARTITION OF nanocode_plog FOR VALUES IN (%s)', i, i); INSERT INTO nanocode_log_fence (part) VALUES (i) ON CONFLICT DO NOTHING; END LOOP; RETURN n; END $parts$",
     "SELECT nanocode_plog_parts(CAST($1::text AS INTEGER))",
 ];
-const PREPARE_SQLITE: [&str; 5] = [
+const PREPARE_SQLITE: [&str; 6] = [
     "CREATE TABLE IF NOT EXISTS nanocode_log_fence (part INTEGER PRIMARY KEY, epoch INTEGER NOT NULL DEFAULT 0, holder TEXT, expires_ms INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE IF NOT EXISTS nanocode_log_cursor (part INTEGER NOT NULL, reader TEXT NOT NULL, pos INTEGER NOT NULL, PRIMARY KEY (part, reader)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS nanocode_plog (part INTEGER NOT NULL, scope TEXT NOT NULL, seq INTEGER NOT NULL, pos INTEGER NOT NULL, snap INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (part, scope, seq)) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS nanocode_plog_pos ON nanocode_plog (part, pos)",
+    CHECKPOINT_CREATE[0],
     "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i + 1 < CAST(?1 AS INTEGER)) INSERT OR IGNORE INTO nanocode_log_fence (part) SELECT i FROM n",
 ];
 
@@ -622,5 +626,20 @@ impl<H: Sql + Send + Sync + ?Sized> PartStore for SqlParts<H> {
             let answer = self.fenced("plog_prune", &part, epoch, statements).await?;
             Ok(result(&answer, 1)?.len() as u64)
         })
+    }
+
+    fn checkpoint<'a>(
+        &'a self,
+        scope: &'a str,
+    ) -> Option<StoreFuture<'a, Result<Option<StoredCheckpoint>, StoreError>>> {
+        Some(Box::pin(load_checkpoint(&*self.host, scope)))
+    }
+
+    fn save_checkpoint<'a>(
+        &'a self,
+        scope: &'a str,
+        checkpoint: &'a StoredCheckpoint,
+    ) -> Option<StoreFuture<'a, Result<(), StoreError>>> {
+        Some(Box::pin(store_checkpoint(&*self.host, scope, checkpoint)))
     }
 }
