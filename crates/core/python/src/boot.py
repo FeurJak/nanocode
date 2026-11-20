@@ -276,6 +276,10 @@ class _Finder:
         for base in sys.path if path is None else path:
             if not isinstance(base, str):
                 continue
+            # As CPython's FileFinder does, a relative entry is searched from the working
+            # directory, so modules found there name absolute files.
+            if not base.startswith('/'):
+                base = posix.getcwd() if base in ('', '.') else posix.getcwd() + '/' + base
             # A zip archive on the path, or a package inside one, imports through zipimport.
             if _archive(base) is not None:
                 try:
@@ -287,7 +291,7 @@ class _Finder:
                     _loaded.append(name)
                     return spec
                 continue
-            base = (base or '.') + '/' + tail
+            base = base.rstrip('/') + '/' + tail
             try:
                 if posix.stat(base).st_mode & 0o170000 == 0o040000:
                     portions.append(base)
