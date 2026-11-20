@@ -234,7 +234,7 @@ fn usage() -> ExitCode {
        board: [--mutation {}]
        cost: [--mutation {}]
        plog: [--mutation {}]
-       board_shards: [--mutation {}] | --board-shards-bench [RTT_US [ROW_US [BATCH]]]
+       board_shards: [--mutation {}] | --board-shards-bench [RTT_US [ROW_US [BATCH [PARTITIONS [WRITERS]]]]]
        hand_router: [--mutation {}]
        board_sync: [--mutation {}]
        dispatcher: [--mutation {}]
@@ -1541,7 +1541,13 @@ fn main() -> ExitCode {
             jitter_ms: 0,
         };
         let batch = numbers.get(2).copied().unwrap_or(256) as usize;
-        board_shards::bench(&[1, 4, 16, 64], &[16, 256, 1_024], batch, cost);
+        let partitions = numbers
+            .get(3)
+            .map_or_else(|| vec![1, 4, 16, 64], |count| vec![*count as u32]);
+        let writers = numbers
+            .get(4)
+            .map_or_else(|| vec![16, 256, 1_024], |count| vec![*count]);
+        board_shards::bench(&partitions, &writers, batch, cost);
         return ExitCode::SUCCESS;
     }
     let args: Vec<String> = std::env::args().skip(1).collect();

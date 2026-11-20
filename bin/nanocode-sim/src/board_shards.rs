@@ -28,7 +28,7 @@ use nanocode_board::{
     Applied, Board, BoardError, ClaimId, EventId, Fold, NewTask, Op, Outcome, Rejection, TaskId,
     Write,
     access::{Can, Grant, Who},
-    shards::{self, Committer, Merged, Route, Stats as CommitStats},
+    shards::{self, Committer, Merged, ReadyIndex, Route, Stats as CommitStats},
     sim::{self as board_sim, Mutation as BoardRule},
 };
 use nanocode_durability_core::{StoreError, StoreFuture};
@@ -45,6 +45,7 @@ const SCOPE: &str = "shards";
 const OWNER: &str = "user:lead";
 const MS: u64 = 1_000_000;
 const END: u64 = i64::MAX as u64;
+const BENCH_ROUNDS: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShardsMutation {
@@ -54,16 +55,22 @@ pub enum ShardsMutation {
     GroupSplits,
     RouteIgnoresTask,
     MergeSkipsPartition,
+    MergedIndexSkipsRows,
+    MergedIndexIgnoresRank,
+    ChildFollowsParent,
 }
 
 impl ShardsMutation {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 9] = [
         Self::None,
         Self::GroupSkipsSeq,
         Self::GroupVerdictFromPlan,
         Self::GroupSplits,
         Self::RouteIgnoresTask,
         Self::MergeSkipsPartition,
+        Self::MergedIndexSkipsRows,
+        Self::MergedIndexIgnoresRank,
+        Self::ChildFollowsParent,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -80,6 +87,9 @@ impl ShardsMutation {
             Self::GroupSplits => "group_splits",
             Self::RouteIgnoresTask => "route_ignores_task",
             Self::MergeSkipsPartition => "merge_skips_partition",
+            Self::MergedIndexSkipsRows => "merged_index_skips_rows",
+            Self::MergedIndexIgnoresRank => "merged_index_ignores_rank",
+            Self::ChildFollowsParent => "child_follows_parent",
         }
     }
 
@@ -100,6 +110,9 @@ impl ShardsMutation {
             Self::GroupSplits => BoardRule::GroupSplits,
             Self::RouteIgnoresTask => BoardRule::RouteIgnoresTask,
             Self::MergeSkipsPartition => BoardRule::MergeSkipsPartition,
+            Self::MergedIndexSkipsRows => BoardRule::MergedIndexSkipsRows,
+            Self::MergedIndexIgnoresRank => BoardRule::MergedIndexIgnoresRank,
+            Self::ChildFollowsParent => BoardRule::ChildFollowsParent,
         }
     }
 }
@@ -122,6 +135,8 @@ pub struct ShardsStats {
     pub faults: u64,
     pub elapsed_ms: u64,
     pub contended: u64,
+    pub ranked: u64,
+    pub picks: u64,
 }
 
 impl ShardsStats {
@@ -144,6 +159,8 @@ impl ShardsStats {
         self.faults += other.faults;
         self.elapsed_ms += other.elapsed_ms;
         self.contended += other.contended;
+        self.ranked += other.ranked;
+        self.picks += other.picks;
     }
 }
 
@@ -154,6 +171,12 @@ pub struct Cost {
     pub rtt_us: u64,
     pub row_us: u64,
     pub jitter_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pick {
+    Scan,
+    Index,
 }
 
 #[derive(Clone, Debug)]
@@ -177,6 +200,9 @@ struct Shape {
     read_ppm: u64,
     cost: Cost,
     deadline_ms: u64,
+    rank_ppm: u64,
+    pick: Pick,
+    audit: bool,
 }
 
 impl Shape {
@@ -206,6 +232,9 @@ impl Shape {
                 jitter_ms: rng.range(0, 4),
             },
             deadline_ms: 120_000,
+            rank_ppm: rng.range(0, 200_000),
+            pick: Pick::Index,
+            audit: true,
         }
     }
 
@@ -372,9 +401,11 @@ struct World {
     plan: Vec<NewTask>,
     committers: RefCell<Vec<Vec<Committer>>>,
     view: RefCell<Vec<Fold>>,
+    index: RefCell<ReadyIndex>,
     oracle: RefCell<Oracle>,
     rng: RefCell<Rng>,
     spins: std::cell::Cell<u64>,
+    pick_ns: std::cell::Cell<u128>,
 }
 
 fn thread_of(seed: u64, index: u64) -> String {
@@ -404,11 +435,19 @@ fn plan(seed: u64, shape: &Shape) -> Vec<NewTask> {
     for index in 0..shape.roots {
         if rng.chance(shape.child_ppm) {
             let parent = TaskId(format!("t{}", rng.below(shape.roots)));
+            let labels = if rng.chance(shape.thread_ppm) {
+                BTreeMap::from([(
+                    shards::THREAD_LABEL.to_owned(),
+                    thread_of(seed, shape.roots + index),
+                )])
+            } else {
+                BTreeMap::new()
+            };
             tasks.push(NewTask {
                 id: TaskId(format!("c{index}")),
                 parent: Some(parent),
                 spec: format!("child {index}"),
-                labels: BTreeMap::new(),
+                labels,
                 needs: Vec::new(),
                 terms: nanocode_board::tasks::Terms::default(),
             });
@@ -455,7 +494,55 @@ impl World {
                 }
             }
         }
+        let view = self.view.borrow();
+        self.index
+            .borrow_mut()
+            .catch_up(&Merged::new(view.iter().collect()));
         true
+    }
+
+    fn pick(&self, now: u64, keep: impl Fn(&TaskId) -> bool) -> Vec<TaskId> {
+        let view = self.view.borrow();
+        let merged = Merged::new(view.iter().collect());
+        let index = self.index.borrow();
+        let top = self.shape.top;
+        let indexed = || -> Vec<TaskId> {
+            index
+                .ready(&merged, now)
+                .filter(|(_, id)| keep(id))
+                .take(top)
+                .map(|(_, id)| id.clone())
+                .collect()
+        };
+        let scanned = || -> Vec<TaskId> {
+            merged
+                .ready(now)
+                .into_iter()
+                .filter(|(_, id)| keep(id))
+                .take(top)
+                .map(|(_, id)| id.clone())
+                .collect()
+        };
+        let started = std::time::Instant::now();
+        let picked = match self.shape.pick {
+            Pick::Index => indexed(),
+            Pick::Scan => scanned(),
+        };
+        self.pick_ns
+            .set(self.pick_ns.get() + started.elapsed().as_nanos());
+        if self.shape.audit {
+            let other = match self.shape.pick {
+                Pick::Index => scanned(),
+                Pick::Scan => indexed(),
+            };
+            if picked != other {
+                self.oracle.borrow_mut().wrong.push(format!(
+                    "the merged ready index at {now} ms picks {picked:?} but a scan of the folds picks {other:?}"
+                ));
+            }
+        }
+        self.oracle.borrow_mut().stats.picks += 1;
+        picked
     }
 
     fn committer(&self, partition: Partition) -> Option<Committer> {
@@ -491,7 +578,8 @@ impl World {
         key: String,
         op: Op,
     ) -> (Option<Partition>, Result<Applied, BoardError>) {
-        match self.merged(|merged| merged.route(by, &op)) {
+        let (route, op) = self.merged(|merged| merged.place(by, op));
+        match route {
             Route::One(partition) => (Some(partition), self.send(partition, by, key, op).await),
             Route::Every => {
                 let mut last = Err(BoardError::Dropped("no partitions".into()));
@@ -636,17 +724,8 @@ async fn writer(world: &World, index: u64) {
             );
         }
         let now = world.now_ms();
-        let ready: Vec<TaskId> = world.merged(|merged| {
-            merged
-                .ready(now)
-                .into_iter()
-                .filter(|(_, id)| {
-                    !world.shape.spread
-                        || fnv(FNV_OFFSET, id.0.as_bytes()) % world.shape.writers == index
-                })
-                .take(world.shape.top)
-                .map(|(_, id)| id.clone())
-                .collect()
+        let ready = world.pick(now, |id| {
+            !world.shape.spread || fnv(FNV_OFFSET, id.0.as_bytes()) % world.shape.writers == index
         });
         if ready.is_empty() {
             world.nap(world.shape.poll_ms).await;
@@ -654,6 +733,21 @@ async fn writer(world: &World, index: u64) {
         }
         let task = ready[rng.pick(ready.len())].clone();
         tries += 1;
+        if rng.chance(world.shape.rank_ppm) {
+            let rank = Op::Rank {
+                task: task.clone(),
+                rank: Some(rng.below(world.plan.len() as u64)),
+            };
+            if world
+                .submit(&by, format!("rank:{tries}"), rank)
+                .await
+                .1
+                .is_ok()
+            {
+                world.oracle.borrow_mut().stats.ranked += 1;
+            }
+            continue;
+        }
         let key = format!("claim:{tries}");
         let claim = Op::Claim {
             task: task.clone(),
@@ -881,10 +975,47 @@ fn check(world: &World, logs: &[Vec<(u64, String)>]) -> Result<ShardsStats, Stri
         .collect();
     serial_ready.sort();
     let serial_ready: Vec<&TaskId> = serial_ready.into_iter().map(|(_, _, id)| id).collect();
+    let mut index = ReadyIndex::new();
+    index.catch_up(&merged);
+    let indexed: Vec<&TaskId> = index.ready(&merged, now).map(|(_, id)| id).collect();
+    if indexed != merged_ready {
+        return Err(format!(
+            "ready order differs: index {indexed:?} merged {merged_ready:?}"
+        ));
+    }
     if merged_ready != serial_ready {
         return Err(format!(
             "ready order differs: merged {merged_ready:?} serial {serial_ready:?}"
         ));
+    }
+    for task in &world.plan {
+        if let Some(key) = shards::own_key(task) {
+            let want = nanocode_partitions::partition_of(&key, world.count);
+            if merged.home(&task.id).is_some_and(|home| home != want) {
+                return Err(format!(
+                    "{} names its own routing key but sits in partition {:?}, not {want:?}",
+                    task.id,
+                    merged.home(&task.id)
+                ));
+            }
+        }
+        if merged.task(&task.id).is_some() && merged.parent(&task.id) != task.parent {
+            return Err(format!(
+                "{} has parent {:?} in the merged view, planned {:?}",
+                task.id,
+                merged.parent(&task.id),
+                task.parent
+            ));
+        }
+        if let Some(parent) = &task.parent
+            && merged.task(&task.id).is_some()
+            && !merged.children(parent).contains(&&task.id)
+        {
+            return Err(format!(
+                "{} is missing from the merged children of {parent}",
+                task.id
+            ));
+        }
     }
     if !merged.tasks().values().all(|task| task.finished()) || merged.len() != world.plan.len() {
         return Err(format!(
@@ -914,6 +1045,7 @@ fn check(world: &World, logs: &[Vec<(u64, String)>]) -> Result<ShardsStats, Stri
 
 pub struct ShardsOutcome {
     digest: u64,
+    pick_ns: u128,
     wrong: Option<String>,
     stats: ShardsStats,
     shape: String,
@@ -944,9 +1076,11 @@ fn simulate_shape(seed: u64, shape: Shape, mutation: ShardsMutation) -> ShardsOu
         count,
         committers: RefCell::new(vec![Vec::new(); count.get() as usize]),
         view: RefCell::new(vec![Fold::new(); count.get() as usize]),
+        index: RefCell::new(ReadyIndex::new()),
         oracle: RefCell::new(Oracle::default()),
         rng: RefCell::new(Rng::derive(seed, "board shards routing")),
         spins: std::cell::Cell::new(0),
+        pick_ns: std::cell::Cell::new(0),
         shape,
     };
     board_sim::mutate(mutation.rule());
@@ -995,6 +1129,7 @@ fn simulate_shape(seed: u64, shape: Shape, mutation: ShardsMutation) -> ShardsOu
     stats.contended = u64::from(world.shape.committers > 1);
     ShardsOutcome {
         digest,
+        pick_ns: world.pick_ns.get(),
         wrong: verdict.err(),
         stats,
         shape: described,
@@ -1015,6 +1150,7 @@ pub fn run_seed(seed: u64, mutation: ShardsMutation) -> ShardsOutcome {
             .unwrap_or_default();
         ShardsOutcome {
             digest: 0,
+            pick_ns: 0,
             wrong: Some(format!("panic: {message}")),
             stats: ShardsStats::default(),
             shape: String::new(),
@@ -1083,7 +1219,47 @@ pub fn bench(partitions: &[u32], writers: &[u64], batch: usize, cost: Cost) {
                 read_ppm: 0,
                 cost,
                 deadline_ms: 3_600_000,
+                rank_ppm: 0,
+                pick: Pick::Index,
+                audit: false,
             };
+            let mut walls = Vec::new();
+            for _ in 0..BENCH_ROUNDS {
+                for pick in [Pick::Scan, Pick::Index] {
+                    let started = std::time::Instant::now();
+                    let outcome = simulate_shape(
+                        0xb0a2d,
+                        Shape {
+                            pick,
+                            ..shape.clone()
+                        },
+                        ShardsMutation::None,
+                    );
+                    walls.push((
+                        pick,
+                        started.elapsed().as_micros(),
+                        outcome.pick_ns,
+                        outcome.stats.picks,
+                    ));
+                }
+            }
+            for pick in [Pick::Scan, Pick::Index] {
+                let mine = || walls.iter().filter(|(each, ..)| *each == pick);
+                let mut micros: Vec<u128> = mine().map(|(_, micros, ..)| *micros).collect();
+                let mut nanos: Vec<u128> = mine().map(|(_, _, nanos, _)| *nanos).collect();
+                micros.sort_unstable();
+                nanos.sort_unstable();
+                let picks = mine().next().map_or(0, |(.., picks)| *picks);
+                println!(
+                    "metric board.wall_ms{{partitions={count},writers={writers},batch={batch},pick={pick:?}}} median={:.1} min={:.1} picks={picks} rounds={BENCH_ROUNDS}",
+                    micros[micros.len() / 2] as f64 / 1000.0,
+                    micros[0] as f64 / 1000.0,
+                );
+                println!(
+                    "metric board.pick_us{{partitions={count},writers={writers},batch={batch},pick={pick:?}}} median={:.2}",
+                    nanos[nanos.len() / 2] as f64 / 1000.0 / picks.max(1) as f64,
+                );
+            }
             let outcome = simulate_shape(0xb0a2d, shape, ShardsMutation::None);
             let stats = outcome.stats;
             let secs = (stats.elapsed_ms.max(1)) as f64 / 1000.0;

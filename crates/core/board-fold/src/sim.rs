@@ -140,6 +140,9 @@ pub enum Mutation {
     DeliveryReceiptKeepsDead,
     DeliveryAttemptUncounted,
     DeliveryReceiptsRenote,
+    MergedIndexSkipsRows,
+    MergedIndexIgnoresRank,
+    ChildFollowsParent,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

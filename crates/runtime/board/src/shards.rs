@@ -1,14 +1,22 @@
 //! Partitioned boards: tasks hash onto P partitions, each its own log scope with its own seq.
 //!
-//! A task lives in one partition for life: a root task in the partition of its routing key (its
-//! thread's UUID as 16 raw bytes when it names one, else its own id), a child in its parent's.
-//! Single-task events (claim, renew, finish, reply, relabel, rank) go to the task's partition, so
-//! claims on tasks in different partitions never meet in one log, and claims on different tasks
-//! in one partition share a group commit rather than racing for a seq. Grants and revokes go to
-//! every partition. A move stays inside its partition. Reads fold each partition on its own and
-//! merge the folds into one view of the whole board.
+//! A task lives in one partition for life, picked by one function, `partition_of`, over its
+//! routing key: a task that names a thread sits in the partition of the thread's UUID as 16 raw
+//! bytes, one that names a project in its project's, whether or not it has a parent; any other
+//! child sits in its parent's, and any other root in its own id's. A child placed away from its
+//! parent is posted with the parent named by its `parent` label instead of its fold link, and the
+//! merged view joins the two (`Merged::parent`, `Merged::children`). Single-task events (claim,
+//! renew, finish, reply, relabel, rank) go to the task's partition, so claims on tasks in
+//! different partitions never meet in one log, and claims on different tasks in one partition
+//! share a group commit rather than racing for a seq. Grants and revokes go to every partition. A
+//! move stays inside its partition. Reads fold each partition on its own and merge the folds into
+//! one view of the whole board.
 
-use std::{collections::BTreeMap, num::NonZeroU32, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU32,
+    sync::Arc,
+};
 
 use nanocode_partitions::{Partition, partition_of};
 use nanocode_sync::{mpsc, oneshot};
@@ -22,6 +30,10 @@ use crate::{
 
 /// The label a task names its thread with; its value is the thread's UUID.
 pub const THREAD_LABEL: &str = "thread";
+
+pub const PROJECT_LABEL: &str = "project";
+
+pub const PARENT_LABEL: &str = "parent";
 
 /// The scope of partition `index` of the board at `scope`: one partition keeps the bare scope.
 pub fn scope_of(scope: &str, count: NonZeroU32, partition: Partition) -> String {
@@ -48,10 +60,20 @@ pub fn uuid_bytes(text: &str) -> Option<[u8; 16]> {
 
 /// The key a root task hashes by: its thread's UUID bytes, else its id's bytes.
 pub fn home_key(task: &NewTask) -> Vec<u8> {
+    own_key(task).unwrap_or_else(|| task.id.0.as_bytes().to_vec())
+}
+
+pub fn own_key(task: &NewTask) -> Option<Vec<u8>> {
+    let key = |label: &str| {
+        task.labels.get(label).map(|value| {
+            uuid_bytes(value).map_or_else(|| value.as_bytes().to_vec(), |bytes| bytes.to_vec())
+        })
+    };
     task.labels
         .get(THREAD_LABEL)
         .and_then(|thread| uuid_bytes(thread))
-        .map_or_else(|| task.id.0.as_bytes().to_vec(), |bytes| bytes.to_vec())
+        .map(|bytes| bytes.to_vec())
+        .or_else(|| key(PROJECT_LABEL))
 }
 
 /// Where one write goes.
@@ -112,6 +134,42 @@ impl<'a> Merged<'a> {
         self.shown().map(|(_, fold)| fold.tasks().len()).sum()
     }
 
+    pub fn parent(&self, id: &TaskId) -> Option<TaskId> {
+        let task = self.task(id)?;
+        task.spec.parent.clone().or_else(|| {
+            task.spec
+                .labels
+                .get(PARENT_LABEL)
+                .map(|parent| TaskId(parent.clone()))
+        })
+    }
+
+    pub fn children(&self, id: &TaskId) -> Vec<&'a TaskId> {
+        self.shown()
+            .flat_map(|(_, fold)| fold.tasks().iter())
+            .filter(|(_, task)| {
+                task.spec.parent.as_ref() == Some(id)
+                    || (task.spec.parent.is_none()
+                        && task.spec.labels.get(PARENT_LABEL) == Some(&id.0))
+            })
+            .map(|(child, _)| child)
+            .collect()
+    }
+
+    pub fn place(&self, by: &str, op: Op) -> (Route, Op) {
+        let route = self.route(by, &op);
+        let Op::Post { mut task } = op else {
+            return (route, op);
+        };
+        if let (Route::One(partition), Some(parent)) = (&route, task.parent.clone())
+            && self.home(&parent).is_some_and(|home| home != *partition)
+        {
+            task.parent = None;
+            task.labels.insert(PARENT_LABEL.to_owned(), parent.0);
+        }
+        (route, Op::Post { task })
+    }
+
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -149,11 +207,11 @@ impl<'a> Merged<'a> {
             return Route::One(hash(by.as_bytes()));
         }
         match op {
-            Op::Post { task } => Route::One(
-                task.parent
-                    .as_ref()
-                    .map_or_else(|| hash(&home_key(task)), home),
-            ),
+            Op::Post { task } => Route::One(match (own_key(task), &task.parent) {
+                (Some(key), _) if !mutated(Mutation::ChildFollowsParent) => hash(&key),
+                (_, Some(parent)) => home(parent),
+                (_, None) => hash(&home_key(task)),
+            }),
             Op::Tasks(TaskOp::Batch { name, tasks }) => Route::One(
                 tasks
                     .iter()
@@ -177,6 +235,88 @@ impl<'a> Merged<'a> {
             Op::Grant { .. } | Op::Revoke { .. } | Op::Charter {} => Route::Every,
             _ => Route::One(op.task().map_or(Partition(0), home)),
         }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ReadyIndex {
+    folded: Vec<u64>,
+    order: BTreeSet<(u64, Partition, TaskId)>,
+    ranks: BTreeMap<(Partition, TaskId), u64>,
+}
+
+impl ReadyIndex {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn catch_up(&mut self, merged: &Merged<'_>) {
+        let count = merged.folds.len();
+        assert!(
+            self.folded.len() <= count,
+            "a board does not lose partitions"
+        );
+        self.folded.resize(count, 0);
+        for (index, fold) in merged.folds.iter().enumerate() {
+            let partition = Partition(index as u32);
+            let entries = fold.entries();
+            let from = entries.partition_point(|entry| entry.seq < self.folded[index]);
+            let fresh = &entries[from..];
+            let Some(last) = fresh.last() else {
+                continue;
+            };
+            let skip = usize::from(mutated(Mutation::MergedIndexSkipsRows));
+            for entry in &fresh[..fresh.len() - skip] {
+                self.refresh(partition, fold, &entry.task);
+            }
+            self.folded[index] = last.seq + 1;
+        }
+    }
+
+    fn refresh(&mut self, partition: Partition, fold: &Fold, id: &TaskId) {
+        let key = (partition, id.clone());
+        if let Some(rank) = self.ranks.remove(&key) {
+            assert!(
+                self.order.remove(&(rank, partition, id.clone())),
+                "an indexed task is in the order"
+            );
+        }
+        let Some(task) = fold.task(id) else {
+            return;
+        };
+        if task.phase.terminal() {
+            return;
+        }
+        let rank = if mutated(Mutation::MergedIndexIgnoresRank) {
+            u64::MAX
+        } else {
+            task.rank.unwrap_or(u64::MAX)
+        };
+        self.order.insert((rank, partition, id.clone()));
+        self.ranks.insert(key, rank);
+    }
+
+    pub fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
+    pub fn ready<'a>(
+        &'a self,
+        merged: &'a Merged<'a>,
+        at_ms: u64,
+    ) -> impl Iterator<Item = (Partition, &'a TaskId)> + 'a {
+        self.order
+            .iter()
+            .filter(move |(_, partition, id)| {
+                merged
+                    .fold(*partition)
+                    .is_some_and(|fold| fold.claimable(id, at_ms).is_ok())
+            })
+            .map(|(_, partition, id)| (*partition, id))
     }
 }
 

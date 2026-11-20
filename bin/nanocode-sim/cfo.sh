@@ -193,6 +193,16 @@ default_table='
 1 canary_dispatcher_sleeps_through_idle canary:40 --scenario dispatcher --mutation dispatcher_sleeps_through_idle
 1 canary_dispatcher_sleeps_after_acting canary:40 --scenario dispatcher --mutation dispatcher_sleeps_after_acting
 1 canary_dispatcher_never_reaps canary:40 --scenario dispatcher --mutation dispatcher_never_reaps
+4 board_shards pass --scenario board_shards
+2 board_shards_twice pass --scenario board_shards --twice
+1 canary_board_shards_group_skips_seq canary:40 --scenario board_shards --mutation group_skips_seq
+1 canary_board_shards_group_verdict_from_plan canary:40 --scenario board_shards --mutation group_verdict_from_plan
+1 canary_board_shards_group_splits canary:40 --scenario board_shards --mutation group_splits
+1 canary_board_shards_route_ignores_task canary:40 --scenario board_shards --mutation route_ignores_task
+1 canary_board_shards_merge_skips_partition canary:40 --scenario board_shards --mutation merge_skips_partition
+1 canary_board_shards_merged_index_skips_rows canary:40 --scenario board_shards --mutation merged_index_skips_rows
+1 canary_board_shards_merged_index_ignores_rank canary:40 --scenario board_shards --mutation merged_index_ignores_rank
+1 canary_board_shards_child_follows_parent canary:40 --scenario board_shards --mutation child_follows_parent
 1 canary_capture_skip_trim canary --scenario capture --mutation skip_trim
 1 canary_capture_drop_chunk canary --scenario capture --mutation drop_chunk
 1 canary_buffered_admission_written canary --scenario turns --policy turnlog --mutation buffered_admission_written
