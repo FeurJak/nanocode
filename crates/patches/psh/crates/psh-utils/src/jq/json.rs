@@ -30,6 +30,11 @@ pub struct Reader<R> {
     /// A parse error ended the input.
     failed: bool,
     keys: Vec<Option<Rc<str>>>,
+    /// The elements of the arrays being read, innermost last, so each array is made at
+    /// its size once complete.
+    items: Vec<Val>,
+    /// The same for the objects being read.
+    pairs: Vec<(Rc<str>, Val)>,
 }
 
 const CHUNK: usize = 64 * 1024;
@@ -46,6 +51,8 @@ impl<R: Read> Reader<R> {
             lines_read: 0,
             failed: false,
             keys: vec![None; 256],
+            items: Vec::new(),
+            pairs: Vec::new(),
         }
     }
 
@@ -57,19 +64,26 @@ impl<R: Read> Reader<R> {
             self.buf.drain(..self.pos);
             self.pos = 0;
         }
-        let mut chunk = vec![0u8; CHUNK];
+        // Read straight into the buffer's tail, which keeps its allocation from one
+        // fill to the next.
+        let len = self.buf.len();
+        self.buf.resize(len + CHUNK, 0);
         loop {
-            match self.src.read(&mut chunk) {
+            match self.src.read(&mut self.buf[len..]) {
                 Ok(0) => {
+                    self.buf.truncate(len);
                     self.eof = true;
                     return Ok(false);
                 }
                 Ok(n) => {
-                    self.buf.extend_from_slice(&chunk[..n]);
+                    self.buf.truncate(len + n);
                     return Ok(true);
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
+                Err(e) => {
+                    self.buf.truncate(len);
+                    return Err(e);
+                }
             }
         }
     }
@@ -215,6 +229,9 @@ impl<R: Read> Reader<R> {
     }
 
     fn value_top(&mut self) -> Result<Option<Val>, ParseError> {
+        // What an error left of a value being read.
+        self.items.clear();
+        self.pairs.clear();
         // A byte order mark before a value is skipped, as jq does.
         if self.peek().ok().flatten() == Some(0xEF)
             && self.buf.get(self.pos..self.pos + 3) == Some(&[0xEF, 0xBB, 0xBF][..])
@@ -260,14 +277,14 @@ impl<R: Read> Reader<R> {
         match b {
             b'{' => {
                 self.bump().ok();
-                let mut m = Map::new();
                 let r = self.skip_ws();
                 self.io(r)?;
                 let p = self.peek();
                 if self.io(p)? == Some(b'}') {
                     self.bump().ok();
-                    return Ok(Val::obj(m));
+                    return Ok(Val::obj(Map::new()));
                 }
+                let start = self.pairs.len();
                 loop {
                     let r = self.skip_ws();
                     self.io(r)?;
@@ -306,13 +323,19 @@ impl<R: Read> Reader<R> {
                         }
                     }
                     let v = self.value(depth + 1)?;
-                    m.insert(k, v);
+                    self.pairs.push((k, v));
                     let r = self.skip_ws();
                     self.io(r)?;
                     let p = self.bump();
                     match self.io(p)? {
                         Some(b',') => {}
-                        Some(b'}') => return Ok(Val::obj(m)),
+                        Some(b'}') => {
+                            let mut m = Map::with_capacity(self.pairs.len() - start);
+                            for (k, v) in self.pairs.drain(start..) {
+                                m.insert(k, v);
+                            }
+                            return Ok(Val::obj(m));
+                        }
                         None => return self.unfinished(),
                         // jq holds the key on its stack until the value is complete.
                         Some(b']') => return self.error("Unmatched ']'"),
@@ -326,14 +349,14 @@ impl<R: Read> Reader<R> {
             }
             b'[' => {
                 self.bump().ok();
-                let mut a = Vec::new();
                 let r = self.skip_ws();
                 self.io(r)?;
                 let p = self.peek();
                 if self.io(p)? == Some(b']') {
                     self.bump().ok();
-                    return Ok(Val::arr(a));
+                    return Ok(Val::arr(Vec::new()));
                 }
+                let start = self.items.len();
                 loop {
                     let r = self.skip_ws();
                     self.io(r)?;
@@ -346,13 +369,14 @@ impl<R: Read> Reader<R> {
                         }
                         _ => {}
                     }
-                    a.push(self.value(depth + 1)?);
+                    let v = self.value(depth + 1)?;
+                    self.items.push(v);
                     let r = self.skip_ws();
                     self.io(r)?;
                     let p = self.bump();
                     match self.io(p)? {
                         Some(b',') => {}
-                        Some(b']') => return Ok(Val::arr(a)),
+                        Some(b']') => return Ok(Val::arr(self.items.drain(start..).collect())),
                         None => return self.unfinished(),
                         Some(b'}') => return self.error("Objects must consist of key:value pairs"),
                         Some(b':') => return self.error("':' not as part of an object"),
@@ -544,6 +568,20 @@ impl<R: Read> Reader<R> {
     }
 
     fn string(&mut self) -> Result<Rc<str>, ParseError> {
+        // A string without escapes whose end is in the buffer is made straight from it.
+        let rest = &self.buf[self.pos..];
+        if let Some(n) = rest
+            .get(1..)
+            .and_then(|r| r.iter().position(|&c| c == b'"' || c == b'\\' || c < 0x20))
+            && rest[1 + n] == b'"'
+            && let raw = &rest[1..1 + n]
+            && let Ok(text) = std::str::from_utf8(raw)
+        {
+            let s: Rc<str> = Rc::from(text);
+            self.col += 2 + raw.iter().filter(|&&c| c & 0xC0 != 0x80).count();
+            self.pos += n + 2;
+            return Ok(s);
+        }
         self.bump().ok(); // the quote
         let mut out: Vec<u8> = Vec::new();
         // jq complains about a bad escape or a raw control character once the string is
@@ -951,6 +989,35 @@ mod tests {
             &["1"],
             "Unfinished JSON term at EOF at line 1, column 2",
         );
+    }
+
+    #[test]
+    fn nested_values_and_strings_read_whole() {
+        let (vals, err) = read(
+            "[\"a\",\"é\\u00e9\",[[],{}],{\"k\":[1,{\"k\":\"v\\n\"}],\"j\":\"\"}] \"ü\" {\"a\":1,\"a\":2}",
+        );
+        assert_eq!(err, None);
+        assert_eq!(
+            vals,
+            [
+                "[\"a\",\"éé\",[[],{}],{\"k\":[1,{\"k\":\"v\\n\"}],\"j\":\"\"}]",
+                "\"ü\"",
+                "{\"a\":2}",
+            ]
+        );
+        // The column counts characters, past a string read whole as past one with escapes.
+        check("[\"éé\" 1]", &[], "Expected separator between values at line 1, column 8");
+        check("[\"\\u00e9\" 1]", &[], "Expected separator between values at line 1, column 12");
+    }
+
+    #[test]
+    fn values_after_an_error_inside_collections_stand_alone() {
+        let mut r = Reader::new(&b"[1,[2,{\"a\":3,]]] [4] {\"b\":[5]}"[..]);
+        assert!(matches!(r.next_value(), Some(Err(_))));
+        let rest: Vec<_> = std::iter::from_fn(|| r.next_value())
+            .filter_map(|v| v.ok().map(|v| v.to_json()))
+            .collect();
+        assert!(rest.iter().all(|v| !v.contains('2') && !v.contains('3')), "{rest:?}");
     }
 
     #[test]
