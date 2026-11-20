@@ -8,7 +8,11 @@
 //! Options are key=value: parts (board partitions, 16), log_parts (log partitions, = parts),
 //! claimers (64), tasks (20000), batch (committer group, 256), conns (pool, 64), threads (4),
 //! max_rows (rows per log commit, 512), pipeline (1: send each finish with the next claim rather
-//! than before it, so both can share a log commit; 0). The board must be fresh: give each run its own database.
+//! than before it, so both can share a log commit; 0), sync_notify (1: the NOTIFY transaction is
+//! durable, as the bench always ran it; 0: unsynced, as a node sends it through PgSql), prof (1:
+//! print PHASE lines at the claim phase's start and end and PROF lines with pool wait and
+//! transaction time per operation and the client's CPU per thread). The board must be fresh: give
+//! each run its own database.
 //! Prints one METRIC line: claims/s over the whole claim phase and over its first 90% (before the
 //! tail where only some partitions still have tasks), claim latency, Postgres transactions per
 //! claim, board writes per log append and log appends per Postgres commit.
@@ -28,9 +32,11 @@ use nanocode_board::{
     access::{Can, Grant, Identity, Verifier, Who},
     shards::{self, Committer},
 };
-use nanocode_durability_core::{Sql, SqlDialect, SqlRow, SqlStatement, StoreError, StoreFuture};
+use nanocode_durability_core::{
+    Settle, Sql, SqlDialect, SqlRow, SqlStatement, StoreError, StoreFuture,
+};
 use nanocode_partitions::{Partition, partition_of};
-use nanocode_store_sql::{PgOptions, PgPool, PgSql};
+use nanocode_store_sql::{PgOptions, PgPool, PgSql, PgTimes};
 use nanocode_turnlog::{
     LogHost,
     parted::{PartedLog, SqlParts},
@@ -44,6 +50,7 @@ const LEASE_MS: u64 = 600_000;
 struct Counted {
     inner: PgSql,
     trips: AtomicU64,
+    sync_notify: bool,
 }
 
 impl Sql for Counted {
@@ -59,6 +66,103 @@ impl Sql for Counted {
         self.trips.fetch_add(1, Ordering::Relaxed);
         self.inner.transaction(operation, statements)
     }
+
+    fn write<'a>(
+        &'a self,
+        settle: Settle,
+        operation: &'static str,
+        statements: &'a [SqlStatement<'a>],
+    ) -> StoreFuture<'a, Result<Vec<Vec<SqlRow>>, StoreError>> {
+        if self.sync_notify {
+            return self.transaction(operation, statements);
+        }
+        self.trips.fetch_add(1, Ordering::Relaxed);
+        self.inner.write(settle, operation, statements)
+    }
+}
+
+/// What prof=1 collects per operation from PgSql::timed: pool wait and transaction time.
+#[derive(Default)]
+struct OpTimes {
+    count: u64,
+    waited_us: u64,
+    ran_us: Vec<u32>,
+}
+
+static PROFILE: Mutex<BTreeMap<&'static str, OpTimes>> = Mutex::new(BTreeMap::new());
+
+fn timed(operation: &'static str, times: PgTimes) {
+    let mut profile = PROFILE.lock().unwrap_or_else(PoisonError::into_inner);
+    let entry = profile.entry(operation).or_default();
+    entry.count += 1;
+    entry.waited_us += u64::try_from(times.waited.as_micros()).unwrap_or(u64::MAX);
+    entry
+        .ran_us
+        .push(u32::try_from(times.ran.as_micros()).unwrap_or(u32::MAX));
+}
+
+/// Each thread's name and CPU ticks (user + system) from /proc/self/task, on Linux.
+fn thread_ticks() -> BTreeMap<String, u64> {
+    let mut ticks = BTreeMap::new();
+    let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
+        return ticks;
+    };
+    for task in tasks.flatten() {
+        let Ok(stat) = std::fs::read_to_string(task.path().join("stat")) else {
+            continue;
+        };
+        let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else {
+            continue;
+        };
+        let fields: Vec<&str> = stat[close + 1..].split_whitespace().collect();
+        let used = fields
+            .get(11..13)
+            .map_or(0, |pair| pair.iter().filter_map(|f| f.parse::<u64>().ok()).sum());
+        let name = format!("{}#{}", &stat[open + 1..close], task.file_name().to_string_lossy());
+        ticks.insert(name, used);
+    }
+    ticks
+}
+
+fn print_profile(claims: f64, elapsed: f64, before: &BTreeMap<String, u64>) {
+    let profile = std::mem::take(&mut *PROFILE.lock().unwrap_or_else(PoisonError::into_inner));
+    for (operation, mut times) in profile {
+        times.ran_us.sort_unstable();
+        let ran: Vec<u64> = times.ran_us.iter().map(|us| u64::from(*us)).collect();
+        let total: u64 = ran.iter().sum();
+        println!(
+            "PROF op={operation} n={} per_claim={:.3} per_s={:.0} wait_avg_us={:.1} ran_avg_us={:.1} ran_p50_ms={:.3} ran_p99_ms={:.3} ran_max_ms={:.3}",
+            times.count,
+            times.count as f64 / claims.max(1.0),
+            times.count as f64 / elapsed,
+            times.waited_us as f64 / (times.count as f64).max(1.0),
+            total as f64 / (times.count as f64).max(1.0),
+            percentile(&ran, 0.5),
+            percentile(&ran, 0.99),
+            percentile(&ran, 1.0),
+        );
+    }
+    // Ticks are 1/100 s on Linux.
+    let after = thread_ticks();
+    let mut busy: Vec<(String, f64)> = after
+        .iter()
+        .map(|(name, ticks)| {
+            let used = ticks - before.get(name).copied().unwrap_or(0);
+            (name.clone(), used as f64 / 100.0 / elapsed)
+        })
+        .filter(|(_, share)| *share > 0.01)
+        .collect();
+    busy.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let total: f64 = busy.iter().map(|(_, share)| share).sum();
+    let threads: Vec<String> = busy
+        .iter()
+        .map(|(name, share)| format!("{name}:{:.0}%", share * 100.0))
+        .collect();
+    println!(
+        "PROF cpu cores={total:.2} cpu_us_per_claim={:.1} threads={}",
+        total * elapsed * 1e6 / claims.max(1.0),
+        threads.join(","),
+    );
 }
 
 struct Tokens;
@@ -80,6 +184,8 @@ struct Options {
     threads: usize,
     max_rows: usize,
     pipeline: bool,
+    sync_notify: bool,
+    prof: bool,
 }
 
 impl Options {
@@ -105,6 +211,8 @@ impl Options {
             "threads",
             "max_rows",
             "pipeline",
+            "sync_notify",
+            "prof",
         ];
         if let Some(key) = values.keys().find(|key| !known.contains(&key.as_str())) {
             return Err(format!("unknown option {key}"));
@@ -123,6 +231,8 @@ impl Options {
             threads: get("threads", 4).max(1),
             max_rows: get("max_rows", 512),
             pipeline: get("pipeline", 0) != 0,
+            sync_notify: get("sync_notify", 1) != 0,
+            prof: get("prof", 0) != 0,
         })
     }
 }
@@ -317,9 +427,14 @@ fn main() -> std::process::ExitCode {
         Err(error) => return fail(&format!("bad url: {error}")),
     };
     let pool = PgPool::new(pg, options.conns);
+    let mut inner = PgSql::reading(pool.clone(), pool);
+    if options.prof {
+        inner = inner.timed(timed);
+    }
     let sql = Arc::new(Counted {
-        inner: PgSql::reading(pool.clone(), pool),
+        inner,
         trips: AtomicU64::new(0),
+        sync_notify: options.sync_notify,
     });
     let store = Arc::new(SqlParts::new(Arc::clone(&sql)));
     runtime.spawn(store.notifier());
@@ -393,6 +508,13 @@ fn main() -> std::process::ExitCode {
     // claimers: claim a task, finish it, take the next.
     let trips_before = sql.trips.load(Ordering::Relaxed);
     let log_before = log.stats();
+    let ticks_before = if options.prof {
+        PROFILE.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        println!("PHASE claim_start unix_ms={}", now_ms());
+        thread_ticks()
+    } else {
+        BTreeMap::new()
+    };
     let started = Instant::now();
     let parts = options.parts as usize;
     let handles: Vec<_> = (0..options.claimers)
@@ -425,6 +547,10 @@ fn main() -> std::process::ExitCode {
         }
     });
     let elapsed = started.elapsed().as_secs_f64();
+    if options.prof {
+        println!("PHASE claim_end unix_ms={}", now_ms());
+        print_profile(options.tasks as f64, elapsed, &ticks_before);
+    }
     let trips = sql.trips.load(Ordering::Relaxed) - trips_before;
     let stats = log.stats();
     drop(committers);
