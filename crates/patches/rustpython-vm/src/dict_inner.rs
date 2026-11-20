@@ -843,7 +843,10 @@ impl<T: DictValue> Dict<T> {
             let mut inner = self.write();
             match inner.entries.get_mut(hint) {
                 Some(Some(entry)) if key.key_is(&entry.key) => {
-                    let track = self.gc_needs_track(key, &value);
+                    // The key is the one already stored, which a lazily
+                    // untracked dict only holds if it is atomic, so only the
+                    // new value can need tracking.
+                    let track = self.gc_lazy.load(Relaxed) && value.may_be_gc_tracked();
                     let removed = core::mem::replace(&mut entry.value, value);
                     drop(inner);
                     // defer dec RC until after the lock is released

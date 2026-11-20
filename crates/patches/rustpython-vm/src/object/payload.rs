@@ -103,6 +103,12 @@ pub trait PyPayload: MaybeTraverse + PyThreadingConstraint + Sized + 'static {
     /// Maximum number of objects to keep in the freelist.
     const MAX_FREELIST: usize = 0;
 
+    /// Whether an instance whose class is exactly `Self::class` never has a
+    /// `__del__`, weak references, an instance dict or slots, children to
+    /// clear, or GC tracking, so deallocating it only has to recycle or free
+    /// its memory. Lets `default_dealloc` skip those checks for it.
+    const EXACT_IS_LEAF: bool = false;
+
     /// Try to push a dead object onto this type's freelist for reuse.
     /// Returns true if the object was stored (caller must NOT free the memory).
     /// Called after tp_clear, so the payload is a cleared husk; implementations

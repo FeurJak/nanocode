@@ -169,6 +169,19 @@ mod trashcan {
 /// Equivalent to subtype_dealloc.
 pub(super) unsafe fn default_dealloc<T: PyPayload>(obj: *mut PyObject) {
     let obj_ref = unsafe { &*(obj as *const PyObject) };
+    // An exact leaf instance has nothing to finalize, clear or untrack: it
+    // only goes back to the freelist or is freed, under the same
+    // published-object rule as the general path below.
+    if T::EXACT_IS_LEAF
+        && core::ptr::eq(obj_ref.class(), T::class(crate::vm::Context::genesis()))
+        && !obj_ref.0.ref_count.is_published()
+    {
+        debug_assert!(!obj_ref.is_gc_tracked());
+        if !(T::HAS_FREELIST && unsafe { T::freelist_push(obj) }) {
+            unsafe { Py::dealloc(obj as *mut Py<T>) };
+        }
+        return;
+    }
     if let Err(()) = obj_ref.drop_slow_inner() {
         return; // resurrected by __del__
     }
@@ -2761,6 +2774,28 @@ impl<T: PyPayload> PyRef<T> {
 }
 
 impl<T: PyPayload + crate::object::MaybeTraverse + core::fmt::Debug> PyRef<T> {
+    /// `new_ref` for an untracked payload whose freelist holds only husks of
+    /// exact `T::class` instances: a popped husk already has the right class,
+    /// so the class reference is neither cloned nor compared.
+    #[inline(always)]
+    pub(crate) fn new_exact_untracked(payload: T, ctx: &crate::vm::Context) -> Self {
+        debug_assert!(!<T as crate::object::MaybeTraverse>::HAS_TRAVERSE);
+        if let Some(cached) = unsafe { T::freelist_pop(&payload) } {
+            let inner = cached.as_ptr() as *mut Py<T>;
+            unsafe {
+                debug_assert!(core::ptr::eq(&*(*inner).typ, T::class(ctx)));
+                core::ptr::write(&mut (*inner).ref_count, RefCount::new());
+                (*inner).gc_bits.store(0, Ordering::Relaxed);
+                core::ptr::drop_in_place(&mut (*inner).payload);
+                core::ptr::write(&mut (*inner).payload, payload);
+            }
+            return Self {
+                ptr: unsafe { NonNull::new_unchecked(inner) },
+            };
+        }
+        Self::new_ref(payload, T::class(ctx).to_owned(), None)
+    }
+
     #[inline(always)]
     pub fn new_ref(payload: T, typ: crate::builtins::PyTypeRef, dict: Option<PyDictRef>) -> Self {
         let has_dict = dict.is_some();

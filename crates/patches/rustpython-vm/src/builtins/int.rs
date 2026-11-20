@@ -58,6 +58,7 @@ thread_local! {
 impl PyPayload for PyInt {
     const MAX_FREELIST: usize = 100;
     const HAS_FREELIST: bool = true;
+    const EXACT_IS_LEAF: bool = true;
 
     #[inline]
     fn class(ctx: &Context) -> &'static Py<PyType> {
@@ -69,7 +70,9 @@ impl PyPayload for PyInt {
     // reload of two 8-byte stores missed store forwarding on every new int.
     #[inline(always)]
     fn into_ref(self, ctx: &Context) -> PyRef<Self> {
-        PyRef::new_ref(self, ctx.types.int_type.to_owned(), None)
+        // The freelist takes only exact ints (`default_dealloc`), so a
+        // reused husk is already an int.
+        PyRef::new_exact_untracked(self, ctx)
     }
 
     fn into_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
@@ -357,6 +360,14 @@ impl Py<PyInt> {
     /// Extract the inline magnitude without the generic primitive-conversion path.
     #[inline(always)]
     pub(crate) fn try_to_i64_fast(&self) -> Option<i64> {
+        if let Some(value) = self.as_bigint().inline_i64() {
+            return Some(value);
+        }
+        self.try_to_i64_slow()
+    }
+
+    #[cold]
+    fn try_to_i64_slow(&self) -> Option<i64> {
         let bits = self.as_bigint().bits();
         if bits > i64::BITS as u64 {
             return None;
