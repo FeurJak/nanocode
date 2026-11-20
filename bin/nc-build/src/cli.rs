@@ -31,6 +31,9 @@ const USAGE: &str = "usage:
                                       the one with the fewest cores leased to kind K (default build), so kinds mix and boxes stay full, then
                                       the pool order: the large pool (default, nanocode work) the largest boxes first, the small pool
                                       (pyramid2 work) the smaller boxes and dev-georgios first; gak-9 only with --machine gak-9;
+                                      without --machine it takes on this box, the name in $NC_BUILD_MACHINE or ~/.config/nc-build/machine,
+                                      when that is set, so only an explicit --machine places elsewhere; a lease on a machine that is
+                                      neither that name nor this hostname prints a warning to stderr;
                                       a label containing fill (any case) is refused: filler runs SCHED_IDLE in fill.slice and never holds a lease;
                                       a label starting with a standing --label-prefix reservation's prefix places inside its cpus when they have room;
                                       a take whose label and kind a lane cap covers is refused (and with --wait retried) when that lane's
@@ -167,11 +170,7 @@ fn metric(args: &[String], wall_ms: u128, exit: u8, cached: Option<bool>) {
         [sub, ..] => format!("nc-build {sub}"),
     };
     let (commit, repo) = git_head().unwrap_or_default();
-    let host = std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .or_else(|_| std::fs::read_to_string("/etc/hostname"))
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
+    let host = hostname();
     let point = serde_json::json!({
         "name": format!("build {repo} {cmd}"),
         "value": wall_ms,
@@ -195,6 +194,14 @@ fn metric(args: &[String], wall_ms: u128, exit: u8, cached: Option<bool>) {
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = file.write_all(format!("{point}\n").as_bytes());
     }
+}
+
+fn hostname() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .or_else(|_| std::fs::read_to_string("/etc/hostname"))
+        .unwrap_or_default()
+        .trim()
+        .to_owned()
 }
 
 fn option<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
@@ -725,6 +732,14 @@ fn slots_command(args: &[String]) -> Result<(), String> {
         .map_err(|error| format!("--wait: {error}"))?
         * 1000;
     let args = without(&without(args, "--local", false), "--wait", true);
+    let take = command == Some("take");
+    let env = take && args.iter().any(|arg| arg == "--env");
+    let local = config("NC_BUILD_MACHINE", "machine");
+    let args = if take {
+        local_take(&without(&args, "--env", false), local.as_deref())
+    } else {
+        args
+    };
     let once = || match &url {
         Some(url) => remote(url, &args, &input),
         None => slots_once(&args, &input),
@@ -732,6 +747,30 @@ fn slots_command(args: &[String]) -> Result<(), String> {
     let started = now_ms();
     loop {
         match once() {
+            Ok(out) if take => {
+                let lease: serde_json::Value =
+                    serde_json::from_str(&out).map_err(|error| format!("take: {error}: {out}"))?;
+                let host = hostname();
+                let hosts: Vec<&str> = [Some(host.as_str()), local.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .filter(|name| !name.is_empty())
+                    .collect();
+                if let Some(warning) =
+                    placement_warning(lease["machine"].as_str().unwrap_or_default(), &hosts)
+                {
+                    let _ = writeln!(io::stderr(), "{warning}");
+                }
+                let out = if env {
+                    format!("{}\n", lease["env"].as_str().unwrap_or_default())
+                } else {
+                    out
+                };
+                return io::stdout()
+                    .lock()
+                    .write_all(out.as_bytes())
+                    .map_err(|error| error.to_string());
+            }
             Ok(out) => {
                 return io::stdout()
                     .lock()
@@ -747,6 +786,25 @@ fn slots_command(args: &[String]) -> Result<(), String> {
             Err(message) => return Err(message),
         }
     }
+}
+
+fn local_take(args: &[String], local: Option<&str>) -> Vec<String> {
+    let mut args = args.to_vec();
+    if let Some(local) = local
+        && option(&args, "--machine").is_none()
+    {
+        args.extend(["--machine".to_owned(), local.to_owned()]);
+    }
+    args
+}
+
+fn placement_warning(machine: &str, hosts: &[&str]) -> Option<String> {
+    (!hosts.contains(&machine)).then(|| {
+        format!(
+            "warning: lease is on {machine}, not this box ({}): run the build there or give the lease back",
+            hosts.join(", ")
+        )
+    })
 }
 
 fn remote(url: &str, args: &[String], input: &str) -> Result<String, String> {
@@ -906,9 +964,10 @@ fn slots_once(args: &[String], input: &str) -> Result<String, String> {
                     (lease.to_json(machine), lease)
                 })
             })?;
-            let (json, lease) = taken.map_err(|refusal| match refusal {
-                Refusal::NoRoom => format!("{NO_ROOM} {cores} free cores"),
-                Refusal::OverCap { lane, held, cap } => format!(
+            let (json, lease) = taken.map_err(|refusal| match (refusal, &want.only) {
+                (Refusal::NoRoom, Some(name)) => format!("{NO_ROOM} {cores} free cores on {name}"),
+                (Refusal::NoRoom, None) => format!("{NO_ROOM} {cores} free cores"),
+                (Refusal::OverCap { lane, held, cap }, _) => format!(
                     "{OVER_CAP} lane {lane} holds {held}/{cap} cores across the fleet, so --label {} cannot take {cores} more",
                     want.label
                 ),
@@ -1339,7 +1398,7 @@ fn post(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_observation, slots};
+    use super::{local_take, parse_observation, placement_warning, slots};
     use nanocode_build_opt::slots::{Cap, Lease, Machine, Pin, Placement, Refusal, State, Want};
 
     const NOW: u64 = 1_000_000;
@@ -1641,5 +1700,52 @@ mod tests {
         ] {
             assert!(slots::caps_from_json(&serde_json::from_str(bad).unwrap()).is_err());
         }
+    }
+
+    fn words(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    #[test]
+    fn take_without_machine_defaults_to_this_box() {
+        let take = words(&["take", "--cores", "8", "--label", "t"]);
+        assert_eq!(
+            local_take(&take, Some("b1")),
+            words(&["take", "--cores", "8", "--label", "t", "--machine", "b1"])
+        );
+        assert_eq!(local_take(&take, None), take);
+    }
+
+    #[test]
+    fn an_explicit_machine_overrides_this_box() {
+        let take = words(&["take", "--cores", "8", "--machine", "b2", "--label", "t"]);
+        assert_eq!(local_take(&take, Some("b1")), take);
+    }
+
+    #[test]
+    fn take_on_this_box_never_places_on_another_with_room() {
+        let mut other = machine();
+        other.name = "other".to_owned();
+        let mut state = state(&running("TS", 0..44), &[]);
+        let mut only = want(8);
+        only.only = Some("m".to_owned());
+        assert!(state.take(&[other.clone(), machine()], &only, NOW).is_err());
+        assert_eq!(
+            state
+                .take(&[other, machine()], &want(8), NOW)
+                .unwrap()
+                .machine,
+            "other"
+        );
+    }
+
+    #[test]
+    fn a_lease_on_another_box_warns() {
+        assert_eq!(placement_warning("b1", &["ip-10-0-0-1", "b1"]), None);
+        assert_eq!(placement_warning("b1", &["b1"]), None);
+        assert!(
+            placement_warning("b2", &["ip-10-0-0-1", "b1"])
+                .is_some_and(|warning| warning.contains("b2") && warning.contains("b1"))
+        );
     }
 }
