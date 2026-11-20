@@ -418,13 +418,13 @@ impl Inner {
         }
     }
 
-    async fn blob(&self, digest: &Digest) -> io::Result<Bytes> {
+    async fn blob(&self, digest: &Digest) -> Result<Bytes, Failure> {
         if let Some(blob) = self.blobs.borrow().get(digest) {
             return Ok(blob.bytes().clone());
         }
         let blob = self.store.blob(digest).await?;
         if blob.digest() != digest {
-            return Err(Failure::Missing(*digest).into());
+            return Err(Failure::Missing(*digest));
         }
         let bytes = blob.bytes().clone();
         if self.manifest.borrow().holds(digest) {
@@ -442,10 +442,22 @@ impl Inner {
     }
 
     async fn file(&self, path: &[u8]) -> io::Result<(Entry, Bytes)> {
+        match self.held(path).await? {
+            (entry, Ok(bytes)) => Ok((entry, bytes)),
+            (_, Err(Failure::Missing(_))) if !mutated(Mutation::StaleReadSkipsReload) => {
+                self.reload().await?;
+                let (entry, bytes) = self.held(path).await?;
+                Ok((entry, bytes?))
+            }
+            (_, Err(failure)) => Err(failure.into()),
+        }
+    }
+
+    async fn held(&self, path: &[u8]) -> io::Result<(Entry, Result<Bytes, Failure>)> {
         match self.lookup(path, true)? {
             (path, _) if path.is_empty() => Err(io::ErrorKind::IsADirectory.into()),
             (_, Some(entry @ Entry::File { digest, .. })) => {
-                let bytes = self.blob(&digest).await?;
+                let bytes = self.blob(&digest).await;
                 Ok((entry, bytes))
             }
             (_, Some(Entry::Dir { .. })) => Err(io::ErrorKind::IsADirectory.into()),

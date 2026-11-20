@@ -96,15 +96,17 @@ pub enum WorkspaceSqlMutation {
     ReleaseBeforeCommit,
     SplitTransaction,
     SweepSkipsTombstone,
+    StaleReadSkipsReload,
 }
 
 impl WorkspaceSqlMutation {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::None,
         Self::SkipVersionCas,
         Self::ReleaseBeforeCommit,
         Self::SplitTransaction,
         Self::SweepSkipsTombstone,
+        Self::StaleReadSkipsReload,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -120,6 +122,7 @@ impl WorkspaceSqlMutation {
             Self::ReleaseBeforeCommit => "release_before_commit",
             Self::SplitTransaction => "split_transaction",
             Self::SweepSkipsTombstone => "sweep_skips_tombstone",
+            Self::StaleReadSkipsReload => "stale_read_skips_reload",
         }
     }
 
@@ -139,6 +142,7 @@ impl WorkspaceSqlMutation {
             Self::ReleaseBeforeCommit => FsRule::SqlReleaseBeforeCommit,
             Self::SplitTransaction => FsRule::SqlSplitTransaction,
             Self::SweepSkipsTombstone => FsRule::SqlSweepSkipsTombstone,
+            Self::StaleReadSkipsReload => FsRule::StaleReadSkipsReload,
         }
     }
 }
@@ -1239,12 +1243,33 @@ impl World {
         for flight in &flights {
             self.judge(flight, &flights, &crashed)?;
         }
+        self.check_stale_reads()?;
         for writer in crashed {
             self.reopen(writer)?;
         }
         if self.rng.chance(REOPEN_PPM) {
             let at = self.rng.pick(self.writers.len());
             self.reopen(at)?;
+        }
+        Ok(())
+    }
+
+    fn check_stale_reads(&self) -> Result<(), String> {
+        for (workspace, fs) in &self.writers {
+            let shown = fs.manifest();
+            if shown.version() == self.seen.version(WORKSPACES[*workspace]) {
+                continue;
+            }
+            for (path, entry) in shown.entries() {
+                if !matches!(entry, Entry::File { .. }) {
+                    continue;
+                }
+                if let Err(error) = reply(fs.read(path.as_bytes(), u64::MAX))?
+                    && error.kind() == io::ErrorKind::InvalidData
+                {
+                    return Err(format!("{path} unreadable on a stale view: {error}"));
+                }
+            }
         }
         Ok(())
     }
@@ -1285,9 +1310,19 @@ impl World {
         if !alone || crashed.contains(&flight.writer) {
             return Ok(());
         }
-        let fs = &self.writers[flight.writer].1;
-        let read = reply(fs.read(path.as_bytes(), u64::MAX))?
-            .map_err(|error| format!("{path} unreadable after its write: {error}"))?;
+        let (workspace, fs) = &self.writers[flight.writer];
+        let stale = fs.manifest().version() != self.seen.version(WORKSPACES[*workspace]);
+        let read = reply(fs.read(path.as_bytes(), u64::MAX))?;
+        if stale {
+            return match read {
+                Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                    Err(format!("{path} unreadable on a stale view: {error}"))
+                }
+                _ => Ok(()),
+            };
+        }
+        let read =
+            read.map_err(|error| format!("{path} unreadable after its write: {error}"))?;
         if read[..] != bytes[..] {
             return Err(format!(
                 "{path} reads {} bytes after a write of {}",

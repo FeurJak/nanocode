@@ -13,6 +13,7 @@ pub enum Mutation {
     SqlSplitTransaction,
     SqlSweepSkipsTombstone,
     AnswersNow,
+    StaleReadSkipsReload,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);
