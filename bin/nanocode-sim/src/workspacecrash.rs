@@ -43,8 +43,11 @@
 //! unlinkSync) through the workspace bridge; the store must hold the files
 //! exactly as they were between two calls, and making the calls after those
 //! again must finish it. Held: psh redirects into a file a cell holds open
-//! read-only through node:fs; the file must hold a state it had between two
-//! operations, and running the job again must leave the redirect's output.
+//! through node:fs, read-only or for appending (a write before the redirect
+//! and one after); the file must hold a state it had between two operations,
+//! and running the job again must leave the redirect's output (then, when
+//! appending, the write after: O_APPEND writes land at the end the file has
+//! when they are made, never a copy of the file from before the redirect).
 //!
 //! Some canaries bend the job's file system instead of the store: a whole-file
 //! write that removes the old file first, one that empties it first, and a
@@ -969,7 +972,7 @@ async fn bridge(files: &Rc<dyn FileSystem>, input: &Value) -> Result<Value, Stri
     let failed = |error: std::io::Error| error.to_string();
     let path = field("path").as_bytes();
     match field("op") {
-        "info" => Ok(json!({ "cwd": ROOT, "env": {} })),
+        "info" => Ok(json!({ "cwd": ROOT, "env": {}, "append": true })),
         "read" => match files.stat(path, true).get().await {
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(json!({ "kind": "none" })),
             Err(error) => Err(failed(error)),
@@ -991,6 +994,11 @@ async fn bridge(files: &Rc<dyn FileSystem>, input: &Value) -> Result<Value, Stri
         "write" => {
             let data = STANDARD.decode(field("data")).map_err(|error| error.to_string())?;
             files.write(path, &data, Write::Replace).get().await.map_err(failed)?;
+            Ok(json!({}))
+        }
+        "append" => {
+            let data = STANDARD.decode(field("data")).map_err(|error| error.to_string())?;
+            files.write(path, &data, Write::Append).get().await.map_err(failed)?;
             Ok(json!({}))
         }
         "mkdir" => mkdir_all(files, path).await.map(|()| json!({})).map_err(failed),
@@ -2591,17 +2599,21 @@ fn seq(
     Ok(())
 }
 
-/// A crash while psh redirects into a file a cell holds open read-only
-/// through node:fs: the file holds a state it had between two operations
-/// (the redirect's output in whole pieces once it truncated the file), and
-/// running the job again leaves the redirect's output.
+/// A crash while psh redirects into a file a cell holds open through node:fs,
+/// read-only or for appending: the file holds a state it had between two
+/// operations (the redirect's output in whole pieces once it truncated the
+/// file), and running the job again leaves the redirect's output, followed
+/// by the write after it when the cell appends.
 fn held(
     rng: &mut Rng,
     stats: &mut WorkspaceCrashStats,
     digest: &mut u64,
     shape: &mut String,
 ) -> Result<(), String> {
+    let appends = rng.chance(HALF_PPM);
     let first = words(rng, 4);
+    let before = format!("<b{}>", words(rng, 2));
+    let after = format!("<z{}>", words(rng, 2));
     let pieces: Vec<String> = (0..rng.range(1, REDIRECT_MAX))
         .map(|at| format!("<x{at}{}>", words(rng, 3)))
         .collect();
@@ -2612,12 +2624,25 @@ fn held(
         .collect();
     let shell = json!({ "op": "sh", "script": format!("set -e\n{{ {}; }} > {path}", writes.join("; ")) });
     let target = Value::from(path.as_str());
-    let code = format!(
-        "const fs = require(\"node:fs\");\nconst fd = fs.openSync({target}, \"r\");\nawait tools.w({shell});\nfs.closeSync(fd);\n"
-    );
+    let code = if appends {
+        let (b, z) = (Value::from(before.as_str()), Value::from(after.as_str()));
+        format!(
+            "const fs = require(\"node:fs\");\nconst fd = fs.openSync({target}, \"a\");\nfs.writeSync(fd, {b});\nfs.fsyncSync(fd);\nawait tools.w({shell});\nfs.writeSync(fd, {z});\nfs.closeSync(fd);\n"
+        )
+    } else {
+        format!(
+            "const fs = require(\"node:fs\");\nconst fd = fs.openSync({target}, \"r\");\nawait tools.w({shell});\nfs.closeSync(fd);\n"
+        )
+    };
     let mut allowed = vec![first.clone()];
+    if appends {
+        allowed.push(format!("{first}{before}"));
+    }
     allowed.extend((0..=pieces.len()).map(|count| pieces[..count].concat()));
-    let done = pieces.concat();
+    let mut done = pieces.concat();
+    if appends {
+        done.push_str(&after);
+    }
     allowed.push(done.clone());
     let initial = vec![(HELD, first)];
     let setup_fn: SetupFn = Box::new(move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
@@ -2629,8 +2654,9 @@ fn held(
             Box::pin(cell_with(files, code.clone(), Some(BRIDGED)))
         })
     };
+    let label = if appends { "held:append" } else { "held:read" };
     let _ = write!(shape, " redirected={}", pieces.len());
-    let Some(died) = die_during(rng, stats, digest, shape, "held:read", &setup_fn, &job_fn)? else {
+    let Some(died) = die_during(rng, stats, digest, shape, label, &setup_fn, &job_fn)? else {
         return Ok(());
     };
     stats.points_held += 1;
