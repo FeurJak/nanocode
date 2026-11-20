@@ -1731,8 +1731,13 @@ async fn arith_command(
     };
     if vp.opts.get(SetOpt::Xtrace) {
         // `(( x ))`: the text as written between the parentheses; a clause of
-        // `for ((…))` trimmed.
-        let t: &[u8] = if clause { text.trim_ascii() } else { text };
+        // `for ((…))` without the blanks before it (bash keeps those after it), and
+        // an empty one as `1`.
+        let t: &[u8] = match clause {
+            true if text.trim_ascii().is_empty() => b"1",
+            true => text.trim_ascii_start(),
+            false => text,
+        };
         let mut line = b"(( ".to_vec();
         line.extend_from_slice(t);
         line.extend_from_slice(b" ))");

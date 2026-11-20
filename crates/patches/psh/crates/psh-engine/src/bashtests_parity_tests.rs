@@ -176,3 +176,12 @@ fn printf_v_overflowed_star_width_eats_the_next_byte() {
     let e = String::from_utf8_lossy(&e);
     assert!(e.contains("warning: 9: Numerical result out of range"), "{e}");
 }
+
+#[test]
+fn xtrace_of_arith_for_clauses_keeps_trailing_blanks() {
+    let (_, _, e) = run("set -x\nfor (( i=0 ; i<1 ; i++)) ; do :; done\nfor ((  ;  ; )) ; do break; done\n");
+    assert_eq!(
+        String::from_utf8_lossy(&e),
+        "+ (( i=0  ))\n+ (( i<1  ))\n+ :\n+ (( i++ ))\n+ (( i<1  ))\n+ (( 1 ))\n+ (( 1 ))\n+ break\n"
+    );
+}
