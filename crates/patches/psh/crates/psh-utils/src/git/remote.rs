@@ -32,6 +32,8 @@ pub trait Remote {
 const ZERO: Oid = Oid([0; 20]);
 const ABBREV: usize = 7;
 const SUMMARY_WIDTH: usize = 2 * ABBREV + 3;
+const GIT_PACK_WINDOW_DEFAULT: usize = 10;
+const GIT_PACK_DEPTH_DEFAULT: usize = 50;
 const UPLOAD: &str = "git-upload-pack";
 const RECEIVE: &str = "git-receive-pack";
 const COMMANDS: [&str; 5] = ["clone", "fetch", "pull", "push", "ls-remote"];
@@ -458,6 +460,7 @@ enum Job {
         tips: Vec<Oid>,
         known: Vec<Oid>,
         checks: Vec<(Oid, Oid)>,
+        ofs_delta: bool,
     },
 }
 
@@ -517,8 +520,9 @@ fn probe(ctx: &mut SyncCtx, (job, sent): (Job, Sent)) -> i32 {
             tips,
             known,
             checks,
+            ofs_delta,
         } => Repo::discover(&fs, &cwd, &env, &overrides)
-            .and_then(|repo| objects(&repo, &tips, &known, &checks)),
+            .and_then(|repo| objects(&repo, &tips, &known, &checks, ofs_delta)),
     };
     if !matches!(&found, Err(Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock) {
         let _ = sent.send(found);
@@ -578,35 +582,63 @@ fn reach(
     root: Oid,
     skip: &HashSet<Oid>,
     seen: &mut HashSet<Oid>,
-    out: Option<&mut Vec<(Kind, Data)>>,
+    out: Option<&mut Vec<(Kind, Data, u32)>>,
 ) -> Res<()> {
     let mut out = out;
-    let mut stack = vec![root];
-    while let Some(tree) = stack.pop() {
+    let mut stack = vec![(root, 0)];
+    while let Some((tree, name)) = stack.pop() {
         if skip.contains(&tree) || !seen.insert(tree) {
             continue;
         }
         let (kind, data) = repo.object(&tree)?;
         for entry in parse_tree(&data)? {
+            let hash = pack::name_hash(&entry.name);
             match entry.mode {
-                MODE_TREE => stack.push(entry.oid),
+                MODE_TREE => stack.push((entry.oid, hash)),
                 MODE_GITLINK => {}
                 _ if skip.contains(&entry.oid) || !seen.insert(entry.oid) => {}
                 _ => {
                     if let Some(out) = out.as_deref_mut() {
-                        out.push(repo.object(&entry.oid)?);
+                        let (kind, data) = repo.object(&entry.oid)?;
+                        out.push((kind, data, hash));
                     }
                 }
             }
         }
         if let Some(out) = out.as_deref_mut() {
-            out.push((kind, data));
+            out.push((kind, data, name));
         }
     }
     Ok(())
 }
 
-fn objects(repo: &Repo<'_>, tips: &[Oid], known: &[Oid], checks: &[(Oid, Oid)]) -> Res<Found> {
+fn deltas(config: &repo::Config, ofs_delta: bool) -> Res<pack::Deltas> {
+    let number = |key: &str, default: usize| match config.get(key) {
+        None => Ok(default),
+        Some(text) => text
+            .parse()
+            .map_err(|_| Error::Fatal(format!("bad numeric config value '{text}' for '{key}'"))),
+    };
+    if !ofs_delta {
+        return Ok(pack::Deltas {
+            window: 0,
+            depth: 0,
+        });
+    }
+    Ok(pack::Deltas {
+        window: number("pack.window", GIT_PACK_WINDOW_DEFAULT)?,
+        depth: number("pack.depth", GIT_PACK_DEPTH_DEFAULT)?,
+    })
+}
+
+fn objects(
+    repo: &Repo<'_>,
+    tips: &[Oid],
+    known: &[Oid],
+    checks: &[(Oid, Oid)],
+    ofs_delta: bool,
+) -> Res<Found> {
+    let deltas = deltas(&repo.config, ofs_delta)?;
     let mut results = Vec::new();
     for (old, new) in checks {
         let has = repo.odb.has(old)?;
@@ -637,7 +669,7 @@ fn objects(repo: &Repo<'_>, tips: &[Oid], known: &[Oid], checks: &[(Oid, Oid)]) 
             stack.extend(repo.commit(&commit)?.parents.iter().copied());
         }
     }
-    let mut out: Vec<(Kind, Data)> = Vec::new();
+    let mut out: Vec<(Kind, Data, u32)> = Vec::new();
     let mut trees = Vec::new();
     let mut boundary = Vec::new();
     let mut seen = HashSet::new();
@@ -669,7 +701,7 @@ fn objects(repo: &Repo<'_>, tips: &[Oid], known: &[Oid], checks: &[(Oid, Oid)]) 
             Kind::Blob => {}
         }
         if kind != Kind::Tree {
-            out.push((kind, data));
+            out.push((kind, data, 0));
         }
     }
     for commit in boundary {
@@ -680,9 +712,16 @@ fn objects(repo: &Repo<'_>, tips: &[Oid], known: &[Oid], checks: &[(Oid, Oid)]) 
     for tree in trees {
         reach(repo, tree, &excluded, &mut kept, Some(&mut out))?;
     }
-    let borrowed: Vec<(Kind, &[u8])> = out.iter().map(|(kind, data)| (*kind, &data[..])).collect();
+    let borrowed: Vec<pack::Object<'_>> = out
+        .iter()
+        .map(|(kind, data, name)| pack::Object {
+            kind: *kind,
+            data,
+            name: *name,
+        })
+        .collect();
     Ok(Found::Objects {
-        pack: pack::write(&borrowed),
+        pack: pack::write(&borrowed, deltas),
         checks: results,
     })
 }
@@ -1573,6 +1612,7 @@ async fn push(ctx: &mut UtilCtx<'_>, remote: &dyn Remote, inv: &Invocation) -> R
         tips: pushes.iter().filter_map(|p| p.src).collect(),
         known,
         checks: checks.clone(),
+        ofs_delta: advert.has("ofs-delta"),
     };
     let Found::Objects {
         pack: data,
