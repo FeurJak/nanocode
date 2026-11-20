@@ -106,7 +106,14 @@ impl Counter {
                 }
                 continue;
             }
-            let (ch, len) = if utf8 && b >= 0x80 {
+            if !utf8 {
+                // A byte past ASCII outside a UTF-8 locale is a character that is not
+                // printable: it has no width and neither starts nor ends a word (GNU wc).
+                i += 1;
+                self.c.chars += 1;
+                continue;
+            }
+            let (ch, len) = {
                 let len = match b {
                     0xc2..=0xdf => 2,
                     0xe0..=0xef => 3,
@@ -122,8 +129,6 @@ impl Counter {
                     Ok(s) => (s.chars().next(), len),
                     Err(_) => (None, 1),
                 }
-            } else {
-                (Some(b as char), 1)
             };
             i += len;
             if let Some(ch) = ch {
@@ -145,7 +150,7 @@ impl Counter {
                 }
                 if space {
                     self.in_word = false;
-                } else if !self.in_word && (ch as u32 >= 0x20 || !utf8) && !ch.is_control() {
+                } else if !self.in_word && !ch.is_control() {
                     self.in_word = true;
                     self.c.words += 1;
                 }
@@ -302,4 +307,25 @@ pub async fn run(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
         return common::write_failed(ctx, &e).await;
     }
     status
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Counter;
+
+    fn words(data: &[u8], utf8: bool) -> u64 {
+        let mut c = Counter::default();
+        c.feed(data, utf8);
+        c.finish().words
+    }
+
+    #[test]
+    fn bytes_past_ascii_start_no_word_outside_utf8() {
+        // GNU wc in the C locale: they are not printable, so they neither start nor end
+        // a word.
+        assert_eq!(words(b"\xc3\xa9\n", false), 0);
+        assert_eq!(words(b"t\xc3\xa9\n", false), 1);
+        assert_eq!(words(b"\xa9a \xa9 b\n", false), 2);
+        assert_eq!(words("é\n".as_bytes(), true), 1);
+    }
 }
