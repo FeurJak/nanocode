@@ -211,7 +211,12 @@ pub async fn run(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
         let mut first_failed = false;
         for (i, name) in files.iter().enumerate() {
             if name == b"-" {
-                irregular = true;
+                // Standard input counts as its descriptor's file: a redirected regular
+                // file adds its size, anything else (a pipe, a terminal) widens to 7.
+                match ctx.fd_identity(0) {
+                    Some((_, _, size)) => total_size += size,
+                    None => irregular = true,
+                }
                 continue;
             }
             match ctx.stat(name, true).await {

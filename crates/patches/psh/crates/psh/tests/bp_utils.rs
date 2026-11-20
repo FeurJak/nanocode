@@ -107,3 +107,9 @@ fn sort_rejects_two_ways_to_compare_one_key() {
         ("sort: options '-gn' are incompatible\n2\nsort: options '-hV' are incompatible\n2\n2\n1\n0\n".into(), 0)
     );
 }
+
+#[test]
+fn wc_pads_redirected_stdin_to_its_size() {
+    let src = "printf 'a b\\nc\\n' > f; wc < f; wc -l -c < f; printf 'x\\n' | wc -l -c";
+    assert_eq!(sh(src), ("2 3 6\n2 6\n      1       2\n".into(), 0));
+}
