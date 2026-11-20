@@ -19,6 +19,15 @@
 //! their steps and the store's commits interleaved by the seed. Every
 //! acknowledged token must be in the store once, in its writer's order, and no
 //! file may hold a torn token.
+//!
+//! Crash points: each seed also kills one job at one of its commits and
+//! resumes it: an append written in pieces through one open file, a git
+//! checkout between two branches, or a rename between two appends. The
+//! appended file must hold its first content followed by whole pieces, and
+//! appending the rest must give all of them once; the rename must leave the
+//! files as they were between two operations, never the moved file twice or
+//! nowhere, and running the rest must finish it; a forced checkout after the
+//! crash must leave the branch's tree with nothing to commit.
 
 use std::{
     cell::Cell,
@@ -84,6 +93,12 @@ const PLAN_NONE: u8 = 0;
 const PLAN_BEFORE: u8 = 1;
 const PLAN_AFTER: u8 = 2;
 const RUNTIMES: [Runtime; 3] = [Runtime::Psh, Runtime::Python, Runtime::Cell];
+const PIECES_MIN: u64 = 2;
+const PIECES_MAX: u64 = 7;
+const REPO: &str = "g";
+const REPO_PATHS: [&str; 4] = ["a.txt", "b.txt", "d/c.txt", "e.txt"];
+const TRACKED_PPM: u64 = 700_000;
+const GIT_ENV: &str = "export GIT_AUTHOR_NAME=Agent GIT_AUTHOR_EMAIL=agent@sim GIT_COMMITTER_NAME=Agent GIT_COMMITTER_EMAIL=agent@sim";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkspaceCrashMutation {
@@ -154,6 +169,9 @@ pub struct WorkspaceCrashStats {
     pub tokens: u64,
     pub acked: u64,
     pub yields: u64,
+    pub points_append: u64,
+    pub points_checkout: u64,
+    pub points_rename: u64,
 }
 
 impl WorkspaceCrashStats {
@@ -168,6 +186,9 @@ impl WorkspaceCrashStats {
         self.tokens += other.tokens;
         self.acked += other.acked;
         self.yields += other.yields;
+        self.points_append += other.points_append;
+        self.points_checkout += other.points_checkout;
+        self.points_rename += other.points_rename;
     }
 }
 
@@ -438,6 +459,7 @@ enum FileOp {
     Put(&'static str, String),
     Append(&'static str, String),
     Remove(&'static str),
+    Rename(&'static str, &'static str),
 }
 
 /// What one run of a program said: whether it reported success, what it
@@ -513,6 +535,7 @@ fn psh_line(op: &FileOp) -> String {
             format!("printf '%s' {} >> {}", quoted(content), absolute(path))
         }
         FileOp::Remove(path) => format!("rm -f {}", absolute(path)),
+        FileOp::Rename(from, to) => format!("mv {} {}", absolute(from), absolute(to)),
     }
 }
 
@@ -526,6 +549,7 @@ fn python_line(op: &FileOp) -> String {
             let path = absolute(path);
             format!("os.path.exists({path:?}) and os.remove({path:?})")
         }
+        FileOp::Rename(from, to) => format!("os.rename({:?}, {:?})", absolute(from), absolute(to)),
     }
 }
 
@@ -543,6 +567,7 @@ fn cell_input(op: &FileOp) -> Value {
         FileOp::Put(path, content) => json!({"op": "put", "path": path, "data": content}),
         FileOp::Append(path, content) => json!({"op": "append", "path": path, "data": content}),
         FileOp::Remove(path) => json!({"op": "rm", "path": path}),
+        FileOp::Rename(from, to) => json!({"op": "mv", "path": from, "to": to}),
     }
 }
 
@@ -555,6 +580,7 @@ async fn answer(files: &Rc<dyn FileSystem>, input: &Value) -> Result<Value, Stri
     let done = match field("op") {
         "put" => files.write(path, data, Write::Replace).get().await,
         "append" => files.write(path, data, Write::Append).get().await,
+        "mv" => files.rename(path, absolute(field("to")).as_bytes()).get().await,
         "rm" => match files.stat(path, false).get().await {
             Ok(_) => files.remove(path, Remove::File).get().await,
             Err(_) => Ok(()),
@@ -772,6 +798,11 @@ fn prefixes((initial, ops): &Plan) -> Vec<Contents> {
             }
             FileOp::Remove(path) => {
                 held.remove(&keyed(path));
+            }
+            FileOp::Rename(from, to) => {
+                if let Some(bytes) = held.remove(&keyed(from)) {
+                    held.insert(keyed(to), bytes);
+                }
             }
         }
         all.push(held.clone());
@@ -1116,6 +1147,473 @@ fn race(
     Ok(())
 }
 
+type SetupFn = Box<dyn Fn(WorkspaceFs) -> Boxed<'static, Result<(), String>>>;
+type JobFn = Box<dyn Fn(Rc<dyn FileSystem>) -> Boxed<'static, Said>>;
+
+/// What a crash point left: the store the dead process wrote to, how it
+/// died, and every file the reopened workspace holds.
+struct Died {
+    inner: Arc<MemStore>,
+    when: String,
+    contents: Contents,
+}
+
+/// Runs setup and then job to completion over one store, then again over a
+/// store that dies at one of the job's commits, before or after the store
+/// takes it. Checks what every crash must leave: the job reported a failure,
+/// the dead process's view shows no commit the store refused, and the
+/// reopened store holds exactly the state before or after that commit, every
+/// file readable whole. None when the job made no commit.
+fn die_during(
+    rng: &mut Rng,
+    stats: &mut WorkspaceCrashStats,
+    digest: &mut u64,
+    shape: &mut String,
+    label: &str,
+    setup: &SetupFn,
+    job: &JobFn,
+) -> Result<Option<Died>, String> {
+    let reference = Dying::new(Arc::new(MemStore::new()), None);
+    let files = one(open(reference.clone()), rng)??;
+    one(setup(files.clone()), rng)??;
+    let base = reference.states().len();
+    let view: Rc<dyn FileSystem> = Rc::new(files.clone());
+    let said = one(job(view), rng)?;
+    if !said.ok {
+        return Err(format!("{label} failed without a crash: {}", said.output));
+    }
+    drop(files);
+    let states = reference.states().split_off(base - 1);
+    let commits = states.len() as u64 - 1;
+    stats.commits += commits;
+    let _ = write!(shape, " point={label} commits={commits}");
+    if commits == 0 {
+        return Ok(None);
+    }
+
+    let at = rng.range(1, commits);
+    let planned = match rng.pick(2) {
+        0 => PLAN_BEFORE,
+        _ => PLAN_AFTER,
+    };
+    let _ = write!(shape, " at={at} plan={planned}");
+    let inner = Arc::new(MemStore::new());
+    let dying = Dying::new(inner.clone(), None);
+    let files = one(open(dying.clone()), rng)??;
+    one(setup(files.clone()), rng)??;
+    dying.plan(at, planned);
+    let view: Rc<dyn FileSystem> = Rc::new(files.clone());
+    let said = one(job(view), rng)?;
+    let fired = dying.fired.load(Ordering::SeqCst);
+    if fired != planned {
+        return Err(format!(
+            "{label}: the planned crash at commit {at} of {commits} did not fire ({fired})"
+        ));
+    }
+    let (before, after) = (&states[at as usize - 1], &states[at as usize]);
+    let expected = match planned {
+        PLAN_BEFORE => {
+            stats.crashes_before += 1;
+            before
+        }
+        _ => {
+            stats.crashes_after += 1;
+            after
+        }
+    };
+    let when = format!("{label} died at commit {at} of {commits}");
+    if said.ok {
+        return Err(format!("{when}, yet it reported success: {}", said.output));
+    }
+    let live = state(&files.manifest());
+    if live != *before && !(planned == PLAN_AFTER && live == *after) {
+        return Err(format!(
+            "{when}: the dead process's view {} shows a commit the store did not take (before {}, after {})",
+            shown_state(&live),
+            shown_state(before),
+            shown_state(after)
+        ));
+    }
+    drop(files);
+    let files = one(open(Dying::new(inner.clone(), None)), rng)??;
+    let held = state(&files.manifest());
+    if held != *expected {
+        return Err(format!(
+            "{when}: the store holds {}, not {}",
+            shown_state(&held),
+            shown_state(expected)
+        ));
+    }
+    let contents = one(readable(files), rng)?.map_err(|error| format!("{when}: {error}"))?;
+    fold(digest, &contents);
+    Ok(Some(Died {
+        inner,
+        when,
+        contents,
+    }))
+}
+
+/// Reopens the store a crash point wrote to and reads every file again.
+fn reopened(inner: &Arc<MemStore>, rng: &mut Rng, digest: &mut u64) -> Result<Contents, String> {
+    let files = one(open(Dying::new(inner.clone(), None)), rng)??;
+    let contents = one(readable(files), rng)??;
+    fold(digest, &contents);
+    Ok(contents)
+}
+
+fn lossy(bytes: Option<&Vec<u8>>) -> Option<String> {
+    bytes.map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// Appends pieces to path in runtime through one open file: one psh
+/// redirection around every printf, one Python file object flushed after each
+/// write, or one cell call per piece.
+async fn appending(
+    runtime: Runtime,
+    files: Rc<dyn FileSystem>,
+    path: &'static str,
+    pieces: Vec<String>,
+) -> Said {
+    match runtime {
+        Runtime::Psh => {
+            let writes: Vec<String> = pieces
+                .iter()
+                .map(|piece| format!("printf '%s' {}", quoted(piece)))
+                .collect();
+            let script = format!("set -e\n{{ {}; }} >> {}", writes.join("; "), absolute(path));
+            psh(files, script).await
+        }
+        Runtime::Python => {
+            let program = format!(
+                "f = open({:?}, 'a')\nfor s in {pieces:?}:\n    f.write(s)\n    f.flush()\nf.close()\n",
+                absolute(path)
+            );
+            psh(files, format!("python3 -c {}", quoted(&program))).await
+        }
+        Runtime::Cell => {
+            let ops = pieces
+                .into_iter()
+                .map(|piece| FileOp::Append(path, piece))
+                .collect();
+            program(Runtime::Cell, files, ops).await
+        }
+    }
+}
+
+/// A crash in the middle of an append written in pieces: the file holds its
+/// first content and then whole pieces, and appending the rest gives every
+/// piece once.
+fn mid_append(
+    rng: &mut Rng,
+    stats: &mut WorkspaceCrashStats,
+    digest: &mut u64,
+    shape: &mut String,
+) -> Result<(), String> {
+    let runtime = RUNTIMES[rng.pick(RUNTIMES.len())];
+    let path = FILES[rng.pick(FILES.len())];
+    let first = words(rng, 4);
+    let pieces: Vec<String> = (0..rng.range(PIECES_MIN, PIECES_MAX))
+        .map(|at| format!("<{at}{}>", words(rng, 3)))
+        .collect();
+    let initial = vec![(path, first.clone())];
+    let setup_fn: SetupFn = Box::new(move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
+        Box::pin(setup(files, initial.clone()))
+    });
+    let all = pieces.clone();
+    let job: JobFn = Box::new(move |files: Rc<dyn FileSystem>| -> Boxed<'static, Said> {
+        Box::pin(appending(runtime, files, path, all.clone()))
+    });
+    let label = format!("append:{}", runtime.name());
+    let Some(died) = die_during(rng, stats, digest, shape, &label, &setup_fn, &job)? else {
+        return Ok(());
+    };
+    stats.points_append += 1;
+    let when = died.when;
+    let key = keyed(path);
+    let filled = |count: usize| [first.as_bytes(), pieces[..count].concat().as_bytes()].concat();
+    let held = died.contents.get(&key);
+    let landed = (0..=pieces.len())
+        .find(|&count| held == Some(&filled(count)))
+        .ok_or_else(|| {
+            format!(
+                "{when}: {path} holds {:?}, not {first:?} followed by whole pieces of {pieces:?}",
+                lossy(held)
+            )
+        })?;
+    if died.contents.len() != 1 {
+        return Err(format!(
+            "{when}: the store holds files the append never wrote: {:?}",
+            died.contents.keys().collect::<Vec<_>>()
+        ));
+    }
+    let _ = write!(shape, " landed={landed}");
+    if landed < pieces.len() {
+        let files = one(open(Dying::new(died.inner.clone(), None)), rng)??;
+        let rest = pieces[landed..].to_vec();
+        let resumed = one(appending(runtime, Rc::new(files), path, rest), rng)?;
+        if !resumed.ok {
+            return Err(format!(
+                "{when}: appending the rest failed: {}",
+                resumed.output
+            ));
+        }
+    }
+    stats.resumed += 1;
+    let again = reopened(&died.inner, rng, digest).map_err(|error| format!("{when}: {error}"))?;
+    let want = filled(pieces.len());
+    if again.get(&key) != Some(&want) {
+        return Err(format!(
+            "{when}: after resuming at piece {landed}, {path} holds {:?}, not {:?}",
+            lossy(again.get(&key)),
+            String::from_utf8_lossy(&want)
+        ));
+    }
+    Ok(())
+}
+
+/// A crash around a rename between two appends: the store holds the files as
+/// they were between two operations (the moved file once, under one name),
+/// and running the rest of the operations finishes the job.
+fn rename_across(
+    rng: &mut Rng,
+    stats: &mut WorkspaceCrashStats,
+    digest: &mut u64,
+    shape: &mut String,
+) -> Result<(), String> {
+    let runtime = RUNTIMES[rng.pick(RUNTIMES.len())];
+    let mut order = FILES.to_vec();
+    let from = order.remove(rng.pick(order.len()));
+    let to = order.remove(rng.pick(order.len()));
+    let side = order[0];
+    let mut initial = vec![(from, words(rng, 4)), (side, words(rng, 4))];
+    if rng.chance(HALF_PPM) {
+        initial.push((to, words(rng, 4)));
+    }
+    let ops = vec![
+        FileOp::Append(side, format!("<{}>", words(rng, 3))),
+        FileOp::Rename(from, to),
+        FileOp::Append(side, format!("<{}>", words(rng, 3))),
+    ];
+    let between = prefixes(&(initial.clone(), ops.clone()));
+    let setup_fn: SetupFn = Box::new(move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
+        Box::pin(setup(files, initial.clone()))
+    });
+    let planned = ops.clone();
+    let job: JobFn = Box::new(move |files: Rc<dyn FileSystem>| -> Boxed<'static, Said> {
+        Box::pin(program(runtime, files, planned.clone()))
+    });
+    let label = format!("rename:{}", runtime.name());
+    let Some(died) = die_during(rng, stats, digest, shape, &label, &setup_fn, &job)? else {
+        return Ok(());
+    };
+    stats.points_rename += 1;
+    let when = died.when;
+    let rest = match runtime {
+        Runtime::Python => python_rest(&when, &died.contents, &between, &ops)?,
+        _ => {
+            let done = between
+                .iter()
+                .position(|held| *held == died.contents)
+                .ok_or_else(|| {
+                    format!(
+                        "{when}: the store holds {:?}, which the files never held between two operations of {ops:?}",
+                        died.contents
+                    )
+                })?;
+            ops[done..].to_vec()
+        }
+    };
+    let done = ops.len() - rest.len();
+    let _ = write!(shape, " done={done}");
+    let files = one(open(Dying::new(died.inner.clone(), None)), rng)??;
+    let resumed = one(program(runtime, Rc::new(files), rest), rng)?;
+    if !resumed.ok {
+        return Err(format!(
+            "{when}: running the rest after operation {done} failed: {}",
+            resumed.output
+        ));
+    }
+    stats.resumed += 1;
+    let again = reopened(&died.inner, rng, digest).map_err(|error| format!("{when}: {error}"))?;
+    let want = &between[between.len() - 1];
+    if again != *want {
+        return Err(format!(
+            "{when}: after running the rest from operation {done}, the store holds {again:?}, not {want:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// What is left of a rename job after a Python run died. Python writes back
+/// file by file when it ends, so each file holds what it held before the run
+/// or after it, and the moved file may sit in both places but never in
+/// neither. The rest is the side file's appends when they are missing and the
+/// rename when its source is still there.
+fn python_rest(
+    when: &str,
+    held: &Contents,
+    between: &[Contents],
+    ops: &[FileOp],
+) -> Result<Vec<FileOp>, String> {
+    let (start, end) = (&between[0], &between[between.len() - 1]);
+    let paths: BTreeSet<&String> = start.keys().chain(end.keys()).chain(held.keys()).collect();
+    for path in paths {
+        let now = held.get(path);
+        if now != start.get(path) && now != end.get(path) {
+            return Err(format!(
+                "{when}: {path} holds {:?}, neither what it held before the run nor after it",
+                lossy(now)
+            ));
+        }
+    }
+    let (from, to, side) = match ops {
+        [FileOp::Append(side, _), FileOp::Rename(from, to), FileOp::Append(_, _)] => (*from, *to, *side),
+        _ => return Err(format!("{when}: not a rename job: {ops:?}")),
+    };
+    let moved = start.get(&keyed(from));
+    if held.get(&keyed(from)).is_none() && held.get(&keyed(to)) != moved {
+        return Err(format!(
+            "{when}: {from} was moved to {to} but the store holds it in neither: {held:?}"
+        ));
+    }
+    let mut rest = Vec::new();
+    let key = keyed(side);
+    if held.get(&key) != end.get(&key) {
+        let (before, after) = (start.get(&key).map_or(0, Vec::len), &end[&key]);
+        rest.push(FileOp::Append(
+            side,
+            String::from_utf8_lossy(&after[before..]).into_owned(),
+        ));
+    }
+    if held.contains_key(&keyed(from)) {
+        rest.push(FileOp::Rename(from, to));
+    }
+    Ok(rest)
+}
+
+/// A tree for the checkout's branches: each path's content, absent paths
+/// untracked.
+type Tree = BTreeMap<&'static str, String>;
+
+fn writes(tree: &Tree) -> String {
+    tree.iter()
+        .map(|(path, content)| format!("printf '%s' {} > {path}\n", quoted(content)))
+        .collect()
+}
+
+/// A crash during a git checkout's writes, from branch one to branch two: a
+/// forced checkout of two over what the crash left must leave HEAD on two,
+/// two's tree in the work tree, and nothing to commit.
+fn checkout(
+    rng: &mut Rng,
+    stats: &mut WorkspaceCrashStats,
+    digest: &mut u64,
+    shape: &mut String,
+) -> Result<(), String> {
+    let mut first = Tree::new();
+    for (at, path) in REPO_PATHS.into_iter().enumerate() {
+        if at == 0 || rng.chance(TRACKED_PPM) {
+            first.insert(path, words(rng, 4));
+        }
+    }
+    let mut second = first.clone();
+    for path in REPO_PATHS {
+        match rng.pick(4) {
+            0 => {}
+            1 => {
+                second.insert(path, format!("<two {}>", words(rng, 4)));
+            }
+            2 => {
+                second.remove(path);
+            }
+            _ => second.entry(path).or_default().push_str("<two>"),
+        }
+    }
+    if second == first || second.is_empty() {
+        second.insert(REPO_PATHS[0], "<two>".to_owned());
+    }
+    let removed: String = first
+        .keys()
+        .filter(|path| !second.contains_key(*path))
+        .map(|path| format!("rm -f {path}\n"))
+        .collect();
+    let repo = absolute(REPO);
+    let script = format!(
+        "set -e\n{GIT_ENV}\nmkdir -p {repo}/d\ncd {repo}\ngit init -q\n{}git add -A\ngit commit -qm one\ngit branch one\ngit checkout -q -b two\n{removed}{}git add -A\ngit commit -qm two\ngit checkout -q one\n",
+        writes(&first),
+        writes(&second)
+    );
+    let setup_fn: SetupFn = Box::new(move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
+        let script = script.clone();
+        Box::pin(async move {
+            setup(files.clone(), Vec::new()).await?;
+            let said = psh(Rc::new(files), script).await;
+            match said.ok {
+                true => Ok(()),
+                false => Err(format!("the repository's setup failed: {}", said.output)),
+            }
+        })
+    });
+    let switch = format!("set -e\n{GIT_ENV}\ncd {repo}\ngit checkout -q two\n");
+    let job: JobFn = Box::new(move |files: Rc<dyn FileSystem>| -> Boxed<'static, Said> {
+        Box::pin(psh(files, switch.clone()))
+    });
+    let Some(died) = die_during(rng, stats, digest, shape, "checkout", &setup_fn, &job)? else {
+        return Ok(());
+    };
+    stats.points_checkout += 1;
+    let when = died.when;
+    let files = one(open(Dying::new(died.inner.clone(), None)), rng)??;
+    let resume = format!(
+        "set -e\n{GIT_ENV}\ncd {repo}\nrm -f .git/index.lock .git/HEAD.lock\ngit checkout -q -f two\nhead=$(cat .git/HEAD)\nstatus=$(git status --porcelain)\necho \"head=$head status=$status\"\n[ \"$head\" = 'ref: refs/heads/two' ]\n[ -z \"$status\" ]\n"
+    );
+    let resumed = one(psh(Rc::new(files), resume), rng)?;
+    if !resumed.ok {
+        return Err(format!(
+            "{when}: a forced checkout of two over what the crash left failed: {}",
+            resumed.output
+        ));
+    }
+    stats.resumed += 1;
+    let again = reopened(&died.inner, rng, digest).map_err(|error| format!("{when}: {error}"))?;
+    let prefix = keyed(&format!("{REPO}/"));
+    let git = keyed(&format!("{REPO}/.git/"));
+    let tree: BTreeMap<String, String> = again
+        .iter()
+        .filter(|(path, _)| path.starts_with(&prefix) && !path.starts_with(&git))
+        .map(|(path, bytes)| {
+            (
+                path[prefix.len()..].to_owned(),
+                String::from_utf8_lossy(bytes).into_owned(),
+            )
+        })
+        .collect();
+    let want: BTreeMap<String, String> = second
+        .iter()
+        .map(|(path, content)| ((*path).to_owned(), content.clone()))
+        .collect();
+    if tree != want {
+        return Err(format!(
+            "{when}: after a forced checkout of two the work tree holds {tree:?}, not {want:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// One crash point per seed: mid-append, mid-checkout or across a rename.
+fn points(
+    rng: &mut Rng,
+    stats: &mut WorkspaceCrashStats,
+    digest: &mut u64,
+    shape: &mut String,
+) -> Result<(), String> {
+    match rng.pick(3) {
+        0 => mid_append(rng, stats, digest, shape),
+        1 => checkout(rng, stats, digest, shape),
+        _ => rename_across(rng, stats, digest, shape),
+    }
+}
+
 fn simulate(seed: u64, mutation: WorkspaceCrashMutation) -> WorkspaceCrashOutcome {
     let mut rng = Rng::derive(seed, "workspace_crash");
     let mut stats = WorkspaceCrashStats {
@@ -1128,6 +1626,10 @@ fn simulate(seed: u64, mutation: WorkspaceCrashMutation) -> WorkspaceCrashOutcom
     fs_sim::mutate(mutation.rule());
     let wrong = crash(&mut rng, &mut stats, &mut digest, &mut shape)
         .and_then(|()| race(&mut rng, &mut stats, &mut digest, &mut shape))
+        .and_then(|()| {
+            let mut rng = Rng::derive(seed, "workspace_crash_points");
+            points(&mut rng, &mut stats, &mut digest, &mut shape)
+        })
         .err();
     fs_sim::mutate(FsRule::None);
     digest = fnv(digest, shape.as_bytes());
