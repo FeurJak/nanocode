@@ -351,7 +351,7 @@ mod hex_digest {
             if text.len() != digest.len() * 2 {
                 return Err(E::invalid_length(text.len(), &self));
             }
-            for (byte, pair) in digest.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+            for (byte, pair) in digest.iter_mut().zip(text.as_bytes().as_chunks::<2>().0) {
                 let nibble = |at: usize| char::from(pair[at]).to_digit(16);
                 *byte = nibble(0)
                     .zip(nibble(1))
