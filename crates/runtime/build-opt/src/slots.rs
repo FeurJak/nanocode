@@ -6,6 +6,12 @@ use crate::idle::KEPT_LABEL_PREFIX;
 
 const FRESH_MS: u64 = 15 * 60 * 1000;
 
+/// No lease may run into a box's last 15 minutes: the box is swapped then.
+pub const CLOSE_WINDOW_MS: u64 = 15 * 60_000;
+
+/// A waiter whose take has not retried for this long (its client died) is dropped.
+pub const WAITER_GONE_MS: u64 = 2 * 60_000;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pin {
     Taskset,
@@ -88,6 +94,39 @@ pub struct Want {
     pub label: String,
     pub only: Option<String>,
     pub ttl_ms: u64,
+    pub queue: Option<Queue>,
+}
+
+/// A take --wait's place in line: its id (stable across its retries), when it first asked and for how long.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Queue {
+    pub id: String,
+    pub since_ms: u64,
+    pub wait_ms: u64,
+}
+
+/// A take --wait still waiting, recorded in the state so cpus can be held for the oldest one per machine.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Waiter {
+    pub id: String,
+    pub machine: Option<String>,
+    pub cores: u32,
+    pub kind: String,
+    pub label: String,
+    pub ttl_ms: u64,
+    pub since_ms: u64,
+    pub until_ms: u64,
+    pub seen_ms: u64,
+}
+
+/// The cpus first_cpu..end_cpu on machine held for waiter, whose N contiguous cpus are all free at ready_ms.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hold {
+    pub machine: String,
+    pub waiter: String,
+    pub first_cpu: u32,
+    pub end_cpu: u32,
+    pub ready_ms: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -97,6 +136,7 @@ pub struct State {
     pub next: u64,
     pub boxes: Option<Value>,
     pub caps: Vec<Cap>,
+    pub waiters: Vec<Waiter>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,6 +190,40 @@ impl Lease {
             "label": self.label,
             "taken_ms": self.taken_ms,
             "until_ms": self.until_ms,
+        })
+    }
+}
+
+impl Waiter {
+    pub const fn live(&self, now_ms: u64) -> bool {
+        self.until_ms > now_ms && self.seen_ms + WAITER_GONE_MS > now_ms
+    }
+
+    fn from_json(value: &Value) -> Option<Self> {
+        Some(Self {
+            id: text(value, "id")?,
+            machine: text(value, "machine"),
+            cores: u32::try_from(number(value, "cores")?).ok()?,
+            kind: text(value, "kind").unwrap_or_else(|| DEFAULT_KIND.to_owned()),
+            label: text(value, "label")?,
+            ttl_ms: number(value, "ttl_ms")?,
+            since_ms: number(value, "since_ms")?,
+            until_ms: number(value, "until_ms")?,
+            seen_ms: number(value, "seen_ms")?,
+        })
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "id": self.id,
+            "machine": self.machine,
+            "cores": self.cores,
+            "kind": self.kind,
+            "label": self.label,
+            "ttl_ms": self.ttl_ms,
+            "since_ms": self.since_ms,
+            "until_ms": self.until_ms,
+            "seen_ms": self.seen_ms,
         })
     }
 }
@@ -285,6 +359,11 @@ impl State {
                 None | Some(Value::Null) => Vec::new(),
                 Some(caps) => caps_from_json(caps).ok()?,
             },
+            waiters: value
+                .get("waiters")
+                .and_then(Value::as_array)
+                .map(|waiters| waiters.iter().filter_map(Waiter::from_json).collect())
+                .unwrap_or_default(),
         })
     }
 
@@ -322,13 +401,16 @@ impl State {
                 })
             })
             .collect();
-        serde_json::to_string_pretty(&json!({
+        let mut value = json!({
             "observations": observations,
             "leases": leases,
             "next": self.next,
             "boxes": self.boxes,
-        }))
-        .unwrap_or_default()
+        });
+        if !self.waiters.is_empty() {
+            value["waiters"] = self.waiters.iter().map(Waiter::to_json).collect();
+        }
+        serde_json::to_string_pretty(&value).unwrap_or_default()
     }
 
     pub fn expire(&mut self, now_ms: u64) -> Vec<Lease> {
@@ -337,6 +419,7 @@ impl State {
             .drain(..)
             .partition(|lease| lease.until_ms <= now_ms);
         self.leases = live;
+        self.waiters.retain(|waiter| waiter.live(now_ms));
         expired
     }
 
@@ -420,12 +503,13 @@ impl State {
             .sum()
     }
 
-    fn gap(&self, machine: &Machine, cores: u32, want: u32) -> Option<u32> {
+    fn gap(&self, machine: &Machine, cores: u32, want: u32, held: &[(u32, u32)]) -> Option<u32> {
         let mut used: Vec<(u32, u32)> = self
             .leases
             .iter()
             .filter(|lease| lease.machine == machine.name)
             .map(|lease| (lease.first_cpu, lease.first_cpu + lease.cores))
+            .chain(held.iter().copied())
             .collect();
         used.sort_unstable();
         let mut start = 0;
@@ -461,6 +545,114 @@ impl State {
         (start + want <= held.end_cpu()).then_some(start)
     }
 
+    /// The window of want contiguous cpus on machine that is all free soonest (now when it is
+    /// free now): its first cpu and when it is free, the latest end of the leases over it.
+    pub fn window(&self, machine: &str, cores: u32, want: u32, now_ms: u64) -> Option<(u32, u64)> {
+        if want == 0 || want > cores {
+            return None;
+        }
+        let leases: Vec<&Lease> = self
+            .leases
+            .iter()
+            .filter(|lease| lease.machine == machine)
+            .collect();
+        (0..=cores - want)
+            .map(|start| {
+                let ready = leases
+                    .iter()
+                    .filter(|lease| lease.first_cpu < start + want && start < lease.end_cpu())
+                    .map(|lease| lease.until_ms)
+                    .fold(now_ms, u64::max);
+                (ready, start)
+            })
+            .min()
+            .map(|(ready, start)| (start, ready))
+    }
+
+    fn over_cap(&self, kind: &str, label: &str, cores: u32) -> bool {
+        self.caps
+            .iter()
+            .any(|cap| cap.covers(kind, label) && self.held(cap) + cores > cap.cores)
+    }
+
+    /// The cpus held for waiting takes: the oldest live waiter on each machine (by request time;
+    /// one without --machine on the machine where its window is free soonest) holds the window of
+    /// its N cpus that frees soonest, unless it cannot fit before that machine's close window or
+    /// its lane is over its cap, so it could not take there anyway.
+    pub fn holds(&self, machines: &[Machine], now_ms: u64) -> Vec<Hold> {
+        let mut waiters: Vec<&Waiter> = self
+            .waiters
+            .iter()
+            .filter(|waiter| {
+                waiter.live(now_ms) && !self.over_cap(&waiter.kind, &waiter.label, waiter.cores)
+            })
+            .collect();
+        waiters.sort_by(|a, b| (a.since_ms, &a.id).cmp(&(b.since_ms, &b.id)));
+        let mut holds: Vec<Hold> = Vec::new();
+        for waiter in waiters {
+            let soonest = machines
+                .iter()
+                .filter(|machine| {
+                    waiter
+                        .machine
+                        .as_deref()
+                        .is_none_or(|name| name == machine.name)
+                        && machine
+                            .kinds
+                            .as_ref()
+                            .is_none_or(|kinds| kinds.contains(&waiter.kind))
+                        && !holds.iter().any(|hold| hold.machine == machine.name)
+                        && (waiter.machine.is_some() || machine.placement == Placement::Fill)
+                })
+                .filter_map(|machine| {
+                    let cores = self.usage(machine, now_ms).cores;
+                    let (first_cpu, ready_ms) =
+                        self.window(&machine.name, cores, waiter.cores, now_ms)?;
+                    let fits = machine.expires_ms.is_none_or(|expires| {
+                        expires.saturating_sub(CLOSE_WINDOW_MS) >= ready_ms + waiter.ttl_ms
+                    });
+                    fits.then_some((ready_ms, machine, first_cpu))
+                })
+                .min_by_key(|(ready_ms, _, _)| *ready_ms);
+            if let Some((ready_ms, machine, first_cpu)) = soonest {
+                holds.push(Hold {
+                    machine: machine.name.clone(),
+                    waiter: waiter.id.clone(),
+                    first_cpu,
+                    end_cpu: first_cpu + waiter.cores,
+                    ready_ms,
+                });
+            }
+        }
+        holds
+    }
+
+    fn enqueue(&mut self, want: &Want, now_ms: u64) {
+        let Some(queue) = &want.queue else { return };
+        let until_ms = queue.since_ms.saturating_add(queue.wait_ms);
+        if let Some(waiter) = self.waiters.iter_mut().find(|waiter| waiter.id == queue.id) {
+            // Refresh at most every 30s, so a waiter's 5s retries don't rewrite the state each time.
+            if now_ms >= waiter.seen_ms + WAITER_GONE_MS / 4 {
+                waiter.seen_ms = now_ms;
+            }
+        } else if until_ms > now_ms {
+            self.waiters.push(Waiter {
+                id: queue.id.clone(),
+                machine: want.only.clone(),
+                cores: want.cores,
+                kind: want.kind.clone(),
+                label: want.label.clone(),
+                ttl_ms: want.ttl_ms,
+                since_ms: queue.since_ms,
+                until_ms,
+                seen_ms: now_ms,
+            });
+        }
+    }
+
+    /// Takes a lease; a take with a queue (take --wait) is recorded as a waiter until it gets one or
+    /// its wait ends, and every take sees the cpus held for an older waiter as busy, except a
+    /// backfill: a take whose lease ends by the time that waiter's window is free.
     pub fn take(
         &mut self,
         machines: &[Machine],
@@ -468,6 +660,15 @@ impl State {
         now_ms: u64,
     ) -> Result<Lease, Refusal> {
         self.expire(now_ms);
+        self.enqueue(want, now_ms);
+        let taken = self.place(machines, want, now_ms);
+        if let (Ok(_), Some(queue)) = (&taken, &want.queue) {
+            self.waiters.retain(|waiter| waiter.id != queue.id);
+        }
+        taken
+    }
+
+    fn place(&mut self, machines: &[Machine], want: &Want, now_ms: u64) -> Result<Lease, Refusal> {
         let standing = self.leases.iter().find_map(|held| {
             let prefix = held.label_prefix()?;
             if !want.label.starts_with(prefix)
@@ -515,6 +716,8 @@ impl State {
             held.until_ms = now_ms + want.ttl_ms;
             return Ok(held.clone());
         }
+        let mine = want.queue.as_ref().map(|queue| queue.id.as_str());
+        let holds = self.holds(machines, now_ms);
         let mut best: Option<(u32, &Machine, u32)> = None;
         for machine in machines {
             if want
@@ -532,14 +735,35 @@ impl State {
                 continue;
             }
             let usage = self.usage(machine, now_ms);
+            let held: Vec<(u32, u32)> = holds
+                .iter()
+                .filter(|hold| {
+                    hold.machine == machine.name
+                        && Some(hold.waiter.as_str()) != mine
+                        && now_ms + want.ttl_ms > hold.ready_ms
+                })
+                .map(|hold| (hold.first_cpu, hold.end_cpu.min(usage.cores)))
+                .collect();
+            let held_free: u32 = held
+                .iter()
+                .flat_map(|&(first, end)| first..end)
+                .filter(|&cpu| {
+                    !self.leases.iter().any(|lease| {
+                        lease.machine == machine.name
+                            && lease.first_cpu <= cpu
+                            && cpu < lease.end_cpu()
+                    })
+                })
+                .map(|_| 1)
+                .sum();
             if !usage.memory_ok
-                || usage.busy + want.cores > usage.cores
+                || usage.busy + held_free + want.cores > usage.cores
                 || (machine.placement == Placement::LastResort && !usage.observed)
                 || (machine.placement == Placement::Named && want.only.is_none())
             {
                 continue;
             }
-            let Some(first_cpu) = self.gap(machine, usage.cores, want.cores) else {
+            let Some(first_cpu) = self.gap(machine, usage.cores, want.cores, &held) else {
                 continue;
             };
             let same_kind = self

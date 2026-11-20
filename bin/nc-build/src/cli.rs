@@ -44,6 +44,11 @@ const USAGE: &str = "usage:
                                       leased cores across all machines plus N would exceed the cap; takes placed inside a standing
                                       --label-prefix reservation neither count nor are refused
   (a take refuses a box whose lease would run into its last 15 minutes before expiry; use a shorter --minutes or another box)
+  (fair queue: a take --wait is recorded in the state as a waiter with its request time, cores and --machine while it waits;
+   the oldest live waiter on each machine holds the window of its N contiguous cpus that frees soonest, and every other
+   take sees that window's free cpus as busy, except takes inside a standing reservation matching their label and a
+   backfill whose --minutes ends before the window frees; a waiter is dropped once it gets its lease, its --wait
+   runs out, or it has not retried for 2 minutes; 'slots list' shows waiters and their holds)
   nc-build slots give LEASE | slots renew LEASE [--minutes T]
   nc-build slots reserve --machine M --cpus FIRST-LAST --until 'YYYY-MM-DD HH:MM' --label L [--kind reserved] [--overlap]
   nc-build slots reserve --machine M --cpus FIRST-LAST --until 'YYYY-MM-DD HH:MM' --label-prefix P [--overlap]
@@ -364,7 +369,7 @@ const OVER_CAP: &str = "over its cap:";
 const PST_OFFSET_MINUTES: i64 = -8 * 60;
 
 /// No lease may run into a box's last 15 minutes: the box is swapped then.
-const CLOSE_WINDOW_MS: u64 = 15 * 60_000;
+const CLOSE_WINDOW_MS: u64 = slots::CLOSE_WINDOW_MS;
 
 fn fits_before_close(expires_ms: Option<u64>, now: u64, ttl: u64) -> bool {
     expires_ms.is_none_or(|expires| expires.saturating_sub(CLOSE_WINDOW_MS) >= now + ttl)
@@ -773,8 +778,14 @@ fn slots_command(args: &[String]) -> Result<(), String> {
     let take = command == Some("take");
     let env = take && args.iter().any(|arg| arg == "--env");
     let local = config("NC_BUILD_MACHINE", "machine");
+    let started = now_ms();
     let args = if take {
-        local_take(&without(&args, "--env", false), local.as_deref())
+        queued_take(
+            &local_take(&without(&args, "--env", false), local.as_deref()),
+            started,
+            wait_ms,
+            &hostname(),
+        )
     } else {
         args
     };
@@ -782,7 +793,6 @@ fn slots_command(args: &[String]) -> Result<(), String> {
         Some(url) => remote(url, &args, &input),
         None => slots_once(&args, &input),
     };
-    let started = now_ms();
     loop {
         match once() {
             Ok(out) if take => {
@@ -970,7 +980,42 @@ fn want(args: &[String], cores: u32, ttl_ms: u64) -> Result<Want, String> {
         label: option(args, "--label").ok_or("--label L")?.to_owned(),
         only: option(args, "--machine").map(str::to_owned),
         ttl_ms,
+        queue: queue(args)?,
     })
+}
+
+/// The queue a take --wait sends with each retry: --queue-id ID --queue-since MS --queue-wait MS.
+fn queue(args: &[String]) -> Result<Option<slots::Queue>, String> {
+    let Some(id) = option(args, "--queue-id") else {
+        return Ok(None);
+    };
+    let ms = |name: &str| {
+        option(args, name)
+            .ok_or_else(|| format!("--queue-id needs {name}"))?
+            .parse::<u64>()
+            .map_err(|error| format!("{name}: {error}"))
+    };
+    Ok(Some(slots::Queue {
+        id: id.to_owned(),
+        since_ms: ms("--queue-since")?,
+        wait_ms: ms("--queue-wait")?,
+    }))
+}
+
+/// A take --wait carries its place in line on every retry, so the state can record it as a waiter.
+fn queued_take(args: &[String], started: u64, wait_ms: u64, host: &str) -> Vec<String> {
+    let mut args = args.to_vec();
+    if wait_ms > 0 {
+        args.extend([
+            "--queue-id".to_owned(),
+            format!("{host}-{}-{started}", std::process::id()),
+            "--queue-since".to_owned(),
+            started.to_string(),
+            "--queue-wait".to_owned(),
+            wait_ms.to_string(),
+        ]);
+    }
+    args
 }
 
 fn slots_once(args: &[String], input: &str) -> Result<String, String> {
@@ -1068,6 +1113,7 @@ fn slots_once(args: &[String], input: &str) -> Result<String, String> {
                     label: format!("{prefix}{}", slots::PREFIX_MARK),
                     only: Some(machine.to_owned()),
                     ttl_ms: until.saturating_sub(now),
+                    queue: None,
                 },
                 Some(_) => return Err("--label-prefix P: P is empty".to_owned()),
                 None => want(args, last - first + 1, until.saturating_sub(now))?,
@@ -1315,6 +1361,32 @@ fn list(machines: &[Machine], state: &State, now: u64) -> String {
             lease.until_ms.saturating_sub(now) / 1000
         ));
     }
+    let holds = state.holds(machines, now);
+    for waiter in state.waiters.iter().filter(|waiter| waiter.live(now)) {
+        let hold =
+            holds
+                .iter()
+                .find(|hold| hold.waiter == waiter.id)
+                .map_or(String::new(), |hold| {
+                    format!(
+                        ", holds {} cpus {}-{} free in {}s",
+                        hold.machine,
+                        hold.first_cpu,
+                        hold.end_cpu - 1,
+                        hold.ready_ms.saturating_sub(now) / 1000
+                    )
+                });
+        out.push_str(&format!(
+            "waiter {} {} {} cores {} {} waiting {}s, {}s left{hold}\n",
+            waiter.id,
+            waiter.machine.as_deref().unwrap_or("any"),
+            waiter.cores,
+            waiter.kind,
+            waiter.label,
+            now.saturating_sub(waiter.since_ms) / 1000,
+            waiter.until_ms.saturating_sub(now) / 1000
+        ));
+    }
     for cap in &state.caps {
         out.push_str(&format!(
             "lane {} held {}/{}\n",
@@ -1456,7 +1528,7 @@ fn post(
 
 #[cfg(test)]
 mod tests {
-    use super::{local_take, parse_observation, placement_warning, reap_gone, slots};
+    use super::{local_take, parse_observation, placement_warning, queued_take, reap_gone, slots};
     use nanocode_build_opt::slots::{Cap, Lease, Machine, Pin, Placement, Refusal, State, Want};
 
     const NOW: u64 = 1_000_000;
@@ -1495,6 +1567,7 @@ mod tests {
             label: "t".to_owned(),
             only: None,
             ttl_ms: 60_000,
+            queue: None,
         }
     }
 
@@ -1892,5 +1965,204 @@ mod tests {
         assert!(fits_before_close(Some(expires), now, 25 * 60_000));
         assert!(!fits_before_close(Some(expires), now, 26 * 60_000));
         assert!(fits_before_close(None, now, 600 * 60_000));
+    }
+
+    const MIN: u64 = 60_000;
+
+    /// A full 48-core box of twelve 4-core leases, lease i on cpus 4i..4i+4 until NOW + 5(i+1) minutes.
+    fn staggered() -> State {
+        let mut state = State::default();
+        for i in 0..12_u32 {
+            let mut held = lease(&format!("s{i}"), 4 * i, 4, "build", "small");
+            held.until_ms = NOW + 5 * MIN * u64::from(i + 1);
+            state.leases.push(held);
+        }
+        state
+    }
+
+    fn waiting(cores: u32, id: &str, since_ms: u64, wait_ms: u64, ttl_ms: u64) -> Want {
+        let mut waiting = want(cores);
+        waiting.only = Some("m".to_owned());
+        waiting.ttl_ms = ttl_ms;
+        waiting.queue = Some(slots::Queue {
+            id: id.to_owned(),
+            since_ms,
+            wait_ms,
+        });
+        waiting
+    }
+
+    fn small(ttl_ms: u64) -> Want {
+        let mut small = want(4);
+        small.only = Some("m".to_owned());
+        small.ttl_ms = ttl_ms;
+        small
+    }
+
+    #[test]
+    fn a_sixteen_core_waiter_gets_cores_before_later_four_core_takes() {
+        let machines = [machine()];
+        let mut state = staggered();
+        let big = waiting(16, "big", NOW, 120 * MIN, 60 * MIN);
+        assert_eq!(state.take(&machines, &big, NOW), Err(Refusal::NoRoom));
+        assert_eq!(state.waiters.len(), 1);
+        let holds = state.holds(&machines, NOW);
+        assert_eq!(holds.len(), 1);
+        assert_eq!((holds[0].first_cpu, holds[0].end_cpu), (0, 16));
+        assert_eq!(holds[0].ready_ms, NOW + 20 * MIN);
+        let later = waiting(4, "later", NOW + MIN, 120 * MIN, 60 * MIN);
+        for at in [5, 10, 15] {
+            let now = NOW + at * MIN;
+            // The waiter retries every few seconds; between its retries the freed cpus stay held.
+            assert_eq!(
+                state.take(&machines, &big, now),
+                Err(Refusal::NoRoom),
+                "big still waits at {at}m"
+            );
+            // Without the waiter the 4-core take would win the freed cpus.
+            let mut unfair = state.clone();
+            unfair.waiters.clear();
+            assert!(unfair.take(&machines, &small(60 * MIN), now).is_ok());
+            assert_eq!(
+                state.take(&machines, &small(60 * MIN), now),
+                Err(Refusal::NoRoom)
+            );
+            assert_eq!(state.take(&machines, &later, now), Err(Refusal::NoRoom));
+        }
+        let got = state.take(&machines, &big, NOW + 20 * MIN).unwrap();
+        assert_eq!((got.cpus(), got.cores), ("0-15".to_owned(), 16));
+        assert!(state.waiters.iter().all(|waiter| waiter.id != "big"));
+        // The 4-core waiter is next in line: it holds the next window, the 4 cpus that free first.
+        let lease = state.take(&machines, &later, NOW + 25 * MIN).unwrap();
+        assert_eq!(lease.cpus(), "16-19");
+        assert!(state.waiters.is_empty());
+    }
+
+    #[test]
+    fn a_short_take_backfills_cpus_held_for_a_waiter_only_if_it_ends_first() {
+        let machines = [machine()];
+        let mut state = staggered();
+        let big = waiting(16, "big", NOW, 120 * MIN, 60 * MIN);
+        assert!(state.take(&machines, &big, NOW).is_err());
+        let now = NOW + 5 * MIN;
+        assert!(state.take(&machines, &big, now).is_err());
+        // cpus 0-3 freed at 5m; the waiter's window 0-15 is free at 20m.
+        assert_eq!(
+            state.take(&machines, &small(16 * MIN), now),
+            Err(Refusal::NoRoom)
+        );
+        let backfill = state.take(&machines, &small(15 * MIN), now).unwrap();
+        assert_eq!(backfill.cpus(), "0-3");
+        assert_eq!(state.holds(&machines, now)[0].ready_ms, NOW + 20 * MIN);
+        assert!(state.take(&machines, &big, NOW + 20 * MIN).is_ok());
+        // Cpus outside a waiter's window are not held at all.
+        let mut wide = self::state(&[], &[(0, 24)]);
+        wide.leases[0].until_ms = NOW + 30 * MIN;
+        let mut held = lease("h", 24, 8, "build", "small");
+        held.until_ms = NOW + 10 * MIN;
+        wide.leases.push(held);
+        let big = waiting(24, "big", NOW, 120 * MIN, 60 * MIN);
+        assert!(wide.take(&machines, &big, NOW).is_err());
+        let hold = &wide.holds(&machines, NOW)[0];
+        assert_eq!((hold.first_cpu, hold.end_cpu), (24, 48));
+        assert_eq!(
+            wide.take(&machines, &small(60 * MIN), NOW),
+            Err(Refusal::NoRoom)
+        );
+        let narrow = waiting(8, "narrow", NOW, 120 * MIN, 60 * MIN);
+        let mut other = self::state(&[], &[(0, 24), (24, 8)]);
+        other.leases[0].until_ms = NOW + 30 * MIN;
+        other.leases[1].until_ms = NOW + 10 * MIN;
+        other.waiters.push(slots::Waiter {
+            id: "narrow".to_owned(),
+            machine: Some("m".to_owned()),
+            cores: 8,
+            kind: slots::DEFAULT_KIND.to_owned(),
+            label: "t".to_owned(),
+            ttl_ms: 60 * MIN,
+            since_ms: NOW,
+            until_ms: NOW + 120 * MIN,
+            seen_ms: NOW,
+        });
+        // The 8-core waiter holds 32-39 (free now); 40-47 stay open to a 60-minute take.
+        assert_eq!(
+            other.take(&machines, &small(60 * MIN), NOW).unwrap().cpus(),
+            "40-43"
+        );
+        assert_eq!(other.take(&machines, &narrow, NOW).unwrap().cpus(), "32-39");
+        assert!(other.waiters.is_empty());
+    }
+
+    #[test]
+    fn a_stale_waiter_is_dropped() {
+        let machines = [machine()];
+        let mut state = staggered();
+        let big = waiting(16, "big", NOW, 2 * MIN, 60 * MIN);
+        assert!(state.take(&machines, &big, NOW).is_err());
+        assert_eq!(
+            State::from_json(&state.to_json()).unwrap().waiters,
+            state.waiters
+        );
+        assert_eq!(
+            state.take(&machines, &small(60 * MIN), NOW + MIN),
+            Err(Refusal::NoRoom)
+        );
+        // Its --wait (2 minutes) ran out: the 4 cpus freed at 5m go to the next take.
+        let lease = state
+            .take(&machines, &small(60 * MIN), NOW + 5 * MIN)
+            .unwrap();
+        assert_eq!(lease.cpus(), "0-3");
+        assert!(state.waiters.is_empty());
+        // A waiter whose client stopped retrying is dropped after 2 minutes, however long its --wait.
+        let mut gone = staggered();
+        let big = waiting(16, "gone", NOW, 120 * MIN, 60 * MIN);
+        assert!(gone.take(&machines, &big, NOW).is_err());
+        assert!(
+            gone.take(&machines, &small(60 * MIN), NOW + MIN + 1)
+                .is_err()
+        );
+        assert!(
+            gone.take(&machines, &small(60 * MIN), NOW + 5 * MIN)
+                .is_ok()
+        );
+        assert!(gone.waiters.is_empty());
+        // A take whose wait already ran out is not recorded.
+        let mut late = staggered();
+        assert!(
+            late.take(
+                &machines,
+                &waiting(16, "late", NOW - 3 * MIN, MIN, 60 * MIN),
+                NOW
+            )
+            .is_err()
+        );
+        assert!(late.waiters.is_empty());
+    }
+
+    #[test]
+    fn a_take_inside_a_matching_standing_reservation_ignores_holds() {
+        let machines = [machine()];
+        let mut state = staggered();
+        let mut reservation = lease("r", 0, 8, slots::RESERVED_KIND, "py-*");
+        reservation.until_ms = NOW + 60 * MIN;
+        state.leases.retain(|held| held.first_cpu >= 8);
+        state.leases.push(reservation);
+        let big = waiting(16, "big", NOW, 120 * MIN, 60 * MIN);
+        assert!(state.take(&machines, &big, NOW).is_err());
+        let mut inside = small(60 * MIN);
+        inside.label = "py-x".to_owned();
+        assert_eq!(state.take(&machines, &inside, NOW).unwrap().cpus(), "0-3");
+    }
+
+    #[test]
+    fn take_wait_sends_its_place_in_line() {
+        let take = words(&["take", "--cores", "16", "--label", "t"]);
+        assert_eq!(queued_take(&take, 5, 0, "h"), take);
+        let queued = queued_take(&take, 5, 9_000, "h");
+        let want = super::want(&queued, 16, MIN).unwrap();
+        let queue = want.queue.unwrap();
+        assert_eq!((queue.since_ms, queue.wait_ms), (5, 9_000));
+        assert!(queue.id.starts_with("h-"));
+        assert_eq!(super::want(&take, 16, MIN).unwrap().queue, None);
     }
 }
