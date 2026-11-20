@@ -693,9 +693,14 @@ pub(crate) fn replace_with(
             let mut i = 0;
             let mut last = 0;
             while i <= n {
-                let found = (i..=n)
-                    .rev()
-                    .find(|&e| e > i && fits(e - i) && p.matches_units(&u[i..e]));
+                // A pattern of one length can only end in one place: trying every end
+                // made each replacement quadratic in the length of the text.
+                let found = match fixed {
+                    Some(m) => {
+                        (m > 0 && i + m <= n && p.matches_units(&u[i..i + m])).then_some(i + m)
+                    }
+                    None => (i..=n).rev().find(|&e| e > i && p.matches_units(&u[i..e])),
+                };
                 match found {
                     Some(e) => {
                         out.extend_from_slice(&text[offs[last]..offs[i]]);

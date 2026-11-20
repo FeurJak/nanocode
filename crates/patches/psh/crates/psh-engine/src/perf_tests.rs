@@ -31,3 +31,24 @@ fn an_array_length_counts_every_kind_of_variable() {
         "4501500\n"
     );
 }
+
+#[test]
+fn a_replacement_of_a_fixed_length_pattern_finds_every_match() {
+    assert_eq!(
+        out("s=item1,item22,itemitem; echo ${s//item/x} ${s/item/x}"),
+        "x1,x22,xx x1,item22,itemitem\n"
+    );
+    assert_eq!(
+        out("s=abcabc; echo ${s//?b/X} ${s//[ac]/-} ${s//\\*/!}"),
+        "XcXc -b--b- abcabc\n"
+    );
+    assert_eq!(out("s='a*b'; echo ${s//\\*/!}"), "a!b\n");
+    assert_eq!(
+        out("s=aaaa; echo ${s//aa/b} ${s//a*/b} ${s//*/b}"),
+        "bb b b\n"
+    );
+    assert_eq!(
+        out("s=; for i in {1..20000}; do s+=item$i,; done; t=${s//item/x}; echo ${#t}"),
+        "128894\n"
+    );
+}
