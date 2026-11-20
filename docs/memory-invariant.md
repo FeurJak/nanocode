@@ -41,10 +41,10 @@ The owner is the committed message's canonical serialized JSON, one `Arc<str>` p
 
 ```sh
 SHIPPY_REMOTE_BUILD=0 cargo build --release --locked --offline -p nanocode-sim
-target/release/nanocode-sim --memory                     # report only, exit 0
+target/release/nanocode-sim --memory                     # report only; exit 1 on a broken prefix
 target/release/nanocode-sim --memory --memory-gate       # exit 1 on any breach
 target/release/nanocode-sim --memory --only claude/reload --turns 150 --rounds 24 --verbose
-bin/nanocode-sim/memory-mutations.sh                     # the mutation the gate catches
+bin/nanocode-sim/memory-mutations.sh                     # the mutations the check catches
 ```
 
 Each combination of a backend and a durability mode runs one session against an in-process mock model: `--turns` turns (default 60) of `--rounds` tool rounds (default 16), each tool result a seeded log-uniform size between `--min-bytes` (200) and `--max-bytes` (64 KiB), about 10 MiB of history by default. The durable store keeps its records on disk, so they do not count as session heap. A counting global allocator (`nanocode_sys::alloc::Counted`) gives live and peak bytes; after each turn the check records retained (live minus the baseline before the first turn) and transient (peak during the turn minus the larger of start and end). The mock keeps only one hash per message, and checks every request's message prefix against the previous request's.
@@ -90,7 +90,7 @@ Measured excess is the combination's retained bytes minus `K x history`. The pro
 | V7 | `crates/backends/claude/src/agent/rounds.rs:1176` | claude x all | The token estimate forces the JSON cache on new tool results | inside V1 | 136 MiB |
 | V8 | Codex history beside its loaded and request copies (`crates/backends/codex/src/durability/context.rs:177` shares loaded bytes; the live list and the request copy do not) | codex x paged, reload | Retained 2.2x history | 9.8 MiB over K at 9.9 MiB history | not profiled |
 | V9 | Request build and load, both backends | claude x memo, replay; codex x all | A step allocates 2 to 4 request bodies (codex) or 2.5x history on load (claude replay) beyond what it keeps | codex 20 to 41 MiB per turn at 10 MiB history; claude/replay 25.7 MiB | ~475 MiB staged writes (`crates/core/durability/src/staged.rs:619`) |
-| V10 | `crates/backends/codex/client/src/session/context.rs:105` (`truncate_tool_output`, `:808`) | codex x reload, memo, replay | On reload a tool output already cut to its token budget is cut again: the marker changes from `…2759 tokens truncated…` to `…7 tokens truncated…` and the cached prefix breaks at the first long output | prefix broken | prompt-cache misses after every reload |
+| V10 | `crates/backends/codex/client/src/session/context.rs:105` (`truncate_tool_output`, `:808`) | codex x reload, memo, replay | On reload a tool output already cut to its token budget is cut again: the marker changes from `…2759 tokens truncated…` to `…7 tokens truncated…` and the cached prefix breaks at the first long output | prefix broken; **fixed** by `fix(codex): keep truncated tool output within its token budget`: a cut output fits its budget, so a second cut is a no-op | prompt-cache misses after every reload |
 
 ## Adding a backend or a mode
 

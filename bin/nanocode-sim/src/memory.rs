@@ -189,6 +189,7 @@ pub fn main(args: &[String]) -> ExitCode {
         "combo", "history", "retained", "max", "final", "transient", "xbody", "prefix"
     );
     let mut breached = 0_usize;
+    let mut broken = 0_usize;
     let mut failed = 0_usize;
     for backend in BACKENDS {
         for mode in MODES {
@@ -199,6 +200,7 @@ pub fn main(args: &[String]) -> ExitCode {
             match measure(backend, mode, &options) {
                 Ok(report) => {
                     let line = report.line(&combo);
+                    broken += usize::from(report.unstable > 0);
                     if report.breaches().is_empty() {
                         println!("{line}  PASS");
                     } else {
@@ -213,7 +215,7 @@ pub fn main(args: &[String]) -> ExitCode {
             }
         }
     }
-    if failed > 0 || (options.gate && breached > 0) {
+    if failed > 0 || broken > 0 || (options.gate && breached > 0) {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
