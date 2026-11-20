@@ -6,11 +6,10 @@
 //! settles, retires idle agents) until every task is done. Only what happens inside
 //! `Dispatcher::pass` is counted.
 use std::{
-    cell::RefCell,
     collections::BTreeMap,
     num::NonZeroU32,
     sync::{
-        Arc,
+        Arc, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicU64, Ordering},
     },
     time::Instant,
@@ -104,16 +103,22 @@ struct Bots {
     bots: Vec<Bot>,
 }
 
-struct BenchPool(RefCell<Bots>);
+struct BenchPool(Mutex<Bots>);
+
+impl BenchPool {
+    fn bots(&self) -> MutexGuard<'_, Bots> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
 
 impl Pool for BenchPool {
     fn agents(&self) -> PoolFuture<'_, Vec<Agent>> {
-        let agents = self.0.borrow().bots.iter().map(|bot| bot.agent.clone()).collect();
+        let agents = self.bots().bots.iter().map(|bot| bot.agent.clone()).collect();
         Box::pin(std::future::ready(agents))
     }
 
     fn start(&self, start: Start) -> PoolFuture<'_, Result<(), PoolError>> {
-        let mut bots = self.0.borrow_mut();
+        let mut bots = self.bots();
         let now = bots.now;
         bots.bots.push(Bot {
             agent: Agent {
@@ -130,7 +135,7 @@ impl Pool for BenchPool {
     }
 
     fn retire<'a>(&'a self, agent: &'a str) -> PoolFuture<'a, Result<(), PoolError>> {
-        self.0.borrow_mut().bots.retain(|bot| bot.agent.id != agent);
+        self.bots().bots.retain(|bot| bot.agent.id != agent);
         Box::pin(std::future::ready(Ok(())))
     }
 }
@@ -250,7 +255,7 @@ fn main() -> std::process::ExitCode {
             policy.clone(),
             BRIEF,
         );
-        let pool = BenchPool(RefCell::new(Bots {
+        let pool = BenchPool(Mutex::new(Bots {
             now: 2_000,
             bots: Vec::new(),
         }));
@@ -262,14 +267,14 @@ fn main() -> std::process::ExitCode {
         while done < tasks && steps < 200_000 {
             steps += 1;
             let now = {
-                let mut bots = pool.0.borrow_mut();
+                let mut bots = pool.bots();
                 bots.now += STEP_MS;
                 bots.now
             };
-            let count = pool.0.borrow().bots.len();
+            let count = pool.bots().bots.len();
             for index in 0..count {
                 let (phase, worker, work, domain) = {
-                    let bots = pool.0.borrow();
+                    let bots = pool.bots();
                     let bot = &bots.bots[index];
                     (bot.agent.phase, bot.worker.clone(), bot.work.clone(), bot.agent.domain.clone())
                 };
@@ -304,7 +309,7 @@ fn main() -> std::process::ExitCode {
                         if let Some(Phase::Claimed { claim, .. }) =
                             board.fold().task(&task).map(|task| task.phase.clone())
                         {
-                            let mut bots = pool.0.borrow_mut();
+                            let mut bots = pool.bots();
                             bots.bots[index].work = Some((task, claim));
                             bots.bots[index].agent.phase = AgentPhase::Busy;
                         }
@@ -316,7 +321,7 @@ fn main() -> std::process::ExitCode {
                             outcome: Outcome::Done("ok".to_owned()),
                         };
                         done += u64::from(board.submit(now, finish).await.is_ok());
-                        let mut bots = pool.0.borrow_mut();
+                        let mut bots = pool.bots();
                         bots.bots[index].work = None;
                         bots.bots[index].agent.phase = AgentPhase::Idle { since_ms: now };
                     }
