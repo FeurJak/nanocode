@@ -76,6 +76,9 @@ pub(super) async fn printf(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         var: var.is_some(),
         conv: 0,
         utf8: vp.utf8(),
+        pass_start: 0,
+        counts: Vec::new(),
+        lost: 0,
     };
     // bash reports a pass's errors as they happen and writes its output at the end of
     // each pass through the format.
@@ -83,10 +86,17 @@ pub(super) async fn printf(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     let mut write_st = 0;
     loop {
         let before = f.next;
+        f.pass_start = f.out.len();
         f.run(format);
         status |= i32::from(std::mem::take(&mut f.failed));
         for e in std::mem::take(&mut f.errors) {
             vp.error(&format!("printf: {e}")).await;
+        }
+        for (name, n) in std::mem::take(&mut f.counts) {
+            if let Err(msg) = vp.assign(&s(&name), n.to_string().into_bytes()) {
+                vp.error(&msg).await;
+                status = 1;
+            }
         }
         if f.huge {
             vp.error("printf: cannot allocate memory").await;
@@ -106,6 +116,7 @@ pub(super) async fn printf(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     }
     match var {
         Some(n) => {
+            f.out.drain(..f.lost.min(f.out.len()));
             // bash stores the result as a C string: it ends at the first NUL.
             if let Some(end) = f.out.iter().position(|&b| b == 0) {
                 f.out.truncate(end);
@@ -209,6 +220,12 @@ struct Formatter<'a> {
     /// The conversion being formatted.
     conv: u8,
     utf8: bool,
+    /// Bytes at the start of `out` that `-v`'s buffer wrote before its start.
+    lost: usize,
+    /// Where this pass's output starts in `out`, for `%n`.
+    pass_start: usize,
+    /// `%n`'s assignments: the name and the bytes this pass wrote before it.
+    counts: Vec<(Vec<u8>, usize)>,
 }
 
 #[derive(Default)]
@@ -435,6 +452,22 @@ impl Formatter<'_> {
                 .find(|b| !b"hlLqjzt".contains(b))
                 .is_some_and(|b| b"diouxXeEfFgGaA".contains(b));
             if spec.width.unwrap_or(0) >= HUGE || (numeric && spec.prec.unwrap_or(0) >= HUGE) {
+                if self.var && numeric {
+                    // bash's `-v` buffer adds vsnprintf's -1: the conversion prints
+                    // nothing and takes back the byte before it.
+                    match self.out.len() > self.lost {
+                        true => drop(self.out.pop()),
+                        false => self.lost += 1,
+                    }
+                    while i < fmt.len() && b"hlLqjzt".contains(&fmt[i]) {
+                        i += 1;
+                    }
+                    if i < fmt.len() {
+                        i += 1;
+                        let _ = self.arg();
+                    }
+                    continue;
+                }
                 self.huge = true;
                 self.stop = true;
                 return;
@@ -658,6 +691,18 @@ impl Formatter<'_> {
                 }
                 // inf and nan are padded with blanks, never zeros.
                 self.pad(body.as_bytes(), spec, v.is_finite());
+            }
+            // `%n`: the next argument names a variable that gets the number of
+            // bytes this pass wrote so far (bash).
+            b'n' => {
+                let name = self.arg().map(<[u8]>::to_vec).unwrap_or_default();
+                if name.is_empty() {
+                } else if crate::state::is_name(&name) {
+                    self.counts.push((name, self.out.len() - self.pass_start));
+                } else {
+                    self.fail(format!("`{}': not a valid identifier", s(&name)));
+                    self.stop = true;
+                }
             }
             other => {
                 self.fail(format!("`{}': invalid format character", other as char));
