@@ -627,6 +627,13 @@ impl Python {
                 }
             }
             Program::File(path) => match host::source(path) {
+                // A zip archive runs its __main__ with the archive first on sys.path.
+                Ok(source) if source.starts_with(b"PK\x03\x04") => Prepared::Source(
+                    format!(
+                        "__import__('sys').path.__setitem__(0, {path:?}); __import__('runpy')._run_module_as_main('__main__', False)\n"
+                    ),
+                    path.clone(),
+                ),
                 Ok(source) => decoded(source, path),
                 Err(error) => {
                     host::print(&format!(

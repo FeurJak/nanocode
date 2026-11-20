@@ -11,6 +11,8 @@ import _frozen_importlib_external
 # _bootstrap until set here; importlib.util.spec_from_file_location needs it.
 if getattr(_frozen_importlib_external, '_bootstrap', None) is None:
     _frozen_importlib_external._set_bootstrap_module(_frozen_importlib)
+if getattr(_frozen_importlib, '_bootstrap_external', None) is None:
+    _frozen_importlib._bootstrap_external = _frozen_importlib_external
 
 sys.builtin_module_names = tuple(sys.builtin_module_names) + ('posix',)
 
@@ -256,6 +258,21 @@ class _Finder:
         portions = []
         for base in sys.path if path is None else path:
             if not isinstance(base, str):
+                continue
+            # A zip archive on the path (an app.pyz run by name) imports through zipimport.
+            try:
+                archive = bool(base) and posix.stat(base).st_mode & 0o170000 == 0o100000
+            except OSError:
+                archive = False
+            if archive:
+                try:
+                    import zipimport
+                    spec = zipimport.zipimporter(base).find_spec(name)
+                except Exception:
+                    spec = None
+                if spec is not None:
+                    _loaded.append(name)
+                    return spec
                 continue
             base = (base or '.') + '/' + tail
             try:
