@@ -90,6 +90,7 @@ pub(super) struct Hosts {
     registry: Atom<Option<Weak<Registry>>>,
     dispatching: Atom<Option<Dispatching>>,
     hosted: Atom<BTreeMap<String, Hosted>>,
+    pools: Atom<BTreeMap<String, Arc<SubagentPool>>>,
 }
 
 impl Hosts {
@@ -100,6 +101,7 @@ impl Hosts {
             registry: Atom::new(None),
             dispatching: Atom::new(Some(Dispatching::default())),
             hosted: Atom::new(BTreeMap::new()),
+            pools: Atom::new(BTreeMap::new()),
         }
     }
 
@@ -128,12 +130,19 @@ impl Hosts {
         let Some(parent) = registry.session_handle(root) else {
             return;
         };
-        let pool = Arc::new(SubagentPool::clocked(
+        let placed = Arc::new(SubagentPool::clocked(
             parent,
             &registry,
             root,
             Arc::clone(&dispatching.now_ms),
         ));
+        let pool = self.pools.update(|pools| {
+            Arc::clone(
+                pools
+                    .entry(root.to_owned())
+                    .or_insert_with(|| Arc::clone(&placed)),
+            )
+        });
         let scope = dispatch_scope(&self.scope, root);
         let (serving, stop) = abortable(serve(
             Arc::clone(&self.host),
@@ -165,7 +174,10 @@ impl Hosts {
         }
     }
 
-    pub(super) fn stop(&self, root: &str) {
+    pub(super) fn release(&self, root: &str) {
+        self.pools.update(|pools| {
+            pools.remove(root);
+        });
         let stopped = self.hosted.update(|all| all.remove(root));
         if let Some(hosted) = stopped {
             hosted.stop.abort();
@@ -308,21 +320,20 @@ async fn serve(
                 None
             }
         };
-        work(&host, &scope, &dispatcher, &pool, &dispatching, now).await;
+        let ops = claims(&dispatcher, &pool, &dispatching, now);
+        work(&host, &scope, ops, now).await;
         let poll = now.saturating_add(dispatching.poll_ms);
         let at = wake_at.map_or(poll, |at| at.min(poll));
         nap(at.saturating_sub(now)).await;
     }
 }
 
-async fn work(
-    host: &Arc<dyn LogHost>,
-    scope: &str,
+fn claims(
     dispatcher: &Dispatcher,
     pool: &SubagentPool,
     dispatching: &Dispatching,
     now: u64,
-) {
+) -> Vec<(String, Op)> {
     let fold = dispatcher.board().fold();
     let mut ops = Vec::new();
     for intent in nanocode_dispatch::intents(fold, &dispatching.policy) {
@@ -331,7 +342,7 @@ async fn work(
         };
         let task = intent.task.clone();
         let op = match fold.task(&task).map(|task| &task.phase) {
-            Some(Phase::Open) => Some(Op::Claim {
+            Some(Phase::Open) if pool.ended(agent).is_none() => Some(Op::Claim {
                 task,
                 lease_ms: dispatching.lease_ms,
                 fence: None,
@@ -375,6 +386,10 @@ async fn work(
             ops.push((agent.clone(), op));
         }
     }
+    ops
+}
+
+async fn work(host: &Arc<dyn LogHost>, scope: &str, ops: Vec<(String, Op)>, now: u64) {
     for (agent, op) in ops {
         let worker = match identity(Some(&agent)) {
             Ok(worker) => worker,

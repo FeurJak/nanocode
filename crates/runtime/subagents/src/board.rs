@@ -1299,6 +1299,6 @@ impl Coordination for BoardCoordination {
     }
 
     fn release_root(&self, root_session_id: &str) {
-        self.hosts.stop(root_session_id);
+        self.hosts.release(root_session_id);
     }
 }
