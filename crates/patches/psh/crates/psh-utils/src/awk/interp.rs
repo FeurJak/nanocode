@@ -844,6 +844,19 @@ impl<'c, 'v> Interp<'c, 'v> {
         Ok(())
     }
 
+    /// `v op= r`. A global that already holds a number is updated in place: nothing
+    /// is cloned or dropped.
+    fn aug(&mut self, v: Var, op: BinOp, r: f64) -> R<()> {
+        if let Var::Global(i) = v
+            && let Value::Num(l) = &mut self.globals[i as usize]
+        {
+            *l = arith(op, *l, r)?;
+            return Ok(());
+        }
+        let l = self.load(v).num();
+        self.store(v, Value::Num(arith(op, l, r)?))
+    }
+
     /// An array subscript: numbers that are integers as integers, else CONVFMT.
     fn key(&self, v: &Value) -> S {
         self.to_str(v)
@@ -1157,8 +1170,16 @@ impl<'c, 'v> Interp<'c, 'v> {
                 }
                 Op::AugStore(v, b) => {
                     let r = self.pop().num();
-                    let l = self.load(*v).num();
-                    self.store(*v, Value::Num(arith(*b, l, r)?))?;
+                    self.aug(*v, *b, r)?;
+                }
+                Op::AugNum(v, b, r) => self.aug(*v, *b, *r)?,
+                Op::AugFieldNum(v, b, i) => {
+                    let r = self.field_num(*i as usize);
+                    self.aug(*v, *b, r)?;
+                }
+                Op::AugFieldLength(v, b, i) => {
+                    let r = self.field_length(*i as usize) as f64;
+                    self.aug(*v, *b, r)?;
                 }
                 Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge => {
                     let r = self.pop();

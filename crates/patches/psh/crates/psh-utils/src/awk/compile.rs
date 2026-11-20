@@ -80,6 +80,12 @@ pub enum Op {
     FieldLength(u32),
     Load(Var),
     AugStore(Var, BinOp),
+    /// `var op= n`, the operand in the instruction: nothing goes through the stack.
+    AugNum(Var, BinOp, f64),
+    /// `var op= $N`, $N read as a number where it lies in the record.
+    AugFieldNum(Var, BinOp, u32),
+    /// `var op= length($N)`, counted where $N lies in the record.
+    AugFieldLength(Var, BinOp, u32),
     /// index -> a[index] (created if missing)
     ArrayGet(Arr),
     /// index -> (index in a)
@@ -408,9 +414,8 @@ impl Compiler<'_> {
                         let Expr::Var(name, _) = &**expr else {
                             unreachable!()
                         };
-                        self.add(Op::Num(1.0));
                         let v = self.scalar(name);
-                        self.add(Op::AugStore(v, if *decr { BinOp::Sub } else { BinOp::Add }));
+                        self.add(Op::AugNum(v, if *decr { BinOp::Sub } else { BinOp::Add }, 1.0));
                     }
                     Expr::Incr { expr, decr, .. } => {
                         self.dupe_index_lvalue(expr)?;
@@ -705,14 +710,30 @@ impl Compiler<'_> {
     /// `l op= r`, leaving the new value on the stack.
     /// `l op= r`; its value stays on the stack when `keep` (it is an expression).
     fn aug_assign(&mut self, l: &Expr, op: BinOp, r: &Expr, keep: bool) -> CResult {
+        // `length($N)` only reads the record.
+        if let (Expr::Var(name, _), false, Some(i)) = (l, keep, field_length(r)) {
+            let v = self.scalar(name);
+            self.add(Op::AugFieldLength(v, op, i));
+            return Ok(());
+        }
         match l {
             // The right side first, as gawk: `x += x++`, `$f() += g()` calls g first.
             // A right side that only reads cannot change the variable: the old value
             // is loaded first, and nothing is swapped.
             Expr::Var(name, _) if !keep && reads_only(r) => {
+                let start = self.code.len();
                 self.operand(r)?;
                 let v = self.scalar(name);
-                self.add(Op::AugStore(v, op));
+                // An operand of one instruction goes into the update itself.
+                let fused = match self.code[start..] {
+                    [Op::Num(n)] => Some(Op::AugNum(v, op, n)),
+                    [Op::FieldNum(i)] => Some(Op::AugFieldNum(v, op, i)),
+                    _ => None,
+                };
+                match fused {
+                    Some(f) => self.code[start] = f,
+                    None => self.add(Op::AugStore(v, op)),
+                }
             }
             Expr::Var(..) if reads_only(r) => {
                 self.expr(l)?;
@@ -1175,6 +1196,19 @@ fn constant_field(e: &Expr) -> Option<u32> {
         Expr::Group(inner) => constant_field(inner),
         Expr::Field(i) => match **i {
             Expr::Num(n) if n >= 0.0 && n == n.trunc() && n < 1e9 => Some(n as u32),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// N for `length($N)` (or `length`, N = 0): the character count of a field.
+fn field_length(e: &Expr) -> Option<u32> {
+    match e {
+        Expr::Group(inner) => field_length(inner),
+        Expr::Call(Builtin::Length, args) => match &args[..] {
+            [] => Some(0),
+            [a] => constant_field(a),
             _ => None,
         },
         _ => None,
