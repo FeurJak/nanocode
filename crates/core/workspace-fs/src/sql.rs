@@ -268,12 +268,23 @@ impl SqlStore {
                 .map(|digest| Value::String(digest.hex()))
                 .collect(),
         );
-        let blobs: Vec<(String, String)> = batch
+        let early = mutated(Mutation::SqlReleaseBeforeCommit) && !change.dropped.is_empty();
+        let released = change.dropped.iter().filter(|_| !early);
+        let mut blobs: Vec<(String, Option<String>)> = batch
             .blobs()
             .iter()
-            .map(|blob| (blob.digest().hex(), STANDARD.encode(blob.bytes())))
+            .map(|blob| (blob.digest().hex(), Some(STANDARD.encode(blob.bytes()))))
+            .chain(released.map(|digest| (digest.hex(), None)))
             .collect();
-        let mut statements = Vec::with_capacity(6 + blobs.len());
+        blobs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        let lists: Vec<String> = blobs
+            .iter()
+            .map(|(digest, data)| match data {
+                Some(_) => String::new(),
+                None => json(vec![Value::String(digest.clone())]),
+            })
+            .collect();
+        let mut statements = Vec::with_capacity(5 + blobs.len());
         statements.push(if change.base == 0 {
             SqlStatement {
                 sql: self.pick(&CLAIM_FIRST),
@@ -299,13 +310,18 @@ impl SqlStore {
                 params: vec![workspace, &token, &put],
             });
         }
-        for (digest, data) in &blobs {
-            statements.push(SqlStatement {
-                sql: self.pick(&ADD_BLOB),
-                params: vec![workspace, &token, digest, data],
+        for ((digest, data), list) in blobs.iter().zip(&lists) {
+            statements.push(match data {
+                Some(data) => SqlStatement {
+                    sql: self.pick(&ADD_BLOB),
+                    params: vec![workspace, &token, digest, data],
+                },
+                None => SqlStatement {
+                    sql: self.pick(&RELEASE_BLOBS),
+                    params: vec![workspace, &token, list],
+                },
             });
         }
-        let early = mutated(Mutation::SqlReleaseBeforeCommit) && !change.dropped.is_empty();
         if early {
             let release = [&RELEASE_EARLY, &DROP_EARLY].map(|sql| SqlStatement {
                 sql: self.pick(sql),
@@ -317,10 +333,6 @@ impl SqlStore {
                 .map_err(backend)?;
         }
         if !change.dropped.is_empty() && !early {
-            statements.push(SqlStatement {
-                sql: self.pick(&RELEASE_BLOBS),
-                params: vec![workspace, &token, &dropped],
-            });
             statements.push(SqlStatement {
                 sql: self.pick(&DROP_BLOBS),
                 params: vec![workspace, &token, &dropped],
