@@ -1087,8 +1087,7 @@ pub(crate) fn shell_quote(v: &[u8], utf8: bool) -> Vec<u8> {
                 | b','
         ) || (b == b'#' && i == 0)
             // A tilde that would expand: first, or after `:` or `=`.
-            || (b == b'~' && (i == 0 || matches!(v[i - 1], b':' | b'=')))
-            || (b == b'=' && i == 0);
+            || (b == b'~' && (i == 0 || matches!(v[i - 1], b':' | b'=')));
         if special {
             out.push(b'\\');
         }

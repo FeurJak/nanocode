@@ -230,7 +230,7 @@ impl Formatter<'_> {
         let Some(a) = self.arg().map(<[u8]>::to_vec).filter(|a| !a.is_empty()) else {
             return 0;
         };
-        let n = parse_num(&a);
+        let n = parse_num(&a, self.utf8);
         if !n.ok {
             self.errors.push(format!("{}: invalid number", s(&a)));
         }
@@ -257,7 +257,7 @@ impl Formatter<'_> {
         let Some(a) = self.arg().map(<[u8]>::to_vec).filter(|a| !a.is_empty()) else {
             return 0;
         };
-        let n = parse_num(&a);
+        let n = parse_num(&a, self.utf8);
         if !n.ok {
             self.errors.push(format!("{}: invalid number", s(&a)));
         }
@@ -275,18 +275,18 @@ impl Formatter<'_> {
             None => 0.0,
             Some(a) => {
                 let a = a.to_vec();
+                if let Some(v) = char_code(&a, self.utf8) {
+                    return f64::from(v);
+                }
                 let t = s(&a);
                 let t = t.trim();
-                if let Some(c) = t.strip_prefix(['\'', '"']) {
-                    return c.chars().next().map_or(0.0, |c| f64::from(c as u32));
-                }
                 match t.parse::<f64>() {
                     Ok(v) => v,
                     Err(_) => {
                         if a.is_empty() {
                             return 0.0;
                         }
-                        let n = parse_num(&a);
+                        let n = parse_num(&a, self.utf8);
                         if !n.ok {
                             self.errors.push(format!("{}: invalid number", s(&a)));
                         }
@@ -437,7 +437,7 @@ impl Formatter<'_> {
             None => self.now,
             Some(a) if a.is_empty() => self.now,
             Some(a) => {
-                let n = parse_num(&a);
+                let n = parse_num(&a, self.utf8);
                 if !n.ok {
                     self.errors.push(format!("{}: invalid number", s(&a)));
                 }
@@ -675,19 +675,45 @@ struct Num {
     ok: bool,
 }
 
+/// A `'c` or `"c` argument (the quote first, no blanks before it): the code of the
+/// character after the quote, as bash's `asciicode` does with `mbtowc`. In a UTF-8
+/// locale a valid multibyte character gives its code point; otherwise (or in the C
+/// locale) the first byte. Nothing after the quote is 0.
+fn char_code(a: &[u8], utf8: bool) -> Option<u32> {
+    let rest = a.strip_prefix(b"'").or_else(|| a.strip_prefix(b"\""))?;
+    let Some(&first) = rest.first() else {
+        return Some(0);
+    };
+    if utf8 && first >= 0x80 {
+        let n = match first {
+            0xC2..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF4 => 4,
+            _ => 0,
+        };
+        if let Some(c) = rest
+            .get(..n)
+            .and_then(|b| std::str::from_utf8(b).ok())
+            .and_then(|t| t.chars().next())
+        {
+            return Some(u32::from(c));
+        }
+    }
+    Some(u32::from(first))
+}
+
 /// Parses an integer argument like `strtoimax` with base 0, plus `'c` for a char code.
-fn parse_num(a: &[u8]) -> Num {
-    let t = s(a);
-    let t = t.trim_start();
-    if let Some(c) = t.strip_prefix(['\'', '"']) {
-        let v = c.chars().next().map_or(0, |c| u128::from(u32::from(c)));
+fn parse_num(a: &[u8], utf8: bool) -> Num {
+    if let Some(v) = char_code(a, utf8) {
         return Num {
             neg: false,
-            mag: v,
+            mag: u128::from(v),
             overflow: false,
             ok: true,
         };
     }
+    let t = s(a);
+    let t = t.trim_start();
     let (neg, body) = match t.strip_prefix('-') {
         Some(r) => (true, r),
         None => (false, t.strip_prefix('+').unwrap_or(t)),
@@ -718,5 +744,31 @@ fn parse_num(a: &[u8]) -> Num {
         mag,
         overflow,
         ok,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{char_code, parse_num, shell_quote};
+
+    #[test]
+    fn char_constant_follows_the_locale() {
+        // `printf %d "'é"`: the code point in UTF-8, the first byte in C.
+        assert_eq!(char_code("'été'-x".as_bytes(), true), Some(0xE9));
+        assert_eq!(char_code("'été'-x".as_bytes(), false), Some(0xC3));
+        // An invalid sequence is its first byte even in UTF-8.
+        assert_eq!(char_code(b"'\xff", true), Some(0xFF));
+        assert_eq!(char_code(b"\"", true), Some(0));
+        // Blanks before the quote make it an ordinary (invalid) number.
+        assert_eq!(char_code(b" 'a", true), None);
+        assert_eq!(parse_num("'é".as_bytes(), false).mag, 0xC3);
+        assert!(!parse_num(b" 'a", false).ok);
+    }
+
+    #[test]
+    fn percent_q_leaves_a_leading_equals_alone() {
+        assert_eq!(shell_quote(b"=v", true), b"=v");
+        assert_eq!(shell_quote(b"=~", true), b"=\\~");
+        assert_eq!(shell_quote(b"~=", true), b"\\~=");
     }
 }
