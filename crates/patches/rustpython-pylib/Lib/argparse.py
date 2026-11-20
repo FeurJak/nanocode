@@ -615,7 +615,8 @@ class HelpFormatter(object):
                 args_string = (
                     f"{t.label}{self._format_args(action, default)}{t.reset}"
                 )
-                return ', '.join(option_strings) + ' ' + args_string
+                # nanocode: CPython 3.12 repeats the metavar after each option string (-o FILE, --out FILE)
+                return ', '.join(f"{s} {args_string}" for s in option_strings)
 
     def _metavar_formatter(self, action, default_metavar):
         if action.metavar is not None:

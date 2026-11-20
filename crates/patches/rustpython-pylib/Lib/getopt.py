@@ -188,8 +188,7 @@ def long_has_args(opt, longopts):
     # Possibilities must be unique to be accepted
     if len(possibilities) > 1:
         raise GetoptError(
-            _("option --%s not a unique prefix; possible options: %s")
-            % (opt, ", ".join(possibilities)),
+            _("option --%s not a unique prefix") % opt,
             opt,
         )
     assert len(possibilities) == 1
