@@ -1,0 +1,3 @@
+# Backend/mode combos nc-build check runs under nanocode-sim --memory --memory-gate (docs/memory-invariant.md).
+# Add a combo here once it holds the invariant on master.
+codex/paged

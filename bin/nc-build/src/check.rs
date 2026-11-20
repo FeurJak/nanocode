@@ -36,6 +36,8 @@ const SIM: Simulator = Simulator {
     aliases: &[("runtime", "whole"), ("executor", "tasks")],
 };
 const TABLE: &str = "bin/nanocode-sim/cfo.sh";
+/// Backend/mode combos that must hold the memory invariant (docs/memory-invariant.md), one per line.
+const MEMORY_GATE: &str = "bin/nanocode-sim/memory-gate.txt";
 const EVERYTHING_PREFIXES: [&str; 5] = [
     "vendor/",
     "scripts/check",
@@ -455,6 +457,7 @@ enum SimBuild {
         tidy: Step,
         machines: Step,
         canaries: Step,
+        memory: Option<(Step, String)>,
         sim: Step,
     },
 }
@@ -508,6 +511,16 @@ fn simulate(target: &Path, logs: &Path, options: &Options, jobs: &[SimJob]) -> S
             command.args(["--machines", "--canaries"]);
             (walk, logged("machine-canaries", logs, command))
         });
+        let memory = scope.spawn(|| {
+            let combos = memory_combos();
+            (!combos.is_empty()).then(|| {
+                let mut command = Command::new(&bin);
+                command
+                    .args(["--memory", "--memory-gate", "--only"])
+                    .arg(combos.join(","));
+                (logged("memory", logs, command), combos.join(" "))
+            })
+        });
         let started = Instant::now();
         let finished = run_units(&bin, jobs, &units, options.jobs, timeout);
         let report = gate::report(&SIM, jobs, &finished, units.len());
@@ -531,14 +544,35 @@ fn simulate(target: &Path, logs: &Path, options: &Options, jobs: &[SimJob]) -> S
             };
             (failed("machines"), failed("machine-canaries"))
         });
+        let memory = memory.join().unwrap_or_else(|_| {
+            Some((
+                Step {
+                    name: "memory".to_owned(),
+                    exit: SPAWN_EXIT,
+                    secs: 0.0,
+                },
+                String::new(),
+            ))
+        });
         SimBuild::Built {
             done,
             tidy,
             machines,
             canaries,
+            memory,
             sim,
         }
     })
+}
+
+fn memory_combos() -> Vec<String> {
+    fs::read_to_string(MEMORY_GATE)
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect()
 }
 
 const fn kind_name(kind: Kind) -> &'static str {
@@ -798,6 +832,7 @@ pub fn main(args: &[String]) -> u8 {
                     tidy,
                     machines,
                     canaries,
+                    memory,
                     sim,
                 }),
             )),
@@ -815,6 +850,18 @@ pub fn main(args: &[String]) -> u8 {
             ui.step(&tidy, "nanocode-sim --tidy");
             ui.step(&machines, "nanocode-sim --machines --deep");
             ui.step(&canaries, "nanocode-sim --machines --canaries");
+            match &memory {
+                Some((step, combos)) => ui.step(
+                    step,
+                    &format!("nanocode-sim --memory --memory-gate: {combos}"),
+                ),
+                None => ui.line(
+                    Status::Skip,
+                    "memory",
+                    0.0,
+                    &format!("no combos in {MEMORY_GATE}"),
+                ),
+            }
             let passes = jobs.iter().filter(|job| job.kind == Kind::Pass).count();
             ui.step(
                 &sim,
