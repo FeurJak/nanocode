@@ -191,7 +191,7 @@ impl<T> Receiver<T> {
         Ok(self.version != self.shared.version())
     }
 
-    pub fn mark_changed(&mut self) {
+    pub const fn mark_changed(&mut self) {
         self.version = self.version.wrapping_sub(1);
     }
 

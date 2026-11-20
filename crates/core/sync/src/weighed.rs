@@ -45,7 +45,7 @@ impl<V: Clone> Weighed<V> {
                     })
                 })
                 .collect(),
-            limit: budget / shards.get(),
+            limit: budget / shards,
             clock: AtomicU64::new(0),
             held: AtomicU64::new(0),
         }

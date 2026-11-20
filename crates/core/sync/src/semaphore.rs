@@ -30,7 +30,7 @@ struct Node {
 }
 
 impl Node {
-    fn assigned(state: usize) -> usize {
+    const fn assigned(state: usize) -> usize {
         state >> NODE_FLAG_BITS
     }
 }
