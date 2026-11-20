@@ -2283,7 +2283,8 @@ fn run_simple<'a>(
         // Bash performs an external command's redirections in the child it forks, so
         // what expanding them sets (`$((n++))` in a here-document, `${x:=f}`, `{fd}>`)
         // does not reach the shell.
-        let vars = forks_for(vp, &argv).then(|| vp.vars.clone());
+        let forks = forks_for(vp, &argv);
+        let vars = forks.then(|| vp.vars.clone());
         let applied = Box::pin(apply_redirects(vp, code, &cmd.redirects)).await;
         if let Some(vars) = vars {
             vp.vars = vars;
@@ -2297,6 +2298,11 @@ fn run_simple<'a>(
                     return Err(Unwind::Exit(1));
                 }
                 return Ok(1);
+            }
+            // An expansion error there ends only that child (`cat <<< ${x?}` is 127).
+            Err(Unwind::Abort(status) | Unwind::Exit(status)) if forks => {
+                restore_fds(vp, saved);
+                return Ok(status);
             }
             Err(u) => {
                 restore_fds(vp, saved);
@@ -3162,12 +3168,10 @@ async fn redirect_fd(vp: &mut Vp, code: &Rc<Code>, r: &Redirect, fd: u32) -> Res
                     body_error(vp, code, e, doc.error_subst).await;
                     return Ok(false);
                 }
-                match Box::pin(expand::expand_heredoc(vp, code, &doc.body)).await {
-                    // An arithmetic error in the body fails the redirection, as bash
-                    // does, rather than the whole command line (`cat <<EOF || …`).
-                    Err(Unwind::Exit(_) | Unwind::Abort(1)) => return Ok(false),
-                    r => r?,
-                }
+                // An expansion error in the body abandons the command line or ends
+                // the shell, unless the command forks, which only fails
+                // (`cat <<EOF || …`).
+                Box::pin(expand::expand_heredoc(vp, code, &doc.body)).await?
             };
             if !doc.terminated {
                 // The input ended before the delimiter: the last line gets its newline,

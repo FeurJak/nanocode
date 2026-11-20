@@ -47,3 +47,17 @@ fn an_external_commands_redirections_expand_in_its_child() {
     assert_eq!(out("n=0; f() { :; }; f <<< $((n++)); echo \"$n\""), "1\n");
     assert_eq!(out("exec {fd}>/dev/null; echo \"[$fd]\""), "[10]\n");
 }
+
+#[test]
+fn an_expansion_error_in_an_external_commands_redirection_fails_only_it() {
+    assert_eq!(out("cat <<< ${zz?boom} 2>/dev/null; echo \"rc=$?\""), "rc=127\n");
+    assert_eq!(out("cat <<< $((1/0)) 2>/dev/null; echo \"rc=$?\""), "rc=1\n");
+    assert_eq!(out("cat <<E 2>/dev/null\n${zz?boom}\nE\necho \"rc=$?\""), "rc=127\n");
+    assert_eq!(out("cat <<E 2>/dev/null || echo \"or $?\"\n$((1/0))\nE\necho \"after $?\""), "or 1\nafter 0\n");
+    // A builtin's, a function's and a compound's are the shell's own, so the line is
+    // abandoned.
+    assert_eq!(out("true <<E 2>/dev/null || echo or\n$((1/0))\nE\necho \"after $?\""), "after 1\n");
+    assert_eq!(out("f() { cat; }; f <<E 2>/dev/null; echo same\n$((1/0))\nE\necho \"after $?\""), "after 1\n");
+    assert_eq!(out("{ cat; } <<E 2>/dev/null; echo same\n$((1/0))\nE\necho \"after $?\""), "after 1\n");
+    assert_eq!(out("true <<< ${zz?boom} 2>/dev/null; echo \"rc=$?\""), "");
+}
