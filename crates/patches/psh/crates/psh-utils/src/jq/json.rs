@@ -224,12 +224,20 @@ impl<R: Read> Reader<R> {
         let r = self.skip_ws();
         self.io(r)?;
         let p = self.peek();
-        if self.io(p)?.is_none() {
+        let Some(first) = self.io(p)? else {
             // At the end jq has read every line.
             self.lines_read = self.line - 1;
             return Ok(None);
-        }
+        };
         let v = self.value(0)?;
+        if !matches!(first, b'[' | b'{' | b'"') {
+            // jq delivers a bare literal at the byte that ends it, and only once that byte
+            // is taken: a stray `,` `:` `]` or `}` there fails, and the literal is lost.
+            let p = self.peek();
+            if let Some(b',' | b':' | b']' | b'}') = self.io(p)? {
+                return self.value(0).map(Some);
+            }
+        }
         let r = self.note_line();
         self.io(r)?;
         Ok(Some(v))
@@ -288,6 +296,10 @@ impl<R: Read> Reader<R> {
                     match self.io(p)? {
                         Some(b':') => {}
                         None => return self.unfinished(),
+                        Some(b',' | b'}') => {
+                            return self.error("Objects must consist of key:value pairs");
+                        }
+                        Some(b']') => return self.error("Unmatched ']'"),
                         Some(_) => {
                             self.unbump();
                             return self.separator_error();
@@ -302,9 +314,9 @@ impl<R: Read> Reader<R> {
                         Some(b',') => {}
                         Some(b'}') => return Ok(Val::obj(m)),
                         None => return self.unfinished(),
-                        Some(b']') => {
-                            return self.error("Unmatched ']' in the middle of an object");
-                        }
+                        // jq holds the key on its stack until the value is complete.
+                        Some(b']') => return self.error("Unmatched ']'"),
+                        Some(b':') => return self.error("':' not as part of an object"),
                         Some(_) => {
                             self.unbump();
                             return self.separator_error();
@@ -342,7 +354,8 @@ impl<R: Read> Reader<R> {
                         Some(b',') => {}
                         Some(b']') => return Ok(Val::arr(a)),
                         None => return self.unfinished(),
-                        Some(b'}') => return self.error("Unmatched '}' in the middle of an array"),
+                        Some(b'}') => return self.error("Objects must consist of key:value pairs"),
+                        Some(b':') => return self.error("':' not as part of an object"),
                         Some(_) => {
                             self.unbump();
                             return self.separator_error();
@@ -365,7 +378,7 @@ impl<R: Read> Reader<R> {
             }
             b':' => {
                 self.bump().ok();
-                self.error("':' not as part of an object")
+                self.error("Expected string key before ':'")
             }
             _ => self.literal(),
         }
@@ -476,7 +489,9 @@ impl<R: Read> Reader<R> {
             "-Infinity" | "-infinity" => return Ok(Val::num(f64::NEG_INFINITY)),
             _ => {}
         }
-        if matches!(tok.first(), Some(b't' | b'f' | b'n')) {
+        // jq matches a token against `true`, `false` or `null` by its first bytes (`nu`
+        // for null, as a lone `n` may start `nan`); anything else is read as a number.
+        if matches!(tok.first(), Some(b't' | b'f')) || tok.starts_with(b"nu") {
             return self.error("Invalid literal");
         }
         match Num::literal(&t) {
@@ -880,5 +895,122 @@ pub fn write(out: &mut Vec<u8>, v: &Val, style: &Style, level: usize) {
                 out.extend_from_slice(RESET);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ParseError, Reader};
+
+    /// The values read before the input ends, compact, and the parse error ending it.
+    fn read(text: &str) -> (Vec<String>, Option<String>) {
+        let mut r = Reader::new(text.as_bytes());
+        let mut vals = Vec::new();
+        while let Some(v) = r.next_value() {
+            match v {
+                Ok(v) => vals.push(v.to_json()),
+                Err(ParseError(m)) => return (vals, Some(m)),
+            }
+        }
+        (vals, None)
+    }
+
+    fn check(text: &str, vals: &[&str], err: &str) {
+        let (got, e) = read(text);
+        let want = vals.iter().map(|v| v.to_string()).collect::<Vec<_>>();
+        assert_eq!((got, e.as_deref()), (want, Some(err)), "{text:?}");
+    }
+
+    #[test]
+    fn literal_ended_by_stray_delimiter_is_lost() {
+        check(
+            "3,1,2,",
+            &[],
+            "Expected value before ',' at line 1, column 2",
+        );
+        check(
+            "1: x\n",
+            &[],
+            "Expected string key before ':' at line 1, column 2",
+        );
+        check("1]", &[], "Unmatched ']' at line 1, column 2");
+        check("1}", &[], "Unmatched '}' at line 1, column 2");
+        check(
+            "1 2 3,",
+            &["1", "2"],
+            "Expected value before ',' at line 1, column 6",
+        );
+        check(
+            "1 ,",
+            &["1"],
+            "Expected value before ',' at line 1, column 3",
+        );
+        check("1\n]", &["1"], "Unmatched ']' at line 2, column 1");
+        check(
+            "1[",
+            &["1"],
+            "Unfinished JSON term at EOF at line 1, column 2",
+        );
+    }
+
+    #[test]
+    fn colon_without_key() {
+        check(
+            "[1]:",
+            &["[1]"],
+            "Expected string key before ':' at line 1, column 4",
+        );
+        check(
+            "\"a\":1",
+            &["\"a\""],
+            "Expected string key before ':' at line 1, column 4",
+        );
+        check(
+            "[:]",
+            &[],
+            "Expected string key before ':' at line 1, column 2",
+        );
+        check(
+            "{:1}",
+            &[],
+            "Expected string key before ':' at line 1, column 2",
+        );
+        check(
+            "[1:2]",
+            &[],
+            "':' not as part of an object at line 1, column 3",
+        );
+        check(
+            r#"{"a":1:}"#,
+            &[],
+            "':' not as part of an object at line 1, column 7",
+        );
+    }
+
+    #[test]
+    fn mismatched_closers() {
+        check(
+            r#"{"a"}"#,
+            &[],
+            "Objects must consist of key:value pairs at line 1, column 5",
+        );
+        check(
+            r#"{"a",1}"#,
+            &[],
+            "Objects must consist of key:value pairs at line 1, column 5",
+        );
+        check(
+            "[1}",
+            &[],
+            "Objects must consist of key:value pairs at line 1, column 3",
+        );
+        check(r#"{"a":1]"#, &[], "Unmatched ']' at line 1, column 7");
+    }
+
+    #[test]
+    fn literal_kinds() {
+        check("n ", &[], "Invalid numeric literal at line 1, column 2");
+        check("1 nul ", &["1"], "Invalid literal at line 1, column 6");
+        check("tru,", &[], "Invalid literal at line 1, column 4");
     }
 }
