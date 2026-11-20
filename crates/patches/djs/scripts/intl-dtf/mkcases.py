@@ -34,8 +34,7 @@ cases.append(case("range-args", "const f=new Intl.DateTimeFormat('en-US',{timeZo
     "for(const g of [()=>f.formatRange(),()=>f.formatRange(1),()=>f.formatRange(undefined,1),()=>f.formatRange(NaN,1),()=>f.formatRange(1,Infinity),()=>f.formatRange(1n,2),()=>f.formatRange(Symbol(),2),()=>f.formatRange(1,'86400000'),()=>f.formatRange(new Date(9e12),new Date(0)),()=>f.formatRange(8.64e15,8.64e15+1),()=>f.formatRangeToParts(null,0),()=>f.formatRangeToParts(0,0),()=>Intl.DateTimeFormat.prototype.formatRange.call({},1,2),()=>Intl.DateTimeFormat.prototype.formatRangeToParts.call(1,1,2),()=>[f.formatRange.length,f.formatRangeToParts.length,f.formatRange.name]])out.push(t(g));"
     "const log=[];f.formatRange({valueOf(){log.push('s');return 0}},{valueOf(){log.push('e');return 1}});out.push(log.join(''));"))
 
-# range cases djs does not match yet (weekday with hour, some time-only ranges)
-RANGE_TODO = ["intl-dtf-ja-range", "intl-dtf-nl-range", "intl-dtf-ru-range", "intl-dtf-vi-range", "intl-dtf-zh-TW-range", "intl-dtf-zh-TW-range-parts", "intl-dtf-zh-range"]
-cases = [c for c in cases if c["id"] not in RANGE_TODO]
+# -u-hc- stands in for hourCycle when neither hourCycle nor hour12 is given, and only then stays in the locale
+cases.append(case("hc-keyword", "for(const [l,o] of [['en-US-u-hc-h23',{}],['en-US-u-hc-h23',{hourCycle:'h11'}],['en-US-u-hc-h24',{hour:'numeric'}],['en-US-u-hc-h12',{hour:'numeric'}],['en-US-u-hc-xx',{hour:'numeric'}],['en-US-u-nu-arab-hc-h23',{hour:'numeric'}],['de-u-hc-h12',{hour:'numeric'}],['ja-u-hc-h11',{hour:'numeric',minute:'numeric'}],['en-US-u-hc-h23',{timeStyle:'short'}],['en-US-u-hc-h23',{hour:'numeric',hour12:true}],['en-US-u-hc-h23-nu-arab',{hour:'numeric',numberingSystem:'latn'}],['zh-TW',{dateStyle:'medium',timeStyle:'medium',hour12:false}]]){const f=new Intl.DateTimeFormat(l,{timeZone:'UTC',...o});const r=f.resolvedOptions();out.push(l+' '+JSON.stringify(o)+' '+r.locale+' '+r.hourCycle+' '+r.hour12+' '+f.format(D[4])+' | '+f.formatRange(D[4],D[5]))}"))
 open(sys.argv[1], "w").write("".join(json.dumps(c, ensure_ascii=False) + "\n" for c in cases))
 print(len(cases))

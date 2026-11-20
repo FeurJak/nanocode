@@ -136,12 +136,68 @@ fn sub_zone(p: &str, letters: &str) -> String {
     out
 }
 
+/// The option-bag fields (and zone name) of a style pattern's skeleton, or None for a letter an
+/// option bag has no field for.
+fn skeleton_fields(p: &str) -> Option<([usize; 10], Option<&'static str>)> {
+    let mut f = [0usize; 10];
+    let mut z = None;
+    let mut quoted = false;
+    let cs: alloc::vec::Vec<char> = p.chars().collect();
+    let mut i = 0;
+    while i < cs.len() {
+        let c = cs[i];
+        if c == '\'' {
+            quoted = !quoted;
+            i += 1;
+            continue;
+        }
+        let mut n = 1;
+        while i + n < cs.len() && cs[i + n] == c {
+            n += 1;
+        }
+        i += n;
+        if quoted || !c.is_ascii_alphabetic() {
+            continue;
+        }
+        let num = if n >= 2 { 2 } else { 1 };
+        match c {
+            'E' | 'c' => f[0] = if n >= 4 { 1 } else { 2 },
+            'G' => f[1] = if n >= 4 { 1 } else { 2 },
+            'y' => f[2] = if n == 2 { 2 } else { 1 },
+            'M' | 'L' => f[3] = match n { 1 => 1, 2 => 2, 3 => 4, 4 => 3, _ => 5 },
+            'd' => f[4] = num,
+            'a' => {}
+            'h' | 'H' | 'k' | 'K' => f[6] = num,
+            'm' => f[7] = num,
+            's' => f[8] = num,
+            'z' => z = Some(if n >= 4 { "long" } else { "short" }),
+            'O' => z = Some(if n >= 4 { "longOffset" } else { "shortOffset" }),
+            'v' => z = Some(if n >= 4 { "longGeneric" } else { "shortGeneric" }),
+            _ => return None,
+        }
+    }
+    Some((f, z))
+}
+
 fn locale_pattern(l: &DateLocale, f: &[usize; 10], fsd: usize, cy: usize, styles: (Option<&str>, Option<&str>), tzn: Option<&str>) -> String {
     let (ds, ts) = styles;
     if ds.is_some() || ts.is_some() {
         let di = ds.map(|s| pos(&STYLES, Some(s)));
         let dp = di.and_then(|i| dtf_pattern(l.style_date[i]));
         let tp = ts.and_then(|s| dtf_pattern(l.style_time[cy][pos(&STYLES, Some(s))]));
+        // V8 rebuilds a date-time style pattern from its skeleton when the hour cycle changes its
+        // hour letter (ja long + h11 -> y/M/d aK:mm:ss), as for an option bag.
+        if let (Some(d), Some(t), Some(t0)) = (dp, tp, ts.and_then(|s| dtf_pattern(l.style_time[0][pos(&STYLES, Some(s))]))) {
+            let hour = |p: &str| p.chars().find(|c| matches!(c, 'h' | 'H' | 'k' | 'K'));
+            if hour(t) != hour(t0)
+                && let Some((sf, z)) = skeleton_fields(&format!("{d} {t}"))
+            {
+                let p = locale_pattern(l, &sf, 0, cy, (None, None), z);
+                if !p.is_empty() {
+                    return p;
+                }
+            }
+        }
         return match (dp, tp) {
             (Some(d), Some(t)) => join(l.style_glue[di.unwrap_or(3)], d, t),
             (Some(d), None) => d.to_string(),
@@ -304,6 +360,11 @@ pub(super) fn resolve(locale: &str, tags: &[String], raw: &Spec) -> Result<Spec,
     };
     let hour12 = raw.get("hour12").map(|v| v == "true");
     let hc_opt = raw.choose_opt("hourCycle", &CYCLES, n)?;
+    // A supported -u-hc- keyword stands in for hourCycle when neither hourCycle nor hour12 is given,
+    // and only then stays in the resolved locale.
+    let hc_key = keywords.iter().find(|(k, _)| *k == "hc").and_then(|(_, v)| CYCLES.iter().copied().find(|c| c == v));
+    let hc_kept = hc_key.filter(|_| hc_opt.is_none() && hour12.is_none());
+    let hc_opt = hc_opt.or(hc_kept);
     let zone = match raw.get("timeZone") {
         Some(z) => match canonical_zone(z) {
             Some(c) => c,
@@ -441,9 +502,13 @@ pub(super) fn resolve(locale: &str, tags: &[String], raw: &Spec) -> Result<Spec,
         None => build(&fields, ds, ts),
     };
     let mut out = Spec::default();
+    // Unicode extension keywords in key order: ca, hc, nu.
     let mut kept: alloc::vec::Vec<String> = alloc::vec::Vec::new();
     if ca_kept {
         kept.push(format!("ca-{}", calendar::CALENDARS[cal]));
+    }
+    if let Some(c) = hc_kept {
+        kept.push(format!("hc-{c}"));
     }
     if let Some(k) = nu_kept {
         kept.push(k.trim_start_matches("-u-").to_string());
@@ -1122,7 +1187,7 @@ fn format_pattern(spec: &Spec, t: f64, pattern: &str, ctx: &str) -> Result<Parts
             }
             'B' => {
                 let v = match h {
-                    12 if mi == 0 && s == 0 => if n == 5 { "n" } else { "noon" },
+                    12 if exact => if n == 5 { "n" } else { "noon" },
                     0..=11 => "in the morning",
                     12..=17 => "in the afternoon",
                     18..=20 => "in the evening",

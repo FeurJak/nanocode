@@ -102,6 +102,8 @@ function letters(ty, obs, single, hc) {
   }
   return cands.find(c => obs.every(([d, v]) => same(one(c, d), [ty, v]))) || "?" + ty;
 }
+let SEP;
+const fallbackSep = () => SEP ??= fmt({second: "numeric"}).formatRangeToParts(...PAIRS.m[0]).find(p => p.source === "shared").value;
 function infer(o, lv, single) {
   const [a, b] = PAIRS[lv][0];
   const parts = nodeRange(o, a, b);
@@ -116,6 +118,17 @@ function infer(o, lv, single) {
     const h = i < split ? 0 : 1;
     pat[h] += p[0] === "literal" ? q(p[1]) : letters(p[0], all.map(([x, y, ps]) => [h ? y : x, ps[i][1]]), single, hc);
   });
+  // A fallback whose pattern starts with a literal (vi "'lúc 'HH:mm d MMMM, y") reads as cut after
+  // that literal in the end date, which joins the separator: give the literal back to the pattern.
+  const unq = P => toks(P).map(t => t[0] === "'" ? (t === "''" ? "'" : t.slice(1, -1).replace(/''/g, "'")) : t).join("");
+  const t0 = toks(pat[0]);
+  if (t0.length && !/^[A-Za-z]/.test(t0[0]) && parts[0][0] === "literal") {
+    const X = parts[0][1], sep = fallbackSep();
+    if (sep !== undefined && unq(pat[0]) === X + unq(pat[1]) + sep + X) {
+      const P = q(X) + pat[1], alt = [P + q(sep), P];
+      if (PAIRS[lv].every(([x, y]) => same(nodeRange(o, x, y), predict(alt, x, y)))) return alt;
+    }
+  }
   for (const [x, y] of PAIRS[lv]) {
     const want = nodeRange(o, x, y), got = predict(pat, x, y);
     if (!same(want, got)) return {bad: pat, want: JSON.stringify(want), got: JSON.stringify(got)};

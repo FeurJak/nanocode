@@ -31,6 +31,7 @@ module.exports = {timeOpts, split};
 if (require.main === module) {
   const out = {tpat: [{}, {}, {}, {}, {}, {}, {}], bad: []};
   const glues = new Map();
+  const raw = [];
   for (let k = 0; k < 3024; k++) {
     const o = timeOpts(k); if (!o) continue;
     for (let z = 0; z < 7; z++) {
@@ -39,9 +40,25 @@ if (require.main === module) {
       if (p.bad || p === "=") { out.bad.push([oz, p]); continue; }
       const s = split(p[1]);
       if (s.tail) { out.bad.push([oz, "tail", p[1]]); continue; }
-      glues.set(s.glue, (glues.get(s.glue) || 0) + 1);
-      out.tpat[z][k] = s.tp;
+      raw.push([z, k, s]);
     }
+  }
+  // A time pattern that ends in literal text (vi "HH 'giờ' (Giây: ss)") runs into the glue: count the
+  // glues, then give each pattern back what its glue has beyond the locale's own.
+  const unq = g => g.replace(/'([^']*)'/g, (_, x) => x === "" ? "'" : x);
+  const cnt = new Map();
+  for (const [, , s] of raw) cnt.set(s.glue, (cnt.get(s.glue) || 0) + 1);
+  const dom = [...cnt].sort((a, b) => b[1] - a[1])[0][0];
+  const dmid = unq(dom).replace(/[{]\d[}]/g, "");
+  const q = lit => /[A-Za-z']/.test(lit) ? "'" + lit.replace(/'/g, "''") + "'" : lit;
+  for (const [z, k, s] of raw) {
+    let {tp, glue} = s;
+    const mid = unq(glue).replace(/[{]\d[}]/g, "");
+    if (glue !== dom && dom.startsWith("{0}") && glue.startsWith("{0}") && mid.endsWith(dmid)) {
+      tp += q(mid.slice(0, mid.length - dmid.length)); glue = dom;
+    }
+    glues.set(glue, (glues.get(glue) || 0) + 1);
+    out.tpat[z][k] = tp;
   }
   out.glues = [...glues].sort((a, b) => b[1] - a[1]);
   fs.writeFileSync(__dirname + '/tp-' + LOC + '.json', JSON.stringify(out));

@@ -20,6 +20,9 @@ const gm = tmpl(m.infer({month: "short", day: "numeric", hour: "numeric", minute
 const ti = R.time[((1 * 3 + 1) * 7 + 4) * 4][3];
 // ICU's interval glue can differ from format's (pt-BR, id join with a space): take whichever of
 // format's glue, a space or nothing reads every date key.
+const q = lit => /[A-Za-z']/.test(lit) ? "'" + lit.replace(/'/g, "''") + "'" : lit;
+const U = p => r.toks(p).flatMap(t => /^[A-Za-z]/.test(t) ? [t] : [...(t[0] === "'" ? (t === "''" ? "'" : t.slice(1, -1).replace(/''/g, "'")) : t)].map(c => "\0" + c));
+const J = us => { let o = "", lit = ""; for (const u of us) { if (u[0] === "\0") lit += u.slice(1); else { o += q(lit) + u; lit = ""; } } return o + q(lit); };
 const run = gm => {
   const dpat = {}, bad = [];
   for (let k = 0; k < 864; k++) {
@@ -31,7 +34,12 @@ const run = gm => {
       else {
         const i0 = gm.indexOf("{0}"), i1 = gm.indexOf("{1}");
         if (i1 < i0) { const pre = gm.slice(0, i1), mid = gm.slice(i1 + 3, i0); if (p[0].startsWith(pre) && p[0].endsWith(mid + ti[0]) && p[1] === ti[1] + gm.slice(i0 + 3)) D = p[0].slice(pre.length, p[0].length - mid.length - ti[0].length); }
-        else { const pre = gm.slice(0, i0), mid = gm.slice(i0 + 3, i1), post = gm.slice(i1 + 3); if (p[0] === pre + ti[0] && p[1].startsWith(ti[1] + mid) && p[1].endsWith(post)) D = p[1].slice(ti[1].length + mid.length, p[1].length - post.length); }
+        else {
+          // compare as units (a field, or one literal character): quoting can merge the glue's space
+          // into the date's own literal (vi "HH:mm' tháng 'MM, y")
+          const pre = gm.slice(0, i0), mid = U(gm.slice(i0 + 3, i1)), post = U(gm.slice(i1 + 3)), b = U(p[1]), head = [...U(ti[1]), ...mid];
+          if (p[0] === pre + ti[0] && head.every((x, i) => b[i] === x) && post.every((x, i) => b[b.length - post.length + i] === x)) D = J(b.slice(head.length, b.length - post.length));
+        }
       }
     }
     if (D === null) bad.push([o, "dpat", p]); else dpat[k] = D;

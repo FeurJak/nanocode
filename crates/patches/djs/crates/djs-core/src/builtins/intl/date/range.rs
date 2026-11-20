@@ -39,6 +39,18 @@ const DPN: usize = TPF + 7 * 3024 / 16;
 // Date interval entries with a zone name (6 kinds x 864 x levels G y M d): ICU leaves an offset
 // zone (O) out of the interval skeleton, so these are read as node shows them.
 const DZ: usize = DPN + 864 / 16;
+// ICU's own pattern for a time-only skeleton without interval data (seconds, fractional seconds),
+// which its time-level fallback formats with, where it is not TP's (7 x 3024): with seconds and no
+// minute ICU appends the hour to the seconds, unlike the pattern it joins to a date.
+const TPS: usize = DZ + 6 * 864 * 4 / 16;
+// The date pattern of a fallback at a date level the key lacks (864 x 4), where not DP's for the
+// widened key: ICU inserts the field into the whole skeleton and takes its best pattern
+// (zh-TW M月d日 where DP has M/d).
+const DPI: usize = TPS + 7 * 3024 / 16;
+// DPI for keys with an hour and no minute, whose whole skeleton can pick another date form (ja y/M/dE).
+const DPIH: usize = DPI + 864 * 4 / 16;
+// DPIH measured with a 12-hour cycle (its day period changes the skeleton: ko "(E)").
+const DPIH12: usize = DPIH + 864 * 4 / 16;
 
 /// What the resolved options select: fields (weekday era year month day dayPeriod hour minute
 /// second, encoded as resolve reads them), fractional digits, hour cycle choice (0 to 6), zone name
@@ -239,7 +251,9 @@ fn entry(l: &RangeLocale, k: &Key, single: &str, level: usize) -> Entry {
     // ICU has interval patterns for every hour skeleton (in some locales they read like a fallback).
     // With a day period (B) ICU can miss: en-US with a zone has none, and its hour entry reads as one.
     let real = |e: &Option<Entry>| matches!(e, Some(e @ Entry::Pair(..)) if !is_fallback(e, sep));
-    let found = tab.as_ref().is_some_and(|t| (f[6] != 0 && (f[5] == 0 || k.z == 0 || real(&t[3]))) || t[2..].iter().any(real));
+    // A 24-hour cycle drops the day period from the skeleton, so it cannot miss for that.
+    let h24 = tokens(tpat).iter().any(|t| matches!(letter(t), Some('H' | 'k')));
+    let found = tab.as_ref().is_some_and(|t| (f[6] != 0 && (f[5] == 0 || h24 || k.z == 0 || real(&t[3]))) || t[2..].iter().any(real));
     fn pat_or<'a>(l: &RangeLocale, row: usize, i: usize, or: &'a str) -> &'a str {
         let c = cell(l, row, i);
         if c == NONE { or } else { pattern(c) }
@@ -256,14 +270,15 @@ fn entry(l: &RangeLocale, k: &Key, single: &str, level: usize) -> Entry {
     if !has_date {
         if level < 4 {
             let fd: [usize; 5] = if level == 0 { [0, 2, 1, 1, 1] } else { [0, 0, 1, 1, 1] };
-            // ICU builds this skeleton from its time skeleton, which leaves an offset zone (O) out.
-            let t = if matches!(k.z, 3 | 4) { pat_or(l, TPF, tk, pat_or(l, TP, tk, tpatf)) } else { tpatf };
-            return fallback(&apply(l.glue[3], pat_or(l, DP, dkey(&fd), ""), t), sep);
+            // TP is read off this very fallback (tpat.js), per zone kind.
+            // DPI's date key 0 holds the date part where it is not DP's (ru era GGGGG).
+            return fallback(&apply(l.glue[3], pat_or(l, DPI, level, pat_or(l, DP, dkey(&fd), "")), tpat), sep);
         }
         if found && level <= 6 {
             return tab.and_then(|t| t[level - 2].clone()).unwrap_or(Entry::Same);
         }
-        return if ignored(level, tpat) { Entry::Same } else { fallback(tpat, sep) };
+        let own = pat_or(l, TPS, k.z * 3024 + tk, tpat);
+        return if ignored(level, own) { Entry::Same } else { fallback(own, sep) };
     }
     if level < 4 {
         // ICU sets an interval pattern for a date field the skeleton lacks: the skeleton with that
@@ -272,14 +287,26 @@ fn entry(l: &RangeLocale, k: &Key, single: &str, level: usize) -> Entry {
         // ICU looks for the field's letter in the skeleton V8 reads off the pattern, so a stand-alone
         // month (L, as en-US picks for a month without a day) counts as missing too.
         let missing = f[level + 1] == 0 || (level == 2 && tokens(single).iter().any(|t| letter(t) == Some('L')));
-        if found && missing {
-            for (lv, i, v) in [(3, 4, 1), (2, 3, 1), (1, 2, 1), (0, 1, 2)] {
-                if level <= lv && g[i] == 0 {
-                    g[i] = v;
-                }
+        let mut w = g;
+        for (lv, i, v) in [(3, 4, 1), (2, 3, 1), (1, 2, 1), (0, 1, 2)] {
+            if level <= lv && w[i] == 0 {
+                w[i] = v;
             }
         }
-        let p = best(&g);
+        if found && missing {
+            g = w;
+        }
+        // dpi.js measures every key that lacks the level's field where ICU has interval data for its
+        // time (found), with the widened key's glue.
+        let table = match (f[7], h24) {
+            (0, true) => DPIH,
+            (0, false) => DPIH12,
+            _ => DPI,
+        };
+        let p = match cell(l, table, dkey(f) * 4 + level) {
+            c if c != NONE && missing && found => apply(glue_by(&w), pattern(c), tpatf),
+            _ => best(&g),
+        };
         return if ignored(level, &p) { Entry::Same } else { fallback(&p, sep) };
     }
     if found && level <= 6 {
