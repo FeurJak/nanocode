@@ -1,4 +1,4 @@
-//! Regressions from the coverage-2 bash parity suite (bash 5.2).
+//! Regressions from the coverage-2 and coverage-3 bash parity suites (bash 5.2).
 
 use super::run_on_test_host as run;
 
@@ -25,4 +25,10 @@ fn unicode_escapes_stay_escaped_outside_utf8_locales() {
     assert_eq!(out("LC_ALL=C\necho $'\\u0043\\u00e9\\U0001F600'"), "C\\u00E9\\U0001F600\n");
     assert_eq!(out("LC_ALL=C.UTF-8\necho $'\\u00e9'"), "\u{e9}\n");
     assert_eq!(out(r"LC_ALL=C; x='\u00e9'; echo ${x@E}"), "\\u00E9\n");
+}
+
+#[test]
+fn quoted_prefix_names_with_no_match_give_no_word() {
+    assert_eq!(out(r#"set -- "${!zzq_@}"; echo $#; set -- "${!zzq_*}"; echo $#"#), "0\n1\n");
+    assert_eq!(out(r#"zq_a=1 zq_b=2; set -- "${!zq_@}"; echo $# $2"#), "2 zq_b\n");
 }

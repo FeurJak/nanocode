@@ -1481,9 +1481,10 @@ fn is_at(p: &WordPart) -> bool {
         Part::Param(p) => {
             let at = p.name == ParamName::Special(b'@') || matches!(p.index, Some(Subscript::At));
             match p.prefix {
-                // `"${!a[@]}"`: the keys, also possibly none.
+                // `"${!a[@]}"`: the keys, and `"${!pre@}"`: the names, also possibly none.
                 ParamPrefix::Indirect => {
-                    matches!(p.index, Some(Subscript::At)) && matches!(p.op, ParamOp::None)
+                    (matches!(p.index, Some(Subscript::At)) && matches!(p.op, ParamOp::None))
+                        || matches!(p.op, ParamOp::Names { star: false })
                 }
                 ParamPrefix::Length => false,
                 ParamPrefix::None => {
