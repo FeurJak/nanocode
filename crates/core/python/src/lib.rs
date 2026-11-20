@@ -365,6 +365,8 @@ impl Drop for Python {
     fn drop(&mut self) {
         if let Some(interpreter) = self.interpreter.take() {
             interpreter.enter(|vm| {
+                // Give back what boot froze, so finalize collects its cycles.
+                vm.state.gc.unfreeze();
                 self.boot.clear();
                 vm.set_limiter(Some(PyRc::new(host::Shut) as PyRc<dyn Limiter>));
             });
@@ -408,7 +410,12 @@ impl Python {
             .add_native_module(matplotlib)
             .add_frozen_modules(added_frozen().into_iter().flat_map(|lib| lib.decode()))
             .build();
-        let (boot, depth) = interpreter.enter(|vm| (vm.ctx.new_dict(), vm.recursion_limit.get()));
+        let (boot, depth) = interpreter.enter(|vm| {
+            // What boot left alive lives as long as the interpreter: keep it out of
+            // every collection's scan, as gc.freeze() does after a fork server boots.
+            vm.state.gc.freeze();
+            (vm.ctx.new_dict(), vm.recursion_limit.get())
+        });
         Ok(Self {
             interpreter: Some(interpreter),
             boot,
