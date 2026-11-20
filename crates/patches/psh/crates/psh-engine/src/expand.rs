@@ -601,6 +601,14 @@ pub(crate) async fn expand_heredoc(
     Ok(f.joined())
 }
 
+/// A value's length in characters (bytes without UTF-8).
+fn str_len(s: &[u8], utf8: bool) -> i64 {
+    match utf8 {
+        true => String::from_utf8_lossy(s).chars().count() as i64,
+        false => s.len() as i64,
+    }
+}
+
 /// In a here-doc body bash removes line continuations before it reads names, so
 /// `$a\<newline>b` names `ab`: a name takes in the literal text after continuations.
 fn join_continued_names(code: &Code, pieces: &mut Vec<Piece<'_>>) {
@@ -2337,6 +2345,19 @@ async fn param(
                             Val::Unset
                         }
                     }
+                }
+                // `${s[@]:off}` of a scalar: no word at all once the offset is past
+                // its end (bash slices it as a one-element array there).
+                None if matches!(p.index, Some(Subscript::At))
+                    && match &val {
+                        Val::Str(s) => off > str_len(s, utf8),
+                        Val::List(items, false) if items.len() == 1 => {
+                            off > str_len(&items[0], utf8)
+                        }
+                        _ => false,
+                    } =>
+                {
+                    Val::List(Vec::new(), false)
                 }
                 None => map_val(val, |s| match substring(s, off, len, utf8) {
                     Ok(v) => v,
