@@ -624,7 +624,9 @@
         if (preludeSource && !preludeAtSetup) {
           defineGlobals(preludeSource(tools, callHost, callHostSync) ?? {});
         }
-        const script = new AsyncFunction(source);
+        // Strict, as an ES module is (cells run like one: top-level await works), so
+        // top-level `this` is undefined. On the source's first line, so line numbers hold.
+        const script = new AsyncFunction('"use strict";' + source);
         await finish(script());
         if (threw) throw thrown;
         return terminal();
