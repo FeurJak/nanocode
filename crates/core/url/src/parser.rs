@@ -35,7 +35,7 @@ fn is_normalized_windows_drive_letter(text: &str) -> bool {
     is_windows_drive_letter(text) && text.ends_with(':')
 }
 
-fn starts_with_windows_drive_letter(chars: &[char]) -> bool {
+const fn starts_with_windows_drive_letter(chars: &[char]) -> bool {
     match chars {
         [letter, ':' | '|'] => letter.is_ascii_alphabetic(),
         [letter, ':' | '|', next, ..] => {
