@@ -47,6 +47,12 @@ const EVERYTHING_PREFIXES: [&str; 5] = [
 ];
 const WORKSPACE: &str = "nanocode";
 const WASM: &str = "wasm32-unknown-unknown";
+const WASM_ALWAYS: [&str; 4] = [
+    "nanocode-board",
+    "nanocode-board-fold",
+    "nanocode-partitions",
+    "nanocode-turnlog",
+];
 const UNIT_TIMEOUT_SECS: u64 = 120;
 const HUNG_EXIT: i32 = 124;
 const SPAWN_EXIT: i32 = 127;
@@ -747,8 +753,15 @@ pub fn main(args: &[String]) -> u8 {
             .flat_map(|name| ["-p".to_owned(), name.clone()])
             .collect()
     };
+    let always_wasm = |libraries: &BTreeSet<String>| -> Vec<String> {
+        let mut crates = libraries.clone();
+        crates.extend(WASM_ALWAYS.map(str::to_owned));
+        let mut wasm = packages(&crates);
+        wasm.push("--lib".to_owned());
+        wasm
+    };
     // Native: --lib --bins (--bins alone when no reached crate has a library, since cargo refuses
-    // --lib then); wasm32: the libraries only. Empty means skipped.
+    // --lib then); wasm32: the libraries plus the crates nanocode-ts links. Empty means skipped.
     let (native_args, wasm_args, detail): (Vec<String>, Vec<String>, String) =
         match &planned.selection {
             Selection::Workspace => (
@@ -758,22 +771,18 @@ pub fn main(args: &[String]) -> u8 {
                 ["--workspace", "--lib"].map(str::to_owned).to_vec(),
                 "workspace".to_owned(),
             ),
-            Selection::Crates { reached, .. } if reached.is_empty() => {
-                (Vec::new(), Vec::new(), format!("no crates changed{since}"))
-            }
+            Selection::Crates { reached, .. } if reached.is_empty() => (
+                Vec::new(),
+                always_wasm(&BTreeSet::new()),
+                format!("no crates changed{since}"),
+            ),
             Selection::Crates { reached, libraries } => {
                 let mut native = packages(reached);
                 if !libraries.is_empty() {
                     native.push("--lib".to_owned());
                 }
                 native.push("--bins".to_owned());
-                let wasm = if libraries.is_empty() {
-                    Vec::new()
-                } else {
-                    let mut wasm = packages(libraries);
-                    wasm.push("--lib".to_owned());
-                    wasm
-                };
+                let wasm = always_wasm(libraries);
                 (
                     native,
                     wasm,
