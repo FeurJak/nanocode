@@ -84,7 +84,7 @@ fn sha1(data: &[u8]) -> Oid {
 
 fn inflate(inflater: &mut Inflater, input: &[u8], size: usize) -> io::Result<(Vec<u8>, usize)> {
     inflater.reset();
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(size);
     match inflater.inflate(input, InputEnd::Final, &mut out, size) {
         Ok(Progress::Done { consumed }) if out.len() == size => Ok((out, consumed)),
         _ => Err(corrupt("a pack entry does not inflate to its size")),
