@@ -150,6 +150,15 @@ default_table='
 1 canary_http_real_elapsed canary:40 --scenario runtime --store kv --wire http --twice --mutation http-real-elapsed
 1 canary_child_acks_early canary:1000 --scenario runtime --children remote --mutation child-acks-early
 1 canary_child_adopts_turn canary:400 --scenario runtime --children remote --mutation child-adopts-turn
+4 runtime_log pass --scenario runtime --store log
+4 runtime_log_board pass --scenario runtime --store log --subagents-board
+4 agents_board pass --scenario agents --subagents-board
+4 hands_fleet pass --scenario hands --fleet 4
+1 canary_coordinator_forgets_spawns canary:200 --scenario runtime --children remote --mutation coordinator-forgets-spawns
+1 canary_acks_unflushed canary:400 --scenario runtime --store log --mutation acks-unflushed
+1 canary_reopen_forgets_agents canary:100 --scenario runtime --store log --subagents-board --mutation reopen-forgets-agents
+1 canary_board_failures_unread canary:100 --scenario agents --subagents-board --mutation board_failures_unread
+1 canary_fleet_swallow_unsent canary:4000 --scenario hands --fleet 4 --mutation fleet_swallow_unsent
 1 canary_child_forgets_notice canary:100 --scenario runtime --children remote --mutation child-forgets-notice
 1 canary_child_respawns_fresh canary:400 --scenario runtime --children remote --mutation child-respawns-fresh
 1 canary_child_settles_lazily canary:100 --scenario runtime --children remote --mutation child-settles-lazily
@@ -209,6 +218,14 @@ default_table='
 1 canary_cell_before_checkpoint canary --scenario turns --policy turnlog --mutation cell_before_checkpoint
 1 canary_open_drops_journals canary --scenario turns --policy turnlog --mutation open_drops_journals
 1 canary_resume_redispatches_running canary --scenario turns --policy turnlog --mutation resume_redispatches_running
+1 canary_snapshot_ratio_ignored canary:100 --scenario turns --policy turnlog --event-bytes 4096 --mutation snapshot_ratio_ignored
+1 canary_snapshot_pointer_stale canary:100 --scenario turns --policy turnlog --mutation snapshot_pointer_stale
+1 canary_sections_pruned canary:100 --scenario turns --policy turnlog --snapshot-rows 4 --mutation sections_pruned
+1 canary_sections_kept canary:100 --scenario turns --policy turnlog --event-bytes 4096 --mutation sections_kept
+1 canary_part_read_unloaded canary:100 --scenario turns --policy turnlog --snapshot-rows 4 --mutation part_read_unloaded
+1 canary_forgets_other_cell canary:20 --scenario turns --policy turnlog --mutation forgets_other_cell
+1 canary_content_rewritten_stale canary:20 --scenario turns --policy turnlog --mutation content_rewritten_stale
+1 canary_content_collected_live canary:20 --scenario turns --policy turnlog --mutation content_collected_live
 1 canary_agents_cancel_ignored canary:200 --scenario agents --mutation cancel_ignored
 1 canary_agents_shutdown_hangs canary:200 --scenario agents --mutation shutdown_hangs
 1 canary_agents_shutdown_keeps_harness canary:200 --scenario agents --mutation shutdown_keeps_harness
