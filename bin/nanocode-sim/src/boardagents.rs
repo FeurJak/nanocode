@@ -5,7 +5,9 @@ use nanocode_subagents::{BoardCoordination, BoardStats, Coordination};
 use nanocode_turnlog::{LogHost, MemoryLog};
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
-static SEED: Mutex<Option<Seed>> = Mutex::new(None);
+thread_local! {
+    static SEED: std::cell::RefCell<Option<Seed>> = const { std::cell::RefCell::new(None) };
+}
 static TOTALS: Mutex<Option<(u64, BoardStats)>> = Mutex::new(None);
 
 struct Seed {
@@ -27,10 +29,10 @@ pub fn enabled() -> bool {
 
 pub fn begin() {
     if enabled() {
-        *lock(&SEED) = Some(Seed {
+        SEED.set(Some(Seed {
             host: Arc::new(MemoryLog::new()),
             planes: Vec::new(),
-        });
+        }));
     }
 }
 
@@ -38,22 +40,23 @@ pub fn plane() -> Option<Arc<dyn Coordination>> {
     if !enabled() {
         return None;
     }
-    let mut seed = lock(&SEED);
-    let seed = seed.get_or_insert_with(|| Seed {
-        host: Arc::new(MemoryLog::new()),
-        planes: Vec::new(),
-    });
-    let host: Arc<dyn LogHost> = seed.host.clone();
-    let plane = BoardCoordination::new(host, "subagents");
-    seed.planes.push(Arc::clone(&plane));
-    Some(plane)
+    SEED.with_borrow_mut(|seed| {
+        let seed = seed.get_or_insert_with(|| Seed {
+            host: Arc::new(MemoryLog::new()),
+            planes: Vec::new(),
+        });
+        let host: Arc<dyn LogHost> = seed.host.clone();
+        let plane = BoardCoordination::new(host, "subagents");
+        seed.planes.push(Arc::clone(&plane));
+        Some(plane as Arc<dyn Coordination>)
+    })
 }
 
 pub fn finish() -> Option<String> {
     if !enabled() {
         return None;
     }
-    let seed = lock(&SEED).take()?;
+    let seed = SEED.take()?;
     let mut total = BoardStats::default();
     for plane in &seed.planes {
         match nanocode_sync::block_on(plane.audit()) {

@@ -134,7 +134,7 @@ pub struct PartitionsStats {
 }
 
 impl PartitionsStats {
-    fn add(&mut self, other: &Self) {
+    pub fn add(&mut self, other: &Self) {
         self.seeds += other.seeds;
         self.claims += other.claims;
         self.takeovers += other.takeovers;

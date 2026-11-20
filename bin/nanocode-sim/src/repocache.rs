@@ -117,7 +117,7 @@ pub struct RepoCacheStats {
 }
 
 impl RepoCacheStats {
-    const fn add(&mut self, other: &Self) {
+    pub const fn add(&mut self, other: &Self) {
         self.seeds += other.seeds;
         self.worktrees += other.worktrees;
         self.commits += other.commits;

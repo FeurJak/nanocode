@@ -125,7 +125,7 @@ pub struct ShardsStats {
 }
 
 impl ShardsStats {
-    const fn add(&mut self, other: &Self) {
+    pub const fn add(&mut self, other: &Self) {
         self.seeds += other.seeds;
         self.partitions += other.partitions;
         self.writers += other.writers;

@@ -109,7 +109,7 @@ pub struct ControlplaneStats {
 }
 
 impl ControlplaneStats {
-    fn add(&mut self, other: &Self) {
+    pub fn add(&mut self, other: &Self) {
         self.seeds += other.seeds;
         self.events += other.events;
         self.goals += other.goals;

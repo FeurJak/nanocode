@@ -165,7 +165,7 @@ pub struct WorkspaceSqlStats {
 }
 
 impl WorkspaceSqlStats {
-    const fn add(&mut self, other: &Self) {
+    pub const fn add(&mut self, other: &Self) {
         self.seeds += other.seeds;
         self.rounds += other.rounds;
         self.flights += other.flights;

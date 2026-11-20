@@ -113,7 +113,7 @@ pub struct ScaleStats {
 }
 
 impl ScaleStats {
-    fn add(&mut self, other: &Self) {
+    pub fn add(&mut self, other: &Self) {
         self.seeds += other.seeds;
         for size in 0..AGENT_COUNTS.len() {
             self.runs[size] += other.runs[size];

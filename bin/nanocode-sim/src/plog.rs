@@ -55,7 +55,7 @@ pub struct PlogStats {
 }
 
 impl PlogStats {
-    const fn add(&mut self, other: &Self) {
+    pub const fn add(&mut self, other: &Self) {
         self.seeds += other.seeds;
         self.appends += other.appends;
         self.acked += other.acked;

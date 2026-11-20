@@ -154,7 +154,7 @@ pub struct WorkspaceStackStats {
 }
 
 impl WorkspaceStackStats {
-    const fn add(&mut self, other: &Self) {
+    pub const fn add(&mut self, other: &Self) {
         self.seeds += other.seeds;
         self.writes += other.writes;
         self.edits += other.edits;

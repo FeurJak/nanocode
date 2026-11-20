@@ -118,7 +118,7 @@ pub struct WorkspaceFsStats {
 }
 
 impl WorkspaceFsStats {
-    const fn add(&mut self, other: &Self) {
+    pub const fn add(&mut self, other: &Self) {
         self.seeds += other.seeds;
         self.steps += other.steps;
         self.commits += other.commits;

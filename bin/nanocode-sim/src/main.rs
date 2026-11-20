@@ -164,6 +164,8 @@ struct Args {
     /// Print `SEED seed=N pass|fail` as each seed settles, for runners that time, schedule
     /// and recheck single seeds (bin/nanocode-sim/run.py).
     seed_lines: bool,
+    /// Worker threads that run seeds at once (--jobs N); output is identical to --jobs 1.
+    jobs: usize,
     scenario: Scenario,
     turns: TurnOptions,
     whole: WholeOptions,
@@ -214,7 +216,7 @@ type Caught = BTreeMap<Invariant, (u64, u64, (u64, u64))>;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|inbox_stress|capture|executor|dns|board|board_shards|controlplane|cost|plog|hand_router|workspace_host|board_sync|dispatcher|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|live|partitions|scale] [--ops N] [--twice] [--seed-lines] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
+        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|inbox_stress|capture|executor|dns|board|board_shards|controlplane|cost|plog|hand_router|workspace_host|board_sync|dispatcher|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|live|partitions|scale] [--ops N] [--twice] [--seed-lines] [--jobs N] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
        websocket: [--mutation {}]
        http_server: [--mutation {}]
        alloc: [--mutation overstate_size|forget_free|scribble]
@@ -296,6 +298,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         verbose: false,
     };
     let mut twice = false;
+    let mut jobs = 1_usize;
     let mut seed_lines = false;
     let mut scenario = Scenario::Store;
     let mut mutation = None;
@@ -363,6 +366,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         match flag.as_str() {
             "--twice" => twice = true,
             "--seed-lines" => seed_lines = true,
+            "--jobs" => jobs = rest.next()?.parse().ok().filter(|&jobs| jobs > 0)?,
             "--trace-dir" => live::trace_to(rest.next()?),
             "--subagents-board" => boardagents::enable(),
             "--verbose" => options.verbose = true,
@@ -523,6 +527,9 @@ fn parse_args(args: &[String]) -> Option<Args> {
     if whole.store_mutation != Mutation::None && whole.store != Some(StoreKind::Kv) {
         return None;
     }
+    if jobs > 1 && options.verbose {
+        return None;
+    }
     turns.verbose = options.verbose;
     whole.verbose = options.verbose;
     whole.calm = turns.calm;
@@ -531,6 +538,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         options,
         twice,
         seed_lines,
+        jobs,
         scenario,
         turns,
         whole,
@@ -1079,6 +1087,445 @@ fn tidy() -> ExitCode {
     }
 }
 
+#[derive(Default)]
+struct Totals {
+    totals: Stats,
+    agent_totals: AgentStats,
+    turn_totals: TurnStats,
+    whole_totals: WholeStats,
+    websocket_totals: WebSocketStats,
+    http_server_totals: HttpServerStats,
+    mpp_totals: MppStats,
+    sync_totals: SyncStats,
+    streams_totals: StreamsStats,
+    hands_totals: HandsStats,
+    cell_calls_totals: CellCallsStats,
+    live_totals: LiveStats,
+    long_thread_totals: LongThreadStats,
+    request_close_totals: RequestCloseStats,
+    inbox_stress_totals: InboxStressStats,
+    tasks_totals: TasksStats,
+    board_totals: BoardStats,
+    controlplane_totals: ControlplaneStats,
+    cost_totals: CostStats,
+    plog_totals: PlogStats,
+    shards_totals: ShardsStats,
+    hand_router_totals: HandRouterStats,
+    workspace_host_totals: WorkspaceHostStats,
+    board_sync_totals: BoardSyncStats,
+    dispatcher_totals: DispatcherStats,
+    board_steer_totals: BoardSteerStats,
+    board_brief_totals: BoardBriefStats,
+    workspace_fs_totals: WorkspaceFsStats,
+    repo_cache_totals: RepoCacheStats,
+    workspace_sql_totals: WorkspaceSqlStats,
+    git_remote_totals: GitRemoteStats,
+    workspace_stack_totals: WorkspaceStackStats,
+    partitions_totals: PartitionsStats,
+    scale_totals: ScaleStats,
+    hand_auto_totals: HandAutoStats,
+    #[cfg(unix)]
+    capture_totals: capture::CaptureStats,
+    #[cfg(target_os = "linux")]
+    dns_totals: dns::DnsStats,
+    #[cfg(unix)]
+    alloc_totals: alloc::AllocStats,
+    #[cfg(unix)]
+    egress_totals: egress::EgressStats,
+}
+
+impl Totals {
+    fn add(&mut self, other: &Self) {
+        self.totals.add(&other.totals);
+        self.agent_totals.add(&other.agent_totals);
+        self.turn_totals.add(&other.turn_totals);
+        self.whole_totals.add(&other.whole_totals);
+        self.websocket_totals.add(&other.websocket_totals);
+        self.http_server_totals.add(&other.http_server_totals);
+        self.mpp_totals.add(&other.mpp_totals);
+        self.sync_totals.add(&other.sync_totals);
+        self.streams_totals.add(&other.streams_totals);
+        self.hands_totals.add(&other.hands_totals);
+        self.cell_calls_totals.add(&other.cell_calls_totals);
+        self.live_totals.add(&other.live_totals);
+        self.long_thread_totals.add(&other.long_thread_totals);
+        self.request_close_totals.add(&other.request_close_totals);
+        self.inbox_stress_totals.add(&other.inbox_stress_totals);
+        self.tasks_totals.add(&other.tasks_totals);
+        self.board_totals.add(&other.board_totals);
+        self.controlplane_totals.add(&other.controlplane_totals);
+        self.cost_totals.add(&other.cost_totals);
+        self.plog_totals.add(&other.plog_totals);
+        self.shards_totals.add(&other.shards_totals);
+        self.hand_router_totals.add(&other.hand_router_totals);
+        self.workspace_host_totals.add(&other.workspace_host_totals);
+        self.board_sync_totals.add(&other.board_sync_totals);
+        self.dispatcher_totals.add(&other.dispatcher_totals);
+        self.board_steer_totals.add(&other.board_steer_totals);
+        self.board_brief_totals.add(&other.board_brief_totals);
+        self.workspace_fs_totals.add(&other.workspace_fs_totals);
+        self.repo_cache_totals.add(&other.repo_cache_totals);
+        self.workspace_sql_totals.add(&other.workspace_sql_totals);
+        self.git_remote_totals.add(&other.git_remote_totals);
+        self.workspace_stack_totals
+            .add(&other.workspace_stack_totals);
+        self.partitions_totals.add(&other.partitions_totals);
+        self.scale_totals.add(&other.scale_totals);
+        self.hand_auto_totals.add(&other.hand_auto_totals);
+        #[cfg(unix)]
+        self.capture_totals.add(&other.capture_totals);
+        #[cfg(target_os = "linux")]
+        self.dns_totals.add(&other.dns_totals);
+        #[cfg(unix)]
+        self.alloc_totals.add(&other.alloc_totals);
+        #[cfg(unix)]
+        self.egress_totals.add(&other.egress_totals);
+    }
+}
+
+fn merge_caught(caught: &mut Caught, seed: &Caught) {
+    for (invariant, (count, first, shortest)) in seed {
+        let entry = caught.entry(*invariant).or_insert((0, *first, *shortest));
+        entry.0 += count;
+        if shortest.0 < entry.2.0 {
+            entry.2 = *shortest;
+        }
+    }
+}
+
+/// Judges one seed of the chosen scenario, adding its stats to totals.
+fn judge_one(seed: u64, args: &Args, totals: &mut Totals, caught: &mut Caught) -> Option<String> {
+    match args.scenario {
+        Scenario::Store => judge(seed, args, &mut totals.totals),
+        Scenario::Agents => judge_agents(seed, args, &mut totals.agent_totals),
+        Scenario::Turns => judge_turns(seed, args, &mut totals.turn_totals, caught),
+        Scenario::Runtime => judge_whole(seed, args, &mut totals.whole_totals),
+        Scenario::Websocket => websocket::judge(
+            seed,
+            args.websocket,
+            args.twice,
+            args.options.verbose,
+            &mut totals.websocket_totals,
+        ),
+        Scenario::HttpServer => httpserver::judge(
+            seed,
+            args.http_server,
+            args.twice,
+            args.options.verbose,
+            &mut totals.http_server_totals,
+        ),
+        Scenario::Mpp => mpp::judge_seed(
+            seed,
+            args.mpp,
+            args.twice,
+            args.options.verbose,
+            &mut totals.mpp_totals,
+        ),
+        Scenario::Sync => sync::judge_seed(
+            seed,
+            args.sync,
+            args.twice,
+            args.options.verbose,
+            &mut totals.sync_totals,
+        ),
+        Scenario::CellCalls => cellcalls::judge(
+            seed,
+            args.cell_calls,
+            args.twice,
+            args.options.verbose,
+            &mut totals.cell_calls_totals,
+        ),
+        Scenario::Live => live::judge(
+            seed,
+            args.live,
+            args.twice,
+            args.options.verbose,
+            &mut totals.live_totals,
+        ),
+        Scenario::LongThread => longthread::judge(
+            seed,
+            args.long_thread,
+            args.twice,
+            args.options.verbose,
+            &mut totals.long_thread_totals,
+        ),
+        Scenario::RequestClose => requestclose::judge(
+            seed,
+            args.twice,
+            args.options.verbose,
+            &mut totals.request_close_totals,
+        ),
+        Scenario::InboxStress => inboxstress::judge(
+            seed,
+            args.twice,
+            args.options.verbose,
+            &mut totals.inbox_stress_totals,
+        ),
+        Scenario::Hands => hands::judge_seed(
+            seed,
+            args.hands,
+            hands::HandsOptions {
+                fleet: args.fleet,
+                reopen: args.reopen,
+                cancel: args.cancel,
+            },
+            args.twice,
+            args.options.verbose,
+            &mut totals.hands_totals,
+        ),
+        Scenario::Streams => streams::judge(
+            seed,
+            args.streams,
+            args.twice,
+            args.options.verbose,
+            &mut totals.streams_totals,
+        ),
+        Scenario::Executor => tasks::judge(
+            seed,
+            args.tasks,
+            args.twice,
+            args.options.verbose,
+            &mut totals.tasks_totals,
+        ),
+        Scenario::Board => board::judge(
+            seed,
+            args.board,
+            args.twice,
+            args.options.verbose,
+            &mut totals.board_totals,
+        ),
+        Scenario::Controlplane => controlplane::judge(
+            seed,
+            controlplane_agents(args),
+            args.controlplane,
+            args.twice,
+            args.options.verbose,
+            &mut totals.controlplane_totals,
+        ),
+        Scenario::Cost => cost::judge(
+            seed,
+            args.cost,
+            args.twice,
+            args.options.verbose,
+            &mut totals.cost_totals,
+        ),
+        Scenario::Plog => plog::judge(
+            seed,
+            args.plog,
+            args.twice,
+            args.options.verbose,
+            &mut totals.plog_totals,
+        ),
+        Scenario::BoardShards => board_shards::judge(
+            seed,
+            args.board_shards,
+            args.twice,
+            args.options.verbose,
+            &mut totals.shards_totals,
+        ),
+        Scenario::HandRouter => handrouter::judge(
+            seed,
+            args.hand_router,
+            args.twice,
+            args.options.verbose,
+            &mut totals.hand_router_totals,
+        ),
+        Scenario::WorkspaceHost => workspacehost::judge(
+            seed,
+            args.workspace_host,
+            args.twice,
+            args.options.verbose,
+            &mut totals.workspace_host_totals,
+        ),
+        Scenario::BoardSync => board_sync::judge(
+            seed,
+            args.board_sync,
+            args.twice,
+            args.options.verbose,
+            &mut totals.board_sync_totals,
+        ),
+        Scenario::Dispatcher => dispatcher::judge(
+            seed,
+            args.dispatcher,
+            args.twice,
+            args.options.verbose,
+            &mut totals.dispatcher_totals,
+        ),
+        Scenario::BoardSteer => board_steer::judge(
+            seed,
+            args.board_steer,
+            args.twice,
+            args.options.verbose,
+            &mut totals.board_steer_totals,
+        ),
+        Scenario::BoardBrief => board_brief::judge(
+            seed,
+            args.board_brief,
+            args.twice,
+            args.options.verbose,
+            &mut totals.board_brief_totals,
+        ),
+        Scenario::WorkspaceFs => workspacefs::judge(
+            seed,
+            args.workspace_fs,
+            args.twice,
+            args.options.verbose,
+            &mut totals.workspace_fs_totals,
+        ),
+        Scenario::RepoCache => repocache::judge(
+            seed,
+            args.repo_cache,
+            args.twice,
+            args.options.verbose,
+            &mut totals.repo_cache_totals,
+        ),
+        Scenario::WorkspaceSql => workspacesql::judge(
+            seed,
+            args.workspace_sql,
+            args.twice,
+            args.options.verbose,
+            &mut totals.workspace_sql_totals,
+        ),
+        Scenario::GitRemote => gitremote::judge(
+            seed,
+            args.git_remote,
+            args.twice,
+            args.options.verbose,
+            &mut totals.git_remote_totals,
+        ),
+        Scenario::WorkspaceStack => workspacestack::judge(
+            seed,
+            args.workspace_stack,
+            args.twice,
+            args.options.verbose,
+            &mut totals.workspace_stack_totals,
+        ),
+        Scenario::Partitions => partitions::judge(
+            seed,
+            args.partitions,
+            args.twice,
+            args.options.verbose,
+            &mut totals.partitions_totals,
+        ),
+        Scenario::Scale => scale::judge(
+            seed,
+            args.scale,
+            args.twice,
+            args.options.verbose,
+            &mut totals.scale_totals,
+        ),
+        Scenario::HandAuto => handauto::judge(
+            seed,
+            args.hand_auto,
+            args.twice,
+            args.options.verbose,
+            &mut totals.hand_auto_totals,
+        ),
+        #[cfg(unix)]
+        Scenario::Capture => capture::judge(
+            seed,
+            args.capture,
+            args.twice,
+            args.options.verbose,
+            &mut totals.capture_totals,
+        ),
+        #[cfg(not(unix))]
+        Scenario::Capture => unreachable!("the capture scenario parses only on unix"),
+        #[cfg(target_os = "linux")]
+        Scenario::Dns => dns::judge(
+            seed,
+            args.dns,
+            args.twice,
+            args.options.verbose,
+            &mut totals.dns_totals,
+        ),
+        #[cfg(not(target_os = "linux"))]
+        Scenario::Dns => unreachable!("the dns scenario parses only on linux"),
+        #[cfg(unix)]
+        Scenario::Alloc => alloc::judge(
+            seed,
+            args.options.ops,
+            args.alloc,
+            args.twice,
+            args.options.verbose,
+            &mut totals.alloc_totals,
+        ),
+        #[cfg(not(unix))]
+        Scenario::Alloc => unreachable!("the alloc scenario parses only on unix"),
+        #[cfg(unix)]
+        Scenario::Egress => egress::judge_seed(
+            seed,
+            args.egress,
+            args.twice,
+            args.options.verbose,
+            &mut totals.egress_totals,
+        ),
+        #[cfg(not(unix))]
+        Scenario::Egress => unreachable!("the egress scenario parses only on unix"),
+    }
+}
+
+const WORKER_STACK_BYTES: usize = 64 << 20;
+
+/// Runs every seed and hands each verdict to settle in seed order. With more than one job,
+/// scoped workers pull seeds from a shared counter and judge them into their own totals; the
+/// calling thread settles them in order and merges their totals, so the output and the totals
+/// equal a run with one job.
+fn each_seed(
+    args: &Args,
+    jobs: usize,
+    totals: &mut Totals,
+    caught: &mut Caught,
+    mut settle: impl FnMut(u64, Option<String>),
+) {
+    if jobs <= 1 {
+        for seed in args.seeds.clone() {
+            let verdict = judge_one(seed, args, totals, caught);
+            settle(seed, verdict);
+        }
+        return;
+    }
+    let seeds: Vec<u64> = args.seeds.clone().collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        for worker in 0..jobs.min(seeds.len()) {
+            let sender = sender.clone();
+            let (next, seeds) = (&next, &seeds);
+            std::thread::Builder::new()
+                .name(format!("seed-worker-{worker}"))
+                .stack_size(WORKER_STACK_BYTES)
+                .spawn_scoped(scope, move || {
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(&seed) = seeds.get(index) else {
+                            break;
+                        };
+                        let mut own = Box::<Totals>::default();
+                        let mut own_caught = Caught::new();
+                        let verdict = judge_one(seed, args, &mut own, &mut own_caught);
+                        if sender.send((index, verdict, own, own_caught)).is_err() {
+                            break;
+                        }
+                    }
+                })
+                .expect("the OS starts a seed worker thread");
+        }
+        drop(sender);
+        let mut waiting = BTreeMap::new();
+        let mut settled = 0_usize;
+        for (index, verdict, own, own_caught) in receiver {
+            waiting.insert(index, (verdict, own, own_caught));
+            while let Some((verdict, own, own_caught)) = waiting.remove(&settled) {
+                totals.add(&own);
+                merge_caught(caught, &own_caught);
+                settle(seeds[settled], verdict);
+                settled += 1;
+            }
+        }
+    });
+}
+
 #[global_allocator]
 static HEAP: memory::Heap = nanocode_sys::alloc::Counted(std::alloc::System);
 
@@ -1166,319 +1613,24 @@ fn main() -> ExitCode {
         || (args.scenario == Scenario::HandAuto && args.hand_auto != HandAutoMutation::None)
         || alloc_experiment(&args);
     let (mut passed, mut failed) = (0_u64, 0_u64);
-    let mut totals = Stats::default();
-    let mut agent_totals = AgentStats::default();
-    let mut turn_totals = TurnStats::default();
-    let mut whole_totals = WholeStats::default();
-    let mut websocket_totals = WebSocketStats::default();
-    let mut http_server_totals = HttpServerStats::default();
-    let mut mpp_totals = MppStats::default();
-    let mut sync_totals = SyncStats::default();
-    let mut streams_totals = StreamsStats::default();
-    let mut hands_totals = HandsStats::default();
-    let mut cell_calls_totals = CellCallsStats::default();
-    let mut live_totals = LiveStats::default();
-    let mut long_thread_totals = LongThreadStats::default();
-    let mut request_close_totals = RequestCloseStats::default();
-    let mut inbox_stress_totals = InboxStressStats::default();
-    let mut tasks_totals = TasksStats::default();
-    let mut board_totals = BoardStats::default();
-    let mut controlplane_totals = ControlplaneStats::default();
-    let mut cost_totals = CostStats::default();
-    let mut plog_totals = PlogStats::default();
-    let mut shards_totals = ShardsStats::default();
-    let mut hand_router_totals = HandRouterStats::default();
-    let mut workspace_host_totals = WorkspaceHostStats::default();
-    let mut board_sync_totals = BoardSyncStats::default();
-    let mut dispatcher_totals = DispatcherStats::default();
-    let mut board_steer_totals = BoardSteerStats::default();
-    let mut board_brief_totals = BoardBriefStats::default();
-    let mut workspace_fs_totals = WorkspaceFsStats::default();
-    let mut repo_cache_totals = RepoCacheStats::default();
-    let mut workspace_sql_totals = WorkspaceSqlStats::default();
-    let mut git_remote_totals = GitRemoteStats::default();
-    let mut workspace_stack_totals = WorkspaceStackStats::default();
-    let mut partitions_totals = PartitionsStats::default();
-    let mut scale_totals = ScaleStats::default();
-    let mut hand_auto_totals = HandAutoStats::default();
-    #[cfg(unix)]
-    let mut capture_totals = capture::CaptureStats::default();
-    #[cfg(target_os = "linux")]
-    let mut dns_totals = dns::DnsStats::default();
-    #[cfg(unix)]
-    let mut alloc_totals = alloc::AllocStats::default();
-    #[cfg(unix)]
-    let mut egress_totals = egress::EgressStats::default();
+    let mut all = Totals::default();
     let mut caught = Caught::new();
-    for seed in args.seeds.clone() {
-        let verdict = match args.scenario {
-            Scenario::Store => judge(seed, &args, &mut totals),
-            Scenario::Agents => judge_agents(seed, &args, &mut agent_totals),
-            Scenario::Turns => judge_turns(seed, &args, &mut turn_totals, &mut caught),
-            Scenario::Runtime => judge_whole(seed, &args, &mut whole_totals),
-            Scenario::Websocket => websocket::judge(
-                seed,
-                args.websocket,
-                args.twice,
-                args.options.verbose,
-                &mut websocket_totals,
-            ),
-            Scenario::HttpServer => httpserver::judge(
-                seed,
-                args.http_server,
-                args.twice,
-                args.options.verbose,
-                &mut http_server_totals,
-            ),
-            Scenario::Mpp => mpp::judge_seed(
-                seed,
-                args.mpp,
-                args.twice,
-                args.options.verbose,
-                &mut mpp_totals,
-            ),
-            Scenario::Sync => sync::judge_seed(
-                seed,
-                args.sync,
-                args.twice,
-                args.options.verbose,
-                &mut sync_totals,
-            ),
-            Scenario::CellCalls => cellcalls::judge(
-                seed,
-                args.cell_calls,
-                args.twice,
-                args.options.verbose,
-                &mut cell_calls_totals,
-            ),
-            Scenario::Live => live::judge(
-                seed,
-                args.live,
-                args.twice,
-                args.options.verbose,
-                &mut live_totals,
-            ),
-            Scenario::LongThread => longthread::judge(
-                seed,
-                args.long_thread,
-                args.twice,
-                args.options.verbose,
-                &mut long_thread_totals,
-            ),
-            Scenario::RequestClose => requestclose::judge(
-                seed,
-                args.twice,
-                args.options.verbose,
-                &mut request_close_totals,
-            ),
-            Scenario::InboxStress => inboxstress::judge(
-                seed,
-                args.twice,
-                args.options.verbose,
-                &mut inbox_stress_totals,
-            ),
-            Scenario::Hands => hands::judge_seed(
-                seed,
-                args.hands,
-                hands::HandsOptions {
-                    fleet: args.fleet,
-                    reopen: args.reopen,
-                    cancel: args.cancel,
-                },
-                args.twice,
-                args.options.verbose,
-                &mut hands_totals,
-            ),
-            Scenario::Streams => streams::judge(
-                seed,
-                args.streams,
-                args.twice,
-                args.options.verbose,
-                &mut streams_totals,
-            ),
-            Scenario::Executor => tasks::judge(
-                seed,
-                args.tasks,
-                args.twice,
-                args.options.verbose,
-                &mut tasks_totals,
-            ),
-            Scenario::Board => board::judge(
-                seed,
-                args.board,
-                args.twice,
-                args.options.verbose,
-                &mut board_totals,
-            ),
-            Scenario::Controlplane => controlplane::judge(
-                seed,
-                controlplane_agents(&args),
-                args.controlplane,
-                args.twice,
-                args.options.verbose,
-                &mut controlplane_totals,
-            ),
-            Scenario::Cost => cost::judge(
-                seed,
-                args.cost,
-                args.twice,
-                args.options.verbose,
-                &mut cost_totals,
-            ),
-            Scenario::Plog => plog::judge(
-                seed,
-                args.plog,
-                args.twice,
-                args.options.verbose,
-                &mut plog_totals,
-            ),
-            Scenario::BoardShards => board_shards::judge(
-                seed,
-                args.board_shards,
-                args.twice,
-                args.options.verbose,
-                &mut shards_totals,
-            ),
-            Scenario::HandRouter => handrouter::judge(
-                seed,
-                args.hand_router,
-                args.twice,
-                args.options.verbose,
-                &mut hand_router_totals,
-            ),
-            Scenario::WorkspaceHost => workspacehost::judge(
-                seed,
-                args.workspace_host,
-                args.twice,
-                args.options.verbose,
-                &mut workspace_host_totals,
-            ),
-            Scenario::BoardSync => board_sync::judge(
-                seed,
-                args.board_sync,
-                args.twice,
-                args.options.verbose,
-                &mut board_sync_totals,
-            ),
-            Scenario::Dispatcher => dispatcher::judge(
-                seed,
-                args.dispatcher,
-                args.twice,
-                args.options.verbose,
-                &mut dispatcher_totals,
-            ),
-            Scenario::BoardSteer => board_steer::judge(
-                seed,
-                args.board_steer,
-                args.twice,
-                args.options.verbose,
-                &mut board_steer_totals,
-            ),
-            Scenario::BoardBrief => board_brief::judge(
-                seed,
-                args.board_brief,
-                args.twice,
-                args.options.verbose,
-                &mut board_brief_totals,
-            ),
-            Scenario::WorkspaceFs => workspacefs::judge(
-                seed,
-                args.workspace_fs,
-                args.twice,
-                args.options.verbose,
-                &mut workspace_fs_totals,
-            ),
-            Scenario::RepoCache => repocache::judge(
-                seed,
-                args.repo_cache,
-                args.twice,
-                args.options.verbose,
-                &mut repo_cache_totals,
-            ),
-            Scenario::WorkspaceSql => workspacesql::judge(
-                seed,
-                args.workspace_sql,
-                args.twice,
-                args.options.verbose,
-                &mut workspace_sql_totals,
-            ),
-            Scenario::GitRemote => gitremote::judge(
-                seed,
-                args.git_remote,
-                args.twice,
-                args.options.verbose,
-                &mut git_remote_totals,
-            ),
-            Scenario::WorkspaceStack => workspacestack::judge(
-                seed,
-                args.workspace_stack,
-                args.twice,
-                args.options.verbose,
-                &mut workspace_stack_totals,
-            ),
-            Scenario::Partitions => partitions::judge(
-                seed,
-                args.partitions,
-                args.twice,
-                args.options.verbose,
-                &mut partitions_totals,
-            ),
-            Scenario::Scale => scale::judge(
-                seed,
-                args.scale,
-                args.twice,
-                args.options.verbose,
-                &mut scale_totals,
-            ),
-            Scenario::HandAuto => handauto::judge(
-                seed,
-                args.hand_auto,
-                args.twice,
-                args.options.verbose,
-                &mut hand_auto_totals,
-            ),
-            #[cfg(unix)]
-            Scenario::Capture => capture::judge(
-                seed,
-                args.capture,
-                args.twice,
-                args.options.verbose,
-                &mut capture_totals,
-            ),
-            #[cfg(not(unix))]
-            Scenario::Capture => unreachable!("the capture scenario parses only on unix"),
-            #[cfg(target_os = "linux")]
-            Scenario::Dns => dns::judge(
-                seed,
-                args.dns,
-                args.twice,
-                args.options.verbose,
-                &mut dns_totals,
-            ),
-            #[cfg(not(target_os = "linux"))]
-            Scenario::Dns => unreachable!("the dns scenario parses only on linux"),
-            #[cfg(unix)]
-            Scenario::Alloc => alloc::judge(
-                seed,
-                args.options.ops,
-                args.alloc,
-                args.twice,
-                args.options.verbose,
-                &mut alloc_totals,
-            ),
-            #[cfg(not(unix))]
-            Scenario::Alloc => unreachable!("the alloc scenario parses only on unix"),
-            #[cfg(unix)]
-            Scenario::Egress => egress::judge_seed(
-                seed,
-                args.egress,
-                args.twice,
-                args.options.verbose,
-                &mut egress_totals,
-            ),
-            #[cfg(not(unix))]
-            Scenario::Egress => unreachable!("the egress scenario parses only on unix"),
-        };
+    let jobs = if mutation != Mutation::None
+        || experiment
+        || matches!(
+            args.scenario,
+            Scenario::Executor | Scenario::Alloc | Scenario::Runtime | Scenario::Controlplane
+        ) {
+        // Mutations flip process-wide switches, the executor and alloc scenarios measure the
+        // process itself, and runtime drives the whole runtime, whose ID counters are
+        // process-wide and shift its schedules when seeds share a process, so those runs keep
+        // to one seed at a time. Controlplane prints a SCORE line with wall-clock rates from
+        // inside each seed, so it keeps one too.
+        1
+    } else {
+        args.jobs
+    };
+    each_seed(&args, jobs, &mut all, &mut caught, |seed, verdict| {
         if args.seed_lines {
             println!(
                 "SEED seed={seed} {}",
@@ -1487,7 +1639,7 @@ fn main() -> ExitCode {
         }
         let Some(message) = verdict else {
             passed += 1;
-            continue;
+            return;
         };
         failed += 1;
         let mut replay = replay(seed, &args);
@@ -1499,7 +1651,52 @@ fn main() -> ExitCode {
         } else if failed <= u64::try_from(CAUGHT_SHOWN_MAX).expect("a small count fits in u64") {
             println!("CAUGHT seed={seed} {message} :: replay: {replay}");
         }
-    }
+    });
+    let Totals {
+        totals,
+        agent_totals,
+        turn_totals,
+        whole_totals,
+        websocket_totals,
+        http_server_totals,
+        mpp_totals,
+        sync_totals,
+        streams_totals,
+        hands_totals,
+        cell_calls_totals,
+        live_totals,
+        long_thread_totals,
+        request_close_totals,
+        inbox_stress_totals,
+        tasks_totals,
+        board_totals,
+        controlplane_totals,
+        cost_totals,
+        plog_totals,
+        shards_totals,
+        hand_router_totals,
+        workspace_host_totals,
+        board_sync_totals,
+        dispatcher_totals,
+        board_steer_totals,
+        board_brief_totals,
+        workspace_fs_totals,
+        repo_cache_totals,
+        workspace_sql_totals,
+        git_remote_totals,
+        workspace_stack_totals,
+        partitions_totals,
+        scale_totals,
+        hand_auto_totals,
+        #[cfg(unix)]
+        capture_totals,
+        #[cfg(target_os = "linux")]
+        dns_totals,
+        #[cfg(unix)]
+        alloc_totals,
+        #[cfg(unix)]
+        egress_totals,
+    } = all;
     if args.scenario == Scenario::Websocket {
         return websocket::report(
             &args.seeds,

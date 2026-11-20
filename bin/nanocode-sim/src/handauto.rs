@@ -103,7 +103,7 @@ pub struct HandAutoStats {
 }
 
 impl HandAutoStats {
-    const fn add(&mut self, other: &Self) {
+    pub const fn add(&mut self, other: &Self) {
         self.seeds += other.seeds;
         self.explicit += other.explicit;
         self.auto += other.auto;

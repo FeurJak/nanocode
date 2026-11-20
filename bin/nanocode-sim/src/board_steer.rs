@@ -484,7 +484,9 @@ fn cancel(host: &mut Host, oracle: &mut Oracle, now: u64, task: TaskId) -> Resul
     }
     for seq in pending {
         if oracle.acked.contains_key(&seq) || !oracle.dropped.insert(seq) {
-            return Err(format!("steer {seq} on {task} dropped after it was settled"));
+            return Err(format!(
+                "steer {seq} on {task} dropped after it was settled"
+            ));
         }
         oracle.stats.dropped += 1;
     }

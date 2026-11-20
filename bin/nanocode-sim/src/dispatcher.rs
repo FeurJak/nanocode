@@ -75,7 +75,7 @@ pub struct DispatcherStats {
 }
 
 impl DispatcherStats {
-    const fn add(&mut self, other: &Self) {
+    pub const fn add(&mut self, other: &Self) {
         self.seeds += other.seeds;
         self.tasks += other.tasks;
         self.done += other.done;
