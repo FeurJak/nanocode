@@ -40,6 +40,22 @@ pub struct PyDict {
 }
 pub type PyDictRef = PyRef<PyDict>;
 
+// `track_lazy_dict` finds the dict from its storage's address.
+const _: () = assert!(core::mem::offset_of!(PyDict, entries) == 0);
+
+/// Track the lazily untracked exact dict whose `entries` storage is at
+/// `entries`.
+///
+/// # Safety
+/// `entries` must point to the `entries` of a live `Py<PyDict>` that is not
+/// tracked.
+#[cold]
+pub(crate) unsafe fn track_lazy_dict(entries: *const ()) {
+    let dict = unsafe { &*Py::<PyDict>::from_payload_ptr(entries.cast::<PyDict>()) };
+    let obj = NonNull::from(dict.as_object());
+    unsafe { crate::gc_state::gc_state().track_object(obj, crate::gc_state::current_owner()) };
+}
+
 // SAFETY: Traverse properly visits all owned PyObjectRefs
 unsafe impl Traverse for PyDict {
     fn traverse(&self, traverse_fn: &mut TraverseFn<'_>) {
@@ -69,6 +85,17 @@ thread_local! {
 impl PyPayload for PyDict {
     const MAX_FREELIST: usize = 80;
     const HAS_FREELIST: bool = true;
+    const GC_TRACK_LAZILY: bool = true;
+
+    /// An exact dict holding only atomic keys and values starts untracked, as
+    /// in CPython; its storage tracks it once it stores anything that may be
+    /// tracked.
+    #[inline]
+    fn gc_start_untracked(zelf: &Py<Self>) -> bool {
+        use crate::class::StaticType;
+        Self::static_cell().get().is_some_and(|t| zelf.class().is(t))
+            && zelf.entries.gc_start_untracked()
+    }
 
     #[inline]
     fn class(ctx: &Context) -> &'static Py<PyType> {

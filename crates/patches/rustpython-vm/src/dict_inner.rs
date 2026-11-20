@@ -20,7 +20,7 @@ use alloc::fmt;
 use core::mem::size_of;
 use core::ops::ControlFlow;
 use core::sync::atomic::{
-    AtomicU32,
+    AtomicBool, AtomicU32,
     Ordering::{AcqRel, Acquire, Relaxed, Release},
 };
 use nanocode_numeric::ToPrimitive;
@@ -49,6 +49,32 @@ pub(crate) struct Dict<T = PyObjectRef> {
     /// entry layout is exactly the one the stamp was issued for, so entry
     /// indexes cached against a stamp stay valid wherever the stamp matches.
     keys_version: AtomicU32,
+    /// Set while this storage belongs to an exact `dict` that was left
+    /// untracked by the GC because it held only atomic keys and values (see
+    /// [`Self::gc_start_untracked`]). The first store of a key or value that
+    /// may be GC-tracked clears it and tracks the dict, like CPython's
+    /// `MAINTAIN_TRACKING`.
+    gc_lazy: AtomicBool,
+}
+
+/// Values a [`Dict`] can hold.
+pub(crate) trait DictValue: Clone {
+    /// Whether the value is, or may later become, tracked by the GC.
+    fn may_be_gc_tracked(&self) -> bool;
+}
+
+impl DictValue for PyObjectRef {
+    #[inline(always)]
+    fn may_be_gc_tracked(&self) -> bool {
+        (**self).gc_may_be_tracked()
+    }
+}
+
+impl DictValue for () {
+    #[inline(always)]
+    fn may_be_gc_tracked(&self) -> bool {
+        false
+    }
 }
 
 /// Source of keys-version stamps. Allocated globally so a shape stamp and a
@@ -202,7 +228,7 @@ unsafe impl<T: Traverse> Traverse for DictInner<T> {
     }
 }
 
-impl<T: Clone> Clone for Dict<T> {
+impl<T: DictValue> Clone for Dict<T> {
     fn clone(&self) -> Self {
         let inner = self.read();
         if inner.used == 0 {
@@ -229,6 +255,7 @@ impl<T: Clone> Clone for Dict<T> {
         Self {
             inner: PyRwLock::new(inner),
             keys_version: AtomicU32::new(0),
+            gc_lazy: AtomicBool::new(false),
         }
     }
 }
@@ -243,6 +270,7 @@ impl<T> Default for Dict<T> {
                 entries: Vec::new(),
             }),
             keys_version: AtomicU32::new(0),
+            gc_lazy: AtomicBool::new(false),
         }
     }
 }
@@ -306,6 +334,15 @@ impl GenIndexes {
             .wrapping_add(1);
         self.perturb >>= 5;
         (prev & self.mask) as usize
+    }
+}
+
+impl<T: DictValue> DictInner<T> {
+    /// Whether any key or value may be GC-tracked.
+    fn may_hold_gc_tracked(&self) -> bool {
+        self.entries.iter().flatten().any(|entry| {
+            entry.key.gc_may_be_tracked() || entry.value.may_be_gc_tracked()
+        })
     }
 }
 
@@ -424,7 +461,26 @@ impl<T> DictInner<T> {
 
 type PopInnerResult<T> = ControlFlow<Option<DictEntry<T>>>;
 
-impl<T: Clone> Dict<T> {
+impl<T: DictValue> Dict<T> {
+    /// Whether storing `key` and `value` must track the lazily untracked
+    /// dict owning this storage.
+    #[inline(always)]
+    fn gc_needs_track<K: DictKey + ?Sized>(&self, key: &K, value: &T) -> bool {
+        self.gc_lazy.load(Relaxed) && (value.may_be_gc_tracked() || key.key_may_be_gc_tracked())
+    }
+
+    /// Track the lazily untracked dict owning this storage, unless another
+    /// store already did. Call it after the store, with no lock held.
+    #[cold]
+    #[inline(never)]
+    fn gc_track_lazily(&self) {
+        if self.gc_lazy.swap(false, Relaxed) {
+            // SAFETY: `gc_lazy` is only ever set by `gc_start_untracked`,
+            // which `PyDict` calls on the storage of an exact, live dict.
+            unsafe { crate::builtins::dict::track_lazy_dict((self as *const Self).cast()) };
+        }
+    }
+
     /// Current keys-version stamp, or 0 if none has been assigned since the
     /// last key-set change. Equal nonzero stamps guarantee an unchanged key
     /// set (values may differ).
@@ -636,6 +692,7 @@ impl<T: Clone> Dict<T> {
     where
         K: DictKey + ?Sized,
     {
+        let track = self.gc_needs_track(key, &value);
         let (stored_index, _removed) = loop {
             let (entry_index, index_index) = self.lookup(vm, key, hash, None)?;
             let mut inner = self.write();
@@ -680,6 +737,9 @@ impl<T: Clone> Dict<T> {
                 break (stored, None);
             }
         };
+        if track {
+            self.gc_track_lazily();
+        }
         Ok(stored_index)
     }
 
@@ -783,10 +843,14 @@ impl<T: Clone> Dict<T> {
             let mut inner = self.write();
             match inner.entries.get_mut(hint) {
                 Some(Some(entry)) if key.key_is(&entry.key) => {
+                    let track = self.gc_needs_track(key, &value);
                     let removed = core::mem::replace(&mut entry.value, value);
                     drop(inner);
                     // defer dec RC until after the lock is released
                     drop(removed);
+                    if track {
+                        self.gc_track_lazily();
+                    }
                     return Ok(None);
                 }
                 _ => value,
@@ -898,11 +962,15 @@ impl<T: Clone> Dict<T> {
     /// Install an owned table, releasing the old entries after unlocking.
     pub(crate) fn replace_contents(&self, other: Self) {
         let replacement = other.inner.into_inner();
+        let track = self.gc_lazy.load(Relaxed) && replacement.may_hold_gc_tracked();
         let _removed = {
             let mut inner = self.write();
             self.invalidate_keys_version();
             core::mem::replace(&mut *inner, replacement)
         };
+        if track {
+            self.gc_track_lazily();
+        }
     }
 
     /// Delete a key
@@ -1002,6 +1070,7 @@ impl<T: Clone> Dict<T> {
         hash: HashValue,
         value: T,
     ) -> PyResult<()> {
+        let track = self.gc_needs_track(key, &value);
         let _removed = loop {
             let lookup = self.lookup(vm, key, hash, None)?;
             let (entry, index_index) = lookup;
@@ -1020,6 +1089,9 @@ impl<T: Clone> Dict<T> {
             inner.unchecked_push(index_index, hash, key.to_owned(), value, entry);
             break None;
         };
+        if track {
+            self.gc_track_lazily();
+        }
         Ok(())
     }
 
@@ -1054,6 +1126,10 @@ impl<T: Clone> Dict<T> {
                 value.clone(),
                 index_entry,
             );
+            drop(inner);
+            if self.gc_needs_track(key, &value) {
+                self.gc_track_lazily();
+            }
             return Ok(value);
         }
     }
@@ -1091,6 +1167,10 @@ impl<T: Clone> Dict<T> {
             let ret = (key_obj.clone(), value.clone());
             self.invalidate_keys_version();
             inner.unchecked_push(index_index, hash, key_obj, value, index_entry);
+            drop(inner);
+            if self.gc_needs_track(key, &ret.1) {
+                self.gc_track_lazily();
+            }
             return Ok(ret);
         }
     }
@@ -1452,6 +1532,22 @@ type LookupResult = (IndexEntry, IndexIndex);
 /// the dictionary. Typical use-cases are:
 /// - PyObjectRef -> arbitrary python type used as key
 /// - str -> string reference used as key, this is often used internally
+impl Dict<PyObjectRef> {
+    /// Leave the dict owning this storage untracked by the GC if every key
+    /// and value is atomic, returning whether it did. From then on the first
+    /// store of a key or value that may be tracked tracks the dict.
+    ///
+    /// Only for the storage of an exact `dict` that is not yet tracked or
+    /// published.
+    pub(crate) fn gc_start_untracked(&self) -> bool {
+        if self.read().may_hold_gc_tracked() {
+            return false;
+        }
+        self.gc_lazy.store(true, Relaxed);
+        true
+    }
+}
+
 pub trait DictKey {
     type Owned: ToPyObject;
     fn _to_owned(&self, vm: &VirtualMachine) -> Self::Owned;
@@ -1463,11 +1559,19 @@ pub trait DictKey {
     /// Compare the stored entry (`other_key`) with this lookup key, in that order.
     fn key_eq(&self, vm: &VirtualMachine, other_key: &PyObject) -> PyResult<bool>;
     fn key_as_isize(&self, vm: &VirtualMachine) -> PyResult<isize>;
+    /// Whether the key object stored for this key is, or may later become,
+    /// tracked by the GC.
+    fn key_may_be_gc_tracked(&self) -> bool;
 }
 
 /// Implement trait for PyObjectRef such that we can use python objects
 /// to index dictionaries.
 impl DictKey for PyObject {
+    #[inline(always)]
+    fn key_may_be_gc_tracked(&self) -> bool {
+        self.gc_may_be_tracked()
+    }
+
     type Owned = PyObjectRef;
     #[inline(always)]
     fn _to_owned(&self, _vm: &VirtualMachine) -> Self::Owned {
@@ -1510,6 +1614,11 @@ impl DictKey for PyObject {
 }
 
 impl DictKey for Py<PyStr> {
+    #[inline(always)]
+    fn key_may_be_gc_tracked(&self) -> bool {
+        self.as_object().gc_may_be_tracked()
+    }
+
     type Owned = PyStrRef;
     #[inline(always)]
     fn _to_owned(&self, _vm: &VirtualMachine) -> Self::Owned {
@@ -1543,6 +1652,11 @@ impl DictKey for Py<PyStr> {
 }
 
 impl DictKey for Py<PyUtf8Str> {
+    #[inline(always)]
+    fn key_may_be_gc_tracked(&self) -> bool {
+        self.as_object().gc_may_be_tracked()
+    }
+
     type Owned = PyUtf8StrRef;
     #[inline(always)]
     fn _to_owned(&self, _vm: &VirtualMachine) -> Self::Owned {
@@ -1570,6 +1684,11 @@ impl DictKey for Py<PyUtf8Str> {
 }
 
 impl DictKey for PyStrInterned {
+    #[inline(always)]
+    fn key_may_be_gc_tracked(&self) -> bool {
+        self.as_object().gc_may_be_tracked()
+    }
+
     type Owned = PyRefExact<PyStr>;
 
     #[inline]
@@ -1600,6 +1719,11 @@ impl DictKey for PyStrInterned {
 }
 
 impl DictKey for PyExact<PyStr> {
+    #[inline(always)]
+    fn key_may_be_gc_tracked(&self) -> bool {
+        self.as_object().gc_may_be_tracked()
+    }
+
     type Owned = PyRefExact<PyStr>;
 
     #[inline]
@@ -1633,6 +1757,12 @@ impl DictKey for PyExact<PyStr> {
 /// Implement trait for the str type, so that we can use strings
 /// to index dictionaries.
 impl DictKey for str {
+    #[inline(always)]
+    fn key_may_be_gc_tracked(&self) -> bool {
+        // Stored as a new exact, atomic object.
+        false
+    }
+
     type Owned = String;
 
     #[inline(always)]
@@ -1669,6 +1799,12 @@ impl DictKey for str {
 }
 
 impl DictKey for String {
+    #[inline(always)]
+    fn key_may_be_gc_tracked(&self) -> bool {
+        // Stored as a new exact, atomic object.
+        false
+    }
+
     type Owned = Self;
 
     #[inline]
@@ -1694,6 +1830,12 @@ impl DictKey for String {
 }
 
 impl DictKey for Wtf8 {
+    #[inline(always)]
+    fn key_may_be_gc_tracked(&self) -> bool {
+        // Stored as a new exact, atomic object.
+        false
+    }
+
     type Owned = Wtf8Buf;
 
     #[inline(always)]
@@ -1730,6 +1872,12 @@ impl DictKey for Wtf8 {
 }
 
 impl DictKey for Wtf8Buf {
+    #[inline(always)]
+    fn key_may_be_gc_tracked(&self) -> bool {
+        // Stored as a new exact, atomic object.
+        false
+    }
+
     type Owned = Self;
 
     #[inline]
@@ -1755,6 +1903,12 @@ impl DictKey for Wtf8Buf {
 }
 
 impl DictKey for [u8] {
+    #[inline(always)]
+    fn key_may_be_gc_tracked(&self) -> bool {
+        // Stored as a new exact, atomic object.
+        false
+    }
+
     type Owned = Vec<u8>;
 
     #[inline(always)]
@@ -1791,6 +1945,12 @@ impl DictKey for [u8] {
 }
 
 impl DictKey for Vec<u8> {
+    #[inline(always)]
+    fn key_may_be_gc_tracked(&self) -> bool {
+        // Stored as a new exact, atomic object.
+        false
+    }
+
     type Owned = Self;
 
     #[inline]
@@ -1816,6 +1976,12 @@ impl DictKey for Vec<u8> {
 }
 
 impl DictKey for usize {
+    #[inline(always)]
+    fn key_may_be_gc_tracked(&self) -> bool {
+        // Stored as a new exact, atomic object.
+        false
+    }
+
     type Owned = Self;
 
     #[inline]

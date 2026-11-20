@@ -2211,6 +2211,15 @@ impl PyObject {
         unsafe { &*ptr }
     }
 
+    /// Whether this object is tracked by the GC now or may become tracked
+    /// (`_PyObject_GC_MAY_BE_TRACKED`): it is tracked, or its payload can
+    /// hold references. A dict stays untracked only while every key and
+    /// value it holds answers `false`.
+    #[inline(always)]
+    pub(crate) fn gc_may_be_tracked(&self) -> bool {
+        self.0.vtable.trace.is_some() || self.is_gc_tracked()
+    }
+
     /// _PyObject_GC_IS_TRACKED
     pub fn is_gc_tracked(&self) -> bool {
         GcBits::from_bits_retain(self.0.gc_bits.load(Ordering::Relaxed)).contains(GcBits::TRACKED)
@@ -2799,8 +2808,15 @@ impl<T: PyPayload + crate::object::MaybeTraverse + core::fmt::Debug> PyRef<T> {
         // - heap type (all heap type instances are GC-tracked, like Py_TPFLAGS_HAVE_GC)
         // unless the payload opts out via NEW_REF_UNTRACKED (e.g. call frames,
         // which are tracked lazily only on escape).
+        // Exact dicts holding only atomic values start untracked too
+        // (`GC_TRACK_LAZILY`); they are tracked on the first store that
+        // could make them part of a cycle.
         if (<T as crate::object::MaybeTraverse>::HAS_TRAVERSE || has_dict || is_heaptype)
             && !T::NEW_REF_UNTRACKED
+            && !(T::GC_TRACK_LAZILY
+                && !has_dict
+                && !is_heaptype
+                && T::gc_start_untracked(unsafe { ptr.as_ref() }))
         {
             // Tracks under the interpreter running now and collects if this
             // allocation pushed gen0 past its threshold.
