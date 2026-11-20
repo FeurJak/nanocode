@@ -79,10 +79,11 @@ pub enum GitRemoteMutation {
     ForgetsShallow,
     KeepsPruned,
     ForcesRefspec,
+    RevertsUpstream,
 }
 
 impl GitRemoteMutation {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::None,
         Self::StoresSecret,
         Self::UpdatesRefOnBadPack,
@@ -93,6 +94,7 @@ impl GitRemoteMutation {
         Self::ForgetsShallow,
         Self::KeepsPruned,
         Self::ForcesRefspec,
+        Self::RevertsUpstream,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -113,6 +115,7 @@ impl GitRemoteMutation {
             Self::ForgetsShallow => "forgets_shallow",
             Self::KeepsPruned => "keeps_pruned",
             Self::ForcesRefspec => "forces_refspec",
+            Self::RevertsUpstream => "reverts_upstream",
         }
     }
 
@@ -1208,6 +1211,8 @@ struct World {
     files: BTreeMap<String, Vec<u8>>,
     local_ahead: bool,
     base: Oid,
+    /// What the local commits since base appended, per file: a push must carry base's tree plus exactly these.
+    appended: BTreeMap<String, Vec<u8>>,
     message: String,
     mutation: GitRemoteMutation,
     commits: u64,
@@ -1692,7 +1697,27 @@ impl World {
             return Err("pull did not move main to the server's".to_owned());
         }
         self.base = main;
-        self.check_tree(&main)
+        self.check_tree(&main)?;
+        if self.mutation == GitRemoteMutation::RevertsUpstream
+            && let Some(before) = before
+        {
+            // A stale work tree after the pull, as a checkout that skipped files would leave it: the next commit
+            // then carries a file's old content back over the upstream change.
+            let old = self.server.files(&before);
+            let new = self.server.files(&main);
+            if let Some((path, data)) = old
+                .iter()
+                .find(|(path, data)| new.get(*path) != Some(*data))
+            {
+                self.fs
+                    .insert(
+                        format!("{WORK}/{path}").as_bytes(),
+                        Bytes::from(data.clone()),
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(())
     }
 
     fn local_commit(&mut self) -> Result<(), String> {
@@ -1712,6 +1737,9 @@ impl World {
             if status != 0 {
                 return Err(format!("commit exited {status}: {text}"));
             }
+            let added = self.appended.entry(name.to_owned()).or_default();
+            added.extend_from_slice(line.as_bytes());
+            added.push(b'\n');
         }
         self.local_ahead = true;
         Ok(())
@@ -1783,10 +1811,31 @@ impl World {
         if self.read_ref("refs/remotes/origin/main") != Some(local) {
             return Err("push did not move origin/main".to_owned());
         }
+        self.check_no_revert(local)?;
         self.tracked.insert("main".to_owned(), local);
         self.local_ahead = false;
         self.base = local;
         self.files = self.server.files(&local);
+        Ok(())
+    }
+
+    /// A pushed commit holds its base's tree with exactly the local commits' appends: it never reverts or drops a
+    /// file changed upstream of the local work (canary reverts_upstream).
+    fn check_no_revert(&mut self, local: Oid) -> Result<(), String> {
+        let mut want = self.server.files(&self.base);
+        for (path, added) in std::mem::take(&mut self.appended) {
+            want.entry(path).or_default().extend_from_slice(&added);
+        }
+        let got = self.server.files(&local);
+        let paths: BTreeSet<&String> = want.keys().chain(got.keys()).collect();
+        for path in paths {
+            if want.get(path) != got.get(path) {
+                return Err(format!(
+                    "the pushed commit's {path} is not its base's plus the local commits' changes: a landed commit \
+                     reverts a file changed upstream"
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -1929,6 +1978,7 @@ fn simulate(seed: u64, mutation: GitRemoteMutation) -> GitRemoteOutcome {
         files: BTreeMap::new(),
         local_ahead: false,
         base: ZERO,
+        appended: BTreeMap::new(),
         message: String::new(),
         mutation,
         commits: 0,

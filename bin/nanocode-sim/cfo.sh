@@ -179,6 +179,18 @@ default_table='
 1 canary_workspace_stack_has_nothing canary:200 --scenario workspace_stack --mutation has_nothing
 1 canary_workspace_stack_has_everything canary:200 --scenario workspace_stack --mutation has_everything
 1 canary_workspace_stack_auto_off canary:200 --scenario workspace_stack --mutation auto_off
+4 git_remote pass --scenario git_remote
+1 git_remote_twice pass --scenario git_remote --twice
+1 canary_git_remote_stores_secret canary:200 --scenario git_remote --mutation stores_secret
+1 canary_git_remote_updates_ref_on_bad_pack canary:200 --scenario git_remote --mutation updates_ref_on_bad_pack
+1 canary_git_remote_server_drops_object canary:200 --scenario git_remote --mutation server_drops_object
+1 canary_git_remote_server_keeps_ref canary:200 --scenario git_remote --mutation server_keeps_ref
+1 canary_git_remote_stale_tracking canary:200 --scenario git_remote --mutation stale_tracking
+1 canary_git_remote_push_wrong_base canary:200 --scenario git_remote --mutation push_wrong_base
+1 canary_git_remote_forgets_shallow canary:200 --scenario git_remote --mutation forgets_shallow
+1 canary_git_remote_keeps_pruned canary:200 --scenario git_remote --mutation keeps_pruned
+1 canary_git_remote_forces_refspec canary:200 --scenario git_remote --mutation forces_refspec
+1 canary_git_remote_reverts_upstream canary:200 --scenario git_remote --mutation reverts_upstream
 4 workspace_crash pass --scenario workspace_crash
 1 workspace_crash_twice pass --scenario workspace_crash --twice
 1 canary_workspace_crash_torn_commit canary:200 --scenario workspace_crash --mutation torn_commit
