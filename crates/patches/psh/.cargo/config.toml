@@ -7,6 +7,10 @@ rustflags = ["-C", "target-feature=+simd128"]
 # nanocode's own build does not read this file.
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "target-feature=+crt-static", "-C", "relocation-model=static"]
+# rustdoc links doctests itself and reads rustdocflags, not rustflags: without these it links the
+# static objects above into a position independent executable and fails.
+rustdocflags = ["-C", "target-feature=+crt-static", "-C", "relocation-model=static"]
 
 [target.aarch64-unknown-linux-gnu]
 rustflags = ["-C", "target-feature=+crt-static", "-C", "relocation-model=static"]
+rustdocflags = ["-C", "target-feature=+crt-static", "-C", "relocation-model=static"]
