@@ -311,11 +311,8 @@ class Popen:
             data = self.stdin._data.getvalue()
         else:
             data = _drain(self._stdin)
-        for stream in (sys.stdout, sys.stderr):
-            try:
-                stream.flush()
-            except Exception:
-                pass
+        # Like CPython, a child does not flush this program's sys.stdout: what it
+        # holds comes out after the child's output unless the program flushed it.
         merged = self._stderr == STDOUT
         try:
             ran = _inline(self._argv, self._env, self._cwd, data, merged)

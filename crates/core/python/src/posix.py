@@ -803,6 +803,16 @@ def waitstatus_to_exitcode(status):
 
 
 def _exit(status):
+    # Ends without flushing stdio or running atexit, as CPython does: what sys.stdout
+    # still holds is dropped.
+    import sys
+    for stream in (sys.stdout, sys.stderr, sys.__stdout__, sys.__stderr__):
+        raw = getattr(getattr(stream, 'buffer', None), 'raw', None)
+        if raw is not None and hasattr(raw, '_run'):
+            raw._run = None
+    atexit = sys.modules.get('atexit')
+    if atexit is not None:
+        atexit._clear()
     raise SystemExit(status)
 
 

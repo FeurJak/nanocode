@@ -284,10 +284,13 @@ enum Program {
 struct Invocation {
     program: Program,
     argv: Vec<String>,
+    /// -u: stdout written through, not held until it fills or the program ends.
+    unbuffered: bool,
 }
 
 fn invocation(args: &[String]) -> Result<Invocation, String> {
     let mut rest = args.iter();
+    let mut unbuffered = false;
     while let Some(arg) = rest.next() {
         let program = match arg.as_str() {
             "-c" => {
@@ -304,7 +307,11 @@ fn invocation(args: &[String]) -> Result<Invocation, String> {
                 rest.next();
                 continue;
             }
-            "-u" | "-B" | "-E" | "-s" | "-S" | "-I" | "-O" | "-OO" | "-q" | "-b" | "-P" => continue,
+            "-u" => {
+                unbuffered = true;
+                continue;
+            }
+            "-B" | "-E" | "-s" | "-S" | "-I" | "-O" | "-OO" | "-q" | "-b" | "-P" => continue,
             option if option.starts_with('-') => return Err(format!("Unknown option: {option}")),
             path => Program::File(path.to_owned()),
         };
@@ -316,11 +323,16 @@ fn invocation(args: &[String]) -> Result<Invocation, String> {
         let argv = std::iter::once(first.to_owned())
             .chain(rest.cloned())
             .collect();
-        return Ok(Invocation { program, argv });
+        return Ok(Invocation {
+            program,
+            argv,
+            unbuffered,
+        });
     }
     Ok(Invocation {
         program: Program::Stdin,
         argv: vec![String::new()],
+        unbuffered,
     })
 }
 
@@ -579,7 +591,11 @@ impl Python {
             .map(|arg| vm.ctx.new_str(arg.as_str()).into())
             .collect();
         let first = vm.ctx.new_str(first);
-        self.call(vm, "_start", (vm.ctx.new_list(argv), first))?;
+        self.call(
+            vm,
+            "_start",
+            (vm.ctx.new_list(argv), first, invocation.unbuffered),
+        )?;
         let decoded = |source: Vec<u8>, name: &str| match String::from_utf8(source) {
             Ok(source) => Prepared::Source(source, name.to_owned()),
             Err(_) => {

@@ -447,10 +447,18 @@ _resumed = {}
 sys.meta_path.insert(0, _Resumer)
 
 
-def _stdio(fd, name):
+def _stdio(fd, name, unbuffered=False):
     raw = FileIO(fd, 'r' if fd == 0 else 'w', False)
     raw.name = name
-    if fd == 0:
+    if fd == 1:
+        # As CPython: stdout is line-buffered on a terminal and otherwise held until it
+        # fills, is flushed or the program ends (so os._exit drops it); -u writes through.
+        try:
+            tty = raw.isatty()
+        except Exception:
+            tty = False
+        text = _io.TextIOWrapper(_io.BufferedWriter(raw), 'utf-8', 'surrogateescape', '\n', tty or unbuffered, unbuffered)
+    elif fd == 0:
         text = _io.TextIOWrapper(_io.BufferedReader(raw), 'utf-8', 'surrogateescape', '\n', False)
     else:
         text = _io.TextIOWrapper(_io.BufferedWriter(raw), 'utf-8', 'backslashreplace' if fd == 2 else 'surrogateescape', '\n', fd == 2)
@@ -604,7 +612,7 @@ _bounded()
 _warnings_base = None
 
 
-def _start(argv, first):
+def _start(argv, first, unbuffered=False):
     global _unfinished, _warnings_base
     posix._reset()
     if 'matplotlib' in sys.modules:
@@ -654,7 +662,8 @@ def _start(argv, first):
             extra.append(entry)
     sys.path[:] = [posix._abs(first).decode('utf-8', 'surrogateescape') if first else '', *extra, sys.prefix + '/lib/python%d.%d/site-packages' % sys.version_info[:2]]
     sys.stdin = sys.__stdin__ = _stdio(0, '<stdin>')
-    sys.stdout = sys.__stdout__ = _stdio(1, '<stdout>')
+    unbuffered = unbuffered or bool(posix.environ.get(b'PYTHONUNBUFFERED'))
+    sys.stdout = sys.__stdout__ = _stdio(1, '<stdout>', unbuffered)
     sys.stderr = sys.__stderr__ = _stdio(2, '<stderr>')
 
 
