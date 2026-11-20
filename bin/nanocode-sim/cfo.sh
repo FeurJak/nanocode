@@ -258,6 +258,8 @@ default_table='
 1 canary_agents_pool_forgets_intent canary:40 --scenario agents --mutation pool_forgets_intent
 1 canary_agents_board_pool_forgets_intent canary:40 --scenario agents --subagents-board --mutation pool_forgets_intent
 4 agents_subagents_board_delayed pass --scenario agents --subagents-board-delayed
+4 agents_subagents_board_lagging pass --scenario agents --subagents-board-lagging
+1 agents_board_lagging_pinned_placement pass --scenario agents --subagents-board-lagging --seed 5
 4 runtime_subagents_board_delayed pass --scenario runtime --subagents-board-delayed
 4 runtime_subagents_board_lagging pass --scenario runtime --subagents-board-lagging
 1 canary_subagents_board_polled_once canary:40 --scenario agents --subagents-board-mutation polled_once
