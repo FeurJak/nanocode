@@ -205,6 +205,12 @@ fn etc_gmt_hours(name: &str) -> Option<i64> {
     }
 }
 
+/// Names ICU resolves to UTC but formats with the Greenwich Mean Time names of Africa/Abidjan.
+fn greenwich_alias(name: &str) -> bool {
+    let u = name.to_ascii_uppercase();
+    matches!(u.as_str(), "ETC/GMT0" | "ETC/GMT+0" | "ETC/GMT-0" | "ETC/GREENWICH" | "GREENWICH")
+}
+
 /// The zone's canonical name, from a case-insensitive IANA name, alias or offset.
 fn canonical_zone(name: &str) -> Option<String> {
     let b = name.as_bytes();
@@ -375,6 +381,10 @@ pub(super) fn resolve(locale: &str, tags: &[String], raw: &Spec) -> Result<Spec,
     out.put("calendar", "gregory");
     out.put("numberingSystem", &nu);
     out.put("timeZone", &zone);
+    if raw.get("timeZone").is_some_and(greenwich_alias) {
+        out.put("@zone", "Africa/Abidjan");
+        out.put("@gmt", "1");
+    }
     let has = |c: char| field_width(&pattern, c) != 0;
     if has('j') {
         let hc = if has('h') { "h12" } else if has('K') { "h11" } else if has('k') { "h24" } else { "h23" };
@@ -800,7 +810,8 @@ pub(super) fn format(spec: &Spec, t: f64) -> Result<Parts, Fault> {
         return range("Invalid time value");
     }
     let ms = t as i64;
-    let zone = spec.get("timeZone").unwrap_or("UTC");
+    let zone = spec.get("@zone").or(spec.get("timeZone")).unwrap_or("UTC");
+    let gmt = spec.get("@gmt").is_some();
     let secs = ms.div_euclid(1000);
     let (off, dst, entry) = zone_offset(zone, secs);
     let local = ms + off * 1000;
@@ -879,6 +890,8 @@ pub(super) fn format(spec: &Spec, t: f64) -> Result<Parts, Fault> {
                         ('z', _) => 0,
                         ('O', 4) => 3,
                         ('O', _) => 2,
+                        ('v', 4) if gmt => 1,
+                        ('v', _) if gmt => 0,
                         ('v', 4) => 5,
                         _ => 4,
                     };
@@ -955,6 +968,8 @@ pub(super) fn format(spec: &Spec, t: f64) -> Result<Parts, Fault> {
                     ('z', _) => 0,
                     ('O', 4) => 3,
                     ('O', _) => 2,
+                    ('v', 4) if gmt => 1,
+                    ('v', _) if gmt => 0,
                     ('v', 4) => 5,
                     _ => 4,
                 };
