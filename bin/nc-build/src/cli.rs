@@ -43,6 +43,7 @@ const USAGE: &str = "usage:
                                       a take whose label and kind a lane cap covers is refused (and with --wait retried) when that lane's
                                       leased cores across all machines plus N would exceed the cap; takes placed inside a standing
                                       --label-prefix reservation neither count nor are refused
+  (a take refuses a box whose lease would run into its last 15 minutes before expiry; use a shorter --minutes or another box)
   nc-build slots give LEASE | slots renew LEASE [--minutes T]
   nc-build slots reserve --machine M --cpus FIRST-LAST --until 'YYYY-MM-DD HH:MM' --label L [--kind reserved] [--overlap]
   nc-build slots reserve --machine M --cpus FIRST-LAST --until 'YYYY-MM-DD HH:MM' --label-prefix P [--overlap]
@@ -361,6 +362,13 @@ const KILL_RULE: &str = "; stop only jobs under your own lease (its systemd unit
 const OVER_CAP: &str = "over its cap:";
 
 const PST_OFFSET_MINUTES: i64 = -8 * 60;
+
+/// No lease may run into a box's last 15 minutes: the box is swapped then.
+const CLOSE_WINDOW_MS: u64 = 15 * 60_000;
+
+fn fits_before_close(expires_ms: Option<u64>, now: u64, ttl: u64) -> bool {
+    expires_ms.is_none_or(|expires| expires.saturating_sub(CLOSE_WINDOW_MS) >= now + ttl)
+}
 
 fn machines(pool: Pool, state: &State, now: u64) -> Vec<Machine> {
     let boxes = match &state.boxes {
@@ -978,16 +986,25 @@ fn slots_once(args: &[String], input: &str) -> Result<String, String> {
                 .ok_or("--cores N")?
                 .parse()
                 .map_err(|error| format!("--cores: {error}"))?;
-            let want = want(args, cores, minutes(args, 60)?)?;
+            let ttl = minutes(args, 60)?;
+            let want = want(args, cores, ttl)?;
             if want.label.to_ascii_lowercase().contains("fill") {
                 return Err(format!(
                     "--label {}: a filler label (contains fill) never takes a lease; filler runs SCHED_IDLE in fill.slice on cores leases leave free",
                     want.label
                 ));
             }
+            let mut closing = None;
             let (taken, gone) = with_state(|state| {
-                let machines = machines(pool, state, now);
+                let mut machines = machines(pool, state, now);
                 let gone = reap_gone(state, &machines);
+                machines.retain(|machine| {
+                    let fits = fits_before_close(machine.expires_ms, now, ttl);
+                    if !fits && want.only.as_deref() == Some(machine.name.as_str()) {
+                        closing = machine.expires_ms;
+                    }
+                    fits
+                });
                 let taken = state.take(&machines, &want, now).map(|lease| {
                     let machine = machines
                         .iter()
@@ -997,6 +1014,14 @@ fn slots_once(args: &[String], input: &str) -> Result<String, String> {
                 (taken, gone)
             })?;
             log_gone(&gone);
+            if let (Err(_), Some(expires), Some(name)) = (&taken, closing, &want.only) {
+                let left = expires.saturating_sub(now) / 60_000;
+                let room = expires.saturating_sub(now + CLOSE_WINDOW_MS) / 60_000;
+                return Err(format!(
+                    "{name} expires in {left}m and no lease may run into its last {}m; ask for --minutes {room} or less, or take on another box",
+                    CLOSE_WINDOW_MS / 60_000
+                ));
+            }
             let (json, lease) = taken.map_err(|refusal| match (refusal, &want.only) {
                 (Refusal::NoRoom, Some(name)) => format!("{NO_ROOM} {cores} free cores on {name}{KILL_RULE}"),
                 (Refusal::NoRoom, None) => format!("{NO_ROOM} {cores} free cores{KILL_RULE}"),
@@ -1857,5 +1882,15 @@ mod tests {
             placement_warning("b2", &["ip-10-0-0-1", "b1"])
                 .is_some_and(|warning| warning.contains("b2") && warning.contains("b1"))
         );
+    }
+
+    #[test]
+    fn take_refuses_leases_that_run_into_the_last_fifteen_minutes() {
+        use super::fits_before_close;
+        let now = 1_000_000_000;
+        let expires = now + 40 * 60_000;
+        assert!(fits_before_close(Some(expires), now, 25 * 60_000));
+        assert!(!fits_before_close(Some(expires), now, 26 * 60_000));
+        assert!(fits_before_close(None, now, 600 * 60_000));
     }
 }
