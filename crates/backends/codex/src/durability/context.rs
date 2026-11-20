@@ -266,7 +266,7 @@ pub(crate) async fn advance_snapshot(
     let payloads = if added.is_empty() {
         Vec::new()
     } else {
-        reader.load_payloads(added).await?
+        reader.take_payloads(added).await?
     };
     let history = loaded_history(&previous_history, &mut log, payloads)?;
     let (prefix, prefix_references, prefix_kept) = match saved.prefix {
@@ -582,7 +582,7 @@ pub(crate) async fn load_hydrated_with_keys(
     let payloads = if references.is_empty() {
         Vec::new()
     } else {
-        reader.load_payloads(references).await?
+        reader.take_payloads(references).await?
     };
     let mut log = SequenceLog::default();
     let history = loaded_history(&ResponseHistory::default(), &mut log, payloads)?;

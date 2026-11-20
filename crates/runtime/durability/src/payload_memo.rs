@@ -70,13 +70,43 @@ impl PayloadMemo {
         });
     }
 
+    /// Loads payloads the caller decodes into values of its own and then drops:
+    /// hands back the copies kept for them and forgets them, and keeps none it
+    /// loads, since a kept copy would hold the bytes beside the decoded values.
+    pub(crate) async fn take_many(
+        &self,
+        payloads: &[EncodedPayload],
+        store: &SharedStore,
+        state_id: &str,
+    ) -> Result<Vec<EncodedPayload>> {
+        let slots: Vec<Option<EncodedPayload>> = self.0.update(|kept| match kept {
+            Kept::Keeping(map) => payloads
+                .iter()
+                .map(|payload| map.remove(payload.key()))
+                .collect(),
+            Kept::Forgotten => vec![None; payloads.len()],
+        });
+        let missing: Vec<EncodedPayload> = payloads
+            .iter()
+            .zip(&slots)
+            .filter(|(_, kept)| kept.is_none())
+            .map(|(payload, _)| payload.clone())
+            .collect();
+        let loaded = if missing.is_empty() {
+            Vec::new()
+        } else {
+            EncodedPayload::load_many(&missing, &mut store.clone(), state_id).await?
+        };
+        fill(slots, loaded)
+    }
+
     pub(crate) async fn load_many(
         &self,
         payloads: &[EncodedPayload],
         store: &SharedStore,
         state_id: &str,
     ) -> Result<Vec<EncodedPayload>> {
-        let mut slots = self.kept(payloads);
+        let slots = self.kept(payloads);
         let missing: Vec<EncodedPayload> = payloads
             .iter()
             .zip(&slots)
@@ -89,15 +119,20 @@ impl PayloadMemo {
             EncodedPayload::load_many(&missing, &mut store.clone(), state_id).await?
         };
         self.keep(payloads, &loaded);
-        let mut loaded = loaded.into_iter();
-        for slot in slots.iter_mut().filter(|slot| slot.is_none()) {
-            *slot = loaded.next();
-        }
-        slots
-            .into_iter()
-            .map(|slot| {
-                slot.ok_or_else(|| Error::InvalidState("payload load lost a payload".into()))
-            })
-            .collect()
+        fill(slots, loaded)
     }
+}
+
+fn fill(
+    mut slots: Vec<Option<EncodedPayload>>,
+    loaded: Vec<EncodedPayload>,
+) -> Result<Vec<EncodedPayload>> {
+    let mut loaded = loaded.into_iter();
+    for slot in slots.iter_mut().filter(|slot| slot.is_none()) {
+        *slot = loaded.next();
+    }
+    slots
+        .into_iter()
+        .map(|slot| slot.ok_or_else(|| Error::InvalidState("payload load lost a payload".into())))
+        .collect()
 }
