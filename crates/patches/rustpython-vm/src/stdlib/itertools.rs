@@ -26,6 +26,25 @@ mod decl {
     use alloc::fmt;
     use nanocode_numeric::{Signed, ToPrimitive};
 
+    /// CPython 3.12 still pickles and copies itertools objects, warning that 3.14 drops it.
+    fn pickle_deprecation(vm: &VirtualMachine) -> PyResult<()> {
+        crate::warn::warn(
+            vm.ctx
+                .new_str(
+                    "Pickle, copy, and deepcopy support will be removed from itertools in Python 3.14.",
+                )
+                .into(),
+            Some(vm.ctx.exceptions.deprecation_warning.to_owned()),
+            1,
+            None,
+            vm,
+        )
+    }
+
+    fn index_arg(obj: &PyObject, vm: &VirtualMachine) -> PyResult<isize> {
+        obj.try_index(vm)?.try_to_primitive(vm)
+    }
+
     #[pyattr]
     #[pyclass(name = "chain", traverse)]
     #[derive(Debug, PyPayload)]
@@ -77,6 +96,48 @@ mod decl {
             vm: &VirtualMachine,
         ) -> PyResult<PyGenericAlias> {
             PyGenericAlias::from_args(cls, object, vm)
+        }
+
+        #[pymethod]
+        fn __reduce__(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
+            pickle_deprecation(vm)?;
+            let cls: PyObjectRef = zelf.class().to_owned().into();
+            let empty: PyObjectRef = vm.ctx.empty_tuple.clone().into();
+            let source = zelf.source.read().clone();
+            let active = zelf.active.read().clone();
+            let items = match source {
+                None => vec![cls, empty],
+                Some(source) => {
+                    let mut state: Vec<PyObjectRef> = vec![source.into()];
+                    if let Some(active) = active {
+                        state.push(active.into());
+                    }
+                    vec![cls, empty, vm.ctx.new_tuple(state).into()]
+                }
+            };
+            Ok(vm.ctx.new_tuple(items))
+        }
+
+        #[pymethod]
+        fn __setstate__(
+            zelf: PyRef<Self>,
+            state: PyTupleRef,
+            vm: &VirtualMachine,
+        ) -> PyResult<()> {
+            pickle_deprecation(vm)?;
+            let args = state.as_slice();
+            if args.is_empty() || args.len() > 2 {
+                return Err(vm.new_type_error(format!(
+                    "chain state takes 1 or 2 items, not {}",
+                    args.len()
+                )));
+            }
+            if !args.iter().all(|a| PyIter::check(a)) {
+                return Err(vm.new_type_error("Arguments must be iterators."));
+            }
+            *zelf.source.write() = Some(PyIter::new(args[0].clone()));
+            *zelf.active.write() = args.get(1).map(|a| PyIter::new(a.clone()));
+            Ok(())
         }
     }
 
@@ -172,7 +233,19 @@ mod decl {
     }
 
     #[pyclass(with(IterNext, Iterable, Constructor), flags(BASETYPE))]
-    impl PyItertoolsCompress {}
+    impl PyItertoolsCompress {
+        #[pymethod]
+        fn __reduce__(
+            zelf: PyRef<Self>,
+            vm: &VirtualMachine,
+        ) -> PyResult<(PyTypeRef, (PyIter, PyIter))> {
+            pickle_deprecation(vm)?;
+            Ok((
+                zelf.class().to_owned(),
+                (zelf.data.clone(), zelf.selectors.clone()),
+            ))
+        }
+    }
 
     impl SelfIter for PyItertoolsCompress {}
 
@@ -227,7 +300,24 @@ mod decl {
     }
 
     #[pyclass(with(IterNext, Iterable, Constructor, Representable))]
-    impl PyItertoolsCount {}
+    impl PyItertoolsCount {
+        #[pymethod]
+        fn __reduce__(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
+            pickle_deprecation(vm)?;
+            let cls = zelf.class().to_owned();
+            let cur = zelf.cur.read().clone();
+            let step = zelf.step.clone();
+            let int_type = vm.ctx.types.int_type;
+            let fast = cur.class().is(int_type)
+                && step.class().is(int_type)
+                && vm.bool_eq(&step, vm.ctx.new_int(1).as_object())?;
+            Ok(if fast {
+                vm.new_tuple((cls, (cur,)))
+            } else {
+                vm.new_tuple((cls, (cur, step)))
+            })
+        }
+    }
 
     impl SelfIter for PyItertoolsCount {}
 
@@ -267,6 +357,13 @@ mod decl {
         saved: PyRwLock<Vec<PyObjectRef>>,
         #[pytraverse(skip)]
         index: AtomicCell<usize>,
+        // `saved` already holds the whole cycle (set by __setstate__), so items
+        // still coming from `iter` are not saved again.
+        #[pytraverse(skip)]
+        firstpass: AtomicCell<bool>,
+        // `iter` is exhausted and `saved` is replayed from `index`.
+        #[pytraverse(skip)]
+        replaying: AtomicCell<bool>,
     }
 
     impl Constructor for PyItertoolsCycle {
@@ -279,21 +376,72 @@ mod decl {
                 iter,
                 saved: PyRwLock::new(Vec::new()),
                 index: AtomicCell::new(0),
+                firstpass: AtomicCell::new(false),
+                replaying: AtomicCell::new(false),
             })
         }
     }
 
     #[pyclass(with(IterNext, Iterable, Constructor), flags(BASETYPE))]
-    impl PyItertoolsCycle {}
+    impl PyItertoolsCycle {
+        #[pymethod]
+        fn __reduce__(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
+            pickle_deprecation(vm)?;
+            let cls = zelf.class().to_owned();
+            let saved = zelf.saved.read().clone();
+            if zelf.replaying.load() {
+                let index = zelf.index.load().min(saved.len());
+                let rest = vm.ctx.new_list(saved[index..].to_vec());
+                let it = rest.as_object().get_iter(vm)?;
+                let saved = vm.ctx.new_list(saved);
+                Ok(vm.new_tuple((cls, (it,), (saved, true))))
+            } else {
+                let saved = vm.ctx.new_list(saved);
+                Ok(vm.new_tuple((
+                    cls,
+                    (zelf.iter.clone(),),
+                    (saved, zelf.firstpass.load()),
+                )))
+            }
+        }
+
+        #[pymethod]
+        fn __setstate__(
+            zelf: PyRef<Self>,
+            state: PyTupleRef,
+            vm: &VirtualMachine,
+        ) -> PyResult<()> {
+            pickle_deprecation(vm)?;
+            let [saved, firstpass] = state.as_slice() else {
+                return Err(vm.new_type_error("cycle state must be (list, int)"));
+            };
+            let saved = saved
+                .downcast_ref::<PyList>()
+                .ok_or_else(|| vm.new_type_error("cycle state must start with a list"))?
+                .borrow_vec()
+                .to_vec();
+            let firstpass = index_arg(firstpass, vm)? != 0;
+            *zelf.saved.write() = saved;
+            zelf.firstpass.store(firstpass);
+            zelf.index.store(0);
+            Ok(())
+        }
+    }
 
     impl SelfIter for PyItertoolsCycle {}
 
     impl IterNext for PyItertoolsCycle {
         fn next(zelf: &Py<Self>, vm: &VirtualMachine) -> PyResult<PyIterReturn> {
-            let item = if let PyIterReturn::Return(item) = zelf.iter.next(vm)? {
-                zelf.saved.write().push(item.clone());
-                item
-            } else {
+            if !zelf.replaying.load() {
+                if let PyIterReturn::Return(item) = zelf.iter.next(vm)? {
+                    if !zelf.firstpass.load() {
+                        zelf.saved.write().push(item.clone());
+                    }
+                    return Ok(PyIterReturn::Return(item));
+                }
+                zelf.replaying.store(true);
+            }
+            let item = {
                 let saved = zelf.saved.read();
                 if saved.is_empty() {
                     return Ok(PyIterReturn::StopIteration(None));
@@ -364,6 +512,16 @@ mod decl {
                 .ok_or_else(|| vm.new_type_error("length of unsized object."))?;
             Ok(*times.read())
         }
+
+        #[pymethod]
+        fn __reduce__(&self, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
+            pickle_deprecation(vm)?;
+            let cls = self.class().to_owned();
+            Ok(match self.times {
+                Some(ref times) => vm.new_tuple((cls, (self.object.clone(), *times.read()))),
+                None => vm.new_tuple((cls, (self.object.clone(),))),
+            })
+        }
     }
 
     impl SelfIter for PyItertoolsRepeat {}
@@ -425,7 +583,19 @@ mod decl {
     }
 
     #[pyclass(with(IterNext, Iterable, Constructor), flags(BASETYPE))]
-    impl PyItertoolsStarmap {}
+    impl PyItertoolsStarmap {
+        #[pymethod]
+        fn __reduce__(
+            zelf: PyRef<Self>,
+            vm: &VirtualMachine,
+        ) -> PyResult<(PyTypeRef, (PyObjectRef, PyIter))> {
+            pickle_deprecation(vm)?;
+            Ok((
+                zelf.class().to_owned(),
+                (zelf.function.clone(), zelf.iterable.clone()),
+            ))
+        }
+    }
 
     impl SelfIter for PyItertoolsStarmap {}
 
@@ -482,7 +652,31 @@ mod decl {
     }
 
     #[pyclass(with(IterNext, Iterable, Constructor), flags(BASETYPE))]
-    impl PyItertoolsTakewhile {}
+    impl PyItertoolsTakewhile {
+        #[pymethod]
+        fn __reduce__(
+            zelf: PyRef<Self>,
+            vm: &VirtualMachine,
+        ) -> PyResult<(PyTypeRef, (PyObjectRef, PyIter), u32)> {
+            pickle_deprecation(vm)?;
+            Ok((
+                zelf.class().to_owned(),
+                (zelf.predicate.clone(), zelf.iterable.clone()),
+                u32::from(zelf.stop_flag.load()),
+            ))
+        }
+
+        #[pymethod]
+        fn __setstate__(
+            zelf: PyRef<Self>,
+            state: PyObjectRef,
+            vm: &VirtualMachine,
+        ) -> PyResult<()> {
+            pickle_deprecation(vm)?;
+            zelf.stop_flag.store(state.try_to_bool(vm)?);
+            Ok(())
+        }
+    }
 
     impl SelfIter for PyItertoolsTakewhile {}
 
@@ -546,7 +740,31 @@ mod decl {
     }
 
     #[pyclass(with(IterNext, Iterable, Constructor), flags(BASETYPE))]
-    impl PyItertoolsDropwhile {}
+    impl PyItertoolsDropwhile {
+        #[pymethod]
+        fn __reduce__(
+            zelf: PyRef<Self>,
+            vm: &VirtualMachine,
+        ) -> PyResult<(PyTypeRef, (PyObjectRef, PyIter), u32)> {
+            pickle_deprecation(vm)?;
+            Ok((
+                zelf.class().to_owned(),
+                (zelf.predicate.clone(), zelf.iterable.clone()),
+                u32::from(zelf.start_flag.load()),
+            ))
+        }
+
+        #[pymethod]
+        fn __setstate__(
+            zelf: PyRef<Self>,
+            state: PyObjectRef,
+            vm: &VirtualMachine,
+        ) -> PyResult<()> {
+            pickle_deprecation(vm)?;
+            zelf.start_flag.store(state.try_to_bool(vm)?);
+            Ok(())
+        }
+    }
 
     impl SelfIter for PyItertoolsDropwhile {}
 
@@ -630,11 +848,11 @@ mod decl {
         fn py_new(
             _cls: &Py<PyType>,
             Self::Args { iterable, key }: Self::Args,
-            _vm: &VirtualMachine,
+            vm: &VirtualMachine,
         ) -> PyResult<Self> {
             Ok(Self {
                 iterable,
-                key_func: key,
+                key_func: key.filter(|key| !vm.is_none(key)),
                 state: PyMutex::new(GroupByState::default()),
             })
         }
@@ -653,6 +871,45 @@ mod decl {
                 new_value.clone()
             };
             Ok(PyIterReturn::Return((new_value, new_key)))
+        }
+
+        #[pymethod]
+        fn __reduce__(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
+            pickle_deprecation(vm)?;
+            let cls = zelf.class().to_owned();
+            let key = zelf.key_func.clone().unwrap_or_else(|| vm.ctx.none());
+            let it = zelf.iterable.clone();
+            let (currkey, currvalue, tgtkey) = {
+                let state = zelf.state.lock();
+                (
+                    state.current_key.clone(),
+                    state.current_value.clone(),
+                    state.tgtkey.clone(),
+                )
+            };
+            Ok(match (currkey, currvalue, tgtkey) {
+                (Some(currkey), Some(currvalue), Some(tgtkey)) => {
+                    vm.new_tuple((cls, (it, key), (currkey, currvalue, tgtkey)))
+                }
+                _ => vm.new_tuple((cls, (it, key))),
+            })
+        }
+
+        #[pymethod]
+        fn __setstate__(
+            zelf: PyRef<Self>,
+            state: PyTupleRef,
+            vm: &VirtualMachine,
+        ) -> PyResult<()> {
+            pickle_deprecation(vm)?;
+            let [currkey, currvalue, tgtkey] = state.as_slice() else {
+                return Err(vm.new_type_error("groupby state must be a 3-tuple"));
+            };
+            let mut st = zelf.state.lock();
+            st.current_key = Some(currkey.clone());
+            st.current_value = Some(currvalue.clone());
+            st.tgtkey = Some(tgtkey.clone());
+            Ok(())
         }
     }
 
@@ -709,7 +966,34 @@ mod decl {
     }
 
     #[pyclass(with(IterNext, Iterable), flags(HAS_WEAKREF))]
-    impl PyItertoolsGrouper {}
+    impl PyItertoolsGrouper {
+        #[pyslot]
+        fn slot_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+            let (groupby, tgtkey): (PyRef<PyItertoolsGroupBy>, PyObjectRef) =
+                args.bind_for(vm, Self::NAME)?;
+            let grouper = Self {
+                groupby: groupby.clone(),
+                tgtkey,
+            }
+            .into_ref_with_type(vm, cls)?;
+            groupby.state.lock().grouper = Some(grouper.downgrade(None, vm)?);
+            Ok(grouper.into())
+        }
+
+        #[pymethod]
+        fn __reduce__(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
+            pickle_deprecation(vm)?;
+            if zelf.groupby.state.lock().is_current(&zelf) {
+                Ok(vm.new_tuple((
+                    zelf.class().to_owned(),
+                    (zelf.groupby.clone(), zelf.tgtkey.clone()),
+                )))
+            } else {
+                let iter = vm.builtins.get_attr("iter", vm)?;
+                Ok(vm.new_tuple((iter, (vm.ctx.empty_tuple.clone(),))))
+            }
+        }
+    }
 
     impl SelfIter for PyItertoolsGrouper {}
 
@@ -743,7 +1027,6 @@ mod decl {
                 return Ok(PyIterReturn::StopIteration(None));
             }
             let value = state.current_value.take();
-            state.current_key = None;
             match value {
                 Some(v) => Ok(PyIterReturn::Return(v)),
                 None => Ok(PyIterReturn::StopIteration(None)),
@@ -859,6 +1142,42 @@ mod decl {
             .into_ref_with_type(vm, cls)
             .map(Into::into)
         }
+
+        #[pymethod]
+        fn __reduce__(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
+            pickle_deprecation(vm)?;
+            let cls = zelf.class().to_owned();
+            let iterable = zelf.iterable.lock().clone();
+            match iterable {
+                None => {
+                    let empty = vm.ctx.new_list(vec![]).as_object().get_iter(vm)?;
+                    Ok(vm.new_tuple((cls, (empty, 0, 0), 0)))
+                }
+                Some(it) => {
+                    let stop: PyObjectRef = match zelf.stop {
+                        Some(stop) => vm.ctx.new_int(stop).into(),
+                        None => vm.ctx.none(),
+                    };
+                    Ok(vm.new_tuple((
+                        cls,
+                        (it, zelf.next.load(), stop, zelf.step),
+                        zelf.cur.load(),
+                    )))
+                }
+            }
+        }
+
+        #[pymethod]
+        fn __setstate__(
+            zelf: PyRef<Self>,
+            state: PyObjectRef,
+            vm: &VirtualMachine,
+        ) -> PyResult<()> {
+            pickle_deprecation(vm)?;
+            let cur = index_arg(&state, vm)?;
+            zelf.cur.store(cur.max(0) as usize);
+            Ok(())
+        }
     }
 
     impl SelfIter for PyItertoolsIslice {}
@@ -934,7 +1253,19 @@ mod decl {
     }
 
     #[pyclass(with(IterNext, Iterable, Constructor), flags(BASETYPE))]
-    impl PyItertoolsFilterFalse {}
+    impl PyItertoolsFilterFalse {
+        #[pymethod]
+        fn __reduce__(
+            zelf: PyRef<Self>,
+            vm: &VirtualMachine,
+        ) -> PyResult<(PyTypeRef, (PyObjectRef, PyIter))> {
+            pickle_deprecation(vm)?;
+            Ok((
+                zelf.class().to_owned(),
+                (zelf.predicate.clone(), zelf.iterable.clone()),
+            ))
+        }
+    }
 
     impl SelfIter for PyItertoolsFilterFalse {}
 
@@ -992,7 +1323,46 @@ mod decl {
     }
 
     #[pyclass(with(IterNext, Iterable, Constructor))]
-    impl PyItertoolsAccumulate {}
+    impl PyItertoolsAccumulate {
+        #[pymethod]
+        fn __reduce__(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
+            pickle_deprecation(vm)?;
+            let cls = zelf.class().to_owned();
+            let bin_op = zelf.bin_op.clone().unwrap_or_else(|| vm.ctx.none());
+            let it: PyObjectRef = zelf.iterable.clone().into();
+            let chain = PyItertoolsChain::class(&vm.ctx);
+            let acc = zelf.acc_value.read().clone();
+            match (acc, &zelf.initial) {
+                (None, Some(initial)) => {
+                    let it = chain
+                        .as_object()
+                        .call((vm.new_tuple((initial.clone(),)), it), vm)?;
+                    Ok(vm.new_tuple((cls, (it, bin_op), vm.ctx.none())))
+                }
+                (None, None) => Ok(vm.new_tuple((cls, (it, bin_op), vm.ctx.none()))),
+                // A None total can't be the state (pickle skips a None state), so
+                // replay it ahead of the input and drop the value it yields again.
+                (Some(acc), _) if vm.is_none(&acc) => {
+                    let it = chain.as_object().call((vm.new_tuple((acc,)), it), vm)?;
+                    let acc = cls.as_object().call((it, bin_op), vm)?;
+                    let islice = PyItertoolsIslice::class(&vm.ctx).to_owned();
+                    Ok(vm.new_tuple((islice, (acc, 1, vm.ctx.none()))))
+                }
+                (Some(acc), _) => Ok(vm.new_tuple((cls, (it, bin_op), acc))),
+            }
+        }
+
+        #[pymethod]
+        fn __setstate__(
+            zelf: PyRef<Self>,
+            state: PyObjectRef,
+            vm: &VirtualMachine,
+        ) -> PyResult<()> {
+            pickle_deprecation(vm)?;
+            *zelf.acc_value.write() = Some(state);
+            Ok(())
+        }
+    }
 
     impl SelfIter for PyItertoolsAccumulate {}
 
@@ -1031,8 +1401,38 @@ mod decl {
         running: AtomicBool,
     }
 
-    #[pyclass(flags(DISALLOW_INSTANTIATION))]
+    #[pyclass]
     impl PyItertoolsTeeData {
+        #[pyslot]
+        fn slot_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+            let (iterable, values, nextlink): (PyIter, PyRef<PyList>, PyObjectRef) =
+                args.bind_for(vm, Self::NAME)?;
+            if !vm.is_none(&nextlink) {
+                return Err(vm.new_value_error("_tee_dataobject nextlink must be None"));
+            }
+            Self {
+                iterable,
+                values: PyMutex::new(values.borrow_vec().to_vec()),
+                running: AtomicBool::new(false),
+            }
+            .into_ref_with_type(vm, cls)
+            .map(Into::into)
+        }
+
+        #[pymethod]
+        fn __reduce__(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
+            pickle_deprecation(vm)?;
+            let values = zelf
+                .values
+                .try_lock()
+                .ok_or_else(|| vm.new_runtime_error("cannot re-enter the tee iterator"))?
+                .clone();
+            Ok(vm.new_tuple((
+                zelf.class().to_owned(),
+                (zelf.iterable.clone(), vm.ctx.new_list(values), vm.ctx.none()),
+            )))
+        }
+
         fn new(iterable: PyIter, vm: &VirtualMachine) -> PyRef<Self> {
             Self {
                 iterable,
@@ -1075,7 +1475,7 @@ mod decl {
     #[pyclass(name = "_tee", traverse)]
     #[derive(Debug, PyPayload)]
     struct PyItertoolsTee {
-        tee_data: PyRef<PyItertoolsTeeData>,
+        tee_data: PyRwLock<PyRef<PyItertoolsTeeData>>,
         #[pytraverse(skip)]
         index: AtomicCell<usize>,
         #[pytraverse(skip)]
@@ -1093,7 +1493,7 @@ mod decl {
                 return Ok(tee.__copy__());
             }
             Ok(Self {
-                tee_data: PyItertoolsTeeData::new(iterator, vm),
+                tee_data: PyRwLock::new(PyItertoolsTeeData::new(iterator, vm)),
                 index: AtomicCell::new(0),
                 advancing: AtomicBool::new(false),
             })
@@ -1107,7 +1507,7 @@ mod decl {
                 return vm.call_special_method(&iterator, identifier!(vm, __copy__), ());
             }
             Ok(Self {
-                tee_data: PyItertoolsTeeData::new(iterator, vm),
+                tee_data: PyRwLock::new(PyItertoolsTeeData::new(iterator, vm)),
                 index: AtomicCell::new(0),
                 advancing: AtomicBool::new(false),
             }
@@ -1121,10 +1521,40 @@ mod decl {
         #[pymethod]
         fn __copy__(&self) -> PyItertoolsTee {
             PyItertoolsTee {
-                tee_data: self.tee_data.clone(),
+                tee_data: PyRwLock::new(self.tee_data.read().clone()),
                 index: AtomicCell::new(self.index.load()),
                 advancing: AtomicBool::new(false),
             }
+        }
+
+        #[pymethod]
+        fn __reduce__(&self, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
+            pickle_deprecation(vm)?;
+            Ok(vm.new_tuple((
+                self.class().to_owned(),
+                (vm.ctx.empty_tuple.clone(),),
+                (self.tee_data.read().clone(), self.index.load()),
+            )))
+        }
+
+        #[pymethod]
+        fn __setstate__(&self, state: PyTupleRef, vm: &VirtualMachine) -> PyResult<()> {
+            pickle_deprecation(vm)?;
+            let [data, index] = state.as_slice() else {
+                return Err(vm.new_type_error("_tee state must be (_tee_dataobject, index)"));
+            };
+            let data = data
+                .clone()
+                .downcast::<PyItertoolsTeeData>()
+                .map_err(|_| vm.new_type_error("_tee state must start with a _tee_dataobject"))?;
+            let index = index_arg(index, vm)?;
+            let len = data.values.lock().len();
+            if index < 0 || index as usize > len {
+                return Err(vm.new_value_error("Index out of range"));
+            }
+            *self.tee_data.write() = data;
+            self.index.store(index as usize);
+            Ok(())
         }
     }
 
@@ -1155,8 +1585,12 @@ mod decl {
         tee_vec
             .try_reserve_exact(n)
             .map_err(|_| vm.no_memory_error())?;
-        for _ in 0..n {
-            tee_vec.push(vm.call_special_method(&copyable, identifier!(vm, __copy__), ())?);
+        // Like CPython, the first result is the copyable iterator itself.
+        if n > 0 {
+            for _ in 1..n {
+                tee_vec.push(vm.call_special_method(&copyable, identifier!(vm, __copy__), ())?);
+            }
+            tee_vec.insert(0, copyable);
         }
 
         Ok(PyTuple::new_ref(tee_vec, &vm.ctx))
@@ -1172,7 +1606,8 @@ mod decl {
             }
             rustpython_common::defer! { zelf.advancing.store(false, Ordering::Release) }
             let index = zelf.index.load();
-            let value = raise_if_stop!(zelf.tee_data.get_item(vm, index)?);
+            let tee_data = zelf.tee_data.read().clone();
+            let value = raise_if_stop!(tee_data.get_item(vm, index)?);
             zelf.index.store(index + 1);
             Ok(PyIterReturn::Return(value))
         }
@@ -1277,6 +1712,62 @@ mod decl {
                 self.cur.store(idxs.len() - 1);
             }
         }
+
+        #[pymethod]
+        fn __reduce__(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
+            pickle_deprecation(vm)?;
+            let cls = zelf.class().to_owned();
+            if zelf.stop.load() {
+                return Ok(vm.new_tuple((cls, (vm.ctx.empty_tuple.clone(),))));
+            }
+            let pools: Vec<PyObjectRef> = zelf
+                .pools
+                .iter()
+                .map(|p| vm.ctx.new_tuple(p.clone()).into())
+                .collect();
+            let pools = vm.ctx.new_tuple(pools);
+            let idxs = zelf.idxs.read().clone();
+            if idxs.iter().all(|&i| i == 0) || zelf.pools.iter().any(|p| p.is_empty()) {
+                return Ok(vm.new_tuple((cls, pools)));
+            }
+            // `idxs` is the next result; the state is the last one returned.
+            let mut last = idxs;
+            for i in (0..last.len()).rev() {
+                if last[i] > 0 {
+                    last[i] -= 1;
+                    break;
+                }
+                last[i] = zelf.pools[i].len() - 1;
+            }
+            let state: Vec<PyObjectRef> = last.into_iter().map(|i| vm.ctx.new_int(i).into()).collect();
+            Ok(vm.new_tuple((cls, pools, vm.ctx.new_tuple(state))))
+        }
+
+        #[pymethod]
+        fn __setstate__(
+            zelf: PyRef<Self>,
+            state: PyTupleRef,
+            vm: &VirtualMachine,
+        ) -> PyResult<()> {
+            pickle_deprecation(vm)?;
+            let args = state.as_slice();
+            if args.len() != zelf.pools.len() {
+                return Err(vm.new_value_error("invalid arguments"));
+            }
+            if zelf.pools.iter().any(|p| p.is_empty()) {
+                zelf.stop.store(true);
+                return Ok(());
+            }
+            let mut idxs = zelf.idxs.write();
+            for (i, arg) in args.iter().enumerate() {
+                let index = index_arg(arg, vm)?;
+                let max = zelf.pools[i].len() - 1;
+                idxs[i] = (index.max(0) as usize).min(max);
+            }
+            zelf.cur.store(idxs.len().wrapping_sub(1));
+            zelf.update_idxs(idxs);
+            Ok(())
+        }
     }
 
     impl SelfIter for PyItertoolsProduct {}
@@ -1369,7 +1860,55 @@ mod decl {
     }
 
     #[pyclass(with(IterNext, Iterable, Constructor))]
-    impl PyItertoolsCombinations {}
+    impl PyItertoolsCombinations {
+        #[pymethod]
+        fn __reduce__(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
+            pickle_deprecation(vm)?;
+            let cls = zelf.class().to_owned();
+            let r = zelf.r.load();
+            if zelf.exhausted.load() {
+                // An empty pool with r >= 1 yields nothing.
+                return Ok(vm.new_tuple((cls, (vm.ctx.empty_tuple.clone(), r.max(1)))));
+            }
+            let pool = vm.ctx.new_tuple(zelf.pool.clone());
+            if zelf.result.read().is_none() {
+                return Ok(vm.new_tuple((cls, (pool, r))));
+            }
+            let indices: Vec<PyObjectRef> = zelf
+                .indices
+                .read()
+                .iter()
+                .map(|&i| vm.ctx.new_int(i).into())
+                .collect();
+            Ok(vm.new_tuple((cls, (pool, r), vm.ctx.new_tuple(indices))))
+        }
+
+        #[pymethod]
+        fn __setstate__(
+            zelf: PyRef<Self>,
+            state: PyTupleRef,
+            vm: &VirtualMachine,
+        ) -> PyResult<()> {
+            pickle_deprecation(vm)?;
+            let args = state.as_slice();
+            let r = zelf.r.load();
+            let n = zelf.pool.len();
+            if args.len() != r {
+                return Err(vm.new_value_error("invalid arguments"));
+            }
+            if r == 0 || r > n {
+                zelf.exhausted.store(true);
+                return Ok(());
+            }
+            let mut indices = zelf.indices.write();
+            for (i, arg) in args.iter().enumerate() {
+                let index = index_arg(arg, vm)?;
+                indices[i] = (index.max(0) as usize).min(i + n - r);
+            }
+            *zelf.result.write() = Some(indices.iter().map(|&i| zelf.pool[i].clone()).collect());
+            Ok(())
+        }
+    }
 
     impl SelfIter for PyItertoolsCombinations {}
     impl IterNext for PyItertoolsCombinations {
@@ -1480,7 +2019,50 @@ mod decl {
     }
 
     #[pyclass(with(IterNext, Iterable, Constructor))]
-    impl PyItertoolsCombinationsWithReplacement {}
+    impl PyItertoolsCombinationsWithReplacement {
+        #[pymethod]
+        fn __reduce__(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
+            pickle_deprecation(vm)?;
+            let cls = zelf.class().to_owned();
+            let r = zelf.r.load();
+            if zelf.exhausted.load() {
+                // An empty pool with r >= 1 yields nothing.
+                return Ok(vm.new_tuple((cls, (vm.ctx.empty_tuple.clone(), r.max(1)))));
+            }
+            let pool = vm.ctx.new_tuple(zelf.pool.clone());
+            // The state is the indices of the next result.
+            let indices: Vec<PyObjectRef> = zelf
+                .indices
+                .read()
+                .iter()
+                .map(|&i| vm.ctx.new_int(i).into())
+                .collect();
+            Ok(vm.new_tuple((cls, (pool, r), vm.ctx.new_tuple(indices))))
+        }
+
+        #[pymethod]
+        fn __setstate__(
+            zelf: PyRef<Self>,
+            state: PyTupleRef,
+            vm: &VirtualMachine,
+        ) -> PyResult<()> {
+            pickle_deprecation(vm)?;
+            let args = state.as_slice();
+            let n = zelf.pool.len();
+            if args.len() != zelf.r.load() {
+                return Err(vm.new_value_error("invalid arguments"));
+            }
+            if n == 0 {
+                return Ok(());
+            }
+            let mut indices = zelf.indices.write();
+            for (i, arg) in args.iter().enumerate() {
+                let index = index_arg(arg, vm)?;
+                indices[i] = (index.max(0) as usize).min(n - 1);
+            }
+            Ok(())
+        }
+    }
 
     impl SelfIter for PyItertoolsCombinationsWithReplacement {}
 
@@ -1596,7 +2178,68 @@ mod decl {
     }
 
     #[pyclass(with(IterNext, Iterable, Constructor))]
-    impl PyItertoolsPermutations {}
+    impl PyItertoolsPermutations {
+        #[pymethod]
+        fn __reduce__(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
+            pickle_deprecation(vm)?;
+            let cls = zelf.class().to_owned();
+            let r = zelf.r.load();
+            if zelf.exhausted.load() {
+                // An empty pool with r >= 1 yields nothing.
+                return Ok(vm.new_tuple((cls, (vm.ctx.empty_tuple.clone(), r.max(1)))));
+            }
+            let pool = vm.ctx.new_tuple(zelf.pool.clone());
+            if zelf.result.read().is_none() {
+                return Ok(vm.new_tuple((cls, (pool, r))));
+            }
+            let to_tuple = |v: &[usize]| {
+                vm.ctx
+                    .new_tuple(v.iter().map(|&i| vm.ctx.new_int(i).into()).collect())
+            };
+            let indices = to_tuple(&zelf.indices.read());
+            let cycles = to_tuple(&zelf.cycles.read());
+            Ok(vm.new_tuple((cls, (pool, r), (indices, cycles))))
+        }
+
+        #[pymethod]
+        fn __setstate__(
+            zelf: PyRef<Self>,
+            state: PyTupleRef,
+            vm: &VirtualMachine,
+        ) -> PyResult<()> {
+            pickle_deprecation(vm)?;
+            let [indices, cycles] = state.as_slice() else {
+                return Err(vm.new_type_error("permutations state must be (indices, cycles)"));
+            };
+            let (Some(indices), Some(cycles)) = (
+                indices.downcast_ref::<PyTuple>(),
+                cycles.downcast_ref::<PyTuple>(),
+            ) else {
+                return Err(vm.new_type_error("permutations state must hold two tuples"));
+            };
+            let n = zelf.pool.len();
+            let r = zelf.r.load();
+            if indices.len() != n || cycles.len() != r {
+                return Err(vm.new_value_error("invalid arguments"));
+            }
+            if n == 0 || r > n {
+                zelf.exhausted.store(true);
+                return Ok(());
+            }
+            let mut new_indices = Vec::with_capacity(n);
+            for arg in indices.as_slice() {
+                new_indices.push((index_arg(arg, vm)?.max(0) as usize).min(n - 1));
+            }
+            let mut new_cycles = Vec::with_capacity(r);
+            for (i, arg) in cycles.as_slice().iter().enumerate() {
+                new_cycles.push((index_arg(arg, vm)?.max(1) as usize).min(n - i));
+            }
+            *zelf.result.write() = Some(new_indices[..r].to_vec());
+            *zelf.indices.write() = new_indices;
+            *zelf.cycles.write() = new_cycles;
+            Ok(())
+        }
+    }
 
     impl SelfIter for PyItertoolsPermutations {}
 
@@ -1703,7 +2346,29 @@ mod decl {
     }
 
     #[pyclass(with(IterNext, Iterable, Constructor))]
-    impl PyItertoolsZipLongest {}
+    impl PyItertoolsZipLongest {
+        #[pymethod]
+        fn __reduce__(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
+            pickle_deprecation(vm)?;
+            let args: Vec<PyObjectRef> = zelf.iterators.iter().map(|i| i.clone().into()).collect();
+            Ok(vm.new_tuple((
+                zelf.class().to_owned(),
+                vm.ctx.new_tuple(args),
+                zelf.fillvalue.read().clone(),
+            )))
+        }
+
+        #[pymethod]
+        fn __setstate__(
+            zelf: PyRef<Self>,
+            state: PyObjectRef,
+            vm: &VirtualMachine,
+        ) -> PyResult<()> {
+            pickle_deprecation(vm)?;
+            *zelf.fillvalue.write() = state;
+            Ok(())
+        }
+    }
 
     impl SelfIter for PyItertoolsZipLongest {}
 
