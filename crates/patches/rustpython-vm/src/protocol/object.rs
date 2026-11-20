@@ -702,7 +702,21 @@ impl PyObject {
     }
 
     pub fn hash(&self, vm: &VirtualMachine) -> PyResult<PyHash> {
-        if let Some(hash) = self.class().slots().hash.load() {
+        // An exact str or int hashes without calling back into Python, so it
+        // needs no stack guard or indirect slot call. It still spends its step.
+        let cls = self.class();
+        if cls.is(vm.ctx.types.str_type) {
+            vm.step()?;
+            // SAFETY: the class is exactly `str`.
+            return Ok(unsafe { self.downcast_unchecked_ref::<PyStr>() }.hash(vm));
+        }
+        if cls.is(vm.ctx.types.int_type) {
+            vm.step()?;
+            // SAFETY: the class is exactly `int`.
+            let int = unsafe { self.downcast_unchecked_ref::<PyInt>() };
+            return Ok(crate::common::hash::hash_bigint(int.as_bigint()));
+        }
+        if let Some(hash) = cls.slots().hash.load() {
             return vm.with_recursion("while hashing", || hash(self, vm));
         }
 
