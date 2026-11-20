@@ -758,9 +758,10 @@ fn steps(
     for (seq, body) in rows {
         let event: Event = serde_json::from_str(body)
             .map_err(|error| format!("row {seq} is not an event: {error}"))?;
-        if !seen.insert(event.id.clone()) {
+        if seen.contains(&event.id) || !nanocode_board::access::owns(&event.by, &event.id) {
             continue;
         }
+        seen.insert(event.id.clone());
         now = now.max(event.at_ms);
         if fold.outcome(&event.id) != Some(&Ok(*seq)) {
             continue;
