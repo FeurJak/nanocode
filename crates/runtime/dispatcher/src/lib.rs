@@ -1,7 +1,7 @@
-use std::{future::Future, pin::Pin};
+use std::{collections::BTreeSet, future::Future, pin::Pin};
 
 use nanocode_board::{
-    Board, BoardError, ClaimId, Op, Phase, TaskId,
+    Board, BoardError, ClaimId, Op, Phase, TaskId, Write,
     brief::{Brief, BriefError, BriefPolicy},
     tasks::TaskOp,
     wake::{Timer, Wake},
@@ -69,6 +69,20 @@ pub struct Counters {
     pub start_failures: u64,
     pub retire_failures: u64,
     pub waits: u64,
+    /// Board appends the passes' op groups took (one per round of a group).
+    pub appends: u64,
+    /// Ops the passes sent to the board in groups.
+    pub ops: u64,
+}
+
+/// One pass's board ops, sent as one `Board::submit_group` so a pass with many spawns, starts
+/// and settles commits them in one or two appends instead of one per op. Starts wait for the
+/// group: an agent starts only once its intent's claim landed and is held.
+#[derive(Default)]
+struct Staged {
+    writes: Vec<Write>,
+    intents: BTreeSet<TaskId>,
+    starts: Vec<(Spawn, Brief)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,6 +106,16 @@ pub fn agent_name(intent: &TaskId) -> String {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '-' })
         .collect()
+}
+
+const fn intent_of(action: &Action) -> Option<&TaskId> {
+    match action {
+        Action::Spawn(spawn) => Some(&spawn.intent),
+        Action::Start { intent } | Action::Settle { intent, .. } | Action::Release { intent, .. } => {
+            Some(intent)
+        }
+        Action::Retire { .. } | Action::Wait { .. } => None,
+    }
 }
 
 pub const EAGER_PASSES_MAX: u64 = 4;
@@ -141,11 +165,29 @@ impl Dispatcher {
         self.counters.passes += 1;
         let mut failures = Vec::new();
         let mut acted = false;
+        let mut staged = Staged::default();
+        let mut failed = None;
         for action in &plan.actions {
-            match self.act(pool, at_ms, action).await? {
-                Some(failure) => failures.push(failure),
-                None => acted |= !matches!(action, Action::Wait { .. }),
+            match self
+                .act(pool, at_ms, action, &mut staged, &mut failures, &mut acted)
+                .await
+            {
+                Ok(Some(failure)) => failures.push(failure),
+                Ok(None) => acted |= !matches!(action, Action::Wait { .. }),
+                Err(error) => {
+                    failed = Some(error);
+                    break;
+                }
             }
+        }
+        if let Err(error) = self
+            .flush(pool, at_ms, &mut staged, &mut failures, &mut acted)
+            .await
+        {
+            failed.get_or_insert(error);
+        }
+        if let Some(error) = failed {
+            return Err(error);
         }
         if !mutated(Mutation::NeverReaps) {
             let retired = plan
@@ -209,14 +251,30 @@ impl Dispatcher {
         }
     }
 
+    /// Stages one action's ops into the pass's group, or acts at once for retires and waits. An
+    /// action that must see the group's ops land first flushes it, so its ops are computed
+    /// against a fold that includes the earlier ones, as one op at a time did.
     async fn act(
         &mut self,
         pool: &dyn Pool,
         at_ms: u64,
         action: &Action,
+        staged: &mut Staged,
+        failures: &mut Vec<Failure>,
+        acted: &mut bool,
     ) -> Result<Option<Failure>, DispatchError> {
+        // A retire writes its own ops (releasing what the agent held) and must see the earlier
+        // ones land first, as must an action on an intent the group already touches.
+        if matches!(action, Action::Retire { .. })
+            || intent_of(action).is_some_and(|intent| staged.intents.contains(intent))
+        {
+            self.flush(pool, at_ms, staged, failures, acted).await?;
+        }
         match action {
-            Action::Spawn(spawn) => self.spawn(pool, at_ms, spawn.clone(), action).await,
+            Action::Spawn(spawn) => {
+                self.spawn(pool, at_ms, spawn.clone(), action, staged, acted)
+                    .await
+            }
             Action::Start { intent } => {
                 let spawn = nanocode_dispatch::intents(self.board.fold(), &self.policy)
                     .into_iter()
@@ -225,13 +283,18 @@ impl Dispatcher {
                 let Some(spawn) = spawn else {
                     panic!("the plan started intent {intent}, which is not on the board");
                 };
-                self.spawn(pool, at_ms, spawn, action).await
+                self.spawn(pool, at_ms, spawn, action, staged, acted).await
             }
             Action::Settle { .. } | Action::Release { .. } => {
-                self.apply(at_ms, action).await?;
+                self.stage(at_ms, action, staged);
+                *acted = true;
                 Ok(None)
             }
-            Action::Retire { agent } => self.retire(pool, at_ms, agent).await,
+            Action::Retire { agent } => {
+                let failure = self.retire(pool, at_ms, agent).await?;
+                *acted |= failure.is_none();
+                Ok(failure)
+            }
             Action::Wait { .. } => {
                 self.counters.waits += 1;
                 Ok(None)
@@ -239,20 +302,65 @@ impl Dispatcher {
         }
     }
 
-    async fn apply(&mut self, at_ms: u64, action: &Action) -> Result<(), DispatchError> {
+    fn stage(&self, at_ms: u64, action: &Action, staged: &mut Staged) {
         let ops = nanocode_dispatch::ops(
             self.board.fold(),
             &self.policy,
             self.board.writer(),
             action,
         );
-        for (key, op) in ops {
-            match self.board.submit_keyed(&key, at_ms, op).await {
-                Ok(_) | Err(BoardError::Rejected(_)) => {}
-                Err(error) => return Err(error.into()),
+        if let Some(intent) = intent_of(action) {
+            staged.intents.insert(intent.clone());
+        }
+        staged
+            .writes
+            .extend(ops.into_iter().map(|(key, op)| Write {
+                by: None,
+                key: Some(key),
+                at_ms,
+                op,
+            }));
+    }
+
+    /// Sends the staged ops as one group, then starts each staged spawn whose intent the
+    /// dispatcher now holds. Every op gets its own verdict: a rejected one (another writer's
+    /// claim, a stale fence, a cap) is skipped as one op at a time skipped it, and a store error
+    /// on one op still lets the others' starts go ahead before the pass reports it.
+    async fn flush(
+        &mut self,
+        pool: &dyn Pool,
+        at_ms: u64,
+        staged: &mut Staged,
+        failures: &mut Vec<Failure>,
+        acted: &mut bool,
+    ) -> Result<(), DispatchError> {
+        let writes = std::mem::take(&mut staged.writes);
+        staged.intents.clear();
+        let mut failed = None;
+        if !writes.is_empty() {
+            self.counters.ops += writes.len() as u64;
+            let (verdicts, appends) = self.board.submit_group(writes).await;
+            self.counters.appends += appends;
+            for verdict in verdicts {
+                match verdict {
+                    Ok(_) | Err(BoardError::Rejected(_)) => {}
+                    Err(error) => {
+                        failed.get_or_insert(error);
+                    }
+                }
             }
         }
-        Ok(())
+        for (spawn, brief) in std::mem::take(&mut staged.starts) {
+            if self.holds(&spawn.intent, at_ms).is_none() {
+                *acted = true;
+                continue;
+            }
+            match self.start(pool, spawn, brief).await? {
+                Some(failure) => failures.push(failure),
+                None => *acted = true,
+            }
+        }
+        failed.map_or(Ok(()), |error| Err(error.into()))
     }
 
     async fn spawn(
@@ -261,19 +369,21 @@ impl Dispatcher {
         at_ms: u64,
         spawn: Spawn,
         action: &Action,
+        staged: &mut Staged,
+        acted: &mut bool,
     ) -> Result<Option<Failure>, DispatchError> {
         let brief = match self.board.fold().brief(&spawn.task, &self.brief) {
             Ok(brief) => brief,
             Err(error) => return self.block(at_ms, &spawn.task, error).await,
         };
         if mutated(Mutation::StartsBeforeIntent) {
-            return self.start(pool, spawn, brief).await;
+            let failure = self.start(pool, spawn, brief).await?;
+            *acted |= failure.is_none();
+            return Ok(failure);
         }
-        self.apply(at_ms, action).await?;
-        if self.holds(&spawn.intent, at_ms).is_none() {
-            return Ok(None);
-        }
-        self.start(pool, spawn, brief).await
+        self.stage(at_ms, action, staged);
+        staged.starts.push((spawn, brief));
+        Ok(None)
     }
 
     async fn start(

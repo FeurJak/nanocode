@@ -9,7 +9,7 @@ use nanocode_board::sim::{Mutation, mutated};
 use nanocode_board::tasks::Terms;
 use nanocode_board::{
     Applied, Board, BoardError, Change, ClaimId, EventId, NewTask, Op, Outcome, Phase, Rejection,
-    TaskId,
+    TaskId, Write,
 };
 use nanocode_sync::{Owned, mpsc, oneshot, watch};
 use nanocode_turnlog::LogHost;
@@ -128,6 +128,28 @@ pub fn profile_of(session: &str) -> String {
         hex.push_str(&format!("{byte:02x}"));
     }
     hex
+}
+
+fn session_task(
+    root: &str,
+    session: &str,
+    agent: AgentId,
+    parent: &TaskId,
+    k: u64,
+    spec: &str,
+) -> NewTask {
+    NewTask {
+        id: task_of(session, k),
+        parent: Some(parent.clone()),
+        spec: spec.to_owned(),
+        labels: BTreeMap::from([
+            ("session".to_owned(), session.to_owned()),
+            ("root".to_owned(), root.to_owned()),
+            ("agent".to_owned(), agent.to_string()),
+        ]),
+        needs: Vec::new(),
+        terms: Terms::default(),
+    }
 }
 
 pub fn worker_of(session: &str) -> String {
@@ -742,18 +764,7 @@ impl Inner {
         spec: &str,
     ) {
         let id = task_of(session, k);
-        let task = NewTask {
-            id: id.clone(),
-            parent: Some(parent.clone()),
-            spec: spec.to_owned(),
-            labels: BTreeMap::from([
-                ("session".to_owned(), session.to_owned()),
-                ("root".to_owned(), root.to_owned()),
-                ("agent".to_owned(), agent.to_string()),
-            ]),
-            needs: Vec::new(),
-            terms: Terms::default(),
-        };
+        let task = session_task(root, session, agent, parent, k, spec);
         match self
             .dispatch(&format!("post:{id}"), Op::Post { task })
             .await
@@ -761,6 +772,90 @@ impl Inner {
             Some(Ok((_, false))) => self.stats.posts += 1,
             Some(Ok((_, true))) | None => {}
             Some(Err(error)) => self.fail(format!("post {id}: {error}")),
+        }
+    }
+
+    /// Posts a session's task k and claims it for the session's worker as one board group, so
+    /// both share one append instead of taking one each. Each op keeps its own verdict and the
+    /// keys the two-step path uses (post:{id} by the dispatcher, claim:{id}:1 by the worker), so a
+    /// retry of either path replays rather than doubles. Returns None, having written nothing,
+    /// when the task is already on the board (a restore or replay): the caller then takes the
+    /// two-step path, which reads the task's phase before claiming.
+    async fn post_claim(
+        &mut self,
+        root: &str,
+        session: &str,
+        agent: AgentId,
+        parent: &TaskId,
+        k: u64,
+        spec: &str,
+    ) -> Option<Option<ClaimId>> {
+        let id = task_of(session, k);
+        let task = session_task(root, session, agent, parent, k, spec);
+        let worker = worker_of(session);
+        self.worker(session).await?;
+        let post_at = self.tick();
+        let claim_at = self.tick();
+        let board = self.dispatcher_board().await?;
+        let _ = board.refresh().await;
+        if board.fold().task(&id).is_some() {
+            return None;
+        }
+        let before = board.fold().next();
+        let writes = vec![
+            Write {
+                by: None,
+                key: Some(format!("post:{id}")),
+                at_ms: post_at,
+                op: Op::Post { task },
+            },
+            Write {
+                by: Some(worker.clone()),
+                key: Some(format!("claim:{id}:1")),
+                at_ms: claim_at,
+                op: Op::Claim {
+                    task: id.clone(),
+                    lease_ms: LEASE_MS,
+                    fence: None,
+                    cap: None,
+                },
+            },
+        ];
+        let (mut verdicts, _) = board.submit_group(writes).await;
+        let claimed = verdicts.pop();
+        let posted = verdicts.pop();
+        let claim = match &claimed {
+            Some(Ok(_)) => board.fold().entries().iter().rev().find_map(|entry| {
+                match &entry.change {
+                    Change::Claimed {
+                        claim,
+                        worker: holder,
+                        ..
+                    } if entry.task == id && *holder == worker => Some(claim.clone()),
+                    _ => None,
+                }
+            }),
+            _ => None,
+        };
+        match posted {
+            Some(Ok(applied)) if applied.seq >= before => self.stats.posts += 1,
+            Some(Ok(_)) | None => {}
+            Some(Err(error)) => self.fail(format!("post {id}: {error}")),
+        }
+        match claimed {
+            Some(Ok(_)) => self.stats.claims += 1,
+            Some(Err(error)) => self.fail(format!("claim {id} for {session}: {error}")),
+            None => {}
+        }
+        Some(claim)
+    }
+
+    fn claimed(&mut self, session: &str, claim: Option<ClaimId>) {
+        if let Some(state) = self.sessions.get_mut(session) {
+            if state.claim != claim {
+                state.heard = None;
+            }
+            state.claim = claim;
         }
     }
 
@@ -881,9 +976,15 @@ impl Inner {
             }
         }
         let restored = k > 0;
+        let mut grouped = None;
         if !restored {
             k = 1;
-            self.post(root, session, id, &parent_task, k, spec).await;
+            grouped = self
+                .post_claim(root, session, id, &parent_task, k, spec)
+                .await;
+            if grouped.is_none() {
+                self.post(root, session, id, &parent_task, k, spec).await;
+            }
         }
         self.sessions.insert(
             session.to_owned(),
@@ -897,7 +998,10 @@ impl Inner {
                 last_output: None,
             },
         );
-        self.claim(session, restored).await;
+        match grouped {
+            Some(claim) => self.claimed(session, claim),
+            None => self.claim(session, restored).await,
+        }
     }
 
     async fn session_of(&mut self, root: &str, id: AgentId) -> Option<String> {
@@ -920,7 +1024,12 @@ impl Inner {
             Some(phase) if phase.terminal() => {}
             _ => return,
         }
-        self.post(root, session, id, &parent, k + 1, "reused").await;
+        let grouped = self
+            .post_claim(root, session, id, &parent, k + 1, "reused")
+            .await;
+        if grouped.is_none() {
+            self.post(root, session, id, &parent, k + 1, "reused").await;
+        }
         self.stats.reuses += 1;
         if let Some(state) = self.sessions.get_mut(session) {
             state.k = k + 1;
@@ -928,7 +1037,10 @@ impl Inner {
             state.heard = None;
             state.last_output = None;
         }
-        self.claim(session, false).await;
+        match grouped {
+            Some(claim) => self.claimed(session, claim),
+            None => self.claim(session, false).await,
+        }
     }
 
     async fn finish(
