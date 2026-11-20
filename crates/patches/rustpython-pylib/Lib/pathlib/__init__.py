@@ -120,6 +120,7 @@ class PurePath:
         '_hash',
     )
     parser = os.path
+    _flavour = os.path  # 3.12 name for parser, still used by code written against 3.12
 
     def __new__(cls, *args, **kwargs):
         """Construct a PurePath from one or several strings and or existing
@@ -606,6 +607,7 @@ class PurePosixPath(PurePath):
     However, you can also instantiate it directly on any system.
     """
     parser = posixpath
+    _flavour = posixpath  # 3.12 name for parser, still used by code written against 3.12
     __slots__ = ()
 
 
@@ -616,6 +618,7 @@ class PureWindowsPath(PurePath):
     However, you can also instantiate it directly on any system.
     """
     parser = ntpath
+    _flavour = ntpath  # 3.12 name for parser, still used by code written against 3.12
     __slots__ = ()
 
 

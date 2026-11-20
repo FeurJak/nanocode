@@ -410,10 +410,27 @@ mod _testinternalcapi {
             .collect()
     }
 
+    /// The flat config dict CPython 3.12's test.support reads: get_config()['code_debug_ranges'].
+    #[pyfunction]
+    fn get_config(vm: &VirtualMachine) -> PyResult<PyDictRef> {
+        config_dict(vm)
+    }
+
     #[pyfunction]
     fn get_configs(vm: &VirtualMachine) -> PyResult<PyDictRef> {
+        let configs = vm.ctx.new_dict();
+        configs.set_item("config", config_dict(vm)?.into(), vm)?;
+        Ok(configs)
+    }
+
+    fn config_dict(vm: &VirtualMachine) -> PyResult<PyDictRef> {
         let settings = &vm.state.config.settings;
         let global = vm.ctx.new_dict();
+        global.set_item(
+            "code_debug_ranges",
+            vm.ctx.new_bool(settings.code_debug_ranges).into(),
+            vm,
+        )?;
         global.set_item("isolated", vm.ctx.new_bool(settings.isolated).into(), vm)?;
         global.set_item("dev_mode", vm.ctx.new_bool(settings.dev_mode).into(), vm)?;
         global.set_item("verbose", vm.ctx.new_int(settings.verbose).into(), vm)?;
@@ -434,9 +451,7 @@ mod _testinternalcapi {
             vm.ctx.new_int(settings.hash_seed.unwrap_or(0)).into(),
             vm,
         )?;
-        let configs = vm.ctx.new_dict();
-        configs.set_item("config", global.into(), vm)?;
-        Ok(configs)
+        Ok(global)
     }
 
     #[pyfunction]
