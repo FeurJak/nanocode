@@ -148,7 +148,8 @@ impl Kept {
             }
             (_, asked) => {
                 asked.get().await?;
-                let tree = Rc::new(copy(&files, &call.cwd, shell.file).await?);
+                let roots = roots(&files, &call.cwd, &run.argv).await;
+                let tree = Rc::new(copy(&files, roots, shell.file).await?);
                 let mixed = Mixed {
                     tree: tree.clone(),
                     real: files.clone(),
@@ -500,30 +501,91 @@ impl Files for Direct {
     }
 }
 
-async fn copy(files: &Rc<dyn FileSystem>, root: &[u8], limit: u64) -> io::Result<Tree> {
-    let tree = Tree::new(vec![root.to_vec()]);
-    let mut dirs = vec![root.to_vec()];
-    while let Some(dir) = dirs.pop() {
-        let mode = files.stat(&dir, true).get().await?.mode;
-        for name in files.list(&dir).get().await? {
-            let path = join(&dir, &name);
-            let found = files.stat(&path, true).get().await?;
-            match found.kind {
-                nanocode_shell::Kind::Dir => dirs.push(path),
-                nanocode_shell::Kind::File => {
-                    let entry = Entry::File {
-                        data: files.read(&path, limit).get().await?.to_vec(),
-                        mode: found.mode,
-                        mtime_ns: found.mtime_ns,
-                    };
-                    tree.put(path, entry);
+/// The directories copied in for a run over a file system that cannot answer
+/// at once: the working directory, the temporary directory programs write
+/// scratch files and scripts to, and the directory of the script file named
+/// on the command line, without one nested in another.
+async fn roots(files: &Rc<dyn FileSystem>, cwd: &[u8], argv: &[String]) -> Vec<Vec<u8>> {
+    let mut wanted = vec![cwd.to_vec()];
+    let mut extra = vec![b"/tmp".to_vec()];
+    if let Some(script) = argv.first().filter(|arg| !arg.starts_with('-')) {
+        let script = script.as_bytes();
+        if script.starts_with(b"/") {
+            if let Some(slash) = script.iter().rposition(|&byte| byte == b'/') {
+                if slash > 0 {
+                    extra.push(script[..slash].to_vec());
                 }
-                nanocode_shell::Kind::Symlink => {}
             }
         }
-        tree.put(dir, Entry::Dir { mode });
+    }
+    for dir in extra {
+        let is_dir = matches!(
+            files.stat(&dir, true).get().await,
+            Ok(found) if matches!(found.kind, nanocode_shell::Kind::Dir)
+        );
+        if is_dir {
+            wanted.push(dir);
+        }
+    }
+    let inside = |path: &[u8], dir: &[u8]| {
+        dir == b"/"
+            || path == dir
+            || (path.starts_with(dir) && path.get(dir.len()) == Some(&b'/'))
+    };
+    let mut kept: Vec<Vec<u8>> = Vec::new();
+    for (index, dir) in wanted.iter().enumerate() {
+        let covered = wanted.iter().enumerate().any(|(other, root)| {
+            other != index && inside(dir, root) && (dir != root || other < index)
+        });
+        if !covered {
+            kept.push(dir.clone());
+        }
+    }
+    kept
+}
+
+/// Copies the roots in; the first must copy whole, while a file or directory
+/// under a later one that cannot be read is left out rather than failing the run.
+async fn copy(files: &Rc<dyn FileSystem>, roots: Vec<Vec<u8>>, limit: u64) -> io::Result<Tree> {
+    let tree = Tree::new(roots.clone());
+    let first = roots.first().cloned().unwrap_or_default();
+    let mut dirs = roots;
+    while let Some(dir) = dirs.pop() {
+        let strict = dir.starts_with(&first);
+        match copy_dir(files, &tree, &dir, limit, &mut dirs).await {
+            Err(_) if !strict => {}
+            done => done?,
+        }
     }
     Ok(tree)
+}
+
+async fn copy_dir(
+    files: &Rc<dyn FileSystem>,
+    tree: &Tree,
+    dir: &[u8],
+    limit: u64,
+    dirs: &mut Vec<Vec<u8>>,
+) -> io::Result<()> {
+    let mode = files.stat(dir, true).get().await?.mode;
+    for name in files.list(dir).get().await? {
+        let path = join(dir, &name);
+        let found = files.stat(&path, true).get().await?;
+        match found.kind {
+            nanocode_shell::Kind::Dir => dirs.push(path),
+            nanocode_shell::Kind::File => {
+                let entry = Entry::File {
+                    data: files.read(&path, limit).get().await?.to_vec(),
+                    mode: found.mode,
+                    mtime_ns: found.mtime_ns,
+                };
+                tree.put(path, entry);
+            }
+            nanocode_shell::Kind::Symlink => {}
+        }
+    }
+    tree.put(dir.to_vec(), Entry::Dir { mode });
+    Ok(())
 }
 
 async fn apply(tree: &Tree, files: &Rc<dyn FileSystem>) -> io::Result<()> {
