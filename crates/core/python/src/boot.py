@@ -364,15 +364,31 @@ class _Shim:
 sys.meta_path.insert(0, _Shim)
 
 
+class _FrozenFiles(_frozen_importlib.FrozenImporter):
+    # A frozen site package's data files sit beside its file name, as an installed one's do.
+    @staticmethod
+    def get_resource_reader(name=None):
+        spec = sys.modules[name].__spec__
+        if spec.submodule_search_locations is None:
+            return None
+        from importlib.resources.readers import FileReader
+
+        class _Path:
+            path = spec.loader_state.filename
+
+        return FileReader(_Path)
+
+
 class _Located:
     @staticmethod
     def find_spec(name, path=None, target=None):
-        if name.partition('.')[0] not in ('matplotlib', 'mpl_toolkits', 'numpy'):
+        if name.partition('.')[0] not in ('matplotlib', 'mpl_toolkits', 'numpy', 'tzdata'):
             return None
         spec = _frozen_importlib.FrozenImporter.find_spec(name)
         if spec is not None:
             tail = '/__init__.py' if spec.submodule_search_locations is not None else '.py'
             spec.loader_state.filename = '%s/lib/python%d.%d/site-packages/%s%s' % (sys.prefix, *sys.version_info[:2], name.replace('.', '/'), tail)
+            spec.loader = _FrozenFiles
         return spec
 
     @staticmethod
