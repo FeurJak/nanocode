@@ -314,6 +314,9 @@ default_table='
 1 canary_scale_row_per_record canary:16 --scenario scale --mutation row_per_record
 1 canary_scale_one_node canary:16 --scenario scale --mutation one_node
 1 canary_scale_double_claim canary:16 --scenario scale --mutation double_claim
+1 scale_skewed pass --scenario scale --load skewed
+1 scale_skewed_twice pass --scenario scale --load skewed --twice
+1 canary_scale_ignore_hot canary:16 --scenario scale --load skewed --mutation ignore_hot
 '
 default_known='
 '

@@ -6,7 +6,6 @@ mod board_brief;
 mod board_shards;
 mod board_steer;
 mod board_sync;
-mod dispatcher;
 mod boardagents;
 #[cfg(unix)]
 mod capture;
@@ -16,6 +15,7 @@ mod children;
 mod controlplane;
 mod cost;
 mod disk;
+mod dispatcher;
 #[cfg(target_os = "linux")]
 mod dns;
 mod drive;
@@ -75,11 +75,11 @@ use crate::{
     board_shards::{ShardsMutation, ShardsStats},
     board_steer::{SteerMutation as BoardSteerMutation, SteerStats as BoardSteerStats},
     board_sync::{SyncMutation as BoardSyncMutation, SyncStats as BoardSyncStats},
-    dispatcher::{DispatcherMutation, DispatcherStats},
     cellcalls::{CellCallsMutation, CellCallsStats},
     children::ChildMutation,
     controlplane::{ControlplaneMutation, ControlplaneStats},
     cost::{CostMutation, CostStats},
+    dispatcher::{DispatcherMutation, DispatcherStats},
     gitremote::{GitRemoteMutation, GitRemoteStats},
     handauto::{HandAutoMutation, HandAutoStats},
     handrouter::{HandRouterMutation, HandRouterStats},
@@ -96,7 +96,7 @@ use crate::{
     plog::{PlogMutation, PlogStats},
     repocache::{RepoCacheMutation, RepoCacheStats},
     requestclose::RequestCloseStats,
-    scale::{ScaleMutation, ScaleStats},
+    scale::{ScaleConfig, ScaleLoad, ScaleMutation, ScaleStats},
     simulate::{Options, run_seed},
     store::Mutation,
     streams::{StreamsMutation, StreamsStats},
@@ -200,7 +200,7 @@ struct Args {
     git_remote: GitRemoteMutation,
     workspace_stack: WorkspaceStackMutation,
     partitions: PartitionsMutation,
-    scale: ScaleMutation,
+    scale: ScaleConfig,
     hand_auto: HandAutoMutation,
     #[cfg(unix)]
     alloc: alloc::AllocMutation,
@@ -244,7 +244,7 @@ fn usage() -> ExitCode {
        git_remote: [--mutation {}]
        workspace_stack: [--mutation {}]
        partitions: [--mutation {}]
-       scale: [--mutation {}]
+       scale: [--load uniform|skewed] [--nodes 1,2,..,10] [--mutation {}]
        hand_auto: [--mutation {}]",
         Mutation::names(),
         TurnMutation::names(),
@@ -351,7 +351,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
     let mut git_remote = GitRemoteMutation::None;
     let mut workspace_stack = WorkspaceStackMutation::None;
     let mut partitions = PartitionsMutation::None;
-    let mut scale = ScaleMutation::None;
+    let mut scale = ScaleConfig::default();
     let mut hand_auto = HandAutoMutation::None;
     #[cfg(unix)]
     let mut capture = capture::CaptureMutation::None;
@@ -376,6 +376,8 @@ fn parse_args(args: &[String]) -> Option<Args> {
                 }
             }
             "--verbose" => options.verbose = true,
+            "--load" => scale.load = ScaleLoad::parse(rest.next()?)?,
+            "--nodes" => scale.nodes = scale::parse_nodes(rest.next()?)?,
             "--calm" => turns.calm = true,
             "--store" => whole.store = Some(StoreKind::parse(rest.next()?)?),
             "--deferred-start" => whole.deferred_start = true,
@@ -496,7 +498,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         (Scenario::BoardShards, Some(name)) => board_shards = ShardsMutation::parse(name)?,
         (Scenario::HandRouter, Some(name)) => hand_router = HandRouterMutation::parse(name)?,
         (Scenario::Partitions, Some(name)) => partitions = PartitionsMutation::parse(name)?,
-        (Scenario::Scale, Some(name)) => scale = ScaleMutation::parse(name)?,
+        (Scenario::Scale, Some(name)) => scale.mutation = ScaleMutation::parse(name)?,
         (Scenario::WorkspaceHost, Some(name)) => {
             workspace_host = WorkspaceHostMutation::parse(name)?
         }
@@ -681,7 +683,7 @@ fn replay(seed: u64, args: &Args) -> String {
         return partitions::replay(seed, args.partitions);
     }
     if args.scenario == Scenario::Scale {
-        return scale::replay(seed, args.scale);
+        return scale::replay(seed, &args.scale);
     }
     if args.scenario == Scenario::HandAuto {
         return handauto::replay(seed, args.hand_auto);
@@ -1415,7 +1417,7 @@ fn judge_one(seed: u64, args: &Args, totals: &mut Totals, caught: &mut Caught) -
         ),
         Scenario::Scale => scale::judge(
             seed,
-            args.scale,
+            &args.scale,
             args.twice,
             args.options.verbose,
             &mut totals.scale_totals,
@@ -1607,7 +1609,7 @@ fn main() -> ExitCode {
         || (args.scenario == Scenario::BoardShards && args.board_shards != ShardsMutation::None)
         || (args.scenario == Scenario::HandRouter && args.hand_router != HandRouterMutation::None)
         || (args.scenario == Scenario::Partitions && args.partitions != PartitionsMutation::None)
-        || (args.scenario == Scenario::Scale && args.scale != ScaleMutation::None)
+        || (args.scenario == Scenario::Scale && args.scale.mutation != ScaleMutation::None)
         || (args.scenario == Scenario::WorkspaceHost
             && args.workspace_host != WorkspaceHostMutation::None)
         || (args.scenario == Scenario::BoardSync && args.board_sync != BoardSyncMutation::None)
@@ -1959,7 +1961,7 @@ fn main() -> ExitCode {
             passed,
             failed,
             args.twice,
-            args.scale,
+            &args.scale,
             &scale_totals,
         );
     }
