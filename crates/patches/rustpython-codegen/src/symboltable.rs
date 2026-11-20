@@ -922,6 +922,13 @@ impl SymbolTableAnalyzer {
         st_typ: CompilerScope,
         skip_enclosing_function_scope: bool,
     ) -> Option<SymbolScope> {
+        // A class body's own use of `__conditional_annotations__` names the cell the
+        // compiler makes for that class; an enclosing class's cell is not visible
+        // from it (class scopes don't nest), so it resolves as a global, as when the
+        // class is nested in a function.
+        if st_typ == CompilerScope::Class && name == "__conditional_annotations__" {
+            return None;
+        }
         let mut decl_depth = None;
         for (i, (symbols, typ, _skip)) in self.tables.iter().rev().enumerate() {
             if matches!(typ, CompilerScope::Module)

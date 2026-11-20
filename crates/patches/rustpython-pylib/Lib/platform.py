@@ -190,8 +190,9 @@ def libc_ver(executable=None, lib='', version='', chunksize=16384):
 
         executable = sys.executable
 
-        if not executable:
-            # sys.executable is not set.
+        if not executable or not os.path.isfile(executable):
+            # sys.executable is not set, or names no file to scan (nanocode's
+            # python3 is built into the host, not a file in the workspace).
             return lib, version
 
     libc_search = re.compile(br"""

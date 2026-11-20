@@ -17,6 +17,11 @@ from _opcode_metadata import (_specializations, _specialized_opmap, opmap,  # no
                               HAVE_ARGUMENT, MIN_INSTRUMENTED_OPCODE)  # noqa: F401
 EXTENDED_ARG = opmap['EXTENDED_ARG']
 
+# RustPython has no specializing adaptive interpreter, so tests that need one
+# (test.support.requires_specialization) skip, as on a CPython built without it.
+ENABLE_SPECIALIZATION = getattr(_opcode, 'ENABLE_SPECIALIZATION', False)
+ENABLE_SPECIALIZATION_FT = getattr(_opcode, 'ENABLE_SPECIALIZATION_FT', False)
+
 opname = ['<%r>' % (op,) for op in range(max(opmap.values()) + 1)]
 for m in (opmap, _specialized_opmap):
     for op, i in m.items():
