@@ -744,6 +744,26 @@ impl PyCode {
         py_code
     }
 
+    /// A code object from a frozen module's marshaled form
+    /// (FrozenCodeObject::decompress).
+    pub(crate) fn new_ref_from_marshaled(vm: &VirtualMachine, decompressed: &[u8]) -> PyRef<Self> {
+        let code = frozen::deserialize(decompressed, PyVmBag(vm));
+        let py_code = Self::new_ref_with_bag(vm, code);
+        apply_frozen_co_filename(&py_code, vm);
+        py_code
+    }
+
+    /// This interpreter's own code object for a frozen module that the
+    /// process already decoded.
+    pub(crate) fn new_ref_from_shared(
+        vm: &VirtualMachine,
+        code: &bytecode::CodeObject,
+    ) -> PyRef<Self> {
+        let py_code = Self::new_ref_with_bag(vm, code.map_clone_bag(&PyVmBag(vm)));
+        apply_frozen_co_filename(&py_code, vm);
+        py_code
+    }
+
     pub fn from_pyc_path(_path: &std::path::Path, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
         Err(vm.new_runtime_error("loading a pyc file requires the `host_env` feature"))
     }
