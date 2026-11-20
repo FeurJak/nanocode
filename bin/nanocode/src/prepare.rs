@@ -26,30 +26,14 @@ pub(super) fn prepare<'a>(
                 "this binary supplies its own Codex client; --gateway is unavailable".into(),
             );
         }
-        let antigravity = match args.harness {
-            Some(harness) => harness == crate::HarnessArg::Antigravity,
-            None => args
-                .model
-                .as_deref()
-                .is_some_and(|model| model.starts_with("gemini-")),
-        };
-        if !antigravity
-            && args
-                .model
-                .as_deref()
-                .is_none_or(|model| clients.resolve(model).is_err())
+        if args
+            .model
+            .as_deref()
+            .is_none_or(|model| clients.resolve(model).is_err())
         {
             clients.listed().await?;
         }
         let (route, model) = match (&args.model, args.harness) {
-            (model, _) if antigravity => (
-                host::Route::Native,
-                nanocode::antigravity::AntigravityHarness::selection(
-                    model
-                        .clone()
-                        .unwrap_or_else(|| nanocode::antigravity::DEFAULT_MODEL.to_owned()),
-                ),
-            ),
             (Some(model), harness) => {
                 let (route, model) = clients.resolve(model)?;
                 let model = match harness {
@@ -141,7 +125,6 @@ pub(super) fn prepare<'a>(
             runner_servers: runner_configs.servers,
             tab: runner_configs.tab,
             gateway,
-            google: args.google.config(),
             clients,
             headless,
             cyber_access_program: args.cyber_access_program.map(Into::into),

@@ -35,7 +35,6 @@
 | `nanocode-machine` | `machine!`: a lifecycle declared once as states, wire names and moves, with its stored-state check and fence text |
 | `nanocode-http`, `nanocode-zstd`, `nanocode-tls` | HTTP layer contracts and retry rules, a streaming zstd decoder, cached TLS configuration |
 | `nanocode-mcp`, `nanocode-mcp-http` | The MCP client: portable session engine; native Streamable HTTP and OAuth |
-| `nanocode-google-auth` | Google Cloud access tokens from Application Default Credentials: user, service account, impersonated and workload identity credentials, the metadata server, gcloud |
 | `nanocode-schema` | JSON Schema validation for output contracts |
 | `nanocode-home` | The Nanocode home, AGENTS.md and skill discovery, shell detection, user services |
 | `nanocode-image`, `nanocode-audio` | Prompt image preparation; audio token accounting |
@@ -59,9 +58,6 @@
 
 | Crate | Owns |
 | --- | --- |
-| `nanocode-backend-antigravity-client` | The Gemini wire format, SSE streaming, retries, explicit context caching |
-| `nanocode-backend-antigravity-tools` | Antigravity's engine tools, their declarations and output formats |
-| `nanocode-backend-antigravity` | The Antigravity driver, its pinned prompts, reminders and compaction |
 | `nanocode-backend-claude-client` | The Messages wire format, authentication, the subscription wire, streaming, message threads |
 | `nanocode-backend-claude-tools` | Claude's tool definitions and handlers |
 | `nanocode-backend-claude` | The Claude driver, its pinned upstream prompts and tools, durability format |

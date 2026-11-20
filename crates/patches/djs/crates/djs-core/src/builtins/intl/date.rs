@@ -39,9 +39,9 @@ pub(super) struct DateLocale {
     gmt: [&'static str; 2],
 }
 
-pub(super) const LANGS: [&str; 35] = [
+pub(super) const LANGS: [&str; 38] = [
     "en", "de", "fr", "es", "it", "pt", "nl", "ja", "zh", "ko", "ru", "pl", "tr", "ar", "hi", "id", "vi", "hu", "nb", "no", "he", "ta", "sr", "cs", "uk", "sv", "da",
-    "ms", "ro", "bn", "el", "sw", "ur", "fil", "ca",
+    "ms", "ro", "bn", "el", "sw", "ur", "fil", "ca", "th", "fa", "am",
 ];
 
 fn date_locale(locale: &str) -> Option<usize> {
@@ -287,7 +287,7 @@ pub(super) fn resolve(locale: &str, tags: &[String], raw: &Spec) -> Result<Spec,
         (Some(o), Some(k)) if o != k => (o, false),
         (Some(o), k) => (o, k.is_some()),
         (None, Some(k)) => (k, true),
-        (None, None) => (0, false),
+        (None, None) => (calendar::default_for(locale), false),
     };
     let nu_key = keywords.iter().find(|(k, _)| *k == "nu").map(|(_, v)| v.as_str()).filter(|v| nu_supported(v));
     let nu_opt = raw.get("numberingSystem");

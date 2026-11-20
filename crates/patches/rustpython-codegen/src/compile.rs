@@ -180,11 +180,6 @@ struct Compiler<'a> {
     current_source_range: TextRange,
     future_features: bytecode::CodeFlags,
     future_annotations: bool,
-    /// A module or class body that names `__annotations__` also fills an
-    /// eager `__annotations__` dict, as CPython 3.12 does, next to `__annotate__`.
-    eager_annotations: bool,
-    /// Compiling an eagerly evaluated annotation outside its annotation scope.
-    in_eager_annotation: bool,
     ctx: CompileContext,
     opts: CompileOpts,
     in_annotation: bool,
@@ -1208,8 +1203,6 @@ impl<'warnings> Compiler<'warnings> {
             current_source_range: TextRange::default(),
             future_features: opts.future_features,
             future_annotations: false,
-            eager_annotations: false,
-            in_eager_annotation: false,
             ctx: CompileContext {
                 in_class: false,
                 func: FunctionContext::NoFunction,
@@ -2949,8 +2942,7 @@ impl<'warnings> Compiler<'warnings> {
             self.store_name(&"__conditional_annotations__".into())?;
         }
 
-        self.eager_annotations = self.scope_wants_eager_annotations();
-        if (self.future_annotations || self.eager_annotations) && annotations_used {
+        if self.future_annotations && annotations_used {
             self.set_source_range(module_start_loc);
             emit!(self, Instruction::SetupAnnotations);
         }
@@ -3028,8 +3020,7 @@ impl<'warnings> Compiler<'warnings> {
             self.store_name(&"__conditional_annotations__".into())?;
         }
 
-        self.eager_annotations = self.scope_wants_eager_annotations();
-        if (self.future_annotations || self.eager_annotations) && annotations_used {
+        if self.future_annotations && annotations_used {
             self.set_source_range(module_start_loc);
             // PEP 563: Initialize __annotations__ dict
             emit!(self, Instruction::SetupAnnotations);
@@ -3361,8 +3352,6 @@ impl<'warnings> Compiler<'warnings> {
                         | CompilerScope::TypeVariable
                         | CompilerScope::TypeParams
                 ) {
-                    SymbolScope::GlobalImplicit
-                } else if self.in_eager_annotation {
                     SymbolScope::GlobalImplicit
                 } else if matches!(
                     name.as_str(),
@@ -6017,9 +6006,7 @@ impl<'warnings> Compiler<'warnings> {
             self.store_name(&"__conditional_annotations__".into())?;
         }
 
-        let eager_annotations = self.scope_wants_eager_annotations();
-        let saved_eager_annotations = mem::replace(&mut self.eager_annotations, eager_annotations);
-        if (self.future_annotations || eager_annotations) && annotations_used {
+        if self.future_annotations && annotations_used {
             emit!(self, Instruction::SetupAnnotations);
         }
 
@@ -6035,7 +6022,6 @@ impl<'warnings> Compiler<'warnings> {
 
         // 3. Compile the class body
         self.compile_statements(body)?;
-        self.eager_annotations = saved_eager_annotations;
 
         if annotations_used && !self.future_annotations {
             self.compile_module_annotate(body, Some(class_body_prefix_range))?;
@@ -8260,39 +8246,6 @@ impl<'warnings> Compiler<'warnings> {
         Ok(())
     }
 
-    /// Whether a module or class body should also fill an eager
-    /// `__annotations__` dict: it names `__annotations__` itself, which under
-    /// PEP 649 alone would raise NameError (CPython 3.12 code does this).
-    fn scope_wants_eager_annotations(&self) -> bool {
-        let table = self.current_symbol_table();
-        !self.future_annotations
-            && table.annotations_used
-            && matches!(table.typ, CompilerScope::Module | CompilerScope::Class)
-            && table
-                .lookup(&Name::new_static("__annotations__"))
-                .is_some()
-    }
-
-    /// Annotations holding their own scopes (lambdas, comprehensions) or
-    /// walrus targets live only in the annotation scope's symbol table, so
-    /// they are left to `__annotate__`.
-    fn annotation_has_nested_scope(annotation: &ast::Expr) -> bool {
-        ruff_python_ast::helpers::any_over_expr(annotation, |expr| {
-            matches!(
-                expr,
-                ast::Expr::Lambda(_)
-                    | ast::Expr::ListComp(_)
-                    | ast::Expr::SetComp(_)
-                    | ast::Expr::DictComp(_)
-                    | ast::Expr::Generator(_)
-                    | ast::Expr::Named(_)
-                    | ast::Expr::Yield(_)
-                    | ast::Expr::YieldFrom(_)
-                    | ast::Expr::Await(_)
-            )
-        })
-    }
-
     fn compile_annotated_assign(
         &mut self,
         target: &ast::Expr,
@@ -8360,24 +8313,6 @@ impl<'warnings> Compiler<'warnings> {
                         emit!(self, Instruction::SetAdd { i: 1 });
                         emit!(self, Instruction::PopTop);
                     }
-                }
-                if self.eager_annotations && !Self::annotation_has_nested_scope(annotation) {
-                    let was_eager = mem::replace(&mut self.in_eager_annotation, true);
-                    let result = self.compile_annotation(annotation);
-                    self.in_eager_annotation = was_eager;
-                    result?;
-                    self.set_source_range(loc);
-                    let annotations_name = self.name("__annotations__");
-                    emit!(
-                        self,
-                        Instruction::LoadName {
-                            namei: annotations_name
-                        }
-                    );
-                    self.emit_load_const(ConstantData::Str {
-                        value: self.mangle(id).as_str().into(),
-                    });
-                    emit!(self, Instruction::StoreSubscr);
                 }
             }
         }

@@ -32,9 +32,6 @@ members = [
     "crates/runtime/board-sync",
     "crates/runtime/live",
     "crates/runtime/hands",
-    "crates/backends/antigravity",
-    "crates/backends/antigravity/client",
-    "crates/backends/antigravity/tools",
     "crates/backends/claude",
     "crates/backends/claude/client",
     "crates/backends/claude/tools",
@@ -42,7 +39,6 @@ members = [
     "crates/backends/codex/client",
     "crates/core/home",
     "crates/core/http",
-    "crates/core/google-auth",
     "crates/core/bytes",
     "crates/core/zstd",
     "crates/core/digest",
@@ -154,14 +150,10 @@ nanocode-tool-contracts = { version = "0.7.0", path = "crates/core/tool-contract
 nanocode-store-jsonl = { version = "0.7.0", path = "crates/integrations/store-jsonl" }
 memchr = "2.8.3"
 nanocode-backend-claude = { version = "0.7.0", path = "crates/backends/claude" }
-nanocode-backend-antigravity = { version = "0.7.0", path = "crates/backends/antigravity" }
-nanocode-backend-antigravity-client = { version = "0.7.0", path = "crates/backends/antigravity/client" }
-nanocode-backend-antigravity-tools = { version = "0.7.0", path = "crates/backends/antigravity/tools" }
 nanocode-backend-claude-client = { version = "0.7.0", path = "crates/backends/claude/client" }
 nanocode-arguments = { version = "0.7.0", path = "crates/core/arguments" }
 nanocode-home = { version = "0.7.0", path = "crates/core/home" }
 nanocode-http = { version = "0.7.0", path = "crates/core/http" }
-nanocode-google-auth = { version = "0.7.0", path = "crates/core/google-auth" }
 nanocode-bytes = { version = "0.7.0", path = "crates/core/bytes" }
 nanocode-machine = { version = "0.7.0", path = "crates/core/machine" }
 nanocode-mcp = { version = "0.7.0", path = "crates/core/mcp" }

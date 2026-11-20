@@ -602,16 +602,36 @@ mod escape_warnings {
 
         fn warning_message(&self) -> String {
             match self {
-                Self::Char { ch, .. } => format!("invalid escape sequence '\\{ch}'"),
+                Self::Char { ch, .. } => format!(
+                    "\"\\{ch}\" is an invalid escape sequence. \
+                     Such sequences will not work in the future. \
+                     Did you mean \"\\\\{ch}\"? A raw string is also an option."
+                ),
                 Self::Octal { digits, .. } => {
                     let [a, b, c] = Self::octal_text(*digits);
-                    format!("invalid octal escape sequence '\\{a}{b}{c}'")
+                    format!(
+                        "\"\\{a}{b}{c}\" is an invalid octal escape sequence. \
+                         Such sequences will not work in the future. \
+                         Did you mean \"\\\\{a}{b}{c}\"? A raw string is also an option."
+                    )
                 }
             }
         }
 
         fn syntax_error_message(&self) -> String {
-            self.warning_message()
+            match self {
+                Self::Char { ch, .. } => format!(
+                    "\"\\{ch}\" is an invalid escape sequence. \
+                     Did you mean \"\\\\{ch}\"? A raw string is also an option."
+                ),
+                Self::Octal { digits, .. } => {
+                    let [a, b, c] = Self::octal_text(*digits);
+                    format!(
+                        "\"\\{a}{b}{c}\" is an invalid octal escape sequence. \
+                         Did you mean \"\\\\{a}{b}{c}\"? A raw string is also an option."
+                    )
+                }
+            }
         }
     }
 

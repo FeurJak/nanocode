@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # suite.py > intl-dtf-cal.jsonl: tempoxyz/nanocode-rt parity cases for DateTimeFormat calendars
-# (one case per calendar x locale, plus option resolution), diffed against reference node v22.23.5.
+# (one case per calendar x locale, default for a locale's own calendar, plus option resolution), diffed against reference node v22.23.5.
 import json, random
-CALS = {"buddhist": [], "roc": ["zh-TW"], "japanese": ["ja"], "persian": [], "islamic-civil": ["ar"], "islamic-tbla": ["ar"],
+CALS = {"default": ["th", "fa", "am"], "gregory": ["th", "fa", "am"], "buddhist": ["th"], "roc": ["zh-TW"], "japanese": ["ja"], "persian": ["fa"], "islamic-civil": ["ar"], "islamic-tbla": ["ar"],
         "islamic-umalqura": ["ar"], "islamic": ["ar"], "islamic-rgsa": ["ar"], "hebrew": ["he"], "indian": ["hi"], "coptic": ["ar"],
         "ethiopic": [], "ethioaa": [], "chinese": ["zh"], "dangi": ["ko"], "iso8601": []}
 rnd = random.Random(22235)
@@ -15,8 +15,8 @@ OPTS = [{}, {"dateStyle": "full"}, {"dateStyle": "long"}, {"dateStyle": "medium"
         {"year": "numeric", "month": "long", "day": "numeric", "hour": "numeric", "minute": "2-digit"}, {"year": "numeric", "month": "short", "day": "numeric", "timeZoneName": "short"}]
 out = []
 for cal, natives in CALS.items():
-    for loc in ["en-US"] + natives:
-        tag = f"{loc}-u-ca-{cal}"
+    for loc in (natives if cal in ("default", "gregory") else ["en-US"] + natives):
+        tag = loc if cal == "default" else f"{loc}-u-ca-{cal}"
         src = (f"const D={json.dumps(DATES)}.map(s=>new Date(s));const out=[];for(const o of {json.dumps(OPTS)})"
                f"{{const f=new Intl.DateTimeFormat({json.dumps(tag)},{{timeZone:'UTC',...o}});const r=f.resolvedOptions();"
                "out.push(JSON.stringify(o)+' '+r.locale+' '+r.calendar);for(const d of D)out.push(f.formatToParts(d).map(p=>p.type+':'+p.value).join('|'))}"

@@ -53,19 +53,9 @@ stateDiagram-v2
 
 ## LogHost and SqlParts
 
-`LogHost` (`crates/core/turnlog/src/host.rs`) is scan, load and append over a scope, plus an optional checkpoint per scope. `PartedLog` (`parted/mod.rs`) implements it over a `PartStore` and appends to a partition only while it holds that partition's fence. `PartedLog::claim` runs `Row::claim` (`crates/core/partitions/src/lib.rs`): the row is taken if it is free, ours, expired or its holder is not live, and the epoch rises. The row is swapped with `PartStore::swap_fence`, which fails if the row changed. `renew` extends the lease and `release` frees it after in-flight appends land.
+`LogHost` (`crates/core/turnlog/src/host.rs`) is scan, load and append over a scope. `PartedLog` (`parted/mod.rs`) implements it over a `PartStore` and appends to a partition only while it holds that partition's fence. `PartedLog::claim` runs `Row::claim` (`crates/core/partitions/src/lib.rs`): the row is taken if it is free, ours, expired or its holder is not live, and the epoch rises. The row is swapped with `PartStore::swap_fence`, which fails if the row changed. `renew` extends the lease and `release` frees it after in-flight appends land.
 
 `SqlParts` (`parted/sql.rs`) is the `PartStore` for Postgres and SQLite, with a statement per dialect (`Dialects`, picked by `SqlParts::pick`). Every write first runs the `LOCK` statement on the partition's `nanocode_log_fence` row, matching the epoch; if no row matches the whole batch fails with `StoreError::Fenced`. On Postgres a commit sends `pg_notify('nanocode_log', 'scope:head')`; `SqlParts::notifier` batches those off the commit path.
-
-## Checkpoints
-
-`Board::open` reopens from the scope's checkpoint when it can (`crates/runtime/board/src/checkpoint.rs`): the fold's compact snapshot after every row before a seq, base64 under a hash of the row just before that seq, saved through `LogHost::save_checkpoint` and read with `LogHost::checkpoint`. It folds only the rows from that seq on. `SqlLog` and `SqlParts` keep checkpoints in `nanocode_checkpoint` (scope, part, parts, seq, version, body), with a body split into 1 MB rows and replaced in one transaction. `MemoryLog` keeps them in memory, and `PartedLog` and `Notifying` pass them through. A host that returns None keeps none, and its boards replay.
-
-A board saves one every `CHECKPOINT_EVERY` (4096) events past its last, after a submit or group commits, or when `Board::checkpoint` is called (call it before closing a board). `checkpoint_every` changes the cadence for the process. A save takes no fence, and a failed one only means a longer replay.
-
-A checkpoint is used only when its version is this build's `CHECKPOINT_VERSION` (a format number and a hash of the fold's source and the machine and schema sources it rests on, made by `board-fold/build.rs`), when it restores, when its fold's next seq is its seq, and when the row before that seq is in the log as it was hashed. Otherwise the board replays the whole log, and `Board::opened` says why (`Opened::Replay(Fallback)`). So a build whose fold changed replays once and saves a new one, and a log restored from an older copy is never folded from a checkpoint that is ahead of it. The board sim reopens boards from checkpoints at random cuts against a full replay, and its canaries `checkpoint_version_ignored` and `checkpoint_tail_unchecked` drop each guard.
-
-`cargo run --release -p nanocode-board --example reopen` times `Board::open` over a `MemoryLog` of swarm events (post, claim, renew, finish, some steers). On 4 cores: 10k events 68 ms replayed, 26 ms from a checkpoint at the head; 50k 293 ms and 102 ms; 100k 702 ms and 171 ms, and 175 ms from one 4096 events behind. The fold keeps every entry, task and event id, so a checkpoint still grows with the log (about 300 bytes an event, 31 MB at 100k) and its restore is linear too, only cheaper per event than folding. Bounding it further means compacting the fold's history, which checkpoints don't do.
 
 ## Watch and wake
 

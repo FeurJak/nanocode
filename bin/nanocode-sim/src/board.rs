@@ -19,7 +19,7 @@ use nanocode_board::{
 };
 use nanocode_durability_core::{StoreError, StoreFuture};
 use nanocode_sync::Slot;
-use nanocode_turnlog::{LogHost, MemoryLog, StoredCheckpoint};
+use nanocode_turnlog::{LogHost, MemoryLog};
 
 use crate::{
     executor::{Clock, Ended, Executor, Task},
@@ -94,8 +94,6 @@ pub enum BoardMutation {
     ResumeSkipsRows,
     SnapshotSkipsRows,
     SnapshotLosesDedupe,
-    CheckpointVersionIgnored,
-    CheckpointTailUnchecked,
     DueIgnored,
     DueFiresTwice,
     RecurrenceSkipsOnRestart,
@@ -128,7 +126,7 @@ pub enum BoardMutation {
 }
 
 impl BoardMutation {
-    const ALL: [Self; 74] = [
+    const ALL: [Self; 72] = [
         Self::None,
         Self::ClaimIgnoresLease,
         Self::ClaimIgnoresNeeds,
@@ -174,8 +172,6 @@ impl BoardMutation {
         Self::ResumeSkipsRows,
         Self::SnapshotSkipsRows,
         Self::SnapshotLosesDedupe,
-        Self::CheckpointVersionIgnored,
-        Self::CheckpointTailUnchecked,
         Self::DueIgnored,
         Self::DueFiresTwice,
         Self::RecurrenceSkipsOnRestart,
@@ -261,8 +257,6 @@ impl BoardMutation {
             Self::ResumeSkipsRows => "resume_skips_rows",
             Self::SnapshotSkipsRows => "snapshot_skips_rows",
             Self::SnapshotLosesDedupe => "snapshot_loses_dedupe",
-            Self::CheckpointVersionIgnored => "checkpoint_version_ignored",
-            Self::CheckpointTailUnchecked => "checkpoint_tail_unchecked",
             Self::DueIgnored => "due_ignored",
             Self::DueFiresTwice => "due_fires_twice",
             Self::RecurrenceSkipsOnRestart => "recurrence_skips_on_restart",
@@ -355,8 +349,6 @@ impl BoardMutation {
             Self::ResumeSkipsRows => BoardRule::ResumeSkipsRows,
             Self::SnapshotSkipsRows => BoardRule::SnapshotSkipsRows,
             Self::SnapshotLosesDedupe => BoardRule::SnapshotLosesDedupe,
-            Self::CheckpointVersionIgnored => BoardRule::CheckpointVersionIgnored,
-            Self::CheckpointTailUnchecked => BoardRule::CheckpointTailUnchecked,
             Self::DueIgnored => BoardRule::DueIgnored,
             Self::DueFiresTwice => BoardRule::DueFiresTwice,
             Self::RecurrenceSkipsOnRestart => BoardRule::RecurrenceSkipsOnRestart,
@@ -723,39 +715,6 @@ impl LogHost for FaultLog {
             }
             appended
         })
-    }
-
-    fn checkpoint<'a>(
-        &'a self,
-        scope: &'a str,
-    ) -> Option<StoreFuture<'a, Result<Option<StoredCheckpoint>, StoreError>>> {
-        Some(Box::pin(async move {
-            self.clock.sleep(self.delay()).await;
-            if self.roll(|rng| rng.chance(self.read_ppm)) {
-                return Err(self.injected("checkpoint read"));
-            }
-            self.inner
-                .checkpoint(scope)
-                .expect("a memory log keeps checkpoints")
-                .await
-        }))
-    }
-
-    fn save_checkpoint<'a>(
-        &'a self,
-        scope: &'a str,
-        checkpoint: &'a StoredCheckpoint,
-    ) -> Option<StoreFuture<'a, Result<(), StoreError>>> {
-        Some(Box::pin(async move {
-            self.clock.sleep(self.delay()).await;
-            if self.roll(|rng| rng.chance(self.before_ppm)) {
-                return Err(self.injected("checkpoint save"));
-            }
-            self.inner
-                .save_checkpoint(scope, checkpoint)
-                .expect("a memory log keeps checkpoints")
-                .await
-        }))
     }
 }
 
@@ -1826,95 +1785,6 @@ fn resumes(rows: &[(u64, String)]) -> Result<(), String> {
     Ok(())
 }
 
-/// A board opened from a checkpoint at a random cut and the rows after it must fold what a full
-/// replay folds; one opened over a checkpoint another fold's version wrote, or over a log that no
-/// longer holds the row the checkpoint ends on, must replay the whole log instead.
-fn reopens_from_checkpoints(seed: u64, rows: &[(u64, String)]) -> Result<(), String> {
-    use nanocode_board::checkpoint::{self, Fallback, Opened};
-    let fold = |rows: &[(u64, String)]| -> Result<nanocode_board::Fold, String> {
-        let mut fold = nanocode_board::Fold::new();
-        for (seq, body) in rows {
-            fold.apply(*seq, body)
-                .map_err(|error| format!("refold: {error}"))?;
-        }
-        Ok(fold)
-    };
-    let open = |rows: &[(u64, String)], saved: &StoredCheckpoint| {
-        let log = Arc::new(MemoryLog::new());
-        nanocode_sync::block_on(async {
-            if !rows.is_empty() {
-                log.append(SCOPE, rows).await?;
-            }
-            log.save_checkpoint(SCOPE, saved)
-                .expect("a memory log keeps checkpoints")
-                .await
-        })
-        .map_err(|error| format!("copy the log: {error}"))?;
-        let host: Arc<dyn LogHost> = log;
-        nanocode_sync::block_on(Board::open(host, SCOPE, access::identity("user:reopener")))
-            .map_err(|error| format!("open over a checkpoint at {}: {error}", saved.seq))
-    };
-    if rows.is_empty() {
-        return Ok(());
-    }
-    let full = fold(rows)?;
-    let mut rng = Rng::derive(seed, "checkpoint cuts");
-    for _ in 0..3 {
-        let cut = 1 + rng.pick(rows.len());
-        let held = fold(&rows[..cut])?;
-        let saved = checkpoint::encode(&held, &rows[cut - 1].1);
-        let board = open(rows, &saved)?;
-        let tail = (rows.len() - cut) as u64;
-        let expected = Opened::Checkpoint {
-            seq: saved.seq,
-            tail,
-        };
-        if board.opened() != &expected {
-            return Err(format!(
-                "a board over a checkpoint at row {cut} of {} opened as {:?}, not {expected:?}",
-                rows.len(),
-                board.opened()
-            ));
-        }
-        if board.fold() != &full {
-            return Err(format!(
-                "a board opened from a checkpoint at row {cut} differs from a full replay of {} rows",
-                rows.len()
-            ));
-        }
-        // A fold another build wrote: the same snapshot under a version this build doesn't
-        // write must not be trusted, whatever it holds.
-        let stale = StoredCheckpoint {
-            version: "board-fold/0/stale".to_owned(),
-            ..saved.clone()
-        };
-        let board = open(rows, &stale)?;
-        if !matches!(board.opened(), Opened::Replay(Fallback::Version(_))) {
-            return Err(format!(
-                "a board opened from a checkpoint at row {cut} another fold's version wrote ({:?})",
-                board.opened()
-            ));
-        }
-        if board.fold() != &full {
-            return Err(format!(
-                "a board over a stale checkpoint at row {cut} differs from a full replay"
-            ));
-        }
-        // A log that lost the rows from the checkpoint's last one on, as a restore from an older
-        // copy would: the checkpoint is ahead of the log and must not be used.
-        let lost = &rows[..cut - 1];
-        let board = open(lost, &saved)?;
-        if board.fold() != &fold(lost)? {
-            return Err(format!(
-                "a board over {} rows opened from a checkpoint at row {cut} ({:?}) differs from a full replay",
-                lost.len(),
-                board.opened()
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn check(world: &World, rows: &[(u64, String)]) -> Result<BoardStats, String> {
     let mut fold = nanocode_board::Fold::new();
     for (seq, body) in rows {
@@ -2086,14 +1956,6 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
         shape,
     };
     board_sim::mutate(mutation.rule());
-    // Boards save checkpoints as they go and reopen from them after a crash: every few events
-    // on most seeds, never on some, so a reopen meets both.
-    let mut cadence = Rng::derive(seed, "checkpoint cadence");
-    nanocode_board::checkpoint::checkpoint_every(if cadence.chance(250_000) {
-        0
-    } else {
-        cadence.range(1, 33)
-    });
     let mut crashes = world.shape.crashes.clone();
     crashes.sort_unstable();
     let mut number = 0;
@@ -2164,13 +2026,11 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
         .unwrap_or_default();
     let indexed = indexes(&rows);
     let resumed = resumes(&rows);
-    let checkpointed = reopens_from_checkpoints(seed, &rows);
     let due = due::run(seed);
     let intended = intent::run(seed).map(|_| ());
     let delivered = deliver::run(seed);
     board_sim::mutate(BoardRule::None);
-    nanocode_board::checkpoint::checkpoint_every(nanocode_board::checkpoint::CHECKPOINT_EVERY);
-    for wrong in [live, indexed, resumed, checkpointed, intended]
+    for wrong in [live, indexed, resumed, intended]
         .into_iter()
         .filter_map(Result::err)
     {

@@ -313,9 +313,6 @@ impl ModelSelection {
                 (_, Some(_), ModelTransport::Managed) => {
                     (set(&[Low, Medium, High]), Medium, false, false, false)
                 }
-                _ if self.backend.as_str() == "antigravity" => {
-                    (set(&[None, Low, Medium, High]), High, false, false, false)
-                }
                 _ => (set(&Thinking::ALL), Medium, false, false, false),
             };
         ModelCapabilities {

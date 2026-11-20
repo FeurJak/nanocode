@@ -1,6 +1,6 @@
 // diff.js CAL [TAGS...]: prints one JSON line per case (tag, options, date) with formatToParts,
 // format, resolvedOptions().calendar/locale and toLocale*String, for running under node and djs and
-// comparing (check.sh). Deterministic: dates come from a fixed LCG over 1900-2100.
+// comparing (check.sh). CAL default uses the tags as given (their own default calendar). Deterministic: dates come from a fixed LCG over 1900-2100.
 const ARGS = typeof CAL_ARGS !== "undefined" ? CAL_ARGS : process.argv.slice(2);
 const cal = ARGS[0];
 const NATIVE = {buddhist: [], roc: ["zh-TW"], japanese: ["ja"], persian: [], "islamic-civil": ["ar"], "islamic-tbla": ["ar"], "islamic-umalqura": ["ar"], islamic: ["ar"], "islamic-rgsa": ["ar"],
@@ -17,7 +17,7 @@ const optSets = [{}, {dateStyle: "full"}, {dateStyle: "long"}, {dateStyle: "medi
 for (let k = 0; k < 60; k++) { const o = {}; if (rnd() < .3) o.weekday = pick(W); if (rnd() < .3) o.era = pick(W); if (rnd() < .7) o.year = pick(N); if (rnd() < .7) o.month = pick(M); if (rnd() < .7) o.day = pick(N); if (rnd() < .2) o.hour = "numeric"; if (rnd() < .1) o.timeZoneName = "short"; optSets.push(o); }
 const out = [];
 for (const tag of tags) {
-  const loc = tag + "-u-ca-" + cal;
+  const loc = cal === "default" ? tag : tag + "-u-ca-" + cal;
   for (const o of optSets) {
     let f; try { f = new Intl.DateTimeFormat(loc, {timeZone: "UTC", ...o}); } catch (e) { out.push(JSON.stringify({loc, o, err: String(e)})); continue; }
     const ro = f.resolvedOptions();
@@ -28,7 +28,7 @@ for (const tag of tags) {
   }
   const d = new Date(Date.UTC(2023, 2, 25, 13, 5));
   out.push(JSON.stringify({loc, tl: [d.toLocaleDateString(loc, {timeZone: "UTC"}), d.toLocaleString(loc, {timeZone: "UTC"}), d.toLocaleTimeString(loc, {timeZone: "UTC"})]}));
-  out.push(JSON.stringify({loc, opt: new Intl.DateTimeFormat(tag, {calendar: cal}).resolvedOptions().calendar}));
+  out.push(JSON.stringify({loc, opt: new Intl.DateTimeFormat(tag, cal === "default" ? {} : {calendar: cal}).resolvedOptions().calendar}));
 }
 console.log(out.join("\n"));
 

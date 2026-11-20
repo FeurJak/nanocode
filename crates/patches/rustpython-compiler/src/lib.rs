@@ -5721,7 +5721,7 @@ fn invalid_conversion_error(
             .get(following)
             .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
         {
-            "conversion type must come right after the exclamanation mark"
+            "conversion type must come right after the exclamation mark"
         } else {
             "missing conversion character"
         };
@@ -5766,13 +5766,6 @@ fn invalid_conversion_error(
 
     let conversion_end = identifier_end(bytes, next, end);
     let conversion = &bytes[next..conversion_end];
-    if conversion_end >= end && !matches!(conversion, b"s" | b"r" | b"a") {
-        return Some(CpythonDiagnostic::new(
-            format!("{prefix}: expecting '}}'"),
-            next,
-            conversion_end,
-        ));
-    }
     if !matches!(conversion, b"s" | b"r" | b"a") {
         let conversion = ::core::str::from_utf8(conversion).unwrap_or("");
         return Some(CpythonDiagnostic::new(
@@ -6608,14 +6601,9 @@ fn incompatible_string_prefix_error(source: &str) -> Option<CpythonDiagnostic> {
             }
             b'\'' | b'"' => {
                 if let Some((start, letters)) = prefix_letters_before_quote(bytes, index)
-                    && incompatible_prefix_message(&letters).is_some()
+                    && let Some(message) = incompatible_prefix_message(&letters)
                 {
-                    // CPython 3.12 has no dedicated message for mixed prefixes.
-                    return Some(CpythonDiagnostic::new(
-                        "invalid syntax".to_owned(),
-                        start,
-                        start + 1,
-                    ));
+                    return Some(CpythonDiagnostic::new(message, start, start + 1));
                 }
                 index = skip_string_token(bytes, index);
             }

@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use nanocode::antigravity::GoogleBuilder;
 use nanocode::{
     ClaudeHarness, ClaudeModel, CodexHarness, Model, ModelSelection, Nanocode, OpenAi, Runner,
     RunnerServerConfig, ServiceTier, Thinking,
@@ -487,7 +486,6 @@ pub struct HostConfig {
     pub runner_servers: Vec<RunnerServerConfig>,
     pub tab: Option<String>,
     pub gateway: Option<Gateway>,
-    pub google: nanocode::antigravity::GoogleConfig,
     pub clients: ModelClients,
     pub headless: bool,
     pub cyber_access_program: Option<nanocode::codex::CyberAccessProgram>,
@@ -869,7 +867,6 @@ impl Host {
         let mut builder = Nanocode::builder()
             .openai(codex)
             .claude(claude)
-            .google(config.google.clone())
             .workspace(config.workspace.clone())
             .tool_environment(config.clients.tool_environment.clone());
         if !config.clients.mcp_servers.is_empty() {

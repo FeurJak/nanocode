@@ -17,7 +17,7 @@ use nanocode_durability_core::{StoreError, StoreFuture};
 use nanocode_partitions::{Partition, Row, partition_of};
 use nanocode_sync::oneshot;
 
-use crate::host::{Compaction, Extension, LogHost, Rider, StoredCheckpoint, Write};
+use crate::host::{Compaction, Extension, LogHost, Rider, Write};
 
 pub mod model;
 pub mod sim;
@@ -130,25 +130,6 @@ pub trait PartStore: Send + Sync {
         scope: &'a str,
         before: u64,
     ) -> StoreFuture<'a, Result<u64, StoreError>>;
-
-    /// The scope's saved checkpoint (see [`LogHost::checkpoint`]); None when this store keeps
-    /// none.
-    fn checkpoint<'a>(
-        &'a self,
-        _scope: &'a str,
-    ) -> Option<StoreFuture<'a, Result<Option<StoredCheckpoint>, StoreError>>> {
-        None
-    }
-
-    /// Replaces the scope's checkpoint; None when this store keeps none. A checkpoint is not a
-    /// write to the log, so it takes no fence.
-    fn save_checkpoint<'a>(
-        &'a self,
-        _scope: &'a str,
-        _checkpoint: &'a StoredCheckpoint,
-    ) -> Option<StoreFuture<'a, Result<(), StoreError>>> {
-        None
-    }
 }
 
 pub type Place = Arc<dyn Fn(&str, NonZeroU32) -> Partition + Send + Sync>;
@@ -660,20 +641,5 @@ impl<S: PartStore + ?Sized> LogHost for PartedLog<S> {
         _rider: Rider<'a>,
     ) -> Option<StoreFuture<'a, Result<(), StoreError>>> {
         None
-    }
-
-    fn checkpoint<'a>(
-        &'a self,
-        scope: &'a str,
-    ) -> Option<StoreFuture<'a, Result<Option<StoredCheckpoint>, StoreError>>> {
-        self.store.checkpoint(scope)
-    }
-
-    fn save_checkpoint<'a>(
-        &'a self,
-        scope: &'a str,
-        checkpoint: &'a StoredCheckpoint,
-    ) -> Option<StoreFuture<'a, Result<(), StoreError>>> {
-        self.store.save_checkpoint(scope, checkpoint)
     }
 }

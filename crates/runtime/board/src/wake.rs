@@ -8,7 +8,7 @@ use std::{
 
 use nanocode_durability_core::{StoreError, StoreFuture};
 use nanocode_sync::{Atom, Notify};
-use nanocode_turnlog::{LogHost, ScopeRows, StoredCheckpoint};
+use nanocode_turnlog::{LogHost, ScopeRows};
 
 use crate::{
     Board, BoardError, TaskId,
@@ -181,21 +181,6 @@ impl LogHost for Notifying {
             }
             appended
         })
-    }
-
-    fn checkpoint<'a>(
-        &'a self,
-        scope: &'a str,
-    ) -> Option<StoreFuture<'a, Result<Option<StoredCheckpoint>, StoreError>>> {
-        self.inner.checkpoint(scope)
-    }
-
-    fn save_checkpoint<'a>(
-        &'a self,
-        scope: &'a str,
-        checkpoint: &'a StoredCheckpoint,
-    ) -> Option<StoreFuture<'a, Result<(), StoreError>>> {
-        self.inner.save_checkpoint(scope, checkpoint)
     }
 }
 

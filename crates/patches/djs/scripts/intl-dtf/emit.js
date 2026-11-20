@@ -7,7 +7,7 @@ const dir = process.argv[2];
 // arab-digit regions differ from ar only in their digits, which date.rs transliterates).
 const LOCS = ["de", "fr", "es", "ja", "zh", "pt-BR", "ko", "it", "ru", "nl", "pl", "tr", "ar", "hi", "id", "vi", "zh-TW", "en-GB", "en-IN", "es-MX", "fr-CA",
   "hu", "nb", "he", "ta", "sr", "sr-Latn", "cs", "uk", "sv", "da", "ms", "ro", "bn", "el",
-  "sw", "ur", "fil", "ca", "en-AU", "zh-HK", "nl-BE", "it-CH", "fr-CH", "de-AT", "pt-PT", "es-419"];
+  "sw", "ur", "fil", "ca", "en-AU", "zh-HK", "nl-BE", "it-CH", "fr-CH", "de-AT", "pt-PT", "es-419", "th", "fa", "am"];
 const ALIASES = {de: ["de", "de-DE"], fr: ["fr", "fr-FR"], es: ["es", "es-ES"], ja: ["ja", "ja-JP"], zh: ["zh", "zh-CN", "zh-Hans", "zh-Hans-CN"], "pt-BR": ["pt", "pt-BR"],
   ko: ["ko", "ko-KR"], it: ["it", "it-IT"], ru: ["ru", "ru-RU", "ru-BY", "ru-KZ"], nl: ["nl", "nl-NL"], pl: ["pl", "pl-PL"], tr: ["tr", "tr-TR"],
   ar: ["ar", "ar-001", "ar-AE", "ar-EG", "ar-BH", "ar-DJ", "ar-KW", "ar-OM", "ar-QA", "ar-SD", "ar-YE"], hi: ["hi", "hi-IN"], id: ["id", "id-ID"], vi: ["vi", "vi-VN"],
@@ -16,7 +16,8 @@ const ALIASES = {de: ["de", "de-DE"], fr: ["fr", "fr-FR"], es: ["es", "es-ES"], 
   "sr-Latn": ["sr-Latn", "sr-Latn-RS"], cs: ["cs", "cs-CZ"], uk: ["uk", "uk-UA"], sv: ["sv", "sv-SE"], el: ["el", "el-GR"], da: ["da", "da-DK"],
   ms: ["ms", "ms-MY"], fi: ["fi", "fi-FI"], ro: ["ro", "ro-RO"], bn: ["bn", "bn-BD"],
   sw: ["sw", "sw-TZ"], ur: ["ur", "ur-PK"], fil: ["fil", "fil-PH"], ca: ["ca", "ca-ES"], "en-AU": ["en-AU"], "zh-HK": ["zh-HK", "zh-Hant-HK"], "nl-BE": ["nl-BE"],
-  "it-CH": ["it-CH"], "fr-CH": ["fr-CH"], "de-AT": ["de-AT"], "pt-PT": ["pt-PT"], "es-419": ["es-419"]};
+  "it-CH": ["it-CH"], "fr-CH": ["fr-CH"], "de-AT": ["de-AT"], "pt-PT": ["pt-PT"], "es-419": ["es-419"],
+  th: ["th", "th-TH"], fa: ["fa", "fa-IR"], am: ["am", "am-ET"]};
 // The four pattern tables are cut into rows of 16 cells, and each distinct row is stored once in
 // DTF_ROWS for every locale: a locale keeps only its row indices (about 60% smaller than flat tables).
 const rows = [], ridx = new Map();

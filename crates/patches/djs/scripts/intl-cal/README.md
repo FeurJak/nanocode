@@ -7,7 +7,8 @@ formatting) and the generated `calendar_data.rs` (names, patterns, lunisolar and
 Calendars: buddhist, roc, japanese, persian, islamic-civil, islamic-tbla, islamic-umalqura, islamic, islamic-rgsa,
 hebrew, indian, coptic, ethiopic, ethioaa, chinese, dangi, iso8601 (aliases islamicc, ethiopic-amete-alem).
 Each has en-US data plus its native locale where djs has that DateLocale (zh-TW roc, ja japanese, ar islamic*/coptic,
-he hebrew, hi indian, zh chinese, ko dangi). A calendar a locale has no data for formats gregorian and resolves
+he hebrew, hi indian, zh chinese, ko dangi, th buddhist, fa persian). th and fa format in those calendars by
+default (calendar.rs default_for), as in node. A calendar a locale has no data for formats gregorian and resolves
 `calendar` to gregory, so the two always agree.
 
 | file | what |
@@ -19,7 +20,7 @@ he hebrew, hi indian, zh chinese, ko dangi). A calendar a locale has no data for
 | numsys.js | the numberings calendar patterns override fields with (Hebrew letters, Han digits, Chinese day names, 元年) |
 | gen.sh OUT TAG... | runs cinfer.js four at a time |
 | emit.js DIR | calendar_data.rs from DIR's c-*.json and tables.json |
-| diff.js, check.sh DJS CAL | the differential: ~1900-3750 cases per calendar (en-US + native, 75 option sets, random dates 1900-2100, toLocale*String, calendar option) under node and djs |
+| diff.js, check.sh DJS CAL [TAGS] | the differential: ~1900-3750 cases per calendar (en-US + native, 75 option sets, random dates 1900-2100, toLocale*String, calendar option) under node and djs; CAL default checks TAGS in their own calendar |
 | suite.py | the tempoxyz/nanocode-rt parity suite intl-dtf-cal.jsonl |
 
 Pattern extensions: `r` related gregorian year, `U` cyclic year name, and U+E001..U+E004 before a numeric field

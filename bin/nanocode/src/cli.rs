@@ -21,36 +21,6 @@ pub enum Command {
     },
     #[cfg(unix)]
     Cua(CuaArgs),
-    Setup(SetupArgs),
-}
-
-#[derive(Clone, Debug)]
-pub struct SetupArgs {
-    pub command: SetupCommand,
-}
-
-#[derive(Clone, Debug)]
-pub enum SetupCommand {
-    Google {
-        google: GoogleArgs,
-        model: Option<String>,
-        check: bool,
-    },
-}
-
-impl SetupArgs {
-    fn from_matches(matches: &Matches) -> Self {
-        let (name, matches) = matches.subcommand().expect("setup requires a subcommand");
-        let command = match name {
-            "google" => SetupCommand::Google {
-                google: GoogleArgs::from_matches(matches),
-                model: matches.text("setup_model"),
-                check: matches.flag("check"),
-            },
-            other => unreachable!("{other} is not a setup subcommand"),
-        };
-        Self { command }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -80,17 +50,13 @@ pub enum CuaCommand {
 pub enum HarnessArg {
     Codex,
     Claude,
-    Antigravity,
 }
 
 impl HarnessArg {
-    const ALL: [Self; 3] = [Self::Codex, Self::Claude, Self::Antigravity];
-    const CHOICES: [Choice; 3] = [
+    const ALL: [Self; 2] = [Self::Codex, Self::Claude];
+    const CHOICES: [Choice; 2] = [
         Choice::new("codex").help("OpenAI Codex models (ChatGPT login)"),
         Choice::new("claude").help("Anthropic Claude models (Claude Code login)"),
-        Choice::new("antigravity").help(
-            "Google Antigravity's engine on Gemini models (GEMINI_API_KEY or AGY_LLM_GATEWAY_URL)",
-        ),
     ];
 }
 
@@ -176,47 +142,6 @@ impl GatewayArg {
             "Cloudflare AI Gateway OpenAI proxy; OPENAI_API_KEY, CF_AIG_TOKEN for stored keys, or CLOUDFLARE_API_TOKEN for Unified Billing; needs --cloudflare-account and --cloudflare-gateway",
         ),
     ];
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GoogleAuthArg {
-    Auto,
-    ApiKey,
-    Vertex,
-    VertexExpress,
-    Gateway,
-}
-
-impl GoogleAuthArg {
-    const ALL: [Self; 5] = [
-        Self::Auto,
-        Self::ApiKey,
-        Self::Vertex,
-        Self::VertexExpress,
-        Self::Gateway,
-    ];
-    const CHOICES: [Choice; 5] = [
-        Choice::new("auto").help(
-            "Pick the first that is configured: AGY_LLM_GATEWAY_URL, GOOGLE_GENAI_USE_VERTEXAI, GEMINI_API_KEY or GOOGLE_API_KEY, then Application Default Credentials for Vertex AI",
-        ),
-        Choice::new("api-key").help("Gemini API with GEMINI_API_KEY or GOOGLE_API_KEY"),
-        Choice::new("vertex").help(
-            "Vertex AI with Application Default Credentials (GOOGLE_APPLICATION_CREDENTIALS, gcloud auth application-default login, the metadata server or gcloud)",
-        ),
-        Choice::new("vertex-express").help("Vertex AI express mode with a GOOGLE_API_KEY express key"),
-        Choice::new("gateway").help("An Antigravity LLM gateway at AGY_LLM_GATEWAY_URL"),
-    ];
-
-    pub const fn method(self) -> Option<nanocode::antigravity::AuthMethod> {
-        use nanocode::antigravity::AuthMethod;
-        match self {
-            Self::Auto => None,
-            Self::ApiKey => Some(AuthMethod::ApiKey),
-            Self::Vertex => Some(AuthMethod::Vertex),
-            Self::VertexExpress => Some(AuthMethod::VertexExpress),
-            Self::Gateway => Some(AuthMethod::Gateway),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -499,26 +424,6 @@ const GATEWAY: Group = Group::named(
     ],
 );
 
-const GOOGLE: Group = Group::named(
-    "GoogleArgs",
-    &[
-        Argument::value("google_auth", "METHOD", Parser::Choice(&GoogleAuthArg::CHOICES))
-            .long("google-auth")
-            .env("NANOCODE_GOOGLE_AUTH")
-            .help(
-                "How the antigravity harness reaches Gemini: auto (the default), api-key, vertex, vertex-express or gateway",
-            ),
-        Argument::value("google_project", "PROJECT", Parser::Text)
-            .long("google-project")
-            .help(
-                "Google Cloud project for Vertex AI; defaults to GOOGLE_CLOUD_PROJECT, then the credentials' quota or service account project, the metadata server's, the gcloud configuration's, then the project nanocode setup google saved or found by probing",
-            ),
-        Argument::value("google_location", "LOCATION", Parser::Text)
-            .long("google-location")
-            .help("Vertex AI location such as us-central1; defaults to GOOGLE_CLOUD_LOCATION, then global"),
-    ],
-);
-
 const REMOTE: Group = Group::named(
     "RemoteArgs",
     &[
@@ -659,35 +564,13 @@ const CUA: arguments::Command = arguments::Command::new("cua")
             .groups(&[Group::named("BrowserHost", &[Argument::trailing("args", "ARGS")])]),
     ]);
 
-const SETUP: arguments::Command = arguments::Command::new("setup")
-    .about("Set up a model provider's credentials")
-    .subcommand_required()
-    .subcommands(&[arguments::Command::new("google")
-        .about(
-            "Set up Gemini through Vertex AI: sign in with gcloud Application Default Credentials if needed, find a Google Cloud project where the model answers (offering to enable aiplatform.googleapis.com), and save it for later runs",
-        )
-        .groups(&[
-            GOOGLE,
-            Group::named(
-                "SetupGoogle",
-                &[
-                    Argument::value("setup_model", "MODEL", Parser::Text)
-                        .long("model")
-                        .help("Model to probe with (defaults to gemini-4-neon)"),
-                    Argument::flag("check").long("check").help(
-                        "Print the resolved auth method, project, location and model, and probe them with one countTokens call, without changing anything",
-                    ),
-                ],
-            ),
-        ])]);
-
 pub static COMMAND: arguments::Command = arguments::Command::new("nanocode")
     .version(env!("CARGO_PKG_VERSION"))
     .about("Interactive coding agent for Codex and Claude")
     .long_about(
         "Interactive coding agent for Codex and Claude. Run without a subcommand to open the terminal interface; 'nc' is an alias of 'nanocode'.",
     )
-    .groups(&[SESSION, GATEWAY, GOOGLE, REMOTE, ObservabilityOutputArgs::ARGUMENTS])
+    .groups(&[SESSION, GATEWAY, REMOTE, ObservabilityOutputArgs::ARGUMENTS])
     .subcommands(&[
         arguments::Command::new("hand")
             .aliases(&[Alias::visible("runner")])
@@ -700,7 +583,7 @@ pub static COMMAND: arguments::Command = arguments::Command::new("nanocode")
             .about(
                 "Run one prompt without the terminal interface, streaming the reply to stdout and reasoning summaries and tool calls to stderr",
             )
-            .groups(&[SESSION, ATTEMPTS, ESCALATION, GATEWAY, GOOGLE, REMOTE]),
+            .groups(&[SESSION, ATTEMPTS, ESCALATION, GATEWAY, REMOTE]),
         arguments::Command::new("models").about("List models per harness with thinking levels and speed tiers"),
         arguments::Command::new("resume")
             .about("Resume a saved session; without an id, pick one interactively")
@@ -710,7 +593,6 @@ pub static COMMAND: arguments::Command = arguments::Command::new("nanocode")
             )]),
         #[cfg(unix)]
         CUA,
-        SETUP,
     ]);
 
 impl Cli {
@@ -741,7 +623,6 @@ impl Command {
             },
             #[cfg(unix)]
             "cua" => Self::Cua(CuaArgs::from_matches(matches)),
-            "setup" => Self::Setup(SetupArgs::from_matches(matches)),
             other => unreachable!("{other} is not a nanocode subcommand"),
         }
     }
@@ -810,44 +691,7 @@ pub struct SessionArgs {
     pub min_wait_ms: Option<u64>,
     pub time_limit: Option<u64>,
     pub gateway: GatewayArgs,
-    pub google: GoogleArgs,
     pub remote: RemoteArgs,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct GoogleArgs {
-    pub auth: Option<GoogleAuthArg>,
-    pub project: Option<String>,
-    pub location: Option<String>,
-}
-
-impl GoogleArgs {
-    fn from_matches(matches: &Matches) -> Self {
-        Self {
-            auth: matches
-                .choice("google_auth")
-                .map(|index| GoogleAuthArg::ALL[index]),
-            project: matches.text("google_project"),
-            location: matches.text("google_location"),
-        }
-    }
-
-    fn or(self, root: Self) -> Self {
-        Self {
-            auth: self.auth.or(root.auth),
-            project: self.project.or(root.project),
-            location: self.location.or(root.location),
-        }
-    }
-
-    pub fn config(&self) -> nanocode::antigravity::GoogleConfig {
-        nanocode::antigravity::GoogleConfig {
-            method: self.auth.and_then(GoogleAuthArg::method),
-            project: self.project.clone(),
-            location: self.location.clone(),
-            state: None,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -917,7 +761,6 @@ impl SessionArgs {
             min_wait_ms: matches.u64("min_wait_ms"),
             time_limit: matches.u64("time_limit"),
             gateway: GatewayArgs::from_matches(matches),
-            google: GoogleArgs::from_matches(matches),
             remote: RemoteArgs::from_matches(matches),
         }
     }
@@ -1002,7 +845,6 @@ impl SessionArgs {
                     false => self.gateway.identity_attestation,
                 },
             },
-            google: self.google.or(root.google),
             remote: RemoteArgs {
                 runner_connect: self.remote.runner_connect.or(root.remote.runner_connect),
                 runner_host: self.remote.runner_host.or(root.remote.runner_host),

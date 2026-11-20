@@ -69,6 +69,16 @@ pub(super) fn canonical(v: &str) -> Option<usize> {
     CALENDARS.iter().position(|c| *c == v)
 }
 
+/// The calendar a locale formats in without a calendar option or -u-ca- keyword: Thai the buddhist one
+/// and Persian the persian one, as in node 22.
+pub(super) fn default_for(locale: &str) -> usize {
+    match locale.split('-').next() {
+        Some("th") => 1,
+        Some("fa") => 4,
+        _ => 0,
+    }
+}
+
 /// A calendar option's shape: one or more 3-8 alphanumeric subtags.
 pub(super) fn well_formed(v: &str) -> bool {
     !v.is_empty() && v.split('-').all(|p| (3..=8).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_alphanumeric()))

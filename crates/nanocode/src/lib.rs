@@ -19,25 +19,6 @@ pub use nanocode_process_contracts as process;
 
 pub use nanocode_agent::HarnessRequest;
 pub use nanocode_backend_claude::ClaudeHarness;
-pub mod antigravity {
-    pub use nanocode_backend_antigravity::{
-        AntigravityHarness, Auth, AuthMethod, CacheConfig, Client, ClientError, DEFAULT_MODEL,
-        Endpoint, FAMILY, Failure, GoogleAuth, GoogleConfig, Probe, Profile, Project,
-        ProjectSource, Projects, RetryPolicy, Route, SETUP_COMMAND, Saved, Store,
-        VERTEX_GLOBAL_LOCATION, VERTEX_SERVICE, vertex_base_url,
-    };
-
-    pub trait GoogleBuilder {
-        #[must_use]
-        fn google(self, harness: impl Into<AntigravityHarness>) -> Self;
-    }
-
-    impl<B> GoogleBuilder for crate::NanocodeBuilder<B> {
-        fn google(self, harness: impl Into<AntigravityHarness>) -> Self {
-            self.harness(harness.into())
-        }
-    }
-}
 pub use nanocode_backend_codex::CodexHarness;
 pub type Harness = nanocode_agent::Harness<Defaults>;
 pub type HarnessBuilder = nanocode_agent::HarnessBuilder<Defaults>;
@@ -342,7 +323,6 @@ pub mod prelude {
     pub use crate::{Agent, ClaudeModel, HarnessFamily, Model, ModelSelection, Thinking};
     pub use crate::{Claude, ClaudeClient};
 
-    pub use crate::antigravity::{AntigravityHarness, GoogleBuilder, GoogleConfig};
     pub use crate::durability::{MemoryStore, SessionStore};
     pub use crate::{AgentEvents, CodexBuilder, OpenAi};
     #[cfg(all(not(target_family = "wasm"), feature = "cua"))]

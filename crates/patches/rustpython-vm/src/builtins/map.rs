@@ -50,17 +50,7 @@ struct MapCallArgs {
 impl Constructor for PyMap {
     type Args = PyMapNewArgs;
 
-    fn slot_new(cls: PyTypeRef, mut args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-        // Like CPython, map rejects unknown keyword arguments unless a
-        // subclass overrides __init__ to take its own.
-        let map_type = vm.ctx.types.map_type;
-        if !cls.is(map_type) {
-            let cls_init = cls.slots.init.load().map(crate::types::fn_addr);
-            let map_init = map_type.slots.init.load().map(crate::types::fn_addr);
-            if cls_init != map_init {
-                args.kwargs.retain(|name, _| name.as_bytes() == b"strict");
-            }
-        }
+    fn slot_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
         let MapCallArgs {
             function: mapper,
             iterables,

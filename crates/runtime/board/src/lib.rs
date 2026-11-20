@@ -5,7 +5,6 @@ use nanocode_turnlog::LogHost;
 pub use nanocode_board_fold::*;
 
 pub mod access;
-pub mod checkpoint;
 pub mod cost;
 pub mod files;
 pub mod middleware;
@@ -32,11 +31,6 @@ pub struct Board {
     fold: Fold,
     contended: bool,
     chain: middleware::Chain,
-    opened: checkpoint::Opened,
-    /// The seq of the last checkpoint this board saved or opened from.
-    checkpointed: u64,
-    /// Cleared once the host says it keeps no checkpoints.
-    checkpoints: bool,
 }
 
 impl Board {
@@ -45,24 +39,8 @@ impl Board {
         scope: &str,
         identity: access::Identity,
     ) -> Result<Self, BoardError> {
-        let mut board = match checkpoint::reopen(&host, scope).await {
-            Ok((fold, rows)) => {
-                let seq = fold.next();
-                let tail = rows.len() as u64;
-                let mut board = Self::start(host, scope, identity, fold, rows)?;
-                board.opened = checkpoint::Opened::Checkpoint { seq, tail };
-                board.checkpointed = seq;
-                board
-            }
-            Err(fallback) => {
-                let rows = host.load(scope).await?;
-                let mut board = Self::start(host, scope, identity, Fold::new(), rows)?;
-                board.opened = checkpoint::Opened::Replay(fallback);
-                board
-            }
-        };
-        board.keep_checkpoint().await;
-        Ok(board)
+        let rows = host.load(scope).await?;
+        Self::start(host, scope, identity, Fold::new(), rows)
     }
 
     pub async fn resume(
@@ -93,9 +71,6 @@ impl Board {
             fold,
             contended: false,
             chain: middleware::Chain::default(),
-            opened: checkpoint::Opened::Resumed,
-            checkpointed: 0,
-            checkpoints: true,
         };
         board.fold_rows(rows)?;
         if !mutated(Mutation::MintedRestarts) {
@@ -181,17 +156,6 @@ impl Board {
     }
 
     async fn submit_as(&mut self, id: EventId, at_ms: u64, op: Op) -> Result<Applied, BoardError> {
-        let applied = self.submit_once(id, at_ms, op).await;
-        self.keep_checkpoint().await;
-        applied
-    }
-
-    async fn submit_once(
-        &mut self,
-        id: EventId,
-        at_ms: u64,
-        op: Op,
-    ) -> Result<Applied, BoardError> {
         if mutated(Mutation::MiddlewareRerunsLanded) {
             self.chain.vet(&id, &self.writer, &op)?;
         }
@@ -350,7 +314,6 @@ impl Board {
             .into_iter()
             .map(|verdict| verdict.unwrap_or_else(|| Err(BoardError::Dropped("unsettled".into()))))
             .collect();
-        self.keep_checkpoint().await;
         (verdicts, rounds)
     }
 }
