@@ -499,14 +499,17 @@ impl Python {
             return Ended::Needs(missing);
         }
         let result = vm.new_scope_with_main().and_then(|scope| {
-            if let Program::File(path) = &invocation.program {
-                // CPython 3.12 names a script by its absolute path in __file__ and
-                // in its tracebacks, however the command line spelled it.
-                let path = vm
-                    .import("os", 0)?
+            if let Program::File(_) = &invocation.program {
+                // CPython 3.12 names a script by its path joined to the working
+                // directory, unnormalized ("./x.py" stays), in __file__ and in its
+                // tracebacks; a directory runs as its __main__.py.
+                let path = name.as_str();
+                let os = vm.import("os", 0)?;
+                let cwd = os.get_attr("getcwd", vm)?.call((), vm)?;
+                let path = os
                     .get_attr("path", vm)?
-                    .get_attr("abspath", vm)?
-                    .call((vm.ctx.new_str(path.as_str()),), vm)?
+                    .get_attr("join", vm)?
+                    .call((cwd, vm.ctx.new_str(path)), vm)?
                     .str(vm)?
                     .to_string();
                 scope
@@ -541,8 +544,19 @@ impl Python {
             let scope = Scope::with_builtins(None, self.boot.clone(), vm);
             vm.run_code_obj(vm.ctx.new_code(code), scope)?;
         }
+        // CPython 3.12 runs a directory by its __main__.py with the directory
+        // first on sys.path, and a module from -m with the working directory there.
+        let directory = match &invocation.program {
+            Program::File(path) => matches!(
+                host::source(path),
+                Err(error) if error.kind() == io::ErrorKind::IsADirectory
+            ),
+            _ => false,
+        };
         let first = match &invocation.program {
+            Program::File(path) if directory => path.as_str(),
             Program::File(path) => path.rfind('/').map_or(".", |cut| &path[..cut.max(1)]),
+            Program::Module(_) => ".",
             _ => "",
         };
         let argv: Vec<PyObjectRef> = invocation
@@ -562,6 +576,26 @@ impl Python {
         Ok(match &invocation.program {
             Program::Command(code) => Prepared::Source(code.clone(), "<string>".to_owned()),
             Program::Stdin => decoded(host::input(), "<stdin>"),
+            Program::File(path) if directory => {
+                let main = format!("{}/__main__.py", path.trim_end_matches('/'));
+                match host::source(&main) {
+                    Ok(source) => decoded(source, &main),
+                    Err(_) => {
+                        let shown = vm
+                            .import("os", 0)?
+                            .get_attr("path", vm)?
+                            .get_attr("abspath", vm)?
+                            .call((vm.ctx.new_str(path.as_str()),), vm)?
+                            .str(vm)?
+                            .to_string();
+                        host::print(&format!(
+                            "python3: can't find '__main__' module in {shown:?}
+"
+                        ));
+                        Prepared::Exited(1)
+                    }
+                }
+            }
             Program::File(path) => match host::source(path) {
                 Ok(source) => decoded(source, path),
                 Err(error) => {
@@ -635,7 +669,9 @@ impl Python {
         {
             vm.print_exception(&error);
         }
-        code.cast_signed()
+        // A process's status is one byte: sys.exit(256) ends with 0, sys.exit(-1)
+        // with 255.
+        (code & 0xff).cast_signed()
     }
 }
 
