@@ -782,8 +782,7 @@ fn claude_transcript(checkpoint: &Value, prompts: &[AdmittedPrompt]) -> Vec<Tran
         .iter()
         .chain(conversation["messages"].as_array().into_iter().flatten())
         .filter(|message| summary_message(message).is_none())
-        .cloned()
-        .collect::<Vec<_>>();
+        .collect::<Vec<&Value>>();
     let messages = messages.as_slice();
     let receipt = |message: &Value| blocks(message).any(|block| block["type"] == "tool_result");
 
@@ -876,7 +875,7 @@ fn claude_transcript(checkpoint: &Value, prompts: &[AdmittedPrompt]) -> Vec<Tran
                 .get(next_prompt..)
                 .and_then(|rest| rest.iter().position(|prompt| prompt.parts == parts))
             else {
-                segment.push(message);
+                segment.push(*message);
                 continue;
             };
             match steers {
