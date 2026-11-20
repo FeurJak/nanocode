@@ -745,6 +745,18 @@ fn zh_available(locale: &str) -> String {
     }
 }
 
+/// The regional locales ICU has their own collation data for (outside zh); every other locale
+/// resolves to its bare language, as new Intl.Collator("nl-BE").resolvedOptions().locale is "nl".
+const COLLATION_REGIONS: [&str; 7] = ["en-US", "de-AT", "fr-CA", "nb-NO", "he-IL", "ar-SA", "id-ID"];
+
+fn collation_locale(locale: &str) -> String {
+    // A script subtag (en-Latn-US) has no data of its own either: it resolves to the language.
+    let mut sub = locale.split('-');
+    let lang = sub.next().unwrap_or("");
+    let tag = alloc::format!("{lang}-{}", sub.next().unwrap_or(""));
+    if COLLATION_REGIONS.contains(&tag.as_str()) { tag } else { String::from(lang) }
+}
+
 pub(super) fn resolve(locale: &str, tags: &[String], raw: &Spec) -> Result<Spec, Fault> {
     let n = "Intl.Collator";
     let zh_locale;
@@ -752,7 +764,8 @@ pub(super) fn resolve(locale: &str, tags: &[String], raw: &Spec) -> Result<Spec,
         zh_locale = zh_available(locale);
         zh_locale.as_str()
     } else {
-        locale
+        zh_locale = collation_locale(locale);
+        zh_locale.as_str()
     };
     let usage = raw.choose("usage", &["sort", "search"], "sort", n)?;
     let sensitivity = raw.choose("sensitivity", &["base", "accent", "case", "variant"], "variant", n)?;
