@@ -2,7 +2,9 @@
 """Writes intl-number.jsonl: the NumberFormat parity suite (each case prints with text(); the
 parity runner compares djs with node 22). Every case was checked with local.py-style runs."""
 import json, os
-L = ["en-US", "de", "fr", "es", "ja", "zh", "pt-BR"]
+L = ["en-US", "de", "fr", "es", "ja", "zh", "pt-BR",
+     # with their own digits, grouping, bidi marks or plural categories
+     "ar", "ar-EG", "hi", "en-IN", "pl", "ru", "tr", "id", "vi", "zh-TW", "en-GB", "es-MX", "fr-CA", "ko", "it", "nl"]
 V = "[0,-0,1,-1,0.5,1.005,2.5,-2.5,1234.5678,-1234.5678,1000,99999.5,1234567.891,0.000123,1e21,NaN,Infinity,-Infinity]"
 H = "const V=" + V + ";const P=a=>a.map(p=>p.type+':'+p.value).join('|');const out=[];const run=(L,os)=>{for(const o of os){const f=new Intl.NumberFormat(L,o);out.push(JSON.stringify(o)+' '+JSON.stringify(f.resolvedOptions())+' '+V.map(v=>P(f.formatToParts(v))).join(' ; '))}};"
 G = {
