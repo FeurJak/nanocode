@@ -512,7 +512,14 @@ declare -fx {n}
                 if matches!(which, Which::Export | Which::Readonly)
                     && msg.ends_with(": readonly variable") =>
             {
-                vp.error(&msg).await;
+                // `readonly -a 'r=(7)'` runs as `declare -gra` in bash, whose error
+                // names the builtin; other assignments fail as plain ones do.
+                let quoted_array = matches!(a, DeclArg::Assign { .. })
+                    && (Opts::on(o.indexed) || Opts::on(o.assoc));
+                match quoted_array {
+                    true => vp.error(&format!("{bname}: {msg}")).await,
+                    false => vp.error(&msg).await,
+                }
                 vp.bad_assign = true;
                 status = 1;
             }
@@ -816,10 +823,13 @@ async fn declare_one(
                 } else if let Some(sub) = &elem {
                     vp.assign_elem(&target, sub, value.clone(), *append)?;
                 } else if is_array
+                    && (!o.export_like || Opts::on(o.indexed) || Opts::on(o.assoc))
                     && value.first() == Some(&b'(')
                     && value.last() == Some(&b')')
                     && let Some(items) = reparse_compound(vp, value).await?
                 {
+                    // export and readonly assign a quoted `(…)` as plain text unless
+                    // -a or -A makes them declare it (bash's set_or_show_attributes).
                     vp.assign_array(&target, items, *append)?;
                 } else {
                     let v = vp.prepare_value(&target, value.clone(), *append)?;
