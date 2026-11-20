@@ -36,6 +36,9 @@ pub(crate) struct Vfs {
     pub(crate) limits: Limits,
     pub(crate) strict: bool,
     pub(crate) operations: Cell<u64>,
+    /// Counts the calls that may change a file's contents (writes, removes, renames),
+    /// so an open file can tell whether its file changed since its own last write.
+    pub(crate) writes: Cell<u64>,
     pub(crate) changes: RefCell<Changes>,
     pub(crate) missing: RefCell<Vec<Vec<u8>>>,
     pub(crate) refused: Cell<Option<Limit>>,
@@ -128,6 +131,7 @@ impl Vfs {
     pub(crate) fn write(self: &Rc<Self>, path: &[u8], data: &[u8], how: Write) -> Reply<()> {
         match self.charge() {
             Ok(()) => {
+                self.writes.set(self.writes.get() + 1);
                 let reply = self.fs().write(path, data, how);
                 if self.changes.borrow().written.contains(path) {
                     return reply;
@@ -168,6 +172,7 @@ impl Vfs {
     pub(crate) fn remove(self: &Rc<Self>, path: Vec<u8>, what: Remove) -> Reply<()> {
         match self.charge() {
             Ok(()) => {
+                self.writes.set(self.writes.get() + 1);
                 let reply = self.fs().remove(&path, what);
                 self.change(reply, move |changes| changes.removed(path))
             }
@@ -178,6 +183,7 @@ impl Vfs {
     pub(crate) fn rename(self: &Rc<Self>, from: Vec<u8>, to: Vec<u8>) -> Reply<()> {
         match self.charge() {
             Ok(()) => {
+                self.writes.set(self.writes.get() + 1);
                 let reply = self.fs().rename(&from, &to);
                 self.change(reply, move |changes| changes.moved(from, to))
             }

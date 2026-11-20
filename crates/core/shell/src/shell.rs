@@ -227,6 +227,7 @@ impl Shell {
             limits: config.limits,
             strict: config.strict,
             operations: Cell::new(0),
+            writes: Cell::new(0),
             changes: RefCell::new(Changes::default()),
             missing: RefCell::new(Vec::new()),
             refused: Cell::new(None),
