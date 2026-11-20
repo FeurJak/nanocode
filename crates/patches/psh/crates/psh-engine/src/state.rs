@@ -494,6 +494,13 @@ pub(crate) struct Vp {
     /// This vproc is a background job of one simple command that has not run it yet:
     /// a `%job` command word there is `bg`, not `fg`.
     pub bg_simple: bool,
+    /// A forked simple command's own address (a pipeline stage or `cmd &`): bash's child
+    /// holds the EXIT trap it inherited until it runs the command, so an expansion error
+    /// in the command's own words runs that trap there.
+    pub own_simple: Option<usize>,
+    /// The vproc this subshell was copied from ran an EXIT trap of its own (a trap a
+    /// subshell only inherited is gone in bash's grandchildren).
+    pub parent_exit: bool,
     /// Where the shell's pending signals are (D1411).
     pub sigs: Sigs,
     /// Levels of command substitution and `eval`: `set -x` repeats PS4's first char.
@@ -561,6 +568,12 @@ impl Vp {
         sub.own_sigs = Cell::new(0);
         sub.fork_job = false;
         sub.bg_simple = false;
+        sub.own_simple = None;
+        sub.parent_exit = self
+            .traps
+            .map
+            .get(&crate::builtins::trap::TrapKey::Exit)
+            .is_some_and(|t| t.active && !t.action.is_empty());
         sub.traps = self.traps.for_subshell(
             self.opts.get(crate::options::SetOpt::Errtrace),
             self.opts.get(crate::options::SetOpt::Functrace)

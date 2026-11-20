@@ -114,3 +114,24 @@ fn printf_floats_take_what_strtod_converts() {
     assert!(e.contains("2228e9x: invalid number") && e.contains("1e: invalid number"));
     assert!(!e.contains("0x1Ap1"));
 }
+
+#[test]
+fn a_forked_simple_command_that_fails_to_expand_runs_the_inherited_exit_trap() {
+    // bash's child for a pipeline stage or job holds the trap until it runs the
+    // command, so the trap's output goes down the pipe.
+    let s = "trap 'echo bye' EXIT; echo $((1 % 0)) 2>/dev/null | { read -r q; echo \"got $q\"; }";
+    assert_eq!(out(s), "got bye\nbye\n");
+    assert_eq!(out("trap 'echo bye' EXIT; echo a | x=$((1/0)) 2>/dev/null | cat; echo after"), "bye\nafter\nbye\n");
+    assert_eq!(out("trap 'echo bye' EXIT; echo $((1/0)) 2>/dev/null & wait; echo after"), "bye\nafter\nbye\n");
+    // Not for a subshell, a group, a command substitution, a function's body, a failing
+    // builtin or a prefix assignment to a readonly variable.
+    assert_eq!(out("trap 'echo bye' EXIT; ( echo $((1/0)) ) 2>/dev/null | cat; echo after"), "after\nbye\n");
+    assert_eq!(out("trap 'echo bye' EXIT; { echo $((1/0)); } 2>/dev/null | cat; echo after"), "after\nbye\n");
+    assert_eq!(out("trap 'echo bye' EXIT; x=$(echo $((1/0))) 2>/dev/null; echo after"), "after\nbye\n");
+    assert_eq!(out("trap 'echo bye' EXIT; f(){ echo $((1/0)); }; f 2>/dev/null | cat; echo after"), "after\nbye\n");
+    assert_eq!(out("trap 'echo bye' EXIT; cd /nope 2>/dev/null | cat; echo after"), "after\nbye\n");
+    assert_eq!(out("trap 'echo bye' EXIT; readonly r=1; r=2 echo hi 2>/dev/null | cat; echo after"), "hi\nafter\nbye\n");
+    assert_eq!(out("trap 'echo bye' EXIT; ( echo $((1/0)) 2>/dev/null | cat ); echo after"), "after\nbye\n");
+    assert_eq!(out("trap 'echo bye' EXIT; (trap 'echo in' EXIT; echo $((1/0)) 2>/dev/null | cat); echo after"), "in\nin\nafter\nbye\n");
+}
+

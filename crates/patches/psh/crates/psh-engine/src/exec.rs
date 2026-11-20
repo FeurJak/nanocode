@@ -141,8 +141,12 @@ async fn run_background(vp: &mut Vp, code: &Rc<Code>, list: ListId, item: usize)
                 .map
                 .values()
                 .any(|t| t.active && !t.action.is_empty());
-            if direct && !traps {
-                sub.exec_tail = Some(std::ptr::from_ref(code.ast.cmd(p.stages[0].cmd)) as usize);
+            if direct {
+                let own = Some(std::ptr::from_ref(code.ast.cmd(p.stages[0].cmd)) as usize);
+                sub.own_simple = own;
+                if !traps {
+                    sub.exec_tail = own;
+                }
             }
             run_command_unchecked(&mut sub, &code, p.stages[0].cmd).await
         } else {
@@ -894,8 +898,11 @@ pub(crate) fn spawn_sub(sub: Vp, code: Rc<Code>, body: Body) -> Join<i32> {
                     .map
                     .values()
                     .any(|t| t.active && !t.action.is_empty());
-                if matches!(cmd.kind, CommandKind::Simple(_)) && !traps {
-                    sub.exec_tail = Some(std::ptr::from_ref(cmd) as usize);
+                if matches!(cmd.kind, CommandKind::Simple(_)) {
+                    sub.own_simple = Some(std::ptr::from_ref(cmd) as usize);
+                    if !traps {
+                        sub.exec_tail = sub.own_simple;
+                    }
                 }
                 run_command_unchecked(&mut sub, &code, c).await
             }
@@ -2206,7 +2213,11 @@ fn run_simple<'a>(
             vp.exec_tail = None;
         }
         vp.line = simple_line(code, cmd, s);
-        let (argv, assigns) = match Box::pin(prepare_simple(vp, code, cmd, s)).await? {
+        let prepared = Box::pin(prepare_simple(vp, code, cmd, s)).await;
+        if prepared.is_err() && vp.own_simple == Some(std::ptr::from_ref(cmd) as usize) {
+            trap::arm_inherited_exit(vp);
+        }
+        let (argv, assigns) = match prepared? {
             Prepared::Done(status) => return Ok(status),
             Prepared::Run(argv, assigns) => {
                 if vp.opts.get(SetOpt::Xtrace) {
