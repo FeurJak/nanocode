@@ -84,6 +84,7 @@ pub enum WireMutation {
     DropToolResult,
     RewriteAssistant,
     AcksUnflushed,
+    CodingPassthrough,
 }
 
 impl WireMutation {
@@ -99,6 +100,7 @@ impl WireMutation {
             "drop-tool-result" => Some(Self::DropToolResult),
             "rewrite-assistant" => Some(Self::RewriteAssistant),
             "acks-unflushed" => Some(Self::AcksUnflushed),
+            "http-coding-passthrough" => Some(Self::CodingPassthrough),
             _ => None,
         }
     }
@@ -116,10 +118,11 @@ impl WireMutation {
             Self::DropToolResult => "drop-tool-result",
             Self::RewriteAssistant => "rewrite-assistant",
             Self::AcksUnflushed => "acks-unflushed",
+            Self::CodingPassthrough => "http-coding-passthrough",
         }
     }
 
-    pub const NAMES: &'static str = "http-reuse-dirty|http-no-read-timeout|tool-result-twice|drop-cancelled-prompt|hedge-unmarked|http-real-elapsed|drop-acked-answer|drop-tool-result|rewrite-assistant|acks-unflushed";
+    pub const NAMES: &'static str = "http-reuse-dirty|http-no-read-timeout|tool-result-twice|drop-cancelled-prompt|hedge-unmarked|http-real-elapsed|drop-acked-answer|drop-tool-result|rewrite-assistant|acks-unflushed|http-coding-passthrough";
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -964,7 +967,9 @@ fn framed(
         HeaderValue::from_static("text/event-stream"),
     );
     headers.insert("request-id", HeaderValue::from_static("req_sim"));
-    if let Some(name) = coding_name(coding) {
+    let passthrough = server.mutation == WireMutation::CodingPassthrough
+        && matches!(coding, Coding::Brotli | Coding::Zstd);
+    if let Some(name) = coding_name(coding).filter(|_| !passthrough) {
         headers.insert("content-encoding", HeaderValue::from_static(name));
     }
     let mut after = Previous::Complete;

@@ -778,6 +778,8 @@ async fn run_turn(
     }
 }
 
+const SSE_GARBLED: [&str; 2] = ["invalid UTF-8 SSE line", "expected message_start"];
+
 async fn run_root(
     runtime: &Nanocode,
     store: &SessionStore,
@@ -811,6 +813,11 @@ async fn run_root(
             }
             Err(error) => {
                 world.trace(&format!("{label} turn {turn} failed: {error}"));
+                if SSE_GARBLED.iter().any(|garbled| error.contains(garbled)) {
+                    world.wrong(format!(
+                        "sse_garbled: {label} turn {turn} failed on bytes the server never sent as SSE: {error}"
+                    ));
+                }
                 client.failed.borrow_mut().push((label.clone(), turn));
             }
         }

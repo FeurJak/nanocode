@@ -102,6 +102,7 @@ default_table='
 1 canary_http_reuse_dirty canary:100 --scenario runtime --store kv --wire http --mutation http-reuse-dirty
 1 canary_http_no_read_timeout canary:200 --scenario runtime --store kv --wire http --mutation http-no-read-timeout
 1 canary_tool_result_twice canary:40 --scenario runtime --store kv --wire http --mutation tool-result-twice
+1 canary_http_coding_passthrough canary:40 --scenario runtime --store kv --wire http --mutation http-coding-passthrough
 1 canary_drop_cancelled_prompt canary:100 --scenario runtime --mutation drop-cancelled-prompt
 1 canary_websocket_corrupt_payload canary --scenario websocket --mutation corrupt_payload
 1 canary_websocket_drop_client_byte canary --scenario websocket --mutation drop_client_byte
