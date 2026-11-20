@@ -3693,18 +3693,26 @@ impl Registry {
             let outcome = self
                 .state
                 .call(move |state| {
-                    if state
-                        .scopes
-                        .get(&scoped)
-                        .is_some_and(|scope| scope.paused > 0)
-                    {
-                        return Err(job);
+                    let Some(scope) = state.scopes.get(&scoped) else {
+                        return Ok(Ok(job(state)));
+                    };
+                    if scope.paused == 0 {
+                        return Ok(Ok(job(state)));
                     }
-                    Ok(job(state))
+                    // A closing scope holds its pause until every turn stops, so a
+                    // message parked here would hold its sender's turn open until
+                    // the close times out. Nothing can flow into it again: refuse now.
+                    if scope.life.closing() {
+                        return Ok(Err(std::io::Error::other(
+                            "subagent task tree is closing and cannot take messages",
+                        )));
+                    }
+                    Err(job)
                 })
                 .await;
             match outcome {
-                Ok(value) => return Ok(value),
+                Ok(Ok(value)) => return Ok(value),
+                Ok(Err(closing)) => return Err(closing),
                 Err(returned) => {
                     job = returned;
                     changes
