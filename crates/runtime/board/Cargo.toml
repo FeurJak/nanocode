@@ -17,6 +17,7 @@ nanocode-cost-fold.workspace = true
 nanocode-digest.workspace = true
 nanocode-durability-core.workspace = true
 nanocode-partitions.workspace = true
+nanocode-platform.workspace = true
 nanocode-sync.workspace = true
 nanocode-sys.workspace = true
 nanocode-turnlog.workspace = true

@@ -472,6 +472,7 @@ dependencies = [
  "nanocode-digest",
  "nanocode-durability-core",
  "nanocode-partitions",
+ "nanocode-platform",
  "nanocode-sync",
  "nanocode-sys",
  "nanocode-turnlog",

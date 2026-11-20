@@ -37,6 +37,8 @@ pub struct Board {
     checkpointed: u64,
     /// Cleared once the host says it keeps no checkpoints.
     checkpoints: bool,
+    /// The saver's fold while no save runs; empty while one does.
+    saver: Arc<nanocode_sync::Slot<checkpoint::Shadow>>,
 }
 
 impl Board {
@@ -61,7 +63,7 @@ impl Board {
                 board
             }
         };
-        board.keep_checkpoint().await;
+        board.keep_checkpoint();
         Ok(board)
     }
 
@@ -96,6 +98,7 @@ impl Board {
             opened: checkpoint::Opened::Resumed,
             checkpointed: 0,
             checkpoints: true,
+            saver: Arc::new(nanocode_sync::Slot::new(Some(checkpoint::Shadow::Unbuilt))),
         };
         board.fold_rows(rows)?;
         if !mutated(Mutation::MintedRestarts) {
@@ -182,7 +185,7 @@ impl Board {
 
     async fn submit_as(&mut self, id: EventId, at_ms: u64, op: Op) -> Result<Applied, BoardError> {
         let applied = self.submit_once(id, at_ms, op).await;
-        self.keep_checkpoint().await;
+        self.keep_checkpoint();
         applied
     }
 
@@ -350,7 +353,7 @@ impl Board {
             .into_iter()
             .map(|verdict| verdict.unwrap_or_else(|| Err(BoardError::Dropped("unsettled".into()))))
             .collect();
-        self.keep_checkpoint().await;
+        self.keep_checkpoint();
         (verdicts, rounds)
     }
 }
