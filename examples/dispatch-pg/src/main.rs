@@ -53,19 +53,7 @@ impl Sql for Counted {
     ) -> StoreFuture<'a, Result<Vec<Vec<SqlRow>>, StoreError>> {
         self.trips.fetch_add(1, Ordering::Relaxed);
         Box::pin(async move {
-            let mut answer = self.inner.transaction(operation, statements).await?;
-            // PG's plog scan and load order by their text-cast seq column (1, 10, 2, ...): put
-            // the rows back in seq order until turnlog's queries order by the integer column.
-            if matches!(operation, "plog_scan" | "plog_load") {
-                for rows in &mut answer {
-                    rows.sort_by_key(|row| {
-                        row.first()
-                            .and_then(|seq| seq.as_deref())
-                            .and_then(|seq| seq.parse::<u64>().ok())
-                    });
-                }
-            }
-            Ok(answer)
+            self.inner.transaction(operation, statements).await
         })
     }
 }

@@ -170,6 +170,24 @@ async fn conformance(sql: Arc<Counted>, failed: &mut u32) -> Result<(), StoreErr
         &format!("dropped={dropped} first={:?}", left.first()),
         failed,
     );
+    let more: Vec<(u64, String)> = (5..=14).map(|seq| (seq, format!("d{seq}:1"))).collect();
+    b.append(&scope, &more).await?;
+    let scanned = b.scan(&scope, 0, u64::MAX).await?;
+    let loaded = b.load(&scope).await?;
+    let in_order = |rows: &[(u64, String)]| rows.windows(2).all(|pair| pair[1].0 == pair[0].0 + 1);
+    check(
+        "scan and load return more than nine rows in seq order",
+        in_order(&scanned)
+            && scanned.last().is_some_and(|(seq, _)| *seq == 14)
+            && in_order(&loaded)
+            && loaded.len() == 12,
+        &format!(
+            "scan={:?} load={:?}",
+            scanned.iter().map(|row| row.0).collect::<Vec<_>>(),
+            loaded.iter().map(|row| row.0).collect::<Vec<_>>()
+        ),
+        failed,
+    );
     b.cursor(part, &format!("reader-{scope}"), u64::MAX / 2)
         .await?;
     b.release(part).await?;
