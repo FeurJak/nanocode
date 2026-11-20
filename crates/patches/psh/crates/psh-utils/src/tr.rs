@@ -40,6 +40,8 @@ enum Item {
     Range(u32, u32),
     /// `[:name:]`
     Class(&'static str),
+    /// `[=c=]`
+    Equiv(u32),
     /// `[c*n]`; `None` fills SET2 to the length of SET1.
     Repeat(u32, Option<usize>),
 }
@@ -141,7 +143,7 @@ fn parse_set(s: &[u8], chars: bool, repeats: bool, utf8: bool) -> Result<Vec<Ite
             if s[i + 1] == b'=' && i + 2 < s.len() {
                 let (u, n) = read_unit(s, i + 2, chars);
                 if s[i + 2 + n..].starts_with(b"=]") {
-                    items.push(Item::Unit(u));
+                    items.push(Item::Equiv(u));
                     i += 2 + n + 2;
                     continue;
                 }
@@ -212,7 +214,7 @@ fn expand(items: &[Item], fill: usize) -> Vec<u32> {
     let fixed: usize = items
         .iter()
         .map(|it| match it {
-            Item::Unit(_) => 1,
+            Item::Unit(_) | Item::Equiv(_) => 1,
             Item::Range(a, b) => (b - a + 1) as usize,
             Item::Class(c) => class_members(c).len(),
             Item::Repeat(_, n) => n.unwrap_or(0),
@@ -222,7 +224,7 @@ fn expand(items: &[Item], fill: usize) -> Vec<u32> {
     let mut filled = false;
     for it in items {
         match it {
-            Item::Unit(u) => out.push(*u),
+            Item::Unit(u) | Item::Equiv(u) => out.push(*u),
             Item::Range(a, b) => out.extend(*a..=*b),
             Item::Class(c) => out.extend(class_members(c)),
             Item::Repeat(u, Some(n)) => out.extend(std::iter::repeat_n(*u, *n)),
@@ -235,6 +237,67 @@ fn expand(items: &[Item], fill: usize) -> Vec<u32> {
         }
     }
     out
+}
+
+/// GNU's checks of SET2 against SET1, in GNU's order; `set1_len` is the complement's
+/// size with `-c`.
+fn validate(
+    set1: &[Item],
+    set2: &[Item],
+    set1_len: usize,
+    set2_len: usize,
+    translating: bool,
+    complement: bool,
+    truncate: bool,
+) -> Result<(), &'static str> {
+    if !translating {
+        if set2.iter().any(|i| matches!(i, Item::Repeat(_, None))) {
+            return Err("the [c*] construct may appear in string2 only when translating");
+        }
+        return Ok(());
+    }
+    if set2.iter().any(|i| matches!(i, Item::Equiv(_))) {
+        return Err("[=c=] expressions may not appear in string2 when translating");
+    }
+    if set1_len > set2_len && !truncate && matches!(set2.last(), Some(Item::Class(_))) {
+        return Err(
+            "when translating with string1 longer than string2,\nthe latter string must not end with a character class",
+        );
+    }
+    let case = |c: &str| c == "upper" || c == "lower";
+    if !complement && set2.iter().any(|i| matches!(i, Item::Class(c) if case(c))) {
+        // Each unit of a case class in SET2 must face a unit of a case class in SET1.
+        let tags = |items: &[Item]| -> Vec<bool> {
+            items
+                .iter()
+                .flat_map(|it| match it {
+                    Item::Class(c) => vec![case(c); class_members(c).len()],
+                    Item::Range(a, b) => vec![false; (b - a + 1) as usize],
+                    Item::Repeat(_, n) => vec![false; n.unwrap_or(0)],
+                    Item::Unit(_) | Item::Equiv(_) => vec![false],
+                })
+                .collect()
+        };
+        let (t1, t2) = (tags(set1), tags(set2));
+        if t1.iter().zip(&t2).any(|(a, b)| *b && !a) || (t2.len() > t1.len() && t2[t1.len()]) {
+            return Err("misaligned [:upper:] and/or [:lower:] construct");
+        }
+    }
+    if complement && set1.iter().any(|i| matches!(i, Item::Class(_))) {
+        let mut units = set2.iter().map(|it| match it {
+            Item::Unit(u) | Item::Equiv(u) | Item::Repeat(u, _) => Some(*u),
+            Item::Range(a, b) if a == b => Some(*a),
+            _ => None,
+        });
+        let first = units.next().flatten();
+        let homogeneous = first.is_some() && units.all(|u| u == first);
+        if !homogeneous || set2_len > set1_len {
+            return Err(
+                "when translating with complemented character classes,\nstring2 must map all characters in the domain to one",
+            );
+        }
+    }
+    Ok(())
 }
 
 /// What happens to each unit.
@@ -322,7 +385,10 @@ pub async fn run(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
             return 1;
         }
     };
-    if set1_items.iter().any(|i| matches!(i, Item::Repeat(_, None))) {
+    if set1_items
+        .iter()
+        .any(|i| matches!(i, Item::Repeat(_, None)))
+    {
         ctx.error("the [c*] repeat construct may not appear in string1")
             .await;
         return 1;
@@ -347,6 +413,26 @@ pub async fn run(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
                     "when translating, the only character classes that may appear in\nstring2 are 'upper' and 'lower'",
                 )
                 .await;
+                return 1;
+            }
+            let set1_len = if complement {
+                let distinct = set1.iter().collect::<BTreeSet<_>>().len();
+                let domain = if chars { RAW as usize + 256 } else { 256 };
+                domain - distinct
+            } else {
+                set1.len()
+            };
+            let set2 = expand(&items, set1_len);
+            if let Err(e) = validate(
+                &set1_items,
+                &items,
+                set1_len,
+                set2.len(),
+                translating,
+                complement,
+                truncate,
+            ) {
+                ctx.error(e).await;
                 return 1;
             }
             Some(expand(&items, set1.len()))

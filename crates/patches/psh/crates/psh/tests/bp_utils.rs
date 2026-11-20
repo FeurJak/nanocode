@@ -158,3 +158,26 @@ fn tr_reads_repeats_in_set1_and_refuses_fill_there() {
         ("c3*]\ntr: the [c*] repeat construct may not appear in string1\n1\n".into(), 0)
     );
 }
+
+#[test]
+fn tr_refuses_set2_shapes_gnu_refuses() {
+    let src = r#"set -f; for a in '[:digit:] [:lower:]' '-ds a [x*]' '-c [:alnum:] a-z' '-c [:alnum:] x' 'x [=e=]' '-c A-Z [:upper:]' '[:lower:] [:upper:]'; do echo aZ9 | tr $a 2>&1; echo $?; done"#;
+    assert_eq!(
+        sh(src),
+        (
+            concat!(
+                "tr: misaligned [:upper:] and/or [:lower:] construct\n1\n",
+                "tr: the [c*] construct may appear in string2 only when translating\n1\n",
+                "tr: when translating with complemented character classes,\n",
+                "string2 must map all characters in the domain to one\n1\n",
+                "aZ9x0\n",
+                "tr: [=c=] expressions may not appear in string2 when translating\n1\n",
+                "tr: when translating with string1 longer than string2,\n",
+                "the latter string must not end with a character class\n1\n",
+                "AZ9\n0\n",
+            )
+            .into(),
+            0
+        )
+    );
+}
