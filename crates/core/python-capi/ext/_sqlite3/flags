@@ -1,2 +1,4 @@
 -include
 nanocode_pycore.h
+-include
+nanocode_sqlite_prefix.h
