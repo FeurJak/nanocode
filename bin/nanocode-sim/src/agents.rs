@@ -1,9 +1,12 @@
 use std::{cell::RefCell, sync::Arc, time::Duration};
 
 use nanocode_agent_core::AgentHandle;
+use nanocode_board::{TaskId, brief::Brief};
+use nanocode_dispatch::{Domain, Spawn};
+use nanocode_dispatcher::{Pool, Start};
 use nanocode_subagents::{
-    AgentStatus, AgentTask, Coordination, DEFAULT_MAX_SUBAGENTS, Registry, ScopedAgentUpdate,
-    SubagentControl,
+    AgentId, AgentStatus, AgentTask, Coordination, DEFAULT_MAX_SUBAGENTS, Registry,
+    ScopedAgentUpdate, SubagentControl, SubagentPool,
 };
 use nanocode_sync::mpsc::UnboundedReceiver;
 use serde_json::Value;
@@ -23,6 +26,7 @@ pub const STEP_LATENCY_MS_MAX: u64 = 20_000;
 pub const RESTORE_LATENCY_MS_MAX: u64 = 2_000;
 pub const SHUTDOWN_LATENCY_MS_MAX: u64 = 1_000;
 pub const CANCEL_PPM: u64 = 250_000;
+pub const POOLED_MAX: u64 = 4;
 pub const RUNTIME_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 const ROOT_SESSION: &str = "root";
 
@@ -34,16 +38,18 @@ pub enum AgentsMutation {
     ShutdownKeepsHarness,
     TurnLeaks,
     BoardFailuresUnread,
+    PoolRetireKeepsAgent,
 }
 
 impl AgentsMutation {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::None,
         Self::CancelIgnored,
         Self::ShutdownHangs,
         Self::ShutdownKeepsHarness,
         Self::TurnLeaks,
         Self::BoardFailuresUnread,
+        Self::PoolRetireKeepsAgent,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -60,6 +66,7 @@ impl AgentsMutation {
             Self::ShutdownKeepsHarness => "shutdown_keeps_harness",
             Self::TurnLeaks => "turn_leaks",
             Self::BoardFailuresUnread => "board_failures_unread",
+            Self::PoolRetireKeepsAgent => "pool_retire_keeps_agent",
         }
     }
 
@@ -76,6 +83,7 @@ enum Stop {
 
 struct Shape {
     children: u64,
+    pooled: u64,
     resident_max: usize,
     stop_after: Duration,
     stop: Stop,
@@ -102,8 +110,10 @@ impl Shape {
         };
         let turn_ms_max = script.steps_max * script.step_latency_ms_max;
         let stop_after = Duration::from_millis(rng.range(0, turn_ms_max));
+        let pooled = rng.range(1, POOLED_MAX);
         Self {
             children,
+            pooled,
             resident_max: usize::try_from(resident_max).expect("a resident bound fits in usize"),
             stop_after,
             stop,
@@ -113,8 +123,9 @@ impl Shape {
 
     fn describe(&self) -> String {
         format!(
-            "scenario=agents children={} resident<={} stop={:?} after_ms={} steps<={} latency_ms<={} restore_ms<={} shutdown_ms<={}",
+            "scenario=agents children={} pooled={} resident<={} stop={:?} after_ms={} steps<={} latency_ms<={} restore_ms<={} shutdown_ms<={}",
             self.children,
+            self.pooled,
             self.resident_max,
             self.stop,
             self.stop_after.as_millis(),
@@ -248,7 +259,12 @@ const fn settled(stop: Stop, status: &AgentStatus) -> bool {
     }
 }
 
-async fn judge(run: &Run, shape: &Shape, ledger: &Ledger) -> Result<(), String> {
+async fn judge(
+    run: &Run,
+    shape: &Shape,
+    ledger: &Ledger,
+    retired: &[AgentId],
+) -> Result<(), String> {
     let turns = ledger.running_turns();
     if turns > 0 {
         return Err(format!(
@@ -273,14 +289,21 @@ async fn judge(run: &Run, shape: &Shape, ledger: &Ledger) -> Result<(), String> 
             )
         })?;
     let count = u64::try_from(listed.len()).expect("a child count fits in u64");
-    if count != shape.children {
+    if count != shape.children + shape.pooled {
         return Err(format!(
-            "the directory lists {count} of {} children",
-            shape.children
+            "the directory lists {count} of {} children and {} pooled agents",
+            shape.children, shape.pooled
         ));
     }
     for entry in listed {
-        if !settled(shape.stop, &entry.status) {
+        let closed = retired.contains(&entry.agent_id);
+        if closed && entry.status != AgentStatus::Closed {
+            return Err(format!(
+                "the pool retired agent {} but it is {:?} after {:?}",
+                entry.agent_id, entry.status, shape.stop
+            ));
+        }
+        if !closed && !settled(shape.stop, &entry.status) {
             return Err(format!(
                 "agent {} is {:?} after {:?}",
                 entry.agent_id, entry.status, shape.stop
@@ -373,7 +396,86 @@ async fn board_agrees(
     Ok(())
 }
 
-async fn drive(shape: &Shape, ledger: &Arc<Ledger>, clock: &Clock) -> Result<u64, String> {
+fn start_of(index: u64) -> Start {
+    let intent = TaskId(format!("intent/pooled-{index}"));
+    let task = TaskId(format!("pooled-{index}"));
+    Start {
+        spawn: Spawn {
+            intent,
+            task: task.clone(),
+            domain: Domain {
+                role: "worker".to_owned(),
+                member: "member".to_owned(),
+                project: "project".to_owned(),
+            },
+            placement: "sim".to_owned(),
+            cost_nano_usd: 1,
+        },
+        agent: format!("pooled-{index}"),
+        worker: format!("dispatcher+pooled-{index}"),
+        brief: Brief {
+            task,
+            text: format!("pooled task {index}"),
+            tokens: 4,
+            steers: Vec::new(),
+            omitted_bytes: 0,
+        },
+    }
+}
+
+async fn pooled(run: &Run, shape: &Shape, clock: &Arc<Clock>) -> Result<Vec<AgentId>, String> {
+    let now = Arc::clone(clock);
+    let pool = SubagentPool::new(
+        run.root.clone(),
+        Arc::clone(&run.registry),
+        ROOT_SESSION,
+        Box::new(move || now.now_ns() / 1_000_000),
+    );
+    for index in 0..shape.pooled {
+        pool.start(start_of(index))
+            .await
+            .map_err(|error| format!("the pool did not start pooled-{index}: {error:?}"))?;
+    }
+    pool.start(start_of(0))
+        .await
+        .map_err(|error| format!("the pool did not restart pooled-0: {error:?}"))?;
+    let listed = pool.agents().await;
+    for index in 0..shape.pooled {
+        let name = format!("pooled-{index}");
+        let Some(agent) = listed.iter().find(|agent| agent.id == name) else {
+            return Err(format!("the pool started {name} but does not list it"));
+        };
+        if agent.intent != Some(start_of(index).spawn.intent) {
+            return Err(format!("the pool lists {name} under {:?}", agent.intent));
+        }
+    }
+    let Some(gone) = pool.agent_id("pooled-0") else {
+        return Err("the pool forgot pooled-0 before retiring it".to_owned());
+    };
+    pool.retire("pooled-0")
+        .await
+        .map_err(|error| format!("the pool did not retire pooled-0: {error:?}"))?;
+    let directory = run
+        .registry
+        .directory(ROOT_SESSION, true, false)
+        .await
+        .map_err(|error| format!("the directory did not answer after a retire: {error}"))?;
+    let status = directory
+        .iter()
+        .find(|entry| entry.agent_id == gone)
+        .map(|entry| &entry.status);
+    if status != Some(&AgentStatus::Closed) {
+        return Err(format!(
+            "the pool retired pooled-0 (agent {gone}) but the runtime has it {status:?}"
+        ));
+    }
+    if pool.agents().await.iter().any(|agent| agent.id == "pooled-0") {
+        return Err("the pool still lists pooled-0 after retiring it".to_owned());
+    }
+    Ok(vec![gone])
+}
+
+async fn drive(shape: &Shape, ledger: &Arc<Ledger>, clock: &Arc<Clock>) -> Result<u64, String> {
     let run = build(ledger, shape);
     nanocode_subagents::start_agents(
         &run.root,
@@ -384,6 +486,8 @@ async fn drive(shape: &Shape, ledger: &Arc<Ledger>, clock: &Clock) -> Result<u64
     .await
     .map_err(|error| format!("start_agents failed: {error}"))?;
     ledger.trace("started");
+    let retired = pooled(&run, shape, clock).await?;
+    ledger.trace("pooled");
     nanocode_platform::sleep(shape.stop_after).await;
     if let Some(plane) = &run.plane {
         board_agrees(&run, plane, false).await?;
@@ -392,7 +496,7 @@ async fn drive(shape: &Shape, ledger: &Arc<Ledger>, clock: &Clock) -> Result<u64
     let took_ms = stop(&run, shape, clock).await?;
     ledger.trace("stopped");
     nanocode_platform::sleep(RUNTIME_STOP_TIMEOUT).await;
-    judge(&run, shape, ledger).await?;
+    judge(&run, shape, ledger, &retired).await?;
     drop(run.updates);
     Ok(took_ms)
 }
@@ -400,6 +504,9 @@ async fn drive(shape: &Shape, ledger: &Arc<Ledger>, clock: &Clock) -> Result<u64
 pub fn simulate(seed: u64, mutation: AgentsMutation) -> AgentOutcome {
     if mutation == AgentsMutation::BoardFailuresUnread {
         nanocode_board::sim::mutate(nanocode_board::sim::Mutation::SubagentFailuresUnread);
+    }
+    if mutation == AgentsMutation::PoolRetireKeepsAgent {
+        nanocode_board::sim::mutate(nanocode_board::sim::Mutation::PoolRetireKeepsAgent);
     }
     let shape = Shape::of(seed, mutation);
     let clock = Clock::new();

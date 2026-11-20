@@ -14,6 +14,8 @@ mod message;
 mod model;
 mod platform;
 mod policy;
+mod pool;
+pub use pool::SubagentPool;
 mod roster;
 mod routing;
 mod runtime;

@@ -231,6 +231,7 @@ default_table='
 1 canary_agents_cancel_ignored canary:200 --scenario agents --mutation cancel_ignored
 1 canary_agents_shutdown_hangs canary:200 --scenario agents --mutation shutdown_hangs
 1 canary_agents_shutdown_keeps_harness canary:200 --scenario agents --mutation shutdown_keeps_harness
+1 canary_agents_pool_retire_keeps_agent canary:40 --scenario agents --mutation pool_retire_keeps_agent
 1 canary_runtime_kv_power_loss_drops_acked canary:100 --scenario runtime --store kv --mutation power_loss_drops_acked
 1 canary_runtime_kv_power_loss_drops_acceptance canary:100 --scenario runtime --store kv --mutation power_loss_drops_acceptance
 1 canary_runtime_kv_record_insert_drops canary:100 --scenario runtime --store kv --mutation record_insert_drops
