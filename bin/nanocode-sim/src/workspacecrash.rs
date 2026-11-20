@@ -28,6 +28,24 @@
 //! files as they were between two operations, never the moved file twice or
 //! nowhere, and running the rest must finish it; a forced checkout after the
 //! crash must leave the branch's tree with nothing to commit.
+//!
+//! Many files: one job writes, moves and removes many files at once, from a
+//! Python program's write-back or a cell's node:fs; every file must hold its
+//! old content or its whole new one and a moved file must never be under
+//! neither name. Push: git push dies while it writes the remote-tracking
+//! refs; each must hold its old commit or the pushed one, pushing again must
+//! leave the server on every pushed commit, and fetching then leaves every
+//! ref on it. Atomic
+//! write: a Python program replaces files through a temporary file and
+//! os.replace; every target must hold its old content or its whole new one,
+//! with no temporary file left, and running it again must finish it.
+//!
+//! Some canaries bend the job's file system instead of the store: a whole-file
+//! write that removes the old file first, one that empties it first, and a
+//! remote-tracking ref written in two pieces, and (only in the many-file
+//! job) a move that removes the old path before writing the new one, and
+//! (only in the atomic-write job) a write-back that removes each target
+//! before moving a temporary copy over it.
 
 use std::{
     cell::Cell,
@@ -50,8 +68,9 @@ use std::{
 use nanocode_code_mode_engine::{CellTools, EmbeddedHost, Interrupt, RuntimeEvent};
 use nanocode_durability_core::StoreFuture;
 use nanocode_shell::{
-    Commands, Config as ShellConfig, Ended, FileSystem, HostInfo, Identity, Kind, Limits, Machine,
-    NoCommands, Remove, Script, Shell, Write,
+    Commands, Config as ShellConfig, Credentials, Ended, Fetch, FileDownload,
+    FileSystem, FileUpload, HostInfo, Identity, Kind, Limits, Links, Machine, NoCommands, Remove,
+    Reply, SHA256_BYTES, Script, Shell, Stat, WholeFile, Write, Wrote,
 };
 use nanocode_sys::base64::STANDARD;
 use nanocode_workspace_fs::{
@@ -60,7 +79,10 @@ use nanocode_workspace_fs::{
 };
 use serde_json::{Value, json};
 
-use crate::rng::{FNV_OFFSET, Rng, fnv};
+use crate::{
+    gitremote::Origin,
+    rng::{FNV_OFFSET, Rng, fnv},
+};
 
 const ROOT: &str = "/w";
 const KEY: &str = "crash";
@@ -109,6 +131,12 @@ const MANY_MAX: u64 = 12;
 const REPO: &str = "g";
 const REPO_PATHS: [&str; 4] = ["a.txt", "b.txt", "d/c.txt", "e.txt"];
 const TRACKED_PPM: u64 = 700_000;
+const PUSH_REPO: &str = "p";
+const BRANCHES: [&str; 3] = ["t0", "t1", "t2"];
+const FRESH: &str = "t3";
+/// The files an atomic-write job starts from (the last is new, in a new
+/// directory).
+const ATOMIC: [&str; 4] = ["d/a.json", "d/b.json", "c.json", "d/n/e.json"];
 const GIT_ENV: &str = "export GIT_AUTHOR_NAME=Agent GIT_AUTHOR_EMAIL=agent@sim GIT_COMMITTER_NAME=Agent GIT_COMMITTER_EMAIL=agent@sim";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,16 +147,26 @@ pub enum WorkspaceCrashMutation {
     VisibleBeforeCommit,
     LostUpdate,
     StaleRetryOverwrites,
+    ReplaceRemovesFirst,
+    ReplaceEmptiesFirst,
+    TrackingRefTorn,
+    ManyMoveRemovesFirst,
+    AtomicReplaceRemovesTarget,
 }
 
 impl WorkspaceCrashMutation {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 11] = [
         Self::None,
         Self::TornCommit,
         Self::BackendFailureAcked,
         Self::VisibleBeforeCommit,
         Self::LostUpdate,
         Self::StaleRetryOverwrites,
+        Self::ReplaceRemovesFirst,
+        Self::ReplaceEmptiesFirst,
+        Self::TrackingRefTorn,
+        Self::ManyMoveRemovesFirst,
+        Self::AtomicReplaceRemovesTarget,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -145,6 +183,11 @@ impl WorkspaceCrashMutation {
             Self::VisibleBeforeCommit => "visible_before_commit",
             Self::LostUpdate => "lost_update",
             Self::StaleRetryOverwrites => "stale_retry_overwrites",
+            Self::ReplaceRemovesFirst => "replace_removes_first",
+            Self::ReplaceEmptiesFirst => "replace_empties_first",
+            Self::TrackingRefTorn => "tracking_ref_torn",
+            Self::ManyMoveRemovesFirst => "many_move_removes_first",
+            Self::AtomicReplaceRemovesTarget => "atomic_replace_removes_target",
         }
     }
 
@@ -164,7 +207,188 @@ impl WorkspaceCrashMutation {
             Self::VisibleBeforeCommit => FsRule::VisibleBeforeCommit,
             Self::LostUpdate => FsRule::LostUpdate,
             Self::StaleRetryOverwrites => FsRule::StaleRetryOverwrites,
+            Self::ReplaceRemovesFirst
+            | Self::ReplaceEmptiesFirst
+            | Self::TrackingRefTorn
+            | Self::ManyMoveRemovesFirst
+            | Self::AtomicReplaceRemovesTarget => FsRule::None,
         }
+    }
+
+    /// How the mutation bends the file system a crash point's job writes
+    /// through, if it does.
+    const fn bend(self) -> Bend {
+        match self {
+            Self::ReplaceRemovesFirst => Bend::RemovesFirst,
+            Self::ReplaceEmptiesFirst => Bend::EmptiesFirst,
+            Self::TrackingRefTorn => Bend::TornTrackingRef,
+            Self::ManyMoveRemovesFirst => Bend::MoveRemovesFirst,
+            Self::AtomicReplaceRemovesTarget => Bend::ReplaceRemovesTarget,
+            _ => Bend::None,
+        }
+    }
+}
+
+/// A canary in the file system a crash point's job writes through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Bend {
+    None,
+    /// A whole-file write over an existing file removes it first.
+    RemovesFirst,
+    /// A whole-file write over an existing file empties it first.
+    EmptiesFirst,
+    /// A whole-file write of a remote-tracking ref writes it in two pieces.
+    TornTrackingRef,
+    /// The many-file job moves a file by removing the old path first, then
+    /// writing the new one in pieces.
+    MoveRemovesFirst,
+    /// The atomic-write job's write-back replays the program's pattern
+    /// without its atomicity: it writes a temporary file, removes the target,
+    /// then moves the temporary file over it.
+    ReplaceRemovesTarget,
+}
+
+/// How many pieces a bent move writes its new path in.
+const MOVE_PIECES: usize = 4;
+
+thread_local! {
+    static BEND: Cell<Bend> = const { Cell::new(Bend::None) };
+}
+
+/// The job's file system, bent by the seed's canary when it has one. A
+/// bent one takes no many-file step, so every write goes one at a time.
+fn bent(files: Rc<dyn FileSystem>, label: &str) -> Rc<dyn FileSystem> {
+    match BEND.with(Cell::get) {
+        Bend::None => files,
+        // Only the many-file job's moves are bent, so no other point sees it.
+        Bend::MoveRemovesFirst if !label.starts_with("many") => files,
+        Bend::ReplaceRemovesTarget if label != "atomic" => files,
+        bend => Rc::new(Bent(files, bend)),
+    }
+}
+
+struct Bent(Rc<dyn FileSystem>, Bend);
+
+impl FileSystem for Bent {
+    fn stat(&self, path: &[u8], follow: bool) -> Reply<Stat> {
+        self.0.stat(path, follow)
+    }
+
+    fn read(&self, path: &[u8], limit: u64) -> Reply<nanocode_bytes::Bytes> {
+        self.0.read(path, limit)
+    }
+
+    fn write(&self, path: &[u8], data: &[u8], how: Write) -> Reply<()> {
+        let bends = how == Write::Replace
+            && match self.1 {
+                Bend::None | Bend::MoveRemovesFirst => false,
+                Bend::TornTrackingRef => path
+                    .windows(b"/.git/refs/remotes/".len())
+                    .any(|part| part == b"/.git/refs/remotes/"),
+                Bend::RemovesFirst | Bend::EmptiesFirst | Bend::ReplaceRemovesTarget => true,
+            };
+        if !bends {
+            return self.0.write(path, data, how);
+        }
+        let (files, bend, path, data) = (self.0.clone(), self.1, path.to_vec(), data.to_vec());
+        Reply::Later(Box::pin(async move {
+            if bend == Bend::TornTrackingRef {
+                let half = data.len() / 2;
+                files.write(&path, &data[..half], Write::Replace).get().await?;
+                return files.write(&path, &data[half..], Write::Append).get().await;
+            }
+            let old = files
+                .stat(&path, false)
+                .get()
+                .await
+                .is_ok_and(|stat| stat.kind == Kind::File);
+            if old && bend == Bend::ReplaceRemovesTarget {
+                let mut temporary = path.clone();
+                temporary.extend_from_slice(b".tmp-canary");
+                files.write(&temporary, &data, Write::Replace).get().await?;
+                files.remove(&path, Remove::File).get().await?;
+                return files.rename(&temporary, &path).get().await;
+            }
+            if old && bend == Bend::RemovesFirst {
+                files.remove(&path, Remove::File).get().await?;
+            } else if old {
+                files.write(&path, b"", Write::Replace).get().await?;
+            }
+            files.write(&path, &data, Write::Replace).get().await
+        }))
+    }
+
+    fn list(&self, path: &[u8]) -> Reply<Vec<Vec<u8>>> {
+        self.0.list(path)
+    }
+
+    fn mkdir(&self, path: &[u8], mode: u32) -> Reply<()> {
+        self.0.mkdir(path, mode)
+    }
+
+    fn remove(&self, path: &[u8], what: Remove) -> Reply<()> {
+        self.0.remove(path, what)
+    }
+
+    fn rename(&self, from: &[u8], to: &[u8]) -> Reply<()> {
+        if self.1 != Bend::MoveRemovesFirst {
+            return self.0.rename(from, to);
+        }
+        let (files, from, to) = (self.0.clone(), from.to_vec(), to.to_vec());
+        Reply::Later(Box::pin(async move {
+            let stat = files.stat(&from, false).get().await?;
+            if stat.kind != Kind::File {
+                return files.rename(&from, &to).get().await;
+            }
+            let data = files.read(&from, u64::MAX).get().await?;
+            files.remove(&from, Remove::File).get().await?;
+            files.write(&to, b"", Write::Replace).get().await?;
+            for piece in data.chunks(data.len().div_ceil(MOVE_PIECES).max(1)) {
+                files.write(&to, piece, Write::Append).get().await?;
+            }
+            Ok(())
+        }))
+    }
+
+    fn symlink(&self, target: &[u8], link: &[u8]) -> Reply<()> {
+        self.0.symlink(target, link)
+    }
+
+    fn read_link(&self, path: &[u8]) -> Reply<Vec<u8>> {
+        self.0.read_link(path)
+    }
+
+    fn hard_link(&self, existing: &[u8], link: &[u8]) -> Reply<()> {
+        self.0.hard_link(existing, link)
+    }
+
+    fn links(&self, path: &[u8], follow: bool) -> Option<Links> {
+        self.0.links(path, follow)
+    }
+
+    fn set_mode(&self, path: &[u8], mode: u32) -> Reply<()> {
+        self.0.set_mode(path, mode)
+    }
+
+    fn set_mtime(&self, path: &[u8], mtime_ns: i64) -> Reply<()> {
+        self.0.set_mtime(path, mtime_ns)
+    }
+
+    fn upload(&self, path: &[u8], sha256: [u8; SHA256_BYTES]) -> Reply<Box<dyn FileUpload>> {
+        self.0.upload(path, sha256)
+    }
+
+    fn download(&self, path: &[u8], limit: u64) -> Reply<FileDownload> {
+        self.0.download(path, limit)
+    }
+
+    fn write_files(&self, files: &[WholeFile<'_>], dir_mode: u32) -> Reply<Wrote> {
+        let _ = (files, dir_mode);
+        Reply::Now(Ok(Wrote::default()))
+    }
+
+    fn answers_now(&self) -> bool {
+        self.0.answers_now()
     }
 }
 
@@ -184,6 +408,8 @@ pub struct WorkspaceCrashStats {
     pub points_checkout: u64,
     pub points_rename: u64,
     pub points_many: u64,
+    pub points_push: u64,
+    pub points_atomic: u64,
 }
 
 impl WorkspaceCrashStats {
@@ -202,6 +428,8 @@ impl WorkspaceCrashStats {
         self.points_checkout += other.points_checkout;
         self.points_rename += other.points_rename;
         self.points_many += other.points_many;
+        self.points_push += other.points_push;
+        self.points_atomic += other.points_atomic;
     }
 }
 
@@ -485,6 +713,15 @@ struct Said {
 }
 
 async fn psh(files: Rc<dyn FileSystem>, script: String) -> Said {
+    psh_on(files, script, None).await
+}
+
+/// Runs script in psh, reaching a git server over the network when given one.
+async fn psh_on(
+    files: Rc<dyn FileSystem>,
+    script: String,
+    network: Option<(Rc<dyn Fetch>, Rc<dyn Credentials>)>,
+) -> Said {
     let commands: Rc<dyn Commands> =
         Rc::new(nanocode_python::Command::new(PYTHON, Rc::new(NoCommands)));
     let mut shell = Shell::new(ShellConfig {
@@ -510,6 +747,10 @@ async fn psh(files: Rc<dyn FileSystem>, script: String) -> Said {
         without: Vec::new(),
         strict: false,
     });
+    if let Some((fetch, credentials)) = network {
+        shell.set_fetch(fetch);
+        shell.set_credentials(credentials);
+    }
     let ran = shell
         .run(
             Script {
@@ -1296,7 +1537,7 @@ fn die_during(
     let files = one(open(reference.clone()), rng)??;
     one(setup(files.clone()), rng)??;
     let base = reference.states().len();
-    let view: Rc<dyn FileSystem> = Rc::new(files.clone());
+    let view = bent(Rc::new(files.clone()), label);
     let said = one(job(view), rng)?;
     if !said.ok {
         return Err(format!("{label} failed without a crash: {}", said.output));
@@ -1321,7 +1562,7 @@ fn die_during(
     let files = one(open(dying.clone()), rng)??;
     one(setup(files.clone()), rng)??;
     dying.plan(at, planned);
-    let view: Rc<dyn FileSystem> = Rc::new(files.clone());
+    let view = bent(Rc::new(files.clone()), label);
     let said = one(job(view), rng)?;
     let fired = dying.fired.load(Ordering::SeqCst);
     if fired != planned {
@@ -1905,6 +2146,256 @@ fn many(
     Ok(())
 }
 
+/// A crash while git push writes the remote-tracking refs, after the server
+/// took the push: each ref must hold its old commit or the pushed one,
+/// pushing again must leave the server on every pushed commit (and each ref
+/// on its old commit or the pushed one), and fetching then must leave every
+/// ref on its branch's commit.
+fn push(
+    rng: &mut Rng,
+    stats: &mut WorkspaceCrashStats,
+    digest: &mut u64,
+    shape: &mut String,
+) -> Result<(), String> {
+    let kept = &BRANCHES[..rng.range(1, BRANCHES.len() as u64) as usize];
+    let mut moved: Vec<&'static str> = kept.iter().copied().filter(|_| rng.chance(HALF_PPM)).collect();
+    let fresh = rng.chance(HALF_PPM);
+    if moved.is_empty() && !fresh {
+        moved.push(kept[0]);
+    }
+    let mut pushed: Vec<&'static str> = kept.to_vec();
+    if fresh {
+        pushed.push(FRESH);
+    }
+    let named = pushed.join(" ");
+    let repo = absolute(PUSH_REPO);
+    let mut script = format!(
+        "set -e\n{GIT_ENV}\nmkdir -p {repo}\ncd {repo}\ngit init -q\nprintf '%s' {} > f.txt\ngit add -A\ngit commit -qm base\ngit checkout -q -b {}\n",
+        quoted(&words(rng, 4)),
+        kept[0]
+    );
+    for branch in &kept[1..] {
+        let _ = writeln!(script, "git branch {branch}");
+    }
+    let _ = writeln!(
+        script,
+        "git remote add origin {}\ngit push -q origin {}",
+        Origin::url(),
+        kept.join(" ")
+    );
+    for branch in &moved {
+        let _ = writeln!(
+            script,
+            "git checkout -q {branch}\nprintf '%s' {} > {branch}.txt\ngit add -A\ngit commit -qm {branch}",
+            quoted(&words(rng, 4))
+        );
+    }
+    if fresh {
+        let _ = writeln!(script, "git branch {FRESH}");
+    }
+    let seed = rng.below(u64::MAX);
+    let origin: Rc<std::cell::RefCell<Option<Origin>>> = Rc::default();
+    // Each branch's remote-tracking ref before the push (None for a new
+    // branch) and the commit the push sends, both as their files hold them.
+    let refs: Rc<std::cell::RefCell<BTreeMap<&'static str, (Option<String>, String)>>> = Rc::default();
+    let network = {
+        let origin = origin.clone();
+        move || {
+            let origin = origin.borrow();
+            let origin = origin.as_ref().expect("setup made the server");
+            (origin.fetch(), origin.credentials())
+        }
+    };
+    let setup_fn: SetupFn = {
+        let (origin, refs, network, pushed) = (origin.clone(), refs.clone(), network.clone(), pushed.clone());
+        Box::new(move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
+            *origin.borrow_mut() = Some(Origin::new(seed));
+            let (script, refs, network, pushed) = (script.clone(), refs.clone(), network(), pushed.clone());
+            Box::pin(async move {
+                setup(files.clone(), Vec::new()).await?;
+                let said = psh_on(Rc::new(files.clone()), script, Some(network)).await;
+                if !said.ok {
+                    return Err(format!("the pushing repository's setup failed: {}", said.output));
+                }
+                let mut held = BTreeMap::new();
+                for branch in pushed {
+                    let read = |path: String| {
+                        let files = files.clone();
+                        async move {
+                            let path = absolute(&format!("{PUSH_REPO}/.git/{path}"));
+                            files
+                                .read(path.as_bytes(), u64::MAX)
+                                .get()
+                                .await
+                                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                        }
+                    };
+                    let old = read(format!("refs/remotes/origin/{branch}")).await.ok();
+                    let new = read(format!("refs/heads/{branch}"))
+                        .await
+                        .map_err(|error| format!("setup left no loose ref for {branch}: {error}"))?;
+                    held.insert(branch, (old, new));
+                }
+                *refs.borrow_mut() = held;
+                Ok(())
+            })
+        })
+    };
+    let job = format!("set -e\ncd {repo}\ngit push -q origin {named}\n");
+    let job_fn: JobFn = {
+        let network = network.clone();
+        Box::new(move |files: Rc<dyn FileSystem>| -> Boxed<'static, Said> {
+            Box::pin(psh_on(files, job.clone(), Some(network())))
+        })
+    };
+    let _ = write!(shape, " pushed={}", pushed.len());
+    let Some(died) = die_during(rng, stats, digest, shape, "push", &setup_fn, &job_fn)? else {
+        return Ok(());
+    };
+    stats.points_push += 1;
+    let when = died.when;
+    let refs = refs.borrow().clone();
+    let tracking = |branch: &str| keyed(&format!("{PUSH_REPO}/.git/refs/remotes/origin/{branch}"));
+    for (branch, (old, new)) in &refs {
+        let held = lossy(died.contents.get(&tracking(branch)));
+        if held != *old && held.as_ref() != Some(new) {
+            return Err(format!(
+                "{when}: the remote-tracking ref of {branch} holds {held:?}, not {old:?} or {new:?}"
+            ));
+        }
+    }
+    let files = one(open(Dying::new(died.inner.clone(), None)), rng)??;
+    let again = format!(
+        "set -e\ncd {repo}\nrm -f .git/*.lock .git/refs/remotes/origin/*.lock\ngit push -q origin {named}\n"
+    );
+    let resumed = one(psh_on(Rc::new(files), again, Some(network())), rng)?;
+    if !resumed.ok {
+        return Err(format!("{when}: pushing again failed: {}", resumed.output));
+    }
+    stats.resumed += 1;
+    let again = reopened(&died.inner, rng, digest).map_err(|error| format!("{when}: {error}"))?;
+    let heads = origin.borrow().as_ref().map(Origin::heads).unwrap_or_default();
+    for (branch, (old, new)) in &refs {
+        let held = lossy(again.get(&tracking(branch)));
+        if held != *old && held.as_ref() != Some(new) {
+            return Err(format!(
+                "{when}: after pushing again the remote-tracking ref of {branch} holds {held:?}, not {old:?} or {new:?}"
+            ));
+        }
+        if heads.get(*branch).map(String::as_str) != Some(new.trim_end()) {
+            return Err(format!(
+                "{when}: after pushing again the server holds {branch} at {:?}, not {new:?}",
+                heads.get(*branch)
+            ));
+        }
+    }
+    let files = one(open(Dying::new(died.inner.clone(), None)), rng)??;
+    let fetch = format!("set -e\ncd {repo}\ngit fetch -q origin\n");
+    let fetched = one(psh_on(Rc::new(files), fetch, Some(network())), rng)?;
+    if !fetched.ok {
+        return Err(format!("{when}: fetching after pushing again failed: {}", fetched.output));
+    }
+    let after = reopened(&died.inner, rng, digest).map_err(|error| format!("{when}: {error}"))?;
+    for (branch, (_, new)) in &refs {
+        let held = lossy(after.get(&tracking(branch)));
+        if held.as_ref() != Some(new) {
+            return Err(format!(
+                "{when}: after fetching the remote-tracking ref of {branch} holds {held:?}, not {new:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A crash during a Python program's atomic writes: each target written to a
+/// temporary file in its directory, then moved over it with os.replace. Every
+/// target holds its old content or its whole new one, no temporary file is
+/// left, and running the program again finishes it.
+fn atomic(
+    rng: &mut Rng,
+    stats: &mut WorkspaceCrashStats,
+    digest: &mut u64,
+    shape: &mut String,
+) -> Result<(), String> {
+    let initial: Vec<(&'static str, String)> = ATOMIC[..ATOMIC.len() - 1]
+        .iter()
+        .map(|&path| (path, words(rng, 4)))
+        .collect();
+    let mut targets: Vec<(&'static str, String)> = Vec::new();
+    for path in ATOMIC {
+        if rng.chance(HALF_PPM) {
+            targets.push((path, format!("<a{}{}>", targets.len(), words(rng, 3))));
+        }
+    }
+    if targets.is_empty() {
+        targets.push((ATOMIC[0], format!("<a{}>", words(rng, 3))));
+    }
+    let listed: Vec<(String, String)> = targets
+        .iter()
+        .map(|(path, content)| (absolute(path), content.clone()))
+        .collect();
+    let program = format!(
+        "import os, tempfile\nfor p, s in {listed:?}:\n    d = os.path.dirname(p)\n    os.makedirs(d, exist_ok=True)\n    fd, t = tempfile.mkstemp(dir=d, prefix='.tmp-')\n    with os.fdopen(fd, 'w') as f:\n        f.write(s)\n    os.replace(t, p)\n"
+    );
+    let code = format!("python3 -c {}", quoted(&program));
+    let setup_fn: SetupFn = {
+        let initial = initial.clone();
+        Box::new(move |files: WorkspaceFs| -> Boxed<'static, Result<(), String>> {
+            Box::pin(setup(files, initial.clone()))
+        })
+    };
+    let job_fn: JobFn = {
+        let code = code.clone();
+        Box::new(move |files: Rc<dyn FileSystem>| -> Boxed<'static, Said> {
+            Box::pin(psh(files, code.clone()))
+        })
+    };
+    let _ = write!(shape, " targets={}", targets.len());
+    let Some(died) = die_during(rng, stats, digest, shape, "atomic", &setup_fn, &job_fn)? else {
+        return Ok(());
+    };
+    stats.points_atomic += 1;
+    let when = died.when;
+    let old = |path: &str| initial.iter().find(|(at, _)| *at == path).map(|(_, content)| content.clone());
+    let new = |path: &str| targets.iter().find(|(at, _)| *at == path).map(|(_, content)| content.clone());
+    if let Some(stray) = died.contents.keys().find(|key| !ATOMIC.iter().any(|path| keyed(path) == **key)) {
+        return Err(format!("{when}: the store holds {stray}, which the program never meant to leave"));
+    }
+    for path in ATOMIC {
+        let held = lossy(died.contents.get(&keyed(path)));
+        if held != old(path) && (held.is_none() || held != new(path)) {
+            return Err(format!(
+                "{when}: {path} holds {held:?}, not {:?} or {:?}",
+                old(path),
+                new(path)
+            ));
+        }
+    }
+    let files = one(open(Dying::new(died.inner.clone(), None)), rng)??;
+    let resumed = one(psh(Rc::new(files), code), rng)?;
+    if !resumed.ok {
+        return Err(format!("{when}: running the program again failed: {}", resumed.output));
+    }
+    stats.resumed += 1;
+    let again = reopened(&died.inner, rng, digest).map_err(|error| format!("{when}: {error}"))?;
+    let mut want = 0;
+    for path in ATOMIC {
+        let held = lossy(again.get(&keyed(path)));
+        let done = new(path).or_else(|| old(path));
+        want += usize::from(done.is_some());
+        if held != done {
+            return Err(format!("{when}: after running it again {path} holds {held:?}, not {done:?}"));
+        }
+    }
+    if again.len() != want {
+        return Err(format!(
+            "{when}: after running it again the store holds {:?}",
+            again.keys().collect::<Vec<_>>()
+        ));
+    }
+    Ok(())
+}
+
 /// One crash point per seed: mid-append, mid-checkout or across a rename.
 fn points(
     rng: &mut Rng,
@@ -1929,6 +2420,7 @@ fn simulate(seed: u64, mutation: WorkspaceCrashMutation) -> WorkspaceCrashOutcom
     let mut shape = String::new();
     crate::host::enter(seed, &crate::executor::Clock::new());
     fs_sim::mutate(mutation.rule());
+    BEND.with(|bend| bend.set(mutation.bend()));
     let wrong = crash(&mut rng, &mut stats, &mut digest, &mut shape)
         .and_then(|()| race(&mut rng, &mut stats, &mut digest, &mut shape))
         .and_then(|()| {
@@ -1939,8 +2431,17 @@ fn simulate(seed: u64, mutation: WorkspaceCrashMutation) -> WorkspaceCrashOutcom
             let mut rng = Rng::derive(seed, "workspace_crash_many");
             many(&mut rng, &mut stats, &mut digest, &mut shape)
         })
+        .and_then(|()| {
+            let mut rng = Rng::derive(seed, "workspace_crash_push");
+            push(&mut rng, &mut stats, &mut digest, &mut shape)
+        })
+        .and_then(|()| {
+            let mut rng = Rng::derive(seed, "workspace_crash_atomic");
+            atomic(&mut rng, &mut stats, &mut digest, &mut shape)
+        })
         .err();
     fs_sim::mutate(FsRule::None);
+    BEND.with(|bend| bend.set(Bend::None));
     digest = fnv(digest, shape.as_bytes());
     WorkspaceCrashOutcome {
         digest,
@@ -1953,6 +2454,7 @@ fn simulate(seed: u64, mutation: WorkspaceCrashMutation) -> WorkspaceCrashOutcom
 fn run_seed(seed: u64, mutation: WorkspaceCrashMutation) -> WorkspaceCrashOutcome {
     std::panic::catch_unwind(|| simulate(seed, mutation)).unwrap_or_else(|panic| {
         fs_sim::mutate(FsRule::None);
+        BEND.with(|bend| bend.set(Bend::None));
         let message = panic
             .downcast_ref::<String>()
             .cloned()

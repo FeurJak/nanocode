@@ -1076,6 +1076,63 @@ impl Credentials for Keys {
     }
 }
 
+/// A git server over smart HTTP that starts with no refs, for other scenarios
+/// whose jobs push to it: its fetcher, the credentials it takes, its URL and
+/// the branches it holds.
+pub(crate) struct Origin {
+    server: Rc<Server>,
+    keys: Rc<Keys>,
+}
+
+impl Origin {
+    pub(crate) fn new(seed: u64) -> Self {
+        let mut rng = Rng::derive(seed, "gitremote-origin");
+        let secret: String = (0..SECRET_BYTES)
+            .map(|_| char::from(b'a' + rng.below(26) as u8))
+            .collect();
+        let server = Rc::new(Server {
+            objects: RefCell::new(BTreeMap::new()),
+            refs: RefCell::new(BTreeMap::new()),
+            secret: secret.clone(),
+            rng: RefCell::new(rng),
+            corrupt: Cell::new(None),
+            mutation: GitRemoteMutation::None,
+            leaks: RefCell::new(Vec::new()),
+            deltas: Cell::new(0),
+            pushed_deltas: Cell::new(0),
+            received: RefCell::new(None),
+            trace: RefCell::new(Vec::new()),
+        });
+        let keys = Rc::new(Keys {
+            secret,
+            asks: Cell::new(0),
+        });
+        Self { server, keys }
+    }
+
+    pub(crate) fn fetch(&self) -> Rc<dyn Fetch> {
+        Rc::new(Wire(self.server.clone()))
+    }
+
+    pub(crate) fn credentials(&self) -> Rc<dyn Credentials> {
+        self.keys.clone()
+    }
+
+    pub(crate) fn url() -> String {
+        format!("http://{HOST}{REPO}")
+    }
+
+    /// Each branch the server holds, by its short name, to its commit in hex.
+    pub(crate) fn heads(&self) -> BTreeMap<String, String> {
+        self.server
+            .refs
+            .borrow()
+            .iter()
+            .filter_map(|(name, oid)| Some((name.strip_prefix("refs/heads/")?.to_owned(), hex(oid))))
+            .collect()
+    }
+}
+
 struct Clock {
     now: Cell<u64>,
 }
