@@ -7,6 +7,7 @@ macro_rules! ensure {
 }
 
 mod board_fold;
+mod board_partitioned;
 mod board_sync;
 mod live_fold;
 mod partitions;
@@ -27,15 +28,17 @@ const ITERATIONS_DEFAULT: u64 = 100_000;
 enum Target {
     BoardFold,
     BoardFoldSpread,
+    BoardPartitioned,
     BoardSyncIngest,
     LiveFoldDecode,
     PartitionsRow,
 }
 
 impl Target {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::BoardFold,
         Self::BoardFoldSpread,
+        Self::BoardPartitioned,
         Self::BoardSyncIngest,
         Self::LiveFoldDecode,
         Self::PartitionsRow,
@@ -45,6 +48,7 @@ impl Target {
         match self {
             Self::BoardFold => "board_fold",
             Self::BoardFoldSpread => "board_fold_spread",
+            Self::BoardPartitioned => "board_partitioned",
             Self::BoardSyncIngest => "board_sync_ingest",
             Self::LiveFoldDecode => "live_fold_decode",
             Self::PartitionsRow => "partitions_row",
@@ -59,6 +63,7 @@ impl Target {
         match self {
             Self::BoardFold => board_fold::check(rng),
             Self::BoardFoldSpread => board_fold::spread(rng),
+            Self::BoardPartitioned => board_partitioned::check(rng),
             Self::BoardSyncIngest => board_sync::check(rng),
             Self::LiveFoldDecode => live_fold::check(rng),
             Self::PartitionsRow => partitions::check(rng),
