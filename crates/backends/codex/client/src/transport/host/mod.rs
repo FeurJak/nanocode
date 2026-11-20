@@ -10,6 +10,7 @@ pub(crate) mod socket;
 const RESPONSES_WEBSOCKETS_BETA: &str = "responses_websockets=2026-02-06";
 const RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 const TURN_STATE_HEADER: &str = "x-codex-turn-state";
+const MAX_MESSAGE_BYTES_HEADER: &str = "x-codex-websocket-max-message-bytes";
 const USER_AGENT: &str = concat!("nanocode/", env!("CARGO_PKG_VERSION"));
 
 #[cfg(not(target_family = "wasm"))]
@@ -297,6 +298,7 @@ pub struct HostConnectionMetadata {
     pub(crate) server_model: Option<String>,
     pub(crate) reasoning_included: bool,
     pub(crate) turn_state: Option<String>,
+    pub(crate) max_message_bytes: Option<usize>,
 }
 
 impl HostConnectionMetadata {
@@ -308,6 +310,7 @@ impl HostConnectionMetadata {
             server_model: None,
             reasoning_included: false,
             turn_state: None,
+            max_message_bytes: None,
         }
     }
 
@@ -325,6 +328,7 @@ impl HostConnectionMetadata {
             server_model: text("openai-model"),
             reasoning_included: headers.contains_key("x-reasoning-included"),
             turn_state: text(TURN_STATE_HEADER),
+            max_message_bytes: text(MAX_MESSAGE_BYTES_HEADER).and_then(|value| value.parse().ok()),
         }
     }
 

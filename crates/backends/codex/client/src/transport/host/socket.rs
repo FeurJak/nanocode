@@ -21,6 +21,7 @@ pub(crate) struct ResponsesSocket {
     connection: Box<dyn HostConnection>,
     idle: IdleTimer,
     turn_state: Option<String>,
+    max_message_bytes: Option<usize>,
 }
 
 pub(crate) struct ReceivedText {
@@ -68,6 +69,7 @@ impl ResponsesSocket {
                 },
             })?
             .into_parts();
+        let max_message_bytes = metadata.max_message_bytes;
         let metadata = ConnectionMetadata {
             status: metadata.status,
             request_id: metadata.request_id,
@@ -80,6 +82,7 @@ impl ResponsesSocket {
                 connection,
                 idle: IdleTimer::default(),
                 turn_state: metadata.turn_state.clone(),
+                max_message_bytes,
             },
             metadata,
         ))
@@ -91,6 +94,14 @@ impl ResponsesSocket {
     ) -> Result<SendOutcome, ResponsesError> {
         if self.connection.is_closed() {
             return Ok(SendOutcome::Disconnected);
+        }
+        let bytes = request.json().len();
+        if let Some(limit) = self.max_message_bytes
+            && bytes > limit
+        {
+            return Err(ResponsesError::MessageTooLarge {
+                detail: format!("{bytes} bytes over the advertised {limit}"),
+            });
         }
         self.connection
             .send(request.json())

@@ -181,8 +181,14 @@ impl ResponsesRetryPolicy {
             ResponsesAttemptKind::Warmup | ResponsesAttemptKind::Connect
         ) && advice.is_some()
             && request.attempt >= request.max_attempts;
+        let message_too_large = matches!(
+            failure.responses_error(),
+            Some(ResponsesError::MessageTooLarge { .. })
+        );
         let fallback_reason = if upgrade_required {
             Some("upgrade_required")
+        } else if message_too_large {
+            Some("message_too_large")
         } else if exhausted_websocket_budget {
             Some("retry_exhausted")
         } else {

@@ -85,6 +85,10 @@ pub enum ResponsesError {
         detail: String,
     },
 
+    MessageTooLarge {
+        detail: String,
+    },
+
     Api {
         event: String,
 
@@ -197,6 +201,10 @@ impl std::fmt::Display for ResponsesError {
                 "Responses API event did not match its declared type: {event}"
             ),
             Self::Closed { detail } => write!(formatter, "Responses WebSocket closed {detail}"),
+            Self::MessageTooLarge { detail } => write!(
+                formatter,
+                "Responses WebSocket request exceeds the server's message size limit: {detail}"
+            ),
             Self::Api { event, .. } => {
                 write!(formatter, "Responses API returned an error event: {event}")
             }
@@ -398,6 +406,7 @@ impl ResponsesError {
             Self::EncodeRequest(_) => "encode_request",
             Self::InvalidPayload { .. } => "invalid_payload",
             Self::Closed { .. } => "closed",
+            Self::MessageTooLarge { .. } => "message_too_large",
             Self::Api { event, .. } if api_error_is_checkpoint_missing(event) => {
                 "checkpoint_missing"
             }
@@ -690,6 +699,7 @@ impl ResponsesError {
             | Self::Send { detail, .. }
             | Self::Receive { detail, .. }
             | Self::Closed { detail }
+            | Self::MessageTooLarge { detail }
             | Self::HttpRequest { detail, .. }
             | Self::InvalidSseUtf8 { detail } => credentials.redact_in_place(detail),
             Self::HandshakeRejected { body, .. } | Self::HttpRejected { body, .. } => {

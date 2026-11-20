@@ -13,7 +13,7 @@ use nanocode_platform::timeout;
 use nanocode_sync::{FutureExt, SinkExt, StreamExt};
 use nanocode_sync::{mpsc, oneshot};
 use nanocode_websocket::{
-    Error as WebSocketError, Frame, IntoClientRequest, MaybeTlsStream, Message, OpCode,
+    CloseCode, Error as WebSocketError, Frame, IntoClientRequest, MaybeTlsStream, Message, OpCode,
     ProtocolError, Utf8Bytes, WebSocketStream,
 };
 
@@ -36,6 +36,7 @@ const SOCKET_BATCH_CAPACITY: usize = 32;
 const RESPONSES_WEBSOCKETS_BETA: &str = "responses_websockets=2026-02-06";
 const RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 const TURN_STATE_HEADER: &str = "x-codex-turn-state";
+const MAX_MESSAGE_BYTES_HEADER: &str = "x-codex-websocket-max-message-bytes";
 
 type Socket = WebSocketStream<InflateStream<MaybeTlsStream<TcpStream>>>;
 
@@ -51,6 +52,8 @@ pub(crate) struct ResponsesSocket {
     pump: SocketPump,
     turn_state: Option<String>,
     deflate: bool,
+    max_message_bytes: Option<usize>,
+    answered: AtomicBool,
 }
 
 pub(crate) struct ReceivedText {
@@ -189,6 +192,9 @@ impl ResponsesSocket {
                 pump: SocketPump::new(socket),
                 turn_state,
                 deflate: deflate::negotiated(response.headers()),
+                max_message_bytes: header_string(response.headers(), MAX_MESSAGE_BYTES_HEADER)
+                    .and_then(|value| value.parse().ok()),
+                answered: AtomicBool::new(false),
             },
             metadata,
         ))
@@ -199,6 +205,14 @@ impl ResponsesSocket {
         request: EncodedRequest,
     ) -> Result<SendOutcome, ResponsesError> {
         let text = request.into_string();
+        if let Some(limit) = self.max_message_bytes
+            && text.len() > limit
+        {
+            return Err(ResponsesError::MessageTooLarge {
+                detail: format!("{} bytes over the advertised {limit}", text.len()),
+            });
+        }
+        self.answered.store(false, Ordering::Release);
         let message = if self.deflate {
             let payload =
                 nanocode_platform::spawn_blocking(move || deflate::deflate(text.as_bytes()))
@@ -253,6 +267,7 @@ impl ResponsesSocket {
     ) -> Result<Option<ReceivedText>, ResponsesError> {
         match received.message.map_err(map_receive_error)? {
             Message::Text(text) => {
+                self.answered.store(true, Ordering::Release);
                 self.capture_turn_state(text.as_str());
                 Ok(Some(ReceivedText {
                     text,
@@ -262,6 +277,14 @@ impl ResponsesSocket {
             }
             Message::Binary(_) => Err(ResponsesError::UnexpectedBinary),
             Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => Ok(None),
+            Message::Close(Some(frame))
+                if frame.code == CloseCode::Size
+                    && !self.answered.load(Ordering::Acquire) =>
+            {
+                Err(ResponsesError::MessageTooLarge {
+                    detail: format!("closed with code {}: {}", frame.code, frame.reason),
+                })
+            }
             Message::Close(frame) => {
                 let detail = frame.map_or_else(
                     || "without a reason".to_owned(),
