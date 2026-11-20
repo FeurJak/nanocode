@@ -456,9 +456,19 @@ impl Python {
         }
         let result = vm.new_scope_with_main().and_then(|scope| {
             if let Program::File(path) = &invocation.program {
-                let path = vm.ctx.new_str(path.as_str());
-                scope.globals.set_item("__file__", path.into(), vm)?;
-                return vm.run_string(scope, &source, &name);
+                // CPython 3.12 names a script by its absolute path in __file__ and
+                // in its tracebacks, however the command line spelled it.
+                let path = vm
+                    .import("os", 0)?
+                    .get_attr("path", vm)?
+                    .get_attr("abspath", vm)?
+                    .call((vm.ctx.new_str(path.as_str()),), vm)?
+                    .str(vm)?
+                    .to_string();
+                scope
+                    .globals
+                    .set_item("__file__", vm.ctx.new_str(path.as_str()).into(), vm)?;
+                return vm.run_string(scope, &source, &path);
             }
             // CPython 3.12 keeps no source for a program from -c or stdin, so its
             // tracebacks name the lines without showing them: skip linecache.
