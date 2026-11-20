@@ -60,6 +60,36 @@ import math as _math
 import numbers as _numbers
 import sys
 
+
+# Coefficients and exponents routinely exceed sys.int_max_str_digits; like
+# CPython's C decimal, this module's own int<->str conversions ignore that
+# limit. A user's int(str) and str(int) keep it.
+def _nolimit(f, x, _get=sys.get_int_max_str_digits,
+             _set=sys.set_int_max_str_digits):
+    try:
+        return f(x)
+    except ValueError:
+        old = _get()
+        if not old:
+            raise
+        _set(0)
+        try:
+            return f(x)
+        finally:
+            _set(old)
+
+
+def _istr(x, _lim=10**4000):
+    if x.__class__ is int and -_lim < x < _lim:
+        return str(x)
+    return _nolimit(str, x)
+
+
+def _iint(x):
+    if x.__class__ is str and len(x) < 4000:
+        return int(x)
+    return _nolimit(int, x)
+
 try:
     from collections import namedtuple as _namedtuple
     DecimalTuple = _namedtuple('DecimalTuple', 'sign digits exponent', module='decimal')
@@ -500,15 +530,15 @@ class Decimal(object):
             if intpart is not None:
                 # finite number
                 fracpart = m.group('frac') or ''
-                exp = int(m.group('exp') or '0')
-                self._int = str(int(intpart+fracpart))
+                exp = _iint(m.group('exp') or '0')
+                self._int = _istr(_iint(intpart+fracpart))
                 self._exp = exp - len(fracpart)
                 self._is_special = False
             else:
                 diag = m.group('diag')
                 if diag is not None:
                     # NaN
-                    self._int = str(int(diag or '0')).lstrip('0')
+                    self._int = _istr(_iint(diag or '0')).lstrip('0')
                     if m.group('signal'):
                         self._exp = 'N'
                     else:
@@ -527,7 +557,7 @@ class Decimal(object):
             else:
                 self._sign = 1
             self._exp = 0
-            self._int = str(abs(value))
+            self._int = _istr(abs(value))
             self._is_special = False
             return self
 
@@ -542,8 +572,8 @@ class Decimal(object):
         # From an internal working value
         if isinstance(value, _WorkRep):
             self._sign = value.sign
-            self._int = str(value.int)
-            self._exp = int(value.exp)
+            self._int = _istr(value.int)
+            self._exp = _iint(value.exp)
             self._is_special = False
             return self
 
@@ -647,7 +677,7 @@ class Decimal(object):
         if isinstance(f, int):                # handle integer inputs
             sign = 0 if f >= 0 else 1
             k = 0
-            coeff = str(abs(f))
+            coeff = _istr(abs(f))
         elif isinstance(f, float):
             if _math.isinf(f) or _math.isnan(f):
                 return cls(repr(f))
@@ -657,7 +687,7 @@ class Decimal(object):
                 sign = 1
             n, d = abs(f).as_integer_ratio()
             k = d.bit_length() - 1
-            coeff = str(n*5**k)
+            coeff = _istr(n*5**k)
         else:
             raise TypeError("argument must be int or float.")
 
@@ -915,7 +945,7 @@ class Decimal(object):
             exp_hash = pow(10, self._exp, _PyHASH_MODULUS)
         else:
             exp_hash = pow(_PyHASH_10INV, -self._exp, _PyHASH_MODULUS)
-        hash_ = int(self._int) * exp_hash % _PyHASH_MODULUS
+        hash_ = _iint(self._int) * exp_hash % _PyHASH_MODULUS
         ans = hash_ if self >= 0 else -hash_
         return -2 if ans == -1 else ans
 
@@ -951,7 +981,7 @@ class Decimal(object):
 
         # Find n, d in lowest terms such that abs(self) == n / d;
         # we'll deal with the sign later.
-        n = int(self._int)
+        n = _iint(self._int)
         if self._exp >= 0:
             # self is an integer.
             n, d = n * 10**self._exp, 1
@@ -979,7 +1009,7 @@ class Decimal(object):
     def __repr__(self):
         """Represents the number as an instance of Decimal."""
         # Invariant:  eval(repr(d)) == d
-        return "Decimal('%s')" % str(self)
+        return "Decimal('%s')" % _istr(self)
 
     def __str__(self, eng=False, context=None):
         """Return string representation of the number in scientific notation.
@@ -1268,7 +1298,7 @@ class Decimal(object):
         op1 = _WorkRep(self)
         op2 = _WorkRep(other)
 
-        ans = _dec_from_triple(resultsign, str(op1.int * op2.int), resultexp)
+        ans = _dec_from_triple(resultsign, _istr(op1.int * op2.int), resultexp)
         ans = ans._fix(context)
 
         return ans
@@ -1330,7 +1360,7 @@ class Decimal(object):
                     coeff //= 10
                     exp += 1
 
-        ans = _dec_from_triple(sign, str(coeff), exp)
+        ans = _dec_from_triple(sign, _istr(coeff), exp)
         return ans._fix(context)
 
     def _divide(self, other, context):
@@ -1358,8 +1388,8 @@ class Decimal(object):
                 op2.int *= 10**(op2.exp - op1.exp)
             q, r = divmod(op1.int, op2.int)
             if q < 10**context.prec:
-                return (_dec_from_triple(sign, str(q), 0),
-                        _dec_from_triple(self._sign, str(r), ideal_exp))
+                return (_dec_from_triple(sign, _istr(q), 0),
+                        _dec_from_triple(self._sign, _istr(r), ideal_exp))
 
         # Here the quotient is too large to be representable
         ans = context._raise_error(DivisionImpossible,
@@ -1522,7 +1552,7 @@ class Decimal(object):
             sign = 1-sign
             r = -r
 
-        ans = _dec_from_triple(sign, str(r), ideal_exponent)
+        ans = _dec_from_triple(sign, _istr(r), ideal_exponent)
         return ans._fix(context)
 
     def __floordiv__(self, other, context=None):
@@ -1567,7 +1597,7 @@ class Decimal(object):
                 raise ValueError("Cannot convert signaling NaN to float")
             s = "-nan" if self._sign else "nan"
         else:
-            s = str(self)
+            s = _istr(self)
         return float(s)
 
     def __int__(self):
@@ -1579,9 +1609,9 @@ class Decimal(object):
                 raise OverflowError("Cannot convert infinity to integer")
         s = (-1)**self._sign
         if self._exp >= 0:
-            return s*int(self._int)*10**self._exp
+            return s*_iint(self._int)*10**self._exp
         else:
-            return s*int(self._int[:self._exp] or '0')
+            return s*_iint(self._int[:self._exp] or '0')
 
     __trunc__ = __int__
 
@@ -1666,7 +1696,7 @@ class Decimal(object):
             changed = rounding_method(self, digits)
             coeff = self._int[:digits] or '0'
             if changed > 0:
-                coeff = str(int(coeff)+1)
+                coeff = _istr(_iint(coeff)+1)
                 if len(coeff) > context.prec:
                     coeff = coeff[:-1]
                     exp_min += 1
@@ -1840,7 +1870,7 @@ class Decimal(object):
                 raise ValueError("cannot round a NaN")
             else:
                 raise OverflowError("cannot round an infinity")
-        return int(self._rescale(0, ROUND_HALF_EVEN))
+        return _iint(self._rescale(0, ROUND_HALF_EVEN))
 
     def __floor__(self):
         """Return the floor of self, as an integer.
@@ -1855,7 +1885,7 @@ class Decimal(object):
                 raise ValueError("cannot round a NaN")
             else:
                 raise OverflowError("cannot round an infinity")
-        return int(self._rescale(0, ROUND_FLOOR))
+        return _iint(self._rescale(0, ROUND_FLOOR))
 
     def __ceil__(self):
         """Return the ceiling of self, as an integer.
@@ -1870,7 +1900,7 @@ class Decimal(object):
                 raise ValueError("cannot round a NaN")
             else:
                 raise OverflowError("cannot round an infinity")
-        return int(self._rescale(0, ROUND_CEILING))
+        return _iint(self._rescale(0, ROUND_CEILING))
 
     def fma(self, other, third, context=None):
         """Fused multiply-add.
@@ -1911,7 +1941,7 @@ class Decimal(object):
                 product = _SignedInfinity[self._sign ^ other._sign]
         else:
             product = _dec_from_triple(self._sign ^ other._sign,
-                                       str(int(self._int) * int(other._int)),
+                                       _istr(_iint(self._int) * _iint(other._int)),
                                        self._exp + other._exp)
 
         return product.__add__(third, context)
@@ -1989,7 +2019,7 @@ class Decimal(object):
 
         # convert modulo to a Python integer, and self and other to
         # Decimal integers (i.e. force their exponents to be >= 0)
-        modulo = abs(int(modulo))
+        modulo = abs(_iint(modulo))
         base = _WorkRep(self.to_integral_value())
         exponent = _WorkRep(other.to_integral_value())
 
@@ -1999,7 +2029,7 @@ class Decimal(object):
             base = pow(base, 10, modulo)
         base = pow(base, exponent.int, modulo)
 
-        return _dec_from_triple(sign, str(base), 0)
+        return _dec_from_triple(sign, _istr(base), 0)
 
     def _power_exact(self, other, p):
         """Attempt to compute self**other exactly.
@@ -2086,7 +2116,7 @@ class Decimal(object):
                 exponent = -exponent
             # if other is a nonnegative integer, use ideal exponent
             if other._isinteger() and other._sign == 0:
-                ideal_exponent = self._exp*int(other)
+                ideal_exponent = self._exp*_iint(other)
                 zeros = min(exponent-ideal_exponent, p-1)
             else:
                 zeros = 0
@@ -2129,7 +2159,7 @@ class Decimal(object):
 
                 # emax >= largest e such that 5**e < 10**p.
                 emax = p*93//65
-                if ye >= len(str(emax)):
+                if ye >= len(_istr(emax)):
                     return None
 
                 # Find -e*y and -xe*y; both must be integers
@@ -2157,7 +2187,7 @@ class Decimal(object):
                 # the 'xc is a power of 2' branch.  10/3 is an upper bound for
                 # log(10)/log(2).
                 emax = p*10//3
-                if ye >= len(str(emax)):
+                if ye >= len(_istr(emax)):
                     return None
 
                 e = _decimal_lshift_exact(e * yc, ye)
@@ -2176,7 +2206,7 @@ class Decimal(object):
             # possible at this point.
             assert xc > 1, self
             assert xc % 10 != 0, self
-            strxc = str(xc)
+            strxc = _istr(xc)
             if len(strxc) > p:
                 return None
             xe = -e-xe
@@ -2186,10 +2216,10 @@ class Decimal(object):
         if ye >= 0:
             m, n = yc*10**ye, 1
         else:
-            if xe != 0 and len(str(abs(yc*xe))) <= -ye:
+            if xe != 0 and len(_istr(abs(yc*xe))) <= -ye:
                 return None
             xc_bits = _nbits(xc)
-            if len(str(abs(yc)*xc_bits)) <= -ye:
+            if len(_istr(abs(yc)*xc_bits)) <= -ye:
                 return None
             m, n = yc, 10**(-ye)
             while m % 2 == n % 2 == 0:
@@ -2235,7 +2265,7 @@ class Decimal(object):
         # this point.
         assert xc > 1, self
         assert xc % 10 != 0, self
-        str_xc = str(xc)
+        str_xc = _istr(xc)
         if len(str_xc) > p:
             return None
 
@@ -2243,7 +2273,7 @@ class Decimal(object):
         # adjust the exponent to get as close as possible to the ideal
         # exponent, if necessary
         if other._isinteger() and other._sign == 0:
-            ideal_exponent = self._exp*int(other)
+            ideal_exponent = self._exp*_iint(other)
             zeros = min(xe-ideal_exponent, p-len(str_xc))
         else:
             zeros = 0
@@ -2338,7 +2368,7 @@ class Decimal(object):
                 elif other > context.prec:
                     multiplier = context.prec
                 else:
-                    multiplier = int(other)
+                    multiplier = _iint(other)
 
                 exp = self._exp * multiplier
                 if exp < 1-context.prec:
@@ -2376,13 +2406,13 @@ class Decimal(object):
         if (self_adj >= 0) == (other._sign == 0):
             # self > 1 and other +ve, or self < 1 and other -ve
             # possibility of overflow
-            if bound >= len(str(context.Emax)):
+            if bound >= len(_istr(context.Emax)):
                 ans = _dec_from_triple(result_sign, '1', context.Emax+1)
         else:
             # self > 1 and other -ve, or self < 1 and other +ve
             # possibility of underflow to 0
             Etiny = context.Etiny()
-            if bound >= len(str(-Etiny)):
+            if bound >= len(_istr(-Etiny)):
                 ans = _dec_from_triple(result_sign, '1', Etiny-1)
 
         # try for an exact result with precision +1
@@ -2408,11 +2438,11 @@ class Decimal(object):
             extra = 3
             while True:
                 coeff, exp = _dpower(xc, xe, yc, ye, p+extra)
-                if coeff % (5*10**(len(str(coeff))-p-1)):
+                if coeff % (5*10**(len(_istr(coeff))-p-1)):
                     break
                 extra += 3
 
-            ans = _dec_from_triple(result_sign, str(coeff), exp)
+            ans = _dec_from_triple(result_sign, _istr(coeff), exp)
 
         # unlike exp, ln and log10, the power function respects the
         # rounding mode; no need to switch to ROUND_HALF_EVEN here
@@ -2604,7 +2634,7 @@ class Decimal(object):
         changed = this_function(self, digits)
         coeff = self._int[:digits] or '0'
         if changed == 1:
-            coeff = str(int(coeff)+1)
+            coeff = _istr(_iint(coeff)+1)
         return _dec_from_triple(self._sign, coeff, exp)
 
     def _round(self, places, rounding):
@@ -2767,7 +2797,7 @@ class Decimal(object):
             if n % 5 == 0:
                 n += 1
 
-        ans = _dec_from_triple(0, str(n), e)
+        ans = _dec_from_triple(0, _istr(n), e)
 
         # round, and fit to current context
         context = context._shallow_copy()
@@ -3033,10 +3063,10 @@ class Decimal(object):
         # the default context.  For smaller exponent the result is
         # indistinguishable from 1 at the given precision, while for
         # larger exponent the result either overflows or underflows.
-        if self._sign == 0 and adj > len(str((context.Emax+1)*3)):
+        if self._sign == 0 and adj > len(_istr((context.Emax+1)*3)):
             # overflow
             ans = _dec_from_triple(0, '1', context.Emax+1)
-        elif self._sign == 1 and adj > len(str((-context.Etiny()+1)*3)):
+        elif self._sign == 1 and adj > len(_istr((-context.Etiny()+1)*3)):
             # underflow to 0
             ans = _dec_from_triple(0, '1', context.Etiny()-1)
         elif self._sign == 0 and adj < -p:
@@ -3058,11 +3088,11 @@ class Decimal(object):
             extra = 3
             while True:
                 coeff, exp = _dexp(c, e, p+extra)
-                if coeff % (5*10**(len(str(coeff))-p-1)):
+                if coeff % (5*10**(len(_istr(coeff))-p-1)):
                     break
                 extra += 3
 
-            ans = _dec_from_triple(0, str(coeff), exp)
+            ans = _dec_from_triple(0, _istr(coeff), exp)
 
         # at this stage, ans should round correctly with *any*
         # rounding mode, not just with ROUND_HALF_EVEN
@@ -3139,19 +3169,19 @@ class Decimal(object):
         adj = self._exp + len(self._int) - 1
         if adj >= 1:
             # argument >= 10; we use 23/10 = 2.3 as a lower bound for ln(10)
-            return len(str(adj*23//10)) - 1
+            return len(_istr(adj*23//10)) - 1
         if adj <= -2:
             # argument <= 0.1
-            return len(str((-1-adj)*23//10)) - 1
+            return len(_istr((-1-adj)*23//10)) - 1
         op = _WorkRep(self)
         c, e = op.int, op.exp
         if adj == 0:
             # 1 < self < 10
-            num = str(c-10**-e)
-            den = str(c)
+            num = _istr(c-10**-e)
+            den = _istr(c)
             return len(num) - len(den) - (num < den)
         # adj == -1, 0.1 <= self < 1
-        return e + len(str(10**-e - c)) - 1
+        return e + len(_istr(10**-e - c)) - 1
 
 
     def ln(self, context=None):
@@ -3193,10 +3223,10 @@ class Decimal(object):
         while True:
             coeff = _dlog(c, e, places)
             # assert len(str(abs(coeff)))-p >= 1
-            if coeff % (5*10**(len(str(abs(coeff)))-p-1)):
+            if coeff % (5*10**(len(_istr(abs(coeff)))-p-1)):
                 break
             places += 3
-        ans = _dec_from_triple(int(coeff<0), str(abs(coeff)), -places)
+        ans = _dec_from_triple(_iint(coeff<0), _istr(abs(coeff)), -places)
 
         context = context._shallow_copy()
         rounding = context._set_rounding(ROUND_HALF_EVEN)
@@ -3219,19 +3249,19 @@ class Decimal(object):
         adj = self._exp + len(self._int) - 1
         if adj >= 1:
             # self >= 10
-            return len(str(adj))-1
+            return len(_istr(adj))-1
         if adj <= -2:
             # self < 0.1
-            return len(str(-1-adj))-1
+            return len(_istr(-1-adj))-1
         op = _WorkRep(self)
         c, e = op.int, op.exp
         if adj == 0:
             # 1 < self < 10
-            num = str(c-10**-e)
-            den = str(231*c)
+            num = _istr(c-10**-e)
+            den = _istr(231*c)
             return len(num) - len(den) - (num < den) + 2
         # adj == -1, 0.1 <= self < 1
-        num = str(10**-e-c)
+        num = _istr(10**-e-c)
         return len(num) + e - (num < "231") - 1
 
     def log10(self, context=None):
@@ -3274,10 +3304,10 @@ class Decimal(object):
             while True:
                 coeff = _dlog10(c, e, places)
                 # assert len(str(abs(coeff)))-p >= 1
-                if coeff % (5*10**(len(str(abs(coeff)))-p-1)):
+                if coeff % (5*10**(len(_istr(abs(coeff)))-p-1)):
                     break
                 places += 3
-            ans = _dec_from_triple(int(coeff<0), str(abs(coeff)), -places)
+            ans = _dec_from_triple(_iint(coeff<0), _istr(abs(coeff)), -places)
 
         context = context._shallow_copy()
         rounding = context._set_rounding(ROUND_HALF_EVEN)
@@ -3359,7 +3389,7 @@ class Decimal(object):
         (opa, opb) = self._fill_logical(context, self._int, other._int)
 
         # make the operation, and clean starting zeroes
-        result = "".join([str(int(a)&int(b)) for a,b in zip(opa,opb)])
+        result = "".join([_istr(_iint(a)&_iint(b)) for a,b in zip(opa,opb)])
         return _dec_from_triple(0, result.lstrip('0') or '0', 0)
 
     def logical_invert(self, context=None):
@@ -3389,7 +3419,7 @@ class Decimal(object):
         (opa, opb) = self._fill_logical(context, self._int, other._int)
 
         # make the operation, and clean starting zeroes
-        result = "".join([str(int(a)|int(b)) for a,b in zip(opa,opb)])
+        result = "".join([_istr(_iint(a)|_iint(b)) for a,b in zip(opa,opb)])
         return _dec_from_triple(0, result.lstrip('0') or '0', 0)
 
     def logical_xor(self, other, context=None):
@@ -3409,7 +3439,7 @@ class Decimal(object):
         (opa, opb) = self._fill_logical(context, self._int, other._int)
 
         # make the operation, and clean starting zeroes
-        result = "".join([str(int(a)^int(b)) for a,b in zip(opa,opb)])
+        result = "".join([_istr(_iint(a)^_iint(b)) for a,b in zip(opa,opb)])
         return _dec_from_triple(0, result.lstrip('0') or '0', 0)
 
     def max_mag(self, other, context=None):
@@ -3623,14 +3653,14 @@ class Decimal(object):
 
         if other._exp != 0:
             return context._raise_error(InvalidOperation)
-        if not (-context.prec <= int(other) <= context.prec):
+        if not (-context.prec <= _iint(other) <= context.prec):
             return context._raise_error(InvalidOperation)
 
         if self._isinfinity():
             return Decimal(self)
 
         # get values, pad if necessary
-        torot = int(other)
+        torot = _iint(other)
         rotdig = self._int
         topad = context.prec - len(rotdig)
         if topad > 0:
@@ -3658,13 +3688,13 @@ class Decimal(object):
             return context._raise_error(InvalidOperation)
         liminf = -2 * (context.Emax + context.prec)
         limsup =  2 * (context.Emax + context.prec)
-        if not (liminf <= int(other) <= limsup):
+        if not (liminf <= _iint(other) <= limsup):
             return context._raise_error(InvalidOperation)
 
         if self._isinfinity():
             return Decimal(self)
 
-        d = _dec_from_triple(self._sign, self._int, self._exp + int(other))
+        d = _dec_from_triple(self._sign, self._int, self._exp + _iint(other))
         d = d._fix(context)
         return d
 
@@ -3681,14 +3711,14 @@ class Decimal(object):
 
         if other._exp != 0:
             return context._raise_error(InvalidOperation)
-        if not (-context.prec <= int(other) <= context.prec):
+        if not (-context.prec <= _iint(other) <= context.prec):
             return context._raise_error(InvalidOperation)
 
         if self._isinfinity():
             return Decimal(self)
 
         # get values, pad if necessary
-        torot = int(other)
+        torot = _iint(other)
         rotdig = self._int
         topad = context.prec - len(rotdig)
         if topad > 0:
@@ -3708,17 +3738,17 @@ class Decimal(object):
 
     # Support for pickling, copy, and deepcopy
     def __reduce__(self):
-        return (self.__class__, (str(self),))
+        return (self.__class__, (_istr(self),))
 
     def __copy__(self):
         if type(self) is Decimal:
             return self     # I'm immutable; therefore I am my own clone
-        return self.__class__(str(self))
+        return self.__class__(_istr(self))
 
     def __deepcopy__(self, memo):
         if type(self) is Decimal:
             return self     # My components are also immutable
-        return self.__class__(str(self))
+        return self.__class__(_istr(self))
 
     # PEP 3101 support.  the _localeconv keyword argument should be
     # considered private: it's provided for ease of testing only.
@@ -3745,7 +3775,7 @@ class Decimal(object):
         # special values don't care about the type or precision
         if self._is_special:
             sign = _format_sign(self._sign, spec)
-            body = str(self.copy_abs())
+            body = _istr(self.copy_abs())
             if spec['type'] == '%':
                 body += '%'
             return _format_align(sign, body, spec)
@@ -4049,11 +4079,11 @@ class Context(object):
 
     def Etiny(self):
         """Returns Etiny (= Emin - prec + 1)"""
-        return int(self.Emin - self.prec + 1)
+        return _iint(self.Emin - self.prec + 1)
 
     def Etop(self):
         """Returns maximum exponent (= Emax - prec + 1)"""
-        return int(self.Emax - self.prec + 1)
+        return _iint(self.Emax - self.prec + 1)
 
     def _set_rounding(self, type):
         """Sets the rounding type.
@@ -4152,7 +4182,7 @@ class Context(object):
             return r
 
     def _apply(self, a):
-        return str(a._fix(self))
+        return _istr(a._fix(self))
 
     def canonical(self, a):
         """Returns the same Decimal object.
@@ -5609,7 +5639,7 @@ class _WorkRep(object):
             self.exp = None
         elif isinstance(value, Decimal):
             self.sign = value._sign
-            self.int = int(value._int)
+            self.int = _iint(value._int)
             self.exp = value._exp
         else:
             # assert isinstance(value, tuple)
@@ -5639,8 +5669,8 @@ def _normalize(op1, op2, prec = 0):
     # as adding any positive quantity smaller than 10**exp; similarly
     # for subtraction.  So if other is smaller than 10**exp we replace
     # it with 10**exp.  This avoids tmp.exp - other.exp getting too large.
-    tmp_len = len(str(tmp.int))
-    other_len = len(str(other.int))
+    tmp_len = len(_istr(tmp.int))
+    other_len = len(_istr(other.int))
     exp = tmp.exp + min(-1, tmp_len - prec - 2)
     if other_len + other.exp - 1 < exp:
         other.int = 1
@@ -5671,7 +5701,7 @@ def _decimal_lshift_exact(n, e):
         return n * 10**e
     else:
         # val_n = largest power of 10 dividing n.
-        str_n = str(abs(n))
+        str_n = _istr(abs(n))
         val_n = len(str_n) - len(str_n.rstrip('0'))
         return None if val_n < -e else n // 10**-e
 
@@ -5746,7 +5776,7 @@ def _ilog(x, M, L = 8):
         R += 1
 
     # Taylor series with T terms
-    T = -int(-10*len(str(M))//(3*L))
+    T = -_iint(-10*len(_istr(M))//(3*L))
     yshift = _rshift_nearest(y, R)
     w = _div_nearest(M, T)
     for k in range(T-1, 0, -1):
@@ -5767,7 +5797,7 @@ def _dlog10(c, e, p):
     #   f >= 0 and 1 <= d <= 10, or
     #   f <= 0 and 0.1 <= d <= 1.
     # Thus for c*10**e close to 1, f = 0
-    l = len(str(c))
+    l = len(_istr(c))
     f = e+l - (e+l >= 1)
 
     if p > 0:
@@ -5800,7 +5830,7 @@ def _dlog(c, e, p):
     # rewrite c*10**e as d*10**f with either f >= 0 and 1 <= d <= 10,
     # or f <= 0 and 0.1 <= d <= 1.  Then we can compute 10**p * log(c*10**e)
     # as 10**p * log(d) + 10**p*f * log(10).
-    l = len(str(c))
+    l = len(_istr(c))
     f = e+l - (e+l >= 1)
 
     # compute approximation to 10**p*log(d), with error < 27
@@ -5819,7 +5849,7 @@ def _dlog(c, e, p):
 
     # compute approximation to f*10**p*log(10), with error < 11.
     if f:
-        extra = len(str(abs(f)))-1
+        extra = len(_istr(abs(f)))-1
         if p + extra >= 0:
             # error in f * _log10_digits(p+extra) < |f| * 1 = |f|
             # after division, error < |f|/10**extra + 0.5 < 10 + 0.5 < 11
@@ -5858,14 +5888,14 @@ class _Log10Memoize(object):
             while True:
                 # compute p+extra digits, correct to within 1ulp
                 M = 10**(p+extra+2)
-                digits = str(_div_nearest(_ilog(10*M, M), 100))
+                digits = _istr(_div_nearest(_ilog(10*M, M), 100))
                 if digits[-extra:] != '0'*extra:
                     break
                 extra += 3
             # keep all reliable digits so far; remove trailing zeros
             # and next nonzero digit
             self.digits = digits.rstrip('0')[:-1]
-        return int(self.digits[:p+1])
+        return _iint(self.digits[:p+1])
 
 _log10_digits = _Log10Memoize().getdigits
 
@@ -5893,7 +5923,7 @@ def _iexp(x, M, L=8):
     R = _nbits((x<<L)//M)
 
     # Taylor series.  (2**L)**T > M
-    T = -int(-10*len(str(M))//(3*L))
+    T = -_iint(-10*len(_istr(M))//(3*L))
     y = _div_nearest(x, T)
     Mshift = M<<R
     for i in range(T-1, 0, -1):
@@ -5924,7 +5954,7 @@ def _dexp(c, e, p):
     p += 2
 
     # compute log(10) with extra precision = adjusted exponent of c*10**e
-    extra = max(0, e + len(str(c)) - 1)
+    extra = max(0, e + len(_istr(c)) - 1)
     q = p + extra
 
     # compute quotient c*10**e/(log(10)) = c*10**(e+q)/(log(10)*10**q),
@@ -5958,7 +5988,7 @@ def _dpower(xc, xe, yc, ye, p):
     """
 
     # Find b such that 10**(b-1) <= |y| <= 10**b
-    b = len(str(abs(yc))) + ye
+    b = len(_istr(abs(yc))) + ye
 
     # log(x) = lxc*10**(-p-b-1), to p+b+1 places after the decimal point
     lxc = _dlog(xc, xe, p+b+1)
@@ -5973,7 +6003,7 @@ def _dpower(xc, xe, yc, ye, p):
     if pc == 0:
         # we prefer a result that isn't exactly 1; this makes it
         # easier to compute a correctly rounded result in __pow__
-        if ((len(str(xc)) + xe >= 1) == (yc > 0)): # if x**y > 1:
+        if ((len(_istr(xc)) + xe >= 1) == (yc > 0)): # if x**y > 1:
             coeff, exp = 10**(p-1)+1, 1-p
         else:
             coeff, exp = 10**p-1, -p
@@ -5990,7 +6020,7 @@ def _log10_lb(c, correction = {
     """Compute a lower bound for 100*log10(c) for a positive integer c."""
     if c <= 0:
         raise ValueError("The argument to _log10_lb should be nonnegative.")
-    str_c = str(c)
+    str_c = _istr(c)
     return 100*len(str_c) - correction[str_c[0]]
 
 ##### Helper Functions ####################################################
@@ -6031,7 +6061,7 @@ def _convert_for_comparison(self, other, equality_op=False):
     if isinstance(other, _numbers.Rational):
         if not self._is_special:
             self = _dec_from_triple(self._sign,
-                                    str(int(self._int) * other.denominator),
+                                    _istr(_iint(self._int) * other.denominator),
                                     self._exp)
         return self, Decimal(other.numerator)
 
@@ -6208,9 +6238,9 @@ def _parse_format_specifier(format_spec, _localeconv=None):
         format_dict['sign'] = '-'
 
     # minimumwidth defaults to 0; precision remains None if not given
-    format_dict['minimumwidth'] = int(format_dict['minimumwidth'] or '0')
+    format_dict['minimumwidth'] = _iint(format_dict['minimumwidth'] or '0')
     if format_dict['precision'] is not None:
-        format_dict['precision'] = int(format_dict['precision'])
+        format_dict['precision'] = _iint(format_dict['precision'])
 
     # if format type is 'g' or 'G' then a precision of 0 makes little
     # sense; convert it to 1.  Same if format type is unspecified.
