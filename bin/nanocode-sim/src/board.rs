@@ -721,7 +721,7 @@ impl World {
         loop {
             let host = self
                 .watched
-                .wrap(Arc::clone(&self.host) as Arc<dyn LogHost>);
+                .wrap(Arc::clone(&self.host) as Arc<dyn LogHost>, &self.clock);
             match Board::open(host, SCOPE, access::identity(writer)).await {
                 Ok(board) => {
                     self.resume(board.writer()).await;
@@ -1931,7 +1931,10 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
         digest = fnv(digest, &seq.to_le_bytes());
         digest = fnv(digest, body.as_bytes());
     }
-    let verdict = wrong
+    let verdict = world
+        .watched
+        .broken()
+        .or(wrong)
         .map_or_else(|| check(&world, &rows), Err)
         .and_then(|mut stats| {
             let due = due?;
