@@ -226,6 +226,7 @@ default_table='
 1 canary_live_instance_per_socket canary:20 --scenario live --mutation instance_per_socket
 1 canary_live_coalesce_drops_frame canary:20 --scenario live --mutation coalesce_drops_frame
 1 canary_live_rebuild_skips_first canary:20 --scenario live --mutation rebuild_skips_first
+1 canary_live_overload_keeps_frames canary:4000 --scenario live --mutation overload_keeps_frames
 8 controlplane pass --scenario controlplane --ops 2000
 2 controlplane_twice pass --scenario controlplane --ops 1500 --twice
 1 canary_controlplane_claim_ignores_lease canary:32 --scenario controlplane --ops 300 --mutation claim_ignores_lease

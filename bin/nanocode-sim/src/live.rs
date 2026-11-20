@@ -65,10 +65,11 @@ pub enum LiveMutation {
     InstancePerSocket,
     CoalesceDropsFrame,
     RebuildSkipsFirst,
+    OverloadKeepsFrames,
 }
 
 impl LiveMutation {
-    const ALL: [Self; 19] = [
+    const ALL: [Self; 20] = [
         Self::None,
         Self::SettleDropsDeletes,
         Self::SettleKeepsStart,
@@ -88,6 +89,7 @@ impl LiveMutation {
         Self::InstancePerSocket,
         Self::CoalesceDropsFrame,
         Self::RebuildSkipsFirst,
+        Self::OverloadKeepsFrames,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -117,6 +119,7 @@ impl LiveMutation {
             Self::InstancePerSocket => "instance_per_socket",
             Self::CoalesceDropsFrame => "coalesce_drops_frame",
             Self::RebuildSkipsFirst => "rebuild_skips_first",
+            Self::OverloadKeepsFrames => "overload_keeps_frames",
         }
     }
 
@@ -1024,8 +1027,9 @@ impl World {
 
     fn enqueue(&mut self, socket: usize, sub: Option<u32>, text: String) {
         let bound = self.bound;
+        let keeps = self.mutation == LiveMutation::OverloadKeepsFrames;
         let state = &mut self.sockets[socket];
-        if !state.alive {
+        if !state.alive || (!keeps && sub.is_some_and(|id| !state.subs.contains_key(&id))) {
             return;
         }
         if state.writable {
