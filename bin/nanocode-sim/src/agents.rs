@@ -736,7 +736,15 @@ fn hosted_placed(view: &HostedView, want: u64) -> Result<Option<String>, String>
     }
     for intent in &view.intents {
         let phase = view.phases.get(&intent.task.0);
-        if matches!(phase, Some(Phase::Done { .. })) {
+        // A worker that claimed its task and then ended it was placed. The
+        // scripted harness never calls submit_result, so each worker's turn
+        // ends Failed once it runs out of steps, and a slow placement (a
+        // lagging board costs the dispatcher a pass) lets the first workers
+        // end before the last one claims.
+        if matches!(
+            phase,
+            Some(Phase::Done { .. } | Phase::Failed { worker: Some(_), .. })
+        ) {
             continue;
         }
         let IntentState::Live { agent } = &intent.state else {
