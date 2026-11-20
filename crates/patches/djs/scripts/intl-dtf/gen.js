@@ -58,7 +58,9 @@ for (let w = 1; w <= 3; w++) for (let k = 0; k < 3024; k++) {
 }
 // localized GMT format: [prefix, minus sign]
 const lo = new Intl.DateTimeFormat(LOC, {timeZone: "-03:00", timeZoneName: "shortOffset"}).formatToParts(0).find(p => p.type === "timeZoneName").value;
-const gmt = [lo.slice(0, lo.length - 2), lo.slice(lo.length - 2, lo.length - 1)];
+const hi = new Intl.DateTimeFormat(LOC, {timeZone: "+03:00", timeZoneName: "shortOffset"}).formatToParts(0).find(p => p.type === "timeZoneName").value;
+const neg = lo.replace(/\u200e$/, "");
+const gmt = [hi.slice(0, hi.indexOf("+")), neg.slice(neg.length - 2, neg.length - 1)];
 // styles
 const st = ["full", "long", "medium", "short"];
 const styles = {date: st.map(s => m.infer({dateStyle: s}).p), time: [], both: []};

@@ -37,7 +37,10 @@ pub(super) struct DateLocale {
     gmt: [&'static str; 2],
 }
 
-pub(super) const LANGS: [&str; 17] = ["en", "de", "fr", "es", "it", "pt", "nl", "ja", "zh", "ko", "ru", "pl", "tr", "ar", "hi", "id", "vi"];
+pub(super) const LANGS: [&str; 30] = [
+    "en", "de", "fr", "es", "it", "pt", "nl", "ja", "zh", "ko", "ru", "pl", "tr", "ar", "hi", "id", "vi", "hu", "nb", "no", "he", "ta", "sr", "cs", "uk", "sv", "da",
+    "ms", "ro", "bn",
+];
 
 fn date_locale(locale: &str) -> Option<usize> {
     let find = |t: &str| DATE_LOCALES.iter().position(|l| l.tags.contains(&t));
@@ -48,6 +51,9 @@ fn date_locale(locale: &str) -> Option<usize> {
     let lang = sub.next().unwrap_or("");
     if lang == "zh" && sub.any(|s| matches!(s, "Hant" | "TW" | "HK" | "MO")) {
         return find("zh-Hant");
+    }
+    if lang == "sr" && locale.split('-').any(|s| s == "Latn") {
+        return find("sr-Latn");
     }
     find(lang)
 }
@@ -73,8 +79,11 @@ fn nu_digit(nu: &str, d: u32) -> char {
 
 pub(super) fn numbering_system(locale: &str) -> &'static str {
     let mut sub = locale.split('-');
-    if sub.next() == Some("ar") && sub.any(|s| ARAB_DIGIT_REGIONS.contains(&s)) {
+    let lang = sub.next();
+    if lang == Some("ar") && sub.any(|s| ARAB_DIGIT_REGIONS.contains(&s)) {
         "arab"
+    } else if lang == Some("bn") {
+        "beng"
     } else {
         "latn"
     }
@@ -821,6 +830,16 @@ fn zone_name(kind: usize, z: &ZoneAt) -> String {
 }
 
 fn locale_offset(l: &DateLocale, off: i64, long: bool) -> String {
+    // he isolates the offset with LRMs: GMT\u{200e}+5\u{200e}, but GMT-5\u{200e} (GMT-05:00\u{200e}\u{200e} long).
+    if let Some(prefix) = l.gmt[0].strip_suffix('\u{200e}') {
+        let plain = locale_offset(&DateLocale { gmt: [prefix, l.gmt[1]], ..*l }, off, long);
+        let (head, tail) = plain.split_at(prefix.len());
+        return if off < 0 {
+            format!("{head}{tail}\u{200e}{}", if long { "\u{200e}" } else { "" })
+        } else {
+            format!("{head}\u{200e}{tail}\u{200e}")
+        };
+    }
     let sign = if off < 0 { l.gmt[1] } else { "+" };
     let (h, m, sec) = (off.abs() / 3600, off.abs() / 60 % 60, off.abs() % 60);
     let secs = if sec != 0 { format!(":{sec:02}") } else { String::new() };

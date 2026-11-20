@@ -7,7 +7,7 @@
 mod ducet;
 
 use ducet::{
-    COMMON_S, COMMON_T, CONTR, DIGIT_ZERO, DIGIT_ZEROS, IMPLICIT, MAP, POOL, PREFIX, SEQ,
+    COMMON_S as COMMON_S1, COMMON_T, CONTR, DIGIT_ZERO, DIGIT_ZEROS, IMPLICIT, MAP, POOL, PREFIX, SEQ,
     TRAILING, UNIFIED, VARIABLE_TOP,
 };
 use super::{Spec, range};
@@ -15,6 +15,9 @@ use crate::interp::conv::Fault;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
+
+/// The common secondary weight, on the scale of 8 that Ce's s uses (room for tailorings below it).
+const COMMON_S: u16 = COMMON_S1 << 3;
 
 /// One collation element. `p` is the primary as a sort key: the main weight in the high
 /// half (0: ignorable), a sub-weight for implicit and numeric primaries in the low half.
@@ -28,6 +31,13 @@ struct Ce {
 }
 
 struct Options {
+    han: Option<&'static [u8]>,
+    /// ko: Han sort by their Hangul reading.
+    ko: bool,
+    /// zh: pinyin tones sort before the plain vowel (ā á ǎ à a), and after ê (ê ê̄ ế ê̌ ề).
+    tones: bool,
+    /// vi: tone marks in Vietnamese order (grave, hook, tilde, acute, dot below).
+    vi: bool,
     order: (&'static [Script], bool),
     tail: (&'static [Tail], bool),
     numeric: bool,
@@ -52,6 +62,88 @@ fn main_key(rank: u32) -> u64 {
 /// Han in radical-stroke order: runs of code points with consecutive positions, by start,
 /// each `(start - 0x3400) | position << 18` in 5 little-endian bytes (gen-collation.py).
 static HAN: &[u8] = include_bytes!("han.bin");
+
+/// Han in a locale's reading or stroke order (scripts/gen-han-order.js): zh pinyin, zh stroke
+/// (zh-Hant's default) and ja. Their tailored Han sort first, the rest after them by
+/// radical and strokes.
+static HAN_ZH: &[u8] = include_bytes!("han-zh.bin");
+static HAN_STROKE: &[u8] = include_bytes!("han-zh-stroke.bin");
+static HAN_JA: &[u8] = include_bytes!("han-ja.bin");
+static HAN_ZHUYIN: &[u8] = include_bytes!("han-zh-zhuyin.bin");
+/// ko: Han with a Hangul reading sort a secondary difference after that syllable.
+static HAN_KO: &[u8] = include_bytes!("han-ko.bin");
+static HAN_KO_SYL: &[u8] = include_bytes!("han-ko-syl.bin");
+
+/// A ko Han's collation elements: its reading's, then a secondary for its place among that
+/// reading's Han.
+fn ko_han(cp: u32, out: &mut Vec<Ce>) -> bool {
+    let Some(key) = han_key(HAN_KO, cp) else { return false };
+    let count = u64::from(u16::from_le_bytes([HAN_KO[2], HAN_KO[3]]));
+    let rank = key - 0x1_0000;
+    if rank >= count {
+        return false;
+    }
+    let r = rank as usize;
+    let syl = u32::from(u16::from_le_bytes([HAN_KO_SYL[r * 2], HAN_KO_SYL[r * 2 + 1]]));
+    let k = u16::from(HAN_KO_SYL[count as usize * 2 + r]);
+    // The syllable's jamo (code_points gives Hangul in NFD).
+    single(0x1100 + syl / 588, out);
+    single(0x1161 + syl % 588 / 28, out);
+    if syl % 28 != 0 {
+        single(0x11A7 + syl % 28, out);
+    }
+    out.push(Ce { p: 0, s: COMMON_S + 1 + k, t: COMMON_T, case: 0 });
+    true
+}
+
+/// The main key of a Han code point in a locale's Han order.
+fn han_key(table: &[u8], cp: u32) -> Option<u64> {
+    let at = han_position(cp)?;
+    let word = |i: usize| u16::from_le_bytes([table[i], table[i + 1]]);
+    let (dense, count) = (word(0) == 1, u64::from(word(2)));
+    let mut rest = &table[4..];
+    if dense {
+        if (0x4E00..=0x9FFF).contains(&cp) {
+            let r = word(4 + (cp - 0x4E00) as usize * 2);
+            return Some(0x1_0000 + if r == 0xFFFF { count + at } else { u64::from(r) });
+        }
+        rest = &table[4 + 0x5200 * 2..];
+    }
+    let entry = |i: usize| {
+        let e = &rest[i * 5..i * 5 + 5];
+        (u32::from(e[0]) | u32::from(e[1]) << 8 | u32::from(e[2]) << 16, u64::from(u16::from_le_bytes([e[3], e[4]])))
+    };
+    let n = rest.len() / 5;
+    let (mut lo, mut hi) = (0, n);
+    while lo < hi {
+        let mid = usize::midpoint(lo, hi);
+        if entry(mid).0 < cp { lo = mid + 1 } else { hi = mid }
+    }
+    Some(0x1_0000 + if lo < n && entry(lo).0 == cp { entry(lo).1 } else { count + at })
+}
+
+/// The Han order of a collation: None for the root's radical-stroke order.
+fn han_table(spec: &Spec) -> Option<&'static [u8]> {
+    if spec.get("usage") == Some("search") {
+        return None;
+    }
+    let locale = spec.get("locale").unwrap_or("");
+    match locale.split('-').next().unwrap_or("") {
+        "ja" => Some(HAN_JA),
+        "zh" => {
+            let hant = is_hant(locale);
+            let co = unicode_keywords(locale).into_iter().find(|(k, _)| *k == "co").map(|(_, v)| v);
+            match co.as_deref() {
+                Some("pinyin") => Some(HAN_ZH),
+                Some("stroke") => Some(HAN_STROKE),
+                Some("zhuyin") => Some(HAN_ZHUYIN),
+                Some("unihan") => None,
+                _ => Some(if hant { HAN_STROKE } else { HAN_ZH }),
+            }
+        }
+        _ => None,
+    }
+}
 
 /// The radical-stroke position of a Han code point.
 fn han_position(cp: u32) -> Option<u64> {
@@ -86,7 +178,7 @@ fn unpack(w: u32) -> Ce {
     let rank = w >> 16;
     Ce {
         p: if rank == 0 { 0 } else { main_key(rank) << 32 },
-        s: ((w >> 7) & 0x1FF) as u16,
+        s: (((w >> 7) & 0x1FF) as u16) << 3,
         t: ((w >> 2) & 31) as u8,
         case: (w & 3) as u8,
     }
@@ -209,15 +301,34 @@ const SV: &[Tail] = &[("å", 'z', 1, 0), ("ä", 'z', 2, 0), ("æ", 'z', 2, 1), (
 const DA: &[Tail] = &[("æ", 'z', 1, 0), ("ä", 'z', 1, 1), ("ø", 'z', 2, 0), ("ö", 'z', 2, 1), ("å", 'z', 3, 0), ("ü", 'y', 0, 1)];
 const ES: &[Tail] = &[("ñ", 'n', 1, 0)];
 const ES_TRAD: &[Tail] = &[("ch", 'c', 1, 0), ("ll", 'l', 1, 0), ("ñ", 'n', 1, 0)];
-const TR: &[Tail] = &[("ç", 'c', 1, 0), ("ğ", 'g', 1, 0), ("ı", 'h', 1, 0), ("ö", 'o', 1, 0), ("ş", 's', 1, 0), ("ü", 'u', 1, 0)];
+static TR: &[Tail] = &[("ç", 'c', 1, 0), ("ğ", 'g', 1, 0), ("ı", 'h', 1, 0), ("ö", 'o', 1, 0), ("ş", 's', 1, 0), ("ü", 'u', 1, 0)];
 const CS: &[Tail] = &[("č", 'c', 1, 0), ("ch", 'h', 1, 0), ("ř", 'r', 1, 0), ("š", 's', 1, 0), ("ž", 'z', 1, 0)];
+static HU: &[Tail] = &[
+    ("cs", 'c', 1, 0),
+    ("dzs", 'd', 2, 0),
+    ("dz", 'd', 1, 0),
+    ("gy", 'g', 1, 0),
+    ("ly", 'l', 1, 0),
+    ("ny", 'n', 1, 0),
+    ("sz", 's', 1, 0),
+    ("ty", 't', 1, 0),
+    ("zs", 'z', 1, 0),
+    ("ö", 'o', 1, 0),
+    ("ő", 'o', 1, 1),
+    ("ü", 'u', 1, 0),
+    ("ű", 'u', 1, 1),
+];
+/// ro and vi letters keep their tailored primary under further accents (ắ is ă with an acute).
+static RO: &[Tail] = &[("ă", 'a', 1, 0), ("â", 'a', 2, 0), ("î", 'i', 1, 0), ("ș", 's', 1, 0), ("ş", 's', 1, 0), ("ț", 't', 1, 0), ("ţ", 't', 1, 0)];
+static VI: &[Tail] = &[("ă", 'a', 1, 0), ("â", 'a', 2, 0), ("đ", 'd', 1, 0), ("ê", 'e', 1, 0), ("ô", 'o', 1, 0), ("ơ", 'o', 2, 0), ("ư", 'u', 1, 0)];
+const FIL: &[Tail] = &[("ñ", 'n', 1, 0), ("ng", 'n', 2, 0)];
 const PL: &[Tail] = &[("ą", 'a', 1, 0), ("ć", 'c', 1, 0), ("ę", 'e', 1, 0), ("ł", 'l', 1, 0), ("ń", 'n', 1, 0), ("ó", 'o', 1, 0), ("ś", 's', 1, 0), ("ź", 'z', 1, 0), ("ż", 'z', 2, 0)];
 /// de-u-co-phonebk: the umlauts expand to their base letter and e.
 const DE_PHONEBK: &[(&str, &str)] = &[("ä", "ae"), ("ö", "oe"), ("ü", "ue")];
 
 /// The languages a Collator resolves to beyond mod.rs LANGS: tailored, reordered, or (ca, sw,
 /// id) collating as the root does.
-pub(super) const TAILORED: [&str; 16] = ["sv", "fi", "da", "nb", "no", "tr", "cs", "pl", "uk", "el", "he", "ar", "th", "ca", "sw", "id"];
+pub(super) const TAILORED: [&str; 20] = ["sv", "fi", "da", "nb", "no", "tr", "cs", "pl", "uk", "el", "he", "ar", "th", "ca", "sw", "id", "hu", "ro", "vi", "fil"];
 
 fn tailoring(spec: &Spec) -> (&'static [Tail], bool) {
     let locale = spec.get("locale").unwrap_or("");
@@ -227,6 +338,8 @@ fn tailoring(spec: &Spec) -> (&'static [Tail], bool) {
         // The search collations of cs and pl are the root's; de's expands umlauts as phonebk does.
         ("cs" | "pl", _) if search => (&[], false),
         ("de", _) if search => (&[], true),
+        // hu, ro, vi and fil search as the root does.
+        ("hu" | "ro" | "vi" | "fil", _) if search => (&[], false),
         ("sv" | "fi", _) => (SV, false),
         ("da" | "nb" | "no", _) => (DA, false),
         ("es", "trad") if spec.get("usage") != Some("search") => (ES_TRAD, false),
@@ -234,6 +347,10 @@ fn tailoring(spec: &Spec) -> (&'static [Tail], bool) {
         ("tr", _) => (TR, false),
         ("cs", _) => (CS, false),
         ("pl", _) => (PL, false),
+        ("hu", _) => (HU, false),
+        ("ro", _) => (RO, false),
+        ("vi", _) => (VI, false),
+        ("fil", _) => (FIL, false),
         ("de", "phonebk") => (&[], true),
         _ => (&[], false),
     }
@@ -247,7 +364,7 @@ fn nfd_of(s: &str) -> Vec<u32> {
 /// Whether want (NFD) starts at cps[i], its first code point in either case, with no further
 /// combining mark on it; the case of the match (0 lower, 2 upper).
 #[allow(clippy::if_same_then_else)]
-fn tail_match(cps: &[u32], used: &[bool], i: usize, want: &[u32]) -> Option<u8> {
+fn tail_match(cps: &[u32], used: &[bool], i: usize, want: &[u32], loose: bool) -> Option<u8> {
     if i + want.len() > cps.len() || used[i..i + want.len()].iter().any(|u| *u) {
         return None;
     }
@@ -268,11 +385,38 @@ fn tail_match(cps: &[u32], used: &[bool], i: usize, want: &[u32]) -> Option<u8> 
     let rest_ok = want[1..].iter().zip(&cps[i + 1..]).all(|(w, c)| {
         *w == *c || char::from_u32(*w).is_some_and(|w| w.to_uppercase().eq(char::from_u32(*c)))
     });
-    let next_free = cps.get(i + want.len()).is_none_or(|c| ccc(*c) == 0);
+    let next_free = loose || cps.get(i + want.len()).is_none_or(|c| ccc(*c) == 0);
     (rest_ok && next_free).then_some(case)
 }
 
 /// The CEs of a tailored letter or expansion at cps[i], and how many code points it takes.
+/// hu's doubled digraphs (ccs, ggy, ssz, ddzs...) sort as the digraph twice.
+fn hu_double(cps: &[u32], used: &[bool], i: usize, tail: &(&'static [Tail], bool), out: &mut Vec<Ce>) -> Option<usize> {
+    let lower = |c: u32| char::from_u32(c).map_or(c, |c| u32::from(c.to_ascii_lowercase()));
+    let (first, second) = (*cps.get(i)?, *cps.get(i + 1)?);
+    if used.get(i + 1) != Some(&false) || lower(first) != lower(second) {
+        return None;
+    }
+    for digraph in ["dzs", "cs", "dz", "gy", "ly", "ny", "sz", "ty", "zs"] {
+        let want: Vec<u32> = digraph.chars().map(u32::from).collect();
+        let n = want.len();
+        let Some(rest) = cps.get(i + 1..i + 1 + n) else { continue };
+        if rest.iter().map(|c| lower(*c)).ne(want.iter().copied()) || used[i + 1..i + 1 + n].iter().any(|u| *u) {
+            continue;
+        }
+        if cps.get(i + 1 + n).is_some_and(|c| ccc(*c) != 0) {
+            return None;
+        }
+        let mut one: Vec<u32> = alloc::vec![first];
+        one.extend_from_slice(&rest[1..]);
+        let free = alloc::vec![false; n];
+        tailored(&one, &free, 0, tail, out)?;
+        tailored(rest, &free, 0, tail, out)?;
+        return Some(n + 1);
+    }
+    None
+}
+
 fn tailored(cps: &[u32], used: &[bool], i: usize, tail: &(&'static [Tail], bool), out: &mut Vec<Ce>) -> Option<usize> {
     // Turkish: dotted İ (I and U+0307 in NFD) is the uppercase of i.
     if core::ptr::eq(tail.0, TR) && cps[i] == u32::from('I') && cps.get(i + 1) == Some(&0x307) && !used[i + 1] {
@@ -282,9 +426,10 @@ fn tailored(cps: &[u32], used: &[bool], i: usize, tail: &(&'static [Tail], bool)
         out.push(Ce { p: b.p, s: b.s, t: upper_tertiary('i'), case: 2 });
         return Some(2);
     }
+    let loose = core::ptr::eq(tail.0, RO) || core::ptr::eq(tail.0, VI);
     for &(seq, after, n, sec) in tail.0 {
         let want = nfd_of(seq);
-        let Some(case) = tail_match(cps, used, i, &want) else { continue };
+        let Some(case) = tail_match(cps, used, i, &want, loose) else { continue };
         if seq == "\u{131}" && case == 2 && cps[i] != u32::from('I') {
             continue;
         }
@@ -296,24 +441,56 @@ fn tailored(cps: &[u32], used: &[bool], i: usize, tail: &(&'static [Tail], bool)
             1 => upper_tertiary(after),
             _ => b.t,
         };
-        out.push(Ce { p: b.p | u64::from(n), s: b.s + sec, t, case });
+        out.push(Ce { p: b.p | u64::from(n), s: b.s + (sec << 3), t, case });
         return Some(want.len());
     }
     if tail.1 {
         for &(seq, exp) in DE_PHONEBK {
             let want = nfd_of(seq);
-            let Some(case) = tail_match(cps, used, i, &want) else { continue };
+            let Some(case) = tail_match(cps, used, i, &want, false) else { continue };
             let start = out.len();
             for (k, c) in exp.chars().enumerate() {
                 single(u32::from(if case == 2 && k == 0 { c.to_ascii_uppercase() } else { c }), out);
             }
+            // A secondary just after the expansion's, and before æ's (&AE<<ä).
             if let Some(e) = out.get_mut(start) {
-                e.s += 1;
+                e.s += 4;
             }
             return Some(want.len());
         }
     }
     None
+}
+
+/// zh's pinyin tones: a vowel (or m, n, ü) with a macron, acute, caron or grave sorts just
+/// before the plain letter in that order; ê with one sorts just after ê.
+fn tone(cps: &[u32], used: &[bool], i: usize, out: &mut Vec<Ce>) -> Option<usize> {
+    let c = char::from_u32(cps[i])?;
+    let next = |k: usize| cps.get(i + k).copied().filter(|_| !used.get(i + k).copied().unwrap_or(true));
+    let lower = c.to_ascii_lowercase();
+    let base = match (lower, next(1)) {
+        ('u', Some(0x308)) => 2,
+        ('e', Some(0x302)) => 2,
+        ('a' | 'e' | 'i' | 'o' | 'u' | 'm' | 'n', _) => 1,
+        _ => return None,
+    };
+    let at = [0x304, 0x301, 0x30C, 0x300].iter().position(|m| Some(*m) == next(base))?;
+    if next(base + 1).is_some_and(|c| ccc(c) != 0) {
+        return None;
+    }
+    for k in 0..base {
+        single(cps[i + k], out);
+    }
+    if lower == 'e' && base == 2 {
+        let mut mark = Vec::new();
+        single(0x301, &mut mark);
+        let t = mark.first().map_or(COMMON_T, |e| e.t);
+        out.push(Ce { p: 0, s: at as u16 + 1, t, case: 0 });
+    } else {
+        let e = out.last_mut()?;
+        e.s -= 4 - at as u16;
+    }
+    Some(base + 1)
 }
 
 /// The tertiary weight of an uppercase ASCII letter.
@@ -350,7 +527,7 @@ fn reorder(locale: &str) -> (&'static [Script], bool) {
         "ar" => (&[Script::Arab], false),
         "th" => (&[Script::Thai], false),
         "zh" => (&[Script::Hani], false),
-        "ko" => (&[Script::Hani, Script::Hang], false),
+        "ko" => (&[Script::Hang, Script::Hani], false),
         "ja" => (&[Script::Kana, Script::Hani], true),
         _ => (&[], false),
     }
@@ -398,6 +575,18 @@ fn elems(units: &[u16], o: &Options) -> Vec<Ce> {
             }
             continue;
         }
+        if o.tones
+            && let Some(n) = tone(&cps, &used, i, &mut out)
+        {
+            i += n;
+            continue;
+        }
+        if core::ptr::eq(o.tail.0, HU)
+            && let Some(n) = hu_double(&cps, &used, i, &o.tail, &mut out)
+        {
+            i += n;
+            continue;
+        }
         let start = out.len();
         if let Some(n) = tailored(&cps, &used, i, &o.tail, &mut out) {
             i += n;
@@ -412,13 +601,31 @@ fn elems(units: &[u16], o: &Options) -> Vec<Ce> {
                 used[j] = true;
             }
             push_words(pool(e), &mut out);
+        } else if o.ko && ko_han(c, &mut out) {
+        } else if let Some(key) = o.han.and_then(|t| han_key(t, c)) {
+            out.push(Ce { p: key << 32, s: COMMON_S, t: COMMON_T, case: 0 });
         } else {
             single(c, &mut out);
         }
         if !o.order.0.is_empty() {
-            reorder_ces(&mut out[start..], c, &o.order);
+            // A ko Han with a Hangul reading reorders with Hangul.
+            let reading = o.ko && han_position(c).is_some() && out[start..].first().is_some_and(|e| e.p >> 32 < 0x1_0000);
+            reorder_ces(&mut out[start..], if reading { 0xAC00 } else { c }, &o.order);
         }
         i += 1;
+    }
+    if o.vi {
+        // vi: the tone marks follow the grave in Vietnamese order (hook, tilde, acute, dot below).
+        let marks = [0x300, 0x309, 0x303, 0x301, 0x323].map(|m| {
+            let mut v = Vec::new();
+            single(m, &mut v);
+            v.first().map_or(0, |e| e.s)
+        });
+        for e in out.iter_mut().filter(|e| e.p == 0) {
+            if let Some(k) = marks.iter().position(|m| *m == e.s) {
+                e.s = marks[0] + k as u16;
+            }
+        }
     }
     if o.shifted {
         // Variable CEs (spaces and punctuation) are ignored, with the ignorables after them.
@@ -445,7 +652,13 @@ fn options(spec: &Spec) -> Options {
         Some("case") => 3,
         _ => 4,
     };
+    let lang = spec.get("locale").unwrap_or("").split('-').next().unwrap_or("");
+    let sort = spec.get("usage") != Some("search");
     Options {
+        han: han_table(spec),
+        ko: sort && lang == "ko",
+        tones: sort && lang == "zh",
+        vi: sort && lang == "vi",
         // The search collations keep the root script order.
         order: if spec.get("usage") == Some("search") { (&[], false) } else { reorder(spec.get("locale").unwrap_or("")) },
         tail: tailoring(spec),
@@ -506,12 +719,46 @@ pub(super) fn unicode_keywords(tag: &str) -> Vec<(&str, String)> {
 
 /// ResolveLocale for Intl.Collator: `tags` are the requested locales, `locale` the one
 /// chosen from them.
+/// Whether a zh-Hant collator was made in this process (ICU's data cache, which changes what
+/// zh-u-co-stroke reports).
+static ZH_HANT_LOADED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Whether a zh locale is Traditional Chinese.
+fn is_hant(locale: &str) -> bool {
+    let base: Vec<&str> = locale.split("-u-").next().unwrap_or("").split('-').collect();
+    base.contains(&"Hant") || (!base.contains(&"Hans") && base.iter().any(|s| matches!(*s, "TW" | "HK" | "MO")))
+}
+
+/// The zh locale ICU has collation data for: a region only with its own script.
+fn zh_available(locale: &str) -> String {
+    let base: Vec<&str> = locale.split('-').collect();
+    match base.get(1).copied() {
+        Some(script) if script.len() == 4 => {
+            let region = base.get(2).copied().unwrap_or("");
+            match (script, region) {
+                ("Hans", "CN" | "SG") | ("Hant", "HK" | "TW" | "MO") => alloc::format!("zh-{script}-{region}"),
+                ("Hans" | "Hant", _) => alloc::format!("zh-{script}"),
+                _ => String::from("zh"),
+            }
+        }
+        _ => String::from(locale),
+    }
+}
+
 pub(super) fn resolve(locale: &str, tags: &[String], raw: &Spec) -> Result<Spec, Fault> {
     let n = "Intl.Collator";
+    let zh_locale;
+    let locale = if locale.split('-').next() == Some("zh") {
+        zh_locale = zh_available(locale);
+        zh_locale.as_str()
+    } else {
+        locale
+    };
     let usage = raw.choose("usage", &["sort", "search"], "sort", n)?;
     let sensitivity = raw.choose("sensitivity", &["base", "accent", "case", "variant"], "variant", n)?;
-    let ignore = raw.get("ignorePunctuation") == Some("true");
     let lang = locale.split('-').next();
+    // th ignores punctuation by default, but not in its search collation.
+    let ignore = raw.get("ignorePunctuation").map_or(lang == Some("th") && raw.get("usage") != Some("search"), |v| v == "true");
     let keywords = tags.iter().find(|t| t.split('-').next() == lang).map(|t| unicode_keywords(t)).unwrap_or_default();
     let keyword = |k: &str| keywords.iter().find(|(key, _)| *key == k).map(|(_, v)| v.as_str());
     // The locale keeps a keyword whose value is supported and that no option overrides.
@@ -556,19 +803,42 @@ pub(super) fn resolve(locale: &str, tags: &[String], raw: &Spec) -> Result<Spec,
         return range(&alloc::format!("Invalid collation : {c}"));
     }
     // co: phonebk for de and trad for es, from the option or else the keyword; the locale keeps it.
-    let co = |c: &&str| matches!((lang, *c), (Some("de"), "phonebk") | (Some("es"), "trad"));
+    let co = |c: &&str| {
+        matches!(
+            (lang, *c),
+            (Some("de"), "phonebk") | (Some("es"), "trad") | (Some("zh"), "pinyin" | "stroke" | "zhuyin" | "unihan") | (Some("ja"), "unihan")
+        )
+    };
     // usage: "search" selects the search collation, which drops co (ICU reports default).
-    let collation = if usage == "search" { "default" } else { match raw.get("collation") {
-            Some(c) => Some(c).filter(co),
-            None => keyword("co").filter(co),
-        }
-        .unwrap_or("default") };
-    let with_co;
-    let locale = if collation == "default" {
-        locale
+    let chosen = if usage == "search" {
+        None
     } else {
-        with_co = if locale.contains("-u-") { alloc::format!("{locale}-co-{collation}") } else { alloc::format!("{locale}-u-co-{collation}") };
-        with_co.as_str()
+        match raw.get("collation") {
+            Some(c) => Some(c).filter(co).map(|c| (c, false)),
+            None => keyword("co").filter(co).map(|c| (c, true)),
+        }
+    };
+    // zh's own default (pinyin, or stroke for Traditional) reports default, and the locale keeps it
+    // only from a keyword.
+    let hant = lang == Some("zh") && is_hant(locale);
+    let zh_default = if hant { "stroke" } else { "pinyin" };
+    let (collation, tag_co) = match chosen {
+        None => ("default", None),
+        Some((c, from_keyword)) if lang == Some("zh") && c == zh_default => ("default", from_keyword.then_some(c)),
+        // ICU reports stroke as zh's default once it has loaded zh-Hant's data, whose default it is.
+        Some(("stroke", true)) if lang == Some("zh") && ZH_HANT_LOADED.load(core::sync::atomic::Ordering::Relaxed) => ("default", Some("stroke")),
+        Some((c, _)) => (c, Some(c)),
+    };
+    if hant && matches!(chosen, None | Some(("stroke", _))) {
+        ZH_HANT_LOADED.store(true, core::sync::atomic::Ordering::Relaxed);
+    }
+    let with_co;
+    let locale = match tag_co {
+        None => locale,
+        Some(c) => {
+            with_co = if locale.contains("-u-") { alloc::format!("{locale}-co-{c}") } else { alloc::format!("{locale}-u-co-{c}") };
+            with_co.as_str()
+        }
     };
     let mut out = Spec::default();
     out.put("locale", locale);
