@@ -20,7 +20,7 @@ pub const COMMANDS: [(&str, &str); 35] = [
     ("/resume", "resume a saved session"),
     (
         "/login",
-        "sign in with ChatGPT, Claude or Tempo ID: /login codex|claude|tempo",
+        "sign in with ChatGPT, Claude, Google Cloud (Gemini on Vertex AI) or Tempo ID: /login codex|claude|google|tempo",
     ),
     (
         "/fund",

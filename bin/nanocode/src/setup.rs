@@ -8,7 +8,11 @@ use nanocode::antigravity::{
 };
 use nanocode_http::Method;
 
+use nanocode_sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use nanocode_tui::transcript::NoticeLevel;
+
 use crate::{
+    app::AppEvent,
     cli::{SetupArgs, SetupCommand},
     host::Result,
 };
@@ -19,7 +23,33 @@ const SETTLED_SUCCESSES: usize = 3;
 const SETTLE_ATTEMPTS: usize = 60;
 const SETTLE_GAP: Duration = Duration::from_secs(5);
 const COUNT_TOKENS_BODY: &str = r#"{"contents":[{"role":"user","parts":[{"text":"ping"}]}]}"#;
+const SIGN_IN_PAGE: &str = "Google Cloud sign-in";
 const API_KEY_HELP: &str = "To use a Gemini API key instead, create one at https://aistudio.google.com/apikey and run GEMINI_API_KEY=... nanocode -m gemini-4-neon (gemini-4-neon needs a paid-tier key: enable billing for the key's project in AI Studio).";
+
+pub(crate) enum Report {
+    Terminal,
+    Notices {
+        events: UnboundedSender<AppEvent>,
+        codes: Option<(UnboundedSender<String>, UnboundedReceiver<String>)>,
+    },
+}
+
+impl Report {
+    fn say(&self, text: impl Into<String>) {
+        match self {
+            Self::Terminal => eprintln!("{}", text.into()),
+            Self::Notices { events, .. } => {
+                drop(events.send(AppEvent::Notice(NoticeLevel::Info, text.into())));
+            }
+        }
+    }
+
+    fn release_codes(&mut self) {
+        if let Self::Notices { codes, .. } = self {
+            codes.take();
+        }
+    }
+}
 
 fn lookup(name: &str) -> Option<String> {
     std::env::var(name)
@@ -39,7 +69,13 @@ pub async fn setup(args: SetupArgs) -> Result<()> {
             let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_owned());
             match check {
                 true => self::check(&config, &model).await,
-                false => self::google(&config, &model).await,
+                false => {
+                    self::google(&config, &model, &mut Report::Terminal).await?;
+                    eprintln!(
+                        "Done. Run: nanocode -m {model}\nOverride with --google-project or GOOGLE_CLOUD_PROJECT; check with nanocode setup google --check."
+                    );
+                    Ok(())
+                }
             }
         }
     }
@@ -74,7 +110,7 @@ async fn confirm(question: String) -> bool {
         .is_some_and(|answer| matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
-async fn adc_login(gcloud: Option<&std::path::Path>) -> Result<()> {
+async fn adc_login(gcloud: Option<&std::path::Path>, report: &mut Report) -> Result<()> {
     let Some(gcloud) = gcloud.map(std::path::Path::to_path_buf) else {
         return Err(format!(
             "gcloud is not installed: install the Google Cloud CLI (https://cloud.google.com/sdk/docs/install), then run {GCLOUD} {}, or use a Gemini API key. {API_KEY_HELP}",
@@ -82,7 +118,15 @@ async fn adc_login(gcloud: Option<&std::path::Path>) -> Result<()> {
         )
         .into());
     };
-    eprintln!("Running {GCLOUD} {} ...", ADC_LOGIN.join(" "));
+    report.say(format!("Running {GCLOUD} {} ...", ADC_LOGIN.join(" ")));
+    if let Report::Notices { events, codes } = report {
+        let Some(codes) = codes.take() else {
+            return Err("the Google sign-in has no way to take a verification code".into());
+        };
+        let events = events.clone();
+        return nanocode_platform::spawn_blocking(move || piped_adc_login(&gcloud, &events, codes))
+            .await?;
+    }
     let status = nanocode_platform::spawn_blocking(move || {
         std::process::Command::new(gcloud).args(ADC_LOGIN).status()
     })
@@ -93,9 +137,91 @@ async fn adc_login(gcloud: Option<&std::path::Path>) -> Result<()> {
     }
 }
 
+fn piped_adc_login(
+    gcloud: &std::path::Path,
+    events: &UnboundedSender<AppEvent>,
+    (code_holder, mut codes): (UnboundedSender<String>, UnboundedReceiver<String>),
+) -> Result<()> {
+    use std::io::BufRead;
+    use std::process::Stdio;
+    let mut child = std::process::Command::new(gcloud)
+        .args(ADC_LOGIN)
+        .arg("--launch-browser")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let (Some(mut stdin), Some(stdout), Some(stderr)) =
+        (child.stdin.take(), child.stdout.take(), child.stderr.take())
+    else {
+        return Err(format!("{GCLOUD} started without its pipes").into());
+    };
+    let read = |pipe: Box<dyn std::io::Read + Send>| {
+        let mut console = false;
+        let mut errors = Vec::new();
+        for line in std::io::BufReader::new(pipe).lines() {
+            let Ok(line) = line else { break };
+            let line = line.trim();
+            if line.starts_with("Go to the following link") {
+                console = true;
+            } else if line.starts_with("Your browser has been opened") {
+                console = false;
+            } else if line.starts_with("https://") {
+                let text = match console {
+                    true => format!(
+                        "{}, then paste the verification code it shows with /login google CODE",
+                        crate::login::browse(SIGN_IN_PAGE, line)
+                    ),
+                    false => format!(
+                        "opened {SIGN_IN_PAGE} in your browser; if it did not appear, visit {line}"
+                    ),
+                };
+                drop(events.send(AppEvent::Notice(NoticeLevel::Info, text)));
+            } else if line.starts_with("ERROR") {
+                errors.push(line.to_owned());
+            }
+        }
+        errors
+    };
+    let (status, errors) = std::thread::scope(move |scope| {
+        scope.spawn(move || {
+            while let Some(code) = codes.blocking_recv() {
+                if writeln!(stdin, "{}", code.trim())
+                    .and_then(|()| stdin.flush())
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let out = scope.spawn(move || read(Box::new(stdout)));
+        let err = scope.spawn(move || read(Box::new(stderr)));
+        let status = child.wait();
+        drop(code_holder);
+        let mut errors = out.join().unwrap_or_default();
+        errors.extend(err.join().unwrap_or_default());
+        (status, errors)
+    });
+    let status = status?;
+    match status.success() {
+        true => Ok(()),
+        false => Err(format!(
+            "{GCLOUD} {} failed ({status}){}{}; to sign in outside nanocode, run it in a terminal, then /login google again",
+            ADC_LOGIN.join(" "),
+            match errors.is_empty() {
+                true => "",
+                false => ": ",
+            },
+            errors.join("; ")
+        )
+        .into()),
+    }
+}
+
 async fn credentials(
     sender: &Arc<dyn nanocode_http::layer::Sender>,
     gcloud: Option<&std::path::Path>,
+    report: &mut Report,
 ) -> Result<GoogleAuth> {
     let found = GoogleAuth::discover(&lookup, Arc::clone(sender)).await;
     let failure = match &found {
@@ -112,7 +238,7 @@ async fn credentials(
     let Some(failure) = failure else {
         return found.map_err(|error| error.to_string().into());
     };
-    eprintln!("{failure}");
+    report.say(failure.clone());
     let relogin = match &found {
         Ok(auth) => auth.kind().is_user(),
         Err(_) => true,
@@ -120,7 +246,7 @@ async fn credentials(
     if !relogin {
         return Err(failure.into());
     }
-    adc_login(gcloud).await?;
+    adc_login(gcloud, report).await?;
     let auth = GoogleAuth::discover(&lookup, Arc::clone(sender))
         .await
         .map_err(|error| error.to_string())?;
@@ -128,19 +254,23 @@ async fn credentials(
     Ok(auth)
 }
 
-async fn remember(store: &Store, auth: &GoogleAuth, project: &str, location: &str, model: &str) {
+async fn remember(
+    store: &Store,
+    auth: &GoogleAuth,
+    project: &str,
+    location: &str,
+    model: &str,
+    report: &Report,
+) {
     let saved = Saved {
         project: project.to_owned(),
         location: location.to_owned(),
         model: model.to_owned(),
     };
     match store.save(&auth.identity(), saved).await {
-        Ok(path) => eprintln!("Saved {project} ({location}) in {path}."),
-        Err(error) => eprintln!("Could not save the choice: {error}"),
+        Ok(path) => report.say(format!("Saved {project} ({location}) in {path}.")),
+        Err(error) => report.say(format!("Could not save the choice: {error}")),
     }
-    eprintln!(
-        "Done. Run: nanocode -m {model}\nOverride with --google-project or GOOGLE_CLOUD_PROJECT; check with nanocode setup google --check."
-    );
 }
 
 async fn settle(projects: &Projects, project: &str, location: &str, model: &str) -> bool {
@@ -166,15 +296,25 @@ async fn settle(projects: &Projects, project: &str, location: &str, model: &str)
     false
 }
 
-async fn google(config: &GoogleConfig, model: &str) -> Result<()> {
+pub(crate) async fn google(
+    config: &GoogleConfig,
+    model: &str,
+    report: &mut Report,
+) -> Result<String> {
     let gcloud = on_path(GCLOUD);
     match &gcloud {
-        Some(path) => eprintln!("gcloud: {}", path.display()),
-        None => eprintln!("gcloud: not found on PATH"),
+        Some(path) => report.say(format!("gcloud: {}", path.display())),
+        None => report.say("gcloud: not found on PATH"),
     }
     let sender = Client::native_sender()?;
-    let auth = credentials(&sender, gcloud.as_deref()).await?;
-    eprintln!("Credentials: {} from {}", auth.kind().name(), auth.origin());
+    let auth = credentials(&sender, gcloud.as_deref(), report).await;
+    report.release_codes();
+    let auth = auth?;
+    report.say(format!(
+        "Credentials: {} from {}",
+        auth.kind().name(),
+        auth.origin()
+    ));
     let location = config
         .location
         .clone()
@@ -185,15 +325,15 @@ async fn google(config: &GoogleConfig, model: &str) -> Result<()> {
     let preferred = auth.project_source(config.project.as_deref(), &lookup);
     let mut preferred_probe = None;
     if let Some((project, source)) = &preferred {
-        eprintln!(
+        report.say(format!(
             "Probing {project} (from {}) with {model} in {location} ...",
             source.name()
-        );
+        ));
         let probe = projects.probe(project, &location, model).await;
-        eprintln!("  {project}: {}", probe.describe());
+        report.say(format!("  {project}: {}", probe.describe()));
         if probe.is_ready() {
-            remember(&store, &auth, project, &location, model).await;
-            return Ok(());
+            remember(&store, &auth, project, &location, model, report).await;
+            return Ok(project.clone());
         }
         preferred_probe = Some(Project {
             id: project.clone(),
@@ -201,18 +341,22 @@ async fn google(config: &GoogleConfig, model: &str) -> Result<()> {
         })
         .zip(Some(probe));
     }
-    eprintln!("Listing your active Google Cloud projects and probing each ...");
+    report.say("Listing your active Google Cloud projects and probing each ...");
     let skip = preferred.as_ref().map(|(project, _)| project.as_str());
     let discovery = projects.discover(&location, model, skip).await?;
     let mut probed = preferred_probe.into_iter().collect::<Vec<_>>();
     probed.extend(discovery.probed);
-    for (project, probe) in &probed {
-        eprintln!("  {:<32} {}", project.id, probe.describe());
-    }
+    report.say(
+        probed
+            .iter()
+            .map(|(project, probe)| format!("  {:<32} {}", project.id, probe.describe()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
     if let Some(chosen) = discovery.chosen {
-        eprintln!("Picked {}.", chosen.id);
-        remember(&store, &auth, &chosen.id, &location, model).await;
-        return Ok(());
+        report.say(format!("Picked {}.", chosen.id));
+        remember(&store, &auth, &chosen.id, &location, model, report).await;
+        return Ok(chosen.id);
     }
     let disabled: Vec<String> = probed
         .iter()
@@ -222,6 +366,13 @@ async fn google(config: &GoogleConfig, model: &str) -> Result<()> {
     if disabled.is_empty() {
         return Err(format!(
             "No project you can reach has Vertex AI ready, and none only needs {VERTEX_SERVICE} enabled (see the list above: fix billing or permissions in one, or pass --google-project). {API_KEY_HELP}"
+        )
+        .into());
+    }
+    if let Report::Notices { .. } = report {
+        return Err(format!(
+            "Vertex AI ({VERTEX_SERVICE}) is disabled in {}: enable it with gcloud services enable {VERTEX_SERVICE} --project PROJECT (Vertex AI calls bill to that project), or run nanocode setup google in a terminal to pick one, then /login google again. {API_KEY_HELP}",
+            disabled.join(", ")
         )
         .into());
     }
@@ -261,8 +412,8 @@ async fn google(config: &GoogleConfig, model: &str) -> Result<()> {
         )
         .into());
     }
-    remember(&store, &auth, &project, &location, model).await;
-    Ok(())
+    remember(&store, &auth, &project, &location, model, report).await;
+    Ok(project)
 }
 
 async fn check(config: &GoogleConfig, model: &str) -> Result<()> {

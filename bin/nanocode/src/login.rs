@@ -3,7 +3,7 @@ use nanocode::{
     codex::auth::{ChatGptLogin, chatgpt_auth_file},
 };
 use nanocode_mpp::tempo_id::{self, DeviceLogin};
-use nanocode_sync::mpsc::UnboundedSender;
+use nanocode_sync::mpsc::{UnboundedSender, unbounded_channel};
 use nanocode_tui::transcript::NoticeLevel;
 
 use crate::app::{App, AppEvent};
@@ -12,7 +12,11 @@ impl App {
     pub(crate) fn login(&mut self, argument: &str) {
         let _span = nanocode_trace::info_span!(target: "nanocode", "nc.action", action.name = "login", session.id = self.agent.as_ref().map(|agent| agent.session_id())).entered();
         let tx = self.tx.clone();
-        match argument.trim() {
+        let (provider, rest) = argument
+            .trim()
+            .split_once(char::is_whitespace)
+            .unwrap_or((argument.trim(), ""));
+        match provider {
             "codex" | "chatgpt" | "openai" => {
                 nanocode_platform::spawn_task(codex(tx));
             }
@@ -22,7 +26,50 @@ impl App {
             "tempo" => {
                 nanocode_platform::spawn_task(tempo(tx));
             }
-            _ => self.notice(NoticeLevel::Info, "usage: /login codex|claude|tempo"),
+            "google" | "gemini" | "vertex" => self.login_google(rest.trim()),
+            _ => self.notice(NoticeLevel::Info, "usage: /login codex|claude|google|tempo"),
+        }
+    }
+
+    fn login_google(&mut self, code: &str) {
+        let waiting = self
+            .google_codes
+            .as_ref()
+            .and_then(nanocode_sync::mpsc::WeakUnboundedSender::upgrade);
+        match (waiting, code.is_empty()) {
+            (Some(codes), false) => {
+                drop(codes.send(code.to_owned()));
+                self.notice(NoticeLevel::Info, "sent the verification code to gcloud");
+            }
+            (Some(_), true) => self.notice(
+                NoticeLevel::Info,
+                "a Google sign-in is already running: finish it in the browser, or paste its verification code with /login google CODE",
+            ),
+            (None, false) => self.notice(
+                NoticeLevel::Info,
+                "no Google sign-in is waiting for a code; /login google starts one",
+            ),
+            (None, true) => {
+                let (codes, waiting) = unbounded_channel();
+                self.google_codes = Some(codes.downgrade());
+                let antigravity = self.model.family().as_str() == nanocode::antigravity::FAMILY;
+                let model = match antigravity {
+                    true => self.model.as_str().to_owned(),
+                    false => nanocode::antigravity::DEFAULT_MODEL.to_owned(),
+                };
+                let next = match (antigravity, self.agent.is_none()) {
+                    (true, true) => "/new starts a session that uses it".to_owned(),
+                    (true, false) => "restart nanocode to use it in a new session".to_owned(),
+                    (false, _) => format!("restart with nanocode -m {model} to use it"),
+                };
+                nanocode_platform::spawn_task(google(
+                    self.tx.clone(),
+                    self.host.config.google.clone(),
+                    model,
+                    next,
+                    (codes, waiting),
+                ));
+            }
         }
     }
 
@@ -102,6 +149,32 @@ async fn claude(tx: UnboundedSender<AppEvent>) {
     }
 }
 
+async fn google(
+    tx: UnboundedSender<AppEvent>,
+    config: nanocode::antigravity::GoogleConfig,
+    model: String,
+    next: String,
+    codes: (
+        UnboundedSender<String>,
+        nanocode_sync::mpsc::UnboundedReceiver<String>,
+    ),
+) {
+    let mut report = crate::setup::Report::Notices {
+        events: tx.clone(),
+        codes: Some(codes),
+    };
+    let notice = |level, text| drop(tx.send(AppEvent::Notice(level, text)));
+    match crate::setup::google(&config, &model, &mut report).await {
+        Ok(project) => notice(
+            NoticeLevel::Info,
+            format!(
+                "signed in to Google Cloud: Vertex AI project {project} serves {model}; {next}"
+            ),
+        ),
+        Err(error) => notice(NoticeLevel::Error, format!("login google: {error}")),
+    }
+}
+
 const TEMPO_PAYS: &str = "it pays for the Tempo gateway's and Mercator's tools and the Tempo services shell commands reach, and --gateway tempo pays for models with it; /fund buys MACH by card";
 
 async fn tempo(tx: UnboundedSender<AppEvent>) {
@@ -157,7 +230,7 @@ async fn account(tx: UnboundedSender<AppEvent>) {
     );
 }
 
-fn browse(page: &str, url: &str) -> String {
+pub(crate) fn browse(page: &str, url: &str) -> String {
     if crate::extras::open_url(url) {
         format!("opened {page} in your browser; if it did not appear, visit {url}")
     } else {

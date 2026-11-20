@@ -59,6 +59,7 @@ pub(super) fn run(
             tier_override: launch.tier_override,
             awaiting_terminal: false,
             computer_use_notice: None,
+            google_codes: None,
             session_started: false,
             tx,
             quit: false,

@@ -89,7 +89,7 @@ impl HarnessArg {
         Choice::new("codex").help("OpenAI Codex models (ChatGPT login)"),
         Choice::new("claude").help("Anthropic Claude models (Claude Code login)"),
         Choice::new("antigravity").help(
-            "Google Antigravity's engine on Gemini models (GEMINI_API_KEY or AGY_LLM_GATEWAY_URL)",
+            "Google Antigravity's engine on Gemini models (GEMINI_API_KEY, AGY_LLM_GATEWAY_URL, or Vertex AI after nanocode setup google or /login google)",
         ),
     ];
 }
