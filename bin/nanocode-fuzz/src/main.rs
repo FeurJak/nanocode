@@ -26,14 +26,16 @@ const ITERATIONS_DEFAULT: u64 = 100_000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Target {
     BoardFold,
+    BoardFoldSpread,
     BoardSyncIngest,
     LiveFoldDecode,
     PartitionsRow,
 }
 
 impl Target {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::BoardFold,
+        Self::BoardFoldSpread,
         Self::BoardSyncIngest,
         Self::LiveFoldDecode,
         Self::PartitionsRow,
@@ -42,6 +44,7 @@ impl Target {
     const fn name(self) -> &'static str {
         match self {
             Self::BoardFold => "board_fold",
+            Self::BoardFoldSpread => "board_fold_spread",
             Self::BoardSyncIngest => "board_sync_ingest",
             Self::LiveFoldDecode => "live_fold_decode",
             Self::PartitionsRow => "partitions_row",
@@ -55,6 +58,7 @@ impl Target {
     fn check(self, rng: &mut Rng) -> Checked {
         match self {
             Self::BoardFold => board_fold::check(rng),
+            Self::BoardFoldSpread => board_fold::spread(rng),
             Self::BoardSyncIngest => board_sync::check(rng),
             Self::LiveFoldDecode => live_fold::check(rng),
             Self::PartitionsRow => partitions::check(rng),

@@ -45,6 +45,7 @@ pub mod blocks;
 pub mod group;
 pub mod messages;
 
+pub use compact::Spread;
 pub use messages::{MessageId, Say};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -751,7 +752,11 @@ impl Fold {
     }
 
     pub fn snapshot(&self) -> Vec<u8> {
-        compact::snapshot(self).expect("a fold encodes")
+        self.snapshot_spread(Spread::for_fold(self))
+    }
+
+    pub fn snapshot_spread(&self, spread: Spread) -> Vec<u8> {
+        compact::snapshot(self, spread).expect("a fold encodes")
     }
 
     pub fn snapshot_json(&self) -> String {
@@ -759,12 +764,16 @@ impl Fold {
     }
 
     pub fn restore(snapshot: &[u8]) -> Result<Self, BoardError> {
+        Self::restore_spread(snapshot, Spread::for_snapshot(snapshot))
+    }
+
+    pub fn restore_spread(snapshot: &[u8], spread: Spread) -> Result<Self, BoardError> {
         let corrupt = |detail: String| BoardError::Corrupt {
             seq: 0,
             detail: format!("fold snapshot: {detail}"),
         };
         let mut fold: Self = if snapshot.starts_with(compact::MAGIC) {
-            compact::restore(snapshot).map_err(|error| corrupt(error.to_string()))?
+            compact::restore(snapshot, spread).map_err(|error| corrupt(error.to_string()))?
         } else {
             serde_json::from_slice(snapshot).map_err(|error| corrupt(error.to_string()))?
         };

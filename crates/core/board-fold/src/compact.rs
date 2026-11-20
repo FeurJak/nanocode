@@ -98,8 +98,43 @@ enum Part {
 
 type Job<'a, T> = Box<dyn FnOnce() -> T + Send + 'a>;
 
+const THREADS_FROM_EVENTS: usize = 1024;
+
+const THREADS_FROM_BYTES: usize = 1 << 20;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Spread {
+    Inline,
+    Threads,
+}
+
+impl Spread {
+    pub fn for_fold(fold: &Fold) -> Self {
+        if fold.seen.len() < THREADS_FROM_EVENTS {
+            Self::Inline
+        } else {
+            Self::Threads
+        }
+    }
+
+    pub const fn for_snapshot(snapshot: &[u8]) -> Self {
+        if snapshot.len() < THREADS_FROM_BYTES {
+            Self::Inline
+        } else {
+            Self::Threads
+        }
+    }
+}
+
+fn all<T: Send>(spread: Spread, jobs: Vec<Job<'_, T>>) -> Vec<T> {
+    match spread {
+        Spread::Inline => jobs.into_iter().map(|job| job()).collect(),
+        Spread::Threads => threads(jobs),
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
-fn all<T: Send>(jobs: Vec<Job<'_, T>>) -> Vec<T> {
+fn threads<T: Send>(jobs: Vec<Job<'_, T>>) -> Vec<T> {
     std::thread::scope(|scope| {
         let handles: Vec<_> = jobs.into_iter().map(|job| scope.spawn(job)).collect();
         handles
@@ -114,11 +149,11 @@ fn all<T: Send>(jobs: Vec<Job<'_, T>>) -> Vec<T> {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn all<T: Send>(jobs: Vec<Job<'_, T>>) -> Vec<T> {
+fn threads<T: Send>(jobs: Vec<Job<'_, T>>) -> Vec<T> {
     jobs.into_iter().map(|job| job()).collect()
 }
 
-pub fn snapshot(fold: &Fold) -> Result<Vec<u8>, Error> {
+pub fn snapshot(fold: &Fold, spread: Spread) -> Result<Vec<u8>, Error> {
     let Fold {
         next,
         now_ms,
@@ -159,7 +194,9 @@ pub fn snapshot(fold: &Fold) -> Result<Vec<u8>, Error> {
         Box::new(move || encode(steers)),
         Box::new(move || encode(intents)),
     ];
-    let bodies = all(jobs).into_iter().collect::<Result<Vec<_>, _>>()?;
+    let bodies = all(spread, jobs)
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
     let mut writer = Writer::default();
     writer.out.extend_from_slice(MAGIC);
     writer.varint(SECTIONS.len() as u64);
@@ -176,7 +213,7 @@ pub fn snapshot(fold: &Fold) -> Result<Vec<u8>, Error> {
     Ok(out)
 }
 
-pub fn restore(snapshot: &[u8]) -> Result<Fold, Error> {
+pub fn restore(snapshot: &[u8], spread: Spread) -> Result<Fold, Error> {
     let Some(rest) = snapshot.strip_prefix(MAGIC.as_slice()) else {
         return fail("not a compact fold snapshot");
     };
@@ -204,8 +241,17 @@ pub fn restore(snapshot: &[u8]) -> Result<Fold, Error> {
     if reader.at != rest.len() {
         return fail("snapshot has bytes after its last section");
     }
-    let [head, tasks, seen, entries, access, mirror, said, steers, intents] =
-        <[&[u8]; 9]>::try_from(bodies).map_err(|_| Error("snapshot sections".to_owned()))?;
+    let [
+        head,
+        tasks,
+        seen,
+        entries,
+        access,
+        mirror,
+        said,
+        steers,
+        intents,
+    ] = <[&[u8]; 9]>::try_from(bodies).map_err(|_| Error("snapshot sections".to_owned()))?;
     let jobs: Vec<Job<'_, Result<Part, Error>>> = vec![
         Box::new(move || decode(head).map(Part::Head)),
         Box::new(move || decode(tasks).map(Part::Tasks)),
@@ -217,7 +263,7 @@ pub fn restore(snapshot: &[u8]) -> Result<Fold, Error> {
         Box::new(move || decode(steers).map(Part::Steers)),
         Box::new(move || decode(intents).map(Part::Intents)),
     ];
-    let mut parts = all(jobs).into_iter().zip(SECTIONS);
+    let mut parts = all(spread, jobs).into_iter().zip(SECTIONS);
     let mut part = || match parts.next() {
         Some((Ok(part), _)) => Ok(part),
         Some((Err(error), name)) => fail(format!("snapshot section {name}: {error}")),
@@ -696,7 +742,11 @@ impl<'de> Reader<'de> {
     }
 
     fn take(&mut self, len: usize) -> Result<&'de [u8], Error> {
-        let Some(end) = self.at.checked_add(len).filter(|end| *end <= self.input.len()) else {
+        let Some(end) = self
+            .at
+            .checked_add(len)
+            .filter(|end| *end <= self.input.len())
+        else {
             return fail("snapshot ends mid-value");
         };
         let bytes = &self.input[self.at..end];
@@ -795,7 +845,10 @@ impl<'de> SeqAccess<'de> for Items<'_, 'de> {
 impl<'de> MapAccess<'de> for Items<'_, 'de> {
     type Error = Error;
 
-    fn next_key_seed<K: DeserializeSeed<'de>>(&mut self, seed: K) -> Result<Option<K::Value>, Error> {
+    fn next_key_seed<K: DeserializeSeed<'de>>(
+        &mut self,
+        seed: K,
+    ) -> Result<Option<K::Value>, Error> {
         if !self.more()? {
             return Ok(None);
         }
@@ -946,5 +999,111 @@ impl<'de> de::Deserializer<'de> for &mut Reader<'de> {
         bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
         bytes byte_buf unit unit_struct seq tuple tuple_struct map struct
         identifier ignored_any
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::Spread;
+    use crate::tasks::Terms;
+    use crate::{Event, EventId, Fold, NewTask, Op, TaskId};
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n.max(1)
+        }
+    }
+
+    fn random_fold(rng: &mut Rng) -> Fold {
+        let mut fold = Fold::new();
+        let events = rng.below(300);
+        let mut posted = 0u64;
+        for seq in 1..=events {
+            let task = TaskId(format!("t{}", rng.below(posted + 1)));
+            let op = match rng.below(7) {
+                0 if seq == 1 => Op::Charter {},
+                0 | 1 | 2 => {
+                    posted += 1;
+                    Op::Post {
+                        task: NewTask {
+                            id: TaskId(format!("t{posted}")),
+                            parent: (posted > 1 && rng.below(2) == 0)
+                                .then(|| TaskId(format!("t{}", 1 + rng.below(posted - 1)))),
+                            spec: format!("spec {}", rng.next()),
+                            labels: BTreeMap::from([(
+                                format!("k{}", rng.below(4)),
+                                format!("v{}", rng.below(9)),
+                            )]),
+                            needs: Vec::new(),
+                            terms: Terms::default(),
+                        },
+                    }
+                }
+                3 => Op::Claim {
+                    task,
+                    lease_ms: 1 + rng.below(10_000),
+                    fence: None,
+                    cap: None,
+                },
+                4 => Op::Reply {
+                    task,
+                    body: format!("reply {}", rng.next()),
+                },
+                5 => Op::Relabel {
+                    task,
+                    set: BTreeMap::from([(format!("k{}", rng.below(4)), "x".to_owned())]),
+                    unset: BTreeSet::from([format!("k{}", rng.below(4))]),
+                },
+                _ => Op::Rank {
+                    task,
+                    rank: Some(rng.below(100)),
+                },
+            };
+            let body = serde_json::to_string(&Event {
+                id: EventId(format!("user:w{}.{seq}", rng.below(3))),
+                by: format!("user:w{}", rng.below(3)),
+                at_ms: seq * 10,
+                op,
+            })
+            .expect("an event encodes");
+            let _ = fold.apply(seq, &body);
+        }
+        fold
+    }
+
+    #[test]
+    fn inline_and_threads_agree_on_random_folds() {
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        for _ in 0..200 {
+            let fold = random_fold(&mut rng);
+            let inline = fold.snapshot_spread(Spread::Inline);
+            assert_eq!(inline, fold.snapshot_spread(Spread::Threads));
+            let restored = Fold::restore_spread(&inline, Spread::Inline).expect("restores");
+            assert_eq!(restored, fold);
+            assert_eq!(
+                Fold::restore_spread(&inline, Spread::Threads).expect("restores"),
+                restored
+            );
+            let mut mangled = inline.clone();
+            if !mangled.is_empty() {
+                let at = rng.below(mangled.len() as u64) as usize;
+                mangled[at] ^= 1 << rng.below(8);
+            }
+            assert_eq!(
+                Fold::restore_spread(&mangled, Spread::Inline).map_err(|e| e.to_string()),
+                Fold::restore_spread(&mangled, Spread::Threads).map_err(|e| e.to_string()),
+            );
+        }
     }
 }
