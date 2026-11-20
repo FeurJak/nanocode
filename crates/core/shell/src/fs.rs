@@ -111,6 +111,10 @@ pub trait FileSystem {
         let _ = (path, limit);
         Reply::Now(Err(io::ErrorKind::Unsupported.into()))
     }
+
+    fn answers_now(&self) -> bool {
+        true
+    }
 }
 
 pub fn normalize(path: &[u8]) -> Vec<u8> {

@@ -11,6 +11,7 @@ pub enum Mutation {
     SqlSkipVersionCas,
     SqlReleaseBeforeCommit,
     SqlSplitTransaction,
+    AnswersNow,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

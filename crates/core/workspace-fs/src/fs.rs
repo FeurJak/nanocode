@@ -752,4 +752,8 @@ impl FileSystem for WorkspaceFs {
             })
         })
     }
+
+    fn answers_now(&self) -> bool {
+        mutated(Mutation::AnswersNow)
+    }
 }

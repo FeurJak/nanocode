@@ -132,12 +132,12 @@ impl Kept {
             stop: call.shell.stop(),
         };
         let files = call.shell.files();
-        let ran = match files.stat(&call.cwd, true) {
-            Reply::Now(_) => {
+        let ran = match (files.answers_now(), files.stat(&call.cwd, true)) {
+            (true, Reply::Now(_)) => {
                 self.interpret(python, run, Rc::new(Direct(files, call.shell.clone())))
             }
-            Reply::Later(asked) => {
-                asked.await?;
+            (_, asked) => {
+                asked.get().await?;
                 let copied = Rc::new(copy(&files, &call.cwd, shell.file).await?);
                 let ran = self.interpret(python, run, copied.clone());
                 apply(&copied, &files).await?;

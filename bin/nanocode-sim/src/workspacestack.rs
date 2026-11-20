@@ -47,6 +47,14 @@ const SHELL_FILES: [&str; 2] = ["a.txt", "b.txt"];
 const PIECES: [&str; 5] = ["a", "b", "ab", "\n", "c"];
 const SLICE: u32 = 4096;
 const DEPTH: u32 = 64;
+const PYTHON: nanocode_python::Budget = nanocode_python::Budget {
+    steps: 1 << 24,
+    time: Duration::from_secs(60),
+    memory: None,
+    sleep: Duration::ZERO,
+    depth: DEPTH as usize,
+};
+const LINES: usize = 4;
 const OPS_MIN: u64 = 12;
 const OPS_MAX: u64 = 48;
 const CHUNK_MAX: u64 = 6;
@@ -74,15 +82,17 @@ pub enum WorkspaceStackMutation {
     VisibleBeforeCommit,
     ShaUnchecked,
     PutsInPlace,
+    AnswersNow,
 }
 
 impl WorkspaceStackMutation {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::None,
         Self::TornCommit,
         Self::VisibleBeforeCommit,
         Self::ShaUnchecked,
         Self::PutsInPlace,
+        Self::AnswersNow,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -98,6 +108,7 @@ impl WorkspaceStackMutation {
             Self::VisibleBeforeCommit => "visible_before_commit",
             Self::ShaUnchecked => "sha_unchecked",
             Self::PutsInPlace => "puts_in_place",
+            Self::AnswersNow => "answers_now",
         }
     }
 
@@ -121,6 +132,7 @@ impl WorkspaceStackMutation {
             ),
             Self::ShaUnchecked => (FsRule::None, HandRule::ShaUnchecked, WorkspaceRule::None),
             Self::PutsInPlace => (FsRule::None, HandRule::None, WorkspaceRule::PutsInPlace),
+            Self::AnswersNow => (FsRule::AnswersNow, HandRule::None, WorkspaceRule::None),
         }
     }
 }
@@ -474,6 +486,7 @@ fn clock() -> Rc<dyn Machine> {
 }
 
 fn open(
+    seed: u64,
     store: &Arc<Crashing>,
     hand: &Arc<Hand>,
     corrupt: &Arc<AtomicBool>,
@@ -492,7 +505,10 @@ fn open(
         machine: Arc::new(clock),
         fetch: None,
         credentials: None,
-        commands: Arc::new(|| -> Rc<dyn Commands> { Rc::new(NoCommands) }),
+        commands: Arc::new(move || -> Rc<dyn Commands> {
+            crate::host::enter(seed, &crate::executor::Clock::new());
+            Rc::new(nanocode_python::Command::new(PYTHON, Rc::new(NoCommands)))
+        }),
         identity: Identity {
             info: HostInfo::default(),
             pid: 1,
@@ -658,7 +674,7 @@ fn simulate(seed: u64, mutation: WorkspaceStackMutation) -> WorkspaceStackOutcom
     let corrupt = Arc::new(AtomicBool::new(false));
     let (fs_rule, hand_rule, workspace_rule) = mutation.rules();
     let wrong = block_on(async {
-        let mut stack = open(&store, &hand, &corrupt)?;
+        let mut stack = open(seed, &store, &hand, &corrupt)?;
         stack
             .files
             .write(absolute(".keep").as_bytes(), b"")
@@ -739,7 +755,7 @@ fn simulate(seed: u64, mutation: WorkspaceStackMutation) -> WorkspaceStackOutcom
                     let mut lines = Vec::new();
                     for _ in 0..rng.range(1, 4) {
                         let path = SHELL_FILES[rng.pick(SHELL_FILES.len())];
-                        let line = match rng.pick(3) {
+                        let line = match rng.pick(LINES) {
                             0 => {
                                 let content = words(&mut rng, 3);
                                 model.insert(path.to_owned(), content.clone().into_bytes());
@@ -753,9 +769,16 @@ fn simulate(seed: u64, mutation: WorkspaceStackMutation) -> WorkspaceStackOutcom
                                     .extend(content.bytes());
                                 format!("printf '%s' {} >> {}", quoted(&content), absolute(path))
                             }
-                            _ => {
+                            2 => {
                                 model.remove(path);
                                 format!("rm -f {}", absolute(path))
+                            }
+                            _ => {
+                                let content = words(&mut rng, 3);
+                                model.insert(path.to_owned(), content.clone().into_bytes());
+                                let program =
+                                    format!("open({:?}, 'w').write({content:?})", absolute(path));
+                                format!("python3 -c {}", quoted(&program))
                             }
                         };
                         lines.push(line);
@@ -877,7 +900,7 @@ fn simulate(seed: u64, mutation: WorkspaceStackMutation) -> WorkspaceStackOutcom
                 _ => {
                     stats.restarts += 1;
                     drop(stack);
-                    stack = open(&store, &hand, &corrupt)?;
+                    stack = open(seed, &store, &hand, &corrupt)?;
                     "restarted".to_owned()
                 }
             };
@@ -895,7 +918,7 @@ fn simulate(seed: u64, mutation: WorkspaceStackMutation) -> WorkspaceStackOutcom
                 if fired != PLAN_NONE {
                     stats.restarts += 1;
                     drop(stack);
-                    stack = open(&store, &hand, &corrupt)?;
+                    stack = open(seed, &store, &hand, &corrupt)?;
                     let when = format!("op {op}: after the restart");
                     agrees(&stack.files, &model, &when, &mut digest).await?;
                 }
@@ -904,7 +927,7 @@ fn simulate(seed: u64, mutation: WorkspaceStackMutation) -> WorkspaceStackOutcom
         }
         stats.restarts += 1;
         drop(stack);
-        let stack = open(&store, &hand, &corrupt)?;
+        let stack = open(seed, &store, &hand, &corrupt)?;
         agrees(&stack.files, &model, "at the last restart", &mut digest).await
     })
     .err();

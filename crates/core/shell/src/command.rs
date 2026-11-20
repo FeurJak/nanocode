@@ -253,6 +253,10 @@ impl FileSystem for Tracked {
     fn set_mtime(&self, path: &[u8], mtime_ns: i64) -> Reply<()> {
         self.0.set_mtime(&normalize(path), mtime_ns)
     }
+
+    fn answers_now(&self) -> bool {
+        self.0.fs.answers_now()
+    }
 }
 
 #[derive(Clone)]

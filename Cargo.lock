@@ -1029,6 +1029,7 @@ dependencies = [
  "nanocode-platform",
  "nanocode-process",
  "nanocode-process-contracts",
+ "nanocode-python",
  "nanocode-sandbox",
  "nanocode-shell",
  "nanocode-subagents",
