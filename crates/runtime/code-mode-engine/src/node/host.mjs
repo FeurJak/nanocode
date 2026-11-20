@@ -8,7 +8,9 @@
 //   { op: "mkdir", path }         -> {}  (with parents)
 //   { op: "remove", path }        -> {}  (recursive, missing is fine)
 //   { op: "rename", from, to }    -> {}  (replaces to)
-// node:fs then reads and writes that workspace, and process.env and process.cwd() start from
+//   { op: "append", path, data }  -> {}  (data base64, added at the file's end as it is then;
+//                                     only asked when info's answer has append: true)
+// info may also carry append: true. node:fs then reads and writes that workspace, and process.env and process.cwd() start from
 // its environment. Without one, node:fs is an in-memory tree private to the cell.
 const provider = () => globalThis.__nanocodeNodeWorkspace;
 let info;

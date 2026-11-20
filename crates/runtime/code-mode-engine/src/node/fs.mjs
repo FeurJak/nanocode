@@ -1,7 +1,7 @@
 import process from "node:process";
 import { Buffer } from "node:buffer";
 import { resolve as resolvePath } from "node:path";
-import { connected, ask } from "node:internal/workspace";
+import { connected, ask, workspace } from "node:internal/workspace";
 
 const S_IFMT = 0o170000;
 const S_IFDIR = 0o040000;
@@ -48,88 +48,177 @@ function now() {
 }
 
 function directory(mode = 0o777, time = now()) {
-  return { kind: "dir", entries: new Map(), mode: S_IFDIR | (mode & 0o7777 & ~0o022), ino: ++inodes, nlink: 2, atime: time, mtime: time, ctime: time, birthtime: time };
+  return { kind: "dir", entries: new Map(), mode: S_IFDIR | (mode & 0o7777 & ~0o022), ino: ++inodes, nlink: 2, atime: time, mtime: time, ctime: time, birthtime: time, made: epoch };
 }
 
 function file(data, mode = 0o666) {
   const time = now();
-  return { kind: "file", data, mode: S_IFREG | (mode & 0o7777 & ~0o022), ino: ++inodes, nlink: 1, atime: time, mtime: time, ctime: time, birthtime: time };
+  return { kind: "file", data, mode: S_IFREG | (mode & 0o7777 & ~0o022), ino: ++inodes, nlink: 1, atime: time, mtime: time, ctime: time, birthtime: time, made: epoch };
 }
+
+// Each outermost fs call is one epoch; snapshot holds the workspace reads made during it.
+let epoch = 0;
+let calls = 0;
+let snapshot;
 
 const root = directory(0o755, 0);
 root.entries.set("tmp", directory(0o1777, 0));
 root.entries.set("work", directory(0o755, 0));
 
-// With a connected workspace the tree mirrors it: directories fault their entries in from the
-// workspace as they are looked up or listed, files load their bytes when first read, and every
-// change made through this module is written back (see mirrored below).
+// With a connected workspace the tree mirrors it, and the workspace is the truth: other
+// runtimes (a shell redirect, another cell) change it while a cell runs, so nothing here caches
+// what it holds past one call. A directory looks each name up again (and lists again) on every
+// call, and a file's bytes are read from the workspace each time they are needed and written to
+// it at once when they change (see liveFile). Within one outermost fs call reads are remembered
+// (see scoped), and a node this call made, or a name it removed, stands until the call writes it
+// back (see mirrored).
 function under(path, name) {
   return path === "/" ? "/" + name : path + "/" + name;
 }
 
-function remoteFile(path, data) {
-  const node = file(undefined);
-  delete node.data;
-  if (data !== undefined) node.data = data;
-  else {
-    Object.defineProperty(node, "data", {
-      configurable: true,
-      enumerable: true,
-      get() {
-        const answer = ask({ op: "read", path });
-        const bytes = answer.kind === "file" ? new Uint8Array(Buffer.from(answer.data ?? "", "base64")) : new Uint8Array(0);
-        Object.defineProperty(node, "data", { value: bytes, writable: true, configurable: true, enumerable: true });
-        return bytes;
-      },
-      set(value) {
-        Object.defineProperty(node, "data", { value, writable: true, configurable: true, enumerable: true });
-      },
-    });
+
+function scoped(fn) {
+  return function (...args) {
+    if (!connected()) return fn.apply(this, args);
+    if (calls++ === 0) {
+      epoch++;
+      snapshot = new Map();
+    }
+    try {
+      return fn.apply(this, args);
+    } finally {
+      if (--calls === 0) snapshot = undefined;
+    }
+  };
+}
+
+function fetchRemote(path) {
+  let answer = snapshot?.get(path);
+  if (answer === undefined) {
+    const raw = ask({ op: "read", path });
+    answer = raw.kind === "file" ? { kind: "file", bytes: new Uint8Array(Buffer.from(raw.data ?? "", "base64")) } : { kind: raw.kind === "dir" ? "dir" : "none" };
+    snapshot?.set(path, answer);
   }
+  return answer;
+}
+
+function listRemote(path) {
+  const key = "\0list:" + path;
+  let entries = snapshot?.get(key);
+  if (entries === undefined) {
+    entries = ask({ op: "list", path }).entries ?? [];
+    snapshot?.set(key, entries);
+  }
+  return entries;
+}
+
+// Any change but a whole-file write drops what this call read.
+function tell(request) {
+  snapshot?.clear();
+  return ask(request);
+}
+
+function writeRemote(path, bytes) {
+  tell({ op: "write", path, data: Buffer.from(bytes).toString("base64") });
+  snapshot?.set(path, { kind: "file", bytes });
+}
+
+// O_APPEND: the bytes go at the file's end as it is when they are written. A host whose info
+// says append: true appends in one step; otherwise read, extend and write back.
+function appendRemote(path, bytes) {
+  if (workspace()?.append === true) {
+    tell({ op: "append", path, data: Buffer.from(bytes).toString("base64") });
+    return;
+  }
+  const answer = fetchRemote(path);
+  writeRemote(path, concat(answer.kind === "file" ? answer.bytes : new Uint8Array(0), bytes));
+}
+
+function makeLive(node, path) {
+  delete node.data;
+  node.live = true;
+  node.path = path;
+  Object.defineProperty(node, "data", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      const answer = fetchRemote(this.path);
+      return answer.kind === "file" ? answer.bytes : new Uint8Array(0);
+    },
+    set(value) {
+      writeRemote(this.path, value);
+    },
+  });
   return node;
 }
 
-function remoteDirectory(path) {
+function liveFile(path) {
+  return makeLive(file(undefined), path);
+}
+
+function remoteDirectory(path, seed) {
   const node = directory(0o755);
-  node.entries = new RemoteEntries(path);
+  node.live = true;
+  node.entries = new RemoteEntries(path, seed);
   return node;
+}
+
+// A node made (or a name removed) in this epoch and not yet written back stands; anything else
+// is checked against the workspace.
+function fresh(node) {
+  return node !== undefined && !node.live && node.made === epoch;
 }
 
 class RemoteEntries extends Map {
-  #path;
-  #listed = false;
-  #gone = new Set();
+  #gone = new Map();
 
-  constructor(path) {
+  constructor(path, seed) {
     super();
-    this.#path = path;
+    this.path = path;
+    if (seed !== undefined) for (const [name, node] of seed) super.set(name, node);
   }
 
-  #fault(name) {
-    if (this.#listed || typeof name !== "string" || super.has(name) || this.#gone.has(name)) return;
-    const path = under(this.#path, name);
-    const answer = ask({ op: "read", path });
-    if (answer.kind === "file") super.set(name, remoteFile(path, new Uint8Array(Buffer.from(answer.data ?? "", "base64"))));
-    else if (answer.kind === "dir") super.set(name, remoteDirectory(path));
+  #check(name) {
+    if (typeof name !== "string" || this.#gone.get(name) === epoch) return;
+    const cached = super.get(name);
+    if (fresh(cached)) return;
+    const path = under(this.path, name);
+    const kind = fetchRemote(path).kind;
+    if (kind === "file") {
+      if (!(cached?.live && cached.kind === "file")) super.set(name, liveFile(path));
+    } else if (kind === "dir") {
+      if (!(cached?.live && cached.kind === "dir")) super.set(name, remoteDirectory(path));
+    } else if (cached !== undefined) super.delete(name);
   }
 
   #list() {
-    if (this.#listed) return;
-    this.#listed = true;
-    for (const [name, kind] of ask({ op: "list", path: this.#path }).entries ?? []) {
-      if (super.has(name) || this.#gone.has(name)) continue;
-      const path = under(this.#path, name);
-      super.set(name, kind === "dir" ? remoteDirectory(path) : remoteFile(path));
+    const listed = new Map(listRemote(this.path));
+    for (const [name, node] of [...super.entries()]) {
+      if (this.#gone.get(name) === epoch) continue;
+      if (!listed.has(name) && !fresh(node)) super.delete(name);
+    }
+    for (const [name, kind] of listed) {
+      if (this.#gone.get(name) === epoch) continue;
+      const cached = super.get(name);
+      if (fresh(cached) || (cached?.live && cached.kind === (kind === "dir" ? "dir" : "file"))) continue;
+      const path = under(this.path, name);
+      super.set(name, kind === "dir" ? remoteDirectory(path) : liveFile(path));
     }
   }
 
+  // After a rename moved this directory: it and what it holds now live under path.
+  relocate(path) {
+    this.path = path;
+    for (const [name, child] of super.entries()) relocate(child, under(path, name));
+  }
+
   get(name) {
-    this.#fault(name);
+    this.#check(name);
     return super.get(name);
   }
 
   has(name) {
-    this.#fault(name);
+    this.#check(name);
     return super.has(name);
   }
 
@@ -139,7 +228,7 @@ class RemoteEntries extends Map {
   }
 
   delete(name) {
-    this.#gone.add(name);
+    this.#gone.set(name, epoch);
     return super.delete(name);
   }
 
@@ -171,6 +260,12 @@ class RemoteEntries extends Map {
   [Symbol.iterator]() {
     return this.entries();
   }
+}
+
+function relocate(node, path) {
+  if (node.kind === "file") {
+    if (node.live) node.path = path;
+  } else if (node.entries instanceof RemoteEntries) node.entries.relocate(path);
 }
 
 let attached = false;
@@ -424,8 +519,10 @@ function readFileSync(path, options) {
   const encoding = encodingOf(options);
   if (typeof path === "number") {
     const entry = descriptor(path, "read");
-    const bytes = entry.node.data.subarray(entry.position);
-    entry.position = entry.node.data.length;
+    if (!entry.flags.read) throw fsError("EBADF", "read");
+    const data = entry.node.data;
+    const bytes = data.subarray(entry.position ?? data.length);
+    entry.position = data.length;
     return decode(bytes, encoding);
   }
   const node = lookup(path, "open");
@@ -503,10 +600,18 @@ function writeFileSync(path, data, options) {
     return;
   }
   const flags = flagsOf(options?.flag, "w");
-  const node = openNode(path, flags, options?.mode, "open");
+  // The new bytes replace the old in one write: no empty file in between for others to see.
+  const node = openNode(path, { ...flags, truncate: false }, options?.mode, "open");
   if (node.kind === "dir") throw fsError("EISDIR", "open", toPath(path));
-  node.data = flags.append ? concat(node.data, bytes) : bytes;
+  if (flags.append) appendTo(node, bytes);
+  else node.data = bytes;
   touch(node);
+}
+
+// Adds bytes at the end the file has now (a workspace file's, not one read earlier).
+function appendTo(node, bytes) {
+  if (node.live) appendRemote(node.path, bytes);
+  else node.data = concat(node.data, bytes);
 }
 
 function appendFileSync(path, data, options) {
@@ -805,23 +910,43 @@ function readSync(fd, buffer, offsetOrOptions, length, position) {
   offset ??= 0;
   length ??= buffer.byteLength - offset;
   if (entry.node.kind === "dir") throw fsError("EISDIR", "read");
-  const start = typeof position === "number" || typeof position === "bigint" ? Number(position) : entry.position;
-  const bytes = entry.node.data.subarray(start, start + length);
+  if (!entry.flags.read) throw fsError("EBADF", "read");
+  const data = entry.node.data;
+  const positioned = typeof position === "number" || typeof position === "bigint";
+  const start = positioned ? Number(position) : entry.position ?? data.length;
+  const bytes = data.subarray(start, start + length);
   new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength).set(bytes, offset);
-  if (!(typeof position === "number" || typeof position === "bigint")) entry.position += bytes.length;
+  if (!positioned) entry.position = start + bytes.length;
   return bytes.length;
 }
 
 function writeAt(entry, bytes, position) {
   if (!entry.flags.write) throw fsError("EBADF", "write");
   const node = entry.node;
-  const start = entry.flags.append ? node.data.length : typeof position === "number" ? position : entry.position;
-  if (start + bytes.length > node.data.length) {
-    const grown = new Uint8Array(start + bytes.length);
-    grown.set(node.data);
-    node.data = grown;
+  if (entry.flags.append) {
+    // O_APPEND: every write lands at the end the file has when it is made (a position is
+    // ignored, as on Linux), and the offset moves to that end.
+    appendTo(node, bytes);
+    entry.position = null;
+    touch(node);
+    return bytes.length;
   }
-  node.data.set(bytes, start);
+  const start = typeof position === "number" ? position : entry.position ?? node.data.length;
+  if (node.live) {
+    // Over what the workspace holds now: bytes others wrote around this range stay.
+    const current = node.data;
+    const out = new Uint8Array(Math.max(current.length, start + bytes.length));
+    out.set(current);
+    out.set(bytes, start);
+    node.data = out;
+  } else {
+    if (start + bytes.length > node.data.length) {
+      const grown = new Uint8Array(start + bytes.length);
+      grown.set(node.data);
+      node.data = grown;
+    }
+    node.data.set(bytes, start);
+  }
   if (typeof position !== "number") entry.position = start + bytes.length;
   touch(node);
   return bytes.length;
@@ -859,14 +984,47 @@ function mirrored(fn, after) {
   };
 }
 
+// A file that is live at this path already wrote every change through; one this call made is
+// written once and turns live in place (so open descriptors follow the workspace from then on).
 function mirror(path, deep = false) {
   const absolute = resolvePath(path);
   const node = find(absolute);
-  if (node === undefined) ask({ op: "remove", path: absolute });
+  if (node === undefined) tell({ op: "remove", path: absolute });
   else if (node.kind === "dir") {
-    ask({ op: "mkdir", path: absolute });
+    tell({ op: "mkdir", path: absolute });
+    liven(absolute);
     if (deep) for (const name of node.entries.keys()) mirror(under(absolute, name), true);
-  } else ask({ op: "write", path: absolute, data: Buffer.from(node.data).toString("base64") });
+  } else if (!(node.live && node.path === absolute)) {
+    writeRemote(absolute, node.data);
+    if (node.live) {
+      // A hard link: the workspace holds a copy, which this path now follows.
+      const { parent, name } = parentOf(absolute, "link");
+      parent.entries.set(name, liveFile(absolute));
+    } else makeLive(node, absolute);
+  }
+}
+
+// Directories made on the way to absolute now follow the workspace.
+function liven(absolute) {
+  let node = root;
+  let path = "/";
+  for (const part of parts(absolute)) {
+    path = under(path, part);
+    const next = node.entries.get(part);
+    if (next === undefined || next.kind !== "dir") return;
+    if (!next.live) {
+      next.live = true;
+      next.entries = new RemoteEntries(path, next.entries);
+    }
+    node = next;
+  }
+}
+
+function renamed(from, to) {
+  const target = resolvePath(toPath(to));
+  tell({ op: "rename", from: resolvePath(toPath(from)), to: target });
+  const node = find(target);
+  if (node !== undefined) relocate(node, target);
 }
 
 function mirrorTarget(target, entry) {
@@ -879,19 +1037,50 @@ function mirrorTarget(target, entry) {
 writeFileSync = mirrored(writeFileSync, ([target]) => mirrorTarget(target));
 appendFileSync = mirrored(appendFileSync, ([target]) => mirrorTarget(target));
 truncateSync = mirrored(truncateSync, ([target]) => mirrorTarget(target));
-ftruncateSync = mirrored(ftruncateSync, ([fd]) => mirrorTarget(fd));
-fsyncSync = mirrored(fsyncSync, ([fd]) => mirrorTarget(fd));
-closeSync = mirrored(closeSync, ([fd], _, [entry]) => mirrorTarget(fd, entry));
 openSync = mirrored(openSync, (_, fd) => mirrorTarget(fd));
 mkdirSync = mirrored(mkdirSync, ([path]) => mirror(toPath(path)));
 mkdtempSync = mirrored(mkdtempSync, (_, path) => mirror(path));
 rmdirSync = mirrored(rmdirSync, ([path]) => mirror(toPath(path)));
 rmSync = mirrored(rmSync, ([path]) => mirror(toPath(path)));
 unlinkSync = mirrored(unlinkSync, ([path]) => mirror(toPath(path)));
-renameSync = mirrored(renameSync, ([from, to]) => ask({ op: "rename", from: resolvePath(toPath(from)), to: resolvePath(toPath(to)) }));
+renameSync = mirrored(renameSync, ([from, to]) => renamed(from, to));
 copyFileSync = mirrored(copyFileSync, ([, to]) => mirror(toPath(to)));
 cpSync = mirrored(cpSync, ([, to]) => mirror(toPath(to), true));
 linkSync = mirrored(linkSync, ([, path]) => mirror(toPath(path)));
+// Writes through descriptors (writeSync, ftruncateSync) reach a workspace file as they are made,
+// so fsyncSync and closeSync have nothing left to write back. Every call reads the workspace
+// afresh (see scoped).
+existsSync = scoped(existsSync);
+accessSync = scoped(accessSync);
+statSync = scoped(statSync);
+lstatSync = scoped(lstatSync);
+fstatSync = scoped(fstatSync);
+readFileSync = scoped(readFileSync);
+writeFileSync = scoped(writeFileSync);
+appendFileSync = scoped(appendFileSync);
+mkdirSync = scoped(mkdirSync);
+mkdtempSync = scoped(mkdtempSync);
+readdirSync = scoped(readdirSync);
+rmdirSync = scoped(rmdirSync);
+rmSync = scoped(rmSync);
+unlinkSync = scoped(unlinkSync);
+renameSync = scoped(renameSync);
+copyFileSync = scoped(copyFileSync);
+cpSync = scoped(cpSync);
+truncateSync = scoped(truncateSync);
+ftruncateSync = scoped(ftruncateSync);
+utimesSync = scoped(utimesSync);
+futimesSync = scoped(futimesSync);
+chmodSync = scoped(chmodSync);
+fchmodSync = scoped(fchmodSync);
+chownSync = scoped(chownSync);
+realpathSync = scoped(realpathSync);
+readlinkSync = scoped(readlinkSync);
+linkSync = scoped(linkSync);
+openSync = scoped(openSync);
+readSync = scoped(readSync);
+writeSync = scoped(writeSync);
+realpathSync.native = realpathSync;
 
 const sync = {
   existsSync,
