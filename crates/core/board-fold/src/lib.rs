@@ -658,7 +658,9 @@ impl Fold {
             }
             Op::Renew { task, claim, .. } => {
                 let held = self.holds(task, claim, Act::Renew)?;
-                if held.stage(self.now_ms.max(at_ms)) == Stage::Lapsed {
+                if held.stage(self.now_ms.max(at_ms)) == Stage::Lapsed
+                    && !mutated(Mutation::RenewIgnoresCap)
+                {
                     self.room(task, held.cap.as_ref(), at_ms)
                 } else {
                     Ok(())

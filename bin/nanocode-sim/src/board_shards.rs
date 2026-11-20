@@ -8,6 +8,8 @@
 //! - every partition's seqs run from 0 without a gap;
 //! - group commit is all or nothing: every append lands every row or none, and each group round
 //!   is one append;
+//! - a renew of a lapsed claim takes a slot again: under a cap it lands only with room, and is
+//!   refused full only without it;
 //! - with one committer per partition, claims on different tasks never retry because of each
 //!   other: no append loses a seq race, and a claim is only refused for its own task's state.
 
@@ -31,6 +33,7 @@ use nanocode_board::{
     deliver::Outbox,
     shards::{self, Committer, Merged, ReadyIndex, Route, Stats as CommitStats},
     sim::{self as board_sim, Mutation as BoardRule},
+    stage::Stage,
 };
 use nanocode_durability_core::{StoreError, StoreFuture};
 use nanocode_partitions::Partition;
@@ -68,10 +71,11 @@ pub enum ShardsMutation {
     ClaimCapIgnored,
     ClaimCapIgnoresLabel,
     FinishForgetsWorker,
+    RenewIgnoresCap,
 }
 
 impl ShardsMutation {
-    const ALL: [Self; 16] = [
+    const ALL: [Self; 17] = [
         Self::None,
         Self::GroupSkipsSeq,
         Self::GroupVerdictFromPlan,
@@ -88,6 +92,7 @@ impl ShardsMutation {
         Self::ClaimCapIgnored,
         Self::ClaimCapIgnoresLabel,
         Self::FinishForgetsWorker,
+        Self::RenewIgnoresCap,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -114,6 +119,7 @@ impl ShardsMutation {
             Self::ClaimCapIgnored => "claim_cap_ignored",
             Self::ClaimCapIgnoresLabel => "claim_cap_ignores_label",
             Self::FinishForgetsWorker => "finish_forgets_worker",
+            Self::RenewIgnoresCap => "renew_ignores_cap",
         }
     }
 
@@ -144,6 +150,7 @@ impl ShardsMutation {
             Self::ClaimCapIgnored => BoardRule::ClaimCapIgnored,
             Self::ClaimCapIgnoresLabel => BoardRule::ClaimCapIgnoresLabel,
             Self::FinishForgetsWorker => BoardRule::FinishForgetsWorker,
+            Self::RenewIgnoresCap => BoardRule::RenewIgnoresCap,
         }
     }
 }
@@ -171,6 +178,8 @@ pub struct ShardsStats {
     pub picks: u64,
     pub moved: u64,
     pub crashes: u64,
+    pub lapsed_renews: u64,
+    pub renews_full: u64,
 }
 
 impl ShardsStats {
@@ -198,6 +207,8 @@ impl ShardsStats {
         self.picks += other.picks;
         self.moved += other.moved;
         self.crashes += other.crashes;
+        self.lapsed_renews += other.lapsed_renews;
+        self.renews_full += other.renews_full;
     }
 }
 
@@ -248,6 +259,9 @@ struct Shape {
     /// Share of fenced claims a writer makes from a view one epoch behind
     /// its partition, as an agent that read the board before the last bump.
     stale_ppm: u64,
+    /// Share of landed claims whose writer, under a cap, sleeps past its lease and then renews,
+    /// so the renew must take a slot again while other writers may have filled the cap.
+    lapse_ppm: u64,
 }
 
 impl Shape {
@@ -288,9 +302,20 @@ impl Shape {
                 .chance(500_000)
                 .then(|| cap_of(seed, rng.range(1, 6) as u32)),
             stale_ppm: rng.range(100_000, 600_000),
+            lapse_ppm: 0,
+        };
+        // Drawn apart from the shape's own stream so every earlier seed keeps its shape.
+        let lapse_ppm = if shape.cap.is_some() {
+            Rng::derive(seed, "board shards lapse").range(50_000, 400_000)
+        } else {
+            0
         };
         let lease_ms = shape.lease_ms.max(shape.lease_floor_ms());
-        Self { lease_ms, ..shape }
+        Self {
+            lease_ms,
+            lapse_ppm,
+            ..shape
+        }
     }
 
     /// The shortest lease a winner can use: every writer queues a write on one committer, so a
@@ -852,6 +877,7 @@ async fn fencer(world: &World) {
 async fn writer(world: &World, index: u64) {
     let by = format!("agent:w{index}");
     let mut rng = Rng::derive(fnv(FNV_OFFSET, by.as_bytes()), "board shards writer");
+    let mut lapses = Rng::derive(fnv(FNV_OFFSET, by.as_bytes()), "board shards lapses");
     let mut tries = 0_u64;
     loop {
         if world.now_ms() > world.shape.deadline_ms {
@@ -909,7 +935,9 @@ async fn writer(world: &World, index: u64) {
             {
                 let away = world.merged(|merged| {
                     merged.parent(&task).is_some_and(|parent| {
-                        merged.home(&parent).is_some_and(|at| Some(at) != merged.home(&task))
+                        merged
+                            .home(&parent)
+                            .is_some_and(|at| Some(at) != merged.home(&task))
                     })
                 });
                 let mut oracle = world.oracle.borrow_mut();
@@ -927,7 +955,11 @@ async fn writer(world: &World, index: u64) {
             let stale = rng.chance(world.shape.stale_ppm);
             Fence {
                 partition: home.0,
-                epoch: if stale { epoch.saturating_sub(1) } else { epoch },
+                epoch: if stale {
+                    epoch.saturating_sub(1)
+                } else {
+                    epoch
+                },
             }
         });
         let claim = Op::Claim {
@@ -947,7 +979,26 @@ async fn writer(world: &World, index: u64) {
                     task.clone(),
                     Told::Applied(applied.seq),
                 ));
-                world.nap(rng.range(1, world.shape.step_ms + 1)).await;
+                if lapses.chance(world.shape.lapse_ppm) {
+                    world
+                        .nap(world.shape.lease_ms + lapses.range(1, world.shape.step_ms + 1))
+                        .await;
+                    let renew = Op::Renew {
+                        task: task.clone(),
+                        claim: ClaimId(event.0.clone()),
+                        lease_ms: world.shape.lease_ms,
+                    };
+                    if world
+                        .submit(&by, format!("renew:{tries}"), renew)
+                        .await
+                        .1
+                        .is_err()
+                    {
+                        continue;
+                    }
+                } else {
+                    world.nap(rng.range(1, world.shape.step_ms + 1)).await;
+                }
                 let finish = Op::Finish {
                     task: task.clone(),
                     claim: ClaimId(event.0.clone()),
@@ -1132,6 +1183,14 @@ fn serial(logs: &[Vec<(u64, String)>], folds: &[Fold]) -> Result<Fold, String> {
                 }
                 *cap = None;
             }
+            if matches!(event.op, Op::Renew { .. })
+                && matches!(
+                    folds[partition].outcome(&event.id),
+                    Some(Err(Rejection::Full { .. }))
+                )
+            {
+                continue;
+            }
             let body = serde_json::to_string(&event)
                 .map_err(|error| format!("partition {partition} row {position}: {error}"))?;
             rows.push((clock, partition, position, body));
@@ -1165,8 +1224,11 @@ fn check(world: &World, logs: &[Vec<(u64, String)>]) -> Result<ShardsStats, Stri
         }
     }
     let mut folds = Vec::new();
+    let mut lapsed_renews = 0;
+    let mut renews_full = 0;
     for (index, log) in logs.iter().enumerate() {
         let mut fold = Fold::new();
+        let mut clock = 0;
         for (seq, body) in log {
             let event: nanocode_board::Event = serde_json::from_str(body)
                 .map_err(|error| format!("partition {index} row {seq}: {error}"))?;
@@ -1184,8 +1246,41 @@ fn check(world: &World, logs: &[Vec<(u64, String)>]) -> Result<ShardsStats, Stri
                 }),
                 _ => None,
             };
+            clock = clock.max(event.at_ms);
+            let lapsed = match &event.op {
+                Op::Renew { task, .. } => fold
+                    .task(task)
+                    .filter(|task| task.stage(clock) == Stage::Lapsed)
+                    .and_then(|task| task.cap.clone()),
+                _ => None,
+            };
             fold.apply(*seq, body)
                 .map_err(|error| format!("partition {index} does not fold: {error}"))?;
+            if let Some(cap) = &lapsed {
+                let held = fold.held(cap, event.at_ms);
+                let max = cap.max() as usize;
+                match fold.outcome(&event.id) {
+                    Some(Ok(landed)) if landed == seq => {
+                        lapsed_renews += 1;
+                        if held > max {
+                            return Err(format!(
+                                "partition {index} row {seq}: renew {} revived a lapsed claim over its cap {cap:?} with {held} live claims",
+                                event.id
+                            ));
+                        }
+                    }
+                    Some(Err(Rejection::Full { .. })) => {
+                        renews_full += 1;
+                        if held < max {
+                            return Err(format!(
+                                "partition {index} row {seq}: renew {} was refused as full under {cap:?} with {held} live claims",
+                                event.id
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
             if let Some((fence, held)) = fence
                 && fold.outcome(&event.id) == Some(&Ok(*seq))
                 && fence.epoch != held
@@ -1259,6 +1354,8 @@ fn check(world: &World, logs: &[Vec<(u64, String)>]) -> Result<ShardsStats, Stri
     }
     drop(calls);
     let mut stats = oracle.stats;
+    stats.lapsed_renews = lapsed_renews;
+    stats.renews_full = renews_full;
     for (partition, event, task, told) in &oracle.told {
         let home = Merged::new(folds.iter().collect()).home(task);
         let fold = &folds[home.unwrap_or(*partition).0 as usize];
@@ -1642,6 +1739,7 @@ pub fn bench(partitions: &[u32], writers: &[u64], batch: usize, cost: Cost) {
                 fence_ppm: 0,
                 cap: None,
                 stale_ppm: 0,
+                lapse_ppm: 0,
             };
             let mut walls = Vec::new();
             for _ in 0..BENCH_ROUNDS {
