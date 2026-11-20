@@ -5,7 +5,7 @@ codex/paged
 codex/reload
 claude/paged
 claude/reload
-claude/memo=retained
+claude/memo
 claude/replay=retained
 codex/memo
 codex/replay=retained
