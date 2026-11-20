@@ -601,7 +601,10 @@ impl GcState {
         // the range that is its own: a vector each would be an allocation per
         // tracked object, and the collection wants them all at once anyway.
         let mut referent_ptrs: Vec<NonNull<PyObject>> = Vec::new();
-        let mut referent_ranges: GcMap<GcPtr, (usize, usize)> = GcMap::default();
+        // Sized for every candidate up front: grown from empty, the table
+        // rehashed itself several times in every gen0 collection.
+        let mut referent_ranges: GcMap<GcPtr, (usize, usize)> =
+            GcMap::with_capacity_and_hasher(candidate_ptrs.len(), GcBuildHasher::default());
 
         for &ptr in &candidate_ptrs {
             let obj = unsafe { ptr.0.as_ref() };
