@@ -724,6 +724,20 @@ def _start(argv, first, unbuffered=False):
         environ = sys.modules['os'].environ
         environ._data.clear()
         environ._data.update(fresh)
+    sys.excepthook = sys.__excepthook__
+    events = sys.modules.get('asyncio.events')
+    if events is not None:
+        events._set_running_loop(None)
+    logging = sys.modules.get('logging')
+    if logging is not None:
+        logging.disable(logging.NOTSET)
+        for logger in [logging.root, *logging.Logger.manager.loggerDict.values()]:
+            if isinstance(logger, logging.Logger):
+                for handler in logger.handlers[:]:
+                    logger.removeHandler(handler)
+                logger.setLevel(logging.WARNING if logger is logging.root else logging.NOTSET)
+                logger.disabled = False
+                logger.propagate = True
     sys.argv = argv
     sys.executable = sys._base_executable = '/usr/bin/python3'
     extra = []

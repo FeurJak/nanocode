@@ -1213,7 +1213,6 @@ impl ToPyException for rustpython_host_env::wide_string::NulError {
     }
 }
 
-#[cfg(any(unix, windows, target_os = "wasi"))]
 pub(crate) fn errno_to_exc_type(errno: i32, vm: &VirtualMachine) -> Option<&'static Py<PyType>> {
     use crate::stdlib::errno::errors;
     let excs = &vm.ctx.exceptions;
@@ -1243,11 +1242,6 @@ pub(crate) fn errno_to_exc_type(errno: i32, vm: &VirtualMachine) -> Option<&'sta
         errors::ETIMEDOUT => Some(excs.timeout_error),
         _ => None,
     }
-}
-
-#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
-pub(crate) fn errno_to_exc_type(_errno: i32, _vm: &VirtualMachine) -> Option<&'static Py<PyType>> {
-    None
 }
 
 pub(crate) trait ToOSErrorBuilder {

@@ -18,6 +18,7 @@ pub struct State {
     env: Vec<(Vec<u8>, Vec<u8>)>,
     limits: Limits,
     stop: Stop,
+    skipped: Duration,
     slept: Duration,
     started: Instant,
     steps: u64,
@@ -40,6 +41,10 @@ pub struct State {
 }
 
 impl State {
+    fn elapsed(&self) -> Duration {
+        self.started.elapsed().saturating_add(self.skipped)
+    }
+
     pub fn new(files: Rc<dyn Files>, run: Run) -> Self {
         Self {
             files,
@@ -50,6 +55,7 @@ impl State {
             env: run.env,
             limits: run.limits,
             stop: run.stop,
+            skipped: Duration::ZERO,
             slept: Duration::ZERO,
             started: Instant::now(),
             steps: 0,
@@ -196,7 +202,7 @@ impl State {
         let left = self.limits.steps.saturating_sub(self.steps);
         self.refused = if left == 0 {
             Some(Limit::Steps)
-        } else if self.started.elapsed() >= self.limits.time {
+        } else if self.elapsed() >= self.limits.time {
             Some(Limit::Time)
         } else if self.over(0) {
             Some(Limit::Memory)
@@ -374,7 +380,7 @@ fn absolute(cwd: &[u8], path: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(not(target_family = "wasm"))]
-fn wait(duration: Duration, stop: &Stop) -> io::Result<bool> {
+fn wait(duration: Duration, stop: &Stop, _: &mut Duration) -> io::Result<bool> {
     const POLL: Duration = Duration::from_millis(20);
     let until = Instant::now() + duration;
     loop {
@@ -390,8 +396,12 @@ fn wait(duration: Duration, stop: &Stop) -> io::Result<bool> {
 }
 
 #[cfg(target_family = "wasm")]
-fn wait(_: Duration, _: &Stop) -> io::Result<bool> {
-    Err(io::ErrorKind::Unsupported.into())
+fn wait(duration: Duration, stop: &Stop, skipped: &mut Duration) -> io::Result<bool> {
+    if stop() {
+        return Ok(false);
+    }
+    *skipped = skipped.saturating_add(duration);
+    Ok(true)
 }
 
 #[rustpython_vm::pymodule]
@@ -787,15 +797,17 @@ mod _host {
     }
 
     #[pyfunction]
-    fn now() -> f64 {
-        nanocode_platform::system_time()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0.0, |since| since.as_secs_f64())
+    fn now(vm: &VirtualMachine) -> PyResult<f64> {
+        state(vm, |state| {
+            Ok(nanocode_platform::system_time()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0.0, |since| since.saturating_add(state.skipped).as_secs_f64()))
+        })
     }
 
     #[pyfunction]
     fn monotonic(vm: &VirtualMachine) -> PyResult<f64> {
-        state(vm, |state| Ok(state.started.elapsed().as_secs_f64()))
+        state(vm, |state| Ok(state.elapsed().as_secs_f64()))
     }
 
     #[pyfunction]
@@ -804,11 +816,11 @@ mod _host {
             .map_err(|_| vm.new_value_error("sleep length must be non-negative"))?;
         let slept = state(vm, |state| {
             let slept = state.slept.saturating_add(duration);
-            let left = state.limits.time.saturating_sub(state.started.elapsed());
+            let left = state.limits.time.saturating_sub(state.elapsed());
             let waited = if slept > state.limits.sleep {
                 Err(io::ErrorKind::TimedOut.into())
             } else {
-                wait(duration.min(left), &state.stop)
+                wait(duration.min(left), &state.stop, &mut state.skipped)
             };
             match waited {
                 Err(_) => {
