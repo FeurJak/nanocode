@@ -85,8 +85,13 @@ async fn unary(vp: &mut Vp, op: UnaryTest, op_text: &[u8], v: &[u8]) -> R {
             Ok(t) => t,
             // `-v a[sub]`: a subscript that is not arithmetic abandons the command,
             // as an expansion error does (bash).
+            // Under `-c` it ends the shell (or subshell) with status 1, as bash does.
             Err(msg) if op_text == b"-v" => {
                 vp.error(&msg).await;
+                if vp.opts.dash_c {
+                    vp.sub_fatal = false;
+                    return Err(Unwind::Exit(1));
+                }
                 return Err(Unwind::Abort(1));
             }
             // `-t x`: not a file descriptor number.

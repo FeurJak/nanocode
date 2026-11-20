@@ -241,6 +241,7 @@ impl Vp {
         }
         let mut next = self.max_index(&name).map_or(0, |k| k + 1);
         for item in items {
+            let item = rescan_indexed(item);
             let i = match &item.key {
                 // A bad subscript skips its element with a warning (bash).
                 Some(k) if k == b"@" || k == b"*" => {
@@ -360,6 +361,80 @@ impl Vp {
             _ => {}
         }
         Ok(())
+    }
+}
+
+/// bash finds the subscript of an indexed array's `[key]=value` element in the
+/// expanded element, so a key whose quotes held a `]` ends at that bracket: the
+/// element is `[k]=v` with a shorter key, or a plain value when what follows the
+/// bracket is not `=` or `+=`.
+fn rescan_indexed(item: ArrayItem) -> ArrayItem {
+    let Some(key) = &item.key else {
+        return item;
+    };
+    if !key.iter().any(|&b| matches!(b, b'[' | b']' | b'\\' | b'\'' | b'"')) {
+        return item;
+    }
+    let mut w = Vec::with_capacity(key.len() + item.value.len() + 4);
+    w.push(b'[');
+    w.extend_from_slice(key);
+    w.push(b']');
+    w.extend_from_slice(if item.append { b"+=" } else { b"=" });
+    w.extend_from_slice(&item.value);
+    let mut depth = 0usize;
+    let mut i = 0;
+    let mut close = None;
+    while i < w.len() {
+        match w[i] {
+            b'\\' => i += 1,
+            b'\'' if i > 0 => match w[i + 1..].iter().position(|&b| b == b'\'') {
+                Some(n) => i += n + 1,
+                None => break,
+            },
+            b'"' => {
+                let mut j = i + 1;
+                while j < w.len() && w[j] != b'"' {
+                    j += if w[j] == b'\\' { 2 } else { 1 };
+                }
+                if j >= w.len() {
+                    break;
+                }
+                i = j;
+            }
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if close == Some(key.len() + 1) {
+        return item;
+    }
+    let plain = |w: Vec<u8>| ArrayItem {
+        key: None,
+        value: w,
+        append: false,
+        src: None,
+    };
+    let Some(j) = close else {
+        return plain(w);
+    };
+    let (append, at) = match &w[j + 1..] {
+        [b'=', ..] => (false, j + 2),
+        [b'+', b'=', ..] => (true, j + 3),
+        _ => return plain(w),
+    };
+    ArrayItem {
+        key: Some(w[1..j].to_vec()),
+        value: w[at..].to_vec(),
+        append,
+        src: item.src,
     }
 }
 

@@ -1933,6 +1933,20 @@ async fn param(
                     && matches!(p.op, ParamOp::None)
                     && matches!(p.index, Some(Subscript::At | Subscript::Star))
                 {
+                    // `set -u`: counting an array that was never given a value is an
+                    // error that ends a non-interactive shell with status 1 (bash).
+                    if vp.opts.get(SetOpt::Nounset)
+                        && vp
+                            .vars
+                            .get(&name)
+                            .is_none_or(|v| v.declared_only || v.value == crate::vars::Value::Unset)
+                    {
+                        vp.error(&format!("{name}: unbound variable")).await;
+                        return Err(match vp.opts.interactive {
+                            true => Unwind::Abort(1),
+                            false => Unwind::Exit(1),
+                        });
+                    }
                     let n = vp.vars.get(&name).map_or(0, crate::vars::Var::count);
                     emit(f, n.to_string().as_bytes(), quoted);
                     return Ok(());
@@ -2350,9 +2364,9 @@ async fn param(
                 // its end (bash slices it as a one-element array there).
                 None if matches!(p.index, Some(Subscript::At))
                     && match &val {
-                        Val::Str(s) => off > str_len(s, utf8),
+                        Val::Str(s) => past_end(off, str_len(s, utf8)),
                         Val::List(items, false) if items.len() == 1 => {
-                            off > str_len(&items[0], utf8)
+                            past_end(off, str_len(&items[0], utf8))
                         }
                         _ => false,
                     } =>
@@ -2890,6 +2904,13 @@ pub(crate) fn slice_items(
         Some(l) => it.take(l as usize).collect(),
         None => it.collect(),
     })
+}
+
+/// Whether a substring offset points outside a string of `n` chars: past its end,
+/// or (negative) before its start.
+fn past_end(off: i64, n: i64) -> bool {
+    let start = if off < 0 { n.saturating_add(off) } else { off };
+    start < 0 || start > n
 }
 
 /// `${x:off:len}` on a string, by chars (UTF-8 locale) or bytes.

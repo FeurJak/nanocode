@@ -228,7 +228,8 @@ fn fnv1(key: &[u8]) -> u32 {
     let mut h: u32 = 2_166_136_261;
     for &b in key {
         h = h.wrapping_mul(16_777_619);
-        h ^= u32::from(b);
+        // bash hashes `char`s, which are signed: a byte past 0x7f is sign-extended.
+        h ^= i32::from(b as i8) as u32;
     }
     h
 }

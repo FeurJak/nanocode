@@ -630,7 +630,19 @@ async fn unset(vp: &mut Vp, args: &[Vec<u8>]) -> R {
             && is_name(&a[..open])
         {
             let name = String::from_utf8_lossy(&a[..open]).into_owned();
-            let sub = crate::expand::expand_sub_text(vp, &a[open + 1..a.len() - 1]).await?;
+            let raw = &a[open + 1..a.len() - 1];
+            let sub = crate::expand::expand_sub_text(vp, raw).await?;
+            // A key of an associative array that expands to nothing is an error; a
+            // literal `[]` is not (bash).
+            if sub.is_empty()
+                && !raw.is_empty()
+                && vp.vars.get(&vp.resolve(&name)).is_some_and(|v| v.is_assoc())
+            {
+                vp.error(&format!("unset: [{}]: bad array subscript", s(raw)))
+                    .await;
+                status = 1;
+                continue;
+            }
             if let Err(msg) = vp.unset_elem(&name, &sub) {
                 if std::mem::take(&mut vp.sub_fatal) {
                     vp.error(&msg).await;

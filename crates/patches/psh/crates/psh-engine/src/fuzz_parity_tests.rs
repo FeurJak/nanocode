@@ -211,7 +211,9 @@ fn bash_fuzz6_arrays() {
     assert!(err("declare -A w=([\"\"]=1)").contains("['']='1': bad array subscript"));
     // -v on an unset name evaluates the subscript as arithmetic.
     assert_eq!(o("[[ -v m[k=5] ]]; echo $? $k"), "1 5\n");
-    assert_eq!(o("[[ -v m[\"q z\"] ]] || echo same; echo no\necho next"), "next\n");
+    // Under `-c` a subscript that is not arithmetic ends the shell with status 1.
+    let r = run("[[ -v m[\"q z\"] ]] || echo same; echo no\necho next");
+    assert_eq!((r.0, r.1.as_slice()), (1, &b""[..]));
     assert_eq!(run("a='*.t'\n[[ -v m[\"$a\"] ]] || echo unset").0, 1);
     assert!(!err("[[ -v m[1+] ]]").contains("[[: "));
     assert_eq!(o("m[x]+=v\n[[ -v m[$k] ]] && echo set || echo unset"), "unset\n");
