@@ -15,7 +15,7 @@ mod rng;
 use std::cell::RefCell;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rng::Rng;
 
@@ -75,13 +75,14 @@ struct Run {
     seed: u64,
     count: Count,
     jobs: usize,
+    deadline: Option<Duration>,
     targets: Vec<Target>,
 }
 
 fn usage() -> ExitCode {
     let names: Vec<&str> = Target::ALL.iter().map(|target| target.name()).collect();
     eprintln!(
-        "usage: nanocode-fuzz fuzz [--seed S] [--iterations N | --iteration I] [--jobs J] [--target {}]",
+        "usage: nanocode-fuzz fuzz [--seed S] [--iterations N | --iteration I] [--seconds S] [--jobs J] [--target {}]",
         names.join("|")
     );
     ExitCode::from(2)
@@ -95,6 +96,7 @@ fn parse(args: &[String]) -> Option<Run> {
     let mut seed = None;
     let mut count = None;
     let mut jobs = None;
+    let mut deadline = None;
     let mut target = None;
     let mut rest = rest.iter();
     while let Some(flag) = rest.next() {
@@ -106,6 +108,9 @@ fn parse(args: &[String]) -> Option<Run> {
             }
             "--iteration" if count.is_none() => count = Some(Count::One(value.parse().ok()?)),
             "--jobs" if jobs.is_none() => jobs = Some(value.parse().ok().filter(|jobs| *jobs > 0)?),
+            "--seconds" if deadline.is_none() => {
+                deadline = Some(Duration::try_from_secs_f64(value.parse().ok()?).ok()?);
+            }
             "--target" if target.is_none() => target = Some(Target::parse(value)?),
             _ => return None,
         }
@@ -117,10 +122,16 @@ fn parse(args: &[String]) -> Option<Run> {
         u64::try_from(now.as_nanos() % u128::from(u64::MAX)).expect("a remainder fits a u64")
     });
     let jobs = jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from));
+    let unbounded = if deadline.is_some() {
+        u64::MAX
+    } else {
+        ITERATIONS_DEFAULT
+    };
     Some(Run {
         seed,
-        count: count.unwrap_or(Count::Iterations(ITERATIONS_DEFAULT)),
+        count: count.unwrap_or(Count::Iterations(unbounded)),
         jobs,
+        deadline,
         targets: target.map_or_else(|| Target::ALL.to_vec(), |target| vec![target]),
     })
 }
@@ -165,15 +176,20 @@ fn main() -> ExitCode {
         Count::One(i) => (i, 1),
     };
     let width = run.targets.len() as u64;
-    let work = total * width;
+    let work = total.saturating_mul(width);
     let cursor = AtomicU64::new(0);
+    let done = AtomicU64::new(0);
     let started = Instant::now();
+    let due = run.deadline.map(|deadline| started + deadline);
     let failures: Vec<String> = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..run.jobs.min(usize::try_from(work).unwrap_or(usize::MAX)).max(1))
             .map(|_| {
                 scope.spawn(|| {
                     let mut failed = Vec::new();
                     loop {
+                        if due.is_some_and(|due| Instant::now() >= due) {
+                            return failed;
+                        }
                         let at = cursor.fetch_add(1, Ordering::Relaxed);
                         if at >= work {
                             return failed;
@@ -193,6 +209,7 @@ fn main() -> ExitCode {
                             println!("{line}");
                             failed.push(line);
                         }
+                        done.fetch_add(1, Ordering::Relaxed);
                     }
                 })
             })
@@ -203,6 +220,7 @@ fn main() -> ExitCode {
             .collect()
     });
     let seconds = started.elapsed().as_secs_f64();
+    let work = done.into_inner();
     let names: Vec<&str> = run.targets.iter().map(|target| target.name()).collect();
     println!(
         "FUZZ iterations={work} failed={} seed={} seconds={seconds:.3} iterations_per_s={:.0} targets=[{}]",
