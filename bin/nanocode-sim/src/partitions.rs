@@ -33,6 +33,9 @@ const FAULT_TICKS_MAX: u64 = 600;
 const FAULT_PPM: u64 = 50_000;
 const FAULT_KINDS: u64 = 8;
 const KILL_LANDS_PPM: u64 = 500_000;
+/// Per tick while a hand runs a step: the hand moves off its host mid-step, the path
+/// where the host must fail (not drop) its board claim.
+const BUSY_HAND_MOVE_PPM: u64 = 250_000;
 const PAUSE_MS_MIN: u64 = TTL_MS / 2;
 const PAUSE_MS_MAX: u64 = TTL_MS * 3;
 const CUT_TICKS_MIN: u64 = 2;
@@ -714,7 +717,37 @@ impl World {
         }
     }
 
+    fn busy_hands(&self) -> Vec<usize> {
+        let mut busy: Vec<usize> = self
+            .nodes
+            .iter()
+            .flat_map(|node| {
+                node.running
+                    .values()
+                    .filter(|hosted| self.hands[hosted.hand as usize] == Some(node.id))
+                    .map(|hosted| hosted.hand as usize)
+            })
+            .collect();
+        busy.sort_unstable();
+        busy.dedup();
+        busy
+    }
+
+    fn move_busy_hand(&mut self) {
+        let busy = self.busy_hands();
+        if busy.is_empty() || !self.rng.chance(BUSY_HAND_MOVE_PPM) {
+            return;
+        }
+        let hand = busy[self.rng.pick(busy.len())];
+        let host = self.hands[hand];
+        match self.pick(|node| node.stays() && Some(node.id) != host) {
+            Some(at) => self.attach(hand, at),
+            None => self.hands[hand] = None,
+        }
+    }
+
     fn fault(&mut self) -> Result<(), String> {
+        self.move_busy_hand();
         if !self.rng.chance(FAULT_PPM) {
             return Ok(());
         }
@@ -1428,6 +1461,17 @@ impl World {
     }
 
     fn check_beliefs(&mut self) -> Result<(), String> {
+        for (key, task) in &self.store.tasks {
+            if let TaskState::Claimed { host } = task.state {
+                let node = &self.nodes[host.index()];
+                if matches!(node.life, Life::Up | Life::Leaving) && !node.running.contains_key(key) {
+                    return Err(format!(
+                        "invariant 4 (no lost claim): thread {} step {} is claimed by {host:?}, which is up but no longer runs it",
+                        key.0, key.1
+                    ));
+                }
+            }
+        }
         for partition in self.partitions() {
             let row = &self.store.rows[&partition];
             let epoch = row.epoch();
