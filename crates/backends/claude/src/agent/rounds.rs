@@ -620,19 +620,13 @@ pub(super) fn run_rounds<'a>(
                 pending.push(Message::text(Role::User, &upgrade.notice).into());
                 conversation.recovery_notices.push(upgrade.notice);
             }
-            let recorded = response.recorded;
             let mut response = response.message;
             let assistant = Message {
                 role: Role::Assistant,
                 content: std::mem::take(&mut response.content),
                 output_config: None,
             };
-            let assistant = match recorded {
-                Some(recorded) => {
-                    HistoryMessage::recorded(assistant, recorded.json, recorded.record)
-                }
-                None => HistoryMessage::from(assistant),
-            };
+            let assistant = HistoryMessage::from(assistant);
             state.publish_side_view(Some(pending.iter().chain([&assistant]).cloned().collect()));
             if cursor.model_step_offset == 0 {
                 cursor.model_step_offset = 1;
@@ -1173,8 +1167,8 @@ pub(super) fn run_rounds<'a>(
                         pending
                             .last()
                             .expect("tool result was appended")
-                            .json()
-                            .map(|text| estimate_text_tokens(text))
+                            .json_utf16_len()
+                            .map(|units| units.div_ceil(4))
                             .unwrap_or(0),
                     );
 

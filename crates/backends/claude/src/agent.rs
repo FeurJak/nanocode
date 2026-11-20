@@ -4495,7 +4495,6 @@ impl From<NanocodeError> for ResponseFailure {
 struct ResponseOutcome {
     hedge: HedgeOutcome,
     message: crate::MessageResponse,
-    recorded: Option<durable::Recorded>,
     upgrade: Option<durable::CodeOnlyUpgrade>,
 
     replayed: bool,

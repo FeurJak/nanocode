@@ -205,7 +205,6 @@ pub(super) fn request_response<'a>(
                 return Ok(ResponseOutcome {
                     hedge: HedgeOutcome::Unneeded,
                     message: response,
-                    recorded: None,
                     upgrade: None,
                     replayed: true,
                 });
@@ -283,7 +282,6 @@ pub(super) fn request_response<'a>(
                 return Ok(ResponseOutcome {
                     hedge: HedgeOutcome::Unneeded,
                     message: response,
-                    recorded: None,
                     upgrade: Some(upgrade.clone()),
                     replayed: true,
                 });
@@ -646,15 +644,13 @@ pub(super) fn request_response<'a>(
                     if let Some(shown) = shown.take() {
                         response.id = shown;
                     }
-                    let mut recorded = None;
                     state
                         .client
                         .clone()
                         .for_session(&state.session_id)
                         .clear_root_region();
                     if let Some(effect) = active_effect {
-                        let completion;
-                        (completion, recorded) =
+                        let completion =
                             effect.model_completion(&mut response, state.pages_messages())?;
                         match journal.as_deref_mut() {
                             Some(journal) => journal.complete(completion),
@@ -686,7 +682,6 @@ pub(super) fn request_response<'a>(
                     return Ok(ResponseOutcome {
                         hedge,
                         message: response,
-                        recorded,
                         upgrade,
                         replayed: false,
                     });

@@ -353,14 +353,17 @@ async fn advance_snapshot(
     Ok((snapshot, Some(hydrated), Some(reuse)))
 }
 
-pub(super) async fn hydrate_cursor(reader: PayloadReader<'_>, stored: Value) -> Result<Value> {
+pub(super) async fn hydrate_cursor(
+    reader: PayloadReader<'_>,
+    stored: Value,
+    read: &mut HashSet<String>,
+) -> Result<Value> {
     if !paged(&stored) {
         return Ok(stored);
     }
     let conversation: PagedConversation =
         serde_json::from_value(stored.clone()).map_err(Error::InvalidPayload)?;
     let paged: PagedCursor = serde_json::from_value(stored).map_err(Error::InvalidPayload)?;
-    let read = &mut HashSet::new();
     let pending = load_sequence(reader, paged.pending, read).await?;
     let prompt: serde_json::Map<String, Value> =
         reader.load_payload(paged.template).await?.decode()?;
@@ -492,7 +495,7 @@ impl CheckpointFormat for ClaudeCheckpointFormat {
         reader: PayloadReader<'a>,
         continuation: Value,
     ) -> FormatFuture<'a, Result<Option<Value>>> {
-        Box::pin(async move { hydrate_cursor(reader, continuation).await.map(Some) })
+        Box::pin(async move { hydrate_cursor(reader, continuation, &mut HashSet::new()).await.map(Some) })
     }
 
     fn hydrate_continuation<'a>(
@@ -501,7 +504,7 @@ impl CheckpointFormat for ClaudeCheckpointFormat {
         continuation: Value,
     ) -> FormatFuture<'a, Result<Option<Value>>> {
         Box::pin(async move {
-            let mut continuation = hydrate_cursor(reader, continuation).await?;
+            let mut continuation = hydrate_cursor(reader, continuation, &mut HashSet::new()).await?;
             let Some(mut snapshot) = continuation
                 .get_mut("snapshot")
                 .map(Value::take)

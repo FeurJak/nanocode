@@ -1,7 +1,6 @@
 use crate::{ClaudeError, ContentBlock, Message, MessageDigests, WireMessage};
 use nanocode_durability::EncodedPayload;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::value::RawValue;
 use std::{
     borrow::Cow,
     ops::Deref,
@@ -23,11 +22,9 @@ fn wire_id() -> u64 {
 struct Entry {
     message: Message,
     wire: OnceLock<Box<str>>,
-    json: OnceLock<Arc<str>>,
     digests: OnceLock<MessageDigests>,
     images: OnceLock<usize>,
     companions: OnceLock<bool>,
-    record: OnceLock<EncodedPayload>,
     results: OnceLock<Box<[(usize, u64)]>>,
     cleared: OnceLock<HistoryMessage>,
 }
@@ -37,11 +34,9 @@ impl Clone for Entry {
         Self {
             message: self.message.clone(),
             wire: OnceLock::new(),
-            json: OnceLock::new(),
             digests: OnceLock::new(),
             images: OnceLock::new(),
             companions: OnceLock::new(),
-            record: OnceLock::new(),
             results: OnceLock::new(),
             cleared: OnceLock::new(),
         }
@@ -53,11 +48,9 @@ impl HistoryMessage {
         self.1 = wire_id();
         let entry = Arc::make_mut(&mut self.0);
         entry.wire = OnceLock::new();
-        entry.json = OnceLock::new();
         entry.digests = OnceLock::new();
         entry.images = OnceLock::new();
         entry.companions = OnceLock::new();
-        entry.record = OnceLock::new();
         entry.results = OnceLock::new();
         entry.cleared = OnceLock::new();
         &mut entry.message
@@ -109,41 +102,34 @@ impl HistoryMessage {
         Arc::try_unwrap(self.0).map_or_else(|entry| entry.message.clone(), |entry| entry.message)
     }
 
-    pub(super) fn recorded(message: Message, json: Arc<str>, record: EncodedPayload) -> Self {
-        Self(
-            Arc::new(Entry {
-                message,
-                wire: OnceLock::new(),
-                json: OnceLock::from(json),
-                digests: OnceLock::new(),
-                images: OnceLock::new(),
-                companions: OnceLock::new(),
-                record: OnceLock::from(record),
-                results: OnceLock::new(),
-                cleared: OnceLock::new(),
-            }),
-            wire_id(),
-        )
-    }
-
-    pub(super) fn cache_json(&self) -> serde_json::Result<()> {
-        self.json().map(drop)
-    }
-
-    pub(super) fn json(&self) -> serde_json::Result<&Arc<str>> {
-        if let Some(json) = self.0.json.get() {
-            return Ok(json);
-        }
-        let encoded = Arc::from(serde_json::to_string(&self.0.message)?);
-        Ok(self.0.json.get_or_init(|| encoded))
+    pub(super) fn json(&self) -> serde_json::Result<Arc<str>> {
+        serde_json::to_string(&self.0.message).map(Arc::from)
     }
 
     pub(super) fn record(&self) -> serde_json::Result<EncodedPayload> {
-        if let Some(record) = self.0.record.get() {
-            return Ok(record.clone());
+        let record = EncodedPayload::from_json(self.json()?);
+        Ok(record)
+    }
+
+    pub(super) fn json_utf16_len(&self) -> serde_json::Result<u64> {
+        struct Utf16(u64);
+        impl std::io::Write for Utf16 {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                for &byte in bytes {
+                    if byte & 0xC0 != 0x80 {
+                        self.0 += if byte >= 0xF0 { 2 } else { 1 };
+                    }
+                }
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
         }
-        let record = EncodedPayload::from_json(Arc::clone(self.json()?));
-        Ok(self.0.record.get_or_init(|| record).clone())
+        let mut units = Utf16(0);
+        serde_json::to_writer(&mut units, &self.0.message)?;
+        Ok(units.0)
     }
 }
 
@@ -153,11 +139,9 @@ impl From<Message> for HistoryMessage {
             Arc::new(Entry {
                 message,
                 wire: OnceLock::new(),
-                json: OnceLock::new(),
                 digests: OnceLock::new(),
                 images: OnceLock::new(),
                 companions: OnceLock::new(),
-                record: OnceLock::new(),
                 results: OnceLock::new(),
                 cleared: OnceLock::new(),
             }),
@@ -182,12 +166,7 @@ impl PartialEq for HistoryMessage {
 
 impl Serialize for HistoryMessage {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self.0.json.get() {
-            Some(json) => serde_json::from_str::<&RawValue>(json)
-                .map_err(serde::ser::Error::custom)?
-                .serialize(serializer),
-            None => self.0.message.serialize(serializer),
-        }
+        self.0.message.serialize(serializer)
     }
 }
 
@@ -221,14 +200,7 @@ impl WireMessage for HistoryMessage {
             };
             return Ok(Cow::Borrowed(wire));
         }
-        let json = match self.0.json.get() {
-            Some(json) => json,
-            None => {
-                let encoded = Arc::from(encode(&self.0.message)?);
-                self.0.json.get_or_init(|| encoded)
-            }
-        };
-        Ok(Cow::Borrowed(json))
+        encode(&self.0.message).map(Cow::Owned)
     }
 
     fn digests(
@@ -248,7 +220,6 @@ pub(super) struct CodeRound(Arc<Round>);
 
 struct Round {
     value: serde_json::Value,
-    record: OnceLock<EncodedPayload>,
     bytes: OnceLock<usize>,
 }
 
@@ -258,11 +229,7 @@ impl CodeRound {
     }
 
     pub(super) fn record(&self) -> serde_json::Result<EncodedPayload> {
-        if let Some(record) = self.0.record.get() {
-            return Ok(record.clone());
-        }
-        let record = EncodedPayload::from_json(serde_json::to_string(&self.0.value)?.into());
-        Ok(self.0.record.get_or_init(|| record).clone())
+        serde_json::to_string(&self.0.value).map(|json| EncodedPayload::from_json(json.into()))
     }
 
     pub(super) fn bytes(&self) -> usize {
@@ -277,7 +244,6 @@ impl From<serde_json::Value> for CodeRound {
     fn from(value: serde_json::Value) -> Self {
         Self(Arc::new(Round {
             value,
-            record: OnceLock::new(),
             bytes: OnceLock::new(),
         }))
     }
