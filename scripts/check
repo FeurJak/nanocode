@@ -134,9 +134,12 @@ elif [ -n "$crates" ]; then sel=(); for p in $crates; do sel+=(-p "$p"); done; d
 else sel=(); detail="no crates changed$since"; fi
 [ $sim = 1 ] && [ -n "$scenarios" ] || sim=0
 
-# The release simulator builds in its own target dir, at the same time as the debug checks.
+# The simulator builds in its own target dir, at the same time as the debug checks: in the fast
+# profile (release with incremental and 256 codegen units: about the same seeds/s, a relink 10x
+# quicker), and in release with --full.
+simprofile=fast; [ $full = 1 ] && simprofile=release
 if [ $sim = 1 ]; then
-  ( CARGO_TARGET_DIR=$target/check-sim cargo build --locked --release -p nanocode-sim >"$logs/sim-build.log" 2>&1; echo $? >"$logs/sim-build.rc" ) &
+  ( CARGO_TARGET_DIR=$target/check-sim cargo build --locked --profile $simprofile -p nanocode-sim >"$logs/sim-build.log" 2>&1; echo $? >"$logs/sim-build.rc" ) &
   sim_pid=$!
 fi
 if [ ${#sel[@]} -gt 0 ]; then
@@ -214,9 +217,9 @@ simall() {
 }
 if [ $sim = 1 ]; then
   t0=$(now); wait $sim_pid; rc=$(cat "$logs/sim-build.rc")
-  export SIM_BIN=$target/check-sim/release/nanocode-sim
+  export SIM_BIN=$target/check-sim/$simprofile/nanocode-sim
   if [ "$rc" = 0 ]; then
-    line "$green" ok sim-build "$(secs $t0)" "release nanocode-sim (time left after the checks)"
+    line "$green" ok sim-build "$(secs $t0)" "$simprofile nanocode-sim (time left after the checks)"
     run tidy "nanocode-sim --tidy" "$SIM_BIN" --tidy
     table=$(awk "/^default_table='/{f=1;next} f&&/^'/{exit} f" bin/nanocode-sim/cfo.sh)
     [ "$scenarios" = all ] && scenarios=$("$SIM_BIN" 2>&1 | grep -o -- '--scenario [a-z_|]*' | head -1 | sed 's/--scenario //' | tr '|' ' ')
