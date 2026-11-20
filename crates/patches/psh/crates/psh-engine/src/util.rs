@@ -462,6 +462,14 @@ impl UtilFile {
         }
     }
 
+    /// A regular file's device, inode and size (`HostFile::identity`).
+    pub fn identity(&self) -> Option<(u64, u64, u64)> {
+        match &*self.file {
+            FdObj::File(file) => file.identity(),
+            FdObj::PipeRead(_) | FdObj::PipeWrite(_) => None,
+        }
+    }
+
     pub async fn read_to_end(&self, out: &mut Vec<u8>) -> io::Result<()> {
         let mut buf = vec![0u8; 16 * 1024];
         loop {
@@ -527,6 +535,15 @@ impl UtilCtx<'_> {
 
     fn fd(&self, n: u32) -> Option<Fd> {
         self.vp.fd(n)
+    }
+
+    /// Descriptor `n`'s device, inode and size, when it is a regular file the host
+    /// can tell.
+    pub fn fd_identity(&self, n: u32) -> Option<(u64, u64, u64)> {
+        match self.fd(n).as_deref() {
+            Some(FdObj::File(f)) => f.identity(),
+            _ => None,
+        }
     }
 
     pub fn seek_stdin(&self, pos: io::SeekFrom) -> Option<io::Result<u64>> {

@@ -64,6 +64,9 @@ pub(crate) struct Fields {
     text_only: bool,
     word: psh_syntax::Span,
     extglob: bool,
+    /// The piece being expanded is followed by an expansion or quoted text: a tilde
+    /// prefix running to its end is not one (`~$x`, `~"/a"` are literal, bash).
+    tilde_cut: bool,
 }
 
 fn is_ifs_ws(b: u8) -> bool {
@@ -110,6 +113,7 @@ impl Fields {
             text_only: false,
             word: psh_syntax::Span::default(),
             extglob: vp.opts.shopt(Shopt::Extglob),
+            tilde_cut: false,
         }
     }
 
@@ -622,6 +626,11 @@ fn expand_pieces<'a>(
 ) -> LocalBoxFuture<'a, Result<(), Unwind>> {
     Box::pin(async move {
         for (i, piece) in pieces.iter().enumerate() {
+            f.tilde_cut = match pieces.get(i + 1) {
+                Some(Piece::Var(_)) => true,
+                Some(Piece::Part(p)) => !matches!(p.kind, Part::Lit | Part::Brace(_)),
+                _ => false,
+            };
             match piece {
                 Piece::Text(t) if t == b"`" => {
                     let mut rest = t.clone();
@@ -1059,6 +1068,7 @@ pub(crate) fn single_now(vp: &mut Vp, code: &Rc<Code>, w: &Word) -> Result<Vec<u
         text_only: true,
         word: w.span,
         extglob: false,
+        tilde_cut: false,
     };
     for (i, p) in w.parts.iter().enumerate() {
         part_sync(vp, code, p, false, &mut f, Ctx::Assign, i == 0)?;
@@ -1113,7 +1123,7 @@ fn tilde(vp: &Vp, name: &[u8]) -> Option<Vec<u8>> {
 /// Tilde expansion of unquoted literal text at the start of a word (and after `:` in
 /// assignments). `first` is whether the text starts the word.
 fn literal_with_tilde(vp: &Vp, text: &[u8], first: bool, ctx: Ctx, f: &mut Fields) {
-    if ctx == Ctx::HereDoc {
+    if ctx == Ctx::HereDoc || ctx == Ctx::Arith {
         f.quoted(text);
         return;
     }
@@ -1141,7 +1151,8 @@ fn literal_with_tilde(vp: &Vp, text: &[u8], first: bool, ctx: Ctx, f: &mut Field
             // Only a tilde prefix that ends the literal text or a slash counts; a
             // quoted char right after it (`~"x"`) makes it literal, which we cannot
             // see here, so text that ends this part is accepted.
-            if let Some(home) = tilde(vp, &rest[1..end]) {
+            let cut = end == rest.len() && f.tilde_cut;
+            if !cut && let Some(home) = tilde(vp, &rest[1..end]) {
                 f.quoted(&home);
                 rest = &rest[end..];
             }
@@ -1307,7 +1318,28 @@ async fn expand_part(
                 .first()
                 .is_some_and(|w| w.text == b"let" || w.text == b"eval") =>
         {
-            let (items, st) = expand_array_lit(vp, code, lit).await?;
+            // For `let` the word is one arithmetic expression: no splitting or
+            // globbing of its items (`let n=(1 * 1)`, bash).
+            let (items, st) = if f.out.first().is_some_and(|w| w.text == b"let") {
+                let mut items = Vec::new();
+                let mut st = None;
+                for e in &lit.elems {
+                    let key = match &e.key {
+                        Some(k) => Some(expand_single(vp, code, k, Ctx::Word).await?.0),
+                        None => None,
+                    };
+                    let (value, s) = expand_single(vp, code, &e.value, Ctx::Arith).await?;
+                    st = s.or(st);
+                    items.push(crate::arrays::ArrayItem {
+                        key,
+                        value,
+                        append: e.append,
+                    });
+                }
+                (items, st)
+            } else {
+                expand_array_lit(vp, code, lit).await?
+            };
             f.subst_status = st.or(f.subst_status);
             let mut text = b"(".to_vec();
             for (i, item) in items.iter().enumerate() {
@@ -3113,9 +3145,18 @@ pub(crate) async fn expand_decl_args(
                 items,
             });
         } else if assignment_like(code, w) {
-            let (v, st) = expand_single(vp, code, w, Ctx::Assign).await?;
-            status = st.or(status);
-            args.push(DeclArg::from_word(v));
+            // Brace expansion applies (`local a={1..3}` is `local a=1 a=2 a=3`, bash);
+            // each word is then an assignment.
+            for pieces in brace_expand(code, &w.parts) {
+                let mut f = Fields::new(vp, false);
+                f.assign = true;
+                f.text_only = true;
+                f.word = w.span;
+                expand_pieces(vp, code, &pieces, false, &mut f, Ctx::Assign).await?;
+                f.finish_word();
+                status = f.subst_status.or(status);
+                args.push(DeclArg::from_word(f.joined()));
+            }
         } else {
             let f = expand_words(vp, code, std::slice::from_ref(w)).await?;
             status = f.subst_status.or(status);

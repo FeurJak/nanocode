@@ -71,19 +71,30 @@ pub(super) async fn printf(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         stop: false,
         utf8: vp.utf8(),
     };
+    // bash reports a pass's errors as they happen and writes its output at the end of
+    // each pass through the format.
+    let mut status = 0;
+    let mut write_st = 0;
     loop {
         let before = f.next;
         f.run(format);
+        status |= i32::from(!f.errors.is_empty());
+        for e in std::mem::take(&mut f.errors) {
+            vp.error(&format!("printf: {e}")).await;
+        }
+        if var.is_none() && !f.out.is_empty() && write_st == 0 {
+            write_st = out(vp, "printf", &std::mem::take(&mut f.out)).await?;
+        }
         if f.stop || f.next >= f.args.len() || f.next == before {
             break;
         }
     }
-    let status = i32::from(!f.errors.is_empty());
-    for e in &f.errors {
-        vp.error(&format!("printf: {e}")).await;
-    }
     match var {
         Some(n) => {
+            // bash stores the result as a C string: it ends at the first NUL.
+            if let Some(end) = f.out.iter().position(|&b| b == 0) {
+                f.out.truncate(end);
+            }
             // `NAME` or `NAME[SUB]`, with the variable's attributes.
             let r = match n.split_once('[') {
                 Some((base, sub)) => {
@@ -99,10 +110,7 @@ pub(super) async fn printf(vp: &mut Vp, args: &[Vec<u8>]) -> R {
             }
             Ok(status)
         }
-        None => {
-            let st = out(vp, "printf", &f.out).await?;
-            Ok(if st != 0 { st } else { status })
-        }
+        None => Ok(if write_st != 0 { write_st } else { status }),
     }
 }
 
@@ -218,7 +226,8 @@ impl Formatter<'_> {
     /// An integer argument for a signed conversion (also `*` widths): clamped to
     /// the range of `i64` with an error, as `strtoimax` does.
     fn num_arg(&mut self) -> i64 {
-        let Some(a) = self.arg().map(<[u8]>::to_vec) else {
+        // A missing or empty argument is 0 (`strtoimax` stops at once, at the end).
+        let Some(a) = self.arg().map(<[u8]>::to_vec).filter(|a| !a.is_empty()) else {
             return 0;
         };
         let n = parse_num(&a);
@@ -245,7 +254,7 @@ impl Formatter<'_> {
     /// An integer argument for an unsigned conversion: negative values wrap around,
     /// as `strtoumax` does.
     fn unsigned_arg(&mut self) -> u64 {
-        let Some(a) = self.arg().map(<[u8]>::to_vec) else {
+        let Some(a) = self.arg().map(<[u8]>::to_vec).filter(|a| !a.is_empty()) else {
             return 0;
         };
         let n = parse_num(&a);
@@ -274,11 +283,21 @@ impl Formatter<'_> {
                 match t.parse::<f64>() {
                     Ok(v) => v,
                     Err(_) => {
+                        if a.is_empty() {
+                            return 0.0;
+                        }
                         let n = parse_num(&a);
                         if !n.ok {
                             self.errors.push(format!("{}: invalid number", s(&a)));
                         }
-                        if n.neg { -(n.mag as f64) } else { n.mag as f64 }
+                        // Nothing converted (`-n`): 0, without the sign.
+                        if n.mag == 0 && !n.ok {
+                            0.0
+                        } else if n.neg {
+                            -(n.mag as f64)
+                        } else {
+                            n.mag as f64
+                        }
                     }
                 }
             }
@@ -506,7 +525,8 @@ impl Formatter<'_> {
             }
             b'c' => {
                 let a = self.arg().map(<[u8]>::to_vec).unwrap_or_default();
-                let body: Vec<u8> = a.first().map(|b| vec![*b]).unwrap_or_default();
+                // An empty or missing argument is a NUL byte (bash).
+                let body = vec![a.first().copied().unwrap_or(0)];
                 self.pad(&body, spec, false);
             }
             b'd' | b'i' => {

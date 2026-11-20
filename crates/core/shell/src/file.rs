@@ -165,8 +165,17 @@ impl HostFile for Device {
 }
 
 struct Reader {
+    path: Vec<u8>,
     data: Bytes,
     at: Cell<usize>,
+}
+
+/// A virtual file's identity for `HostFile::identity`: its path stands for the inode.
+fn identity(path: &[u8], size: u64) -> Option<(u64, u64, u64)> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    Some((u64::MAX, hasher.finish(), size))
 }
 
 impl HostFile for Reader {
@@ -184,6 +193,10 @@ impl HostFile for Reader {
 
     fn kind(&self) -> Option<FileKind> {
         Some(FileKind::File)
+    }
+
+    fn identity(&self) -> Option<(u64, u64, u64)> {
+        identity(&self.path, self.data.len() as u64)
     }
 }
 
@@ -229,6 +242,10 @@ impl HostFile for Appender {
 
     fn kind(&self) -> Option<FileKind> {
         Some(FileKind::File)
+    }
+
+    fn identity(&self) -> Option<(u64, u64, u64)> {
+        identity(&self.path, self.size.get())
     }
 }
 
@@ -294,6 +311,10 @@ impl HostFile for Updater {
     fn kind(&self) -> Option<FileKind> {
         Some(FileKind::File)
     }
+
+    fn identity(&self) -> Option<(u64, u64, u64)> {
+        identity(&self.path, self.data.borrow().len() as u64)
+    }
 }
 
 pub(crate) async fn open(
@@ -304,6 +325,7 @@ pub(crate) async fn open(
     if !options.write && !options.append {
         let data = vfs.read(&path).get().await?;
         return Ok(Rc::new(Reader {
+            path,
             data,
             at: Cell::new(0),
         }));

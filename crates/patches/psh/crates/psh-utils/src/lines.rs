@@ -621,16 +621,20 @@ pub async fn join(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
         return common::usage(ctx, "missing operand").await;
     };
     let mut tables: Vec<Vec<Vec<Vec<u8>>>> = Vec::new();
+    // Each row's line number and text, for order errors.
+    let mut raws: Vec<Vec<(usize, Vec<u8>)>> = Vec::new();
     for name in [first, second] {
         let data = match read_all(ctx, std::slice::from_ref(name)).await {
             Ok(data) => data,
             Err(st) => return st,
         };
         let mut rows = Vec::new();
-        for line in data.split(|&b| b == b'\n') {
+        let mut raw = Vec::new();
+        for (n, line) in data.split(|&b| b == b'\n').enumerate() {
             if line.is_empty() {
                 continue;
             }
+            raw.push((n + 1, line.to_vec()));
             let fields: Vec<Vec<u8>> = match sep {
                 Some(s) => line.split(|&b| b == s).map(<[u8]>::to_vec).collect(),
                 None => line
@@ -642,6 +646,7 @@ pub async fn join(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
             rows.push(fields);
         }
         tables.push(rows);
+        raws.push(raw);
     }
     let key = |row: &[Vec<u8>], side: usize| -> Vec<u8> {
         let k = row.get(keys[side] - 1).cloned().unwrap_or_default();
@@ -703,6 +708,20 @@ pub async fn join(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
         out.extend_from_slice(&fields.join(&out_sep));
         out.push(b'\n');
     };
+    // GNU's order check: lines are checked as they are read, from the first unpairable
+    // line on (always with --check-order, never with --nocheck-order).
+    let check = if p.has(&JOIN, "nocheck-order") {
+        None
+    } else {
+        Some(p.has(&JOIN, "check-order"))
+    };
+    let names = [first.as_slice(), second.as_slice()];
+    let mut order = Order {
+        check,
+        seen_unpairable: false,
+        warned: [false, false],
+        errors: Vec::new(),
+    };
     let (mut i, mut j) = (0, 0);
     while i < tables[0].len() && j < tables[1].len() {
         let (ka, kb) = (key(&tables[0][i], 0), key(&tables[1][j], 1));
@@ -712,12 +731,20 @@ pub async fn join(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
                     line(Some(&tables[0][i]), None);
                 }
                 i += 1;
+                if order.read(0, i, &tables, &key, &raws, names) {
+                    break;
+                }
+                order.seen_unpairable = true;
             }
             std::cmp::Ordering::Greater => {
                 if unpaired[1] {
                     line(None, Some(&tables[1][j]));
                 }
                 j += 1;
+                if order.read(1, j, &tables, &key, &raws, names) {
+                    break;
+                }
+                order.seen_unpairable = true;
             }
             std::cmp::Ordering::Equal => {
                 let i_end = (i..tables[0].len())
@@ -726,6 +753,8 @@ pub async fn join(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
                 let j_end = (j..tables[1].len())
                     .find(|&n| key(&tables[1][n], 1) != kb)
                     .unwrap_or(tables[1].len());
+                let fatal = (i + 1..=i_end).any(|n| order.read(0, n, &tables, &key, &raws, names))
+                    || (j + 1..=j_end).any(|n| order.read(1, n, &tables, &key, &raws, names));
                 if !only_unpaired {
                     for a in &tables[0][i..i_end] {
                         for b in &tables[1][j..j_end] {
@@ -735,20 +764,96 @@ pub async fn join(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
                 }
                 i = i_end;
                 j = j_end;
+                if fatal {
+                    break;
+                }
             }
         }
     }
-    if unpaired[0] {
-        for a in &tables[0][i..] {
-            line(Some(a), None);
+    let fatal = order.check == Some(true) && order.warned.contains(&true);
+    let checktail = order.check.is_some() && !(order.warned[0] && order.warned[1]);
+    if !fatal {
+        for side in 0..2 {
+            let (at, other) = if side == 0 { (i, j) } else { (j, i) };
+            if !(unpaired[side] || checktail) || at >= tables[side].len() {
+                continue;
+            }
+            if other < tables[1 - side].len() {
+                order.seen_unpairable = true;
+            }
+            for n in at..tables[side].len() {
+                if n > at && order.read(side, n, &tables, &key, &raws, names) {
+                    break;
+                }
+                if unpaired[side] {
+                    let row = Some(&tables[side][n]);
+                    if side == 0 {
+                        line(row, None);
+                    } else {
+                        line(None, row);
+                    }
+                } else if order.warned[side] {
+                    break;
+                }
+            }
         }
     }
-    if unpaired[1] {
-        for b in &tables[1][j..] {
-            line(None, Some(b));
-        }
+    for e in std::mem::take(&mut order.errors) {
+        ctx.error(&e).await;
     }
-    emit(ctx, &out).await
+    let st = emit(ctx, &out).await;
+    if order.warned.contains(&true) {
+        if order.check.is_none_or(|on| !on) {
+            ctx.error("input is not in sorted order").await;
+        }
+        return 1;
+    }
+    st
+}
+
+/// A line of `join`'s input: its fields.
+type Row = Vec<Vec<u8>>;
+
+/// `join`'s input order check (GNU `check_order`).
+struct Order {
+    /// `None`: --nocheck-order; `Some(true)`: --check-order (fatal).
+    check: Option<bool>,
+    seen_unpairable: bool,
+    warned: [bool; 2],
+    errors: Vec<String>,
+}
+
+impl Order {
+    /// Line `n` of `side` is read: checks it against the line before. True when the
+    /// disorder is fatal.
+    fn read(
+        &mut self,
+        side: usize,
+        n: usize,
+        tables: &[Vec<Row>],
+        key: &dyn Fn(&[Vec<u8>], usize) -> Vec<u8>,
+        raws: &[Vec<(usize, Vec<u8>)>],
+        names: [&[u8]; 2],
+    ) -> bool {
+        let Some(check) = self.check else {
+            return false;
+        };
+        if n == 0 || n >= tables[side].len() || self.warned[side] || !(check || self.seen_unpairable)
+        {
+            return false;
+        }
+        if key(&tables[side][n - 1], side) > key(&tables[side][n], side) {
+            let (no, text) = &raws[side][n];
+            self.errors.push(format!(
+                "{}:{no}: is not sorted: {}",
+                String::from_utf8_lossy(names[side]),
+                String::from_utf8_lossy(text)
+            ));
+            self.warned[side] = true;
+            return check;
+        }
+        false
+    }
 }
 
 /// Random bytes from the host's /dev/urandom.

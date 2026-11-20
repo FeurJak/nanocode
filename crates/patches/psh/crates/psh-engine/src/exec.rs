@@ -571,10 +571,22 @@ async fn run_pipeline_stages(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
     // `shopt -s lastpipe`: the last command runs in this shell (no job control here).
     let lastpipe = vp.opts.shopt(Shopt::Lastpipe);
     let mut joins: Vec<Join<i32>> = Vec::with_capacity(n);
+    // The stages start last first: a later stage's redirections (`ls | cat > out`)
+    // are usually in place before an earlier stage runs, as with bash's processes.
+    let mut ready: Vec<Vp> = Vec::with_capacity(n);
+    let start = |ready: &mut Vec<Vp>, joins: &mut Vec<Join<i32>>| {
+        let first = joins.len();
+        for (k, sub) in ready.drain(..).enumerate().rev() {
+            let cmd = p.stages[first + k].cmd;
+            joins.push(spawn_sub(sub, code.clone(), Body::Stage(cmd)));
+        }
+        joins[first..].reverse();
+    };
     let mut next_in: Option<Fd> = None;
     let mut last_here = None;
     for (i, stage) in p.stages.iter().enumerate() {
         if i + 1 == n && lastpipe {
+            start(&mut ready, &mut joins);
             let saved = vp.fds.clone();
             if let Some(r) = next_in.take() {
                 vp.fds.set(0, r);
@@ -616,8 +628,9 @@ async fn run_pipeline_stages(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
             }
             next_in = Some(Rc::new(FdObj::PipeRead(r)));
         }
-        joins.push(spawn_sub(sub, code.clone(), Body::Stage(stage.cmd)));
+        ready.push(sub);
     }
+    start(&mut ready, &mut joins);
     let mut statuses = Vec::with_capacity(n);
     for j in joins {
         match crate::signals::or_signal(vp, crate::signals::Gives::Fatal, j).await {
@@ -699,6 +712,28 @@ pub(crate) fn spawn_sub(sub: Vp, code: Rc<Code>, body: Body) -> Join<i32> {
             }
             Body::Stage(c) => {
                 let cmd = code.ast.cmd(c);
+                // bash runs an `if`, loop or `case` stage without the subshell's exit
+                // processing: an EXIT trap set there fires only on `exit`.
+                if matches!(
+                    cmd.kind,
+                    CommandKind::If(_)
+                        | CommandKind::While(_)
+                        | CommandKind::For(_)
+                        | CommandKind::Select(_)
+                        | CommandKind::ArithFor(_)
+                        | CommandKind::Case(_)
+                ) {
+                    let r = run_command_unchecked(&mut sub, &code, c).await;
+                    let last = sub.status;
+                    return match r {
+                        Ok(s) => s,
+                        Err(u @ Unwind::Exit(_)) => {
+                            let status = u.status(last);
+                            Box::pin(trap::exit_trap(&mut sub, status)).await
+                        }
+                        Err(u) => u.status(last),
+                    };
+                }
                 // bash does not exec while a trap could still run in the subshell.
                 let traps = sub
                     .traps

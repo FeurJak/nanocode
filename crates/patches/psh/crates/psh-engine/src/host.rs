@@ -60,6 +60,11 @@ pub trait HostFile: Any {
     fn seek(&self, _pos: io::SeekFrom) -> Option<io::Result<u64>> {
         None
     }
+    /// A regular file's device, inode and size (`fstat`), where the host can tell:
+    /// `cat` refuses to read the file it writes to. `None`: unknown or not regular.
+    fn identity(&self) -> Option<(u64, u64, u64)> {
+        None
+    }
     fn is_null(&self) -> bool {
         false
     }
