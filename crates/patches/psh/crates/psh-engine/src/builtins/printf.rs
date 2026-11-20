@@ -440,16 +440,15 @@ impl Formatter<'_> {
     /// `%(fmt)T`: an argument of seconds since the epoch (`-1` or none: now, `-2`:
     /// when the shell started) formatted with `strftime`.
     fn time(&mut self, tfmt: &[u8], spec: &Spec) {
-        let t = match self.arg().map(<[u8]>::to_vec) {
-            None => self.now,
-            Some(a) if a.is_empty() => self.now,
-            Some(a) => {
-                let n = parse_num(&a, self.utf8);
-                if !n.ok {
-                    self.fail(invalid_number(&a));
-                }
-                let v = if n.neg { -(n.mag as i64) } else { n.mag as i64 };
-                if v == -1 || v == -2 { self.now } else { v }
+        // Only a missing argument means now: an empty one is 0, as for %d. A time
+        // localtime can't give a year for (one out of range warns) falls back to 0.
+        let t = if self.args.get(self.next).is_none() {
+            self.now
+        } else {
+            match self.num_arg() {
+                -1 | -2 => self.now,
+                v if !(-67_768_040_609_740_800..=67_768_036_191_676_799).contains(&v) => 0,
+                v => v,
             }
         };
         let utc = super::strftime::Zone::utc();

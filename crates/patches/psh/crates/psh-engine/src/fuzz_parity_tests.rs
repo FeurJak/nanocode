@@ -71,6 +71,20 @@ fn a_command_word_starting_with_a_percent_resumes_a_job() {
 }
 
 #[test]
+fn printf_time_of_an_empty_or_unrepresentable_argument_is_the_epoch() {
+    // Only a missing argument is now; an empty one is 0 and a time past what
+    // localtime can represent falls back to 0 (out of range ones only warn).
+    let (s, o, e) = run(
+        "export TZ=UTC; printf '%(%Y)T|' '' 99999999999999999999 67768036191676800 0x10; \
+         printf '%(%S)T\\n' 0x10",
+    );
+    assert_eq!(String::from_utf8_lossy(&o), "1970|1970|1970|1970|16\n");
+    assert_eq!(s, 0);
+    let e = String::from_utf8_lossy(&e);
+    assert!(e.contains("warning: 99999999999999999999: Numerical result out of range"));
+}
+
+#[test]
 fn printf_floats_are_long_doubles() {
     // bash converts with strtold, so values past f64's range keep their digits, and
     // nan and inf print in lowercase (uppercase for F E G A).
