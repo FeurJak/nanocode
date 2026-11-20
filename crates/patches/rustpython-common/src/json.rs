@@ -207,7 +207,7 @@ pub fn scan_string(
             }
             '\x00'..='\x1f' if strict => {
                 return Err(DecodeError {
-                    msg: format!("Invalid control character {cp:?} at"),
+                    msg: "Invalid control character at".to_owned(),
                     pos: char_offset + char_i,
                 });
             }
