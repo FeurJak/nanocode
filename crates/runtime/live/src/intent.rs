@@ -614,13 +614,13 @@ impl<M> Optimistic<M> {
             .map(|(mid, pending)| (*mid, pending.mutation()))
     }
 
+    /// Everything to send again on a new connection: unacked intents, and acked ones whose
+    /// position no view has reached yet. The new node may have snapshotted a view below that
+    /// position, and only the repeated ack makes it advance that view far enough to reconcile.
     pub fn resend(&self) -> impl Iterator<Item = (u64, &M)> {
         self.pending
             .iter()
-            .filter_map(|(mid, pending)| match pending {
-                Pending::Sent(mutation) => Some((*mid, mutation)),
-                Pending::Acked(..) => None,
-            })
+            .map(|(mid, pending)| (*mid, pending.mutation()))
     }
 
     pub fn len(&self) -> usize {

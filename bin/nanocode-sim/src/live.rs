@@ -352,6 +352,7 @@ struct ServerSub {
 struct Frame {
     sub: Option<u32>,
     text: String,
+    stale: bool,
 }
 
 struct Socket {
@@ -363,6 +364,8 @@ struct Socket {
     writes: VecDeque<Vec<String>>,
     inbound: VecDeque<String>,
     subs: BTreeMap<u32, ServerSub>,
+    /// Subscriptions this socket dropped for overload that the client has not resubscribed yet.
+    dropped: BTreeSet<u32>,
 }
 
 struct ClientSub {
@@ -1041,15 +1044,28 @@ impl World {
     fn enqueue(&mut self, socket: usize, sub: Option<u32>, text: String) {
         let bound = self.bound;
         let keeps = self.mutation == LiveMutation::OverloadKeepsFrames;
-        let state = &mut self.sockets[socket];
+        let state = &self.sockets[socket];
         if !state.alive || (!keeps && sub.is_some_and(|id| !state.subs.contains_key(&id))) {
             return;
         }
+        let stale = sub.filter(|id| state.dropped.contains(id));
+        if let Some(id) = stale
+            && state.writable
+        {
+            self.fail(format!(
+                "overload_drops_frames: socket {socket} wrote a frame for sub {id} after dropping it for overload"
+            ));
+        }
+        let state = &mut self.sockets[socket];
         if state.writable {
             state.writes.push_back(vec![text]);
             return;
         }
-        state.queue.push(Frame { sub, text });
+        state.queue.push(Frame {
+            sub,
+            text,
+            stale: stale.is_some(),
+        });
         if state
             .queue
             .iter()
@@ -1068,12 +1084,19 @@ impl World {
             .iter()
             .position(|frame| frame.sub == Some(victim))
             .unwrap_or(state.queue.len());
-        state.queue.retain(|frame| frame.sub != Some(victim));
+        if keeps {
+            for frame in state.queue.iter_mut().filter(|frame| frame.sub == Some(victim)) {
+                frame.stale = true;
+            }
+        } else {
+            state.queue.retain(|frame| frame.sub != Some(victim));
+        }
         let first = first.min(state.queue.len());
         state.queue.insert(
             first,
             Frame {
                 sub: None,
+                stale: false,
                 text: encode(&ServerFrame::Err {
                     id: Some(victim),
                     code: ErrCode::Overloaded,
@@ -1081,8 +1104,15 @@ impl World {
                 }),
             },
         );
+        state.dropped.insert(victim);
+        let held = state.queue.iter().filter(|frame| frame.sub.is_some()).count();
         self.stats.overloads += 1;
         self.remove_sub(socket, victim);
+        if held > bound {
+            self.fail(format!(
+                "bounded_queue: socket {socket} holds {held} subscription frames after an overflow, over its bound {bound}"
+            ));
+        }
     }
 
     fn remove_sub(&mut self, socket: usize, id: u32) {
@@ -1103,6 +1133,16 @@ impl World {
     }
 
     fn drain(&mut self, socket: usize) {
+        let stale = self.sockets[socket]
+            .queue
+            .iter()
+            .find(|frame| frame.stale)
+            .and_then(|frame| frame.sub);
+        if let Some(id) = stale {
+            self.fail(format!(
+                "overload_drops_frames: socket {socket} wrote a frame for sub {id} after dropping it for overload"
+            ));
+        }
         let state = &mut self.sockets[socket];
         state.writable = true;
         if state.queue.is_empty() {
@@ -1134,6 +1174,7 @@ impl World {
         };
         match frame {
             ClientFrame::Sub { id, view, cursor } => {
+                self.sockets[socket].dropped.remove(&id);
                 self.remove_sub(socket, id);
                 let Some(shape) = Shape::parse(&view, self.partitions(), self.threads) else {
                     let text = encode(&ServerFrame::Err {
@@ -1242,6 +1283,7 @@ impl World {
             alive: true,
             writable: true,
             queue: Vec::new(),
+            dropped: BTreeSet::new(),
             writes: VecDeque::new(),
             inbound: VecDeque::new(),
             subs: BTreeMap::new(),
@@ -1270,9 +1312,11 @@ impl World {
         let muts = self.clients[client]
             .optimistic
             .resend()
-            .map(|(_, intent)| ClientFrame::Mut(intent.clone()))
+            .map(|(mid, intent)| (mid, intent.name.clone(), ClientFrame::Mut(intent.clone())))
             .collect::<Vec<_>>();
-        for frame in muts {
+        for (mid, name, frame) in muts {
+            // An acked intent sent again is acked again, from the log's record of the first apply.
+            self.clients[client].unacked.entry(mid).or_insert(name);
             self.send(client, &frame);
         }
     }
