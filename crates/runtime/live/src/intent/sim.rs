@@ -9,6 +9,7 @@ pub enum Mutation {
     DropOnAck,
     UnknownRefuses,
     BelowAcrossPartitions,
+    HoldSkipped,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

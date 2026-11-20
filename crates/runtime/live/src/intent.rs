@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 use nanocode_live_fold::{Ack, Cursor, Failure, Intent, ViewKey};
 use nanocode_sync::Mailbox;
 
-use crate::follow::Feed;
+use crate::follow::{Feed, Hold};
 
 pub mod sim;
 
@@ -186,7 +186,14 @@ impl Ledger {
 
 struct Waiting<C> {
     intent: Intent,
+    partition: u32,
     conns: Vec<C>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Move {
+    Hold(u32),
+    Release(u32),
 }
 
 pub enum Receipt {
@@ -203,6 +210,9 @@ pub struct Due<C> {
 pub struct Intake<C> {
     ledger: Ledger,
     waiting: BTreeMap<(String, u64), Waiting<C>>,
+    holds: BTreeMap<u32, usize>,
+    heads: BTreeMap<u32, u64>,
+    moves: Vec<Move>,
     twice: u64,
 }
 
@@ -211,6 +221,9 @@ impl<C> Default for Intake<C> {
         Self {
             ledger: Ledger::new(),
             waiting: BTreeMap::new(),
+            holds: BTreeMap::new(),
+            heads: BTreeMap::new(),
+            moves: Vec::new(),
             twice: 0,
         }
     }
@@ -240,9 +253,15 @@ impl<C: Clone + PartialEq> Intake<C> {
             key,
             Waiting {
                 intent: intent.clone(),
+                partition,
                 conns: vec![conn],
             },
         );
+        let holds = self.holds.entry(partition).or_insert(0);
+        *holds += 1;
+        if *holds == 1 {
+            self.moves.push(Move::Hold(partition));
+        }
         Receipt::Submit(intent)
     }
 
@@ -270,6 +289,11 @@ impl<C: Clone + PartialEq> Intake<C> {
     }
 
     pub fn fold(&mut self, at: Cursor, outcome: Outcome) -> Vec<Due<C>> {
+        let head = self.heads.entry(at.partition).or_insert(0);
+        if at.pos <= *head && *head > 0 {
+            return Vec::new();
+        }
+        *head = at.pos;
         let (client, mid) = (outcome.client.clone(), outcome.mid);
         match self.ledger.fold(at, outcome) {
             Fold::First(settled) | Fold::Repeat(settled) => self.release(&client, mid, &settled),
@@ -285,10 +309,32 @@ impl<C: Clone + PartialEq> Intake<C> {
     }
 
     pub fn close(&mut self, conn: &C) {
+        let mut emptied = Vec::new();
         self.waiting.retain(|_, waiting| {
             waiting.conns.retain(|held| held != conn);
+            if waiting.conns.is_empty() {
+                emptied.push(waiting.partition);
+            }
             !waiting.conns.is_empty()
         });
+        for partition in emptied {
+            self.unhold(partition);
+        }
+    }
+
+    pub fn moves(&mut self) -> Vec<Move> {
+        std::mem::take(&mut self.moves)
+    }
+
+    fn unhold(&mut self, partition: u32) {
+        let Some(holds) = self.holds.get_mut(&partition) else {
+            return;
+        };
+        *holds -= 1;
+        if *holds == 0 {
+            self.holds.remove(&partition);
+            self.moves.push(Move::Release(partition));
+        }
     }
 
     pub fn unsettled(&self) -> Vec<Intent> {
@@ -306,6 +352,7 @@ impl<C: Clone + PartialEq> Intake<C> {
         let Some(waiting) = self.waiting.remove(&(client.to_owned(), mid)) else {
             return Vec::new();
         };
+        self.unhold(waiting.partition);
         waiting
             .conns
             .into_iter()
@@ -320,6 +367,7 @@ impl<C: Clone + PartialEq> Intake<C> {
 pub struct Intents<A, V: Views> {
     applier: Arc<A>,
     views: Arc<V>,
+    hold: Option<Arc<dyn Hold>>,
     intake: Mailbox<Intake<V::Conn>>,
 }
 
@@ -328,6 +376,7 @@ impl<A, V: Views> Clone for Intents<A, V> {
         Self {
             applier: Arc::clone(&self.applier),
             views: Arc::clone(&self.views),
+            hold: self.hold.clone(),
             intake: self.intake.clone(),
         }
     }
@@ -338,16 +387,27 @@ impl<A: Applier, V: Views<Record = A::Record>> Intents<A, V> {
         Self {
             applier,
             views,
+            hold: None,
             intake: Mailbox::new(Intake::new()),
         }
+    }
+
+    pub fn holding(mut self, hold: Arc<dyn Hold>) -> Self {
+        self.hold = Some(hold);
+        self
     }
 
     pub async fn receive(&self, conn: V::Conn, intent: Intent) {
         let held = conn.clone();
         let partition = self.applier.partition(&intent);
+        let hold = self.hold.clone();
         match self
             .intake
-            .call(move |intake| intake.receive(held, partition, intent))
+            .call(move |intake| {
+                let receipt = intake.receive(held, partition, intent);
+                apply(hold.as_ref(), intake.moves());
+                receipt
+            })
             .await
         {
             Receipt::Settled(ack) => self.views.ack(&conn, ack),
@@ -365,10 +425,12 @@ impl<A: Applier, V: Views<Record = A::Record>> Intents<A, V> {
     async fn submit(&self, intent: Intent) {
         let result = self.applier.submit(&intent).await;
         let views = Arc::clone(&self.views);
+        let hold = self.hold.clone();
         self.intake.send(move |intake| {
             for due in intake.submitted(&intent.client, intent.mid, result) {
                 views.ack(&due.conn, due.ack);
             }
+            apply(hold.as_ref(), intake.moves());
         });
     }
 
@@ -390,7 +452,11 @@ impl<A: Applier, V: Views<Record = A::Record>> Intents<A, V> {
     }
 
     pub fn close(&self, conn: V::Conn) {
-        self.intake.send(move |intake| intake.close(&conn));
+        let hold = self.hold.clone();
+        self.intake.send(move |intake| {
+            intake.close(&conn);
+            apply(hold.as_ref(), intake.moves());
+        });
     }
 
     pub async fn waiting(&self) -> usize {
@@ -410,12 +476,14 @@ impl<A: Applier, V: Views<Record = A::Record>> Intents<A, V> {
             return;
         }
         let views = Arc::clone(&self.views);
+        let hold = self.hold.clone();
         self.intake.send(move |intake| {
             for (at, outcome) in outcomes {
                 for due in intake.fold(at, outcome) {
                     views.ack(&due.conn, due.ack);
                 }
             }
+            apply(hold.as_ref(), intake.moves());
         });
     }
 }
@@ -439,6 +507,21 @@ where
         exhausted: bool,
     ) {
         self.views.backfilled(key, epoch, records, exhausted);
+    }
+}
+
+fn apply(hold: Option<&Arc<dyn Hold>>, moves: Vec<Move>) {
+    let Some(hold) = hold else {
+        return;
+    };
+    if mutated(Mutation::HoldSkipped) {
+        return;
+    }
+    for change in moves {
+        match change {
+            Move::Hold(partition) => hold.hold(partition),
+            Move::Release(partition) => hold.release(partition),
+        }
     }
 }
 

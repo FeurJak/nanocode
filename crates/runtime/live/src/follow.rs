@@ -37,6 +37,12 @@ pub trait Source: Send + Sync + 'static {
     fn partition(&self, scope: &str) -> u32;
 }
 
+pub trait Hold: Send + Sync + 'static {
+    fn hold(&self, partition: u32);
+
+    fn release(&self, partition: u32);
+}
+
 pub trait Feed: Send + Sync {
     type Record;
 
@@ -55,6 +61,7 @@ pub trait Feed: Send + Sync {
 enum Command {
     Follow(u32, u64),
     Unfollow(u32),
+    Hold(u32),
     Backfill(ViewKey, u32, u64),
     Heard(u32),
     Everything,
@@ -82,6 +89,7 @@ struct Part {
     pos: u64,
     epoch: u64,
     behind: bool,
+    holds: usize,
 }
 
 struct Fill {
@@ -147,6 +155,7 @@ impl<S: Source> Tailer<S> {
 
     pub async fn run<F: Feed<Record = S::Record>>(&self, feed: &F) -> StoreError {
         let mut parts = BTreeMap::<u32, Part>::new();
+        let mut last = BTreeMap::<u32, u64>::new();
         let mut fills = Vec::<Fill>::new();
         let mut stalled = Vec::<Fill>::new();
         loop {
@@ -156,19 +165,14 @@ impl<S: Source> Tailer<S> {
             }
             for command in commands {
                 match command {
-                    Command::Follow(partition, after) => {
-                        parts.insert(
-                            partition,
-                            Part {
-                                pos: after,
-                                epoch: 0,
-                                behind: true,
-                            },
-                        );
+                    Command::Follow(partition, after) => join_part(&mut parts, partition, after),
+                    Command::Hold(partition) => {
+                        let after = last.get(&partition).copied().unwrap_or(0);
+                        join_part(&mut parts, partition, after);
                     }
                     Command::Unfollow(partition) => {
                         if !mutated(Mutation::UnfollowIgnored) {
-                            parts.remove(&partition);
+                            leave_part(&mut parts, &mut last, partition);
                         }
                     }
                     Command::Backfill(key, partition, after) => fills.push(Fill {
@@ -260,6 +264,31 @@ impl<S: Source> Tailer<S> {
     }
 }
 
+fn join_part(parts: &mut BTreeMap<u32, Part>, partition: u32, after: u64) {
+    let part = parts.entry(partition).or_insert(Part {
+        pos: after,
+        epoch: 0,
+        behind: true,
+        holds: 0,
+    });
+    part.holds += 1;
+    if after < part.pos {
+        part.pos = after;
+        part.behind = true;
+    }
+}
+
+fn leave_part(parts: &mut BTreeMap<u32, Part>, last: &mut BTreeMap<u32, u64>, partition: u32) {
+    let Some(part) = parts.get_mut(&partition) else {
+        return;
+    };
+    part.holds = part.holds.saturating_sub(1);
+    if part.holds == 0 {
+        last.insert(partition, part.pos);
+        parts.remove(&partition);
+    }
+}
+
 fn disorder<R>(partition: u32, after: u64, records: &[(u64, R)]) -> Option<StoreError> {
     let mut last = after;
     for (pos, _) in records {
@@ -284,5 +313,15 @@ impl<S: Source> Follow for Tailer<S> {
 
     fn backfill(&self, key: ViewKey, partition: u32, after: u64) {
         Self::backfill(self, key, partition, after);
+    }
+}
+
+impl<S: Source> Hold for Tailer<S> {
+    fn hold(&self, partition: u32) {
+        self.push(Command::Hold(partition));
+    }
+
+    fn release(&self, partition: u32) {
+        self.push(Command::Unfollow(partition));
     }
 }
