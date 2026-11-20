@@ -61,3 +61,15 @@ fn an_expansion_error_in_an_external_commands_redirection_fails_only_it() {
     assert_eq!(out("{ cat; } <<E 2>/dev/null; echo same\n$((1/0))\nE\necho \"after $?\""), "after 1\n");
     assert_eq!(out("true <<< ${zz?boom} 2>/dev/null; echo \"rc=$?\""), "");
 }
+
+#[test]
+fn printf_floats_take_what_strtod_converts() {
+    let (_, o, e) = run("printf '%.2f\\n' 2228e9x 12e3abc 1.5x 0x1Ap1 1e e3 -n");
+    assert_eq!(
+        String::from_utf8_lossy(&o),
+        "2228000000000.00\n12000.00\n1.50\n52.00\n1.00\n0.00\n0.00\n"
+    );
+    let e = String::from_utf8_lossy(&e);
+    assert!(e.contains("2228e9x: invalid number") && e.contains("1e: invalid number"));
+    assert!(!e.contains("0x1Ap1"));
+}

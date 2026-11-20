@@ -286,18 +286,13 @@ impl Formatter<'_> {
                         if a.is_empty() {
                             return 0.0;
                         }
-                        let n = parse_num(&a, self.utf8);
-                        if !n.ok {
+                        // What strtold converts of it, with an error for the rest
+                        // (`2228e9x` is 2228e9).
+                        let (v, used) = float_prefix(t.as_bytes()).unwrap_or((0.0, 0));
+                        if used < t.len() {
                             self.errors.push(format!("{}: invalid number", s(&a)));
                         }
-                        // Nothing converted (`-n`): 0, without the sign.
-                        if n.mag == 0 && !n.ok {
-                            0.0
-                        } else if n.neg {
-                            -(n.mag as f64)
-                        } else {
-                            n.mag as f64
-                        }
+                        v
                     }
                 }
             }
@@ -745,6 +740,114 @@ fn parse_num(a: &[u8], utf8: bool) -> Num {
         overflow,
         ok,
     }
+}
+
+/// The value of the longest prefix of `t` that C's `strtod` converts: a decimal or
+/// hexadecimal number with its exponent, or `inf`, `infinity` or `nan`. None when it
+/// converts nothing (`-n`, `e3`). The second value is how many bytes it converted.
+fn float_prefix(t: &[u8]) -> Option<(f64, usize)> {
+    let (neg, body) = match t.first() {
+        Some(b'-') => (true, &t[1..]),
+        Some(b'+') => (false, &t[1..]),
+        _ => (false, t),
+    };
+    let sign = t.len() - body.len();
+    let lower = body.to_ascii_lowercase();
+    let (v, used) = if lower.starts_with(b"infinity") {
+        (f64::INFINITY, 8)
+    } else if lower.starts_with(b"inf") {
+        (f64::INFINITY, 3)
+    } else if lower.starts_with(b"nan") {
+        (f64::NAN, 3)
+    } else if let Some((v, n)) = lower.strip_prefix(b"0x").and_then(hex_float) {
+        (v, n + 2)
+    } else {
+        let digits = |i: &mut usize| {
+            let start = *i;
+            while body.get(*i).is_some_and(u8::is_ascii_digit) {
+                *i += 1;
+            }
+            *i - start
+        };
+        let mut i = 0;
+        let mut n = digits(&mut i);
+        if body.get(i) == Some(&b'.') {
+            i += 1;
+            n += digits(&mut i);
+        }
+        if n == 0 {
+            return None;
+        }
+        let mantissa = i;
+        if matches!(body.get(i), Some(b'e' | b'E')) {
+            let mut j = i + 1;
+            if matches!(body.get(j), Some(b'+' | b'-')) {
+                j += 1;
+            }
+            if digits(&mut j) > 0 {
+                i = j;
+            }
+        }
+        match std::str::from_utf8(&body[..i]).ok()?.parse::<f64>() {
+            Ok(v) => (v, i),
+            Err(_) => (
+                std::str::from_utf8(&body[..mantissa]).ok()?.parse().ok()?,
+                mantissa,
+            ),
+        }
+    };
+    Some((if neg { -v } else { v }, sign + used))
+}
+
+/// A hexadecimal float's value after its `0x` (digits, a fraction and a `p` exponent),
+/// and how many bytes it takes.
+fn hex_float(b: &[u8]) -> Option<(f64, usize)> {
+    let mut i = 0;
+    let mut v = 0f64;
+    let mut n = 0;
+    while let Some(d) = b.get(i).and_then(|c| (*c as char).to_digit(16)) {
+        v = v * 16.0 + f64::from(d);
+        i += 1;
+        n += 1;
+    }
+    if b.get(i) == Some(&b'.') {
+        i += 1;
+        let mut scale = 1.0 / 16.0;
+        while let Some(d) = b.get(i).and_then(|c| (*c as char).to_digit(16)) {
+            v += f64::from(d) * scale;
+            scale /= 16.0;
+            i += 1;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return None;
+    }
+    if matches!(b.get(i), Some(b'p' | b'P')) {
+        let mut j = i + 1;
+        let neg = match b.get(j) {
+            Some(b'-') => {
+                j += 1;
+                true
+            }
+            Some(b'+') => {
+                j += 1;
+                false
+            }
+            _ => false,
+        };
+        let start = j;
+        let mut e: i32 = 0;
+        while let Some(d) = b.get(j).filter(|c| c.is_ascii_digit()) {
+            e = e.saturating_mul(10).saturating_add(i32::from(d - b'0'));
+            j += 1;
+        }
+        if j > start {
+            v *= 2f64.powi(if neg { -e } else { e });
+            i = j;
+        }
+    }
+    Some((v, i))
 }
 
 #[cfg(test)]
