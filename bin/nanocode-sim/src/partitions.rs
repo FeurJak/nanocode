@@ -131,6 +131,61 @@ pub struct PartitionsStats {
     pub gaps: u64,
     pub settle_ms_max: u64,
     pub takeover_ms: Vec<u64>,
+    pub timed: Vec<Takeover>,
+    pub claims_by_nodes: BTreeMap<u64, u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gone {
+    Killed,
+    Paused,
+    Cut,
+}
+
+/// One timed takeover, split into where its time went.
+#[derive(Clone, Copy, Debug)]
+pub struct Takeover {
+    pub nodes: u64,
+    pub cause: Gone,
+    /// From the holder going away to the new holder's claim.
+    pub total_ms: u64,
+    /// Virtual clock jumps inside that window.
+    pub gap_ms: u64,
+    /// Until the holder's heartbeat aged past the TTL.
+    pub detect_ms: u64,
+    /// Until the holder's lease expired.
+    pub lease_ms: u64,
+    /// From the row first being claimable (holder dead or lease expired) to the claim.
+    pub claim_lag_ms: u64,
+    /// The new holder joined after the old one went: no node was left to take over.
+    pub waited_for_join: bool,
+    /// Another node was killed (within a TTL), paused or cut during the window.
+    pub overlapping: bool,
+    /// No other node killed (within a TTL), paused or cut during the window, no clock gap,
+    /// and a node that could take over was already there.
+    pub clean: bool,
+}
+
+fn percentile(sorted: &[u64], percent: usize) -> u64 {
+    sorted
+        .len()
+        .checked_mul(percent)
+        .map(|scaled| scaled.div_ceil(PERCENT))
+        .and_then(|rank| rank.checked_sub(1))
+        .and_then(|at| sorted.get(at))
+        .copied()
+        .unwrap_or(0)
+}
+
+fn spread(values: impl Iterator<Item = u64>) -> String {
+    let mut sorted: Vec<u64> = values.collect();
+    sorted.sort_unstable();
+    format!(
+        "{}/{}/{}",
+        percentile(&sorted, PERCENT / 2),
+        percentile(&sorted, PERCENTILE),
+        sorted.last().copied().unwrap_or(0)
+    )
 }
 
 impl PartitionsStats {
@@ -153,6 +208,53 @@ impl PartitionsStats {
         self.gaps += other.gaps;
         self.settle_ms_max = self.settle_ms_max.max(other.settle_ms_max);
         self.takeover_ms.extend_from_slice(&other.takeover_ms);
+        self.timed.extend_from_slice(&other.timed);
+        for (nodes, claims) in &other.claims_by_nodes {
+            *self.claims_by_nodes.entry(*nodes).or_insert(0) += claims;
+        }
+    }
+
+    /// Takeover time split into its parts, by cause and by node count (p50/p99/max ms).
+    pub fn breakdown(&self) -> String {
+        let row = |label: String, of: &[&Takeover]| {
+            format!(
+                "{label} n={} total={} gap={} detect={} lease={} claim_lag={} total_minus_gap={}",
+                of.len(),
+                spread(of.iter().map(|t| t.total_ms)),
+                spread(of.iter().map(|t| t.gap_ms)),
+                spread(of.iter().map(|t| t.detect_ms)),
+                spread(of.iter().map(|t| t.lease_ms)),
+                spread(of.iter().map(|t| t.claim_lag_ms)),
+                spread(of.iter().map(|t| t.total_ms - t.gap_ms)),
+            )
+        };
+        let all: Vec<&Takeover> = self.timed.iter().collect();
+        let clean: Vec<&Takeover> = self.timed.iter().filter(|t| t.clean).collect();
+        let gapped: Vec<&Takeover> = self.timed.iter().filter(|t| t.gap_ms > 0).collect();
+        let overlapped: Vec<&Takeover> = self
+            .timed
+            .iter()
+            .filter(|t| t.gap_ms == 0 && t.overlapping)
+            .collect();
+        let joined: Vec<&Takeover> = self
+            .timed
+            .iter()
+            .filter(|t| t.gap_ms == 0 && !t.overlapping && t.waited_for_join)
+            .collect();
+        let mut lines = vec![
+            row("all".to_owned(), &all),
+            row("clean".to_owned(), &clean),
+            row("clock_gap".to_owned(), &gapped),
+            row("overlapping_fault".to_owned(), &overlapped),
+            row("waited_for_join".to_owned(), &joined),
+        ];
+        for cause in [Gone::Killed, Gone::Paused, Gone::Cut] {
+            let of: Vec<&Takeover> = self.timed.iter().filter(|t| t.cause == cause).collect();
+            lines.push(row(format!("{cause:?}"), &of));
+            let clean: Vec<&Takeover> = of.into_iter().filter(|t| t.clean).collect();
+            lines.push(row(format!("{cause:?}_clean"), &clean));
+        }
+        lines.join("\n")
     }
 
     fn summary(&self) -> String {
@@ -187,7 +289,24 @@ impl PartitionsStats {
             latencies.last().copied().unwrap_or(0),
             p99,
             self.settle_ms_max
-        )
+        ) + &self.by_nodes()
+    }
+
+    fn by_nodes(&self) -> String {
+        (NODES_MIN..=NODES_MAX)
+            .map(|nodes| {
+                format!(
+                    " nodes{nodes}=claims:{},takeover_ms_p50/p99/max:{}",
+                    self.claims_by_nodes.get(&nodes).copied().unwrap_or(0),
+                    spread(
+                        self.timed
+                            .iter()
+                            .filter(|t| t.nodes == nodes)
+                            .map(|t| t.total_ms)
+                    )
+                )
+            })
+            .collect()
     }
 }
 
@@ -531,7 +650,11 @@ struct World {
     resolved: BTreeSet<StepKey>,
     runs: BTreeMap<StepKey, u32>,
     task_claims: BTreeMap<StepKey, u32>,
-    gone_at: BTreeMap<NodeId, u64>,
+    gone_at: BTreeMap<NodeId, (u64, Gone)>,
+    gaps: Vec<(u64, u64)>,
+    faults: Vec<(NodeId, u64, u64)>,
+    joined_at: BTreeMap<NodeId, u64>,
+    nodes_at_start: u64,
     stats: PartitionsStats,
 }
 
@@ -602,7 +725,10 @@ impl World {
                     let until = self.now + self.rng.range(PAUSE_MS_MIN, PAUSE_MS_MAX);
                     self.flush(at);
                     self.nodes[at].paused_until = Some(until);
-                    self.gone_at.entry(self.nodes[at].id).or_insert(self.now);
+                    self.gone_at
+                        .entry(self.nodes[at].id)
+                        .or_insert((self.now, Gone::Paused));
+                    self.faults.push((self.nodes[at].id, self.now, until));
                     self.stats.pauses += 1;
                 }
                 Ok(())
@@ -611,7 +737,10 @@ impl World {
                 if let Some(at) = self.pick(|node| node.member() && node.cut_until.is_none()) {
                     let until = self.now + self.rng.range(CUT_TICKS_MIN, CUT_TICKS_MAX) * TICK_MS;
                     self.nodes[at].cut_until = Some(until);
-                    self.gone_at.entry(self.nodes[at].id).or_insert(self.now);
+                    self.gone_at
+                        .entry(self.nodes[at].id)
+                        .or_insert((self.now, Gone::Cut));
+                    self.faults.push((self.nodes[at].id, self.now, until));
                     self.stats.cuts += 1;
                 }
                 Ok(())
@@ -624,6 +753,7 @@ impl World {
                     u32::try_from(self.nodes.len()).map_err(|error| error.to_string())?,
                 );
                 self.nodes.push(Node::new(id));
+                self.joined_at.insert(id, self.now);
                 self.stats.joins += 1;
                 self.membership(Change::Join(id))
             }
@@ -635,7 +765,9 @@ impl World {
                 Ok(())
             }
             5 => {
-                self.now += self.rng.range(GAP_MS_MIN, GAP_MS_MAX);
+                let gap = self.rng.range(GAP_MS_MIN, GAP_MS_MAX);
+                self.gaps.push((self.now, gap));
+                self.now += gap;
                 self.stats.gaps += 1;
                 Ok(())
             }
@@ -686,8 +818,9 @@ impl World {
                 self.wire.push(flight);
             }
         }
-        self.gone_at.insert(id, self.now);
+        self.gone_at.insert(id, (self.now, Gone::Killed));
         self.detach(id);
+        self.faults.push((id, self.now, self.now + TTL_MS));
         self.stats.kills += 1;
         self.membership(Change::Leave(id))
     }
@@ -988,6 +1121,10 @@ impl World {
         let row = &self.store.rows[&partition];
         let before = row.epoch();
         let holder_live = row.holder().is_some_and(|holder| alive.contains(holder));
+        let expires_at = match row {
+            Row::Held { expires_at, .. } => *expires_at,
+            Row::Free { .. } => self.now,
+        };
         let Ok((previous, epoch)) = self
             .store
             .claim(partition, id, self.now, TTL_MS, holder_live)
@@ -1010,16 +1147,63 @@ impl World {
         }
         self.granted.insert(partition, epoch);
         self.stats.claims += 1;
+        *self
+            .stats
+            .claims_by_nodes
+            .entry(self.nodes_at_start)
+            .or_insert(0) += 1;
         if let Some(previous) = previous
             && previous != id
         {
             self.stats.takeovers += 1;
-            if let Some(gone_at) = self.gone_at.get(&previous) {
-                self.stats.takeover_ms.push(self.now - gone_at);
+            if let Some((gone_at, cause)) = self.gone_at.get(&previous).copied() {
+                self.time_takeover(id, previous, gone_at, cause, expires_at);
             }
         }
         self.fold(at, partition, epoch);
         Ok(())
+    }
+
+    fn time_takeover(
+        &mut self,
+        by: NodeId,
+        previous: NodeId,
+        gone_at: u64,
+        cause: Gone,
+        expires_at: u64,
+    ) {
+        let total_ms = self.now - gone_at;
+        let dead_at = self
+            .store
+            .members
+            .get(&previous)
+            .map_or(gone_at, |seen_at| seen_at + TTL_MS);
+        let claimable_at = dead_at.min(expires_at).max(gone_at).min(self.now);
+        let gap_ms = self
+            .gaps
+            .iter()
+            .filter(|(at, _)| *at >= gone_at)
+            .map(|(_, gap)| gap)
+            .sum::<u64>()
+            .min(total_ms);
+        let overlapping = self
+            .faults
+            .iter()
+            .any(|(node, from, until)| *node != previous && *from <= self.now && *until >= gone_at);
+        let waited_for_join = self.joined_at.get(&by).is_some_and(|at| *at > gone_at);
+        self.stats.takeover_ms.push(total_ms);
+        self.stats.timed.push(Takeover {
+            nodes: self.nodes_at_start,
+            cause,
+            total_ms,
+            gap_ms,
+            detect_ms: dead_at.saturating_sub(gone_at),
+            lease_ms: expires_at.saturating_sub(gone_at),
+            claim_lag_ms: self.now - claimable_at,
+            waited_for_join,
+            overlapping,
+            clean: gap_ms == 0 && !overlapping && !waited_for_join,
+        });
     }
 
     fn fold(&mut self, at: usize, partition: Partition, epoch: u64) {
@@ -1415,6 +1599,10 @@ fn build(seed: u64, mutation: PartitionsMutation) -> (World, u64, String) {
         runs: BTreeMap::new(),
         task_claims: BTreeMap::new(),
         gone_at: BTreeMap::new(),
+        gaps: Vec::new(),
+        faults: Vec::new(),
+        joined_at: BTreeMap::new(),
+        nodes_at_start: nodes,
         stats: PartitionsStats {
             seeds: 1,
             ..PartitionsStats::default()
@@ -1526,6 +1714,9 @@ pub fn report(
     mutation: PartitionsMutation,
     totals: &PartitionsStats,
 ) -> ExitCode {
+    for line in totals.breakdown().lines() {
+        println!("TAKEOVER {line}");
+    }
     println!(
         "RESULT seeds={}..{} scenario=partitions mutation={} passed={passed} failed={failed} twice={twice} stats={}",
         seeds.start,
