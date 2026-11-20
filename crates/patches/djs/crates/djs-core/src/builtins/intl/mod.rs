@@ -288,6 +288,18 @@ pub(crate) fn intrinsic(heap: &mut Heap, k: u16, a: [Value; 5]) -> Result<Option
             let collator_langs: Vec<&str> = LANGS.iter().chain(collate::TAILORED.iter()).copied().collect();
             let locale = resolve_locale(&tags, if kind == 1 { &date::LANGS } else if kind == 2 { &collator_langs } else { &LANGS });
             let raw = Spec::parse(&raw);
+            // Every constructor reads localeMatcher first and accepts only its two values.
+            let ctor = match kind {
+                0 => "NumberFormat",
+                1 => "DateTimeFormat",
+                2 => "Collator",
+                3 => "PluralRules",
+                4 => "ListFormat",
+                5 => "RelativeTimeFormat",
+                DISPLAY_NAMES => "DisplayNames",
+                _ => "Segmenter",
+            };
+            raw.choose("localeMatcher", &["lookup", "best fit"], "best fit", &format!("Intl.{ctor}"))?;
             let spec = match kind {
                 0 => number::resolve(&locale, &raw)?,
                 1 => date::resolve(&locale, &tags, &raw)?,
