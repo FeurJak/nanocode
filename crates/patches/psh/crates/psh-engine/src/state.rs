@@ -491,6 +491,9 @@ pub(crate) struct Vp {
     /// This vproc is a background job of one simple command that has not run it yet:
     /// if the command turns out to be no program, the job forks first (D1900).
     pub fork_job: bool,
+    /// This vproc is a background job of one simple command that has not run it yet:
+    /// a `%job` command word there is `bg`, not `fg`.
+    pub bg_simple: bool,
     /// Where the shell's pending signals are (D1411).
     pub sigs: Sigs,
     /// Levels of command substitution and `eval`: `set -x` repeats PS4's first char.
@@ -557,6 +560,7 @@ impl Vp {
         sub.top = false;
         sub.own_sigs = Cell::new(0);
         sub.fork_job = false;
+        sub.bg_simple = false;
         sub.traps = self.traps.for_subshell(
             self.opts.get(crate::options::SetOpt::Errtrace),
             self.opts.get(crate::options::SetOpt::Functrace)

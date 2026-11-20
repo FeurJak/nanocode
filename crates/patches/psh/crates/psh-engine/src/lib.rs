@@ -370,6 +370,7 @@ impl Shell {
             own_sigs: Cell::new(0),
             top: true,
             fork_job: false,
+            bg_simple: false,
             sigs: state::Sigs::Shell,
             xtrace_level: 1,
             cmd_name: None,

@@ -63,6 +63,14 @@ fn an_expansion_error_in_an_external_commands_redirection_fails_only_it() {
 }
 
 #[test]
+fn a_command_word_starting_with_a_percent_resumes_a_job() {
+    let (_, o, e) = run("%y; echo \"rc=$?\"; %y() { echo fn; }; %y");
+    assert_eq!(String::from_utf8_lossy(&o), "rc=1\n");
+    assert!(String::from_utf8_lossy(&e).contains("fg: no job control"));
+    assert!(String::from_utf8_lossy(&run("%1 &\nwait").2).contains("bg: no job control"));
+}
+
+#[test]
 fn printf_floats_take_what_strtod_converts() {
     let (_, o, e) = run("printf '%.2f\\n' 2228e9x 12e3abc 1.5x 0x1Ap1 1e e3 -n");
     assert_eq!(

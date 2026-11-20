@@ -101,6 +101,7 @@ async fn run_background(vp: &mut Vp, code: &Rc<Code>, list: ListId, item: usize)
     // does: the copy is the job's process, with a pid, and outlives the shell (D1900).
     let forks = sub.fds.all_files() && vp.core.host.forks();
     sub.fork_job = forks && direct;
+    sub.bg_simple = direct;
     // The job's vproc is the subshell of a job that is one `( … )`, as bash forks once
     // for it: its commands are the job's own, and a signal sent to the job ends them.
     sub.stage_subshell = ao.rest.is_empty()
@@ -2344,6 +2345,9 @@ fn forks_for(vp: &Vp, argv: &[Vec<u8>]) -> bool {
     let Some(name) = argv.get(i) else {
         return false;
     };
+    if i == 0 && name.starts_with(b"%") {
+        return false;
+    }
     let function = i == 0
         && std::str::from_utf8(name)
             .ok()
@@ -2357,6 +2361,21 @@ fn run_argv(
     argv: Vec<Vec<u8>>,
     assigns: Vec<(String, Vec<u8>)>,
 ) -> LocalBoxFuture<'_, R> {
+    // A command word that starts with `%` is a job: bash resumes it with `fg`, or
+    // `bg` when run with `&`, ahead of functions and the PATH.
+    let bg = std::mem::take(&mut vp.bg_simple);
+    if argv[0].starts_with(b"%") {
+        vp.fork_job = false;
+        let resume = if bg {
+            "bg"
+        } else {
+            "fg"
+        };
+        let mut argv = argv;
+        argv.insert(0, resume.as_bytes().to_vec());
+        vp.exec_now = false;
+        return Box::pin(run_builtin(vp, argv, assigns));
+    }
     if std::mem::take(&mut vp.fork_job) {
         return Box::pin(run_job_argv(vp, argv, assigns));
     }
