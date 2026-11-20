@@ -28,7 +28,7 @@ fn scan_source(source: &[u8], depth: u32) -> bool {
         return false;
     }
     // extglob on: more scripts parse, and a pattern never hides a `$$`.
-    let mut parser = Parser::from_bytes(source, Options { extglob: true });
+    let mut parser = Parser::from_bytes(source, Options { extglob: true, ..Options::default() });
     while let Some(Ok(ast)) = parser.next_chunk() {
         let mut s = Scan {
             ast: &ast,

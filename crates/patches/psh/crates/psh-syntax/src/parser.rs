@@ -27,6 +27,9 @@ pub struct Options {
     /// words and case patterns. They are always patterns on the right of `==` and `!=`
     /// in `[[ ]]`, as in bash.
     pub extglob: bool,
+    /// `set -o posix`: a single quote in the word of a double-quoted `${x+word}` is an
+    /// ordinary character, which needs no closing one (`"${x+'a}"` is `'a`).
+    pub posix: bool,
 }
 
 /// Parses a whole script with default options.
@@ -2963,7 +2966,17 @@ impl<'a> P<'a> {
                     }
                 },
                 b'\'' => {
-                    if matches!(ctx, Ctx::Double | Ctx::HereDoc { .. }) {
+                    if matches!(ctx, Ctx::Double | Ctx::HereDoc { .. })
+                        || (self.opts.posix
+                            && matches!(
+                                ctx,
+                                Ctx::Operand {
+                                    dq: true,
+                                    lit_squote: true,
+                                    ..
+                                }
+                            ))
+                    {
                         self.pos += 1;
                         push_lit(out, start, self.pos);
                     } else if matches!(

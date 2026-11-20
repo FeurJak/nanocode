@@ -377,6 +377,7 @@ pub(crate) fn shopt_index(name: &str) -> Option<usize> {
 pub(crate) fn parser_options(opts: &Options) -> psh_syntax::Options {
     psh_syntax::Options {
         extglob: opts.shopt(Shopt::Extglob),
+        posix: opts.get(SetOpt::Posix),
     }
 }
 

@@ -158,3 +158,11 @@ fn set_k_takes_assignment_arguments_as_assignments() {
         "5 7 8\n2 1 3 y=4\n"
     );
 }
+
+#[test]
+fn posix_single_quote_in_double_quoted_default_word_is_plain() {
+    assert_eq!(
+        out("echo \"${IFS+'a'}\"\nset -o posix\necho \"${IFS+'bar}\"\necho ${IFS+'}'z} \"${IFS+'}'z}\"\n"),
+        "'a'\n'bar\n}z ''z}\n"
+    );
+}

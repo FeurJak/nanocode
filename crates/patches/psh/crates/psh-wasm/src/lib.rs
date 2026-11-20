@@ -146,6 +146,7 @@ export! {
         let source = take_input(len);
         let opts = psh_syntax::Options {
             extglob: flags & PARSE_EXTGLOB != 0,
+            ..Default::default()
         };
         let (json, ok) = if flags & PARSE_OUTLINE != 0 {
             parse_json::outline_to_json(&source, opts)
