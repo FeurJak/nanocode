@@ -121,6 +121,8 @@ pub enum Mutation {
     ReplaysApply,
     UnblockRefused,
     StalledStuck,
+    DeliveryIngestedTwice,
+    DeliveryLost,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

@@ -27,6 +27,8 @@ use crate::{
 
 #[path = "board_access.rs"]
 mod access;
+#[path = "board_deliver.rs"]
+mod deliver;
 #[path = "board_due.rs"]
 mod due;
 #[path = "board_intent.rs"]
@@ -116,6 +118,7 @@ pub enum BoardMutation {
     SaysUnchecked,
     MessagesLeak,
     Watch(BoardRule),
+    Deliver(BoardRule),
 }
 
 impl BoardMutation {
@@ -196,6 +199,7 @@ impl BoardMutation {
             .into_iter()
             .chain(watching::ALL.map(Self::Watch))
             .chain(intent::ALL.map(Self::Watch))
+            .chain(deliver::ALL.map(Self::Deliver))
             .find(|mutation| mutation.name() == name)
     }
 
@@ -274,6 +278,7 @@ impl BoardMutation {
                 Some(name) => name,
                 None => watching::name(rule),
             },
+            Self::Deliver(rule) => deliver::name(rule),
         }
     }
 
@@ -284,6 +289,7 @@ impl BoardMutation {
             .copied()
             .chain(watching::ALL.map(Self::Watch))
             .chain(intent::ALL.map(Self::Watch))
+            .chain(deliver::ALL.map(Self::Deliver))
             .map(|mutation| mutation.name())
             .collect::<Vec<_>>()
             .join("|")
@@ -357,7 +363,7 @@ impl BoardMutation {
             Self::CursorInclusive => BoardRule::CursorInclusive,
             Self::SaysUnchecked => BoardRule::SaysUnchecked,
             Self::MessagesLeak => BoardRule::MessagesLeak,
-            Self::Watch(rule) => rule,
+            Self::Watch(rule) | Self::Deliver(rule) => rule,
             Self::None | Self::CursorBeforeEffect | Self::EffectBeforeCursor => BoardRule::None,
         }
     }
@@ -393,6 +399,9 @@ pub struct BoardStats {
     pub due_runs: u64,
     pub due_retries: u64,
     pub due_restarts: u64,
+    pub deliveries: u64,
+    pub redeliveries: u64,
+    pub delivery_takeovers: u64,
 }
 
 impl BoardStats {
@@ -425,6 +434,9 @@ impl BoardStats {
         self.due_runs += other.due_runs;
         self.due_retries += other.due_retries;
         self.due_restarts += other.due_restarts;
+        self.deliveries += other.deliveries;
+        self.redeliveries += other.redeliveries;
+        self.delivery_takeovers += other.delivery_takeovers;
     }
 }
 
@@ -1919,6 +1931,7 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
     let resumed = resumes(&rows);
     let due = due::run(seed);
     let intended = intent::run(seed).map(|_| ());
+    let delivered = deliver::run(seed);
     board_sim::mutate(BoardRule::None);
     for wrong in [live, indexed, resumed, intended]
         .into_iter()
@@ -1938,6 +1951,10 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
         .map_or_else(|| check(&world, &rows), Err)
         .and_then(|mut stats| {
             let due = due?;
+            let delivered = delivered?;
+            stats.deliveries = delivered.posted;
+            stats.redeliveries = delivered.again;
+            stats.delivery_takeovers = delivered.takeovers;
             stats.due_runs = due.runs;
             stats.due_retries = due.retries;
             stats.due_restarts = due.restarts;

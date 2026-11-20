@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod access;
 pub mod brief;
+pub mod deliver;
 pub mod intent;
 pub mod mirror;
 pub mod schedule;
