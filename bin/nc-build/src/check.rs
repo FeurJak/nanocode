@@ -325,6 +325,8 @@ enum Selection {
 struct Planned {
     selection: Selection,
     scenarios: Vec<String>,
+    /// The change reaches nanocode-sim, so its memory gate runs even when no scenario does.
+    simulator: bool,
 }
 
 fn scope_of(full: bool, changed: &[String], graph: &Graph) -> Result<Planned, String> {
@@ -340,6 +342,7 @@ fn scope_of(full: bool, changed: &[String], graph: &Graph) -> Result<Planned, St
     match scope {
         Scope::Everything => Ok(Planned {
             selection: Selection::Workspace,
+            simulator: true,
             scenarios: gate::all_scenarios(&modules(SIM.src)?)
                 .map_err(|error| format!("{error:?}"))?,
         }),
@@ -351,6 +354,7 @@ fn scope_of(full: bool, changed: &[String], graph: &Graph) -> Result<Planned, St
                 Vec::new()
             };
             Ok(Planned {
+                simulator: reached.contains(SIM.package),
                 selection: Selection::Crates(gate::libraries(graph, &reached)),
                 scenarios,
             })
@@ -742,7 +746,9 @@ pub fn main(args: &[String]) -> u8 {
             format!("{} crates changed{since}, with dependents", crates.len()),
         ),
     };
-    let jobs = if options.sim && !planned.scenarios.is_empty() {
+    let jobs = if options.sim
+        && (!planned.scenarios.is_empty() || (planned.simulator && !memory_combos().is_empty()))
+    {
         let jobs = fs::read_to_string(TABLE)
             .map_err(|error| format!("{TABLE}: {error}"))
             .and_then(|script| {
@@ -863,15 +869,24 @@ pub fn main(args: &[String]) -> u8 {
                 ),
             }
             let passes = jobs.iter().filter(|job| job.kind == Kind::Pass).count();
-            ui.step(
-                &sim,
-                &format!(
-                    "{} scenarios: {passes} pass jobs x {} seeds, {} canaries",
-                    planned.scenarios.len(),
-                    options.seeds,
-                    jobs.len() - passes
-                ),
-            );
+            if jobs.is_empty() {
+                ui.line(
+                    Status::Skip,
+                    "sim",
+                    0.0,
+                    "no simulator scenario reaches the changed crates",
+                );
+            } else {
+                ui.step(
+                    &sim,
+                    &format!(
+                        "{} scenarios: {passes} pass jobs x {} seeds, {} canaries",
+                        planned.scenarios.len(),
+                        options.seeds,
+                        jobs.len() - passes
+                    ),
+                );
+            }
         }
         (Some((checked, Ok(SimBuild::Failed { done }))), _) => {
             ui.line(
