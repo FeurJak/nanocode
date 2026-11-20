@@ -28,8 +28,8 @@ mod _bisect {
     // Handles defaults for lo, hi.
     //
     //  - lo must be >= 0 with a default of 0.
-    //  - hi, while it could be negative, defaults to `0` and the same effect is achieved
-    //    (while loop isn't entered); this way we keep it a usize (and, if my understanding
+    //  - hi of -1 means the sequence length, as CPython's default sentinel; any other negative
+    //    hi becomes 0, with the same effect (the while loop isn't entered); this way we keep it a usize (and, if my understanding
     //    is correct, issue 13496 is handled). Its default value is set to the length of the
     //    input sequence.
     #[inline]
@@ -45,7 +45,11 @@ mod _bisect {
         let hi = match hi {
             Some(value) => {
                 let value: isize = value.into_int_ref().try_to_primitive(vm)?;
-                usize::try_from(value).unwrap_or(0)
+                if value == -1 {
+                    seq_len
+                } else {
+                    usize::try_from(value).unwrap_or(0)
+                }
             }
             None => seq_len,
         };

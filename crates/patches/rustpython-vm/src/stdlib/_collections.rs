@@ -408,7 +408,7 @@ mod _collections {
         }
 
         #[pymethod]
-        fn insert(&self, index: i32, value: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
+        fn insert(&self, index: isize, value: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
             self.state.fetch_add(1);
             let mut deque = self.borrow_deque_mut();
 
@@ -417,11 +417,7 @@ mod _collections {
             }
 
             let index = if index < 0 {
-                if -index as usize > deque.len() {
-                    0
-                } else {
-                    deque.len() - ((-index) as usize)
-                }
+                deque.len().saturating_sub(index.unsigned_abs())
             } else if index as usize > deque.len() {
                 deque.len()
             } else {
