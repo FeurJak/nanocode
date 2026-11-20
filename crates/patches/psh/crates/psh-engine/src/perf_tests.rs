@@ -52,3 +52,19 @@ fn a_replacement_of_a_fixed_length_pattern_finds_every_match() {
         "128894\n"
     );
 }
+
+#[test]
+fn a_case_word_split_once_matches_every_pattern_as_before() {
+    assert_eq!(
+        out("a=0 b=0 c=0 d=0; for ((i=0;i<2000;i++)); do w=item$((i%11)); case $w in item0|item1) ((a++));; item[23]) ((b++));; *5|*7) ((c++));; *) ((d++));; esac; done; echo $a $b $c $d"),
+        "364 364 364 908\n"
+    );
+    assert_eq!(
+        out("for w in hello hallo HALLO ''; do case $w in h?llo) echo q;; '') echo e;; *) echo o;; esac; done"),
+        "q\nq\no\ne\n"
+    );
+    assert_eq!(
+        out("shopt -s nocasematch; case HALLO in h[a-c]llo) echo y;; *) echo n;; esac"),
+        "y\n"
+    );
+}

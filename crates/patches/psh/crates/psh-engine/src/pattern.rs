@@ -34,6 +34,14 @@ pub(crate) fn units(text: &[u8], utf8: bool) -> (Vec<Unit>, Vec<usize>) {
     (units, offs)
 }
 
+/// Splits text into units, without the offsets `units` records.
+pub(crate) fn unit_vec(text: &[u8], utf8: bool) -> Vec<Unit> {
+    if !utf8 || text.is_ascii() {
+        return text.iter().map(|&b| u32::from(b)).collect();
+    }
+    units(text, utf8).0
+}
+
 /// Decodes the first UTF-8 char of `b`.
 pub(crate) fn decode_one(b: &[u8]) -> Option<(char, usize)> {
     let n = match b[0] {
@@ -182,7 +190,7 @@ impl Pattern {
     }
 
     pub(crate) fn with(pat: &[u8], opts: MatchOpts) -> Pattern {
-        let (u, _) = units(pat, opts.utf8);
+        let u = unit_vec(pat, opts.utf8);
         let (mut toks, _) = compile(&u, 0, opts.extglob, false);
         let groups = toks.iter().any(|t| matches!(t, Tok::Group { .. }));
         if opts.nocase {
@@ -241,7 +249,7 @@ impl Pattern {
     }
 
     pub(crate) fn matches(&self, text: &[u8], utf8: bool) -> bool {
-        self.matches_units(&units(text, utf8).0)
+        self.matches_units(&unit_vec(text, utf8))
     }
 }
 
@@ -662,7 +670,7 @@ pub(crate) fn replace_with(
 ) -> Vec<u8> {
     let utf8 = opts.utf8;
     let p = Pattern::with(pat, opts);
-    let fixed = match_len(&units(pat, utf8).0);
+    let fixed = match_len(&unit_vec(pat, utf8));
     let (u, offs) = units(text, utf8);
     let n = u.len();
     let fits = |len: usize| fixed.is_none_or(|m| m == len);

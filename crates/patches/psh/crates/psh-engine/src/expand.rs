@@ -836,7 +836,7 @@ fn param_op_now(
         (ParamPrefix::Length, ParamOp::None) => {
             let n = match &val {
                 Val::Str(s) if s.is_ascii() => s.len(),
-                Val::Str(s) => pattern::units(s, vp.utf8()).0.len(),
+                Val::Str(s) => pattern::unit_vec(s, vp.utf8()).len(),
                 _ => 0,
             };
             emit(f, n.to_string().as_bytes(), quoted);
@@ -1947,7 +1947,7 @@ async fn param(
             let utf8 = vp.utf8();
             let n = match &val {
                 Val::Unset => 0,
-                Val::Str(s) => pattern::units(s, utf8).0.len(),
+                Val::Str(s) => pattern::unit_vec(s, utf8).len(),
                 Val::List(l, _) => l.len(),
             };
             emit(f, n.to_string().as_bytes(), quoted);

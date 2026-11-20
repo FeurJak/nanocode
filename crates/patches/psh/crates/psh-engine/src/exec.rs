@@ -1747,7 +1747,7 @@ async fn run_case(vp: &mut Vp, code: &Rc<Code>, cmd: &Command, c: &psh_syntax::C
         let text = command_text(code, cmd);
         builtins::set::xtrace(vp, text.trim_ascii_end()).await;
     }
-    let utf8 = vp.utf8();
+    let text = crate::pattern::unit_vec(&word, vp.utf8());
     let mut status = 0;
     let mut i = 0;
     let mut fall = false;
@@ -1761,7 +1761,7 @@ async fn run_case(vp: &mut Vp, code: &Rc<Code>, cmd: &Command, c: &psh_syntax::C
                     &pat,
                     vp.match_opts(vp.opts.shopt(Shopt::Nocasematch)),
                 )
-                .matches(&word, utf8)
+                .matches_units(&text)
                 {
                     hit = true;
                     break;
