@@ -1,10 +1,57 @@
 import { EventEmitter } from "node:events";
 import { statSync } from "node:fs";
 import { Buffer } from "node:buffer";
+import { workspace } from "node:internal/workspace";
 
 const home = "/work";
 let current = home;
 let started;
+let attached = false;
+
+// A connected workspace supplies the starting directory and environment, the first time a cell
+// looks at either.
+function attach() {
+  if (attached) return;
+  const info = workspace();
+  if (info === undefined) return;
+  attached = true;
+  if (typeof info.cwd === "string" && info.cwd.startsWith("/")) current = info.cwd;
+  if (info.env !== null && typeof info.env === "object") {
+    for (const [name, value] of Object.entries(info.env)) values[name] = String(value);
+  }
+}
+
+const values = { HOME: home, PWD: home, TMPDIR: "/tmp", PATH: "" };
+const environment = new Proxy(values, {
+  get(target, name) {
+    attach();
+    return Reflect.get(target, name);
+  },
+  set(target, name, value) {
+    attach();
+    return Reflect.set(target, name, typeof name === "string" ? String(value) : value);
+  },
+  has(target, name) {
+    attach();
+    return Reflect.has(target, name);
+  },
+  deleteProperty(target, name) {
+    attach();
+    return Reflect.deleteProperty(target, name);
+  },
+  ownKeys(target) {
+    attach();
+    return Reflect.ownKeys(target);
+  },
+  getOwnPropertyDescriptor(target, name) {
+    attach();
+    return Reflect.getOwnPropertyDescriptor(target, name);
+  },
+  defineProperty(target, name, descriptor) {
+    attach();
+    return Reflect.defineProperty(target, name, descriptor);
+  },
+});
 
 function codedError(Kind, code, message) {
   const error = new Kind(message);
@@ -75,15 +122,17 @@ Object.assign(process, {
   execArgv: [],
   execPath: "node",
   exitCode: undefined,
-  env: { HOME: home, PWD: home, TMPDIR: "/tmp", PATH: "" },
+  env: environment,
   config: { variables: {} },
   features: {},
   stdout: stream("stdout", 1),
   stderr: stream("stderr", 2),
   cwd() {
+    attach();
     return current;
   },
   chdir(directory) {
+    attach();
     if (typeof directory !== "string") {
       throw codedError(TypeError, "ERR_INVALID_ARG_TYPE", "The \"directory\" argument must be of type string. Received " + typeof directory);
     }

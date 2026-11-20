@@ -5,7 +5,7 @@ const CODE_TOOLS: &str = include_str!("code-tools.mjs");
 const CODE_VALUES: &str = include_str!("code-values.mjs");
 const WEB: &str = include_str!("web.js");
 
-const NODE_MODULES: [(&str, &str); 19] = [
+const NODE_MODULES: [(&str, &str); 20] = [
     ("buffer", include_str!("node/buffer.mjs")),
     ("events", include_str!("node/events.mjs")),
     ("path", include_str!("node/path.mjs")),
@@ -25,6 +25,7 @@ const NODE_MODULES: [(&str, &str); 19] = [
     ("timers/promises", include_str!("node/timers-promises.mjs")),
     ("child_process", include_str!("node/child-process.mjs")),
     ("module", include_str!("node/module.mjs")),
+    ("internal/workspace", include_str!("node/host.mjs")),
 ];
 
 const NODE_GLOBALS: &str = include_str!("node/globals.mjs");
@@ -33,9 +34,11 @@ const NODE_GLOBALS_MODULE: &str = "nanocode:node";
 struct NodeModules;
 
 impl Loader for NodeModules {
-    fn resolve(&self, specifier: &str, _referrer: Option<&str>) -> Result<String, String> {
+    fn resolve(&self, specifier: &str, referrer: Option<&str>) -> Result<String, String> {
         let name = specifier.strip_prefix("node:").unwrap_or(specifier);
-        if NODE_MODULES.iter().any(|(known, _)| *known == name) {
+        let internal = name.starts_with("internal/");
+        let builtin = referrer.is_some_and(|referrer| referrer.starts_with("node:"));
+        if NODE_MODULES.iter().any(|(known, _)| *known == name) && (!internal || builtin) {
             Ok(format!("node:{name}"))
         } else if specifier.starts_with("node:") {
             Err(format!("No such built-in module: {specifier}"))

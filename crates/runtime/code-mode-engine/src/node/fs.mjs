@@ -1,6 +1,7 @@
 import process from "node:process";
 import { Buffer } from "node:buffer";
 import { resolve as resolvePath } from "node:path";
+import { connected, ask } from "node:internal/workspace";
 
 const S_IFMT = 0o170000;
 const S_IFDIR = 0o040000;
@@ -59,6 +60,127 @@ const root = directory(0o755, 0);
 root.entries.set("tmp", directory(0o1777, 0));
 root.entries.set("work", directory(0o755, 0));
 
+// With a connected workspace the tree mirrors it: directories fault their entries in from the
+// workspace as they are looked up or listed, files load their bytes when first read, and every
+// change made through this module is written back (see mirrored below).
+function under(path, name) {
+  return path === "/" ? "/" + name : path + "/" + name;
+}
+
+function remoteFile(path, data) {
+  const node = file(undefined);
+  delete node.data;
+  if (data !== undefined) node.data = data;
+  else {
+    Object.defineProperty(node, "data", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        const answer = ask({ op: "read", path });
+        const bytes = answer.kind === "file" ? new Uint8Array(Buffer.from(answer.data ?? "", "base64")) : new Uint8Array(0);
+        Object.defineProperty(node, "data", { value: bytes, writable: true, configurable: true, enumerable: true });
+        return bytes;
+      },
+      set(value) {
+        Object.defineProperty(node, "data", { value, writable: true, configurable: true, enumerable: true });
+      },
+    });
+  }
+  return node;
+}
+
+function remoteDirectory(path) {
+  const node = directory(0o755);
+  node.entries = new RemoteEntries(path);
+  return node;
+}
+
+class RemoteEntries extends Map {
+  #path;
+  #listed = false;
+  #gone = new Set();
+
+  constructor(path) {
+    super();
+    this.#path = path;
+  }
+
+  #fault(name) {
+    if (this.#listed || typeof name !== "string" || super.has(name) || this.#gone.has(name)) return;
+    const path = under(this.#path, name);
+    const answer = ask({ op: "read", path });
+    if (answer.kind === "file") super.set(name, remoteFile(path, new Uint8Array(Buffer.from(answer.data ?? "", "base64"))));
+    else if (answer.kind === "dir") super.set(name, remoteDirectory(path));
+  }
+
+  #list() {
+    if (this.#listed) return;
+    this.#listed = true;
+    for (const [name, kind] of ask({ op: "list", path: this.#path }).entries ?? []) {
+      if (super.has(name) || this.#gone.has(name)) continue;
+      const path = under(this.#path, name);
+      super.set(name, kind === "dir" ? remoteDirectory(path) : remoteFile(path));
+    }
+  }
+
+  get(name) {
+    this.#fault(name);
+    return super.get(name);
+  }
+
+  has(name) {
+    this.#fault(name);
+    return super.has(name);
+  }
+
+  set(name, value) {
+    this.#gone.delete(name);
+    return super.set(name, value);
+  }
+
+  delete(name) {
+    this.#gone.add(name);
+    return super.delete(name);
+  }
+
+  get size() {
+    this.#list();
+    return super.size;
+  }
+
+  keys() {
+    this.#list();
+    return super.keys();
+  }
+
+  values() {
+    this.#list();
+    return super.values();
+  }
+
+  entries() {
+    this.#list();
+    return super.entries();
+  }
+
+  forEach(callback, self) {
+    this.#list();
+    return super.forEach(callback, self);
+  }
+
+  [Symbol.iterator]() {
+    return this.entries();
+  }
+}
+
+let attached = false;
+
+function attach() {
+  if (attached || !connected()) return;
+  attached = true;
+  root.entries = new RemoteEntries("/");
+}
+
 function fsError(code, syscall, path, dest) {
   let message = code + ": " + DESCRIPTIONS[code] + ", " + syscall;
   if (path !== undefined) message += " '" + path + "'";
@@ -106,6 +228,7 @@ function parts(absolute) {
 }
 
 function lookup(path, syscall) {
+  attach();
   const shown = toPath(path);
   const absolute = resolvePath(shown);
   let node = root;
@@ -127,6 +250,7 @@ function find(path) {
 }
 
 function parentOf(path, syscall) {
+  attach();
   const shown = toPath(path);
   const names = parts(resolvePath(shown));
   const name = names.pop();
@@ -410,6 +534,7 @@ function mkdirSync(path, options) {
     touch(parent);
     return undefined;
   }
+  attach();
   let node = root;
   let current = "";
   let first;
@@ -658,7 +783,7 @@ function openSync(path, flags = "r", mode) {
   const parsed = flagsOf(flags, "r");
   const node = openNode(path, parsed, mode, "open");
   const fd = nextDescriptor++;
-  descriptors.set(fd, { node, position: 0, flags: parsed, path: toPath(path) });
+  descriptors.set(fd, { node, position: 0, flags: parsed, path: toPath(path), absolute: resolvePath(toPath(path)) });
   return fd;
 }
 
@@ -712,6 +837,61 @@ function writeSync(fd, data, offsetOrPosition, lengthOrEncoding, position) {
   const length = typeof lengthOrEncoding === "number" ? lengthOrEncoding : bytes.length - offset;
   return writeAt(entry, bytes.subarray(offset, offset + length), position);
 }
+
+// Writes a change made through this module back to the connected workspace. Calls made inside
+// another fs call (cpSync copying files, rmSync removing them) leave it to the outermost one.
+let depth = 0;
+
+function mirrored(fn, after) {
+  return function (...args) {
+    if (!connected()) return fn.apply(this, args);
+    attach();
+    const before = after.length > 2 ? args.map((arg) => (typeof arg === "number" ? descriptors.get(arg) : undefined)) : undefined;
+    depth++;
+    let result;
+    try {
+      result = fn.apply(this, args);
+    } finally {
+      depth--;
+    }
+    if (depth === 0) after(args, result, before);
+    return result;
+  };
+}
+
+function mirror(path, deep = false) {
+  const absolute = resolvePath(path);
+  const node = find(absolute);
+  if (node === undefined) ask({ op: "remove", path: absolute });
+  else if (node.kind === "dir") {
+    ask({ op: "mkdir", path: absolute });
+    if (deep) for (const name of node.entries.keys()) mirror(under(absolute, name), true);
+  } else ask({ op: "write", path: absolute, data: Buffer.from(node.data).toString("base64") });
+}
+
+function mirrorTarget(target, entry) {
+  if (typeof target === "number") {
+    entry ??= descriptors.get(target);
+    if (entry?.flags.write) mirror(entry.absolute);
+  } else mirror(toPath(target));
+}
+
+writeFileSync = mirrored(writeFileSync, ([target]) => mirrorTarget(target));
+appendFileSync = mirrored(appendFileSync, ([target]) => mirrorTarget(target));
+truncateSync = mirrored(truncateSync, ([target]) => mirrorTarget(target));
+ftruncateSync = mirrored(ftruncateSync, ([fd]) => mirrorTarget(fd));
+fsyncSync = mirrored(fsyncSync, ([fd]) => mirrorTarget(fd));
+closeSync = mirrored(closeSync, ([fd], _, [entry]) => mirrorTarget(fd, entry));
+openSync = mirrored(openSync, (_, fd) => mirrorTarget(fd));
+mkdirSync = mirrored(mkdirSync, ([path]) => mirror(toPath(path)));
+mkdtempSync = mirrored(mkdtempSync, (_, path) => mirror(path));
+rmdirSync = mirrored(rmdirSync, ([path]) => mirror(toPath(path)));
+rmSync = mirrored(rmSync, ([path]) => mirror(toPath(path)));
+unlinkSync = mirrored(unlinkSync, ([path]) => mirror(toPath(path)));
+renameSync = mirrored(renameSync, ([from, to]) => ask({ op: "rename", from: resolvePath(toPath(from)), to: resolvePath(toPath(to)) }));
+copyFileSync = mirrored(copyFileSync, ([, to]) => mirror(toPath(to)));
+cpSync = mirrored(cpSync, ([, to]) => mirror(toPath(to), true));
+linkSync = mirrored(linkSync, ([, path]) => mirror(toPath(path)));
 
 const sync = {
   existsSync,
