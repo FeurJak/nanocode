@@ -744,6 +744,8 @@ pub(crate) fn initial_vars(host: &dyn Host, env: &[(Vec<u8>, Vec<u8>)], cwd: &[u
             v.value = vars::Value::Assoc(Default::default());
         }
     }
+    // The command hash table as an array; psh has no hash table, so it stays empty.
+    vars.entry("BASH_CMDS").value = vars::Value::Assoc(Default::default());
     // Who and where the shell runs, from the host (D1328). As in bash: UID and
     // EUID (readonly integers) and the names below give way to the environment's;
     // PPID never does; GROUPS is computed, so assignments to it do nothing.

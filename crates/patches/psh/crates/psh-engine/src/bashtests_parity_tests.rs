@@ -50,3 +50,8 @@ fn file_comparisons_with_an_empty_name_are_false() {
         "1\n1\n1\n0\n0\n"
     );
 }
+
+#[test]
+fn bash_cmds_is_an_empty_associative_array() {
+    assert_eq!(out("declare -A\n"), "declare -A BASH_ALIASES=()\ndeclare -A BASH_CMDS=()\n");
+}
