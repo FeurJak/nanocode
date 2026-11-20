@@ -254,6 +254,9 @@ fn remove_importlib_frames_inner(
         || file_name == "<frozen importlib._bootstrap_external>"
         || file_name == "_frozen_importlib"
         || file_name == "_frozen_importlib_external"
+        // nanocode's own finder and loader (crates/core/python/src/boot.py, frozen as
+        // "python") stand in for importlib's, so their frames are trimmed the same way.
+        || file_name == "python"
     {
         if traceback.frame.iframe().code().obj_name.as_str() == "_call_with_frames_removed" {
             now_in_importlib = true;

@@ -206,7 +206,9 @@ class _Loader:
 
     def get_code(self, name=None):
         with open(self.path, 'rb') as file:
-            return compile(file.read(), self.path, 'exec')
+            source = file.read()
+        # As importlib does, so a SyntaxError's traceback drops the import machinery.
+        return _frozen_importlib._call_with_frames_removed(compile, source, self.path, 'exec')
 
     def get_data(self, path):
         with open(path, 'rb') as file:
@@ -218,7 +220,7 @@ class _Loader:
 
     def exec_module(self, module):
         module.__file__ = self.path
-        exec(self.get_code(), module.__dict__)
+        _frozen_importlib._call_with_frames_removed(exec, self.get_code(), module.__dict__)
 
 
 _loaded = []
