@@ -363,6 +363,7 @@ impl Shell {
             expand_aliases: false,
             calls: Vec::new(),
             hash: Default::default(),
+            completions: Default::default(),
             disabled: Default::default(),
             opts,
             no_errexit: false,
@@ -1395,3 +1396,5 @@ mod coverage_parity_tests;
 mod fuzz_parity_tests;
 #[cfg(test)]
 mod perf_tests;
+#[cfg(test)]
+mod realworld_parity_tests;

@@ -473,6 +473,8 @@ pub(crate) struct Vp {
     pub dirstack: Vec<Vec<u8>>,
     /// The file creation mask set with `umask`; `None`: the process's.
     pub umask: Option<u32>,
+    /// `complete` specifications; shared with subshells until one changes them.
+    pub completions: Rc<crate::builtins::CompSpecs>,
     /// Builtins turned off with `enable -n`.
     pub disabled: Rc<Vec<Vec<u8>>>,
     /// `set` and `shopt` options (D1280).

@@ -2,8 +2,10 @@
 //! them.
 
 pub(crate) mod alias;
+pub(crate) use complete::Specs as CompSpecs;
 mod command;
 mod compgen;
+mod complete;
 pub(crate) mod declare;
 pub(crate) mod dirs;
 mod eval;
@@ -76,6 +78,9 @@ pub(crate) fn find(name: &[u8]) -> Option<Builtin> {
         b"let" => (builtin!(let_), false),
         b"getopts" => (builtin!(getopts), false),
         b"compgen" => (builtin!(compgen::compgen), false),
+        b"complete" => (builtin!(complete::complete), false),
+        b"compopt" => (builtin!(complete::compopt), false),
+        b"bind" => (builtin!(complete::bind), false),
         b"mapfile" | b"readarray" => (builtin!(mapfile::mapfile), false),
         b"test" => (builtin!(test::test), false),
         b"[" => (builtin!(test::bracket), false),
