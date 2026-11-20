@@ -187,8 +187,10 @@ impl Session {
         let known = vfs.missing.borrow().len();
         let mut charged = 0;
         let outer = vfs.timers.replace(Some(Vec::new()));
+        let skipped = vfs.skipped.get();
         let status = self.drive(&mut engine, &name, &mut charged);
         vfs.timers.replace(outer);
+        vfs.skipped.set(skipped);
         let status = status?;
         if status == NOT_FOUND && vfs.missing.borrow()[known..].contains(&name) {
             return Err(io::ErrorKind::NotFound.into());
@@ -241,7 +243,9 @@ impl Session {
 
     /// Waits until the soonest sleep of a blocked command is due and wakes
     /// the sleeps that are, or returns false when nothing but a timer could
-    /// unblock it (or this platform cannot wait in place).
+    /// unblock it. Where the platform cannot wait in place (wasm), the shell's
+    /// clock skips ahead to that deadline instead, so sleeps and timeouts end
+    /// in the order they would have, only sooner.
     fn wait_timers(&self) -> bool {
         let vfs = &self.0;
         let timers = vfs
@@ -253,12 +257,14 @@ impl Session {
         let Some(soonest) = timers.iter().map(|(until, _)| *until).min() else {
             return false;
         };
-        if !wait_until(&*vfs.machine, soonest, || {
-            vfs.control.get().is_some_and(ControlHandle::cancelled)
-        }) {
-            return false;
+        if CAN_WAIT {
+            wait_until(vfs, soonest, || {
+                vfs.control.get().is_some_and(ControlHandle::cancelled)
+            });
+        } else {
+            skip_to(vfs, soonest);
         }
-        let now = vfs.machine.now();
+        let now = vfs.now();
         for (until, waker) in timers {
             if until <= now {
                 waker.wake();
@@ -270,25 +276,33 @@ impl Session {
     }
 }
 
+const CAN_WAIT: bool = cfg!(not(target_family = "wasm"));
+
+/// Moves the shell's clock on to a deadline it is behind.
+fn skip_to(vfs: &Vfs, until: Duration) {
+    let behind = until.saturating_sub(vfs.now());
+    vfs.skipped.set(vfs.skipped.get().saturating_add(behind));
+}
+
+/// Waits until the deadline or until stop says to (the run loop then sees
+/// the cancellation).
 #[cfg(not(target_family = "wasm"))]
-fn wait_until(machine: &dyn crate::machine::Machine, until: Duration, stop: impl Fn() -> bool) -> bool {
+fn wait_until(vfs: &Vfs, until: Duration, stop: impl Fn() -> bool) {
     const POLL: Duration = Duration::from_millis(20);
     loop {
         if stop() {
-            return true;
+            return;
         }
-        let left = until.saturating_sub(machine.now());
+        let left = until.saturating_sub(vfs.now());
         if left.is_zero() {
-            return true;
+            return;
         }
         std::thread::sleep(left.min(POLL));
     }
 }
 
 #[cfg(target_family = "wasm")]
-fn wait_until(_: &dyn crate::machine::Machine, _: Duration, _: impl Fn() -> bool) -> bool {
-    false
-}
+fn wait_until(_: &Vfs, _: Duration, _: impl Fn() -> bool) {}
 
 struct Tracked(Rc<Vfs>);
 

@@ -241,6 +241,7 @@ impl Shell {
             slice: Cell::new(0),
             utilities,
             timers: RefCell::new(None),
+            skipped: Cell::new(std::time::Duration::ZERO),
         });
         let stdin = Rc::new(Source::new(vfs.clone()));
         let stdout = Rc::new(Capture::new(config.limits.output));

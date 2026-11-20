@@ -55,9 +55,18 @@ pub(crate) struct Vfs {
     /// sleeps are deadlines the run loop waits out itself (see
     /// [`crate::command::Session::run`]), since no executor drives timers then.
     pub(crate) timers: RefCell<Option<Vec<(Duration, Waker)>>>,
+    /// How far such runs have skipped ahead of the machine's clock where the
+    /// platform cannot wait in place (wasm): their sleeps end at once, in
+    /// deadline order, and the shell's clock moves on by what they slept.
+    pub(crate) skipped: Cell<Duration>,
 }
 
 impl Vfs {
+    /// The machine's clock, plus what sleeps skipped where it cannot wait.
+    pub(crate) fn now(&self) -> Duration {
+        self.machine.now().saturating_add(self.skipped.get())
+    }
+
     pub(crate) fn fs(&self) -> Rc<dyn FileSystem> {
         self.fs.borrow().clone()
     }
@@ -544,7 +553,7 @@ impl psh_engine::Host for Host {
     }
 
     fn now(&self) -> Duration {
-        self.0.machine.now()
+        self.0.now()
     }
 
     fn sleep(&self, duration: Duration) -> HostFuture<()> {
@@ -552,9 +561,9 @@ impl psh_engine::Host for Host {
             return self.0.machine.sleep(duration);
         }
         let vfs = self.0.clone();
-        let until = vfs.machine.now().saturating_add(duration);
+        let until = vfs.now().saturating_add(duration);
         Box::pin(std::future::poll_fn(move |cx| {
-            if vfs.machine.now() >= until {
+            if vfs.now() >= until {
                 return Poll::Ready(());
             }
             if let Some(timers) = vfs.timers.borrow_mut().as_mut() {
