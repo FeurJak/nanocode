@@ -5,7 +5,11 @@
 // compounds ICU names itself (checked: every X-per-Y that the per rule does not give),
 // currency name patterns and symbols. Plural categories: zero one two few many other;
 // "" means the same as other.
-const LANGS = ["en", "de", "fr", "es", "it", "pt", "nl", "ja", "zh", "ko", "ru"];
+const LANGS = ["en", "de", "fr", "es", "it", "pt", "nl", "ja", "zh", "ko", "ru", "pl", "tr", "ar", "hi", "id", "vi",
+  "en-GB", "en-IN", "es-MX", "fr-CA", "zh-Hant"];
+// Regional data: its rows are kept only where they differ from its language's (djs reads a
+// regional row first, then the language's).
+const REGIONAL = { "en-GB": "en", "en-IN": "en", "es-MX": "es", "fr-CA": "fr", "zh-Hant": "zh" };
 const SIMPLE = ["acre", "bit", "byte", "celsius", "centimeter", "day", "degree", "fahrenheit", "fluid-ounce",
   "foot", "gallon", "gigabit", "gigabyte", "gram", "hectare", "hour", "inch", "kilobit",
   "kilobyte", "kilogram", "kilometer", "liter", "megabit", "megabyte", "meter", "microsecond",
@@ -29,7 +33,8 @@ function pats(lang, opts, sm) {
   return CATS.map((c) => {
     if (!(c in sm)) return null;
     const n = sm[c], s = f.format(n), num = nf.format(n);
-    if (!s.includes(num)) throw new Error("no number in " + s);
+    // ar names one and two without the number (فدان, فدانان)
+    if (!s.includes(num)) { if (c !== "one" && c !== "two") throw new Error("no number in " + s); return s; }
     return s.replace(num, "{0}");
   });
 }
@@ -91,6 +96,7 @@ for (const lang of LANGS) {
   const nf = new Intl.NumberFormat(lang);
   const sep = nf.formatRange(1, 2).slice(1, -1), approx = nf.formatRange(5, 5).replace("5", "");
   ranges.push([lang, sep, approx]);
+  if (lang in REGIONAL) continue;
   const sm = samples(lang), pr = new Intl.PluralRules(lang);
   for (const a of CATS) for (const b of CATS) {
     if (!(a in sm) || !(b in sm)) continue;
@@ -112,7 +118,9 @@ for (const lang of LANGS) for (const long of [false, true]) {
     const shown = Number(p2.filter((p) => p.type === "integer").map((p) => p.value).join(""));
     const div = m - Math.round(Math.log10(shown / 2));
     const pats = {};
-    for (const k of [2, 1.5, 3, 5, 11, 21, 22, 1.25, 7, 25, 1.01, 100, 101]) {
+    // 1.02 to 1.23 reach pl's and ru's few and one, and ar's few and many, at magnitudes that show
+    // three digits; 1.55 and 1.555 their other (a fraction) at those showing two and three.
+    for (const k of [2, 1.5, 3, 5, 11, 21, 22, 1.25, 7, 25, 1.01, 100, 101, 1.02, 1.03, 1.11, 1.21, 1.22, 1.55, 1.555]) {
       const v = k * 10 ** (m - div) >= 10 ** (m - div + 1) ? null : k;
       if (v === null) continue;
       const n = k * 10 ** (m - div);
@@ -125,10 +133,16 @@ for (const lang of LANGS) for (const long of [false, true]) {
     const one = f.format(10 ** m), on = plain.format(10 ** (m - div));
     const c1 = pr.select(10 ** (m - div));
     let exact = "";
-    if (!one.includes(on)) exact = one;
+    // it's one is itself without the number (mille, -mille); fr's is only exactly 1 (-1 millier).
+    if (!one.includes(on) && f.format(-(10 ** m)) === "-" + one) pats[c1] = one;
+    else if (!one.includes(on)) exact = one;
     else if (!(c1 in pats)) pats[c1] = one.replace(on, "{0}");
     else if (one.replace(on, "{0}") !== pats[c1]) exact = one.replace(on, "{0}");
     if (!Object.keys(pats).length) throw new Error("no compact pattern " + lang + " " + long + " " + m + " " + div + " " + f.format(2 * 10 ** m));
+    // Past the largest pattern (trillions), magnitudes share one and show no fraction: take
+    // their missing categories from its own magnitude.
+    const same = compact.find((r) => r[0] === lang && r[1] === long && r[3] === div && r[4]);
+    if (same) CATS.forEach((c, i) => { if (!(c in pats) && same[4][i] !== null) pats[c] = same[4][i]; });
     compact.push([lang, long, m, div, CATS.map((c) => pats[c] ?? null), exact]);
   }
 }
@@ -146,7 +160,7 @@ for (const lang of LANGS) {
       for (const past of [0, 1]) for (const c of CATS) {
         if (!(c in sm)) continue;
         const n = sm[c], t = f.format(past ? -n : n, u), num = nf.format(n);
-        if (!t.includes(num)) throw new Error("rtf " + lang + u + t);
+        if (!t.includes(num) && c !== "one" && c !== "two") throw new Error("rtf " + lang + u + t);
         rel.push([lang, ui, s, past, c, t.replace(num, "{0}")]);
       }
       for (const v of [-3, -2, -1, 0, 1, 2, 3]) {
@@ -162,6 +176,32 @@ for (const lang of LANGS) {
     lists.push([lang, t, s, [between(two, "A", "B"), between(three, "A", "B"), between(four, "B", "C"), between(three, "B", "C")]]);
   }
 }
+const gaps = LANGS.map((lang) => {
+  const p = new Intl.NumberFormat(lang, { style: "percent", notation: "compact" }).formatToParts(0.12);
+  const i = p.findIndex((x) => x.type === "unit");
+  return [lang, i > 0 && p[i - 1].type === "literal" ? p[i - 1].value : ""];
+});
+// Tables where every language has every key drop a regional row equal to its language's; tables
+// where a missing row means something (no compound, no auto word) keep a regional locale's rows
+// only when they differ from its language's as a whole.
+const J = JSON.stringify;
+const perRow = (rows, nkey) => {
+  const base = new Map(rows.filter((r) => !(r[0] in REGIONAL)).map((r) => [J(r.slice(0, nkey)), J(r.slice(nkey))]));
+  return rows.filter((r) => !(r[0] in REGIONAL) || base.get(J([REGIONAL[r[0]], ...r.slice(1, nkey)])) !== J(r.slice(nkey)));
+};
+// The tables whose rows a regional locale owns (possibly none: zh-Hant composes km/h).
+const owned = [];
+const perTable = (rows, name) => {
+  const by = (l) => J(rows.filter((r) => r[0] === l).map((r) => r.slice(1)));
+  for (const l in REGIONAL) if (by(l) !== by(REGIONAL[l])) owned.push([name, l]);
+  return rows.filter((r) => !(r[0] in REGIONAL) || by(r[0]) !== by(REGIONAL[r[0]]));
+};
+const keep = (a, f) => { const k = f(a); a.length = 0; for (const r of k) a.push(r); };
+keep(units, (a) => perRow(a, 3)); keep(pers, (a) => perRow(a, 3)); keep(names, (a) => perRow(a, 2));
+keep(syms, (a) => perRow(a, 2)); keep(rel, (a) => perRow(a, 5)); keep(lists, (a) => perRow(a, 3));
+keep(ranges, (a) => perRow(a, 1)); keep(gaps, (a) => perRow(a, 1));
+keep(comps, (a) => perTable(a, "compound")); keep(pctper, (a) => perTable(a, "percent_per"));
+keep(compact, (a) => perTable(a, "compact")); keep(relAuto, (a) => perTable(a, "relative_auto"));
 const arr = (a) => "[" + a.map(esc).join(", ") + "]";
 const o = [];
 o.push("#![allow(clippy::type_complexity)]");
@@ -183,16 +223,17 @@ o.push("pub(super) static PERCENT_PER: &[(&str, u8, [&str; 6])] = &[");
 for (const [l, d, p] of pctper) o.push("    (" + esc(l) + ", " + d + ", " + arr(p) + "),");
 o.push("];");
 o.push("// (language, long, magnitude, power of ten shown numbers are divided by, patterns by plural, pattern of exactly 1)");
+o.push("// The tables (compound, percent_per, compact, relative_auto) whose rows a regional locale");
+o.push("// has in place of its language's, possibly none.");
+o.push("pub(super) static REGIONAL_TABLES: &[(&str, &str)] = &[");
+for (const [t, l] of owned) o.push("    (" + esc(t) + ", " + esc(l) + "),");
+o.push("];");
 o.push("pub(super) static COMPACT_PATTERNS: &[(&str, bool, u8, u8, [&str; 6], &str)] = &[");
 for (const [l, lg, m, d, p, e] of compact) if (p) o.push("    (" + esc(l) + ", " + lg + ", " + m + ", " + d + ", " + arr(fill(p)) + ", " + esc(e) + "),");
 o.push("];");
 o.push("// The text between a compact percent's number and its sign (ICU's own, not the percent pattern's).");
 o.push("pub(super) static COMPACT_PERCENT_GAP: &[(&str, &str)] = &[");
-for (const lang of LANGS) {
-  const p = new Intl.NumberFormat(lang, { style: "percent", notation: "compact" }).formatToParts(0.12);
-  const i = p.findIndex((x) => x.type === "unit");
-  o.push("    (" + esc(lang) + ", " + esc(i > 0 && p[i - 1].type === "literal" ? p[i - 1].value : "") + "),");
-}
+for (const [l, g] of gaps) o.push("    (" + esc(l) + ", " + esc(g) + "),");
 o.push("];");
 o.push("// Styles are long, short, narrow; past is 1 for a negative value.");
 o.push("pub(super) static RELATIVE: &[(&str, u8, u8, u8, &str, &str)] = &[");
