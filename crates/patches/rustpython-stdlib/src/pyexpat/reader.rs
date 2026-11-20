@@ -1417,6 +1417,11 @@ impl Parser {
             Token::Character(character) if !self.is_valid_unrestricted_character(character) => {
                 ValueStep::Failed(ReaderError::InvalidCharacter)
             }
+            // Attribute-value normalization (XML 1.0 section 3.3.3): a literal tab, newline or carriage return
+            // becomes a space, as expat does; one written as a character reference (&#9;) stays as it is.
+            Token::Character('\t' | '\n' | '\r') if self.quote.is_some() => {
+                self.push_attribute_token(Token::Character(' '))
+            }
             _ if self.quote.is_some() => self.push_attribute_token(token),
             _ => {
                 self.error_position = Some(self.lexer.position);
