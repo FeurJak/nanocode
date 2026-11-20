@@ -759,7 +759,7 @@ impl PyObject {
         if let Ok(mapping) = self.try_mapping(vm) {
             mapping.subscript(&needle, vm)
         } else if let Ok(seq) = self.try_sequence(vm) {
-            let i = needle.key_as_isize(vm)?;
+            let i = seq_fallback_index(&needle, vm)?;
             seq.get_item(i, vm)
         } else {
             if self.class().fast_issubclass(vm.ctx.types.type_type) {
@@ -804,7 +804,7 @@ impl PyObject {
 
         let seq = self.sequence_unchecked();
         if let Some(f) = seq.slots().ass_item.load() {
-            let i = needle.key_as_isize(vm)?;
+            let i = seq_fallback_index(&needle.to_pyobject(vm), vm)?;
             return f(seq, i, Some(value), vm);
         }
 
@@ -826,7 +826,7 @@ impl PyObject {
         }
         let seq = self.sequence_unchecked();
         if let Some(f) = seq.slots().ass_item.load() {
-            let i = needle.key_as_isize(vm)?;
+            let i = seq_fallback_index(&needle.to_pyobject(vm), vm)?;
             return f(seq, i, None, vm);
         }
 
@@ -877,4 +877,22 @@ macro_rules! set_attrs {
             $obj.set_attr($key, $val, $vm)?;
         )+
     };
+}
+
+/// The sequence-protocol fallback of get_item, set_item and del_item converts the key the way CPython's
+/// PyNumber_AsSsize_t(key, PyExc_IndexError) does: an int too large for isize raises IndexError, not OverflowError.
+fn seq_fallback_index(needle: &PyObject, vm: &VirtualMachine) -> PyResult<isize> {
+    // A key without __index__ is a TypeError worded as CPython's sequence subscript words it.
+    let i = needle.try_index_opt(vm).unwrap_or_else(|| {
+        Err(vm.new_type_error(format!(
+            "sequence index must be integer, not '{}'",
+            needle.class().name()
+        )))
+    })?;
+    i.try_to_primitive::<isize>(vm).map_err(|_| {
+        vm.new_index_error(format!(
+            "cannot fit '{}' into an index-sized integer",
+            needle.class().name()
+        ))
+    })
 }
