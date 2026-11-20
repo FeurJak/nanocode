@@ -1471,7 +1471,8 @@ impl Reference {
                 .get(&id)
                 .and_then(|(parent, _, _)| parent.clone());
         }
-        panic!("the model's parent links above {id} loop");
+        assert!(at.is_none(), "the model's parent links above {id} loop");
+        false
     }
 
     fn holds(&self, task: &TaskId, claim: &ClaimId) -> bool {
