@@ -111,11 +111,6 @@ pub fn log2(n: f64) -> f64 {
 // Power functions
 
 #[inline(always)]
-pub fn cbrt(n: f64) -> f64 {
-    unsafe { m_sys::cbrt(n) }
-}
-
-#[inline(always)]
 pub fn hypot(x: f64, y: f64) -> f64 {
     unsafe { m_sys::hypot(x, y) }
 }
