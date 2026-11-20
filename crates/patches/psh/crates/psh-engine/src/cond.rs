@@ -87,7 +87,7 @@ async fn unary(vp: &mut Vp, op: UnaryTest, op_text: &[u8], v: &[u8]) -> R {
             // as an expansion error does (bash).
             // Under `-c` it ends the shell (or subshell) with status 1, as bash does.
             Err(msg) if op_text == b"-v" => {
-                vp.error(&msg).await;
+                vp.error(&quote_subscript_error(v, &msg)).await;
                 if vp.opts.dash_c {
                     vp.sub_fatal = false;
                     return Err(Unwind::Exit(1));
@@ -102,6 +102,64 @@ async fn unary(vp: &mut Vp, op: UnaryTest, op_text: &[u8], v: &[u8]) -> R {
         },
     };
     Ok(i32::from(!t))
+}
+
+/// bash expands a `-v` operand's subscript with its quoted `]` and `'` backslashed, so
+/// an arithmetic error there shows them so: `[[ -v m["x]y"] ]]` reports `x\]y`. A
+/// `]` that closes no `[` of the subscript, and any `'`, can only have been quoted.
+fn quote_subscript_error(v: &[u8], msg: &str) -> String {
+    let (Some(open), Some(b']')) = (v.iter().position(|&b| b == b'['), v.last()) else {
+        return msg.to_string();
+    };
+    let Ok(sub) = std::str::from_utf8(&v[open + 1..v.len() - 1]) else {
+        return msg.to_string();
+    };
+    let Some(rest) = msg.strip_prefix(sub).and_then(|r| r.strip_prefix(": ")) else {
+        return msg.to_string();
+    };
+    if !sub.contains([']', '\'']) {
+        return msg.to_string();
+    }
+    // The escaped text of `sub` from each byte on, for the error token.
+    let mut depth = 0usize;
+    let mut pieces: Vec<String> = Vec::with_capacity(sub.len());
+    for c in sub.chars() {
+        let quoted = match c {
+            '[' => {
+                depth += 1;
+                false
+            }
+            ']' if depth > 0 => {
+                depth -= 1;
+                false
+            }
+            ']' | '\'' => true,
+            _ => false,
+        };
+        let mut p = String::new();
+        if quoted {
+            p.push('\\');
+        }
+        p.push(c);
+        for _ in 0..c.len_utf8() {
+            pieces.push(String::new());
+        }
+        *pieces.last_mut().expect("pushed") = p;
+    }
+    let from = |i: usize| pieces[i..].concat();
+    let mut out = format!("{}: {rest}", from(0));
+    let tag = "(error token is \"";
+    if let Some(at) = out.find(tag) {
+        let start = at + tag.len();
+        if let Some(tok) = out[start..].strip_suffix("\")")
+            && let Some(i) = sub.len().checked_sub(tok.len())
+            && sub.is_char_boundary(i)
+            && &sub[i..] == tok
+        {
+            out = format!("{}{}\")", &out[..start], from(i));
+        }
+    }
+    out
 }
 
 async fn binary(
