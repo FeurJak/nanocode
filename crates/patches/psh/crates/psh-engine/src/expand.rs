@@ -67,6 +67,8 @@ pub(crate) struct Fields {
     /// The piece being expanded is followed by an expansion or quoted text: a tilde
     /// prefix running to its end is not one (`~$x`, `~"/a"` are literal, bash).
     tilde_cut: bool,
+    /// A declaration builtin's `name=value` argument: its value starts after the `=`.
+    decl: bool,
 }
 
 fn is_ifs_ws(b: u8) -> bool {
@@ -114,6 +116,7 @@ impl Fields {
             word: psh_syntax::Span::default(),
             extglob: vp.opts.shopt(Shopt::Extglob),
             tilde_cut: false,
+            decl: false,
         }
     }
 
@@ -1160,6 +1163,7 @@ pub(crate) fn single_now_after(
         word: w.span,
         extglob: false,
         tilde_cut: false,
+        decl: false,
     };
     let (p, rest) = w.parts.split_first().expect("leads_with_self");
     if let Part::Double(inner) = &p.kind {
@@ -1189,6 +1193,7 @@ pub(crate) fn single_now(vp: &mut Vp, code: &Rc<Code>, w: &Word) -> Result<Vec<u
         word: w.span,
         extglob: false,
         tilde_cut: false,
+        decl: false,
     };
     for (i, p) in w.parts.iter().enumerate() {
         part_sync(vp, code, p, false, &mut f, Ctx::Assign, i == 0)?;
@@ -1251,8 +1256,13 @@ fn literal_with_tilde(vp: &Vp, text: &[u8], first: bool, ctx: Ctx, f: &mut Field
     let mut at_start = first;
     let mut ctx = ctx;
     // A word that looks like an assignment (`x=~/a`, also as a command argument)
-    // gets tilde expansion after its `=` and each `:`, as in bash.
+    // gets tilde expansion after its `=` and each `:`, as in bash. An assignment's
+    // value is past its `=` already: `a=b=~` keeps its tilde. POSIX mode drops
+    // this for words that aren't assignments (`echo a=~`), not for `declare a=~`.
+    let assign_value = ctx == Ctx::Assign && !f.decl;
     if first
+        && !assign_value
+        && (ctx == Ctx::Assign || !vp.opts.get(crate::options::SetOpt::Posix))
         && let Some(eq) = text.iter().position(|&b| b == b'=')
         && eq > 0
         && is_name(text[..eq].strip_suffix(b"+").unwrap_or(&text[..eq]))
@@ -3516,6 +3526,7 @@ pub(crate) async fn expand_decl_args(
                 let mut f = Fields::new(vp, false);
                 f.assign = true;
                 f.text_only = true;
+                f.decl = true;
                 f.word = w.span;
                 expand_pieces(vp, code, &pieces, false, &mut f, Ctx::Assign).await?;
                 f.finish_word();
