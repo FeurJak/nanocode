@@ -444,7 +444,7 @@ impl FileSystem for MemFs {
             return None;
         };
         let names = Rc::strong_count(inode) as u64;
-        (names > 1).then(|| Links {
+        (names > 1).then_some(Links {
             group: Rc::as_ptr(inode) as usize as u64,
             names,
         })
