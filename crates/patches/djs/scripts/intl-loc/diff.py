@@ -8,7 +8,7 @@ RUN, OUT, CLDR = sys.argv[1:4]; groups = sys.argv[4:]
 NODE = os.environ.get("NODE", "node")
 here = os.path.dirname(os.path.abspath(__file__))
 env = {**os.environ, "NODE_NO_WARNINGS": "1"}
-cases = [json.loads(l) for l in subprocess.run([NODE, os.path.join(here, "matrix.js"), CLDR] + groups, capture_output=True, text=True, env=env, check=True).stdout.splitlines()]
+cases = [json.loads(l) for l in subprocess.run([NODE, os.path.join(here, "matrix.js"), CLDR] + groups, capture_output=True, text=True, env=env, check=True).stdout.split("\n") if l]
 os.makedirs(OUT, exist_ok=True)
 refp = os.path.join(OUT, "ref.json")
 ref = json.load(open(refp)) if os.path.exists(refp) and not os.environ.get("REGEN") else {}
@@ -17,7 +17,7 @@ for c in cases:
         ref[c["id"]] = subprocess.run([NODE, "-"], input="globalThis.text=v=>process.stdout.write(v+'\\n');" + c["src"], capture_output=True, text=True, env=env).stdout
 json.dump(ref, open(refp, "w"))
 p = subprocess.run([RUN], input="".join(json.dumps(c["src"]) + "\n" for c in cases), capture_output=True, text=True)
-outs = p.stdout.splitlines()
+outs = [l for l in p.stdout.split("\n") if l]
 if p.returncode: print("runjs rc", p.returncode, p.stderr[-2000:])
 tot = collections.Counter(); bad = collections.Counter(); mism = []
 for i, c in enumerate(cases):

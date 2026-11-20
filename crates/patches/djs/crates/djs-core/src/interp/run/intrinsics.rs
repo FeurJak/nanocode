@@ -2812,6 +2812,8 @@ impl Exec<'_> {
             "%RegExpStringIteratorPrototype%" => Some(Intrinsic::RegExpStringIteratorProto),
             "%IteratorHelperPrototype%" => Some(Intrinsic::IteratorHelperProto),
             "%WrapForValidIteratorPrototype%" => Some(Intrinsic::WrapForValidIteratorProto),
+            "%IntlSegmentsPrototype%" => Some(Intrinsic::IntlSegmentsProto),
+            "%IntlSegmentIteratorPrototype%" => Some(Intrinsic::IntlSegmentIteratorProto),
             "%TypedArray%" => Some(Intrinsic::TypedArrayCtor),
             "%CallSitePrototype%" => Some(Intrinsic::CallSiteProto),
             // `X.prototype` of a constructor the prelude has not installed yet.

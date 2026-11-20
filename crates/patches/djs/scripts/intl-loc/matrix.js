@@ -96,6 +96,41 @@ for (const t of infoTags) info.push("((l)=>[" + I.map((g) => "l." + g).join(",")
 add("info", info, 1000);
 // ---- supportedValuesOf ----
 add("svo", ["calendar", "collation", "currency", "numberingSystem", "timeZone", "unit", "x", "Calendar", undefined].map((k) => "Intl.supportedValuesOf(" + (k === undefined ? "" : q(k)) + ")").concat(["Intl.supportedValuesOf({toString(){return 'unit'}}).length", "Intl.supportedValuesOf(Symbol())"]));
+// ---- DisplayNames ----
+if (!only.length || only.includes("dn") || only.includes("dnx")) {
+  const N = (f, k) => [...new Set(Object.keys(Object.values(J("names/" + f + ".json").main)[0].localeDisplayNames[k]).map((x) => x.split("-alt-")[0]))];
+  const langs = N("languages", "languages"), regions = N("territories", "territories"), scripts = N("scripts", "scripts"), variants = N("variants", "variants").map((v) => v.toLowerCase());
+  const currencies = Object.keys(Object.values(J("names/currencies.json").main)[0].numbers.currencies);
+  const calendars = Intl.supportedValuesOf("calendar").concat(["ethiopic-amete-alem", "islamicc", "gregory", "Gregory", "xx", "abcdef", "gregorian"]);
+  const fields = ["era", "year", "quarter", "month", "weekOfYear", "weekday", "day", "dayPeriod", "hour", "minute", "second", "timeZoneName", "foo"];
+  const extraLang = ["en-US", "en-GB", "zh-Hant-TW", "zh-Hans", "zh-Hant", "sr-Latn", "sr-Cyrl-RS", "xyz", "xyz-US", "xyz-Latn-TW", "en-Latn-US-u-ca-gregory", "en_US", "EN-us", "root", "und", "iw", "en-x-foo", "de-CH-1996", "zh-Hant-TW-pinyin", "es-419", "pt-BR", "pt-PT", "fr-CA", "nl-BE", "ar-001", "en-AA", "en-Qaaa", "ja-Latn-JP-hepburn", "sl-rozaj-biske", "de-AT", "ko-KR", "ru-RU", "it-CH", "es-MX", "en-Zzzz-ZZ", "mo", "sh", "tl"];
+  const codes = { language: [...langs, ...variants.map((v) => "xyz-" + v), ...extraLang], region: [...regions, "us", "SU", "ZZ", "AA", "999", "USA", "419", "XA"], script: [...scripts, "latn", "Qaaa", "Abcd", "Lat"], currency: [...currencies, "usd", "XYZ", "US"], calendar: calendars, dateTimeField: fields };
+  const exprs = [];
+  const LOC = only.includes("dnx") ? ["en-GB", "pt-PT", "zh-Hant", "de-AT", "es-MX", "fr-CA", "xx"] : ["en", "de", "fr", "es", "it", "pt", "nl", "ja", "zh", "ko", "ru"];
+  for (const loc of LOC) for (const [type, cs] of Object.entries(codes)) for (const style of ["long", "short", "narrow"]) for (const ld of type === "language" ? ["dialect", "standard"] : ["dialect"]) for (const fb of ["code", "none"]) {
+    if (fb === "none" && style !== "long") continue;
+    const opts = q({ type, style, fallback: fb, languageDisplay: ld });
+    for (let i = 0; i < cs.length; i += 40) exprs.push("((d)=>" + q(cs.slice(i, i + 40)) + ".map((c)=>{try{return d.of(c)}catch(e){return 'E:'+e.constructor.name+':'+e.message}}))(new Intl.DisplayNames(" + q(loc) + "," + opts + "))");
+  }
+  exprs.push(...["new Intl.DisplayNames('en')", "new Intl.DisplayNames('en',{})", "new Intl.DisplayNames('en',{type:'x'})", "new Intl.DisplayNames('en',{type:'language',style:'x'})", "new Intl.DisplayNames('en',{type:'language',languageDisplay:'x'})", "new Intl.DisplayNames('en',{type:'region',languageDisplay:'standard'}).resolvedOptions()", "new Intl.DisplayNames('en-US-u-ca-buddhist',{type:'language'}).resolvedOptions()", "new Intl.DisplayNames('xx',{type:'language'}).resolvedOptions()", "new Intl.DisplayNames(['en-GB'],{type:'region'}).resolvedOptions()", "new Intl.DisplayNames('zh-Hant',{type:'region'}).resolvedOptions()", "Intl.DisplayNames('en',{type:'region'})", "new Intl.DisplayNames('en',{type:'language'}).of()", "Object.getOwnPropertyNames(Intl.DisplayNames).join()", "Object.getOwnPropertyNames(Intl.DisplayNames.prototype).join()", "Intl.DisplayNames.length", "Intl.DisplayNames.supportedLocalesOf(['en','xx','de-AT'])", "Object.prototype.toString.call(new Intl.DisplayNames('en',{type:'region'}))", "Intl.DisplayNames.prototype.of.call({}, 'en')", "new Intl.DisplayNames('en',{type:'region',fallback:'x'})", "new Intl.DisplayNames('en',null)", "new Intl.DisplayNames('en',{type:'region',style:undefined}).resolvedOptions()"]);
+  add(only.includes("dnx") ? "dnx" : "dn", exprs, 300);
+}
+// ---- Segmenter ----
+if (!only.length || only.includes("seg")) {
+  const fromTest = (f) => fs.readFileSync(path.join(DIR, "ucd", f), "utf8").split("\n").map((l) => l.split("#")[0].trim()).filter(Boolean).map((l) => String.fromCodePoint(...l.split(/\s*[÷×]\s*/).filter(Boolean).map((h) => parseInt(h, 16))));
+  const extra = ["", "a", "Hello, world! How are you?", "U.S.A. is big. Mr. Smith left.", "3.14 is pi; 1,000,000.", "can't won't O'Neil", "e\u0301\u0301x", "👨‍👩‍👧‍👦👍🏽🇺🇸🇩🇪🇫", "🏳️‍🌈 ok", "नमस्ते क्षत्रिय", "ক্ষ্মী", "สวัสดีครับ ไทย", "日本語のテキストです。東京タワー", "中华人民共和国成立了", "한국어 텍스트", "Привет, мир. Как дела?", "a\r\nb\nc", "\ud800x\udc00", "foo_bar baz-qux", "αβγ. Δέλτα", "שלום עולם", "مرحبا بالعالم", "カタカナとひらがな", "ﾊﾝｶｸ", "x\u200dy", "$12.50 or €3", "e.g. this", "end.\u2029Next", "(Quote.) Next", "‘single’ “double”"];
+  const strs = [...fromTest("GraphemeBreakTest.txt"), ...fromTest("WordBreakTest.txt"), ...fromTest("SentenceBreakTest.txt"), ...extra];
+  const exprs = [];
+  for (const g of ["grapheme", "word", "sentence"]) for (let i = 0; i < strs.length; i += 25) exprs.push("((s)=>" + q(strs.slice(i, i + 25)) + ".map((t)=>[...s.segment(t)].map((x)=>x.index+(x.isWordLike===undefined?'':x.isWordLike?'w':'n'))))(new Intl.Segmenter('en',{granularity:" + q(g) + "}))");
+  for (const loc of ["ja", "zh", "th"]) exprs.push("((s)=>" + q(extra) + ".map((t)=>[...s.segment(t)].map((x)=>x.index+(x.isWordLike?'w':'n'))))(new Intl.Segmenter(" + q(loc) + ",{granularity:'word'}))");
+  exprs.push(...["new Intl.Segmenter().resolvedOptions()", "new Intl.Segmenter('de',{granularity:'word'}).resolvedOptions()", "new Intl.Segmenter('en',{granularity:'x'})", "Intl.Segmenter()", "Intl.Segmenter.length", "Object.getOwnPropertyNames(Intl.Segmenter.prototype).join()", "Object.prototype.toString.call(new Intl.Segmenter())",
+    "((s)=>[s.containing(0),s.containing(4),s.containing(-1),s.containing(99),s.containing('2'),s.containing(1.7),s.containing()])(new Intl.Segmenter('en',{granularity:'word'}).segment('Hi there'))",
+    "((s)=>Object.getOwnPropertyNames(Object.getPrototypeOf(s)).join()+'/'+Object.prototype.toString.call(s))(new Intl.Segmenter().segment('x'))",
+    "((it)=>[Object.prototype.toString.call(it),typeof it.next,it.next(),it.next(),it.next(),Object.getPrototypeOf(Object.getPrototypeOf(it))===Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()))])(new Intl.Segmenter().segment('ab')[Symbol.iterator]())",
+    "((s)=>{const a=[...s],b=[...s];return a.length===b.length})(new Intl.Segmenter().segment('abc'))", "Intl.Segmenter.prototype.segment.call({}, 'x')", "Object.getPrototypeOf(new Intl.Segmenter().segment('x')).containing.call({}, 0)",
+    "Intl.Segmenter.supportedLocalesOf(['en','th','xx'])", "[...new Intl.Segmenter('en',{granularity:'word'}).segment({toString(){return 'a b'}})].length"]);
+  add("seg", exprs, 60);
+}
 for (const c of cases) process.stdout.write(JSON.stringify(c) + "\n");
 
 

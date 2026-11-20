@@ -1,6 +1,10 @@
 mod collate;
 mod data;
 mod date;
+mod displaynames;
+mod segdata;
+mod segmenter;
+mod dndata;
 mod locale;
 mod locdata;
 mod number;
@@ -207,6 +211,8 @@ pub(crate) fn plural_categories(lang: &str, ordinal: bool) -> &'static str {
 /// The Intl kinds of Locale (its spec is its tag) and of Intl.supportedValuesOf's lists.
 const LOCALE: i32 = 16;
 const SUPPORTED_VALUES: i32 = 15;
+const DISPLAY_NAMES: i32 = 17;
+const SEGMENTER: i32 = 18;
 
 pub(crate) const LANGS: [&str; 11] = ["en", "de", "fr", "es", "it", "pt", "nl", "ja", "zh", "ko", "ru"];
 
@@ -285,6 +291,8 @@ pub(crate) fn intrinsic(heap: &mut Heap, k: u16, a: [Value; 5]) -> Result<Option
                 0 => number::resolve(&locale, &raw)?,
                 1 => date::resolve(&locale, &raw)?,
                 2 => collate::resolve(&locale, &tags, &raw)?,
+                DISPLAY_NAMES => displaynames::resolve(&locale, &raw)?,
+                SEGMENTER => segmenter::resolve(&locale, &raw)?,
                 _ => text::resolve(kind, &locale, &raw)?,
             };
             string_value(heap, &spec.encode())?
@@ -296,6 +304,18 @@ pub(crate) fn intrinsic(heap: &mut Heap, k: u16, a: [Value; 5]) -> Result<Option
             if kind == LOCALE {
                 let what = str_arg(heap, a[2]).unwrap_or_default();
                 return Ok(Some(match locale::get(&spec, &what)? {
+                    Some(v) => string_value(heap, &v)?,
+                    None => Value::UNDEFINED,
+                }));
+            }
+            if kind == SEGMENTER {
+                let Some(x) = a[2].as_string() else { return Ok(None) };
+                let units: Vec<u16> = heap.str_units(x).collect();
+                return Ok(Some(string_value(heap, &segmenter::segment(&Spec::parse(&spec), &units))?));
+            }
+            if kind == DISPLAY_NAMES {
+                let code = str_arg(heap, a[2]).unwrap_or_default();
+                return Ok(Some(match displaynames::of(&Spec::parse(&spec), &code)? {
                     Some(v) => string_value(heap, &v)?,
                     None => Value::UNDEFINED,
                 }));

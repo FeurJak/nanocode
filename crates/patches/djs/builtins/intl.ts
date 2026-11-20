@@ -18,6 +18,9 @@ function IntlLocaleTags(locales: Value): Str {
     }
     return AsStr(locales);
   }
+  if (locales === null) {
+    throw NewTypeError("Cannot convert undefined or null to object");
+  }
   const one: Value = IntlSpec(locales, 16);
   if (one !== undefined) {
     return AsStr(one);
@@ -996,6 +999,227 @@ function IntlSupportedValuesOf(key?: Value): Obj {
   return IntlSplit(AsStr(IntlFormat(15, ToString(key), undefined, undefined, false)), ",", 0);
 }
 
+
+// ---- DisplayNames (ECMA-402 12) -------------------------------------------------------
+// Kind 17: displaynames.rs.
+
+/**
+ * Intl.DisplayNames ( locales, options ).
+ * @constructor Intl.DisplayNames
+ * @length 2
+ */
+function IntlDisplayNamesConstructor(locales?: Value, options?: Value): Obj {
+  IntlRequireNew(new.target, "DisplayNames");
+  if (options === undefined || options === null) {
+    throw NewTypeError("invalid_argument");
+  }
+  return IntlConstruct(new.target, "DisplayNames", 17, locales, IntlReadOptions(options, "localeMatcher:s,style:s,type:s,fallback:s,languageDisplay:s"));
+}
+
+/**
+ * Intl.DisplayNames.supportedLocalesOf ( locales [ , options ] ).
+ * @builtin Intl.DisplayNames.supportedLocalesOf
+ * @length 1
+ */
+function IntlDisplayNamesSupportedLocalesOf(locales?: Value): Obj {
+  return IntlSupportedLocales(locales);
+}
+
+/**
+ * Intl.DisplayNames.prototype.resolvedOptions ( ).
+ * @builtin Intl.DisplayNames.prototype.resolvedOptions
+ */
+function IntlDisplayNamesPrototypeResolvedOptions(this: Value): Obj {
+  return IntlResolvedObject(IntlThis(this, 17, "Intl.DisplayNames.prototype.resolvedOptions"));
+}
+
+/**
+ * Intl.DisplayNames.prototype.of ( code ).
+ * @builtin Intl.DisplayNames.prototype.of
+ */
+function IntlDisplayNamesPrototypeOf(this: Value, code?: Value): Value {
+  const spec: Str = IntlThis(this, 17, "Intl.DisplayNames.prototype.of");
+  return IntlFormat(17, spec, ToString(code), undefined, false);
+}
+
+/**
+ * Intl.DisplayNames.prototype [ %Symbol.toStringTag% ].
+ * @value Intl.DisplayNames.prototype[Symbol.toStringTag]
+ * @attributes configurable
+ */
+function IntlDisplayNamesToStringTag(): Str {
+  return "Intl.DisplayNames";
+}
+
+// ---- Segmenter (ECMA-402 18) ----------------------------------------------------------
+// Kind 18 is a Segmenter (segmenter.rs), 19 its Segments and 20 their iterator; a Segments'
+// and an iterator's slot holds the internal array [string, starts, wordLike, position].
+
+/**
+ * Intl.Segmenter ( [ locales [ , options ] ] ).
+ * @constructor Intl.Segmenter
+ * @length 0
+ */
+function IntlSegmenterConstructor(locales?: Value, options?: Value): Obj {
+  IntlRequireNew(new.target, "Segmenter");
+  if (options === null) {
+    throw NewTypeError("Cannot convert undefined or null to object");
+  }
+  return IntlConstruct(new.target, "Segmenter", 18, locales, IntlReadOptions(options, "localeMatcher:s,granularity:s"));
+}
+
+/**
+ * Intl.Segmenter.supportedLocalesOf ( locales [ , options ] ).
+ * @builtin Intl.Segmenter.supportedLocalesOf
+ * @length 1
+ */
+function IntlSegmenterSupportedLocalesOf(locales?: Value): Obj {
+  return IntlSupportedLocales(locales);
+}
+
+/**
+ * Intl.Segmenter.prototype.resolvedOptions ( ).
+ * @builtin Intl.Segmenter.prototype.resolvedOptions
+ */
+function IntlSegmenterPrototypeResolvedOptions(this: Value): Obj {
+  return IntlResolvedObject(IntlThis(this, 18, "Intl.Segmenter.prototype.resolvedOptions"));
+}
+
+/**
+ * Intl.Segmenter.prototype.segment ( string ).
+ * @builtin Intl.Segmenter.prototype.segment
+ */
+function IntlSegmenterPrototypeSegment(this: Value, string?: Value): Obj {
+  const spec: Str = IntlThis(this, 18, "Intl.Segmenter.prototype.segment");
+  const s: Str = ToString(string);
+  const o: Obj = IntlCreate(RealmIntrinsic("IntlSegmentsPrototype"), 19, spec);
+  const data: Obj = ArrayCreate(0);
+  ArrayPushDense(data, s);
+  ArrayPushDense(data, undefined);
+  ArrayPushDense(data, undefined);
+  ArrayPushDense(data, 0);
+  IntlBound(o, data);
+  return o;
+}
+
+/**
+ * Intl.Segmenter.prototype [ %Symbol.toStringTag% ].
+ * @value Intl.Segmenter.prototype[Symbol.toStringTag]
+ * @attributes configurable
+ */
+function IntlSegmenterToStringTag(): Str {
+  return "Intl.Segmenter";
+}
+
+/** The segment starts (and the end) of a Segments' data, computed once. */
+function IntlSegmentStarts(spec: Str, data: Obj): Obj {
+  const have: Value = Get(data, 1);
+  if (have !== undefined) {
+    return AsObj(have);
+  }
+  const enc: Str = AsStr(IntlFormat(18, spec, Get(data, 0), undefined, false));
+  const bar: f64 = StrIndexOf(enc, "|", 0);
+  const list: Str = bar < 0 ? enc : StrSubstring(enc, 0, bar);
+  const parts: Obj = IntlSplit(list, ",", 0);
+  const starts: Obj = ArrayCreate(0);
+  let i: f64 = 0;
+  const n: f64 = LengthOfArrayLike(parts);
+  while (i < n) {
+    ArrayPushDense(starts, ToNumber(Get(parts, i)));
+    i += 1;
+  }
+  Set(data, 1, starts);
+  if (bar >= 0) {
+    Set(data, 2, StrSubstring(enc, bar + 1, StrLength(enc)));
+  }
+  return starts;
+}
+
+/** CreateSegmentDataObject for the k-th segment. */
+function IntlSegmentData(spec: Str, data: Obj, k: f64): Obj {
+  const starts: Obj = IntlSegmentStarts(spec, data);
+  const s: Str = AsStr(Get(data, 0));
+  const a: f64 = ToNumber(Get(starts, k));
+  const b: f64 = ToNumber(Get(starts, k + 1));
+  const o: Obj = ObjectCreate(RealmIntrinsic("ObjectPrototype"));
+  CreateDataPropertyOrThrow(o, "segment", StrSubstring(s, a, b));
+  CreateDataPropertyOrThrow(o, "index", a);
+  CreateDataPropertyOrThrow(o, "input", s);
+  const flags: Value = Get(data, 2);
+  if (flags !== undefined) {
+    CreateDataPropertyOrThrow(o, "isWordLike", StrSubstring(AsStr(flags), k, k + 1) === "1");
+  }
+  return o;
+}
+
+/**
+ * %IntlSegmentsPrototype%.containing ( index ).
+ * @builtin %IntlSegmentsPrototype%.containing
+ */
+function IntlSegmentsPrototypeContaining(this: Value, index?: Value): Value {
+  const spec: Str = IntlThis(this, 19, "%Segments.prototype%.containing");
+  const data: Obj = AsObj(IntlBound(AsObj(this), undefined));
+  const s: Str = AsStr(Get(data, 0));
+  const n: f64 = ToIntegerOrInfinity(index);
+  const len: f64 = StrLength(s);
+  if (n < 0 || n >= len) {
+    return undefined;
+  }
+  const starts: Obj = IntlSegmentStarts(spec, data);
+  let lo: f64 = 0;
+  let hi: f64 = LengthOfArrayLike(starts) - 1;
+  while (hi - lo > 1) {
+    const mid: f64 = MathFloor((lo + hi) / 2);
+    if (ToNumber(Get(starts, mid)) <= n) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return IntlSegmentData(spec, data, lo);
+}
+
+/**
+ * %IntlSegmentsPrototype% [ %Symbol.iterator% ] ( ).
+ * @builtin %IntlSegmentsPrototype%[Symbol.iterator]
+ */
+function IntlSegmentsPrototypeIterator(this: Value): Obj {
+  const spec: Str = IntlThis(this, 19, "%Segments.prototype%[@@iterator]");
+  const data: Obj = AsObj(IntlBound(AsObj(this), undefined));
+  const it: Obj = IntlCreate(RealmIntrinsic("IntlSegmentIteratorPrototype"), 20, spec);
+  const own: Obj = ArrayCreate(0);
+  ArrayPushDense(own, Get(data, 0));
+  ArrayPushDense(own, Get(data, 1));
+  ArrayPushDense(own, Get(data, 2));
+  ArrayPushDense(own, 0);
+  IntlBound(it, own);
+  return it;
+}
+
+/**
+ * %IntlSegmentIteratorPrototype%.next ( ).
+ * @builtin %IntlSegmentIteratorPrototype%.next
+ */
+function IntlSegmentIteratorPrototypeNext(this: Value): Obj {
+  const spec: Str = IntlThis(this, 20, "%SegmentIterator.prototype%.next");
+  const data: Obj = AsObj(IntlBound(AsObj(this), undefined));
+  const starts: Obj = IntlSegmentStarts(spec, data);
+  const k: f64 = ToNumber(Get(data, 3));
+  if (k + 1 >= LengthOfArrayLike(starts)) {
+    return CreateIterResultObject(undefined, true);
+  }
+  Set(data, 3, k + 1);
+  return CreateIterResultObject(IntlSegmentData(spec, data, k), false);
+}
+
+/**
+ * %IntlSegmentIteratorPrototype% [ %Symbol.toStringTag% ].
+ * @value %IntlSegmentIteratorPrototype%[Symbol.toStringTag]
+ * @attributes configurable
+ */
+function IntlSegmentIteratorToStringTag(): Str {
+  return "Segmenter String Iterator";
+}
 
 // ---- the locale-sensitive methods of other builtins (ECMA-402 chapters 19 to 21) -------
 

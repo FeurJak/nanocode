@@ -203,9 +203,12 @@ pub enum Intrinsic {
     Modules,
     /// %SharedArrayBuffer.prototype% (builtins/sharedarraybuffer.ts).
     SharedArrayBufferProto,
+    /// %IntlSegmentsPrototype% and %IntlSegmentIteratorPrototype% (builtins/intl.ts).
+    IntlSegmentsProto,
+    IntlSegmentIteratorProto,
 }
 
-const INTRINSIC_COUNT: u32 = Intrinsic::SharedArrayBufferProto as u32 + 1;
+const INTRINSIC_COUNT: u32 = Intrinsic::IntlSegmentIteratorProto as u32 + 1;
 
 impl Intrinsic {
     /// The intrinsic prototype of the constructor `name`, if the realm has one: the
@@ -255,6 +258,8 @@ impl Intrinsic {
             "Iterator" => Intrinsic::IteratorProto,
             "IteratorHelper" => Intrinsic::IteratorHelperProto,
             "WrapForValidIterator" => Intrinsic::WrapForValidIteratorProto,
+            "IntlSegments" => Intrinsic::IntlSegmentsProto,
+            "IntlSegmentIterator" => Intrinsic::IntlSegmentIteratorProto,
             "DisposableStack" => Intrinsic::DisposableStackProto,
             "AsyncDisposableStack" => Intrinsic::AsyncDisposableStackProto,
             "SuppressedError" => Intrinsic::SuppressedErrorProto,
@@ -394,6 +399,7 @@ pub(crate) fn init(heap: &mut Heap) -> Result<(), HeapError> {
         Intrinsic::RegExpStringIteratorProto,
         Intrinsic::IteratorHelperProto,
         Intrinsic::WrapForValidIteratorProto,
+        Intrinsic::IntlSegmentIteratorProto,
     ] {
         let p = heap.new_object(Some(iterator_proto))?;
         set(heap, i, Value::object(p));
@@ -448,6 +454,7 @@ pub(crate) fn init(heap: &mut Heap) -> Result<(), HeapError> {
         Intrinsic::WeakRefProto,
         Intrinsic::FinalizationRegistryProto,
         Intrinsic::SharedArrayBufferProto,
+        Intrinsic::IntlSegmentsProto,
     ] {
         let p = heap.new_object(Some(object_proto))?;
         set(heap, i, Value::object(p));
