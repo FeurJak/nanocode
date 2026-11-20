@@ -105,6 +105,10 @@ pub trait Files {
         Err(io::ErrorKind::Unsupported.into())
     }
 
+    fn set_mtime(&self, _path: &[u8], _mtime_ns: i64) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
     /// The entry at a path itself: a symlink rather than what it points at.
     fn lstat(&self, path: &[u8]) -> io::Result<Stat> {
         self.stat(path)

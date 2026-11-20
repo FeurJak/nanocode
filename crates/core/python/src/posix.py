@@ -378,8 +378,32 @@ def chmod(path, mode, *, dir_fd=None, follow_symlinks=True):
     _host.chmod(_abs(path), mode)
 
 
+def _utime_ns(value):
+    if isinstance(value, int):
+        return value * 1000000000
+    if isinstance(value, float):
+        whole = value // 1
+        return int(whole) * 1000000000 + int((value - whole) * 1e9)
+    raise TypeError("utime: 'times' must be either a tuple of two ints or None")
+
+
+@_named
 def utime(path, times=None, *, ns=None, dir_fd=None, follow_symlinks=True):
-    _host.stat(_abs(path))
+    if times is not None and ns is not None:
+        raise ValueError("utime: you may specify either 'times' or 'ns' but not both")
+    if times is not None:
+        if not isinstance(times, tuple) or len(times) != 2:
+            raise TypeError("utime: 'times' must be either a tuple of two ints or None")
+        mtime_ns = _utime_ns(times[1])
+        _utime_ns(times[0])
+    elif ns is not None:
+        if not isinstance(ns, tuple) or len(ns) != 2 or not all(isinstance(part, int) for part in ns):
+            raise TypeError("utime: 'ns' must be a tuple of two ints")
+        mtime_ns = ns[1]
+    else:
+        import time
+        mtime_ns = time.time_ns()
+    _host.utime(_abs(path), mtime_ns)
 
 
 @_named

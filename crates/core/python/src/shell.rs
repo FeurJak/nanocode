@@ -387,6 +387,14 @@ impl FileSystem for Mixed {
         }
     }
 
+    fn set_mtime(&self, path: &[u8], mtime_ns: i64) -> Reply<()> {
+        if self.tree.holds(path) {
+            Reply::Now(self.tree.set_mtime(path, mtime_ns))
+        } else {
+            self.real.set_mtime(path, mtime_ns)
+        }
+    }
+
     fn symlink(&self, target: &[u8], link: &[u8]) -> Reply<()> {
         if self.tree.holds(link) {
             Reply::Now(self.tree.symlink(target, link))
@@ -445,6 +453,10 @@ impl Files for Direct {
 
     fn set_mode(&self, path: &[u8], mode: u32) -> io::Result<()> {
         now(self.files.set_mode(path, mode))
+    }
+
+    fn set_mtime(&self, path: &[u8], mtime_ns: i64) -> io::Result<()> {
+        now(self.files.set_mtime(path, mtime_ns))
     }
 
     fn lstat(&self, path: &[u8]) -> io::Result<Stat> {
@@ -536,6 +548,12 @@ async fn apply(tree: &Tree, files: &Rc<dyn FileSystem>) -> io::Result<()> {
     }
     for (link, target) in &delta.linked {
         files.symlink(target, link).get().await?;
+    }
+    for (path, mtime_ns) in &delta.times {
+        match files.set_mtime(path, *mtime_ns).get().await {
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => {}
+            done => done?,
+        }
     }
     Ok(())
 }

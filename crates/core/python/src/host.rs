@@ -643,6 +643,17 @@ mod _host {
     }
 
     #[pyfunction]
+    fn utime(path: ArgBytesLike, mtime_ns: i64, vm: &VirtualMachine) -> PyResult<()> {
+        let path = path.borrow_buf();
+        files(vm, &path, |state| match state.files.set_mtime(&path, mtime_ns) {
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                state.files.stat(&path).map(|_| ())
+            }
+            done => done,
+        })
+    }
+
+    #[pyfunction]
     fn rename(from: ArgBytesLike, to: ArgBytesLike, vm: &VirtualMachine) -> PyResult<()> {
         let from = from.borrow_buf();
         let to = to.borrow_buf();

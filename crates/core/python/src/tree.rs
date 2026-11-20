@@ -21,6 +21,8 @@ pub struct Delta {
     pub modes: Vec<(Vec<u8>, u32)>,
     /// Symlinks Python made, as (link, target).
     pub linked: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Modification times Python set, as (path, mtime_ns).
+    pub times: Vec<(Vec<u8>, i64)>,
 }
 
 enum Node {
@@ -52,6 +54,8 @@ pub struct Tree {
     nodes: RefCell<BTreeMap<Vec<u8>, Node>>,
     /// Symlinks Python made here, by path, each with its target as given.
     links: RefCell<BTreeMap<Vec<u8>, Vec<u8>>>,
+    /// Paths whose modification time Python set.
+    timed: RefCell<std::collections::BTreeSet<Vec<u8>>>,
 }
 
 fn parent(path: &[u8]) -> &[u8] {
@@ -110,6 +114,7 @@ impl Tree {
             first: RefCell::new(BTreeMap::new()),
             nodes: RefCell::new(BTreeMap::new()),
             links: RefCell::new(BTreeMap::new()),
+            timed: RefCell::new(std::collections::BTreeSet::new()),
         }
     }
 
@@ -164,6 +169,11 @@ impl Tree {
                 if *moded {
                     delta.modes.push((path.clone(), *mode));
                 }
+            }
+        }
+        for path in self.timed.borrow().iter() {
+            if let Some(Node::File { mtime_ns, .. } | Node::Dir { mtime_ns, .. }) = nodes.get(path) {
+                delta.times.push((path.clone(), *mtime_ns));
             }
         }
         delta
@@ -318,6 +328,19 @@ impl Files for Tree {
             }
             None => Err(missing()),
         }
+    }
+
+    fn set_mtime(&self, path: &[u8], mtime_ns: i64) -> io::Result<()> {
+        self.within(path)?;
+        let path = self.resolve(path)?;
+        match self.nodes.borrow_mut().get_mut(&path) {
+            Some(Node::File { mtime_ns: kept, .. } | Node::Dir { mtime_ns: kept, .. }) => {
+                *kept = mtime_ns;
+            }
+            None => return Err(missing()),
+        }
+        self.timed.borrow_mut().insert(path);
+        Ok(())
     }
 
     fn list(&self, path: &[u8]) -> io::Result<Vec<Vec<u8>>> {
