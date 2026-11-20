@@ -167,6 +167,7 @@ default_table='
 1 canary_hands_forget_pending canary:200 --scenario hands --mutation forget_pending
 1 canary_hands_cross_replies canary:200 --scenario hands --mutation cross_replies
 1 canary_hands_mangle_runtime canary:200 --scenario hands --mutation mangle_runtime
+1 canary_hands_reply_overwrites canary:12000 --scenario hands --mutation reply_overwrites
 8 workspace_stack pass --scenario workspace_stack
 2 workspace_stack_twice pass --scenario workspace_stack --twice
 1 canary_workspace_stack_torn_commit canary:200 --scenario workspace_stack --mutation torn_commit

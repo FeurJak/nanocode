@@ -96,10 +96,11 @@ pub enum HandsMutation {
     ReopenOrphaned,
     ReopenUnprobed,
     CancelLate,
+    ReplyOverwrites,
 }
 
 impl HandsMutation {
-    const ALL: [Self; 19] = [
+    const ALL: [Self; 20] = [
         Self::None,
         Self::AckBeforeStore,
         Self::SkipRecord,
@@ -119,6 +120,7 @@ impl HandsMutation {
         Self::ReopenOrphaned,
         Self::ReopenUnprobed,
         Self::CancelLate,
+        Self::ReplyOverwrites,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -148,6 +150,7 @@ impl HandsMutation {
             Self::ReopenOrphaned => "reopen_orphaned",
             Self::ReopenUnprobed => "reopen_unprobed",
             Self::CancelLate => "cancel_late",
+            Self::ReplyOverwrites => "reply_overwrites",
         }
     }
 
@@ -472,6 +475,7 @@ impl Store {
 
     fn answer(&self, key: &str, runtime: &str, id: u64, reply: &RemoteReply) {
         let cross = self.mutation == HandsMutation::CrossReplies;
+        let overwrite = self.mutation == HandsMutation::ReplyOverwrites;
         let runtime = if self.mutation == HandsMutation::MangleRuntime {
             ""
         } else {
@@ -480,7 +484,8 @@ impl Store {
         self.rows.update(|rows| {
             for row in rows.values_mut() {
                 let same = row.key == key && row.runtime == runtime;
-                if same && (row.id == id || (cross && row.reply.is_none())) {
+                let open = row.reply.is_none() || overwrite;
+                if same && open && (row.id == id || cross) {
                     row.reply = Some(reply.clone());
                 }
             }
@@ -594,9 +599,8 @@ impl HandRequests for Store {
         call_id: &'a str,
     ) -> HostFuture<'a, Result<Option<PendingRequest>, String>> {
         Box::pin(async move {
-            self.write().await;
             let at = (session_id.to_owned(), call_id.to_owned());
-            Ok(self.rows.read(|rows| {
+            let found = self.rows.read(|rows| {
                 rows.get(&at).map(|row| PendingRequest {
                     id: row.id,
                     key: row.key.clone(),
@@ -606,7 +610,9 @@ impl HandRequests for Store {
                     turn_id: row.turn_id.clone(),
                     reply: row.reply.clone(),
                 })
-            }))
+            });
+            self.write().await;
+            Ok(found)
         })
     }
 
