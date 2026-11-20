@@ -5,10 +5,10 @@ use std::{
 };
 
 use nanocode_board::{
-    ClaimId, Event, EventId, Fold, NewTask, Op, Outcome, Phase, Rejection, TaskId,
+    Change, ClaimId, Event, EventId, Fold, NewTask, Op, Outcome, Phase, Rejection, TaskId,
     access::{Can, Grant, Who},
     sim::{self as board_sim, Mutation as BoardRule},
-    steer::SteerOp,
+    steer::{SteerOp, Steered},
 };
 
 use crate::rng::{FNV_OFFSET, Rng, fnv};
@@ -26,10 +26,11 @@ pub enum SteerMutation {
     ByClaimFollows,
     ToTerminal,
     FinishIgnoresSteers,
+    KeptOnCancel,
 }
 
 impl SteerMutation {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::None,
         Self::LostOnMove,
         Self::RedeliveredAfterHeed,
@@ -37,6 +38,7 @@ impl SteerMutation {
         Self::ByClaimFollows,
         Self::ToTerminal,
         Self::FinishIgnoresSteers,
+        Self::KeptOnCancel,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -54,6 +56,7 @@ impl SteerMutation {
             Self::ByClaimFollows => "steer_by_claim_follows",
             Self::ToTerminal => "steer_to_terminal",
             Self::FinishIgnoresSteers => "finish_ignores_steers",
+            Self::KeptOnCancel => "steer_kept_on_cancel",
         }
     }
 
@@ -75,6 +78,7 @@ impl SteerMutation {
             Self::ByClaimFollows => BoardRule::SteerByClaimFollows,
             Self::ToTerminal => BoardRule::SteerToTerminal,
             Self::FinishIgnoresSteers => BoardRule::FinishIgnoresSteers,
+            Self::KeptOnCancel => BoardRule::SteerKeptOnCancel,
         }
     }
 }
@@ -86,6 +90,7 @@ pub struct SteerStats {
     pub refused: u64,
     pub heeded: u64,
     pub pending: u64,
+    pub dropped: u64,
     pub takeovers: u64,
     pub stale: u64,
     pub crashes: u64,
@@ -100,6 +105,7 @@ impl SteerStats {
         self.refused += other.refused;
         self.heeded += other.heeded;
         self.pending += other.pending;
+        self.dropped += other.dropped;
         self.takeovers += other.takeovers;
         self.stale += other.stale;
         self.crashes += other.crashes;
@@ -190,6 +196,7 @@ struct Oracle {
     sent: BTreeMap<u64, (TaskId, u64)>,
     taken: BTreeMap<u64, BTreeSet<ClaimId>>,
     acked: BTreeMap<u64, ClaimId>,
+    dropped: BTreeSet<u64>,
     claims: BTreeMap<TaskId, Vec<ClaimId>>,
     stats: SteerStats,
 }
@@ -442,6 +449,48 @@ fn step(
     Ok(())
 }
 
+/// Cancelling a task with pending steers drops every one of them exactly once and says so
+/// in one Dropped change, so the sender never waits on a steer no holder will read.
+fn cancel(host: &mut Host, oracle: &mut Oracle, now: u64, task: TaskId) -> Result<(), String> {
+    let pending = host.pending(&task);
+    let before = host.fold.entries().len();
+    let op = Op::Cancel {
+        task: task.clone(),
+        reason: "dropped".to_owned(),
+    };
+    if host.append(OWNER, now, op)?.1.is_err() {
+        return Ok(());
+    }
+    let left = host.pending(&task);
+    if !left.is_empty() {
+        return Err(format!("cancelled {task} still holds steers {left:?}"));
+    }
+    let drops: Vec<(u64, u64)> = host.fold.entries()[before..]
+        .iter()
+        .filter(|entry| entry.task == task)
+        .filter_map(|entry| match &entry.change {
+            Change::Steered(Steered::Dropped { upto, count }) => Some((*upto, *count)),
+            _ => None,
+        })
+        .collect();
+    let wanted: Vec<(u64, u64)> = pending
+        .last()
+        .map(|upto| vec![(*upto, pending.len() as u64)])
+        .unwrap_or_default();
+    if drops != wanted {
+        return Err(format!(
+            "cancel of {task} reported drops {drops:?}, pending were {pending:?}"
+        ));
+    }
+    for seq in pending {
+        if oracle.acked.contains_key(&seq) || !oracle.dropped.insert(seq) {
+            return Err(format!("steer {seq} on {task} dropped after it was settled"));
+        }
+        oracle.stats.dropped += 1;
+    }
+    Ok(())
+}
+
 fn run(seed: u64) -> Result<(SteerStats, u64), String> {
     let mut rng = Rng::derive(seed, "board steer");
     let mut now = 1_700_000_000_000 + rng.range(0, 400 * 24 * 3_600 * SECOND);
@@ -480,11 +529,7 @@ fn run(seed: u64) -> Result<(SteerStats, u64), String> {
             send(&mut host, &mut oracle, &mut rng, now, &task)?;
         } else if roll < steer_ppm + 4_000 {
             let task = tasks[rng.pick(tasks.len())].clone();
-            let op = Op::Cancel {
-                task,
-                reason: "dropped".to_owned(),
-            };
-            let _ = host.append(OWNER, now, op)?;
+            cancel(&mut host, &mut oracle, now, task)?;
         } else if roll < steer_ppm + 12_000 {
             oracle.stats.restarts += 1;
             host.restart(rng.chance(500_000))?;
@@ -518,6 +563,7 @@ fn run(seed: u64) -> Result<(SteerStats, u64), String> {
                     by.0
                 ));
             }
+            (None, false) if oracle.dropped.contains(seq) => {}
             (None, false) => return Err(format!("steer {seq} on {task} was lost unheeded")),
             (None, true) => oracle.stats.pending += 1,
             (Some(_), false) => {}
@@ -596,7 +642,7 @@ pub fn report(
     totals: &SteerStats,
 ) -> ExitCode {
     println!(
-        "RESULT seeds={}..{} scenario=board_steer mutation={} passed={passed} failed={failed} twice={twice} sent={} refused={} heeded={} pending={} takeovers={} stale_heeds={} crashes={} restarts={} heed_latency_p99_ms={} (simulated)",
+        "RESULT seeds={}..{} scenario=board_steer mutation={} passed={passed} failed={failed} twice={twice} sent={} refused={} heeded={} pending={} dropped={} takeovers={} stale_heeds={} crashes={} restarts={} heed_latency_p99_ms={} (simulated)",
         seeds.start,
         seeds.end,
         mutation.name(),
@@ -604,6 +650,7 @@ pub fn report(
         totals.refused,
         totals.heeded,
         totals.pending,
+        totals.dropped,
         totals.takeovers,
         totals.stale,
         totals.crashes,

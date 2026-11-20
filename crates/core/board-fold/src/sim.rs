@@ -110,6 +110,7 @@ pub enum Mutation {
     SteerByClaimFollows,
     SteerToTerminal,
     FinishIgnoresSteers,
+    SteerKeptOnCancel,
     GoalClaimedByAnyone,
     ReportsDropped,
     RetryPostsTwice,

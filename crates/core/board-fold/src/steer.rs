@@ -60,6 +60,10 @@ pub enum Steered {
         upto: u64,
         count: u64,
     },
+    Dropped {
+        upto: u64,
+        count: u64,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,6 +178,27 @@ impl Fold {
             }
         };
         self.record(seq, event, &id, Change::Steered(change));
+    }
+}
+
+impl Fold {
+    /// Cancelling a task drops the steers no holder heeded and records how many, so
+    /// whoever watches it learns they were never acted on instead of waiting forever.
+    pub(crate) fn drop_steers(&mut self, seq: u64, event: &Event, id: &TaskId) {
+        if mutated(Mutation::SteerKeptOnCancel) {
+            return;
+        }
+        let Some(queue) = self.steers.queues.remove(id) else {
+            return;
+        };
+        let Some(upto) = queue.back().map(|steer| steer.seq) else {
+            return;
+        };
+        let change = Steered::Dropped {
+            upto,
+            count: queue.len() as u64,
+        };
+        self.record(seq, event, id, Change::Steered(change));
     }
 }
 

@@ -947,6 +947,7 @@ impl Fold {
         if !self.enter(id, cancelled, None, self.now_ms) {
             return;
         }
+        self.drop_steers(seq, event, id);
         self.record(seq, event, id, Change::Cancelled { reason });
         self.cascade(seq, event, id);
     }
