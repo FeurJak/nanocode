@@ -72,6 +72,10 @@ struct Reuse {
     decoded: usize,
 }
 
+/// Pages decoded per load: each chunk's raw pages are dropped before the next
+/// loads, so the encoded and decoded history never sit side by side whole.
+const DECODE_CHUNK: usize = 16;
+
 async fn advance_sequence(
     reader: PayloadReader<'_>,
     sequence: Sequence,
@@ -95,8 +99,9 @@ async fn advance_sequence(
     let added = references[reused..].to_vec();
     reuse.reused += reused;
     reuse.decoded += added.len();
-    if !added.is_empty() {
-        for payload in reader.load_payloads(added).await? {
+    values.reserve(added.len());
+    for chunk in added.chunks(DECODE_CHUNK) {
+        for payload in reader.take_payloads(chunk.to_vec()).await? {
             values.push(payload.decode()?);
         }
     }
