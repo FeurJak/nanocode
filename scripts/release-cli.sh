@@ -244,7 +244,7 @@ publish() {
   [ -z "$missing" ] || { echo "release-cli.sh: the release lacks $missing" >&2; exit 1; }
   gh release download nanocode-cli --repo "$repo" --pattern SHA256SUMS --output "$staged/previous" 2>/dev/null || : > "$staged/previous"
   git push -f origin "$(git rev-parse HEAD):refs/tags/nanocode-cli"
-  cp install "$staged/install.sh"
+  awk -v sums="$staged/SHA256SUMS" '$0 == "sums=" { printf "sums=\047"; while ((getline line < sums) > 0) print line; print "\047"; next } 1' install > "$staged/install.sh"
   cp install.ps1 "$staged/install.ps1"
   gh release upload nanocode-cli --repo "$repo" --clobber "$staged/SHA256SUMS" "$staged/INPUTS" "$staged/install.sh" "$staged/install.ps1"
   keep="$staged/keep"

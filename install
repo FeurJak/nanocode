@@ -15,62 +15,52 @@ digest() {
 asset() {
   grep -E "^[0-9a-f]{64}  $1(\.[0-9a-f]{12})?\.$2\$" "$tmp/SHA256SUMS" | head -n 1 || true
 }
+current() {
+  [ -x "$bin/$1" ] && [ "$(cat "$bin/.$2.sha256" 2>/dev/null)" = "$3" ]
+}
+fetch() {
+  name="${1#*  }"
+  case $name in *.xz) unpack="xz -dc" ;; *) unpack="gunzip -c" ;; esac
+  if ! curl -fsSL "$release/$name" | tee "$tmp/$2.packed" | $unpack > "$tmp/$2"; then echo "nanocode: downloading $name failed" >&2; return 1; fi
+  if [ "$(digest "$tmp/$2.packed")" != "${1%%  *}" ]; then echo "nanocode: checksum mismatch for $name" >&2; return 1; fi
+  chmod +x "$tmp/$2"
+  mv "$tmp/$2" "$bin/$2"
+  echo "${1%%  *}" > "$bin/.$3.sha256"
+}
+pids=
+get() {
+  if [ -z "$1" ] || current "$2" "$3" "${1%%  *}"; then return 0; fi
+  fetch "$@" &
+  pids="$pids $!"
+}
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-curl -fsSL "$release/SHA256SUMS" -o "$tmp/SHA256SUMS"
+sums=
+if [ -n "$sums" ] && [ -z "${NANOCODE_RELEASE:-}" ]; then printf '%s\n' "$sums" > "$tmp/SHA256SUMS"; else curl -fsSL "$release/SHA256SUMS" -o "$tmp/SHA256SUMS"; fi
 packed=gz
 if command -v xz >/dev/null 2>&1 && [ -n "$(asset "nanocode-$target" xz)" ]; then packed=xz; fi
 line="$(asset "nanocode-$target" "$packed")"
-expected="${line%%  *}"
-name="${line#*  }"
-if [ -z "$expected" ]; then echo "nanocode: the release has no build for $target" >&2; exit 1; fi
+if [ -z "$line" ]; then echo "nanocode: the release has no build for $target" >&2; exit 1; fi
 frontline="$(asset "nanocode-front-$target" gz)"
-front="${frontline%%  *}"
-agent=nanocode
-if [ -n "$front" ]; then agent=nanocode-agent; fi
-mkdir -p "$bin"
-if [ ! -x "$bin/$agent" ] || [ "$(cat "$bin/.$agent.sha256" 2>/dev/null)" != "$expected" ]; then
-  echo "nanocode: downloading $target" >&2
-  curl -fsSL "$release/$name" -o "$tmp/nanocode.$packed"
-  if [ "$(digest "$tmp/nanocode.$packed")" != "$expected" ]; then echo "nanocode: checksum mismatch for $name" >&2; exit 1; fi
-  case $packed in xz) xz -dc "$tmp/nanocode.xz" > "$tmp/nanocode" ;; *) gunzip -c "$tmp/nanocode.gz" > "$tmp/nanocode" ;; esac
-  chmod +x "$tmp/nanocode"
-  mv "$tmp/nanocode" "$bin/$agent"
-  echo "$expected" > "$bin/.$agent.sha256"
-  echo "nanocode: installed $bin/nc" >&2
-fi
-if [ -n "$front" ] && { [ ! -x "$bin/nanocode" ] || [ "$(cat "$bin/.nanocode-front.sha256" 2>/dev/null)" != "$front" ]; }; then
-  curl -fsSL "$release/${frontline#*  }" -o "$tmp/nanocode-front.gz"
-  if [ "$(digest "$tmp/nanocode-front.gz")" != "$front" ]; then echo "nanocode: checksum mismatch for nanocode-front-$target.gz" >&2; exit 1; fi
-  gunzip -c "$tmp/nanocode-front.gz" > "$tmp/nanocode-front"
-  chmod +x "$tmp/nanocode-front"
-  mv "$tmp/nanocode-front" "$bin/nanocode"
-  rm -f "$bin/.nanocode.sha256"
-  echo "$front" > "$bin/.nanocode-front.sha256"
-fi
-if [ -z "$front" ] && [ -f "$bin/.nanocode-front.sha256" ]; then rm -f "$bin/nanocode-agent" "$bin/.nanocode-agent.sha256" "$bin/.nanocode-front.sha256"; fi
 onlyline="$(asset "nanocode-exec-$target" "$packed")"
-only="${onlyline%%  *}"
-if [ -n "$only" ] && { [ ! -x "$bin/nanocode-exec" ] || [ "$(cat "$bin/.nanocode-exec.sha256" 2>/dev/null)" != "$only" ]; }; then
-  curl -fsSL "$release/${onlyline#*  }" -o "$tmp/nanocode-exec.$packed"
-  if [ "$(digest "$tmp/nanocode-exec.$packed")" != "$only" ]; then echo "nanocode: checksum mismatch for nanocode-exec-$target.$packed" >&2; exit 1; fi
-  case $packed in xz) xz -dc "$tmp/nanocode-exec.xz" > "$tmp/nanocode-exec" ;; *) gunzip -c "$tmp/nanocode-exec.gz" > "$tmp/nanocode-exec" ;; esac
-  chmod +x "$tmp/nanocode-exec"
-  mv "$tmp/nanocode-exec" "$bin/nanocode-exec"
-  echo "$only" > "$bin/.nanocode-exec.sha256"
-fi
-if [ -z "$only" ]; then rm -f "$bin/nanocode-exec" "$bin/.nanocode-exec.sha256"; fi
-ln -sf nanocode "$bin/nc"
 driverline="$(asset "nanocode-cua-driver-$target" gz)"
-driver="${driverline%%  *}"
-if [ -n "$driver" ] && { [ ! -x "$bin/nanocode-cua-driver" ] || [ "$(cat "$bin/.nanocode-cua-driver.sha256" 2>/dev/null)" != "$driver" ]; }; then
-  curl -fsSL "$release/${driverline#*  }" -o "$tmp/nanocode-cua-driver.gz"
-  if [ "$(digest "$tmp/nanocode-cua-driver.gz")" != "$driver" ]; then echo "nanocode: checksum mismatch for nanocode-cua-driver-$target.gz" >&2; exit 1; fi
-  gunzip -c "$tmp/nanocode-cua-driver.gz" > "$tmp/nanocode-cua-driver"
-  chmod +x "$tmp/nanocode-cua-driver"
-  mv "$tmp/nanocode-cua-driver" "$bin/nanocode-cua-driver"
-  echo "$driver" > "$bin/.nanocode-cua-driver.sha256"
-fi
+agent=nanocode
+if [ -n "$frontline" ]; then agent=nanocode-agent; fi
+mkdir -p "$bin"
+fresh=
+if ! current "$agent" "$agent" "${line%%  *}"; then fresh=1; echo "nanocode: downloading $target" >&2; fi
+get "$line" "$agent" "$agent"
+get "$frontline" nanocode nanocode-front
+get "$onlyline" nanocode-exec nanocode-exec
+get "$driverline" nanocode-cua-driver nanocode-cua-driver
+status=0
+for pid in $pids; do wait "$pid" || status=1; done
+[ $status = 0 ] || exit 1
+if [ -n "$fresh" ]; then echo "nanocode: installed $bin/nc" >&2; fi
+if [ -n "$frontline" ]; then rm -f "$bin/.nanocode.sha256"; fi
+if [ -z "$frontline" ] && [ -f "$bin/.nanocode-front.sha256" ]; then rm -f "$bin/nanocode-agent" "$bin/.nanocode-agent.sha256" "$bin/.nanocode-front.sha256"; fi
+if [ -z "$onlyline" ]; then rm -f "$bin/nanocode-exec" "$bin/.nanocode-exec.sha256"; fi
+ln -sf nanocode "$bin/nc"
 case ":$PATH:" in
   *":$bin:"*) ;;
   *)
