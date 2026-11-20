@@ -1711,6 +1711,27 @@ impl World {
         let local = self.read_ref(MAIN).ok_or("no local main")?;
         let accepted = self.local_ahead && !self.diverged();
         let current = before == Some(local);
+        // An up-to-date push still moves the remote-tracking ref (git does), so
+        // one that follows a push that died before writing it catches it up.
+        let older = self
+            .server
+            .objects
+            .borrow()
+            .iter()
+            .find(|(oid, (kind, _))| *kind == COMMIT && **oid != local)
+            .map(|(oid, _)| *oid);
+        let stale = match older {
+            Some(older) if current && self.read_ref("refs/remotes/origin/main") == Some(local) => {
+                self.fs
+                    .insert(
+                        format!("{WORK}/.git/refs/remotes/origin/main").as_bytes(),
+                        Bytes::from(format!("{}\n", hex(&older))),
+                    )
+                    .map_err(|e| e.to_string())?;
+                true
+            }
+            _ => false,
+        };
         let had: BTreeSet<Oid> = self.server.objects.borrow().keys().copied().collect();
         self.server.received.borrow_mut().take();
         let (status, text) = self.run(&format!("cd {WORK} && git push"))?;
@@ -1726,6 +1747,9 @@ impl World {
             return Err(format!("push exited {status}: {text}"));
         }
         if current {
+            if stale && self.read_ref("refs/remotes/origin/main") != Some(local) {
+                return Err("an up-to-date push left origin/main behind".to_owned());
+            }
             return Ok(());
         }
         self.stats.pushes += 1;

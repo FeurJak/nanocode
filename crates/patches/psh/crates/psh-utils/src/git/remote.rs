@@ -2034,6 +2034,10 @@ async fn push(ctx: &mut UtilCtx<'_>, remote: &dyn Remote, inv: &Invocation) -> R
     }
     let advert = advertised(remote, &target.url, RECEIVE).await?;
     let mut pushes: Vec<Push> = Vec::new();
+    // Refs the server already holds at their source: git still moves their
+    // remote-tracking refs, so a push after one that died before writing them
+    // catches them up.
+    let mut current: Vec<(&str, Oid)> = Vec::new();
     for (source, dst, force) in &wanted {
         let old = advert.get(dst).unwrap_or(ZERO);
         let src = source.as_ref().map(|(_, oid)| *oid);
@@ -2047,6 +2051,7 @@ async fn push(ctx: &mut UtilCtx<'_>, remote: &dyn Remote, inv: &Invocation) -> R
             ));
         }
         if src == Some(old) {
+            current.push((dst, old));
             continue;
         }
         pushes.push(Push {
@@ -2059,6 +2064,13 @@ async fn push(ctx: &mut UtilCtx<'_>, remote: &dyn Remote, inv: &Invocation) -> R
     }
     let tracking = specs_of(&first, &target);
     let mut plan = Plan::default();
+    for (dst, oid) in current {
+        if let Some(local_name) = mapped(&tracking, dst).filter(|n| safe_ref(n))
+            && first.get_ref(&local_name) != Some(oid)
+        {
+            plan.ops.push(ref_op(&first.common, &local_name, Some(oid)));
+        }
+    }
     if upstream
         && let Some((Some((full, _)), dst, _)) = wanted.first()
         && let (Some(name), Some(branch)) = (&target.name, full.strip_prefix("refs/heads/"))
