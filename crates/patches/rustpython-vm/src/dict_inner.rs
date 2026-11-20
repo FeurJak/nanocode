@@ -206,11 +206,67 @@ impl IndexEntry {
     }
 }
 
+/// The smallest index table, which every new dict starts with.
+const MIN_INDICES: usize = 8;
+
+/// A dict's index table. The smallest size lives inline, so a dict of up to
+/// five keys needs a heap block for its entries only, as CPython's combined
+/// table does; a larger table is one heap block of exactly its size.
+#[derive(Clone)]
+enum IndexTable {
+    Inline([IndexEntry; MIN_INDICES]),
+    Heap(Box<[IndexEntry]>),
+}
+
+impl IndexTable {
+    /// A table of `size` free slots.
+    fn new(size: usize) -> Self {
+        if size == MIN_INDICES {
+            Self::Inline([IndexEntry::FREE; MIN_INDICES])
+        } else {
+            Self::Heap(vec![IndexEntry::FREE; size].into_boxed_slice())
+        }
+    }
+
+    /// A table of `size` free slots, or `None` if it cannot be allocated.
+    fn try_new(size: usize) -> Option<Self> {
+        if size == MIN_INDICES {
+            return Some(Self::new(size));
+        }
+        let mut table = Vec::new();
+        table.try_reserve_exact(size).ok()?;
+        table.resize(size, IndexEntry::FREE);
+        Some(Self::Heap(table.into_boxed_slice()))
+    }
+}
+
+impl core::ops::Deref for IndexTable {
+    type Target = [IndexEntry];
+
+    #[inline(always)]
+    fn deref(&self) -> &[IndexEntry] {
+        match self {
+            Self::Inline(table) => table,
+            Self::Heap(table) => table,
+        }
+    }
+}
+
+impl core::ops::DerefMut for IndexTable {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut [IndexEntry] {
+        match self {
+            Self::Inline(table) => table,
+            Self::Heap(table) => table,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct DictInner<T> {
     used: usize,
     filled: usize,
-    indices: Vec<IndexEntry>,
+    indices: IndexTable,
     entries: Vec<Option<DictEntry<T>>>,
 }
 
@@ -244,7 +300,7 @@ impl<T: DictValue> Clone for Dict<T> {
             let mut copy = DictInner {
                 used: inner.used,
                 filled: inner.used,
-                indices: Vec::new(),
+                indices: IndexTable::Heap(Box::default()),
                 entries: Vec::with_capacity(inner.used),
             };
             copy.entries
@@ -266,7 +322,7 @@ impl<T> Default for Dict<T> {
             inner: PyRwLock::new(DictInner {
                 used: 0,
                 filled: 0,
-                indices: vec![IndexEntry::FREE; 8],
+                indices: IndexTable::new(MIN_INDICES),
                 entries: Vec::new(),
             }),
             keys_version: AtomicU32::new(0),
@@ -374,7 +430,7 @@ impl<T> DictInner<T> {
             compacted.extend(self.entries.drain(..).flatten().map(Some));
             self.entries = compacted;
         }
-        self.indices = vec![IndexEntry::FREE; new_size];
+        self.indices = IndexTable::new(new_size);
         let mask = (new_size - 1) as i64;
         for (entry_idx, entry) in self.entries.iter_mut().enumerate() {
             // SAFETY: compaction above removed every hole, so every slot is
@@ -432,7 +488,7 @@ impl<T> DictInner<T> {
         self.entries.len() - 1
     }
 
-    const fn size(&self) -> DictSize {
+    fn size(&self) -> DictSize {
         DictSize {
             indices_size: self.indices.len(),
             entries_size: self.entries.len(),
@@ -442,7 +498,7 @@ impl<T> DictInner<T> {
     }
 
     #[inline]
-    const fn should_resize(&self) -> Option<usize> {
+    fn should_resize(&self) -> Option<usize> {
         if self.filled * 3 > self.indices.len() * 2 {
             Some(self.used * 2)
         } else {
@@ -640,11 +696,12 @@ impl<T: DictValue> Dict<T> {
         if inner.entries.try_reserve_exact(capacity).is_err() {
             return;
         }
-        let additional = index_capacity.saturating_sub(inner.indices.len());
-        if additional != 0 && inner.indices.try_reserve_exact(additional).is_ok() {
-            // Every existing index is FREE, so extending needs no rehash and
-            // leaves the empty key layout and its version unchanged.
-            inner.indices.resize(index_capacity, IndexEntry::FREE);
+        if index_capacity > inner.indices.len()
+            && let Some(indices) = IndexTable::try_new(index_capacity)
+        {
+            // Every existing index is FREE, so a larger free table needs no
+            // rehash and leaves the empty key layout and its version unchanged.
+            inner.indices = indices;
         }
     }
 
@@ -953,8 +1010,7 @@ impl<T: DictValue> Dict<T> {
         let _removed = {
             let mut inner = self.write();
             self.invalidate_keys_version();
-            inner.indices.clear();
-            inner.indices.resize(8, IndexEntry::FREE);
+            inner.indices = IndexTable::new(MIN_INDICES);
             inner.used = 0;
             inner.filled = 0;
             // defer dec rc
@@ -1441,10 +1497,15 @@ impl<T: DictValue> Dict<T> {
         Some((entry.key, entry.value))
     }
 
+    /// The bytes the inline index table adds to a struct holding it, beyond
+    /// the header of a heap table. `__sizeof__` leaves them out, as it already
+    /// counts the table in full, so its figure stays the same.
+    pub(crate) const INLINE_INDEX_BYTES: usize =
+        size_of::<IndexTable>() - size_of::<Vec<IndexEntry>>();
+
     pub(crate) fn sizeof(&self) -> usize {
         let inner = self.read();
-        size_of::<Self>()
-            + size_of::<DictInner<T>>()
+        size_of::<Self>() + size_of::<DictInner<T>>() - 2 * Self::INLINE_INDEX_BYTES
             + inner.indices.len() * size_of::<i64>()
             + inner.entries.len() * size_of::<DictEntry<T>>()
     }

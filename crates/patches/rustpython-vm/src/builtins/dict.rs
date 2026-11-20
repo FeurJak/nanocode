@@ -439,7 +439,7 @@ impl PyDict {
     }
 
     pub(crate) fn __sizeof__(&self) -> usize {
-        core::mem::size_of::<Self>() + self.entries.sizeof()
+        core::mem::size_of::<Self>() - DictContentType::INLINE_INDEX_BYTES + self.entries.sizeof()
     }
     pub fn clear(&self) {
         self.entries.clear()
