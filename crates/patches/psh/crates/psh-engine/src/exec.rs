@@ -1974,8 +1974,19 @@ async fn prefix_assigns(
                         let line = builtins::set::xtrace_assign(name.as_bytes(), op, &v);
                         builtins::set::xtrace(vp, &line).await;
                     }
+                    // An arithmetic error assigning to an integer variable ends the
+                    // shell (bash jumps to the top level, which exits a script).
+                    let integer = {
+                        let target = vp.resolve(name);
+                        vp.vars.get(&target).is_some_and(|v| v.integer && !v.readonly)
+                    };
                     // Assigned at once: later assignments see earlier ones (`a=1 b=$a`).
                     let r = vp.assign_with(name, v, a.append);
+                    if integer && let Err(msg) = &r {
+                        crate::arith::notes(vp).await;
+                        vp.error(msg).await;
+                        return Err(Unwind::Exit(1));
+                    }
                     if r.is_ok() && name == "BASH_XTRACEFD" {
                         builtins::set::check_xtracefd(vp).await;
                     }

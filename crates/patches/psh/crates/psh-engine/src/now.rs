@@ -142,8 +142,13 @@ fn simple<'a>(
                 Ok(v) => v,
                 Err(msg) => return Some(arith_failed(vp, msg)),
             };
+            let integer = {
+                let target = vp.resolve(name);
+                vp.vars.get(&target).is_some_and(|v| v.integer && !v.readonly)
+            };
             if let Err(msg) = vp.assign_with(name, v, a.append || skip) {
-                let errexit = vp.opts.get(crate::options::SetOpt::Errexit);
+                // An arithmetic error on an integer variable ends the shell (exec.rs).
+                let errexit = integer || vp.opts.get(crate::options::SetOpt::Errexit);
                 return Some(Now::Later(Box::pin(async move {
                     vp.error(&msg).await;
                     Err(match errexit {

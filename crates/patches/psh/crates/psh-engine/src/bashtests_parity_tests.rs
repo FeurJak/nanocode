@@ -132,3 +132,13 @@ fn length_and_bang_heads_with_operators() {
         "2 2 p q\n1\n"
     );
 }
+
+#[test]
+fn integer_assignment_arith_error_ends_the_shell() {
+    assert_eq!(
+        out("declare -i i\n(i=0#4; echo no)\necho $?\n(f() { i+=1/0; }; f; echo no)\necho $?\n"),
+        "1\n1\n"
+    );
+    assert_eq!(run("declare -i i\ni=0#4\necho no\n").0, 1);
+    assert_eq!(out("declare -i i\ni=0#4\necho no\n"), "");
+}
