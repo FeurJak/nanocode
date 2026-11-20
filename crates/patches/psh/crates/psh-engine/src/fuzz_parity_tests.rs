@@ -191,3 +191,12 @@ fn a_subscript_that_is_not_arithmetic_ends_the_script() {
     assert_eq!(o("declare -A m; m[\"\"]=v; echo no\necho next"), "next\n");
     assert!(err("declare -A m; m[\"\"]=v").contains("m[\"\"]: bad array subscript"));
 }
+
+#[test]
+fn bash_fuzz6_heredoc_continuations_join_names() {
+    assert_eq!(out("a=1 ab=2\ncat <<E\n$a\\\nb.\nE"), "2.\n");
+    assert_eq!(out("a=1\ncat <<E\nx $a\\\n plain\nE"), "x 1 plain\n");
+    assert_eq!(out("a=v\ncat <<E\n$\\\n'sq $a'\nE"), "$'sq v'\n");
+    assert_eq!(out("a=v\ncat <<E\n$\\\n\"dq $a\"\nE"), "$\"dq v\"\n");
+}
+

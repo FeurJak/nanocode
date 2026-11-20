@@ -3331,7 +3331,17 @@ impl<'a> P<'a> {
         let before = out.len();
         self.parse_dollar_here(ctx, out)?;
         if out.len() > before {
-            out.last_mut().unwrap().span.start = start as u32;
+            let last = out.last_mut().unwrap();
+            if matches!(last.kind, Part::Lit)
+                && last.span.start as usize == next - 1
+                && last.span.end as usize == next
+            {
+                // A plain `$` (before a quote that is literal here, say): the
+                // continuation is gone, as in bash.
+                last.span = sp(start, start + 1);
+            } else {
+                last.span.start = start as u32;
+            }
         }
         Ok(())
     }

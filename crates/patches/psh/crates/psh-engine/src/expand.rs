@@ -594,10 +594,61 @@ pub(crate) async fn expand_heredoc(
     body: &Word,
 ) -> Result<Vec<u8>, Unwind> {
     let mut f = Fields::new(vp, false);
-    let pieces: Vec<Piece> = body.parts.iter().map(Piece::Part).collect();
+    let mut pieces: Vec<Piece> = body.parts.iter().map(Piece::Part).collect();
+    join_continued_names(code, &mut pieces);
     expand_pieces(vp, code, &pieces, true, &mut f, Ctx::HereDoc).await?;
     f.finish_word();
     Ok(f.joined())
+}
+
+/// In a here-doc body bash removes line continuations before it reads names, so
+/// `$a\<newline>b` names `ab`: a name takes in the literal text after continuations.
+fn join_continued_names(code: &Code, pieces: &mut Vec<Piece<'_>>) {
+    let name_char = |b: &u8| b.is_ascii_alphanumeric() || *b == b'_';
+    let only_conts = |s: u32, e: u32| {
+        s < e && {
+            let gap = code.ast.bytes(psh_syntax::Span { start: s, end: e });
+            gap.len().is_multiple_of(2) && gap.chunks(2).all(|c| c == b"\\\n")
+        }
+    };
+    let mut i = 0;
+    while i + 1 < pieces.len() {
+        let (mut name, mut end) = match &pieces[i] {
+            Piece::Part(WordPart {
+                kind: Part::Param(p),
+                span,
+            }) if !p.braced && p.name == ParamName::Var => {
+                (code.ast.bytes(p.name_span).to_vec(), span.end)
+            }
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        let mut joined = false;
+        while let Some(Piece::Part(p)) = pieces.get(i + 1) {
+            if !matches!(p.kind, Part::Lit) || !only_conts(end, p.span.start) {
+                break;
+            }
+            let text = code.ast.bytes(p.span);
+            let n = text.iter().take_while(|b| name_char(b)).count();
+            if n == 0 {
+                break;
+            }
+            name.extend_from_slice(&text[..n]);
+            joined = true;
+            if n < text.len() {
+                pieces[i + 1] = Piece::Text(text[n..].to_vec());
+                break;
+            }
+            end = p.span.end;
+            pieces.remove(i + 1);
+        }
+        if joined {
+            pieces[i] = Piece::Var(name);
+        }
+        i += 1;
+    }
 }
 
 /// Where a word is: decides tilde expansion and a few quoting details.
