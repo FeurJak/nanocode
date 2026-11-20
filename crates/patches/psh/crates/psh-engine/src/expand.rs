@@ -2391,6 +2391,8 @@ fn transform_var(
                 if f == "-" { String::new() } else { f }
             });
             match val {
+                // A declared array with no elements still shows its attributes once.
+                Val::List(items, _) if items.is_empty() && var.is_some() => Val::Str(flags.into_bytes()),
                 Val::List(items, st) => Val::List(
                     items.iter().map(|_| flags.clone().into_bytes()).collect(),
                     st,
@@ -2412,6 +2414,11 @@ fn transform_var(
                 return Val::Str(d);
             }
             let flags = var.flags();
+            // `${x[@]@A}` of a scalar is `${x@A}`.
+            let val = match val {
+                Val::List(mut l, _) if list && l.len() == 1 => Val::Str(l.pop().unwrap_or_default()),
+                v => v,
+            };
             let Val::Str(s) = val else {
                 // An array without element 0: its declaration alone.
                 return if var.is_array() && !list {
@@ -2788,39 +2795,47 @@ pub(crate) fn quote(s: &[u8], utf8: bool) -> Vec<u8> {
 }
 
 fn change_case(s: &[u8], kind: CaseKind, pat: &Pattern, utf8: bool) -> Vec<u8> {
-    let text = String::from_utf8_lossy(s);
-    let mut out = String::new();
+    let mut out = Vec::with_capacity(s.len());
     let all = matches!(
         kind,
         CaseKind::UpperAll | CaseKind::LowerAll | CaseKind::ToggleAll
     );
-    for (i, ch) in text.chars().enumerate() {
-        let mut buf = [0u8; 4];
-        let applies = (all || i == 0) && pat.matches(ch.encode_utf8(&mut buf).as_bytes(), utf8);
-        if !applies {
-            out.push(ch);
-            continue;
-        }
-        // Like towupper/towlower: only one-char mappings (ß stays ß).
-        let one = |m: &mut dyn Iterator<Item = char>| {
-            let v: Vec<char> = m.collect();
-            if v.len() == 1 { v[0] } else { ch }
-        };
-        let up = || one(&mut ch.to_uppercase());
-        let down = || one(&mut ch.to_lowercase());
-        out.push(match kind {
-            CaseKind::UpperFirst | CaseKind::UpperAll => up(),
-            CaseKind::LowerFirst | CaseKind::LowerAll => down(),
-            CaseKind::ToggleFirst | CaseKind::ToggleAll => {
-                if ch.is_uppercase() {
-                    down()
-                } else {
-                    up()
-                }
+    // Bytes that are not valid UTF-8 stay as they are, one character each.
+    let mut i = 0;
+    for chunk in s.utf8_chunks() {
+        for ch in chunk.valid().chars() {
+            let mut buf = [0u8; 4];
+            let enc = ch.encode_utf8(&mut buf).as_bytes();
+            let applies = (all || i == 0) && pat.matches(enc, utf8);
+            i += 1;
+            if !applies || (!utf8 && !ch.is_ascii()) {
+                out.extend_from_slice(enc);
+                continue;
             }
-        });
+            // Like towupper/towlower: only one-char mappings (ß stays ß).
+            let one = |m: &mut dyn Iterator<Item = char>| {
+                let v: Vec<char> = m.collect();
+                if v.len() == 1 { v[0] } else { ch }
+            };
+            let up = || one(&mut ch.to_uppercase());
+            let down = || one(&mut ch.to_lowercase());
+            let c = match kind {
+                CaseKind::UpperFirst | CaseKind::UpperAll => up(),
+                CaseKind::LowerFirst | CaseKind::LowerAll => down(),
+                CaseKind::ToggleFirst | CaseKind::ToggleAll => {
+                    if ch.is_uppercase() {
+                        down()
+                    } else {
+                        up()
+                    }
+                }
+            };
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+        }
+        i += chunk.invalid().len();
+        out.extend_from_slice(chunk.invalid());
     }
-    out.into_bytes()
+    out
 }
 
 fn map_val(val: Val, mut f: impl FnMut(&[u8]) -> Vec<u8>) -> Val {

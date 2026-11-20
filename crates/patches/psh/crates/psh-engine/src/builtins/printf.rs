@@ -572,6 +572,13 @@ impl Formatter<'_> {
                     while digits.len() < p {
                         digits.insert(0, '0');
                     }
+                    // C: a zero precision prints no digits for zero.
+                    if p == 0 && v == 0 {
+                        digits.clear();
+                    }
+                }
+                if spec.alt && conv == b'o' && v == 0 && digits.is_empty() {
+                    digits.push('0');
                 }
                 if spec.alt && v != 0 {
                     match conv {
