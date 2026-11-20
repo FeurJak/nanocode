@@ -573,11 +573,13 @@ async fn run_pipeline_stages(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
     let mut joins: Vec<Join<i32>> = Vec::with_capacity(n);
     // The stages start first to last, as bash forks them, and each expands its words
     // and opens its own redirections before the gate; its command runs once every
-    // stage got that far (`pass_gate`). So a later stage's `> out` is there for
-    // `ls` (`ls | cat > out`), while `echo *` expanded before it, and a file a
-    // later stage's program creates (`ls | tee out`) is not.
+    // stage got that far (`pass_gate`), however long an open takes. So a later
+    // stage's `> out` is there for `ls` (`ls | cat > out`), while `echo *`
+    // expanded before it, and `tee out` in `ls | tee out | comm - f > out` writes
+    // after the last stage truncated `out`.
     let gate = Rc::new(StageGate {
         left: std::cell::Cell::new(n),
+        waiters: Default::default(),
     });
     let mut ready: Vec<Vp> = Vec::with_capacity(n);
     let start = |ready: &mut Vec<Vp>, joins: &mut Vec<Join<i32>>| {
@@ -588,6 +590,8 @@ async fn run_pipeline_stages(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
         }
     };
     let mut next_in: Option<Fd> = None;
+    // The pipe the next stage reads, watched at its gate.
+    let mut next_watch: Option<pipe::Watch> = None;
     let mut last_here = None;
     for (i, stage) in p.stages.iter().enumerate() {
         if i + 1 == n && lastpipe {
@@ -596,7 +600,10 @@ async fn run_pipeline_stages(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
             if let Some(r) = next_in.take() {
                 vp.fds.set(0, r);
             }
-            vp.stage_gate = Some(GateTicket::new(&gate));
+            vp.stage_gate = Some(GateTicket::new(
+                &gate,
+                next_watch.take().into_iter().collect(),
+            ));
             let r = run_command_unchecked(vp, code, stage.cmd).await;
             vp.stage_gate = None;
             restore_fds(vp, saved);
@@ -626,9 +633,11 @@ async fn run_pipeline_stages(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
         if let Some(r) = next_in.take() {
             sub.fds.set(0, r);
         }
-        sub.stage_gate = Some(GateTicket::new(&gate));
+        let mut pipes: Vec<pipe::Watch> = next_watch.take().into_iter().collect();
         if i + 1 < n {
             let (r, w) = pipe::pipe();
+            pipes.push(w.watch());
+            next_watch = Some(r.watch());
             let w: Fd = Rc::new(FdObj::PipeWrite(w));
             sub.fds.set(1, w.clone());
             if stage.pipe_stderr {
@@ -636,6 +645,7 @@ async fn run_pipeline_stages(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
             }
             next_in = Some(Rc::new(FdObj::PipeRead(r)));
         }
+        sub.stage_gate = Some(GateTicket::new(&gate, pipes));
         ready.push(sub);
     }
     start(&mut ready, &mut joins);
@@ -676,29 +686,40 @@ async fn run_pipeline_stages(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
     check_failure(vp, status).await
 }
 
-/// The start gate of a pipeline's stages: how many have not reached it.
+/// The start gate of a pipeline's stages: how many have not reached it, and the
+/// stages waiting there.
 pub(crate) struct StageGate {
     left: std::cell::Cell<usize>,
+    waiters: std::cell::RefCell<Vec<std::task::Waker>>,
 }
 
 /// A stage's place at its pipeline's [`StageGate`]: it arrives once, when its command
-/// is about to run or when the stage ends before that.
+/// is about to run or when the stage ends before that. It watches the pipes between
+/// the stage and its neighbours.
 pub(crate) struct GateTicket {
     gate: Rc<StageGate>,
     arrived: std::cell::Cell<bool>,
+    pipes: Vec<pipe::Watch>,
 }
 
 impl GateTicket {
-    fn new(gate: &Rc<StageGate>) -> Rc<GateTicket> {
+    fn new(gate: &Rc<StageGate>, pipes: Vec<pipe::Watch>) -> Rc<GateTicket> {
         Rc::new(GateTicket {
             gate: gate.clone(),
             arrived: std::cell::Cell::new(false),
+            pipes,
         })
     }
 
     fn arrive(&self) {
         if !self.arrived.replace(true) {
-            self.gate.left.set(self.gate.left.get() - 1);
+            let left = self.gate.left.get() - 1;
+            self.gate.left.set(left);
+            if left == 0 {
+                for w in self.gate.waiters.borrow_mut().drain(..) {
+                    w.wake();
+                }
+            }
         }
     }
 }
@@ -709,32 +730,41 @@ impl Drop for GateTicket {
     }
 }
 
-/// How often a stage looks again for the others at the gate before it goes on: a
-/// stage that waits on this one before its gate (`echo x | echo "$(cat)"`) must not
-/// hold the pipeline forever.
-const GATE_TRIES: u32 = 256;
-
 /// A pipeline stage's command waits here, after its words and redirections, until
 /// every stage got that far, as bash's stage processes have all started and opened
-/// their files by the time the first one's program runs. It goes on early when no
-/// other task can run (a later stage waits on this one) or after [`GATE_TRIES`].
+/// their files by the time the first one's program runs. However long a stage takes
+/// to get there (a redirection's file opens on a host thread), the others wait; one
+/// goes on early only when the stage at the other end of one of its pipes waits on it
+/// before its own gate (`echo x | echo "$(cat)"`), which would otherwise never come.
 pub(crate) async fn pass_gate(vp: &mut Vp) {
     let Some(ticket) = vp.stage_gate.take() else {
         return;
     };
     ticket.arrive();
-    let gate = ticket.gate.clone();
-    drop(ticket);
-    let sched = vp.core.sched.clone();
-    let mut tries = 0;
+    let mut yielded = false;
     std::future::poll_fn(move |cx| {
         // Every stage yields once, so the stages' commands start in pipeline order
         // even when the last one to reach the gate opens it.
-        if tries > 0 && (gate.left.get() == 0 || tries >= GATE_TRIES || !sched.has_ready()) {
+        if !std::mem::replace(&mut yielded, true) {
+            cx.waker().wake_by_ref();
+            return std::task::Poll::Pending;
+        }
+        let gate = &ticket.gate;
+        if gate.left.get() == 0 {
             return std::task::Poll::Ready(());
         }
-        tries += 1;
-        cx.waker().wake_by_ref();
+        // Every watch registers, so a neighbour that starts waiting wakes this one.
+        let mut waited_on = false;
+        for w in &ticket.pipes {
+            waited_on |= w.poll_waited_on(cx);
+        }
+        if waited_on {
+            return std::task::Poll::Ready(());
+        }
+        let mut waiters = gate.waiters.borrow_mut();
+        if !waiters.iter().any(|w| w.will_wake(cx.waker())) {
+            waiters.push(cx.waker().clone());
+        }
         std::task::Poll::Pending
     })
     .await;
@@ -1575,8 +1605,7 @@ pub(crate) fn run_item<'a>(
         let p = &item.first;
         if item.background {
             background(vp, code, id, i).await
-        } else if item.rest.is_empty() && p.stages.len() == 1 && !p.negated() && p.time.is_none()
-        {
+        } else if item.rest.is_empty() && p.stages.len() == 1 && !p.negated() && p.time.is_none() {
             let cmd = p.stages[0].cmd;
             if let Some(now) = crate::now::command(vp, code, cmd, true) {
                 match now {
@@ -2805,14 +2834,17 @@ async fn spawn_program(
                     Err(ref m) if m.kind() == std::io::ErrorKind::NotFound
                 ) =>
         {
-            vp.error(&format!("{shown}: No such file or directory")).await;
+            vp.error(&format!("{shown}: No such file or directory"))
+                .await;
             Err(Ok(127))
         }
         // A file without execute permission is refused as `execve` refuses it.
         Err(e)
             if crate::host::RunInShell::is(&e)
                 && matches!(
-                    vp.host().access(&program, crate::host::Access::Execute).await,
+                    vp.host()
+                        .access(&program, crate::host::Access::Execute)
+                        .await,
                     Ok(false)
                 ) =>
         {

@@ -52,6 +52,9 @@ struct Inner {
     /// (SIGPIPE) as with bash, rather than the writer filling the buffer before the
     /// reader runs. Set while the writer waits that turn.
     yielded: bool,
+    /// The stages at a pipeline's start gate that look at this pipe ([`Watch`]):
+    /// woken when a reader or writer starts waiting on it.
+    watchers: Vec<Waker>,
     /// The OS pipe once materialized: (read end, write end), each dropped when the
     /// engine's last reader or writer goes.
     os: Option<(OsEnd, OsEnd)>,
@@ -84,6 +87,7 @@ pub(crate) fn pipe() -> (PipeReader, PipeWriter) {
         read_wakers: Vec::new(),
         write_wakers: Vec::new(),
         yielded: false,
+        watchers: Vec::new(),
         os: None,
     }));
     (PipeReader(inner.clone()), PipeWriter(inner))
@@ -102,6 +106,7 @@ pub(crate) fn preloaded(data: &[u8]) -> PipeReader {
         read_wakers: Vec::new(),
         write_wakers: Vec::new(),
         yielded: false,
+        watchers: Vec::new(),
         os: None,
     })))
 }
@@ -211,6 +216,36 @@ impl Drop for Feed {
     }
 }
 
+/// A look at a pipe that holds neither end: a stage at its pipeline's start gate
+/// watches the pipes it reads and writes, to go on when the stage at the other end
+/// waits on it before that stage's own gate (`echo x | echo "$(cat)"`).
+pub(crate) struct Watch(Rc<RefCell<Inner>>);
+
+impl Watch {
+    /// Whether a vproc waits to read this (empty) pipe, or to write it (full);
+    /// otherwise `cx` is woken when one starts to.
+    pub(crate) fn poll_waited_on(&self, cx: &mut Context<'_>) -> bool {
+        let mut p = self.0.borrow_mut();
+        if (!p.read_wakers.is_empty() && p.buf.is_empty()) || !p.write_wakers.is_empty() {
+            return true;
+        }
+        register(&mut p.watchers, cx.waker());
+        false
+    }
+}
+
+impl PipeReader {
+    pub(crate) fn watch(&self) -> Watch {
+        Watch(self.0.clone())
+    }
+}
+
+impl PipeWriter {
+    pub(crate) fn watch(&self) -> Watch {
+        Watch(self.0.clone())
+    }
+}
+
 impl PipeReader {
     /// See [`os_end`].
     pub(crate) fn os_end(&self, host: &dyn Host) -> Option<Rc<dyn HostFile>> {
@@ -268,6 +303,7 @@ impl PipeReader {
             return Poll::Ready(Ok(0));
         }
         register(&mut p.read_wakers, cx.waker());
+        wake_all(&mut p.watchers);
         Poll::Pending
     }
 }
@@ -337,6 +373,7 @@ impl PipeWriter {
         let space = PIPE_CAPACITY.saturating_sub(p.buf.len());
         if space == 0 {
             register(&mut p.write_wakers, cx.waker());
+            wake_all(&mut p.watchers);
             return Poll::Pending;
         }
         if !p.buf.is_empty() && !std::mem::replace(&mut p.yielded, true) {
@@ -428,7 +465,10 @@ mod tests {
 
     #[test]
     fn a_path_that_names_no_file_is_not_found() {
-        check("a/b/c.txt 2>/dev/null; echo $?; ./nope 2>/dev/null; echo $?", b"127\n127\n");
+        check(
+            "a/b/c.txt 2>/dev/null; echo $?; ./nope 2>/dev/null; echo $?",
+            b"127\n127\n",
+        );
     }
 
     #[test]

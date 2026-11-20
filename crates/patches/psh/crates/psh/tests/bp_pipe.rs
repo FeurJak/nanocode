@@ -1,0 +1,51 @@
+//! Pipeline stages matching bash: each stage opens its redirections before any
+//! stage's program runs, and stages that wait on each other still finish.
+
+use std::process::Command;
+
+fn sh(name: &str, src: &str) -> (String, i32) {
+    let dir = std::env::temp_dir().join(format!("psh-bp-pipe-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_psh"))
+        .arg("-c")
+        .arg(src)
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        out.status.code().unwrap_or(-1),
+    )
+}
+
+#[test]
+fn a_later_stage_opens_its_output_before_the_first_program_runs() {
+    // The redirection's file opens on a host thread; the first stage waits for it.
+    let src = "for i in 1 2 3 4 5 6 7 8 9 10; do rm -f out; ls | cat > out; cat out; done";
+    assert_eq!(sh("cat-out", src), ("out\n".repeat(10), 0));
+}
+
+#[test]
+fn a_file_the_later_program_writes_is_the_last_word() {
+    let src = "mkdir -p d/e; touch d/a.txt d/e/b.txt d/c.md; \
+               ls d | tee out | comm -12 - f1 > out; cat out";
+    assert_eq!(sh("tee-out", src), ("a.txt\nc.md\ne\n".into(), 0));
+}
+
+#[test]
+fn a_stage_that_reads_its_input_before_its_command_still_gets_it() {
+    assert_eq!(sh("subst", "echo x | echo \"$(cat)\""), ("x\n".into(), 0));
+    assert_eq!(
+        sh("subst3", "echo x | echo \"<$(cat)>\" | echo \"[$(cat)]\""),
+        ("[<x>]\n".into(), 0)
+    );
+    assert_eq!(
+        sh(
+            "subst-mid",
+            "seq 3 | { read a; echo \"$a\"; cat; } | echo \"$(tr '\\n' ,)\""
+        ),
+        ("1,2,3,\n".into(), 0)
+    );
+}
