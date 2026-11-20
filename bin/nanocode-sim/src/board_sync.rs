@@ -2849,6 +2849,11 @@ pub fn simulate(seed: u64, mutation: SyncMutation) -> SyncOutcome {
     };
     board_sim::mutate(mutation.board());
     sync_sim::mutate(mutation.engine());
+    // Checkpoints are off by default; the sync's boards keep saving them at the cadence they
+    // shipped with, so its reopens still meet them.
+    nanocode_board::checkpoint::checkpoint_every_here(Some(
+        nanocode_board::checkpoint::CHECKPOINT_EVERY,
+    ));
     let mut crashes = world.shape.crashes.clone();
     crashes.sort_unstable();
     let mut number = 0;
@@ -2893,6 +2898,7 @@ pub fn simulate(seed: u64, mutation: SyncMutation) -> SyncOutcome {
     }
     board_sim::mutate(BoardRule::None);
     sync_sim::mutate(SyncRule::None);
+    nanocode_board::checkpoint::checkpoint_every_here(None);
     let mut digest = fnv(FNV_OFFSET, described.as_bytes());
     for (seq, body) in &rows {
         digest = fnv(digest, &seq.to_le_bytes());
@@ -2932,6 +2938,7 @@ pub fn run_seed(seed: u64, mutation: SyncMutation) -> SyncOutcome {
     std::panic::catch_unwind(|| simulate(seed, mutation)).unwrap_or_else(|panic| {
         board_sim::mutate(BoardRule::None);
         sync_sim::mutate(SyncRule::None);
+        nanocode_board::checkpoint::checkpoint_every_here(None);
         let message = panic
             .downcast_ref::<String>()
             .cloned()

@@ -8,6 +8,10 @@
 //! when its version is this build's, it restores, its fold's next seq is its seq and that row is
 //! still in the log as hashed; anything else replays the whole log. A checkpoint is only ever a
 //! shortcut: losing one, failing to save one or failing to read one costs a full replay.
+//!
+//! Boards save none on their own unless [`checkpoint_every`] turns them on: saving them cost
+//! half the board's commit throughput on the bench, so by default a reopen replays the log, and
+//! only [`Board::checkpoint`] saves one.
 
 use std::{
     cell::Cell,
@@ -26,15 +30,18 @@ use crate::{
     sim::{Mutation, mutated},
 };
 
-/// The fewest events a board folds past its last checkpoint before it saves another: past
-/// that, it waits as many events as the last checkpoint covered, so each save's encode is paid
-/// for by as many events as it encodes and the total stays linear in the log.
+/// A cadence to turn checkpoints on with, through [`checkpoint_every`]: the fewest events a
+/// board folds past its last checkpoint before it saves another. Past that, it waits as many
+/// events as the last checkpoint covered, so each save's encode is paid for by as many events
+/// as it encodes and the total stays linear in the log.
 pub const CHECKPOINT_EVERY: u64 = 4096;
 
-static EVERY: AtomicU64 = AtomicU64::new(CHECKPOINT_EVERY);
+/// Off by default: a board saves no checkpoint on its own until [`checkpoint_every`] sets a
+/// cadence.
+static EVERY: AtomicU64 = AtomicU64::new(0);
 
 /// Sets the fewest events a board folds past its last checkpoint before it saves another, for
-/// every board in the process; 0 saves none on its own.
+/// every board in the process; 0, the default, saves none on its own.
 pub fn checkpoint_every(events: u64) {
     EVERY.store(events, Ordering::Relaxed);
 }
@@ -179,9 +186,9 @@ impl Board {
         Ok(true)
     }
 
-    /// Hands a save to the board's saver once the fold is [`CHECKPOINT_EVERY`] events, or as many
-    /// as the last checkpoint covered, past it. Skipped while the last save still runs; a failed
-    /// save only means the next reopen folds more.
+    /// Hands a save to the board's saver once the fold is [`checkpoint_every`] events (none by
+    /// default), or as many as the last checkpoint covered, past it. Skipped while the last save
+    /// still runs; a failed save only means the next reopen folds more.
     pub(crate) fn keep_checkpoint(&mut self) {
         let every = every();
         let next = self.fold.next();

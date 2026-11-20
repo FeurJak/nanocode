@@ -1946,6 +1946,42 @@ fn reopens_from_checkpoints(seed: u64, rows: &[(u64, String)]) -> Result<(), Str
 /// that left in the log must still open as exactly the fold of the rows before its seq, with the
 /// rest folded after it, and the boards must have encoded no more than twice the log each:
 /// saves that came as often as the fewest events allowed would encode it quadratically.
+/// A log the boards kept no checkpoint of, as with checkpoints off, must reopen by replaying
+/// every row into exactly the fold of the log.
+fn replays_without_checkpoint(rows: &[(u64, String)]) -> Result<(), String> {
+    use nanocode_board::checkpoint::{Fallback, Opened};
+    let log = Arc::new(MemoryLog::new());
+    nanocode_sync::block_on(log.append(SCOPE, rows))
+        .map_err(|error| format!("copy the log: {error}"))?;
+    let reopened: Arc<dyn LogHost> = log;
+    let board = nanocode_sync::block_on(Board::open(
+        reopened,
+        SCOPE,
+        access::identity("user:reopener"),
+    ))
+    .map_err(|error| format!("open {} rows without a checkpoint: {error}", rows.len()))?;
+    let expected = Opened::Replay(Fallback::Missing);
+    if board.opened() != &expected {
+        return Err(format!(
+            "a board over {} rows and no checkpoint opened as {:?}, not {expected:?}",
+            rows.len(),
+            board.opened()
+        ));
+    }
+    let mut full = nanocode_board::Fold::new();
+    for (seq, body) in rows {
+        full.apply(*seq, body)
+            .map_err(|error| format!("refold: {error}"))?;
+    }
+    if board.fold() != &full {
+        return Err(format!(
+            "a board reopened without a checkpoint differs from a full replay of {} rows",
+            rows.len()
+        ));
+    }
+    Ok(())
+}
+
 fn kept_checkpoint(host: &FaultLog, rows: &[(u64, String)]) -> Result<u64, String> {
     use nanocode_board::checkpoint::Opened;
     let encoded = host.checkpoint_encoded.load(Ordering::SeqCst);
@@ -1964,6 +2000,7 @@ fn kept_checkpoint(host: &FaultLog, rows: &[(u64, String)]) -> Result<u64, Strin
     )
     .map_err(|error| format!("read the kept checkpoint: {error}"))?
     else {
+        replays_without_checkpoint(rows)?;
         return Ok(0);
     };
     let log = Arc::new(MemoryLog::new());
@@ -2183,14 +2220,18 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
         shape,
     };
     board_sim::mutate(mutation.rule());
-    // Boards save checkpoints as they go and reopen from them after a crash: every few events
-    // on most seeds, never on some, so a reopen meets both.
+    // Checkpoints are off by default, so the sim turns them on: boards save them every few events
+    // on most seeds and reopen from them after a crash. On some seeds they stay off, half of those
+    // by a cadence of 0 and half by the default, so a reopen meets both, and a default board must
+    // save none and reopen by replaying the log.
     let mut cadence = Rng::derive(seed, "checkpoint cadence");
-    nanocode_board::checkpoint::checkpoint_every_here(Some(if cadence.chance(250_000) {
-        0
+    let mut default_cadence = false;
+    nanocode_board::checkpoint::checkpoint_every_here(if cadence.chance(250_000) {
+        default_cadence = cadence.chance(500_000);
+        (!default_cadence).then_some(0)
     } else {
-        cadence.range(1, 33)
-    }));
+        Some(cadence.range(1, 33))
+    });
     let mut crashes = world.shape.crashes.clone();
     crashes.sort_unstable();
     let mut number = 0;
@@ -2265,14 +2306,30 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
     let kept = kept_checkpoint(&world.host, &rows);
     let checkpoint_opens = kept.as_ref().copied().unwrap_or_default();
     let kept = kept.map(|_| ());
+    let saves = world.host.checkpoint_saves.load(Ordering::SeqCst);
+    let default_off = if default_cadence && saves > 0 {
+        Err(format!(
+            "boards on the default cadence saved {saves} checkpoints; the default is off"
+        ))
+    } else {
+        Ok(())
+    };
     let due = due::run(seed);
     let intended = intent::run(seed).map(|_| ());
     let delivered = deliver::run(seed);
     board_sim::mutate(BoardRule::None);
     nanocode_board::checkpoint::checkpoint_every_here(None);
-    for wrong in [live, indexed, resumed, checkpointed, kept, intended]
-        .into_iter()
-        .filter_map(Result::err)
+    for wrong in [
+        live,
+        indexed,
+        resumed,
+        checkpointed,
+        kept,
+        default_off,
+        intended,
+    ]
+    .into_iter()
+    .filter_map(Result::err)
     {
         world.oracle.borrow_mut().wrong.push(wrong);
     }
