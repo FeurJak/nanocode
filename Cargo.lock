@@ -1088,10 +1088,12 @@ dependencies = [
  "nanocode-durability-core",
  "nanocode-executor",
  "nanocode-io",
+ "nanocode-partitions",
  "nanocode-platform",
  "nanocode-sync",
  "nanocode-sys",
  "nanocode-tls",
+ "nanocode-turnlog",
  "nanocode-zstd",
  "rustls",
 ]
