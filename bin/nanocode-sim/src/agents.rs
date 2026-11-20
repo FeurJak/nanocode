@@ -5,8 +5,8 @@ use nanocode_board::{Board, NewTask, Op, Phase, TaskId};
 use nanocode_dispatch::{Budgets, IntentState, Policy, Role};
 use nanocode_dispatcher::{BRIEF, Dispatcher, Pool};
 use nanocode_subagents::{
-    AgentId, AgentStatus, AgentTask, Coordination, DEFAULT_MAX_SUBAGENTS, Registry,
-    ScopedAgentUpdate, SubagentControl, SubagentPool,
+    AgentId, AgentStatus, AgentTask, Coordination, DEFAULT_MAX_SUBAGENTS, DISPATCH_LABEL,
+    DISPATCH_POLL_MS, DISPATCH_ROLE, HostedView, Registry, ScopedAgentUpdate, SubagentControl, SubagentPool,
 };
 use nanocode_sync::mpsc::UnboundedReceiver;
 use nanocode_turnlog::{LogHost, MemoryLog};
@@ -42,6 +42,8 @@ const POOL_CHARTER_MS: u64 = 1_000;
 const POOL_LEASE_MS: u64 = 3_600_000;
 const POOL_IDLE_RETIRE_MS: u64 = 60_000;
 const POOL_PASSES_MAX: u64 = 16;
+const HOSTED_PASSES_MAX: u64 = 24;
+const HOSTED_POLL: Duration = Duration::from_millis(DISPATCH_POLL_MS);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentsMutation {
@@ -280,6 +282,7 @@ async fn judge(
     shape: &Shape,
     ledger: &Ledger,
     retired: &[AgentId],
+    hosted: u64,
 ) -> Result<(), String> {
     let turns = ledger.running_turns();
     if turns > 0 {
@@ -305,9 +308,9 @@ async fn judge(
             )
         })?;
     let count = u64::try_from(listed.len()).expect("a child count fits in u64");
-    if count != shape.children + shape.pooled {
+    if count != shape.children + shape.pooled + hosted {
         return Err(format!(
-            "the directory lists {count} of {} children and {} pooled agents",
+            "the directory lists {count} of {} children, {} pooled and {hosted} hosted agents",
             shape.children, shape.pooled
         ));
     }
@@ -663,6 +666,107 @@ async fn pooled(run: &Run, shape: &Shape, clock: &Arc<Clock>) -> Result<Vec<Agen
     Ok(gone)
 }
 
+/// Posts pooled work to the dispatcher the board hosts for the root, the
+/// production path, and waits until it placed an agent on each task.
+async fn hosted(shape: &Shape) -> Result<u64, String> {
+    let Some(plane) = crate::boardagents::hosting_plane() else {
+        return Ok(0);
+    };
+    if !plane.hosting().iter().any(|root| root == ROOT_SESSION) {
+        return Err("the board hosts no dispatcher for the root session".to_owned());
+    }
+    for index in 0..shape.pooled {
+        let labels = [
+            (DISPATCH_LABEL, DISPATCH_ROLE),
+            (POOL_MEMBER, "member"),
+            (POOL_PROJECT, "project"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect();
+        let task = NewTask {
+            id: TaskId(format!("hosted-{index}")),
+            parent: None,
+            spec: format!("hosted task {index}"),
+            labels,
+            needs: Vec::new(),
+            terms: Default::default(),
+        };
+        plane.post_dispatch(ROOT_SESSION, task).await?;
+    }
+    let mut waiting = "no pass yet".to_owned();
+    for _ in 0..HOSTED_PASSES_MAX {
+        nanocode_platform::sleep(HOSTED_POLL).await;
+        let Some(view) = plane.hosted(ROOT_SESSION).await? else {
+            return Err("the hosted dispatcher stopped before its work was placed".to_owned());
+        };
+        match hosted_placed(&view, shape.pooled)? {
+            None => return Ok(shape.pooled),
+            Some(reason) => waiting = reason,
+        }
+    }
+    Err(format!(
+        "the hosted dispatcher did not place its work after {HOSTED_PASSES_MAX} polls: {waiting}"
+    ))
+}
+
+/// `Err` when the hosted pool and its board disagree, `Ok(Some(_))` while
+/// placement is still under way, `Ok(None)` once every task has its agent.
+fn hosted_placed(view: &HostedView, want: u64) -> Result<Option<String>, String> {
+    for agent in &view.agents {
+        let Some(intent) = &agent.intent else {
+            return Err(format!(
+                "the hosted pool lists {} without the intent it was placed for",
+                agent.id
+            ));
+        };
+        if !view.intents.iter().any(|known| known.id == *intent) {
+            return Err(format!(
+                "the hosted pool lists {} under {intent}, which {} never recorded",
+                agent.id, view.scope
+            ));
+        }
+    }
+    if u64::try_from(view.intents.len()).expect("an intent count fits in u64") != want {
+        return Ok(Some(format!(
+            "{} intents for {want} hosted tasks",
+            view.intents.len()
+        )));
+    }
+    for intent in &view.intents {
+        let phase = view.phases.get(&intent.task.0);
+        if matches!(phase, Some(Phase::Done { .. })) {
+            continue;
+        }
+        let IntentState::Live { agent } = &intent.state else {
+            return Ok(Some(format!("intent {} is {:?}", intent.id, intent.state)));
+        };
+        let Some(listed) = view.agents.iter().find(|listed| listed.id == *agent) else {
+            return Err(format!(
+                "{} settled {} on {agent} but the hosted pool does not list it",
+                view.scope, intent.id
+            ));
+        };
+        if listed.intent.as_ref() != Some(&intent.id) {
+            return Err(format!(
+                "the hosted pool lists {agent} under {:?}, {} settled it for {}",
+                listed.intent, view.scope, intent.id
+            ));
+        }
+        match phase {
+            Some(Phase::Claimed { worker, .. }) if worker.ends_with(&format!("+{agent}")) => {}
+            Some(Phase::Claimed { worker, .. }) => {
+                return Err(format!(
+                    "{} is claimed by {worker}, not by {agent} that the dispatcher placed on it",
+                    intent.task
+                ));
+            }
+            other => return Ok(Some(format!("{} is {other:?}", intent.task))),
+        }
+    }
+    Ok(None)
+}
+
 async fn steer_running(run: &Run) -> Result<(), String> {
     let listed = run
         .registry
@@ -690,6 +794,10 @@ async fn drive(shape: &Shape, ledger: &Arc<Ledger>, clock: &Arc<Clock>) -> Resul
     ledger.trace("started");
     let retired = pooled(&run, shape, clock).await?;
     ledger.trace("pooled");
+    let hosted = hosted(shape).await?;
+    if hosted > 0 {
+        ledger.trace("hosted");
+    }
     if run.plane.is_some() {
         steer_running(&run).await?;
         ledger.trace("steered");
@@ -699,10 +807,11 @@ async fn drive(shape: &Shape, ledger: &Arc<Ledger>, clock: &Arc<Clock>) -> Resul
         board_agrees(&run, plane, false).await?;
     }
     ledger.trace("stop");
+    crate::boardagents::stop_hosting();
     let took_ms = stop(&run, shape, clock).await?;
     ledger.trace("stopped");
     nanocode_platform::sleep(RUNTIME_STOP_TIMEOUT).await;
-    judge(&run, shape, ledger, &retired).await?;
+    judge(&run, shape, ledger, &retired, hosted).await?;
     drop(run.updates);
     Ok(took_ms)
 }

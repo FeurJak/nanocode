@@ -74,7 +74,7 @@ pub struct HostedView {
     pub scope: String,
     pub intents: Vec<Intent>,
     pub agents: Vec<Agent>,
-    pub claimed: BTreeMap<String, String>,
+    pub phases: BTreeMap<String, Phase>,
 }
 
 #[derive(Clone)]
@@ -193,23 +193,19 @@ impl Hosts {
             .map_err(|error| format!("open {scope}: {error}"))?;
         let fold = board.fold();
         let intents = nanocode_dispatch::intents(fold, &hosted.policy);
-        let claimed = intents
+        let phases = intents
             .iter()
-            .filter_map(
-                |intent| match fold.task(&intent.task).map(|task| &task.phase) {
-                    Some(Phase::Claimed { worker, .. }) => {
-                        Some((intent.task.0.clone(), worker.clone()))
-                    }
-                    _ => None,
-                },
-            )
+            .filter_map(|intent| {
+                let task = fold.task(&intent.task)?;
+                Some((intent.task.0.clone(), task.phase.clone()))
+            })
             .collect();
         let agents = hosted.pool.agents().await;
         Ok(Some(HostedView {
             scope,
             intents,
             agents,
-            claimed,
+            phases,
         }))
     }
 

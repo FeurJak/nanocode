@@ -6,8 +6,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 
 use nanocode_durability_core::{StoreError, StoreFuture};
-use nanocode_subagents::{AgentId, BoardCoordination, BoardStats, Coordination};
+use nanocode_subagents::{AgentId, BoardCoordination, BoardStats, Coordination, Dispatching};
 use nanocode_turnlog::{LogHost, MemoryLog};
+
+const HOSTED_IDLE_RETIRE_MS: u64 = 24 * 60 * 60 * 1_000;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static DELAYED: AtomicBool = AtomicBool::new(false);
@@ -236,10 +238,31 @@ pub fn plane() -> Option<Arc<dyn Coordination>> {
             format!("subagents-{}", seed.planes.len())
         };
         let plane = BoardCoordination::new(Arc::clone(&seed.host), &scope);
+        plane.dispatching(Some(dispatching()));
         seed.scopes.push(scope);
         seed.planes.push(Arc::clone(&plane));
         Some(plane as Arc<dyn Coordination>)
     })
+}
+
+/// Production dispatching, except that pooled agents stay placed for the
+/// whole run so the judge can read every one of them.
+fn dispatching() -> Dispatching {
+    let mut dispatching = Dispatching::default();
+    dispatching.policy.idle_retire_ms = HOSTED_IDLE_RETIRE_MS;
+    dispatching
+}
+
+pub fn hosting_plane() -> Option<Arc<BoardCoordination>> {
+    SEED.with_borrow(|seed| seed.as_ref()?.planes.last().cloned())
+}
+
+pub fn stop_hosting() {
+    SEED.with_borrow(|seed| {
+        for plane in seed.iter().flat_map(|seed| &seed.planes) {
+            plane.dispatching(None);
+        }
+    });
 }
 
 pub async fn steer(root: &str, id: AgentId) -> bool {

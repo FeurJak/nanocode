@@ -24,7 +24,7 @@ mod hosting;
 mod steers;
 
 pub use hosting::{
-    DISPATCH_LABEL, DISPATCH_POSTER, DISPATCH_ROLE, Dispatching, HostedView, dispatch_policy,
+    DISPATCH_LABEL, DISPATCH_POLL_MS, DISPATCH_POSTER, DISPATCH_ROLE, Dispatching, HostedView, dispatch_policy,
     dispatch_scope,
 };
 
