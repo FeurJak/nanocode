@@ -159,6 +159,10 @@ pub struct VirtualMachine {
     /// UnsafeCell because the VM is per-thread and no reference into the Vec
     /// is held across anything that could push to it.
     trampoline_stack: core::cell::UnsafeCell<Vec<SuspendedFrame>>,
+    /// Address of the builtins module's dict as the VM built it, so that
+    /// `is_builtins_dict` turns away every other dict with one compare. A
+    /// module's `__dict__` cannot be rebound, so a match is only confirmed.
+    builtins_dict_addr: usize,
 }
 
 // SAFETY: FramePtr is only stored in a thread's shared frame stack
@@ -521,9 +525,11 @@ impl VirtualMachine {
     /// store that asks.
     #[inline]
     pub(crate) fn is_builtins_dict(&self, obj: &PyObject) -> bool {
-        self.builtins
-            .as_object()
-            .with_instance_dict(|dict| dict.is_some_and(|dict| dict.as_object().is(obj)))
+        core::ptr::from_ref(obj).addr() == self.builtins_dict_addr
+            && self
+                .builtins
+                .as_object()
+                .with_instance_dict(|dict| dict.is_some_and(|dict| dict.as_object().is(obj)))
     }
 
     fn init_callable_cache(&mut self) -> PyResult<()> {
@@ -629,7 +635,7 @@ impl VirtualMachine {
         let trace_func = RefCell::new(ctx.none());
         let signal_handlers = OnceCell::from(SignalHandlers::default());
 
-        let vm = Self {
+        let mut vm = Self {
             builtins,
             sys_module,
             ctx,
@@ -667,6 +673,7 @@ impl VirtualMachine {
             pending_tailcall_owner: core::cell::UnsafeCell::new(None),
             pending_gen_resume: core::cell::UnsafeCell::new(None),
             trampoline_stack: core::cell::UnsafeCell::new(Vec::new()),
+            builtins_dict_addr: 0,
         };
 
         vm.builtins.init_dict(
@@ -681,6 +688,9 @@ impl VirtualMachine {
                 .map(|doc| vm.ctx.intern_str(doc).to_owned()),
             &vm,
         );
+        vm.builtins_dict_addr = vm.builtins.as_object().with_instance_dict(|dict| {
+            dict.map_or(0, |dict| core::ptr::from_ref::<PyObject>(dict.as_object()).addr())
+        });
         // let name = vm.sys_module.get_attr("__name__", &vm).unwrap();
         vm
     }
