@@ -461,6 +461,7 @@ struct Shape {
     prs: Vec<u64>,
     hooks: Vec<Hook>,
     cancel: Option<(TaskId, u64)>,
+    cancel_early: bool,
     crashes: Vec<u64>,
     deadline_ms: u64,
     stable: bool,
@@ -543,6 +544,27 @@ impl Shape {
             }
         }
         let tasks = tasks::Plan::of(seed, &mut plan, workers, lease_ms);
+        let mut later = Rng::derive(seed, "board early cancel");
+        let cancel_early = later.chance(700_000);
+        let posted = plan
+            .iter()
+            .filter(|task| {
+                task.labels["step"] == "fix"
+                    && !task
+                        .parent
+                        .as_ref()
+                        .is_some_and(|lane| tasks.batched.contains(lane))
+            })
+            .map(|task| task.id.clone())
+            .collect::<Vec<_>>();
+        let cancel = cancel.or_else(|| {
+            (!posted.is_empty() && later.chance(700_000)).then(|| {
+                (
+                    posted[later.pick(posted.len())].clone(),
+                    later.range(0, lease_ms * 4),
+                )
+            })
+        });
         Self {
             seed,
             tasks,
@@ -562,6 +584,7 @@ impl Shape {
             prs,
             hooks,
             cancel,
+            cancel_early,
             crashes,
             stable: Rng::derive(seed, "board identity").chance(500_000),
         }
@@ -885,6 +908,15 @@ async fn lead(world: &World, epoch: u64) {
                 }
             }
         }
+        if world.shape.cancel_early
+            && world
+                .shape
+                .cancel
+                .as_ref()
+                .is_some_and(|(cancel, _)| *cancel == task.id)
+        {
+            replan(world, &mut board, &task.id).await;
+        }
         if world.shape.tasks.batched.contains(&task.id) {
             tasks::post_batch(world, &mut board, &task.id).await;
         }
@@ -898,26 +930,33 @@ async fn lead(world: &World, epoch: u64) {
         && !*world.cancelled.borrow()
     {
         world.nap(after_ms).await;
-        loop {
-            match world
-                .submit(
-                    &mut board,
-                    Op::Cancel {
-                        task: task.clone(),
-                        reason: "lead replanned".to_owned(),
-                    },
-                )
-                .await
-            {
-                Ok(_) | Err(BoardError::Rejected(_)) => break,
-                Err(error) => {
-                    world.note(&error);
-                    world.nap(world.shape.poll_ms).await;
-                }
+        replan(world, &mut board, &task).await;
+    }
+}
+
+async fn replan(world: &World, board: &mut Board, task: &TaskId) {
+    if *world.cancelled.borrow() {
+        return;
+    }
+    loop {
+        match world
+            .submit(
+                board,
+                Op::Cancel {
+                    task: task.clone(),
+                    reason: "lead replanned".to_owned(),
+                },
+            )
+            .await
+        {
+            Ok(_) | Err(BoardError::Rejected(_)) => break,
+            Err(error) => {
+                world.note(&error);
+                world.nap(world.shape.poll_ms).await;
             }
         }
-        world.cancelled.replace(true);
     }
+    world.cancelled.replace(true);
 }
 
 #[derive(Clone, Debug)]
@@ -1070,7 +1109,10 @@ impl Worker<'_> {
                 .await;
             return;
         }
-        let outcome = if self.rng.chance(shape.fail_ppm) {
+        let failed = self.rng.chance(shape.fail_ppm)
+            || (tasks::waits(self.board.fold(), &task)
+                && self.rng.chance(shape.tasks.wait_fail_ppm));
+        let outcome = if failed {
             Outcome::Failed(format!("{task} failed under {claim}"))
         } else {
             Outcome::Done(format!("{task} by {claim}"))
@@ -1205,12 +1247,12 @@ async fn watcher(world: &World, epoch: u64) {
                 match world.mutation {
                     BoardMutation::CursorBeforeEffect => {
                         world.watch.borrow_mut().cursor = cursor + 1;
-                        world.nap(rng.range(0, world.shape.step_ms)).await;
+                        world.nap(rng.range(0, world.shape.lease_ms)).await;
                         world.watch.borrow_mut().consumed.push(item);
                     }
                     BoardMutation::EffectBeforeCursor => {
                         world.watch.borrow_mut().consumed.push(item);
-                        world.nap(rng.range(0, world.shape.step_ms)).await;
+                        world.nap(rng.range(0, world.shape.lease_ms)).await;
                         world.watch.borrow_mut().cursor = cursor + 1;
                     }
                     _ => {

@@ -34,6 +34,8 @@ pub struct Plan {
     pub acts: u64,
     pub act_ppm: u64,
     pub drowse_ppm: u64,
+    pub wait_fail_ppm: u64,
+    pub slow_ppm: u64,
     pub desk: u64,
 }
 
@@ -67,8 +69,10 @@ impl Plan {
             hold_ms: rng.range(0, lease_ms * 2),
             acts: rng.range(0, plan.len() as u64),
             act_ppm: rng.range(0, 300_000),
-            drowse_ppm: rng.range(0, 200_000),
+            drowse_ppm: rng.range(0, 400_000),
             desk: rng.draw(),
+            wait_fail_ppm: rng.range(0, 900_000),
+            slow_ppm: rng.range(0, 150_000),
         }
     }
 
@@ -294,13 +298,24 @@ impl Pace for Drowsy<'_> {
     }
 }
 
+pub fn waits(fold: &nanocode_board::Fold, task: &TaskId) -> bool {
+    fold.task(task)
+        .is_some_and(|task| task.spec.terms.on_fail == OnFail::Wait)
+}
+
 pub async fn run(worker: &mut Worker<'_>, task: TaskId) {
     let world = worker.world;
     let shape = &world.shape;
+    let slow = if worker.rng.chance(shape.tasks.slow_ppm) {
+        shape.lease_ms
+    } else {
+        shape.step_ms
+    };
     let steps = (0..worker.rng.range(1, 6))
-        .map(|_| worker.rng.range(1, shape.step_ms))
+        .map(|_| worker.rng.range(1, slow))
         .collect::<Vec<_>>();
-    let failed = worker.rng.chance(shape.fail_ppm);
+    let failed = worker.rng.chance(shape.fail_ppm)
+        || (waits(worker.board.fold(), &task) && worker.rng.chance(shape.tasks.wait_fail_ppm));
     let pace = Drowsy {
         world,
         rng: RefCell::new(Rng::derive(worker.rng.draw(), "board drowse")),
