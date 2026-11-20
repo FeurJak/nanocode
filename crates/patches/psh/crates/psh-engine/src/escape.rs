@@ -54,7 +54,8 @@ pub(crate) fn decode(s: &[u8], dialect: Dialect, utf8: bool) -> Decoded {
             b't' => out.push(b'\t'),
             b'v' => out.push(0x0b),
             b'\\' => out.push(b'\\'),
-            b'"' if dialect == Dialect::Printf => out.push(b'"'),
+            // The format only drops the backslash of \", \' and \? (bash).
+            b'"' | b'\'' | b'?' if dialect == Dialect::Printf => out.push(c),
             b'c' if dialect != Dialect::Printf => {
                 return Decoded {
                     bytes: out,
