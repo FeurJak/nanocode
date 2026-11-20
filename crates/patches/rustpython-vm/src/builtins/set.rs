@@ -810,21 +810,9 @@ unsafe impl crate::object::Traverse for PySetInner {
 }
 
 impl PySetInner {
-    pub(super) fn from_iter<T>(iter: T, vm: &VirtualMachine) -> PyResult<Self>
-    where
-        T: IntoIterator<Item = PyResult<PyObjectRef>>,
-    {
-        let set = Self::default();
-        for item in iter {
-            let item = item?;
-            set.add(&item, vm)?;
-        }
-        Ok(set)
-    }
-
     /// Build a set from an arbitrary object, reusing stored hashes when the
     /// source is a set/frozenset/dict.
-    fn from_object(iterable: PyObjectRef, vm: &VirtualMachine) -> PyResult<Self> {
+    pub(super) fn from_object(iterable: PyObjectRef, vm: &VirtualMachine) -> PyResult<Self> {
         let set = Self::default();
         set.update_internal(iterable, vm)?;
         Ok(set)
@@ -1010,23 +998,6 @@ impl PySetInner {
         Ok(result)
     }
 
-    /// `difference_update` in place, returning this set: the dict views' `-`.
-    pub(super) fn difference(&self, other: ArgIterable, vm: &VirtualMachine) -> PyResult<Self> {
-        self.difference_update_internal(other, vm)?;
-        Ok(self.clone())
-    }
-
-    /// `symmetric_difference_update` in place, returning this set: the dict
-    /// views' `^`.
-    pub(super) fn symmetric_difference(
-        &self,
-        other: ArgIterable,
-        vm: &VirtualMachine,
-    ) -> PyResult<Self> {
-        self.symmetric_difference_update_internal(other, vm)?;
-        Ok(self.clone())
-    }
-
     /// `set_symmetric_difference`: a copy of `other` toggled by this set's keys.
     fn symmetric_difference_new(&self, other: ArgIterable, vm: &VirtualMachine) -> PyResult<Self> {
         let result = Self::from_object(other.as_object().to_owned(), vm)?;
@@ -1153,7 +1124,11 @@ impl PySetInner {
     }
 
     /// `set_update_internal`.
-    fn update_internal(&self, iterable: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
+    pub(super) fn update_internal(
+        &self,
+        iterable: PyObjectRef,
+        vm: &VirtualMachine,
+    ) -> PyResult<()> {
         // check AnySet
         if let Ok(any_set) = AnySet::try_from_object(vm, iterable.to_owned()) {
             self.merge_set(any_set, vm)
@@ -1191,7 +1166,11 @@ impl PySetInner {
     }
 
     /// `set_difference_update_internal`.
-    fn difference_update_internal(&self, other: ArgIterable, vm: &VirtualMachine) -> PyResult<()> {
+    pub(super) fn difference_update_internal(
+        &self,
+        other: ArgIterable,
+        vm: &VirtualMachine,
+    ) -> PyResult<()> {
         if let Some(other_set) = extract_set(other.as_object()) {
             if PyRc::ptr_eq(&self.content, &other_set.content) {
                 self.clear();
@@ -1231,7 +1210,7 @@ impl PySetInner {
     }
 
     /// `set_symmetric_difference_update`.
-    fn symmetric_difference_update_internal(
+    pub(super) fn symmetric_difference_update_internal(
         &self,
         other: ArgIterable,
         vm: &VirtualMachine,

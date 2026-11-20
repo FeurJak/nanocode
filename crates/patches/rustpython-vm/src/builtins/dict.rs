@@ -93,7 +93,9 @@ impl PyPayload for PyDict {
     #[inline]
     fn gc_start_untracked(zelf: &Py<Self>) -> bool {
         use crate::class::StaticType;
-        Self::static_cell().get().is_some_and(|t| zelf.class().is(t))
+        Self::static_cell()
+            .get()
+            .is_some_and(|t| zelf.class().is(t))
             && zelf.entries.gc_start_untracked()
     }
 
@@ -1797,16 +1799,26 @@ impl AsSequence for PyDictValues {
     }
 }
 
+/// dictviews_to_set: a keys view of an exact dict copies the dict's table, as PySet_New(dict) does; any other
+/// operand is set() of it. The operators then update that set in place, as CPython's dictviews_* do.
+fn dictview_to_set(a: &PyObject, vm: &VirtualMachine) -> PyResult<PySetInner> {
+    let source = match a.downcast_ref::<PyDictKeys>() {
+        Some(keys) if keys.dict().class().is(vm.ctx.types.dict_type) => {
+            keys.dict().to_owned().into()
+        }
+        _ => a.to_owned(),
+    };
+    PySetInner::from_object(source, vm)
+}
+
 fn set_inner_number_op<F>(a: &PyObject, b: &PyObject, f: F, vm: &VirtualMachine) -> PyResult
 where
-    F: FnOnce(PySetInner, ArgIterable) -> PyResult<PySetInner>,
+    F: FnOnce(&PySetInner, ArgIterable) -> PyResult<()>,
 {
-    let a = PySetInner::from_iter(
-        ArgIterable::try_from_object(vm, a.to_owned())?.iter(vm)?,
-        vm,
-    )?;
+    let a = dictview_to_set(a, vm)?;
     let b = ArgIterable::try_from_object(vm, b.to_owned())?;
-    Ok(PySet { inner: f(a, b)? }.into_pyobject(vm))
+    f(&a, b)?;
+    Ok(PySet { inner: a }.into_pyobject(vm))
 }
 
 pub(crate) fn set_inner_number_subtract(
@@ -1814,7 +1826,7 @@ pub(crate) fn set_inner_number_subtract(
     b: &PyObject,
     vm: &VirtualMachine,
 ) -> PyResult {
-    set_inner_number_op(a, b, |a, b| a.difference(b, vm), vm)
+    set_inner_number_op(a, b, |a, b| a.difference_update_internal(b, vm), vm)
 }
 
 pub(crate) fn set_inner_number_and(a: &PyObject, b: &PyObject, vm: &VirtualMachine) -> PyResult {
@@ -1824,11 +1836,29 @@ pub(crate) fn set_inner_number_and(a: &PyObject, b: &PyObject, vm: &VirtualMachi
     set_view_number_and(view, other, vm)
 }
 
+/// _PyDictView_Intersect.
 pub(crate) fn set_view_number_and(
     view: &PyObject,
     other: &PyObject,
     vm: &VirtualMachine,
 ) -> PyResult {
+    let len_self = view.length(vm)?;
+    // A view no larger than an exact set is the set's intersection with it.
+    if let Some(set) = other.downcast_ref_if_exact::<PySet>(vm)
+        && len_self <= other.length(vm)?
+    {
+        let view_iter = ArgIterable::try_from_object(vm, view.to_owned())?;
+        let inner = set.inner.intersection(view_iter, vm)?;
+        return Ok(PySet { inner }.into_pyobject(vm));
+    }
+    // Of two views, iterate the smaller.
+    let other_is_view = other.downcast_ref::<PyDictKeys>().is_some()
+        || other.downcast_ref::<PyDictItems>().is_some();
+    let (view, other) = if other_is_view && other.length(vm)? > len_self {
+        (other, view)
+    } else {
+        (view, other)
+    };
     let other = ArgIterable::<PyObjectRef>::try_from_object(vm, other.to_owned())?;
     let result = PySet::default();
     for item in other.iter(vm)? {
@@ -1841,7 +1871,12 @@ pub(crate) fn set_view_number_and(
 }
 
 pub(crate) fn set_inner_number_xor(a: &PyObject, b: &PyObject, vm: &VirtualMachine) -> PyResult {
-    set_inner_number_op(a, b, |a, b| a.symmetric_difference(b, vm), vm)
+    set_inner_number_op(
+        a,
+        b,
+        |a, b| a.symmetric_difference_update_internal(b, vm),
+        vm,
+    )
 }
 
 pub(crate) fn set_item_view_number_xor(
@@ -1880,7 +1915,9 @@ fn dict_item_view_number_xor(a: &PyObject, b: &PyObject, vm: &VirtualMachine) ->
 }
 
 pub(crate) fn set_inner_number_or(a: &PyObject, b: &PyObject, vm: &VirtualMachine) -> PyResult {
-    set_inner_number_op(a, b, |a, b| a.union(b, vm), vm)
+    let result = dictview_to_set(a, vm)?;
+    result.update_internal(b.to_owned(), vm)?;
+    Ok(PySet { inner: result }.into_pyobject(vm))
 }
 
 fn vectorcall_dict(
