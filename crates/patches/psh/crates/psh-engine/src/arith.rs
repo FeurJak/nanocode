@@ -77,6 +77,10 @@ impl ArithEnv for Env<'_> {
                 let v = match index {
                     ArithIndex::Key(k) => self.vp.get_elem(&name, &unquote(k)),
                     ArithIndex::Num(i) => self.vp.get_elem(&name, i.to_string().as_bytes()),
+                    ArithIndex::Empty => {
+                        self.vp.arith_notes.push(format!("{name}[]: bad array subscript"));
+                        self.vp.get_elem(&name, b"0")
+                    }
                 };
                 // Out of range below the start: 0, with bash's message.
                 let v = match v {
@@ -155,6 +159,12 @@ impl ArithEnv for Env<'_> {
             Some(ArithIndex::Num(i)) => {
                 self.vp
                     .assign_elem(&name, i.to_string().as_bytes(), v, false)
+            }
+            // bash reports it and goes on, with nothing stored.
+            Some(ArithIndex::Empty) => {
+                self.vp.arith_notes.push(format!("{name}[]: bad array subscript"));
+                self.vp.arith_notes.push(format!("`{name}[]': not a valid identifier"));
+                Ok(())
             }
         }
     }

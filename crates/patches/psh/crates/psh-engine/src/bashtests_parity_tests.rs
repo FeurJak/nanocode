@@ -84,3 +84,51 @@ fn backtick_escaped_backslash_before_newline_is_not_a_continuation() {
         "[x\\\ny]\n[pq]\n"
     );
 }
+
+#[test]
+fn char_range_through_backquote_and_backslash() {
+    assert_eq!(
+        out("echo {Z..a}\necho {a..Z}\n"),
+        "Z [  ] ^ _ ` a\na ` _ ^ ]  [ Z\n"
+    );
+}
+
+#[test]
+fn space_after_dollar_brace_that_is_no_command_list_parses() {
+    assert_eq!(
+        out("eval 'foo() { _; } >_[${ $() }] ;{ echo eval ok; }'\n"),
+        "eval ok\n"
+    );
+}
+
+#[test]
+fn arith_store_to_an_empty_subscript_stores_nothing() {
+    assert_eq!(
+        out("echo $(( A[$key]++ ))\ndeclare -p A\necho $?\n"),
+        "0\n1\n"
+    );
+}
+
+#[test]
+fn backquote_body_lines_count_from_its_command() {
+    assert_eq!(
+        out("true\necho `echo $LINENO\necho $LINENO`\n"),
+        "3 4\n"
+    );
+}
+
+#[test]
+fn time_alone_prints_with_its_space() {
+    assert_eq!(
+        out("f() { time; echo; }\ndeclare -f f\n"),
+        "f () \n{ \n    time ;\n    echo\n}\n"
+    );
+}
+
+#[test]
+fn length_and_bang_heads_with_operators() {
+    assert_eq!(
+        out("set -- a b\necho ${#-x} ${#/a/b} ${!-p} ${!:-q}\n(echo ${#+})\n(echo ${#%})\necho $?\n"),
+        "2 2 p q\n1\n"
+    );
+}

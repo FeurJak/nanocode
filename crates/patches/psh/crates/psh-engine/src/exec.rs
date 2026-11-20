@@ -3975,7 +3975,9 @@ pub(crate) async fn command_subst_text(
             let inner = Rc::new(Code {
                 lines: Rc::new(psh_syntax::LineIndex::from_bytes(script)),
                 ast: Arc::new(ast),
-                line_base: code.line(offset) - 1,
+                // bash counts the body's lines from the line of the command it
+                // runs in, not from where the backquote opens.
+                line_base: vp.line.max(1) - 1,
                 arith: Default::default(),
                 flat: Default::default(),
             });

@@ -23,6 +23,9 @@ pub enum ArithIndex<'a> {
     Num(i64),
     /// The key of an associative array: the subscript text as written.
     Key(&'a [u8]),
+    /// An indexed array's subscript that is empty (`a[]`, or `a[$k]` with `k` empty):
+    /// read as element 0, but a store to it is a bad subscript that stores nothing.
+    Empty,
 }
 
 /// A variable's value as the evaluator reads it.
@@ -176,7 +179,12 @@ impl<E: ArithEnv> Evaluator<'_, E> {
         } else if sub.iter().any(|&b| matches!(b, b'$' | b'`'))
             && let Some(expanded) = self.env.expand_subscript(sub).map_err(EvalError::Env)?
         {
-            Ok(Some(ArithIndex::Num(self.text(&expanded)?)))
+            match expanded.iter().all(u8::is_ascii_whitespace) {
+                true => Ok(Some(ArithIndex::Empty)),
+                false => Ok(Some(ArithIndex::Num(self.text(&expanded)?))),
+            }
+        } else if sub.iter().all(u8::is_ascii_whitespace) {
+            Ok(Some(ArithIndex::Empty))
         } else {
             Ok(Some(ArithIndex::Num(self.text(sub)?)))
         }

@@ -3524,6 +3524,7 @@ impl<'a> P<'a> {
             // `${ list; }` and `${| list; }`: bash 5.3's command substitution in the
             // current shell.
             self.pos = if c == b'|' { p + 1 } else { p };
+            let depth = self.depth;
             let outer = self.stash_pending();
             let closer = self.closer.replace("}");
             let r = self.parse_compound_list(
@@ -3536,10 +3537,25 @@ impl<'a> P<'a> {
                 true,
             );
             self.closer = closer;
+            // Not a command list closed by `}` (`${ $() }`): bash 5.2 has no such
+            // substitution and scans it as a `${…}` that is a bad substitution when
+            // expanded.
+            let closed = match &r {
+                Ok(_) => {
+                    self.skip_blanks();
+                    self.peek() == Some(b'}')
+                }
+                Err(_) => false,
+            };
+            if !closed && self.pending.is_empty() {
+                self.pending = outer;
+                self.depth = depth;
+                self.pos = p;
+                return self.finish_bad_subst(start, dq);
+            }
             self.unstash_pending(outer, r.is_ok())?;
             let list = r?;
-            self.skip_blanks();
-            if self.peek() != Some(b'}') {
+            if !closed {
                 return Err(self.unexpected());
             }
             self.pos += 1;
@@ -3555,6 +3571,9 @@ impl<'a> P<'a> {
         let head = match self.byte(p) {
             Some(b'#') => match self.byte(p + 1) {
                 Some(b'}') => Some((ParamName::Special(b'#'), p, p + 1)),
+                // `${#+}`, `${#/}`: an operator with nothing after it is a bad
+                // substitution in bash (`${#-}` and `${#?}` are lengths).
+                Some(b'+' | b'=' | b'/' | b'%') if self.byte(p + 2) == Some(b'}') => None,
                 _ => match self.param_name_at(p + 1) {
                     Some((n, e)) if matches!(self.byte(e), Some(b'}' | b'[')) => {
                         prefix = ParamPrefix::Length;
@@ -3565,6 +3584,10 @@ impl<'a> P<'a> {
             },
             Some(b'!') => match self.byte(p + 1) {
                 Some(b'}') => Some((ParamName::Special(b'!'), p, p + 1)),
+                // `${!-word}` is `$!` with a default, as in bash.
+                Some(b'-') if self.byte(p + 2) != Some(b'}') => {
+                    Some((ParamName::Special(b'!'), p, p + 1))
+                }
                 _ => match self.param_name_at(p + 1) {
                     Some((n, e)) => {
                         prefix = ParamPrefix::Indirect;

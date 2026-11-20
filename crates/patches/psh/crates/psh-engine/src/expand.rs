@@ -459,7 +459,9 @@ fn seq(start: &str, end: &str, step: Option<&str>) -> Option<Vec<Vec<u8>>> {
             if (a <= b && i > b) || (a > b && i < b) {
                 break;
             }
-            out.push(vec![i as u8]);
+            // bash rescans the generated text, so a backslash quotes nothing and is
+            // removed, leaving an empty word ({Z..a}).
+            out.push(if i == i128::from(b'\\') { Vec::new() } else { vec![i as u8] });
             i = if a <= b { i + step_abs } else { i - step_abs };
         }
         return Some(out);
@@ -704,25 +706,6 @@ fn expand_pieces<'a>(
                 _ => false,
             };
             match piece {
-                Piece::Text(t) if t == b"`" => {
-                    let mut rest = t.clone();
-                    for p in &pieces[i + 1..] {
-                        match p {
-                            Piece::Part(p) => rest.extend_from_slice(code.ast.bytes(p.span)),
-                            Piece::Text(t) => rest.extend_from_slice(t),
-                            Piece::Var(n) => {
-                                rest.push(b'$');
-                                rest.extend_from_slice(n);
-                            }
-                        }
-                    }
-                    vp.error(&format!(
-                        "bad substitution: no closing \"`\" in {}",
-                        String::from_utf8_lossy(&rest)
-                    ))
-                    .await;
-                    return Err(Unwind::Abort(1));
-                }
                 Piece::Text(t) if i == 0 && t.first() == Some(&b'~') => {
                     literal_with_tilde(vp, t, true, ctx, f);
                 }
