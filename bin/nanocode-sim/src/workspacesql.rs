@@ -1,5 +1,5 @@
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
     future::Future,
     io,
@@ -15,12 +15,15 @@ use std::{
     time::Duration,
 };
 
+use nanocode_bytes::Bytes;
 use nanocode_durability_core::{Sql, SqlAccess, SqlRow, SqlStatement, StoreError, StoreFuture};
 use nanocode_shell::{FileSystem, Machine, Remove, Reply, Write};
 use nanocode_sync::Atom;
 use nanocode_sys::base64::STANDARD;
 use nanocode_workspace_fs::{
-    Batch, Blob, Caps, Change, Digest, Entry, Failure, Manifest, SqlStore, Store, WorkspaceFs,
+    Batch, Blob, Caps, Change, Digest, Entry, Failure, Manifest, SqlStore, Store, Sweep,
+    WorkspaceFs,
+    objects::{Listed, Objects},
     sim::{self as fs_sim, Mutation as FsRule},
 };
 use serde_json::Value;
@@ -61,6 +64,22 @@ const FILE: &str = "file";
 const DIR: &str = "dir";
 const SYMLINK: &str = "symlink";
 const GATE: &str = "AND token = ?2)";
+const OBJECTS_PPM: u64 = 500_000;
+const SWEEP_PPM: u64 = 150_000;
+const SWEEP_LIMIT: usize = 4;
+const SWEEP_TICKS_MAX: u64 = 8;
+const SWEEP: Sweep = Sweep {
+    settle_ms: 4,
+    window_ms: 12,
+    put_ms: 6,
+};
+const OBJECT: &str = "@object";
+const GONE: &str = "@gone:";
+const OBJECT_PREFIX: &str = "blobs/";
+const TOMBSTONE: &str =
+    "INSERT INTO nanocode_workspace_blobs (digest, data, refs) SELECT value, ?2, 0 ";
+const DEAD: &str = "SELECT digest, data FROM nanocode_workspace_blobs WHERE refs <= 0 ";
+const EXPIRE: &str = "DELETE FROM nanocode_workspace_blobs WHERE digest IN (SELECT value FROM json_each(?1)) AND data IN ";
 const CAS: &str = "AND version = ";
 const GATED: [&str; 5] = [
     "DELETE FROM nanocode_workspace_entries ",
@@ -76,14 +95,16 @@ pub enum WorkspaceSqlMutation {
     SkipVersionCas,
     ReleaseBeforeCommit,
     SplitTransaction,
+    SweepSkipsTombstone,
 }
 
 impl WorkspaceSqlMutation {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::None,
         Self::SkipVersionCas,
         Self::ReleaseBeforeCommit,
         Self::SplitTransaction,
+        Self::SweepSkipsTombstone,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -98,6 +119,7 @@ impl WorkspaceSqlMutation {
             Self::SkipVersionCas => "skip_version_cas",
             Self::ReleaseBeforeCommit => "release_before_commit",
             Self::SplitTransaction => "split_transaction",
+            Self::SweepSkipsTombstone => "sweep_skips_tombstone",
         }
     }
 
@@ -116,6 +138,7 @@ impl WorkspaceSqlMutation {
             Self::SkipVersionCas => FsRule::SqlSkipVersionCas,
             Self::ReleaseBeforeCommit => FsRule::SqlReleaseBeforeCommit,
             Self::SplitTransaction => FsRule::SqlSplitTransaction,
+            Self::SweepSkipsTombstone => FsRule::SqlSweepSkipsTombstone,
         }
     }
 }
@@ -137,6 +160,8 @@ pub struct WorkspaceSqlStats {
     pub failed_opens: u64,
     pub shared: u64,
     pub max_version: u64,
+    pub sweeps: u64,
+    pub reaped: u64,
 }
 
 impl WorkspaceSqlStats {
@@ -155,6 +180,8 @@ impl WorkspaceSqlStats {
         self.reopens += other.reopens;
         self.failed_opens += other.failed_opens;
         self.shared += other.shared;
+        self.sweeps += other.sweeps;
+        self.reaped += other.reaped;
         if other.max_version > self.max_version {
             self.max_version = other.max_version;
         }
@@ -311,6 +338,43 @@ impl Tables {
                 .insert(component, param(statement, 1)?.to_owned());
             return Ok(Vec::new());
         }
+        if sql.starts_with("CREATE INDEX IF NOT EXISTS ") {
+            return Ok(Vec::new());
+        }
+        if sql.starts_with(TOMBSTONE) {
+            let mark = param(statement, 1)?;
+            for digest in texts(param(statement, 0)?)? {
+                self.blobs
+                    .entry(digest)
+                    .or_insert_with(|| (mark.to_owned(), 0));
+            }
+            return Ok(Vec::new());
+        }
+        if sql.starts_with(DEAD) {
+            let limit: usize = param(statement, 0)?
+                .parse()
+                .map_err(|_| refused("a limit does not parse"))?;
+            return Ok(self
+                .blobs
+                .iter()
+                .filter(|(_, (_, refs))| *refs <= 0)
+                .take(limit)
+                .map(|(digest, (data, _))| vec![Some(digest.clone()), Some(data.clone())])
+                .collect());
+        }
+        if sql.starts_with(EXPIRE) {
+            let marks = texts(param(statement, 1)?)?;
+            for digest in texts(param(statement, 0)?)? {
+                if self
+                    .blobs
+                    .get(&digest)
+                    .is_some_and(|(data, refs)| *refs <= 0 && marks.contains(data))
+                {
+                    self.blobs.remove(&digest);
+                }
+            }
+            return Ok(Vec::new());
+        }
         let key = param(statement, 0)?;
         if sql.starts_with("SELECT CAST(h.version AS TEXT), e.path,") {
             return Ok(self.load(key));
@@ -327,13 +391,18 @@ impl Tables {
         }
         let token = param(statement, 1)?;
         if sql.starts_with("INSERT INTO nanocode_workspace_heads ") {
+            if self.tombstoned(param(statement, 2)?)? {
+                return Ok(Vec::new());
+            }
             self.heads
                 .entry(key.to_owned())
                 .or_insert_with(|| (1, token.to_owned()));
             return Ok(Vec::new());
         }
         if sql.starts_with("UPDATE nanocode_workspace_heads SET version = version + 1") {
-            self.claim(sql, key, token, param(statement, 2)?)?;
+            if !self.tombstoned(param(statement, 3)?)? {
+                self.claim(sql, key, token, param(statement, 2)?)?;
+            }
             return Ok(Vec::new());
         }
         if !GATED.iter().any(|prefix| sql.starts_with(prefix)) {
@@ -345,6 +414,14 @@ impl Tables {
             self.change(statement, key)?;
         }
         Ok(Vec::new())
+    }
+
+    fn tombstoned(&self, list: &str) -> Result<bool, StoreError> {
+        Ok(texts(list)?.iter().any(|digest| {
+            self.blobs
+                .get(digest)
+                .is_some_and(|(data, _)| data.starts_with(GONE))
+        }))
     }
 
     fn claim(
@@ -386,7 +463,12 @@ impl Tables {
             let data = param(statement, 3)?;
             self.blobs
                 .entry(list.to_owned())
-                .and_modify(|(_, refs)| *refs += 1)
+                .and_modify(|(held, refs)| {
+                    *refs += 1;
+                    if held.starts_with(GONE) {
+                        data.clone_into(held);
+                    }
+                })
                 .or_insert_with(|| (data.to_owned(), 1));
         } else if sql.starts_with(GATED[3]) {
             for digest in texts(list)? {
@@ -437,6 +519,77 @@ impl Future for Hold {
         self.0 -= 1;
         context.waker().wake_by_ref();
         Poll::Pending
+    }
+}
+
+struct SimObjects {
+    held: Atom<BTreeMap<String, (Vec<u8>, u64)>>,
+    now: Arc<AtomicU64>,
+}
+
+impl SimObjects {
+    fn clock(&self) -> nanocode_workspace_fs::Clock {
+        let now = Arc::clone(&self.now);
+        Arc::new(move || now.load(Ordering::Relaxed))
+    }
+
+    fn bytes(&self, digest: &str) -> Option<Vec<u8>> {
+        let key = format!("{OBJECT_PREFIX}{digest}");
+        self.held
+            .update(|held| held.get(&key).map(|(bytes, _)| bytes.clone()))
+    }
+}
+
+impl Objects for SimObjects {
+    fn put<'a>(&'a self, key: &'a str, bytes: &'a Bytes) -> StoreFuture<'a, Result<(), Failure>> {
+        Box::pin(async move {
+            Hold(1).await;
+            let at = self.now.fetch_add(1, Ordering::Relaxed) + 1;
+            self.held.update(|held| {
+                held.insert(key.to_owned(), (bytes.to_vec(), at));
+            });
+            Ok(())
+        })
+    }
+
+    fn get<'a>(&'a self, key: &'a str) -> StoreFuture<'a, Result<Option<Bytes>, Failure>> {
+        Box::pin(async move {
+            Hold(1).await;
+            Ok(self
+                .held
+                .update(|held| held.get(key).map(|(bytes, _)| Bytes::from(bytes.clone()))))
+        })
+    }
+
+    fn delete<'a>(&'a self, key: &'a str) -> StoreFuture<'a, Result<(), Failure>> {
+        Box::pin(async move {
+            Hold(1).await;
+            self.held.update(|held| {
+                held.remove(key);
+            });
+            Ok(())
+        })
+    }
+
+    fn list<'a>(
+        &'a self,
+        prefix: &'a str,
+        after: &'a str,
+        limit: usize,
+    ) -> StoreFuture<'a, Result<Vec<Listed>, Failure>> {
+        Box::pin(async move {
+            Hold(1).await;
+            Ok(self.held.update(|held| {
+                held.iter()
+                    .filter(|(key, _)| key.starts_with(prefix) && key.as_str() > after)
+                    .take(limit)
+                    .map(|(key, (_, at))| Listed {
+                        key: key.clone(),
+                        modified_ms: *at,
+                    })
+                    .collect()
+            }))
+        })
     }
 }
 
@@ -648,13 +801,64 @@ struct World {
     seen: Arc<Tables>,
     pending: Vec<(String, Change)>,
     stats: WorkspaceSqlStats,
+    objects: Option<Arc<SimObjects>>,
+    sweeper: Option<Rc<SqlStore>>,
+    cursor: Rc<RefCell<String>>,
+    reaped: Rc<Cell<u64>>,
 }
 
 impl World {
+    fn store(&self) -> Result<Result<SqlStore, Failure>, String> {
+        let host: Arc<dyn Sql> = self.host.clone();
+        match &self.objects {
+            Some(objects) => {
+                let clock = objects.clock();
+                let objects: Arc<dyn Objects> = objects.clone();
+                drive(SqlStore::with_objects(host, objects, SWEEP, clock))
+            }
+            None => drive(SqlStore::open(host)),
+        }
+    }
+
+    fn open_sweeper(&mut self) -> Result<(), String> {
+        if self.objects.is_none() {
+            return Ok(());
+        }
+        for _ in 0..OPENS_MAX {
+            if let Ok(store) = self.store()? {
+                self.sweeper = Some(Rc::new(store));
+                return Ok(());
+            }
+            self.stats.failed_opens += 1;
+        }
+        Err(format!("the sweeper failed to open {OPENS_MAX} times"))
+    }
+
+    fn sweep(&mut self) -> Option<Flying> {
+        let sweeper = Rc::clone(self.sweeper.as_ref()?);
+        let objects = self.objects.as_ref()?;
+        if !self.rng.chance(SWEEP_PPM) {
+            return None;
+        }
+        let ticks = self.rng.below(SWEEP_TICKS_MAX + 1);
+        objects.now.fetch_add(ticks, Ordering::Relaxed);
+        self.stats.sweeps += 1;
+        let (cursor, reaped) = (Rc::clone(&self.cursor), Rc::clone(&self.reaped));
+        Some(Box::pin(async move {
+            let after = cursor.borrow().clone();
+            let swept = sweeper
+                .sweep(&after, SWEEP_LIMIT)
+                .await
+                .map_err(|failure| io::Error::other(failure.to_string()))?;
+            reaped.set(reaped.get() + swept.deleted as u64);
+            *cursor.borrow_mut() = swept.next.unwrap_or_default();
+            Ok(())
+        }))
+    }
+
     fn open(&mut self, workspace: usize) -> Result<WorkspaceFs, String> {
         for _ in 0..OPENS_MAX {
-            let host: Arc<dyn Sql> = self.host.clone();
-            let Ok(inner) = drive(SqlStore::open(host))? else {
+            let Ok(inner) = self.store()? else {
                 self.stats.failed_opens += 1;
                 continue;
             };
@@ -772,6 +976,12 @@ impl World {
         }
         for (digest, (data, refs)) in &snapshot.blobs {
             let short = &digest[..digest.len().min(DIGEST_SHOWN)];
+            if data.starts_with(GONE) {
+                if holders.contains_key(digest.as_str()) || *refs > 0 {
+                    return Err(format!("the tombstoned blob {short} is still held"));
+                }
+                continue;
+            }
             match holders.get(digest.as_str()) {
                 Some(count) if count == refs => {}
                 Some(count) => {
@@ -785,9 +995,15 @@ impl World {
                     ));
                 }
             }
-            let bytes = STANDARD
-                .decode(data)
-                .map_err(|_| format!("blob {short} is not base64"))?;
+            let bytes = match (&self.objects, data == OBJECT) {
+                (Some(objects), true) => objects
+                    .bytes(digest)
+                    .ok_or_else(|| format!("blob {short} lost its object"))?,
+                (None, true) => return Err(format!("blob {short} points at no object store")),
+                _ => STANDARD
+                    .decode(data)
+                    .map_err(|_| format!("blob {short} is not base64"))?,
+            };
             if Digest::of(&bytes).hex() != *digest {
                 return Err(format!("blob {short} holds other bytes"));
             }
@@ -877,6 +1093,10 @@ impl World {
             expect: Expect::Any,
             written: None,
         };
+        if let Some(sweep) = self.sweep() {
+            flight.future = Some(sweep);
+            return Ok(flight);
+        }
         let kind = self.rng.below(10);
         let future = match kind {
             0..=2 => self.write(&fs, kind, &mut flight)?,
@@ -1134,6 +1354,15 @@ fn world(seed: u64) -> (World, u64, String) {
         aborts: AtomicU64::new(0),
         crashes_after: AtomicU64::new(0),
     });
+    let objects = (fs_sim::mutated(FsRule::SqlSweepSkipsTombstone)
+        || Rng::derive(seed, "workspace-sql-objects").chance(OBJECTS_PPM))
+    .then(|| {
+        Arc::new(SimObjects {
+            held: Atom::new(BTreeMap::new()),
+            now: Arc::new(AtomicU64::new(0)),
+        })
+    });
+    let shape = format!("{shape} objects={}", objects.is_some());
     let world = World {
         rng,
         caps,
@@ -1150,6 +1379,10 @@ fn world(seed: u64) -> (World, u64, String) {
             seeds: 1,
             ..WorkspaceSqlStats::default()
         },
+        objects,
+        sweeper: None,
+        cursor: Rc::new(RefCell::new(String::new())),
+        reaped: Rc::new(Cell::new(0)),
     };
     (world, rounds, shape)
 }
@@ -1161,6 +1394,7 @@ fn play(world: &mut World, rounds: u64) -> Result<(), String> {
             .map_err(|message| format!("open: {message}"))?;
         world.writers.push((workspace, opened));
     }
+    world.open_sweeper()?;
     world.check_commits()?;
     for round in 0..rounds {
         world
@@ -1184,6 +1418,7 @@ fn simulate(seed: u64, mutation: WorkspaceSqlMutation) -> WorkspaceSqlOutcome {
     world.stats.transactions = world.host.transactions.load(Ordering::Relaxed);
     world.stats.aborts = world.host.aborts.load(Ordering::Relaxed);
     world.stats.crashes_after = world.host.crashes_after.load(Ordering::Relaxed);
+    world.stats.reaped = world.reaped.get();
     WorkspaceSqlOutcome {
         digest: world.digest(),
         wrong,

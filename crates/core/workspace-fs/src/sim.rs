@@ -11,6 +11,7 @@ pub enum Mutation {
     SqlSkipVersionCas,
     SqlReleaseBeforeCommit,
     SqlSplitTransaction,
+    SqlSweepSkipsTombstone,
     AnswersNow,
 }
 
