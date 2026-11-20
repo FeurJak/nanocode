@@ -61,12 +61,13 @@ const WEEKDAY_NAMES: [&str; 7] = [
     "Saturday",
 ];
 const WEEKDAY_ABBREVIATIONS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const DATE_TIME_FORMAT: &str = "%Y M%m %-d, %a %H:%M:%S";
-const DATE_TIME_UPPERCASE_FORMAT: &str = "%Y M%m %-d, %^a %H:%M:%S";
-const DATE_FORMAT: &str = "%Y M%m %-d";
+// %c, %x and %r as glibc's C locale writes them, which native CPython on Linux prints
+const DATE_TIME_FORMAT: &str = "%a %b %e %H:%M:%S %Y";
+const DATE_TIME_UPPERCASE_FORMAT: &str = "%^a %^b %e %H:%M:%S %Y";
+const DATE_FORMAT: &str = "%m/%d/%y";
 const TIME_FORMAT: &str = "%H:%M:%S";
-const TWELVE_HOUR_FORMAT: &str = "%-I:%M:%S %p";
-const TWELVE_HOUR_UPPERCASE_FORMAT: &str = "%-I:%M:%S %^p";
+const TWELVE_HOUR_FORMAT: &str = "%I:%M:%S %p";
+const TWELVE_HOUR_UPPERCASE_FORMAT: &str = "%I:%M:%S %^p";
 
 #[derive(Debug)]
 pub(super) struct OutOfRange;

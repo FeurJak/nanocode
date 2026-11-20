@@ -819,7 +819,8 @@ mod decl {
                 tm_hour: vm.ctx.new_int(tm.hour()).into(),
                 tm_min: vm.ctx.new_int(tm.minute()).into(),
                 tm_sec: vm.ctx.new_int(tm.second()).into(),
-                tm_wday: vm.ctx.new_int(tm.weekday_from_sunday()).into(),
+                // struct_time counts weekdays from Monday (0), not Sunday
+                tm_wday: vm.ctx.new_int((tm.weekday_from_sunday() + 6) % 7).into(),
                 tm_yday: vm.ctx.new_int(tm.day_of_year()).into(),
                 tm_isdst: vm.ctx.new_int(isdst).into(),
                 tm_zone: vm.ctx.new_str(UTC_ABBREVIATION).into(),

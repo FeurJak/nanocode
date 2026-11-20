@@ -248,6 +248,8 @@ pub mod sys {
         target_os = "ios" => c"ios",
         windows => c"win32",
         target_os = "wasi" => c"wasi",
+        // nanocode's wasm32 build emulates a Linux host (POSIX files, psh), so scripts see the platform native runs report
+        all(target_arch = "wasm32", target_os = "unknown") => c"linux",
         _ => c"unknown"
     };
 
