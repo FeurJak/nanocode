@@ -511,6 +511,24 @@ mod _host {
     }
 
     #[pyfunction]
+    fn link(existing: ArgBytesLike, link: ArgBytesLike, vm: &VirtualMachine) -> PyResult<()> {
+        let existing = existing.borrow_buf();
+        let link = link.borrow_buf();
+        files(vm, &link, |state| {
+            state.files.hard_link(&existing, &link)?;
+            state.changes.removed.remove(&*link);
+            state.changes.written.insert(link.to_vec());
+            Ok(())
+        })
+    }
+
+    #[pyfunction]
+    fn links(path: ArgBytesLike, follow: bool, vm: &VirtualMachine) -> PyResult<Option<(u64, u64)>> {
+        let path = path.borrow_buf();
+        state(vm, |state| Ok(state.files.links(&path, follow)))
+    }
+
+    #[pyfunction]
     fn readlink(path: ArgBytesLike, vm: &VirtualMachine) -> PyResult<PyBytesRef> {
         let path = path.borrow_buf();
         let target = files(vm, &path, |state| state.files.read_link(&path))?;

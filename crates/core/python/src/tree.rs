@@ -1,4 +1,8 @@
-use std::{cell::RefCell, collections::BTreeMap, io};
+use std::{
+    cell::{Cell, RefCell},
+    collections::BTreeMap,
+    io,
+};
 
 use crate::{Files, Kind, Remove, Stat, Write};
 
@@ -23,6 +27,8 @@ pub struct Delta {
     pub linked: Vec<(Vec<u8>, Vec<u8>)>,
     /// Modification times Python set, as (path, mtime_ns).
     pub times: Vec<(Vec<u8>, i64)>,
+    /// Hard links Python made, as (existing, link), in the order it made them.
+    pub hard_linked: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 enum Node {
@@ -56,6 +62,12 @@ pub struct Tree {
     links: RefCell<BTreeMap<Vec<u8>, Vec<u8>>>,
     /// Paths whose modification time Python set.
     timed: RefCell<std::collections::BTreeSet<Vec<u8>>>,
+    /// The hard-link group of each file that shares its content with other names.
+    groups: RefCell<BTreeMap<Vec<u8>, u64>>,
+    /// Hard links Python made here, as (existing, link).
+    made: RefCell<Vec<(Vec<u8>, Vec<u8>)>>,
+    /// The next group a hard link Python makes starts.
+    fresh: Cell<u64>,
 }
 
 fn parent(path: &[u8]) -> &[u8] {
@@ -115,6 +127,64 @@ impl Tree {
             nodes: RefCell::new(BTreeMap::new()),
             links: RefCell::new(BTreeMap::new()),
             timed: RefCell::new(std::collections::BTreeSet::new()),
+            groups: RefCell::new(BTreeMap::new()),
+            made: RefCell::new(Vec::new()),
+            fresh: Cell::new(1 << 62),
+        }
+    }
+
+    /// Puts the file at `path` in hard-link group `group`, with the other names
+    /// that share its content.
+    pub fn join(&self, path: Vec<u8>, group: u64) {
+        self.groups.borrow_mut().insert(path, group);
+    }
+
+    /// The other names of the file at `path`.
+    fn peers(&self, path: &[u8]) -> Vec<Vec<u8>> {
+        let groups = self.groups.borrow();
+        let Some(group) = groups.get(path) else {
+            return Vec::new();
+        };
+        groups
+            .iter()
+            .filter(|(other, shared)| *shared == group && other.as_slice() != path)
+            .map(|(other, _)| other.clone())
+            .collect()
+    }
+
+    /// Gives every other name of the file at `path` its content, mode and time.
+    fn spread(&self, path: &[u8], nodes: &mut BTreeMap<Vec<u8>, Node>) {
+        let peers = self.peers(path);
+        if peers.is_empty() {
+            return;
+        }
+        let Some(Node::File {
+            data,
+            mode,
+            mtime_ns,
+            changed,
+            moded,
+        }) = nodes.get(path)
+        else {
+            return;
+        };
+        let (data, mode, mtime_ns, changed, moded) =
+            (data.clone(), *mode, *mtime_ns, *changed, *moded);
+        for peer in peers {
+            if let Some(Node::File {
+                data: held,
+                mode: kept,
+                mtime_ns: time,
+                changed: written,
+                moded: chmoded,
+            }) = nodes.get_mut(&peer)
+            {
+                held.clone_from(&data);
+                *kept = mode;
+                *time = mtime_ns;
+                *written |= changed;
+                *chmoded |= moded;
+            }
         }
     }
 
@@ -174,6 +244,19 @@ impl Tree {
         for path in self.timed.borrow().iter() {
             if let Some(Node::File { mtime_ns, .. } | Node::Dir { mtime_ns, .. }) = nodes.get(path) {
                 delta.times.push((path.clone(), *mtime_ns));
+            }
+        }
+        let groups = self.groups.borrow();
+        for (existing, link) in self.made.borrow().iter() {
+            let file = |path: &Vec<u8>| matches!(nodes.get(path), Some(Node::File { .. }));
+            let shared = groups.get(existing).is_some() && groups.get(existing) == groups.get(link);
+            if file(existing) && file(link) && shared {
+                // The link takes its content from the name it links to.
+                delta.written.retain(|path| path != link);
+                delta.modes.retain(|(path, _)| path != link);
+                delta.hard_linked.push((existing.clone(), link.clone()));
+            } else if file(link) && !delta.written.contains(link) {
+                delta.written.push(link.clone());
             }
         }
         delta
@@ -266,7 +349,7 @@ impl Files for Tree {
         if !matches!(nodes.get(parent(path)), Some(Node::Dir { .. })) {
             return Err(missing());
         }
-        match (nodes.get_mut(path), write) {
+        let done = match (nodes.get_mut(path), write) {
             (Some(Node::Dir { .. }), _) => Err(io::ErrorKind::IsADirectory.into()),
             (Some(Node::File { .. }), Write::New) => Err(io::ErrorKind::AlreadyExists.into()),
             (
@@ -308,37 +391,46 @@ impl Files for Tree {
                 nodes.insert(path.to_vec(), node);
                 Ok(())
             }
+        };
+        if done.is_ok() {
+            self.spread(path, &mut nodes);
         }
+        done
     }
 
     fn set_mode(&self, path: &[u8], mode: u32) -> io::Result<()> {
         self.within(path)?;
         let path = &self.resolve(path)?[..];
-        match self.nodes.borrow_mut().get_mut(path) {
+        let mut nodes = self.nodes.borrow_mut();
+        match nodes.get_mut(path) {
             Some(Node::File {
                 mode: kept, moded, ..
             }) => {
                 *kept = mode & 0o7777;
                 *moded = true;
-                Ok(())
             }
             Some(Node::Dir { mode: kept, .. }) => {
                 *kept = mode & 0o7777;
-                Ok(())
+                return Ok(());
             }
-            None => Err(missing()),
+            None => return Err(missing()),
         }
+        self.spread(path, &mut nodes);
+        Ok(())
     }
 
     fn set_mtime(&self, path: &[u8], mtime_ns: i64) -> io::Result<()> {
         self.within(path)?;
         let path = self.resolve(path)?;
-        match self.nodes.borrow_mut().get_mut(&path) {
+        let mut nodes = self.nodes.borrow_mut();
+        match nodes.get_mut(&path) {
             Some(Node::File { mtime_ns: kept, .. } | Node::Dir { mtime_ns: kept, .. }) => {
                 *kept = mtime_ns;
             }
             None => return Err(missing()),
         }
+        self.spread(&path, &mut nodes);
+        drop(nodes);
         self.timed.borrow_mut().insert(path);
         Ok(())
     }
@@ -404,6 +496,7 @@ impl Files for Tree {
             (Some(Node::File { .. }), Remove::File) => {}
         }
         nodes.remove(path);
+        self.groups.borrow_mut().remove(path);
         Ok(())
     }
 
@@ -436,6 +529,11 @@ impl Files for Tree {
             })
             .cloned()
             .collect();
+        let mut groups = self.groups.borrow_mut();
+        let mut made = self.made.borrow_mut();
+        if matches!(nodes.get(to), Some(Node::File { .. })) {
+            groups.remove(to);
+        }
         for path in moved {
             let Some(mut node) = nodes.remove(&path) else {
                 continue;
@@ -445,6 +543,17 @@ impl Files for Tree {
             }
             let mut placed = to.to_vec();
             placed.extend_from_slice(&path[from.len()..]);
+            if let Some(group) = groups.remove(&path) {
+                groups.insert(placed.clone(), group);
+            }
+            for (existing, link) in made.iter_mut() {
+                if *existing == path {
+                    existing.clone_from(&placed);
+                }
+                if *link == path {
+                    link.clone_from(&placed);
+                }
+            }
             nodes.insert(placed, node);
         }
         Ok(())
@@ -489,5 +598,63 @@ impl Files for Tree {
         } else {
             Err(missing())
         }
+    }
+
+    fn hard_link(&self, existing: &[u8], link: &[u8]) -> io::Result<()> {
+        self.within(existing)?;
+        self.within(link)?;
+        if self.links.borrow().contains_key(existing) {
+            return Err(io::ErrorKind::Unsupported.into());
+        }
+        let mut nodes = self.nodes.borrow_mut();
+        if nodes.contains_key(link) || self.links.borrow().contains_key(link) {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        if !matches!(nodes.get(parent(link)), Some(Node::Dir { .. })) {
+            return Err(missing());
+        }
+        let copy = match nodes.get(existing) {
+            Some(Node::File {
+                data,
+                mode,
+                mtime_ns,
+                ..
+            }) => Node::File {
+                data: data.clone(),
+                mode: *mode,
+                mtime_ns: *mtime_ns,
+                changed: false,
+                moded: false,
+            },
+            Some(Node::Dir { .. }) => return Err(io::ErrorKind::PermissionDenied.into()),
+            None => return Err(missing()),
+        };
+        nodes.insert(link.to_vec(), copy);
+        let mut groups = self.groups.borrow_mut();
+        let group = if let Some(group) = groups.get(existing) {
+            *group
+        } else {
+            let group = self.fresh.get();
+            self.fresh.set(group + 1);
+            groups.insert(existing.to_vec(), group);
+            group
+        };
+        groups.insert(link.to_vec(), group);
+        self.made
+            .borrow_mut()
+            .push((existing.to_vec(), link.to_vec()));
+        Ok(())
+    }
+
+    fn links(&self, path: &[u8], follow: bool) -> Option<(u64, u64)> {
+        let path = if follow {
+            self.resolve(path).ok()?
+        } else {
+            path.to_vec()
+        };
+        let groups = self.groups.borrow();
+        let group = *groups.get(&path)?;
+        let names = groups.values().filter(|shared| **shared == group).count() as u64;
+        Some((group, names))
     }
 }

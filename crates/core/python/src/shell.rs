@@ -412,6 +412,24 @@ impl FileSystem for Mixed {
         }
     }
 
+    fn hard_link(&self, existing: &[u8], link: &[u8]) -> Reply<()> {
+        match (self.tree.holds(existing), self.tree.holds(link)) {
+            (true, true) => Reply::Now(self.tree.hard_link(existing, link)),
+            (false, false) => self.real.hard_link(existing, link),
+            _ => Reply::Now(Err(io::ErrorKind::CrossesDevices.into())),
+        }
+    }
+
+    fn links(&self, path: &[u8], follow: bool) -> Option<nanocode_shell::Links> {
+        if self.tree.holds(path) {
+            self.tree
+                .links(path, follow)
+                .map(|(group, names)| nanocode_shell::Links { group, names })
+        } else {
+            self.real.links(path, follow)
+        }
+    }
+
     fn answers_now(&self) -> bool {
         false
     }
@@ -470,6 +488,16 @@ impl Files for Direct {
 
     fn read_link(&self, path: &[u8]) -> io::Result<Vec<u8>> {
         now(self.files.read_link(path))
+    }
+
+    fn hard_link(&self, existing: &[u8], link: &[u8]) -> io::Result<()> {
+        now(self.files.hard_link(existing, link))
+    }
+
+    fn links(&self, path: &[u8], follow: bool) -> Option<(u64, u64)> {
+        self.files
+            .links(path, follow)
+            .map(|links| (links.group, links.names))
     }
 
     fn spawns(&self) -> bool {
@@ -574,6 +602,9 @@ async fn copy_dir(
         match found.kind {
             nanocode_shell::Kind::Dir => dirs.push(path),
             nanocode_shell::Kind::File => {
+                if let Some(links) = files.links(&path, true) {
+                    tree.join(path.clone(), links.group);
+                }
                 let entry = Entry::File {
                     data: files.read(&path, limit).get().await?.to_vec(),
                     mode: found.mode,
@@ -604,6 +635,9 @@ async fn apply(tree: &Tree, files: &Rc<dyn FileSystem>) -> io::Result<()> {
         let data = tree.take(path).unwrap_or_default();
         let write = nanocode_shell::Write::Replace;
         files.write(path, &data, write).get().await?;
+    }
+    for (existing, link) in &delta.hard_linked {
+        files.hard_link(existing, link).get().await?;
     }
     for (path, mode) in &delta.modes {
         files.set_mode(path, *mode).get().await?;

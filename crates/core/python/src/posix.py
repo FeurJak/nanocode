@@ -125,9 +125,15 @@ class stat_result(tuple):
         return 'os.stat_result(st_mode=%d, st_ino=%d, st_dev=%d, st_nlink=%d, st_uid=%d, st_gid=%d, st_size=%d, st_atime=%d, st_mtime=%d, st_ctime=%d)' % tuple(self)
 
 
-def _stat_result(mode, path, size, mtime_ns):
+def _stat_result(mode, path, size, mtime_ns, follow=True):
     seconds = mtime_ns // 1000000000
-    self = stat_result((mode, (hash(path) & 0x7FFFFFFFFFFFFFFF) or 1, 1, 1, _uid, _uid, size, seconds, seconds, seconds))
+    ino, nlink = (hash(path) & 0x7FFFFFFFFFFFFFFF) or 1, 1
+    if mode & 0o170000 == 0o100000 and isinstance(path, bytes):
+        # Hard-linked names share one inode and count each other.
+        found = _host.links(path, follow)
+        if found is not None:
+            ino, nlink = (hash((b'link', found[0])) & 0x7FFFFFFFFFFFFFFF) or 1, found[1]
+    self = stat_result((mode, ino, 1, nlink, _uid, _uid, size, seconds, seconds, seconds))
     self._ns = mtime_ns
     return self
 
@@ -242,7 +248,7 @@ def lstat(path, *, dir_fd=None):
         kind, size, mode, mtime_ns = _host.lstat(path)
     except FileNotFoundError:
         return stat(path)
-    return _stat_result(_mode(kind, mode), path, size, mtime_ns)
+    return _stat_result(_mode(kind, mode), path, size, mtime_ns, False)
 
 
 def access(path, mode, *, dir_fd=None, effective_ids=False, follow_symlinks=True):
@@ -461,7 +467,20 @@ def symlink(src, dst, target_is_directory=False, *, dir_fd=None):
 
 @_named2
 def link(src, dst, *, src_dir_fd=None, dst_dir_fd=None, follow_symlinks=True):
-    raise _fail(_errno.EPERM, dst)
+    # Like CPython on Linux, which calls link(2): a symlink source is linked itself.
+    source = _abs(src)
+    kind = _host.lstat(source)[0]
+    if kind == 1:
+        raise _fail(_errno.EPERM, dst)
+    try:
+        if kind == 2:
+            _host.symlink(_host.readlink(source), _abs(dst))
+        else:
+            _host.link(source, _abs(dst))
+    except OSError as error:
+        if error.errno == _errno.ENOTSUP:
+            raise _fail(_errno.EPERM, dst) from None
+        raise
 
 
 def getcwd():

@@ -122,6 +122,18 @@ pub trait Files {
         Err(io::ErrorKind::InvalidInput.into())
     }
 
+    /// Makes `link` another name of the file `existing` (not following a symlink
+    /// there), so a change through either shows through both.
+    fn hard_link(&self, _existing: &[u8], _link: &[u8]) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
+    /// The hard-link group of the file at `path` and how many names it has, or
+    /// `None` when it has only its own.
+    fn links(&self, _path: &[u8], _follow: bool) -> Option<(u64, u64)> {
+        None
+    }
+
     fn ranged(&self) -> bool {
         false
     }
