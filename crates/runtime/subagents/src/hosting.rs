@@ -5,7 +5,7 @@ use std::time::Duration;
 use nanocode_board::brief::BriefPolicy;
 use nanocode_board::{Board, BoardError, NewTask, Op, Outcome, Phase, Rejection};
 use nanocode_dispatch::{Agent, Budgets, Intent, IntentState, Policy, Role};
-use nanocode_dispatcher::{BRIEF, Dispatcher, Pool};
+use nanocode_dispatcher::{BRIEF, Dispatcher, Pool, agent_name};
 use nanocode_sync::Atom;
 use nanocode_sync::future::{AbortHandle, abortable};
 use nanocode_turnlog::LogHost;
@@ -337,12 +337,21 @@ fn claims(
     let fold = dispatcher.board().fold();
     let mut ops = Vec::new();
     for intent in nanocode_dispatch::intents(fold, &dispatching.policy) {
-        let IntentState::Live { agent } = &intent.state else {
-            continue;
+        // Claim the work as soon as the pool placed its agent: a running
+        // agent is no supply to the planner, so work left open past the pass
+        // that settles the intent would get a second intent.
+        let agent = match &intent.state {
+            IntentState::Live { agent } => agent.clone(),
+            IntentState::Starting { .. } => agent_name(&intent.id),
+            _ => continue,
         };
+        if pool.agent_id(&agent).is_none() {
+            continue;
+        }
+        let agent = &agent;
         let task = intent.task.clone();
         let op = match fold.task(&task).map(|task| &task.phase) {
-            Some(Phase::Open) if pool.ended(agent).is_none() => Some(Op::Claim {
+            Some(Phase::Open) if pool.ended(agent) != Some(Ended::Stopped) => Some(Op::Claim {
                 task,
                 lease_ms: dispatching.lease_ms,
                 fence: None,
