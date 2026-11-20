@@ -812,18 +812,37 @@ impl Manifest {
     }
 
     pub fn children<'a>(&'a self, dir: &str) -> impl Iterator<Item = &'a str> + 'a {
+        self.child_entries(dir).into_iter().map(|(name, _)| name)
+    }
+
+    /// The entries directly in `dir`, by name in order. Each child's own subtree is
+    /// skipped with one seek rather than read key by key.
+    #[must_use]
+    pub fn child_entries<'a>(&'a self, dir: &str) -> Vec<(&'a str, &'a Entry)> {
         let prefix = if dir.is_empty() {
             String::new()
         } else {
             format!("{dir}/")
         };
         let skip = prefix.len();
-        self.entries
-            .range(prefix.clone()..)
-            .map(|(key, _)| key.as_str())
-            .take_while(move |key| key.starts_with(&prefix))
-            .filter(move |key| !key[skip..].contains('/'))
-            .map(move |key| &key[skip..])
+        let mut found = Vec::new();
+        let mut keys = self.entries.range(prefix.clone()..);
+        while let Some((key, entry)) = keys.next() {
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            let name = &key[skip..];
+            match name.find('/') {
+                None => found.push((name, entry)),
+                Some(at) => {
+                    // Every key under "child/" sorts below "child0", '0' being the byte after '/'.
+                    let mut past = key[..skip + at].to_owned();
+                    past.push('0');
+                    keys = self.entries.range(past..);
+                }
+            }
+        }
+        found
     }
 
     pub fn apply(&self, base: u64, ops: &[Op], caps: &Caps) -> Result<Change, Refusal> {
