@@ -369,6 +369,11 @@ mod _pyexpat {
         // become harmless no-ops instead of starting a new document.
         #[pytraverse(skip)]
         finished: AtomicBool,
+        // libexpat 2.6's reparse deferral switch (XML_SetReparseDeferralEnabled), on by
+        // default. The reader never defers, so the flag only answers
+        // GetReparseDeferralEnabled; ElementTree and xml.sax flush() toggle it.
+        #[pytraverse(skip)]
+        reparse_deferral: AtomicBool,
         start_element: MutableObject,
         end_element: MutableObject,
         character_data: MutableObject,
@@ -963,6 +968,7 @@ mod _pyexpat {
                 backend: PyRwLock::new(None),
                 busy: AtomicBool::new(false),
                 finished: AtomicBool::new(false),
+                reparse_deferral: AtomicBool::new(true),
                 start_element: MutableObject::new(vm.ctx.none()),
                 end_element: MutableObject::new(vm.ctx.none()),
                 character_data: MutableObject::new(vm.ctx.none()),
@@ -1178,6 +1184,16 @@ mod _pyexpat {
             // and always parses documents standalone, so the flag is accepted and
             // ignored purely so callers that toggle this setting (e.g. genshi) don't
             // fail with AttributeError.
+        }
+
+        #[pymethod(name = "SetReparseDeferralEnabled")]
+        fn set_reparse_deferral_enabled(zelf: &Py<Self>, enabled: bool) {
+            zelf.reparse_deferral.store(enabled, Ordering::Relaxed);
+        }
+
+        #[pymethod(name = "GetReparseDeferralEnabled")]
+        fn get_reparse_deferral_enabled(zelf: &Py<Self>) -> bool {
+            zelf.reparse_deferral.load(Ordering::Relaxed)
         }
 
         #[pymethod(name = "SetBase")]
