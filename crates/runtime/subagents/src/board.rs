@@ -36,6 +36,12 @@ pub trait Coordination: Send + Sync {
     fn brief<'a>(&'a self, _session: &'a str) -> ReadFuture<'a, Result<Option<String>, String>> {
         Box::pin(std::future::ready(Ok(None)))
     }
+    fn reconcile(
+        &self,
+        _root_session_id: &str,
+        _finished: Vec<(AgentId, AgentStatus, Option<u64>)>,
+    ) {
+    }
 }
 
 pub const LEASE_MS: u64 = 1 << 30;
@@ -371,6 +377,7 @@ fn finished(phase: &Phase) -> Result<Option<AgentStatus>, String> {
         Phase::Failed { error } => Ok(Some(AgentStatus::Failed {
             error: error.clone(),
         })),
+        Phase::Cancelled { .. } => Ok(Some(AgentStatus::Closed)),
         _ => Ok(None),
     }
 }
@@ -408,6 +415,10 @@ impl Inner {
                         }
                     }
                     self.dispatcher = Some(board);
+                    self.reopen();
+                    if let Err(error) = self.restored() {
+                        self.fail(error);
+                    }
                 }
                 Ok(None) => {
                     self.stats.deferred += 1;
@@ -420,6 +431,104 @@ impl Inner {
             }
         }
         self.dispatcher.as_mut()
+    }
+
+    fn restored(&self) -> Result<(), String> {
+        let Some(board) = self.dispatcher.as_ref() else {
+            return Ok(());
+        };
+        for (id, task) in board.fold().tasks() {
+            let labels = &task.spec.labels;
+            let Some(root) = labels.get("root") else {
+                continue;
+            };
+            let (Some(session), Some(agent)) = (labels.get("session"), labels.get("agent")) else {
+                if !self.roots.contains(root) {
+                    return Err(format!(
+                        "reopen did not restore root {root} from board task {id}"
+                    ));
+                }
+                continue;
+            };
+            let k =
+                id.0.strip_prefix(session.as_str())
+                    .and_then(|rest| rest.strip_prefix('/'))
+                    .and_then(|k| k.parse::<u64>().ok());
+            let (Some(k), Ok(agent)) = (k, agent.parse::<u64>()) else {
+                continue;
+            };
+            if self.agents.get(&(root.clone(), AgentId::new(agent))) != Some(session) {
+                return Err(format!(
+                    "reopen did not restore agent {agent} of {root} from board task {id}"
+                ));
+            }
+            if self.sessions.get(session).is_none_or(|state| state.k < k) {
+                return Err(format!(
+                    "reopen did not restore session {session} at attempt {k} from board task {id}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn reopen(&mut self) {
+        if mutated(Mutation::ReopenForgetsAgents) {
+            return;
+        }
+        let Some(board) = self.dispatcher.as_mut() else {
+            return;
+        };
+        let _ = ready(board.refresh());
+        let mut roots = Vec::new();
+        let mut attempts = Vec::new();
+        let mut errors = Vec::new();
+        for (id, task) in board.fold().tasks() {
+            let labels = &task.spec.labels;
+            let Some(root) = labels.get("root") else {
+                continue;
+            };
+            let (Some(session), Some(agent)) = (labels.get("session"), labels.get("agent")) else {
+                roots.push(root.clone());
+                continue;
+            };
+            let k =
+                id.0.strip_prefix(session.as_str())
+                    .and_then(|rest| rest.strip_prefix('/'))
+                    .and_then(|k| k.parse::<u64>().ok());
+            let (Some(k), Ok(agent), Some(parent)) =
+                (k, agent.parse::<u64>(), task.spec.parent.clone())
+            else {
+                errors.push(format!(
+                    "reopen: board task {id} has labels {labels:?} and parent {:?}",
+                    task.spec.parent
+                ));
+                continue;
+            };
+            attempts.push((
+                root.clone(),
+                AgentId::new(agent),
+                session.clone(),
+                parent,
+                k,
+            ));
+        }
+        self.roots.extend(roots);
+        for error in errors {
+            self.fail(error);
+        }
+        for (root, agent, session, parent, k) in attempts {
+            self.agents.insert((root, agent), session.clone());
+            let state = self.sessions.entry(session).or_insert(Session {
+                parent: parent.clone(),
+                k,
+                claim: None,
+                last_output: None,
+            });
+            if k > state.k {
+                state.k = k;
+                state.parent = parent;
+            }
+        }
     }
 
     fn worker(&mut self, session: &str) -> Option<&mut Board> {
@@ -605,7 +714,10 @@ impl Inner {
     ) {
         self.agents
             .insert((root.to_owned(), id), session.to_owned());
-        if self.sessions.contains_key(session) {
+        if let Some(state) = self.sessions.get(session) {
+            if state.claim.is_none() {
+                self.claim(session, true);
+            }
             return;
         }
         let root_id = self.ensure_root(root);
@@ -637,7 +749,8 @@ impl Inner {
         self.claim(session, restored);
     }
 
-    fn session_of(&self, root: &str, id: AgentId) -> Option<String> {
+    fn session_of(&mut self, root: &str, id: AgentId) -> Option<String> {
+        let _ = self.dispatcher_board();
         self.agents.get(&(root.to_owned(), id)).cloned()
     }
 
@@ -679,7 +792,7 @@ impl Inner {
             AgentStatus::Failed { error } => Outcome::Failed(error.clone()),
             _ => return,
         };
-        let key = match revision {
+        let mut key = match revision {
             Some(revision) => format!("finish:{session}:{revision}"),
             None => format!(
                 "finish:{session}:k{}",
@@ -687,13 +800,37 @@ impl Inner {
             ),
         };
         let event = EventId(format!("{}#{key}", worker_of(session)));
-        let replayed = self.dispatcher_board().is_some_and(|board| {
+        let current = self.sessions.get(session).map(|state| state.task(session));
+        let replayed = self.dispatcher_board().and_then(|board| {
             let _ = ready(board.refresh());
-            board.fold().outcome(&event).is_some()
+            let fold = board.fold();
+            let seq = match fold.outcome(&event)? {
+                Ok(seq) => Some(*seq),
+                Err(_) => None,
+            };
+            let reopened = seq
+                .and_then(|seq| fold.entries().iter().find(|entry| entry.seq == seq))
+                .zip(current.as_ref())
+                .is_some_and(|(entry, current)| {
+                    entry.task != *current
+                        && fold
+                            .task(current)
+                            .is_some_and(|task| !task.phase.terminal())
+                });
+            Some(reopened)
         });
-        if replayed {
-            self.stats.finish_replays += 1;
-            return;
+        match replayed {
+            Some(true) => {
+                key = format!(
+                    "{key}@{}",
+                    self.sessions.get(session).map_or(0, |state| state.k)
+                )
+            }
+            Some(false) => {
+                self.stats.finish_replays += 1;
+                return;
+            }
+            None => {}
         }
         if let Some(current) = self.sessions.get(session).map(|state| state.task(session))
             && matches!(self.phase(&current), Some(Phase::Cancelled { .. }))
@@ -864,6 +1001,24 @@ impl Seen {
 }
 
 impl Inner {
+    fn reconcile(&mut self, root: &str, finished: Vec<(AgentId, AgentStatus, Option<u64>)>) {
+        for (id, status, revision) in finished {
+            let Some(session) = self.session_of(root, id) else {
+                continue;
+            };
+            let Some(task) = self
+                .sessions
+                .get(&session)
+                .map(|state| state.task(&session))
+            else {
+                continue;
+            };
+            if self.phase(&task).is_some_and(|phase| !phase.terminal()) {
+                self.finish(root, id, &session, &status, revision);
+            }
+        }
+    }
+
     fn seen(&mut self, root: &str, seen: Seen) {
         match seen {
             Seen::Added {
@@ -934,6 +1089,14 @@ impl Coordination for BoardCoordination {
 
     fn changes(&self) -> watch::Receiver<u64> {
         self.changes.subscribe()
+    }
+
+    fn reconcile(&self, root: &str, finished: Vec<(AgentId, AgentStatus, Option<u64>)>) {
+        let root = root.to_owned();
+        self.inner.send(move |inner| {
+            inner.reconcile(&root, finished);
+            inner.changes.send_modify(|revision| *revision += 1);
+        });
     }
 
     fn agents<'a>(&'a self, root: &'a str) -> ReadFuture<'a, Result<BoardAgents, String>> {

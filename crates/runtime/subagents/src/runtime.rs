@@ -3091,9 +3091,12 @@ fn board_status(board: &crate::board::BoardAgents, id: AgentId, status: &mut Age
     if matches!(
         status,
         AgentStatus::Completed { .. } | AgentStatus::Failed { .. }
-    ) && let Some(Some(finished)) = board.get(&id)
-    {
-        finished.clone_into(status);
+    ) {
+        match board.get(&id) {
+            Some(Some(AgentStatus::Closed)) | None => {}
+            Some(Some(finished)) => finished.clone_into(status),
+            Some(None) => *status = AgentStatus::Running,
+        }
     }
 }
 
@@ -3389,6 +3392,7 @@ impl Registry {
                         .await;
                 }
             }
+            registry.reconcile_board(&root).await;
             let work = RestoredWork {
                 messages: pending,
                 unstarted,
@@ -5173,6 +5177,44 @@ impl Registry {
                 );
             }
         }));
+    }
+
+    async fn reconcile_board(&self, root_session_id: &str) {
+        let Some(coordination) = Option::clone(&self.coordination.get()) else {
+            return;
+        };
+        let root = root_session_id.to_owned();
+        let finished = self
+            .state
+            .call(move |state| {
+                let mut finished = state
+                    .scopes
+                    .get(&root)
+                    .map(|scope| {
+                        scope
+                            .sessions
+                            .sessions
+                            .iter()
+                            .filter(|(_, session)| {
+                                session.turn.is_none()
+                                    && matches!(
+                                        session.status,
+                                        AgentStatus::Completed { .. } | AgentStatus::Failed { .. }
+                                    )
+                            })
+                            .map(|(id, session)| {
+                                (*id, session.status.clone(), session.completion.revision())
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                finished.sort_by_key(|(id, _, _)| *id);
+                finished
+            })
+            .await;
+        if !finished.is_empty() {
+            coordination.reconcile(root_session_id, finished);
+        }
     }
 
     async fn announce_cold_completions(&self, root_session_id: &str) {

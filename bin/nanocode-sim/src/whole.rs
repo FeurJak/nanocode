@@ -1134,6 +1134,9 @@ fn drop_spawned() {
 }
 
 pub fn simulate(seed: u64, options: WholeOptions) -> WholeOutcome {
+    if options.mutation == WireMutation::ReopenForgetsAgents {
+        nanocode_board::sim::mutate(nanocode_board::sim::Mutation::ReopenForgetsAgents);
+    }
     let shape = Shape::of(seed, options);
     if std::env::var_os("NANOCODE_SIM_POLLS").is_some() {
         eprintln!("RUN seed {seed}");

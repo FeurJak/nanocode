@@ -124,6 +124,7 @@ pub enum Mutation {
     StalledStuck,
     DeliveryIngestedTwice,
     DeliveryLost,
+    ReopenForgetsAgents,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);
