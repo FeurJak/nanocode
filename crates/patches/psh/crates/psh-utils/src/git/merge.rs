@@ -418,10 +418,9 @@ pub fn three_way(git: &Git<'_>, io: &mut Io<'_>, head: Oid, theirs: Oid, opts: O
     if !message.ends_with('\n') {
         message.push('\n');
     }
+    // git's -q leaves the merge's own messages, as Auto-merging.
     for note in &merged.notes {
-        if !opts.quiet || note.starts_with("CONFLICT") {
-            writeln!(io.out, "{note}")?;
-        }
+        writeln!(io.out, "{note}")?;
     }
     if !merged.conflicts.is_empty() || !opts.commit {
         git.write(join(&repo.git_dir, b"MERGE_HEAD"), format!("{}\n", theirs.hex()).into_bytes());
