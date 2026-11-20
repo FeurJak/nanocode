@@ -3,6 +3,9 @@ use std::{ops::Range, sync::Arc};
 use nanocode_durability_core::{Sql, SqlAccess, SqlStatement, StoreError, StoreFuture};
 use nanocode_sync::Atom;
 
+/// One scope's rows as `(seq, row)` pairs, in seq order.
+pub type ScopeRows = Vec<(u64, String)>;
+
 #[derive(Clone)]
 pub struct Compaction<'a> {
     pub archived: &'a [(u64, String)],
@@ -45,7 +48,7 @@ pub trait LogHost: Send + Sync {
     fn scans<'a>(
         &'a self,
         scans: &'a [(&'a str, u64)],
-    ) -> StoreFuture<'a, Result<Vec<Vec<(u64, String)>>, StoreError>> {
+    ) -> StoreFuture<'a, Result<Vec<ScopeRows>, StoreError>> {
         Box::pin(async move {
             let mut rows = Vec::with_capacity(scans.len());
             for (scope, from) in scans {
@@ -277,7 +280,7 @@ impl<H: Sql + Send + Sync + ?Sized> LogHost for SqlLog<H> {
     fn scans<'a>(
         &'a self,
         scans: &'a [(&'a str, u64)],
-    ) -> StoreFuture<'a, Result<Vec<Vec<(u64, String)>>, StoreError>> {
+    ) -> StoreFuture<'a, Result<Vec<ScopeRows>, StoreError>> {
         Box::pin(async move {
             if scans.is_empty() {
                 return Ok(Vec::new());

@@ -8,7 +8,7 @@ use std::{
 
 use nanocode_durability_core::{StoreError, StoreFuture};
 use nanocode_sync::{Atom, Notify};
-use nanocode_turnlog::LogHost;
+use nanocode_turnlog::{LogHost, ScopeRows};
 
 use crate::{
     Board, BoardError, TaskId,
@@ -156,7 +156,7 @@ impl LogHost for Notifying {
     fn scans<'a>(
         &'a self,
         scans: &'a [(&'a str, u64)],
-    ) -> StoreFuture<'a, Result<Vec<Vec<(u64, String)>>, StoreError>> {
+    ) -> StoreFuture<'a, Result<Vec<ScopeRows>, StoreError>> {
         self.inner.scans(scans)
     }
 

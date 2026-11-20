@@ -35,7 +35,7 @@ use nanocode_board::{
 use nanocode_durability_core::{StoreError, StoreFuture};
 use nanocode_partitions::Partition;
 use nanocode_sync::Slot;
-use nanocode_turnlog::{LogHost, MemoryLog};
+use nanocode_turnlog::{LogHost, MemoryLog, ScopeRows};
 
 use crate::{
     executor::{Clock, Ended, Executor, Task},
@@ -413,7 +413,7 @@ impl LogHost for ShardLog {
     fn scans<'a>(
         &'a self,
         scans: &'a [(&'a str, u64)],
-    ) -> StoreFuture<'a, Result<Vec<Vec<(u64, String)>>, StoreError>> {
+    ) -> StoreFuture<'a, Result<Vec<ScopeRows>, StoreError>> {
         Box::pin(self.reads(scans))
     }
 
