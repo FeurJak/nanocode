@@ -75,6 +75,9 @@ struct Order {
     printable: bool,
     kind: Kind,
     reverse: bool,
+    /// Which of -g -h -M -n -R -V were given (bits in that order), for GNU's check that
+    /// a key has at most one way to compare.
+    seen: u8,
 }
 
 impl Order {
@@ -86,16 +89,61 @@ impl Order {
             b'd' => self.dictionary = true,
             b'f' => self.fold = true,
             b'i' => self.printable = true,
-            b'g' => self.kind = Kind::General,
-            b'h' => self.kind = Kind::Human,
-            b'M' => self.kind = Kind::Month,
-            b'n' => self.kind = Kind::Numeric,
-            b'R' => self.kind = Kind::Random,
-            b'V' => self.kind = Kind::Version,
+            b'g' => {
+                self.kind = Kind::General;
+                self.seen |= 1;
+            }
+            b'h' => {
+                self.kind = Kind::Human;
+                self.seen |= 2;
+            }
+            b'M' => {
+                self.kind = Kind::Month;
+                self.seen |= 4;
+            }
+            b'n' => {
+                self.kind = Kind::Numeric;
+                self.seen |= 8;
+            }
+            b'R' => {
+                self.kind = Kind::Random;
+                self.seen |= 16;
+            }
+            b'V' => {
+                self.kind = Kind::Version;
+                self.seen |= 32;
+            }
             b'r' => self.reverse = true,
             _ => return false,
         }
         true
+    }
+
+    /// GNU's ordering check: more than one of -n, -g, -h, -M and (-V, -R, -d or -i)
+    /// in one key is an error, named by the key's options.
+    fn incompatible(&self) -> Option<String> {
+        let s = self.seen;
+        let others = s & 0b11_0000 != 0 || self.dictionary || self.printable;
+        if (s & 0b1111).count_ones() + u32::from(others) < 2 {
+            return None;
+        }
+        let mut o = String::from("-");
+        for (on, c) in [
+            (self.dictionary, 'd'),
+            (self.fold, 'f'),
+            (s & 1 != 0, 'g'),
+            (s & 2 != 0, 'h'),
+            (self.printable, 'i'),
+            (s & 4 != 0, 'M'),
+            (s & 8 != 0, 'n'),
+            (s & 16 != 0, 'R'),
+            (s & 32 != 0, 'V'),
+        ] {
+            if on {
+                o.push(c);
+            }
+        }
+        Some(format!("options '{o}' are incompatible"))
     }
 
     fn any(&self) -> bool {
@@ -855,6 +903,10 @@ pub async fn run(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
             end: None,
             order: global,
         });
+    }
+    if let Some(e) = keys.iter().find_map(|k| k.order.incompatible()) {
+        ctx.error(&e).await;
+        return 2;
     }
     let unique = p.has(&SPEC, "unique");
     let sorter = Sorter {

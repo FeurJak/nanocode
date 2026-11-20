@@ -98,3 +98,12 @@ fn cksum_prints_the_posix_crc_and_digests_like_gnu() {
         )
     );
 }
+
+#[test]
+fn sort_rejects_two_ways_to_compare_one_key() {
+    let src = "printf '2\\n1\\n' > f; sort -n -g f 2>&1; echo $?; sort -k1,1n -k1,1Vh f 2>&1; echo $?; sort -n -r -b f; echo $?";
+    assert_eq!(
+        sh(src),
+        ("sort: options '-gn' are incompatible\n2\nsort: options '-hV' are incompatible\n2\n2\n1\n0\n".into(), 0)
+    );
+}
