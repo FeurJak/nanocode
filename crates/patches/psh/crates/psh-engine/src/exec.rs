@@ -107,6 +107,7 @@ async fn run_background(vp: &mut Vp, code: &Rc<Code>, list: ListId, item: usize)
     let forks = sub.fds.all_files() && vp.core.host.forks();
     sub.fork_job = forks && direct;
     sub.bg_simple = direct;
+    sub.job_own = direct;
     // The job's vproc is the subshell of a job that is one `( … )`, as bash forks once
     // for it: its commands are the job's own, and a signal sent to the job ends them.
     sub.stage_subshell = ao.rest.is_empty()
@@ -2697,6 +2698,9 @@ pub(crate) async fn run_external_with(
             vp.signal_trap_ignored(sig)
                 || vp.ignores & (1u64 << sig) != 0
                 || (vp.job.is_some()
+                    && vp.job_own
+                    // bash's job forks again for a function's own programs.
+                    && !vp.in_function()
                     && !monitor
                     && (sig == crate::host::SIGINT || sig == crate::host::SIGQUIT))
         })

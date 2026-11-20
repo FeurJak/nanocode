@@ -502,6 +502,13 @@ pub(crate) struct Vp {
     /// This vproc is a background job of one simple command that has not run it yet:
     /// a `%job` command word there is `bg`, not `fg`.
     pub bg_simple: bool,
+    /// This vproc is a background job that is one simple command (no job control):
+    /// a program it runs is the job's own process and keeps INT and QUIT ignored, as
+    /// bash's does; a program a compound job runs gets them back (bash forks again
+    /// and restores them).
+    pub job_own: bool,
+    /// A pipeline stage's command whose DEBUG trap the parent already ran (functrace).
+    pub debug_skip: Option<usize>,
     /// This vproc is a pipeline stage of one simple command that has not run it yet:
     /// bash looks up a `%job` command word only in a shell that has not forked for
     /// it, so there it is a plain command name.
@@ -580,6 +587,8 @@ impl Vp {
         sub.own_sigs = Cell::new(0);
         sub.fork_job = false;
         sub.bg_simple = false;
+        sub.job_own = false;
+        sub.debug_skip = None;
         sub.stage_simple = false;
         sub.own_simple = None;
         sub.parent_exit = self

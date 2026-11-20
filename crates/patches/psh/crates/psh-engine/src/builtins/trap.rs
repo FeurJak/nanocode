@@ -516,6 +516,23 @@ pub(crate) async fn trap(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         return Ok(if st != 0 { st } else { status });
     }
     if rest.is_empty() || print {
+        // A compound background job ignores INT (bash's async subshell): listing traps
+        // there records it as ignored from the start, so `trap` shows it and the
+        // job's programs keep it ignored.
+        let int = TrapKey::Signal(crate::host::SIGINT);
+        if vp.job.is_some()
+            && !vp.job_own
+            && !vp.opts.get(crate::options::SetOpt::Monitor)
+            && !vp.traps.map.contains_key(&int)
+        {
+            Rc::make_mut(&mut vp.traps).map.insert(
+                int,
+                Trap {
+                    action: Rc::from(&b""[..]),
+                    active: true,
+                },
+            );
+        }
         let mut buf = Vec::new();
         let mut status = 0;
         let keys: Vec<TrapKey> = if rest.is_empty() {
