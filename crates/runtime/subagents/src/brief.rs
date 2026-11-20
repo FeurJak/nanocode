@@ -38,7 +38,7 @@ impl Inner {
             .dispatcher_board()
             .await
             .ok_or_else(|| "subagent brief: the board is not open".to_owned())?;
-        if let Err(error) = board.refresh().await {
+        if let Err(error) = board.catch_up().await {
             return Err(format!("subagent brief: board refresh: {error}"));
         }
         board

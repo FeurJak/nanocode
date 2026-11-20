@@ -815,7 +815,9 @@ impl Inner {
 
     async fn phase(&mut self, task: &TaskId) -> Option<Phase> {
         let board = self.dispatcher_board().await?;
-        let _ = board.refresh().await;
+        // A lagging read fails now and then: catch_up retries it, so a reuse or finish does not
+        // decide from a fold that misses the task's last phase (seed 1795200000000686281).
+        let _ = board.catch_up().await;
         board.fold().task(task).map(|task| task.phase.clone())
     }
 

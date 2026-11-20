@@ -269,6 +269,7 @@ default_table='
 1 agents_board_lagging_pinned_placement pass --scenario agents --subagents-board-lagging --seed 5
 4 runtime_subagents_board_delayed pass --scenario runtime --subagents-board-delayed
 4 runtime_subagents_board_lagging pass --scenario runtime --subagents-board-lagging
+1 runtime_board_lagging_pinned_phase pass --scenario runtime --subagents-board-lagging --seed 1795200000000686281
 1 canary_subagents_board_polled_once canary:40 --scenario agents --subagents-board-mutation polled_once
 1 canary_subagents_board_append_unflushed canary:40 --scenario agents --subagents-board-mutation append_unflushed
 1 canary_subagents_board_reopen_lost canary:100 --scenario runtime --subagents-board-mutation reopen_lost
