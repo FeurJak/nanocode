@@ -236,6 +236,16 @@ default_table='
 1 canary_controlplane_wake_dropped canary:32 --scenario controlplane --ops 300 --mutation wake_dropped
 1 canary_controlplane_goal_finished_early canary:32 --scenario controlplane --ops 300 --mutation goal_finished_early
 1 canary_controlplane_spawn_retry_renames canary:32 --scenario controlplane --ops 300 --mutation spawn_retry_renames
+8 partitions pass --scenario partitions
+2 partitions_twice pass --scenario partitions --twice
+1 canary_partitions_unfenced canary:64 --scenario partitions --mutation unfenced
+1 canary_partitions_claim_keeps_epoch canary:64 --scenario partitions --mutation claim_keeps_epoch
+1 canary_partitions_waits_for_free canary:64 --scenario partitions --mutation waits_for_free
+1 canary_partitions_keeps_moved canary:64 --scenario partitions --mutation keeps_moved
+1 canary_partitions_assign_by_index canary:64 --scenario partitions --mutation assign_by_index
+1 canary_partitions_replays_in_flight canary:64 --scenario partitions --mutation replays_in_flight
+1 canary_partitions_double_claim canary:64 --scenario partitions --mutation double_claim
+1 canary_partitions_lost_claim canary:64 --scenario partitions --mutation lost_claim
 '
 default_known='
 '
