@@ -1147,6 +1147,10 @@ pub const NUMFMT: Spec = Spec {
         long("suffix").value(),
         long("to-unit").value(),
         long("from-unit").value(),
+        long("padding").value(),
+        long("field").value(),
+        // Thousands separators: none in the C locale, the only one psh has.
+        long("grouping"),
     ],
     posix_order: false,
 };
@@ -1242,6 +1246,23 @@ fn numfmt_show(value: f64, to: Scale) -> String {
     format!("{sign}{text}{}{i}", NUMFMT_SUFFIXES[power - 1] as char)
 }
 
+/// A --field list: `N`, `N-M`, `N-`, `-M` or `-`, separated by commas, as
+/// inclusive ranges from 1.
+fn numfmt_fields(spec: &[u8]) -> Option<Vec<(usize, usize)>> {
+    let num = |s: &str| s.parse::<usize>().ok().filter(|&n| n > 0);
+    std::str::from_utf8(spec)
+        .ok()?
+        .split(',')
+        .map(|part| match part.split_once('-') {
+            None => num(part).map(|n| (n, n)),
+            Some(("", "")) => Some((1, usize::MAX)),
+            Some((a, "")) => Some((num(a)?, usize::MAX)),
+            Some(("", b)) => Some((1, num(b)?)),
+            Some((a, b)) => Some((num(a)?, num(b)?)).filter(|(a, b)| a <= b),
+        })
+        .collect()
+}
+
 pub async fn numfmt(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
     let p = match common::parse(ctx, &NUMFMT, argv).await {
         Ok(p) => p,
@@ -1271,6 +1292,34 @@ pub async fn numfmt(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
         return common::usage(ctx, "invalid unit size").await;
     };
     let suffix = p.last(&NUMFMT, "suffix").unwrap_or_default().to_vec();
+    let padding = match p.last(&NUMFMT, "padding") {
+        None => 0,
+        Some(v) => match std::str::from_utf8(v).ok().and_then(|v| v.parse::<i64>().ok()) {
+            Some(n) if n != 0 => n,
+            _ => {
+                let v = common::quote(ctx, v);
+                return common::usage(ctx, &format!("invalid padding value {v}")).await;
+            }
+        },
+    };
+    let fields = match p.last(&NUMFMT, "field") {
+        None => vec![(1, 1)],
+        Some(v) => match numfmt_fields(v) {
+            Some(f) => f,
+            None => {
+                let v = common::quote(ctx, v);
+                return common::usage(ctx, &format!("invalid field value {v}")).await;
+            }
+        },
+    };
+    let pad = |text: String| -> String {
+        let width = padding.unsigned_abs() as usize;
+        match padding {
+            n if n > 0 => format!("{text:>width$}"),
+            n if n < 0 => format!("{text:<width$}"),
+            _ => text,
+        }
+    };
     let numbers: Vec<Vec<u8>> = if p.operands.is_empty() {
         let data = match read_all(ctx, &[]).await {
             Ok(data) => data,
@@ -1283,18 +1332,43 @@ pub async fn numfmt(ctx: &mut UtilCtx<'_>, argv: &[Vec<u8>]) -> i32 {
     let last_empty = p.operands.is_empty() && numbers.last().is_some_and(Vec::is_empty);
     let count = numbers.len() - usize::from(last_empty);
     let mut out = Vec::new();
+    let only_first = p.last(&NUMFMT, "field").is_none();
     for raw in &numbers[..count] {
         let text = String::from_utf8_lossy(raw);
-        let trimmed = text.trim();
-        let body = trimmed.strip_suffix(std::str::from_utf8(&suffix).unwrap_or("")).unwrap_or(trimmed);
-        let Some(value) = numfmt_parse(body, from, from_unit) else {
-            let _ = ctx.write(&out).await;
-            let shown = common::quote(ctx, trimmed.as_bytes());
-            ctx.error(&format!("invalid number: {shown}")).await;
-            return 2;
-        };
-        out.extend_from_slice(numfmt_show(value / to_unit, to).as_bytes());
-        out.extend_from_slice(&suffix);
+        // Fields are runs of non-blanks, each kept with the blanks before it; without
+        // --field the whole line is the number.
+        let mut tokens: Vec<(&str, &str)> = Vec::new();
+        if only_first {
+            tokens.push(("", text.trim()));
+        } else {
+            let mut rest: &str = &text;
+            while !rest.is_empty() {
+                let lead = rest.len() - rest.trim_start().len();
+                let (blanks, after) = rest.split_at(lead);
+                let end = after.find(char::is_whitespace).unwrap_or(after.len());
+                let (word, next) = after.split_at(end);
+                tokens.push((blanks, word));
+                rest = next;
+            }
+        }
+        for (n, (blanks, word)) in tokens.iter().enumerate() {
+            out.extend_from_slice(blanks.as_bytes());
+            let n = n + 1;
+            if !fields.iter().any(|&(a, b)| a <= n && n <= b) || (word.is_empty() && !only_first) {
+                out.extend_from_slice(word.as_bytes());
+                continue;
+            }
+            let body = word.strip_suffix(std::str::from_utf8(&suffix).unwrap_or("")).unwrap_or(word);
+            let Some(value) = numfmt_parse(body, from, from_unit) else {
+                let _ = ctx.write(&out).await;
+                let shown = common::quote(ctx, word.as_bytes());
+                ctx.error(&format!("invalid number: {shown}")).await;
+                return 2;
+            };
+            let mut shown = numfmt_show(value / to_unit, to);
+            shown.push_str(std::str::from_utf8(&suffix).unwrap_or(""));
+            out.extend_from_slice(pad(shown).as_bytes());
+        }
         out.push(b'\n');
     }
     emit(ctx, &out).await

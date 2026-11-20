@@ -57,3 +57,10 @@ fn join_keeps_a_trailing_empty_field_and_empty_lines() {
     assert_eq!(sh(src), (String::new(), 1));
 }
 
+
+#[test]
+fn numfmt_pads_and_converts_one_field() {
+    assert_eq!(sh("numfmt --padding=8 42; numfmt --padding=-4 7"), ("      42\n7   \n".into(), 0));
+    let src = "printf 'a 2048\\nb 10\\n' | numfmt --field=2 --to=iec; echo 123456 | numfmt --grouping";
+    assert_eq!(sh(src), ("a 2.0K\nb 10\n123456\n".into(), 0));
+}
