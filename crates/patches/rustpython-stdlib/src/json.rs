@@ -62,6 +62,27 @@ mod _json {
         out.push_str(core::str::from_utf8(&buf[pos..]).expect("digits are ASCII"));
     }
 
+    thread_local! {
+        /// Nesting the scanner and encoder are in, counted against the recursion limit
+        /// on top of the Python frames, as CPython's _Py_EnterRecursiveCall does.
+        static JSON_DEPTH: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    }
+
+    /// Run `f` one level deeper, failing with RecursionError past the recursion limit.
+    fn with_json_depth<R>(
+        vm: &VirtualMachine,
+        r#where: &str,
+        f: impl FnOnce() -> PyResult<R>,
+    ) -> PyResult<R> {
+        let depth = JSON_DEPTH.get() + 1;
+        if vm.current_recursion_depth() + depth > vm.recursion_limit.get() {
+            return Err(vm.new_recursion_error(format!("maximum recursion depth exceeded {where}")));
+        }
+        JSON_DEPTH.set(depth);
+        let _guard = rustpython_common::scope::guard((), |()| JSON_DEPTH.set(depth - 1));
+        vm.with_recursion(r#where, f)
+    }
+
     fn starts_with_bytes(bytes: &[u8], pattern: &[u8]) -> bool {
         bytes.len() >= pattern.len() && &bytes[..pattern.len()] == pattern
     }
@@ -266,6 +287,10 @@ mod _json {
                 }
             } else if let Some(ref parse_int) = self.parse_int {
                 parse_int.call((buf,), vm)
+            } else if buf.len() > 640 {
+                // Long enough to reach sys.int_info.str_digits_check_threshold: int()
+                // applies sys.set_int_max_str_digits, as PyLong_FromString does.
+                vm.ctx.types.int_type.as_object().call((buf,), vm)
             } else {
                 Ok(vm.new_pyobj(BigInt::from_str(buf).unwrap()))
             };
@@ -553,7 +578,7 @@ mod _json {
             // `'[' * 50000 + ']' * 50000` overflows the native Rust stack and
             // crashes the process with SIGSEGV. Matches CPython's
             // _Py_EnterRecursiveCall in Modules/_json.c.
-            vm.with_recursion("while decoding a JSON object from a string", || {
+            with_json_depth(vm, "while decoding a JSON object from a string", || {
                 let bytes = pystr.as_bytes();
                 let wtf8 = pystr.as_wtf8();
 
@@ -1276,7 +1301,7 @@ mod _json {
             out: &mut Wtf8Buf,
             vm: &VirtualMachine,
         ) -> PyResult<()> {
-            vm.with_recursion("while encoding a JSON object", || {
+            with_json_depth(vm, "while encoding a JSON object", || {
                 if let Some(s) = obj.downcast_ref::<PyStr>() {
                     self.write_str_obj(obj, s, out, vm)
                 } else if vm.is_none(obj) {
