@@ -797,58 +797,75 @@ async fn declare_one(
         }
     }
     let _ = existed;
-    match a {
-        DeclArg::Word(_) => {}
-        DeclArg::Assign {
-            index: None,
-            append,
-            value,
-            ..
-        } => {
-            let is_array = vp.vars.get(&target).is_some_and(|v| v.is_array());
-            if o.nameref == Some(true) {
-                vp.vars.entry(&target).set(value.clone());
-            } else if let Some(sub) = &elem {
-                vp.assign_elem(&target, sub, value.clone(), *append)?;
-            } else if is_array
-                && value.first() == Some(&b'(')
-                && value.last() == Some(&b')')
-                && let Some(items) = reparse_compound(vp, value).await?
-            {
-                vp.assign_array(&target, items, *append)?;
-            } else {
-                let v = vp.prepare_value(&target, value.clone(), *append)?;
-                vp.vars.entry(&target).set(v);
+    // An arithmetic error assigning to an integer variable abandons the command
+    // line, as an expansion error does (bash).
+    let integer = vp.vars.get(&target).is_some_and(|v| v.integer);
+    let r: Result<(), DeclError> = async {
+        match a {
+            DeclArg::Word(_) => {}
+            DeclArg::Assign {
+                index: None,
+                append,
+                value,
+                ..
+            } => {
+                let is_array = vp.vars.get(&target).is_some_and(|v| v.is_array());
+                if o.nameref == Some(true) {
+                    vp.vars.entry(&target).set(value.clone());
+                } else if let Some(sub) = &elem {
+                    vp.assign_elem(&target, sub, value.clone(), *append)?;
+                } else if is_array
+                    && value.first() == Some(&b'(')
+                    && value.last() == Some(&b')')
+                    && let Some(items) = reparse_compound(vp, value).await?
+                {
+                    vp.assign_array(&target, items, *append)?;
+                } else {
+                    let v = vp.prepare_value(&target, value.clone(), *append)?;
+                    vp.vars.entry(&target).set(v);
+                }
+            }
+            DeclArg::Assign {
+                index: Some(i),
+                append,
+                value,
+                ..
+            } => {
+                let is_array = vp.vars.get(&target).is_some_and(|v| v.is_array());
+                if is_array
+                    && value.first() == Some(&b'(')
+                    && value.last() == Some(&b')')
+                    && let Some(items) = reparse_compound(vp, value).await?
+                {
+                    vp.assign_array(&target, items, *append)?;
+                } else {
+                    let i = crate::expand::expand_sub_text(vp, i)
+                        .await
+                        .map_err(DeclError::Unwind)?;
+                    vp.assign_elem(&target, &i, value.clone(), *append)?;
+                }
+            }
+            DeclArg::Array { append, items, .. } => {
+                vp.assign_array(&target, items.clone(), *append)?;
             }
         }
-        DeclArg::Assign {
-            index: Some(i),
-            append,
-            value,
-            ..
-        } => {
-            let is_array = vp.vars.get(&target).is_some_and(|v| v.is_array());
-            if is_array
-                && value.first() == Some(&b'(')
-                && value.last() == Some(&b')')
-                && let Some(items) = reparse_compound(vp, value).await?
-            {
-                vp.assign_array(&target, items, *append)?;
-            } else {
-                let i = crate::expand::expand_sub_text(vp, i)
-                    .await
-                    .map_err(DeclError::Unwind)?;
-                vp.assign_elem(&target, &i, value.clone(), *append)?;
-            }
-        }
-        DeclArg::Array { append, items, .. } => {
-            vp.assign_array(&target, items.clone(), *append)?;
-        }
+        Ok(())
     }
+    .await;
     // Elements a compound assignment skipped, with their warnings.
     if !vp.arith_notes.is_empty() {
         crate::arith::notes(vp).await;
     }
+    if let Err(DeclError::Msg(m)) = &r
+        && integer
+        && !m.ends_with(": readonly variable")
+        && !m.ends_with("bad array subscript")
+        && !m.ends_with("not a valid identifier")
+    {
+        vp.error(&format!("{bname}: {m}")).await;
+        return Err(DeclError::Unwind(crate::state::Unwind::Abort(1)));
+    }
+    r?;
     // `set -a`: a declaration that gives a value exports it, as an assignment does.
     if !matches!(a, DeclArg::Word(_))
         && !o.unexport

@@ -199,11 +199,13 @@ impl Vp {
                         continue;
                     }
                     Some(k) => (k, item.value, item.append),
+                    // A bad element is skipped with a warning; the rest are assigned (bash).
                     None if !pairs => {
-                        return Err(format!(
+                        self.arith_notes.push(format!(
                             "{name}: {}: must use subscript when assigning associative array",
                             String::from_utf8_lossy(&item.value)
                         ));
+                        continue;
                     }
                     None => match pending_key.take() {
                         Some(k) => (k, item.value, false),
