@@ -1,0 +1,460 @@
+use crate::{read_body, write_body};
+use nanocode_executor::{UnixListener, UnixStream};
+use nanocode_io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use nanocode_sync::{Atom, Signal, Slot};
+use nanocode_sync::{Semaphore, mpsc, oneshot};
+use nanocode_tool_contracts::{
+    Tool, ToolContext, ToolDefinition, ToolError, ToolInput, ToolOutput, ToolResult,
+};
+use serde_json::{Value, json};
+use std::{
+    collections::HashMap,
+    io::{self, BufRead, Write},
+    os::unix::{fs::PermissionsExt, net},
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{Receiver, RecvTimeoutError, sync_channel},
+    },
+    thread,
+    time::{Duration, Instant},
+};
+
+const STEP_TIMEOUT: Duration = Duration::from_secs(45);
+pub(crate) const REDIAL: Duration = Duration::from_millis(250);
+const MAX_CONNECTIONS: usize = 8;
+const OUTBOX: usize = 64;
+const MAX_INPUT: usize = 32 * 1024;
+const RECONNECT: Duration = Duration::from_secs(2);
+const RECONNECT_POLL: Duration = Duration::from_millis(25);
+
+type Diagnose = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
+pub struct ExtensionLink {
+    name: String,
+    absent: String,
+    next: AtomicU64,
+    live: Atom<Option<Arc<Live>>>,
+    unavailable: Atom<Option<String>>,
+    diagnose: Option<Diagnose>,
+    gone: Atom<Instant>,
+}
+
+struct Live {
+    id: u64,
+    rank: u8,
+    closed: Signal,
+    out: mpsc::Sender<String>,
+    pending: Atom<HashMap<String, Arc<Slot<oneshot::Sender<Value>>>>>,
+}
+
+impl Live {
+    fn answer(&self, call: &str) -> Option<oneshot::Sender<Value>> {
+        self.pending
+            .try_update(|pending| pending.remove(call))
+            .and_then(|waiting| waiting.take())
+    }
+}
+
+impl ExtensionLink {
+    pub fn new(name: impl Into<String>, absent: impl Into<String>) -> Arc<Self> {
+        Self::built(name.into(), absent.into(), None)
+    }
+
+    pub fn diagnosing(
+        name: impl Into<String>,
+        absent: impl Into<String>,
+        diagnose: impl Fn() -> Option<String> + Send + Sync + 'static,
+    ) -> Arc<Self> {
+        Self::built(name.into(), absent.into(), Some(Arc::new(diagnose)))
+    }
+
+    fn built(name: String, absent: String, diagnose: Option<Diagnose>) -> Arc<Self> {
+        Arc::new(Self {
+            name,
+            absent,
+            next: AtomicU64::new(0),
+            live: Atom::default(),
+            unavailable: Atom::default(),
+            diagnose,
+            gone: Atom::new(Instant::now()),
+        })
+    }
+
+    async fn browser(&self) -> Option<Arc<Live>> {
+        let deadline = *self.gone.get() + RECONNECT;
+        loop {
+            if let Some(live) = Option::clone(&self.live.get()) {
+                return Some(live);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            nanocode_platform::sleep(RECONNECT_POLL).await;
+        }
+    }
+
+    pub fn connected(&self) -> bool {
+        self.live.read(Option::is_some)
+    }
+
+    pub fn set_unavailable(&self, reason: Option<String>) {
+        self.unavailable.set(reason);
+    }
+
+    async fn missing(&self) -> ToolOutput {
+        if let Some(diagnose) = self.diagnose.clone()
+            && let Ok(Some(reason)) = nanocode_platform::spawn_blocking(move || diagnose()).await
+        {
+            return ToolOutput::error(reason);
+        }
+        self.absent()
+    }
+
+    fn absent(&self) -> ToolOutput {
+        ToolOutput::error(match self.unavailable.get().as_deref() {
+            Some(reason) => format!("{} {reason}", self.absent),
+            None => self.absent.clone(),
+        })
+    }
+
+    pub async fn serve(self: Arc<Self>, path: PathBuf) -> io::Result<()> {
+        self.serve_ranked(path, 0).await
+    }
+
+    pub async fn serve_ranked(self: Arc<Self>, path: PathBuf, rank: u8) -> io::Result<()> {
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+        loop {
+            let permit = Arc::clone(&slots)
+                .acquire_owned()
+                .await
+                .map_err(io::Error::other)?;
+            let (stream, _) = listener.accept().await?;
+            let link = Arc::clone(&self);
+            nanocode_platform::spawn_task(async move {
+                link.connection(stream, rank).await;
+                drop(permit);
+            });
+        }
+    }
+
+    async fn connection(self: Arc<Self>, stream: UnixStream, rank: u8) {
+        let (read, mut write) = stream.into_split();
+        let (out, mut lines_out) = mpsc::channel::<String>(OUTBOX);
+        let live = Arc::new(Live {
+            id: self.next.fetch_add(1, Ordering::Relaxed) + 1,
+            rank,
+            closed: Signal::new(),
+            out: out.clone(),
+            pending: Atom::default(),
+        });
+        let claimed = self.live.try_update(|current| match current {
+            Some(held) if held.rank >= rank => None,
+            _ => Some(current.replace(Arc::clone(&live))),
+        });
+        let Some(previous) = claimed else {
+            let _ = write
+                .write_all(b"{\"type\":\"status\",\"connection\":\"other_browser\"}\n")
+                .await;
+            return;
+        };
+        if let Some(previous) = previous {
+            previous.closed.fire();
+        }
+        let _ = out
+            .send(json!({"type": "hello", "hand": self.name}).to_string())
+            .await;
+        drop(out);
+        let writer = nanocode_platform::spawn_task(async move {
+            while let Some(line) = lines_out.recv().await {
+                if write.write_all(line.as_bytes()).await.is_err()
+                    || write.write_all(b"\n").await.is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let mut lines = BufReader::new(read).lines();
+        loop {
+            let line = nanocode_sync::select! {
+                line = lines.next_line() => line,
+                () = live.closed.wait() => break,
+            };
+            let Ok(Some(line)) = line else { break };
+            let Ok(reply) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let Some(call) = reply["id"].as_str().filter(|_| reply["type"] == "result") else {
+                continue;
+            };
+            if let Some(waiting) = live.answer(call) {
+                let _ = waiting.send(reply);
+            }
+        }
+        self.live.update(|current| {
+            if current
+                .as_ref()
+                .is_some_and(|current| current.id == live.id)
+            {
+                *current = None;
+            }
+        });
+        self.gone.set(Instant::now());
+        live.pending.set(HashMap::new());
+        writer.abort();
+    }
+
+    async fn turn_ended(&self, session: &str, turn: &str) {
+        let out = self
+            .live
+            .read(|live| live.as_ref().map(|live| live.out.clone()));
+        if let Some(out) = out {
+            let frame = json!({"type": "turn_ended", "session": session, "turn": turn});
+            let _ = out.send(frame.to_string()).await;
+        }
+    }
+
+    async fn step(
+        &self,
+        context: ToolContext<'_>,
+        input: Value,
+        authorization: Option<Value>,
+    ) -> ToolOutput {
+        let call = context.call_id().to_owned();
+        let mut frame = json!({
+            "type": "call",
+            "id": call,
+            "session": context.session_id(),
+            "turn": context.turn_id(),
+            "input": input,
+        });
+        if let Some(authorization) = authorization {
+            frame["authorization"] = authorization;
+        }
+        let frame = frame.to_string();
+        let Some(live) = self.browser().await else {
+            return self.missing().await;
+        };
+        let (sender, receiver) = oneshot::channel();
+        let waiting = Arc::new(Slot::new(Some(sender)));
+        live.pending.update(|pending| {
+            pending.insert(call.clone(), Arc::clone(&waiting));
+        });
+        drop(waiting);
+        let out = live.out.clone();
+        let live = Arc::downgrade(&live);
+        let sent_and_answered = nanocode_platform::timeout(STEP_TIMEOUT, async {
+            if out.send(frame).await.is_err() {
+                return None;
+            }
+            Some(receiver.await)
+        })
+        .await;
+        let reply = match sent_and_answered {
+            Ok(None) => {
+                if let Some(live) = live.upgrade() {
+                    drop(live.answer(&call));
+                }
+                return self.missing().await;
+            }
+            Ok(Some(Ok(reply))) => reply,
+            Ok(Some(Err(_))) => {
+                return ToolOutput::error(
+                    "The browser disconnected during this step; whether it took effect is unknown. Take a snapshot before trying again.",
+                );
+            }
+            Err(_) => {
+                if let Some(live) = live.upgrade() {
+                    drop(live.answer(&call));
+                }
+                return ToolOutput::error(
+                    "The browser did not finish this step within 45 seconds; whether it took effect is unknown. Take a snapshot before trying again.",
+                );
+            }
+        };
+        let summary = reply["summary"]
+            .as_str()
+            .unwrap_or("Browser step")
+            .to_owned();
+        if reply["ok"] == true {
+            ToolOutput::text(summary).with_structured_result(reply["result"].clone())
+        } else {
+            ToolOutput::error(
+                reply["error"]
+                    .as_str()
+                    .unwrap_or("The browser step failed.")
+                    .to_owned(),
+            )
+        }
+    }
+}
+
+pub struct ExtensionTool {
+    link: Arc<ExtensionLink>,
+    definition: ToolDefinition,
+    authorization: Option<&'static str>,
+}
+
+impl ExtensionTool {
+    pub const fn new(link: Arc<ExtensionLink>, definition: ToolDefinition) -> Self {
+        Self {
+            link,
+            definition,
+            authorization: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn relaying(mut self, key: &'static str) -> Self {
+        self.authorization = Some(key);
+        self
+    }
+}
+
+impl Tool for ExtensionTool {
+    fn definition(&self) -> ToolDefinition {
+        self.definition.clone()
+    }
+
+    fn execute<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        input: ToolInput,
+        context: ToolContext<'life1>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = ToolResult> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            let output: ToolResult = {
+                let mut input: Value = input.decode_json()?;
+                let authorization = self.authorization.map(|key| {
+                    input
+                        .as_object_mut()
+                        .and_then(|object| object.remove(key))
+                        .unwrap_or(Value::Null)
+                });
+                if !input.is_object() || input.to_string().len() > MAX_INPUT {
+                    return Ok(ToolOutput::error(
+                        "expected browser arguments of at most 32 KiB",
+                    ));
+                }
+                Ok(self.link.step(context, input, authorization).await)
+            };
+            output
+        })
+    }
+
+    fn end_turn<'life0, 'life1, 'life2, 'life3, 'async_trait>(
+        &'life0 self,
+        session_id: &'life1 str,
+        turn_id: &'life2 str,
+        _hook_event_name: &'life3 str,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), ToolError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        'life3: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            let output: Result<(), ToolError> = {
+                self.link.turn_ended(session_id, turn_id).await;
+                Ok(())
+            };
+            output
+        })
+    }
+}
+
+fn emit(message: &[u8]) -> bool {
+    write_body(&mut io::stdout().lock(), message).is_ok()
+}
+
+fn forward(stream: net::UnixStream, browser: &Receiver<Vec<u8>>) -> io::Result<bool> {
+    let reader = stream.try_clone()?;
+    let (closed, done) = sync_channel::<()>(1);
+    let reading = thread::spawn(move || {
+        for line in io::BufReader::new(reader).lines() {
+            let Ok(line) = line else { break };
+            if !emit(line.as_bytes()) {
+                std::process::exit(0);
+            }
+        }
+        let _ = closed.send(());
+    });
+    let mut writer = stream;
+    let mut gone = false;
+    loop {
+        match browser.recv_timeout(Duration::from_millis(250)) {
+            Ok(message) => {
+                if writer
+                    .write_all(&message)
+                    .and_then(|()| writer.write_all(b"\n"))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                gone = true;
+                break;
+            }
+        }
+        if done.try_recv().is_ok() {
+            break;
+        }
+    }
+    let _ = writer.shutdown(std::net::Shutdown::Both);
+    let _ = reading.join();
+    Ok(gone)
+}
+
+pub fn relay_host(claimed: impl Fn() -> bool, socket: &Path) -> io::Result<()> {
+    let (from_browser, browser) = sync_channel::<Vec<u8>>(16);
+    thread::spawn(move || {
+        let mut stdin = io::stdin().lock();
+        loop {
+            let Ok(message) = read_body(&mut stdin) else {
+                std::process::exit(0);
+            };
+            if from_browser.send(message).is_err() {
+                std::process::exit(0);
+            }
+        }
+    });
+    let mut reported = "";
+    loop {
+        let status = if !claimed() {
+            "unclaimed"
+        } else {
+            match net::UnixStream::connect(socket) {
+                Ok(stream) => {
+                    reported = "";
+                    if forward(stream, &browser)? {
+                        return Ok(());
+                    }
+                    thread::sleep(REDIAL);
+                    continue;
+                }
+                Err(_) => "hand_offline",
+            }
+        };
+        if status != reported {
+            reported = status;
+            let message = json!({"type": "status", "connection": status}).to_string();
+            if !emit(message.as_bytes()) {
+                return Ok(());
+            }
+        }
+        while browser.try_recv().is_ok() {}
+        thread::sleep(REDIAL);
+    }
+}

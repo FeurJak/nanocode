@@ -1,0 +1,37 @@
+[package]
+edition = "2021"
+rust-version = "1.71"
+name = "serde_json"
+version = "1.0.150"
+description = "A JSON serialization file format"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/serde-rs/json"
+publish = false
+
+[features]
+default = ["std"]
+float_roundtrip = []
+preserve_order = ["indexmap", "std"]
+raw_value = []
+std = ["serde_core/std"]
+
+[lib]
+name = "serde_json"
+path = "src/lib.rs"
+test = false
+doctest = false
+bench = false
+
+[dependencies.indexmap]
+version = "2.2.3"
+optional = true
+
+[dependencies.itoa]
+version = "1.0"
+
+[dependencies.serde_core]
+version = "1.0.220"
+default-features = false
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies.nanocode-sys]
+path = "../../core/sys"

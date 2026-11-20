@@ -1,0 +1,29 @@
+[package]
+autotests = false
+autobenches = false
+name = "nanocode-tools-macros"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Shared typed-tool procedural macros for Codex and Claude"
+
+[package.metadata.docs.rs]
+rustdoc-args = ["-D", "warnings"]
+
+[lib]
+test = false
+doctest = false
+bench = false
+proc-macro = true
+
+[dependencies]
+nanocode-macro-support.workspace = true
+
+[lints]
+workspace = true

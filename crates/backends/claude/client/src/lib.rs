@@ -1,0 +1,4395 @@
+#[cfg(all(target_family = "wasm", not(target_os = "unknown")))]
+compile_error!(
+    "nanocode-backend-claude-client supports native targets and hosted wasm*-unknown-unknown targets; WASI is not yet supported"
+);
+
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Waker},
+    time::Duration,
+};
+
+use nanocode_agent_types::{ClaudeTokens, EstimatedUsdCost, UsdAmount};
+use nanocode_sync::{Stream, StreamExt, stream};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+mod admission;
+mod auth;
+#[cfg(not(target_family = "wasm"))]
+mod claude_code;
+#[cfg(not(target_family = "wasm"))]
+mod federation;
+#[cfg(not(target_family = "wasm"))]
+mod home;
+mod root_region;
+mod subscription_identity;
+#[doc(hidden)]
+pub mod subscription_wire;
+pub mod transport;
+pub use subscription_wire::{SessionDigest, SubscriptionIdentity};
+use transport::{HttpClient, HttpError, HttpResponse, layer::retry};
+pub mod subscription;
+pub mod thread;
+mod wire_cache;
+pub use auth::{
+    ClaudeAccessToken, ClaudeAuthOrKey, ClaudeFall, ClaudeTokenSource, RefreshingClaudeAuth,
+};
+#[cfg(not(target_family = "wasm"))]
+pub use federation::{ClaudeIdentityTokenSource, ClaudeTokenCache, ClaudeWorkloadIdentity};
+#[cfg(not(target_family = "wasm"))]
+pub use home::ClaudeHomeLogin;
+pub use root_region::{RegionError, RootRegion, checksum as root_region_checksum};
+pub use thread::{
+    CreateReason, MESSAGE_THREADS_BETA, MessageThread, THREAD_IDLE_EXPIRY, ThreadErrorCode,
+    ThreadMode, ThreadParam, ThreadRecovery, ThreadTurn,
+};
+use wire_cache::Assembled;
+pub use wire_cache::{KeptBody, WireCache};
+
+pub const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
+
+pub const ANTHROPIC_SUBSCRIPTION_MESSAGES_URL: &str =
+    "https://api.anthropic.com/v1/messages?beta=true";
+pub const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+pub const HEDGE_HEADER: &str = "x-nanocode-hedge";
+
+#[cfg(not(target_family = "wasm"))]
+pub const MESSAGES_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub const MESSAGES_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+pub const MESSAGES_HEAD_TIMEOUT: Duration = Duration::from_secs(600);
+
+const FAST_MODE_BETA: &str = "fast-mode-2026-02-01";
+const THINKING_BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
+const EFFORT_UPDATES_BETA: &str = "mid-conversation-output-config-2026-07-01";
+const COMPACTION_BETA: &str = "compact-2026-09-04";
+const INLINE_TOOLS_BETA: &str = "inline-tools-2026-09-15";
+const FIRST_PARTY_HOST: &str = "api.anthropic.com";
+const GZIP_MIN_BODY_BYTES: usize = 4096;
+const INVALID_JSON_MESSAGES: [&str; 2] = [
+    "The request body is not valid JSON",
+    "Failed to parse request: could not parse request body as JSON",
+];
+
+const TRANSIENT_PAYMENT_PROBLEMS: [&str; 3] = [
+    "/reference#description/payment-failed",
+    "https://paymentauth.org/problems/verification-failed",
+    "https://paymentauth.org/problems/session/delta-too-small",
+];
+
+#[derive(Debug)]
+pub enum ClaudeError {
+    Http {
+        status: u16,
+        body: String,
+
+        retry_after: Option<Duration>,
+
+        should_retry: Option<bool>,
+    },
+    Transport(HttpError),
+    Json(serde_json::Error),
+    StreamError {
+        kind: String,
+        message: String,
+    },
+    Protocol(String),
+    IncompleteStream,
+    AuthUnavailable(ClaudeAuthUnavailable),
+}
+
+impl std::fmt::Display for ClaudeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Http { status, body, .. } => write!(formatter, "Messages HTTP {status}: {body}"),
+            Self::Transport(value) => write!(formatter, "Messages transport: {value}"),
+            Self::Json(value) => write!(formatter, "Messages JSON: {value}"),
+            Self::StreamError { kind, message } => {
+                write!(formatter, "Messages stream error {kind}: {message}")
+            }
+            Self::Protocol(value) => write!(formatter, "Messages protocol: {value}"),
+            Self::IncompleteStream => {
+                formatter.write_str("Messages stream ended before message_stop")
+            }
+            Self::AuthUnavailable(value) => std::fmt::Display::fmt(value, formatter),
+        }
+    }
+}
+
+impl std::error::Error for ClaudeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Transport(value) => Some(value),
+            Self::Json(value) => Some(value),
+            Self::AuthUnavailable(value) => std::error::Error::source(value),
+            _ => None,
+        }
+    }
+}
+
+impl From<HttpError> for ClaudeError {
+    fn from(source: HttpError) -> Self {
+        Self::Transport(source)
+    }
+}
+
+impl From<serde_json::Error> for ClaudeError {
+    fn from(source: serde_json::Error) -> Self {
+        Self::Json(source)
+    }
+}
+
+impl From<ClaudeAuthUnavailable> for ClaudeError {
+    fn from(source: ClaudeAuthUnavailable) -> Self {
+        Self::AuthUnavailable(source)
+    }
+}
+
+impl ClaudeError {
+    #[doc(hidden)]
+    pub fn is_throttled(&self) -> bool {
+        match self {
+            Self::Http { status, .. } => matches!(status, 429 | 529),
+            Self::StreamError { kind, .. } => {
+                matches!(kind.as_str(), "rate_limit_error" | "overloaded_error")
+            }
+            _ => false,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Http {
+                status,
+                body,
+                should_retry,
+                ..
+            } => should_retry.unwrap_or_else(|| {
+                (retry::retryable_status(*status) || (*status == 402 && transient_payment(body)))
+                    && !upstream_rejected(body)
+            }),
+            Self::Transport(error) => transport::is_transient(error),
+            Self::StreamError { kind, message } => {
+                matches!(
+                    kind.as_str(),
+                    "overloaded_error" | "api_error" | "rate_limit_error" | "timeout_error"
+                ) && !upstream_client_error(message)
+            }
+            Self::IncompleteStream => true,
+            Self::Json(_) | Self::Protocol(_) | Self::AuthUnavailable(_) => false,
+        }
+    }
+}
+
+impl nanocode_agent_types::BackendFailure for ClaudeError {
+    fn retryable(&self) -> bool {
+        self.is_transient()
+            && !matches!(
+                self,
+                Self::Http {
+                    status: 402,
+                    should_retry: None,
+                    ..
+                }
+            )
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+fn retry_after(headers: &nanocode_http::types::header::HeaderMap) -> Option<Duration> {
+    if let Some(delay) = retry::retry_after_ms(headers) {
+        return Some(delay);
+    }
+    let value = headers
+        .get(nanocode_http::types::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Some(Duration::from_secs(value.parse().unwrap_or(u64::MAX)));
+    }
+    let deadline = nanocode_platform::parse_http_date(value)
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    let now = nanocode_platform::system_time()
+        .duration_since(nanocode_platform::UNIX_EPOCH)
+        .ok()?;
+    Some(deadline.saturating_sub(now))
+}
+
+fn transient_payment(body: &str) -> bool {
+    serde_json::from_str::<Value>(body).is_ok_and(|value| {
+        value["type"]
+            .as_str()
+            .is_some_and(|kind| TRANSIENT_PAYMENT_PROBLEMS.contains(&kind))
+    })
+}
+
+fn upstream_rejected(body: &str) -> bool {
+    serde_json::from_str::<Value>(body).is_ok_and(|value| {
+        [&value["detail"], &value["error"]["message"]]
+            .into_iter()
+            .filter_map(Value::as_str)
+            .any(upstream_client_error)
+    })
+}
+
+fn upstream_client_error(detail: &str) -> bool {
+    detail
+        .split_once(": ")
+        .filter(|(code, _)| !code.is_empty() && code.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|(_, upstream)| serde_json::from_str::<Value>(upstream).ok())
+        .and_then(|upstream| upstream["code"].as_u64())
+        .and_then(|code| u16::try_from(code).ok())
+        .is_some_and(|code| matches!(code, 400..=499) && !retry::retryable_status(code))
+}
+
+fn rejects_gzip(status: u16, from_anthropic: bool, body: &str) -> bool {
+    matches!(status, 400 | 403 | 415) && (!from_anthropic || (status == 400 && invalid_json(body)))
+}
+
+fn invalid_json(body: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return bad_json(body.trim_end());
+    };
+    if value["type"] == "error"
+        && let Some(message) = value["error"]["message"].as_str()
+    {
+        return INVALID_JSON_MESSAGES
+            .iter()
+            .any(|prefix| message.starts_with(prefix));
+    }
+    value["reason"] == "bad_json" && value["error"].as_str().is_some_and(bad_json)
+}
+
+fn bad_json(text: &str) -> bool {
+    text.strip_prefix("bad json: ").is_some_and(|detail| {
+        detail.starts_with("invalid character ")
+            || matches!(
+                detail,
+                "unexpected EOF" | "unexpected end of JSON input" | "EOF"
+            )
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    User,
+    Assistant,
+    System,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[cfg_attr(not(target_family = "wasm"), derive(Deserialize))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentBlock {
+    Image {
+        source: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    Document {
+        source: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    Text {
+        text: String,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    ServerToolUse {
+        id: String,
+        name: String,
+        #[serde(default = "empty_object")]
+        input: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    WebSearchToolResult {
+        tool_use_id: String,
+        content: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    WebFetchToolResult {
+        tool_use_id: String,
+        content: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    ToolSearchToolResult {
+        tool_use_id: String,
+        content: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    CodeExecutionToolResult {
+        tool_use_id: String,
+        content: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    BashCodeExecutionToolResult {
+        tool_use_id: String,
+        content: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    TextEditorCodeExecutionToolResult {
+        tool_use_id: String,
+        content: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    McpToolUse {
+        id: String,
+        name: String,
+        server_name: String,
+        #[serde(default = "empty_object")]
+        input: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    McpToolResult {
+        tool_use_id: String,
+        content: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    McpToolListing {
+        mcp_server_name: String,
+        tools: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: ToolResultContent,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        is_error: Option<bool>,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    Thinking {
+        thinking: String,
+        #[serde(default)]
+        signature: String,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    RedactedThinking {
+        data: String,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    Compaction {
+        content: String,
+        signature: String,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    ToolAddition {
+        tool: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    ToolRemoval {
+        tool: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[cfg_attr(not(target_family = "wasm"), derive(Deserialize))]
+#[serde(untagged)]
+pub enum ToolResultContent {
+    Text(String),
+    Blocks(Vec<Value>),
+}
+
+#[cfg(target_family = "wasm")]
+impl<'de> Deserialize<'de> for ToolResultContent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match Value::deserialize(deserializer)? {
+            Value::String(text) => Ok(Self::Text(text)),
+            Value::Array(blocks) => Ok(Self::Blocks(blocks)),
+            _ => Err(serde::de::Error::custom(
+                "data did not match any variant of untagged enum ToolResultContent",
+            )),
+        }
+    }
+}
+
+#[cfg(target_family = "wasm")]
+struct Fields(serde_json::Map<String, Value>);
+
+#[cfg(target_family = "wasm")]
+impl Fields {
+    fn value(&mut self, name: &'static str) -> Result<Value, serde_json::Error> {
+        self.0
+            .remove(name)
+            .ok_or_else(|| serde::de::Error::missing_field(name))
+    }
+
+    fn take<T: serde::de::DeserializeOwned>(
+        &mut self,
+        name: &'static str,
+    ) -> Result<T, serde_json::Error> {
+        serde_json::from_value(self.value(name)?)
+    }
+
+    fn string(&mut self, name: &'static str) -> Result<String, serde_json::Error> {
+        String::deserialize(self.value(name)?)
+    }
+
+    fn index(&mut self, name: &'static str) -> Result<usize, serde_json::Error> {
+        usize::deserialize(self.value(name)?)
+    }
+
+    fn fields(&mut self, name: &'static str) -> Result<Self, serde_json::Error> {
+        serde_json::Map::deserialize(self.value(name)?).map(Self)
+    }
+
+    fn defaulted_string(&mut self, name: &'static str) -> Result<String, serde_json::Error> {
+        self.0
+            .remove(name)
+            .map_or_else(|| Ok(String::new()), String::deserialize)
+    }
+
+    fn object(&mut self, name: &'static str) -> Value {
+        self.0.remove(name).unwrap_or_else(empty_object)
+    }
+
+    fn extra(self) -> BTreeMap<String, Value> {
+        let mut extra = BTreeMap::new();
+        for (key, value) in self.0 {
+            extra.insert(key, value);
+        }
+        extra
+    }
+}
+
+#[cfg(target_family = "wasm")]
+const CONTENT_BLOCK_TYPES: &[&str] = &[
+    "image",
+    "document",
+    "text",
+    "tool_use",
+    "server_tool_use",
+    "web_search_tool_result",
+    "web_fetch_tool_result",
+    "tool_search_tool_result",
+    "code_execution_tool_result",
+    "bash_code_execution_tool_result",
+    "text_editor_code_execution_tool_result",
+    "mcp_tool_use",
+    "mcp_tool_result",
+    "mcp_tool_listing",
+    "tool_result",
+    "thinking",
+    "redacted_thinking",
+    "compaction",
+    "tool_addition",
+    "tool_removal",
+];
+
+#[cfg(target_family = "wasm")]
+impl<'de> Deserialize<'de> for ContentBlock {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let fields = Fields(serde_json::Map::deserialize(deserializer)?);
+        Self::from_fields(fields).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(target_family = "wasm")]
+impl ContentBlock {
+    fn from_fields(mut fields: Fields) -> Result<Self, serde_json::Error> {
+        let kind = fields.string("type")?;
+        Ok(match kind.as_str() {
+            "image" => Self::Image {
+                source: fields.value("source")?,
+                extra: fields.extra(),
+            },
+            "document" => Self::Document {
+                source: fields.value("source")?,
+                extra: fields.extra(),
+            },
+            "text" => Self::Text {
+                text: fields.string("text")?,
+                extra: fields.extra(),
+            },
+            "tool_use" => Self::ToolUse {
+                id: fields.string("id")?,
+                name: fields.string("name")?,
+                input: fields.value("input")?,
+                extra: fields.extra(),
+            },
+            "server_tool_use" => Self::ServerToolUse {
+                id: fields.string("id")?,
+                name: fields.string("name")?,
+                input: fields.object("input"),
+                extra: fields.extra(),
+            },
+            "web_search_tool_result" => Self::WebSearchToolResult {
+                tool_use_id: fields.string("tool_use_id")?,
+                content: fields.value("content")?,
+                extra: fields.extra(),
+            },
+            "web_fetch_tool_result" => Self::WebFetchToolResult {
+                tool_use_id: fields.string("tool_use_id")?,
+                content: fields.value("content")?,
+                extra: fields.extra(),
+            },
+            "tool_search_tool_result" => Self::ToolSearchToolResult {
+                tool_use_id: fields.string("tool_use_id")?,
+                content: fields.value("content")?,
+                extra: fields.extra(),
+            },
+            "code_execution_tool_result" => Self::CodeExecutionToolResult {
+                tool_use_id: fields.string("tool_use_id")?,
+                content: fields.value("content")?,
+                extra: fields.extra(),
+            },
+            "bash_code_execution_tool_result" => Self::BashCodeExecutionToolResult {
+                tool_use_id: fields.string("tool_use_id")?,
+                content: fields.value("content")?,
+                extra: fields.extra(),
+            },
+            "text_editor_code_execution_tool_result" => Self::TextEditorCodeExecutionToolResult {
+                tool_use_id: fields.string("tool_use_id")?,
+                content: fields.value("content")?,
+                extra: fields.extra(),
+            },
+            "mcp_tool_use" => Self::McpToolUse {
+                id: fields.string("id")?,
+                name: fields.string("name")?,
+                server_name: fields.string("server_name")?,
+                input: fields.object("input"),
+                extra: fields.extra(),
+            },
+            "mcp_tool_result" => Self::McpToolResult {
+                tool_use_id: fields.string("tool_use_id")?,
+                content: fields.value("content")?,
+                extra: fields.extra(),
+            },
+            "mcp_tool_listing" => Self::McpToolListing {
+                mcp_server_name: fields.string("mcp_server_name")?,
+                tools: fields.value("tools")?,
+                extra: fields.extra(),
+            },
+            "tool_result" => Self::ToolResult {
+                tool_use_id: fields.string("tool_use_id")?,
+                content: ToolResultContent::deserialize(fields.value("content")?)?,
+                is_error: fields
+                    .0
+                    .remove("is_error")
+                    .map_or(Ok(None), Option::<bool>::deserialize)?,
+                extra: fields.extra(),
+            },
+            "thinking" => Self::Thinking {
+                thinking: fields.string("thinking")?,
+                signature: fields.defaulted_string("signature")?,
+                extra: fields.extra(),
+            },
+            "redacted_thinking" => Self::RedactedThinking {
+                data: fields.string("data")?,
+                extra: fields.extra(),
+            },
+            "compaction" => Self::Compaction {
+                content: fields.string("content")?,
+                signature: fields.string("signature")?,
+                extra: fields.extra(),
+            },
+            "tool_addition" => Self::ToolAddition {
+                tool: fields.value("tool")?,
+                extra: fields.extra(),
+            },
+            "tool_removal" => Self::ToolRemoval {
+                tool: fields.value("tool")?,
+                extra: fields.extra(),
+            },
+            _ => {
+                return Err(serde::de::Error::unknown_variant(
+                    &kind,
+                    CONTENT_BLOCK_TYPES,
+                ));
+            }
+        })
+    }
+}
+
+fn empty_object() -> Value {
+    serde_json::json!({})
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
+impl ContentBlock {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text {
+            text: text.into(),
+            extra: BTreeMap::new(),
+        }
+    }
+
+    pub fn tool_use(id: impl Into<String>, name: impl Into<String>, input: Value) -> Self {
+        Self::ToolUse {
+            id: id.into(),
+            name: name.into(),
+            input,
+            extra: BTreeMap::new(),
+        }
+    }
+
+    pub fn tool_result(id: impl Into<String>, content: impl Into<String>, is_error: bool) -> Self {
+        Self::ToolResult {
+            tool_use_id: id.into(),
+            content: ToolResultContent::Text(content.into()),
+            is_error: is_error.then_some(true),
+            extra: BTreeMap::new(),
+        }
+    }
+
+    pub fn tool_result_content(
+        id: impl Into<String>,
+        content: ToolResultContent,
+        is_error: bool,
+    ) -> Self {
+        Self::ToolResult {
+            tool_use_id: id.into(),
+            content,
+            is_error: is_error.then_some(true),
+            extra: BTreeMap::new(),
+        }
+    }
+
+    pub fn tool_result_blocks(id: impl Into<String>, blocks: Vec<Value>, is_error: bool) -> Self {
+        Self::ToolResult {
+            tool_use_id: id.into(),
+            content: ToolResultContent::Blocks(blocks),
+            is_error: is_error.then_some(true),
+            extra: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Message {
+    pub role: Role,
+    pub content: Vec<ContentBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<OutputConfig>,
+}
+
+impl Message {
+    pub fn text(role: Role, text: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: vec![ContentBlock::text(text)],
+            output_config: None,
+        }
+    }
+
+    pub const fn tool_results(content: Vec<ContentBlock>) -> Self {
+        Self {
+            role: Role::User,
+            content,
+            output_config: None,
+        }
+    }
+
+    pub const fn effort(effort: Effort) -> Self {
+        Self {
+            role: Role::System,
+            content: Vec::new(),
+            output_config: Some(OutputConfig { effort }),
+        }
+    }
+
+    pub const fn is_effort_update(&self) -> bool {
+        matches!(self.role, Role::System) && self.output_config.is_some()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: std::sync::Arc<str>,
+    pub input_schema: nanocode_types_core::responses::JsonSchema,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub defer_loading: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ServerToolDefinition {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub name: String,
+    #[serde(flatten)]
+    pub options: BTreeMap<String, Value>,
+}
+impl ServerToolDefinition {
+    pub fn tool_search_bm25() -> Self {
+        Self {
+            kind: "tool_search_tool_bm25_20251119".into(),
+            name: "tool_search_tool_bm25".into(),
+            options: BTreeMap::new(),
+        }
+    }
+    pub fn tool_search_regex() -> Self {
+        Self {
+            kind: "tool_search_tool_regex_20251119".into(),
+            name: "tool_search_tool_regex".into(),
+            options: BTreeMap::new(),
+        }
+    }
+    pub fn web_search_basic(max_uses: u32) -> Self {
+        Self {
+            kind: "web_search_20250305".into(),
+            name: "web_search".into(),
+            options: BTreeMap::from([("max_uses".into(), Value::from(max_uses))]),
+        }
+    }
+
+    pub fn web_search_current(max_uses: u32) -> Self {
+        Self {
+            kind: "web_search_20260318".into(),
+            name: "web_search".into(),
+            options: BTreeMap::from([("max_uses".into(), Value::from(max_uses))]),
+        }
+    }
+
+    pub fn web_fetch_current(max_uses: u32) -> Self {
+        Self {
+            kind: "web_fetch_20260318".into(),
+            name: "web_fetch".into(),
+            options: BTreeMap::from([("max_uses".into(), Value::from(max_uses))]),
+        }
+    }
+
+    pub fn code_execution_current() -> Self {
+        Self {
+            kind: "code_execution_20260521".into(),
+            name: "code_execution".into(),
+            options: BTreeMap::new(),
+        }
+    }
+    pub fn web_fetch_basic(max_uses: u32) -> Self {
+        Self {
+            kind: "web_fetch_20250910".into(),
+            name: "web_fetch".into(),
+            options: BTreeMap::from([("max_uses".into(), Value::from(max_uses))]),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ClaudeToolSpec {
+    Client(ToolDefinition),
+    Server(ServerToolDefinition),
+}
+impl From<ToolDefinition> for ClaudeToolSpec {
+    fn from(value: ToolDefinition) -> Self {
+        Self::Client(value)
+    }
+}
+impl From<ServerToolDefinition> for ClaudeToolSpec {
+    fn from(value: ServerToolDefinition) -> Self {
+        Self::Server(value)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheControl {
+    #[serde(rename = "type")]
+    pub kind: CacheType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<CacheTtl>,
+}
+impl CacheControl {
+    pub const fn ephemeral() -> Self {
+        Self {
+            kind: CacheType::Ephemeral,
+            ttl: None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheType {
+    Ephemeral,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CacheTtl {
+    #[serde(rename = "5m")]
+    FiveMinutes,
+    #[serde(rename = "1h")]
+    OneHour,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputConfig {
+    pub effort: Effort,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Speed {
+    Standard,
+    Fast,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MessagesRequest {
+    pub model: String,
+    pub max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<OutputConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<Speed>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_management: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<std::sync::Arc<Value>>,
+    pub messages: Vec<Message>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ClaudeToolSpec>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub effort_updates: bool,
+}
+
+impl CacheControl {
+    const fn effective_ttl(&self) -> CacheTtl {
+        match self.ttl {
+            Some(ttl) => ttl,
+            None => CacheTtl::FiveMinutes,
+        }
+    }
+}
+
+const CACHE_BREAKPOINTS: usize = 4;
+
+const INELIGIBLE_CACHE_TARGET: &str = "cache_control cannot target thinking or empty text blocks";
+const INVALID_CACHE_CONTROL: &str = "invalid cache_control type or TTL";
+
+#[derive(Clone, Copy, Default)]
+struct CacheLayout {
+    breakpoints: usize,
+    short_ttl: bool,
+    long_ttl: bool,
+    long_after_short: bool,
+    last_eligible: Option<Option<CacheTtl>>,
+    invalid: Option<&'static str>,
+}
+
+impl CacheLayout {
+    const fn push(&mut self, ttl: CacheTtl) {
+        self.breakpoints += 1;
+        match ttl {
+            CacheTtl::FiveMinutes => self.short_ttl = true,
+            CacheTtl::OneHour => {
+                self.long_after_short |= self.short_ttl;
+                self.long_ttl = true;
+            }
+        }
+    }
+
+    const fn marked(&mut self, ttl: Option<CacheTtl>) {
+        if let Some(ttl) = ttl {
+            self.push(ttl);
+        }
+        self.last_eligible = Some(ttl);
+    }
+
+    fn block(&mut self, control: Option<&Value>, eligible: bool) {
+        if self.invalid.is_some() {
+            return;
+        }
+        let ttl = match control {
+            None => None,
+            Some(_) if !eligible => {
+                self.invalid = Some(INELIGIBLE_CACHE_TARGET);
+                return;
+            }
+            Some(value) => match CacheControl::deserialize(value) {
+                Ok(control) => Some(control.effective_ttl()),
+                Err(_) => {
+                    self.invalid = Some(INVALID_CACHE_CONTROL);
+                    return;
+                }
+            },
+        };
+        if let Some(ttl) = ttl {
+            self.push(ttl);
+        }
+        if eligible {
+            self.last_eligible = Some(ttl);
+        }
+    }
+
+    fn message(message: &Message) -> Self {
+        let mut layout = Self::default();
+        for block in &message.content {
+            let (control, eligible) = block.cache_slot();
+            layout.block(control, eligible);
+        }
+        layout
+    }
+
+    const fn then(self, next: Self) -> Self {
+        if self.invalid.is_some() {
+            return self;
+        }
+        Self {
+            breakpoints: self.breakpoints + next.breakpoints,
+            short_ttl: self.short_ttl || next.short_ttl,
+            long_ttl: self.long_ttl || next.long_ttl,
+            long_after_short: self.long_after_short
+                || next.long_after_short
+                || (self.short_ttl && next.long_ttl),
+            last_eligible: match next.last_eligible {
+                Some(last) => Some(last),
+                None => self.last_eligible,
+            },
+            invalid: next.invalid,
+        }
+    }
+
+    fn validate(mut self, automatic: Option<&CacheControl>) -> Result<usize, ClaudeError> {
+        if let Some(invalid) = self.invalid {
+            return Err(ClaudeError::Protocol(invalid.into()));
+        }
+        if let (Some(automatic), Some(last)) = (automatic, self.last_eligible) {
+            let ttl = automatic.effective_ttl();
+            if let Some(explicit) = last {
+                if explicit != ttl {
+                    return Err(ClaudeError::Protocol(
+                        "automatic cache TTL conflicts with the final cache breakpoint".into(),
+                    ));
+                }
+            } else {
+                self.push(ttl);
+            }
+        }
+        if self.breakpoints > CACHE_BREAKPOINTS {
+            return Err(ClaudeError::Protocol(
+                "at most four cache breakpoints are allowed".into(),
+            ));
+        }
+        if self.long_after_short {
+            return Err(ClaudeError::Protocol(
+                "1h cache breakpoints must precede 5m cache breakpoints".into(),
+            ));
+        }
+        Ok(self.breakpoints)
+    }
+}
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Default)]
+pub struct MessageLayout {
+    cache: CacheLayout,
+    tool_changes: bool,
+}
+
+impl MessageLayout {
+    pub(crate) fn message(message: &Message) -> Self {
+        Self {
+            cache: CacheLayout::message(message),
+            tool_changes: message.role == Role::System
+                && message.content.iter().any(|block| {
+                    matches!(
+                        block,
+                        ContentBlock::ToolAddition { .. } | ContentBlock::ToolRemoval { .. }
+                    )
+                }),
+        }
+    }
+
+    pub(crate) const fn then(self, next: Self) -> Self {
+        Self {
+            cache: self.cache.then(next.cache),
+            tool_changes: self.tool_changes || next.tool_changes,
+        }
+    }
+
+    #[must_use]
+    pub fn of<M: WireMessage>(messages: &[M]) -> Self {
+        messages.iter().fold(Self::default(), |layout, message| {
+            layout.then(Self::message(message.message()))
+        })
+    }
+}
+
+#[doc(hidden)]
+pub trait WireMessage {
+    fn message(&self) -> &Message;
+
+    fn wire_id(&self) -> Option<u64> {
+        None
+    }
+
+    fn encoded<'a>(
+        &'a self,
+        _subscription: bool,
+        encode: &dyn Fn(&Message) -> Result<String, ClaudeError>,
+    ) -> Result<std::borrow::Cow<'a, str>, ClaudeError> {
+        encode(self.message()).map(std::borrow::Cow::Owned)
+    }
+
+    fn digests(
+        &self,
+        encode: &dyn Fn(&Message) -> Result<String, ClaudeError>,
+    ) -> Result<MessageDigests, ClaudeError> {
+        Ok(MessageDigests::of(&self.encoded(false, encode)?))
+    }
+}
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct MessageDigests {
+    sent: nanocode_digest::Hash,
+    read: nanocode_digest::Hash,
+}
+
+impl MessageDigests {
+    pub(crate) fn marked(&self) -> bool {
+        self.read != self.sent
+    }
+
+    #[must_use]
+    pub fn of(json: &str) -> Self {
+        let sent = nanocode_digest::blake3(json.as_bytes());
+        let mut read = nanocode_digest::Blake3::new();
+        let mut rest = json;
+        let mut marked = false;
+        while let Some((kept, after)) = cache_marker(rest) {
+            read.update(kept.as_bytes());
+            rest = after;
+            marked = true;
+        }
+        let read = if marked {
+            read.update(rest.as_bytes());
+            read.finalize()
+        } else {
+            sent
+        };
+        Self { sent, read }
+    }
+}
+
+impl WireMessage for Message {
+    fn message(&self) -> &Message {
+        self
+    }
+}
+
+impl<T: WireMessage + ?Sized> WireMessage for &T {
+    fn message(&self) -> &Message {
+        (**self).message()
+    }
+
+    fn wire_id(&self) -> Option<u64> {
+        (**self).wire_id()
+    }
+
+    fn encoded<'a>(
+        &'a self,
+        subscription: bool,
+        encode: &dyn Fn(&Message) -> Result<String, ClaudeError>,
+    ) -> Result<std::borrow::Cow<'a, str>, ClaudeError> {
+        (**self).encoded(subscription, encode)
+    }
+
+    fn digests(
+        &self,
+        encode: &dyn Fn(&Message) -> Result<String, ClaudeError>,
+    ) -> Result<MessageDigests, ClaudeError> {
+        (**self).digests(encode)
+    }
+}
+
+impl WireMessage for std::borrow::Cow<'_, Message> {
+    fn message(&self) -> &Message {
+        self
+    }
+}
+
+fn validate_cache_layout(
+    tools: &[ClaudeToolSpec],
+    system: Option<&Value>,
+    messages: MessageLayout,
+    automatic: Option<&CacheControl>,
+) -> Result<usize, ClaudeError> {
+    let mut layout = CacheLayout::default();
+    for tool in tools {
+        match tool {
+            ClaudeToolSpec::Client(tool) => {
+                layout.marked(tool.cache_control.as_ref().map(CacheControl::effective_ttl));
+            }
+            ClaudeToolSpec::Server(tool) => {
+                layout.block(tool.options.get("cache_control"), true);
+            }
+        }
+    }
+    match system {
+        Some(Value::String(text)) => layout.block(None, !text.is_empty()),
+        Some(Value::Array(blocks)) => {
+            for block in blocks {
+                layout.block(block.get("cache_control"), cacheable_json_block(block));
+            }
+        }
+        _ => {}
+    }
+    layout.then(messages.cache).validate(automatic)
+}
+
+pub fn fingerprint(value: &impl Serialize) -> String {
+    fingerprint_bytes(&serde_json::to_vec(value).unwrap_or_default())
+}
+
+#[doc(hidden)]
+pub fn fingerprint_bytes(bytes: &[u8]) -> String {
+    format!("{:016x}", nanocode_digest::xxh64(bytes, 0))
+}
+
+#[doc(hidden)]
+pub fn cache_tail<M: WireMessage>(messages: &[M]) -> Option<(usize, usize)> {
+    messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, message)| {
+            message
+                .message()
+                .content
+                .iter()
+                .rposition(|block| block.cache_slot().1)
+                .map(|block| (index, block))
+        })
+}
+
+fn mark_system_tail(system: Option<&mut Value>, marker: Value) {
+    if let Some(Value::Array(blocks)) = system
+        && let Some(block) = blocks
+            .iter_mut()
+            .rev()
+            .find(|block| cacheable_json_block(block))
+        && let Some(block) = block.as_object_mut()
+    {
+        block.entry("cache_control").or_insert(marker);
+    }
+}
+
+impl MessagesRequest {
+    fn head(&self) -> Self {
+        let Self {
+            model,
+            max_tokens,
+            cache_control,
+            output_config,
+            speed,
+            tool_choice,
+            thinking,
+            context_management,
+            compaction,
+            diagnostics,
+            system,
+            messages: _,
+            container,
+            tools,
+            effort_updates,
+        } = self;
+        Self {
+            model: model.clone(),
+            max_tokens: *max_tokens,
+            cache_control: cache_control.clone(),
+            output_config: output_config.clone(),
+            speed: *speed,
+            tool_choice: tool_choice.clone(),
+            thinking: thinking.clone(),
+            context_management: context_management.clone(),
+            compaction: compaction.clone(),
+            diagnostics: diagnostics.clone(),
+            system: system.clone(),
+            messages: Vec::new(),
+            container: container.clone(),
+            tools: tools.clone(),
+            effort_updates: *effort_updates,
+        }
+    }
+
+    pub fn apply_cache_ttl(&mut self) {
+        let Some(ttl) = self.cache_control.as_ref().and_then(|control| control.ttl) else {
+            return;
+        };
+        let Some(Value::Array(blocks)) = self.system.as_deref() else {
+            return;
+        };
+        if blocks
+            .iter()
+            .filter_map(|block| block.get("cache_control"))
+            .filter_map(Value::as_object)
+            .all(|control| control.contains_key("ttl"))
+        {
+            return;
+        }
+        let Some(Value::Array(blocks)) = self.system.as_mut().map(std::sync::Arc::make_mut) else {
+            return;
+        };
+        for control in blocks
+            .iter_mut()
+            .filter_map(|block| block.get_mut("cache_control"))
+            .filter_map(Value::as_object_mut)
+        {
+            control
+                .entry("ttl")
+                .or_insert_with(|| serde_json::to_value(ttl).expect("cache TTL serializes"));
+        }
+    }
+
+    pub fn validate_cache_control(&self) -> Result<(), ClaudeError> {
+        self.validate_cache_with(MessageLayout::of(&self.messages))
+    }
+
+    fn validate_cache_with(&self, messages: MessageLayout) -> Result<(), ClaudeError> {
+        self.cache_breakpoints_with(messages).map(drop)
+    }
+
+    fn cache_breakpoints_with(&self, messages: MessageLayout) -> Result<usize, ClaudeError> {
+        validate_cache_layout(
+            &self.tools,
+            self.system.as_deref(),
+            messages,
+            self.cache_control.as_ref(),
+        )
+    }
+
+    pub fn cache_system_prefix(&mut self) -> Result<(), ClaudeError> {
+        let layout = MessageLayout::of(&self.messages);
+        self.cache_system_tail_with(layout, false)?;
+        self.cache_tools_tail_with(layout, false, CACHE_BREAKPOINTS - 1)
+    }
+
+    #[doc(hidden)]
+    pub fn cache_system_prefix_with<M: WireMessage>(
+        &mut self,
+        messages: &[M],
+    ) -> Result<(), ClaudeError> {
+        let layout = MessageLayout::of(messages);
+        self.cache_system_tail_with(layout, false)?;
+        self.cache_tools_tail_with(layout, false, CACHE_BREAKPOINTS - 1)
+    }
+
+    #[doc(hidden)]
+    pub fn cache_prefix_with(
+        &mut self,
+        messages: MessageLayout,
+        subscription: bool,
+    ) -> Result<(), ClaudeError> {
+        self.cache_system_tail_with(messages, subscription)?;
+        self.cache_tools_tail_with(messages, subscription, CACHE_BREAKPOINTS)
+    }
+
+    fn wire_cache_breakpoints_with(
+        &self,
+        messages: MessageLayout,
+        subscription: bool,
+    ) -> Result<usize, ClaudeError> {
+        self.cache_breakpoints_with(messages).map(|used| {
+            used + if subscription {
+                subscription_wire::added_breakpoints(self.system.as_deref())
+            } else {
+                0
+            }
+        })
+    }
+
+    fn cache_tools_tail_with(
+        &mut self,
+        messages: MessageLayout,
+        subscription: bool,
+        limit: usize,
+    ) -> Result<(), ClaudeError> {
+        let Some(control) = self.cache_control.clone() else {
+            return Ok(());
+        };
+        if self.tools.iter().any(|tool| match tool {
+            ClaudeToolSpec::Client(tool) => tool.cache_control.is_some(),
+            ClaudeToolSpec::Server(tool) => tool.options.contains_key("cache_control"),
+        }) {
+            return Ok(());
+        }
+        let Some(at) = self
+            .tools
+            .iter()
+            .rposition(|tool| !matches!(tool, ClaudeToolSpec::Client(tool) if tool.defer_loading))
+        else {
+            return Ok(());
+        };
+        let marker = serde_json::to_value(&control)?;
+        match &mut self.tools[at] {
+            ClaudeToolSpec::Client(tool) => tool.cache_control = Some(control),
+            ClaudeToolSpec::Server(tool) => {
+                tool.options.insert("cache_control".to_owned(), marker);
+            }
+        }
+        if !self
+            .wire_cache_breakpoints_with(messages, subscription)
+            .is_ok_and(|count| count <= limit)
+        {
+            match &mut self.tools[at] {
+                ClaudeToolSpec::Client(tool) => tool.cache_control = None,
+                ClaudeToolSpec::Server(tool) => {
+                    tool.options.remove("cache_control");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn cache_system_tail_with(
+        &mut self,
+        messages: MessageLayout,
+        subscription: bool,
+    ) -> Result<(), ClaudeError> {
+        self.validate_cache_with(messages)?;
+        let Some(control) = self.cache_control.as_ref() else {
+            return Ok(());
+        };
+        let mut blocks = match self.system.as_deref() {
+            Some(Value::String(text)) if !text.is_empty() => {
+                vec![serde_json::json!({"type":"text","text":text})]
+            }
+            Some(Value::Array(blocks))
+                if blocks
+                    .iter()
+                    .any(|block| block.get("cache_control").is_some()) =>
+            {
+                return Ok(());
+            }
+            Some(Value::Array(blocks)) => blocks.clone(),
+            _ => return Ok(()),
+        };
+        let Some(block) = blocks.iter_mut().rev().find(|block| {
+            block.get("type").and_then(Value::as_str) == Some("text")
+                && block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| !text.is_empty())
+        }) else {
+            return Ok(());
+        };
+        block["cache_control"] = serde_json::to_value(control)?;
+        let previous = self
+            .system
+            .replace(std::sync::Arc::new(Value::Array(blocks)));
+        if !self
+            .wire_cache_breakpoints_with(messages, subscription)
+            .is_ok_and(|count| count <= CACHE_BREAKPOINTS)
+        {
+            self.system = previous;
+        }
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn cache_floors_with<M: WireMessage>(
+        &mut self,
+        layout: MessageLayout,
+        messages: &mut [M],
+        floors: [Option<usize>; 2],
+        subscription: bool,
+        owned: impl Fn(&mut M) -> &mut Message,
+    ) -> Result<(), ClaudeError> {
+        let Some(control) = self.cache_control.clone() else {
+            return Ok(());
+        };
+        let mut blocks = Vec::new();
+        for floor in floors.into_iter().flatten() {
+            if let Some(at) = cache_tail(&messages[..floor])
+                && !blocks.contains(&at)
+                && messages[at.0].message().content[at.1]
+                    .cache_slot()
+                    .0
+                    .is_none()
+            {
+                blocks.push(at);
+            }
+        }
+        let room = |request: &Self| {
+            let used = request.wire_cache_breakpoints_with(layout, subscription)?;
+            CACHE_BREAKPOINTS.checked_sub(used).ok_or_else(|| {
+                ClaudeError::Protocol("at most four cache breakpoints are allowed".into())
+            })
+        };
+        let mut spare = room(self)?;
+        if blocks.len() > spare {
+            let system = self.system.clone();
+            if self.release_system_marker() && room(self)? > spare {
+                spare += 1;
+            } else {
+                self.system = system;
+            }
+        }
+        for (message, block) in blocks.into_iter().take(spare) {
+            owned(&mut messages[message]).content[block].set_cache_control(&control)?;
+        }
+        Ok(())
+    }
+
+    fn release_system_marker(&mut self) -> bool {
+        let marked = matches!(
+            self.system.as_deref(),
+            Some(Value::Array(blocks)) if blocks.iter().any(|block| block.get("cache_control").is_some())
+        );
+        if let Some(Value::Array(blocks)) = self
+            .system
+            .as_mut()
+            .filter(|_| marked)
+            .map(std::sync::Arc::make_mut)
+            && let Some(block) = blocks
+                .iter_mut()
+                .rev()
+                .filter_map(Value::as_object_mut)
+                .find(|block| block.contains_key("cache_control"))
+        {
+            block.remove("cache_control");
+        }
+        marked
+    }
+
+    pub fn explicit_cache_tail(&mut self) -> Result<(), ClaudeError> {
+        self.validate_cache_control()?;
+        let Some(control) = self.cache_control.take() else {
+            return Ok(());
+        };
+        let marker = serde_json::to_value(&control)?;
+        match cache_tail(&self.messages) {
+            Some((index, block)) => {
+                self.messages[index].content[block]
+                    .extra_mut()
+                    .entry("cache_control".to_owned())
+                    .or_insert(marker);
+            }
+            None => mark_system_tail(self.system.as_mut().map(std::sync::Arc::make_mut), marker),
+        }
+        Ok(())
+    }
+}
+
+impl ContentBlock {
+    #[doc(hidden)]
+    pub fn set_cache_control(&mut self, control: &CacheControl) -> Result<(), ClaudeError> {
+        self.extra_mut()
+            .insert("cache_control".to_owned(), serde_json::to_value(control)?);
+        Ok(())
+    }
+
+    fn cache_slot(&self) -> (Option<&Value>, bool) {
+        match self {
+            Self::Text { text, extra } => (extra.get("cache_control"), !text.is_empty()),
+            Self::Thinking { extra, .. } | Self::RedactedThinking { extra, .. } => {
+                (extra.get("cache_control"), false)
+            }
+            Self::Image { extra, .. }
+            | Self::Document { extra, .. }
+            | Self::ToolResult { extra, .. }
+            | Self::ToolUse { extra, .. }
+            | Self::ServerToolUse { extra, .. }
+            | Self::WebSearchToolResult { extra, .. }
+            | Self::WebFetchToolResult { extra, .. }
+            | Self::ToolSearchToolResult { extra, .. }
+            | Self::CodeExecutionToolResult { extra, .. }
+            | Self::BashCodeExecutionToolResult { extra, .. }
+            | Self::TextEditorCodeExecutionToolResult { extra, .. }
+            | Self::McpToolUse { extra, .. }
+            | Self::McpToolResult { extra, .. }
+            | Self::McpToolListing { extra, .. }
+            | Self::Compaction { extra, .. }
+            | Self::ToolAddition { extra, .. }
+            | Self::ToolRemoval { extra, .. } => (extra.get("cache_control"), true),
+        }
+    }
+    const fn extra_mut(&mut self) -> &mut BTreeMap<String, Value> {
+        match self {
+            Self::Image { extra, .. }
+            | Self::Document { extra, .. }
+            | Self::Text { extra, .. }
+            | Self::ToolUse { extra, .. }
+            | Self::ServerToolUse { extra, .. }
+            | Self::WebSearchToolResult { extra, .. }
+            | Self::WebFetchToolResult { extra, .. }
+            | Self::ToolSearchToolResult { extra, .. }
+            | Self::CodeExecutionToolResult { extra, .. }
+            | Self::BashCodeExecutionToolResult { extra, .. }
+            | Self::TextEditorCodeExecutionToolResult { extra, .. }
+            | Self::McpToolUse { extra, .. }
+            | Self::McpToolResult { extra, .. }
+            | Self::McpToolListing { extra, .. }
+            | Self::ToolResult { extra, .. }
+            | Self::Thinking { extra, .. }
+            | Self::RedactedThinking { extra, .. }
+            | Self::Compaction { extra, .. }
+            | Self::ToolAddition { extra, .. }
+            | Self::ToolRemoval { extra, .. } => extra,
+        }
+    }
+}
+
+fn cacheable_json_block(block: &Value) -> bool {
+    match block.get("type").and_then(Value::as_str) {
+        Some("thinking" | "redacted_thinking") => false,
+        Some("text") => block
+            .get("text")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty()),
+        _ => true,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+    EndTurn,
+    MaxTokens,
+    StopSequence,
+    ToolUse,
+    PauseTurn,
+    Refusal,
+    ModelContextWindowExceeded,
+    Compaction,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation: Option<CacheCreation>,
+    #[serde(
+        default,
+        with = "nanocode_agent_types::usage::usd_number",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cost: Option<UsdAmount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_cost: Option<EstimatedUsdCost>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub iterations: Vec<UsageIteration>,
+    #[serde(default, skip_serializing_if = "no_tokens")]
+    pub hedge_input_tokens: u64,
+}
+
+const fn no_tokens(tokens: &u64) -> bool {
+    *tokens == 0
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheCreation {
+    #[serde(default)]
+    pub ephemeral_5m_input_tokens: u64,
+    #[serde(default)]
+    pub ephemeral_1h_input_tokens: u64,
+}
+
+impl Usage {
+    fn count_iterations(&mut self) {
+        let iterations = std::mem::take(&mut self.iterations);
+        if self.input_tokens
+            + self.cache_read_input_tokens
+            + self.cache_creation_input_tokens
+            + self.output_tokens
+            > 0
+        {
+            return;
+        }
+        for iteration in iterations {
+            self.input_tokens += iteration.input_tokens;
+            self.cache_read_input_tokens += iteration.cache_read_input_tokens;
+            self.cache_creation_input_tokens += iteration.cache_creation_input_tokens;
+            self.output_tokens += iteration.output_tokens;
+            if let Some(created) = iteration.cache_creation {
+                let total = self.cache_creation.get_or_insert_default();
+                total.ephemeral_5m_input_tokens += created.ephemeral_5m_input_tokens;
+                total.ephemeral_1h_input_tokens += created.ephemeral_1h_input_tokens;
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn tokens(&self, requested_ttl: Option<CacheTtl>) -> ClaudeTokens {
+        let (cache_write_5m_input_tokens, cache_write_1h_input_tokens) =
+            match (self.cache_creation, requested_ttl) {
+                (Some(created), _) => (
+                    created.ephemeral_5m_input_tokens,
+                    created.ephemeral_1h_input_tokens,
+                ),
+                (None, Some(CacheTtl::OneHour)) => (0, self.cache_creation_input_tokens),
+                (None, _) => (self.cache_creation_input_tokens, 0),
+            };
+        ClaudeTokens {
+            input_tokens: self.input_tokens,
+            cache_read_input_tokens: self.cache_read_input_tokens,
+            cache_write_5m_input_tokens,
+            cache_write_1h_input_tokens,
+            output_tokens: self.output_tokens,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MessageResponse {
+    pub id: String,
+    pub role: Role,
+    pub model: String,
+    pub content: Vec<ContentBlock>,
+    #[serde(default)]
+    pub stop_reason: Option<StopReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_details: Option<Value>,
+    pub usage: Usage,
+    #[serde(default)]
+    pub container: Option<Value>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct UsageDelta {
+    pub input_tokens: Option<u64>,
+    pub cache_read_input_tokens: Option<u64>,
+    pub cache_creation_input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    #[serde(default, with = "nanocode_agent_types::usage::usd_number")]
+    pub cost: Option<UsdAmount>,
+    #[serde(default)]
+    pub iterations: Vec<UsageIteration>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageIteration {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation: Option<CacheCreation>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    not(target_family = "wasm"),
+    derive(Deserialize),
+    serde(tag = "type", rename_all = "snake_case")
+)]
+pub enum ContentDelta {
+    TextDelta {
+        text: String,
+    },
+    InputJsonDelta {
+        partial_json: String,
+    },
+    ThinkingDelta {
+        thinking: String,
+    },
+    SignatureDelta {
+        signature: String,
+    },
+    CitationsDelta {
+        citation: Value,
+    },
+    #[cfg_attr(not(target_family = "wasm"), serde(other))]
+    Other,
+}
+
+#[cfg(target_family = "wasm")]
+impl<'de> Deserialize<'de> for ContentDelta {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let fields = Fields(serde_json::Map::deserialize(deserializer)?);
+        Self::from_fields(fields).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(target_family = "wasm")]
+impl ContentDelta {
+    fn from_fields(mut fields: Fields) -> Result<Self, serde_json::Error> {
+        Ok(match fields.string("type")?.as_str() {
+            "text_delta" => Self::TextDelta {
+                text: fields.string("text")?,
+            },
+            "input_json_delta" => Self::InputJsonDelta {
+                partial_json: fields.string("partial_json")?,
+            },
+            "thinking_delta" => Self::ThinkingDelta {
+                thinking: fields.string("thinking")?,
+            },
+            "signature_delta" => Self::SignatureDelta {
+                signature: fields.string("signature")?,
+            },
+            "citations_delta" => Self::CitationsDelta {
+                citation: fields.value("citation")?,
+            },
+            _ => Self::Other,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct ApiError {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    not(target_family = "wasm"),
+    derive(Deserialize),
+    serde(tag = "type", rename_all = "snake_case")
+)]
+pub enum StreamEvent {
+    MessageStart {
+        message: MessageResponse,
+    },
+    ContentBlockStart {
+        index: usize,
+        content_block: ContentBlock,
+    },
+    ContentBlockDelta {
+        index: usize,
+        delta: ContentDelta,
+    },
+    ContentBlockStop {
+        index: usize,
+    },
+    MessageDelta {
+        delta: MessageChange,
+        usage: UsageDelta,
+    },
+    MessageStop,
+    Ping,
+    Error {
+        error: ApiError,
+    },
+    #[cfg_attr(not(target_family = "wasm"), serde(other))]
+    Other,
+}
+
+#[cfg(target_family = "wasm")]
+impl<'de> Deserialize<'de> for StreamEvent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let fields = Fields(serde_json::Map::deserialize(deserializer)?);
+        Self::from_fields(fields).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(target_family = "wasm")]
+impl StreamEvent {
+    fn from_fields(mut fields: Fields) -> Result<Self, serde_json::Error> {
+        Ok(match fields.string("type")?.as_str() {
+            "message_start" => Self::MessageStart {
+                message: fields.take("message")?,
+            },
+            "content_block_start" => Self::ContentBlockStart {
+                index: fields.index("index")?,
+                content_block: ContentBlock::from_fields(fields.fields("content_block")?)?,
+            },
+            "content_block_delta" => Self::ContentBlockDelta {
+                index: fields.index("index")?,
+                delta: ContentDelta::from_fields(fields.fields("delta")?)?,
+            },
+            "content_block_stop" => Self::ContentBlockStop {
+                index: fields.index("index")?,
+            },
+            "message_delta" => Self::MessageDelta {
+                delta: fields.take("delta")?,
+                usage: fields.take("usage")?,
+            },
+            "message_stop" => Self::MessageStop,
+            "ping" => Self::Ping,
+            "error" => Self::Error {
+                error: fields.take("error")?,
+            },
+            _ => Self::Other,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct DeltaFrame<'a> {
+    #[serde(rename = "type")]
+    kind: &'a str,
+    index: usize,
+    #[serde(borrow)]
+    delta: DeltaPart<'a>,
+}
+
+#[derive(Deserialize)]
+struct DeltaPart<'a> {
+    #[serde(rename = "type")]
+    kind: &'a str,
+    text: Option<String>,
+    thinking: Option<String>,
+    partial_json: Option<String>,
+    signature: Option<String>,
+}
+
+impl DeltaPart<'_> {
+    fn into_delta(self) -> Option<ContentDelta> {
+        match self.kind {
+            "text_delta" => self.text.map(|text| ContentDelta::TextDelta { text }),
+            "thinking_delta" => self
+                .thinking
+                .map(|thinking| ContentDelta::ThinkingDelta { thinking }),
+            "input_json_delta" => self
+                .partial_json
+                .map(|partial_json| ContentDelta::InputJsonDelta { partial_json }),
+            "signature_delta" => self
+                .signature
+                .map(|signature| ContentDelta::SignatureDelta { signature }),
+            _ => None,
+        }
+    }
+}
+
+fn decode_stream_event(data: &str, event_name: Option<&str>) -> Result<StreamEvent, ClaudeError> {
+    if event_name == Some("content_block_delta")
+        && let Ok(frame) = serde_json::from_str::<DeltaFrame<'_>>(data)
+        && frame.kind == "content_block_delta"
+        && let Some(delta) = frame.delta.into_delta()
+    {
+        return Ok(StreamEvent::ContentBlockDelta {
+            index: frame.index,
+            delta,
+        });
+    }
+    if let Ok(event) = serde_json::from_str::<StreamEvent>(data) {
+        let kind = match &event {
+            StreamEvent::MessageStart { .. } => Some("message_start"),
+            StreamEvent::ContentBlockStart { .. } => Some("content_block_start"),
+            StreamEvent::ContentBlockDelta { .. } => Some("content_block_delta"),
+            StreamEvent::ContentBlockStop { .. } => Some("content_block_stop"),
+            StreamEvent::MessageDelta { .. } => Some("message_delta"),
+            StreamEvent::MessageStop => Some("message_stop"),
+            StreamEvent::Ping => Some("ping"),
+            StreamEvent::Error { .. } => Some("error"),
+            StreamEvent::Other => None,
+        };
+        if let Some(kind) = kind {
+            if event_name.is_some_and(|name| name != kind) {
+                return Err(ClaudeError::Protocol(
+                    "SSE event name disagrees with data type".into(),
+                ));
+            }
+            return Ok(event);
+        }
+    }
+    let value = serde_json::from_str::<Value>(data)?;
+    if event_name.is_some_and(|name| value.get("type").and_then(Value::as_str) != Some(name)) {
+        return Err(ClaudeError::Protocol(
+            "SSE event name disagrees with data type".into(),
+        ));
+    }
+    serde_json::from_value(value).map_err(ClaudeError::from)
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct MessageChange {
+    #[serde(default)]
+    pub stop_reason: Option<StopReason>,
+    #[serde(default)]
+    pub stop_details: Option<Value>,
+    #[serde(default)]
+    pub container: Option<Value>,
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub type ClaudeAuthFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+#[cfg(target_family = "wasm")]
+pub type ClaudeAuthFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+
+pub trait ClaudeAuthProvider: Send + Sync {
+    fn headers(
+        &self,
+    ) -> ClaudeAuthFuture<'_, Result<nanocode_http::types::header::HeaderMap, ClaudeAuthUnavailable>>;
+
+    fn recover_unauthorized<'a>(
+        &'a self,
+        _rejected: &'a nanocode_http::types::header::HeaderMap,
+    ) -> ClaudeAuthFuture<'a, Result<bool, ClaudeAuthUnavailable>> {
+        Box::pin(async { Ok(false) })
+    }
+}
+
+#[derive(Debug)]
+pub struct ClaudeAuthUnavailable {
+    reason: std::borrow::Cow<'static, str>,
+}
+
+impl std::fmt::Display for ClaudeAuthUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self { reason } = self;
+        write!(formatter, "Claude authentication unavailable: {reason}")
+    }
+}
+
+impl std::error::Error for ClaudeAuthUnavailable {}
+
+impl ClaudeAuthUnavailable {
+    pub fn new(reason: impl Into<std::borrow::Cow<'static, str>>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+}
+
+#[derive(Clone)]
+enum ClientAuth {
+    ApiKey(String),
+    Headers(nanocode_http::types::header::HeaderMap),
+    Provider(Arc<dyn ClaudeAuthProvider>),
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[doc(hidden)]
+pub struct FrozenWireProfile {
+    #[doc(hidden)]
+    pub enabled: bool,
+    identity: SubscriptionIdentity,
+    session: String,
+
+    #[serde(default, skip_serializing_if = "is_false")]
+    cache_tail: bool,
+}
+
+#[derive(Clone)]
+enum HttpConnection {
+    Client(HttpClient),
+    Transport(Arc<dyn transport::HttpTransport>),
+}
+
+#[derive(Clone)]
+pub struct ClaudeClient {
+    admission: Arc<admission::Admission>,
+    http: HttpConnection,
+    endpoint: String,
+    auth: ClientAuth,
+    subscription_compatibility: bool,
+    subscription_identity: SubscriptionIdentity,
+    subscription_session: String,
+
+    subscription_cache_tail: bool,
+    gzip_rejected: Arc<std::sync::atomic::AtomicBool>,
+    http_layer: Option<Arc<dyn transport::Layer>>,
+    root: Option<Arc<Root>>,
+}
+
+struct Root {
+    prefetch: nanocode_sync::Slot<Prefetch>,
+    session: String,
+    sink: Arc<dyn RootRegion>,
+}
+
+type Buffered = Result<
+    (
+        nanocode_http::types::StatusCode,
+        nanocode_http::types::header::HeaderMap,
+        Result<Vec<u8>, HttpError>,
+    ),
+    HttpError,
+>;
+
+struct Prefetch {
+    #[expect(dead_code, reason = "dropping the handle aborts the prefetch")]
+    abort: Abort,
+    body: u64,
+    claim: nanocode_sync::oneshot::Sender<()>,
+    response: nanocode_sync::oneshot::Receiver<Buffered>,
+}
+
+pub struct ArmedRoot {
+    body: u64,
+    checksum: u64,
+    client: ClaudeClient,
+    headers: nanocode_http::types::header::HeaderMap,
+    region: root_region::Region,
+    root: Arc<Root>,
+}
+
+struct Abort(nanocode_sync::future::AbortHandle);
+
+impl Drop for Abort {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl ClaudeClient {
+    pub fn new(http: HttpClient, endpoint: impl Into<String>, api_key: impl Into<String>) -> Self {
+        Self {
+            admission: Arc::default(),
+            http: HttpConnection::Client(http),
+            endpoint: endpoint.into(),
+            auth: ClientAuth::ApiKey(api_key.into()),
+            subscription_compatibility: false,
+            subscription_identity: SubscriptionIdentity::default(),
+            subscription_session: nanocode_platform::uuid_v4().to_string(),
+            subscription_cache_tail: true,
+            gzip_rejected: Arc::default(),
+            http_layer: None,
+            root: None,
+        }
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[must_use]
+    pub fn http_client() -> HttpClient {
+        nanocode_tls::install_default_rustls_crypto_provider();
+        nanocode_http::Client::builder()
+            .connect_timeout(MESSAGES_CONNECT_TIMEOUT)
+            .read_timeout(MESSAGES_STREAM_IDLE_TIMEOUT)
+            .head_timeout(MESSAGES_HEAD_TIMEOUT)
+            .default_headers(nanocode_http::accept_encoding(
+                nanocode_http::header::HeaderMap::new(),
+            ))
+            .build()
+            .expect("the Claude HTTP client builds")
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn messages_api(
+        base_url: &str,
+        api_key: impl Into<String>,
+        connect_timeout: Duration,
+        idle_timeout: Duration,
+    ) -> Result<Self, nanocode_http::Error> {
+        nanocode_tls::install_default_rustls_crypto_provider();
+        let http = nanocode_http::Client::builder()
+            .connect_timeout(connect_timeout)
+            .read_timeout(idle_timeout)
+            .default_headers(nanocode_http::accept_encoding(
+                nanocode_http::header::HeaderMap::new(),
+            ))
+            .build()?;
+        let endpoint = format!("{}/messages", base_url.trim_end_matches('/'));
+        Ok(Self::new(http, endpoint, api_key))
+    }
+
+    pub fn with_auth_headers(
+        http: HttpClient,
+        endpoint: impl Into<String>,
+        headers: nanocode_http::types::header::HeaderMap,
+    ) -> Self {
+        Self {
+            admission: Arc::default(),
+            http: HttpConnection::Client(http),
+            endpoint: endpoint.into(),
+            auth: ClientAuth::Headers(headers),
+            subscription_compatibility: false,
+            subscription_identity: SubscriptionIdentity::default(),
+            subscription_session: nanocode_platform::uuid_v4().to_string(),
+            subscription_cache_tail: true,
+            gzip_rejected: Arc::default(),
+            http_layer: None,
+            root: None,
+        }
+    }
+
+    pub fn with_auth_provider(
+        http: HttpClient,
+        endpoint: impl Into<String>,
+        provider: Arc<dyn ClaudeAuthProvider>,
+    ) -> Self {
+        Self {
+            admission: Arc::default(),
+            http: HttpConnection::Client(http),
+            endpoint: endpoint.into(),
+            auth: ClientAuth::Provider(provider),
+            subscription_compatibility: false,
+            subscription_identity: SubscriptionIdentity::default(),
+            subscription_session: nanocode_platform::uuid_v4().to_string(),
+            subscription_cache_tail: true,
+            gzip_rejected: Arc::default(),
+            http_layer: None,
+            root: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_transport(mut self, transport: impl transport::HttpTransport) -> Self {
+        self.http = HttpConnection::Transport(Arc::new(transport));
+        self
+    }
+
+    #[must_use]
+    pub fn with_http_layer(mut self, layer: impl transport::Layer) -> Self {
+        self.http_layer = Some(Arc::new(layer));
+        self
+    }
+
+    #[must_use]
+    pub fn with_root_region(mut self, session: impl Into<String>, sink: impl RootRegion) -> Self {
+        self.root = Some(Arc::new(Root {
+            prefetch: nanocode_sync::Slot::default(),
+            session: session.into(),
+            sink: Arc::new(sink),
+        }));
+        self
+    }
+
+    #[must_use]
+    pub fn for_session(mut self, session: &str) -> Self {
+        if self
+            .root
+            .as_ref()
+            .is_some_and(|root| root.session != session)
+        {
+            self.root = None;
+        }
+        self
+    }
+
+    pub fn clear_root_region(&self) {
+        if let Some(root) = &self.root {
+            root.sink.store(None);
+        }
+    }
+
+    pub async fn prefetch_root_region(&self, region: &[u8]) -> Result<(), ClaudeError> {
+        match self.arm_root_region(region).await? {
+            Some(armed) => {
+                armed.fire();
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+
+    pub async fn arm_root_region(&self, region: &[u8]) -> Result<Option<ArmedRoot>, ClaudeError> {
+        let Some(root) = self.root.clone() else {
+            return Ok(None);
+        };
+        let checksum = root_region::checksum(region)
+            .map_err(|error| ClaudeError::Protocol(error.to_string()))?;
+        let region = root_region::decode(region)
+            .map_err(|error| ClaudeError::Protocol(error.to_string()))?;
+        let mut headers = self.auth_headers().await?;
+        for name in region.headers.keys() {
+            headers.remove(name);
+        }
+        for (name, value) in &region.headers {
+            headers.append(name, value.clone());
+        }
+
+        let mut client = self.clone();
+        client.root = None;
+        Ok(Some(ArmedRoot {
+            body: nanocode_digest::xxh64(region.body.as_bytes(), 0),
+            checksum,
+            client,
+            headers,
+            region,
+            root,
+        }))
+    }
+
+    async fn adopt_root_region(&self, body: &str) -> Option<Result<HttpResponse, HttpError>> {
+        let root = self.root.as_ref()?;
+        let prefetch = root.prefetch.take()?;
+        let fresh = prefetch.body == nanocode_digest::xxh64(body.as_bytes(), 0);
+        root.sink.adopted(fresh);
+        if !fresh {
+            nanocode_trace::warn!("mapped root request stale");
+            return None;
+        }
+        let _claimed = prefetch.claim.send(());
+        match prefetch.response.await {
+            Ok(buffered) => Some(buffered.map(|(status, headers, bytes)| {
+                HttpResponse::new(status, headers, Box::pin(stream::iter([bytes])))
+            })),
+            Err(_) => {
+                nanocode_trace::warn!("mapped root request dropped before its response");
+                None
+            }
+        }
+    }
+
+    async fn auth_headers(&self) -> Result<nanocode_http::types::HeaderMap, ClaudeError> {
+        Ok(match &self.auth {
+            ClientAuth::ApiKey(key) => {
+                let mut headers = nanocode_http::types::header::HeaderMap::new();
+                let mut value =
+                    nanocode_http::types::header::HeaderValue::from_str(key).map_err(|_| {
+                        ClaudeAuthUnavailable::new(
+                            "the Claude API key is not a valid HTTP header value",
+                        )
+                    })?;
+                value.set_sensitive(true);
+                headers.insert("x-api-key", value);
+                headers
+            }
+            ClientAuth::Headers(headers) => headers.clone(),
+            ClientAuth::Provider(provider) => provider.headers().await?,
+        })
+    }
+
+    pub fn official(http: HttpClient, api_key: impl Into<String>) -> Self {
+        Self::new(http, ANTHROPIC_MESSAGES_URL, api_key)
+    }
+
+    pub fn subscription(http: HttpClient, provider: Arc<dyn ClaudeAuthProvider>) -> Self {
+        Self::with_auth_provider(http, ANTHROPIC_SUBSCRIPTION_MESSAGES_URL, provider)
+            .subscription_compatibility()
+    }
+
+    #[must_use]
+    pub const fn uses_subscription(&self) -> bool {
+        self.subscription_compatibility
+    }
+
+    #[cfg_attr(target_family = "wasm", allow(clippy::missing_const_for_fn))]
+    pub fn subscription_compatibility(mut self) -> Self {
+        self.subscription_compatibility = true;
+        #[cfg(not(target_family = "wasm"))]
+        if let Ok(version) = std::env::var("PI_AI_CLAUDE_CODE_VERSION")
+            && !version.is_empty()
+        {
+            self.subscription_identity.version = Some(version);
+        }
+        self
+    }
+
+    pub fn with_subscription_identity(mut self, identity: SubscriptionIdentity) -> Self {
+        self.subscription_identity = identity;
+        self
+    }
+    #[must_use]
+    pub fn with_install_id(mut self, install: impl Into<String>) -> Self {
+        self.subscription_identity.install_id = Some(install.into());
+        self
+    }
+    pub fn session_digest(&self) -> Option<SessionDigest> {
+        self.subscription_identity.session_digest()
+    }
+    #[doc(hidden)]
+    pub fn bind_subscription_session(mut self, session: &str) -> Self {
+        self.subscription_session = session.to_owned();
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn freeze_wire_profile(&self, automatic_cache: bool) -> FrozenWireProfile {
+        let mut identity = self.subscription_identity.clone();
+        identity.version = Some(identity.version().to_owned());
+        identity
+            .install_id
+            .get_or_insert_with(|| self.subscription_session.clone());
+        if identity.platform.is_none() {
+            identity.platform = Some(
+                if cfg!(target_os = "macos") {
+                    "darwin"
+                } else if cfg!(target_os = "windows") {
+                    "win32"
+                } else {
+                    "linux"
+                }
+                .into(),
+            );
+        }
+        if identity.arch.is_none() {
+            identity.arch = Some(
+                if cfg!(target_arch = "aarch64") {
+                    "arm64"
+                } else if cfg!(target_arch = "x86") {
+                    "ia32"
+                } else {
+                    "x64"
+                }
+                .into(),
+            );
+        }
+        FrozenWireProfile {
+            enabled: self.subscription_compatibility,
+            identity,
+            session: self.subscription_session.clone(),
+
+            cache_tail: self.subscription_compatibility
+                && self.subscription_cache_tail
+                && automatic_cache,
+        }
+    }
+    #[doc(hidden)]
+    pub fn restore_wire_profile(&self, profile: Option<&FrozenWireProfile>) -> Self {
+        let mut client = self.clone();
+
+        client.subscription_compatibility = profile.is_some_and(|p| p.enabled);
+        client.subscription_cache_tail = profile.is_some_and(|p| p.cache_tail);
+        if let Some(profile) = profile {
+            client.subscription_identity = profile.identity.clone();
+            client.subscription_session = profile.session.clone();
+        }
+        client
+    }
+
+    pub fn prepare_request(&self, request: &mut MessagesRequest) {
+        if self.subscription_compatibility {
+            subscription_wire::prepare(request, &self.subscription_identity);
+        }
+    }
+
+    pub fn request_body(
+        &self,
+        request: &MessagesRequest,
+        streaming: bool,
+    ) -> Result<String, ClaudeError> {
+        self.wire_body(request, &request.messages, streaming, None)
+            .map(|wire| Arc::unwrap_or_clone(wire.body))
+    }
+
+    fn wire_body<M: WireMessage>(
+        &self,
+        head: &MessagesRequest,
+        messages: &[M],
+        streaming: bool,
+        cache: Option<&WireCache>,
+    ) -> Result<WireBody, ClaudeError> {
+        if self.subscription_compatibility {
+            let (body, messages) = subscription_wire::wire(
+                head,
+                messages,
+                streaming,
+                &self.subscription_identity,
+                &self.subscription_session,
+                self.subscription_cache_tail,
+            )?;
+            Ok(WireBody {
+                body: Arc::new(body),
+                messages,
+                system: None,
+                tools: None,
+                digests: None,
+            })
+        } else {
+            let metadata = self
+                .subscription_identity
+                .api_metadata(&self.subscription_session)?;
+            api_body(head, messages, streaming, None, cache, &metadata)
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn encode_message(&self, message: &Message) -> Result<String, ClaudeError> {
+        if self.subscription_compatibility {
+            subscription_wire::encode_message(message)
+        } else {
+            Ok(serde_json::to_string(message)?)
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn prepare_wire<M: WireMessage>(
+        &self,
+        head: &MessagesRequest,
+        messages: &[M],
+        streaming: bool,
+    ) -> Result<PreparedWire, ClaudeError> {
+        self.prepare_cached_wire(head, messages, streaming, None)
+    }
+
+    #[doc(hidden)]
+    pub fn prepare_cached_wire<M: WireMessage>(
+        &self,
+        head: &MessagesRequest,
+        messages: &[M],
+        streaming: bool,
+        cache: Option<&WireCache>,
+    ) -> Result<PreparedWire, ClaudeError> {
+        let layout = cache.map_or_else(
+            || MessageLayout::of(messages),
+            |cache| cache.layout(messages),
+        );
+        if !self.subscription_compatibility {
+            head.validate_cache_with(layout)?;
+        }
+        let wire = self.wire_body(head, messages, streaming, cache)?;
+        Ok(PreparedWire {
+            body: wire.body,
+            messages: wire.messages,
+            system: wire.system,
+            tools: wire.tools,
+            digests: wire.digests,
+            thread: None,
+            subscription: self.subscription_compatibility,
+            streaming,
+            agent: !head.tools.is_empty() || head.thinking.is_some(),
+            thinking: head.thinking.is_some(),
+            thinking_updates: head
+                .thinking
+                .as_ref()
+                .and_then(|thinking| thinking.get("display"))
+                .and_then(Value::as_str)
+                == Some("updates"),
+            thinking_binding: head
+                .thinking
+                .as_ref()
+                .is_some_and(|thinking| thinking.get("block_binding").is_some()),
+            context_management: head.context_management.is_some(),
+            compaction: head.compaction.is_some()
+                || messages.first().is_some_and(|message| {
+                    message
+                        .message()
+                        .content
+                        .iter()
+                        .any(|block| matches!(block, ContentBlock::Compaction { .. }))
+                }),
+            tool_changes: layout.tool_changes,
+            speed: head.speed.is_some(),
+            effort_updates: head.effort_updates,
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn durable_request(
+        &self,
+        request: &MessagesRequest,
+    ) -> Result<Box<serde_json::value::RawValue>, ClaudeError> {
+        let wire = self.wire_body(request, &request.messages, true, None)?;
+        PreparedWire {
+            body: wire.body,
+            messages: wire.messages,
+            system: wire.system,
+            tools: wire.tools,
+            digests: wire.digests,
+            thread: None,
+            subscription: self.subscription_compatibility,
+            streaming: true,
+            agent: false,
+            thinking: false,
+            thinking_updates: false,
+            thinking_binding: false,
+            context_management: false,
+            compaction: false,
+            tool_changes: false,
+            speed: false,
+            effort_updates: false,
+        }
+        .legacy_durable_input()
+    }
+
+    pub fn attach_thread<M: WireMessage>(
+        &self,
+        wire: &mut PreparedWire,
+        head: &MessagesRequest,
+        messages: &[M],
+        turn: &ThreadTurn,
+    ) -> Result<(), ClaudeError> {
+        let Some(param) = turn.param() else {
+            wire.thread = None;
+            return Ok(());
+        };
+        if self.subscription_compatibility {
+            return Err(ClaudeError::Protocol(
+                "message threads need the Messages API wire, not the subscription wire".into(),
+            ));
+        }
+        let metadata = self
+            .subscription_identity
+            .api_metadata(&self.subscription_session)?;
+        wire.thread = Some(
+            api_body(
+                head,
+                turn.new_messages(messages),
+                wire.streaming,
+                Some(param),
+                None,
+                &metadata,
+            )?
+            .body,
+        );
+        Ok(())
+    }
+
+    const fn decode_block(&self, block: &mut ContentBlock) {
+        if self.subscription_compatibility
+            && let ContentBlock::ToolUse { name, .. } = block
+        {
+            subscription_wire::strip(name);
+        }
+    }
+
+    async fn post(&self, wire: &PreparedWire) -> Result<(HttpResponse, Vec<String>), ClaudeError> {
+        let permit = self.admission.admit().await;
+        self.post_with_permit(wire, permit, false).await
+    }
+
+    async fn post_with_permit(
+        &self,
+        wire: &PreparedWire,
+        permit: admission::Permit,
+        hedge: bool,
+    ) -> Result<(HttpResponse, Vec<String>), ClaudeError> {
+        let posted = self.post_admitted(wire, hedge).await;
+        match &posted {
+            Ok(_) => permit.accepted(),
+            Err(error @ ClaudeError::Http { retry_after, .. }) if error.is_throttled() => {
+                permit.throttled(*retry_after);
+            }
+            Err(_) => drop(permit),
+        }
+        posted
+    }
+
+    #[doc(hidden)]
+    pub async fn admit(&self) -> AdmissionPermit {
+        AdmissionPermit(self.admission.admit().await)
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn try_admit(&self) -> Option<AdmissionPermit> {
+        self.admission.try_admit().map(AdmissionPermit)
+    }
+
+    #[doc(hidden)]
+    pub async fn stream_admitted(
+        &self,
+        wire: &PreparedWire,
+        permit: AdmissionPermit,
+    ) -> Result<ClaudeStream, ClaudeError> {
+        let (response, credentials) = self.post_with_permit(wire, permit.0, false).await?;
+        self.stream_response(response, credentials)
+    }
+
+    #[doc(hidden)]
+    pub async fn stream_hedge(
+        &self,
+        wire: &PreparedWire,
+        permit: AdmissionPermit,
+    ) -> Result<ClaudeStream, ClaudeError> {
+        let (response, credentials) = self.post_with_permit(wire, permit.0, true).await?;
+        self.stream_response(response, credentials)
+    }
+
+    async fn post_admitted(
+        &self,
+        wire: &PreparedWire,
+        hedge: bool,
+    ) -> Result<(HttpResponse, Vec<String>), ClaudeError> {
+        let mut retried = false;
+
+        let mut credentials = Vec::<String>::new();
+        loop {
+            let mut provider_headers = None;
+            let mut headers = match &self.auth {
+                ClientAuth::ApiKey(key) => {
+                    let mut headers = nanocode_http::types::header::HeaderMap::new();
+                    let mut value = nanocode_http::types::header::HeaderValue::from_str(key)
+                        .map_err(|_| {
+                            ClaudeAuthUnavailable::new(
+                                "the Claude API key is not a valid HTTP header value",
+                            )
+                        })?;
+                    value.set_sensitive(true);
+                    headers.insert("x-api-key", value);
+                    headers
+                }
+                ClientAuth::Headers(headers) => headers.clone(),
+                ClientAuth::Provider(provider) => {
+                    let headers = provider.headers().await?;
+                    provider_headers = Some(headers.clone());
+                    headers
+                }
+            };
+
+            let mut betas = Vec::new();
+            for value in headers.get_all("anthropic-beta") {
+                for beta in value
+                    .to_str()
+                    .map_err(|_| {
+                        ClaudeAuthUnavailable::new(
+                            "the Claude authentication anthropic-beta header is not visible ASCII",
+                        )
+                    })?
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|beta| !beta.is_empty())
+                {
+                    if !betas.contains(&beta) {
+                        betas.push(beta);
+                    }
+                }
+            }
+            if self.subscription_compatibility {
+                let agent = wire.agent;
+                let defaults: &[&str] = if agent {
+                    &[
+                        "claude-code-20250219",
+                        "oauth-2025-04-20",
+                        "interleaved-thinking-2025-05-14",
+                        "thinking-token-count-2026-05-13",
+                        "context-management-2025-06-27",
+                        "prompt-caching-scope-2026-01-05",
+                        "mid-conversation-system-2026-04-07",
+                    ]
+                } else {
+                    &[
+                        "oauth-2025-04-20",
+                        "interleaved-thinking-2025-05-14",
+                        "thinking-token-count-2026-05-13",
+                        "context-management-2025-06-27",
+                        "prompt-caching-scope-2026-01-05",
+                        "structured-outputs-2025-12-15",
+                    ]
+                };
+                let extras = std::mem::take(&mut betas);
+                betas.extend_from_slice(defaults);
+                if agent && wire.thinking && !betas.contains(&"effort-2025-11-24") {
+                    betas.push("effort-2025-11-24");
+                }
+                if agent && !betas.contains(&"fallback-credit-2026-06-01") {
+                    betas.push("fallback-credit-2026-06-01");
+                }
+                for beta in extras {
+                    if !betas.contains(&beta) {
+                        betas.push(beta);
+                    }
+                }
+            }
+            if wire.context_management && !betas.contains(&"context-management-2025-06-27") {
+                betas.push("context-management-2025-06-27");
+            }
+
+            const THINKING_UPDATES_BETA: &str = "thinking-display-updates-2026-08-18";
+            if wire.thinking_updates && !betas.contains(&THINKING_UPDATES_BETA) {
+                betas.push(THINKING_UPDATES_BETA);
+            }
+            if wire.thinking_binding && !betas.contains(&THINKING_BINDING_BETA) {
+                betas.push(THINKING_BINDING_BETA);
+            }
+            if wire.speed && !betas.contains(&FAST_MODE_BETA) {
+                betas.push(FAST_MODE_BETA);
+            }
+            if wire.effort_updates && !betas.contains(&EFFORT_UPDATES_BETA) {
+                betas.push(EFFORT_UPDATES_BETA);
+            }
+            if wire.compaction && !betas.contains(&COMPACTION_BETA) {
+                betas.push(COMPACTION_BETA);
+            }
+            if wire.tool_changes && !betas.contains(&INLINE_TOOLS_BETA) {
+                betas.push(INLINE_TOOLS_BETA);
+            }
+            if wire.thread.is_some() && !betas.contains(&MESSAGE_THREADS_BETA) {
+                betas.push(MESSAGE_THREADS_BETA);
+            }
+            if !betas.is_empty() {
+                let value = nanocode_http::types::header::HeaderValue::from_str(&betas.join(","))
+                    .map_err(|_| {
+                    ClaudeAuthUnavailable::new("the combined anthropic-beta header is invalid")
+                })?;
+                headers.insert("anthropic-beta", value);
+            }
+            if self.subscription_compatibility {
+                let identity = &self.subscription_identity;
+                for (name, value) in [
+                    (
+                        "user-agent",
+                        format!("claude-cli/{} (external, cli)", identity.version()),
+                    ),
+                    ("x-app", "cli".into()),
+                    ("x-stainless-lang", "js".into()),
+                    ("x-stainless-runtime", "node".into()),
+                    ("x-stainless-runtime-version", "v26.3.0".into()),
+                    (
+                        "x-stainless-package-version",
+                        subscription_wire::CLAUDE_CODE_SDK_VERSION.into(),
+                    ),
+                    ("x-stainless-retry-count", "0".into()),
+                    (
+                        "x-stainless-timeout",
+                        MESSAGES_HEAD_TIMEOUT.as_secs().to_string(),
+                    ),
+                    ("x-stainless-os", identity.os()),
+                    ("x-stainless-arch", identity.arch()),
+                    (
+                        "x-claude-code-session-id",
+                        self.subscription_session.clone(),
+                    ),
+                    ("accept", "application/json".into()),
+                    ("accept-encoding", "gzip, deflate, br, zstd".into()),
+                    ("connection", "keep-alive".into()),
+                    ("anthropic-dangerous-direct-browser-access", "true".into()),
+                ] {
+                    headers.insert(
+                        name,
+                        nanocode_http::types::header::HeaderValue::from_str(&value).map_err(
+                            |_| ClaudeError::Protocol("invalid subscription wire header".into()),
+                        )?,
+                    );
+                }
+                headers.remove("x-claude-code-request-class");
+            } else {
+                headers.insert(
+                    "x-claude-code-session-id",
+                    nanocode_http::types::header::HeaderValue::from_str(&self.subscription_session)
+                        .map_err(|_| {
+                            ClaudeError::Protocol("invalid Claude Code session header".into())
+                        })?,
+                );
+            }
+            if hedge {
+                headers.insert(
+                    HEDGE_HEADER,
+                    nanocode_http::types::header::HeaderValue::from_static("1"),
+                );
+            }
+            for (name, value) in &headers {
+                if name == nanocode_http::types::header::AUTHORIZATION
+                    || name == "x-api-key"
+                    || value.is_sensitive()
+                {
+                    let value = String::from_utf8_lossy(value.as_bytes());
+                    if !value.is_empty() && !credentials.iter().any(|item| item == &value) {
+                        credentials.push(value.to_string());
+                    }
+                    if name == nanocode_http::types::header::AUTHORIZATION
+                        && let Some((_, token)) = value.split_once(' ')
+                        && !token.trim().is_empty()
+                        && !credentials.iter().any(|item| item == token.trim())
+                    {
+                        credentials.push(token.trim().to_owned());
+                    }
+                }
+            }
+            let body = wire.sent_shared();
+            let adopted = if hedge || retried {
+                None
+            } else {
+                self.adopt_root_region(&body).await
+            };
+            if let Some(root) = self
+                .root
+                .as_ref()
+                .filter(|_| wire.agent && !hedge && adopted.is_none())
+            {
+                let mut kept = headers.clone();
+                for name in [
+                    nanocode_http::types::header::AUTHORIZATION.as_str(),
+                    "x-api-key",
+                ] {
+                    kept.remove(name);
+                }
+                let sensitive = kept
+                    .iter()
+                    .filter(|(_, value)| value.is_sensitive())
+                    .map(|(name, _)| name.clone())
+                    .collect::<Vec<_>>();
+                for name in sensitive {
+                    kept.remove(name);
+                }
+                root.sink
+                    .store(Some(root_region::encode(&self.endpoint, &kept, &body)));
+            }
+            let gzip = self.gzip_request_body(body.len());
+            let layer = self.http_layer.as_deref();
+            let response = match adopted {
+                Some(response) => response?,
+                None => match &self.http {
+                    HttpConnection::Client(client) => {
+                        transport::post(client, &self.endpoint, headers, body, gzip, layer).await?
+                    }
+                    HttpConnection::Transport(transport) => {
+                        transport::post_with(
+                            transport.as_ref(),
+                            &self.endpoint,
+                            headers,
+                            body.to_string(),
+                            layer,
+                        )
+                        .await?
+                    }
+                },
+            };
+
+            if response.status() == nanocode_http::types::StatusCode::UNAUTHORIZED
+                && !retried
+                && let (ClientAuth::Provider(provider), Some(headers)) =
+                    (&self.auth, provider_headers.as_ref())
+                && provider.recover_unauthorized(headers).await?
+            {
+                retried = true;
+                continue;
+            }
+            if !response.status().is_success() {
+                let status = response.status().as_u16();
+                let retry_after = retry_after(response.headers());
+                let should_retry = retry::should_retry(response.headers());
+                let from_anthropic = response
+                    .headers()
+                    .get("request-id")
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|id| id.starts_with("req_"))
+                    || response.headers().contains_key("cf-ray");
+                let mut body = response.text().await?;
+                if gzip && rejects_gzip(status, from_anthropic, &body) {
+                    self.gzip_rejected
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    nanocode_trace::warn!(
+                        target: "nanocode_claude",
+                        status,
+                        from_anthropic,
+                        "Claude Messages rejected a gzip request body; resending it and later requests uncompressed"
+                    );
+                    continue;
+                }
+                credentials.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
+                for credential in &credentials {
+                    body = body.replace(credential, "[redacted]");
+                }
+                return Err(ClaudeError::Http {
+                    status,
+                    body,
+                    retry_after,
+                    should_retry,
+                });
+            }
+            credentials.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
+            return Ok((response, credentials));
+        }
+    }
+
+    fn gzip_request_body(&self, bytes: usize) -> bool {
+        cfg!(not(target_family = "wasm"))
+            && matches!(self.http, HttpConnection::Client(_))
+            && bytes >= GZIP_MIN_BODY_BYTES
+            && !self
+                .gzip_rejected
+                .load(std::sync::atomic::Ordering::Relaxed)
+            && nanocode_url::Url::parse(&self.endpoint)
+                .is_ok_and(|endpoint| endpoint.host_str() == Some(FIRST_PARTY_HOST))
+    }
+
+    pub async fn preconnect(&self) -> Result<(), ClaudeError> {
+        match (&self.http, &self.http_layer) {
+            (HttpConnection::Client(client), None) => transport::preconnect(client, &self.endpoint)
+                .await
+                .map_err(ClaudeError::Transport),
+            _ => Ok(()),
+        }
+    }
+
+    pub async fn create(&self, request: &MessagesRequest) -> Result<MessageResponse, ClaudeError> {
+        let wire = self.prepare_wire(request, &request.messages, false)?;
+        self.create_prepared(&wire).await
+    }
+
+    #[doc(hidden)]
+    pub async fn create_prepared(
+        &self,
+        wire: &PreparedWire,
+    ) -> Result<MessageResponse, ClaudeError> {
+        let mut response: MessageResponse = self.post(wire).await?.0.json().await?;
+        for block in &mut response.content {
+            self.decode_block(block);
+        }
+        response.usage.count_iterations();
+        Ok(response)
+    }
+
+    pub async fn stream(&self, request: &MessagesRequest) -> Result<ClaudeStream, ClaudeError> {
+        let wire = self.prepare_wire(request, &request.messages, true)?;
+        self.stream_prepared(&wire).await
+    }
+
+    #[doc(hidden)]
+    pub async fn stream_prepared(&self, wire: &PreparedWire) -> Result<ClaudeStream, ClaudeError> {
+        let (response, credentials) = self.post(wire).await?;
+        self.stream_response(response, credentials)
+    }
+
+    fn stream_response(
+        &self,
+        mut response: HttpResponse,
+        credentials: Vec<String>,
+    ) -> Result<ClaudeStream, ClaudeError> {
+        let events = response.take_events();
+
+        let is_sse = response
+            .headers()
+            .get(nanocode_http::types::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"));
+        if !is_sse {
+            return Err(ClaudeError::Protocol(
+                "expected text/event-stream response".into(),
+            ));
+        }
+        let response = response.bytes_stream();
+        let decode_subscription = self.subscription_compatibility;
+        Ok(Box::pin(stream::unfold(
+            Some(SseState::new(response, credentials, events)),
+            move |state| async move {
+                let mut state = state?;
+                loop {
+                    let frame = match state.pop_frame() {
+                        Ok(frame) => frame,
+                        Err(error) => {
+                            return Some((Err(redact_error(error, &state.credentials)), None));
+                        }
+                    };
+                    if let Some(frame) = frame {
+                        let handled = match state.handled_event(&frame) {
+                            Ok(handled) => handled,
+                            Err(error) => {
+                                return Some((Err(redact_error(error, &state.credentials)), None));
+                            }
+                        };
+                        if let Some(handled) = handled {
+                            if let Err(error) = handled.await {
+                                return Some((Err(ClaudeError::Transport(error.into())), None));
+                            }
+                            continue;
+                        }
+                        let parsed = state.decode(&frame);
+                        let event = match parsed {
+                            Ok(StreamEvent::Error { error }) => Err(ClaudeError::StreamError {
+                                kind: error.kind,
+                                message: error.message,
+                            }),
+                            other => other,
+                        };
+                        match event {
+                            Ok(StreamEvent::Other | StreamEvent::Ping) => continue,
+                            Ok(StreamEvent::MessageStop) => {
+                                let mut response = state.response;
+                                nanocode_platform::spawn(async move {
+                                    while let Some(Ok(_)) = response.next().await {}
+                                });
+                                return Some((Ok(StreamEvent::MessageStop), None));
+                            }
+                            Err(error) => {
+                                return Some((Err(redact_error(error, &state.credentials)), None));
+                            }
+                            Ok(mut event) => {
+                                if decode_subscription {
+                                    match &mut event {
+                                        StreamEvent::ContentBlockStart {
+                                            content_block: ContentBlock::ToolUse { name, .. },
+                                            ..
+                                        } => subscription_wire::strip(name),
+                                        StreamEvent::MessageStart { message } => {
+                                            for block in &mut message.content {
+                                                if let ContentBlock::ToolUse { name, .. } = block {
+                                                    subscription_wire::strip(name);
+                                                }
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                return Some((Ok(event), Some(state)));
+                            }
+                        }
+                    }
+                    match state.response.next().await {
+                        Some(Ok(chunk)) => {
+                            state.push(&chunk);
+                        }
+                        None => {
+                            return Some((Err(ClaudeError::IncompleteStream), None));
+                        }
+                        Some(Err(error)) => {
+                            return Some((Err(ClaudeError::Transport(error)), None));
+                        }
+                    }
+                }
+            },
+        )))
+    }
+}
+
+impl ArmedRoot {
+    #[must_use]
+    pub const fn checksum(&self) -> u64 {
+        self.checksum
+    }
+
+    pub fn fire(self) {
+        let Self {
+            body,
+            checksum: _,
+            client,
+            headers,
+            region,
+            root,
+        } = self;
+        let (sender, response) = nanocode_sync::oneshot::channel();
+        let (claim, claimed) = nanocode_sync::oneshot::channel::<()>();
+        let (posting, abort) = nanocode_sync::future::abortable(async move {
+            let layer = client.http_layer.as_deref();
+            let posted = match &client.http {
+                HttpConnection::Client(http) => {
+                    transport::post(
+                        http,
+                        &region.endpoint,
+                        headers,
+                        Arc::new(region.body),
+                        false,
+                        layer,
+                    )
+                    .await
+                }
+                HttpConnection::Transport(transport) => {
+                    transport::post_with(
+                        transport.as_ref(),
+                        &region.endpoint,
+                        headers,
+                        region.body,
+                        layer,
+                    )
+                    .await
+                }
+            };
+            let buffered = match posted {
+                Ok(response) => {
+                    let status = response.status();
+                    let headers = response.headers().clone();
+                    let mut body = response.bytes_stream();
+                    let mut bytes = Ok(Vec::new());
+                    while let Some(chunk) = body.next().await {
+                        match (chunk, &mut bytes) {
+                            (Ok(chunk), Ok(bytes)) => bytes.extend(chunk),
+                            (Err(error), _) => {
+                                bytes = Err(error);
+                                break;
+                            }
+                            (Ok(_), Err(_)) => break,
+                        }
+                    }
+                    Ok((status, headers, bytes))
+                }
+                Err(error) => Err(error),
+            };
+            if claimed.await.is_ok() {
+                drop(sender.send(buffered));
+            }
+        });
+        root.prefetch.put(Prefetch {
+            abort: Abort(abort),
+            body,
+            claim,
+            response,
+        });
+        let mut posting = Box::pin(posting);
+        if posting
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+        {
+            nanocode_platform::spawn(async move {
+                let _aborted = posting.await;
+            });
+        }
+    }
+}
+
+#[doc(hidden)]
+pub struct AdmissionPermit(admission::Permit);
+
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct PreparedWire {
+    body: Arc<String>,
+    messages: std::ops::Range<usize>,
+    system: Option<Encoding>,
+    tools: Option<Encoding>,
+    digests: Option<(nanocode_digest::Hash, nanocode_digest::Hash)>,
+    thread: Option<Arc<String>>,
+    subscription: bool,
+    streaming: bool,
+    agent: bool,
+    thinking: bool,
+    thinking_updates: bool,
+    thinking_binding: bool,
+    context_management: bool,
+    compaction: bool,
+    tool_changes: bool,
+    speed: bool,
+    effort_updates: bool,
+}
+
+impl PreparedWire {
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+
+    pub fn sent_body(&self) -> &str {
+        self.thread.as_deref().unwrap_or(&self.body)
+    }
+
+    fn sent_shared(&self) -> Arc<String> {
+        Arc::clone(self.thread.as_ref().unwrap_or(&self.body))
+    }
+
+    pub fn durable_input(&self) -> Result<Box<serde_json::value::RawValue>, ClaudeError> {
+        #[derive(Serialize)]
+        struct Digest<'a> {
+            wire: &'a str,
+            digest: String,
+            bytes: usize,
+            conversation: String,
+            prefix: String,
+        }
+        let (conversation, sent) = self.digests.unwrap_or_else(|| self.stream_digests());
+        let prefix = self.prefix_digest();
+        let mut whole = nanocode_digest::Blake3::new();
+        whole
+            .update(prefix.as_bytes())
+            .update(conversation.as_bytes())
+            .update(sent.as_bytes());
+        Ok(serde_json::value::to_raw_value(&Digest {
+            wire: self.wire_name(),
+            digest: whole.finalize().to_hex().to_string(),
+            bytes: self.body.len(),
+            conversation: conversation.to_hex().to_string(),
+            prefix: prefix.to_hex().to_string(),
+        })?)
+    }
+
+    fn prefix_digest(&self) -> nanocode_digest::Hash {
+        let mut cuts = vec![(self.messages.clone(), None)];
+        cuts.extend(
+            [&self.system, &self.tools]
+                .into_iter()
+                .flatten()
+                .map(|span| (span.range.clone(), Some(span))),
+        );
+        cuts.sort_by_key(|(range, _)| range.start);
+        let bytes = self.body.as_bytes();
+        let mut literal = nanocode_digest::Blake3::new();
+        let mut parts = nanocode_digest::Blake3::new();
+        let (mut from, mut at) = (0, 0_u64);
+        for (range, span) in cuts {
+            literal.update(&bytes[from..range.start]);
+            at += (range.start - from) as u64;
+            if let Some(span) = span {
+                parts
+                    .update(&at.to_le_bytes())
+                    .update(span.digest(&self.body).as_bytes());
+            }
+            from = range.end;
+        }
+        literal.update(&bytes[from..]);
+        let mut prefix = nanocode_digest::Blake3::new();
+        prefix
+            .update(literal.finalize().as_bytes())
+            .update(parts.finalize().as_bytes());
+        prefix.finalize()
+    }
+
+    pub fn stream_durable_input(&self) -> Result<Box<serde_json::value::RawValue>, ClaudeError> {
+        #[derive(Serialize)]
+        struct Digest<'a> {
+            wire: &'a str,
+            digest: String,
+            bytes: usize,
+            conversation: String,
+            prefix: String,
+        }
+        let (conversation, markers) = self.stream_digests();
+        let prefix = self.prefix_digest();
+        let mut whole = nanocode_digest::Blake3::new();
+        whole
+            .update(prefix.as_bytes())
+            .update(conversation.as_bytes())
+            .update(markers.as_bytes());
+        Ok(serde_json::value::to_raw_value(&Digest {
+            wire: self.wire_name(),
+            digest: whole.finalize().to_hex().to_string(),
+            bytes: self.body.len(),
+            conversation: conversation.to_hex().to_string(),
+            prefix: prefix.to_hex().to_string(),
+        })?)
+    }
+
+    pub fn body_durable_input(&self) -> Result<Box<serde_json::value::RawValue>, ClaudeError> {
+        #[derive(Serialize)]
+        struct Digest<'a> {
+            wire: &'a str,
+            blake3: String,
+            bytes: usize,
+            conversation: String,
+            prefix: String,
+        }
+        let (before, after) = (
+            &self.body[..self.messages.start],
+            &self.body[self.messages.end..],
+        );
+        let mut prefix = nanocode_digest::Blake3::new();
+        prefix.update(before.as_bytes()).update(after.as_bytes());
+        Ok(serde_json::value::to_raw_value(&Digest {
+            wire: self.wire_name(),
+            blake3: nanocode_digest::blake3(self.body.as_bytes())
+                .to_hex()
+                .to_string(),
+            bytes: self.body.len(),
+            conversation: self.stream_digests().0.to_hex().to_string(),
+            prefix: prefix.finalize().to_hex().to_string(),
+        })?)
+    }
+
+    pub fn blake3_durable_input(&self) -> Result<Box<serde_json::value::RawValue>, ClaudeError> {
+        #[derive(Serialize)]
+        struct Digest<'a> {
+            wire: &'a str,
+            blake3: String,
+            bytes: usize,
+        }
+        Ok(serde_json::value::to_raw_value(&Digest {
+            wire: self.wire_name(),
+            blake3: nanocode_digest::blake3(self.body.as_bytes())
+                .to_hex()
+                .to_string(),
+            bytes: self.body.len(),
+        })?)
+    }
+
+    #[must_use]
+    pub fn same_conversation(&self, recorded: &str) -> bool {
+        #[derive(Deserialize)]
+        struct Digest {
+            wire: String,
+            conversation: Option<String>,
+        }
+        serde_json::from_str::<Digest>(recorded).is_ok_and(|digest| {
+            digest.wire == self.wire_name()
+                && digest.conversation.is_some_and(|recorded| {
+                    self.digests
+                        .is_some_and(|(conversation, _)| recorded == conversation.to_hex().as_str())
+                        || recorded == self.stream_digests().0.to_hex().as_str()
+                })
+        })
+    }
+
+    fn stream_digests(&self) -> (nanocode_digest::Hash, nanocode_digest::Hash) {
+        let mut hasher = nanocode_digest::Blake3::new();
+        let mut markers = nanocode_digest::Blake3::new();
+        let mut kept_bytes = 0_u64;
+        let mut rest = &self.body[self.messages.clone()];
+        while let Some((kept, after)) = cache_marker(rest) {
+            hasher.update(kept.as_bytes());
+            kept_bytes += kept.len() as u64;
+            let marker = &rest[kept.len()..rest.len() - after.len()];
+            markers
+                .update(&kept_bytes.to_le_bytes())
+                .update(&(marker.len() as u64).to_le_bytes())
+                .update(marker.as_bytes());
+            rest = after;
+        }
+        hasher.update(rest.as_bytes());
+        (hasher.finalize(), markers.finalize())
+    }
+
+    pub fn sha256_durable_input(&self) -> Result<Box<serde_json::value::RawValue>, ClaudeError> {
+        #[derive(Serialize)]
+        struct Digest<'a> {
+            wire: &'a str,
+            sha256: String,
+            bytes: usize,
+        }
+        Ok(serde_json::value::to_raw_value(&Digest {
+            wire: self.wire_name(),
+            sha256: subscription_wire::hex_digest(self.body.as_bytes()),
+            bytes: self.body.len(),
+        })?)
+    }
+
+    const fn wire_name(&self) -> &'static str {
+        if self.subscription {
+            "subscription_wire_v1"
+        } else {
+            "messages_v1"
+        }
+    }
+
+    pub fn legacy_durable_input(&self) -> Result<Box<serde_json::value::RawValue>, ClaudeError> {
+        if !self.streaming {
+            return Err(ClaudeError::Protocol(
+                "durable request inputs record streaming bodies".into(),
+            ));
+        }
+        if self.subscription {
+            #[derive(Serialize)]
+            struct Wire<'a> {
+                subscription_wire_v1: &'a str,
+            }
+            return Ok(serde_json::value::to_raw_value(&Wire {
+                subscription_wire_v1: &self.body,
+            })?);
+        }
+        let request = self
+            .body
+            .strip_suffix(",\"stream\":true}")
+            .ok_or_else(|| ClaudeError::Protocol("unexpected Messages request body".into()))?;
+        Ok(serde_json::value::RawValue::from_string(format!(
+            "{request}}}"
+        ))?)
+    }
+}
+
+struct WireBody {
+    body: Arc<String>,
+    messages: std::ops::Range<usize>,
+    system: Option<Encoding>,
+    tools: Option<Encoding>,
+    digests: Option<(nanocode_digest::Hash, nanocode_digest::Hash)>,
+}
+
+#[derive(Clone, Debug)]
+struct Encoding {
+    range: std::ops::Range<usize>,
+    digest: Option<nanocode_digest::Hash>,
+}
+
+impl Encoding {
+    fn digest(&self, body: &str) -> nanocode_digest::Hash {
+        self.digest
+            .unwrap_or_else(|| nanocode_digest::blake3(&body.as_bytes()[self.range.clone()]))
+    }
+}
+
+fn api_body<M: WireMessage>(
+    head: &MessagesRequest,
+    messages: &[M],
+    streaming: bool,
+    thread: Option<&ThreadParam>,
+    cache: Option<&WireCache>,
+    metadata: &Value,
+) -> Result<WireBody, ClaudeError> {
+    let continuing = matches!(thread, Some(ThreadParam::Continue { .. }));
+    let MessagesRequest {
+        model,
+        max_tokens,
+        cache_control,
+        output_config,
+        speed,
+        tool_choice,
+        thinking,
+        context_management,
+        compaction,
+        diagnostics,
+        system,
+        messages: _,
+        container,
+        tools,
+        effort_updates: _,
+    } = head;
+    #[derive(Serialize)]
+    struct Head<'a> {
+        model: &'a str,
+        max_tokens: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<&'a CacheControl>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_config: Option<&'a OutputConfig>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        speed: Option<Speed>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_choice: Option<&'a Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thinking: Option<&'a Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_management: Option<&'a Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        compaction: Option<&'a Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        diagnostics: Option<&'a Value>,
+    }
+    #[derive(Serialize)]
+    struct Tail<'a> {
+        metadata: &'a Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread: Option<&'a ThreadParam>,
+        stream: bool,
+    }
+    let system = system.as_ref().filter(|_| !continuing);
+    let tools: &[ClaudeToolSpec] = if continuing { &[] } else { tools };
+    let cached_system = match (cache, system) {
+        (Some(cache), Some(system)) => Some(cache.system(system)?),
+        _ => None,
+    };
+    let cached_tools = match cache {
+        Some(cache) if !tools.is_empty() => Some(cache.tools(tools)?),
+        _ => None,
+    };
+    let owned_system = match (&cached_system, system) {
+        (None, Some(system)) => Some(serde_json::value::to_raw_value(&**system)?),
+        _ => None,
+    };
+    let owned_tools = match &cached_tools {
+        None if !tools.is_empty() => Some(serde_json::value::to_raw_value(tools)?),
+        _ => None,
+    };
+    let system_raw = cached_system
+        .as_ref()
+        .map(|encoded| &*encoded.raw)
+        .or(owned_system.as_deref());
+    let tools_raw = cached_tools
+        .as_ref()
+        .map(|encoded| &*encoded.raw)
+        .or(owned_tools.as_deref());
+    let encode = |message: &Message| serde_json::to_string(message).map_err(ClaudeError::from);
+    let fields = serde_json::to_string(&Head {
+        model,
+        max_tokens: *max_tokens,
+        cache_control: cache_control.as_ref(),
+        output_config: output_config.as_ref(),
+        speed: *speed,
+        tool_choice: tool_choice.as_ref(),
+        thinking: thinking.as_ref(),
+        context_management: context_management.as_ref(),
+        compaction: compaction.as_ref(),
+        diagnostics: diagnostics.as_ref(),
+    })?;
+    let rest = serde_json::to_string(&Tail {
+        metadata,
+        thread,
+        stream: streaming,
+    })?;
+    let container = container
+        .as_deref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    const SYSTEM: &str = ",\"system\":";
+    const CONTAINER: &str = "\"container\":";
+    const TOOLS: &str = "\"tools\":";
+    const OPEN: &str = ",\"messages\":[";
+    let fields = &fields[..fields.len() - 1];
+    let opening = [
+        fields,
+        system_raw.map_or("", |_| SYSTEM),
+        system_raw.map_or("", serde_json::value::RawValue::get),
+    ];
+    let start = opening.iter().map(|part| part.len()).sum::<usize>() + OPEN.len();
+    let opens = |body: &str| {
+        let mut remaining = body.as_bytes();
+        opening.iter().all(|part| {
+            remaining
+                .strip_prefix(part.as_bytes())
+                .map(|after| remaining = after)
+                .is_some()
+        })
+    };
+    let tail = [
+        container.as_ref().map_or("", |_| CONTAINER),
+        container.as_deref().unwrap_or(""),
+        container.as_ref().map_or("", |_| ","),
+        tools_raw.map_or("", |_| TOOLS),
+        tools_raw.map_or("", serde_json::value::RawValue::get),
+        tools_raw.map_or("", |_| ","),
+        &rest[1..],
+    ];
+    let cache = cache.filter(|_| streaming && thread.is_none());
+    let kept = cache
+        .and_then(WireCache::assembled)
+        .filter(|kept| kept.start == start && opens(&kept.body))
+        .and_then(|kept| Some((Arc::try_unwrap(kept.body).ok()?, kept.ends)));
+    let previous = cache.and_then(WireCache::hashed).unwrap_or_default();
+    let known = previous.known(messages);
+    let fresh = messages[known..]
+        .iter()
+        .map(|message| message.digests(&encode))
+        .collect::<Result<Vec<_>, _>>()?;
+    let shared = previous.shared(known, &fresh);
+    let reused = kept.as_ref().map_or(0, |(_, ends)| shared.min(ends.len()));
+    let encoded = messages[reused..]
+        .iter()
+        .map(|message| message.encoded(false, &encode))
+        .collect::<Result<Vec<_>, _>>()?;
+    let added = tail.iter().map(|part| part.len()).sum::<usize>()
+        + "],".len()
+        + encoded
+            .iter()
+            .map(|message| message.len() + 1)
+            .sum::<usize>();
+    let (mut body, mut ends) = match kept {
+        Some((mut body, mut ends)) => {
+            body.truncate(reused.checked_sub(1).map_or(start, |last| ends[last]));
+            ends.truncate(reused);
+            body.reserve_exact(added);
+            (body, ends)
+        }
+        None => {
+            let mut body = String::with_capacity(start + added);
+            opening.iter().for_each(|part| body.push_str(part));
+            body.push_str(OPEN);
+            (body, Vec::with_capacity(messages.len()))
+        }
+    };
+    let hashed = previous.resume(
+        shared,
+        known,
+        messages[known..].iter().map(WireMessage::wire_id),
+        fresh,
+    );
+    for message in &encoded {
+        if !ends.is_empty() {
+            body.push(',');
+        }
+        body.push_str(message);
+        ends.push(body.len());
+    }
+    let end = body.len();
+    body.push_str("],");
+    let at = body.len() + tail[..4].iter().map(|part| part.len()).sum::<usize>();
+    tail.iter().for_each(|part| body.push_str(part));
+    let system = system_raw.map(|raw| {
+        let at = fields.len() + SYSTEM.len();
+        Encoding {
+            range: at..at + raw.get().len(),
+            digest: cached_system.as_ref().map(|encoded| encoded.digest),
+        }
+    });
+    let tools = tools_raw.map(|raw| Encoding {
+        range: at..at + raw.get().len(),
+        digest: cached_tools.as_ref().map(|encoded| encoded.digest),
+    });
+    let conversation = (hashed.read.finalize(), hashed.sent.finalize());
+    drop(encoded);
+    let body = Arc::new(body);
+    if let Some(cache) = cache {
+        cache.assemble(Assembled {
+            body: Arc::clone(&body),
+            start,
+            ends,
+        });
+        cache.keep_hashed(hashed);
+    }
+    Ok(WireBody {
+        body,
+        messages: start..end,
+        system,
+        tools,
+        digests: Some(conversation),
+    })
+}
+
+fn cache_marker(json: &str) -> Option<(&str, &str)> {
+    const KEY: &str = "\"cache_control\":{";
+    let mut from = 0;
+    loop {
+        let at = from + memchr::memmem::find(&json.as_bytes()[from..], KEY.as_bytes())?;
+        let value = at + KEY.len();
+        let end = value + json[value..].find('}')? + 1;
+        match json.as_bytes()[..at].last() {
+            Some(b',') => return Some((&json[..at - 1], &json[end..])),
+            Some(b'{') => {
+                let after = &json[end..];
+                return Some((&json[..at], after.strip_prefix(',').unwrap_or(after)));
+            }
+            _ => from = value,
+        }
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub type ClaudeStream = Pin<Box<dyn Stream<Item = Result<StreamEvent, ClaudeError>> + Send>>;
+#[cfg(target_family = "wasm")]
+pub type ClaudeStream = Pin<Box<dyn Stream<Item = Result<StreamEvent, ClaudeError>>>>;
+
+#[doc(hidden)]
+pub trait ToolFuture: Future + nanocode_platform::MaybeSend {}
+impl<T: Future + nanocode_platform::MaybeSend> ToolFuture for T {}
+
+const MAX_SSE_FRAME_BYTES: usize = 32 * 1024 * 1024;
+
+type ResponseBytes = transport::HttpBody;
+
+fn redact_error(error: ClaudeError, credentials: &[String]) -> ClaudeError {
+    let scrub = |mut text: String| {
+        for credential in credentials {
+            text = text.replace(credential, "[redacted]");
+        }
+        text
+    };
+    match error {
+        ClaudeError::StreamError { kind, message } => ClaudeError::StreamError {
+            kind: scrub(kind),
+            message: scrub(message),
+        },
+        ClaudeError::Protocol(message) => ClaudeError::Protocol(scrub(message)),
+        ClaudeError::Json(error) => {
+            let original = error.to_string();
+            let redacted = scrub(original.clone());
+            if redacted == original {
+                ClaudeError::Json(error)
+            } else {
+                ClaudeError::Protocol(format!("invalid Messages JSON: {redacted}"))
+            }
+        }
+        other => other,
+    }
+}
+
+struct SseState {
+    credentials: Vec<String>,
+    response: ResponseBytes,
+    events: Option<Box<dyn transport::layer::EventHook>>,
+    bytes: Vec<u8>,
+    data: Option<FrameData>,
+    frame_bytes: usize,
+    frame_start: usize,
+    event_name: Option<std::ops::Range<usize>>,
+    first_line: bool,
+    skip_lf: bool,
+    scan_start: usize,
+    cursor: usize,
+}
+
+enum FrameData {
+    Line(std::ops::Range<usize>),
+    Joined(String),
+}
+
+struct Frame {
+    event_name: Option<std::ops::Range<usize>>,
+    data: FrameData,
+}
+
+impl SseState {
+    fn new(
+        response: ResponseBytes,
+        credentials: Vec<String>,
+        events: Option<Box<dyn transport::layer::EventHook>>,
+    ) -> Self {
+        Self {
+            credentials,
+            response,
+            events,
+            bytes: Vec::new(),
+            data: None,
+            frame_bytes: 0,
+            frame_start: 0,
+            event_name: None,
+            first_line: true,
+            skip_lf: false,
+            scan_start: 0,
+            cursor: 0,
+        }
+    }
+
+    fn text(&self, range: std::ops::Range<usize>) -> Result<&str, ClaudeError> {
+        std::str::from_utf8(&self.bytes[range])
+            .map_err(|_| ClaudeError::Protocol("invalid UTF-8 SSE line".into()))
+    }
+
+    fn handled_event(
+        &mut self,
+        frame: &Frame,
+    ) -> Result<
+        Option<transport::layer::BoxFuture<'static, Result<(), transport::layer::Error>>>,
+        ClaudeError,
+    > {
+        let Some(events) = self.events.as_mut() else {
+            return Ok(None);
+        };
+        let text = |range: std::ops::Range<usize>| {
+            std::str::from_utf8(&self.bytes[range])
+                .map_err(|_| ClaudeError::Protocol("invalid UTF-8 SSE line".into()))
+        };
+        let name = frame.event_name.clone().map(text).transpose()?;
+        let data = match &frame.data {
+            FrameData::Line(range) => text(range.clone())?,
+            FrameData::Joined(data) => data,
+        };
+        Ok(events.event(transport::layer::Event { name, data }))
+    }
+
+    fn decode(&self, frame: &Frame) -> Result<StreamEvent, ClaudeError> {
+        let event_name = frame
+            .event_name
+            .clone()
+            .map(|range| self.text(range))
+            .transpose()?
+            .filter(|name| *name != "message");
+        match &frame.data {
+            FrameData::Line(range) => decode_stream_event(self.text(range.clone())?, event_name),
+            FrameData::Joined(data) => decode_stream_event(data, event_name),
+        }
+    }
+
+    fn pop_frame(&mut self) -> Result<Option<Frame>, ClaudeError> {
+        loop {
+            if self.skip_lf {
+                if self.cursor == self.bytes.len() {
+                    return Ok(None);
+                }
+                if self.bytes[self.cursor] == b'\n' {
+                    self.cursor += 1;
+                    self.scan_start = self.cursor;
+                }
+                self.skip_lf = false;
+            }
+            let delimiter = memchr::memchr2(b'\n', b'\r', &self.bytes[self.scan_start..])
+                .map(|offset| self.scan_start + offset);
+            let pending = delimiter.map_or(self.bytes.len(), |index| index + 1) - self.cursor;
+            if pending + self.frame_bytes > MAX_SSE_FRAME_BYTES {
+                return Err(ClaudeError::Protocol("SSE frame exceeds 32 MiB".into()));
+            }
+            let Some(index) = delimiter else {
+                self.scan_start = self.bytes.len();
+                return Ok(None);
+            };
+            self.frame_bytes += index + 1 - self.cursor;
+            self.skip_lf = self.bytes[index] == b'\r';
+            let start = self.cursor;
+            self.cursor = index + 1;
+            self.scan_start = self.cursor;
+
+            let mut line_start = start;
+            let line = std::str::from_utf8(&self.bytes[start..index])
+                .map_err(|_| ClaudeError::Protocol("invalid UTF-8 SSE line".into()))?;
+            if self.first_line {
+                self.first_line = false;
+                if line.starts_with('\u{feff}') {
+                    line_start += '\u{feff}'.len_utf8();
+                }
+            }
+            let line = &self.bytes[line_start..index];
+            if line.is_empty() {
+                self.frame_bytes = 0;
+                self.frame_start = self.cursor;
+                let event_name = self.event_name.take();
+                let Some(data) = self.data.take() else {
+                    continue;
+                };
+                return Ok(Some(Frame { event_name, data }));
+            }
+            let (field, value) = match memchr::memchr(b':', line) {
+                Some(colon) => {
+                    let value = line_start + colon + 1;
+                    let value = if self.bytes.get(value) == Some(&b' ') && value < index {
+                        value + 1
+                    } else {
+                        value
+                    };
+                    (&line[..colon], value..index)
+                }
+                None => (line, index..index),
+            };
+            match field {
+                b"event" => self.event_name = (!value.is_empty()).then_some(value),
+                b"data" => {
+                    let text = |range: std::ops::Range<usize>| {
+                        std::str::from_utf8(&self.bytes[range])
+                            .map_err(|_| ClaudeError::Protocol("invalid UTF-8 SSE line".into()))
+                    };
+                    match &mut self.data {
+                        None => self.data = Some(FrameData::Line(value)),
+                        Some(FrameData::Line(first)) => {
+                            let joined = format!("{}\n{}", text(first.clone())?, text(value)?);
+                            self.data = Some(FrameData::Joined(joined));
+                        }
+                        Some(FrameData::Joined(joined)) => {
+                            let value = text(value)?;
+                            joined.push('\n');
+                            joined.push_str(value);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) {
+        let shift = self.frame_start;
+        if shift > 0 {
+            self.bytes.copy_within(shift.., 0);
+            self.bytes.truncate(self.bytes.len() - shift);
+            self.scan_start -= shift;
+            self.cursor -= shift;
+            self.frame_start = 0;
+            let line = match &mut self.data {
+                Some(FrameData::Line(range)) => Some(range),
+                Some(FrameData::Joined(_)) | None => None,
+            };
+            for range in [line, self.event_name.as_mut()].into_iter().flatten() {
+                *range = range.start - shift..range.end - shift;
+            }
+        }
+        self.bytes.extend_from_slice(chunk);
+    }
+}
+
+#[derive(Debug)]
+enum BlockAccumulator {
+    Text {
+        text: String,
+        extra: BTreeMap<String, Value>,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        initial: Value,
+        fragments: String,
+        extra: BTreeMap<String, Value>,
+    },
+    Thinking {
+        thinking: String,
+        signature: String,
+        extra: BTreeMap<String, Value>,
+    },
+    ServerToolUse {
+        id: String,
+        name: String,
+        initial: Value,
+        fragments: String,
+        extra: BTreeMap<String, Value>,
+    },
+    McpToolUse {
+        id: String,
+        name: String,
+        server_name: String,
+        initial: Value,
+        fragments: String,
+        extra: BTreeMap<String, Value>,
+    },
+    Other(ContentBlock),
+}
+
+impl BlockAccumulator {
+    const fn diagnostic_kind(&self) -> &'static str {
+        match self {
+            Self::Text { .. } => "text",
+            Self::ToolUse { .. } => "tool_use",
+            Self::Thinking { .. } => "thinking",
+            Self::ServerToolUse { .. } => "server_tool_use",
+            Self::McpToolUse { .. } => "mcp_tool_use",
+            Self::Other(block) => match block {
+                ContentBlock::Image { .. } => "image",
+                ContentBlock::Document { .. } => "document",
+                ContentBlock::Text { .. } => "text",
+                ContentBlock::ToolUse { .. } => "tool_use",
+                ContentBlock::ServerToolUse { .. } => "server_tool_use",
+                ContentBlock::WebSearchToolResult { .. } => "web_search_tool_result",
+                ContentBlock::WebFetchToolResult { .. } => "web_fetch_tool_result",
+                ContentBlock::ToolSearchToolResult { .. } => "tool_search_tool_result",
+                ContentBlock::CodeExecutionToolResult { .. } => "code_execution_tool_result",
+                ContentBlock::BashCodeExecutionToolResult { .. } => {
+                    "bash_code_execution_tool_result"
+                }
+                ContentBlock::TextEditorCodeExecutionToolResult { .. } => {
+                    "text_editor_code_execution_tool_result"
+                }
+                ContentBlock::McpToolUse { .. } => "mcp_tool_use",
+                ContentBlock::McpToolResult { .. } => "mcp_tool_result",
+                ContentBlock::McpToolListing { .. } => "mcp_tool_listing",
+                ContentBlock::ToolResult { .. } => "tool_result",
+                ContentBlock::Thinking { .. } => "thinking",
+                ContentBlock::RedactedThinking { .. } => "redacted_thinking",
+                ContentBlock::Compaction { .. } => "compaction",
+                ContentBlock::ToolAddition { .. } => "tool_addition",
+                ContentBlock::ToolRemoval { .. } => "tool_removal",
+            },
+        }
+    }
+
+    fn finish(self) -> Result<ContentBlock, ClaudeError> {
+        let block = match self {
+            Self::Text { text, extra } => ContentBlock::Text { text, extra },
+            Self::ToolUse {
+                id,
+                name,
+                initial,
+                fragments,
+                extra,
+            } => {
+                let input = if fragments.is_empty() {
+                    Ok(initial)
+                } else {
+                    serde_json::from_str::<Value>(&fragments)
+                };
+                let input = match input {
+                    Ok(input) if input.is_object() => input,
+                    Err(_) => {
+                        let mut units = 0;
+                        let raw: String = fragments
+                            .chars()
+                            .take_while(|c| {
+                                units += c.len_utf16();
+                                units <= 2048
+                            })
+                            .collect();
+                        serde_json::json!({"__unparsedToolInput": {"raw": raw, "len": fragments.encode_utf16().count()}})
+                    }
+                    _ => {
+                        return Err(ClaudeError::Protocol(
+                            "tool input must be a JSON object".into(),
+                        ));
+                    }
+                };
+                ContentBlock::ToolUse {
+                    id,
+                    name,
+                    input,
+                    extra,
+                }
+            }
+            Self::ServerToolUse {
+                id,
+                name,
+                initial,
+                fragments,
+                extra,
+            } => {
+                let input = if fragments.is_empty() {
+                    initial
+                } else {
+                    serde_json::from_str(&fragments)?
+                };
+                if !input.is_object() {
+                    return Err(ClaudeError::Protocol(
+                        "server tool input must be a JSON object".into(),
+                    ));
+                }
+                ContentBlock::ServerToolUse {
+                    id,
+                    name,
+                    input,
+                    extra,
+                }
+            }
+            Self::Thinking {
+                thinking,
+                signature,
+                extra,
+            } => ContentBlock::Thinking {
+                thinking,
+                signature,
+                extra,
+            },
+            Self::McpToolUse {
+                id,
+                name,
+                server_name,
+                initial,
+                fragments,
+                extra,
+            } => {
+                let input = if fragments.is_empty() {
+                    initial
+                } else {
+                    serde_json::from_str(&fragments)?
+                };
+                if !input.is_object() {
+                    return Err(ClaudeError::Protocol(
+                        "MCP tool input must be a JSON object".into(),
+                    ));
+                }
+                ContentBlock::McpToolUse {
+                    id,
+                    name,
+                    server_name,
+                    input,
+                    extra,
+                }
+            }
+            Self::Other(block) => block,
+        };
+        Ok(block)
+    }
+}
+
+pub async fn collect_stream<S>(
+    first: StreamEvent,
+    mut events: S,
+) -> Result<MessageResponse, ClaudeError>
+where
+    S: Stream<Item = Result<StreamEvent, ClaudeError>> + Unpin,
+{
+    let mut accumulator = MessageAccumulator::new(first)?;
+    while let Some(event) = events.next().await {
+        if accumulator.push(event?)? {
+            return accumulator.finish();
+        }
+    }
+    Err(ClaudeError::IncompleteStream)
+}
+
+pub struct MessageAccumulator {
+    message: MessageResponse,
+    active: BTreeMap<usize, BlockAccumulator>,
+    completed: BTreeMap<usize, BlockAccumulator>,
+    stopped: bool,
+}
+
+impl MessageAccumulator {
+    pub fn new(first: StreamEvent) -> Result<Self, ClaudeError> {
+        let StreamEvent::MessageStart { message } = first else {
+            return Err(ClaudeError::Protocol("expected message_start".into()));
+        };
+        Ok(Self {
+            message,
+            active: BTreeMap::new(),
+            completed: BTreeMap::new(),
+            stopped: false,
+        })
+    }
+
+    pub fn push(&mut self, event: StreamEvent) -> Result<bool, ClaudeError> {
+        match event {
+            StreamEvent::ContentBlockStart {
+                index,
+                content_block,
+            } => {
+                if self.active.contains_key(&index) || self.completed.contains_key(&index) {
+                    return Err(ClaudeError::Protocol(format!(
+                        "duplicate content block {index}"
+                    )));
+                }
+                let block = match content_block {
+                    ContentBlock::Text { text, extra } => BlockAccumulator::Text { text, extra },
+                    ContentBlock::ToolUse {
+                        id,
+                        name,
+                        input,
+                        extra,
+                    } => BlockAccumulator::ToolUse {
+                        id,
+                        name,
+                        initial: input,
+                        fragments: String::new(),
+                        extra,
+                    },
+                    ContentBlock::ServerToolUse {
+                        id,
+                        name,
+                        input,
+                        extra,
+                    } => BlockAccumulator::ServerToolUse {
+                        id,
+                        name,
+                        initial: input,
+                        fragments: String::new(),
+                        extra,
+                    },
+                    ContentBlock::Thinking {
+                        thinking,
+                        signature,
+                        extra,
+                    } => BlockAccumulator::Thinking {
+                        thinking,
+                        signature,
+                        extra,
+                    },
+                    ContentBlock::McpToolUse {
+                        id,
+                        name,
+                        server_name,
+                        input,
+                        extra,
+                    } => BlockAccumulator::McpToolUse {
+                        id,
+                        name,
+                        server_name,
+                        initial: input,
+                        fragments: String::new(),
+                        extra,
+                    },
+                    other => BlockAccumulator::Other(other),
+                };
+                self.active.insert(index, block);
+            }
+            StreamEvent::ContentBlockDelta { index, delta } => {
+                match (self.active.get_mut(&index), delta) {
+                    (
+                        Some(BlockAccumulator::Text { text, .. }),
+                        ContentDelta::TextDelta { text: chunk },
+                    ) => text.push_str(&chunk),
+                    (
+                        Some(BlockAccumulator::Text { extra, .. }),
+                        ContentDelta::CitationsDelta { citation },
+                    ) => match extra
+                        .entry("citations".to_owned())
+                        .or_insert_with(|| Value::Array(Vec::new()))
+                    {
+                        Value::Array(citations) => citations.push(citation),
+                        _ => {
+                            return Err(ClaudeError::Protocol(
+                                "text citations must be an array".into(),
+                            ));
+                        }
+                    },
+                    (
+                        Some(
+                            BlockAccumulator::ToolUse { fragments, .. }
+                            | BlockAccumulator::ServerToolUse { fragments, .. }
+                            | BlockAccumulator::McpToolUse { fragments, .. },
+                        ),
+                        ContentDelta::InputJsonDelta { partial_json },
+                    ) => fragments.push_str(&partial_json),
+                    (
+                        Some(BlockAccumulator::Thinking { thinking, .. }),
+                        ContentDelta::ThinkingDelta { thinking: chunk },
+                    ) => thinking.push_str(&chunk),
+                    (
+                        Some(BlockAccumulator::Thinking { signature, .. }),
+                        ContentDelta::SignatureDelta { signature: chunk },
+                    ) => signature.push_str(&chunk),
+                    (Some(_), ContentDelta::Other) => {
+                        return Err(ClaudeError::Protocol(format!(
+                            "unsupported delta for content block {index}"
+                        )));
+                    }
+                    _ => {
+                        return Err(ClaudeError::Protocol(format!(
+                            "unexpected delta for content block {index}"
+                        )));
+                    }
+                }
+            }
+            StreamEvent::ContentBlockStop { index } => {
+                let block = self.active.remove(&index).ok_or_else(|| {
+                    ClaudeError::Protocol(format!("unknown content block {index}"))
+                })?;
+                self.completed.insert(index, block);
+            }
+            StreamEvent::MessageDelta { delta, usage } => {
+                if let Some(container) = delta.container {
+                    self.message.container = Some(container);
+                }
+                if let Some(reason) = delta.stop_reason {
+                    self.message.stop_reason = Some(reason);
+                }
+                if let Some(details) = delta.stop_details {
+                    self.message.stop_details = Some(details);
+                }
+                if let Some(input) = usage.input_tokens {
+                    self.message.usage.input_tokens = input;
+                }
+                if let Some(cached) = usage.cache_read_input_tokens {
+                    self.message.usage.cache_read_input_tokens = cached;
+                }
+                if let Some(created) = usage.cache_creation_input_tokens {
+                    self.message.usage.cache_creation_input_tokens = created;
+                }
+                if let Some(output) = usage.output_tokens {
+                    self.message.usage.output_tokens = output;
+                }
+                if let Some(cost) = usage.cost {
+                    self.message.usage.cost = Some(cost);
+                }
+                self.message.usage.iterations = usage.iterations;
+                self.message.usage.count_iterations();
+            }
+            StreamEvent::MessageStop => {
+                self.stopped = true;
+                return Ok(true);
+            }
+            StreamEvent::Error { error } => {
+                return Err(ClaudeError::StreamError {
+                    kind: error.kind,
+                    message: error.message,
+                });
+            }
+            StreamEvent::MessageStart { .. } => {
+                return Err(ClaudeError::Protocol("duplicate message_start".into()));
+            }
+            StreamEvent::Ping | StreamEvent::Other => {}
+        }
+        Ok(false)
+    }
+
+    pub fn finish(self) -> Result<MessageResponse, ClaudeError> {
+        if !self.stopped {
+            return Err(ClaudeError::IncompleteStream);
+        }
+        let Self {
+            mut message,
+            active,
+            mut completed,
+            ..
+        } = self;
+        if message.stop_reason.is_none() {
+            if active.is_empty() && completed.is_empty() {
+                return Err(ClaudeError::IncompleteStream);
+            }
+            return Err(ClaudeError::Protocol("missing final stop_reason".into()));
+        }
+        let truncated = message.stop_reason == Some(StopReason::MaxTokens);
+        let refused = message.stop_reason == Some(StopReason::Refusal);
+        for (index, block) in active {
+            if refused {
+                continue;
+            }
+            let block = match block {
+                BlockAccumulator::Text { .. } | BlockAccumulator::ToolUse { .. } if truncated => {
+                    block
+                }
+                _ => {
+                    return Err(ClaudeError::Protocol(format!(
+                        "message_stop before content_block_stop: stop_reason={}, block_kind={}, block_index={index}",
+                        match message.stop_reason {
+                            Some(StopReason::EndTurn) => "end_turn",
+                            Some(StopReason::MaxTokens) => "max_tokens",
+                            Some(StopReason::StopSequence) => "stop_sequence",
+                            Some(StopReason::ToolUse) => "tool_use",
+                            Some(StopReason::PauseTurn) => "pause_turn",
+                            Some(StopReason::Refusal) => "refusal",
+                            Some(StopReason::ModelContextWindowExceeded) =>
+                                "model_context_window_exceeded",
+                            Some(StopReason::Compaction) => "compaction",
+                            Some(StopReason::Unknown) => "unknown",
+                            None => "missing",
+                        },
+                        block.diagnostic_kind(),
+                    )));
+                }
+            };
+            completed.insert(index, block);
+        }
+        let count = completed.len();
+        if completed.keys().copied().ne(0..count) {
+            return Err(ClaudeError::Protocol(
+                "non-contiguous content block indices".into(),
+            ));
+        }
+        message.content = completed
+            .into_values()
+            .map(BlockAccumulator::finish)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(message)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompactedHistory {
+    pub messages: Vec<Message>,
+    pub summary: String,
+    pub dropped_messages: usize,
+}
+
+impl CompactedHistory {
+    pub fn system_context(&self, system: &str) -> String {
+        if self.summary.is_empty() {
+            return system.to_owned();
+        }
+        if system.is_empty() {
+            return format!("Conversation summary:\n{}", self.summary);
+        }
+        format!("{system}\n\nConversation summary:\n{}", self.summary)
+    }
+}
+
+pub fn compact_history(
+    history: &[Message],
+    keep_recent: usize,
+    summary: impl Into<String>,
+) -> CompactedHistory {
+    let mut start = history.len().saturating_sub(keep_recent);
+    if start < history.len() && start > 0 {
+        while start > 0 && !is_user_turn_start(&history[start]) {
+            start -= 1;
+        }
+    }
+    let summary = summary.into();
+    let mut messages = history[start..].to_vec();
+    if start > 0 || !summary.is_empty() {
+        strip_thinking(&mut messages);
+    }
+    CompactedHistory {
+        dropped_messages: history.len() - messages.len(),
+        messages,
+        summary,
+    }
+}
+
+#[doc(hidden)]
+pub fn strip_thinking(messages: &mut Vec<Message>) {
+    messages.retain_mut(|message| {
+        message.content.retain(|block| {
+            !matches!(
+                block,
+                ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
+            )
+        });
+        !message.content.is_empty()
+    });
+}
+
+#[doc(hidden)]
+pub fn is_user_turn_start(message: &Message) -> bool {
+    message.role == Role::User
+        && !message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+}

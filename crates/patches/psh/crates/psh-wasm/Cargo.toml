@@ -1,0 +1,37 @@
+[package]
+name = "psh-wasm"
+description = "psh for wasm32-unknown-unknown: the parser module and the stepped shell over a JS host (ARCH.md \"WASM and the browser\")"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+# cdylib: the .wasm module; rlib: so native builds check the exports.
+crate-type = ["cdylib", "rlib"]
+doctest = false
+test = false
+
+[features]
+default = ["shell"]
+# The whole shell (nanocode-shell: psh-engine and psh-utils over the JS host's file
+# system). Without it, the parser module: parse and classify only.
+shell = ["dep:nanocode-shell", "dep:bytes"]
+
+[dependencies]
+psh-syntax.workspace = true
+psh-classify.workspace = true
+# nanocode's embedding of the engine and the utilities over a host file system: the
+# shell module is its JS host.
+nanocode-shell = { path = "../../../../core/shell", optional = true }
+bytes = { package = "nanocode-bytes", path = "../../../../core/bytes", optional = true }
+
+# The export layer is the one place outside psh-os with `unsafe`: the JS imports and the
+# `no_mangle` exports (D1110). Every use is allowed where it is and says why it is sound.
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

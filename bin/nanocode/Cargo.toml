@@ -1,0 +1,63 @@
+[package]
+name = "nanocode-cli"
+autotests = false
+autobenches = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+authors = ["Nanocode Contributors", "Ben Clabby"]
+license = "Apache-2.0"
+repository.workspace = true
+description = "Interactive terminal coding agent built on the Nanocode Rust crates"
+
+[lib]
+name = "nanocode_cli"
+path = "src/lib.rs"
+test = false
+bench = false
+doctest = false
+
+[[bin]]
+name = "nanocode"
+path = "src/main.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "nanocode-exec"
+path = "src/exec_main.rs"
+test = false
+bench = false
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+nanocode-io.workspace = true
+nanocode-sys.workspace = true
+nanocode = { path = "../../crates/nanocode", version = "0.7.0", default-features = false, features = ["local-cells"] }
+nanocode-agent-host = { path = "../../crates/integrations/agent-host", version = "0.7.0", features = ["cua"] }
+nanocode-arguments.workspace = true
+nanocode-process.workspace = true
+nanocode-psh.workspace = true
+psh.workspace = true
+psh-engine.workspace = true
+nanocode-computer-repl = { path = "../../crates/integrations/computer-repl", version = "0.7.0" }
+nanocode-home = { path = "../../crates/core/home", version = "0.7.0" }
+nanocode-mpp.workspace = true
+nanocode-observability = { path = "../../crates/integrations/observability", version = "0.7.0" }
+nanocode-store-jsonl = { path = "../../crates/integrations/store-jsonl", version = "0.7.0" }
+nanocode-sync.workspace = true
+nanocode-http.workspace = true
+nanocode-tempo.workspace = true
+nanocode-tui = { path = "../../crates/tui", version = "0.7.0" }
+serde_json = { workspace = true, features = ["preserve_order"] }
+nanocode-platform.workspace = true
+serde.workspace = true
+nanocode-executor.workspace = true
+nanocode-trace.workspace = true
+nanocode-compression.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nanocode-psh-embedded.workspace = true
+
+[lints]
+workspace = true

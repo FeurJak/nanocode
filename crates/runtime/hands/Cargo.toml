@@ -1,0 +1,30 @@
+[package]
+autotests = false
+autobenches = false
+name = "nanocode-hands"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Code Mode hosts per session: a per-call target, lazy Hands released when idle, and atomic sha-checked file copies"
+
+[dependencies]
+nanocode-code-mode.workspace = true
+nanocode-cost-fold.workspace = true
+nanocode-digest.workspace = true
+nanocode-platform.workspace = true
+nanocode-sync.workspace = true
+nanocode-tool-contracts.workspace = true
+psh-classify.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+test = false
+doctest = false
+bench = false

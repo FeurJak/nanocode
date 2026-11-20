@@ -1,0 +1,3 @@
+#!/bin/sh
+set -eu
+rustup toolchain install stable --profile minimal

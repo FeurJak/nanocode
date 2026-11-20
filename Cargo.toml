@@ -1,0 +1,769 @@
+[workspace]
+members = [
+    "crates/nanocode",
+    "crates/runtime/agent",
+    "crates/runtime/agent-config",
+    "crates/core/agent",
+    "crates/core/agent-types",
+    "crates/core/hedge",
+    "crates/core/durability",
+    "crates/core/turnlog",
+    "crates/core/types-core",
+    "crates/core/indexmap",
+    "crates/core/unicode-normalization",
+    "crates/core/itoa",
+    "crates/core/memchr",
+    "crates/core/process",
+    "crates/core/executor",
+    "crates/integrations/agent-host",
+    "crates/runtime/tool-host",
+    "crates/runtime/code-mode",
+    "crates/runtime/workspace",
+    "crates/runtime/code-mode-engine",
+    "crates/runtime/durability",
+    "crates/runtime/subagents",
+    "crates/core/board-fold",
+    "crates/core/cost-fold",
+    "crates/core/live-fold",
+    "crates/core/partitions",
+    "crates/core/dispatch",
+    "crates/runtime/board",
+    "crates/runtime/dispatcher",
+    "crates/runtime/board-sync",
+    "crates/runtime/live",
+    "crates/runtime/hands",
+    "crates/backends/claude",
+    "crates/backends/claude/client",
+    "crates/backends/claude/tools",
+    "crates/backends/codex",
+    "crates/backends/codex/client",
+    "crates/core/home",
+    "crates/core/http",
+    "crates/core/bytes",
+    "crates/core/zstd",
+    "crates/core/digest",
+    "crates/core/url",
+    "crates/core/arguments",
+    "crates/core/webp",
+    "crates/core/compression",
+    "crates/core/jpeg",
+    "crates/core/tempo",
+    "crates/core/mcp",
+    "crates/core/mcp-http",
+    "crates/core/platform",
+    "crates/core/numeric",
+    "crates/core/flags",
+    "crates/core/python",
+    "crates/core/python-data",
+    "crates/core/python-capi",
+    "crates/core/schema",
+    "crates/core/repo-cache",
+    "crates/core/shell",
+    "crates/core/workspace-fs",
+    "crates/core/tool-provider",
+    "crates/core/image",
+    "crates/core/png",
+    "crates/core/gif",
+    "crates/core/audio",
+    "crates/core/tls",
+    "crates/core/x509",
+    "crates/core/websocket",
+    "crates/core/machine",
+    "crates/core/sync",
+    "crates/core/trace",
+    "crates/core/sys",
+    "crates/core/libc",
+    "crates/core/windows-sys",
+    "crates/core/tools",
+    "crates/core/tool-contracts",
+    "crates/core/tools-macros",
+    "crates/core/macro-support",
+    "crates/core/serde-derive",
+    "crates/core/types",
+    "crates/integrations/tool-runtime",
+    "crates/integrations/process",
+    "crates/integrations/psh",
+    "crates/integrations/psh-embedded",
+    "crates/integrations/mcp-tools",
+    "crates/integrations/computer",
+    "crates/integrations/computer-repl",
+    "crates/integrations/chatgpt-extension",
+    "crates/integrations/sandbox",
+    "crates/integrations/observability",
+    "crates/integrations/telemetry",
+    "crates/integrations/store-sql",
+    "crates/integrations/store-jsonl",
+    "crates/integrations/mpp",
+    "crates/integrations/s3",
+    "crates/tui",
+    "bin/nanocode",
+    "bin/cua-driver",
+    "bin/nc-lite",
+    "bin/nc-board",
+    "bin/nc-build",
+    "crates/runtime/build-opt",
+    "bin/nanocode-python",
+    "bin/nanocode-sim",
+    "bin/nanocode-fuzz",
+]
+default-members = ["crates/nanocode"]
+exclude = ["crates/patches", "bin/nanocode-front"]
+resolver = "2"
+
+[workspace.package]
+version = "0.7.0"
+edition = "2024"
+rust-version = "1.97"
+authors = ["Nanocode Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/nanocodexyz/nanocode"
+keywords = ["ai", "agents", "openai", "sdk", "websocket"]
+categories = ["api-bindings", "asynchronous", "development-tools"]
+publish = true
+
+[workspace.dependencies]
+nanocode-backend-claude-tools = { version = "0.7.0", path = "crates/backends/claude/tools" }
+nanocode-agent-types = { version = "0.7.0", path = "crates/core/agent-types" }
+nanocode-hedge = { version = "0.7.0", path = "crates/core/hedge" }
+nanocode-durability-core = { version = "0.7.0", path = "crates/core/durability" }
+nanocode-turnlog = { version = "0.7.0", path = "crates/core/turnlog" }
+nanocode-types-core = { version = "0.7.0", path = "crates/core/types-core" }
+nanocode-agent-config = { version = "0.7.0", path = "crates/runtime/agent-config" }
+nanocode-process-contracts = { version = "0.7.0", path = "crates/core/process" }
+nanocode-agent = { version = "0.7.0", path = "crates/runtime/agent" }
+nanocode-agent-host = { version = "0.7.0", path = "crates/integrations/agent-host" }
+nanocode-backend-codex = { version = "0.7.0", path = "crates/backends/codex" }
+nanocode-backend-codex-client = { version = "0.7.0", path = "crates/backends/codex/client" }
+nanocode-agent-core = { version = "0.7.0", path = "crates/core/agent" }
+nanocode-tool-host = { version = "0.7.0", path = "crates/runtime/tool-host" }
+nanocode-image = { version = "0.7.0", path = "crates/core/image" }
+nanocode-audio = { version = "0.7.0", path = "crates/core/audio" }
+nanocode-tls = { version = "0.7.0", path = "crates/core/tls" }
+nanocode-websocket = { version = "0.7.0", path = "crates/core/websocket" }
+nanocode-types = { version = "0.7.0", path = "crates/core/types" }
+nanocode-computer = { version = "0.7.0", path = "crates/integrations/computer" }
+nanocode-computer-repl = { version = "0.7.0", path = "crates/integrations/computer-repl" }
+nanocode-tools = { version = "0.7.0", path = "crates/core/tools" }
+nanocode-tool-contracts = { version = "0.7.0", path = "crates/core/tool-contracts" }
+nanocode-store-jsonl = { version = "0.7.0", path = "crates/integrations/store-jsonl" }
+memchr = "2.8.3"
+nanocode-backend-claude = { version = "0.7.0", path = "crates/backends/claude" }
+nanocode-backend-claude-client = { version = "0.7.0", path = "crates/backends/claude/client" }
+nanocode-arguments = { version = "0.7.0", path = "crates/core/arguments" }
+nanocode-home = { version = "0.7.0", path = "crates/core/home" }
+nanocode-http = { version = "0.7.0", path = "crates/core/http" }
+nanocode-bytes = { version = "0.7.0", path = "crates/core/bytes" }
+nanocode-machine = { version = "0.7.0", path = "crates/core/machine" }
+nanocode-mcp = { version = "0.7.0", path = "crates/core/mcp" }
+nanocode-mcp-http = { version = "0.7.0", path = "crates/core/mcp-http" }
+nanocode-platform = { version = "0.7.0", path = "crates/core/platform" }
+nanocode-python = { version = "0.7.0", path = "crates/core/python" }
+nanocode-python-capi = { version = "0.7.0", path = "crates/core/python-capi" }
+nanocode-python-data = { version = "0.7.0", path = "crates/core/python-data" }
+nanocode-sync = { version = "0.7.0", path = "crates/core/sync" }
+nanocode-trace = { version = "0.7.0", path = "crates/core/trace" }
+nanocode-io = { version = "0.7.0", path = "crates/core/io" }
+nanocode-executor = { version = "0.7.0", path = "crates/core/executor" }
+nanocode-sys = { version = "0.7.0", path = "crates/core/sys" }
+nanocode-tempo = { version = "0.7.0", path = "crates/core/tempo" }
+nanocode-schema = { version = "0.7.0", path = "crates/core/schema" }
+nanocode-repo-cache = { version = "0.7.0", path = "crates/core/repo-cache" }
+nanocode-shell = { version = "0.7.0", path = "crates/core/shell" }
+nanocode-workspace-fs = { version = "0.7.0", path = "crates/core/workspace-fs" }
+nanocode-durability = { version = "0.7.0", path = "crates/runtime/durability" }
+nanocode-subagents = { version = "0.7.0", path = "crates/runtime/subagents" }
+nanocode-board-fold = { version = "0.7.0", path = "crates/core/board-fold" }
+nanocode-cost-fold = { version = "0.7.0", path = "crates/core/cost-fold" }
+nanocode-live-fold = { version = "0.7.0", path = "crates/core/live-fold" }
+nanocode-partitions = { version = "0.7.0", path = "crates/core/partitions" }
+nanocode-dispatch = { version = "0.7.0", path = "crates/core/dispatch" }
+nanocode-board = { version = "0.7.0", path = "crates/runtime/board" }
+nanocode-dispatcher = { version = "0.7.0", path = "crates/runtime/dispatcher" }
+nanocode-board-sync = { version = "0.7.0", path = "crates/runtime/board-sync" }
+nanocode-live = { version = "0.7.0", path = "crates/runtime/live" }
+nanocode-hands = { version = "0.7.0", path = "crates/runtime/hands" }
+nanocode-code-mode = { version = "0.7.0", path = "crates/runtime/code-mode"  }
+nanocode-workspace = { version = "0.7.0", path = "crates/runtime/workspace" }
+nanocode-tool-runtime = { version = "0.7.0", path = "crates/integrations/tool-runtime" }
+nanocode-tool-provider = { version = "0.7.0", path = "crates/core/tool-provider" }
+nanocode-process = { version = "0.7.0", path = "crates/integrations/process" }
+nanocode-psh = { version = "0.7.0", path = "crates/integrations/psh" }
+nanocode-psh-embedded = { version = "0.7.0", path = "crates/integrations/psh-embedded" }
+psh = { path = "crates/patches/psh/crates/psh" }
+psh-classify = { path = "crates/patches/psh/crates/psh-classify" }
+psh-syntax = { path = "crates/patches/psh/crates/psh-syntax" }
+nanocode-mcp-tools = { version = "0.7.0", path = "crates/integrations/mcp-tools" }
+nanocode-mpp = { version = "0.7.0", path = "crates/integrations/mpp" }
+nanocode-code-mode-engine = { version = "0.7.0", path = "crates/runtime/code-mode-engine" }
+nanocode-tools-macros = { version = "0.7.0", path = "crates/core/tools-macros" }
+nanocode-macro-support = { version = "0.7.0", path = "crates/core/macro-support" }
+graviola = "0.4.1"
+rustls = { version = "0.23.45", default-features = false, features = ["std"] }
+djs-embed = { path = "crates/patches/djs/crates/djs-embed" }
+psh-engine = { path = "crates/patches/psh/crates/psh-engine" }
+psh-utils = { path = "crates/patches/psh/crates/psh-utils" }
+serde = { version = "1.0.228", features = ["derive", "rc"] }
+serde_json = { version = "1.0.149", features = ["float_roundtrip", "raw_value"] }
+unicode-normalization = { path = "crates/core/unicode-normalization" }
+nanocode-url = { version = "0.7.0", path = "crates/core/url" }
+nanocode-zstd = { version = "0.7.0", path = "crates/core/zstd" }
+nanocode-digest = { version = "0.7.0", path = "crates/core/digest" }
+nanocode-x509 = { version = "0.7.0", path = "crates/core/x509" }
+nanocode-compression = { version = "0.7.0", path = "crates/core/compression" }
+nanocode-png = { version = "0.7.0", path = "crates/core/png" }
+nanocode-gif = { version = "0.7.0", path = "crates/core/gif" }
+nanocode-jpeg = { version = "0.7.0", path = "crates/core/jpeg" }
+nanocode-webp = { version = "0.7.0", path = "crates/core/webp" }
+ruff_python_ast = { package = "rustpython-ruff_python_ast", version = "=0.16.5" }
+ruff_python_parser = { package = "rustpython-ruff_python_parser", version = "=0.16.5" }
+rustpython-compiler = "=0.6.0"
+rustpython-compiler-core = "=0.6.0"
+rustpython-pylib = "=0.6.0"
+rustpython-stdlib = { version = "=0.6.0", default-features = false, features = ["compiler"] }
+rustpython-vm = { version = "=0.6.0", default-features = false, features = ["compiler", "gc", "freeze-stdlib"] }
+
+[patch.crates-io]
+serde_derive = { path = "crates/core/serde-derive" }
+serde = { path = "crates/patches/serde" }
+serde_core = { path = "crates/patches/serde_core" }
+serde_json = { path = "crates/patches/serde_json" }
+rustls-platform-verifier = { path = "crates/patches/rustls-platform-verifier" }
+graviola = { path = "crates/patches/graviola" }
+rustls = { path = "crates/patches/rustls" }
+rustls-pki-types = { path = "crates/patches/rustls-pki-types" }
+rustls-webpki = { path = "crates/patches/rustls-webpki" }
+itoa = { path = "crates/core/itoa" }
+memchr = { path = "crates/core/memchr" }
+pymath = { path = "crates/patches/pymath" }
+rustpython-codegen = { path = "crates/patches/rustpython-codegen" }
+rustpython-common = { path = "crates/patches/rustpython-common" }
+rustpython-compiler = { path = "crates/patches/rustpython-compiler" }
+rustpython-compiler-core = { path = "crates/patches/rustpython-compiler-core" }
+rustpython-derive = { path = "crates/patches/rustpython-derive" }
+rustpython-derive-impl = { path = "crates/patches/rustpython-derive-impl" }
+rustpython-doc = { path = "crates/patches/rustpython-doc" }
+rustpython-host_env = { path = "crates/patches/rustpython-host_env" }
+rustpython-literal = { path = "crates/patches/rustpython-literal" }
+rustpython-pylib = { path = "crates/patches/rustpython-pylib" }
+rustpython-ruff_python_ast = { path = "crates/patches/rustpython-ruff_python_ast" }
+rustpython-ruff_python_parser = { path = "crates/patches/rustpython-ruff_python_parser" }
+rustpython-ruff_python_trivia = { path = "crates/patches/rustpython-ruff_python_trivia" }
+rustpython-ruff_source_file = { path = "crates/patches/rustpython-ruff_source_file" }
+rustpython-ruff_text_size = { path = "crates/patches/rustpython-ruff_text_size" }
+rustpython-sre_engine = { path = "crates/patches/rustpython-sre_engine" }
+rustpython-stdlib = { path = "crates/patches/rustpython-stdlib" }
+rustpython-unicode = { path = "crates/patches/rustpython-unicode" }
+rustpython-vm = { path = "crates/patches/rustpython-vm" }
+rustpython-wtf8 = { path = "crates/patches/rustpython-wtf8" }
+indexmap = { path = "crates/core/indexmap" }
+unicode-normalization = { path = "crates/core/unicode-normalization" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+missing_const_for_fn = "warn"
+use_self = "warn"
+redundant_clone = "warn"
+large_enum_variant = "allow"
+result_large_err = "allow"
+double_must_use = "allow"
+
+[profile.dev]
+debug = false
+split-debuginfo = "unpacked"
+strip = false
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.ci]
+inherits = "dev"
+incremental = false
+
+[profile.release]
+opt-level = 3
+lto = "off"
+debug = "none"
+strip = "symbols"
+panic = "unwind"
+codegen-units = 16
+
+[profile.release.package.djs-core]
+opt-level = 3
+codegen-units = 16
+
+[profile.release.package.djs-embed]
+opt-level = 3
+codegen-units = 16
+
+[profile.release.package.djs-libm]
+opt-level = 3
+codegen-units = 16
+
+[profile.release.package.djs-prelude]
+opt-level = 3
+codegen-units = 16
+
+[profile.release.package.nanocode-code-mode-engine]
+opt-level = 3
+codegen-units = 16
+
+[profile.release.package.nanocode-agent]
+opt-level = "s"
+
+[profile.release.package.nanocode-agent-config]
+opt-level = "s"
+
+[profile.release.package.nanocode-agent-core]
+opt-level = "s"
+
+[profile.release.package.nanocode-agent-host]
+opt-level = "s"
+
+[profile.release.package.nanocode-arguments]
+opt-level = "s"
+
+[profile.release.package.nanocode-audio]
+opt-level = "s"
+
+[profile.release.package.nanocode-backend-claude]
+opt-level = "s"
+
+[profile.release.package.nanocode-backend-claude-client]
+opt-level = "s"
+
+[profile.release.package.nanocode-backend-claude-tools]
+opt-level = "s"
+
+[profile.release.package.nanocode-backend-codex]
+opt-level = "s"
+
+[profile.release.package.nanocode-cli]
+opt-level = "s"
+
+[profile.release.package.nanocode-computer-repl]
+opt-level = "s"
+
+[profile.release.package.nanocode-durability]
+opt-level = "s"
+
+[profile.release.package.nanocode-durability-core]
+opt-level = "s"
+
+[profile.release.package.nanocode-gif]
+opt-level = "s"
+
+[profile.release.package.nanocode-home]
+opt-level = "s"
+
+[profile.release.package.nanocode-image]
+opt-level = "s"
+
+[profile.release.package.nanocode-jpeg]
+opt-level = "s"
+
+[profile.release.package.nanocode-mcp]
+opt-level = "s"
+
+[profile.release.package.nanocode-mcp-http]
+opt-level = "s"
+
+[profile.release.package.nanocode-mcp-tools]
+opt-level = "s"
+
+[profile.release.package.nanocode-mpp]
+opt-level = "s"
+
+[profile.release.package.nanocode-observability]
+opt-level = "s"
+
+[profile.release.package.nanocode-png]
+opt-level = "s"
+
+[profile.release.package.nanocode-schema]
+opt-level = "s"
+
+[profile.release.package.nanocode-store-jsonl]
+opt-level = "s"
+
+[profile.release.package.nanocode-subagents]
+opt-level = "s"
+
+[profile.release.package.nanocode-tempo]
+opt-level = "s"
+
+[profile.release.package.nanocode-tool-host]
+opt-level = "s"
+
+[profile.release.package.nanocode-tool-provider]
+opt-level = "s"
+
+[profile.release.package.nanocode-tool-runtime]
+opt-level = "s"
+
+[profile.release.package.nanocode-tools]
+opt-level = "s"
+
+[profile.release.package.nanocode-turnlog]
+opt-level = "s"
+
+[profile.release.package.nanocode-webp]
+opt-level = "s"
+
+[profile.release.package.psh-utils]
+opt-level = "s"
+
+[profile.release.package.rustpython-codegen]
+opt-level = "s"
+
+[profile.release.package.rustpython-common]
+opt-level = "s"
+
+[profile.release.package.rustpython-compiler]
+opt-level = "s"
+
+[profile.release.package.rustpython-compiler-core]
+opt-level = "s"
+
+[profile.release.package.rustpython-literal]
+opt-level = "s"
+
+[profile.release.package.rustpython-pylib]
+opt-level = "s"
+
+[profile.release.package.rustpython-ruff_python_ast]
+opt-level = "s"
+
+[profile.release.package.rustpython-ruff_python_parser]
+opt-level = "s"
+
+[profile.release.package.rustpython-ruff_python_trivia]
+opt-level = "s"
+
+[profile.release.package.rustpython-ruff_source_file]
+opt-level = "s"
+
+[profile.release.package.rustpython-ruff_text_size]
+opt-level = "s"
+
+[profile.release.package.rustpython-sre_engine]
+opt-level = "s"
+
+[profile.release.package.rustpython-stdlib]
+opt-level = "s"
+
+[profile.release.package.rustpython-unicode]
+opt-level = "s"
+
+[profile.release.package.rustpython-vm]
+opt-level = "s"
+
+[profile.release.package.rustpython-wtf8]
+opt-level = "s"
+
+[profile.release.package.rustpython-host_env]
+opt-level = "s"
+
+[profile.release.package.rustpython-doc]
+opt-level = "s"
+
+[profile.release.package.unicode-normalization]
+opt-level = "s"
+
+[profile.fast]
+inherits = "release"
+incremental = true
+codegen-units = 256
+
+[profile.dist]
+inherits = "release"
+# Size first: most code runs once per turn or never, and smaller text loads and pages in faster.
+# The crates on the per-step and per-iteration path (Code Mode and its engine, the shell, HTTP and
+# TLS, process) stay at opt-level 3 below. nanocode-cli stays at "s": as the binary crate, its
+# opt-level drives the fat-LTO pipeline, and "z" or 3 there changes inlining in the JS interpreter.
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[profile.dist.package.nanocode-agent]
+opt-level = "z"
+
+[profile.dist.package.nanocode-agent-config]
+opt-level = "z"
+
+[profile.dist.package.nanocode-agent-core]
+opt-level = "z"
+
+[profile.dist.package.nanocode-agent-host]
+opt-level = "z"
+
+[profile.dist.package.nanocode-arguments]
+opt-level = "z"
+
+[profile.dist.package.nanocode-audio]
+opt-level = "z"
+
+[profile.dist.package.nanocode-backend-claude]
+opt-level = "z"
+
+[profile.dist.package.nanocode-backend-claude-client]
+opt-level = "z"
+
+[profile.dist.package.nanocode-backend-claude-tools]
+opt-level = "z"
+
+[profile.dist.package.nanocode-backend-codex]
+opt-level = "z"
+
+[profile.dist.package.nanocode-cli]
+opt-level = "s"
+
+[profile.dist.package.nanocode-computer-repl]
+opt-level = "z"
+
+[profile.dist.package.nanocode-durability]
+opt-level = "z"
+
+[profile.dist.package.nanocode-durability-core]
+opt-level = "z"
+
+[profile.dist.package.nanocode-gif]
+opt-level = "z"
+
+[profile.dist.package.nanocode-home]
+opt-level = "z"
+
+[profile.dist.package.nanocode-image]
+opt-level = "z"
+
+[profile.dist.package.nanocode-jpeg]
+opt-level = "z"
+
+[profile.dist.package.nanocode-mcp]
+opt-level = "z"
+
+[profile.dist.package.nanocode-mcp-http]
+opt-level = "z"
+
+[profile.dist.package.nanocode-mcp-tools]
+opt-level = "z"
+
+[profile.dist.package.nanocode-mpp]
+opt-level = "z"
+
+[profile.dist.package.nanocode-observability]
+opt-level = "z"
+
+[profile.dist.package.nanocode-png]
+opt-level = "z"
+
+[profile.dist.package.nanocode-schema]
+opt-level = "z"
+
+[profile.dist.package.nanocode-store-jsonl]
+opt-level = "z"
+
+[profile.dist.package.nanocode-subagents]
+opt-level = "z"
+
+[profile.dist.package.nanocode-tempo]
+opt-level = "z"
+
+[profile.dist.package.nanocode-tool-host]
+opt-level = "z"
+
+[profile.dist.package.nanocode-tool-provider]
+opt-level = "z"
+
+[profile.dist.package.nanocode-tool-runtime]
+opt-level = "z"
+
+[profile.dist.package.nanocode-tools]
+opt-level = "z"
+
+[profile.dist.package.nanocode-turnlog]
+opt-level = "z"
+
+[profile.dist.package.nanocode-webp]
+opt-level = "z"
+
+[profile.dist.package.psh-utils]
+opt-level = "z"
+
+[profile.dist.package.rustpython-codegen]
+opt-level = "z"
+
+[profile.dist.package.rustpython-common]
+opt-level = "z"
+
+[profile.dist.package.rustpython-compiler]
+opt-level = "z"
+
+[profile.dist.package.rustpython-compiler-core]
+opt-level = "z"
+
+[profile.dist.package.rustpython-literal]
+opt-level = "z"
+
+[profile.dist.package.rustpython-pylib]
+opt-level = "z"
+
+[profile.dist.package.rustpython-ruff_python_ast]
+opt-level = "z"
+
+[profile.dist.package.rustpython-ruff_python_parser]
+opt-level = "z"
+
+[profile.dist.package.rustpython-ruff_python_trivia]
+opt-level = "z"
+
+[profile.dist.package.rustpython-ruff_source_file]
+opt-level = "z"
+
+[profile.dist.package.rustpython-ruff_text_size]
+opt-level = "z"
+
+[profile.dist.package.rustpython-sre_engine]
+opt-level = "z"
+
+[profile.dist.package.rustpython-stdlib]
+opt-level = "z"
+
+[profile.dist.package.rustpython-unicode]
+opt-level = "z"
+
+[profile.dist.package.rustpython-vm]
+opt-level = "z"
+
+[profile.dist.package.rustpython-wtf8]
+opt-level = "z"
+
+[profile.dist.package.rustpython-host_env]
+opt-level = "z"
+
+[profile.dist.package.rustpython-doc]
+opt-level = "z"
+
+[profile.dist.package.unicode-normalization]
+opt-level = "z"
+
+[profile.dist.package.djs-core]
+opt-level = 3
+
+[profile.dist.package.djs-embed]
+opt-level = 3
+
+[profile.dist.package.djs-libm]
+opt-level = 3
+
+[profile.dist.package.djs-prelude]
+opt-level = 3
+
+[profile.dist.package.psh]
+opt-level = 3
+
+[profile.dist.package.psh-classify]
+opt-level = 3
+
+[profile.dist.package.psh-engine]
+opt-level = 3
+
+[profile.dist.package.psh-os]
+opt-level = 3
+
+[profile.dist.package.psh-pattern]
+opt-level = 3
+
+[profile.dist.package.psh-regex]
+opt-level = 3
+
+[profile.dist.package.psh-syntax]
+opt-level = 3
+
+[profile.dist.package.graviola]
+opt-level = 3
+
+[profile.dist.package.rustls]
+opt-level = 3
+
+[profile.dist.package.rustls-webpki]
+opt-level = 3
+
+[profile.dist.package.serde_json]
+opt-level = 3
+
+[profile.dist.package.memchr]
+opt-level = 3
+
+[profile.dist.package.nanocode-code-mode]
+opt-level = 3
+
+[profile.dist.package.nanocode-code-mode-engine]
+opt-level = 3
+
+[profile.dist.package.nanocode-http]
+opt-level = 3
+
+[profile.dist.package.nanocode-tls]
+opt-level = 3
+
+[profile.dist.package.nanocode-process]
+opt-level = 3
+
+[profile.dist.package.nanocode-executor]
+opt-level = 3
+
+[profile.dist.package.nanocode-sys]
+opt-level = 3
+
+[profile.dist.package.nanocode-sync]
+opt-level = 3
+
+[profile.dist.package.nanocode-platform]
+opt-level = 3
+
+[profile.dist.package.nanocode-trace]
+opt-level = 3
+
+[profile.dist.package.nanocode-io]
+opt-level = 3
+
+[profile.dist.package.nanocode-digest]
+opt-level = 3
+
+[profile.dist.package.nanocode-types-core]
+opt-level = 3
+
+[profile.dist.package.nanocode-tool-contracts]
+opt-level = 3
+
+[profile.dist.package.itoa]
+opt-level = 3
+
+[profile.dist.package.serde]
+opt-level = 3
+
+[profile.dist.package.serde_core]
+opt-level = 3
+
+[profile.lite]
+inherits = "dist"
+opt-level = "z"
+
+[profile.profiling]
+inherits = "release"
+debug = "full"
+strip = false
+
+[profile.bench]
+inherits = "profiling"
+
+[profile.wasm]
+inherits = "release"
+lto = "off"
+opt-level = "z"
+panic = "abort"
+strip = "symbols"

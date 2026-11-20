@@ -1,0 +1,638 @@
+use crate::format::Case;
+use alloc::borrow::ToOwned;
+use alloc::format;
+use alloc::string::{String, ToString};
+
+#[must_use]
+pub fn parse_str(literal: &str) -> Option<f64> {
+    parse_inner(literal.trim().as_bytes())
+}
+
+#[must_use]
+pub fn parse_bytes(literal: &[u8]) -> Option<f64> {
+    parse_inner(literal.trim_ascii())
+}
+
+fn parse_inner(literal: &[u8]) -> Option<f64> {
+    let (negative, unsigned) = match literal.split_first() {
+        Some((b'-', rest)) => (true, rest),
+        Some((b'+', rest)) => (false, rest),
+        _ => (false, literal),
+    };
+    let special = if unsigned.eq_ignore_ascii_case(b"inf") || unsigned.eq_ignore_ascii_case(b"infinity") {
+        Some(f64::INFINITY)
+    } else if unsigned.eq_ignore_ascii_case(b"nan") {
+        Some(f64::NAN)
+    } else {
+        None
+    };
+    if let Some(value) = special {
+        return Some(if negative { -value } else { value });
+    }
+    let mut digits = alloc::vec::Vec::with_capacity(literal.len());
+    if negative {
+        digits.push(b'-');
+    }
+    let rest = take_digit_part(unsigned, &mut digits);
+    let integer_digits = digits.len() - usize::from(negative);
+    let (rest, fraction_digits) = match rest.split_first() {
+        Some((b'.', after)) => {
+            digits.push(b'.');
+            let before = digits.len();
+            let after = take_digit_part(after, &mut digits);
+            (after, digits.len() - before)
+        }
+        _ => (rest, 0),
+    };
+    if integer_digits + fraction_digits == 0 {
+        return None;
+    }
+    let rest = match rest.split_first() {
+        Some((b'e' | b'E', after)) => {
+            digits.push(b'e');
+            let after = match after.split_first() {
+                Some((&sign @ (b'+' | b'-'), signed)) => {
+                    digits.push(sign);
+                    signed
+                }
+                _ => after,
+            };
+            let before = digits.len();
+            let after = take_digit_part(after, &mut digits);
+            if digits.len() == before {
+                return None;
+            }
+            after
+        }
+        _ => rest,
+    };
+    if !rest.is_empty() {
+        return None;
+    }
+    core::str::from_utf8(&digits).ok()?.parse::<f64>().ok()
+}
+
+fn take_digit_part<'a>(mut input: &'a [u8], digits: &mut alloc::vec::Vec<u8>) -> &'a [u8] {
+    while let Some((&byte, rest)) = input.split_first() {
+        if byte.is_ascii_digit() {
+            digits.push(byte);
+            input = rest;
+        } else if byte == b'_'
+            && digits.last().is_some_and(u8::is_ascii_digit)
+            && rest.first().is_some_and(u8::is_ascii_digit)
+        {
+            input = rest;
+        } else {
+            break;
+        }
+    }
+    input
+}
+
+#[must_use]
+pub fn is_integer(v: f64) -> bool {
+    v.is_finite() && v.fract() == 0.0
+}
+
+fn format_nan(case: Case) -> String {
+    let nan = match case {
+        Case::Lower => "nan",
+        Case::Upper => "NAN",
+    };
+
+    nan.to_string()
+}
+
+fn format_inf(case: Case) -> String {
+    let inf = match case {
+        Case::Lower => "inf",
+        Case::Upper => "INF",
+    };
+
+    inf.to_string()
+}
+
+#[must_use]
+pub const fn decimal_point_or_empty(precision: usize, alternate_form: bool) -> &'static str {
+    match (precision, alternate_form) {
+        (0, true) => ".",
+        _ => "",
+    }
+}
+
+/// Rust's `format!("{:.*}", n, x)` panics when `n` exceeds the fmt runtime's
+/// internal precision limit. User-supplied precision can legally reach far
+/// higher values (e.g. `f"{1.5:.1000000}"`) — clamp here so we produce a
+/// (truncated-but-valid) output instead of aborting the interpreter. Harmless
+/// in practice: f64 carries only ~17 significant digits, so precision beyond
+/// 65K is padding zeros at best.
+///
+/// The two caps differ by 1: `{:.*}` (plain) accepts `u16::MAX`, but `{:.*e}`
+/// (exponential) hits a tighter assertion (`ndigits > 0` in
+/// `core::num::flt2dec`) at exactly `u16::MAX`. Keeping plain at the higher
+/// cap preserves byte-identical output with CPython up through
+/// `precision == u16::MAX` for fixed / percent / general-non-scientific paths.
+pub const FMT_MAX_PRECISION: usize = u16::MAX as usize;
+pub const FMT_MAX_EXP_PRECISION: usize = u16::MAX as usize - 1;
+
+#[inline]
+#[must_use]
+pub fn clamp_fmt_precision(precision: usize) -> usize {
+    core::cmp::min(precision, FMT_MAX_PRECISION)
+}
+
+#[inline]
+#[must_use]
+pub fn clamp_exp_precision(precision: usize) -> usize {
+    core::cmp::min(precision, FMT_MAX_EXP_PRECISION)
+}
+
+#[must_use]
+pub fn format_fixed(precision: usize, magnitude: f64, case: Case, alternate_form: bool) -> String {
+    match magnitude {
+        magnitude if magnitude.is_finite() => {
+            let point = decimal_point_or_empty(precision, alternate_form);
+            let capped = clamp_fmt_precision(precision);
+            let mut out = format!("{magnitude:.capped$}");
+            // Pad with '0's up to the requested precision to match CPython
+            // byte-identically. `f64` has at most ~767 significant decimal
+            // digits, so any digit past `capped` is deterministically '0'.
+            let missing = precision.saturating_sub(capped);
+            if missing > 0 {
+                out.extend(core::iter::repeat_n('0', missing));
+            }
+            out.push_str(point);
+            out
+        }
+        magnitude if magnitude.is_nan() => format_nan(case),
+        magnitude if magnitude.is_infinite() => format_inf(case),
+        _ => "".to_string(),
+    }
+}
+
+// Formats floats into Python style exponent notation, by first formatting in Rust style
+// exponent notation (`1.0000e0`), then convert to Python style (`1.0000e+00`).
+#[must_use]
+pub fn format_exponent(
+    precision: usize,
+    magnitude: f64,
+    case: Case,
+    alternate_form: bool,
+) -> String {
+    match magnitude {
+        magnitude if magnitude.is_finite() => {
+            let capped = clamp_exp_precision(precision);
+            let r_exp = format!("{magnitude:.capped$e}");
+            let mut parts = r_exp.splitn(2, 'e');
+            let base = parts.next().unwrap();
+            let exponent = parts.next().unwrap().parse::<i64>().unwrap();
+            let e = match case {
+                Case::Lower => 'e',
+                Case::Upper => 'E',
+            };
+            let point = decimal_point_or_empty(precision, alternate_form);
+            // Pad with '0's up to the requested precision to match CPython
+            // byte-identically past our internal cap; see `format_fixed`.
+            let missing = precision.saturating_sub(capped);
+            let mut mantissa = String::with_capacity(base.len() + missing);
+            mantissa.push_str(base);
+            if missing > 0 {
+                mantissa.extend(core::iter::repeat_n('0', missing));
+            }
+            format!("{mantissa}{point}{e}{exponent:+#03}")
+        }
+        magnitude if magnitude.is_nan() => format_nan(case),
+        magnitude if magnitude.is_infinite() => format_inf(case),
+        _ => "".to_string(),
+    }
+}
+
+/// If s represents a floating point value, trailing zeros and a possibly trailing
+/// decimal point will be removed.
+/// This function does NOT work with decimal commas.
+fn maybe_remove_trailing_redundant_chars(s: String, alternate_form: bool) -> String {
+    if !alternate_form && s.contains('.') {
+        // only truncate floating point values when not in alternate form
+        let s = remove_trailing_zeros(s);
+        remove_trailing_decimal_point(s)
+    } else {
+        s
+    }
+}
+
+fn remove_trailing_zeros(s: String) -> String {
+    let mut s = s;
+    while s.ends_with('0') {
+        s.pop();
+    }
+    s
+}
+
+fn remove_trailing_decimal_point(s: String) -> String {
+    let mut s = s;
+    if s.ends_with('.') {
+        s.pop();
+    }
+    s
+}
+
+#[must_use]
+pub fn format_general(
+    precision: usize,
+    magnitude: f64,
+    case: Case,
+    alternate_form: bool,
+    always_shows_fract: bool,
+) -> String {
+    match magnitude {
+        magnitude if magnitude.is_finite() => {
+            let exp_precision = clamp_exp_precision(precision.saturating_sub(1));
+            let r_exp = format!("{magnitude:.exp_precision$e}");
+            let mut parts = r_exp.splitn(2, 'e');
+            let base = parts.next().unwrap();
+            let exponent = parts.next().unwrap().parse::<i64>().unwrap();
+            if exponent < -4 || exponent + (always_shows_fract as i64) >= (precision as i64) {
+                let e = match case {
+                    Case::Lower => 'e',
+                    Case::Upper => 'E',
+                };
+                // `base` is already produced at the clamped precision via
+                // `r_exp`. The previous `format!("{:.*}", precision + 1, base)`
+                // call was a no-op (magnitude is `.abs()`-ed at the caller, so
+                // base has no sign and its length was exactly `precision + 1`)
+                // — reuse `base` directly to avoid double-clamping that would
+                // drop the last 1-2 chars at high precision.
+                let base = maybe_remove_trailing_redundant_chars(base.to_owned(), alternate_form);
+                let point = decimal_point_or_empty(exp_precision, alternate_form);
+                format!("{base}{point}{e}{exponent:+#03}")
+            } else {
+                let precision =
+                    clamp_fmt_precision(((precision as i64) - 1 - exponent).max(0) as usize);
+                let magnitude = format!("{magnitude:.precision$}");
+                let base = maybe_remove_trailing_redundant_chars(magnitude, alternate_form);
+                let point = decimal_point_or_empty(precision, alternate_form);
+                format!("{base}{point}")
+            }
+        }
+        magnitude if magnitude.is_nan() => format_nan(case),
+        magnitude if magnitude.is_infinite() => format_inf(case),
+        _ => "".to_string(),
+    }
+}
+
+pub(crate) fn prefer_cpython_tie_repr(s: String, value: f64) -> String {
+    // Rust's shortest float formatter can land on the odd-digit neighbour of a
+    // rounding tie where round-half-to-even (what `repr` uses) picks the even
+    // one. When the last significant digit is odd and its even neighbour still
+    // round-trips and is no further from the value, prefer the even neighbour.
+    let boundary = s.find('e').unwrap_or(s.len());
+    let Some(digit_pos) = s[..boundary].bytes().rposition(|b| b.is_ascii_digit()) else {
+        return s;
+    };
+
+    let digit = s.as_bytes()[digit_pos];
+    if digit == b'0' {
+        return s;
+    }
+    let decremented = digit - 1;
+    if !(decremented - b'0').is_multiple_of(2) {
+        return s;
+    }
+
+    let mut candidate = s.clone();
+    candidate.replace_range(
+        digit_pos..=digit_pos,
+        core::str::from_utf8(&[decremented]).unwrap(),
+    );
+    if parse_str(&candidate).is_none_or(|parsed| parsed.to_bits() != value.to_bits()) {
+        return s;
+    }
+
+    let Some(current_distance) = decimal_distance_to_f64(&s, value) else {
+        return s;
+    };
+    let Some(candidate_distance) = decimal_distance_to_f64(&candidate, value) else {
+        return s;
+    };
+
+    if candidate_distance <= current_distance {
+        candidate
+    } else {
+        s
+    }
+}
+
+fn checked_pow_u128(base: u128, exp: u32) -> Option<u128> {
+    let mut result = 1u128;
+    for _ in 0..exp {
+        result = result.checked_mul(base)?;
+    }
+    Some(result)
+}
+
+fn parse_decimal_rational(s: &str) -> Option<(u128, u32)> {
+    let (mantissa, exponent) = match s.find('e') {
+        Some(pos) => (&s[..pos], s[pos + 1..].parse::<i32>().ok()?),
+        None => (s, 0),
+    };
+    let significand = mantissa.strip_prefix('-').unwrap_or(mantissa);
+    let dot_pos = significand.find('.');
+    let frac_digits = dot_pos.map_or(0, |pos| significand.len().saturating_sub(pos + 1));
+    let mut digits = String::with_capacity(significand.len());
+    for ch in significand.chars() {
+        if ch != '.' {
+            digits.push(ch);
+        }
+    }
+    let mut int = digits.parse::<u128>().ok()?;
+    let mut scale = i32::try_from(frac_digits).ok()? - exponent;
+    if scale < 0 {
+        int = int.checked_mul(checked_pow_u128(10, (-scale) as u32)?)?;
+        scale = 0;
+    }
+    Some((int, scale as u32))
+}
+
+fn f64_mantissa_exponent(value: f64) -> Option<(u128, i32)> {
+    let bits = value.abs().to_bits();
+    let exponent = ((bits >> 52) & 0x7ff) as i32;
+    let fraction = bits & ((1u64 << 52) - 1);
+    if exponent == 0 {
+        Some((u128::from(fraction), 1 - 1023 - 52))
+    } else if exponent < 0x7ff {
+        Some((u128::from((1u64 << 52) | fraction), exponent - 1023 - 52))
+    } else {
+        None
+    }
+}
+
+fn decimal_distance_to_f64(s: &str, value: f64) -> Option<u128> {
+    let (decimal_int, decimal_scale) = parse_decimal_rational(s)?;
+    let (mantissa, binary_exponent) = f64_mantissa_exponent(value)?;
+    if binary_exponent >= 0 || decimal_scale > 38 {
+        return None;
+    }
+
+    let binary_scale = u32::try_from(-binary_exponent).ok()?;
+    let common_twos = decimal_scale.max(binary_scale);
+    let decimal_scaled =
+        decimal_int.checked_mul(checked_pow_u128(2, common_twos - decimal_scale)?)?;
+    let five_power = checked_pow_u128(5, decimal_scale)?;
+    let binary_scaled = mantissa
+        .checked_mul(checked_pow_u128(2, common_twos - binary_scale)?)?
+        .checked_mul(five_power)?;
+
+    Some(decimal_scaled.abs_diff(binary_scaled))
+}
+
+// TODO: rewrite using format_general
+#[must_use]
+pub fn to_string(value: f64) -> String {
+    let lit = format!("{value:e}");
+    if let Some(position) = lit.find('e') {
+        let significand = &lit[..position];
+        let exponent = &lit[position + 1..];
+        let exponent = exponent.parse::<i32>().unwrap();
+        if exponent < 16 && exponent > -5 {
+            if is_integer(value) {
+                format!("{value:.1?}")
+            } else {
+                prefer_cpython_tie_repr(value.to_string(), value)
+            }
+        } else {
+            prefer_cpython_tie_repr(format!("{significand}e{exponent:+#03}"), value)
+        }
+    } else {
+        let mut s = value.to_string();
+        s.make_ascii_lowercase();
+        s
+    }
+}
+
+const HEX_FLOAT_MANTISSA_BITS_MAX: u32 = 64;
+const HEX_DIGIT_BITS: isize = 4;
+const HEX_DIGITS_PER_MANTISSA: isize = 16;
+const HEX_FLOAT_EXPONENT_LIMIT: isize = 0xffff;
+const DECIMAL_RADIX: isize = 10;
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn parse_hex_float_parts(text: &[u8]) -> Option<(bool, u64, isize)> {
+    let (text, negative) = match text.split_first() {
+        Some((&b'+', rest)) => (rest, false),
+        Some((&b'-', rest)) => (rest, true),
+        Some(_) => (text, false),
+        None => return None,
+    };
+    let mut text = text
+        .strip_prefix(b"0x")
+        .or_else(|| text.strip_prefix(b"0X"))?;
+    let mut mantissa: u64 = 0;
+    let mut digit_seen = false;
+    while let Some(digit) = text.first().copied().and_then(hex_digit) {
+        text = &text[1..];
+        digit_seen = true;
+        if mantissa >> (HEX_FLOAT_MANTISSA_BITS_MAX - 4) != 0 {
+            return None;
+        }
+        mantissa = (mantissa << 4) | u64::from(digit);
+    }
+    let mut fraction_digits: isize = 0;
+    let mut pending_zeros: isize = 0;
+    let mut fraction_digit_seen = false;
+    if let Some(rest) = text.strip_prefix(b".") {
+        text = rest;
+        while let Some(digit) = text.first().copied().and_then(hex_digit) {
+            text = &text[1..];
+            fraction_digit_seen = true;
+            if digit == 0 {
+                pending_zeros = pending_zeros.checked_add(1)?;
+            } else {
+                let new_digits = pending_zeros.checked_add(1)?;
+                fraction_digits = fraction_digits.checked_add(new_digits)?;
+                pending_zeros = 0;
+                if mantissa != 0 {
+                    if new_digits >= HEX_DIGITS_PER_MANTISSA
+                        || mantissa >> (64 - new_digits * HEX_DIGIT_BITS) != 0
+                    {
+                        return None;
+                    }
+                    mantissa <<= new_digits * HEX_DIGIT_BITS;
+                }
+                mantissa |= u64::from(digit);
+            }
+        }
+    }
+    if !(digit_seen || fraction_digit_seen) {
+        return None;
+    }
+    let text = match text.split_first() {
+        Some((&(b'P' | b'p'), rest)) => rest,
+        _ => return None,
+    };
+    let (mut text, negative_exponent) = match text.split_first() {
+        Some((&b'+', rest)) => (rest, false),
+        Some((&b'-', rest)) => (rest, true),
+        Some(_) => (text, false),
+        None => return None,
+    };
+    let mut exponent_digit_seen = false;
+    let mut exponent: isize = 0;
+    loop {
+        match text.split_first() {
+            Some((&digit @ b'0'..=b'9', rest)) => {
+                text = rest;
+                exponent_digit_seen = true;
+                if mantissa != 0 {
+                    exponent = exponent
+                        .checked_mul(DECIMAL_RADIX)
+                        .and_then(|value| value.checked_add(isize::from(digit - b'0')))?;
+                }
+            }
+            None if exponent_digit_seen => break,
+            _ => return None,
+        }
+    }
+    if negative_exponent {
+        exponent = -exponent;
+    }
+    if mantissa == 0 {
+        return Some((negative, 0, 0));
+    }
+    let exponent = fraction_digits
+        .checked_mul(HEX_DIGIT_BITS)
+        .and_then(|value| exponent.checked_sub(value))?;
+    Some((negative, mantissa, exponent))
+}
+
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_wrap)]
+fn hex_float_value(negative: bool, mantissa: u64, exponent: isize) -> Option<f64> {
+    if !(-HEX_FLOAT_EXPONENT_LIMIT..=HEX_FLOAT_EXPONENT_LIMIT).contains(&exponent) {
+        return None;
+    }
+    let trailing = mantissa.trailing_zeros() & 63;
+    let mantissa = mantissa >> trailing;
+    let exponent = exponent + trailing as isize;
+    let leading = mantissa.leading_zeros();
+    let normal_exponent = exponent + (63 - leading as isize);
+    let mantissa_bits = if normal_exponent < f64::MIN_EXP as isize - f64::MANTISSA_DIGITS as isize {
+        return None;
+    } else if normal_exponent < (f64::MIN_EXP - 1) as isize {
+        f64::MANTISSA_DIGITS as isize - f64::MIN_EXP as isize + normal_exponent + 1
+    } else if normal_exponent < f64::MAX_EXP as isize {
+        f64::MANTISSA_DIGITS as isize
+    } else {
+        return None;
+    };
+    if mantissa >> mantissa_bits != 0 {
+        return None;
+    }
+    let mut value = mantissa as f64;
+    if negative {
+        value = -value;
+    }
+    Some(value * power_of_two(exponent))
+}
+
+const DOUBLE_EXPONENT_BIAS: isize = 1023;
+const DOUBLE_EXPONENT_MAX: isize = 1023;
+const DOUBLE_EXPONENT_MIN_NORMAL: isize = -1022;
+const DOUBLE_EXPONENT_MIN_SUBNORMAL: isize = -1074;
+const DOUBLE_MANTISSA_BITS: isize = 52;
+
+#[allow(clippy::cast_sign_loss)]
+fn power_of_two(exponent: isize) -> f64 {
+    if exponent > DOUBLE_EXPONENT_MAX {
+        f64::INFINITY
+    } else if exponent >= DOUBLE_EXPONENT_MIN_NORMAL {
+        f64::from_bits(((exponent + DOUBLE_EXPONENT_BIAS) as u64) << DOUBLE_MANTISSA_BITS)
+    } else if exponent >= DOUBLE_EXPONENT_MIN_SUBNORMAL {
+        f64::from_bits(1u64 << (exponent - DOUBLE_EXPONENT_MIN_SUBNORMAL))
+    } else {
+        0.0
+    }
+}
+
+fn parse_hex_float(text: &str) -> Option<f64> {
+    let (negative, mantissa, exponent) = parse_hex_float_parts(text.as_bytes())?;
+    hex_float_value(negative, mantissa, exponent)
+}
+
+#[must_use]
+pub fn from_hex(s: &str) -> Option<f64> {
+    if let Some(f) = parse_hex_float(s) {
+        return Some(f);
+    }
+    match s.to_ascii_lowercase().as_str() {
+        "nan" | "+nan" | "-nan" => Some(f64::NAN),
+        "inf" | "infinity" | "+inf" | "+infinity" => Some(f64::INFINITY),
+        "-inf" | "-infinity" => Some(f64::NEG_INFINITY),
+        value => {
+            let mut hex = String::with_capacity(value.len());
+            let has_0x = value.contains("0x");
+            let has_p = value.contains('p');
+            let has_dot = value.contains('.');
+            let mut start = 0;
+
+            if !has_0x && value.starts_with('-') {
+                hex.push_str("-0x");
+                start += 1;
+            } else if !has_0x {
+                hex.push_str("0x");
+                if value.starts_with('+') {
+                    start += 1;
+                }
+            }
+
+            for (index, ch) in value.chars().enumerate() {
+                if ch == 'p' {
+                    if has_dot {
+                        hex.push('p');
+                    } else {
+                        hex.push_str(".p");
+                    }
+                } else if index >= start {
+                    hex.push(ch);
+                }
+            }
+
+            if !has_p && has_dot {
+                hex.push_str("p0");
+            } else if !has_p && !has_dot {
+                hex.push_str(".p0")
+            }
+
+            parse_hex_float(hex.as_str())
+        }
+    }
+}
+
+#[must_use]
+pub fn to_hex(value: f64) -> String {
+    let bits = value.to_bits();
+    let sign_fmt = if bits >> 63 != 0 { "-" } else { "" };
+    match value {
+        value if value == 0.0 => format!("{sign_fmt}0x0.0p+0"),
+        value if value.is_infinite() => format!("{sign_fmt}inf"),
+        value if value.is_nan() => "nan".to_owned(),
+        _ => {
+            const FRACT_MASK: u64 = (1u64 << 52) - 1;
+            const EXP_MASK: u64 = 0x7ff;
+            let exponent = (bits >> 52) & EXP_MASK;
+            let fraction = bits & FRACT_MASK;
+            if exponent == 0 {
+                format!("{sign_fmt}0x0.{fraction:013x}p-1022")
+            } else {
+                let exponent = i32::try_from(exponent).unwrap() - 1023;
+                format!("{sign_fmt}0x1.{fraction:013x}p{exponent:+}")
+            }
+        }
+    }
+}

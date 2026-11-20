@@ -1,0 +1,5 @@
+[build]
+rustc-wrapper = "scripts/buildcache"
+
+[env]
+MACOSX_DEPLOYMENT_TARGET = "12.3"

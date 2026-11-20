@@ -1,0 +1,38 @@
+[package]
+autotests = false
+autobenches = false
+name = "nanocode-subagents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Composable task-tree subagents for Nanocode"
+
+[dependencies]
+nanocode-platform.workspace = true
+nanocode-agent-core.workspace = true
+nanocode-board.workspace = true
+nanocode-dispatch.workspace = true
+nanocode-dispatcher.workspace = true
+nanocode-turnlog.workspace = true
+nanocode-durability-core.workspace = true
+nanocode-schema.workspace = true
+nanocode-sync.workspace = true
+nanocode-tool-contracts.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+nanocode-trace.workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+
+[lints]
+workspace = true
+
+[lib]
+doctest = false
+bench = false

@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")/.."
+cargo build --locked --release -p nanocode-cli
+cargo build --locked -p nanocode-cli

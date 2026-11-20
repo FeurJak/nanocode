@@ -1,0 +1,607 @@
+use std::{
+    collections::{HashMap, HashSet},
+    fs::{File, OpenOptions},
+    io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write},
+};
+
+use serde::{Deserialize, Serialize, Serializer, ser::SerializeStruct};
+use serde_json::value::RawValue;
+use std::borrow::Cow;
+
+use super::{
+    Claim, Claimed, Counted, Documents, IndexedRecord, JOURNAL_READ_BUFFER_BYTES, Journal, Kind,
+    Location, OwnerToken, Owners, Record, Spanned, Spans, StoreError, Unit, Verdict,
+};
+use super::{
+    backend, claim, identity, identity_changed, index::Index, judge, scan, sync_journal,
+    value_digest,
+};
+use nanocode_durability_core::OwnerId;
+
+const RECORD_FRAME: &str = r#"{"key":"","value":},"#;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompactionStats {
+    pub before_bytes: u64,
+    pub after_bytes: u64,
+    pub records_removed: u64,
+}
+
+#[derive(Deserialize)]
+struct Header {
+    nanocode_journal: Option<String>,
+}
+
+#[derive(Default)]
+struct Arbiter {
+    owners: HashMap<String, OwnerToken>,
+    revisions: HashMap<String, u64>,
+}
+
+impl Owners for Arbiter {
+    fn owner(&self, id: &str) -> Option<&OwnerToken> {
+        self.owners.get(id)
+    }
+
+    fn revision(&self, id: &str) -> u64 {
+        self.revisions.get(id).copied().unwrap_or_default()
+    }
+}
+
+impl Arbiter {
+    fn apply(&mut self, claims: &[Claim<'_>]) {
+        for claim in claims {
+            match claim.kind {
+                Claimed::Acquire => {
+                    self.owners
+                        .insert(claim.state_id.to_owned(), claim.owner.clone());
+                }
+                Claimed::Replace(revision) => {
+                    self.revisions.insert(claim.state_id.to_owned(), revision);
+                }
+                Claimed::Import { revision, .. } => {
+                    self.owners
+                        .insert(claim.state_id.to_owned(), claim.owner.clone());
+                    self.revisions.insert(claim.state_id.to_owned(), revision);
+                }
+                Claimed::Records => {}
+            }
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum Line<'a> {
+    Acquire {
+        state_id: &'a str,
+        owner: &'a OwnerToken,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        nanocode_journal: Option<&'a str>,
+    },
+    Replace {
+        state_id: &'a str,
+        owner: &'a OwnerToken,
+        revision: u64,
+        payload: Kept<'a>,
+        records: Spanned<'a, [IndexedRecord<'a>]>,
+    },
+    Import {
+        state_id: &'a str,
+        owner: &'a OwnerToken,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        after: Option<&'a OwnerToken>,
+        revision: u64,
+        payload: Kept<'a>,
+        records: Spanned<'a, [IndexedRecord<'a>]>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        nanocode_journal: Option<&'a str>,
+    },
+    Records {
+        state_id: &'a str,
+        owner: &'a OwnerToken,
+        records: Spanned<'a, [IndexedRecord<'a>]>,
+    },
+}
+
+impl Serialize for Spanned<'_, [IndexedRecord<'_>]> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.value.iter().map(|value| Spanned {
+            value,
+            spans: self.spans,
+        }))
+    }
+}
+
+impl Serialize for Spanned<'_, IndexedRecord<'_>> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut record = serializer.serialize_struct("IndexedRecord", 2)?;
+        record.serialize_field("key", &self.value.key)?;
+        record.serialize_field(
+            "value",
+            &Spanned {
+                value: self.value.value,
+                spans: self.spans,
+            },
+        )?;
+        record.end()
+    }
+}
+
+impl Serialize for Spanned<'_, [u8]> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let start = self.spans.written.get();
+        let written = Kept(self.value).serialize(serializer)?;
+        self.spans
+            .values
+            .borrow_mut()
+            .push(start..self.spans.written.get());
+        Ok(written)
+    }
+}
+
+struct Kept<'a>(&'a [u8]);
+
+impl Kept<'_> {
+    fn document(&self) -> bool {
+        !self.0.starts_with(b"\"")
+    }
+}
+
+impl Serialize for Kept<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.document() {
+            return serializer.serialize_u64(self.0.len() as u64);
+        }
+        serde_json::from_slice::<&RawValue>(self.0)
+            .map_err(serde::ser::Error::custom)?
+            .serialize(serializer)
+    }
+}
+
+pub(super) fn lineage(file: &mut File, source: &str) -> Result<String, StoreError> {
+    file.seek(SeekFrom::Start(0)).map_err(backend)?;
+    let mut line = Vec::new();
+    BufReader::new(file)
+        .read_until(b'\n', &mut line)
+        .map_err(backend)?;
+    if line.last() != Some(&b'\n') {
+        return Ok(source.into());
+    }
+    let (header, _) = Documents::of::<Header>(&line).map_err(backend)?;
+    Ok(header.nanocode_journal.unwrap_or_else(|| source.into()))
+}
+
+impl Journal {
+    pub(super) fn reopen_compacted(&mut self) -> Result<(), StoreError> {
+        let file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&self.path)
+            .map_err(backend)?;
+        let mut reads = File::open(&self.path).map_err(backend)?;
+        let source = identity(&file.metadata().map_err(backend)?)?;
+        if identity(&reads.metadata().map_err(backend)?)? != source {
+            return Ok(());
+        }
+        if lineage(&mut reads, &source)? != self.lineage {
+            return Err(identity_changed());
+        }
+        self.harden()?;
+        self.synced = std::sync::Arc::new(file.try_clone().map_err(backend)?);
+        self.file = file;
+        self.reads = reads;
+        self.index = Index::new(source);
+        self.persisted_offset = None;
+        self.invalid_index = None;
+        self.cached = None;
+        self.sealed = None;
+        if self.sidecar {
+            self.restore_index();
+        }
+        Ok(())
+    }
+
+    pub(super) fn superseded(&self) -> bool {
+        let mut entries = HashSet::new();
+        let mut live = 0_u64;
+        for state in self.index.states.values() {
+            let entry = state.location;
+            if entries.insert(entry.position) {
+                live += entry.length as u64;
+            }
+            let within = entry.position..entry.position + entry.length as u64;
+            for (key, record) in state.records.sized() {
+                match *record {
+                    Record::Entry(location) => {
+                        if entries.insert(location.position) {
+                            live += location.length as u64;
+                        }
+                    }
+                    Record::Value { location, .. } if !within.contains(&location.position) => {
+                        live += (RECORD_FRAME.len() + key + location.length) as u64;
+                    }
+                    Record::Value { .. } => {}
+                }
+            }
+        }
+        self.index.offset.saturating_sub(live) > live
+    }
+
+    pub(super) fn compact(&mut self) -> Result<CompactionStats, StoreError> {
+        let (seal, end) = loop {
+            self.writable()?;
+            if self.sidecar {
+                self.clear_temporaries().map_err(backend)?;
+            }
+            if self.index.offset == 0 {
+                return Ok(CompactionStats {
+                    before_bytes: 0,
+                    after_bytes: 0,
+                    records_removed: 0,
+                });
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if self.file.metadata().map_err(backend)?.nlink() != 1 {
+                    return Err(StoreError::NotCommitted(
+                        "cannot compact a journal with hard links".into(),
+                    ));
+                }
+            }
+            let seal = OwnerId::new().as_str().to_owned();
+            if let Some(end) = self.seal(&seal)? {
+                break (seal, end);
+            }
+        };
+        let compacted = self.rebuilt(|store| store.compact_sealed(end));
+        if !matches!(compacted, Ok(Some(_)))
+            && let Err(error) = self.append_marker(&super::Line::Unseal { seal: &seal })
+        {
+            nanocode_trace::warn!(%error, "could not release the JSONL compaction seal");
+            return Err(compacted.err().unwrap_or(error));
+        }
+        let Some(stats) = compacted? else {
+            return Ok(CompactionStats {
+                before_bytes: end,
+                after_bytes: end,
+                records_removed: 0,
+            });
+        };
+        self.refresh_index()?;
+        self.persist_index();
+        Ok(stats)
+    }
+
+    fn compact_sealed(&mut self, end: u64) -> Result<Option<CompactionStats>, StoreError> {
+        let span = nanocode_trace::info_span!(
+            "durability.jsonl.compact",
+            before_bytes = end,
+            after_bytes = nanocode_trace::field::Empty,
+            records_removed = nanocode_trace::field::Empty
+        );
+        let _entered = span.enter();
+        let metadata = self.file.metadata().map_err(backend)?;
+        let mut stats = CompactionStats {
+            before_bytes: end,
+            after_bytes: end,
+            records_removed: 0,
+        };
+        let directory = self
+            .path
+            .parent()
+            .ok_or_else(|| backend("journal has no directory"))?;
+        let directory = directory.to_owned();
+        let mut temporary = self.temporary(".compact-").map_err(backend)?;
+        temporary
+            .as_file()
+            .set_permissions(metadata.permissions())
+            .map_err(backend)?;
+        let empty: &[u8] = b"\"\"";
+        let mut input = BufReader::with_capacity(
+            JOURNAL_READ_BUFFER_BYTES,
+            File::open(&self.path).map_err(backend)?,
+        );
+        let mut output =
+            BufWriter::with_capacity(JOURNAL_READ_BUFFER_BYTES, temporary.as_file_mut());
+        let mut moved = Vec::new();
+        let mut converted = HashMap::new();
+        let mut current = HashMap::with_capacity(self.index.states.len());
+        let mut encoded = Vec::new();
+        let mut written = 0_u64;
+        let mut last = None;
+        let mut arbiter = Arbiter::default();
+        let mut sealed: Option<String> = None;
+        scan(&mut input, 0, end, true, |unit, _| {
+            let Unit::Entries(lines) = unit else {
+                return Ok(());
+            };
+            if let [(_, entry, _)] = lines.as_slice()
+                && matches!(entry.kind, Kind::Seal | Kind::Unseal)
+            {
+                let seal = entry.seal.as_deref().map(str::to_owned);
+                match entry.kind {
+                    Kind::Seal if sealed.is_none() => sealed = seal,
+                    Kind::Unseal if sealed.is_some() && sealed == seal => sealed = None,
+                    _ => {}
+                }
+                return Ok(());
+            }
+            if sealed.is_some() {
+                return Ok(());
+            }
+            let claims = lines
+                .iter()
+                .map(|(_, entry, _)| claim(entry))
+                .collect::<Result<Vec<_>, _>>()?;
+            if matches!(judge(&arbiter, &claims)?, Verdict::Stale) {
+                return Ok(());
+            }
+            arbiter.apply(&claims);
+            for (location, entry, line) in &lines {
+                let position = location.position;
+                let id = entry
+                    .state_id
+                    .as_deref()
+                    .ok_or_else(|| backend("missing state"))?;
+                let owner = entry
+                    .owner
+                    .as_ref()
+                    .ok_or_else(|| backend("missing owner"))?;
+                let spans = Spans::default();
+                encoded.clear();
+                match entry.kind {
+                    Kind::Acquire => {
+                        serde_json::to_writer(
+                            Counted {
+                                bytes: &mut encoded,
+                                spans: &spans,
+                            },
+                            &Line::Acquire {
+                                state_id: id,
+                                owner,
+                                nanocode_journal: (written == 0).then_some(self.lineage.as_str()),
+                            },
+                        )
+                        .map_err(backend)?;
+                    }
+                    Kind::Replace | Kind::Import | Kind::Records => {
+                        let carries_payload = !matches!(entry.kind, Kind::Records);
+                        if carries_payload && entry.payload.is_none() {
+                            return Err(backend("missing payload"));
+                        }
+                        let revision = if carries_payload {
+                            entry.revision.ok_or_else(|| backend("missing revision"))?
+                        } else {
+                            0
+                        };
+                        let original = if carries_payload
+                            && self
+                                .index
+                                .states
+                                .get(id)
+                                .is_some_and(|state| state.location == *location)
+                        {
+                            entry.payload
+                        } else {
+                            None
+                        };
+                        let mut keys = HashSet::new();
+                        let mut records = Vec::new();
+                        let mut sources = Vec::new();
+                        for record in entry
+                            .records
+                            .as_ref()
+                            .ok_or_else(|| backend("missing records"))?
+                        {
+                            let retained = match self.location(id, &record.key)? {
+                                Some(Record::Entry(indexed)) => (indexed == *location
+                                    && keys.insert(record.key.to_string()))
+                                .then(|| {
+                                    (
+                                        Record::Entry(indexed),
+                                        value_digest(id, &record.key, record.value),
+                                    )
+                                }),
+                                Some(Record::Value {
+                                    location: value,
+                                    digest,
+                                }) => {
+                                    let current = Record::located(
+                                        id,
+                                        &record.key,
+                                        line,
+                                        position,
+                                        record.value,
+                                    );
+                                    if current.location() == value {
+                                        if current
+                                            != (Record::Value {
+                                                location: value,
+                                                digest,
+                                            })
+                                        {
+                                            return Err(self
+                                                .invalidated("record changed during compaction"));
+                                        }
+                                        Some((current, digest))
+                                    } else {
+                                        None
+                                    }
+                                }
+                                None => {
+                                    return Err(
+                                        self.invalidated("record missing during compaction")
+                                    );
+                                }
+                            };
+                            match retained {
+                                Some(source) => {
+                                    records.push(IndexedRecord {
+                                        key: Cow::Borrowed(&record.key),
+                                        value: record.value,
+                                    });
+                                    sources.push(source);
+                                }
+                                None => stats.records_removed += 1,
+                            }
+                        }
+                        let payload = Kept(original.unwrap_or(empty));
+                        let framed = payload.document()
+                            || records.iter().any(|record| Kept(record.value).document());
+                        if framed {
+                            encoded.push(b'[');
+                        }
+                        let kept = payload.document().then_some(payload.0);
+                        let records_line = Spanned {
+                            value: records.as_slice(),
+                            spans: &spans,
+                        };
+                        let written_line = match entry.kind {
+                            Kind::Import => Line::Import {
+                                state_id: id,
+                                owner,
+                                after: entry.after.as_ref(),
+                                revision,
+                                payload,
+                                records: records_line,
+                                nanocode_journal: (written == 0).then_some(self.lineage.as_str()),
+                            },
+                            Kind::Records if records.is_empty() => continue,
+                            Kind::Records => Line::Records {
+                                state_id: id,
+                                owner,
+                                records: records_line,
+                            },
+                            _ => Line::Replace {
+                                state_id: id,
+                                owner,
+                                revision,
+                                payload,
+                                records: records_line,
+                            },
+                        };
+                        serde_json::to_writer(
+                            Counted {
+                                bytes: &mut encoded,
+                                spans: &spans,
+                            },
+                            &written_line,
+                        )
+                        .map_err(backend)?;
+                        if framed {
+                            if let Some(payload) = kept {
+                                encoded.push(b',');
+                                encoded.extend_from_slice(payload);
+                            }
+                            for (index, record) in records.iter().enumerate() {
+                                if Kept(record.value).document() {
+                                    encoded.push(b',');
+                                    let at = encoded.len();
+                                    encoded.extend_from_slice(record.value);
+                                    spans.values.borrow_mut()[index] = at..encoded.len();
+                                }
+                            }
+                            encoded.push(b']');
+                        }
+                        if original.is_some() {
+                            current.insert(
+                                position,
+                                Location {
+                                    position: written,
+                                    length: encoded.len() + 1,
+                                },
+                            );
+                        }
+                        for ((record, (source, digest)), span) in
+                            records.iter().zip(sources).zip(spans.values.take())
+                        {
+                            let target = Location {
+                                position: written + span.start as u64,
+                                length: span.len(),
+                            };
+                            match source {
+                                Record::Value { location, .. } => {
+                                    moved.push((location.position, target));
+                                }
+                                Record::Entry(entry) => {
+                                    converted.insert(
+                                        (entry.position, record.key.to_string()),
+                                        Record::Value {
+                                            location: target,
+                                            digest,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Kind::Seal | Kind::Unseal => {
+                        return Err(backend("JSONL seal inside an entry batch"));
+                    }
+                }
+                encoded.push(b'\n');
+                output.write_all(&encoded).map_err(backend)?;
+                last = Some(Location {
+                    position: written,
+                    length: encoded.len(),
+                });
+                written += encoded.len() as u64;
+            }
+            Ok(())
+        })?;
+        output.flush().map_err(backend)?;
+        drop(output);
+        if written >= stats.before_bytes {
+            return Ok(None);
+        }
+        sync_journal(temporary.as_file()).map_err(backend)?;
+        let persisted = temporary
+            .persist(&self.path)
+            .map_err(|error| backend(error.error))?;
+        #[cfg(unix)]
+        File::open(directory)
+            .and_then(|file| sync_journal(&file))
+            .map_err(backend)?;
+        let source = identity(&persisted.metadata().map_err(backend)?)?;
+        drop(persisted);
+        let file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&self.path)
+            .map_err(backend)?;
+        let reads = File::open(&self.path).map_err(backend)?;
+        if identity(&file.metadata().map_err(backend)?)? != source
+            || identity(&reads.metadata().map_err(backend)?)? != source
+        {
+            return Err(identity_changed());
+        }
+        self.file = file;
+        self.reads = reads;
+        self.sealed = None;
+        self.persisted_offset = None;
+        self.invalid_index = None;
+        self.cached = None;
+        let relocated = self
+            .index
+            .relocate(written, last, &current, |key, record| match record {
+                Record::Value { location, digest } => moved
+                    .binary_search_by_key(&location.position, |(position, _)| *position)
+                    .ok()
+                    .map(|found| Record::Value {
+                        location: moved[found].1,
+                        digest,
+                    }),
+                Record::Entry(entry) => converted.remove(&(entry.position, key.to_owned())),
+            });
+        self.index.source = source;
+        if let Err(error) = relocated {
+            self.discard_index(error);
+        }
+        stats.after_bytes = written;
+        span.record("after_bytes", written);
+        span.record("records_removed", stats.records_removed);
+        Ok(Some(stats))
+    }
+}

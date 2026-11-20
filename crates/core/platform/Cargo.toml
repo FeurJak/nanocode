@@ -1,0 +1,28 @@
+[package]
+name = "nanocode-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Rust host interfaces for portable Nanocode execution"
+autotests = false
+autobenches = false
+
+[dependencies]
+nanocode-digest.workspace = true
+nanocode-sys.workspace = true
+serde.workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+rustls-pki-types = { version = "1.15.0", features = ["std"] }
+nanocode-executor.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+test = false
+doctest = false
+bench = false

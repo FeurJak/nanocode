@@ -1,0 +1,550 @@
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
+
+use crate::tools::{
+    BashExecution, BashExecutor, BashRequest, BashResult, ClaudeBash,
+    host::{HostTool, MAX_TASK_OUTPUT_TIMEOUT_MS},
+    text_files,
+};
+use nanocode_agent_core::input::ImageDetail;
+use nanocode_process_contracts::{FileHost, ForegroundCommand, ForegroundExecutor};
+use nanocode_sync::future::{AbortHandle, abortable};
+use nanocode_sync::{Atom, Signal};
+use nanocode_sys::base64::STANDARD;
+use nanocode_tool_host::{
+    Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, Tools, ToolsBuildError,
+    contract::ToolOutputContent, embedded::HostFuture,
+};
+use serde_json::{Value, json};
+
+const IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "webp", "bmp"];
+
+const BACKGROUND_NOTE: &str = "Nothing notifies you when it finishes, and it stops if this session's host shuts down, which can happen once your turn ends: check on it with TaskOutput (with block: true it waits up to timeout milliseconds) and stop it with TaskStop, and wait for it before your final response if you need its result.";
+
+#[cfg(not(target_family = "wasm"))]
+fn spawn(future: impl std::future::Future<Output = ()> + Send + 'static) {
+    drop(nanocode_platform::spawn_task(future));
+}
+
+#[cfg(target_family = "wasm")]
+fn spawn(future: impl std::future::Future<Output = ()> + 'static) {
+    nanocode_platform::spawn_local(future);
+}
+
+pub fn host_tools(
+    workspace: PathBuf,
+    files: Arc<dyn FileHost>,
+    shell: Arc<dyn ForegroundExecutor>,
+) -> Result<Tools, ToolsBuildError> {
+    let workspace: Arc<Path> = workspace.into();
+    let jobs = Arc::new(HostJobs::default());
+    let mut tools = file_tools(Arc::clone(&workspace), files);
+    tools = tools.tool(HostBashTool(ClaudeBash::new(HostBash {
+        workspace,
+        shell,
+        jobs: Arc::clone(&jobs),
+    })));
+    for tool in [HostTool::TaskOutput, HostTool::TaskStop] {
+        tools = tools.tool(HostTaskTool {
+            tool,
+            jobs: Arc::clone(&jobs),
+        });
+    }
+    tools
+        .build()
+        .map(|tools| tools.with_code_mode_policy(crate::code_mode_policy::claude_tool_policy()))
+}
+
+pub fn host_file_tools(
+    workspace: PathBuf,
+    files: Arc<dyn FileHost>,
+) -> Result<Tools, ToolsBuildError> {
+    file_tools(workspace.into(), files)
+        .build()
+        .map(|tools| tools.with_code_mode_policy(crate::code_mode_policy::claude_tool_policy()))
+}
+
+fn file_tools(workspace: Arc<Path>, files: Arc<dyn FileHost>) -> nanocode_tool_host::ToolsBuilder {
+    let mut tools = Tools::builder().without_defaults();
+    for name in ["Read", "Edit", "Write"] {
+        let upstream = nanocode_backend_claude_tools::upstream::tool(name);
+        let name = name.to_owned();
+        tools = tools.tool(HostFileTool {
+            definition: ToolDefinition::function(
+                name.clone(),
+                upstream.description.clone(),
+                upstream.input_schema(),
+            )
+            .with_output_schema(crate::claude_output::host_schema(&name)),
+            name,
+            workspace: Arc::clone(&workspace),
+            files: Arc::clone(&files),
+        });
+    }
+    tools
+}
+
+struct HostFileTool {
+    name: String,
+    definition: ToolDefinition,
+    workspace: Arc<Path>,
+    files: Arc<dyn FileHost>,
+}
+
+impl HostFileTool {
+    async fn run(&self, input: &Value, budget: usize) -> Result<String, String> {
+        text_files::check(&self.name, input)?;
+        let file_path = input
+            .get("file_path")
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+            .ok_or("missing or invalid file_path")?;
+        let path = self.workspace.join(file_path);
+        match self.name.as_str() {
+            "Read" => {
+                if let Some(error) = text_files::binary(file_path) {
+                    return Err(error);
+                }
+                if input.get("pages").is_some() {
+                    return Err("pages is only applicable to PDF files".into());
+                }
+                let content = self.existing(&path).await?;
+                text_files::read(file_path, content.len() as u64, input, budget, || {
+                    Ok(content
+                        .split('\n')
+                        .map(|line| Ok(line.trim_end_matches('\r').to_owned())))
+                })
+            }
+            "Write" => {
+                let content = input
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .ok_or("missing or invalid content")?;
+                let existed = self.existing(&path).await.is_ok();
+                self.files.write(&path, content).await?;
+                Ok(crate::tools::text_files::written(file_path, existed))
+            }
+            _ => {
+                let edit = text_files::Edit::parse(input)?;
+                let content = match self.files.read(&path).await {
+                    Ok(Some(content)) => content,
+                    Ok(None) if edit.creates() => String::new(),
+                    Ok(None) => return Err(self.missing()),
+                    Err(error) if directory(&error) => {
+                        return Err(
+                            "Error calling tool (Edit): EISDIR: illegal operation on a directory, read"
+                                .into(),
+                        );
+                    }
+                    Err(error) => return Err(error),
+                };
+                let (updated, _) = edit.apply(&content)?;
+                self.files.write(&path, &updated).await?;
+                Ok(crate::tools::text_files::edited(
+                    file_path,
+                    edit.replace_all(),
+                ))
+            }
+        }
+    }
+
+    async fn image(&self, input: &Value) -> Option<Result<ToolOutput, String>> {
+        let file_path = input.get("file_path").and_then(Value::as_str)?;
+        let path = self.workspace.join(file_path);
+        let extension = path.extension().and_then(|extension| extension.to_str())?;
+        if self.name != "Read"
+            || !IMAGE_EXTENSIONS
+                .iter()
+                .any(|known| extension.eq_ignore_ascii_case(known))
+        {
+            return None;
+        }
+        Some(self.read_image(input, &path).await)
+    }
+
+    async fn read_image(&self, input: &Value, path: &Path) -> Result<ToolOutput, String> {
+        text_files::check(&self.name, input)?;
+        if input.get("pages").is_some() {
+            return Err("pages is only applicable to PDF files".into());
+        }
+        if input.get("offset").is_some() || input.get("limit").is_some() {
+            return Err(
+                "offset and limit apply to text lines or notebook cells; use pages for PDF files"
+                    .into(),
+            );
+        }
+        let bytes = self
+            .files
+            .read_bytes(path)
+            .await?
+            .ok_or_else(|| self.missing())?;
+        let format = nanocode_image::guess_format(&bytes).ok_or_else(|| {
+            format!(
+                "invalid image: {}",
+                nanocode_image::DecodeError::UnknownFormat
+            )
+        })?;
+        let (media_type, encoded) = match crate::tools::image::media_type(format)? {
+            Some(media_type) => (media_type, STANDARD.encode(&bytes)),
+            None => (
+                "image/png",
+                STANDARD.encode(nanocode_image::encode_png(&crate::tools::image::decode(
+                    &bytes, format,
+                )?)),
+            ),
+        };
+        Ok(
+            crate::claude_output::media(vec![ToolOutputContent::InputImage {
+                image_url: format!("data:{media_type};base64,{encoded}"),
+                detail: ImageDetail::Auto,
+            }])
+            .with_metadata(json!({"kind": "image", "bytes": bytes.len()})),
+        )
+    }
+
+    async fn existing(&self, path: &Path) -> Result<String, String> {
+        match self.files.read(path).await {
+            Ok(Some(content)) => Ok(content),
+            Ok(None) => Err(self.missing()),
+            Err(error) if directory(&error) => Err(format!(
+                "EISDIR: illegal operation on a directory, read '{}'",
+                path.display()
+            )),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn missing(&self) -> String {
+        format!(
+            "File does not exist. Note: your current working directory is {}.",
+            self.workspace.display()
+        )
+    }
+}
+
+fn directory(error: &str) -> bool {
+    error.starts_with("EISDIR")
+        || error.ends_with(": Is a directory")
+        || error.contains("Is a directory (os error 21)")
+}
+
+impl Tool for HostFileTool {
+    fn definition(&self) -> ToolDefinition {
+        self.definition.clone()
+    }
+
+    fn execute<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        input: ToolInput,
+        context: ToolContext<'life1>,
+    ) -> HostFuture<'async_trait, ToolResult>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            let input: Value = input.decode_json()?;
+            if let Some(image) = self.image(&input).await {
+                return Ok(image.unwrap_or_else(ToolOutput::error));
+            }
+            Ok(
+                match self.run(&input, context.output_token_budget()).await {
+                    Ok(text) => ToolOutput::text(text),
+                    Err(error) => ToolOutput::error(error),
+                },
+            )
+        })
+    }
+}
+
+struct HostBash {
+    workspace: Arc<Path>,
+    shell: Arc<dyn ForegroundExecutor>,
+    jobs: Arc<HostJobs>,
+}
+
+type Outcome = Result<BashResult, String>;
+
+#[derive(Default)]
+struct HostJobs {
+    next: AtomicU64,
+    entries: Atom<BTreeMap<String, Arc<HostJob>>>,
+}
+
+struct HostJob {
+    command: String,
+    stream_bytes: usize,
+    result: Atom<Option<Outcome>>,
+    finished: Signal,
+    stopped: AtomicBool,
+    abort: AbortHandle,
+}
+
+impl HostJob {
+    fn status(&self) -> &'static str {
+        match &*self.result.get() {
+            _ if self.stopped.load(Ordering::SeqCst) => "killed",
+            Some(Ok(result)) if result.exit_code == 0 => "completed",
+            Some(_) => "failed",
+            None => "running",
+        }
+    }
+}
+
+async fn run(shell: &dyn ForegroundExecutor, workspace: &Path, request: &BashRequest) -> Outcome {
+    let output = shell
+        .execute(ForegroundCommand {
+            workspace,
+            command: &request.command,
+            timeout: Duration::from_millis(request.timeout_ms),
+            max_stdout: request.max_stdout_bytes,
+            max_stderr: request.max_stderr_bytes,
+            session: request.session.as_ref(),
+            output: None,
+        })
+        .await?;
+    Ok(BashResult {
+        stdout: output.stdout,
+        stderr: output.stderr,
+        exit_code: output.exit_code,
+        truncated: output.truncated,
+    })
+}
+
+impl BashExecutor for HostBash {
+    async fn execute(&self, request: BashRequest) -> Outcome {
+        run(self.shell.as_ref(), &self.workspace, &request).await
+    }
+
+    async fn execute_with_background(
+        &self,
+        request: BashRequest,
+        background: bool,
+    ) -> Result<BashExecution, String> {
+        if !background {
+            return self.execute(request).await.map(BashExecution::Completed);
+        }
+        let id = format!(
+            "bash-{}",
+            self.jobs.next.fetch_add(1, Ordering::Relaxed) + 1
+        );
+        let shell = Arc::clone(&self.shell);
+        let workspace = Arc::clone(&self.workspace);
+        let command = request.command.clone();
+        let stream_bytes = request.max_stdout_bytes;
+        let (task, abort) =
+            abortable(async move { run(shell.as_ref(), &workspace, &request).await });
+        let job = Arc::new(HostJob {
+            command,
+            stream_bytes,
+            result: Atom::new(None),
+            finished: Signal::new(),
+            stopped: AtomicBool::new(false),
+            abort,
+        });
+        self.jobs.entries.update(|entries| {
+            entries.insert(id.clone(), Arc::clone(&job));
+        });
+        spawn(async move {
+            let outcome = task
+                .await
+                .unwrap_or_else(|_| Err("Bash task stopped with TaskStop".into()));
+            job.result.set(Some(outcome));
+            job.finished.fire();
+        });
+        Ok(BashExecution::Background {
+            message: format!("Command running in background with ID: {id}. {BACKGROUND_NOTE}"),
+            output_file: None,
+            task_id: id,
+        })
+    }
+}
+
+struct HostTaskTool {
+    tool: HostTool,
+    jobs: Arc<HostJobs>,
+}
+
+impl HostTaskTool {
+    async fn invoke(&self, input: Value) -> Result<Value, String> {
+        let stop = matches!(self.tool, HostTool::TaskStop);
+        let fields = input.as_object().ok_or("task input must be an object")?;
+        for key in fields.keys() {
+            if key != "task_id"
+                && !(stop && key == "shell_id")
+                && !(!stop && matches!(key.as_str(), "block" | "timeout"))
+            {
+                return Err(format!("unsupported task option: {key}"));
+            }
+        }
+        let id = fields
+            .get("task_id")
+            .filter(|id| !(stop && id.is_null()))
+            .or_else(|| stop.then(|| fields.get("shell_id")).flatten())
+            .and_then(Value::as_str)
+            .ok_or("Missing required parameter: task_id")?;
+        let job = self
+            .jobs
+            .entries
+            .read(|entries| entries.get(id).cloned())
+            .ok_or_else(|| format!("No task found with ID: {id}"))?;
+        if stop {
+            let status = job.status();
+            if status != "running" {
+                return Err(format!("Task {id} is not running (status: {status})"));
+            }
+            job.stopped.store(true, Ordering::SeqCst);
+            job.abort.abort();
+            job.finished.wait().await;
+            return Ok(json!({
+                "message": format!("Successfully stopped task: {id} ({})", job.command),
+                "task_id": id,
+                "task_type": "local_bash",
+                "command": job.command,
+            }));
+        }
+        let block = fields
+            .get("block")
+            .map_or(Some(true), Value::as_bool)
+            .ok_or("block must be boolean")?;
+        let timeout = fields
+            .get("timeout")
+            .map_or(Some(30_000), Value::as_u64)
+            .filter(|value| *value <= MAX_TASK_OUTPUT_TIMEOUT_MS)
+            .ok_or_else(|| {
+                format!("timeout must be 0..{MAX_TASK_OUTPUT_TIMEOUT_MS} milliseconds")
+            })?;
+        if block {
+            let _ = nanocode_platform::timeout(Duration::from_millis(timeout), job.finished.wait())
+                .await;
+        }
+        Ok(match &*job.result.get() {
+            None => json!({
+                "task_id": id,
+                "status": "running",
+                "stdout": format!("Task {id} is still running.\n"),
+                "stderr": "",
+                "exit_code": null,
+                "truncated": false,
+                "error": null,
+            }),
+            Some(Err(error)) => json!({
+                "task_id": id,
+                "status": job.status(),
+                "stdout": "",
+                "stderr": format!("{error}\n"),
+                "exit_code": null,
+                "truncated": false,
+                "error": error,
+            }),
+            Some(Ok(result)) => {
+                let (stdout, stderr, truncated) =
+                    crate::tools::bash::bounded_output(result, job.stream_bytes, None);
+                json!({
+                    "task_id": id,
+                    "status": job.status(),
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "exit_code": result.exit_code,
+                    "truncated": truncated,
+                    "error": null,
+                })
+            }
+        })
+    }
+}
+
+impl Tool for HostTaskTool {
+    fn definition(&self) -> ToolDefinition {
+        let name = self.tool.name();
+        if !matches!(self.tool, HostTool::TaskOutput) {
+            let upstream = nanocode_backend_claude_tools::upstream::tool(name);
+            return ToolDefinition::function(
+                name,
+                upstream.description.clone(),
+                upstream.input_schema(),
+            )
+            .with_output_schema(crate::claude_output::host_schema(name));
+        }
+        let definition = self.tool.definition();
+        ToolDefinition::function(
+            name,
+            definition["description"].as_str().unwrap_or_default(),
+            definition["input_schema"].clone(),
+        )
+        .with_output_schema(crate::claude_output::host_schema(name))
+    }
+
+    fn execute<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        input: ToolInput,
+        _context: ToolContext<'life1>,
+    ) -> HostFuture<'async_trait, ToolResult>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            let input = input.decode_json::<Value>()?;
+            Ok(match self.invoke(input).await {
+                Ok(value) => ToolOutput::text(value.to_string()).with_structured_result(value),
+                Err(error) => ToolOutput::error(error),
+            })
+        })
+    }
+}
+
+struct HostBashTool(ClaudeBash<HostBash>);
+
+impl Tool for HostBashTool {
+    fn definition(&self) -> ToolDefinition {
+        let upstream = nanocode_backend_claude_tools::upstream::tool("Bash");
+        ToolDefinition::function(
+            "Bash",
+            upstream.description.clone(),
+            upstream.input_schema(),
+        )
+        .with_output_schema(crate::claude_output::host_schema("Bash"))
+    }
+
+    fn execute<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        input: ToolInput,
+        context: ToolContext<'life1>,
+    ) -> HostFuture<'async_trait, ToolResult>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            let input = input.decode_json::<Value>()?;
+            Ok(
+                match self
+                    .0
+                    .execute_call("Bash", input, None, Some(context.call_id()))
+                    .await
+                {
+                    Ok(output) => {
+                        let value = serde_json::from_str::<Value>(&output).unwrap_or(Value::Null);
+                        let text = value["message"]
+                            .as_str()
+                            .filter(|_| value["background"] == true)
+                            .map_or(output, str::to_owned);
+                        ToolOutput::text(text).with_structured_result(value)
+                    }
+                    Err(error) => ToolOutput::error(error),
+                },
+            )
+        })
+    }
+}

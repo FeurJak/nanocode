@@ -1,0 +1,19 @@
+[package]
+name = "psh"
+description = "The psh shell binary"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+psh-engine.workspace = true
+psh-syntax.workspace = true
+psh-classify.workspace = true
+psh-os.workspace = true
+# The in-process utilities (D1080).
+psh-utils.workspace = true
+
+[lints]
+workspace = true

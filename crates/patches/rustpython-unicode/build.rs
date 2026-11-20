@@ -1,0 +1,1656 @@
+// spell-checker:ignore decomp DECOMP
+
+extern crate alloc;
+
+use core::{
+    fmt::{Debug, Display},
+    iter::Iterator,
+    num::NonZeroUsize,
+    ops::RangeInclusive,
+    time::Duration,
+};
+
+use alloc::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+};
+
+use std::{
+    env,
+    fs::{self, File},
+    io::{BufRead, BufReader, BufWriter, Cursor, Lines, Read, Write},
+    path::{Path, PathBuf},
+    sync::{Arc, mpsc},
+    thread,
+};
+
+use nanocode_compression::inflate::{InflateStatus, inflate_all};
+
+// Uncompressed size of Unihan-3.2.0.txt
+const UNIHAN_3_2_LEN: NonZeroUsize = NonZeroUsize::new(26301774).unwrap();
+
+/// Iterator over Unicode data file lines.
+struct UnicodeLineReader<R: BufRead> {
+    reader: Lines<R>,
+}
+
+impl<R: BufRead> UnicodeLineReader<R> {
+    fn new(reader: R) -> Self {
+        let reader = reader.lines();
+        Self { reader }
+    }
+
+    fn next_line_raw(&mut self) -> Option<Box<str>> {
+        self.reader.find_map(|line| {
+            let line = line.unwrap();
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                None
+            } else {
+                Some(line.to_owned().into_boxed_str())
+            }
+        })
+    }
+
+    fn raw_iter(&mut self) -> UnicodeRawReader<'_, R> {
+        UnicodeRawReader(self)
+    }
+}
+
+impl UnicodeLineReader<BufReader<File>> {
+    fn from_file_name(file_name: &str, modern: bool) -> Self {
+        Self::new(open_reader(file_name, modern))
+    }
+}
+
+impl UnicodeLineReader<Cursor<String>> {
+    fn from_zlib(file_name: &str, modern: bool, len: NonZeroUsize) -> Self {
+        let mut input = Vec::new();
+        open_reader(file_name, modern)
+            .read_to_end(&mut input)
+            .unwrap();
+        let (status, output) = inflate_all(0, &input, len.get()).unwrap();
+        match status {
+            InflateStatus::Ok | InflateStatus::BufError => {
+                panic!("buffer too small to hold decompressed data: {}", len.get())
+            }
+            InflateStatus::StreamEnd => {
+                assert_eq!(
+                    len.get(),
+                    output.len(),
+                    "expected decompressed size and actual size differs"
+                );
+            }
+        }
+        Self::new(Cursor::new(
+            String::from_utf8(output).expect("Parsed Unicode data should be Unicode"),
+        ))
+    }
+}
+
+impl<R: BufRead> Iterator for UnicodeLineReader<R> {
+    type Item = UnicodeLine;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let line = self.next_line_raw()?;
+
+        let mut fields = line.split(';');
+        let range = fields.next().expect("Unicode data is missing a char range");
+        let (start, end) = match range.split_once("..") {
+            _ if let Some(alt) = range.strip_prefix("U+") => {
+                let cp = alt.split_whitespace().next().unwrap();
+                let start = u32::from_str_radix(cp.trim(), 16).unwrap_or_else(|e| {
+                    panic!("{e}: expected hexadecimal for alt char field 0\ngot: {range}")
+                });
+                (start, start)
+            }
+            Some((left, right)) => {
+                let start = u32::from_str_radix(left.trim(), 16).unwrap_or_else(|e| {
+                    panic!("{e}: expected hexadecimal for start char field 0\ngot: {left}")
+                });
+                let end = u32::from_str_radix(right.trim(), 16).unwrap_or_else(|e| {
+                    panic!("{e}: expected hexadecimal for end char field 0\ngot: {right}")
+                });
+                (start, end)
+            }
+            None => {
+                let start = u32::from_str_radix(range.trim(), 16).unwrap_or_else(|e| {
+                    panic!("{e}: expected hexadecimal for non-range field 0\ngot: {range}")
+                });
+                (start, start)
+            }
+        };
+
+        Some(UnicodeLine { start, end, line })
+    }
+}
+
+struct UnicodeRawReader<'u, R: BufRead>(&'u mut UnicodeLineReader<R>);
+
+impl<R: BufRead> Iterator for UnicodeRawReader<'_, R> {
+    type Item = Box<str>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next_line_raw()
+    }
+}
+
+struct UnicodeLine {
+    start: u32,
+    end: u32,
+    line: Box<str>,
+}
+
+impl UnicodeLine {
+    /// Retrieve a field string from a line of Unicode data with a specified splitter.
+    fn field_with(&self, n: NonZeroUsize, pat: impl Fn(char) -> bool, msg: Option<&str>) -> &str {
+        // TODO: Use impl Pattern when it's stable
+        let field =
+            self.line.split(pat).nth(n.get()).unwrap_or_else(|| {
+                panic!("{}", msg.unwrap_or("Unicode data is missing a property"))
+            });
+        // The field may have a comment so strip that out
+        field.split_once('#').map_or(field, |(left, _)| left).trim()
+    }
+
+    /// Retrieve a field string from a line of Unicode data split by ; (normal case).
+    fn field(&self, n: NonZeroUsize, msg: Option<&str>) -> &str {
+        self.field_with(n, |ch| ch == ';', msg)
+    }
+
+    fn field_whitespace(&self, n: NonZeroUsize, msg: Option<&str>) -> &str {
+        self.field_with(n, |ch| ch.is_whitespace(), msg)
+    }
+}
+
+/// Helper to write a vector of condensed start, end char pairs and the associated ICU prop.
+///
+/// The values are impl Display because Debug would break the representation. For example, strs
+/// would be wrapped in quotation marks which is wrong.
+fn write_slice_display(
+    writer: &mut impl Write,
+    static_name: &str,
+    array_type: &str,
+    values: &mut [(u32, u32, impl Display)],
+) {
+    write_slice_pre(writer, static_name, array_type);
+    values.sort_unstable_by_key(|(start, _, _)| *start);
+    for (start, end, id) in values {
+        write!(writer, "({start}, {end}, {id}),").unwrap();
+    }
+    write_slice_post(writer);
+}
+
+fn write_slice_debug(
+    writer: &mut impl Write,
+    static_name: &str,
+    array_type: &str,
+    values: &mut [(u32, u32, impl Debug)],
+) {
+    write_slice_pre(writer, static_name, array_type);
+    values.sort_unstable_by_key(|(start, _, _)| *start);
+    for (start, end, id) in values {
+        write!(writer, "({start}, {end}, {id:?}),").unwrap();
+    }
+    write_slice_post(writer);
+}
+
+/// Helper to write a vector of start, end char pairs.
+///
+/// See: [`write_slice_display`].
+fn write_slice_pairs(
+    writer: &mut impl Write,
+    static_name: &str,
+    array_type: &str,
+    values: &mut [(u32, u32)],
+) {
+    write_slice_pre(writer, static_name, array_type);
+    values.sort_unstable_by_key(|(start, _)| *start);
+    for (start, end) in values {
+        write!(writer, "({start}, {end}),").unwrap();
+    }
+    write_slice_post(writer);
+}
+
+/// Helper to write a pre-sorted slice of strs.
+///
+/// See: [`write_slice_display`]
+fn write_slice_unordered(
+    writer: &mut impl Write,
+    static_name: &str,
+    array_type: &str,
+    values: &mut [impl Display],
+) {
+    write_slice_pre(writer, static_name, array_type);
+    for v in values {
+        write!(writer, "{v},").unwrap();
+    }
+    write_slice_post(writer);
+}
+
+/// Helper to write raw values for data sources that don't follow the common format.
+///
+/// See: [`write_slice_display`]
+fn write_slice_raw<T, W: Write>(
+    writer: &mut W,
+    static_name: &str,
+    array_type: &str,
+    values: T,
+    mut f: impl FnMut(&mut W, T),
+) {
+    write_slice_pre(writer, static_name, array_type);
+    f(writer, values);
+    write_slice_post(writer);
+}
+
+fn write_slice_pre(writer: &mut impl Write, static_name: &str, array_type: &str) {
+    write!(writer, "static {static_name}: &[{array_type}] = &[").unwrap();
+}
+
+fn write_slice_post(writer: &mut impl Write) {
+    writeln!(writer, "];").unwrap();
+}
+
+fn open_writer(file_name: &str) -> BufWriter<File> {
+    let path = PathBuf::from(env::var("OUT_DIR").unwrap())
+        .join("generated")
+        .join(file_name);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    BufWriter::new(File::create(&path).unwrap())
+}
+
+fn open_reader(file_name: &str, modern: bool) -> BufReader<File> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("unicode")
+        .join(if modern { "latest" } else { "ucd32" })
+        .join(file_name);
+
+    BufReader::new(File::open(&path).unwrap_or_else(|e| {
+        panic!(
+            "{e}: vendored Unicode data file should exist: {}",
+            path.display()
+        )
+    }))
+}
+
+/// Drive parsers that require the latest Unicode data.
+///
+/// The full data is huge so it's ideal to parse it only once.
+fn full_data_parsers_latest() {
+    let reader = UnicodeLineReader::from_file_name("UnicodeData.txt", true);
+
+    let mut decomp_lines = Vec::new();
+    let mut algo_names = Vec::new();
+    for line in reader {
+        let decomp_field = line.field(
+            NonZeroUsize::new(5).unwrap(),
+            Some(&format!(
+                "field 5 missing from UnicodeData.txt: {}",
+                line.line
+            )),
+        );
+        if !decomp_field.is_empty() {
+            decomp_lines.push((line.start, decomp_field.to_owned()));
+        }
+
+        let name_field = line.field(
+            NonZeroUsize::new(1).unwrap(),
+            Some(&format!(
+                "field 1 (name) missing from UnicodeData.txt: {}",
+                line.line
+            )),
+        );
+        if name_field.ends_with("First>") || name_field.ends_with("Last>") {
+            algo_names.push((line.start, name_field.into()));
+        }
+    }
+
+    generate_decomp(decomp_lines);
+    generate_algo_names(algo_names);
+}
+
+fn generate_decomp(decomp_lines: Vec<(u32, String)>) {
+    let mut writer = open_writer("decomp.rs");
+
+    let mut decomp_ranges = Vec::new();
+    let mut values = Vec::new();
+    for (start, value) in decomp_lines {
+        assert!(
+            !value.is_empty(),
+            "Decomp field shouldn't be empty at this point"
+        );
+
+        let (dtype, decomp) = match value.split_once('>') {
+            Some((dtype, decomp)) => {
+                let dtype = dtype.strip_prefix('<').unwrap_or_else(|| {
+                    panic!("Compatibility decomp; expected <tag>\n\tgot: {value}")
+                });
+                (parse_decomp_type(dtype), decomp)
+            }
+            None => (DecompositionType::Canonical, value.as_str()),
+        };
+
+        decomp_ranges.extend(
+            decomp
+                .split_whitespace()
+                .map(|s| u32::from_str_radix(s, 16).unwrap()),
+        );
+        let end = decomp_ranges.len();
+
+        let value = format!("({start}, DecompositionType::{dtype:?}, {end})");
+        values.push(value);
+    }
+
+    write_slice_unordered(
+        &mut writer,
+        "DECOMPOSITIONS",
+        "(u32, DecompositionType, usize)",
+        &mut values,
+    );
+    write_slice_unordered(&mut writer, "DECOMP_RANGE", "u32", &mut decomp_ranges);
+
+    // Normalization corrections is super small - only a handful chars at the time of writing.
+    let reader = UnicodeLineReader::from_file_name("NormalizationCorrections.txt", true);
+    let mut values = Vec::new();
+    for line in reader {
+        let field = line.field(
+            NonZeroUsize::new(1).unwrap(),
+            Some(&format!(
+                "field 2 missing from NormalizationCorrections: {}",
+                line.line
+            )),
+        );
+        let original = u32::from_str_radix(field.trim(), 16).unwrap_or_else(|e| {
+            panic!("field 2 of decomp corrections should be a char in hex: {field} {e}")
+        });
+        let version = line.field(
+            NonZeroUsize::new(3).unwrap(),
+            Some(&format!(
+                "field 4 of decomp corrections should be a UCD version: {}",
+                line.line
+            )),
+        );
+
+        // `version` = when the char was updated. Therefore, we use the incorrect chars past
+        // 3.2.0 but skip the chars fixed in 3.2.0 because they'll already be right.
+        if version != "3.2.0" {
+            values.push((line.start, original))
+        }
+    }
+    write_slice_pairs(&mut writer, "DECOMP_UPDATES", "(u32, u32)", &mut values);
+}
+
+fn generate_algo_names(names: Vec<(u32, Box<str>)>) {
+    const TANGUT: &str = "<Tangut Ideograph";
+    const TANGUT_SUP: &str = "<Tangut Ideograph Supplement";
+
+    let (names, []) = names.as_chunks::<2>() else {
+        panic!("Uneven algorithmic names: {names:#?}");
+    };
+
+    let mut values = Vec::new();
+    for &[(start, ref raw_start), (end, ref raw_end)] in names {
+        // Surrogate and private use ranges are algorithmic names.
+        if (0xD800..=0xDFFF).contains(&start)
+            || (0xE000..=0xF8FF).contains(&start)
+            || (0xF0000..=0xFFFFD).contains(&start)
+            || (0x100000..=0x10FFFD).contains(&start)
+        {
+            continue;
+        };
+        // Skip existing as there are only a few unimplemented algorithmic names.
+        if !raw_start.starts_with("<CJK Ideograph") && !raw_start.starts_with("<Hangul Syllable") {
+            match (raw_start.split_once(','), raw_end.split_once(',')) {
+                (Some((TANGUT, _)), Some((TANGUT, _)))
+                | (Some((TANGUT_SUP, _)), Some((TANGUT_SUP, _))) => {
+                    values.push((start, end, "AlgorithmicName::TangutIdeograph"));
+                }
+                (None, None) => panic!("Unexpected name parsed:\n{raw_start}\n{raw_end}"),
+                _ => panic!("Unhandled algorithmic name:\n{raw_start}\n{raw_end}"),
+            }
+        }
+    }
+
+    let mut writer = open_writer("algo_names.rs");
+    write_slice_display(
+        &mut writer,
+        "ALGO_NAMES",
+        "(u32, u32, AlgorithmicName)",
+        &mut values,
+    );
+}
+
+/// Formal name aliases (`NameAliases.txt`) and named sequences
+/// (`NamedSequences.txt`).  `unicodedata.lookup` consults both; `\N{}`
+/// accepts only a single character, so named sequences stay out of
+/// `lookup_character`.
+fn generate_name_lookups() {
+    let mut aliases = BTreeMap::new();
+    for line in UnicodeLineReader::from_file_name("NameAliases.txt", true) {
+        let name = line
+            .field(
+                NonZeroUsize::new(1).unwrap(),
+                Some(&format!(
+                    "field 1 (alias) missing from NameAliases.txt: {}",
+                    line.line
+                )),
+            )
+            .to_ascii_uppercase();
+        aliases.insert(name, line.start);
+    }
+
+    let mut sequences = BTreeMap::new();
+    let mut sequences_reader = UnicodeLineReader::from_file_name("NamedSequences.txt", true);
+    for line in sequences_reader.raw_iter() {
+        let (name, codes) = line
+            .split_once(';')
+            .unwrap_or_else(|| panic!("NamedSequences.txt line should be `NAME; HEX HEX`: {line}"));
+        let name = name.trim().to_ascii_uppercase();
+        let mut escaped = String::new();
+        for hex in codes.split_whitespace() {
+            let cp = u32::from_str_radix(hex, 16).unwrap_or_else(|e| {
+                panic!("NamedSequences.txt code point should be hex: {hex} ({e})")
+            });
+            escaped.push_str("\\u{");
+            escaped.push_str(&format!("{cp:X}"));
+            escaped.push('}');
+        }
+        sequences.insert(name, escaped);
+    }
+
+    let mut writer = open_writer("name_lookups.rs");
+    write_slice_raw(
+        &mut writer,
+        "NAME_ALIASES",
+        "(&str, char)",
+        aliases,
+        |writer, aliases| {
+            for (name, code) in &aliases {
+                let ch = char::from_u32(*code).unwrap_or_else(|| {
+                    panic!("NameAliases.txt code point should be a scalar: {code:04X}")
+                });
+                writeln!(writer, "(\"{name}\", '\\u{{{:X}}}'),", ch as u32).unwrap();
+            }
+        },
+    );
+
+    write_slice_raw(
+        &mut writer,
+        "NAMED_SEQUENCES",
+        "(&str, &str)",
+        sequences,
+        |writer, sequences| {
+            for (name, escaped) in &sequences {
+                writeln!(writer, "(\"{name}\", \"{escaped}\"),").unwrap();
+            }
+        },
+    );
+}
+
+/// Drive parsers that require the full 3.2.0 data.
+///
+/// As the full data set is HUGE, it's more efficient to parse it once then delegate to subparsers.
+fn full_data_parsers_3_2(tx: mpsc::Sender<Vec<(u32, u32, f64)>>) {
+    let reader = UnicodeLineReader::from_file_name("UnicodeData-3.2.0.txt", false);
+
+    // `DerivedNumericValues` writes the value rounded to a few digits, so the
+    // fraction `UnicodeData` field 8 spells out is what the value comes from.
+    // A character `UnicodeData` leaves out takes its value from Unihan, where
+    // the rounded field is a whole number and loses nothing.
+    let mut ucd32_fractions = BTreeMap::new();
+
+    // Parse membership from the full data. Unfortunately, this is largely uncompressed.
+    let mut membership_set = BTreeSet::new();
+    let mut range_membership = Vec::new();
+
+    for line in reader {
+        // 3.2.0 membership
+        let name = line.field(
+            NonZeroUsize::new(1).unwrap(),
+            Some(&format!(
+                "field 1 (char name) missing from UnicodeData-3.2.0.txt: {}",
+                line.line
+            )),
+        );
+        if name.ends_with("First>") | name.ends_with("Last>") {
+            // Some lines (literally 20) are compressed ranges, so we have to handle those separately
+            range_membership.push(line.start);
+        } else {
+            membership_set.insert((line.start, line.end));
+        }
+
+        // Fractions
+        let numeric = line.field(
+            NonZeroUsize::new(8).unwrap(),
+            Some(&format!(
+                "field 8 (fraction) missing from UnicodeData-3.2.0.txt: {}",
+                line.line
+            )),
+        );
+        if !numeric.is_empty() {
+            // start == end because the full data doesn't list code ranges.
+            ucd32_fractions.insert(line.start, parse_numeric_value(numeric));
+        }
+    }
+
+    // Now delegate to parsers that need the full data.
+    generate_membership_3_2(membership_set, range_membership);
+    generate_numeric_value(ucd32_fractions, tx);
+}
+
+/// Generate a compressed array of Unicode 3.2 membership.
+///
+/// Membership + diff checks is more efficient than storing the full table for 3.2. The logic is to
+/// default to the latest Unicode if a character exists in 3.2 but isn't different. Membership
+/// is needed because diffs aren't enough - a character may be absent in 3.2 which is different
+/// than returning a default.
+fn generate_membership_3_2(membership_set: BTreeSet<(u32, u32)>, range_membership: Vec<u32>) {
+    // Second pass. Compress the ranges.
+    let mut iter = membership_set.iter();
+    let &(mut start_prev, mut end_prev) = iter.next().unwrap();
+    let mut membership = Vec::new();
+
+    for &(start, end) in iter {
+        if start <= end_prev + 1 {
+            end_prev = end_prev.max(end);
+        } else {
+            membership.push((start_prev, end_prev));
+            start_prev = start;
+            end_prev = end;
+        }
+    }
+    membership.push((start_prev, end_prev));
+
+    let (chunks, &[]) = range_membership.as_chunks::<2>() else {
+        panic!("Range membership is always in pairs ('First>' and 'Last>'");
+    };
+    for &chunk in chunks {
+        membership.push(chunk.into());
+    }
+
+    let mut writer = open_writer("membership_3_2.rs");
+    write_slice_pairs(&mut writer, "MEMBERSHIP_3_2", "(u32, u32)", &mut membership);
+}
+
+fn generate_numeric_value(
+    ucd32_fractions: BTreeMap<u32, f64>,
+    tx: mpsc::Sender<Vec<(u32, u32, f64)>>,
+) {
+    let mut ucd32_diffs = BTreeMap::new();
+    let numeric_32 = UnicodeLineReader::from_file_name("DerivedNumericValues-3.2.0.txt", false);
+    for line in numeric_32 {
+        let field = line.field(
+            NonZeroUsize::new(1).unwrap(),
+            Some(&format!(
+                "field 1 (numeric representation) missing from DerivedNumericValues-3.2.0.txt: {}",
+                line.line
+            )),
+        );
+        let value = ucd32_fractions
+            .get(&line.start)
+            .copied()
+            .unwrap_or_else(|| parse_numeric_value(field));
+
+        ucd32_diffs.insert((line.start, line.end), value);
+    }
+
+    let ucd_latest = UnicodeLineReader::from_file_name("DerivedNumericValues.txt", true);
+    let mut values_latest = Vec::new();
+    for line in ucd_latest {
+        // Field 3 holds the fraction; field 1 rounds it to a few digits.
+        let field = line.field(
+            NonZeroUsize::new(3).unwrap(),
+            Some(&format!(
+                "field 3 (fraction) missing from DerivedNumericValues.txt: {}",
+                line.line
+            )),
+        );
+        let value = parse_numeric_value(field);
+
+        // Remove values that are the same between 3.2.0 and the latest Unicode.
+        if ucd32_diffs
+            .get(&(line.start, line.end))
+            .is_some_and(|old_v| *old_v == value)
+        {
+            ucd32_diffs.remove(&(line.start, line.end));
+        }
+        values_latest.push((line.start, line.end, value));
+    }
+
+    // Han ideograph supplement. This data is huge but we don't need a separate thread for it
+    // because the other data sources in this function are very small.
+    // https://www.unicode.org/reports/tr38/
+    let unihan_32 = UnicodeLineReader::from_zlib("Unihan-3.2.0.txt.zlib", false, UNIHAN_3_2_LEN);
+    for line in unihan_32 {
+        let id = line.field_whitespace(
+            NonZeroUsize::new(1).unwrap(),
+            Some(&format!(
+                "field 1 (identity) missing from Unihan-3.2.0.txt: {}",
+                line.line
+            )),
+        );
+        if matches!(
+            id,
+            "kAccountingNumeric" | "kOtherNumeric" | "kPrimaryNumeric"
+        ) {
+            // Field 3 holds the representation, which in this case is numeric.
+            let field = line.field_whitespace(
+                NonZeroUsize::new(2).unwrap(),
+                Some(&format!(
+                    "field 3 (representation) missing from Unihan-3.2.0.txt: {}",
+                    line.line
+                )),
+            );
+
+            let field = normalize_unihan_numeric(field);
+            let value = parse_numeric_value(&field);
+            ucd32_diffs.insert((line.start, line.end), value);
+        }
+    }
+
+    let mut writer = open_writer("numeric_value_3_2.rs");
+    write_slice_debug(
+        &mut writer,
+        "NUMERIC_VALUES",
+        "(u32, u32, f64)",
+        &mut values_latest,
+    );
+    let mut ucd32_diffs: Vec<_> = ucd32_diffs
+        .into_iter()
+        .map(|((start, end), value)| (start, end, value))
+        .collect();
+    write_slice_debug(
+        &mut writer,
+        "NUMERIC_VALUES_DIFF",
+        "(u32, u32, f64)",
+        &mut ucd32_diffs,
+    );
+
+    tx.send(ucd32_diffs)
+        .expect("sending numeric value diffs to numeric type thread should succeed");
+}
+
+fn general_category_3_2() {
+    let mut writer = open_writer("gen_cat_3_2.rs");
+    let reader = UnicodeLineReader::from_file_name("DerivedGeneralCategory-3.2.0.txt", false);
+
+    let mut values = Vec::new();
+    for line in reader {
+        let field = line.field(
+            NonZeroUsize::new(1).unwrap(),
+            Some(&format!(
+                "field 1 (category) missing from DerivedGeneralCategory-3.2.0.txt: {}",
+                line.line
+            )),
+        );
+        let id = value_index(&GENERAL_CATEGORIES, field);
+        if id != value_index(&GENERAL_CATEGORIES, GENERAL_CATEGORY_UNASSIGNED) {
+            let value = value_path("GeneralCategory", &GENERAL_CATEGORIES, id);
+            values.push((line.start, line.end, value));
+        }
+    }
+
+    write_slice_display(
+        &mut writer,
+        "GENERAL_CATEGORY",
+        "(u32, u32, GeneralCategory)",
+        &mut values,
+    );
+}
+
+fn east_asian_width_3_2() {
+    let mut writer = open_writer("eaw_3_2.rs");
+    let reader = UnicodeLineReader::from_file_name("DerivedEastAsianWidth-3.2.0.txt", false);
+
+    let mut values = Vec::new();
+    for line in reader {
+        let field = line.field(
+            NonZeroUsize::new(1).unwrap(),
+            Some(&format!(
+                "field 1 (east Asian width class) missing from DerivedEastAsianWidth-3.2.0.txt: {}",
+                line.line
+            )),
+        );
+        let id = value_index(&EAST_ASIAN_WIDTHS, field);
+        if id != value_index(&EAST_ASIAN_WIDTHS, EAST_ASIAN_WIDTH_NEUTRAL) {
+            let value = value_path("EastAsianWidth", &EAST_ASIAN_WIDTHS, id);
+            values.push((line.start, line.end, value));
+        }
+    }
+
+    write_slice_display(
+        &mut writer,
+        "EAST_ASIAN_WIDTH",
+        "(u32, u32, EastAsianWidth)",
+        &mut values,
+    );
+}
+
+fn bidi_class_3_2(latest: &Latest) {
+    let mut writer = open_writer("bidi_class_3_2.rs");
+    let reader = UnicodeLineReader::from_file_name("DerivedBidiClass-3.2.0.txt", false);
+
+    let mut values = Vec::new();
+    for line in reader {
+        let field = line.field(
+            NonZeroUsize::new(1).unwrap(),
+            Some(&format!(
+                "field 1 (BIDI class) missing from DerivedBidiClass-3.2.0.txt: {}",
+                line.line
+            )),
+        );
+        let id = value_index(&BIDI_CLASSES, field);
+        for i in line.start..=line.end {
+            let modern = char::from_u32(i).map(|_| usize::from(latest.bidi_classes[i as usize]));
+
+            if Some(id) != modern {
+                let value = value_path("BidiClass", &BIDI_CLASSES, id);
+                values.push((line.start, line.end, value));
+                break;
+            }
+        }
+    }
+
+    write_slice_display(
+        &mut writer,
+        "BIDI_CLASS_DIFF",
+        "(u32, u32, BidiClass)",
+        &mut values,
+    );
+}
+
+fn binary_props_3_2() {
+    let mut writer = open_writer("binary_props_3_2.rs");
+    let reader = UnicodeLineReader::from_file_name("DerivedBinaryProperties-3.2.0.txt", false);
+
+    let mut values = Vec::new();
+    for line in reader {
+        let id = line.field(
+            NonZeroUsize::new(1).unwrap(),
+            Some(&format!(
+                "field 1 (binary property) missing from DerivedBinaryProperties-3.2.0.txt: {}",
+                line.line
+            )),
+        );
+        assert_eq!(
+            "Bidi_Mirrored",
+            id.trim(),
+            "DerivedBinaryProperties-3.2.0 only has Bidi_Mirrored"
+        );
+        values.push((line.start, line.end));
+    }
+
+    write_slice_pairs(&mut writer, "BIDI_MIRRORED", "(u32, u32)", &mut values);
+}
+
+fn combining_class_3_2() {
+    let mut writer = open_writer("combining_class_3_2.rs");
+    let reader = UnicodeLineReader::from_file_name("DerivedCombiningClass-3.2.0.txt", false);
+
+    let mut values = Vec::new();
+    for line in reader {
+        let field = line.field(
+            NonZeroUsize::new(1).unwrap(),
+            Some(&format!(
+                "field 1 (combining class) missing from DerivedCombiningClass-3.2.0.txt: {}",
+                line.line
+            )),
+        );
+        let id: u8 = field.parse().unwrap();
+        if id != COMBINING_CLASS_NOT_REORDERED {
+            values.push((line.start, line.end, id));
+        }
+    }
+
+    write_slice_display(
+        &mut writer,
+        "COMBINING_CLASS",
+        "(u32, u32, u8)",
+        &mut values,
+    );
+}
+
+fn generate_numeric_type_3_2(rx: mpsc::Receiver<Vec<(u32, u32, f64)>>, latest: &Latest) {
+    let mut writer = open_writer("num_type_3_2.rs");
+    let reader = UnicodeLineReader::from_file_name("DerivedNumericType-3.2.0.txt", false);
+
+    let mut values = Vec::new();
+    for line in reader {
+        let field = line.field(
+            NonZeroUsize::new(1).unwrap(),
+            Some(&format!(
+                "field 1 (numeric type) missing from DerivedNumericType-3.2.0.txt: {}",
+                line.line
+            )),
+        );
+        let id = value_index(&NUMERIC_TYPES, field);
+        let differs = (line.start..=line.end).any(|c| {
+            char::from_u32(c).is_none_or(|_| usize::from(latest.numeric_types[c as usize]) != id)
+        });
+
+        if differs {
+            values.push((
+                line.start,
+                line.end,
+                value_path("NumericType", &NUMERIC_TYPES, id),
+            ));
+        }
+    }
+
+    let diffs = rx.recv_timeout(Duration::from_mins(10)).unwrap();
+    let numeric = value_index(&NUMERIC_TYPES, NUMERIC_TYPE_NUMERIC);
+    values.extend(diffs.into_iter().map(|(start, end, _)| {
+        (
+            start,
+            end,
+            value_path("NumericType", &NUMERIC_TYPES, numeric),
+        )
+    }));
+
+    write_slice_display(
+        &mut writer,
+        "NUMERIC_TYPE_DIFF",
+        "(u32, u32, NumericType)",
+        &mut values,
+    );
+}
+
+/// Run each UCD parser in parallel.
+fn drive_parsers() {
+    let parsers = [
+        full_data_parsers_latest,
+        general_category_3_2,
+        east_asian_width_3_2,
+        binary_props_3_2,
+        combining_class_3_2,
+        generate_name_lookups,
+        generate_names,
+        generate_case_tables,
+    ];
+
+    let mut handles = Vec::with_capacity(parsers.len() + 4);
+    for parser in parsers {
+        handles.push(thread::spawn(parser));
+    }
+
+    let latest = Arc::new(Latest::read());
+    let properties = Arc::clone(&latest);
+    handles.push(thread::spawn(move || generate_properties(&properties)));
+    let bidi = Arc::clone(&latest);
+    handles.push(thread::spawn(move || bidi_class_3_2(&bidi)));
+    let (tx_numeric, rx_numeric) = mpsc::channel();
+    handles.push(thread::spawn(move || full_data_parsers_3_2(tx_numeric)));
+    handles.push(thread::spawn(move || {
+        generate_numeric_type_3_2(rx_numeric, &latest)
+    }));
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+}
+
+#[derive(Debug, Default)]
+enum DecompositionType {
+    #[default]
+    Canonical,
+    Compat,
+    Circle,
+    Final,
+    Font,
+    Fraction,
+    Initial,
+    Isolated,
+    Medial,
+    Narrow,
+    Nobreak,
+    Small,
+    Square,
+    Sub,
+    Super,
+    Vertical,
+    Wide,
+}
+
+fn parse_decomp_type(id: &str) -> DecompositionType {
+    match id {
+        "canonical" => DecompositionType::Canonical,
+        "compat" => DecompositionType::Compat,
+        "circle" => DecompositionType::Circle,
+        "final" => DecompositionType::Final,
+        "font" => DecompositionType::Font,
+        "fraction" => DecompositionType::Fraction,
+        "initial" => DecompositionType::Initial,
+        "isolated" => DecompositionType::Isolated,
+        "medial" => DecompositionType::Medial,
+        "narrow" => DecompositionType::Narrow,
+        "noBreak" => DecompositionType::Nobreak,
+        "small" => DecompositionType::Small,
+        "square" => DecompositionType::Square,
+        "sub" => DecompositionType::Sub,
+        "super" => DecompositionType::Super,
+        "vertical" => DecompositionType::Vertical,
+        "wide" => DecompositionType::Wide,
+        invalid => unreachable!("Unicode data contains valid properties: {invalid}"),
+    }
+}
+
+/// Normalize Unihan text so that it may be parsed as f64.
+fn normalize_unihan_numeric(s: &str) -> Cow<'_, str> {
+    if s.contains(',') {
+        let bytes = s.bytes().filter(|&c| c != b',').collect();
+        let s = String::from_utf8(bytes).expect("Unihan's numeric field should always be UTF-8");
+        Cow::Owned(s)
+    } else {
+        Cow::Borrowed(s)
+    }
+}
+
+/// Read a numeric value written either on its own or as `numerator/denominator`.
+fn parse_numeric_value(text: &str) -> f64 {
+    let text = text.trim();
+    let (numerator, denominator) = text.split_once('/').unwrap_or((text, "1"));
+    let numerator: f64 = numerator.trim().parse().unwrap_or_else(|e| {
+        panic!("{e}: Unicode data contains valid properties\nnumerator: {text}")
+    });
+    let denominator: f64 = denominator.trim().parse().unwrap_or_else(|e| {
+        panic!("{e}: Unicode data contains valid properties\ndenominator: {text}")
+    });
+    numerator / denominator
+}
+
+fn main() {
+    println!("cargo:rerun-if-changed=unicode/ucd32");
+    println!("cargo:rerun-if-changed=unicode/latest");
+
+    drive_parsers();
+}
+
+const NAMED_SINCE_UNICODE_17: &[(u32, u32)] = &[
+    (0x088F, 0x088F), (0x0C5C, 0x0C5C), (0x0CDC, 0x0CDC), (0x1ACF, 0x1ADD), (0x1AE0, 0x1AEB),
+    (0x20C1, 0x20C1), (0x2B96, 0x2B96), (0xA7CE, 0xA7CF), (0xA7D2, 0xA7D2), (0xA7D4, 0xA7D4),
+    (0xA7F1, 0xA7F1), (0xFBC3, 0xFBD2), (0xFD90, 0xFD91), (0xFDC8, 0xFDCE), (0x10940, 0x10959),
+    (0x10EC5, 0x10EC7), (0x10ED0, 0x10ED8), (0x10EFA, 0x10EFB), (0x11B60, 0x11B67),
+    (0x11DB0, 0x11DDB), (0x11DE0, 0x11DE9), (0x16EA0, 0x16EB8), (0x16EBB, 0x16ED3),
+    (0x16FF2, 0x16FF6), (0x18D80, 0x18DF2), (0x1CCFA, 0x1CCFC), (0x1CEBA, 0x1CED0),
+    (0x1CEE0, 0x1CEF0), (0x1E6C0, 0x1E6DE), (0x1E6E0, 0x1E6F5), (0x1E6FE, 0x1E6FF),
+    (0x1F6D8, 0x1F6D8), (0x1F777, 0x1F77A), (0x1F8D0, 0x1F8D8), (0x1FA54, 0x1FA57),
+    (0x1FA8A, 0x1FA8A), (0x1FA8E, 0x1FA8E), (0x1FAC8, 0x1FAC8), (0x1FACD, 0x1FACD),
+    (0x1FAEA, 0x1FAEA), (0x1FAEF, 0x1FAEF), (0x1FBFA, 0x1FBFA), (0x2B73A, 0x2B73F),
+    (0x2CEA2, 0x2CEAD), (0x323B0, 0x33479),
+];
+
+const ALIASES_SINCE_UNICODE_17: &[&str] = &[
+    "BAMUM LETTER PHASE-B PUNGGAAM",
+    "BAMUM LETTER PHASE-B NGGOM",
+    "BAMUM LETTER PHASE-C SHETFON",
+    "BAMUM LETTER PHASE-E NGGOP",
+];
+
+const NAME_HANGUL_JUNGSEONG_O_E: u32 = 0x1180;
+
+fn named_since_unicode_17(code: u32) -> bool {
+    NAMED_SINCE_UNICODE_17
+        .iter()
+        .any(|&(start, end)| start <= code && code <= end)
+}
+
+fn loose_name_key(name: &str, code: u32) -> String {
+    let bytes = name.as_bytes();
+    let mut key = String::with_capacity(bytes.len());
+    for (index, byte) in bytes.iter().map(u8::to_ascii_uppercase).enumerate() {
+        if byte.is_ascii_whitespace() || byte == b'_' {
+            continue;
+        }
+        let medial = index > 0
+            && bytes.get(index - 1).is_some_and(u8::is_ascii_alphanumeric)
+            && bytes.get(index + 1).is_some_and(u8::is_ascii_alphanumeric);
+        if code != NAME_HANGUL_JUNGSEONG_O_E && byte == b'-' && medial {
+            continue;
+        }
+        assert!(byte.is_ascii_alphanumeric() || byte == b'-', "{name}");
+        key.push(char::from(byte));
+    }
+    key
+}
+
+fn generate_names() {
+    let mut names: Vec<(u32, String)> = Vec::new();
+    let mut cjk_ranges: Vec<(u32, u32)> = Vec::new();
+    let mut lines = UnicodeLineReader::from_file_name("UnicodeData.txt", true).reader;
+    while let Some(Ok(line)) = lines.next() {
+        let mut fields = line.split(';');
+        let code = u32::from_str_radix(fields.next().unwrap(), 16).unwrap();
+        let name = fields.next().unwrap();
+        if (0xD800..=0xDFFF).contains(&code) {
+            continue;
+        }
+        if let Some(range) = name.strip_prefix("<CJK Ideograph") {
+            assert!(range.ends_with("First>"), "{line}");
+            let last = lines.next().unwrap().unwrap();
+            let last_code = u32::from_str_radix(last.split(';').next().unwrap(), 16).unwrap();
+            cjk_ranges.push((code, last_code));
+        } else if !name.starts_with('<') {
+            names.push((code, name.to_owned()));
+        }
+    }
+    names.sort_unstable_by_key(|(code, _)| *code);
+
+    let mut cjk_ranges_16: Vec<(u32, u32)> = Vec::new();
+    for &(start, end) in &cjk_ranges {
+        let mut run: Option<(u32, u32)> = None;
+        for code in start..=end {
+            if named_since_unicode_17(code) {
+                if let Some(range) = run.take() {
+                    cjk_ranges_16.push(range);
+                }
+            } else {
+                run = Some(run.map_or((code, code), |(first, _)| (first, code)));
+            }
+        }
+        if let Some(range) = run {
+            cjk_ranges_16.push(range);
+        }
+    }
+
+    let mut words: Vec<String> = Vec::new();
+    let mut word_index: BTreeMap<String, u16> = BTreeMap::new();
+    let mut tokens: Vec<u16> = Vec::new();
+    let mut entries: Vec<(u32, u32)> = Vec::new();
+    for (code, name) in &names {
+        entries.push((*code, u32::try_from(tokens.len()).unwrap()));
+        let mut pieces = Vec::new();
+        for (space_index, chunk) in name.split(' ').enumerate() {
+            for (hyphen_index, word) in chunk.split('-').enumerate() {
+                pieces.push((word, space_index > 0 && hyphen_index == 0, hyphen_index > 0));
+            }
+        }
+        for (position, &(word, _, _)) in pieces.iter().enumerate() {
+            let next = word_index.len();
+            let index = *word_index.entry(word.to_owned()).or_insert_with(|| {
+                words.push(word.to_owned());
+                u16::try_from(next).unwrap()
+            });
+            assert!(index < 0x8000);
+            let hyphen_follows = pieces.get(position + 1).is_some_and(|&(_, _, hyphen)| hyphen);
+            tokens.push((index << 1) | u16::from(hyphen_follows));
+        }
+    }
+
+    let order = |key: &dyn Fn(usize) -> String| {
+        let mut order: Vec<usize> = (0..names.len()).collect();
+        order.sort_by_cached_key(|&index| key(index));
+        for pair in order.windows(2) {
+            assert_ne!(key(pair[0]), key(pair[1]), "{} {}", names[pair[0]].1, names[pair[1]].1);
+        }
+        order
+    };
+    let by_name = order(&|index| names[index].1.clone());
+    let by_key = order(&|index| loose_name_key(&names[index].1, names[index].0));
+
+    let mut aliases: Vec<(String, u32)> = Vec::new();
+    for line in UnicodeLineReader::from_file_name("NameAliases.txt", true) {
+        let alias = line
+            .field(
+                NonZeroUsize::new(1).unwrap(),
+                Some(&format!("field 1 (alias) missing from NameAliases.txt: {}", line.line)),
+            )
+            .to_owned();
+        aliases.push((alias, line.start));
+    }
+    aliases.sort();
+
+    let mut writer = open_writer("names.rs");
+    let mut text = String::new();
+    let mut ends = Vec::new();
+    for word in &words {
+        text.push_str(word);
+        ends.push(text.len());
+    }
+    let longest = names.iter().map(|(_, name)| name.len()).max().unwrap();
+    writeln!(writer, "pub(crate) const NAME_BYTES_MAX: usize = {longest};").unwrap();
+    writeln!(writer, "pub(crate) static NAME_WORDS: &str = {text:?};").unwrap();
+    writeln!(writer, "pub(crate) static NAME_WORD_ENDS: &[u32] = &{ends:?};").unwrap();
+    writeln!(writer, "pub(crate) static NAME_TOKENS: &[u16] = &{tokens:?};").unwrap();
+    writeln!(writer, "pub(crate) static NAME_CODES: &[u32] = &{:?};", entries.iter().map(|e| e.0).collect::<Vec<_>>()).unwrap();
+    writeln!(writer, "pub(crate) static NAME_TOKEN_STARTS: &[u32] = &{:?};", entries.iter().map(|e| e.1).collect::<Vec<_>>()).unwrap();
+    writeln!(writer, "pub(crate) static NAMES_BY_NAME: &[u16] = &{:?};", by_name.iter().map(|&i| u16::try_from(i).unwrap()).collect::<Vec<_>>()).unwrap();
+    writeln!(writer, "pub(crate) static NAMES_BY_LOOSE_KEY: &[u16] = &{:?};", by_key.iter().map(|&i| u16::try_from(i).unwrap()).collect::<Vec<_>>()).unwrap();
+    writeln!(writer, "pub(crate) static NAMED_SINCE_UNICODE_17: &[(u32, u32)] = &{NAMED_SINCE_UNICODE_17:?};").unwrap();
+    writeln!(writer, "pub(crate) static CJK_IDEOGRAPH_RANGES: &[(u32, u32)] = &{cjk_ranges:?};").unwrap();
+    writeln!(writer, "pub(crate) static CJK_IDEOGRAPH_RANGES_16: &[(u32, u32)] = &{cjk_ranges_16:?};").unwrap();
+    writeln!(writer, "pub(crate) static NAME_ALIAS_TEXTS: &[&str] = &{:?};", aliases.iter().map(|a| a.0.as_str()).collect::<Vec<_>>()).unwrap();
+    writeln!(writer, "pub(crate) static NAME_ALIAS_CODES: &[u32] = &{:?};", aliases.iter().map(|a| a.1).collect::<Vec<_>>()).unwrap();
+    writeln!(writer, "pub(crate) static NAME_ALIAS_SINCE_UNICODE_17: &[bool] = &{:?};", aliases.iter().map(|a| ALIASES_SINCE_UNICODE_17.contains(&a.0.as_str())).collect::<Vec<_>>()).unwrap();
+}
+
+fn parse_code_points(field: &str) -> Vec<u32> {
+    field
+        .split_whitespace()
+        .map(|code| u32::from_str_radix(code, 16).unwrap())
+        .collect()
+}
+
+fn generate_case_tables() {
+    let mut simple: BTreeMap<u32, [u32; 4]> = BTreeMap::new();
+    let mut lines = UnicodeLineReader::from_file_name("UnicodeData.txt", true).reader;
+    while let Some(Ok(line)) = lines.next() {
+        let fields: Vec<&str> = line.split(';').collect();
+        let code = u32::from_str_radix(fields[0], 16).unwrap();
+        let mapping = |index: usize| {
+            (!fields[index].is_empty()).then(|| u32::from_str_radix(fields[index], 16).unwrap())
+        };
+        let upper = mapping(12);
+        let lower = mapping(13);
+        let title = mapping(14).or(upper);
+        if upper.is_some() || lower.is_some() || title.is_some() {
+            simple.insert(
+                code,
+                [
+                    lower.unwrap_or(code),
+                    upper.unwrap_or(code),
+                    title.unwrap_or(code),
+                    code,
+                ],
+            );
+        }
+    }
+    let mut full_fold: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    let mut folding = UnicodeLineReader::from_file_name("CaseFolding.txt", true);
+    for line in folding.raw_iter() {
+        let fields: Vec<&str> = line.split(';').map(str::trim).collect();
+        let code = u32::from_str_radix(fields[0], 16).unwrap();
+        let mapping = parse_code_points(fields[2]);
+        match fields[1] {
+            "C" | "S" => {
+                assert_eq!(mapping.len(), 1, "{line}");
+                simple.entry(code).or_insert([code; 4])[3] = mapping[0];
+                if fields[1] == "C" {
+                    full_fold.entry(code).or_insert(mapping);
+                }
+            }
+            "F" => {
+                full_fold.insert(code, mapping);
+            }
+            "T" => {}
+            status => panic!("unknown CaseFolding status {status}: {line}"),
+        }
+    }
+    let mut full_title: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    let mut special = UnicodeLineReader::from_file_name("SpecialCasing.txt", true);
+    for line in special.raw_iter() {
+        let line = line.split('#').next().unwrap();
+        let fields: Vec<&str> = line.split(';').map(str::trim).collect();
+        if fields.len() > 5 || fields.get(4).is_some_and(|condition| !condition.is_empty()) {
+            continue;
+        }
+        let code = u32::from_str_radix(fields[0], 16).unwrap();
+        full_title.insert(code, parse_code_points(fields[2]));
+    }
+
+    let mut writer = open_writer("case.rs");
+    writeln!(writer, "pub(crate) static CASE_SIMPLE: &[(u32, [u32; 4])] = &[").unwrap();
+    for (code, mappings) in &simple {
+        writeln!(writer, "({code}, {mappings:?}),").unwrap();
+    }
+    writeln!(writer, "];").unwrap();
+    let write_full = |writer: &mut BufWriter<File>, name: &str, table: &BTreeMap<u32, Vec<u32>>| {
+        writeln!(writer, "pub(crate) static {name}: &[(u32, &str)] = &[").unwrap();
+        for (code, mapping) in table {
+            let text: String = mapping.iter().map(|&code| char::from_u32(code).unwrap()).collect();
+            writeln!(writer, "({code}, {text:?}),").unwrap();
+        }
+        writeln!(writer, "];").unwrap();
+    };
+    write_full(&mut writer, "CASE_FULL_FOLD", &full_fold);
+    write_full(&mut writer, "CASE_FULL_TITLE", &full_title);
+}
+
+const CODE_POINT_COUNT: usize = 0x11_0000;
+
+const GENERAL_CATEGORIES: [(&str, &str); 30] = [
+    ("Cn", "Unassigned"),
+    ("Lu", "Uppercase_Letter"),
+    ("Ll", "Lowercase_Letter"),
+    ("Lt", "Titlecase_Letter"),
+    ("Lm", "Modifier_Letter"),
+    ("Lo", "Other_Letter"),
+    ("Mn", "Nonspacing_Mark"),
+    ("Mc", "Spacing_Mark"),
+    ("Me", "Enclosing_Mark"),
+    ("Nd", "Decimal_Number"),
+    ("Nl", "Letter_Number"),
+    ("No", "Other_Number"),
+    ("Zs", "Space_Separator"),
+    ("Zl", "Line_Separator"),
+    ("Zp", "Paragraph_Separator"),
+    ("Cc", "Control"),
+    ("Cf", "Format"),
+    ("Co", "Private_Use"),
+    ("Cs", "Surrogate"),
+    ("Pd", "Dash_Punctuation"),
+    ("Ps", "Open_Punctuation"),
+    ("Pe", "Close_Punctuation"),
+    ("Pc", "Connector_Punctuation"),
+    ("Pi", "Initial_Punctuation"),
+    ("Pf", "Final_Punctuation"),
+    ("Po", "Other_Punctuation"),
+    ("Sm", "Math_Symbol"),
+    ("Sc", "Currency_Symbol"),
+    ("Sk", "Modifier_Symbol"),
+    ("So", "Other_Symbol"),
+];
+
+const GENERAL_CATEGORY_UNASSIGNED: &str = "Cn";
+
+const BIDI_CLASSES: [(&str, &str); 23] = [
+    ("L", "Left_To_Right"),
+    ("R", "Right_To_Left"),
+    ("EN", "European_Number"),
+    ("ES", "European_Separator"),
+    ("ET", "European_Terminator"),
+    ("AN", "Arabic_Number"),
+    ("CS", "Common_Separator"),
+    ("B", "Paragraph_Separator"),
+    ("S", "Segment_Separator"),
+    ("WS", "White_Space"),
+    ("ON", "Other_Neutral"),
+    ("LRE", "Left_To_Right_Embedding"),
+    ("LRO", "Left_To_Right_Override"),
+    ("AL", "Arabic_Letter"),
+    ("RLE", "Right_To_Left_Embedding"),
+    ("RLO", "Right_To_Left_Override"),
+    ("PDF", "Pop_Directional_Format"),
+    ("NSM", "Nonspacing_Mark"),
+    ("BN", "Boundary_Neutral"),
+    ("FSI", "First_Strong_Isolate"),
+    ("LRI", "Left_To_Right_Isolate"),
+    ("RLI", "Right_To_Left_Isolate"),
+    ("PDI", "Pop_Directional_Isolate"),
+];
+
+const EAST_ASIAN_WIDTHS: [(&str, &str); 6] = [
+    ("N", "Neutral"),
+    ("A", "Ambiguous"),
+    ("H", "Halfwidth"),
+    ("F", "Fullwidth"),
+    ("Na", "Narrow"),
+    ("W", "Wide"),
+];
+
+const EAST_ASIAN_WIDTH_NEUTRAL: &str = "N";
+
+const NUMERIC_TYPES: [(&str, &str); 4] = [
+    ("None", "None"),
+    ("De", "Decimal"),
+    ("Di", "Digit"),
+    ("Nu", "Numeric"),
+];
+
+const NUMERIC_TYPE_NUMERIC: &str = "Numeric";
+
+const BIDI_MIRRORED: &str = "Bidi_Mirrored";
+
+const FLAGS: [(&str, &str); 7] = [
+    (BIDI_MIRRORED, "BIDI_MIRRORED"),
+    ("Lowercase", "LOWERCASE"),
+    ("Uppercase", "UPPERCASE"),
+    ("Cased", "CASED"),
+    ("Case_Ignorable", "CASE_IGNORABLE"),
+    ("XID_Start", "XID_START"),
+    ("XID_Continue", "XID_CONTINUE"),
+];
+
+const COMBINING_CLASS_NOT_REORDERED: u8 = 0;
+
+const PROPERTY_BLOCK_BITS_SEARCHED: RangeInclusive<u32> = 1..=16;
+
+fn value_index(values: &[(&str, &str)], name: &str) -> usize {
+    let name = name.trim();
+    values
+        .iter()
+        .position(|&(short, long)| {
+            short.eq_ignore_ascii_case(name) || long.eq_ignore_ascii_case(name)
+        })
+        .unwrap_or_else(|| panic!("Unicode data contains valid property values: {name}"))
+}
+
+fn value_byte(values: &[(&str, &str)], name: &str) -> u8 {
+    u8::try_from(value_index(values, name)).expect("a property has fewer than 256 values")
+}
+
+fn variant_name(long: &str) -> String {
+    long.replace('_', "")
+}
+
+fn value_path(type_name: &str, values: &[(&str, &str)], index: usize) -> String {
+    format!("{type_name}::{}", variant_name(values[index].1))
+}
+
+fn read_property_file(file_name: &str, mut apply: impl FnMut(u32, u32, &[&str])) {
+    let mut text = String::new();
+    open_reader(file_name, true)
+        .read_to_string(&mut text)
+        .unwrap();
+    let missing = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("# @missing:"));
+    let entries = text
+        .lines()
+        .map(|line| line.split_once('#').map_or(line, |(entry, _)| entry).trim())
+        .filter(|entry| !entry.is_empty());
+    for entry in missing.chain(entries) {
+        let mut fields = entry.split(';').map(str::trim);
+        let range = fields
+            .next()
+            .expect("a property line starts with a code point range");
+        let (start, end) = range.split_once("..").unwrap_or((range, range));
+        let start = u32::from_str_radix(start, 16).unwrap_or_else(|e| {
+            panic!("{e}: {file_name} range start should be hexadecimal: {entry}")
+        });
+        let end = u32::from_str_radix(end, 16).unwrap_or_else(|e| {
+            panic!("{e}: {file_name} range end should be hexadecimal: {entry}")
+        });
+        let values: Vec<&str> = fields.collect();
+        assert!(
+            !values.is_empty(),
+            "{file_name} line has no property value: {entry}"
+        );
+        apply(start, end, &values);
+    }
+}
+
+fn fill(values: &mut [u8], start: u32, end: u32, value: u8) {
+    values[start as usize..=end as usize].fill(value);
+}
+
+fn flag_bit(name: &str) -> u8 {
+    let index = FLAGS
+        .iter()
+        .position(|&(flag, _)| flag == name)
+        .unwrap_or_else(|| panic!("{name} is not a stored flag"));
+    1 << index
+}
+
+struct Latest {
+    general_categories: Vec<u8>,
+    bidi_classes: Vec<u8>,
+    east_asian_widths: Vec<u8>,
+    numeric_types: Vec<u8>,
+    flags: Vec<u8>,
+}
+
+impl Latest {
+    fn read() -> Self {
+        let mut latest = Self {
+            general_categories: vec![0; CODE_POINT_COUNT],
+            bidi_classes: vec![0; CODE_POINT_COUNT],
+            east_asian_widths: vec![0; CODE_POINT_COUNT],
+            numeric_types: vec![0; CODE_POINT_COUNT],
+            flags: vec![0; CODE_POINT_COUNT],
+        };
+        latest.read_unicode_data();
+        read_property_file("DerivedBidiClass.txt", |start, end, values| {
+            fill(
+                &mut latest.bidi_classes,
+                start,
+                end,
+                value_byte(&BIDI_CLASSES, values[0]),
+            );
+        });
+        read_property_file("EastAsianWidth.txt", |start, end, values| {
+            let width = value_byte(&EAST_ASIAN_WIDTHS, values[0]);
+            fill(&mut latest.east_asian_widths, start, end, width);
+        });
+        read_property_file("DerivedNumericType.txt", |start, end, values| {
+            fill(
+                &mut latest.numeric_types,
+                start,
+                end,
+                value_byte(&NUMERIC_TYPES, values[0]),
+            );
+        });
+        read_property_file("DerivedCoreProperties.txt", |start, end, values| {
+            if values[0] != BIDI_MIRRORED && FLAGS.iter().any(|&(flag, _)| flag == values[0]) {
+                let bit = flag_bit(values[0]);
+                for flags in &mut latest.flags[start as usize..=end as usize] {
+                    *flags |= bit;
+                }
+            }
+        });
+        latest
+    }
+
+    fn read_unicode_data(&mut self) {
+        let mirrored_bit = flag_bit(BIDI_MIRRORED);
+        let mut range_start = None;
+        for line in UnicodeLineReader::from_file_name("UnicodeData.txt", true) {
+            let fields: Vec<&str> = line.line.split(';').collect();
+            let name = fields[1];
+            if name.ends_with("First>") {
+                assert!(range_start.replace(line.start).is_none(), "{}", line.line);
+                continue;
+            }
+            let start = if name.ends_with("Last>") {
+                range_start.take().unwrap_or_else(|| {
+                    panic!("a Last> line follows its First> line: {}", line.line)
+                })
+            } else {
+                line.start
+            };
+            let category = value_byte(&GENERAL_CATEGORIES, fields[2]);
+            let mirrored = match fields[9] {
+                "Y" => true,
+                "N" => false,
+                other => panic!("Bidi_Mirrored should be Y or N, got {other}: {}", line.line),
+            };
+            fill(&mut self.general_categories, start, line.start, category);
+            if mirrored {
+                for flags in &mut self.flags[start as usize..=line.start as usize] {
+                    *flags |= mirrored_bit;
+                }
+            }
+        }
+        assert!(range_start.is_none(), "UnicodeData.txt ends inside a range");
+    }
+}
+
+fn value_bits(count: usize) -> u32 {
+    usize::BITS - (count - 1).leading_zeros()
+}
+
+fn index_type(count: usize) -> &'static str {
+    if count <= usize::from(u8::MAX) + 1 {
+        "u8"
+    } else if count <= usize::from(u16::MAX) + 1 {
+        "u16"
+    } else {
+        "u32"
+    }
+}
+
+fn index_bytes(count: usize) -> usize {
+    match index_type(count) {
+        "u8" => 1,
+        "u16" => 2,
+        _ => 4,
+    }
+}
+
+struct PropertyBlocks {
+    bits: u32,
+    blocks: Vec<usize>,
+    entries: Vec<usize>,
+}
+
+impl PropertyBlocks {
+    fn split(indexes: &[usize], bits: u32) -> Self {
+        let mut seen: BTreeMap<&[usize], usize> = BTreeMap::new();
+        let mut blocks = Vec::with_capacity(indexes.len() >> bits);
+        let mut entries = Vec::new();
+        for chunk in indexes.chunks(1 << bits) {
+            let next = seen.len();
+            let block = *seen.entry(chunk).or_insert_with(|| {
+                entries.extend_from_slice(chunk);
+                next
+            });
+            blocks.push(block);
+        }
+        Self {
+            bits,
+            blocks,
+            entries,
+        }
+    }
+
+    fn block_count(&self) -> usize {
+        self.entries.len() >> self.bits
+    }
+
+    fn bytes(&self, record_count: usize) -> usize {
+        self.blocks.len() * index_bytes(self.block_count())
+            + self.entries.len() * index_bytes(record_count)
+    }
+}
+
+fn write_enum(
+    writer: &mut impl Write,
+    type_name: &str,
+    values: &[(&str, &str)],
+    short_names: bool,
+) {
+    writeln!(writer, "#[derive(Clone, Copy, Debug, PartialEq, Eq)]").unwrap();
+    writeln!(writer, "pub(crate) enum {type_name} {{").unwrap();
+    for &(_, long) in values {
+        writeln!(writer, "    {},", variant_name(long)).unwrap();
+    }
+    writeln!(writer, "}}").unwrap();
+    writeln!(writer, "impl {type_name} {{").unwrap();
+    writeln!(
+        writer,
+        "    pub(crate) const ALL: [Self; {}] = [",
+        values.len()
+    )
+    .unwrap();
+    for &(_, long) in values {
+        writeln!(writer, "        Self::{},", variant_name(long)).unwrap();
+    }
+    writeln!(writer, "    ];").unwrap();
+    if short_names {
+        writeln!(
+            writer,
+            "    pub(crate) const fn short_name(self) -> &'static str {{"
+        )
+        .unwrap();
+        writeln!(writer, "        match self {{").unwrap();
+        for &(short, long) in values {
+            writeln!(
+                writer,
+                "            Self::{} => {short:?},",
+                variant_name(long)
+            )
+            .unwrap();
+        }
+        writeln!(writer, "        }}").unwrap();
+        writeln!(writer, "    }}").unwrap();
+    }
+    writeln!(writer, "}}").unwrap();
+}
+
+fn generate_properties(latest: &Latest) {
+    let fields: [(&str, &[(&str, &str)], &[u8]); 4] = [
+        (
+            "GENERAL_CATEGORY",
+            &GENERAL_CATEGORIES,
+            &latest.general_categories,
+        ),
+        ("BIDI_CLASS", &BIDI_CLASSES, &latest.bidi_classes),
+        (
+            "EAST_ASIAN_WIDTH",
+            &EAST_ASIAN_WIDTHS,
+            &latest.east_asian_widths,
+        ),
+        ("NUMERIC_TYPE", &NUMERIC_TYPES, &latest.numeric_types),
+    ];
+    let mut writer = open_writer("properties.rs");
+    write_enum(&mut writer, "GeneralCategory", &GENERAL_CATEGORIES, true);
+    write_enum(&mut writer, "BidiClass", &BIDI_CLASSES, true);
+    write_enum(&mut writer, "EastAsianWidth", &EAST_ASIAN_WIDTHS, true);
+    write_enum(&mut writer, "NumericType", &NUMERIC_TYPES, false);
+
+    let mut shift = 0;
+    let mut shifts = Vec::with_capacity(fields.len());
+    for &(name, values, _) in &fields {
+        let bits = value_bits(values.len());
+        writeln!(writer, "pub(crate) const {name}_SHIFT: u32 = {shift};").unwrap();
+        writeln!(
+            writer,
+            "pub(crate) const {name}_MASK: u32 = {};",
+            (1u32 << bits) - 1
+        )
+        .unwrap();
+        shifts.push(shift);
+        shift += bits;
+    }
+    let flags_shift = shift;
+    for (index, &(_, name)) in FLAGS.iter().enumerate() {
+        writeln!(
+            writer,
+            "pub(crate) const {name}: u32 = 1 << {};",
+            flags_shift + index as u32
+        )
+        .unwrap();
+    }
+    assert!(
+        flags_shift + FLAGS.len() as u32 <= u32::BITS,
+        "a property record fits in a u32"
+    );
+
+    let mut records: Vec<u32> = Vec::new();
+    let mut record_indexes: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut indexes = Vec::with_capacity(CODE_POINT_COUNT);
+    for code in 0..CODE_POINT_COUNT {
+        let mut record = u32::from(latest.flags[code]) << flags_shift;
+        for (&(_, _, values), &shift) in fields.iter().zip(&shifts) {
+            record |= u32::from(values[code]) << shift;
+        }
+        let next = records.len();
+        let index = *record_indexes.entry(record).or_insert_with(|| {
+            records.push(record);
+            next
+        });
+        indexes.push(index);
+    }
+
+    let split = PROPERTY_BLOCK_BITS_SEARCHED
+        .map(|bits| PropertyBlocks::split(&indexes, bits))
+        .min_by_key(|split| split.bytes(records.len()))
+        .expect("at least one block size is searched");
+    writeln!(
+        writer,
+        "pub(crate) const PROPERTY_BLOCK_BITS: u32 = {};",
+        split.bits
+    )
+    .unwrap();
+    writeln!(
+        writer,
+        "pub(crate) static PROPERTY_BLOCKS: [{}; {}] = {:?};",
+        index_type(split.block_count()),
+        split.blocks.len(),
+        split.blocks
+    )
+    .unwrap();
+    writeln!(
+        writer,
+        "pub(crate) static PROPERTY_RECORD_INDEXES: [{}; {}] = {:?};",
+        index_type(records.len()),
+        split.entries.len(),
+        split.entries
+    )
+    .unwrap();
+    writeln!(
+        writer,
+        "pub(crate) static PROPERTY_RECORDS: [u32; {}] = {records:?};",
+        records.len()
+    )
+    .unwrap();
+}

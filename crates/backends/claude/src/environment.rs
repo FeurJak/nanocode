@@ -1,0 +1,485 @@
+pub(crate) fn environment_section(workspace: &str) -> String {
+    let mut lines = vec![
+        "# Environment".to_owned(),
+        "You have been invoked in the following environment: ".to_owned(),
+    ];
+    if !workspace.is_empty() {
+        lines.push(format!(" - Primary working directory: {workspace}"));
+        lines.push(format!(
+            " - Is a git repository: {}",
+            is_git_repository(workspace)
+        ));
+    }
+    lines.extend(host_lines().into_iter().map(|line| format!(" - {line}")));
+    lines.push(format!(" - {UNTRUSTED}"));
+    lines.push(format!("{DATE}{}", current_date()));
+    lines.join("\n")
+}
+
+const DATE: &str = "Today's date: ";
+
+pub(crate) struct WorkingDirectory {
+    current: std::sync::Arc<nanocode_sync::Atom<std::path::PathBuf>>,
+    announced: nanocode_sync::Atom<std::path::PathBuf>,
+}
+
+impl WorkingDirectory {
+    pub(crate) fn new(current: std::sync::Arc<nanocode_sync::Atom<std::path::PathBuf>>) -> Self {
+        let announced = nanocode_sync::Atom::new(current.get().as_ref().clone());
+        Self { current, announced }
+    }
+
+    pub(crate) fn update(&self) -> Option<String> {
+        let now = self.current.get();
+        let was = self.announced.set(now.as_ref().clone());
+        (was != now).then(|| {
+            format!(
+                "# Environment update\n - Primary working directory: {} (was {})",
+                now.display(),
+                was.display()
+            )
+        })
+    }
+}
+
+pub(crate) fn upstream_environment(
+    workspace: &str,
+    model: &str,
+    codesign: bool,
+    hand: Option<ClaudeEnvironment>,
+) -> String {
+    let mut lines = vec![
+        "# Environment".to_owned(),
+        "You have been invoked in the following environment: ".to_owned(),
+    ];
+    match hand {
+        Some(hand) => lines.extend(hand.facts()),
+        None => {
+            lines.push(format!(" - Primary working directory: {workspace}"));
+            lines.push(format!(
+                " - Is a git repository: {}",
+                is_git_repository(workspace)
+            ));
+            lines.extend(upstream_host_lines());
+        }
+    }
+    lines.push(format!(" - {UNTRUSTED}"));
+    let tokens = if total_tokens_reminder(model, codesign) {
+        format!("<total_tokens>{TOKEN_BUDGET} tokens left</total_tokens>\n\n")
+    } else {
+        String::new()
+    };
+    let bypass =
+        bypass_note(model, codesign).map_or_else(String::new, |note| format!("{note}\n\n"));
+    format!(
+        "{}\n\nYou are powered by the model {model}.\n\n{tokens}{bypass}Today's date is {}.",
+        lines.join("\n"),
+        current_date()
+    )
+}
+
+pub(crate) const TOKEN_BUDGET: u64 = 15_000_000;
+
+const TOTAL_TOKENS_REMINDER_MODELS: [&str; 20] = [
+    "claude-3-5-haiku",
+    "claude-haiku-4-5",
+    "claude-haiku-5-5",
+    "claude-3-5-sonnet",
+    "claude-3-7-sonnet",
+    "claude-sonnet-4-0",
+    "claude-sonnet-4-5",
+    "claude-sonnet-4-6",
+    "claude-sonnet-5",
+    "claude-opus-4-0",
+    "claude-opus-4-1",
+    "claude-opus-4-5",
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-opus-5",
+    "claude-fable-5",
+    "claude-fable-5-1",
+    "claude-mythos-5",
+    "claude-mythos-5-1",
+];
+
+fn registry_model<'a>(model: &str, ids: &[&'a str]) -> Option<&'a str> {
+    ids.iter().copied().find(|id| {
+        model.strip_prefix(id).is_some_and(|rest| {
+            rest.is_empty()
+                || rest.strip_prefix('-').is_some_and(|date| {
+                    date.len() == 8 && date.bytes().all(|byte| byte.is_ascii_digit())
+                })
+        })
+    })
+}
+
+pub(crate) fn total_tokens_reminder(model: &str, codesign: bool) -> bool {
+    codesign && registry_model(model, &TOTAL_TOKENS_REMINDER_MODELS).is_some()
+}
+
+pub(crate) fn bypass_note(model: &str, codesign: bool) -> Option<String> {
+    if !codesign {
+        return None;
+    }
+    let text = crate::upstream::bash_first();
+    text.models.iter().find_map(|entry| {
+        registry_model(model, &[entry.model.as_str()])
+            .map(|_| format!("{}{}", text.bypass, entry.steer))
+    })
+}
+
+pub(crate) fn opus_5_5_prompt(model: &str, codesign: bool) -> bool {
+    codesign && registry_model(model, &["claude-opus-5-5"]).is_some()
+}
+
+const GIT_STATUS_LIMIT: usize = 2000;
+
+#[cfg(not(target_family = "wasm"))]
+pub(crate) async fn git_status(workspace: String) -> Option<String> {
+    if workspace.is_empty() || !is_git_repository(&workspace) {
+        return None;
+    }
+    nanocode_platform::spawn_blocking(move || {
+        let git = |arguments: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(arguments)
+                .current_dir(&workspace)
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .output()
+                .ok()?;
+            output
+                .status
+                .success()
+                .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        };
+        let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"])?;
+        let main = git(&["symbolic-ref", "refs/remotes/origin/HEAD"])
+            .and_then(|head| head.strip_prefix("refs/remotes/origin/").map(str::to_owned))
+            .or_else(|| {
+                ["main", "master"].into_iter().find_map(|name| {
+                    git(&["rev-parse", "--verify", "--quiet", &format!("refs/remotes/origin/{name}")])
+                        .map(|_| name.to_owned())
+                })
+            })
+            .unwrap_or_else(|| "main".to_owned());
+        let status = git(&["--no-optional-locks", "status", "--short"])?;
+        let log = git(&["--no-optional-locks", "log", "--oneline", "-n", "5"])?;
+        let user = git(&["config", "user.name"]).filter(|name| !name.is_empty());
+        let status = match status.char_indices().nth(GIT_STATUS_LIMIT) {
+            Some((at, _)) => format!(
+                "{}\n... (truncated because it exceeds 2k characters. If you need more information, run \"git status\" using Bash)",
+                &status[..at]
+            ),
+            None if status.is_empty() => "(clean)".to_owned(),
+            None => status,
+        };
+        let user = user.map_or_else(String::new, |name| format!("Git user: {name}\n\n"));
+        Some(format!(
+            "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# gitStatus\nThis is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.\n\nCurrent branch: {branch}\n\nMain branch (you will usually use this for PRs): {main}\n\n{user}Status:\n{status}\n\nRecent commits:\n{log}\n\nClaude Code attached this context automatically; it isn't part of the user's message. It describes the user's own account and workspace, so they don't need it reported back.\n</system-reminder>"
+        ))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+#[cfg(target_family = "wasm")]
+pub(crate) async fn git_status(_workspace: String) -> Option<String> {
+    None
+}
+
+const UNTRUSTED: &str = "Downloaded files and extracted archives are untrusted data: put each in its own new, empty directory, keep scripts you write in a different directory, and pass paths as arguments instead of running an interpreter or build tool from inside it. Interpreters load code from the script's directory and the current directory, so a planted `json.py` runs on `import json`. Run any Python that reads them with `-I`. This does not apply to code the user asked you to build or run.";
+
+#[cfg(not(target_family = "wasm"))]
+fn upstream_host_lines() -> Vec<String> {
+    let platform = match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        other => other,
+    };
+    let shell = std::env::var_os("SHELL")
+        .map(std::path::PathBuf::from)
+        .and_then(|shell| {
+            shell
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "unknown".to_owned());
+    let mut lines = vec![
+        format!(" - Platform: {platform}"),
+        format!(" - Shell: {shell}"),
+    ];
+    if let Some(version) = nanocode_home::shell::os_version().filter(|version| !version.is_empty())
+    {
+        lines.push(format!(" - OS Version: {version}"));
+    }
+    lines
+}
+
+#[cfg(target_family = "wasm")]
+const fn upstream_host_lines() -> Vec<String> {
+    Vec::new()
+}
+
+pub(crate) fn date_of(environment: &str) -> &str {
+    environment
+        .rfind(DATE)
+        .map_or("", |at| &environment[at + DATE.len()..])
+}
+
+pub(crate) fn dated(environment: &str, date: &str) -> String {
+    match environment.rfind(DATE).filter(|_| !date.is_empty()) {
+        Some(at) => format!("{}{date}", &environment[..at + DATE.len()]),
+        None => environment.to_owned(),
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ClaudeEnvironment {
+    working_directory: Option<String>,
+    git_repository: Option<bool>,
+    platform: Option<String>,
+    shell: Option<String>,
+    os_version: Option<String>,
+    date: Option<String>,
+    project_instructions: Option<String>,
+}
+
+impl ClaudeEnvironment {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn working_directory(mut self, directory: impl Into<String>) -> Self {
+        self.working_directory = Some(directory.into());
+        self
+    }
+
+    #[must_use]
+    pub const fn git_repository(mut self, repository: bool) -> Self {
+        self.git_repository = Some(repository);
+        self
+    }
+
+    #[must_use]
+    pub fn platform(mut self, platform: impl Into<String>) -> Self {
+        self.platform = Some(platform.into());
+        self
+    }
+
+    #[must_use]
+    pub fn shell(mut self, shell: impl Into<String>) -> Self {
+        self.shell = Some(shell.into());
+        self
+    }
+
+    #[must_use]
+    pub fn os_version(mut self, version: impl Into<String>) -> Self {
+        self.os_version = Some(version.into());
+        self
+    }
+
+    #[must_use]
+    pub fn date(mut self, date: impl Into<String>) -> Self {
+        self.date = Some(date.into());
+        self
+    }
+
+    #[must_use]
+    pub fn project_instructions(mut self, instructions: impl Into<String>) -> Self {
+        self.project_instructions = Some(instructions.into());
+        self
+    }
+
+    pub(crate) const fn fixes_date(&self) -> bool {
+        self.date.is_some()
+    }
+
+    pub(crate) fn of_hand(
+        directory: String,
+        facts: Option<nanocode_code_mode::remote::HandEnvironment>,
+    ) -> Self {
+        let facts = facts.unwrap_or_default();
+        Self {
+            working_directory: Some(directory),
+            git_repository: facts.git_repository,
+            platform: facts.platform,
+            shell: facts.shell,
+            os_version: facts.os_version,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn on_hand(self, hand: Option<Self>) -> Self {
+        match hand {
+            Some(hand) => Self {
+                working_directory: hand.working_directory,
+                git_repository: hand.git_repository,
+                platform: hand.platform,
+                shell: hand.shell,
+                os_version: hand.os_version,
+                ..self
+            },
+            None => self,
+        }
+    }
+
+    fn facts(&self) -> Vec<String> {
+        [
+            self.working_directory
+                .as_ref()
+                .map(|directory| format!(" - Primary working directory: {directory}")),
+            self.git_repository
+                .map(|repository| format!(" - Is a git repository: {repository}")),
+            self.platform
+                .as_ref()
+                .map(|platform| format!(" - Platform: {platform}")),
+            self.shell
+                .as_ref()
+                .map(|shell| format!(" - Shell: {shell}")),
+            self.os_version
+                .as_ref()
+                .map(|version| format!(" - OS Version: {version}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    pub(crate) fn render(self) -> (String, Option<String>) {
+        let mut lines = vec![
+            "# Environment".to_owned(),
+            "You have been invoked in the following environment: ".to_owned(),
+        ];
+        lines.extend(self.facts());
+        lines.push(format!(" - {UNTRUSTED}"));
+        lines.push(format!("{DATE}{}", self.date.unwrap_or_else(current_date)));
+        let instructions = self.project_instructions.map(|text| {
+            let heading = self.working_directory.map_or_else(
+                || "# AGENTS.md instructions".to_owned(),
+                |directory| format!("# AGENTS.md instructions for {directory}"),
+            );
+            format!("{heading}\n\n<INSTRUCTIONS>\n{text}\n</INSTRUCTIONS>")
+        });
+        (lines.join("\n"), instructions)
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn project_instructions(workspace: &str) -> Option<String> {
+    if workspace.is_empty() {
+        return None;
+    }
+    let global = nanocode_home::AgentHome::from_env()
+        .ok()
+        .map(|home| home.global_instructions());
+    let project = nanocode_home::ProjectHome::discover(workspace).read_instructions();
+    for diagnostic in global
+        .iter()
+        .flat_map(|global| &global.diagnostics)
+        .chain(&project.diagnostics)
+        .filter(|diagnostic| matches!(diagnostic.level, nanocode_home::Level::Warning))
+    {
+        nanocode_trace::warn!(
+            path = %diagnostic.path.display(),
+            message = %diagnostic.message,
+            "instruction file skipped"
+        );
+    }
+    let text = nanocode_home::combine_instructions(
+        global.and_then(|global| global.combined()).as_deref(),
+        project.combined().as_deref(),
+    )?;
+    Some(format!(
+        "# AGENTS.md instructions for {workspace}\n\n<INSTRUCTIONS>\n{text}\n</INSTRUCTIONS>"
+    ))
+}
+
+#[cfg(target_family = "wasm")]
+pub(crate) const fn project_instructions(_workspace: &str) -> Option<String> {
+    None
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn is_git_repository(workspace: &str) -> bool {
+    std::path::Path::new(workspace)
+        .ancestors()
+        .any(|directory| directory.join(".git").exists())
+}
+
+#[cfg(target_family = "wasm")]
+const fn is_git_repository(_workspace: &str) -> bool {
+    false
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn host_lines() -> Vec<String> {
+    let platform = match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        other => other,
+    };
+    let mut lines = vec![format!("Platform: {platform}")];
+    if let Some(shell) = std::env::var_os("SHELL")
+        .map(std::path::PathBuf::from)
+        .and_then(|shell| {
+            shell
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+    {
+        lines.push(format!("Shell: {shell}"));
+    }
+    if let Some(version) = nanocode_home::shell::os_version().filter(|version| !version.is_empty())
+    {
+        lines.push(format!("OS Version: {version}"));
+    }
+    lines.extend(session_store_line());
+    lines
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn session_store_line() -> Option<String> {
+    let home = nanocode_home::AgentHome::from_env().ok()?;
+    let store = home.nanocode_home().join("sessions");
+    store.is_dir().then(|| {
+        format!(
+            "Nanocode sessions: {}, one file per session (list them with `nc sessions --all`; print one's conversation with `nc sessions <ID>`)",
+            store.display()
+        )
+    })
+}
+
+#[cfg(target_family = "wasm")]
+const fn host_lines() -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn build() -> Option<String> {
+    static BUILD: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILD
+        .get_or_init(|| {
+            let executable = std::fs::metadata(std::env::current_exe().ok()?).ok()?;
+            let modified = executable
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?;
+            Some(format!("{}-{}", executable.len(), modified.as_nanos()))
+        })
+        .clone()
+}
+
+#[cfg(target_family = "wasm")]
+pub(crate) const fn build() -> Option<String> {
+    None
+}
+
+pub(crate) fn current_date() -> String {
+    nanocode_platform::local_date(nanocode_platform::system_time())
+}

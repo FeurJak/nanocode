@@ -1,0 +1,10 @@
+lapack_litemodule.c
+lapack_lite/f2c.c
+lapack_lite/f2c_blas.c
+lapack_lite/f2c_c_lapack.c
+lapack_lite/f2c_config.c
+lapack_lite/f2c_d_lapack.c
+lapack_lite/f2c_lapack.c
+lapack_lite/f2c_s_lapack.c
+lapack_lite/f2c_z_lapack.c
+lapack_lite/python_xerbla.c

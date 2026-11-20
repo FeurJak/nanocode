@@ -1,0 +1,92 @@
+#!/bin/sh
+scripts=${0%/*}
+[ -x "$scripts/.buildcache" ] && exec "$scripts/.buildcache" "$scripts" "$@"
+cache=${XDG_CACHE_HOME:-$HOME/.cache}/nanocode/build
+source=$scripts/buildcache.rs
+run() {
+  case $1 in
+    *rustc)
+      for arg; do
+        case $arg in
+          /*) ;;
+          *.rs) exec "$scripts/rustc-parallel-frontend" "$@" ;;
+        esac
+      done
+      ;;
+  esac
+  exec "$@"
+}
+checksum=$(cksum < "$source") || run "$@"
+helper=$cache/bin/buildcache-${checksum%% *}
+[ -x "$helper" ] && exec "$helper" "$scripts" "$@"
+[ -f "$helper.failed" ] && run "$@"
+case $1 in
+  *rustc|publish)
+    compiler=$1
+    [ "$1" = publish ] && compiler=rustc
+    mkdir -p "$cache/bin" || run "$@"
+    lock=${cache%/*}/remote.lock
+    compiles=
+    for arg; do
+      case $arg in
+        *.rs) compiles=1 ;;
+      esac
+    done
+    prebuilt() {
+      remote=${cache%/*}/remote
+      [ -d "$remote" ] || "$scripts/buildcache-prefetch" > /dev/null 2>&1 9>&- || printf %s "$PPID" > "${cache%/*}/remote.failed"
+      for file in "$remote/workspace/helper-${checksum%% *}-$(uname -sm | tr ' ' -)-"*; do
+        [ -f "$file" ] || continue
+        [ "$({ sha256sum || shasum -a 256; } < "$file" 2> /dev/null | cut -c1-64)" = "${file##*-}" ] || continue
+        cp "$file" "$helper.$$" && chmod 755 "$helper.$$" || continue
+        "$helper.$$" "$scripts" 2> /dev/null
+        [ $? -eq 2 ] && mv -f "$helper.$$" "$helper" && return 0
+        rm -f "$helper.$$"
+      done
+      return 1
+    }
+    build() {
+      if { [ "$(uname -s)" = Linux ] && env -u CARGO_MAKEFLAGS -u MAKEFLAGS -u MFLAGS "$compiler" --edition 2024 -C opt-level=2 -C strip=symbols -C target-feature=+crt-static -o "$helper.$$" "$source"; } ||
+        env -u CARGO_MAKEFLAGS -u MAKEFLAGS -u MFLAGS "$compiler" --edition 2024 -C opt-level=2 -C strip=symbols -o "$helper.$$" "$source"; then
+        mv -f "$helper.$$" "$helper"
+      else
+        touch "$helper.failed"
+      fi
+      rm -f "$helper.$$"
+    }
+    if [ -d "$helper.lock" ]; then
+      { read -r builder < "$helper.lock/pid"; } 2>/dev/null
+      kill -0 "${builder:-0}" 2>/dev/null || rm -rf "$helper.lock"
+    fi
+    if mkdir "$helper.lock" 2>/dev/null; then
+      echo $$ > "$helper.lock/pid"
+      if [ "$1" != publish ] && [ -z "$NANOCODE_BUILDCACHE_URL" ] && [ ! -d "$cache/units" ] && [ ! -d "$cache/workspace" ]; then
+        if command -v flock > /dev/null 2>&1; then
+          exec 9> "$lock"
+          flock 9
+          (
+            sh -c 'echo $PPID' > "$helper.lock/pid"
+            prebuilt || build
+            rm -rf "$helper.lock"
+          ) < /dev/null > /dev/null 2>&1 &
+          exec 9>&-
+          [ -n "$compiles" ] && flock -s "$lock" true && [ -x "$helper" ] && exec "$helper" "$scripts" "$@"
+          run "$@"
+        fi
+        prebuilt && rm -rf "$helper.lock" && exec "$helper" "$scripts" "$@"
+      fi
+      (
+        sh -c 'echo $PPID' > "$helper.lock/pid"
+        build
+        rm -rf "$helper.lock"
+      ) < /dev/null > /dev/null 2>&1 &
+      if [ "$1" = publish ] || [ "${NANOCODE_BUILDCACHE_URL:-off}" != off ] || [ -f "${cache%/*}/remote/workspace/index" ] || { [ -z "$NANOCODE_BUILDCACHE_URL" ] && [ ! -d "$cache/units" ] && [ ! -d "$cache/workspace" ]; }; then
+        wait $!
+        [ -x "$helper" ] && exec "$helper" "$scripts" "$@"
+      fi
+    elif [ -n "$compiles" ] && command -v flock > /dev/null 2>&1 && flock -s "$lock" true 2> /dev/null && [ -x "$helper" ]; then
+      exec "$helper" "$scripts" "$@"
+    fi
+    ;;
+esac
+run "$@"

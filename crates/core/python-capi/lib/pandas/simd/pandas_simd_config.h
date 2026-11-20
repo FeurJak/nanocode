@@ -1,0 +1,1 @@
+#define PANDAS_HAVE_SCALAR 1

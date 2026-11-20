@@ -1,0 +1,26 @@
+[package]
+autotests = false
+autobenches = false
+name = "nanocode-types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared SDK contracts and event channels with compatible value reexports"
+
+[dependencies]
+nanocode-sync.workspace = true
+nanocode-platform.workspace = true
+nanocode-types-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+nanocode-trace.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+test = false
+doctest = false
+bench = false

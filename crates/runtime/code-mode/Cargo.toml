@@ -1,0 +1,48 @@
+[package]
+autotests = false
+autobenches = false
+name = "nanocode-code-mode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Backend-generic Code Mode execution and host contracts"
+
+[package.metadata.docs.rs]
+rustdoc-args = ["-D", "warnings"]
+
+[dependencies]
+nanocode-digest.workspace = true
+nanocode-types-core.workspace = true
+nanocode-audio.workspace = true
+nanocode-image.workspace = true
+nanocode-platform.workspace = true
+nanocode-process-contracts.workspace = true
+nanocode-sync.workspace = true
+nanocode-tool-contracts.workspace = true
+nanocode-tools.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+nanocode-trace.workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+nanocode-code-mode-engine.workspace = true
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+nanocode-code-mode-engine = { workspace = true, optional = true }
+
+[features]
+local-cells = ["dep:nanocode-code-mode-engine"]
+
+[lints]
+workspace = true
+
+[lib]
+test = false
+doctest = false
+bench = false

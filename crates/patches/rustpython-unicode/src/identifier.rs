@@ -1,0 +1,24 @@
+//! Python identifier predicates (`str.isidentifier`).
+
+use crate::properties::{XID_CONTINUE, XID_START, has};
+
+/// Whether `c` has the `XID_Start` property.
+#[must_use]
+pub fn is_xid_start(c: char) -> bool {
+    has(c, XID_START)
+}
+
+/// Whether `c` has the `XID_Continue` property.
+#[must_use]
+pub fn is_xid_continue(c: char) -> bool {
+    has(c, XID_CONTINUE)
+}
+
+/// Whether `c` may start a Python identifier: `_` or `XID_Start`.
+#[must_use]
+pub fn is_start(c: char) -> bool {
+    c == '_' || is_xid_start(c)
+}
+
+/// Whether `c` may continue a Python identifier: `XID_Continue`.
+pub use is_xid_continue as is_continue;

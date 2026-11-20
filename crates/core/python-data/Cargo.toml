@@ -1,0 +1,32 @@
+[package]
+name = "nanocode-python-data"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "python3's read-only data: the frozen standard library and site packages and their data files, one blob read entry by entry"
+autotests = false
+autobenches = false
+build = "build.rs"
+
+[build-dependencies]
+nanocode-compression.workspace = true
+rustpython-compiler.workspace = true
+rustpython-compiler-core.workspace = true
+rustpython-pylib.workspace = true
+
+[lib]
+test = false
+doctest = false
+bench = false
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+missing_const_for_fn = "warn"
+use_self = "warn"
+redundant_clone = "warn"

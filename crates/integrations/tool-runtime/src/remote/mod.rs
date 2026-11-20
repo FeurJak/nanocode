@@ -1,0 +1,26 @@
+#[cfg(not(target_family = "wasm"))]
+use crate::embedded::{CodeModeExecution, CodeModeHostError, CodeModeObserver, HostFuture};
+#[cfg(not(target_family = "wasm"))]
+use crate::{Tool, ToolContext, ToolDefinition};
+pub use nanocode_code_mode::remote::*;
+#[cfg(not(target_family = "wasm"))]
+pub mod accept;
+#[cfg(not(target_family = "wasm"))]
+mod hand;
+#[cfg(not(target_family = "wasm"))]
+mod native;
+#[cfg(not(target_family = "wasm"))]
+mod pricing;
+mod read;
+#[cfg(not(target_family = "wasm"))]
+pub use hand::{ConfirmRefusal, Hand, HandEndpoint, HandEvent};
+#[cfg(not(target_family = "wasm"))]
+pub(crate) use native::SocketShutdown;
+#[cfg(not(target_family = "wasm"))]
+pub use native::{
+    DialStages, SocketPolicy, SocketTransport, local_host_info, serve_accept, serve_connect,
+    serve_connect_with, serve_stream,
+};
+#[cfg(not(target_family = "wasm"))]
+pub use pricing::{HandPricing, PricedOperation};
+pub use read::{ReadError, read_whole};

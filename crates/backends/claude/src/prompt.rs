@@ -1,0 +1,534 @@
+use crate::{ContentBlock, Message, Role};
+use nanocode_agent_core::{
+    NanocodeError, Result,
+    input::{Prompt, PromptInput, PromptMessageRole, UserInput},
+};
+use nanocode_durability::BlobUrl;
+use nanocode_image::prepare_base64_images;
+use nanocode_sys::base64::STANDARD;
+use nanocode_tool_host::image::ImageHistory;
+use serde_json::json;
+
+const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
+const MAX_SOURCE_IMAGE_BYTES: usize = 64 * 1024 * 1024;
+
+const IMAGE_PATCH: u32 = 28;
+const MAX_IMAGES: usize = 20;
+const MAX_TOTAL_BYTES: usize = 20 * 1024 * 1024;
+
+const MAX_DOCUMENT_BYTES: usize = 10 * 1024 * 1024;
+const MAX_FILENAME_BYTES: usize = 255;
+
+fn invalid(message: impl Into<String>) -> NanocodeError {
+    NanocodeError::InvalidRequest(message.into())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ImageResolution {
+    max_edge: u32,
+    max_tokens: u32,
+}
+
+impl ImageResolution {
+    pub(crate) fn of(model: &str) -> Self {
+        match model {
+            "claude-opus-5-5" | "claude-fable-5-5" | "claude-fable-5-2" | "claude-mythos-5-2"
+            | "claude-fable-5-1" | "claude-mythos-5-1" | "claude-sonnet-5-5"
+            | "claude-haiku-5-5" | "claude-opus-5" | "claude-sonnet-5" => Self {
+                max_edge: 2576,
+                max_tokens: 4784,
+            },
+            _ => Self {
+                max_edge: 1568,
+                max_tokens: 1568,
+            },
+        }
+    }
+
+    fn fits(self, width: u32, height: u32) -> bool {
+        let (columns, rows) = (width.div_ceil(IMAGE_PATCH), height.div_ceil(IMAGE_PATCH));
+        columns.max(rows) <= self.max_edge / IMAGE_PATCH
+            && u64::from(columns) * u64::from(rows) <= u64::from(self.max_tokens)
+    }
+
+    fn fit(self, width: u32, height: u32) -> (u32, u32) {
+        if self.fits(width, height) {
+            return (width, height);
+        }
+        if height > width {
+            let (height, width) = self.fit(height, width);
+            return (width, height);
+        }
+        let aspect_ratio = f64::from(width) / f64::from(height);
+        let short_edge = |long_edge: u32| {
+            ((f64::from(long_edge) / aspect_ratio).round_ties_even() as u32).max(1)
+        };
+
+        let (mut low, mut high) = (1, width);
+        while low + 1 < high {
+            let middle = low.midpoint(high);
+            if self.fits(middle, short_edge(middle)) {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        (low, short_edge(low))
+    }
+}
+
+fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    nanocode_image::dimensions(bytes)
+}
+
+pub(crate) const IMAGE_UNPROCESSABLE: &str =
+    "image content omitted because it could not be processed";
+const IMAGE_TOO_LARGE: &str =
+    "image content omitted because it exceeded the supported size limit; use a smaller image";
+pub(crate) const IMAGE_URL_UNSUPPORTED: &str =
+    "image content omitted because remote image URLs are not supported";
+pub(crate) const IMAGE_FILE_UNSUPPORTED: &str =
+    "image content omitted because Claude cannot use OpenAI image file references";
+pub(crate) const AUDIO_UNSUPPORTED: &str = "audio content omitted because Claude cannot use audio";
+
+pub(crate) async fn prepare_base64(
+    payload: &str,
+    resolution: ImageResolution,
+) -> std::result::Result<(String, &'static str), &'static str> {
+    let mut long_edge = STANDARD
+        .decode(payload)
+        .ok()
+        .and_then(|bytes| image_dimensions(&bytes))
+        .map_or(resolution.max_edge, |(width, height)| {
+            let (width, height) = resolution.fit(width, height);
+            width.max(height)
+        });
+    let mut previous_len = usize::MAX;
+    loop {
+        let (data, media_type) = prepare_base64_images(vec![payload.to_owned()], long_edge)
+            .await
+            .pop()
+            .expect("each image has a preparation result")?;
+        let bytes = STANDARD
+            .decode(&data)
+            .expect("prepared image data is base64");
+        let next = match image_dimensions(&bytes) {
+            Some((width, height)) if !resolution.fits(width, height) => long_edge - 1,
+            _ if bytes.len() <= MAX_IMAGE_BYTES => return Ok((data, media_type)),
+
+            _ if bytes.len() > previous_len / 10 * 9 => return Err(IMAGE_TOO_LARGE),
+            _ => {
+                previous_len = bytes.len();
+                long_edge * 3 / 4
+            }
+        };
+        if next == 0 {
+            return Err(IMAGE_TOO_LARGE);
+        }
+        long_edge = next;
+    }
+}
+
+async fn prepare_image(
+    image_url: String,
+    resolution: ImageResolution,
+) -> std::result::Result<String, &'static str> {
+    let Some(data) = image_url
+        .get(..5)
+        .filter(|scheme| scheme.eq_ignore_ascii_case("data:"))
+        .map(|_| &image_url[5..])
+    else {
+        return Err(IMAGE_URL_UNSUPPORTED);
+    };
+    let Some((header, payload)) = data.split_once(',') else {
+        return Err(IMAGE_UNPROCESSABLE);
+    };
+    if !header
+        .split(';')
+        .any(|parameter| parameter.eq_ignore_ascii_case("base64"))
+    {
+        return Err(IMAGE_UNPROCESSABLE);
+    }
+    if payload.len() > MAX_SOURCE_IMAGE_BYTES.div_ceil(3) * 4 {
+        return Err(IMAGE_TOO_LARGE);
+    }
+    let (data, media_type) = prepare_base64(payload, resolution).await?;
+    Ok(format!("data:{media_type};base64,{data}"))
+}
+
+fn image_type(bytes: &[u8]) -> Result<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Ok("image/png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Ok("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Ok("image/gif")
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        Ok("image/webp")
+    } else {
+        Err(invalid(
+            "Claude images require PNG, JPEG, GIF, or WebP bytes",
+        ))
+    }
+}
+
+pub(crate) fn image_source(value: &str) -> Result<(serde_json::Value, usize)> {
+    if BlobUrl::is_blob_url(value) {
+        return Ok((json!({"type":"url","url":value}), 0));
+    }
+    if let Some(data) = value.strip_prefix("data:") {
+        if value.len() > MAX_IMAGE_BYTES.div_ceil(3) * 4 + 64 {
+            return Err(invalid("Claude image exceeds 5 MiB"));
+        }
+        let (header, data) = data
+            .split_once(',')
+            .ok_or_else(|| invalid("invalid Claude image data URL"))?;
+        let media_type = header
+            .strip_suffix(";base64")
+            .ok_or_else(|| invalid("Claude image data URL must use base64"))?;
+        if !matches!(
+            media_type,
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        ) {
+            return Err(invalid("unsupported Claude image media type"));
+        }
+        let bytes = STANDARD
+            .decode(data)
+            .map_err(|_| invalid("invalid Claude image base64"))?;
+        if bytes.is_empty() || bytes.len() > MAX_IMAGE_BYTES {
+            return Err(invalid("Claude image must contain 1 byte through 5 MiB"));
+        }
+        if image_type(&bytes)? != media_type {
+            return Err(invalid("Claude image media type does not match its bytes"));
+        }
+        Ok((
+            json!({"type":"base64","media_type":media_type,"data":data}),
+            bytes.len(),
+        ))
+    } else {
+        if value
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+        {
+            return Err(invalid(
+                "Claude image URL must not contain whitespace or control characters",
+            ));
+        }
+        if value.len() > 8192 {
+            return Err(invalid("Claude image URL exceeds 8192 bytes"));
+        }
+        let url =
+            nanocode_url::Url::parse(value).map_err(|_| invalid("invalid Claude image URL"))?;
+        if url.scheme() != "https"
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(invalid(
+                "Claude image URL must use HTTPS without credentials or a fragment",
+            ));
+        }
+        Ok((json!({"type":"url","url":value}), value.len()))
+    }
+}
+
+pub(crate) fn document_block(
+    file_data: &str,
+    filename: Option<&str>,
+) -> Result<(ContentBlock, usize)> {
+    if file_data.len() > MAX_DOCUMENT_BYTES.div_ceil(3) * 4 + 64 {
+        return Err(invalid("Claude document exceeds 10 MiB"));
+    }
+    let (header, data) = file_data
+        .strip_prefix("data:")
+        .and_then(|value| value.split_once(','))
+        .ok_or_else(|| invalid("Claude documents require a base64 data URL"))?;
+    let media_type = header
+        .strip_suffix(";base64")
+        .ok_or_else(|| invalid("Claude document data URL must use base64"))?;
+    let bytes = STANDARD
+        .decode(data)
+        .map_err(|_| invalid("invalid Claude document base64"))?;
+    if bytes.is_empty() || bytes.len() > MAX_DOCUMENT_BYTES {
+        return Err(invalid(
+            "Claude document must contain 1 byte through 10 MiB",
+        ));
+    }
+    let source = match media_type {
+        "application/pdf" => {
+            if !bytes.starts_with(b"%PDF-") {
+                return Err(invalid(
+                    "Claude document media type does not match its bytes",
+                ));
+            }
+            json!({"type":"base64","media_type":"application/pdf","data":data})
+        }
+        "text/plain" => {
+            let text = String::from_utf8(bytes.clone())
+                .map_err(|_| invalid("Claude text document must be UTF-8"))?;
+            json!({"type":"text","media_type":"text/plain","data":text})
+        }
+        _ => {
+            return Err(invalid(
+                "Claude documents support application/pdf and text/plain",
+            ));
+        }
+    };
+    let mut extra = std::collections::BTreeMap::new();
+    if let Some(name) = filename {
+        if name.trim().is_empty()
+            || name.len() > MAX_FILENAME_BYTES
+            || name
+                .chars()
+                .any(|c| c.is_control() || c == '/' || c == '\\')
+        {
+            return Err(invalid(
+                "Claude document filename must be 1-255 bytes without paths or control characters",
+            ));
+        }
+        extra.insert("title".to_owned(), json!(name));
+    }
+    Ok((ContentBlock::Document { source, extra }, bytes.len()))
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn local_image(path: &std::path::Path) -> std::result::Result<String, &'static str> {
+    use std::io::Read as _;
+    const NOT_A_FILE: &str = "is not a regular file of at most 64 MiB";
+    const UNREADABLE: &str = "could not be read";
+
+    let metadata = std::fs::metadata(path).map_err(|_| UNREADABLE)?;
+    if !metadata.is_file() || metadata.len() > MAX_SOURCE_IMAGE_BYTES as u64 {
+        return Err(NOT_A_FILE);
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(nanocode_sys::libc::O_NONBLOCK);
+    }
+    let file = options.open(path).map_err(|_| UNREADABLE)?;
+    let metadata = file.metadata().map_err(|_| UNREADABLE)?;
+    if !metadata.is_file() || metadata.len() > MAX_SOURCE_IMAGE_BYTES as u64 {
+        return Err(NOT_A_FILE);
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_SOURCE_IMAGE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| UNREADABLE)?;
+    if bytes.len() > MAX_SOURCE_IMAGE_BYTES {
+        return Err(NOT_A_FILE);
+    }
+    Ok(format!(
+        "data:application/octet-stream;base64,{}",
+        STANDARD.encode(bytes)
+    ))
+}
+
+#[cfg(target_family = "wasm")]
+const fn local_image(_path: &std::path::Path) -> std::result::Result<String, &'static str> {
+    Err("requires a native filesystem")
+}
+
+pub(crate) async fn freeze(
+    mut prompt: Prompt,
+    resolution: ImageResolution,
+    images: &ImageHistory,
+) -> Result<Prompt> {
+    images
+        .load_prompt(&mut prompt.instruction)
+        .await
+        .map_err(nanocode_durability::agent_store_error)?;
+    if let PromptInput::Content(items) = &mut prompt.instruction {
+        if items.len() > 100 {
+            return Err(invalid("Claude prompt exceeds 100 content items"));
+        }
+        let image_count = items
+            .iter()
+            .filter(|item| matches!(item, UserInput::Image { .. } | UserInput::LocalImage { .. }))
+            .count();
+        if image_count > MAX_IMAGES {
+            return Err(invalid("Claude prompt exceeds 20 images"));
+        }
+        let mut total = 0;
+        for item in items {
+            let (image_url, detail, local) = match item {
+                UserInput::File {
+                    file_data,
+                    filename,
+                } => {
+                    total += document_block(file_data, filename.as_deref())?.1;
+                    if total > MAX_TOTAL_BYTES {
+                        return Err(invalid("Claude prompt exceeds 20 MiB of media data"));
+                    }
+                    continue;
+                }
+                UserInput::ImageFile { .. } => {
+                    *item = UserInput::Text {
+                        text: IMAGE_FILE_UNSUPPORTED.into(),
+                    };
+                    continue;
+                }
+                UserInput::Image { image_url, detail } => {
+                    (std::mem::take(image_url), *detail, None)
+                }
+                UserInput::LocalImage { path, detail } => match local_image(path) {
+                    Ok(image_url) => (image_url, *detail, Some(path.display().to_string())),
+                    Err(reason) => {
+                        *item = UserInput::Text {
+                            text: format!(
+                                "image content omitted because the local image at `{}` {reason}",
+                                path.display()
+                            ),
+                        };
+                        continue;
+                    }
+                },
+                _ => continue,
+            };
+            *item = match prepare_image(image_url, resolution).await {
+                Ok(image_url) => {
+                    total += image_source(&image_url)?.1;
+                    if total > MAX_TOTAL_BYTES {
+                        return Err(invalid("Claude prompt exceeds 20 MiB of media data"));
+                    }
+                    let image_url = images
+                        .store(&image_url)
+                        .await
+                        .map_err(nanocode_durability::agent_store_error)?
+                        .unwrap_or(image_url);
+                    UserInput::Image { image_url, detail }
+                }
+                Err(note) => UserInput::Text {
+                    text: match local {
+                        Some(path) => format!("{note} (local image at `{path}`)"),
+                        None => note.into(),
+                    },
+                },
+            };
+        }
+    }
+    messages(&prompt)?;
+    Ok(prompt)
+}
+
+pub(crate) fn messages(prompt: &Prompt) -> Result<Vec<Message>> {
+    let mut messages = prompt
+        .transcript()
+        .iter()
+        .map(|item| {
+            Message::text(
+                match item.role() {
+                    PromptMessageRole::User => Role::User,
+                    PromptMessageRole::Assistant => Role::Assistant,
+                },
+                item.content(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let content = match &prompt.instruction {
+        PromptInput::Text(text) => vec![ContentBlock::text(text)],
+        PromptInput::Content(items) => {
+            if items.len() > 100 {
+                return Err(invalid("Claude prompt exceeds 100 content items"));
+            }
+            let mut images = 0;
+            let mut bytes = 0;
+            let mut content = Vec::with_capacity(items.len());
+            for item in items {
+                content.push(match item {
+                    UserInput::Text { text } => ContentBlock::text(text),
+                    UserInput::Image { image_url, .. } => {
+                        images += 1;
+                        let (source, size) = image_source(image_url)?;
+                        bytes += size;
+                        if images > MAX_IMAGES || bytes > MAX_TOTAL_BYTES { return Err(invalid("Claude prompt exceeds 20 images or 20 MiB of media data")); }
+                        ContentBlock::Image { source, extra: Default::default() }
+                    }
+                    UserInput::File { file_data, filename } => {
+                        let (block, size) = document_block(file_data, filename.as_deref())?;
+                        bytes += size;
+                        if bytes > MAX_TOTAL_BYTES { return Err(invalid("Claude prompt exceeds 20 MiB of media data")); }
+                        block
+                    }
+                    UserInput::LocalImage { .. } => return Err(invalid("Claude local image was not frozen before execution")),
+                    UserInput::ImageFile { .. } => return Err(invalid("Claude cannot use opaque OpenAI image file IDs; supply a data URL or local image")),
+                    UserInput::Audio { .. } | UserInput::LocalAudio { .. } => return Err(invalid("Claude audio prompts are unsupported")),
+                });
+            }
+            content
+        }
+    };
+    messages.push(Message {
+        role: Role::User,
+        content,
+        output_config: None,
+    });
+    Ok(messages)
+}
+
+pub(crate) async fn freeze_admitted(
+    prompt: Prompt,
+    policy: &dyn crate::execution::ClaudeExecutionPolicy,
+    id: &str,
+    resolution: ImageResolution,
+    images: &ImageHistory,
+) -> Result<(Prompt, ImageResolution)> {
+    let has_local = matches!(&prompt.instruction, PromptInput::Content(items) if items.iter().any(|item| matches!(item, UserInput::LocalImage { .. })));
+    if !has_local {
+        let resolution = policy
+            .continuation_model(id.into())
+            .await?
+            .map_or(resolution, |model| ImageResolution::of(&model));
+        return Ok((freeze(prompt, resolution, images).await?, resolution));
+    }
+    let continuation = policy.continuation(id.into()).await?;
+    let resolution = continuation
+        .as_ref()
+        .and_then(|cursor| cursor["template"]["model"].as_str())
+        .map_or(resolution, ImageResolution::of);
+
+    if let Some(cursor) = continuation {
+        let frozen: Prompt = serde_json::from_value(
+            cursor.get("frozen_prompt").filter(|value| !value.is_null()).cloned()
+                .ok_or_else(|| invalid("Claude media recovery is missing its frozen prompt; local files were not reopened"))?
+        ).map_err(|_| invalid("invalid frozen Claude prompt continuation"))?;
+        messages(&frozen)?;
+        return Ok((frozen, resolution));
+    }
+    let input =
+        serde_json::to_value(&prompt).map_err(|_| invalid("cannot encode Claude prompt"))?;
+    let frozen = match policy
+        .begin_step(
+            id.into(),
+            "prompt-media".into(),
+            "claude_prompt_media".into(),
+            input,
+        )
+        .await?
+    {
+        crate::execution::Step::Interrupted => {
+            return Err(invalid(
+                "prompt step was admitted with an interrupted tool outcome",
+            ));
+        }
+        crate::execution::Step::Replay(value) => {
+            let receipt = serde_json::from_value(value)
+                .map_err(|_| invalid("invalid frozen Claude prompt receipt"))?;
+            freeze(receipt, resolution, images).await?
+        }
+        crate::execution::Step::Execute => {
+            let frozen = freeze(prompt, resolution, images).await?;
+            let value = serde_json::to_value(&frozen)
+                .map_err(|_| invalid("cannot encode frozen Claude prompt"))?;
+            policy
+                .complete_step(id.into(), "prompt-media".into(), value)
+                .await?;
+            frozen
+        }
+    };
+    Ok((frozen, resolution))
+}

@@ -1,0 +1,198 @@
+use std::{fmt, str::FromStr};
+
+/// Representation of a Python version.
+///
+/// N.B. This does not necessarily represent a Python version that we actually support.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct PythonVersion {
+    pub major: u8,
+    pub minor: u8,
+}
+
+impl PythonVersion {
+    pub const PY37: PythonVersion = PythonVersion { major: 3, minor: 7 };
+    pub const PY38: PythonVersion = PythonVersion { major: 3, minor: 8 };
+    pub const PY39: PythonVersion = PythonVersion { major: 3, minor: 9 };
+    pub const PY310: PythonVersion = PythonVersion {
+        major: 3,
+        minor: 10,
+    };
+    pub const PY311: PythonVersion = PythonVersion {
+        major: 3,
+        minor: 11,
+    };
+    pub const PY312: PythonVersion = PythonVersion {
+        major: 3,
+        minor: 12,
+    };
+    pub const PY313: PythonVersion = PythonVersion {
+        major: 3,
+        minor: 13,
+    };
+    pub const PY314: PythonVersion = PythonVersion {
+        major: 3,
+        minor: 14,
+    };
+    pub const PY315: PythonVersion = PythonVersion {
+        major: 3,
+        minor: 15,
+    };
+
+    pub fn iter() -> impl Iterator<Item = PythonVersion> {
+        [
+            PythonVersion::PY37,
+            PythonVersion::PY38,
+            PythonVersion::PY39,
+            PythonVersion::PY310,
+            PythonVersion::PY311,
+            PythonVersion::PY312,
+            PythonVersion::PY313,
+            PythonVersion::PY314,
+            PythonVersion::PY315,
+        ]
+        .into_iter()
+    }
+
+    /// The minimum supported Python version.
+    pub const fn lowest() -> Self {
+        Self::PY37
+    }
+
+    pub const fn latest() -> Self {
+        Self::PY314
+    }
+
+    /// The latest Python version supported in preview
+    pub fn latest_preview() -> Self {
+        let latest_preview = Self::PY315;
+        debug_assert!(latest_preview >= Self::latest());
+        latest_preview
+    }
+
+    pub const fn latest_ty() -> Self {
+        // Make sure to update the default value for `EnvironmentOptions::python_version` when bumping this version.
+        Self::PY314
+    }
+
+    pub const fn as_tuple(self) -> (u8, u8) {
+        (self.major, self.minor)
+    }
+
+    pub fn free_threaded_build_available(self) -> bool {
+        self >= PythonVersion::PY313
+    }
+
+    /// Return `true` if the current version supports [PEP 701].
+    ///
+    /// [PEP 701]: https://peps.python.org/pep-0701/
+    pub fn supports_pep_701(self) -> bool {
+        self >= Self::PY312
+    }
+
+    pub fn defers_annotations(self) -> bool {
+        self >= Self::PY314
+    }
+}
+
+impl Default for PythonVersion {
+    fn default() -> Self {
+        Self::PY310
+    }
+}
+
+impl From<(u8, u8)> for PythonVersion {
+    fn from(value: (u8, u8)) -> Self {
+        let (major, minor) = value;
+        Self { major, minor }
+    }
+}
+
+impl TryFrom<(i64, i64)> for PythonVersion {
+    type Error = std::num::TryFromIntError;
+
+    fn try_from(value: (i64, i64)) -> Result<Self, Self::Error> {
+        let (major, minor) = value;
+        Ok(Self {
+            major: u8::try_from(major)?,
+            minor: u8::try_from(minor)?,
+        })
+    }
+}
+
+impl fmt::Display for PythonVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let PythonVersion { major, minor } = self;
+        write!(f, "{major}.{minor}")
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum PythonVersionDeserializationError {
+    WrongPeriodNumber(Box<str>),
+    InvalidMajorVersion(Box<str>, std::num::ParseIntError),
+    InvalidMinorVersion(Box<str>, std::num::ParseIntError),
+}
+
+impl std::fmt::Display for PythonVersionDeserializationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WrongPeriodNumber(version) => {
+                write!(f, "Invalid python version `{version}`: expected `major.minor`")
+            }
+            Self::InvalidMajorVersion(version, error) => {
+                write!(f, "Invalid major version `{version}`: {error}")
+            }
+            Self::InvalidMinorVersion(version, error) => {
+                write!(f, "Invalid minor version `{version}`: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PythonVersionDeserializationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::WrongPeriodNumber(_) => None,
+            Self::InvalidMajorVersion(_, error) | Self::InvalidMinorVersion(_, error) => Some(error),
+        }
+    }
+}
+
+impl TryFrom<(&str, &str)> for PythonVersion {
+    type Error = PythonVersionDeserializationError;
+
+    fn try_from(value: (&str, &str)) -> Result<Self, Self::Error> {
+        let (major, minor) = value;
+        Ok(Self {
+            major: major.parse().map_err(|err| {
+                PythonVersionDeserializationError::InvalidMajorVersion(Box::from(major), err)
+            })?,
+            minor: minor.parse().map_err(|err| {
+                PythonVersionDeserializationError::InvalidMinorVersion(Box::from(minor), err)
+            })?,
+        })
+    }
+}
+
+impl FromStr for PythonVersion {
+    type Err = PythonVersionDeserializationError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (major, minor) = s
+            .split_once('.')
+            .ok_or_else(|| PythonVersionDeserializationError::WrongPeriodNumber(Box::from(s)))?;
+
+        Self::try_from((major, minor)).map_err(|err| {
+            // Give a better error message for something like `3.8.5` or `3..8`
+            if matches!(
+                err,
+                PythonVersionDeserializationError::InvalidMinorVersion(_, _)
+            ) && minor.contains('.')
+            {
+                PythonVersionDeserializationError::WrongPeriodNumber(Box::from(s))
+            } else {
+                err
+            }
+        })
+    }
+}

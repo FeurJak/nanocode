@@ -1,0 +1,29 @@
+[package]
+name = "nanocode-workspace-fs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A versioned virtual workspace: a manifest of content-addressed files changed all-or-nothing, its stores and the shell filesystem over it"
+autotests = false
+autobenches = false
+
+[dependencies]
+nanocode-bytes.workspace = true
+nanocode-digest.workspace = true
+nanocode-durability-core.workspace = true
+nanocode-platform.workspace = true
+nanocode-shell.workspace = true
+nanocode-sync.workspace = true
+nanocode-sys.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+test = false
+doctest = false
+bench = false

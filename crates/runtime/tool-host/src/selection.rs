@@ -1,0 +1,1550 @@
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    sync::Arc,
+};
+
+#[cfg(not(target_family = "wasm"))]
+use crate::attachment::{
+    AttachmentError, ProcessRouteStore, RemoteMode, RemoteRoute, RemoteRunnerCatalog, RunnerRouting,
+};
+use crate::{Tool, ToolDefinition};
+use nanocode_code_mode::embedded::host_owned_name;
+#[cfg(not(target_family = "wasm"))]
+use std::{any::Any, ffi::OsString, path::PathBuf};
+
+#[cfg(not(target_family = "wasm"))]
+pub use nanocode_tool_provider::DynamicToolProvider;
+pub use nanocode_tool_provider::ToolExposure;
+
+#[cfg(not(target_family = "wasm"))]
+type Nested<'a> = crate::embedded::HostFuture<'a, Option<crate::ToolOutput>>;
+
+#[cfg(not(target_family = "wasm"))]
+pub type ProviderGate =
+    Arc<dyn for<'a> Fn(&'a str, &'a str, Nested<'a>) -> Nested<'a> + Send + Sync>;
+
+#[cfg(not(target_family = "wasm"))]
+struct Gated {
+    inner: Arc<dyn DynamicToolProvider>,
+    gate: ProviderGate,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl DynamicToolProvider for Gated {
+    fn start(&self) {
+        self.inner.start();
+    }
+
+    fn bind_session(&self, session: &crate::SessionEnvironment) {
+        self.inner.bind_session(session);
+    }
+
+    fn direct_tools(&self) -> Vec<Arc<dyn Tool>> {
+        self.inner.direct_tools()
+    }
+
+    fn direct_tools_for_exposure(&self, exposure: ToolExposure) -> Vec<Arc<dyn Tool>> {
+        self.inner.direct_tools_for_exposure(exposure)
+    }
+
+    fn available_definitions(&self) -> Vec<ToolDefinition> {
+        self.inner.available_definitions()
+    }
+
+    fn model_catalog_visible(&self) -> bool {
+        self.inner.model_catalog_visible()
+    }
+
+    fn catalog_revision(&self) -> Option<u64> {
+        self.inner.catalog_revision()
+    }
+
+    fn code_mode_tool_summaries(&self) -> Vec<(String, String)> {
+        self.inner.code_mode_tool_summaries()
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.inner.contains(name)
+    }
+
+    fn supports_parallel_tool_calls(&self, name: &str) -> bool {
+        self.inner.supports_parallel_tool_calls(name)
+    }
+
+    fn resolve<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        name: &'life1 str,
+    ) -> crate::embedded::HostFuture<'async_trait, bool>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.inner.resolve(name)
+    }
+
+    fn execute<'life0, 'life1, 'life2, 'async_trait>(
+        &'life0 self,
+        name: &'life1 str,
+        input: serde_json::Value,
+        context: crate::ToolContext<'life2>,
+    ) -> Nested<'async_trait>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            let call_id = context.call_id().to_owned();
+            (self.gate)(name, &call_id, self.inner.execute(name, input, context)).await
+        })
+    }
+
+    fn resumes(&self, name: &str) -> bool {
+        self.inner.resumes(name)
+    }
+
+    fn recover<'life0, 'life1, 'life2, 'async_trait>(
+        &'life0 self,
+        name: &'life1 str,
+        input: serde_json::Value,
+        context: crate::ToolContext<'life2>,
+    ) -> Nested<'async_trait>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            let call_id = context.call_id().to_owned();
+            (self.gate)(name, &call_id, self.inner.recover(name, input, context)).await
+        })
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct RegisteredTool {
+    pub(crate) handler: Arc<dyn Tool>,
+
+    pub(crate) exposure: Option<ToolExposure>,
+}
+
+pub trait ToolSource: Sized {
+    #[doc(hidden)]
+    fn install(self, builder: ToolsBuilder) -> ToolsBuilder;
+}
+
+impl<T: Tool + 'static> ToolSource for T {
+    fn install(self, builder: ToolsBuilder) -> ToolsBuilder {
+        builder.tool(self)
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl ToolSource for crate::WorkspaceTools {
+    fn install(self, mut builder: ToolsBuilder) -> ToolsBuilder {
+        if builder.tools.workspace_tools.is_some() {
+            builder.duplicate_workspace = true;
+        }
+        builder.tools.workspace = true;
+        builder.tools.workspace_tools = Some(self);
+        builder
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub trait RemoteRunnerTools: Sized {
+    #[doc(hidden)]
+    fn namespace(&self) -> Option<Arc<str>>;
+
+    #[doc(hidden)]
+    fn advertised_workspace(&self) -> Option<PathBuf>;
+
+    #[doc(hidden)]
+    fn into_catalog(self) -> Arc<dyn RemoteRunnerCatalog>;
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub trait AttachTarget {
+    type Connector;
+
+    #[doc(hidden)]
+    fn connect_tools(self, tools: Tools) -> Self::Connector;
+}
+
+static CODE_MODE_HOSTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn code_mode_hosts() -> bool {
+    CODE_MODE_HOSTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[derive(Clone)]
+pub struct Tools {
+    exposure: ToolExposure,
+    builtin_names: Arc<[Box<str>]>,
+    workspace: bool,
+    web_search: bool,
+    image_generation: bool,
+    #[cfg(not(target_family = "wasm"))]
+    pub(super) working_directory: Option<Arc<str>>,
+    #[cfg(not(target_family = "wasm"))]
+    pub(super) default_shell: Option<Arc<str>>,
+    #[cfg(not(target_family = "wasm"))]
+    process_environment: Arc<Vec<(OsString, OsString)>>,
+    #[cfg(not(target_family = "wasm"))]
+    session: Option<crate::SessionEnvironment>,
+    #[cfg(not(target_family = "wasm"))]
+    backend: Option<Arc<str>>,
+    #[cfg(not(target_family = "wasm"))]
+    remote_http_client: Option<nanocode_http::Client>,
+    pub(crate) registered: Vec<RegisteredTool>,
+    #[cfg(not(target_family = "wasm"))]
+    pub(super) provider_direct: Vec<Arc<dyn Tool>>,
+    #[cfg(not(target_family = "wasm"))]
+    pub(super) providers: Vec<Arc<dyn DynamicToolProvider>>,
+    #[cfg(not(target_family = "wasm"))]
+    attachable_providers: Vec<Arc<dyn Any + Send + Sync>>,
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) workspace_tools: Option<crate::WorkspaceTools>,
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) remote_runners: Vec<RemoteRoute>,
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) process_route_store: Option<Arc<dyn ProcessRouteStore>>,
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) runner_pool: Option<RunnerRouting>,
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) code_mode_executors: Option<nanocode_code_mode::remote::CodeModeExecutors>,
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) hand_calls: Option<Arc<dyn crate::embedded::HandCalls>>,
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) hand_authorizer: Option<Arc<dyn nanocode_code_mode::remote::HandAuthorizer>>,
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) cell_journals: Option<nanocode_code_mode::code_mode::CellJournals>,
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) nested_call_limit: Option<usize>,
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) cell_guard: Option<nanocode_code_mode::code_mode::CellGuard>,
+    pub(crate) cell_yield: Option<std::time::Duration>,
+    pub(crate) exec_yield: Option<std::time::Duration>,
+    pub(crate) output_budget: Option<usize>,
+    pub(crate) full_exec_description: bool,
+    background_jobs: bool,
+    #[cfg(not(target_family = "wasm"))]
+    pub(super) deferred_tools_guidance_enabled: bool,
+
+    pub(crate) embedded_host: Option<Arc<dyn crate::embedded::CodeModeHost>>,
+
+    pub(crate) embedded_session_id: Option<Arc<str>>,
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) excluded_code_tools: HashSet<String>,
+
+    code_mode_policies: Vec<Arc<dyn crate::CodeModeToolPolicy>>,
+
+    recovery: Option<Arc<dyn crate::ToolRecovery>>,
+
+    effect_gate: Option<Arc<dyn crate::effects::EffectGate>>,
+
+    tool_settings: nanocode_tool_contracts::ToolSettings,
+
+    pub(crate) brief_code_tools: Arc<[String]>,
+
+    pub(crate) full_code_tools: Option<Arc<[String]>>,
+
+    pub(crate) code_tools_layout: crate::code_mode_description::ExecLayout,
+
+    pub(crate) text_pins: Option<Arc<dyn crate::TextPins>>,
+}
+
+impl Default for Tools {
+    fn default() -> Self {
+        Self {
+            exposure: ToolExposure::default(),
+            builtin_names: Arc::from([]),
+            workspace: true,
+            web_search: true,
+            image_generation: true,
+            #[cfg(not(target_family = "wasm"))]
+            working_directory: None,
+            #[cfg(not(target_family = "wasm"))]
+            default_shell: None,
+            #[cfg(not(target_family = "wasm"))]
+            process_environment: Arc::new(Vec::new()),
+            #[cfg(not(target_family = "wasm"))]
+            session: None,
+            #[cfg(not(target_family = "wasm"))]
+            backend: None,
+            #[cfg(not(target_family = "wasm"))]
+            remote_http_client: None,
+            registered: Vec::new(),
+            #[cfg(not(target_family = "wasm"))]
+            provider_direct: Vec::new(),
+            #[cfg(not(target_family = "wasm"))]
+            providers: Vec::new(),
+            #[cfg(not(target_family = "wasm"))]
+            attachable_providers: Vec::new(),
+            #[cfg(not(target_family = "wasm"))]
+            workspace_tools: None,
+            #[cfg(not(target_family = "wasm"))]
+            remote_runners: Vec::new(),
+            #[cfg(not(target_family = "wasm"))]
+            process_route_store: None,
+            #[cfg(not(target_family = "wasm"))]
+            runner_pool: None,
+            #[cfg(not(target_family = "wasm"))]
+            code_mode_executors: None,
+            #[cfg(not(target_family = "wasm"))]
+            hand_calls: None,
+            #[cfg(not(target_family = "wasm"))]
+            hand_authorizer: None,
+            #[cfg(not(target_family = "wasm"))]
+            cell_journals: None,
+            #[cfg(not(target_family = "wasm"))]
+            nested_call_limit: None,
+            #[cfg(not(target_family = "wasm"))]
+            cell_guard: None,
+            cell_yield: None,
+            exec_yield: None,
+            output_budget: None,
+            full_exec_description: false,
+            background_jobs: true,
+            #[cfg(not(target_family = "wasm"))]
+            deferred_tools_guidance_enabled: false,
+
+            embedded_host: None,
+
+            embedded_session_id: None,
+
+            code_mode_policies: Vec::new(),
+            #[cfg(not(target_family = "wasm"))]
+            excluded_code_tools: HashSet::new(),
+            recovery: None,
+            effect_gate: None,
+            tool_settings: nanocode_tool_contracts::ToolSettings::DEFAULT,
+            brief_code_tools: Arc::from([]),
+            full_code_tools: None,
+            code_tools_layout: crate::code_mode_description::ExecLayout::default(),
+            text_pins: None,
+        }
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl fmt::Debug for Tools {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let remote_http_client_configured = self.remote_http_client.is_some();
+        formatter
+            .debug_struct("Tools")
+            .field("exposure", &self.exposure)
+            .field("workspace", &self.workspace)
+            .field("web_search", &self.web_search)
+            .field("image_generation", &self.image_generation)
+            .field("working_directory", &self.working_directory)
+            .field("default_shell", &self.default_shell)
+            .field("process_environment_count", &self.process_environment.len())
+            .field(
+                "remote_http_client_configured",
+                &remote_http_client_configured,
+            )
+            .field(
+                "registered",
+                &self
+                    .registered
+                    .iter()
+                    .map(|tool| tool.handler.definition().name().to_owned())
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "provider_direct",
+                &self
+                    .provider_direct
+                    .iter()
+                    .map(|tool| tool.definition().name().to_owned())
+                    .collect::<Vec<_>>(),
+            )
+            .field("provider_count", &self.providers.len())
+            .field("attachment_mcp_count", &self.attachment_mcp_count())
+            .field(
+                "workspace_tools_configured",
+                &self.workspace_tools.is_some(),
+            )
+            .finish()
+    }
+}
+
+#[cfg(target_family = "wasm")]
+impl fmt::Debug for Tools {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("Tools");
+        debug
+            .field("exposure", &self.exposure)
+            .field("workspace", &self.workspace)
+            .field("web_search", &self.web_search)
+            .field("image_generation", &self.image_generation)
+            .field(
+                "registered",
+                &self
+                    .registered
+                    .iter()
+                    .map(|tool| tool.handler.definition().name().to_owned())
+                    .collect::<Vec<_>>(),
+            );
+        #[cfg(not(target_family = "wasm"))]
+        debug.field(
+            "workspace_tools_configured",
+            &self.workspace_tools.is_some(),
+        );
+        debug.finish()
+    }
+}
+
+impl Tools {
+    pub fn with_builtin_names(
+        self,
+        names: impl IntoIterator<Item = impl Into<Box<str>>>,
+    ) -> Result<Self, ToolsBuildError> {
+        let mut builder = self.into_builder();
+        builder.tools.builtin_names = names.into_iter().map(Into::into).collect();
+        builder.build()
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub const fn workspace_source(&self) -> Option<&crate::WorkspaceTools> {
+        self.workspace_tools.as_ref()
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn with_workspace_source(mut self, source: crate::WorkspaceTools) -> Self {
+        self.workspace_tools = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub fn with_code_mode_policy(mut self, policy: Arc<dyn crate::CodeModeToolPolicy>) -> Self {
+        if !self
+            .code_mode_policies
+            .iter()
+            .any(|existing| Arc::ptr_eq(existing, &policy))
+        {
+            self.code_mode_policies.push(policy);
+        }
+        self
+    }
+
+    #[must_use]
+    pub fn code_mode_policies(&self) -> Vec<Arc<dyn crate::CodeModeToolPolicy>> {
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(policy) = self
+            .workspace_tools
+            .as_ref()
+            .and_then(crate::WorkspaceTools::code_mode_policy)
+            && !self
+                .code_mode_policies
+                .iter()
+                .any(|existing| Arc::ptr_eq(existing, &policy))
+        {
+            let mut policies = self.code_mode_policies.clone();
+            policies.push(policy);
+            return policies;
+        }
+        self.code_mode_policies.clone()
+    }
+
+    #[must_use]
+    pub fn has_code_mode_host(&self) -> bool {
+        self.embedded().is_some()
+    }
+
+    pub(crate) fn embedded(&self) -> Option<&Arc<dyn crate::embedded::CodeModeHost>> {
+        self.embedded_host.as_ref().filter(|_| code_mode_hosts())
+    }
+
+    #[must_use]
+    pub fn hand_working_directory(&self, session_id: &str) -> Option<String> {
+        self.embedded()?.working_directory(session_id)
+    }
+
+    #[must_use]
+    pub fn hand_environment(
+        &self,
+        session_id: &str,
+    ) -> Option<nanocode_code_mode::remote::HandEnvironment> {
+        self.embedded()?.environment(session_id)
+    }
+
+    #[must_use]
+    pub const fn cell_yield(&self) -> Option<std::time::Duration> {
+        self.cell_yield
+    }
+
+    /// When an `exec` cell that gives no `yield_time_ms` first yields: `cell_yield`
+    /// when set, else the harness's `with_exec_yield` default. `wait` keeps `cell_yield`
+    /// or the Code Mode default.
+    #[must_use]
+    pub const fn exec_yield(&self) -> Option<std::time::Duration> {
+        match self.cell_yield {
+            Some(after) => Some(after),
+            None => self.exec_yield,
+        }
+    }
+
+    /// A harness's default first yield for `exec` cells, below an explicit `cell_yield`.
+    #[must_use]
+    pub const fn with_exec_yield(mut self, after: std::time::Duration) -> Self {
+        self.exec_yield = Some(after);
+        self
+    }
+
+    #[must_use]
+    pub const fn output_budget(&self) -> Option<usize> {
+        self.output_budget
+    }
+
+    #[must_use]
+    pub const fn with_output_budget(mut self, tokens: usize) -> Self {
+        self.output_budget = Some(tokens);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_full_exec_description(mut self) -> Self {
+        self.full_exec_description = true;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_background_jobs(mut self, enabled: bool) -> Self {
+        self.background_jobs = enabled;
+        self
+    }
+
+    #[must_use]
+    pub const fn background_jobs_enabled(&self) -> bool {
+        self.background_jobs
+    }
+
+    #[must_use]
+    pub fn code_mode_host(mut self, host: impl crate::embedded::CodeModeHost) -> Self {
+        CODE_MODE_HOSTS.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.embedded_host = Some(Arc::new(host));
+        self
+    }
+
+    #[must_use]
+    pub fn builder() -> ToolsBuilder {
+        ToolsBuilder::default()
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn with_runner_pool(mut self, pool: impl Into<RunnerRouting>) -> Self {
+        let pool = pool.into();
+        if self.code_mode_executors.is_none() {
+            self.code_mode_executors = pool.code_mode_executors().cloned();
+        }
+        self.runner_pool = Some(pool);
+        self
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[must_use]
+    pub fn with_code_mode_executors(
+        mut self,
+        executors: nanocode_code_mode::remote::CodeModeExecutors,
+    ) -> Self {
+        self.code_mode_executors = Some(executors);
+        self
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[must_use]
+    pub const fn code_mode_executors(
+        &self,
+    ) -> Option<&nanocode_code_mode::remote::CodeModeExecutors> {
+        self.code_mode_executors.as_ref()
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[must_use]
+    pub fn with_cell_journals(
+        mut self,
+        journals: nanocode_code_mode::code_mode::CellJournals,
+    ) -> Self {
+        self.cell_journals = Some(journals);
+        self
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[must_use]
+    pub const fn cell_journals(&self) -> Option<&nanocode_code_mode::code_mode::CellJournals> {
+        self.cell_journals.as_ref()
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn with_process_route_store(self, store: Arc<dyn ProcessRouteStore>) -> Self {
+        self.into_builder().process_route_store(store).tools
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn with_default_process_route_store(mut self, store: Arc<dyn ProcessRouteStore>) -> Self {
+        self.process_route_store.get_or_insert(store);
+        self
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn attach<T: AttachTarget>(self, target: T) -> T::Connector {
+        target.connect_tools(self)
+    }
+
+    #[doc(hidden)]
+    pub fn registered_tools(&self) -> impl Iterator<Item = &Arc<dyn Tool>> {
+        self.registered.iter().map(|registered| &registered.handler)
+    }
+
+    #[doc(hidden)]
+    #[cfg(not(target_family = "wasm"))]
+    pub fn attachable_providers(&self) -> &[Arc<dyn Any + Send + Sync>] {
+        &self.attachable_providers
+    }
+
+    #[doc(hidden)]
+    #[cfg(not(target_family = "wasm"))]
+    pub fn providers(&self) -> &[Arc<dyn DynamicToolProvider>] {
+        &self.providers
+    }
+
+    #[must_use]
+    pub const fn into_builder(self) -> ToolsBuilder {
+        ToolsBuilder {
+            tools: self,
+            duplicate_workspace: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn exposure(&self) -> ToolExposure {
+        self.exposure
+    }
+
+    pub(crate) fn recovery(&self) -> Option<Arc<dyn crate::ToolRecovery>> {
+        self.recovery.clone()
+    }
+
+    pub(crate) fn effect_gate(&self) -> Option<Arc<dyn crate::effects::EffectGate>> {
+        self.effect_gate.clone()
+    }
+
+    pub(crate) const fn tool_settings(&self) -> nanocode_tool_contracts::ToolSettings {
+        self.tool_settings
+    }
+
+    #[must_use]
+    pub const fn workspace_enabled(&self) -> bool {
+        self.workspace
+    }
+
+    #[must_use]
+    pub const fn web_search_enabled(&self) -> bool {
+        self.web_search
+    }
+
+    #[must_use]
+    pub const fn image_generation_enabled(&self) -> bool {
+        self.image_generation
+    }
+
+    #[must_use]
+    #[cfg_attr(target_family = "wasm", allow(unused_mut))]
+    pub fn for_backend(mut self, session_id: &str, backend: &str) -> Self {
+        if let Some(host) = self.embedded() {
+            host.bind_session(session_id, backend);
+        }
+        #[cfg(not(target_family = "wasm"))]
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.session_id() == session_id)
+        {
+            self.backend = Some(Arc::from(backend));
+        } else if let Some(executors) = &self.code_mode_executors {
+            use crate::embedded::CodeModeHost;
+            executors.bind_session(session_id, backend);
+        }
+        self
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn backend(&self) -> Option<&str> {
+        self.backend.as_deref()
+    }
+
+    #[must_use]
+    #[cfg(not(target_family = "wasm"))]
+    pub fn excluding_code_tools(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.excluded_code_tools.extend(names);
+        self
+    }
+
+    #[must_use]
+    pub fn brief_code_tools(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.brief_code_tools = names.into_iter().collect();
+        self
+    }
+
+    #[must_use]
+    pub fn full_code_tools(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.full_code_tools = Some(names.into_iter().collect());
+        self
+    }
+
+    #[must_use]
+    pub fn code_tools_heading(mut self, heading: impl Into<Arc<str>>) -> Self {
+        self.code_tools_layout.heading = Some(heading.into());
+        self
+    }
+
+    #[must_use]
+    pub fn undeclared_code_tools(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.code_tools_layout.undeclared = names.into_iter().collect();
+        self
+    }
+
+    #[must_use]
+    pub fn with_descriptions(mut self, descriptions: &HashMap<String, String>) -> Self {
+        for registered in &mut self.registered {
+            let definition = registered.handler.definition();
+            if let Some(description) = descriptions.get(definition.name())
+                && description.as_str() != definition.description()
+            {
+                registered.handler = Arc::new(Described {
+                    inner: Arc::clone(&registered.handler),
+                    description: Arc::from(description.as_str()),
+                });
+            }
+        }
+        self
+    }
+
+    #[must_use]
+    pub fn with_text_pins(mut self, pins: Arc<dyn crate::TextPins>) -> Self {
+        self.text_pins = Some(pins);
+        self
+    }
+
+    #[must_use]
+    pub fn for_session(mut self, session: &crate::SessionEnvironment) -> Self {
+        self.embedded_session_id = Some(Arc::from(session.session_id()));
+        if let Some(host) = self.embedded() {
+            host.link_session(session.session_id(), session.root_session_id());
+        }
+        #[cfg(not(target_family = "wasm"))]
+        {
+            for (name, value) in session.os_variables() {
+                self.insert_process_environment(name, value);
+            }
+            self.session = Some(session.clone());
+        }
+        self
+    }
+
+    #[must_use]
+    #[cfg(not(target_family = "wasm"))]
+    pub const fn session(&self) -> Option<&crate::SessionEnvironment> {
+        self.session.as_ref()
+    }
+
+    #[doc(hidden)]
+    #[cfg(not(target_family = "wasm"))]
+    pub fn process_environment(&self) -> Arc<Vec<(OsString, OsString)>> {
+        Arc::clone(&self.process_environment)
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn insert_process_environment(&mut self, name: OsString, value: OsString) {
+        let environment = Arc::make_mut(&mut self.process_environment);
+        environment.retain(|(candidate, _)| candidate != &name);
+        environment.push((name, value));
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn remote_http_client(&self) -> Option<nanocode_http::Client> {
+        self.remote_http_client.clone()
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn start_providers(&self) {
+        for provider in &self.providers {
+            if let Some(session) = &self.session {
+                provider.bind_session(session);
+            }
+            provider.start();
+        }
+    }
+
+    #[cfg(target_family = "wasm")]
+    pub const fn start_providers(&self) {}
+
+    #[must_use]
+    #[cfg(not(target_family = "wasm"))]
+    pub fn catalog_revision(&self) -> Option<Vec<u64>> {
+        self.runner_pool
+            .iter()
+            .map(RunnerRouting::catalog_revision)
+            .chain(
+                self.providers
+                    .iter()
+                    .map(|provider| provider.catalog_revision()),
+            )
+            .chain(self.embedded_catalog_revision())
+            .collect()
+    }
+
+    #[must_use]
+    #[cfg(target_family = "wasm")]
+    pub fn catalog_revision(&self) -> Option<Vec<u64>> {
+        self.embedded_catalog_revision().into_iter().collect()
+    }
+
+    fn embedded_catalog_revision(&self) -> Option<Option<u64>> {
+        let host = self.embedded()?;
+        Some(self.embedded_session_id.as_deref().and_then(|session_id| {
+            let definitions = host.tool_definitions(session_id).ok()?;
+            let encoded = serde_json::to_vec(&definitions).ok()?;
+            let mut hasher = std::hash::DefaultHasher::new();
+            std::hash::Hash::hash(&encoded, &mut hasher);
+            Some(std::hash::Hasher::finish(&hasher))
+        }))
+    }
+
+    #[must_use]
+    #[cfg(not(target_family = "wasm"))]
+    pub fn has_dynamic_providers(&self) -> bool {
+        !self.providers.is_empty() || self.runner_pool.is_some()
+    }
+
+    #[doc(hidden)]
+    #[cfg(not(target_family = "wasm"))]
+    pub fn has_unattachable_provider(&self) -> bool {
+        self.providers.len() != self.attachment_mcp_count()
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    const fn attachment_mcp_count(&self) -> usize {
+        self.attachable_providers.len()
+    }
+}
+
+pub(crate) struct Described {
+    pub(crate) inner: Arc<dyn Tool>,
+    pub(crate) description: Arc<str>,
+}
+
+impl Tool for Described {
+    fn definition(&self) -> ToolDefinition {
+        self.inner
+            .definition()
+            .with_description(Arc::clone(&self.description))
+    }
+
+    fn supports_parallel_tool_calls(&self) -> bool {
+        self.inner.supports_parallel_tool_calls()
+    }
+
+    fn running_tasks(&self) -> Vec<nanocode_tools::RunningTask> {
+        self.inner.running_tasks()
+    }
+
+    fn end_turn<'life0, 'life1, 'life2, 'life3, 'async_trait>(
+        &'life0 self,
+        session_id: &'life1 str,
+        turn_id: &'life2 str,
+        hook_event_name: &'life3 str,
+    ) -> crate::embedded::HostFuture<'async_trait, Result<(), nanocode_tools::ToolError>>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        'life3: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.inner.end_turn(session_id, turn_id, hook_event_name)
+    }
+
+    fn execute<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        input: crate::ToolInput,
+        context: crate::ToolContext<'life1>,
+    ) -> crate::embedded::HostFuture<'async_trait, crate::ToolResult>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.inner.execute(input, context)
+    }
+}
+
+#[derive(Default)]
+pub struct ToolsBuilder {
+    tools: Tools,
+    duplicate_workspace: bool,
+}
+
+pub use nanocode_tools::ToolsBuildError;
+
+impl ToolsBuilder {
+    #[must_use]
+    pub fn brief_code_tools(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.tools = self.tools.brief_code_tools(names);
+        self
+    }
+
+    #[must_use]
+    pub fn full_code_tools(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.tools = self.tools.full_code_tools(names);
+        self
+    }
+
+    #[must_use]
+    pub fn code_tools_heading(mut self, heading: impl Into<Arc<str>>) -> Self {
+        self.tools = self.tools.code_tools_heading(heading);
+        self
+    }
+
+    #[must_use]
+    pub fn undeclared_code_tools(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.tools = self.tools.undeclared_code_tools(names);
+        self
+    }
+
+    #[must_use]
+    pub fn with_descriptions(mut self, descriptions: &HashMap<String, String>) -> Self {
+        self.tools = self.tools.with_descriptions(descriptions);
+        self
+    }
+
+    #[must_use]
+    pub fn text_pins(mut self, pins: Arc<dyn crate::TextPins>) -> Self {
+        self.tools = self.tools.with_text_pins(pins);
+        self
+    }
+
+    #[must_use]
+    pub fn code_mode_host(mut self, host: impl crate::embedded::CodeModeHost) -> Self {
+        self.tools = self.tools.code_mode_host(host);
+        self
+    }
+
+    #[must_use]
+    #[allow(
+        clippy::should_implement_trait,
+        reason = "builder composition is intentionally named add and is not arithmetic"
+    )]
+    pub fn add<S: ToolSource>(self, source: S) -> Self {
+        source.install(self)
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn runner_pool(mut self, pool: impl Into<RunnerRouting>) -> Self {
+        self.tools = self.tools.with_runner_pool(pool);
+        self
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[must_use]
+    pub fn code_mode_executors(
+        mut self,
+        executors: nanocode_code_mode::remote::CodeModeExecutors,
+    ) -> Self {
+        self.tools.code_mode_executors = Some(executors);
+        self
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn process_route_store(mut self, store: Arc<dyn ProcessRouteStore>) -> Self {
+        self.tools.process_route_store = Some(store);
+        self
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[must_use]
+    pub fn cell_journals(mut self, journals: nanocode_code_mode::code_mode::CellJournals) -> Self {
+        self.tools.cell_journals = Some(journals);
+        self
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[must_use]
+    pub const fn nested_call_limit(mut self, limit: usize) -> Self {
+        self.tools.nested_call_limit = Some(limit);
+        self
+    }
+
+    #[must_use]
+    pub const fn cell_yield(mut self, after: std::time::Duration) -> Self {
+        self.tools.cell_yield = Some(after);
+        self
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[must_use]
+    pub const fn cell_guard(mut self, guard: nanocode_code_mode::code_mode::CellGuard) -> Self {
+        self.tools.cell_guard = Some(guard);
+        self
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[must_use]
+    pub fn hand_calls(mut self, calls: Arc<dyn crate::embedded::HandCalls>) -> Self {
+        self.tools.hand_calls = Some(calls);
+        self
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[must_use]
+    pub fn hand_authorizer(
+        mut self,
+        authorizer: Arc<dyn nanocode_code_mode::remote::HandAuthorizer>,
+    ) -> Self {
+        self.tools.hand_authorizer = Some(authorizer);
+        self
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn remote_runner_discovered<R: RemoteRunnerTools>(
+        self,
+        tools: R,
+        mode: RemoteMode,
+    ) -> Result<Self, AttachmentError> {
+        let workspace = tools.advertised_workspace().ok_or_else(|| {
+            AttachmentError::Catalog(
+                "runner did not advertise a workspace; supply an explicit workspace override"
+                    .into(),
+            )
+        })?;
+        self.remote_runner(tools, workspace, mode)
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn remote_runner<R: RemoteRunnerTools>(
+        mut self,
+        tools: R,
+        workspace: impl Into<PathBuf>,
+        mode: RemoteMode,
+    ) -> Result<Self, AttachmentError> {
+        let workspace = workspace.into();
+        let namespace = tools.namespace().filter(|_| workspace.is_absolute());
+        let Some(namespace) = namespace else {
+            return Err(AttachmentError::Catalog(
+                "remote routing requires an absolute workspace and nonempty catalog".into(),
+            ));
+        };
+        if self.tools.remote_runners.iter().any(|route| {
+            route.namespace == namespace
+                || route.mode == RemoteMode::Replace
+                || mode == RemoteMode::Replace
+        }) {
+            return Err(AttachmentError::Catalog(
+                "duplicate runner or replacement mixed with other runners".into(),
+            ));
+        }
+        self.tools.workspace = true;
+        if mode == RemoteMode::Replace {
+            self.tools.working_directory = Some(Arc::from(format!("/{namespace}")));
+        }
+        self.tools.remote_runners.push(RemoteRoute {
+            tools: tools.into_catalog(),
+            namespace,
+            workspace,
+            mode,
+        });
+        Ok(self)
+    }
+
+    #[must_use]
+    pub const fn exposure(mut self, exposure: ToolExposure) -> Self {
+        self.tools.exposure = exposure;
+        self
+    }
+
+    #[must_use]
+    pub const fn without_defaults(mut self) -> Self {
+        self.tools.workspace = false;
+        self.tools.web_search = false;
+        self.tools.image_generation = false;
+        self
+    }
+
+    #[must_use]
+    #[cfg(not(target_family = "wasm"))]
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn workspace(mut self, enabled: bool) -> Self {
+        self.tools.workspace = enabled;
+        #[cfg(not(target_family = "wasm"))]
+        if !enabled {
+            self.tools.workspace_tools = None;
+        }
+        self
+    }
+
+    #[must_use]
+    #[cfg(target_family = "wasm")]
+    pub const fn workspace(mut self, enabled: bool) -> Self {
+        self.tools.workspace = enabled;
+        self
+    }
+
+    #[must_use]
+    pub const fn web_search(mut self, enabled: bool) -> Self {
+        self.tools.web_search = enabled;
+        self
+    }
+
+    #[must_use]
+    pub const fn image_generation(mut self, enabled: bool) -> Self {
+        self.tools.image_generation = enabled;
+        self
+    }
+
+    #[must_use]
+    #[cfg(not(target_family = "wasm"))]
+    pub fn working_directory(mut self, directory: impl Into<Arc<str>>) -> Self {
+        self.tools.working_directory = Some(directory.into());
+        self
+    }
+
+    #[must_use]
+    #[cfg(not(target_family = "wasm"))]
+    pub fn default_shell(mut self, shell: impl Into<Arc<str>>) -> Self {
+        self.tools.default_shell = Some(shell.into());
+        self
+    }
+
+    #[must_use]
+    #[cfg(not(target_family = "wasm"))]
+    pub fn process_environment<I, K, V>(mut self, variables: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<OsString>,
+        V: Into<OsString>,
+    {
+        for (name, value) in variables {
+            self.tools
+                .insert_process_environment(name.into(), value.into());
+        }
+        self
+    }
+
+    #[must_use]
+    #[cfg(not(target_family = "wasm"))]
+    pub fn remote_http_client(mut self, client: nanocode_http::Client) -> Self {
+        self.tools.remote_http_client = Some(client);
+        self
+    }
+
+    #[must_use]
+    pub fn tool<T: Tool + 'static>(mut self, tool: T) -> Self {
+        self.tools.registered.push(RegisteredTool {
+            handler: Arc::new(tool),
+
+            exposure: None,
+        });
+        self
+    }
+
+    #[must_use]
+    pub fn tool_recovery(mut self, recovery: Arc<dyn crate::ToolRecovery>) -> Self {
+        self.tools.recovery = Some(recovery);
+        self
+    }
+
+    #[must_use]
+    pub fn effect_gate(mut self, gate: Arc<dyn crate::effects::EffectGate>) -> Self {
+        self.tools.effect_gate = Some(gate);
+        self
+    }
+
+    #[must_use]
+    pub const fn tool_settings(
+        mut self,
+        tool_settings: nanocode_tool_contracts::ToolSettings,
+    ) -> Self {
+        self.tools.tool_settings = tool_settings;
+        self
+    }
+
+    #[must_use]
+    pub fn tool_with_exposure<T: Tool + 'static>(
+        mut self,
+        tool: T,
+        exposure: ToolExposure,
+    ) -> Self {
+        self.tools.registered.push(RegisteredTool {
+            handler: Arc::new(tool),
+
+            exposure: Some(exposure),
+        });
+        self
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    #[cfg(not(target_family = "wasm"))]
+    pub fn attachable_provider<P: DynamicToolProvider + 'static>(
+        mut self,
+        provider: Arc<P>,
+    ) -> Self {
+        self.tools
+            .providers
+            .push(Arc::clone(&provider) as Arc<dyn DynamicToolProvider>);
+        self.tools.attachable_providers.push(provider);
+        self.refresh_provider_direct();
+        self
+    }
+
+    #[must_use]
+    #[cfg(not(target_family = "wasm"))]
+    pub fn provider<P: DynamicToolProvider + 'static>(self, provider: P) -> Self {
+        self.shared_provider(Arc::new(provider))
+    }
+
+    #[must_use]
+    #[cfg(not(target_family = "wasm"))]
+    pub fn shared_provider(mut self, provider: Arc<dyn DynamicToolProvider>) -> Self {
+        self.tools.providers.push(provider);
+        self.refresh_provider_direct();
+        self
+    }
+
+    #[must_use]
+    #[cfg(not(target_family = "wasm"))]
+    pub fn gate_providers(mut self, gate: &ProviderGate) -> Self {
+        self.tools.providers = std::mem::take(&mut self.tools.providers)
+            .into_iter()
+            .map(|inner| {
+                Arc::new(Gated {
+                    inner,
+                    gate: Arc::clone(gate),
+                }) as Arc<dyn DynamicToolProvider>
+            })
+            .collect();
+        self.refresh_provider_direct();
+        self
+    }
+
+    #[allow(unused_mut, reason = "native provider refresh mutates this builder")]
+    pub fn build(mut self) -> Result<Tools, ToolsBuildError> {
+        if self.duplicate_workspace {
+            return Err(ToolsBuildError::DuplicateSource("workspace"));
+        }
+        #[cfg(not(target_family = "wasm"))]
+        self.refresh_provider_direct();
+        #[cfg(not(target_family = "wasm"))]
+        if self
+            .tools
+            .working_directory
+            .as_deref()
+            .is_some_and(|directory| directory.trim().is_empty())
+        {
+            return Err(ToolsBuildError::EmptyWorkingDirectory);
+        }
+        #[cfg(not(target_family = "wasm"))]
+        if self
+            .tools
+            .default_shell
+            .as_deref()
+            .is_some_and(|shell| shell.trim().is_empty())
+        {
+            return Err(ToolsBuildError::EmptyDefaultShell);
+        }
+        let registered = self
+            .tools
+            .registered
+            .iter()
+            .map(|tool| tool.handler.definition())
+            .collect::<Vec<_>>();
+        #[cfg(not(target_family = "wasm"))]
+        let provider_direct = self
+            .tools
+            .provider_direct
+            .iter()
+            .map(|tool| tool.definition())
+            .collect::<Vec<_>>();
+        #[cfg(not(target_family = "wasm"))]
+        let provided = self
+            .tools
+            .providers
+            .iter()
+            .flat_map(|provider| provider.available_definitions())
+            .collect::<Vec<_>>();
+        let mut names = HashSet::with_capacity(registered.len());
+
+        let mut code_mode_names = HashMap::new();
+
+        if self.tools.exposure.is_available_in_code_mode() {
+            for name in self.tools.builtin_names.iter().map(AsRef::as_ref) {
+                insert_code_mode_name(&mut code_mode_names, name)?;
+            }
+        }
+        for (tool, definition) in self.tools.registered.iter().zip(&registered) {
+            let name = definition.name();
+
+            let exposure = tool.exposure.unwrap_or_else(|| self.tools.exposure());
+
+            if exposure != ToolExposure::Hidden {
+                validate_registered_tool_name(
+                    name,
+                    matches!(definition, ToolDefinition::ToolSearch { .. }),
+                )?;
+            } else if name.is_empty() {
+                return Err(ToolsBuildError::EmptyName);
+            }
+            if host_owned_name(name)
+                || (name == "tool_search"
+                    && !matches!(definition, ToolDefinition::ToolSearch { .. }))
+            {
+                return Err(ToolsBuildError::ReservedName(name.into()));
+            }
+            if self
+                .tools
+                .builtin_names
+                .iter()
+                .any(|builtin| builtin.as_ref() == name)
+            {
+                return Err(ToolsBuildError::BuiltInName(name.into()));
+            }
+            if !names.insert(name) {
+                return Err(ToolsBuildError::DuplicateName(name.into()));
+            }
+
+            if exposure.is_available_in_code_mode()
+                && !matches!(definition, ToolDefinition::ToolSearch { .. })
+            {
+                insert_code_mode_name(&mut code_mode_names, name)?;
+            }
+        }
+        #[cfg(not(target_family = "wasm"))]
+        for definition in &provider_direct {
+            let name = definition.name();
+            validate_registered_tool_name(
+                name,
+                matches!(definition, ToolDefinition::ToolSearch { .. }),
+            )?;
+            if host_owned_name(name) {
+                return Err(ToolsBuildError::ReservedName(name.into()));
+            }
+            if self
+                .tools
+                .builtin_names
+                .iter()
+                .any(|builtin| builtin.as_ref() == name)
+            {
+                return Err(ToolsBuildError::BuiltInName(name.into()));
+            }
+            if !names.insert(name) {
+                return Err(ToolsBuildError::DuplicateName(name.into()));
+            }
+            if self.tools.exposure.is_available_in_code_mode()
+                && !matches!(definition, ToolDefinition::ToolSearch { .. })
+            {
+                insert_code_mode_name(&mut code_mode_names, name)?;
+            }
+        }
+        #[cfg(not(target_family = "wasm"))]
+        for definition in &provided {
+            let name = definition.name();
+            validate_registered_tool_name(
+                name,
+                matches!(definition, ToolDefinition::ToolSearch { .. }),
+            )?;
+            if host_owned_name(name)
+                || (name == "tool_search"
+                    && !matches!(definition, ToolDefinition::ToolSearch { .. }))
+            {
+                return Err(ToolsBuildError::ReservedName(name.into()));
+            }
+            if self
+                .tools
+                .builtin_names
+                .iter()
+                .any(|builtin| builtin.as_ref() == name)
+            {
+                return Err(ToolsBuildError::BuiltInName(name.into()));
+            }
+            if !names.insert(name) {
+                return Err(ToolsBuildError::DuplicateName(name.into()));
+            }
+            if !matches!(definition, ToolDefinition::ToolSearch { .. }) {
+                insert_code_mode_name(&mut code_mode_names, name)?;
+            }
+        }
+        Ok(self.tools)
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn refresh_provider_direct(&mut self) {
+        self.tools.deferred_tools_guidance_enabled = self.tools.providers.iter().any(|provider| {
+            provider
+                .direct_tools()
+                .iter()
+                .any(|tool| matches!(tool.definition(), ToolDefinition::ToolSearch { .. }))
+        });
+        self.tools.provider_direct = self
+            .tools
+            .providers
+            .iter()
+            .flat_map(|provider| provider.direct_tools_for_exposure(self.tools.exposure))
+            .collect();
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[derive(Debug)]
+pub enum PublicToolCatalogError {
+    InvalidName(Box<str>),
+    NormalizedNameCollision {
+        first: Box<str>,
+        second: Box<str>,
+        normalized: Box<str>,
+    },
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl std::fmt::Display for PublicToolCatalogError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidName(value) => write!(formatter, "invalid public tool name `{value}`"),
+            Self::NormalizedNameCollision {
+                first,
+                second,
+                normalized,
+            } => write!(
+                formatter,
+                "public tool names `{first}` and `{second}` both normalize to Code Mode name `{normalized}`"
+            ),
+        }
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl std::error::Error for PublicToolCatalogError {}
+
+#[cfg(not(target_family = "wasm"))]
+pub fn validate_public_tool_catalog_names<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+) -> Result<(), PublicToolCatalogError> {
+    let mut normalized_names = HashMap::new();
+    for name in names {
+        if !valid_public_tool_name(name) {
+            return Err(PublicToolCatalogError::InvalidName(name.into()));
+        }
+        let normalized = normalize_public_tool_name(name);
+        if let Some(first) = normalized_names.insert(normalized.clone(), name.to_owned()) {
+            return Err(PublicToolCatalogError::NormalizedNameCollision {
+                first: first.into(),
+                second: name.into(),
+                normalized: normalized.into(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_registered_tool_name(
+    name: &str,
+    native_tool_search: bool,
+) -> Result<(), ToolsBuildError> {
+    if name.is_empty() {
+        return Err(ToolsBuildError::EmptyName);
+    }
+    if !valid_public_tool_name_grammar(name) && !(native_tool_search && name == "tool_search") {
+        return Err(ToolsBuildError::InvalidPublicName(name.into()));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn valid_public_tool_name(name: &str) -> bool {
+    valid_public_tool_name_grammar(name) && !matches!(name, "exec" | "tool_search" | "wait")
+}
+
+fn valid_public_tool_name_grammar(name: &str) -> bool {
+    name.len() <= 128
+        && name
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
+fn insert_code_mode_name<'a>(
+    names: &mut HashMap<std::borrow::Cow<'a, str>, &'a str>,
+    name: &'a str,
+) -> Result<(), ToolsBuildError> {
+    let normalized = normalized_public_tool_name(name);
+    if let Some(first) = names.get(&normalized) {
+        return Err(ToolsBuildError::NormalizedNameCollision {
+            first: (*first).into(),
+            second: name.into(),
+            normalized: normalized.into(),
+        });
+    }
+    names.insert(normalized, name);
+    Ok(())
+}
+
+const fn normalized_character(index: usize, character: char) -> bool {
+    character == '_'
+        || character == '$'
+        || if index == 0 {
+            character.is_ascii_alphabetic()
+        } else {
+            character.is_ascii_alphanumeric()
+        }
+}
+
+pub(crate) fn normalized_public_tool_name(name: &str) -> std::borrow::Cow<'_, str> {
+    if name
+        .chars()
+        .enumerate()
+        .all(|(index, character)| normalized_character(index, character))
+    {
+        std::borrow::Cow::Borrowed(name)
+    } else {
+        std::borrow::Cow::Owned(normalize_public_tool_name(name))
+    }
+}
+
+pub fn normalize_public_tool_name(name: &str) -> String {
+    crate::code_mode_description::normalize_identifier(name)
+}
+
+impl nanocode_tools::ToolCollection for Tools {
+    type Error = ToolsBuildError;
+
+    fn add_shared_tool(self, tool: Arc<dyn Tool>) -> Result<Self, Self::Error> {
+        self.add_shared_tools([tool])
+    }
+
+    fn add_shared_tools(
+        self,
+        tools: impl IntoIterator<Item = Arc<dyn Tool>>,
+    ) -> Result<Self, Self::Error> {
+        let pins = self.text_pins.clone();
+        let mut builder = self.into_builder();
+        builder
+            .tools
+            .registered
+            .extend(tools.into_iter().map(|tool| RegisteredTool {
+                handler: match &pins {
+                    Some(pins) => crate::pins::pin_tool(pins.as_ref(), tool),
+                    None => tool,
+                },
+                exposure: None,
+            }));
+        builder.build()
+    }
+}

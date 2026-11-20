@@ -1,0 +1,186 @@
+use crate::client::{
+    ModelConfig, Prompt, PromptMessageRole,
+    responses::{
+        ContentItem, FunctionOutputBody, FunctionOutputContent, MessageRole, ResponseItem,
+    },
+};
+use nanocode_code_mode::contract::{ToolOutputBody, ToolOutputContent};
+use nanocode_tool_host::Tools;
+use serde_json::Value;
+
+use super::context::ContextSnapshot;
+
+pub(in crate::model) fn task_input(
+    config: &ModelConfig,
+    prompt: &Prompt,
+    user_content: Vec<ContentItem>,
+    context: &ContextSnapshot,
+) -> Vec<ResponseItem> {
+    let mut input = vec![developer_context(config), context.full_item()];
+    input.extend(prompt_messages(prompt, user_content));
+    input
+}
+
+pub(in crate::model) fn prompt_messages(
+    prompt: &Prompt,
+    user_content: Vec<ContentItem>,
+) -> Vec<ResponseItem> {
+    let mut input = Vec::with_capacity(prompt.transcript().len() + 1);
+    input.extend(prompt.transcript().iter().map(|message| {
+        let role = match message.role() {
+            PromptMessageRole::User => MessageRole::User,
+            PromptMessageRole::Assistant => MessageRole::Assistant,
+        };
+        let content = match message.role() {
+            PromptMessageRole::User => ContentItem::input_text(message.content()),
+            PromptMessageRole::Assistant => ContentItem::output_text(message.content()),
+        };
+        ResponseItem::message(role, [content])
+    }));
+    input.push(ResponseItem::message(MessageRole::User, user_content));
+    input
+}
+
+pub(in crate::model) fn turn_aborted() -> ResponseItem {
+    ResponseItem::message(
+        MessageRole::User,
+        [ContentItem::InputText {
+            text: concat!(
+                "<turn_aborted>\n",
+                "The user interrupted the previous turn on purpose. Any running unified exec ",
+                "processes may still be running in the background. If any tools/commands were ",
+                "aborted, they may have partially executed.\n",
+                "</turn_aborted>"
+            )
+            .into(),
+        }],
+    )
+}
+
+pub(in crate::model) const fn empty_response(tools: &Tools) -> &'static str {
+    if tools.exposure().is_available_in_code_mode() {
+        concat!(
+            "<empty_response>\n",
+            "Your last response had no message and no exec call, so nothing happened. ",
+            "Continue the task: call exec, or reply with your final message.\n",
+            "</empty_response>"
+        )
+    } else {
+        concat!(
+            "<empty_response>\n",
+            "Your last response had no message and no tool call, so nothing happened. ",
+            "Continue the task: call a tool, or reply with your final message.\n",
+            "</empty_response>"
+        )
+    }
+}
+
+pub(in crate::model) fn context_notice(text: &str) -> ResponseItem {
+    ResponseItem::message(MessageRole::User, [ContentItem::input_text(text)])
+}
+
+pub(in crate::model) fn developer_context(config: &ModelConfig) -> ResponseItem {
+    ResponseItem::message(
+        MessageRole::Developer,
+        [ContentItem::InputText {
+            text: format!(
+                "{}\n\n{}",
+                permissions_instructions(),
+                config.host_instructions()
+            )
+            .trim_end()
+            .into(),
+        }],
+    )
+}
+
+pub(in crate::model) fn host_context(instructions: String) -> ResponseItem {
+    ResponseItem::message(
+        MessageRole::Developer,
+        [ContentItem::input_text(instructions)],
+    )
+}
+
+fn permissions_instructions() -> String {
+    let sandbox =
+        include_str!("prompts/danger_full_access.md").replace("{{ network_access }}", "enabled");
+    format!(
+        "<permissions instructions>\n{sandbox}{}</permissions instructions>",
+        include_str!("prompts/never.md"),
+    )
+}
+
+pub(in crate::model) fn custom_tool_output(
+    call_id: String,
+    output: ToolOutputBody,
+) -> ResponseItem {
+    ResponseItem::custom_tool_output(call_id, None, function_output(output))
+}
+
+pub(in crate::model) fn custom_tool_notification(call_id: String, text: String) -> ResponseItem {
+    ResponseItem::custom_tool_output(
+        call_id,
+        Some("exec".to_owned()),
+        FunctionOutputBody::Text(text.into_boxed_str()),
+    )
+}
+
+pub(in crate::model) fn function_tool_output(
+    call_id: String,
+    output: ToolOutputBody,
+) -> ResponseItem {
+    ResponseItem::function_call_output(call_id, function_output(output))
+}
+
+pub(in crate::model) fn tool_search_output(call_id: String, tools: Vec<Value>) -> ResponseItem {
+    ResponseItem::ToolSearchOutput {
+        id: None,
+        call_id: Some(call_id.into_boxed_str()),
+        status: "completed".into(),
+        execution: "client".into(),
+        tools: tools.into_iter().map(Into::into).collect(),
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn function_output(output: ToolOutputBody) -> FunctionOutputBody {
+    match output {
+        ToolOutputBody::Text(text) => FunctionOutputBody::Text(text.into_boxed_str()),
+        ToolOutputBody::Content(content) => FunctionOutputBody::Content(
+            content
+                .into_iter()
+                .map(|item| match item {
+                    ToolOutputContent::InputText { text } => FunctionOutputContent::InputText {
+                        text: text.into_boxed_str(),
+                    },
+                    ToolOutputContent::InputImage { image_url, detail } => {
+                        FunctionOutputContent::InputImage {
+                            image_url: image_url.into_boxed_str(),
+                            detail: Some(detail),
+                        }
+                    }
+                    ToolOutputContent::InputImageFile { file_id, detail } => {
+                        FunctionOutputContent::InputImageFile {
+                            file_id: file_id.into_boxed_str(),
+                            detail: Some(detail),
+                        }
+                    }
+                    ToolOutputContent::InputAudio { .. } => FunctionOutputContent::InputText {
+                        text: "[audio omitted: Codex function call outputs carry text and images]"
+                            .into(),
+                    },
+                    ToolOutputContent::InputFile { .. } => FunctionOutputContent::InputText {
+                        text:
+                            "[document omitted: Codex function call outputs carry text and images]"
+                                .into(),
+                    },
+                    ToolOutputContent::EncryptedContent { encrypted_content } => {
+                        FunctionOutputContent::EncryptedContent {
+                            encrypted_content: encrypted_content.into_boxed_str(),
+                        }
+                    }
+                })
+                .collect(),
+        ),
+    }
+}

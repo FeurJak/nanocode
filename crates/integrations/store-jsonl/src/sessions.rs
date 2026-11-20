@@ -1,0 +1,1457 @@
+use std::{
+    borrow::Cow,
+    cmp::Reverse,
+    collections::{HashMap, HashSet},
+    fs::{self, Metadata},
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    thread,
+    time::UNIX_EPOCH,
+};
+
+use nanocode_durability_core::{
+    BriefFilter, BriefState, KnownSummary, ListedState, ListedSummary, OwnedState, OwnerId,
+    OwnerToken, StateSummary, StoreError, StoreRecord, StoreReplacement, StoreUpdate, StoredState,
+    SummaryFilter,
+};
+use serde::Deserialize;
+
+use nanocode_digest::Sha256;
+
+use super::{
+    CompactionStats, JOURNAL_READ_BUFFER_BYTES, Journal, Replacement, archive, backend, briefs,
+    cores, identity,
+    listing::Listing,
+    process_alive,
+    shared::Shared,
+    summaries::{Anchor, Summaries, Summary, raw_summary, unpacked},
+};
+
+const OPEN_JOURNALS: usize = 32;
+const EXTENSION: &str = ".jsonl";
+const HOMES: &str = ".homes";
+const COPY: &str = ".listed-";
+const OWNER_EXTENSION: &str = "owner";
+const RESIDENT: &str = ".resident";
+
+pub(super) struct Sessions {
+    directory: PathBuf,
+    journals: HashMap<String, Opened>,
+    clock: u64,
+    summaries: Summaries,
+    listing: Listing,
+    homes: HashMap<String, String>,
+    colocations: Option<fs::File>,
+    shared: Option<Shared>,
+    touched: HashSet<String>,
+    unknown: HashMap<String, Option<Summary>>,
+    held: HashMap<String, fs::File>,
+    resident: Option<String>,
+    temporaries: Option<PathBuf>,
+}
+
+struct Opened {
+    journal: Journal,
+    used: u64,
+    archive: Option<Archived>,
+}
+
+struct Archived {
+    copy: nanocode_platform::TemporaryPath,
+    file: String,
+    length: u64,
+    anchor: Anchor,
+}
+
+struct Found {
+    key: String,
+    created: std::time::SystemTime,
+    source: String,
+    length: u64,
+    path: PathBuf,
+}
+
+struct Shown {
+    state_id: String,
+    known: bool,
+    file: String,
+    length: u64,
+    path: PathBuf,
+}
+
+struct Listed {
+    state_id: String,
+    file: String,
+    length: u64,
+    path: PathBuf,
+    member: bool,
+    revision: Option<u64>,
+}
+
+pub(super) fn session_key(state_id: &str) -> &str {
+    match state_id.split_once(':') {
+        Some((root, _)) if !root.is_empty() => root,
+        _ => state_id,
+    }
+}
+
+const fn plain(byte: u8, index: usize) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') || (byte == b'.' && index > 0)
+}
+
+pub(super) fn file_name(key: &str) -> String {
+    let mut name = String::with_capacity(key.len() + EXTENSION.len());
+    for (index, byte) in key.bytes().enumerate() {
+        if plain(byte, index) {
+            name.push(char::from(byte));
+        } else {
+            name.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    name.push_str(EXTENSION);
+    name
+}
+
+pub(super) fn key_of(name: &str) -> Option<String> {
+    let name = archive::unarchived(name).unwrap_or(name);
+    let mut rest = name.strip_suffix(EXTENSION)?.as_bytes();
+    let mut bytes = Vec::with_capacity(rest.len());
+    let nibble = |digit: u8| {
+        char::from(digit)
+            .to_digit(16)
+            .filter(|_| !digit.is_ascii_lowercase())
+    };
+    while let Some((&byte, tail)) = rest.split_first() {
+        let (byte, escaped, tail) = match (byte, tail) {
+            (b'%', [high, low, tail @ ..]) => {
+                let byte = u8::try_from(nibble(*high)? << 4 | nibble(*low)?).ok()?;
+                (byte, true, tail)
+            }
+            (b'%', _) => return None,
+            _ => (byte, false, tail),
+        };
+        if plain(byte, bytes.len()) == escaped {
+            return None;
+        }
+        bytes.push(byte);
+        rest = tail;
+    }
+    let key = String::from_utf8(bytes).ok()?;
+    (!key.is_empty()).then_some(key)
+}
+
+fn clear_temporary(entry: &fs::DirEntry, name: &str) -> std::io::Result<()> {
+    if archive::unarchived(name)
+        .unwrap_or(name)
+        .ends_with(EXTENSION)
+    {
+        return Ok(());
+    }
+    let abandoned = [".compact-", ".migrate-", COPY].into_iter().any(|marker| {
+        name.match_indices('.')
+            .find_map(|(at, _)| name[at..].strip_prefix(marker))
+            .and_then(|rest| rest.split_once('-'))
+            .and_then(|(pid, _)| pid.parse::<u32>().ok())
+            .is_some_and(|pid| !process_alive(pid))
+    });
+    if abandoned && entry.file_type()?.is_file() {
+        match fs::remove_file(entry.path()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn clear_temporaries(directory: &Path) -> std::io::Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        if let Some(name) = entry.file_name().to_str() {
+            clear_temporary(&entry, name)?;
+        }
+    }
+    Ok(())
+}
+
+fn unwritable(home: &Path, error: StoreError) -> StoreError {
+    let detail = match error {
+        StoreError::Backend(detail) => detail,
+        other => other.to_string(),
+    };
+    StoreError::Backend(format!(
+        "cannot open the session store in {}: {detail}",
+        home.display()
+    ))
+}
+
+fn files(directory: &Path, temporaries: Option<&Path>) -> Result<Vec<Found>, StoreError> {
+    let mut files = Vec::new();
+    let mut seen = HashSet::new();
+    for entry in fs::read_dir(directory).map_err(backend)? {
+        let entry = entry.map_err(backend)?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(key) = key_of(name) else {
+            if let Some(home) = temporaries {
+                clear_temporary(&entry, name).map_err(|error| unwritable(home, backend(error)))?;
+            }
+            continue;
+        };
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(backend(error)),
+        };
+        if metadata.is_file() && seen.insert(key.clone()) {
+            files.push(Found {
+                created: created(&metadata),
+                source: identity(&metadata)?,
+                length: metadata.len(),
+                path: entry.path(),
+                key,
+            });
+        }
+    }
+    files.sort_by_cached_key(|found| Reverse(found.created));
+    Ok(files)
+}
+
+fn indexed(listing: &mut Listing, directory: &Path) -> Option<Vec<Found>> {
+    let mut text = String::new();
+    let entries = listing.entries(&mut text)?;
+    let mut seen = HashSet::new();
+    let mut files = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let key = key_of(entry.name)?;
+        let path = directory.join(entry.name);
+        let found = if archive::unarchived(entry.name).is_some() {
+            Found {
+                key,
+                created: entry.created,
+                source: entry.source.to_owned(),
+                length: entry.length,
+                path,
+            }
+        } else {
+            let metadata = fs::symlink_metadata(&path).ok().filter(Metadata::is_file)?;
+            Found {
+                key,
+                created: created(&metadata),
+                source: identity(&metadata).ok()?,
+                length: metadata.len(),
+                path,
+            }
+        };
+        if seen.insert(found.key.clone()) {
+            files.push(found);
+        }
+    }
+    files.sort_by_cached_key(|found| Reverse(found.created));
+    Some(files)
+}
+
+fn found(
+    listing: &mut Listing,
+    directory: &Path,
+    temporaries: Option<&Path>,
+) -> Result<(Vec<Found>, bool), StoreError> {
+    if let Some(files) = indexed(listing, directory) {
+        return Ok((files, true));
+    }
+    let scan = listing.scan();
+    let files = files(directory, temporaries)?;
+    if let Some(scan) = scan {
+        listing.snapshot(
+            scan,
+            files.iter().map(|found| {
+                (
+                    found.path.as_path(),
+                    found.created,
+                    found.source.as_str(),
+                    found.length,
+                )
+            }),
+        );
+    }
+    Ok((files, false))
+}
+
+fn same_file(file: &fs::File, path: &Path) -> std::io::Result<bool> {
+    let held = identity(&file.metadata()?).ok();
+    match fs::metadata(path) {
+        Ok(named) => Ok(identity(&named).ok() == held),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn resident(directory: &Path) -> Result<Option<String>, StoreError> {
+    match fs::read_to_string(directory.join(RESIDENT)) {
+        Ok(key) => Ok(Some(key)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(backend(error)),
+    }
+}
+
+fn names(path: &Path) -> Vec<String> {
+    [path.to_owned(), archive::archived(path)]
+        .iter()
+        .filter_map(|path| Some(path.file_name()?.to_str()?.to_owned()))
+        .collect()
+}
+
+fn unmoved(listed: &Shown) -> bool {
+    fs::symlink_metadata(&listed.path).is_ok_and(|metadata| {
+        metadata.len() == listed.length
+            && identity(&metadata).is_ok_and(|source| source == listed.file)
+    })
+}
+
+fn decoded(state_id: &str, known: &Summary) -> Option<(u64, Option<StateSummary>)> {
+    let summary = known
+        .summary
+        .as_ref()
+        .map(|summary| unpacked(state_id, summary.get()))
+        .transpose()
+        .inspect_err(|error| unreadable(state_id, error))
+        .ok()?;
+    Some((known.revision, summary))
+}
+
+fn unreadable(state_id: &str, error: &serde_json::Error) {
+    nanocode_trace::warn!(%error, state_id, "ignoring an unreadable JSONL session summary");
+}
+
+#[derive(Deserialize)]
+struct Head<'a> {
+    #[serde(rename = "s", default, borrow)]
+    scope: Option<Cow<'a, str>>,
+    #[serde(rename = "u")]
+    updated_at_ms: u64,
+}
+
+pub(super) fn created(metadata: &Metadata) -> std::time::SystemTime {
+    metadata
+        .created()
+        .or_else(|_| metadata.modified())
+        .unwrap_or(UNIX_EPOCH)
+}
+
+impl Sessions {
+    pub(super) fn open(directory: PathBuf) -> Result<Self, StoreError> {
+        Self::open_with(directory, None)
+    }
+
+    fn open_with(directory: PathBuf, temporaries: Option<PathBuf>) -> Result<Self, StoreError> {
+        if fs::metadata(&directory).is_ok_and(|metadata| !metadata.is_dir()) {
+            return Err(backend(format!(
+                "{} is not a directory: JSONL sessions are stored one file per session in a directory",
+                directory.display()
+            )));
+        }
+        fs::create_dir_all(&directory).map_err(backend)?;
+        if temporaries.is_none() {
+            clear_temporaries(&directory).map_err(backend)?;
+        }
+        let homes = match fs::read_to_string(directory.join(HOMES)) {
+            Ok(lines) => lines
+                .lines()
+                .filter_map(|line| serde_json::from_str::<(String, String)>(line).ok())
+                .collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(error) => return Err(backend(error)),
+        };
+        let resident = resident(&directory)?;
+        Ok(Self {
+            summaries: Summaries::new(&directory),
+            listing: Listing::new(&directory),
+            directory,
+            journals: HashMap::new(),
+            clock: 0,
+            homes,
+            colocations: None,
+            shared: None,
+            touched: HashSet::new(),
+            unknown: HashMap::new(),
+            held: HashMap::new(),
+            resident,
+            temporaries,
+        })
+    }
+
+    pub(super) fn clear(&mut self) -> Result<(), StoreError> {
+        if let Some(home) = &self.temporaries {
+            if !self.listing.settled() {
+                clear_temporaries(&self.directory)
+                    .map_err(|error| unwritable(home, backend(error)))?;
+            }
+            self.temporaries = None;
+        }
+        Ok(())
+    }
+
+    fn is_home(&self, key: &str) -> bool {
+        self.homes.values().any(|home| home == key)
+    }
+
+    fn owner_path(&self, key: &str) -> PathBuf {
+        self.path(key).with_extension(OWNER_EXTENSION)
+    }
+
+    fn hold(&mut self, state_id: &str) {
+        let key = self.home(state_id);
+        if self.held.contains_key(&key) {
+            return;
+        }
+        let path = self.owner_path(&key);
+        let held = self.listing.change(&[], || {
+            loop {
+                let mut file = fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .read(true)
+                    .write(true)
+                    .open(&path)?;
+                match file.try_lock() {
+                    Ok(()) if !same_file(&file, &path)? => {}
+                    Ok(()) => {
+                        file.set_len(0)?;
+                        file.write_all(std::process::id().to_string().as_bytes())?;
+                        return Ok(Some(file));
+                    }
+                    Err(fs::TryLockError::WouldBlock) => return Ok(None),
+                    Err(fs::TryLockError::Error(error)) => return Err(error),
+                }
+            }
+        });
+        match held {
+            Ok(Some(file)) => {
+                self.held.insert(key, file);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                nanocode_trace::warn!(%error, state_id, "could not mark this process as the owner of a JSONL session");
+            }
+        }
+    }
+
+    pub(super) fn live_owner(&mut self, state_id: &str) -> Result<Option<u32>, StoreError> {
+        let key = self.home(state_id);
+        if self.held.contains_key(&key) {
+            return Ok(None);
+        }
+        let mut file = match fs::File::open(self.owner_path(&key)) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(backend(error)),
+        };
+        match file.try_lock_shared() {
+            Ok(()) => Ok(None),
+            Err(fs::TryLockError::WouldBlock) => {
+                let mut pid = String::new();
+                file.read_to_string(&mut pid).map_err(backend)?;
+                Ok(Some(pid.trim().parse().unwrap_or(0)))
+            }
+            Err(fs::TryLockError::Error(error)) => Err(backend(error)),
+        }
+    }
+
+    fn home(&self, state_id: &str) -> String {
+        let key = session_key(state_id);
+        self.homes.get(key).map_or(key, String::as_str).to_owned()
+    }
+
+    pub(super) fn colocate(&mut self, state_id: &str, beside: &str) {
+        let key = session_key(state_id);
+        let home = self.home(beside);
+        if key == home || self.homes.contains_key(key) || archive::exists(&self.path(key)) {
+            return;
+        }
+        let line = serde_json::to_string(&(key, &home)).map(|line| line + "\n");
+        let appended = line.map_err(std::io::Error::other).and_then(|line| {
+            use std::io::Write as _;
+            let mut colocations = match self.colocations.take() {
+                Some(colocations) => colocations,
+                None => fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(self.directory.join(HOMES))?,
+            };
+            colocations.write_all(line.as_bytes())?;
+            self.colocations = Some(colocations);
+            Ok(())
+        });
+        if let Err(error) = appended {
+            nanocode_trace::warn!(%error, state_id, "could not record where a JSONL session is stored");
+        }
+        if let Some(opened) = self.journals.get_mut(&home) {
+            opened.journal.sidecar = true;
+        }
+        self.homes.insert(key.to_owned(), home);
+    }
+
+    pub(super) fn open_home(home: &Path, deferred: bool) -> Result<Self, StoreError> {
+        Self::open_home_with(home, deferred, false)
+    }
+
+    pub(super) fn open_home_with(
+        home: &Path,
+        deferred: bool,
+        inline: bool,
+    ) -> Result<Self, StoreError> {
+        let unwritable = |error| unwritable(home, error);
+        let mut sessions =
+            Self::open_with(home.join("sessions"), deferred.then(|| home.to_owned()))
+                .map_err(unwritable)?;
+        sessions.shared = Shared::open(home)
+            .map_err(unwritable)?
+            .map(|shared| if inline { shared.inline() } else { shared });
+        let legacy = home.join("sessions.jsonl");
+        if legacy.is_file() {
+            super::migrate::migrate(&mut sessions, &legacy)?;
+        }
+        Ok(sessions)
+    }
+
+    pub(super) fn directory(&self) -> &Path {
+        &self.directory
+    }
+
+    pub(super) fn path(&self, key: &str) -> PathBuf {
+        self.directory.join(file_name(key))
+    }
+
+    fn journal(
+        &mut self,
+        state_id: &str,
+        create: bool,
+    ) -> Result<Option<&mut Journal>, StoreError> {
+        let key = self.home(state_id);
+        let key = key.as_str();
+        self.clock += 1;
+        let clock = self.clock;
+        let listing = !create && self.unknown.contains_key(state_id);
+        if !listing
+            && self
+                .journals
+                .get(key)
+                .is_some_and(|opened| opened.archive.is_some())
+        {
+            self.journals.remove(key);
+        }
+        if !self.journals.contains_key(key) {
+            let path = self.path(key);
+            let mut archive = None;
+            if !path.is_file() && archive::archived(&path).is_file() {
+                if listing {
+                    self.release();
+                    archive = self.copy(&archive::archived(&path))?;
+                } else {
+                    self.listing
+                        .change(&names(&path), || archive::restore(&path))
+                        .map_err(backend)?;
+                    self.touched.insert(key.to_owned());
+                }
+            }
+            if !create && archive.is_none() && !path.is_file() {
+                return Ok(None);
+            }
+            if self.journals.len() >= OPEN_JOURNALS
+                && let Some(oldest) = self
+                    .journals
+                    .iter()
+                    .min_by_key(|(_, opened)| opened.used)
+                    .map(|(key, _)| key.clone())
+                && let Some(mut closed) = self.journals.remove(&oldest)
+            {
+                closed.journal.harden()?;
+            }
+            let opened = archive
+                .as_ref()
+                .map_or(path.as_path(), |archive| &archive.copy);
+            let sidecar = self.is_home(key) || self.resident.as_deref() == Some(key);
+            let mut journal = if create && !opened.is_file() {
+                self.listing
+                    .change(&names(opened), || Journal::open(opened, sidecar))?
+            } else {
+                Journal::open(opened, sidecar)?
+            };
+            journal.shared = self.shared.clone();
+            for member in journal
+                .index
+                .states
+                .keys()
+                .chain(journal.index.owners.keys())
+            {
+                let member = session_key(member);
+                if member != key && !self.homes.contains_key(member) {
+                    self.homes.insert(member.to_owned(), key.to_owned());
+                }
+            }
+            self.journals.insert(
+                key.to_owned(),
+                Opened {
+                    journal,
+                    used: clock,
+                    archive,
+                },
+            );
+        }
+        Ok(self.journals.get_mut(key).map(|opened| {
+            opened.used = clock;
+            opened.journal.index_due();
+            &mut opened.journal
+        }))
+    }
+
+    fn release(&mut self) {
+        self.journals.retain(|_, opened| opened.archive.is_none());
+    }
+
+    fn copy(&self, archived: &Path) -> Result<Option<Archived>, StoreError> {
+        let mut file = match fs::File::open(archived) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(backend(error)),
+        };
+        let metadata = file.metadata().map_err(backend)?;
+        let mut stored = Vec::new();
+        file.read_to_end(&mut stored).map_err(backend)?;
+        let mut copy = nanocode_platform::TemporaryFile::create_in(
+            &self.directory,
+            format!("{COPY}{}-", std::process::id()),
+            None,
+        )
+        .map_err(backend)?;
+        copy.write_all(&archive::decompress(&stored).map_err(backend)?)
+            .map_err(backend)?;
+        Ok(Some(Archived {
+            copy: copy.into_temporary_path(),
+            file: identity(&metadata)?,
+            length: metadata.len(),
+            anchor: Anchor {
+                position: 0,
+                digest: Sha256::digest(&stored),
+            },
+        }))
+    }
+
+    pub(super) fn stale(&mut self) {
+        for opened in self.journals.values_mut() {
+            opened.journal.stale();
+        }
+    }
+
+    pub(super) fn flush(&mut self) {
+        for opened in self.journals.values_mut() {
+            opened.journal.flush_index();
+        }
+    }
+
+    pub(super) fn unsynced(&mut self) -> Vec<std::sync::Arc<fs::File>> {
+        self.journals
+            .values_mut()
+            .filter_map(|opened| opened.journal.unsynced())
+            .collect()
+    }
+
+    pub(super) fn existing(&mut self, state_id: &str) -> Result<Option<&mut Journal>, StoreError> {
+        self.journal(state_id, false)
+    }
+
+    pub(super) fn opened(&mut self, state_id: &str) -> Result<&mut Journal, StoreError> {
+        self.summaries.forget();
+        self.touched.insert(self.home(state_id));
+        self.journal(state_id, true)?
+            .ok_or_else(|| backend("JSONL session file was not created"))
+    }
+
+    pub(super) fn acquire_with(
+        &mut self,
+        id: &str,
+        owner_id: OwnerId,
+        update: StoreUpdate,
+    ) -> Result<OwnedState, StoreError> {
+        let update = self.sharing(update);
+        let owned = self
+            .opened(id)?
+            .acquire_batch(id, owner_id, update, None)
+            .map(|(owned, _)| owned)?;
+        self.hold(id);
+        Ok(owned)
+    }
+
+    pub(super) fn acquire_with_companion(
+        &mut self,
+        id: &str,
+        owner_id: OwnerId,
+        update: StoreUpdate,
+        companion_id: &str,
+        companion_owner: OwnerId,
+    ) -> Result<(OwnedState, OwnedState), StoreError> {
+        if self.home(id) != self.home(companion_id) {
+            return Err(StoreError::NotCommitted(format!(
+                "JSONL stores {companion_id} in another session file than {id}"
+            )));
+        }
+        let update = self.sharing(update);
+        let (owned, companion) = self.opened(id)?.acquire_batch(
+            id,
+            owner_id,
+            update,
+            Some((companion_id, companion_owner)),
+        )?;
+        let acquired = companion
+            .map(|companion| (owned, companion))
+            .ok_or_else(|| backend("JSONL companion acquisition was not staged"))?;
+        self.hold(id);
+        Ok(acquired)
+    }
+
+    pub(super) fn acquire(
+        &mut self,
+        id: &str,
+        owner_id: OwnerId,
+    ) -> Result<OwnedState, StoreError> {
+        let owned = self.opened(id)?.acquire(id, owner_id)?;
+        self.hold(id);
+        Ok(owned)
+    }
+
+    pub(super) fn acquire_many(
+        &mut self,
+        acquisitions: Vec<(String, OwnerId)>,
+    ) -> Vec<Result<OwnedState, StoreError>> {
+        let mut results: Vec<Option<Result<OwnedState, StoreError>>> =
+            (0..acquisitions.len()).map(|_| None).collect();
+        let mut homes = Vec::<String>::new();
+        let mut groups = Vec::<(Vec<usize>, Vec<(String, OwnerId)>)>::new();
+        for (slot, acquisition) in acquisitions.into_iter().enumerate() {
+            let home = self.home(&acquisition.0);
+            match homes.iter().position(|key| *key == home) {
+                Some(group) => {
+                    groups[group].0.push(slot);
+                    groups[group].1.push(acquisition);
+                }
+                None => {
+                    homes.push(home);
+                    groups.push((vec![slot], vec![acquisition]));
+                }
+            }
+        }
+        for (slots, group) in groups {
+            let acquired = match group.first() {
+                Some((first, _)) => self
+                    .opened(first)
+                    .and_then(|journal| journal.acquire_many(&group)),
+                None => continue,
+            };
+            if acquired.is_ok()
+                && let Some((first, _)) = group.first()
+            {
+                self.hold(first);
+            }
+            match acquired {
+                Ok(states) => {
+                    for (slot, state) in slots.into_iter().zip(states) {
+                        results[slot] = Some(Ok(state));
+                    }
+                }
+                Err(error) => {
+                    for slot in slots {
+                        results[slot] = Some(Err(error.clone()));
+                    }
+                }
+            }
+        }
+        results
+            .into_iter()
+            .map(|result| {
+                result.unwrap_or_else(|| Err(backend("JSONL acquisition was not attempted")))
+            })
+            .collect()
+    }
+
+    pub(super) fn replace(
+        &mut self,
+        id: &str,
+        owner: &OwnerToken,
+        expected: u64,
+        payload: String,
+        records: Vec<StoreRecord>,
+    ) -> Result<u64, StoreError> {
+        let records = self.stored(records)?;
+        self.touched.insert(self.home(id));
+        match self.existing(id)? {
+            Some(journal) => journal.replace(id, owner, expected, payload, records),
+            None => Err(StoreError::Fenced),
+        }
+    }
+
+    pub(super) fn replace_many(
+        &mut self,
+        replacements: Vec<Result<Replacement, StoreError>>,
+    ) -> Vec<Result<u64, StoreError>> {
+        let mut results: Vec<Option<Result<u64, StoreError>>> =
+            (0..replacements.len()).map(|_| None).collect();
+        let mut groups: Vec<(Vec<usize>, Vec<Replacement>)> = Vec::new();
+        let mut grouped: HashMap<String, usize> = HashMap::new();
+        for (slot, replacement) in replacements.into_iter().enumerate() {
+            match replacement {
+                Err(error) => results[slot] = Some(Err(error)),
+                Ok(mut replacement) => {
+                    replacement.records = match self.stored(replacement.records) {
+                        Ok(records) => records,
+                        Err(error) => {
+                            results[slot] = Some(Err(error));
+                            continue;
+                        }
+                    };
+                    let key = self.home(&replacement.state_id);
+                    let group = *grouped.entry(key).or_insert_with(|| {
+                        groups.push((Vec::new(), Vec::new()));
+                        groups.len() - 1
+                    });
+                    groups[group].0.push(slot);
+                    groups[group].1.push(replacement);
+                }
+            }
+        }
+        for (slots, replacements) in groups {
+            let Some(first) = replacements.first().map(|first| first.state_id.clone()) else {
+                continue;
+            };
+            let count = replacements.len();
+            self.touched.insert(self.home(&first));
+            let outcome = match self.existing(&first) {
+                Ok(Some(journal)) => {
+                    journal.replace_many(replacements.into_iter().map(Ok).collect())
+                }
+                Ok(None) => (0..count).map(|_| Err(StoreError::Fenced)).collect(),
+                Err(error) => (0..count).map(|_| Err(error.clone())).collect(),
+            };
+            for (slot, result) in slots.into_iter().zip(outcome) {
+                results[slot] = Some(result);
+            }
+        }
+        results
+            .into_iter()
+            .map(|result| {
+                result.unwrap_or_else(|| Err(backend("JSONL replacement was not attempted")))
+            })
+            .collect()
+    }
+
+    pub(super) fn read_record(
+        &mut self,
+        id: &str,
+        key: &str,
+    ) -> Result<Option<String>, StoreError> {
+        self.summaries.forget();
+        let value = match self.existing(id)? {
+            Some(journal) => journal.read_record(id, key)?,
+            None => None,
+        };
+        value.map(|value| self.loaded(value)).transpose()
+    }
+
+    pub(super) fn read_records(
+        &mut self,
+        id: &str,
+        keys: &[String],
+    ) -> Result<Vec<Option<String>>, StoreError> {
+        self.summaries.forget();
+        let values = match self.existing(id)? {
+            Some(journal) => journal.read_records(id, keys)?,
+            None => vec![None; keys.len()],
+        };
+        values
+            .into_iter()
+            .map(|value| value.map(|value| self.loaded(value)).transpose())
+            .collect()
+    }
+
+    fn stored(&self, records: Vec<StoreRecord>) -> Result<Vec<StoreRecord>, StoreError> {
+        match &self.shared {
+            Some(shared) => shared.store(records),
+            None => Ok(records),
+        }
+    }
+
+    fn loaded(&self, value: String) -> Result<String, StoreError> {
+        match &self.shared {
+            Some(shared) => shared.load(value),
+            None => Ok(value),
+        }
+    }
+
+    fn sharing(&self, update: StoreUpdate) -> StoreUpdate {
+        let Some(shared) = self.shared.clone() else {
+            return update;
+        };
+        Box::new(move |state| {
+            update(state)?
+                .map(|replacement| {
+                    Ok(StoreReplacement {
+                        records: shared.store(replacement.records)?,
+                        payload: replacement.payload,
+                    })
+                })
+                .transpose()
+        })
+    }
+
+    pub(super) fn peek(&mut self, id: &str) -> Result<StoredState, StoreError> {
+        let unknown = self.unknown.contains_key(id);
+        let member = unknown && self.homes.contains_key(session_key(id));
+        let Some(journal) = self.existing(id)? else {
+            return Ok(StoredState::default());
+        };
+        let state = journal.peek(id)?;
+        if unknown {
+            let seen = Summary {
+                file: journal.index.source.clone(),
+                length: journal.index.offset,
+                revision: state.revision,
+                summary: None,
+                anchor: if member { None } else { journal.anchor() },
+            };
+            let archive = self.journals.get(&self.home(id));
+            let seen = match archive.and_then(|opened| opened.archive.as_ref()) {
+                Some(archive) => Summary {
+                    file: archive.file.clone(),
+                    length: archive.length,
+                    anchor: Some(archive.anchor),
+                    ..seen
+                },
+                None => seen,
+            };
+            self.unknown.insert(id.to_owned(), Some(seen));
+        }
+        Ok(state)
+    }
+
+    pub(super) fn owner(&mut self, id: &str) -> Result<Option<OwnerToken>, StoreError> {
+        match self.existing(id)? {
+            Some(journal) => journal.owner(id),
+            None => Ok(None),
+        }
+    }
+
+    pub(super) fn list_records(&mut self, id: &str) -> Result<Vec<String>, StoreError> {
+        match self.existing(id)? {
+            Some(journal) => journal.list_records(id),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn listed(&mut self, files: Vec<Found>) -> Result<Vec<Listed>, StoreError> {
+        let mut members = HashMap::<String, Vec<String>>::new();
+        for (member, home) in &self.homes {
+            members
+                .entry(home.clone())
+                .or_default()
+                .push(member.clone());
+        }
+        let mut listed = Vec::new();
+        for Found {
+            key,
+            source,
+            length,
+            path,
+            ..
+        } in files
+        {
+            let mut colocated = members.remove(&key).unwrap_or_default();
+            colocated.sort_unstable_by(|a, b| b.cmp(a));
+            let mut revision = None;
+            if colocated
+                .iter()
+                .all(|member| self.summaries.current(member, &source, length))
+            {
+                listed.extend(colocated.into_iter().map(|member| Listed {
+                    state_id: member,
+                    file: source.clone(),
+                    length,
+                    path: path.clone(),
+                    member: true,
+                    revision: None,
+                }));
+            } else if let Some(journal) = self.existing(&key)? {
+                listed.extend(colocated.into_iter().filter_map(|member| {
+                    Some(Listed {
+                        revision: Some(journal.index.states.get(&member)?.revision),
+                        state_id: member,
+                        file: source.clone(),
+                        length,
+                        path: path.clone(),
+                        member: true,
+                    })
+                }));
+                revision = journal.index.states.get(&key).map(|state| state.revision);
+            }
+            listed.push(Listed {
+                state_id: key,
+                file: source,
+                length,
+                path,
+                member: false,
+                revision,
+            });
+        }
+        Ok(listed)
+    }
+
+    pub(super) fn list_states(&mut self, limit: usize) -> Result<Vec<String>, StoreError> {
+        let (files, _) = found(
+            &mut self.listing,
+            &self.directory,
+            self.temporaries.as_deref(),
+        )?;
+        self.temporaries = None;
+        Ok(self
+            .listed(files)?
+            .into_iter()
+            .take(limit)
+            .map(|listed| listed.state_id)
+            .collect())
+    }
+
+    fn known_summaries(&mut self, limit: usize) -> Result<(Vec<Shown>, usize, bool), StoreError> {
+        let summaries = &mut self.summaries;
+        let listing = &mut self.listing;
+        let directory = &self.directory;
+        let temporaries = self.temporaries.as_deref();
+        let (files, indexed) = thread::scope(|scope| {
+            scope.spawn(|| summaries.refresh());
+            found(listing, directory, temporaries)
+        })?;
+        self.temporaries = None;
+        let listed = self.listed(files)?;
+        self.unknown.clear();
+        self.release();
+        let mut bytes = 0;
+        let listed = listed
+            .into_iter()
+            .take(limit)
+            .map(|listed| {
+                let Listed {
+                    state_id,
+                    file,
+                    length,
+                    path,
+                    member,
+                    revision,
+                } = listed;
+                let known = match revision {
+                    Some(revision) if member => {
+                        self.summaries.colocated(&state_id, &file, length, revision)
+                    }
+                    _ => self.summaries.listed(&state_id, &file, length),
+                };
+                let known = match known {
+                    Some(known) => Some(known),
+                    None => self
+                        .summaries
+                        .copied(&state_id, &file, &path, length, revision),
+                };
+                bytes += known
+                    .and_then(|known| known.summary.as_ref())
+                    .map_or(0, |summary| summary.get().len());
+                Ok(Shown {
+                    known: known.is_some(),
+                    state_id,
+                    file,
+                    length,
+                    path,
+                })
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        Ok((listed, bytes, indexed))
+    }
+
+    fn settle(&mut self) -> Result<(), StoreError> {
+        let summaries = &mut self.summaries;
+        self.listing.change(&[], || summaries.settle())
+    }
+
+    pub(super) fn list_summaries(&mut self, limit: usize) -> Result<Vec<ListedState>, StoreError> {
+        let (listed, bytes, _) = self.known_summaries(limit)?;
+        let summaries = &self.summaries;
+        let decode = |part: &[Shown]| {
+            part.iter()
+                .map(|shown| {
+                    decoded(
+                        &shown.state_id,
+                        summaries.known(&shown.state_id).filter(|_| shown.known)?,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let workers = cores().min(bytes / JOURNAL_READ_BUFFER_BYTES);
+        let decoded = if workers < 2 {
+            decode(&listed)
+        } else {
+            thread::scope(|scope| {
+                let running = listed
+                    .chunks(listed.len().div_ceil(workers))
+                    .map(|part| scope.spawn(move || decode(part)))
+                    .collect::<Vec<_>>();
+                let mut decoded = Vec::with_capacity(listed.len());
+                for part in running {
+                    decoded.extend(
+                        part.join()
+                            .map_err(|_| backend("a JSONL summary worker stopped"))?,
+                    );
+                }
+                Ok::<_, StoreError>(decoded)
+            })?
+        };
+        let listed = listed
+            .into_iter()
+            .zip(decoded)
+            .map(|(Shown { state_id, .. }, known)| {
+                if known.is_none() {
+                    self.unknown.insert(state_id.clone(), None);
+                }
+                ListedState {
+                    revision: known.as_ref().map_or(0, |(revision, _)| *revision),
+                    summary: match known {
+                        Some((_, Some(summary))) => ListedSummary::Listed(summary),
+                        Some((_, None)) => ListedSummary::Unlisted,
+                        None => ListedSummary::Unknown,
+                    },
+                    state_id,
+                }
+            })
+            .collect();
+        self.settle()?;
+        Ok(listed)
+    }
+
+    pub(super) fn newest_summaries(
+        &mut self,
+        scope: &str,
+        limit: usize,
+        keep: &SummaryFilter,
+    ) -> Result<Vec<ListedState>, StoreError> {
+        let (listed, _, indexed) = self.known_summaries(usize::MAX)?;
+        let mut unknown = Vec::new();
+        let mut candidates = Vec::new();
+        for (index, shown) in listed.iter().enumerate() {
+            let state_id = shown.state_id.clone();
+            let Some(known) = self.summaries.known(&state_id).filter(|_| shown.known) else {
+                unknown.push((index, state_id));
+                continue;
+            };
+            let Some(summary) = known.summary.as_ref() else {
+                continue;
+            };
+            match serde_json::from_str::<Head>(summary.get()) {
+                Ok(head)
+                    if head
+                        .scope
+                        .as_deref()
+                        .is_some_and(|other| Path::new(other) != Path::new(scope)) => {}
+                Ok(head) => candidates.push((head.updated_at_ms, index, state_id)),
+                Err(error) => {
+                    unreadable(&state_id, &error);
+                    unknown.push((index, state_id));
+                }
+            }
+        }
+        candidates.sort_by_key(|(updated_at_ms, _, _)| Reverse(*updated_at_ms));
+        let mut newest = Vec::new();
+        let mut shown = Vec::new();
+        for (_, index, state_id) in candidates {
+            if newest.len() == limit {
+                break;
+            }
+            shown.push(index);
+            match self
+                .summaries
+                .known(&state_id)
+                .and_then(|known| decoded(&state_id, known))
+            {
+                Some((revision, Some(summary))) => {
+                    if keep(&state_id, &summary) {
+                        newest.push(ListedState {
+                            state_id,
+                            revision,
+                            summary: ListedSummary::Listed(summary),
+                        });
+                    }
+                }
+                Some((_, None)) => {}
+                None => unknown.push((index, state_id)),
+            }
+        }
+        if indexed && !shown.iter().all(|index| unmoved(&listed[*index])) {
+            self.listing.forget();
+            return self.newest_summaries(scope, limit, keep);
+        }
+        unknown.sort_unstable_by_key(|(index, _)| *index);
+        for (_, state_id) in &unknown {
+            self.unknown.insert(state_id.clone(), None);
+        }
+        self.settle()?;
+        newest.extend(unknown.into_iter().map(|(_, state_id)| ListedState {
+            state_id,
+            revision: 0,
+            summary: ListedSummary::Unknown,
+        }));
+        Ok(newest)
+    }
+
+    pub(super) fn list_briefs(
+        &mut self,
+        scope: Option<&str>,
+        limit: usize,
+        keep: &BriefFilter,
+    ) -> Result<Option<Vec<BriefState>>, StoreError> {
+        if self.homes.keys().any(|member| keep(member)) {
+            return Ok(None);
+        }
+        let directory = &self.directory;
+        let bytes = fs::read(directory.join(briefs::FILE)).unwrap_or_default();
+        if let Some(mut decoded) = briefs::decode(&bytes)
+            && let Some(replayed) = briefs::refresh(&mut decoded.index, directory)
+        {
+            let listed = briefs::query(&decoded.index, directory, scope, limit, keep);
+            if replayed > 0 {
+                let delta = briefs::encode(&decoded.index, bytes.len(), false).filter(|delta| {
+                    decoded.end == bytes.len()
+                        && bytes.len() - decoded.base + delta.len() <= decoded.base
+                });
+                match delta {
+                    Some(delta) => {
+                        briefs::append(directory, &delta, bytes.len() as u64);
+                    }
+                    None => {
+                        if let Some(all) = briefs::encode(&decoded.index, 0, true) {
+                            drop(
+                                self.listing
+                                    .change(&[], || briefs::replace(directory, &all)),
+                            );
+                        }
+                    }
+                }
+            }
+            return Ok(listed);
+        }
+        if !self.listing.settled() {
+            return Ok(None);
+        }
+        self.summaries.refresh();
+        let Some(journal) = self.summaries.journal() else {
+            return Ok(None);
+        };
+        let Some(index) = briefs::build(directory, journal) else {
+            return Ok(None);
+        };
+        let listed = briefs::query(&index, directory, scope, limit, keep);
+        if let Some(all) = briefs::encode(&index, 0, true) {
+            drop(
+                self.listing
+                    .change(&[], || briefs::replace(directory, &all)),
+            );
+        }
+        Ok(listed)
+    }
+
+    pub(super) fn remember_summaries(
+        &mut self,
+        known: Vec<KnownSummary>,
+    ) -> Result<(), StoreError> {
+        let mut remembered = Vec::with_capacity(known.len());
+        for summary in known {
+            if let Some(Some(seen)) = self.unknown.remove(&summary.state_id)
+                && seen.revision == summary.revision
+                && seen.revision > 0
+            {
+                let packed = raw_summary(&summary.state_id, summary.summary.as_ref())?;
+                remembered.push((
+                    summary.state_id,
+                    Summary {
+                        summary: packed,
+                        ..seen
+                    },
+                ));
+                continue;
+            }
+            let journal_key = self.home(&summary.state_id);
+            let Some(journal) = self.existing(&summary.state_id)? else {
+                continue;
+            };
+            let revision = journal.peek(&summary.state_id)?.revision;
+            if summary.revision == revision && revision > 0 {
+                let member = session_key(&summary.state_id) != journal_key;
+                let packed = raw_summary(&summary.state_id, summary.summary.as_ref())?;
+                remembered.push((
+                    summary.state_id,
+                    Summary {
+                        file: journal.index.source.clone(),
+                        length: journal.index.offset,
+                        revision,
+                        summary: packed,
+                        anchor: if member { None } else { journal.anchor() },
+                    },
+                ));
+            }
+        }
+        self.release();
+        self.remember(remembered)
+    }
+
+    pub(super) fn remember(
+        &mut self,
+        remembered: Vec<(String, Summary)>,
+    ) -> Result<(), StoreError> {
+        let summaries = &mut self.summaries;
+        self.listing.change(&[], || summaries.remember(remembered))
+    }
+
+    pub(super) fn written(&self) -> Vec<String> {
+        let touched = |key: &String| {
+            self.touched.contains(key) && self.journals.contains_key(key) && !self.is_home(key)
+        };
+        let mut written = self
+            .touched
+            .iter()
+            .filter(|key| touched(key))
+            .cloned()
+            .chain(
+                self.homes
+                    .iter()
+                    .filter(|(_, home)| touched(home))
+                    .map(|(member, _)| member.clone()),
+            )
+            .collect::<Vec<_>>();
+        written.sort_unstable();
+        written
+    }
+
+    pub(super) fn archive(&mut self) -> Result<usize, StoreError> {
+        let mut archived = 0;
+        let mut touched = std::mem::take(&mut self.touched)
+            .into_iter()
+            .collect::<Vec<_>>();
+        let latest = touched
+            .iter()
+            .filter(|key| !self.is_home(key))
+            .filter_map(|key| Some((self.journals.get(key)?.used, key)))
+            .max()
+            .map(|(_, key)| key.clone());
+        let marked = resident(&self.directory)?;
+        if let Some(previous) = marked.clone()
+            && latest.as_ref().is_some_and(|latest| *latest != previous)
+            && !touched.contains(&previous)
+            && self.path(&previous).is_file()
+        {
+            self.hold(&previous);
+            if self.held.contains_key(&previous) && self.journal(&previous, false)?.is_some() {
+                touched.push(previous);
+            }
+        }
+        touched.sort_unstable();
+        for key in touched {
+            let Some(mut opened) = self.journals.remove(&key) else {
+                continue;
+            };
+            if self.is_home(&key) {
+                self.journals.insert(key, opened);
+                continue;
+            }
+            let path = self.path(&key);
+            let index = path.with_added_extension("index");
+            if latest.as_ref() == Some(&key) {
+                let kept = self
+                    .listing
+                    .change(&[names(&path), names(&index)].concat(), || {
+                        opened.journal.sidecar = true;
+                        if opened.journal.superseded() {
+                            opened.journal.compact()?;
+                        }
+                        opened.journal.flush_index();
+                        opened.journal.harden()
+                    });
+                self.journals.insert(key.clone(), opened);
+                kept?;
+                if marked.as_ref() != Some(&key) {
+                    let marker = self.directory.join(RESIDENT);
+                    self.listing
+                        .change(&[], || fs::write(&marker, &key))
+                        .map_err(backend)?;
+                }
+                continue;
+            }
+            opened.journal.sidecar = false;
+            let owner_path = self.owner_path(&key);
+            let owner = self.held.remove(&key);
+            let summaries = &mut self.summaries;
+            let changed = [names(&path), names(&index)].concat();
+            let stored = self.listing.change(&changed, || {
+                let from = identity(&fs::metadata(&path).map_err(backend)?)?;
+                if opened.journal.superseded() {
+                    opened.journal.compact()?;
+                }
+                opened.journal.harden()?;
+                drop(opened);
+                let compacted = identity(&fs::metadata(&path).map_err(backend)?)?;
+                if !archive::archive(&path).map_err(backend)? {
+                    if compacted != from {
+                        summaries.moved(&from, &compacted, 0, None)?;
+                    }
+                    return Ok(false);
+                }
+                let stored = fs::metadata(archive::archived(&path)).map_err(backend)?;
+                summaries.moved(&from, &identity(&stored)?, stored.len(), None)?;
+                match fs::remove_file(&index) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(backend(error)),
+                }
+                if owner.is_some() {
+                    match fs::remove_file(&owner_path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(backend(error)),
+                    }
+                }
+                Ok::<_, StoreError>(true)
+            });
+            match (&stored, owner) {
+                (Ok(true), _) => archived += 1,
+                (_, Some(owner)) => {
+                    self.held.insert(key, owner);
+                }
+                (_, None) => {}
+            }
+            stored?;
+        }
+        Ok(archived)
+    }
+
+    pub(super) fn compact(&mut self) -> Result<CompactionStats, StoreError> {
+        let mut total = CompactionStats {
+            before_bytes: 0,
+            after_bytes: 0,
+            records_removed: 0,
+        };
+        let files = files(&self.directory, self.temporaries.as_deref())?;
+        self.temporaries = None;
+        for Found { key, .. } in files {
+            let Some(journal) = self.existing(&key)? else {
+                continue;
+            };
+            let stats = journal.compact()?;
+            total.before_bytes += stats.before_bytes;
+            total.after_bytes += stats.after_bytes;
+            total.records_removed += stats.records_removed;
+        }
+        Ok(total)
+    }
+}

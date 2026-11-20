@@ -1,0 +1,39 @@
+[package]
+name = "nanocode-tool-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+autotests = false
+autobenches = false
+description = "Portable tool selection and host execution contracts"
+
+[dependencies]
+nanocode-digest.workspace = true
+nanocode-durability-core.workspace = true
+nanocode-code-mode.workspace = true
+nanocode-home.workspace = true
+nanocode-image.workspace = true
+nanocode-platform.workspace = true
+nanocode-tool-contracts.workspace = true
+nanocode-tool-provider.workspace = true
+nanocode-sync.workspace = true
+nanocode-tools.workspace = true
+nanocode-turnlog.workspace = true
+nanocode-types.workspace = true
+nanocode-types-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+nanocode-trace.workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+nanocode-http.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+doctest = false
+bench = false

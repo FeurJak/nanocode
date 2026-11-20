@@ -1,0 +1,99 @@
+#!/bin/sh
+set -eu
+release="${NANOCODE_RELEASE:-https://github.com/nanocodexyz/nanocode/releases/download/nanocode-cli}"
+bin="${NANOCODE_BIN:-$HOME/.nanocode/bin}"
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64) target=aarch64-apple-darwin ;;
+  Darwin-x86_64) target=x86_64-apple-darwin ;;
+  Linux-x86_64 | Linux-amd64) target=x86_64-unknown-linux-gnu ;;
+  Linux-aarch64 | Linux-arm64) target=aarch64-unknown-linux-gnu ;;
+  *) echo "nanocode has no build for $(uname -s) $(uname -m)" >&2; exit 1 ;;
+esac
+digest() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
+asset() {
+  grep -E "^[0-9a-f]{64}  $1(\.[0-9a-f]{12})?\.$2\$" "$tmp/SHA256SUMS" | head -n 1 || true
+}
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+curl -fsSL "$release/SHA256SUMS" -o "$tmp/SHA256SUMS"
+packed=gz
+if command -v xz >/dev/null 2>&1 && [ -n "$(asset "nanocode-$target" xz)" ]; then packed=xz; fi
+line="$(asset "nanocode-$target" "$packed")"
+expected="${line%%  *}"
+name="${line#*  }"
+if [ -z "$expected" ]; then echo "nanocode: the release has no build for $target" >&2; exit 1; fi
+frontline="$(asset "nanocode-front-$target" gz)"
+front="${frontline%%  *}"
+agent=nanocode
+if [ -n "$front" ]; then agent=nanocode-agent; fi
+mkdir -p "$bin"
+if [ ! -x "$bin/$agent" ] || [ "$(cat "$bin/.$agent.sha256" 2>/dev/null)" != "$expected" ]; then
+  echo "nanocode: downloading $target" >&2
+  curl -fsSL "$release/$name" -o "$tmp/nanocode.$packed"
+  if [ "$(digest "$tmp/nanocode.$packed")" != "$expected" ]; then echo "nanocode: checksum mismatch for $name" >&2; exit 1; fi
+  case $packed in xz) xz -dc "$tmp/nanocode.xz" > "$tmp/nanocode" ;; *) gunzip -c "$tmp/nanocode.gz" > "$tmp/nanocode" ;; esac
+  chmod +x "$tmp/nanocode"
+  mv "$tmp/nanocode" "$bin/$agent"
+  echo "$expected" > "$bin/.$agent.sha256"
+  echo "nanocode: installed $bin/nc" >&2
+fi
+if [ -n "$front" ] && { [ ! -x "$bin/nanocode" ] || [ "$(cat "$bin/.nanocode-front.sha256" 2>/dev/null)" != "$front" ]; }; then
+  curl -fsSL "$release/${frontline#*  }" -o "$tmp/nanocode-front.gz"
+  if [ "$(digest "$tmp/nanocode-front.gz")" != "$front" ]; then echo "nanocode: checksum mismatch for nanocode-front-$target.gz" >&2; exit 1; fi
+  gunzip -c "$tmp/nanocode-front.gz" > "$tmp/nanocode-front"
+  chmod +x "$tmp/nanocode-front"
+  mv "$tmp/nanocode-front" "$bin/nanocode"
+  rm -f "$bin/.nanocode.sha256"
+  echo "$front" > "$bin/.nanocode-front.sha256"
+fi
+if [ -z "$front" ] && [ -f "$bin/.nanocode-front.sha256" ]; then rm -f "$bin/nanocode-agent" "$bin/.nanocode-agent.sha256" "$bin/.nanocode-front.sha256"; fi
+onlyline="$(asset "nanocode-exec-$target" "$packed")"
+only="${onlyline%%  *}"
+if [ -n "$only" ] && { [ ! -x "$bin/nanocode-exec" ] || [ "$(cat "$bin/.nanocode-exec.sha256" 2>/dev/null)" != "$only" ]; }; then
+  curl -fsSL "$release/${onlyline#*  }" -o "$tmp/nanocode-exec.$packed"
+  if [ "$(digest "$tmp/nanocode-exec.$packed")" != "$only" ]; then echo "nanocode: checksum mismatch for nanocode-exec-$target.$packed" >&2; exit 1; fi
+  case $packed in xz) xz -dc "$tmp/nanocode-exec.xz" > "$tmp/nanocode-exec" ;; *) gunzip -c "$tmp/nanocode-exec.gz" > "$tmp/nanocode-exec" ;; esac
+  chmod +x "$tmp/nanocode-exec"
+  mv "$tmp/nanocode-exec" "$bin/nanocode-exec"
+  echo "$only" > "$bin/.nanocode-exec.sha256"
+fi
+if [ -z "$only" ]; then rm -f "$bin/nanocode-exec" "$bin/.nanocode-exec.sha256"; fi
+ln -sf nanocode "$bin/nc"
+driverline="$(asset "nanocode-cua-driver-$target" gz)"
+driver="${driverline%%  *}"
+if [ -n "$driver" ] && { [ ! -x "$bin/nanocode-cua-driver" ] || [ "$(cat "$bin/.nanocode-cua-driver.sha256" 2>/dev/null)" != "$driver" ]; }; then
+  curl -fsSL "$release/${driverline#*  }" -o "$tmp/nanocode-cua-driver.gz"
+  if [ "$(digest "$tmp/nanocode-cua-driver.gz")" != "$driver" ]; then echo "nanocode: checksum mismatch for nanocode-cua-driver-$target.gz" >&2; exit 1; fi
+  gunzip -c "$tmp/nanocode-cua-driver.gz" > "$tmp/nanocode-cua-driver"
+  chmod +x "$tmp/nanocode-cua-driver"
+  mv "$tmp/nanocode-cua-driver" "$bin/nanocode-cua-driver"
+  echo "$driver" > "$bin/.nanocode-cua-driver.sha256"
+fi
+case ":$PATH:" in
+  *":$bin:"*) ;;
+  *)
+    case "$(basename "${SHELL:-sh}")" in
+      zsh) profile="$HOME/.zshrc"; line="export PATH=\"$bin:\$PATH\"" ;;
+      bash) profile="$HOME/.bashrc"; line="export PATH=\"$bin:\$PATH\"" ;;
+      fish) profile="$HOME/.config/fish/conf.d/nanocode.fish"; line="fish_add_path $bin" ;;
+      *) profile="" ;;
+    esac
+    if [ -n "$profile" ] && [ -z "${NANOCODE_NO_MODIFY_PATH:-}" ]; then
+      mkdir -p "$(dirname "$profile")"
+      if grep -qsF "$line" "$profile"; then
+        echo "nanocode: $profile puts $bin on your PATH; open a new shell to run nc" >&2
+      else
+        printf '\n%s\n' "$line" >> "$profile"
+        echo "nanocode: added $bin to your PATH in $profile; open a new shell to run nc" >&2
+      fi
+    else
+      echo "nanocode: add $bin to your PATH to run nc from anywhere" >&2
+    fi
+    ;;
+esac
+rm -rf "$tmp"
+trap - EXIT
+if [ "$#" -gt 0 ]; then exec "$bin/nanocode" "$@"; fi
+echo "nanocode: run $bin/nc to start" >&2
