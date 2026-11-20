@@ -7,13 +7,26 @@ pub struct LeaseCpus {
     pub first: u32,
     pub last: u32,
     pub kind: String,
+    pub label: String,
 }
 
 pub struct IdleLease {
     pub id: String,
+    pub cpus: String,
+    pub kind: String,
+    pub label: String,
     pub busy_percent: u64,
-    pub samples: u32,
-    pub give: bool,
+    pub idle_ms: u64,
+}
+
+pub const KEPT_KINDS: [&str; 3] = ["reserved", "closed-load", "bench"];
+
+pub const KEPT_LABEL_PREFIX: &str = "box-closing-";
+
+impl LeaseCpus {
+    pub fn kept(&self) -> bool {
+        KEPT_KINDS.contains(&self.kind.as_str()) || self.label.starts_with(KEPT_LABEL_PREFIX)
+    }
 }
 
 pub fn cpu_times(stat: &str) -> CpuTimes {
@@ -26,7 +39,7 @@ pub fn cpu_times(stat: &str) -> CpuTimes {
                 .map(str::parse::<u64>)
                 .collect::<Result<Vec<_>, _>>()
                 .ok()?;
-            let idle = values.get(3)? + values.get(4)?;
+            let idle = values.get(1)? + values.get(3)? + values.get(4)?;
             Some((cpu, (values.iter().sum(), idle)))
         })
         .collect()
@@ -48,7 +61,7 @@ pub fn leases_on(listing: &str, machine: &str) -> Vec<LeaseCpus> {
         .lines()
         .filter_map(|line| {
             let fields: Vec<&str> = line.split_whitespace().collect();
-            let ["lease", id, on, "cpus", cpus, kind, ..] = fields.as_slice() else {
+            let ["lease", id, on, "cpus", cpus, kind, label, ..] = fields.as_slice() else {
                 return None;
             };
             if *on != machine {
@@ -60,39 +73,40 @@ pub fn leases_on(listing: &str, machine: &str) -> Vec<LeaseCpus> {
                 first: first.parse().ok()?,
                 last: last.parse().ok()?,
                 kind: (*kind).to_owned(),
+                label: (*label).to_owned(),
             })
         })
         .collect()
 }
 
 pub fn idle_step(
-    runs: &mut BTreeMap<String, u32>,
+    since: &mut BTreeMap<String, u64>,
     leases: &[LeaseCpus],
-    before: &CpuTimes,
-    after: &CpuTimes,
+    before: (&CpuTimes, u64),
+    after: (&CpuTimes, u64),
     below_percent: u64,
-    samples: u32,
-    kept_kind: &str,
+    idle_ms: u64,
 ) -> Vec<IdleLease> {
-    runs.retain(|id, _| leases.iter().any(|lease| &lease.id == id));
+    since.retain(|id, _| leases.iter().any(|lease| &lease.id == id && !lease.kept()));
     let mut idle = Vec::new();
-    for lease in leases {
-        let Some(busy) = busy_percent(before, after, lease.first, lease.last) else {
+    for lease in leases.iter().filter(|lease| !lease.kept()) {
+        let Some(busy) = busy_percent(before.0, after.0, lease.first, lease.last) else {
             continue;
         };
         if busy >= below_percent {
-            runs.remove(&lease.id);
+            since.remove(&lease.id);
             continue;
         }
-        let run = runs.entry(lease.id.clone()).or_insert(0);
-        *run += 1;
-        let give = lease.kind != kept_kind;
-        if *run == samples || (give && *run > samples) {
+        let start = *since.entry(lease.id.clone()).or_insert(before.1);
+        let for_ms = after.1.saturating_sub(start);
+        if for_ms >= idle_ms {
             idle.push(IdleLease {
                 id: lease.id.clone(),
+                cpus: format!("{}-{}", lease.first, lease.last),
+                kind: lease.kind.clone(),
+                label: lease.label.clone(),
                 busy_percent: busy,
-                samples: *run,
-                give,
+                idle_ms: for_ms,
             });
         }
     }

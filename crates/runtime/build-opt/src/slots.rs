@@ -59,6 +59,8 @@ pub const DEFAULT_KIND: &str = "build";
 
 pub const RESERVED_KIND: &str = "reserved";
 
+pub const PREFIX_MARK: char = '*';
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Want {
     pub cores: u32,
@@ -88,6 +90,23 @@ pub struct Usage {
 impl Lease {
     pub fn cpus(&self) -> String {
         format!("{}-{}", self.first_cpu, self.first_cpu + self.cores - 1)
+    }
+
+    pub fn label_prefix(&self) -> Option<&str> {
+        (self.kind == RESERVED_KIND)
+            .then(|| self.label.strip_suffix(PREFIX_MARK))
+            .flatten()
+    }
+
+    const fn end_cpu(&self) -> u32 {
+        self.first_cpu + self.cores
+    }
+
+    fn within(&self, outer: &Self) -> bool {
+        self.id != outer.id
+            && self.machine == outer.machine
+            && outer.first_cpu <= self.first_cpu
+            && self.end_cpu() <= outer.end_cpu()
     }
 
     pub fn to_json(&self, machine: Option<&Machine>) -> Value {
@@ -230,7 +249,15 @@ impl State {
             .iter()
             .filter(|lease| lease.machine == machine.name)
             .collect();
-        let leased = leases.iter().map(|lease| lease.cores).sum();
+        let leased = leases
+            .iter()
+            .filter(|lease| {
+                !leases
+                    .iter()
+                    .any(|outer| outer.label_prefix().is_some() && lease.within(outer))
+            })
+            .map(|lease| lease.cores)
+            .sum();
         let fresh = self
             .observations
             .get(&machine.name)
@@ -283,10 +310,49 @@ impl State {
         (start + want <= cores).then_some(start)
     }
 
+    fn gap_within(&self, held: &Lease, want: u32) -> Option<u32> {
+        let mut used: Vec<(u32, u32)> = self
+            .leases
+            .iter()
+            .filter(|lease| {
+                lease.id != held.id
+                    && lease.machine == held.machine
+                    && lease.first_cpu < held.end_cpu()
+                    && held.first_cpu < lease.end_cpu()
+            })
+            .map(|lease| (lease.first_cpu, lease.end_cpu()))
+            .collect();
+        used.sort_unstable();
+        let mut start = held.first_cpu;
+        for (first, end) in used {
+            if first >= start + want {
+                break;
+            }
+            start = start.max(end);
+        }
+        (start + want <= held.end_cpu()).then_some(start)
+    }
+
     pub fn take(&mut self, machines: &[Machine], want: &Want, now_ms: u64) -> Option<Lease> {
         self.expire(now_ms);
+        let standing = self.leases.iter().find_map(|held| {
+            let prefix = held.label_prefix()?;
+            if !want.label.starts_with(prefix)
+                || want
+                    .only
+                    .as_deref()
+                    .is_some_and(|name| name != held.machine)
+            {
+                return None;
+            }
+            Some((held.machine.clone(), self.gap_within(held, want.cores)?))
+        });
+        if let Some((machine, first_cpu)) = standing {
+            return Some(self.add(&machine, first_cpu, want, now_ms, now_ms + want.ttl_ms));
+        }
         if let Some(held) = self.leases.iter_mut().find(|lease| {
             lease.kind == RESERVED_KIND
+                && lease.label_prefix().is_none()
                 && lease.label == want.label
                 && lease.cores >= want.cores
                 && want

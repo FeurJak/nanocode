@@ -30,20 +30,27 @@ const USAGE: &str = "usage:
                                       (NC_BUILD_LEASE, NC_BUILD_LEASE_CORES and CARGO_BUILD_JOBS, which caps rustc at N, and NC_BUILD_PREFIX); among machines with room it picks
                                       the one with the fewest cores leased to kind K (default build), so kinds mix and boxes stay full, then
                                       the pool order: the large pool (default, nanocode work) the largest boxes first, the small pool
-                                      (pyramid2 work) the smaller boxes and dev-georgios first; gak-9 only with --machine gak-9
+                                      (pyramid2 work) the smaller boxes and dev-georgios first; gak-9 only with --machine gak-9;
+                                      a label containing fill (any case) is refused: filler runs SCHED_IDLE in fill.slice and never holds a lease;
+                                      a label starting with a standing --label-prefix reservation's prefix places inside its cpus when they have room
   nc-build slots give LEASE | slots renew LEASE [--minutes T]
   nc-build slots reserve --machine M --cpus FIRST-LAST --until 'YYYY-MM-DD HH:MM' --label L [--kind reserved] [--overlap]
+  nc-build slots reserve --machine M --cpus FIRST-LAST --until 'YYYY-MM-DD HH:MM' --label-prefix P [--overlap]
                                       holds those cpus until that time (PST) so other takes never place there; with --kind reserved the
                                       first take with the same label (and fitting --cores) gets that lease, which give then frees;
+                                      with --label-prefix P it is a standing reservation (kind reserved, label P*): every take whose label
+                                      starts with P places inside those cpus while they have room, as its own lease, and the reservation
+                                      stays until it expires or is given; other takes see the cpus as busy;
                                       --overlap places it over leases that hold those cpus now, which keep them until they end
-  nc-build slots observe MACHINE [--local] [--check] [--idle-below P --idle-samples N]
+  nc-build slots observe MACHINE [--local] [--check] [--idle-below P] [--idle-minutes M]
                                       reads the output of 'nproc --all; cat /proc/loadavg /proc/meminfo; ps -eLo policy=,stat=,psr=' from that machine
                                       on stdin (--local runs it here); busy cores are its runnable threads outside SCHED_IDLE, so preemptible
                                       filler never blocks a take, or without the ps lines the 1-minute load average; appends a sample line
                                       to machines.log, and an alarm line when busy exceeds cores, which --check turns into exit status 2
-                                      with --local, --idle-below and --idle-samples, a lease on MACHINE whose cpus were under P% busy
-                                      (/proc/stat deltas between observations) for N observations in a row gets a WARN idle-lease line,
-                                      and unless its kind is reserved is given back
+                                      with --local, a lease on MACHINE whose cpus stayed under P% (default 10) busy for M minutes
+                                      (default 10), from /proc/stat deltas between observations with nice time not busy, is given back
+                                      and logged as a reap line with its machine, cpus, kind and label; leases of kind reserved,
+                                      closed-load or bench and labels starting box-closing- are never reaped
   nc-build slots list                 each machine's busy cores, load, memory and expiry, also appended to machines.log
   nc-build slots boxes [--set]        the machines placement uses; --set stores the boxes.json array read on stdin in the state;
                                       an entry with a kinds list, such as [bench], takes only leases of those kinds
@@ -519,29 +526,31 @@ fn without(args: &[String], flag: &str, takes_value: bool) -> Vec<String> {
 }
 
 fn idle_leases(args: &[String], url: Option<&str>) -> Result<(), String> {
-    let (Some(below), Some(samples)) =
-        (option(args, "--idle-below"), option(args, "--idle-samples"))
-    else {
-        return Ok(());
-    };
-    let below: u64 = below
-        .parse()
+    let below: u64 = option(args, "--idle-below")
+        .map_or(Ok(IDLE_BELOW_PERCENT), str::parse)
         .map_err(|error| format!("--idle-below: {error}"))?;
-    let samples: u32 = samples
-        .parse()
-        .map_err(|error| format!("--idle-samples: {error}"))?;
+    let idle_ms: u64 = option(args, "--idle-minutes")
+        .map_or(Ok(IDLE_MINUTES), str::parse::<u64>)
+        .map_err(|error| format!("--idle-minutes: {error}"))?
+        * 60_000;
     let name = args.get(1).ok_or("observe MACHINE")?;
     let stat =
         std::fs::read_to_string("/proc/stat").map_err(|error| format!("/proc/stat: {error}"))?;
     let dir = home().join(".cache/nc-build");
     std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
     let stat_path = dir.join(format!("stat.{name}"));
-    let runs_path = dir.join(format!("idle-runs.{name}"));
+    let since_path = dir.join(format!("idle-since.{name}"));
     let before = std::fs::read_to_string(&stat_path).unwrap_or_default();
+    let before_ms = std::fs::metadata(&stat_path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
+        .map(|at| u64::try_from(at.as_millis()).unwrap_or(u64::MAX));
     std::fs::write(&stat_path, &stat).map_err(|error| error.to_string())?;
-    if before.is_empty() {
+    let Some(before_ms) = before_ms.filter(|_| !before.is_empty()) else {
         return Ok(());
-    }
+    };
+    let now = now_ms();
     let call = |words: &[&str]| {
         let words: Vec<String> = words.iter().map(|word| (*word).to_owned()).collect();
         match url {
@@ -550,48 +559,48 @@ fn idle_leases(args: &[String], url: Option<&str>) -> Result<(), String> {
         }
     };
     let leases = idle::leases_on(&call(&["list"])?, name);
-    let mut runs: std::collections::BTreeMap<String, u32> = std::fs::read_to_string(&runs_path)
+    let mut since: std::collections::BTreeMap<String, u64> = std::fs::read_to_string(&since_path)
         .unwrap_or_default()
         .lines()
         .filter_map(|line| {
-            let (id, run) = line.split_once(' ')?;
-            Some((id.to_owned(), run.parse().ok()?))
+            let (id, at) = line.split_once(' ')?;
+            Some((id.to_owned(), at.parse().ok()?))
         })
         .collect();
     let idle = idle::idle_step(
-        &mut runs,
+        &mut since,
         &leases,
-        &idle::cpu_times(&before),
-        &idle::cpu_times(&stat),
+        (&idle::cpu_times(&before), before_ms),
+        (&idle::cpu_times(&stat), now),
         below,
-        samples,
-        slots::RESERVED_KIND,
+        idle_ms,
     );
     for lease in idle {
-        log_line(&format!(
-            "WARN idle-lease {} {name} {}% busy for {} observations{}",
+        let what = format!(
+            "{} {name} cpus {} {} {} (under {below}% busy for {}m, {}% now)",
             lease.id,
-            lease.busy_percent,
-            lease.samples,
-            if lease.give { "" } else { ", reserved, kept" }
-        ));
-        if lease.give {
-            match call(&["give", &lease.id]) {
-                Ok(_) => log_line(&format!("give {} {name} (idle lease, observe)", lease.id)),
-                Err(error) => log_line(&format!(
-                    "WARN idle-lease give {} failed: {error}",
-                    lease.id
-                )),
-            }
-            runs.remove(&lease.id);
+            lease.cpus,
+            lease.kind,
+            lease.label,
+            lease.idle_ms / 60_000,
+            lease.busy_percent
+        );
+        match call(&["give", &lease.id]) {
+            Ok(_) => log_line(&format!("reap {what}")),
+            Err(error) => log_line(&format!("WARN reap failed {what}: {error}")),
         }
+        since.remove(&lease.id);
     }
-    let runs: String = runs
+    let since: String = since
         .iter()
-        .map(|(id, run)| format!("{id} {run}\n"))
+        .map(|(id, at)| format!("{id} {at}\n"))
         .collect();
-    std::fs::write(&runs_path, runs).map_err(|error| error.to_string())
+    std::fs::write(&since_path, since).map_err(|error| error.to_string())
 }
+
+const IDLE_BELOW_PERCENT: u64 = 10;
+
+const IDLE_MINUTES: u64 = 10;
 
 fn read_stdin() -> Result<String, String> {
     let mut input = String::new();
@@ -787,6 +796,12 @@ fn slots_once(args: &[String], input: &str) -> Result<String, String> {
                 .parse()
                 .map_err(|error| format!("--cores: {error}"))?;
             let want = want(args, cores, minutes(args, 60)?)?;
+            if want.label.to_ascii_lowercase().contains("fill") {
+                return Err(format!(
+                    "--label {}: a filler label (contains fill) never takes a lease; filler runs SCHED_IDLE in fill.slice on cores leases leave free",
+                    want.label
+                ));
+            }
             let taken = with_state(|state| {
                 let machines = machines(pool, state, now);
                 state.take(&machines, &want, now).map(|lease| {
@@ -823,7 +838,22 @@ fn slots_once(args: &[String], input: &str) -> Result<String, String> {
             let until = option(args, "--until")
                 .and_then(|until| slots::parse_local_minutes(until, PST_OFFSET_MINUTES))
                 .ok_or("--until 'YYYY-MM-DD HH:MM' (PST)")?;
-            let want = want(args, last - first + 1, until.saturating_sub(now))?;
+            let want = match option(args, "--label-prefix") {
+                Some(_)
+                    if option(args, "--label").is_some() || option(args, "--kind").is_some() =>
+                {
+                    return Err("--label-prefix takes no --label or --kind".to_owned());
+                }
+                Some(prefix) if !prefix.is_empty() => Want {
+                    cores: last - first + 1,
+                    kind: slots::RESERVED_KIND.to_owned(),
+                    label: format!("{prefix}{}", slots::PREFIX_MARK),
+                    only: Some(machine.to_owned()),
+                    ttl_ms: until.saturating_sub(now),
+                },
+                Some(_) => return Err("--label-prefix P: P is empty".to_owned()),
+                None => want(args, last - first + 1, until.saturating_sub(now))?,
+            };
             let overlap = args.iter().any(|arg| arg == "--overlap");
             let lease =
                 with_state(|state| state.reserve(machine, first, &want, now, until, overlap))?
