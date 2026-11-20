@@ -76,3 +76,11 @@ fn assignment_before_export_of_that_name_persists() {
 fn nested_time_runs_the_command() {
     assert_eq!(out("TIMEFORMAT=\ntime time echo hi\n"), "hi\n");
 }
+
+#[test]
+fn backtick_escaped_backslash_before_newline_is_not_a_continuation() {
+    assert_eq!(
+        out("a=`printf '%s' 'x\\\\\ny'`\necho \"[$a]\"\nb=`echo p\\\nq`\necho \"[$b]\"\n"),
+        "[x\\\ny]\n[pq]\n"
+    );
+}

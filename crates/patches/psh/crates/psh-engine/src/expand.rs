@@ -1383,19 +1383,22 @@ async fn expand_part(
             // In a `${x-…}` operand and a here-document, bash unescapes the body as
             // outside double quotes (`\"` stays).
             let in_dq = quoted && ctx != Ctx::Operand && ctx != Ctx::HereDoc;
-            let body = psh_syntax::backtick_body(code.ast.text(part.span), in_dq);
-            let mut body = code.ast.restore_bytes(&body).into_owned();
-            // A backslash-newline in the body is a line continuation.
+            // A backslash-newline in the body is a line continuation, found before the
+            // body is unescaped: in `\\<newline>` the first backslash quotes the second.
+            let mut raw = code.ast.text(part.span).to_owned();
             let mut i = 0;
-            while i + 1 < body.len() {
-                if body[i] == b'\\' && body[i + 1] == b'\n' {
-                    body.drain(i..i + 2);
-                } else if body[i] == b'\\' {
+            while i + 1 < raw.len() {
+                let b = raw.as_bytes();
+                if b[i] == b'\\' && b[i + 1] == b'\n' {
+                    raw.drain(i..i + 2);
+                } else if b[i] == b'\\' {
                     i += 2;
                 } else {
                     i += 1;
                 }
             }
+            let body = psh_syntax::backtick_body(&raw, in_dq);
+            let body = code.ast.restore_bytes(&body).into_owned();
             let (out, st) = exec::command_subst_text(vp, code, &body, part.span.start).await?;
             f.subst_status = Some(st);
             emit(f, &out, quoted);
