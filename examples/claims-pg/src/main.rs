@@ -9,7 +9,9 @@
 //! claimers (64), tasks (20000), batch (committer group, 256), conns (pool, 64), threads (4),
 //! max_rows (rows per log commit, 512), pipeline (1: send each finish with the next claim rather
 //! than before it, so both can share a log commit; 1, the default; 0 for the old
-//! claim-then-finish order), sync_notify (1: the NOTIFY transaction is
+//! claim-then-finish order), prefetch (k: each claimer keeps k claims in flight, sending claim
+//! i+k with finish i, so a claimer's k claims and k finishes share log commits; 1, the default,
+//! is the pipeline loop above; k > 1 needs pipeline=1), sync_notify (1: the NOTIFY transaction is
 //! durable, as the bench always ran it; 0: unsynced, as a node sends it through PgSql), prof (1:
 //! print PHASE lines at the claim phase's start and end and PROF lines with pool wait and
 //! transaction time per operation and the client's CPU per thread). The board must be fresh: give
@@ -31,7 +33,7 @@
 //! claim, board writes per log append and log appends per Postgres commit.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     num::NonZeroU32,
     sync::{
         Arc, Mutex, PoisonError,
@@ -41,7 +43,7 @@ use std::{
 };
 
 use nanocode_board::{
-    Board, BoardError, ClaimId, NewTask, Op, Outcome, TaskId, Write,
+    Applied, Board, BoardError, ClaimId, NewTask, Op, Outcome, TaskId, Write,
     access::{Can, Grant, Identity, Verifier, Who},
     shards::{self, Committer},
 };
@@ -197,6 +199,7 @@ struct Options {
     threads: usize,
     max_rows: usize,
     pipeline: bool,
+    prefetch: usize,
     sync_notify: bool,
     prof: bool,
     node: u32,
@@ -230,6 +233,7 @@ impl Options {
             "threads",
             "max_rows",
             "pipeline",
+            "prefetch",
             "sync_notify",
             "prof",
             "node",
@@ -273,6 +277,7 @@ impl Options {
             threads: get("threads", 4).max(1),
             max_rows: get("max_rows", 512),
             pipeline: get("pipeline", 1) != 0,
+            prefetch: get("prefetch", 1).max(1),
             sync_notify: get("sync_notify", 1) != 0,
             prof: get("prof", 0) != 0,
             node,
@@ -518,6 +523,85 @@ async fn claimer(
         }
     }
     if let Some(previous) = finishing {
+        claimed.settle(previous, started).await;
+    }
+    claimed
+}
+
+async fn claim(committer: Committer, by: String, index: usize) -> Result<Applied, BoardError> {
+    let claim = Op::Claim {
+        task: TaskId(format!("t{index}")),
+        lease_ms: LEASE_MS,
+        fence: None,
+        cap: None,
+    };
+    committer
+        .submit(write(&by, format!("claim:{index}"), claim))
+        .await
+}
+
+/// prefetch=k: keep k claims in flight. When the oldest claim lands, its finish and the claim of
+/// the task k places further on go to the committer together, so in steady state a claimer's
+/// group carries up to k finishes and k claims. A worker would run task i while claims i+1..i+k
+/// wait; here the work takes no time.
+async fn prefetching(
+    committer: Committer,
+    by: String,
+    tasks: Vec<usize>,
+    started: Instant,
+    prefetch: usize,
+    tolerant: bool,
+) -> Claimed {
+    let mut claimed = Claimed::default();
+    let mut tasks = tasks.into_iter();
+    let mut claims = VecDeque::new();
+    let mut finishing = VecDeque::new();
+    for index in tasks.by_ref().take(prefetch) {
+        let handle = nanocode_executor::spawn(claim(committer.clone(), by.clone(), index));
+        claims.push_back((index, Instant::now(), handle));
+    }
+    while let Some((index, began, handle)) = claims.pop_front() {
+        match handle.await {
+            Ok(Ok(applied)) => {
+                claimed.latencies.push(micros(began));
+                let finish = finish(
+                    committer.clone(),
+                    by.clone(),
+                    index,
+                    ClaimId(applied.event.0),
+                );
+                finishing.push_back(nanocode_executor::spawn(finish));
+            }
+            Ok(Err(error)) if fenced(&error) => {
+                claimed.fenced += 1;
+                break;
+            }
+            Ok(Err(BoardError::Rejected(_))) if tolerant => claimed.lost += 1,
+            Ok(Err(error)) => {
+                note(&error);
+                claimed.refused += 1;
+            }
+            Err(error) => {
+                note(&BoardError::Dropped(format!("claim: {error}")));
+                claimed.refused += 1;
+            }
+        }
+        if let Some(next) = tasks.next() {
+            let handle = nanocode_executor::spawn(claim(committer.clone(), by.clone(), next));
+            claims.push_back((next, Instant::now(), handle));
+        }
+        if finishing.len() > prefetch
+            && let Some(previous) = finishing.pop_front()
+            && !claimed.settle(previous, started).await
+        {
+            break;
+        }
+    }
+    // Claims still in flight after a fence settle as lost work rather than leaking.
+    for (_, _, handle) in claims {
+        let _ = handle.await;
+    }
+    for previous in finishing {
         claimed.settle(previous, started).await;
     }
     claimed
@@ -818,14 +902,15 @@ fn main() -> std::process::ExitCode {
             } else {
                 format!("agent:n{}w{index}", options.node)
             };
-            runtime.spawn(claimer(
-                committers[part].clone(),
-                by,
-                mine,
-                started,
-                options.pipeline,
-                tolerant,
-            ))
+            let committer = committers[part].clone();
+            let (pipeline, prefetch) = (options.pipeline, options.prefetch);
+            runtime.spawn(async move {
+                if pipeline && prefetch > 1 {
+                    prefetching(committer, by, mine, started, prefetch, tolerant).await
+                } else {
+                    claimer(committer, by, mine, started, pipeline, tolerant).await
+                }
+            })
         })
         .collect();
     let mut all = Claimed::default();
@@ -877,13 +962,14 @@ fn main() -> std::process::ExitCode {
     let commits = stats.commits - log_before.commits;
     let appends = stats.appends - log_before.appends;
     println!(
-        "METRIC parts={} log_parts={} claimers={} tasks={} batch={} pipeline={} claims_per_s={:.0} steady_per_s={steady:.0} p50_ms={:.2} p99_ms={:.2} max_ms={:.2} pg_txns_per_claim={:.2} writes_per_append={:.2} appends_per_commit={:.2} refused={refused} seconds={elapsed:.2} first_error={:?} node={} nodes={} race={} claims={} trips={trips} lost={lost} fenced={fenced} late_ms={late_ms} start_unix_ms={start_unix_ms} end_unix_ms={end_unix_ms}",
+        "METRIC parts={} log_parts={} claimers={} tasks={} batch={} pipeline={} prefetch={} claims_per_s={:.0} steady_per_s={steady:.0} p50_ms={:.2} p99_ms={:.2} max_ms={:.2} pg_txns_per_claim={:.2} writes_per_append={:.2} appends_per_commit={:.2} refused={refused} seconds={elapsed:.2} first_error={:?} node={} nodes={} race={} claims={} trips={trips} lost={lost} fenced={fenced} late_ms={late_ms} start_unix_ms={start_unix_ms} end_unix_ms={end_unix_ms}",
         options.parts,
         options.log_parts,
         options.claimers,
         options.tasks,
         options.batch,
         u8::from(options.pipeline),
+        options.prefetch,
         claims / elapsed,
         percentile(&latencies, 0.5),
         percentile(&latencies, 0.99),
