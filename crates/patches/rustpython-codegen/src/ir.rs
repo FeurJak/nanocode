@@ -1561,7 +1561,6 @@ impl Block {
         !self.bb_no_fallthrough()
     }
 
-
     /// flowgraph.c basicblock_exits_scope
     fn basicblock_exits_scope(&self) -> bool {
         let last = self.basicblock_last_instr();
@@ -5120,9 +5119,8 @@ fn eval_const_binop(
                     if r.is_zero() {
                         return None;
                     }
-                    let l_f = l.to_f64()?;
-                    let r_f = r.to_f64()?;
-                    let result = l_f / r_f;
+                    // Correctly rounded, as the runtime's int true division is.
+                    let result = rustpython_common::int::true_div(l, r);
                     if !result.is_finite() {
                         return None;
                     }
@@ -5663,7 +5661,6 @@ fn optimize_load_const(
     }
     Ok(())
 }
-
 
 impl InstrDisplayContext for CodeInfo {
     type Constant = ConstantData;
