@@ -342,8 +342,9 @@ async fn read_script(sub: &Vp, name: &[u8], path: &[u8]) -> Result<Vec<u8>, i32>
     let mut source = Vec::new();
     let read = match crate::exec::dev_fd(path) {
         // The shell's own descriptors (`bash /dev/stdin`, D1055).
-        Some(n) => match sub.fd(n) {
-            Some(f) => f.read_to_end(&mut source).await,
+        Some(n) => match crate::exec::open_dev_fd(sub, n, OpenOptions::read()).await {
+            Some(Ok(f)) => f.read_to_end(&mut source).await,
+            Some(Err(e)) => Err(e),
             None => Err(crate::fd::bad_fd()),
         },
         None => match host.open(&target, OpenOptions::read()).await {

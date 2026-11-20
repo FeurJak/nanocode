@@ -374,4 +374,12 @@ impl HostFile for UnixFile {
         let m = self.file.metadata().ok()?;
         m.is_file().then(|| (m.dev(), m.ino(), m.size()))
     }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn reopen_path(&self) -> Option<Vec<u8>> {
+        use std::os::fd::AsRawFd;
+        let m = self.file.metadata().ok()?;
+        m.is_file()
+            .then(|| format!("/proc/self/fd/{}", self.file.as_raw_fd()).into_bytes())
+    }
 }

@@ -834,13 +834,24 @@ impl UtilCtx<'_> {
                 None => {
                     let mut streams = Vec::new();
                     for n in self.named_fds.clone() {
-                        if let Some(fd) = self.fd(n)
-                            && matches!(*fd, crate::fd::FdObj::PipeRead(_))
-                        {
-                            let mut data = Vec::new();
-                            if fd.read_to_end(&mut data).await.is_ok() {
-                                streams.push((n, Stream(Arc::new(data))));
+                        let Some(fd) = self.fd(n) else { continue };
+                        let fd = match &*fd {
+                            crate::fd::FdObj::PipeRead(_) => fd,
+                            // A regular file opens again from its start, as the path
+                            // does for bash (`grep x /dev/stdin` after a `read`).
+                            crate::fd::FdObj::File(file) if file.reopen_path().is_some() => {
+                                match crate::exec::open_dev_fd(self.vp, n, OpenOptions::read())
+                                    .await
+                                {
+                                    Some(Ok(fd)) => fd,
+                                    _ => continue,
+                                }
                             }
+                            _ => continue,
+                        };
+                        let mut data = Vec::new();
+                        if fd.read_to_end(&mut data).await.is_ok() {
+                            streams.push((n, Stream(Arc::new(data))));
                         }
                     }
                     self.replay.borrow_mut().streams = Some(streams.clone());

@@ -224,7 +224,7 @@ async fn run_with(
                 Some(i) if a.starts_with(b"-") => &a[i + 1..],
                 _ => &a[..],
             };
-            crate::exec::dev_fd(path).filter(|n| *n > 2)
+            crate::exec::dev_fd(path).filter(|n| !matches!(n, 1 | 2))
         })
         .collect();
     let mut ctx = UtilCtx {
@@ -678,7 +678,10 @@ impl UtilCtx<'_> {
         // The shell's own descriptors, as for redirections (D1055): process
         // substitutions are engine pipes no host knows.
         if let Some(n) = crate::exec::dev_fd(path) {
-            return self.fd(n).map(|file| UtilFile { file }).ok_or_else(bad_fd);
+            return match crate::exec::open_dev_fd(self.vp, n, opts).await {
+                Some(file) => file.map(|file| UtilFile { file }),
+                None => Err(bad_fd()),
+            };
         }
         // Files a utility creates get the shell's umask, as a child process would.
         let opts = crate::builtins::umask::creation_mode(self.vp, opts);

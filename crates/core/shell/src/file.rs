@@ -198,6 +198,10 @@ impl HostFile for Reader {
     fn identity(&self) -> Option<(u64, u64, u64)> {
         identity(&self.path, self.data.len() as u64)
     }
+
+    fn reopen_path(&self) -> Option<Vec<u8>> {
+        Some(self.path.clone())
+    }
 }
 
 /// A directory opened for reading (`< dir`), as `open(2)` opens one: reading it fails.
@@ -323,6 +327,10 @@ impl HostFile for Appender {
 
     fn identity(&self) -> Option<(u64, u64, u64)> {
         identity(&self.path, self.size.get())
+    }
+
+    fn reopen_path(&self) -> Option<Vec<u8>> {
+        Some(self.path.clone())
     }
 }
 

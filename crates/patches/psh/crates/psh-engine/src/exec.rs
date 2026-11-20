@@ -4,6 +4,7 @@
 //! vproc can wait without blocking the thread. Recursion goes through boxed futures.
 
 use std::future::poll_fn;
+use std::io;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::Poll;
@@ -3285,9 +3286,33 @@ pub(crate) fn dev_fd(path: &[u8]) -> Option<u32> {
         b"/dev/stderr" => Some(2),
         _ => path
             .strip_prefix(b"/dev/fd/")
+            .or_else(|| path.strip_prefix(b"/proc/self/fd/"))
             .and_then(|n| std::str::from_utf8(n).ok())
             .and_then(|n| n.parse().ok()),
     }
+}
+
+/// Opens the shell's descriptor `n` by its path (`/dev/fd/N`, `/dev/stdin`): a
+/// regular file opens again from its start, with `opts`, as Linux does (bash's
+/// `read b < /dev/stdin` after a `read` rereads the first line); anything else is
+/// the descriptor itself. `None`: `n` is not open.
+pub(crate) async fn open_dev_fd(
+    vp: &Vp,
+    n: u32,
+    opts: OpenOptions,
+) -> Option<io::Result<crate::fd::Fd>> {
+    let obj = vp.fd(n)?;
+    if let crate::fd::FdObj::File(file) = &*obj
+        && let Some(path) = file.reopen_path()
+    {
+        return Some(
+            vp.host()
+                .open(&path, opts)
+                .await
+                .map(|f| Rc::new(crate::fd::FdObj::File(f))),
+        );
+    }
+    Some(Ok(obj))
 }
 
 /// Puts back a command's saved descriptors, keeping what its `{var}>` redirections did.
@@ -3522,12 +3547,18 @@ async fn open_to(
     fds: &[u32],
 ) -> Result<bool, Unwind> {
     if let Some(src) = dev_fd(target) {
-        return match vp.fd(src) {
-            Some(obj) => {
+        return match open_dev_fd(vp, src, opts).await {
+            Some(Ok(obj)) => {
                 for &n in fds {
                     vp.fds.set(n, obj.clone());
                 }
                 Ok(true)
+            }
+            Some(Err(e)) => {
+                let text = error_text(&e);
+                vp.error(&format!("{}: {text}", String::from_utf8_lossy(target)))
+                    .await;
+                Ok(false)
             }
             None => {
                 vp.error(&format!("{src}: Bad file descriptor")).await;

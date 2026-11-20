@@ -310,9 +310,10 @@ async fn find_file(vp: &Vp, file: &[u8], search: Option<&[u8]>) -> Option<Vec<u8
 /// vproc's own descriptors (`source /dev/stdin <<EOF`).
 async fn read_file(vp: &Vp, path: &[u8]) -> Result<Vec<u8>, Option<String>> {
     let fd = match crate::exec::dev_fd(path) {
-        Some(n) => vp
-            .fd(n)
-            .ok_or_else(|| Some("Bad file descriptor".to_string()))?,
+        Some(n) => crate::exec::open_dev_fd(vp, n, OpenOptions::read())
+            .await
+            .ok_or_else(|| Some("Bad file descriptor".to_string()))?
+            .map_err(|e| Some(error_text(&e)))?,
         None => {
             if let Ok(m) = vp.host().stat(path, true).await
                 && m.kind == FileKind::Dir

@@ -65,6 +65,13 @@ pub trait HostFile: Any {
     fn identity(&self) -> Option<(u64, u64, u64)> {
         None
     }
+    /// A path that opens this regular file again with an offset and flags of its own,
+    /// as Linux opens `/dev/fd/N` of one (`read b < /dev/stdin` after a `read`
+    /// starts over). `None`: the descriptor is shared instead, as a pipe or a
+    /// terminal is.
+    fn reopen_path(&self) -> Option<Vec<u8>> {
+        None
+    }
     fn is_null(&self) -> bool {
         false
     }
