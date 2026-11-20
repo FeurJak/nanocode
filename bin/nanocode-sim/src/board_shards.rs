@@ -235,6 +235,9 @@ struct Shape {
     epochs: u64,
     fence_ppm: u64,
     cap: Option<u32>,
+    /// Share of fenced claims a writer makes from a view one epoch behind
+    /// its partition, as an agent that read the board before the last bump.
+    stale_ppm: u64,
 }
 
 impl Shape {
@@ -272,6 +275,7 @@ impl Shape {
             epochs: rng.range(0, 24),
             fence_ppm: rng.range(0, 1_000_000),
             cap: rng.chance(500_000).then(|| rng.range(1, 6) as u32),
+            stale_ppm: rng.range(100_000, 600_000),
         }
     }
 
@@ -731,15 +735,32 @@ async fn lead(world: &World) {
     }
 }
 
+/// Bumps every partition's epoch once within the first steps, so fenced
+/// claims from a view one epoch behind meet a bumped partition early, then
+/// bumps `epochs` random partitions about every half lease (none at all when
+/// `epochs` is 0).
 async fn fencer(world: &World) {
     let mut rng = Rng::derive(world.shape.epochs, "board shards fencer");
-    for bump in 0..world.shape.epochs {
-        world.nap(rng.range(1, world.shape.lease_ms)).await;
+    if world.shape.epochs == 0 {
+        return;
+    }
+    let first = u64::from(world.count.get());
+    for bump in 0..first + world.shape.epochs {
+        let gap_ms = if bump < first {
+            world.shape.step_ms
+        } else {
+            world.shape.lease_ms / 2
+        };
+        world.nap(rng.range(1, gap_ms + 1)).await;
         if world.done() {
             return;
         }
         let _ = world.refresh().await;
-        let partition = Partition(rng.below(u64::from(world.count.get())) as u32);
+        let partition = if bump < first {
+            Partition(bump as u32 % world.count.get())
+        } else {
+            Partition(rng.below(u64::from(world.count.get())) as u32)
+        };
         let epoch = world.view.borrow()[partition.0 as usize].epoch(partition.0) + 1;
         let op = Op::Epoch {
             partition: partition.0,
@@ -825,9 +846,11 @@ async fn writer(world: &World, index: u64) {
             let home = world
                 .merged(|merged| merged.home(&task))
                 .unwrap_or(Partition(0));
+            let epoch = world.view.borrow()[home.0 as usize].epoch(home.0);
+            let stale = rng.chance(world.shape.stale_ppm);
             Fence {
                 partition: home.0,
-                epoch: world.view.borrow()[home.0 as usize].epoch(home.0),
+                epoch: if stale { epoch.saturating_sub(1) } else { epoch },
             }
         });
         let claim = Op::Claim {
@@ -1515,6 +1538,7 @@ pub fn bench(partitions: &[u32], writers: &[u64], batch: usize, cost: Cost) {
                 epochs: 0,
                 fence_ppm: 0,
                 cap: None,
+                stale_ppm: 0,
             };
             let mut walls = Vec::new();
             for _ in 0..BENCH_ROUNDS {
