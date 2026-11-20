@@ -23,6 +23,9 @@ use rng::Rng;
 pub type Checked = Result<(), String>;
 
 const ITERATIONS_DEFAULT: u64 = 100_000;
+// How long a stop (a signal or the --seconds deadline) waits for workers to finish their iteration before it prints
+// the summary anyway: well inside the driver's 10 s grace between SIGTERM and SIGKILL.
+const STOP_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Target {
@@ -171,7 +174,8 @@ fn one(seed: u64, target: Target, iteration: u64) -> Checked {
 }
 
 // SIGTERM or SIGINT stops the workers after their current iteration, and the run still prints its summary, so a
-// shard stopped early (a box over its cores, an outer timeout) keeps its execs and failures.
+// shard stopped early (a box over its cores, an outer timeout) keeps its execs and failures. The summary waits at
+// most STOP_WAIT for a worker still in an iteration.
 #[cfg(unix)]
 fn catch_stop() {
     use nanocode_sys::unix::signal;
@@ -220,71 +224,89 @@ fn main() -> ExitCode {
     let started = Instant::now();
     let due = run.deadline.map(|deadline| started + deadline);
     let stop = AtomicBool::new(false);
+    let failed = AtomicU64::new(0);
+    let names: Vec<&str> = run.targets.iter().map(|target| target.name()).collect();
+    let summary = |stopped_by: Option<&str>, unfinished: usize| {
+        let seconds = started.elapsed().as_secs_f64();
+        let work = done.load(Ordering::Relaxed);
+        let failed = failed.load(Ordering::Relaxed);
+        if let Some(name) = stopped_by {
+            eprintln!("nanocode-fuzz: stopped by {name} after {seconds:.3}s");
+        }
+        if unfinished > 0 {
+            eprintln!(
+                "nanocode-fuzz: {unfinished} worker(s) still in an iteration {}s after the stop; not waiting for them",
+                STOP_WAIT.as_secs()
+            );
+        }
+        println!(
+            "FUZZ iterations={work} failed={failed} seed={} seconds={seconds:.3} iterations_per_s={:.0} targets=[{}]",
+            run.seed,
+            work as f64 / seconds.max(f64::MIN_POSITIVE),
+            names.join(",")
+        );
+        failed == 0
+    };
     let mut stopped_by = None;
-    let failures: Vec<String> = std::thread::scope(|scope| {
+    let mut stopping_since: Option<Instant> = None;
+    std::thread::scope(|scope| {
         let workers: Vec<_> = (0..run.jobs.min(usize::try_from(work).unwrap_or(usize::MAX)).max(1))
             .map(|_| {
-                scope.spawn(|| {
-                    let mut failed = Vec::new();
-                    loop {
-                        if stop.load(Ordering::Relaxed) || due.is_some_and(|due| Instant::now() >= due) {
-                            return failed;
-                        }
-                        let at = cursor.fetch_add(1, Ordering::Relaxed);
-                        if at >= work {
-                            return failed;
-                        }
-                        let target = run.targets[usize::try_from(at % width).expect("a target index fits")];
-                        let iteration = first + at / width;
-                        if let Err(reason) = one(run.seed, target, iteration) {
-                            let reason = reason.replace('\n', " ");
-                            let line = format!(
-                                    "FAIL fuzz target={} seed={} iteration={iteration} {reason} :: replay: cargo run -q -p nanocode-fuzz --release -- fuzz --seed {} --target {} --iteration {iteration}",
-                                    target.name(),
-                                    run.seed,
-                                    run.seed,
-                                    target.name()
-                            );
-                            // Print as found, so a shard killed at its deadline keeps its failures.
-                            println!("{line}");
-                            failed.push(line);
-                        }
-                        done.fetch_add(1, Ordering::Relaxed);
+                scope.spawn(|| loop {
+                    if stop.load(Ordering::Relaxed) || due.is_some_and(|due| Instant::now() >= due) {
+                        return;
                     }
+                    let at = cursor.fetch_add(1, Ordering::Relaxed);
+                    if at >= work {
+                        return;
+                    }
+                    let target = run.targets[usize::try_from(at % width).expect("a target index fits")];
+                    let iteration = first + at / width;
+                    if let Err(reason) = one(run.seed, target, iteration) {
+                        let reason = reason.replace('\n', " ");
+                        // Print as found, so a shard killed at its deadline keeps its failures.
+                        println!(
+                            "FAIL fuzz target={} seed={} iteration={iteration} {reason} :: replay: cargo run -q -p nanocode-fuzz --release -- fuzz --seed {} --target {} --iteration {iteration}",
+                            target.name(),
+                            run.seed,
+                            run.seed,
+                            target.name()
+                        );
+                        failed.fetch_add(1, Ordering::Relaxed);
+                    }
+                    done.fetch_add(1, Ordering::Relaxed);
                 })
             })
             .collect();
-        while !workers
-            .iter()
-            .all(std::thread::ScopedJoinHandle::is_finished)
-        {
+        loop {
+            let unfinished = workers
+                .iter()
+                .filter(|worker| !worker.is_finished())
+                .count();
+            if unfinished == 0 {
+                return;
+            }
             if stopped_by.is_none()
                 && let Some(name) = stop_signal()
             {
                 stopped_by = Some(name);
                 stop.store(true, Ordering::Relaxed);
             }
+            if stopping_since.is_none()
+                && (stopped_by.is_some() || due.is_some_and(|due| Instant::now() >= due))
+            {
+                stopping_since = Some(Instant::now());
+            }
+            // A worker deep in one long iteration, or starved at SCHED_IDLE on a busy box, must not cost the run its
+            // summary before the SIGKILL that follows SIGTERM: print what finished and exit without joining it.
+            if stopping_since.is_some_and(|since| since.elapsed() >= STOP_WAIT) {
+                let passed = summary(stopped_by, unfinished);
+                std::process::exit(i32::from(!passed));
+            }
             std::thread::sleep(Duration::from_millis(10));
         }
-        workers
-            .into_iter()
-            .flat_map(|worker| worker.join().expect("a fuzz worker catches its panics"))
-            .collect()
     });
-    let seconds = started.elapsed().as_secs_f64();
-    let work = done.into_inner();
-    let names: Vec<&str> = run.targets.iter().map(|target| target.name()).collect();
-    if let Some(name) = stopped_by {
-        eprintln!("nanocode-fuzz: stopped by {name} after {seconds:.3}s");
-    }
-    println!(
-        "FUZZ iterations={work} failed={} seed={} seconds={seconds:.3} iterations_per_s={:.0} targets=[{}]",
-        failures.len(),
-        run.seed,
-        work as f64 / seconds.max(f64::MIN_POSITIVE),
-        names.join(",")
-    );
-    if failures.is_empty() {
+    if summary(stopped_by, 0) {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
