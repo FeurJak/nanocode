@@ -182,6 +182,10 @@ default_table='
 1 canary_executor_leak_cancelled canary --scenario executor --mutation leak_cancelled
 1 canary_executor_uncounted_polls canary:100 --scenario executor --mutation uncounted_polls
 1 canary_executor_unchecked_drive canary:40 --scenario executor --mutation unchecked_drive
+8 board pass --scenario board
+2 board_twice pass --scenario board --twice
+1 board_pinned_squatted_ids pass --scenario board --seed 1795147396000000556
+1 board_pinned_join_root pass --scenario board --seed 1208986242872782921
 4 board_steer pass --scenario board_steer
 2 board_steer_twice pass --scenario board_steer --twice
 1 canary_board_steer_lost_on_move canary:40 --scenario board_steer --mutation steer_lost_on_move

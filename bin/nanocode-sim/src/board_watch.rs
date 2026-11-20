@@ -13,7 +13,7 @@ use nanocode_board::{
     Board, Change, Entry, Event, EventId, Fold, Op, TaskId,
     sim::Mutation as BoardRule,
     wake::{Listening, Napping, Notifier, Notifying, Polling, Ring, Timer, Wake},
-    watch::{Attempt, Filter, Handled, Handler, Key, Kind, Lease, Plan, Policy, Registered, Step},
+    watch::{self, Attempt, Filter, Handled, Handler, Key, Kind, Lease, Plan, Policy, Registered, Step},
 };
 use nanocode_durability_core::{StoreError, StoreFuture};
 use nanocode_turnlog::LogHost;
@@ -595,11 +595,22 @@ fn consolidating(world: &World) -> usize {
         .count()
 }
 
+fn joins(fold: &Fold, task: &TaskId) -> bool {
+    fold.task(task)
+        .is_some_and(|task| task.spec.labels.get("gate").map(String::as_str) == Some("join"))
+}
+
+/// A consolidate task's own ending, which every wait must report.
 fn awaited(fold: &Fold, entry: &Entry) -> bool {
-    entry.change.terminal()
-        && fold
-            .task(&entry.task)
-            .is_some_and(|task| task.spec.labels.get("gate").map(String::as_str) == Some("join"))
+    entry.change.terminal() && joins(fold, &entry.task)
+}
+
+/// An ending the wait may report: a filter's labels also match a task whose
+/// root carries them, and moves can leave a finished task under a
+/// consolidate task that became a root.
+fn admitted(fold: &Fold, entry: &Entry) -> bool {
+    awaited(fold, entry)
+        || entry.change.terminal() && joins(fold, &watch::root(fold.tasks(), &entry.task))
 }
 
 async fn waiter(world: &World, epoch: u64) {
@@ -630,10 +641,13 @@ async fn waiter(world: &World, epoch: u64) {
                 WOKEN.fetch_add(1, Ordering::SeqCst);
                 let from = after;
                 for entry in found {
-                    if entry.seq <= from || !awaited(board.fold(), &entry) {
+                    if entry.seq <= from || !admitted(board.fold(), &entry) {
                         world.oracle.borrow_mut().wrong.push(format!(
-                            "wait after row {from} returned {} {:?} on {}",
-                            entry.seq, entry.change, entry.task
+                            "wait after row {from} returned {} {:?} on {} under root {}",
+                            entry.seq,
+                            entry.change,
+                            entry.task,
+                            watch::root(board.fold().tasks(), &entry.task)
                         ));
                     }
                     after = after.max(entry.seq);
@@ -653,6 +667,18 @@ async fn waiter(world: &World, epoch: u64) {
         .iter()
         .filter(|entry| entry.seq <= after && awaited(board.fold(), entry))
         .map(|entry| (entry.seq, entry.task.clone()))
+        .collect::<BTreeSet<_>>();
+    // Endings admitted through a root may come and go as tasks move, so only
+    // consolidate tasks' own endings must all be seen.
+    let got = got
+        .into_iter()
+        .filter(|(seq, task)| {
+            board
+                .fold()
+                .entries()
+                .iter()
+                .any(|entry| entry.seq == *seq && entry.task == *task && awaited(board.fold(), entry))
+        })
         .collect::<BTreeSet<_>>();
     if want != got {
         world.oracle.borrow_mut().wrong.push(format!(
