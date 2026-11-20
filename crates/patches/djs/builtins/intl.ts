@@ -301,7 +301,7 @@ function IntlCaseMode(locales: Value, upper: i32): i32 {
   if (locales === undefined) {
     return upper;
   }
-  const tags: Str = IntlLocales(IntlLocaleTags(locales), false);
+  const tags: Str = IntlLocales(IntlLocaleTags(locales), 0);
   const nl: f64 = StrIndexOf(tags, "\n", 0);
   const first: Str = nl < 0 ? tags : StrSubstring(tags, 0, nl);
   const n: u32 = StrLength(first);
@@ -324,12 +324,25 @@ function IntlCaseMode(locales: Value, upper: i32): i32 {
  * @length 1
  */
 function IntlGetCanonicalLocales(locales?: Value): Obj {
-  return IntlSplit(IntlLocales(IntlLocaleTags(locales), false), "\n", 0);
+  return IntlSplit(IntlLocales(IntlLocaleTags(locales), 0), "\n", 0);
 }
 
 /** SupportedLocales ( availableLocales, requestedLocales, options ). */
-function IntlSupportedLocales(locales: Value): Obj {
-  return IntlSplit(IntlLocales(IntlLocaleTags(locales), true), "\n", 0);
+function IntlSupportedLocales(locales: Value, options: Value, kind: i32, ctor: Str): Obj {
+  const tags: Str = IntlLocales(IntlLocaleTags(locales), kind + 1);
+  if (options !== undefined) {
+    if (options === null) {
+      throw NewTypeError(ctor + ".supportedLocalesOf called on null or undefined");
+    }
+    const m: Value = Get(ToObject(options), "localeMatcher");
+    if (m !== undefined) {
+      const s: Str = ToString(m);
+      if (s !== "lookup" && s !== "best fit") {
+        throw NewRangeError("Value " + s + " out of range for " + ctor + ".supportedLocalesOf options property localeMatcher");
+      }
+    }
+  }
+  return IntlSplit(tags, "\n", 0);
 }
 
 // ---- NumberFormat ----------------------------------------------------------------------
@@ -353,8 +366,8 @@ function IntlNumberFormatConstructor(locales?: Value, options?: Value): Obj {
  * @builtin Intl.NumberFormat.supportedLocalesOf
  * @length 1
  */
-function IntlNumberFormatSupportedLocalesOf(locales?: Value): Obj {
-  return IntlSupportedLocales(locales);
+function IntlNumberFormatSupportedLocalesOf(locales?: Value, options?: Value): Obj {
+  return IntlSupportedLocales(locales, options, 0, "Intl.NumberFormat");
 }
 
 /** ToIntlMathematicalValue: a number, or a BigInt's or string's decimal digits. */
@@ -470,8 +483,8 @@ function IntlDateTimeFormatConstructor(locales?: Value, options?: Value): Obj {
  * @builtin Intl.DateTimeFormat.supportedLocalesOf
  * @length 1
  */
-function IntlDateTimeFormatSupportedLocalesOf(locales?: Value): Obj {
-  return IntlSupportedLocales(locales);
+function IntlDateTimeFormatSupportedLocalesOf(locales?: Value, options?: Value): Obj {
+  return IntlSupportedLocales(locales, options, 1, "Intl.DateTimeFormat");
 }
 
 /** The time value a DateTimeFormat formats: now for undefined. */
@@ -538,8 +551,8 @@ function IntlCollatorConstructor(locales?: Value, options?: Value): Obj {
  * @builtin Intl.Collator.supportedLocalesOf
  * @length 1
  */
-function IntlCollatorSupportedLocalesOf(locales?: Value): Obj {
-  return IntlSupportedLocales(locales);
+function IntlCollatorSupportedLocalesOf(locales?: Value, options?: Value): Obj {
+  return IntlSupportedLocales(locales, options, 2, "Intl.Collator");
 }
 
 /**
@@ -585,8 +598,8 @@ function IntlPluralRulesConstructor(locales?: Value, options?: Value): Obj {
  * @builtin Intl.PluralRules.supportedLocalesOf
  * @length 1
  */
-function IntlPluralRulesSupportedLocalesOf(locales?: Value): Obj {
-  return IntlSupportedLocales(locales);
+function IntlPluralRulesSupportedLocalesOf(locales?: Value, options?: Value): Obj {
+  return IntlSupportedLocales(locales, options, 3, "Intl.PluralRules");
 }
 
 /**
@@ -657,8 +670,8 @@ function IntlListFormatConstructor(locales?: Value, options?: Value): Obj {
  * @builtin Intl.ListFormat.supportedLocalesOf
  * @length 1
  */
-function IntlListFormatSupportedLocalesOf(locales?: Value): Obj {
-  return IntlSupportedLocales(locales);
+function IntlListFormatSupportedLocalesOf(locales?: Value, options?: Value): Obj {
+  return IntlSupportedLocales(locales, options, 4, "Intl.ListFormat");
 }
 
 /** StringListFromIterable, joined by \u0001. */
@@ -734,8 +747,8 @@ function IntlRelativeTimeFormatConstructor(locales?: Value, options?: Value): Ob
  * @builtin Intl.RelativeTimeFormat.supportedLocalesOf
  * @length 1
  */
-function IntlRelativeTimeFormatSupportedLocalesOf(locales?: Value): Obj {
-  return IntlSupportedLocales(locales);
+function IntlRelativeTimeFormatSupportedLocalesOf(locales?: Value, options?: Value): Obj {
+  return IntlSupportedLocales(locales, options, 5, "Intl.RelativeTimeFormat");
 }
 
 /**
@@ -1046,8 +1059,8 @@ function IntlDisplayNamesConstructor(locales?: Value, options?: Value): Obj {
  * @builtin Intl.DisplayNames.supportedLocalesOf
  * @length 1
  */
-function IntlDisplayNamesSupportedLocalesOf(locales?: Value): Obj {
-  return IntlSupportedLocales(locales);
+function IntlDisplayNamesSupportedLocalesOf(locales?: Value, options?: Value): Obj {
+  return IntlSupportedLocales(locales, options, 17, "Intl.DisplayNames");
 }
 
 /**
@@ -1098,8 +1111,8 @@ function IntlSegmenterConstructor(locales?: Value, options?: Value): Obj {
  * @builtin Intl.Segmenter.supportedLocalesOf
  * @length 1
  */
-function IntlSegmenterSupportedLocalesOf(locales?: Value): Obj {
-  return IntlSupportedLocales(locales);
+function IntlSegmenterSupportedLocalesOf(locales?: Value, options?: Value): Obj {
+  return IntlSupportedLocales(locales, options, 18, "Intl.Segmenter");
 }
 
 /**

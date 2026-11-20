@@ -1030,8 +1030,11 @@ declare function IntlResolve(kind: i32, locales: Str, raw: Str): Str;
  * parts as type \u0002 value pairs joined by \u0001; a Collator's comparison as a number. @leaf
  */
 declare function IntlFormat(kind: i32, spec: Str, x: Value, y: Value, parts: boolean): Value;
-/** The canonical LF-joined tags (supported: only those with locale data), else RangeError. @leaf */
-declare function IntlLocales(tags: Str, supported: boolean): Str;
+/**
+ * The canonical LF-joined tags, else RangeError. `supported` 0 keeps them all; a
+ * constructor's kind + 1 keeps those whose language ICU has data for in that service. @leaf
+ */
+declare function IntlLocales(tags: Str, supported: i32): Str;
 
 // ---- JSON (0033, builtins/json.rs over crate::json) -------------------------------------
 

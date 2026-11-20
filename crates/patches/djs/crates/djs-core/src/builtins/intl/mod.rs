@@ -7,6 +7,7 @@ mod segmenter;
 mod dndata;
 mod locale;
 mod locdata;
+mod locdata_avail;
 mod number;
 mod numdata;
 mod text;
@@ -462,9 +463,21 @@ pub(crate) fn intrinsic(heap: &mut Heap, k: u16, a: [Value; 5]) -> Result<Option
                 }
                 s.push_str(t);
             }
-            if a[1] == Value::TRUE {
-                let supported: Vec<&String> = tags.iter().filter(|t| NUM_LANGS.contains(&t.split('-').next().unwrap_or(""))).collect();
-                s = supported.iter().map(|t| t.as_str()).collect::<Vec<_>>().join("\n");
+            // supportedLocalesOf: a[1] is the constructor's kind + 1. ICU's data decides by
+            // the canonical language alone (see scripts/intl-loc/avail.js).
+            if let Some(k) = a[1].as_int().filter(|&k| k > 0) {
+                let bit = match k - 1 {
+                    k @ 0..=5 => k,
+                    DISPLAY_NAMES => 6,
+                    _ => 7,
+                };
+                let available = |t: &&String| {
+                    let lang = t.split('-').next().unwrap_or("");
+                    locdata_avail::AVAILABLE
+                        .binary_search_by(|e| e.0.cmp(lang))
+                        .is_ok_and(|i| locdata_avail::AVAILABLE[i].1 & (1 << bit) != 0)
+                };
+                s = tags.iter().filter(available).map(|t| t.as_str()).collect::<Vec<_>>().join("\n");
             }
             string_value(heap, &s)?
         }
