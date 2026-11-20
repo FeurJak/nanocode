@@ -241,6 +241,22 @@ pub fn format_one(env: &Env, out: &mut Vec<u8>, spec: &Spec, conv: u8, arg: &Val
                 return;
             }
             let t = n.trunc();
+            if spec.prec.is_none() && t.abs() < 1e18 {
+                // The common `%d`: digits written on the stack, no allocation.
+                let (mut buf, mut at) = ([0u8; 20], 20);
+                let mut left = t.abs() as u64;
+                loop {
+                    at -= 1;
+                    buf[at] = b'0' + (left % 10) as u8;
+                    left /= 10;
+                    if left == 0 {
+                        break;
+                    }
+                }
+                let digits = std::str::from_utf8(&buf[at..]).unwrap_or_default();
+                pad_num(out, spec, sign_of(spec, t < 0.0), "", digits, true);
+                return;
+            }
             let mut digits = int_str(t.abs());
             if let Some(p) = spec.prec {
                 if p == 0 && t == 0.0 {
