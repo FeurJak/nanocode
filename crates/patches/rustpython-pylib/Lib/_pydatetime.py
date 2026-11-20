@@ -1051,9 +1051,11 @@ class date:
             raise ValueError(f'Invalid isoformat string: {date_string!r}')
 
         try:
-            return cls(*_parse_isoformat_date(date_string))
+            components = _parse_isoformat_date(date_string)
         except Exception:
-            raise ValueError(f'Invalid isoformat string: {date_string!r}')
+            raise ValueError(f'Invalid isoformat string: {date_string!r}') from None
+        # Out-of-range fields raise the constructor's own error, as _datetime does.
+        return cls(*components)
 
     @classmethod
     def fromisocalendar(cls, year, week, day):
@@ -1374,8 +1376,12 @@ class IsoCalendarDate(tuple):
         return (tuple, (tuple(self),))
 
     def __repr__(self):
-        return (f'{self.__class__.__name__}'
-                f'(year={self[0]}, week={self[1]}, weekday={self[2]})')
+        # _datetime reports the type's tp_name, which is qualified for its own class.
+        name = self.__class__.__name__
+        if self.__class__ is _IsoCalendarDate:
+            name = 'datetime.' + name
+        return f'{name}(year={self[0]}, week={self[1]}, weekday={self[2]})'
+
 
 
 _IsoCalendarDate = IsoCalendarDate
@@ -2326,7 +2332,7 @@ class datetime(date):
         if myoff == otoff:
             return base
         if myoff is None or otoff is None:
-            raise TypeError("cannot mix naive and timezone-aware time")
+            raise TypeError("can't subtract offset-naive and offset-aware datetimes")
         return base + otoff - myoff
 
     def __hash__(self):

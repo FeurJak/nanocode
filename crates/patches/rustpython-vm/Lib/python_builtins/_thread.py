@@ -39,6 +39,24 @@ TIMEOUT_MAX = 2**31
 
 # Main thread ident for dummy implementation
 _MAIN_THREAD_IDENT = -1
+# Threads run synchronously, but each one gets its own ident while it runs, so
+# threading's per-thread bookkeeping (_active, current_thread) keeps the main
+# thread's entry intact.
+_current_ident = _MAIN_THREAD_IDENT
+_next_ident = 1
+
+
+def _enter_thread():
+    global _current_ident, _next_ident
+    previous = _current_ident
+    _current_ident = _next_ident
+    _next_ident += 1
+    return previous
+
+
+def _leave_thread(previous):
+    global _current_ident
+    _current_ident = previous
 
 # NOTE: this module can be imported early in the extension building process,
 # and so top level imports of other modules should be avoided.  Instead, all
@@ -67,6 +85,7 @@ def start_new_thread(function, args, kwargs={}):
         raise TypeError("3rd arg must be a dict")
     global _main
     _main = False
+    previous = _enter_thread()
     try:
         function(*args, **kwargs)
     except SystemExit:
@@ -75,6 +94,8 @@ def start_new_thread(function, args, kwargs={}):
         import traceback
 
         traceback.print_exc()
+    finally:
+        _leave_thread(previous)
     _main = True
     global _interrupt
     if _interrupt:
@@ -91,6 +112,8 @@ def start_joinable_thread(function, handle=None, daemon=True):
         raise RuntimeError("daemon threads are not supported in this interpreter")
     if handle is None:
         handle = _ThreadHandle()
+    previous = _enter_thread()
+    handle._ident = _current_ident
     try:
         function()
     except SystemExit:
@@ -99,6 +122,8 @@ def start_joinable_thread(function, handle=None, daemon=True):
         import traceback
 
         traceback.print_exc()
+    finally:
+        _leave_thread(previous)
     handle._set_done()
     return handle
 
@@ -142,7 +167,7 @@ def get_ident():
     available, it is safe to assume that the current process is the
     only thread.  Thus a constant can be safely returned.
     """
-    return _MAIN_THREAD_IDENT
+    return _current_ident
 
 
 def allocate_lock():
