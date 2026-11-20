@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
+use crate::idle::KEPT_LABEL_PREFIX;
+
 const FRESH_MS: u64 = 15 * 60 * 1000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,6 +63,24 @@ pub const RESERVED_KIND: &str = "reserved";
 
 pub const PREFIX_MARK: char = '*';
 
+pub const BENCH_KIND: &str = "bench";
+
+pub const CLOSED_LOAD_KIND: &str = "closed-load";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Cap {
+    pub lane: String,
+    pub prefixes: Vec<String>,
+    pub cores: u32,
+    pub kinds: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    NoRoom,
+    OverCap { lane: String, held: u32, cap: u32 },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Want {
     pub cores: u32,
@@ -76,6 +96,7 @@ pub struct State {
     pub leases: Vec<Lease>,
     pub next: u64,
     pub boxes: Option<Value>,
+    pub caps: Vec<Cap>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -133,6 +154,78 @@ impl Lease {
     }
 }
 
+impl Cap {
+    pub fn covers(&self, kind: &str, label: &str) -> bool {
+        self.prefixes
+            .iter()
+            .any(|prefix| label.starts_with(prefix.as_str()))
+            && self.kinds.as_ref().map_or(kind != BENCH_KIND, |kinds| {
+                kinds.iter().any(|covered| covered == kind)
+            })
+    }
+
+    pub fn to_json(&self) -> Value {
+        let mut value = json!({
+            "lane": self.lane,
+            "prefixes": self.prefixes,
+            "cores": self.cores,
+        });
+        if let Some(kinds) = &self.kinds {
+            value["kinds"] = json!(kinds);
+        }
+        value
+    }
+}
+
+fn strings(value: &Value, what: &str) -> Result<Vec<String>, String> {
+    let items = value
+        .as_array()
+        .filter(|items| !items.is_empty())
+        .ok_or_else(|| format!("{what}: expected a non-empty array of strings"))?;
+    items
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .filter(|item| !item.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| format!("{what}: expected non-empty strings"))
+        })
+        .collect()
+}
+
+pub fn caps_from_json(value: &Value) -> Result<Vec<Cap>, String> {
+    let entries = value
+        .as_array()
+        .ok_or("caps: expected a JSON array of {lane, prefixes, cores, kinds?}")?;
+    let mut caps: Vec<Cap> = Vec::new();
+    for entry in entries {
+        let lane = text(entry, "lane")
+            .filter(|lane| !lane.is_empty())
+            .ok_or("caps: every entry needs a non-empty lane")?;
+        if caps.iter().any(|cap| cap.lane == lane) {
+            return Err(format!("caps: lane {lane} appears twice"));
+        }
+        let prefixes = strings(
+            entry.get("prefixes").unwrap_or(&Value::Null),
+            &format!("caps: lane {lane} prefixes"),
+        )?;
+        let cores = number(entry, "cores")
+            .and_then(|cores| u32::try_from(cores).ok())
+            .ok_or_else(|| format!("caps: lane {lane} needs cores, a whole number"))?;
+        let kinds = match entry.get("kinds") {
+            None | Some(Value::Null) => None,
+            Some(kinds) => Some(strings(kinds, &format!("caps: lane {lane} kinds"))?),
+        };
+        caps.push(Cap {
+            lane,
+            prefixes,
+            cores,
+            kinds,
+        });
+    }
+    Ok(caps)
+}
+
 fn number(value: &Value, name: &str) -> Option<u64> {
     value.get(name)?.as_u64()
 }
@@ -188,6 +281,10 @@ impl State {
             leases,
             next: number(&value, "next")?,
             boxes: value.get("boxes").filter(|boxes| !boxes.is_null()).cloned(),
+            caps: match value.get("caps") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(caps) => caps_from_json(caps).ok()?,
+            },
         })
     }
 
@@ -230,6 +327,7 @@ impl State {
             "leases": leases,
             "next": self.next,
             "boxes": self.boxes,
+            "caps": self.caps.iter().map(Cap::to_json).collect::<Vec<Value>>(),
         }))
         .unwrap_or_default()
     }
@@ -292,6 +390,25 @@ impl State {
         }
     }
 
+    pub fn held(&self, cap: &Cap) -> u32 {
+        self.leases
+            .iter()
+            .filter(|lease| {
+                lease.kind != RESERVED_KIND
+                    && lease.kind != CLOSED_LOAD_KIND
+                    && !lease.label.starts_with(KEPT_LABEL_PREFIX)
+                    && cap.covers(&lease.kind, &lease.label)
+                    && !self.leases.iter().any(|outer| {
+                        outer
+                            .label_prefix()
+                            .is_some_and(|prefix| lease.label.starts_with(prefix))
+                            && lease.within(outer)
+                    })
+            })
+            .map(|lease| lease.cores)
+            .sum()
+    }
+
     fn gap(&self, machine: &Machine, cores: u32, want: u32) -> Option<u32> {
         let mut used: Vec<(u32, u32)> = self
             .leases
@@ -333,7 +450,12 @@ impl State {
         (start + want <= held.end_cpu()).then_some(start)
     }
 
-    pub fn take(&mut self, machines: &[Machine], want: &Want, now_ms: u64) -> Option<Lease> {
+    pub fn take(
+        &mut self,
+        machines: &[Machine],
+        want: &Want,
+        now_ms: u64,
+    ) -> Result<Lease, Refusal> {
         self.expire(now_ms);
         let standing = self.leases.iter().find_map(|held| {
             let prefix = held.label_prefix()?;
@@ -348,9 +470,9 @@ impl State {
             Some((held.machine.clone(), self.gap_within(held, want.cores)?))
         });
         if let Some((machine, first_cpu)) = standing {
-            return Some(self.add(&machine, first_cpu, want, now_ms, now_ms + want.ttl_ms));
+            return Ok(self.add(&machine, first_cpu, want, now_ms, now_ms + want.ttl_ms));
         }
-        if let Some(held) = self.leases.iter_mut().find(|lease| {
+        let claim = self.leases.iter().position(|lease| {
             lease.kind == RESERVED_KIND
                 && lease.label_prefix().is_none()
                 && lease.label == want.label
@@ -359,11 +481,28 @@ impl State {
                     .only
                     .as_deref()
                     .is_none_or(|name| name == lease.machine)
-        }) {
+        });
+        let cores = claim
+            .and_then(|at| self.leases.get(at))
+            .map_or(want.cores, |lease| lease.cores);
+        if let Some((cap, held)) = self
+            .caps
+            .iter()
+            .filter(|cap| cap.covers(&want.kind, &want.label))
+            .map(|cap| (cap, self.held(cap)))
+            .find(|(cap, held)| held + cores > cap.cores)
+        {
+            return Err(Refusal::OverCap {
+                lane: cap.lane.clone(),
+                held,
+                cap: cap.cores,
+            });
+        }
+        if let Some(held) = claim.and_then(|at| self.leases.get_mut(at)) {
             held.kind.clone_from(&want.kind);
             held.taken_ms = now_ms;
             held.until_ms = now_ms + want.ttl_ms;
-            return Some(held.clone());
+            return Ok(held.clone());
         }
         let mut best: Option<(u32, &Machine, u32)> = None;
         for machine in machines {
@@ -402,8 +541,8 @@ impl State {
                 best = Some((same_kind, machine, first_cpu));
             }
         }
-        let (_, machine, first_cpu) = best?;
-        Some(self.add(&machine.name, first_cpu, want, now_ms, now_ms + want.ttl_ms))
+        let (_, machine, first_cpu) = best.ok_or(Refusal::NoRoom)?;
+        Ok(self.add(&machine.name, first_cpu, want, now_ms, now_ms + want.ttl_ms))
     }
 
     fn add(

@@ -14,7 +14,7 @@ use nanocode_build_opt::{
     idle,
     plan::{self, Rules, Scope},
     schedule::{self, Job, Shard},
-    slots::{self, Machine, Observation, Pin, Placement, Pool, State, Want},
+    slots::{self, Machine, Observation, Pin, Placement, Pool, Refusal, State, Want},
 };
 
 const USAGE: &str = "usage:
@@ -32,7 +32,10 @@ const USAGE: &str = "usage:
                                       the pool order: the large pool (default, nanocode work) the largest boxes first, the small pool
                                       (pyramid2 work) the smaller boxes and dev-georgios first; gak-9 only with --machine gak-9;
                                       a label containing fill (any case) is refused: filler runs SCHED_IDLE in fill.slice and never holds a lease;
-                                      a label starting with a standing --label-prefix reservation's prefix places inside its cpus when they have room
+                                      a label starting with a standing --label-prefix reservation's prefix places inside its cpus when they have room;
+                                      a take whose label and kind a lane cap covers is refused (and with --wait retried) when that lane's
+                                      leased cores across all machines plus N would exceed the cap; takes placed inside a standing
+                                      --label-prefix reservation neither count nor are refused
   nc-build slots give LEASE | slots renew LEASE [--minutes T]
   nc-build slots reserve --machine M --cpus FIRST-LAST --until 'YYYY-MM-DD HH:MM' --label L [--kind reserved] [--overlap]
   nc-build slots reserve --machine M --cpus FIRST-LAST --until 'YYYY-MM-DD HH:MM' --label-prefix P [--overlap]
@@ -51,7 +54,13 @@ const USAGE: &str = "usage:
                                       (default 10), from /proc/stat deltas between observations with nice time not busy, is given back
                                       and logged as a reap line with its machine, cpus, kind and label; leases of kind reserved,
                                       closed-load or bench and labels starting box-closing- are never reaped
-  nc-build slots list                 each machine's busy cores, load, memory and expiry, also appended to machines.log
+  nc-build slots caps [--set]         the lane caps; --set replaces them with the JSON array read on stdin, each entry
+                                      {lane: L, prefixes: [P, ...], cores: N, kinds: [K, ...]}: a lane covers takes whose label
+                                      starts with one of its prefixes and whose kind is listed (without kinds, every kind but bench), and
+                                      holds the cores of its live leases on every machine except kinds reserved and closed-load, labels
+                                      starting box-closing- and leases inside a standing --label-prefix reservation; [] removes them all
+  nc-build slots list                 each machine's busy cores, load, memory and expiry, also appended to machines.log,
+                                      and a line 'lane L held X/N' per lane cap
   nc-build slots boxes [--set]        the machines placement uses; --set stores the boxes.json array read on stdin in the state;
                                       an entry with a kinds list, such as [bench], takes only leases of those kinds
   nc-build slots serve ADDR [--path P]
@@ -333,6 +342,8 @@ fn now_ms() -> u64 {
 }
 
 const NO_ROOM: &str = "no machine has";
+
+const OVER_CAP: &str = "over its cap:";
 
 const PST_OFFSET_MINUTES: i64 = -8 * 60;
 
@@ -623,7 +634,7 @@ fn slots_command(args: &[String]) -> Result<(), String> {
     let input = match command {
         Some("observe") if local => run("sh", &["-c", PROBE])?,
         Some("observe") => read_stdin()?,
-        Some("boxes") if args.iter().any(|arg| arg == "--set") => read_stdin()?,
+        Some("boxes" | "caps") if args.iter().any(|arg| arg == "--set") => read_stdin()?,
         _ => String::new(),
     };
     let wait_ms = option(args, "--wait")
@@ -645,7 +656,8 @@ fn slots_command(args: &[String]) -> Result<(), String> {
                     .map_err(|error| error.to_string());
             }
             Err(message)
-                if message.starts_with(NO_ROOM) && now_ms().saturating_sub(started) < wait_ms =>
+                if (message.starts_with(NO_ROOM) || message.starts_with(OVER_CAP))
+                    && now_ms().saturating_sub(started) < wait_ms =>
             {
                 std::thread::sleep(std::time::Duration::from_secs(5));
             }
@@ -811,7 +823,13 @@ fn slots_once(args: &[String], input: &str) -> Result<String, String> {
                     (lease.to_json(machine), lease)
                 })
             })?;
-            let (json, lease) = taken.ok_or_else(|| format!("{NO_ROOM} {cores} free cores"))?;
+            let (json, lease) = taken.map_err(|refusal| match refusal {
+                Refusal::NoRoom => format!("{NO_ROOM} {cores} free cores"),
+                Refusal::OverCap { lane, held, cap } => format!(
+                    "{OVER_CAP} lane {lane} holds {held}/{cap} cores across the fleet, so --label {} cannot take {cores} more",
+                    want.label
+                ),
+            })?;
             log_line(&format!(
                 "take {} {} {} cores {} {} cpus {}",
                 lease.id,
@@ -971,6 +989,17 @@ fn slots_once(args: &[String], input: &str) -> Result<String, String> {
                 })
                 .collect())
         }
+        Some("caps") => {
+            if args.iter().any(|arg| arg == "--set") {
+                let caps: serde_json::Value =
+                    serde_json::from_str(input).map_err(|error| format!("caps: {error}"))?;
+                let caps = slots::caps_from_json(&caps)?;
+                with_state(|state| state.caps.clone_from(&caps))?;
+            }
+            let state = with_state(|state| state.clone())?;
+            let caps: Vec<serde_json::Value> = state.caps.iter().map(slots::Cap::to_json).collect();
+            Ok(format!("{}\n", serde_json::Value::from(caps)))
+        }
         Some("list") => {
             let state = with_state(|state| {
                 state.expire(now);
@@ -1084,6 +1113,14 @@ fn list(machines: &[Machine], state: &State, now: u64) -> String {
             lease.kind,
             lease.label,
             lease.until_ms.saturating_sub(now) / 1000
+        ));
+    }
+    for cap in &state.caps {
+        out.push_str(&format!(
+            "lane {} held {}/{}\n",
+            cap.lane,
+            state.held(cap),
+            cap.cores
         ));
     }
     out.push_str(&total);
@@ -1220,7 +1257,7 @@ fn post(
 #[cfg(test)]
 mod tests {
     use super::{parse_observation, slots};
-    use nanocode_build_opt::slots::{Lease, Machine, Pin, Placement, State, Want};
+    use nanocode_build_opt::slots::{Cap, Lease, Machine, Pin, Placement, Refusal, State, Want};
 
     const NOW: u64 = 1_000_000;
 
@@ -1307,16 +1344,16 @@ mod tests {
         let threads = running("TS", 12..42);
         let mut state = state(&threads, &[(0, 12)]);
         assert_eq!(state.usage(&machine(), NOW).busy, 42);
-        assert!(state.take(&[machine()], &want(7), NOW).is_none());
-        assert!(state.take(&[machine()], &want(6), NOW).is_some());
-        assert!(state.take(&[machine()], &want(1), NOW).is_none());
+        assert!(state.take(&[machine()], &want(7), NOW).is_err());
+        assert!(state.take(&[machine()], &want(6), NOW).is_ok());
+        assert!(state.take(&[machine()], &want(1), NOW).is_err());
     }
 
     #[test]
     fn take_counts_idle_leases_and_unleased_threads_together() {
         let threads = running("TS", 24..48);
         let mut state = state(&threads, &[(0, 24)]);
-        assert!(state.take(&[machine()], &want(1), NOW).is_none());
+        assert!(state.take(&[machine()], &want(1), NOW).is_err());
     }
 
     #[test]
@@ -1326,7 +1363,7 @@ mod tests {
         threads.extend(running("TS", 12..32));
         let mut state = state(&threads, &[(0, 12)]);
         assert_eq!(state.usage(&machine(), NOW).busy, 32);
-        assert!(state.take(&[machine()], &want(16), NOW).is_some());
+        assert!(state.take(&[machine()], &want(16), NOW).is_ok());
     }
 
     #[test]
@@ -1335,7 +1372,7 @@ mod tests {
         threads.extend(running("IDL", 0..48));
         let mut state = state(&threads, &[]);
         assert_eq!(state.usage(&machine(), NOW).busy, 0);
-        assert!(state.take(&[machine()], &want(48), NOW).is_some());
+        assert!(state.take(&[machine()], &want(48), NOW).is_ok());
     }
 
     #[test]
@@ -1349,7 +1386,167 @@ mod tests {
         let mut state = state(&[], &[(0, 12)]);
         state.observations.get_mut("m").unwrap().load = 40.0;
         assert_eq!(state.usage(&machine(), NOW).busy, 40);
-        assert!(state.take(&[machine()], &want(9), NOW).is_none());
-        assert!(state.take(&[machine()], &want(8), NOW).is_some());
+        assert!(state.take(&[machine()], &want(9), NOW).is_err());
+        assert!(state.take(&[machine()], &want(8), NOW).is_ok());
+    }
+
+    fn lane_cap(cores: u32) -> Cap {
+        Cap {
+            lane: "nf".to_owned(),
+            prefixes: vec!["nf-".to_owned(), "lane-perf-".to_owned()],
+            cores,
+            kinds: None,
+        }
+    }
+
+    fn lease(id: &str, first_cpu: u32, cores: u32, kind: &str, label: &str) -> Lease {
+        Lease {
+            id: id.to_owned(),
+            machine: "m".to_owned(),
+            first_cpu,
+            cores,
+            kind: kind.to_owned(),
+            label: label.to_owned(),
+            taken_ms: NOW - 1_000,
+            until_ms: NOW + 3_600_000,
+        }
+    }
+
+    fn labelled(cores: u32, kind: &str, label: &str) -> Want {
+        Want {
+            kind: kind.to_owned(),
+            label: label.to_owned(),
+            ..want(cores)
+        }
+    }
+
+    #[test]
+    fn a_lane_never_holds_more_cores_than_its_cap() {
+        let mut state = state(&[], &[]);
+        state.caps.push(lane_cap(16));
+        state.leases.push(lease("a", 0, 8, "test", "nf-a"));
+        let mut other = machine();
+        other.name = "o".to_owned();
+        let machines = [machine(), other];
+        assert!(
+            state
+                .take(&machines, &labelled(4, "build", "lane-perf-b"), NOW)
+                .is_ok()
+        );
+        assert_eq!(
+            state.take(&machines, &labelled(8, "sim", "nf-c"), NOW),
+            Err(Refusal::OverCap {
+                lane: "nf".to_owned(),
+                held: 12,
+                cap: 16
+            })
+        );
+        assert!(
+            state
+                .take(&machines, &labelled(4, "sim", "nf-c"), NOW)
+                .is_ok()
+        );
+        assert!(
+            state
+                .take(&machines, &labelled(1, "build", "nf-d"), NOW)
+                .is_err()
+        );
+        assert!(
+            state
+                .take(&machines, &labelled(1, "bench", "nf-e"), NOW)
+                .is_ok()
+        );
+        assert!(
+            state
+                .take(&machines, &labelled(8, "build", "other"), NOW)
+                .is_ok()
+        );
+        assert_eq!(state.held(&lane_cap(16)), 16);
+    }
+
+    #[test]
+    fn a_cap_covers_only_its_kinds() {
+        let mut state = state(&[], &[]);
+        let mut cap = lane_cap(4);
+        cap.kinds = Some(vec!["test".to_owned()]);
+        state.caps.push(cap);
+        assert!(
+            state
+                .take(&[machine()], &labelled(8, "build", "nf-a"), NOW)
+                .is_ok()
+        );
+        assert!(
+            state
+                .take(&[machine()], &labelled(4, "test", "nf-b"), NOW)
+                .is_ok()
+        );
+        assert!(
+            state
+                .take(&[machine()], &labelled(1, "test", "nf-c"), NOW)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn reservations_closing_load_and_standing_takes_do_not_count_against_a_cap() {
+        let mut state = state(&[], &[]);
+        let mut cap = lane_cap(4);
+        cap.prefixes.push("box-".to_owned());
+        state.caps.push(cap.clone());
+        state
+            .leases
+            .push(lease("r", 0, 8, slots::RESERVED_KIND, "nf-held"));
+        state
+            .leases
+            .push(lease("c", 8, 8, slots::CLOSED_LOAD_KIND, "nf-load"));
+        state
+            .leases
+            .push(lease("x", 16, 8, "build", "box-closing-nf"));
+        state
+            .leases
+            .push(lease("s", 24, 16, slots::RESERVED_KIND, "nf-*"));
+        assert_eq!(state.held(&cap), 0);
+        assert!(
+            state
+                .take(&[machine()], &labelled(12, "build", "nf-in"), NOW)
+                .is_ok()
+        );
+        assert_eq!(state.held(&cap), 0);
+        assert!(
+            state
+                .take(&[machine()], &labelled(4, "build", "lane-perf-a"), NOW)
+                .is_ok()
+        );
+        assert!(
+            state
+                .take(&[machine()], &labelled(1, "build", "lane-perf-b"), NOW)
+                .is_err()
+        );
+        assert!(
+            state
+                .take(&[machine()], &labelled(4, "build", "nf-in"), NOW)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn caps_survive_the_state_round_trip_and_reject_bad_entries() {
+        let mut state = state(&[], &[]);
+        state.caps.push(lane_cap(16));
+        let mut cap = lane_cap(8);
+        cap.lane = "sim".to_owned();
+        cap.kinds = Some(vec!["sim".to_owned()]);
+        state.caps.push(cap);
+        assert_eq!(State::from_json(&state.to_json()), Some(state));
+        for bad in [
+            r#"{"lane":"a","prefixes":["a-"],"cores":1}"#,
+            r#"[{"lane":"","prefixes":["a-"],"cores":1}]"#,
+            r#"[{"lane":"a","prefixes":[],"cores":1}]"#,
+            r#"[{"lane":"a","prefixes":["a-"]}]"#,
+            r#"[{"lane":"a","prefixes":["a-"],"cores":1,"kinds":[]}]"#,
+            r#"[{"lane":"a","prefixes":["a-"],"cores":1},{"lane":"a","prefixes":["b-"],"cores":1}]"#,
+        ] {
+            assert!(slots::caps_from_json(&serde_json::from_str(bad).unwrap()).is_err());
+        }
     }
 }
