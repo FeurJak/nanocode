@@ -39,6 +39,7 @@ const PPM_FORCE: u64 = 250_000;
 const PPM_WILDCARD: u64 = 600_000;
 const PPM_REFUSE: u64 = 150_000;
 const PPM_SPEC_PRUNE: u64 = 400_000;
+const PPM_PRUNE_GONE: u64 = 900_000;
 const PPM_TOPIC_REWRITE: u64 = 500_000;
 const PPM_TOPIC_DELETE: u64 = 300_000;
 const DEPTH_MAX: u64 = 3;
@@ -1619,7 +1620,15 @@ impl World {
         } else {
             ""
         };
-        let prune = self.rng.chance(PPM_SPEC_PRUNE);
+        // A plain fetch only prunes something when a tracked branch has left
+        // the server, so prune most such fetches and keep some that leave it.
+        let heads = self.server_heads();
+        let stale = !self.single && self.tracked.keys().any(|name| !heads.contains_key(name));
+        let prune = self.rng.chance(if stale {
+            PPM_PRUNE_GONE
+        } else {
+            PPM_SPEC_PRUNE
+        });
         let flag = if prune { " --prune" } else { "" };
         let (status, text) = self.run(&format!("cd {WORK} && git fetch{quiet}{flag}"))?;
         if status != 0 {
