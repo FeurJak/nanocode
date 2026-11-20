@@ -260,6 +260,7 @@ impl Views for SimViews {
 
 #[derive(Default)]
 struct SimApplier {
+    partitions: u32,
     next: Slot<Result<(), Rejection>>,
     submitted: Inbox<Intent>,
 }
@@ -273,6 +274,15 @@ impl Applier for SimApplier {
             self.submitted.push(intent.clone());
         }
         Box::pin(std::future::ready(result))
+    }
+
+    fn partition(&self, intent: &Intent) -> u32 {
+        let thread = intent
+            .args
+            .get("thread")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        small(thread % u64::from(self.partitions.max(1)))
     }
 
     fn outcome(&self, record: &Value) -> Option<Outcome> {
@@ -499,7 +509,10 @@ impl World {
 
     fn fresh_node(&self, name: String) -> Node {
         let views = Arc::new(SimViews::default());
-        let applier = Arc::new(SimApplier::default());
+        let applier = Arc::new(SimApplier {
+            partitions: self.partitions(),
+            ..SimApplier::default()
+        });
         Node {
             name,
             alive: true,
@@ -635,7 +648,7 @@ impl World {
                 .get("thread")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
-            if let Admit::Repeat(settled) = self.ledgers[part as usize].admit(&intent) {
+            if let Admit::Repeat(settled) = self.ledgers[part as usize].admit(part, &intent) {
                 let settled = match settled {
                     Settled::Applied(cursor) => json!({"cursor": cursor}),
                     Settled::Failed(failure) => json!({"error": failure}),
