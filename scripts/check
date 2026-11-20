@@ -5,307 +5,45 @@
 #                          reach those crates: their pass jobs and every canary they list
 #   scripts/check --full   release gate: the whole workspace and every scenario and canary
 # Options: --base REF (diff base; default: merge-base with the upstream, or HEAD~1 when nothing
-#   differs), -j N (parallel jobs; default: all cores), --seeds N (seeds per pass job; default 8,
-#   64 with --full), --no-sim.
-# Jobs come from bin/nanocode-sim/cfo.sh's table, with its flags; scenarios it doesn't list get a
-# pass job and a --twice job. A canary passes once a seed catches it, trying seeds 0, then 1..8,
-# then the rest of its budget (canary:N, default 400) in units of 16 seeds across all cores.
-# Logs: output/check/<check>.log.
+#   differs), -j N (parallel jobs; default: CARGO_BUILD_JOBS, else the cores it may run on),
+#   --seeds N (seeds per pass job; default 8, 64 with --full), --no-sim, --plan (print the scope only).
+# The engine is 'nc-build check' (bin/nc-build, crates/runtime/build-opt), built from this worktree
+# in the fast profile, so a change to the gate checks itself. Logs: output/check/<check>.log.
+# Target dir: cargo's (CARGO_TARGET_DIR, else the box cargo shim's <worktree>/target, else ./target),
+# one per worktree: its .owner file names the worktree, and one owned by another worktree is refused.
+# RUSTC_WRAPPER is left as the caller has it: blank would turn the configured compiler cache off.
+# Cores: CARGO_BUILD_JOBS when set; else, where the nc-build slot ledger lists this machine, a lease of
+#   NANOCODE_CHECK_CORES (default 16) cores, waiting up to NANOCODE_CHECK_WAIT seconds (default 600)
+#   for room, run under its taskset and given back on exit; else every core this process may run on.
 set -uo pipefail
 root=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 cd "$root"
-full=0 base="" jobs=$(nproc 2>/dev/null || sysctl -n hw.ncpu) seeds="" sim=1
-while [ $# -gt 0 ]; do
-  case $1 in
-    --full) full=1 ;;
-    --base) base=$2; shift ;;
-    -j) jobs=$2; shift ;;
-    --seeds) seeds=$2; shift ;;
-    --no-sim) sim=0 ;;
-    -h | --help) sed -n '2,13p' "$0"; exit 0 ;;
-    *) echo "unknown option $1" >&2; exit 2 ;;
-  esac
-  shift
-done
-[ -n "$seeds" ] || { [ $full = 1 ] && seeds=64 || seeds=8; }
-export CARGO_BUILD_JOBS=$jobs SHIPPY_REMOTE_BUILD=0 CARGO_TERM_COLOR=never
-# Build output goes where cargo puts it (CARGO_TARGET_DIR, else the box's cargo shim's shared
-# ~/target-<repo>, else ./target): never one dir per worktree, so every worktree shares one cache.
-# RUSTC_WRAPPER is left as the caller has it: blank would turn the configured compiler cache off.
-target=$(cargo metadata --format-version 1 --no-deps --offline 2>/dev/null | python3 -I -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])') || target=""
-[ -n "$target" ] || target=${CARGO_TARGET_DIR:-$root/target}
-logs=$root/output/check
-rm -rf "$logs"; mkdir -p "$logs"
-metric_repo=nanocode metric_rust=1
-# metric: one point per run for the swarm dashboard, in its ingest feed format, appended to
-# $NC_METRICS_LOG (off: none; default ~/swarm/dash/feeds/BUILD.jsonl where that directory exists,
-# else ~/swarm/metrics/BUILD.jsonl). noop: no check ran; cached: checks ran and cargo compiled nothing;
-# metric_us: what writing the point cost. Best effort: it reads HEAD from .git without running git,
-# needs bash 5, and never changes the exit status.
-metric_t0=${EPOCHREALTIME:-} metric_pid=$BASHPID
-metric() {
-  local rc=$? t f noop=false cached=null cmd=check g c h l s r sha note
-  {
-    # Background lanes are subshells that inherit this trap: only the script itself writes.
-    [ "$BASHPID" = "$metric_pid" ] || return 0
-    t=${EPOCHREALTIME:-}; [ -n "$t" ] && [ -n "$metric_t0" ] || return 0
-    f=${NC_METRICS_LOG:-$HOME/swarm/dash/feeds/BUILD.jsonl}
-    [ -n "${NC_METRICS_LOG:-}" ] || [ -d "${f%/*}" ] || f=$HOME/swarm/metrics/BUILD.jsonl
-    [ "$f" != off ] || return 0
-    [ -d "${f%/*}" ] || mkdir -p "${f%/*}" || return 0
-    [ $full = 1 ] && cmd="check --full"
-    if [ ! -e "$logs/ran.mark" ]; then noop=true
-    elif [ "$metric_rust" = 1 ]; then
-      # cargo prints its Compiling and Checking lines first; read the head of each log in bash, which is cheaper than grep
-      cached=true
-      for l in "$logs"/*.log; do
-        c=0; while [ $c -lt 40 ] && read -r s; do c=$((c + 1)); [[ $s = Compiling* || $s = Checking* ]] && { cached=false; break 2; }; done <"$l"
-      done
-    fi
-    g=$root/.git
-    if [ -f "$g" ]; then read -r l <"$g"; g=${l#gitdir: }; [[ $g = /* ]] || g=$root/$g; fi
-    c=$g; if [ -f "$g/commondir" ]; then read -r l <"$g/commondir"; [[ $l = /* ]] && c=$l || c=$g/$l; fi
-    read -r h <"$g/HEAD"
-    if [[ $h = "ref: "* ]]; then
-      l=${h#ref: } h=""
-      if [ -f "$g/$l" ]; then read -r h <"$g/$l"; elif [ -f "$c/$l" ]; then read -r h <"$c/$l"
-      else while read -r s r; do [ "$r" = "$l" ] && { h=$s; break; }; done <"$c/packed-refs"; fi
-    fi
-    # exit 0 before the last line means a signal (timeout, ^C) ended the run
-    [ $rc = 0 ] && [ -z "${metric_end:-}" ] && rc=143
-    sha=${h:0:12} note="$HOSTNAME exit=$rc"; $noop && note="$note noop"
-    s=${EPOCHREALTIME/[.,]/}; t=${t/[.,]/}; metric_t0=${metric_t0/[.,]/}
-    printf '{"name":"build %s %s","value":%d,"unit":"ms","better":"down","source":"measured","at":%d,"commit":"%s","note":"%s","repo":"%s","cmd":"%s","box":"%s","exit":%d,"noop":%s,"cached":%s,"metric_us":%d}\n' \
-      "$metric_repo" "$cmd" $(((t - metric_t0) / 1000)) $((t / 1000)) "$sha" "$note" \
-      "$metric_repo" "$cmd" "$HOSTNAME" $rc $noop $cached $((s - t)) >>"$f"
-  } 2>/dev/null
-  return 0
-}
-trap metric EXIT
-
-if [ -t 1 ]; then green=$'\e[32m' red=$'\e[31m' yellow=$'\e[33m' off=$'\e[0m'; else green="" red="" yellow="" off=""; fi
-now() { python3 -c 'import time; print(time.time())'; }
-secs() { python3 -c "print('%.1f' % ($(now) - $1))"; }
-started=$(now)
-line() { printf '%s%-4s%s %-10s %6ss  %s\n' "$1" "$2" "$off" "$3" "$4" "$5"; }
-# run NAME DETAIL CMD...: runs CMD into output/check/NAME.log and prints one line.
-run() {
-  local name=$1 detail=$2 t0 rc
-  shift 2
-  t0=$(now)
-  : >"$logs/ran.mark"
-  "$@" >"$logs/$name.log" 2>&1
-  rc=$?
-  if [ $rc -eq 0 ]; then
-    line "$green" ok "$name" "$(secs $t0)" "$detail"
+case " $* " in *" -h "* | *" --help "*) sed -n '2,17p' "$0"; exit 0 ;; esac
+export SHIPPY_REMOTE_BUILD=0 CARGO_TERM_COLOR=never
+prefix=()
+lease=""
+give() { [ -z "$lease" ] || nc-build slots give "$lease" >/dev/null 2>&1; lease=""; }
+if [ -z "${CARGO_BUILD_JOBS:-}" ] && command -v nc-build >/dev/null 2>&1 &&
+  nc-build slots list 2>/dev/null | grep -q "^$(hostname) "; then
+  out=$(nc-build slots take --cores "${NANOCODE_CHECK_CORES:-16}" --label "check ${root##*/}" \
+    --machine "$(hostname)" --wait "${NANOCODE_CHECK_WAIT:-600}" 2>&1)
+  if read -r lease cores cpus < <(printf '%s' "$out" | python3 -I -c 'import json, sys; l = json.load(sys.stdin); print(l["lease"], l["cores"], l["cpus"])' 2>/dev/null); then
+    trap give EXIT
+    trap 'give; exit 130' INT TERM
+    export CARGO_BUILD_JOBS=$cores
+    prefix=(taskset -c "$cpus")
   else
-    line "$red" FAIL "$name" "$(secs $t0)" "$detail (exit $rc, output/check/$name.log)"
-    grep -E '^(error|FAIL|FAILJOB|MISSEDJOB)|panicked' "$logs/$name.log" | head -20 | sed 's/^/     /'
-    tail -4 "$logs/$name.log" | sed 's/^/     | /'
-    touch "$logs/$name.failed"
+    lease=""
+    echo "scripts/check: no nc-build slot lease ($out); using every core" >&2
   fi
-  return $rc
-}
-skip() { line "$yellow" skip "$1" "0.0" "$2"; }
-# cargo-shippy's wrapper runs cargo with a scrubbed environment: plant secrets, fail if any reaches it.
-if command -v cargo-shippy >/dev/null 2>&1; then run shippy-scrub "cargo-shippy --self-test: no secret reaches cargo" cargo-shippy --self-test
-else skip shippy-scrub "no cargo-shippy on this machine"; fi
-
-# Scope. Line 1: "all" or the changed workspace library crates plus their dependents.
-# Line 2: "all" or the simulator scenarios whose modules changed or whose crates (by the
-# nanocode_* paths their modules name) are among the changed crates or their dependents.
-scope_py=$(cat <<'PY'
-import json, os, re, sys
-m = json.load(sys.stdin)
-root = m["workspace_root"] + "/"
-members = set(m["workspace_members"])
-pkgs = {p["id"]: p for p in m["packages"] if p["id"] in members}
-dirs = [((os.path.dirname(p["manifest_path"]) + "/")[len(root):], p["name"]) for p in pkgs.values()]
-changed = [c for c in os.environ["CHANGED"].split("\n") if c]
-libs = {p["name"] for p in pkgs.values() if any(k in ("lib", "rlib") for t in p["targets"] for k in t["kind"])}
-everything = ("Cargo.toml", "Cargo.lock", "rust-toolchain", "rust-toolchain.toml")
-if os.environ["FULL"] == "1" or any(c in everything or c.startswith((".cargo/", "vendor/", "scripts/buildcache", "scripts/rustc-parallel-frontend", "scripts/wild-cc", "scripts/check")) for c in changed):
-    print("all\nall"); sys.exit()
-hit = set()
-for c in changed:
-    owners = [d for d in dirs if c.startswith(d[0])]
-    if owners: hit.add(max(owners, key=lambda d: len(d[0]))[1])
-names = {p["name"] for p in pkgs.values()}
-rdeps = {}
-for p in pkgs.values():
-    for d in p["dependencies"]:
-        if d.get("path") and d["name"] in names: rdeps.setdefault(d["name"], set()).add(p["name"])
-todo = list(hit)
-while todo:
-    for r in rdeps.get(todo.pop(), ()):
-        if r not in hit: hit.add(r); todo.append(r)
-print(" ".join(sorted(hit & libs)))
-src = "bin/nanocode-sim/src/"
-sim_changed = [c for c in changed if c.startswith("bin/nanocode-sim/")]
-if "nanocode-sim" not in hit:
-    print(""); sys.exit()
-mods = {}
-for f in sorted(os.listdir(src)):
-    if f.endswith(".rs"): mods.setdefault(f[:-3], []).append(src + f)
-    elif os.path.isdir(src + f):
-        for d, _, fs in os.walk(src + f):
-            mods.setdefault(f, []).extend(os.path.join(d, x) for x in fs if x.endswith(".rs"))
-text = {k: "\n".join(open(f).read() for f in v) for k, v in mods.items()}
-crate_of = {name.replace("-", "_"): name for name in libs}
-uses = {k: {crate_of[c] for c in re.findall(r"\b(nanocode_\w+)", t) if c in crate_of} for k, t in text.items()}
-refs = {k: {r for r in re.findall(r"\b(\w+)::", t) if r in mods and r != k and r != "main"} for k, t in text.items()}
-names = re.search(r"--scenario ([a-z_|]+)\]", text["main"]).group(1).split("|")
-special = {"runtime": "whole", "executor": "tasks"}
-picked = []
-for s in names:
-    entry = next((e for e in (s.replace("_", ""), s, special.get(s)) if e in mods), None)
-    if entry is None: picked.append(s); continue
-    seen, todo = {entry}, [entry]
-    while todo:
-        for r in refs[todo.pop()]:
-            if r not in seen: seen.add(r); todo.append(r)
-    files = {f for k in seen | {"main"} for f in mods[k]}
-    crates = set().union(*(uses[k] for k in seen | {"main"}))
-    # A sim file outside every module (new), or outside src (Cargo.toml, cfo.sh), reaches every scenario.
-    if any(c in files or not any(c in v for v in mods.values()) for c in sim_changed) or crates & hit:
-        picked.append(s)
-print(" ".join(picked))
-PY
-)
-if [ $full = 0 ] && [ -z "$base" ]; then
-  upstream=$(git rev-parse -q --verify '@{upstream}' 2>/dev/null || git rev-parse -q --verify origin/master)
-  base=$(git merge-base HEAD "$upstream" 2>/dev/null || echo HEAD)
-  if [ "$(git rev-parse HEAD)" = "$(git rev-parse "$base")" ] && [ -z "$(git status --porcelain)" ]; then base=HEAD~1; fi
 fi
-changed=""
-[ $full = 0 ] && changed=$( { git diff --name-only "$base" --; git ls-files --others --exclude-standard; } | sort -u)
-scope=$(cargo metadata --format-version 1 --locked --no-deps 2>"$logs/metadata.log" | FULL=$full CHANGED="$changed" python3 -I -c "$scope_py") || {
-  line "$red" FAIL scope 0.0 "cargo metadata or scope selection failed (output/check/metadata.log)"; tail -5 "$logs/metadata.log"; exit 1; }
-crates=$(echo "$scope" | sed -n 1p) scenarios=$(echo "$scope" | sed -n 2p)
-printf '%s\n' "$scope" >"$logs/scope.txt"
-since=""; [ $full = 0 ] && since=" since $(git rev-parse --short "$base")"
-if [ "$crates" = all ]; then sel=(--workspace); detail="workspace"
-elif [ -n "$crates" ]; then sel=(); for p in $crates; do sel+=(-p "$p"); done; detail="$(echo $crates | wc -w | tr -d ' ') crates changed$since, with dependents"
-else sel=(); detail="no crates changed$since"; fi
-[ $sim = 1 ] && [ -n "$scenarios" ] || sim=0
-
-# The simulator builds in its own target dir, at the same time as the debug checks: in the fast
-# profile (release with incremental and 256 codegen units: about the same seeds/s, a relink 10x
-# quicker), and in release with --full.
-simprofile=fast; [ $full = 1 ] && simprofile=release
-if [ $sim = 1 ]; then
-  ( CARGO_TARGET_DIR=$target/check-sim cargo build --locked --profile $simprofile -p nanocode-sim >"$logs/sim-build.log" 2>&1; echo $? >"$logs/sim-build.rc" ) &
-  sim_pid=$!
+# The engine builds in the worktree's own target dir, like everything the check builds.
+mkdir -p output
+if ! "${prefix[@]}" cargo build --locked --profile fast -p nc-build >output/check-engine.log 2>&1; then
+  printf 'FAIL engine     building nc-build failed (output/check-engine.log)\n'
+  { grep -E '^error' -A5 output/check-engine.log | head -20; tail -3 output/check-engine.log; } | sed 's/^/     | /'
+  printf 'RED   nanocode (engine)\n'
+  exit 1
 fi
-if [ ${#sel[@]} -gt 0 ]; then
-  run check "$detail" cargo check --locked --lib "${sel[@]}"
-  run check-wasm "$detail" cargo check --locked --lib --target wasm32-unknown-unknown "${sel[@]}" ||
-    { grep -q "__builtin_c[lt]zg" "$logs/check-wasm.log" && echo "     this clang can't build python-capi's wasm32 libc++: set NANOCODE_CC to the clang docs/RELEASE-CHAIN.md uses"; }
-else
-  skip check "$detail"; skip check-wasm "$detail"
-fi
-
-# Sim units: a pass job runs its seeds in units of 8; a canary runs seed 0, then 1..8, then the
-# rest of its budget in units of $chunk seeds, and its later units are skipped once one catches it.
-# Seeds 0..8 start first, longest first by the last run's times (target/check-sim/sim-times.txt),
-# then the rest by lowest seed, so a canary that's caught early costs a few units at most.
-chunk=16
-simunits() {
-  awk -v chunk="$chunk" '{
-    flags = ""; for (i = 4; i <= NF; i++) flags = flags " " $i
-    to = $3; from = 0
-    for (k = 0; from < to; k++) {
-      if ($2 == "pass") upto = from + 8; else upto = k == 0 ? 1 : k == 1 ? 8 : from + chunk
-      if (upto > to) upto = to
-      print $1, $2, from, upto flags; from = upto
-    }
-  }' "$logs/sim-jobs.txt" | awk -v times="$target/check-sim/sim-times.txt" '
-    BEGIN { while ((getline l < times) > 0) { split(l, f, " "); t[f[1] " " f[2] " " f[3]] = f[4]; n++ } }
-    { k = $1 " " $3 " " $4; s = (k in t) ? t[k] : n ? 0 : 1e9; if ($3 >= 8 && $2 == "canary") s = -$3; printf "%s\t%s\n", s, $0 }' |
-    sort -t "$(printf '\t')" -k1,1gr -s | cut -f2-
-}
-simunit() {
-  local name=$1 kind=$2 from=$3 upto=$4 out rc t0 t1
-  shift 4
-  [ "$kind" = canary ] && [ -e "$SIM_UNITS/$name.caught" ] && return
-  t0=$(date +%s%N 2>/dev/null)
-  out=$($SIM_TIMEOUT "$SIM_BIN" --seeds "$from..$upto" "$@" 2>&1); rc=$?
-  [ $rc = 124 ] && [ -n "$SIM_TIMEOUT" ] && out="FAIL hung: no result after ${NANOCODE_CHECK_UNIT_TIMEOUT:-120} s
-$out"
-  t1=$(date +%s%N 2>/dev/null)
-  case "$t0$t1" in *N*) t0=0 t1=0 ;; esac
-  printf 'TIME %s %s %s %s\n' "$name" "$from" "$upto" "$(( (t1 - t0) / 1000000 ))"
-  if [ "$kind" = pass ]; then
-    if [ $rc = 0 ]; then echo "PASSUNIT $name $from..$upto"; else printf 'FAILJOB %s exit=%s :: nanocode-sim --seeds %s..%s %s\n%s\n' "$name" "$rc" "$from" "$upto" "$*" "$(echo "$out" | grep -m3 '^FAIL\|panicked')"; fi
-  elif [ $rc = 0 ] && echo "$out" | grep -q '^MUTATION .* caught by'; then
-    touch "$SIM_UNITS/$name.caught"; echo "CAUGHTUNIT $name $from..$upto"
-  else
-    echo "MISSEDUNIT $name $from..$upto exit=$rc"
-  fi
-}
-simall() {
-  export -f simunit
-  export SIM_UNITS=$logs/sim-units SIM_TIMEOUT=""
-  # A hung unit fails after NANOCODE_CHECK_UNIT_TIMEOUT seconds (default 120; units take ~1 s).
-  command -v timeout >/dev/null && SIM_TIMEOUT="timeout ${NANOCODE_CHECK_UNIT_TIMEOUT:-120}"
-  mkdir -p "$SIM_UNITS"
-  simunits >"$logs/sim-units.txt"
-  xargs -P "$jobs" -L 1 bash -c 'simunit "$@"' _ <"$logs/sim-units.txt" >"$logs/sim.out" 2>&1
-  grep '^TIME ' "$logs/sim.out" | cut -d' ' -f2- >"$target/check-sim/sim-times.txt"
-  # One line per job, as before: PASSJOB, FAILJOB (above, per unit), CAUGHTJOB or MISSEDJOB.
-  while read -r name kind to flags; do
-    if [ "$kind" = pass ]; then
-      grep -q "^FAILJOB $name " "$logs/sim.out" || echo "PASSJOB $name"
-    elif first=$(grep "^CAUGHTUNIT $name " "$logs/sim.out" | cut -d' ' -f3 | sort -n | head -1) && [ -n "$first" ]; then
-      echo "CAUGHTJOB $name seeds=$first"
-    else
-      echo "MISSEDJOB $name $(grep "^MISSEDUNIT $name " "$logs/sim.out" | tail -1 | cut -d' ' -f4) :: nanocode-sim --seeds 0..$to $flags"
-    fi
-  done <"$logs/sim-jobs.txt" >"$logs/sim-jobs.out"
-  grep -v '^TIME \|^PASSUNIT \|^CAUGHTUNIT \|^MISSEDUNIT ' "$logs/sim.out"
-  cat "$logs/sim-jobs.out"
-  local p f c m
-  p=$(grep -c '^PASSJOB' "$logs/sim-jobs.out"); f=$(grep -c '^FAILJOB' "$logs/sim.out")
-  c=$(grep -c '^CAUGHTJOB' "$logs/sim-jobs.out"); m=$(grep -c '^MISSEDJOB' "$logs/sim-jobs.out")
-  echo "SIM pass_jobs=$p failed_units=$f canaries_caught=$c missed=$m units=$(grep -c . "$logs/sim-units.txt")"
-  [ "$f" = 0 ] && [ "$m" = 0 ] && [ $((p + c)) -gt 0 ]
-}
-if [ $sim = 1 ]; then
-  t0=$(now); wait $sim_pid; rc=$(cat "$logs/sim-build.rc")
-  # A copy, since other worktrees share the target dir and may relink it while the sim runs.
-  export SIM_BIN=$logs/nanocode-sim
-  [ "$rc" = 0 ] && { cp "$target/check-sim/$simprofile/nanocode-sim" "$SIM_BIN" || rc=1; }
-  if [ "$rc" = 0 ]; then
-    line "$green" ok sim-build "$(secs $t0)" "$simprofile nanocode-sim (time left after the checks)"
-    run tidy "nanocode-sim --tidy" "$SIM_BIN" --tidy
-    table=$(awk "/^default_table='/{f=1;next} f&&/^'/{exit} f" bin/nanocode-sim/cfo.sh)
-    [ "$scenarios" = all ] && scenarios=$("$SIM_BIN" 2>&1 | grep -o -- '--scenario [a-z_|]*' | head -1 | sed 's/--scenario //' | tr '|' ' ')
-    for s in $scenarios; do
-      echo "$table" | grep -q -- "--scenario $s\( \|$\)" || table="$table
-8 $s pass --scenario $s
-2 ${s}_twice pass --scenario $s --twice"
-    done
-    echo "$table" | SCENARIOS=" $scenarios " awk -v seeds="$seeds" 'NF >= 3 {
-      s = ""; for (i = 4; i < NF; i++) if ($i == "--scenario") s = $(i + 1)
-      if (index(ENVIRON["SCENARIOS"], " " s " ") == 0) next
-      flags = ""; for (i = 4; i <= NF; i++) flags = flags " " $i
-      if ($3 == "pass") print $2, "pass", seeds, flags
-      else if ($3 ~ /^canary/) { n = 400; if ($3 ~ /^canary:/) { split($3, k, ":"); n = k[2] } print $2, "canary", n, flags }
-    }' >"$logs/sim-jobs.txt"
-    np=$(awk '$2=="pass"' "$logs/sim-jobs.txt" | wc -l | tr -d ' '); nc=$(awk '$2=="canary"' "$logs/sim-jobs.txt" | wc -l | tr -d ' ')
-    run sim "$(echo $scenarios | wc -w | tr -d ' ') scenarios: $np pass jobs x $seeds seeds, $nc canaries" simall
-  else
-    line "$red" FAIL sim-build "$(secs $t0)" "(output/check/sim-build.log)"
-    grep -E '^error' -A5 "$logs/sim-build.log" | head -20 | sed 's/^/     | /'
-    touch "$logs/sim-build.failed"
-  fi
-else
-  skip sim "no simulator scenario reaches the changed crates"
-fi
-
-if ls "$logs"/*.failed >/dev/null 2>&1; then
-  printf '%sRED%s   nanocode %ss (%s)\n' "$red" "$off" "$(secs $started)" "$(cd "$logs" && ls *.failed | sed 's/.failed//' | tr '\n' ' ')"; exit 1
-fi
-metric_end=1
-printf '%sGREEN%s nanocode %ss\n' "$green" "$off" "$(secs $started)"
-
+target=$(cargo metadata --format-version 1 --no-deps --offline 2>/dev/null | python3 -I -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])') || target=${CARGO_TARGET_DIR:-$root/target}
+"${prefix[@]}" "$target/fast/nc-build" check "$@"

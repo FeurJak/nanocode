@@ -4,7 +4,7 @@ use std::{
     io::{self, IsTerminal, Read, Write},
     os::unix::process::ExitStatusExt,
     path::{Path, PathBuf},
-    process::{Command, ExitCode, ExitStatus, Stdio},
+    process::{Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
@@ -36,8 +36,9 @@ const SIM: Simulator = Simulator {
     aliases: &[("runtime", "whole"), ("executor", "tasks")],
 };
 const TABLE: &str = "bin/nanocode-sim/cfo.sh";
-const EVERYTHING_PREFIXES: [&str; 4] = [
+const EVERYTHING_PREFIXES: [&str; 5] = [
     "vendor/",
+    "scripts/check",
     "scripts/buildcache",
     "scripts/rustc-parallel-frontend",
     "scripts/wild-cc",
@@ -568,33 +569,34 @@ fn worktree_target(root: &Path, reported: PathBuf) -> Result<PathBuf, String> {
     }
 }
 
-pub fn main(args: &[String]) -> ExitCode {
+/// Runs the gate and returns its exit status: 0 GREEN, 1 RED, 2 when it could not run.
+pub fn main(args: &[String]) -> u8 {
     let options = match parse(args) {
         Ok(Parsed::Run(options)) => options,
         Ok(Parsed::Help) => {
             println!("{USAGE}");
-            return ExitCode::SUCCESS;
+            return 0;
         }
         Err(message) => {
             eprintln!("{message}\n{USAGE}");
-            return ExitCode::from(2);
+            return 2;
         }
     };
     let started = Instant::now();
     let Some(root) = git(&["rev-parse", "--show-toplevel"]) else {
         eprintln!("nc-build check: not in a git repository");
-        return ExitCode::from(2);
+        return 2;
     };
     if let Err(error) = std::env::set_current_dir(&root) {
         eprintln!("{root}: {error}");
-        return ExitCode::from(2);
+        return 2;
     }
     let root = PathBuf::from(root);
     let logs = root.join("output/check");
     let _ = fs::remove_dir_all(&logs);
     if let Err(error) = fs::create_dir_all(&logs) {
         eprintln!("{}: {error}", logs.display());
-        return ExitCode::from(2);
+        return 2;
     }
     let mut ui = Ui {
         color: io::stdout().is_terminal(),
@@ -653,7 +655,7 @@ pub fn main(args: &[String]) -> ExitCode {
             let log = fs::read_to_string(logs.join("metadata.log")).unwrap_or_default();
             let lines: Vec<String> = log.lines().map(str::to_owned).collect();
             Ui::print(&lines[lines.len().saturating_sub(gate::ERROR_CONTEXT_LINES)..]);
-            return ExitCode::FAILURE;
+            return 1;
         }
     };
     let crates_line = match &planned.selection {
@@ -697,7 +699,7 @@ pub fn main(args: &[String]) -> ExitCode {
             Ok(jobs) => Some(jobs),
             Err(error) => {
                 ui.line(Status::Fail, "scope", 0.0, &error);
-                return ExitCode::FAILURE;
+                return 1;
             }
         }
     } else {
@@ -728,7 +730,7 @@ pub fn main(args: &[String]) -> ExitCode {
                 .map(str::to_owned),
         );
         Ui::print(&lines);
-        return ExitCode::SUCCESS;
+        return 0;
     }
     let outcome = thread::scope(|scope| {
         let (target, logs, options) = (&target, &logs, &options);
@@ -816,7 +818,7 @@ pub fn main(args: &[String]) -> ExitCode {
     };
     if ui.failed.is_empty() {
         Ui::print(&[format!("{green}GREEN{off} {WORKSPACE} {secs:.1}s")]);
-        return ExitCode::SUCCESS;
+        return 0;
     }
     let mut failed = ui.failed.clone();
     failed.sort();
@@ -824,5 +826,5 @@ pub fn main(args: &[String]) -> ExitCode {
         "{red}RED{off}   {WORKSPACE} {secs:.1}s ({})",
         failed.join(" ")
     )]);
-    ExitCode::FAILURE
+    1
 }

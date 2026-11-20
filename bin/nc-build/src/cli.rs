@@ -39,7 +39,16 @@ pub fn main() -> ExitCode {
     let started = std::time::Instant::now();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
-        Some("check") => return crate::check::main(&args[1..]),
+        Some("check") => {
+            let code = crate::check::main(&args[1..]);
+            if !args
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "--plan" | "-h" | "--help"))
+            {
+                metric(&args, started.elapsed().as_millis(), code, compiled());
+            }
+            return ExitCode::from(code);
+        }
         Some("affected") => affected(&args[1..]),
         Some("shard") => shard(&args[1..]),
         Some("slots") => slots_command(&args[1..]),
@@ -53,15 +62,43 @@ pub fn main() -> ExitCode {
             2
         }
     };
-    metric(&args, started.elapsed().as_millis(), code);
+    metric(&args, started.elapsed().as_millis(), code, None);
     ExitCode::from(code)
+}
+
+/// After a check: whether cargo compiled nothing, from the first lines of each output/check log, where
+/// cargo prints its Compiling lines; None when no log is there.
+fn compiled() -> Option<bool> {
+    let logs = std::fs::read_dir("output/check").ok()?;
+    let mut any = false;
+    for entry in logs.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|extension| extension != "log") {
+            continue;
+        }
+        any = true;
+        let Ok(file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        if io::BufReader::new(file)
+            .lines()
+            .take(40)
+            .map_while(Result::ok)
+            .any(|line| {
+                line.starts_with("Compiling") || line.trim_start().starts_with("Compiling ")
+            })
+        {
+            return Some(false);
+        }
+    }
+    any.then_some(true)
 }
 
 /// Appends one point for this invocation to the swarm dashboard's feed, in its ingest format:
 /// `$NC_METRICS_LOG` (`off`: none), else ~/swarm/dash/feeds/BUILD.jsonl where that directory
 /// exists, else ~/swarm/metrics/BUILD.jsonl. Best effort: it reads HEAD from .git without
 /// running git, and ignores any error, so it never changes the result.
-fn metric(args: &[String], wall_ms: u128, exit: u8) {
+fn metric(args: &[String], wall_ms: u128, exit: u8, cached: Option<bool>) {
     let started = std::time::Instant::now();
     let path = match std::env::var_os("NC_METRICS_LOG") {
         Some(path) if path == "off" => return,
@@ -74,6 +111,14 @@ fn metric(args: &[String], wall_ms: u128, exit: u8) {
     let cmd = match args {
         [] => return,
         [group, sub, ..] if group == "slots" => format!("nc-build slots {sub}"),
+        // the series scripts/check wrote before it ran this engine
+        [sub, rest @ ..] if sub == "check" => {
+            if rest.iter().any(|arg| arg == "--full") {
+                "check --full".to_owned()
+            } else {
+                "check".to_owned()
+            }
+        }
         [sub, ..] => format!("nc-build {sub}"),
     };
     let (commit, repo) = git_head().unwrap_or_default();
@@ -96,7 +141,7 @@ fn metric(args: &[String], wall_ms: u128, exit: u8) {
         "box": host,
         "exit": exit,
         "noop": false,
-        "cached": null,
+        "cached": cached,
         "metric_us": started.elapsed().as_micros(),
     });
     if let Some(dir) = path.parent() {
