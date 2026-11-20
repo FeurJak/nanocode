@@ -1,5 +1,4 @@
-use std::fs;
-use std::io::Write;
+use nanocode_process_contracts::{FileHost, ProcessFuture};
 use std::path::Path;
 
 pub const MAX_LINES: usize = 800;
@@ -15,7 +14,8 @@ fn absolute(path: &str) -> Result<&Path, String> {
     }
 }
 
-pub fn read_file(
+pub async fn read_file(
+    files: &dyn FileHost,
     path: &str,
     start: Option<i64>,
     end: Option<i64>,
@@ -39,11 +39,10 @@ pub fn read_file(
             "invalid line range: StartLine {start} is greater than EndLine {end}"
         ));
     }
-    let metadata = fs::metadata(file).map_err(|_| "file does not exist".to_owned())?;
-    if metadata.is_dir() {
-        return Err("path is a directory, not a file".to_owned());
-    }
-    let bytes = fs::read(file).map_err(|error| error.to_string())?;
+    let bytes = files
+        .read_bytes(file)
+        .await?
+        .ok_or_else(|| "file does not exist".to_owned())?;
     if bytes.is_empty() {
         return Ok("File is empty".to_owned());
     }
@@ -95,7 +94,8 @@ const fn floor(text: &str, mut index: usize) -> usize {
     index
 }
 
-pub fn write_file(
+pub async fn write_file(
+    files: &dyn FileHost,
     path: &str,
     content: &str,
     overwrite: bool,
@@ -105,29 +105,31 @@ pub fn write_file(
     if overwrite && append {
         return Err("Overwrite and Append cannot both be true".to_owned());
     }
-    if file.exists() && !overwrite && !append {
+    let existing = files.read_bytes(file).await;
+    if !matches!(existing, Ok(None)) && !overwrite && !append {
         return Err(format!(
             "{path} already exists. To overwrite it, retry with Overwrite=true. To edit it, view its contents first and use a code edit tool. Otherwise, choose a different file name"
         ));
     }
-    if let Some(parent) = file.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    match (append, existing) {
+        (true, Ok(Some(mut bytes))) => {
+            bytes.extend_from_slice(content.as_bytes());
+            files.write_bytes(file, &bytes).await?;
+        }
+        (true, Err(error)) => return Err(error),
+        _ => files.write(file, content).await?,
     }
-    match append {
-        true => fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(file)
-            .and_then(|mut handle| handle.write_all(content.as_bytes())),
-        false => fs::write(file, content),
-    }
-    .map_err(|error| error.to_string())?;
     Ok("Created file.".to_owned())
 }
 
-pub fn edit_file(path: &str, target: &str, replacement: &str) -> Result<String, String> {
+pub async fn edit_file(
+    files: &dyn FileHost,
+    path: &str,
+    target: &str,
+    replacement: &str,
+) -> Result<String, String> {
     let file = absolute(path)?;
-    let Ok(text) = fs::read_to_string(file) else {
+    let Ok(Some(text)) = files.read(file).await else {
         return Err(format!(
             "{path} does not exist; the file may have been moved, renamed, or deleted"
         ));
@@ -140,7 +142,9 @@ pub fn edit_file(path: &str, target: &str, replacement: &str) -> Result<String, 
         return Err("target content not found in the file; the Target must exactly match existing file text, including whitespace".to_owned());
     };
     let line = text[..first].matches('\n').count() + 1;
-    fs::write(file, text.replace(target, replacement)).map_err(|error| error.to_string())?;
+    files
+        .write(file, &text.replace(target, replacement))
+        .await?;
     let noun = match count {
         1 => "replacement",
         _ => "replacements",
@@ -150,4 +154,61 @@ pub fn edit_file(path: &str, target: &str, replacement: &str) -> Result<String, 
         replacement.lines().count(),
         target.lines().count()
     ))
+}
+
+pub struct LocalFiles;
+
+fn local(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    match std::fs::metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+        Ok(metadata) if metadata.is_dir() => Err("path is a directory, not a file".to_owned()),
+        Ok(_) => std::fs::read(path)
+            .map(Some)
+            .map_err(|error| error.to_string()),
+    }
+}
+
+fn store(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::write(path, bytes).map_err(|error| error.to_string())
+}
+
+impl FileHost for LocalFiles {
+    fn read<'a>(&'a self, path: &'a Path) -> ProcessFuture<'a, Result<Option<String>, String>> {
+        Box::pin(async move {
+            local(path)?
+                .map(|bytes| String::from_utf8(bytes).map_err(|error| error.to_string()))
+                .transpose()
+        })
+    }
+
+    fn write<'a>(
+        &'a self,
+        path: &'a Path,
+        contents: &'a str,
+    ) -> ProcessFuture<'a, Result<(), String>> {
+        Box::pin(async move { store(path, contents.as_bytes()) })
+    }
+
+    fn remove<'a>(&'a self, path: &'a Path) -> ProcessFuture<'a, Result<(), String>> {
+        Box::pin(async move { std::fs::remove_file(path).map_err(|error| error.to_string()) })
+    }
+
+    fn read_bytes<'a>(
+        &'a self,
+        path: &'a Path,
+    ) -> ProcessFuture<'a, Result<Option<Vec<u8>>, String>> {
+        Box::pin(async move { local(path) })
+    }
+
+    fn write_bytes<'a>(
+        &'a self,
+        path: &'a Path,
+        bytes: &'a [u8],
+    ) -> ProcessFuture<'a, Result<(), String>> {
+        Box::pin(async move { store(path, bytes) })
+    }
 }

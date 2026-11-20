@@ -3,8 +3,11 @@ use nanocode_agent_core::{
     BackendId, HarnessFamily, ModelSelection, NanocodeError, Result, Thinking,
     backend::BackendFuture,
 };
-use nanocode_backend_antigravity_client::{CacheConfig, Endpoint, GoogleConfig, RetryPolicy};
+use nanocode_backend_antigravity_client::{
+    CacheConfig, Endpoint, GoogleConfig, RetryPolicy, Sender,
+};
 use nanocode_durability::CheckpointFormat;
+use nanocode_process_contracts::{FileHost, ShellExecutor};
 use std::sync::Arc;
 
 pub const FAMILY: &str = "antigravity";
@@ -18,14 +21,15 @@ pub struct AntigravityHarness {
     cache: CacheConfig,
     model: Option<String>,
     app_data: Option<std::path::PathBuf>,
-    #[cfg(not(target_family = "wasm"))]
+    sender: Option<Arc<dyn Sender>>,
+    files: Option<Arc<dyn FileHost>>,
+    shell: Option<Arc<dyn ShellExecutor>>,
     connection: Arc<nanocode_sync::OnceCell<Connection>>,
 }
 
-#[cfg(not(target_family = "wasm"))]
 #[derive(Clone)]
 struct Connection {
-    sender: Arc<dyn nanocode_backend_antigravity_client::Sender>,
+    sender: Arc<dyn Sender>,
     endpoint: Endpoint,
 }
 
@@ -77,12 +81,29 @@ impl AntigravityHarness {
         self
     }
 
+    #[must_use]
+    pub fn sender(mut self, sender: Arc<dyn Sender>) -> Self {
+        self.sender = Some(sender);
+        self
+    }
+
+    #[must_use]
+    pub fn files(mut self, files: Arc<dyn FileHost>) -> Self {
+        self.files = Some(files);
+        self
+    }
+
+    #[must_use]
+    pub fn shell(mut self, shell: Arc<dyn ShellExecutor>) -> Self {
+        self.shell = Some(shell);
+        self
+    }
+
     pub fn selection(model: impl Into<String>) -> ModelSelection {
         ModelSelection::new(HarnessFamily::new(FAMILY), model)
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
 pub const fn level(thinking: Thinking) -> Option<&'static str> {
     match thinking {
         Thinking::None => Some("MINIMAL"),
@@ -133,16 +154,6 @@ impl RuntimeBackend for AntigravityHarness {
     }
 }
 
-#[cfg(target_family = "wasm")]
-impl AntigravityHarness {
-    async fn assemble(&self, _request: RuntimeRequest) -> AgentResult {
-        Err(NanocodeError::UnsupportedCapability {
-            capability: "antigravity harness on wasm",
-        })
-    }
-}
-
-#[cfg(not(target_family = "wasm"))]
 impl AntigravityHarness {
     async fn assemble(&self, request: RuntimeRequest) -> AgentResult {
         use crate::driver::{Config, Driver};
@@ -178,7 +189,10 @@ impl AntigravityHarness {
             .connection
             .get_or_try_init(|| async {
                 fresh = true;
-                let sender = Client::native_sender().map_err(|error| invalid(error.to_string()))?;
+                let sender = match self.sender.clone() {
+                    Some(sender) => sender,
+                    None => native_sender()?,
+                };
                 let endpoint = match self.endpoint.clone() {
                     Some(endpoint) => endpoint,
                     None => Endpoint::discover(
@@ -229,20 +243,26 @@ impl AntigravityHarness {
         let selected = selected.add_shared_tools(additive)?;
         let runtime = ToolRuntime::new_with_tools(workspace.to_path_buf(), Vec::new(), &selected);
         let nano = NanoTools::new(runtime, &session);
-        let app_data = self.app_data.clone().unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map_or_else(std::env::temp_dir, std::path::PathBuf::from)
-                .join(".nanocode")
-                .join("antigravity")
-        });
+        let app_data = self
+            .app_data
+            .clone()
+            .unwrap_or_else(|| home(&workspace).join(".nanocode").join("antigravity"));
         let brain = app_data.join("brain").join(&session);
-        let shell = services.process_executors().shell(Vec::new());
+        let shell = match self.shell.clone() {
+            Some(shell) => shell,
+            None => default_shell(services.as_ref())?,
+        };
+        let files = self
+            .files
+            .clone()
+            .unwrap_or_else(|| Arc::new(nanocode_backend_antigravity_tools::LocalFiles));
         let search = crate::search::GoogleSearch {
             client: client.clone(),
             model: profile.model.clone(),
         };
         let engine = Engine::new(
             shell,
+            files,
             workspace.to_path_buf(),
             brain.clone(),
             session.clone(),
@@ -250,7 +270,7 @@ impl AntigravityHarness {
         );
         let skills = skills(&workspace);
         let system = crate::prompts::system(&crate::prompts::Environment {
-            os: std::env::consts::OS,
+            os: OS,
             workspace: &workspace,
             app_data: &app_data,
             conversation: &session,
@@ -304,6 +324,56 @@ impl AntigravityHarness {
 }
 
 #[cfg(not(target_family = "wasm"))]
+const OS: &str = std::env::consts::OS;
+
+#[cfg(target_family = "wasm")]
+const OS: &str = "linux";
+
+#[cfg(not(target_family = "wasm"))]
+fn native_sender() -> Result<Arc<dyn Sender>> {
+    nanocode_backend_antigravity_client::Client::native_sender()
+        .map_err(|error| NanocodeError::InvalidRequest(error.to_string()))
+}
+
+#[cfg(target_family = "wasm")]
+fn native_sender() -> Result<Arc<dyn Sender>> {
+    Err(NanocodeError::InvalidRequest(
+        "the antigravity harness on wasm needs a host sender: AntigravityHarness::sender".into(),
+    ))
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn home(_workspace: &std::path::Path) -> std::path::PathBuf {
+    std::env::var_os("HOME").map_or_else(std::env::temp_dir, std::path::PathBuf::from)
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn default_shell(
+    services: &dyn nanocode_agent_config::configuration::HostServices,
+) -> Result<Arc<dyn ShellExecutor>> {
+    Ok(services.process_executors().shell(Vec::new()))
+}
+
+#[cfg(target_family = "wasm")]
+fn default_shell(
+    _services: &dyn nanocode_agent_config::configuration::HostServices,
+) -> Result<Arc<dyn ShellExecutor>> {
+    Err(NanocodeError::InvalidRequest(
+        "the antigravity harness on wasm needs a host shell: AntigravityHarness::shell".into(),
+    ))
+}
+
+#[cfg(target_family = "wasm")]
+fn home(workspace: &std::path::Path) -> std::path::PathBuf {
+    workspace.to_path_buf()
+}
+
+#[cfg(target_family = "wasm")]
+const fn skills(_workspace: &std::path::Path) -> Vec<(String, String, String)> {
+    Vec::new()
+}
+
+#[cfg(not(target_family = "wasm"))]
 fn skills(workspace: &std::path::Path) -> Vec<(String, String, String)> {
     let Ok(home) = nanocode_home::AgentHome::from_env() else {
         return Vec::new();
@@ -338,7 +408,6 @@ fn skills(workspace: &std::path::Path) -> Vec<(String, String, String)> {
         .collect()
 }
 
-#[cfg(not(target_family = "wasm"))]
 pub(crate) fn new_id(seed: &str) -> String {
     use std::hash::{DefaultHasher, Hash, Hasher};
     let mut first = DefaultHasher::new();

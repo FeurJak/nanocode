@@ -1,9 +1,8 @@
 use crate::files;
 use crate::format::{duration_label, go_json, timestamp};
 use crate::schedule::Cron;
-use nanocode_process_contracts::{ExecCommand, OutputUnit, ShellExecutor, WriteStdin};
+use nanocode_process_contracts::{ExecCommand, FileHost, OutputUnit, ShellExecutor, WriteStdin};
 use serde_json::{Value, json};
-use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -82,6 +81,7 @@ struct Task {
 
 struct Inner {
     shell: Arc<dyn ShellExecutor>,
+    files: Arc<dyn FileHost>,
     workspace: PathBuf,
     brain: PathBuf,
     conversation: String,
@@ -127,6 +127,7 @@ fn command_body(code: i32, output: &str) -> String {
 impl Engine {
     pub fn new(
         shell: Arc<dyn ShellExecutor>,
+        files: Arc<dyn FileHost>,
         workspace: PathBuf,
         brain: PathBuf,
         conversation: String,
@@ -135,6 +136,7 @@ impl Engine {
         Self {
             inner: Arc::new(Inner {
                 shell,
+                files,
                 workspace,
                 brain,
                 conversation,
@@ -170,12 +172,9 @@ impl Engine {
             .join(format!("task-{step}.log"))
     }
 
-    pub fn finish_output(&self, tool: &str, step: u64, full: &str) -> String {
+    pub async fn finish_output(&self, tool: &str, step: u64, full: &str) -> String {
         let file = self.step_file(step);
-        if let Some(parent) = file.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let _ = fs::write(&file, full);
+        let _ = self.inner.files.write(&file, full).await;
         match tool {
             "read_file" => full.to_owned(),
             _ => crate::format::truncate_output(full, &file.to_string_lossy()),
@@ -190,28 +189,34 @@ impl Engine {
         }
         let result = match name {
             "read_file" => files::read_file(
+                self.inner.files.as_ref(),
                 text(args, "Path").unwrap_or_default(),
                 integer(args, "StartLine"),
                 integer(args, "EndLine"),
                 integer(args, "ByteOffset"),
             )
+            .await
             .map(Outcome::Output),
             "write_file" => files::write_file(
+                self.inner.files.as_ref(),
                 text(args, "Path").unwrap_or_default(),
                 text(args, "Content").unwrap_or_default(),
                 flag(args, "Overwrite"),
                 flag(args, "Append"),
             )
+            .await
             .map(Outcome::Output),
             "edit_file" => files::edit_file(
+                self.inner.files.as_ref(),
                 text(args, "Path").unwrap_or_default(),
                 text(args, "Target").unwrap_or_default(),
                 text(args, "Replacement").unwrap_or_default(),
             )
+            .await
             .map(Outcome::Output),
             "run_command" => self.run_command(args, step).await,
             "manage_task" => self.manage_task(args),
-            "schedule" => self.schedule(args, step),
+            "schedule" => self.schedule(args, step).await,
             "search_web" => self.search_web(args).await,
             "ask_question" => Ok(Outcome::Output(ask_question(args))),
             _ => Err(format!("unknown tool {name:?}")),
@@ -298,10 +303,7 @@ impl Engine {
                 let session = i32::try_from(session).unwrap_or_default();
                 let id = format!("{}/task-{step}", self.inner.conversation);
                 let log = self.task_log(step);
-                if let Some(parent) = log.parent() {
-                    let _ = fs::create_dir_all(parent);
-                }
-                let _ = fs::write(&log, &output);
+                let _ = self.inner.files.write(&log, &output).await;
                 let at = now();
                 self.lock_tasks().push(Task {
                     id: id.clone(),
@@ -351,16 +353,12 @@ impl Engine {
                     task.output.push_str(&chunk);
                     task.progress = now();
                 }
-                task.log.clone()
+                (task.log.clone(), task.output.clone())
             });
-            if let Some(log) = &log
+            if let Some((log, output)) = &log
                 && !chunk.is_empty()
             {
-                let _ = fs::OpenOptions::new()
-                    .append(true)
-                    .create(true)
-                    .open(log)
-                    .and_then(|mut file| std::io::Write::write_all(&mut file, chunk.as_bytes()));
+                let _ = self.inner.files.write(log, output).await;
             }
             let finished = result.exit_code.is_some() || result.session_id.is_none();
             if !finished {
@@ -391,16 +389,13 @@ impl Engine {
         }
     }
 
-    fn schedule(&self, args: &Value, step: u64) -> Result<Outcome, String> {
+    async fn schedule(&self, args: &Value, step: u64) -> Result<Outcome, String> {
         let prompt = text(args, "Prompt").unwrap_or_default().to_owned();
         let duration = integer(args, "DurationSeconds");
         let cron = text(args, "CronExpression").filter(|cron| !cron.trim().is_empty());
         let id = format!("{}/task-{step}", self.inner.conversation);
         let log = self.task_log(step);
-        if let Some(parent) = log.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let _ = fs::write(&log, "");
+        let _ = self.inner.files.write(&log, "").await;
         let at = now();
         let task = |summary: String, description: String, daemon: bool, kind: Kind| Task {
             id: id.clone(),

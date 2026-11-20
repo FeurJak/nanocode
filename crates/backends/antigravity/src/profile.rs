@@ -21,7 +21,6 @@ pub struct Profile {
     pub skip_signature: bool,
 }
 
-#[cfg(not(target_family = "wasm"))]
 pub const SKIP_SIGNATURE: &str = "c2tpcF90aG91Z2h0X3NpZ25hdHVyZV92YWxpZGF0b3I=";
 
 impl Profile {

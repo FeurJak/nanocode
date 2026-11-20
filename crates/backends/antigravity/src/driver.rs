@@ -413,10 +413,10 @@ impl Inner {
             return match engine.call(name, args, step).await {
                 Outcome::Output(body) => {
                     let full = with_header(created, Self::now(), &body);
-                    ("output", engine.finish_output(name, step, &full))
+                    ("output", engine.finish_output(name, step, &full).await)
                 }
                 Outcome::Background(text) => {
-                    let _ = engine.finish_output("read_file", step, &text);
+                    let _ = engine.finish_output("read_file", step, &text).await;
                     ("output", text)
                 }
                 Outcome::Error(error) => ("error", error),
@@ -439,7 +439,7 @@ impl Inner {
         match self.config.nano.call(name, args, context).await {
             Ok(body) => {
                 let full = with_header(created, Self::now(), &body);
-                ("output", engine.finish_output(name, step, &full))
+                ("output", engine.finish_output(name, step, &full).await)
             }
             Err(error) => (
                 "error",

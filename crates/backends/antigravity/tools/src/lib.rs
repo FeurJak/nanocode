@@ -5,6 +5,7 @@ mod schedule;
 mod validate;
 
 pub use engine::{Engine, Message, Outcome, WebSearch, WebSearchFuture};
+pub use files::LocalFiles;
 pub use format::{
     REMINDER, TRUNCATE_LIMIT, local_timestamp, system_message, timestamp, truncate_output,
     with_header,
