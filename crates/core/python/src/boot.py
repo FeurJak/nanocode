@@ -231,6 +231,22 @@ class _Loader:
         _frozen_importlib._call_with_frames_removed(exec, self.get_code(), module.__dict__)
 
 
+class _Sourceless(_Loader):
+    # A legacy m.pyc beside where m.py would be, as CPython's SourcelessFileLoader
+    # imports it: its code after the 16-byte header, once the magic number matches.
+    def get_source(self, name=None):
+        return None
+
+    def get_code(self, name=None):
+        import marshal
+        from importlib.util import MAGIC_NUMBER
+        with open(self.path, 'rb') as file:
+            data = file.read()
+        if data[:4] != MAGIC_NUMBER:
+            raise ImportError(f'bad magic number in {self.name!r}: {data[:4]!r}', name=self.name, path=self.path)
+        return marshal.loads(data[16:])
+
+
 _loaded = []
 _unfinished = False
 
@@ -300,13 +316,19 @@ class _Finder:
                     portions.append(base)
             except OSError:
                 pass
-            for file, package in ((base + '/__init__.py', True), (base + '.py', False)):
+            for file, package in ((base + '/__init__.py', True), (base + '/__init__.pyc', True), (base + '.py', False), (base + '.pyc', False)):
                 try:
                     if posix.stat(file).st_mode & 0o170000 != 0o100000:
                         continue
                 except OSError:
                     continue
-                spec = _frozen_importlib.ModuleSpec(name, _Loader(name, file, package), origin=file, is_package=package)
+                loader = (_Sourceless if file.endswith('.pyc') else _Loader)(name, file, package)
+                spec = _frozen_importlib.ModuleSpec(name, loader, origin=file, is_package=package)
+                # As FileFinder's specs do: __file__ from the origin, and __cached__ the
+                # .pyc a source would compile to (a sourceless .pyc is its own).
+                spec.has_location = True
+                if file.endswith('.pyc'):
+                    spec.cached = file
                 if package:
                     spec.submodule_search_locations = [base]
                 _loaded.append(name)

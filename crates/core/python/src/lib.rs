@@ -14,7 +14,7 @@ use std::{collections::BTreeSet, io, rc::Rc, sync::Arc, time::Duration};
 
 use rustpython_vm::{
     AsObject, Interpreter, PyObjectRef, PyResult, Settings, VirtualMachine,
-    builtins::{PyBaseExceptionRef, PyDictRef},
+    builtins::{PyBaseExceptionRef, PyBytes, PyCode, PyDictRef},
     common::rc::PyRc,
     frozen::FrozenLib,
     function::IntoFuncArgs,
@@ -338,6 +338,8 @@ fn invocation(args: &[String]) -> Result<Invocation, String> {
 
 enum Prepared {
     Source(String, String),
+    /// A compiled .pyc: its marshalled code after the 16-byte header, and its path.
+    Compiled(Vec<u8>, String),
     Module(String),
     Exited(i32),
 }
@@ -482,8 +484,9 @@ impl Python {
             }
         };
         region::enter(cfg!(debug_assertions));
-        let (source, name) = match prepared {
-            Prepared::Source(source, name) => (source, name),
+        let (source, name, compiled) = match prepared {
+            Prepared::Source(source, name) => (source, name, None),
+            Prepared::Compiled(code, name) => (String::new(), name, Some(code)),
             Prepared::Module(module) => {
                 let missing = self.missing(vm, "_absent", vm.ctx.new_str(module.as_str()).into());
                 if vm.stopped.borrow().is_some() {
@@ -544,6 +547,22 @@ impl Python {
                 scope
                     .globals
                     .set_item("__file__", vm.ctx.new_str(path.as_str()).into(), vm)?;
+                if let Some(compiled) = &compiled {
+                    // CPython 3.12 runs a .pyc's code object itself as __main__, with
+                    // __cached__ None.
+                    scope
+                        .globals
+                        .set_item("__cached__", vm.ctx.none(), vm)?;
+                    let code = vm
+                        .import("marshal", 0)?
+                        .get_attr("loads", vm)?
+                        .call((vm.ctx.new_bytes(compiled.clone()),), vm)?
+                        .downcast::<PyCode>()
+                        .map_err(|_| {
+                            vm.new_runtime_error("Bad code object in .pyc file".to_owned())
+                        })?;
+                    return vm.run_code_obj(code, scope);
+                }
                 return vm.run_string(scope, &source, &path);
             }
             // CPython 3.12 keeps no source for a program from -c or stdin, so its
@@ -637,6 +656,29 @@ impl Python {
                     ),
                     path.clone(),
                 ),
+                // CPython 3.12 runs a .pyc (by its name, or by the magic number's
+                // b"\r\n" on a file that is no UTF-8 text) as compiled code, and
+                // refuses one whose magic number is another version's.
+                Ok(source)
+                    if path.ends_with(".pyc")
+                        || (source.get(2..4) == Some(&b"\r\n"[..])
+                            && std::str::from_utf8(&source).is_err()) =>
+                {
+                    let magic = vm
+                        .import("importlib.util", 0)?
+                        .get_attr("util", vm)?
+                        .get_attr("MAGIC_NUMBER", vm)?;
+                    let magic = magic
+                        .downcast_ref::<PyBytes>()
+                        .map(|magic| magic.as_bytes().to_vec())
+                        .unwrap_or_default();
+                    if source.len() < 4 || source[..4] != magic[..] {
+                        host::print("RuntimeError: Bad magic number in .pyc file\n");
+                        Prepared::Exited(1)
+                    } else {
+                        Prepared::Compiled(source.get(16..).unwrap_or_default().to_vec(), path.clone())
+                    }
+                }
                 Ok(source) => decoded(source, path),
                 Err(error) => {
                     host::print(&format!(
