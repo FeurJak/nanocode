@@ -229,7 +229,7 @@ async fn owned<'a>(
 /// conflicts, including the forget that keeps a restart from resuming the cell
 /// from an older journal and repeating its effects. The next write re-reads the
 /// head instead.
-fn writing(slot: &mut Session) -> Session {
+const fn writing(slot: &mut Session) -> Session {
     std::mem::replace(slot, Session::Unread)
 }
 
