@@ -63,6 +63,12 @@ pub trait Coordination: Send + Sync {
 }
 
 pub const LEASE_MS: u64 = 1 << 30;
+/// The most worker boards one coordination keeps open at once. Each worker
+/// board replays and holds the scope's whole fold (tens of MB on a long-lived
+/// scope), so a worker's board closes once its task finishes or is cancelled,
+/// and past this many the least recently opened one closes; a later write
+/// reopens it from the log.
+pub const MAX_WORKER_BOARDS: usize = 8;
 pub const PRINCIPAL: &str = "nanocode:subagents";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -196,6 +202,8 @@ struct Inner {
     clock: u64,
     dispatcher: Option<Board>,
     workers: BTreeMap<String, Board>,
+    /// Sessions in `workers`, oldest opened first, bounded by `MAX_WORKER_BOARDS`.
+    opened: std::collections::VecDeque<String>,
     sessions: BTreeMap<String, Session>,
     agents: BTreeMap<(String, AgentId), String>,
     roots: BTreeSet<String>,
@@ -303,6 +311,7 @@ impl BoardCoordination {
                     clock: 0,
                     dispatcher: None,
                     workers: BTreeMap::new(),
+                    opened: std::collections::VecDeque::new(),
                     sessions: BTreeMap::new(),
                     agents: BTreeMap::new(),
                     roots: BTreeSet::new(),
@@ -368,6 +377,14 @@ impl BoardCoordination {
             self.desk.acquire().await.drain().await;
         }
         replied.await.ok()
+    }
+
+    /// Worker boards open now; at most `MAX_WORKER_BOARDS`, and none once
+    /// every task has finished.
+    pub async fn open_workers(&self) -> usize {
+        self.call(|inner| Box::pin(async move { inner.workers.len() }))
+            .await
+            .unwrap_or_default()
     }
 
     pub async fn stats(&self) -> BoardStats {
@@ -585,9 +602,7 @@ impl Inner {
         };
         if !self.workers.contains_key(&held.session) {
             match open(&self.host, &self.scope, Some(&profile_of(&held.session))).await {
-                Ok(Some(board)) => {
-                    self.workers.insert(held.session.clone(), board);
-                }
+                Ok(Some(board)) => self.keep_worker(&held.session, board),
                 Ok(None) => return,
                 Err(error) => {
                     self.fail(format!("open worker {}: {error}", held.session));
@@ -626,6 +641,7 @@ impl Inner {
                     state.claim = None;
                     state.heard = None;
                 }
+                self.close_worker(&session);
             }
             Err(BoardError::Rejected(Rejection::NotHolder)) => {
                 self.stats.fenced += 1;
@@ -784,13 +800,29 @@ impl Inner {
         }
     }
 
+    fn keep_worker(&mut self, session: &str, board: Board) {
+        while self.opened.len() >= MAX_WORKER_BOARDS {
+            let Some(oldest) = self.opened.pop_front() else {
+                break;
+            };
+            self.workers.remove(&oldest);
+        }
+        self.opened.retain(|open| open != session);
+        self.opened.push_back(session.to_owned());
+        self.workers.insert(session.to_owned(), board);
+    }
+
+    fn close_worker(&mut self, session: &str) {
+        if self.workers.remove(session).is_some() {
+            self.opened.retain(|open| open != session);
+        }
+    }
+
     async fn worker(&mut self, session: &str) -> Option<&mut Board> {
         self.settle().await;
         if !self.workers.contains_key(session) {
             match open(&self.host, &self.scope, Some(&profile_of(session))).await {
-                Ok(Some(board)) => {
-                    self.workers.insert(session.to_owned(), board);
-                }
+                Ok(Some(board)) => self.keep_worker(session, board),
                 Ok(None) => return None,
                 Err(error) => {
                     self.fail(format!("open worker {session}: {error}"));
@@ -1322,6 +1354,7 @@ impl Inner {
             state.claim = None;
             state.last_output = None;
         }
+        self.close_worker(session);
     }
 }
 
