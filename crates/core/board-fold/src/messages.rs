@@ -201,6 +201,11 @@ impl Said {
         }
     }
 
+    /// Messages held.
+    pub(crate) fn len(&self) -> usize {
+        self.messages.len()
+    }
+
     /// Keep the newest keep replies under task's root message, dropping older ones and their own
     /// replies (Retain::events).
     pub(crate) fn trim(&mut self, task: &str, keep: usize) {

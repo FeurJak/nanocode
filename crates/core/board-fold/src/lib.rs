@@ -452,8 +452,8 @@ impl Fold {
 
     /// What the fold holds now, in records: tasks, entries, dedupe outcomes and said messages. Unlike
     /// next (every row ever folded), it stays flat on a board whose retention keeps up.
-    pub fn held(&self) -> usize {
-        self.tasks.len() + self.entries.len() + self.seen.len() + self.said.messages.len()
+    pub fn records(&self) -> usize {
+        self.tasks.len() + self.entries.len() + self.seen.len() + self.said.len()
     }
 
     pub const fn now_ms(&self) -> u64 {

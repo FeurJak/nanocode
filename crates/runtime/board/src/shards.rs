@@ -202,9 +202,9 @@ impl<'a> Merged<'a> {
         self.shown().map(|(_, fold)| fold.next()).sum()
     }
 
-    /// Records held across every partition (Fold::held).
+    /// Records held across every partition (Fold::records).
     pub fn held(&self) -> u64 {
-        self.shown().map(|(_, fold)| fold.held() as u64).sum()
+        self.shown().map(|(_, fold)| fold.records() as u64).sum()
     }
 
     /// Where a write goes, given what the folds know about the tasks it names.
