@@ -633,6 +633,7 @@ impl State {
             .iter()
             .filter(|lease| {
                 lease.id != held.id
+                    && lease.label_prefix().is_none()
                     && lease.machine == held.machine
                     && lease.first_cpu < held.end_cpu()
                     && held.first_cpu < lease.end_cpu()

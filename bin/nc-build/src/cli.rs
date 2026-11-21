@@ -2419,6 +2419,33 @@ mod tests {
     }
 
     #[test]
+    fn a_take_places_inside_an_overlapping_prefix_reservation() {
+        let machines = [machine()];
+        let mut state = State::default();
+        for prefix in ["py-", "py-", "nf-"] {
+            let want = Want {
+                cores: 8,
+                kind: slots::RESERVED_KIND.to_owned(),
+                label: format!("{prefix}{}", slots::PREFIX_MARK),
+                only: Some("m".to_owned()),
+                ttl_ms: 600 * MIN,
+                queue: None,
+            };
+            state
+                .reserve("m", 0, &want, NOW, NOW + 600 * MIN, true)
+                .unwrap();
+        }
+        let py = labelled(4, slots::DEFAULT_KIND, "py-a");
+        assert_eq!(state.take(&machines, &py, NOW).unwrap().cpus(), "0-3");
+        let nf = labelled(4, slots::DEFAULT_KIND, "nf-b");
+        assert_eq!(state.take(&machines, &nf, NOW).unwrap().cpus(), "4-7");
+        let full = labelled(1, slots::DEFAULT_KIND, "py-c");
+        if let Ok(lease) = state.take(&machines, &full, NOW) {
+            assert!(lease.first_cpu >= 8, "{}", lease.cpus());
+        }
+    }
+
+    #[test]
     fn a_take_inside_a_standing_reservation_keeps_it_alive() {
         let machines = [machine()];
         let mut state = State::default();
