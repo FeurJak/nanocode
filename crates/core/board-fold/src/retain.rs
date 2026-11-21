@@ -1,9 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
 use crate::sim::{Mutation, mutated};
-use crate::{Change, Entry, EventId, Fold, Op, TaskId};
+use crate::{Change, Entry, EventId, Fold, Op, Phase, TaskId};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Retain {
@@ -18,6 +18,12 @@ pub struct Retain {
     /// lose nothing by it.
     #[serde(default)]
     pub events: usize,
+    /// Evicted tasks whose ids the fold keeps refusing a re-post of (0: every one): past it the earliest evicted
+    /// leave the gone set once their post left the entries too, so a board that evicts a task per job holds at most
+    /// this many plus the entries' rather than every id it ever evicted. A re-post of an id past it folds as a new
+    /// task; a writer that must refuse one keeps its own record.
+    #[serde(default)]
+    pub gone: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +41,8 @@ pub struct Retention {
     #[serde(with = "crate::pairs")]
     posted: BTreeMap<TaskId, usize>,
     gone: BTreeSet<TaskId>,
+    #[serde(default)]
+    gone_order: VecDeque<(usize, TaskId)>,
 }
 
 impl Retention {
@@ -49,6 +57,7 @@ impl Retention {
             minted: BTreeMap::new(),
             posted: BTreeMap::new(),
             gone: BTreeSet::new(),
+            gone_order: VecDeque::new(),
         }
     }
 
@@ -269,6 +278,12 @@ impl Fold {
         let Some(task) = self.tasks.remove(id) else {
             return;
         };
+        let post = self
+            .posted
+            .get(id)
+            .or_else(|| self.retention.posted.get(id))
+            .copied()
+            .unwrap_or(0);
         for (key, value) in &task.spec.labels {
             if let Some(values) = self.labelled.get_mut(key) {
                 if let Some(ids) = values.get_mut(value) {
@@ -319,8 +334,37 @@ impl Fold {
                 *floor = (*floor).max(count);
             }
         }
-        self.retention.gone.insert(id.clone());
         self.retention.evicted += 1;
+        let keep = self.retention.policy.as_ref().map_or(0, |policy| policy.gone);
+        if keep == 0 || mutated(Mutation::GoneUnbounded) {
+            self.retention.gone.insert(id.clone());
+            return;
+        }
+        if self.retention.gone_order.len() < self.retention.gone.len() {
+            self.retention.gone_order = self.retention.gone.iter().map(|id| (0, id.clone())).collect();
+        }
+        if self.retention.gone.insert(id.clone()) {
+            self.retention.gone_order.push_back((post, id.clone()));
+        }
+        self.shed_gone();
+    }
+
+    fn shed_gone(&mut self) {
+        let keep = self.retention.policy.as_ref().map_or(0, |policy| policy.gone);
+        if keep == 0 || mutated(Mutation::GoneUnbounded) {
+            return;
+        }
+        while self.retention.gone_order.len() > keep
+            && self
+                .retention
+                .gone_order
+                .front()
+                .is_some_and(|(post, _)| *post < self.retention.base)
+        {
+            if let Some((_, old)) = self.retention.gone_order.pop_front() {
+                self.retention.gone.remove(&old);
+            }
+        }
     }
 
     fn trim(&mut self, max: usize) {
@@ -340,6 +384,7 @@ impl Fold {
         }
         self.entries.drain(..over);
         self.retention.base += over;
+        self.shed_gone();
     }
 
     pub(crate) fn restored_posts(&self) -> BTreeMap<TaskId, usize> {
@@ -365,6 +410,60 @@ impl Fold {
             self.retention.order.remove(&(at, id.clone()));
             self.retention.order.insert((0, id.clone()));
             self.retention.settled.insert(id, 0);
+        }
+    }
+}
+
+/// What a fold holds, broken down: its tasks by kind (the task's kind label, else its id's prefix) and stage
+/// (a Claimed task past its lease counts as lapsed), its entries, dedupe outcomes and said messages (records sums
+/// these, as Fold::records does), and its retention bookkeeping: the events it tracks per held task (they leave
+/// with it), the settled order, the evicted ids it refuses a re-post of and its writers' minted floors.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct Holding {
+    pub tasks: BTreeMap<(String, &'static str), usize>,
+    pub entries: usize,
+    pub seen: usize,
+    pub tracked: usize,
+    pub said: usize,
+    pub settled: usize,
+    pub gone: usize,
+    pub minted: usize,
+}
+
+impl Holding {
+    pub fn records(&self) -> usize {
+        self.tasks.values().sum::<usize>() + self.entries + self.seen + self.said
+    }
+}
+
+impl Fold {
+    pub fn holding(&self) -> Holding {
+        let mut tasks: BTreeMap<(String, &'static str), usize> = BTreeMap::new();
+        for (id, task) in &self.tasks {
+            let kind = task.spec.labels.get("kind").cloned().unwrap_or_else(|| {
+                id.0.split([':', '/']).next().unwrap_or_default().to_owned()
+            });
+            let stage = match &task.phase {
+                Phase::Open => "open",
+                Phase::Claimed { until_ms, .. } if *until_ms > self.now_ms => "held",
+                Phase::Claimed { .. } => "lapsed",
+                Phase::Done { .. } => "done",
+                Phase::Failed { .. } => "failed",
+                Phase::Cancelled { .. } => "cancelled",
+                Phase::Blocked { .. } => "blocked",
+            };
+            *tasks.entry((kind, stage)).or_default() += 1;
+        }
+        let tracked = self.retention.events.values().map(Vec::len).sum();
+        Holding {
+            tasks,
+            entries: self.entries.len(),
+            seen: self.seen.len(),
+            tracked,
+            said: self.said.len(),
+            settled: self.retention.settled.len(),
+            gone: self.retention.gone.len(),
+            minted: self.retention.minted.len(),
         }
     }
 }
@@ -436,6 +535,7 @@ mod tests {
             entries: 1_000,
             only: None,
             events: 4,
+            gone: 0,
         };
         let mut fold = board(policy, 0);
         let mut minted = 2;
@@ -468,6 +568,7 @@ mod tests {
             entries: 8,
             only: None,
             events: 0,
+            gone: 0,
         };
         let mut fold = board(policy, 20);
         assert_eq!(
@@ -504,6 +605,7 @@ mod tests {
                 entries: 1_000,
                 only,
                 events: 0,
+                gone: 0,
             },
             20,
         );

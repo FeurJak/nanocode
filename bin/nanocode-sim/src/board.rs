@@ -100,6 +100,7 @@ pub enum BoardMutation {
     CheckpointEveryFixed,
     EvictionDiffersByReplica,
     EventsUncapped,
+    GoneUnbounded,
     DueIgnored,
     DueFiresTwice,
     RecurrenceSkipsOnRestart,
@@ -132,7 +133,7 @@ pub enum BoardMutation {
 }
 
 impl BoardMutation {
-    const ALL: [Self; 78] = [
+    const ALL: [Self; 79] = [
         Self::None,
         Self::ClaimIgnoresLease,
         Self::ClaimIgnoresNeeds,
@@ -184,6 +185,7 @@ impl BoardMutation {
         Self::CheckpointEveryFixed,
         Self::EvictionDiffersByReplica,
         Self::EventsUncapped,
+        Self::GoneUnbounded,
         Self::DueIgnored,
         Self::DueFiresTwice,
         Self::RecurrenceSkipsOnRestart,
@@ -275,6 +277,7 @@ impl BoardMutation {
             Self::CheckpointEveryFixed => "checkpoint_every_fixed",
             Self::EvictionDiffersByReplica => "eviction_differs_by_replica",
             Self::EventsUncapped => "events_uncapped",
+            Self::GoneUnbounded => "gone_unbounded",
             Self::DueIgnored => "due_ignored",
             Self::DueFiresTwice => "due_fires_twice",
             Self::RecurrenceSkipsOnRestart => "recurrence_skips_on_restart",
@@ -373,6 +376,7 @@ impl BoardMutation {
             Self::CheckpointEveryFixed => BoardRule::CheckpointEveryFixed,
             Self::EvictionDiffersByReplica => BoardRule::EvictionDiffersByReplica,
             Self::EventsUncapped => BoardRule::EventsUncapped,
+            Self::GoneUnbounded => BoardRule::GoneUnbounded,
             Self::DueIgnored => BoardRule::DueIgnored,
             Self::DueFiresTwice => BoardRule::DueFiresTwice,
             Self::RecurrenceSkipsOnRestart => BoardRule::RecurrenceSkipsOnRestart,
@@ -1882,6 +1886,7 @@ fn retains(seed: u64, rows: &[(u64, String)]) -> Result<u64, String> {
         entries: 1 + rng.below(rows.len() as u64 / 2 + 1) as usize,
         only: None,
         events: rng.below(4) as usize,
+        gone: rng.below(3) as usize,
     };
     // Fold row by row, and at every cut restore the fold from its own compact snapshot: a restore
     // must give back exactly the fold that wrote it, retention bookkeeping included, or the restored
@@ -1916,6 +1921,12 @@ fn retains(seed: u64, rows: &[(u64, String)]) -> Result<u64, String> {
                 ));
             }
         }
+    }
+    let gone = kept.holding().gone;
+    if policy.gone > 0 && gone > policy.gone + policy.entries {
+        return Err(format!(
+            "a fold retaining {policy:?} refuses a re-post of {gone} evicted tasks"
+        ));
     }
     let terminal = kept
         .tasks()
