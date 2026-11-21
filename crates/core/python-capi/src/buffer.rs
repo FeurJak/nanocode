@@ -167,9 +167,21 @@ struct BuiltView {
     _keep: rustpython_vm::PyObjectRef,
 }
 
-unsafe impl Send for BuiltView {}
+/// Views per thread: each holds a runtime object of that thread's interpreter,
+/// whose refcounts aren't atomic, so no other thread may drop or read it. At
+/// thread exit the views are leaked rather than dropped, since the
+/// interpreters that own their objects are gone by then.
+struct Built(Vec<(usize, Box<BuiltView>)>);
 
-static BUILT: std::sync::Mutex<Vec<(usize, Box<BuiltView>)>> = std::sync::Mutex::new(Vec::new());
+impl Drop for Built {
+    fn drop(&mut self) {
+        std::mem::forget(std::mem::take(&mut self.0));
+    }
+}
+
+thread_local! {
+    static BUILT: std::cell::RefCell<Built> = const { std::cell::RefCell::new(Built(Vec::new())) };
+}
 
 /// What PyMemoryView_GET_BUFFER reads: memoryviews are runtime objects, not
 /// CPython's struct, so numpy and others get the exporter's own C view when a
@@ -195,44 +207,63 @@ pub extern "C" fn _PyMemoryView_GetBuffer(pointer: *mut Object) -> *mut Buffer {
             return Ok(holder.view());
         }
         let key = pointer as usize;
-        let mut built = BUILT.lock().unwrap();
         // C reads a view through the memoryview's C object, so a view is
         // dead once that object has no C references: drop those, so views
         // don't pile up for the run (the bridge parks a proxy whose object
         // this table still holds, which kept both forever). _keep holds the
         // object, so the bridge hasn't freed the C object and its count is
-        // still readable.
-        built.retain(|(key, _)| unsafe { (*(*key as *mut Object)).refcnt } != 0);
-        if let Some((_, view)) = built.iter_mut().find(|(k, _)| *k == key) {
-            return Ok(&raw mut view.view);
-        }
-        let base = buffer.obj_bytes().as_ptr() as isize + desc.offset;
-        let ndim = desc.dim_desc.len();
-        let mut dims: Vec<isize> = desc.dim_desc.iter().map(|d| d.0 as isize).collect();
-        dims.extend(desc.dim_desc.iter().map(|d| d.1));
-        let format = std::ffi::CString::new(desc.format.as_bytes()).unwrap_or_default();
-        let mut entry = Box::new(BuiltView {
-            view: unsafe { std::mem::zeroed() },
-            _dims: dims,
-            _format: format,
-            _keep: object.clone(),
+        // still readable. They drop outside the borrow, as a drop may run
+        // Python that comes back here.
+        let dead: Vec<_> = BUILT.with_borrow_mut(|Built(built)| {
+            built
+                .extract_if(
+                    ..,
+                    |(key, _)| unsafe { (*(*key as *mut Object)).refcnt } == 0,
+                )
+                .collect()
         });
-        let dims_ptr = entry._dims.as_mut_ptr();
-        entry.view = Buffer {
-            buf: base as *mut std::ffi::c_void,
-            obj: pointer,
-            len: desc.len as isize,
-            itemsize: desc.itemsize as isize,
-            readonly: desc.readonly as c_int,
-            ndim: ndim as c_int,
-            format: entry._format.as_ptr().cast_mut(),
-            shape: dims_ptr,
-            strides: unsafe { dims_ptr.add(ndim) },
-            suboffsets: null_mut(),
-            internal: null_mut(),
-        };
-        built.push((key, entry));
-        let view = &raw mut built.last_mut().unwrap().1.view;
-        Ok(view)
+        drop(dead);
+        BUILT.with_borrow_mut(|Built(built)| built_view(built, key, pointer, &object, buffer, desc))
     })
+}
+
+fn built_view(
+    built: &mut Vec<(usize, Box<BuiltView>)>,
+    key: usize,
+    pointer: *mut Object,
+    object: &rustpython_vm::PyObjectRef,
+    buffer: &PyBuffer,
+    desc: &BufferDescriptor,
+) -> PyResult<*mut Buffer> {
+    if let Some((_, view)) = built.iter_mut().find(|(k, _)| *k == key) {
+        return Ok(&raw mut view.view);
+    }
+    let base = buffer.obj_bytes().as_ptr() as isize + desc.offset;
+    let ndim = desc.dim_desc.len();
+    let mut dims: Vec<isize> = desc.dim_desc.iter().map(|d| d.0 as isize).collect();
+    dims.extend(desc.dim_desc.iter().map(|d| d.1));
+    let format = std::ffi::CString::new(desc.format.as_bytes()).unwrap_or_default();
+    let mut entry = Box::new(BuiltView {
+        view: unsafe { std::mem::zeroed() },
+        _dims: dims,
+        _format: format,
+        _keep: object.clone(),
+    });
+    let dims_ptr = entry._dims.as_mut_ptr();
+    entry.view = Buffer {
+        buf: base as *mut std::ffi::c_void,
+        obj: pointer,
+        len: desc.len as isize,
+        itemsize: desc.itemsize as isize,
+        readonly: desc.readonly as c_int,
+        ndim: ndim as c_int,
+        format: entry._format.as_ptr().cast_mut(),
+        shape: dims_ptr,
+        strides: unsafe { dims_ptr.add(ndim) },
+        suboffsets: null_mut(),
+        internal: null_mut(),
+    };
+    built.push((key, entry));
+    let view = &raw mut built.last_mut().unwrap().1.view;
+    Ok(view)
 }
