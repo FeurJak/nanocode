@@ -233,6 +233,10 @@ const fn writing(slot: &mut Session) -> Session {
     std::mem::replace(slot, Session::Unread)
 }
 
+fn keeps_head() -> bool {
+    nanocode_durability::sim::mutated(nanocode_durability::sim::Mutation::CellJournalKeepsHead)
+}
+
 async fn replace(
     store: &SharedStore,
     session_id: &str,
@@ -369,7 +373,7 @@ impl CellJournalSink for DurableCellJournals {
                 .await
             }
             .await;
-            if saved.is_ok() {
+            if saved.is_ok() || keeps_head() {
                 *slot = session;
             }
             saved
@@ -403,6 +407,9 @@ impl CellJournalSink for DurableCellJournals {
             match forgotten.await {
                 Ok(()) => *slot = session,
                 Err(error) => {
+                    if keeps_head() {
+                        *slot = session;
+                    }
                     nanocode_trace::warn!(cell_id, %error, "a Code Mode cell journal could not be forgotten");
                 }
             }

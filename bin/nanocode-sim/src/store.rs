@@ -25,6 +25,23 @@ const RECEIPT_WORD: &str = "accepted";
 const ACKED_WRITES_DROPPED_MAX: u64 = 3;
 const CAS_IGNORES_EXPECTED_PPM: u64 = 500_000;
 const KV_LIES_PPM: u64 = 250_000;
+const CELLS_SUFFIX: &str = ":cells";
+
+thread_local! {
+    static JOURNAL_LOSSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many journal head writes this thread's stores reported lost although
+/// they landed. A caller that saw an error after one may retry: the writer
+/// must then read the head back rather than fail on a revision it cached.
+pub fn journal_losses() -> u64 {
+    JOURNAL_LOSSES.with(std::cell::Cell::get)
+}
+
+/// Starts a seed's count of lost journal writes from zero.
+pub fn forget_journal_losses() {
+    JOURNAL_LOSSES.with(|losses| losses.set(0));
+}
 const PHANTOM_KEY: &str = "phantom";
 const RECORD_INSERT_DROPS_PPM: u64 = 250_000;
 const RECORD_INSERT_OVERWRITES_PPM: u64 = 500_000;
@@ -47,10 +64,12 @@ pub enum Mutation {
     GetCorruptsValue,
     ListPhantomKey,
     ListSkipsKey,
+    SubagentJournalKeepsRevision,
+    CellJournalKeepsHead,
 }
 
 impl Mutation {
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 15] = [
         Self::None,
         Self::CasIgnoresExpected,
         Self::RecordInsertDrops,
@@ -64,6 +83,8 @@ impl Mutation {
         Self::GetCorruptsValue,
         Self::ListPhantomKey,
         Self::ListSkipsKey,
+        Self::SubagentJournalKeepsRevision,
+        Self::CellJournalKeepsHead,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -87,6 +108,8 @@ impl Mutation {
             Self::GetCorruptsValue => "get_corrupts_value",
             Self::ListPhantomKey => "list_phantom_key",
             Self::ListSkipsKey => "list_skips_key",
+            Self::SubagentJournalKeepsRevision => "subagent_journal_keeps_revision",
+            Self::CellJournalKeepsHead => "cell_journal_keeps_head",
         }
     }
 
@@ -95,7 +118,23 @@ impl Mutation {
     }
 
     pub const fn runtime_only(self) -> bool {
-        matches!(self, Self::PowerLossDropsAcceptance)
+        matches!(
+            self,
+            Self::PowerLossDropsAcceptance
+                | Self::SubagentJournalKeepsRevision
+                | Self::CellJournalKeepsHead
+        )
+    }
+
+    /// The journal writer bug this mutation restores, if it is one.
+    pub const fn journal(self) -> nanocode_durability::sim::Mutation {
+        match self {
+            Self::SubagentJournalKeepsRevision => {
+                nanocode_durability::sim::Mutation::SubagentJournalKeepsRevision
+            }
+            Self::CellJournalKeepsHead => nanocode_durability::sim::Mutation::CellJournalKeepsHead,
+            _ => nanocode_durability::sim::Mutation::None,
+        }
     }
 
     pub fn store_names() -> String {
@@ -151,6 +190,11 @@ type Recent = (String, Option<Entry>, Entry);
 
 pub struct Kv {
     rng: Rng,
+    journal_rng: Rng,
+    /// How often a cells or subagents journal head write lands while its
+    /// caller sees an error.
+    pub journal_lost_ppm: u64,
+    journal_warm: std::collections::BTreeSet<String>,
     profile: Profile,
     mutation: Mutation,
     pub faults_on: bool,
@@ -437,6 +481,10 @@ impl Kv {
             && self.mutation == Mutation::CasReportsConflict
             && self.rng.chance(KV_LIES_PPM);
         let after_fault = self.fault(op, self.profile.after_ppm, "cas after apply");
+        let journal_fault = !after_fault
+            && swapped
+            && !unwritten
+            && self.journal_lost(op, key, expected_version, &new);
         let event = CasEvent {
             key: key.to_owned(),
             prev,
@@ -444,14 +492,61 @@ impl Kv {
             new,
             value,
             swapped,
-            after_fault,
+            after_fault: after_fault || journal_fault,
             seq: self.seq,
         };
         self.logs.entry(op).or_default().cas.push(event);
         if after_fault {
             return Err(injected("compare_and_swap", "after apply"));
         }
+        if journal_fault {
+            return Err(if self.journal_rng.chance(500_000) {
+                StoreError::Fenced
+            } else {
+                injected("compare_and_swap", "after a journal head landed")
+            });
+        }
         Ok(swapped && !conflict)
+    }
+
+    /// A cells or subagents journal head write that lands while its caller
+    /// sees an error, as when a store answers a landed write as fenced or the
+    /// reply is lost: the writer must not trust its cached revision afterwards.
+    /// Its own generator keeps every other fault of the seed where it was.
+    fn journal_lost(
+        &mut self,
+        op: u64,
+        key: &str,
+        expected_version: Option<&str>,
+        new: &str,
+    ) -> bool {
+        let journal = key.strip_prefix(STATE_PREFIX).is_some_and(|scope| {
+            scope.ends_with(SUBAGENTS_SUFFIX) || scope.ends_with(CELLS_SUFFIX)
+        });
+        // Only a running writer's own writes, after its first one under its
+        // owner: a lost acquire or restore write fails the restore, which a
+        // host answers by restarting rather than by writing again.
+        let owner = |version: &str| {
+            let mut parts = version.splitn(3, '.');
+            let fence = parts.next().map(str::to_owned);
+            (fence, parts.nth(1).map(str::to_owned))
+        };
+        let same_owner = expected_version.is_some_and(|expected| owner(expected) == owner(new));
+        if !journal || !same_owner {
+            self.journal_warm.remove(key);
+            return false;
+        }
+        let first = self.journal_warm.insert(key.to_owned());
+        if first || !self.faults_on || !self.journal_rng.chance(self.journal_lost_ppm) {
+            return false;
+        }
+        self.faults += 1;
+        self.logs.entry(op).or_default().faulted = true;
+        JOURNAL_LOSSES.with(|losses| losses.set(losses.get() + 1));
+        self.trace(&format!(
+            "  kv fault op={op} journal head landed and reported lost"
+        ));
+        true
     }
 
     fn drops_insert(&mut self, key: &str, expected_version: Option<&str>) -> bool {
@@ -537,6 +632,9 @@ impl SimKv {
     ) -> Self {
         let kv = Kv {
             rng: Rng::derive(seed, "kv"),
+            journal_rng: Rng::derive(seed, "kv journal"),
+            journal_lost_ppm: 0,
+            journal_warm: std::collections::BTreeSet::new(),
             profile,
             mutation,
             faults_on: true,

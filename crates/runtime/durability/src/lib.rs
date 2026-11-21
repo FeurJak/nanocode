@@ -14,6 +14,7 @@ mod pool;
 mod record_cache;
 mod session;
 mod shared_store;
+pub mod sim;
 mod state;
 
 pub use backend::{

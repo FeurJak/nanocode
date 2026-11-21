@@ -873,10 +873,16 @@ async fn settle(
     let started = nanocode_platform::now();
     for root in 0..shape.roots {
         let session = session_of(root);
+        let mut retries = 0;
         loop {
             match runtime.settle(&session).await {
                 Ok(true) => break,
                 Ok(false) => {}
+                Err(error) if lost_before(&mut retries) => {
+                    world.trace(&format!(
+                        "settle {session} retried after a lost journal write: {error}"
+                    ));
+                }
                 Err(error) => return Err(format!("settle {session}: {error}")),
             }
             if nanocode_platform::now().duration_since(started) >= SETTLE_DEADLINE {
@@ -904,6 +910,19 @@ async fn settle(
     Ok(())
 }
 
+/// Whether a call that failed may run again because a journal write landed
+/// while the store reported it lost. Retries are bounded, so a writer that
+/// never reads the head back still fails.
+fn lost_before(retries: &mut u32) -> bool {
+    if crate::store::journal_losses() == 0 || *retries >= LOST_JOURNAL_RETRIES {
+        return false;
+    }
+    *retries += 1;
+    true
+}
+
+const LOST_JOURNAL_RETRIES: u32 = 8;
+
 async fn stop(
     runtime: &Nanocode,
     shape: &Shape,
@@ -925,10 +944,18 @@ async fn stop(
         world.trace(&format!("{:?} {session}", shape.stop));
         match shape.stop {
             Stop::Cancel => control.cancel_all(&session).await,
-            Stop::Close => control
-                .close_all(&session)
-                .await
-                .map_err(|error| format!("close_all {session}: {error}"))?,
+            Stop::Close => {
+                let mut retries = 0;
+                loop {
+                    match control.close_all(&session).await {
+                        Ok(()) => break,
+                        Err(error) if lost_before(&mut retries) => world.trace(&format!(
+                            "close_all {session} retried after a lost journal write: {error}"
+                        )),
+                        Err(error) => return Err(format!("close_all {session}: {error}")),
+                    }
+                }
+            }
             Stop::Never => {}
         }
         world.trace(&format!("{:?} {session} returned", shape.stop));
@@ -942,10 +969,20 @@ async fn settled(runtime: &Nanocode, shape: &Shape, world: &World) -> Result<(),
     };
     for root in 0..shape.roots {
         let session = session_of(root);
-        let listed = control
-            .agents(&session)
-            .await
-            .map_err(|error| format!("the directory of {session} did not answer: {error}"))?;
+        let mut retries = 0;
+        let listed = loop {
+            match control.agents(&session).await {
+                Ok(listed) => break listed,
+                Err(error) if lost_before(&mut retries) => world.trace(&format!(
+                    "the directory of {session} retried after a lost journal write: {error}"
+                )),
+                Err(error) => {
+                    return Err(format!(
+                        "the directory of {session} did not answer: {error}"
+                    ));
+                }
+            }
+        };
         for entry in listed {
             world.trace(&format!(
                 "{session} agent {} {:?}",
@@ -982,10 +1019,18 @@ async fn listing(runtime: &Nanocode, shape: &Shape) -> Result<(Listing, BTreeSet
     let mut completed = BTreeSet::new();
     for root in 0..shape.roots {
         let session = session_of(root);
-        let entries = control
-            .agents(&session)
-            .await
-            .map_err(|error| format!("the directory of {session} did not answer: {error}"))?;
+        let mut retries = 0;
+        let entries = loop {
+            match control.agents(&session).await {
+                Ok(entries) => break entries,
+                Err(_) if lost_before(&mut retries) => {}
+                Err(error) => {
+                    return Err(format!(
+                        "the directory of {session} did not answer: {error}"
+                    ));
+                }
+            }
+        };
         let mut lines = Vec::new();
         for entry in &entries {
             if matches!(entry.status, nanocode::AgentStatus::Completed { .. })
@@ -1186,6 +1231,8 @@ pub fn simulate(seed: u64, options: WholeOptions) -> WholeOutcome {
     if options.store_mutation == Mutation::PowerLossDropsAcceptance {
         world.hold_receipts();
     }
+    nanocode_durability::sim::mutate(options.store_mutation.journal());
+    crate::store::forget_journal_losses();
     let wire = match shape.wire {
         WireKind::Transport => Wire::Transport(Arc::new(Network::new(
             seed,
@@ -1230,13 +1277,18 @@ pub fn simulate(seed: u64, options: WholeOptions) -> WholeOutcome {
             profile.torn_ppm = 0;
             profile.read_ppm = 0;
             profile.durability = crate::faults::Durability::OnAck;
-            SimKv::new(
+            let kv = SimKv::new(
                 seed,
                 profile,
                 options.store_mutation,
                 false,
                 Arc::clone(&clock),
-            )
+            );
+            // Journal heads that land while their writer sees an error are the
+            // only store fault here: the runtime must read the head back.
+            let lost = Rng::derive(seed, "whole journal lost").range(0, 60_000);
+            kv.with(|kv| kv.journal_lost_ppm = lost);
+            kv
         }),
     };
     let client = Client {

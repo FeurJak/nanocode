@@ -479,7 +479,10 @@ impl Fenced {
             // Only NotCommitted says the write did not land: the store may
             // have committed any other failure, as a write it answers fenced
             // after it landed, so it waits for the head to say.
-            Err(error) if !matches!(error, StoreError::NotCommitted(_)) => {
+            Err(error)
+                if !matches!(error, StoreError::NotCommitted(_))
+                    && !crate::sim::mutated(crate::sim::Mutation::SubagentJournalKeepsRevision) =>
+            {
                 self.stale = true;
                 self.unresolved.push(Unresolved {
                     expected: entry.expected,
