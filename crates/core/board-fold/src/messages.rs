@@ -206,6 +206,12 @@ impl Said {
         self.messages.len()
     }
 
+    /// Replies held under task's root message.
+    #[cfg(test)]
+    pub(crate) fn replies_to(&self, task: &str) -> usize {
+        self.replies.get(&MessageId(task.to_owned())).map_or(0, Vec::len)
+    }
+
     /// Keep the newest keep replies under task's root message, dropping older ones and their own
     /// replies (Retain::events).
     pub(crate) fn trim(&mut self, task: &str, keep: usize) {

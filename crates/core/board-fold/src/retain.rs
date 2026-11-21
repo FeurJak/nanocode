@@ -456,7 +456,7 @@ mod tests {
         let last = EventId(format!("user:lead.{minted}"));
         assert!(fold.outcome(&last).is_some(), "its newest event stays");
         assert_eq!(fold.minted("user:lead"), minted, "the writer's floor holds");
-        assert_eq!(fold.said.replies[&crate::messages::MessageId("open".to_owned())].len(), 4);
+        assert_eq!(fold.said.replies_to("open"), 4);
         let restored = Fold::restore(&fold.snapshot()).expect("a snapshot restores");
         assert_eq!(restored, fold);
     }
@@ -503,6 +503,7 @@ mod tests {
                 settled: 2,
                 entries: 1_000,
                 only,
+                events: 0,
             },
             20,
         );
