@@ -88,6 +88,11 @@ struct Fenced {
 
     inflight: std::collections::VecDeque<InFlight>,
 
+    /// Writes whose outcome the store did not report, oldest first. A later
+    /// write of the chain that commits proves they landed; once nothing is in
+    /// flight, the head the store holds settles them.
+    unresolved: Vec<Unresolved>,
+
     failure: Option<std::io::Error>,
 
     retry: Vec<String>,
@@ -105,6 +110,28 @@ struct InFlight {
     deferred: Option<DeferredKeys>,
     done: oneshot::Receiver<Result<u64, StoreError>>,
     pending: Vec<String>,
+    /// The head payload this write puts.
+    payload: Arc<nanocode_sync::Slot<Arc<str>>>,
+    /// Where a deferred write's caller hears whether it committed.
+    committed: Option<Committed>,
+}
+
+struct Unresolved {
+    expected: u64,
+    error: StoreError,
+    pending: Vec<String>,
+    payload: Option<Arc<str>>,
+    committed: Option<Committed>,
+}
+
+/// A deferred write's caller, told once: by the store task for a known
+/// outcome, else by the writer once the head settles it.
+type Committed = Arc<nanocode_sync::Slot<oneshot::Sender<std::io::Result<()>>>>;
+
+fn tell(committed: Option<&Committed>, outcome: std::io::Result<()>) {
+    if let Some(sender) = committed.and_then(|slot| slot.take()) {
+        let _ = sender.send(outcome);
+    }
 }
 
 impl Fenced {
@@ -143,8 +170,11 @@ impl Fenced {
     /// the cached revision, and a real takeover still fails the next write as
     /// fenced rather than being taken back with a fresh owner.
     async fn reread(&mut self, store: &mut SharedStore, state_id: &str) -> std::io::Result<()> {
-        self.drain().await;
-        if !self.stale {
+        // Writes still in flight settle the head themselves: one that commits
+        // proves the cached revision, and one that conflicts fails the chain.
+        // Waiting for them here could wait on a deferred write whose caller
+        // waits on this one.
+        if !self.stale || !self.inflight.is_empty() || !self.unresolved.is_empty() {
             return Ok(());
         }
         let stored = store.peek(state_id).await.map_err(std::io::Error::other)?;
@@ -164,7 +194,7 @@ impl Fenced {
         records: Vec<(Arc<str>, Arc<str>)>,
     ) -> std::io::Result<()> {
         if self.failure.is_some() {
-            self.drain().await;
+            self.drain(store, state_id).await;
             if let Some((_, revision)) = &self.owner {
                 self.next = *revision;
             }
@@ -204,16 +234,18 @@ impl Fenced {
             });
         }
         let pending = pending.into_iter().map(|(key, _)| key);
+        let payload = Arc::<str>::from(payload);
         if let Some(last) = self.inflight.back_mut()
             && last
                 .write
                 .as_ref()
                 .is_some_and(|write| write.update(&payload, &staged))
         {
+            last.payload.put(payload);
             last.pending.extend(pending);
             return Ok(());
         }
-        let write = Arc::new(latest_write(payload, staged));
+        let write = Arc::new(latest_write(payload.to_string(), staged));
         let expected = self.next;
         let next = self.next_revision()?;
         let done = store
@@ -226,6 +258,8 @@ impl Fenced {
             deferred: None,
             done,
             pending: pending.collect(),
+            payload: Arc::new(nanocode_sync::Slot::new(Some(payload))),
+            committed: None,
         });
         Ok(())
     }
@@ -236,7 +270,7 @@ impl Fenced {
         state_id: &str,
     ) -> std::io::Result<DeferredJournal> {
         if self.failure.is_some() {
-            self.drain().await;
+            self.drain(store, state_id).await;
             if let Some((_, revision)) = &self.owner {
                 self.next = *revision;
             }
@@ -264,6 +298,8 @@ impl Fenced {
         let (committed, commit) = oneshot::channel::<std::io::Result<()>>();
         let keys = Arc::new(nanocode_sync::Slot::default());
         let filled = Arc::clone(&keys);
+        let tip = Arc::new(nanocode_sync::Slot::default());
+        let put = Arc::clone(&tip);
         let pending = Arc::clone(&self.pending);
         let content: crate::shared_store::DeferredContent = Box::pin(async move {
             let stopped =
@@ -287,6 +323,7 @@ impl Fenced {
                 });
             }
             filled.put(known.into_iter().map(|(key, _)| key).collect());
+            put.put(Arc::<str>::from(payload.as_str()));
             Ok((payload, staged))
         });
         let expected = self.next;
@@ -295,6 +332,8 @@ impl Fenced {
             .replace_deferred(state_id, &owner, expected, content)
             .map_err(std::io::Error::other)?;
         let (settle, done) = oneshot::channel();
+        let committed: Committed = Arc::new(nanocode_sync::Slot::new(Some(committed)));
+        let told = Arc::clone(&committed);
         crate::shared_store::spawn_operation(async move {
             // A dropped reply says nothing about whether the write landed.
             let result = replaced.await.unwrap_or_else(|_| {
@@ -302,10 +341,18 @@ impl Fenced {
                     "the durability store stopped".to_owned(),
                 ))
             });
-            let _ = committed.send(match &result {
-                Ok(_) => Ok(()),
-                Err(error) => Err(std::io::Error::other(error.to_string())),
-            });
+            // The caller hears a known outcome at once; an unknown one waits
+            // for the writer to read it from the head.
+            let known = match &result {
+                Ok(_) => Some(Ok(())),
+                Err(error @ StoreError::NotCommitted(_)) => {
+                    Some(Err(std::io::Error::other(error.to_string())))
+                }
+                Err(_) => None,
+            };
+            if let Some(outcome) = known {
+                tell(Some(&told), outcome);
+            }
             let _ = settle.send(result);
         });
         self.queue(expected, next);
@@ -315,6 +362,8 @@ impl Fenced {
             deferred: Some(keys),
             done,
             pending: Vec::new(),
+            payload: tip,
+            committed: Some(committed),
         });
         Ok(fill)
     }
@@ -336,10 +385,71 @@ impl Fenced {
         self.next = next;
     }
 
-    async fn drain(&mut self) {
+    async fn drain(&mut self, store: &mut SharedStore, state_id: &str) {
         while !self.inflight.is_empty() {
             let result = settled(&mut self.inflight).await;
             self.settled(result);
+        }
+        self.resolve(store, state_id).await;
+    }
+
+    /// Settles writes whose outcome the store did not report: they landed when
+    /// the head holds the last one's revision and payload, as a write the store
+    /// answered fenced after it committed does. Otherwise writes still in
+    /// flight settle them, and with none they failed. It reads the head at
+    /// once rather than waiting on later writes, since a deferred write's
+    /// caller may fill the next one only after hearing about this one.
+    async fn resolve(&mut self, store: &mut SharedStore, state_id: &str) {
+        let Some(last) = self.unresolved.last() else {
+            return;
+        };
+        let revision = last.expected.checked_add(1);
+        let landed = match store.peek(state_id).await {
+            Ok(stored) => {
+                Some(stored.revision) == revision
+                    && last.payload.is_some()
+                    && stored.payload.as_deref() == last.payload.as_deref()
+            }
+            Err(_) => false,
+        };
+        match revision {
+            Some(revision) if landed => self.committed(revision),
+            _ if self.inflight.is_empty() => self.fail_unresolved(),
+            _ => {}
+        }
+    }
+
+    /// Every write up to one that committed at this revision landed.
+    fn committed(&mut self, revision: u64) {
+        if let Some((owner, _)) = self.owner.take() {
+            self.owner = Some((owner, revision));
+        }
+        self.stale = false;
+        for write in std::mem::take(&mut self.unresolved) {
+            self.forget(&write.pending);
+            tell(write.committed.as_ref(), Ok(()));
+        }
+    }
+
+    fn fail_unresolved(&mut self) {
+        for write in std::mem::take(&mut self.unresolved) {
+            tell(
+                write.committed.as_ref(),
+                Err(std::io::Error::other(write.error.to_string())),
+            );
+            self.retry.extend(write.pending);
+            self.failure
+                .get_or_insert(std::io::Error::other(write.error));
+        }
+    }
+
+    fn forget(&self, keys: &[String]) {
+        if !keys.is_empty() {
+            self.pending.update(|known| {
+                for key in keys {
+                    known.remove(key);
+                }
+            });
         }
     }
 
@@ -359,24 +469,32 @@ impl Fenced {
                 entry.expected
             )))
         });
+        let payload = entry.payload.take();
         match result {
             Ok(revision) => {
-                if let Some((owner, _)) = self.owner.take() {
-                    self.owner = Some((owner, revision));
-                }
-                self.stale = false;
-                if !entry.pending.is_empty() {
-                    self.pending.update(|known| {
-                        for key in &entry.pending {
-                            known.remove(key);
-                        }
-                    });
-                }
+                self.committed(revision);
+                self.forget(&entry.pending);
+                tell(entry.committed.as_ref(), Ok(()));
+            }
+            // Only NotCommitted says the write did not land: the store may
+            // have committed any other failure, as a write it answers fenced
+            // after it landed, so it waits for the head to say.
+            Err(error) if !matches!(error, StoreError::NotCommitted(_)) => {
+                self.stale = true;
+                self.unresolved.push(Unresolved {
+                    expected: entry.expected,
+                    error,
+                    pending: entry.pending,
+                    payload,
+                    committed: entry.committed,
+                });
             }
             Err(error) => {
-                if !matches!(error, StoreError::NotCommitted(_)) {
-                    self.stale = true;
-                }
+                self.fail_unresolved();
+                tell(
+                    entry.committed.as_ref(),
+                    Err(std::io::Error::other(error.to_string())),
+                );
                 self.retry.extend(entry.pending);
                 self.failure.get_or_insert(std::io::Error::other(error));
             }
@@ -415,10 +533,11 @@ async fn write_journal(
         nanocode_sync::select! {
             result = settled(&mut fenced.inflight), if !fenced.inflight.is_empty() => {
                 fenced.settled(result);
+                fenced.resolve(&mut store, &state_id).await;
             }
             write = writes.recv() => match write {
                 Some(Write::Load(result)) => {
-                    fenced.drain().await;
+                    fenced.drain(&mut store, &state_id).await;
                     drop(result.send(fenced.acquire(&mut store, &state_id).await));
                 }
                 Some(Write::Save {
@@ -435,7 +554,7 @@ async fn write_journal(
             },
         }
     }
-    fenced.drain().await;
+    fenced.drain(&mut store, &state_id).await;
 }
 
 #[derive(Clone)]
@@ -691,6 +810,7 @@ fn journal(
             next: 0,
             stale: false,
             inflight: std::collections::VecDeque::new(),
+            unresolved: Vec::new(),
             failure: None,
             retry: Vec::new(),
             pending: Arc::clone(&pending),
