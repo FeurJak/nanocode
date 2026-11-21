@@ -8058,13 +8058,12 @@ impl Registry {
         deadline: Instant,
     ) -> std::io::Result<()> {
         let closing = async move {
-            let results = nanocode_sync::join_in_order(
-                harnesses.into_iter().map(|harness| async move {
+            let results =
+                nanocode_sync::join_in_order(harnesses.into_iter().map(|harness| async move {
                     harness.begin_close();
                     harness.close().await
-                }),
-            )
-            .await;
+                }))
+                .await;
             first_error(results)
         };
         timeout_at(deadline, closing).await.map_err(|_| {

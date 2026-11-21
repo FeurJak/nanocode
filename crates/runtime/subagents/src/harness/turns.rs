@@ -123,7 +123,10 @@ pub(super) fn start_turn<'a>(
             )));
         }
         if this.closing.is_fired() {
-            return Err(std::io::Error::other(format!("agent {} is closing", this.id)));
+            return Err(std::io::Error::other(format!(
+                "agent {} is closing",
+                this.id
+            )));
         }
         let registry = this
             .registry
