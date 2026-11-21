@@ -551,6 +551,13 @@ fn tally(tally: &Tally, id: &EventId, target: &Target, action: &Action, revision
 }
 
 impl Mirror {
+    pub(crate) fn holds(&self, task: &TaskId) -> bool {
+        self.by_task.contains_key(task)
+            || self.status.contains_key(task)
+            || self.ever.iter().any(|(held, _)| held == task)
+            || self.worded.contains_key(task)
+    }
+
     pub const fn new() -> Self {
         Self {
             links: BTreeMap::new(),

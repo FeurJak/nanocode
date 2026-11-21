@@ -246,6 +246,11 @@ pub struct Access {
 }
 
 impl Access {
+    pub(crate) fn forget(&mut self, task: &TaskId) {
+        self.posters.remove(task);
+        self.holders.remove(task);
+    }
+
     pub const fn new() -> Self {
         Self {
             owner: None,

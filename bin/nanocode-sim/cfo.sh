@@ -230,6 +230,7 @@ default_table='
 1 canary_board_checkpoint_tail_unchecked canary:20 --scenario board --mutation checkpoint_tail_unchecked
 1 canary_board_checkpoint_ahead canary:20 --scenario board --mutation checkpoint_ahead
 1 canary_board_checkpoint_every_fixed canary:50 --scenario board --mutation checkpoint_every_fixed
+1 canary_board_eviction_differs_by_replica canary:50 --scenario board --mutation eviction_differs_by_replica
 1 canary_board_steer_by_claim_follows canary:40 --scenario board_steer --mutation steer_by_claim_follows
 1 canary_board_steer_to_terminal canary:40 --scenario board_steer --mutation steer_to_terminal
 1 canary_board_finish_ignores_steers canary:40 --scenario board_steer --mutation finish_ignores_steers

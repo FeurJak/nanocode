@@ -98,6 +98,7 @@ pub enum BoardMutation {
     CheckpointTailUnchecked,
     CheckpointAhead,
     CheckpointEveryFixed,
+    EvictionDiffersByReplica,
     DueIgnored,
     DueFiresTwice,
     RecurrenceSkipsOnRestart,
@@ -130,7 +131,7 @@ pub enum BoardMutation {
 }
 
 impl BoardMutation {
-    const ALL: [Self; 76] = [
+    const ALL: [Self; 77] = [
         Self::None,
         Self::ClaimIgnoresLease,
         Self::ClaimIgnoresNeeds,
@@ -180,6 +181,7 @@ impl BoardMutation {
         Self::CheckpointTailUnchecked,
         Self::CheckpointAhead,
         Self::CheckpointEveryFixed,
+        Self::EvictionDiffersByReplica,
         Self::DueIgnored,
         Self::DueFiresTwice,
         Self::RecurrenceSkipsOnRestart,
@@ -269,6 +271,7 @@ impl BoardMutation {
             Self::CheckpointTailUnchecked => "checkpoint_tail_unchecked",
             Self::CheckpointAhead => "checkpoint_ahead",
             Self::CheckpointEveryFixed => "checkpoint_every_fixed",
+            Self::EvictionDiffersByReplica => "eviction_differs_by_replica",
             Self::DueIgnored => "due_ignored",
             Self::DueFiresTwice => "due_fires_twice",
             Self::RecurrenceSkipsOnRestart => "recurrence_skips_on_restart",
@@ -365,6 +368,7 @@ impl BoardMutation {
             Self::CheckpointTailUnchecked => BoardRule::CheckpointTailUnchecked,
             Self::CheckpointAhead => BoardRule::CheckpointAhead,
             Self::CheckpointEveryFixed => BoardRule::CheckpointEveryFixed,
+            Self::EvictionDiffersByReplica => BoardRule::EvictionDiffersByReplica,
             Self::DueIgnored => BoardRule::DueIgnored,
             Self::DueFiresTwice => BoardRule::DueFiresTwice,
             Self::RecurrenceSkipsOnRestart => BoardRule::RecurrenceSkipsOnRestart,
@@ -427,6 +431,7 @@ pub struct BoardStats {
     pub reopens: u64,
     pub checkpoints: u64,
     pub checkpoint_opens: u64,
+    pub evicted: u64,
     pub due_runs: u64,
     pub due_retries: u64,
     pub due_restarts: u64,
@@ -464,6 +469,7 @@ impl BoardStats {
         self.reopens += other.reopens;
         self.checkpoints += other.checkpoints;
         self.checkpoint_opens += other.checkpoint_opens;
+        self.evicted += other.evicted;
         self.due_runs += other.due_runs;
         self.due_retries += other.due_retries;
         self.due_restarts += other.due_restarts;
@@ -1853,6 +1859,97 @@ fn resumes(rows: &[(u64, String)]) -> Result<(), String> {
     Ok(())
 }
 
+/// A fold that evicts settled tasks must evict the same ones however it got its rows: straight, from
+/// a compact or JSON snapshot at any cut, or through a resumed board. It holds no more entries than its
+/// policy, tracks every terminal task it holds, and gives a writer's next event an id past every one
+/// it evicted.
+fn retains(seed: u64, rows: &[(u64, String)]) -> Result<u64, String> {
+    use nanocode_board::{Fold, Retain};
+    let fold = |mut fold: Fold, rows: &[(u64, String)]| -> Result<Fold, String> {
+        for (seq, body) in rows {
+            fold.apply(*seq, body)
+                .map_err(|error| format!("retaining refold: {error}"))?;
+        }
+        Ok(fold)
+    };
+    let mut rng = Rng::derive(seed, "retention");
+    let policy = Retain {
+        settled: rng.below(4) as usize,
+        entries: 1 + rng.below(rows.len() as u64 / 2 + 1) as usize,
+    };
+    let kept = fold(Fold::retaining(policy), rows)?;
+    if kept.entries().len() > policy.entries {
+        return Err(format!(
+            "a fold retaining {policy:?} holds {} entries",
+            kept.entries().len()
+        ));
+    }
+    let terminal = kept
+        .tasks()
+        .values()
+        .filter(|task| task.phase.terminal())
+        .count();
+    if kept.settled_count() != terminal {
+        return Err(format!(
+            "a fold retaining {policy:?} tracks {} settled tasks and holds {terminal}",
+            kept.settled_count()
+        ));
+    }
+    let full = fold(Fold::new(), rows)?;
+    let writers = rows
+        .iter()
+        .filter_map(|(_, body)| serde_json::from_str::<nanocode_board::Event>(body).ok())
+        .filter_map(|event| event.id.0.rsplit_once('.').map(|(writer, _)| writer.to_owned()))
+        .collect::<BTreeSet<_>>();
+    for writer in &writers {
+        if kept.minted(writer) < full.minted(writer) {
+            return Err(format!(
+                "evicting set {writer}'s minted back from {} to {}",
+                full.minted(writer),
+                kept.minted(writer)
+            ));
+        }
+    }
+    let log = Arc::new(MemoryLog::new());
+    if !rows.is_empty() {
+        nanocode_sync::block_on(log.append(SCOPE, rows))
+            .map_err(|error| format!("copy the log: {error}"))?;
+    }
+    for _ in 0..3 {
+        let cut = rng.pick(rows.len() + 1);
+        let held = fold(Fold::retaining(policy), &rows[..cut])?;
+        let compact = Fold::restore(&held.snapshot())
+            .map_err(|error| format!("restore a retaining snapshot of {cut} rows: {error}"))?;
+        let json = Fold::restore(held.snapshot_json().as_bytes())
+            .map_err(|error| format!("restore a retaining JSON snapshot of {cut} rows: {error}"))?;
+        if compact != json {
+            return Err(format!(
+                "compact and JSON snapshots of a retaining fold of {cut} rows restore different folds"
+            ));
+        }
+        if fold(compact.clone(), &rows[cut..])? != kept {
+            return Err(format!(
+                "a retaining fold restored at row {cut} of {} evicts differently from one that folded every row",
+                rows.len()
+            ));
+        }
+        let host: Arc<dyn LogHost> = Arc::clone(&log) as Arc<dyn LogHost>;
+        let board = nanocode_sync::block_on(Board::resume(
+            host,
+            SCOPE,
+            access::identity("user:resumer"),
+            compact,
+        ))
+        .map_err(|error| format!("resume a retaining fold of {cut} rows: {error}"))?;
+        if board.fold() != &kept {
+            return Err(format!(
+                "a board resumed from a retaining fold of {cut} rows evicts differently from a full replay"
+            ));
+        }
+    }
+    Ok(kept.evicted())
+}
+
 /// A board opened from a checkpoint at a random cut and the rows after it must fold what a full
 /// replay folds; one opened over a checkpoint another fold's version wrote, or over a log that no
 /// longer holds the row the checkpoint ends on, must replay the whole log instead.
@@ -2310,6 +2407,9 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
     let indexed = indexes(&rows);
     let resumed = resumes(&rows);
     let checkpointed = reopens_from_checkpoints(seed, &rows);
+    let retained = retains(seed, &rows);
+    let evicted = retained.as_ref().copied().unwrap_or_default();
+    let retained = retained.map(|_| ());
     let kept = kept_checkpoint(&world.host, &rows);
     let checkpoint_opens = kept.as_ref().copied().unwrap_or_default();
     let kept = kept.map(|_| ());
@@ -2331,6 +2431,7 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
         indexed,
         resumed,
         checkpointed,
+        retained,
         kept,
         default_off,
         intended,
@@ -2373,6 +2474,7 @@ pub fn simulate(seed: u64, mutation: BoardMutation) -> BoardOutcome {
     stats.conflicts = host.conflicts.load(Ordering::SeqCst);
     stats.checkpoints = host.checkpoint_saves.load(Ordering::SeqCst);
     stats.checkpoint_opens = checkpoint_opens;
+    stats.evicted = evicted;
     BoardOutcome {
         digest,
         wrong: verdict.err(),

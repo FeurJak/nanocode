@@ -315,6 +315,10 @@ pub struct Marks {
 }
 
 impl Marks {
+    pub(crate) fn lanes_hold(&self, task: &TaskId) -> bool {
+        self.watchers.values().any(|watcher| watcher.lanes.contains_key(task))
+    }
+
     pub const fn new() -> Self {
         Self {
             cursors: BTreeMap::new(),
@@ -938,6 +942,7 @@ impl Fold {
     }
 
     pub(crate) fn index_marks(&mut self) {
+        let base = self.retention.base();
         let Self {
             entries,
             tasks,
@@ -945,7 +950,8 @@ impl Fold {
             access,
             ..
         } = self;
-        for entry in &entries[marks.indexed..] {
+        let from = marks.indexed.saturating_sub(base).min(entries.len());
+        for entry in &entries[from..] {
             let author = marks.authors.get(&entry.event);
             let thread = root(tasks, &entry.task);
             for (name, watcher) in &mut marks.watchers {
@@ -967,7 +973,7 @@ impl Fold {
                 }
             }
         }
-        marks.indexed = entries.len();
+        marks.indexed = base + entries.len();
     }
 }
 
