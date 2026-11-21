@@ -362,6 +362,10 @@ impl AgentFactory for ChildFactory {
     }
 }
 
+/// Tries to cancel each of a closing child's requests, so a close stays well inside
+/// its deadline while a cancel's answer is lost.
+const SHUTDOWN_CANCEL_ATTEMPTS: u32 = 3;
+
 struct RemoteBackend {
     child: Child,
     children: Arc<RemoteChildren>,
@@ -403,7 +407,10 @@ impl RemoteBackend {
                         nanocode_trace::warn!(%error, session_id = &*session_id, request_id, ?delay, "remote child did not take the turn; retrying the same request");
                         nanocode_platform::sleep(delay).await;
                     }
-                    Err(error) => break Box::pin(async move { Err(error) }),
+                    Err(error) => {
+                        requests.remove_if(&key, |_| true);
+                        break Box::pin(async move { Err(error) });
+                    }
                 }
             };
             Ok(BackendTurn {
@@ -543,8 +550,44 @@ impl LifecycleBackend for RemoteBackend {
         {
             return Box::pin(async { Ok(()) });
         }
-        self.children.children.remove_if(&self.session_id, |_| true);
-        self.children.host.close(Arc::clone(&self.session_id))
+        let children = Arc::clone(&self.children);
+        let requests = Arc::clone(&self.requests);
+        let session_id = Arc::clone(&self.session_id);
+        Box::pin(async move {
+            // Closing the child does not stop a turn it runs, such as one a restarted
+            // host picked up again, so the close would wait on it to its natural end.
+            // Cancel every request first, including a start the close gave up, which
+            // the child may have taken.
+            let mut outstanding = requests.update(|requests| {
+                requests
+                    .iter()
+                    .map(|(key, request_id)| (*key, request_id.clone()))
+                    .collect::<Vec<_>>()
+            });
+            outstanding.sort_unstable();
+            for (_, request_id) in outstanding {
+                let mut attempt = 0_u32;
+                loop {
+                    match children
+                        .host
+                        .cancel(Arc::clone(&session_id), Some(request_id.clone()))
+                        .await
+                    {
+                        Err(error @ NanocodeError::Backend { .. })
+                            if attempt < SHUTDOWN_CANCEL_ATTEMPTS =>
+                        {
+                            attempt = attempt.saturating_add(1);
+                            let delay = std::time::Duration::from_millis(250_u64 << attempt);
+                            nanocode_trace::warn!(%error, session_id = &*session_id, request_id, ?delay, "remote child did not take the cancel at close; retrying");
+                            nanocode_platform::sleep(delay).await;
+                        }
+                        Ok(()) | Err(_) => break,
+                    }
+                }
+            }
+            children.children.remove_if(&session_id, |_| true);
+            children.host.close(session_id).await
+        })
     }
 
     fn is_stopped(&self) -> bool {

@@ -122,6 +122,9 @@ pub(super) fn start_turn<'a>(
                 this.id
             )));
         }
+        if this.closing.is_fired() {
+            return Err(std::io::Error::other(format!("agent {} is closing", this.id)));
+        }
         let registry = this
             .registry
             .upgrade()
@@ -209,7 +212,23 @@ pub(super) fn start_turn<'a>(
             }
         };
         agent.set_parking(registry.hibernates() && !recovering);
-        let turn = match agent.prompt(request).await {
+        // A close gives up a start that is still pending: the harness handles the close
+        // only after the start returns, and a remote child's start can retry for
+        // minutes. Its messages are failed like the ones still queued, and the close's
+        // shutdown cancels the request in case the child took it.
+        let closing = Arc::clone(&this.closing);
+        let prompted = nanocode_sync::select! {
+            turn = agent.prompt(request) => Some(turn),
+            () = closing.wait() => None,
+        };
+        let Some(prompted) = prompted else {
+            let error = format!("agent {} closed before its turn started", this.id);
+            registry
+                .harness_turn_start_failed(&this.root_session_id, this.id, error.clone())
+                .await;
+            return Err(std::io::Error::other(error));
+        };
+        let turn = match prompted {
             Ok(turn) => turn,
             Err(error) => {
                 let error = format!("could not start agent {}: {error}", this.id);

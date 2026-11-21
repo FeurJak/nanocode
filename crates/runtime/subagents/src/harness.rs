@@ -15,7 +15,7 @@ use nanocode_agent_core::{
     Agent, NanocodeError, Result as AgentResult, SessionCheckpoint, TurnControl, TurnResult,
     TurnUsage,
 };
-use nanocode_sync::{mpsc, oneshot};
+use nanocode_sync::{Signal, mpsc, oneshot};
 use nanocode_trace::Instrument;
 use std::{
     collections::VecDeque,
@@ -37,6 +37,7 @@ pub(super) struct HarnessHandle {
     deferred: mpsc::UnboundedSender<Box<DeliveryCommand>>,
     urgent: mpsc::UnboundedSender<Box<DeliveryCommand>>,
     side_questions: Arc<AtomicUsize>,
+    closing: Arc<Signal>,
 }
 
 pub(super) struct SideQuestionLease(Arc<AtomicUsize>);
@@ -124,6 +125,7 @@ struct Harness {
     registry: Weak<Registry>,
     parked: u64,
     submitted: Option<nanocode_platform::Instant>,
+    closing: Arc<Signal>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -210,6 +212,13 @@ impl HarnessHandle {
     pub(super) async fn close(&self) -> std::io::Result<()> {
         self.request(|response| HarnessCommand::Close { response })
             .await
+    }
+
+    /// Marks the agent as closing for good, ahead of [`Self::close`]: a turn whose
+    /// start is still pending gives up rather than holding the close behind its
+    /// retries, which back off for minutes on a remote child that never takes it.
+    pub(super) fn begin_close(&self) {
+        self.closing.fire();
     }
 
     pub(super) async fn resume(
@@ -300,11 +309,13 @@ pub(super) fn spawn(
     let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (deferred, deferred_receiver) = mpsc::unbounded_channel();
     let (urgent, urgent_receiver) = mpsc::unbounded_channel();
+    let closing = Arc::new(Signal::new());
     let handle = HarnessHandle {
         commands,
         deferred,
         urgent,
         side_questions: Arc::new(AtomicUsize::new(0)),
+        closing: Arc::clone(&closing),
     };
     let span = nanocode_trace::info_span!(
         "subagent.harness",
@@ -332,6 +343,7 @@ pub(super) fn spawn(
             registry,
             parked: 0,
             submitted: None,
+            closing,
         }
         .run()
         .instrument(span),

@@ -8059,9 +8059,10 @@ impl Registry {
     ) -> std::io::Result<()> {
         let closing = async move {
             let results = nanocode_sync::join_in_order(
-                harnesses
-                    .into_iter()
-                    .map(|harness| async move { harness.close().await }),
+                harnesses.into_iter().map(|harness| async move {
+                    harness.begin_close();
+                    harness.close().await
+                }),
             )
             .await;
             first_error(results)
