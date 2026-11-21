@@ -14,6 +14,10 @@ use super::segment::{
 const PAGE_SCAN_MAX: usize = 8;
 const COLLECT_PAGES_MIN: usize = 32;
 const COLLECT_LIVE_DIVISOR: usize = 4;
+/// A thread collects the blocks other threads freed into its pages at least every this many new pages, however
+/// many pages it holds: COLLECT_LIVE_DIVISOR alone let a thread holding N pages leave remote frees uncollected
+/// (allocated, unusable) for N / 4 new pages, which on a long-lived thread holding gigabytes is never.
+const COLLECT_PAGES_MAX: usize = 256;
 const DIRTY_SLICES_MAX: usize = 4;
 const SHRINK_IN_PLACE_DIVISOR: usize = 2;
 
@@ -174,7 +178,9 @@ impl State {
             self.start(exit);
         }
         if self.pages_since_collect.get()
-            >= COLLECT_PAGES_MIN.max(self.pages_live.get() / COLLECT_LIVE_DIVISOR)
+            >= COLLECT_PAGES_MIN
+                .max(self.pages_live.get() / COLLECT_LIVE_DIVISOR)
+                .min(COLLECT_PAGES_MAX)
         {
             self.collect_all(Heads::Kept);
         }
@@ -658,5 +664,58 @@ impl State {
             (*segment).next.set(null_mut());
             (*segment).prev.set(null_mut());
         }
+    }
+}
+
+#[cfg(test)]
+mod collect_tests {
+    use core::alloc::Layout;
+
+    use super::{Exit, State};
+
+    /// Blocks another thread freed wait on their pages until the owner collects them: the owner's own new pages
+    /// must collect them within COLLECT_PAGES_MAX, however many pages it holds, or they stay allocated forever.
+    #[test]
+    fn an_owner_collects_pages_another_thread_freed_within_collect_pages_max_new_pages() {
+        let _alone = super::super::HEAP_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let owner = State::new();
+        let freed = Layout::from_size_align(640, 8).unwrap();
+        let blocks: Vec<usize> = (0..(256usize << 20) / 640)
+            .map(|_| unsafe { owner.allocate(freed, Exit::Unwatched) } as usize)
+            .collect();
+        let held = owner.census().pages;
+        assert!(
+            held >= 4096,
+            "256 MiB of 640-byte blocks fill 4096 pages: {held}"
+        );
+        std::thread::spawn(move || {
+            let remote = State::new();
+            let probe = Layout::from_size_align(16, 8).unwrap();
+            let own = unsafe { remote.allocate(probe, Exit::Unwatched) };
+            for block in blocks {
+                unsafe { remote.deallocate(block as *mut u8) };
+            }
+            unsafe { remote.deallocate(own) };
+            remote.abandon();
+        })
+        .join()
+        .unwrap();
+        let kept = Layout::from_size_align(4096, 8).unwrap();
+        let pages_kept = super::COLLECT_PAGES_MAX + 8;
+        let blocks_per_page = (64 << 10) / 4096;
+        let fresh: Vec<*mut u8> = (0..pages_kept * blocks_per_page)
+            .map(|_| unsafe { owner.allocate(kept, Exit::Unwatched) })
+            .collect();
+        let pages = owner.census().pages;
+        assert!(
+            pages <= pages_kept + super::COLLECT_PAGES_MAX / 2,
+            "the 4096 pages another thread emptied are collected within COLLECT_PAGES_MAX new pages: {pages} pages live"
+        );
+        for block in fresh {
+            unsafe { owner.deallocate(block) };
+        }
+        owner.abandon();
     }
 }

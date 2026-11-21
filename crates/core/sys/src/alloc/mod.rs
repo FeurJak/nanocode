@@ -18,6 +18,10 @@ pub use counted::{Count, Counted};
 #[cfg(unix)]
 pub use local::Census;
 
+/// Tests that read the process-wide heap counters, or move many pages, run one at a time.
+#[cfg(all(test, unix))]
+static HEAP_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub struct Heap;
 
 #[cfg(unix)]
