@@ -154,6 +154,8 @@ default_table='
 4 runtime_log_board pass --scenario runtime --store log --subagents-board
 1 runtime_board_pinned_claim_terminal pass --scenario runtime --subagents-board --seed 1795172135120000028
 1 runtime_kv_remote_pinned_close_message pass --scenario runtime --store kv --children remote --seed 559288643416904524
+1 runtime_kv_remote_pinned_close_cancel pass --scenario runtime --store kv --children remote --seed 557886671430719270
+1 runtime_kv_remote_pinned_close_start pass --scenario runtime --store kv --children remote --seed 7300000000000016081
 4 agents_board pass --scenario agents --subagents-board
 4 hands_fleet pass --scenario hands --fleet 4
 1 canary_coordinator_forgets_spawns canary:200 --scenario runtime --children remote --mutation coordinator-forgets-spawns
