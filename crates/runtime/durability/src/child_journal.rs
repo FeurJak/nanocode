@@ -79,9 +79,11 @@ struct Fenced {
     next: u64,
 
     /// The store's head revision is unknown: a write failed in a way that does
-    /// not say whether it landed (the store reported the owner fenced, which is
-    /// also what a retried write that already landed sees), so the next write
-    /// peeks the head instead of trusting the cached revision.
+    /// not say whether it landed (only `NotCommitted` says it did not), so the
+    /// next write peeks the head instead of trusting the cached revision. The
+    /// owner token stays: taking a fresh owner here would fence whoever took the
+    /// journal over, while a write under the old token after a real takeover
+    /// still fails as fenced.
     stale: bool,
 
     inflight: std::collections::VecDeque<InFlight>,
@@ -372,10 +374,8 @@ impl Fenced {
                 }
             }
             Err(error) => {
-                match &error {
-                    StoreError::NotCommitted(_) => {}
-                    StoreError::Fenced => self.stale = true,
-                    _ => self.owner = None,
+                if !matches!(error, StoreError::NotCommitted(_)) {
+                    self.stale = true;
                 }
                 self.retry.extend(entry.pending);
                 self.failure.get_or_insert(std::io::Error::other(error));
