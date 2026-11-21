@@ -201,6 +201,26 @@ impl Said {
         }
     }
 
+    /// Keep the newest keep replies under task's root message, dropping older ones and their own
+    /// replies (Retain::events).
+    pub(crate) fn trim(&mut self, task: &str, keep: usize) {
+        let root = MessageId(task.to_owned());
+        if !self.messages.get(&root).is_some_and(|message| message.task) {
+            return;
+        }
+        let Some(list) = self.replies.get_mut(&root) else {
+            return;
+        };
+        let over = list.len().saturating_sub(keep);
+        let mut doomed = list.drain(..over).collect::<Vec<_>>();
+        while let Some(id) = doomed.pop() {
+            doomed.extend(self.replies.remove(&id).unwrap_or_default());
+            if let Some(message) = self.messages.remove(&id) {
+                self.order.remove(&(message.seq, id));
+            }
+        }
+    }
+
     pub const fn new() -> Self {
         Self {
             messages: BTreeMap::new(),

@@ -202,6 +202,11 @@ impl<'a> Merged<'a> {
         self.shown().map(|(_, fold)| fold.next()).sum()
     }
 
+    /// Records held across every partition (Fold::held).
+    pub fn held(&self) -> u64 {
+        self.shown().map(|(_, fold)| fold.held() as u64).sum()
+    }
+
     /// Where a write goes, given what the folds know about the tasks it names.
     pub fn route(&self, by: &str, op: &Op) -> Route {
         let count = self.count();

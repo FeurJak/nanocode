@@ -11,6 +11,13 @@ pub struct Retain {
     pub entries: usize,
     #[serde(default)]
     pub only: Option<(String, String)>,
+    /// Events each task keeps (0: every one): past it the oldest of a task's events leave its dedupe
+    /// record (seen), its replies and its said thread, so an open task that keeps hearing events
+    /// holds a bounded number of them rather than every one since it was posted. A replay of an
+    /// event trimmed here folds again; boards whose writers append each event once (a dense log)
+    /// lose nothing by it.
+    #[serde(default)]
+    pub events: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,8 +162,41 @@ impl Fold {
                 }
             }
             self.settle(seq, &id);
+            self.cap(&id);
         }
         self.evict(seq);
+    }
+
+    /// Keep task's newest policy.events events: the older ones leave seen (raising their writer's
+    /// minted floor, as an eviction does), and its replies and said thread keep as many.
+    fn cap(&mut self, id: &TaskId) {
+        let keep = self.retention.policy.as_ref().map_or(0, |policy| policy.events);
+        if keep == 0 || mutated(Mutation::EventsUncapped) {
+            return;
+        }
+        let Some(list) = self.retention.events.get_mut(id) else {
+            return;
+        };
+        let over = list.len().saturating_sub(keep);
+        if over == 0 {
+            return;
+        }
+        for event in list.drain(..over).collect::<Vec<_>>() {
+            self.seen.remove(&event);
+            if let Some((writer, count)) = event.0.rsplit_once('.')
+                && let Ok(count) = count.parse::<u64>()
+            {
+                let floor = self.retention.minted.entry(writer.to_owned()).or_default();
+                *floor = (*floor).max(count);
+            }
+        }
+        if let Some(task) = self.tasks.get_mut(id) {
+            let over = task.replies.len().saturating_sub(keep);
+            task.replies.drain(..over);
+        }
+        if !self.mirror.holds(id) {
+            self.said.trim(&id.0, keep);
+        }
     }
 
     fn settle(&mut self, seq: u64, id: &TaskId) {
@@ -390,11 +430,44 @@ mod tests {
     }
 
     #[test]
+    fn an_open_task_keeps_its_newest_events_past_the_policy() {
+        let policy = Retain {
+            settled: 8,
+            entries: 1_000,
+            only: None,
+            events: 4,
+        };
+        let mut fold = board(policy, 0);
+        let mut minted = 2;
+        assert!(write(&mut fold, &mut minted, post("open", "thread")).is_ok());
+        let posted = EventId(format!("user:lead.{minted}"));
+        for n in 0..50 {
+            let reply = Op::Reply {
+                task: TaskId("open".to_owned()),
+                body: format!("line {n}"),
+            };
+            assert!(write(&mut fold, &mut minted, reply).is_ok());
+        }
+        let task = fold.task(&TaskId("open".to_owned())).expect("the open task stays");
+        assert!(!task.phase.terminal());
+        let bodies: Vec<&str> = task.replies.iter().map(|(_, body)| body.as_str()).collect();
+        assert_eq!(bodies, ["line 46", "line 47", "line 48", "line 49"]);
+        assert!(fold.outcome(&posted).is_none(), "its post left seen");
+        let last = EventId(format!("user:lead.{minted}"));
+        assert!(fold.outcome(&last).is_some(), "its newest event stays");
+        assert_eq!(fold.minted("user:lead"), minted, "the writer's floor holds");
+        assert_eq!(fold.said.replies[&crate::messages::MessageId("open".to_owned())].len(), 4);
+        let restored = Fold::restore(&fold.snapshot()).expect("a snapshot restores");
+        assert_eq!(restored, fold);
+    }
+
+    #[test]
     fn evicts_the_oldest_settled_past_the_policy() {
         let policy = Retain {
             settled: 3,
             entries: 8,
             only: None,
+            events: 0,
         };
         let mut fold = board(policy, 20);
         assert_eq!(
