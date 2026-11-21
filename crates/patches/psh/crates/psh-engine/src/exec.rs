@@ -711,13 +711,6 @@ async fn run_pipeline_stages(vp: &mut Vp, code: &Rc<Code>, p: &Pipeline) -> R {
     check_failure(vp, status).await
 }
 
-/// How many stages, its own included, a stage's command waits for at the gate: bash
-/// forks the stages one after another, and a stage forked three or more forks later
-/// usually opens its files after the first one's program has started (`> out` in
-/// `ls | xargs … | sort | grep … > out` is not there yet for `ls`, while it is in
-/// `ls | cat > out`).
-const STAGE_REACH: usize = 3;
-
 /// The start gate of a pipeline's stages: which have reached it and which went on
 /// past it, and the stages waiting there.
 pub(crate) struct StageGate {
@@ -772,27 +765,9 @@ impl GateTicket {
         }
     }
 
-    /// Whether the stages this one's command waits for reached the gate.
+    /// Whether every stage of the pipeline reached the gate.
     fn open(&self) -> bool {
-        let arrived = self.gate.arrived.borrow();
-        let end = (self.index + STAGE_REACH).min(arrived.len());
-        arrived[..end].iter().all(|a| *a)
-    }
-
-    /// A stage starts once the stage `STAGE_REACH` places before it went past the
-    /// gate (its program started) or ended, as bash forks it that much later.
-    pub(crate) async fn wait_turn(&self) {
-        let Some(before) = self.index.checked_sub(STAGE_REACH) else {
-            return;
-        };
-        std::future::poll_fn(|cx| {
-            if self.gate.passed.borrow()[before] {
-                return std::task::Poll::Ready(());
-            }
-            self.gate.register(cx);
-            std::task::Poll::Pending
-        })
-        .await;
+        self.gate.arrived.borrow().iter().all(|a| *a)
     }
 }
 
@@ -884,9 +859,6 @@ pub(crate) fn spawn_sub(sub: Vp, code: Rc<Code>, body: Body) -> Join<i32> {
                 r
             }
             Body::Stage(c) => {
-                if let Some(ticket) = sub.stage_gate.clone() {
-                    ticket.wait_turn().await;
-                }
                 let cmd = code.ast.cmd(c);
                 // bash runs an `if`, loop or `case` stage without the subshell's exit
                 // processing: an EXIT trap set there fires only on `exit`.

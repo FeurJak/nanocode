@@ -51,12 +51,21 @@ fn a_stage_that_reads_its_input_before_its_command_still_gets_it() {
 }
 
 #[test]
-fn a_stage_three_forks_later_opens_its_output_after_the_first_program_ran() {
-    // bash forks `grep` three stages after `ls`, which usually lists the directory
-    // before `> out` exists; two stages on (`cat > out`) it is already there.
-    let src = "ls | cat | sort | grep -o '[a-z]' > out; cat out; echo; \
-               ls | cat | cat > out2; cat out2";
-    assert_eq!(sh("reach", src), ("\nout\nout2\n".into(), 0));
+fn every_stage_of_a_long_pipeline_opens_its_output_before_the_first_program_runs() {
+    // An idle many-core bash has started every stage, and opened its `> out`, by the
+    // time `ls` lists the directory, however long the pipeline.
+    let src = "for i in 1 2 3 4 5; do rm -f out; ls | cat | cat | cat > out; cat out; done";
+    assert_eq!(sh("four", src), ("out\n".repeat(5), 0));
+    let src = "ls | cat | sort | grep -o '[a-z]*' > out; cat out";
+    assert_eq!(sh("four-grep", src), ("out\n".into(), 0));
+    let src = "ls | cat | cat | cat | cat | cat > out; cat out";
+    assert_eq!(sh("six", src), ("out\n".into(), 0));
+}
+
+#[test]
+fn a_three_stage_pipeline_opens_its_output_before_the_first_program_runs() {
+    let src = "for i in 1 2 3 4 5; do rm -f out; ls | cat | cat > out; cat out; done";
+    assert_eq!(sh("three", src), ("out\n".repeat(5), 0));
 }
 
 #[test]
