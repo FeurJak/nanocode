@@ -5,10 +5,12 @@ use serde::{Deserialize, Serialize};
 use crate::sim::{Mutation, mutated};
 use crate::{Change, Entry, EventId, Fold, Op, TaskId};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Retain {
     pub settled: usize,
     pub entries: usize,
+    #[serde(default)]
+    pub only: Option<(String, String)>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,8 +71,9 @@ impl Fold {
 
     pub fn set_retain(&mut self, policy: Option<Retain>) {
         let had = self.retention.policy.is_some();
+        let some = policy.is_some();
         self.retention.policy = policy;
-        if policy.is_none() || had {
+        if !some || had {
             return;
         }
         let mut events: BTreeMap<TaskId, Vec<EventId>> = BTreeMap::new();
@@ -88,15 +91,15 @@ impl Fold {
         self.retention.settled.clear();
         self.retention.order.clear();
         for (id, seq) in settled {
-            if self.tasks.get(&id).is_some_and(|task| task.phase.terminal()) {
+            if self.tracked(&id) {
                 self.retention.order.insert((seq, id.clone()));
                 self.retention.settled.insert(id, seq);
             }
         }
     }
 
-    pub const fn retain(&self) -> Option<Retain> {
-        self.retention.policy
+    pub const fn retain(&self) -> Option<&Retain> {
+        self.retention.policy.as_ref()
     }
 
     pub const fn entries_base(&self) -> usize {
@@ -157,7 +160,7 @@ impl Fold {
     }
 
     fn settle(&mut self, seq: u64, id: &TaskId) {
-        let terminal = self.tasks.get(id).is_some_and(|task| task.phase.terminal());
+        let terminal = self.tracked(id);
         match (terminal, self.retention.settled.get(id).copied()) {
             (true, None) => {
                 self.retention.settled.insert(id.clone(), seq);
@@ -169,6 +172,14 @@ impl Fold {
             }
             _ => {}
         }
+    }
+
+    fn tracked(&self, id: &TaskId) -> bool {
+        let only = self.retention.policy.as_ref().and_then(|policy| policy.only.as_ref());
+        self.tasks.get(id).is_some_and(|task| {
+            task.phase.terminal()
+                && only.is_none_or(|(key, value)| task.spec.labels.get(key) == Some(value))
+        })
     }
 
     fn evictable(&self, id: &TaskId) -> bool {
@@ -190,7 +201,7 @@ impl Fold {
     }
 
     fn evict(&mut self, _seq: u64) {
-        let Some(policy) = self.retention.policy else {
+        let Some(policy) = self.retention.policy.clone() else {
             return;
         };
         let over = self.retention.settled.len().saturating_sub(policy.settled);
@@ -249,6 +260,8 @@ impl Fold {
         self.posted.remove(id);
         self.retention.posted.remove(id);
         self.access.forget(id);
+        self.mirror.forget(id);
+        self.said.forget(&id.0);
         self.intents.forget(id, task.spec.parent.as_ref());
         if let Some(at) = self.retention.settled.remove(id) {
             self.retention.order.remove(&(at, id.clone()));
@@ -287,7 +300,7 @@ impl Fold {
         let base = self.retention.base;
         let mut posted = self.retention.trimmed_posts().clone();
         for (index, entry) in self.entries.iter().enumerate() {
-            if entry.change == Change::Posted {
+            if entry.change == Change::Posted && self.tasks.contains_key(&entry.task) {
                 posted.entry(entry.task.clone()).or_insert(base + index);
             }
         }
@@ -303,3 +316,93 @@ impl Fold {
         }
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use crate::access::{Can, Grant, Who};
+    use crate::tasks::Terms;
+    use crate::{Event, EventId, Fold, NewTask, Op, Rejection, Retain, TaskId};
+
+    fn write(fold: &mut Fold, minted: &mut u64, op: Op) -> Result<u64, Rejection> {
+        *minted += 1;
+        let id = EventId(format!("user:lead.{minted}"));
+        let body = serde_json::to_string(&Event {
+            id: id.clone(),
+            by: "user:lead".to_owned(),
+            at_ms: *minted,
+            op,
+        })
+        .expect("an event encodes");
+        fold.apply(fold.next(), &body).expect("the row applies");
+        fold.outcome(&id).cloned().expect("an outcome")
+    }
+
+    fn post(id: &str, kind: &str) -> Op {
+        Op::Post {
+            task: NewTask {
+                id: TaskId(id.to_owned()),
+                parent: None,
+                spec: id.to_owned(),
+                labels: BTreeMap::from([("kind".to_owned(), kind.to_owned())]),
+                needs: Vec::new(),
+                terms: Terms::default(),
+            },
+        }
+    }
+
+    fn cancel(id: &str) -> Op {
+        Op::Cancel {
+            task: TaskId(id.to_owned()),
+            reason: "done".to_owned(),
+        }
+    }
+
+    fn board(policy: Retain, tasks: usize) -> Fold {
+        let mut fold = Fold::retaining(policy);
+        let mut minted = 0;
+        assert!(write(&mut fold, &mut minted, Op::Charter {}).is_ok());
+        let grant = Grant {
+            who: vec![Who::Everyone],
+            can: BTreeMap::from([("*".to_owned(), Can::ALL.to_vec())]),
+        };
+        assert!(write(&mut fold, &mut minted, Op::Grant { grant }).is_ok());
+        for n in 0..tasks {
+            let kind = if n % 2 == 0 { "land" } else { "thread" };
+            let id = format!("t{n}");
+            assert!(write(&mut fold, &mut minted, post(&id, kind)).is_ok());
+            assert!(write(&mut fold, &mut minted, cancel(&id)).is_ok());
+        }
+        fold
+    }
+
+    #[test]
+    fn evicts_the_oldest_settled_past_the_policy() {
+        let policy = Retain { settled: 3, entries: 8, only: None };
+        let mut fold = board(policy, 20);
+        assert_eq!(fold.tasks().len(), 3, "{:?}", fold.tasks().keys().collect::<Vec<_>>());
+        assert!(fold.task(&TaskId("t19".to_owned())).is_some());
+        assert!(fold.task(&TaskId("t0".to_owned())).is_none());
+        assert_eq!(fold.evicted(), 17);
+        assert!(fold.entries().len() <= 8);
+        assert_eq!(fold.entry_count(), fold.entries_base() + fold.entries().len());
+        let restored = Fold::restore(&fold.snapshot()).expect("restores");
+        assert_eq!(restored, fold);
+        let json = Fold::restore(fold.snapshot_json().as_bytes()).expect("restores");
+        assert_eq!(json, fold);
+        let mut minted = 1_000;
+        assert_eq!(write(&mut fold, &mut minted, post("t0", "land")), Err(Rejection::Exists));
+    }
+
+    #[test]
+    fn only_evicts_tasks_with_its_label() {
+        let only = Some(("kind".to_owned(), "land".to_owned()));
+        let fold = board(Retain { settled: 2, entries: 1_000, only }, 20);
+        let land = fold.tasks().values().filter(|t| t.spec.labels["kind"] == "land").count();
+        assert_eq!(land, 2);
+        assert_eq!(fold.tasks().len(), 12);
+    }
+}
+

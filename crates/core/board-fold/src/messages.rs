@@ -187,6 +187,20 @@ pub struct Said {
 }
 
 impl Said {
+    pub(crate) fn forget(&mut self, task: &str) {
+        let root = MessageId(task.to_owned());
+        if !self.messages.get(&root).is_some_and(|message| message.task) {
+            return;
+        }
+        let mut doomed = vec![root];
+        while let Some(id) = doomed.pop() {
+            doomed.extend(self.replies.remove(&id).unwrap_or_default());
+            if let Some(message) = self.messages.remove(&id) {
+                self.order.remove(&(message.seq, id));
+            }
+        }
+    }
+
     pub const fn new() -> Self {
         Self {
             messages: BTreeMap::new(),

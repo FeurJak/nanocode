@@ -1876,8 +1876,9 @@ fn retains(seed: u64, rows: &[(u64, String)]) -> Result<u64, String> {
     let policy = Retain {
         settled: rng.below(4) as usize,
         entries: 1 + rng.below(rows.len() as u64 / 2 + 1) as usize,
+        only: None,
     };
-    let kept = fold(Fold::retaining(policy), rows)?;
+    let kept = fold(Fold::retaining(policy.clone()), rows)?;
     if kept.entries().len() > policy.entries {
         return Err(format!(
             "a fold retaining {policy:?} holds {} entries",
@@ -1917,7 +1918,7 @@ fn retains(seed: u64, rows: &[(u64, String)]) -> Result<u64, String> {
     }
     for _ in 0..3 {
         let cut = rng.pick(rows.len() + 1);
-        let held = fold(Fold::retaining(policy), &rows[..cut])?;
+        let held = fold(Fold::retaining(policy.clone()), &rows[..cut])?;
         let compact = Fold::restore(&held.snapshot())
             .map_err(|error| format!("restore a retaining snapshot of {cut} rows: {error}"))?;
         let json = Fold::restore(held.snapshot_json().as_bytes())

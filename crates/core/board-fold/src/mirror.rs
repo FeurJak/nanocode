@@ -552,10 +552,20 @@ fn tally(tally: &Tally, id: &EventId, target: &Target, action: &Action, revision
 
 impl Mirror {
     pub(crate) fn holds(&self, task: &TaskId) -> bool {
-        self.by_task.contains_key(task)
-            || self.status.contains_key(task)
-            || self.ever.iter().any(|(held, _)| held == task)
-            || self.worded.contains_key(task)
+        self.ever.iter().any(|(held, _)| held == task)
+    }
+
+    pub(crate) fn forget(&mut self, task: &TaskId) {
+        for id in self.by_task.remove(task).unwrap_or_default() {
+            self.messages.remove(&id);
+        }
+        if let Some(id) = self.status.remove(task) {
+            self.messages.remove(&id);
+        }
+        self.worded.remove(task);
+        self.labels.retain(|(held, _), _| held != task);
+        self.read.retain(|(held, _), _| held != task);
+        self.owned.retain(|(held, _), _| held != task);
     }
 
     pub const fn new() -> Self {
