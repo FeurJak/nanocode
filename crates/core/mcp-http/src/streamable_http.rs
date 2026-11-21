@@ -20,11 +20,12 @@ use nanocode_sync::{
 #[cfg(not(target_family = "wasm"))]
 use crate::oauth::OAuthRuntime;
 
-const HEADER_SESSION_ID: HeaderName = HeaderName::from_static("mcp-session-id");
-const HEADER_PROTOCOL_VERSION: HeaderName = HeaderName::from_static("mcp-protocol-version");
+pub(crate) const HEADER_SESSION_ID: HeaderName = HeaderName::from_static("mcp-session-id");
+pub(crate) const HEADER_PROTOCOL_VERSION: HeaderName =
+    HeaderName::from_static("mcp-protocol-version");
 const HEADER_LAST_EVENT_ID: HeaderName = HeaderName::from_static("last-event-id");
-const EVENT_STREAM_MIME_TYPE: &str = "text/event-stream";
-const JSON_MIME_TYPE: &str = "application/json";
+pub(crate) const EVENT_STREAM_MIME_TYPE: &str = "text/event-stream";
+pub(crate) const JSON_MIME_TYPE: &str = "application/json";
 const ACCEPT_MCP: &str = "text/event-stream, application/json";
 const RESERVED_HEADERS: [&str; 3] = ["accept", "mcp-session-id", "last-event-id"];
 const MAX_SSE_EVENT_BYTES: usize = 16 * 1024 * 1024;
@@ -109,7 +110,7 @@ struct SessionState {
     initialize: Option<Message>,
 }
 
-enum Client {
+pub(crate) enum Client {
     #[cfg(not(target_family = "wasm"))]
     Reqwest(nanocode_http::Client),
     Sender {
@@ -118,9 +119,9 @@ enum Client {
     },
 }
 
-struct Reply {
-    status: StatusCode,
-    headers: HeaderMap,
+pub(crate) struct Reply {
+    pub(crate) status: StatusCode,
+    pub(crate) headers: HeaderMap,
     body: Body,
 }
 
@@ -427,14 +428,14 @@ fn negotiated_version(message: &Message) -> Option<HeaderValue> {
         .and_then(|version| HeaderValue::from_str(version).ok())
 }
 
-fn content_type(response: &Reply) -> Option<String> {
+pub(crate) fn content_type(response: &Reply) -> Option<String> {
     response
         .headers
         .get(CONTENT_TYPE)
         .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
 }
 
-fn is_mime(content_type: Option<&str>, mime: &str) -> bool {
+pub(crate) fn is_mime(content_type: Option<&str>, mime: &str) -> bool {
     content_type.is_some_and(|content_type| content_type.as_bytes().starts_with(mime.as_bytes()))
 }
 
@@ -508,7 +509,7 @@ impl Reply {
             .map_err(|error| sender_error(&error))
     }
 
-    async fn bytes(mut self, limit: Option<usize>) -> Result<Vec<u8>, TransportError> {
+    pub(crate) async fn bytes(mut self, limit: Option<usize>) -> Result<Vec<u8>, TransportError> {
         let mut bytes = Vec::new();
         while let Some(chunk) = self.chunk().await? {
             bytes.extend_from_slice(&chunk);
@@ -527,7 +528,7 @@ impl Reply {
 }
 
 impl Client {
-    async fn send(
+    pub(crate) async fn send(
         &self,
         method: &Method,
         url: &str,

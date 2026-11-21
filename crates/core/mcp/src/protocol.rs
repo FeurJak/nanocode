@@ -2,6 +2,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 pub const LATEST_PROTOCOL_VERSION: &str = "2025-11-25";
+pub const STATELESS_PROTOCOL_VERSION: &str = "2026-07-28";
+pub const STATELESS_SUPPORTED_PROTOCOL_VERSIONS: [&str; 5] = [
+    STATELESS_PROTOCOL_VERSION,
+    "2025-11-25",
+    "2025-06-18",
+    "2025-03-26",
+    "2024-11-05",
+];
+pub const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
 
 pub const INITIALIZE: &str = "initialize";
 pub const INITIALIZED: &str = "notifications/initialized";
@@ -14,10 +23,15 @@ pub const RESOURCE_TEMPLATES_LIST: &str = "resources/templates/list";
 pub const RESOURCES_READ: &str = "resources/read";
 pub const ROOTS_LIST: &str = "roots/list";
 pub const ELICITATION_CREATE: &str = "elicitation/create";
+pub const SERVER_DISCOVER: &str = "server/discover";
+pub const PROMPTS_GET: &str = "prompts/get";
 
 pub type JsonObject = Map<String, Value>;
 
 pub const RESUME_META_KEY: &str = "io.nanocode/resume";
+pub const PROTOCOL_VERSION_META_KEY: &str = "io.modelcontextprotocol/protocolVersion";
+pub const CLIENT_INFO_META_KEY: &str = "io.modelcontextprotocol/clientInfo";
+pub const CLIENT_CAPABILITIES_META_KEY: &str = "io.modelcontextprotocol/clientCapabilities";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Implementation {

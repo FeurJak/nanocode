@@ -1,5 +1,6 @@
 #[cfg(not(target_family = "wasm"))]
 pub mod oauth;
+pub mod stateless;
 pub mod streamable_http;
 
 #[derive(Clone)]
