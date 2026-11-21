@@ -78,6 +78,12 @@ struct Fenced {
 
     next: u64,
 
+    /// The store's head revision is unknown: a write failed in a way that does
+    /// not say whether it landed (the store reported the owner fenced, which is
+    /// also what a retried write that already landed sees), so the next write
+    /// peeks the head instead of trusting the cached revision.
+    stale: bool,
+
     inflight: std::collections::VecDeque<InFlight>,
 
     failure: Option<std::io::Error>,
@@ -126,7 +132,26 @@ impl Fenced {
             .map_err(std::io::Error::other)?;
         self.next = owned.state.revision;
         self.owner = Some((owned.owner, owned.state.revision));
+        self.stale = false;
         Ok(owned.state.payload)
+    }
+
+    /// Takes the head revision from the store after a write whose outcome is
+    /// unknown, keeping the owner token: a write that landed moved the head past
+    /// the cached revision, and a real takeover still fails the next write as
+    /// fenced rather than being taken back with a fresh owner.
+    async fn reread(&mut self, store: &mut SharedStore, state_id: &str) -> std::io::Result<()> {
+        self.drain().await;
+        if !self.stale {
+            return Ok(());
+        }
+        let stored = store.peek(state_id).await.map_err(std::io::Error::other)?;
+        if let Some((owner, _)) = self.owner.take() {
+            self.owner = Some((owner, stored.revision));
+        }
+        self.next = stored.revision;
+        self.stale = false;
+        Ok(())
     }
 
     async fn save(
@@ -162,6 +187,8 @@ impl Fenced {
         staged.dedup_by(|a, b| a.key == b.key);
         if self.owner.is_none() {
             self.acquire(store, state_id).await?;
+        } else if self.stale {
+            self.reread(store, state_id).await?;
         }
         let (owner, _) = self
             .owner
@@ -217,6 +244,8 @@ impl Fenced {
         }
         if self.owner.is_none() {
             self.acquire(store, state_id).await?;
+        } else if self.stale {
+            self.reread(store, state_id).await?;
         }
         let (owner, _) = self
             .owner
@@ -265,8 +294,9 @@ impl Fenced {
             .map_err(std::io::Error::other)?;
         let (settle, done) = oneshot::channel();
         crate::shared_store::spawn_operation(async move {
+            // A dropped reply says nothing about whether the write landed.
             let result = replaced.await.unwrap_or_else(|_| {
-                Err(StoreError::NotCommitted(
+                Err(StoreError::Backend(
                     "the durability store stopped".to_owned(),
                 ))
             });
@@ -332,6 +362,7 @@ impl Fenced {
                 if let Some((owner, _)) = self.owner.take() {
                     self.owner = Some((owner, revision));
                 }
+                self.stale = false;
                 if !entry.pending.is_empty() {
                     self.pending.update(|known| {
                         for key in &entry.pending {
@@ -341,8 +372,10 @@ impl Fenced {
                 }
             }
             Err(error) => {
-                if !matches!(error, StoreError::NotCommitted(_) | StoreError::Fenced) {
-                    self.owner = None;
+                match &error {
+                    StoreError::NotCommitted(_) => {}
+                    StoreError::Fenced => self.stale = true,
+                    _ => self.owner = None,
                 }
                 self.retry.extend(entry.pending);
                 self.failure.get_or_insert(std::io::Error::other(error));
@@ -656,6 +689,7 @@ fn journal(
             owner: None,
             seed,
             next: 0,
+            stale: false,
             inflight: std::collections::VecDeque::new(),
             failure: None,
             retry: Vec::new(),
