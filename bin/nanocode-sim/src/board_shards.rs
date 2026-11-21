@@ -1577,6 +1577,10 @@ pub struct ShardsOutcome {
 fn simulate_shape(seed: u64, shape: Shape, mutation: ShardsMutation) -> ShardsOutcome {
     let described = shape.describe();
     let clock = Clock::new();
+    // Boards reach the platform host on their own (a checkpoint save is a task they spawn), so the
+    // seed runs under its simulated host like every other scenario: without it the first save
+    // panics on a thread with no simulation.
+    crate::host::enter(seed, &clock);
     let count = NonZeroU32::new(shape.partitions).unwrap_or(NonZeroU32::MIN);
     let host = Arc::new(ShardLog {
         inner: MemoryLog::new(),
@@ -1664,12 +1668,22 @@ fn simulate_shape(seed: u64, shape: Shape, mutation: ShardsMutation) -> ShardsOu
 }
 
 pub fn simulate(seed: u64, mutation: ShardsMutation) -> ShardsOutcome {
-    simulate_shape(seed, Shape::of(seed), mutation)
+    // Checkpoints are off by default; half the seeds turn them on at the cadence a deployment
+    // would set, so the committers' boards spawn saves as they grow. Drawn apart from the shape's
+    // stream so every seed keeps its shape.
+    let checkpoints = Rng::derive(seed, "board shards checkpoints").chance(500_000);
+    nanocode_board::checkpoint::checkpoint_every_here(
+        checkpoints.then_some(nanocode_board::checkpoint::CHECKPOINT_EVERY),
+    );
+    let outcome = simulate_shape(seed, Shape::of(seed), mutation);
+    nanocode_board::checkpoint::checkpoint_every_here(None);
+    outcome
 }
 
 pub fn run_seed(seed: u64, mutation: ShardsMutation) -> ShardsOutcome {
     std::panic::catch_unwind(|| simulate(seed, mutation)).unwrap_or_else(|panic| {
         board_sim::mutate(BoardRule::None);
+        nanocode_board::checkpoint::checkpoint_every_here(None);
         let message = panic
             .downcast_ref::<String>()
             .cloned()

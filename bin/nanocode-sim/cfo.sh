@@ -211,6 +211,7 @@ default_table='
 1 board_pinned_squatted_ids pass --scenario board --seed 1795147396000000556
 1 board_pinned_join_root pass --scenario board --seed 1208986242872782921
 1 board_shards_pinned_short_lease pass --scenario board_shards --seed 156486433204944099
+1 board_shards_pinned_checkpoint_host pass --scenario board_shards --seed 42004
 1 canary_rate_limit_counts_attempt canary:100 --scenario board_sync --mutation rate_limit_counts_attempt
 1 board_shards_pinned_lapse_budget pass --scenario board_shards --seed 1795200002000022054
 4 board_steer pass --scenario board_steer
