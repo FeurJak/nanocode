@@ -132,7 +132,7 @@ pub enum BoardMutation {
 }
 
 impl BoardMutation {
-    const ALL: [Self; 77] = [
+    const ALL: [Self; 78] = [
         Self::None,
         Self::ClaimIgnoresLease,
         Self::ClaimIgnoresNeeds,
