@@ -175,7 +175,11 @@ impl Fold {
     }
 
     fn tracked(&self, id: &TaskId) -> bool {
-        let only = self.retention.policy.as_ref().and_then(|policy| policy.only.as_ref());
+        let only = self
+            .retention
+            .policy
+            .as_ref()
+            .and_then(|policy| policy.only.as_ref());
         self.tasks.get(id).is_some_and(|task| {
             task.phase.terminal()
                 && only.is_none_or(|(key, value)| task.spec.labels.get(key) == Some(value))
@@ -289,7 +293,9 @@ impl Fold {
             if entry.change == Change::Posted
                 && self.posted.get(&entry.task) == Some(&(base + index))
             {
-                self.retention.posted.insert(entry.task.clone(), base + index);
+                self.retention
+                    .posted
+                    .insert(entry.task.clone(), base + index);
             }
         }
         self.entries.drain(..over);
@@ -309,14 +315,19 @@ impl Fold {
 
     pub(crate) fn restore_retention(&mut self) {
         if mutated(Mutation::EvictionDiffersByReplica) && !self.retention.order.is_empty() {
-            let (at, id) = self.retention.order.iter().next_back().cloned().expect("non-empty");
+            let (at, id) = self
+                .retention
+                .order
+                .iter()
+                .next_back()
+                .cloned()
+                .expect("non-empty");
             self.retention.order.remove(&(at, id.clone()));
             self.retention.order.insert((0, id.clone()));
             self.retention.settled.insert(id, 0);
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -380,29 +391,54 @@ mod tests {
 
     #[test]
     fn evicts_the_oldest_settled_past_the_policy() {
-        let policy = Retain { settled: 3, entries: 8, only: None };
+        let policy = Retain {
+            settled: 3,
+            entries: 8,
+            only: None,
+        };
         let mut fold = board(policy, 20);
-        assert_eq!(fold.tasks().len(), 3, "{:?}", fold.tasks().keys().collect::<Vec<_>>());
+        assert_eq!(
+            fold.tasks().len(),
+            3,
+            "{:?}",
+            fold.tasks().keys().collect::<Vec<_>>()
+        );
         assert!(fold.task(&TaskId("t19".to_owned())).is_some());
         assert!(fold.task(&TaskId("t0".to_owned())).is_none());
         assert_eq!(fold.evicted(), 17);
         assert!(fold.entries().len() <= 8);
-        assert_eq!(fold.entry_count(), fold.entries_base() + fold.entries().len());
+        assert_eq!(
+            fold.entry_count(),
+            fold.entries_base() + fold.entries().len()
+        );
         let restored = Fold::restore(&fold.snapshot()).expect("restores");
         assert_eq!(restored, fold);
         let json = Fold::restore(fold.snapshot_json().as_bytes()).expect("restores");
         assert_eq!(json, fold);
         let mut minted = 1_000;
-        assert_eq!(write(&mut fold, &mut minted, post("t0", "land")), Err(Rejection::Exists));
+        assert_eq!(
+            write(&mut fold, &mut minted, post("t0", "land")),
+            Err(Rejection::Exists)
+        );
     }
 
     #[test]
     fn only_evicts_tasks_with_its_label() {
         let only = Some(("kind".to_owned(), "land".to_owned()));
-        let fold = board(Retain { settled: 2, entries: 1_000, only }, 20);
-        let land = fold.tasks().values().filter(|t| t.spec.labels["kind"] == "land").count();
+        let fold = board(
+            Retain {
+                settled: 2,
+                entries: 1_000,
+                only,
+            },
+            20,
+        );
+        let land = fold
+            .tasks()
+            .values()
+            .filter(|t| t.spec.labels["kind"] == "land")
+            .count();
         assert_eq!(land, 2);
         assert_eq!(fold.tasks().len(), 12);
     }
 }
-

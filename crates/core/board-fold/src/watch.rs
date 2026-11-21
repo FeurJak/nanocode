@@ -316,7 +316,9 @@ pub struct Marks {
 
 impl Marks {
     pub(crate) fn lanes_hold(&self, task: &TaskId) -> bool {
-        self.watchers.values().any(|watcher| watcher.lanes.contains_key(task))
+        self.watchers
+            .values()
+            .any(|watcher| watcher.lanes.contains_key(task))
     }
 
     pub const fn new() -> Self {

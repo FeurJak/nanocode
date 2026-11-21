@@ -1878,7 +1878,23 @@ fn retains(seed: u64, rows: &[(u64, String)]) -> Result<u64, String> {
         entries: 1 + rng.below(rows.len() as u64 / 2 + 1) as usize,
         only: None,
     };
-    let kept = fold(Fold::retaining(policy.clone()), rows)?;
+    // Fold row by row, and at every cut restore the fold from its own compact snapshot: a restore
+    // must give back exactly the fold that wrote it, retention bookkeeping included, or the restored
+    // replica can evict differently later even when the end state happens to converge.
+    let mut kept = Fold::retaining(policy.clone());
+    for cut in 0..=rows.len() {
+        let restored = Fold::restore(&kept.snapshot())
+            .map_err(|error| format!("restore a retaining snapshot of {cut} rows: {error}"))?;
+        if restored != kept {
+            return Err(format!(
+                "a retaining fold of {cut} rows restores from its snapshot as a different fold"
+            ));
+        }
+        if let Some((seq, body)) = rows.get(cut) {
+            kept.apply(*seq, body)
+                .map_err(|error| format!("retaining refold: {error}"))?;
+        }
+    }
     if kept.entries().len() > policy.entries {
         return Err(format!(
             "a fold retaining {policy:?} holds {} entries",
@@ -1900,7 +1916,13 @@ fn retains(seed: u64, rows: &[(u64, String)]) -> Result<u64, String> {
     let writers = rows
         .iter()
         .filter_map(|(_, body)| serde_json::from_str::<nanocode_board::Event>(body).ok())
-        .filter_map(|event| event.id.0.rsplit_once('.').map(|(writer, _)| writer.to_owned()))
+        .filter_map(|event| {
+            event
+                .id
+                .0
+                .rsplit_once('.')
+                .map(|(writer, _)| writer.to_owned())
+        })
         .collect::<BTreeSet<_>>();
     for writer in &writers {
         if kept.minted(writer) < full.minted(writer) {
@@ -1928,7 +1950,31 @@ fn retains(seed: u64, rows: &[(u64, String)]) -> Result<u64, String> {
                 "compact and JSON snapshots of a retaining fold of {cut} rows restore different folds"
             ));
         }
-        if fold(compact.clone(), &rows[cut..])? != kept {
+        if compact != held {
+            return Err(format!(
+                "a retaining fold restored at row {cut} of {} differs from the fold that wrote its snapshot",
+                rows.len()
+            ));
+        }
+        let (mut restored, mut straight) = (compact.clone(), held);
+        for (index, (seq, body)) in rows[cut..].iter().enumerate() {
+            restored
+                .apply(*seq, body)
+                .map_err(|error| format!("retaining refold: {error}"))?;
+            straight
+                .apply(*seq, body)
+                .map_err(|error| format!("retaining refold: {error}"))?;
+            if restored.evicted() != straight.evicted()
+                || restored.tasks().keys().ne(straight.tasks().keys())
+            {
+                return Err(format!(
+                    "a retaining fold restored at row {cut} of {} evicts differently at row {}",
+                    rows.len(),
+                    cut + index
+                ));
+            }
+        }
+        if restored != kept {
             return Err(format!(
                 "a retaining fold restored at row {cut} of {} evicts differently from one that folded every row",
                 rows.len()
