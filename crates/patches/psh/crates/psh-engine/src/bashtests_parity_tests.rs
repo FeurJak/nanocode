@@ -406,3 +406,13 @@ fn an_unterminated_command_substitution_after_a_here_document_counts_the_added_n
          psh: -c: line 5: unexpected EOF while looking for matching `)'\n"
     );
 }
+
+#[test]
+fn declare_with_an_empty_subscript_or_name_matches_bash() {
+    let (_, _, e) = run("declare -r []=asdf\ndeclare -r a[]=asdf\n");
+    assert_eq!(
+        String::from_utf8_lossy(&e),
+        "psh: line 1: declare: `[]=asdf': not a valid identifier\n\
+         psh: line 2: a[]: bad array subscript\n"
+    );
+}

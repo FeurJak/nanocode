@@ -449,8 +449,11 @@ declare -fx {n}
         let raw = a.name();
         // `export -f a::b`: a function's name need not be a variable name.
         if !is_name(raw) && !(o.funcs && matches!(a, DeclArg::Word(_))) {
-            vp.error(&format!("{bname}: `{}': not a valid identifier", a.shown()))
-                .await;
+            vp.error(&format!(
+                "{bname}: `{}': not a valid identifier",
+                a.written()
+            ))
+            .await;
             vp.bad_assign = true;
             status = 1;
             continue;
@@ -541,6 +544,11 @@ declare -fx {n}
                 if (local && inherit_shopt(vp)) || (o.global && in_function) {
                     vp.error(&format!("{bname}: {msg}")).await;
                 }
+                status = 1;
+            }
+            Err(DeclError::Msg(msg)) if msg.ends_with(": bad array subscript") => {
+                vp.error(&msg).await;
+                vp.bad_assign = true;
                 status = 1;
             }
             Err(DeclError::Msg(msg)) => {
@@ -897,6 +905,9 @@ async fn declare_one(
                     let i = crate::expand::expand_sub_text(vp, i)
                         .await
                         .map_err(DeclError::Unwind)?;
+                    if i.is_empty() {
+                        return Err(format!("{target}[]: bad array subscript").into());
+                    }
                     vp.assign_elem(&target, &i, value.clone(), *append)?;
                 }
             }
