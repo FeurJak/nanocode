@@ -7507,11 +7507,28 @@ impl Registry {
         loop {
             let session = session_id.to_owned();
             let wanted = ids.to_vec();
-            let (mut snapshot, root) = self
+            let (mut snapshot, root, unread) = self
                 .state
                 .call(move |state| -> std::io::Result<_> {
                     let root = state.root_session_id(&session).to_owned();
-                    Ok((state.wait_snapshot(&session, &wanted)?, root))
+                    let snapshot = state.wait_snapshot(&session, &wanted)?;
+                    let unread = state
+                        .scopes
+                        .get(&root)
+                        .filter(|_| root == session)
+                        .map_or_else(HashSet::new, |scope| {
+                            wanted
+                                .iter()
+                                .copied()
+                                .filter(|id| {
+                                    scope.sessions.get(id).is_some_and(|child| {
+                                        child.completion.revision().is_some()
+                                            && child.status.wakes_parent()
+                                    })
+                                })
+                                .collect::<HashSet<_>>()
+                        });
+                    Ok((snapshot, root, unread))
                 })
                 .await?;
             if let Some(board) = self.board_agents(&root).await? {
@@ -7539,9 +7556,10 @@ impl Registry {
             let summaries = snapshot.into_iter().map(|(summary, _)| summary).collect();
 
             let reported = |reported: &AgentMap<u64>| {
-                terminal
-                    .iter()
-                    .all(|&(id, mark)| reported.get(&(session_id.to_owned(), id)) == Some(&mark))
+                terminal.iter().all(|&(id, mark)| {
+                    !unread.contains(&id)
+                        && reported.get(&(session_id.to_owned(), id)) == Some(&mark)
+                })
             };
             let (fresh, delivered) = if self.wait_reported.read(reported) {
                 (false, terminal.iter().map(|&(id, _)| id).collect())
@@ -7550,7 +7568,9 @@ impl Registry {
                     let mut fresh = false;
                     let mut delivered = HashSet::new();
                     for &(id, mark) in &terminal {
-                        if reported.insert((session_id.to_owned(), id), mark) == Some(mark) {
+                        if reported.insert((session_id.to_owned(), id), mark) == Some(mark)
+                            && !unread.contains(&id)
+                        {
                             delivered.insert(id);
                         } else {
                             fresh = true;
