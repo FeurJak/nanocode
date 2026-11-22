@@ -1881,6 +1881,9 @@ pub(crate) async fn call_function(
     }
     vp.calls.pop();
     if let Some(frame) = vp.frames.pop() {
+        if let Some(getopts) = frame.getopts {
+            vp.getopts = getopts;
+        }
         if let Some(set) = frame.options {
             let eof = vp.opts.get(SetOpt::Ignoreeof);
             vp.opts.restore_set_bits(set);

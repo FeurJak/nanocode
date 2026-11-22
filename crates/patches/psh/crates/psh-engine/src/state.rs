@@ -582,6 +582,7 @@ pub(crate) struct Frame {
     /// one keeps its export attribute (bash).
     pub from_temp: Vec<String>,
     pub builtin: bool,
+    pub getopts: Option<(i64, usize)>,
 }
 
 impl Vp {
@@ -851,6 +852,9 @@ impl Vp {
             && !self.frames[k].saved.iter().any(|(n, _)| n == name)
         {
             self.frames[k].saved.push((name.to_string(), old));
+            if name == "OPTIND" {
+                self.frames[k].getopts = Some(std::mem::take(&mut self.getopts));
+            }
         }
     }
 

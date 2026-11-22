@@ -416,3 +416,12 @@ fn declare_with_an_empty_subscript_or_name_matches_bash() {
          psh: line 2: a[]: bad array subscript\n"
     );
 }
+
+#[test]
+fn getopts_state_is_saved_with_a_function_local_optind() {
+    let script = "f()\n{\n\ttypeset OPTIND=1\n\ttypeset opt\n\twhile getopts \":abcxyz\" opt\n\tdo\n\t\techo opt: \"$opt\"\n\t\tif [[ $opt = y ]]; then f -abc ; fi\n\tdone\n}\nf -xyz\n";
+    assert_eq!(
+        out(script),
+        "opt: x\nopt: y\nopt: a\nopt: b\nopt: c\nopt: z\n"
+    );
+}
