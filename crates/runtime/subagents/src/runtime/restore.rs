@@ -425,12 +425,7 @@ pub(super) fn restore_inner<'a>(
                         (None, None) => {}
                     }
                     restored_sessions.push(session.descriptor.session_id.clone());
-                    waited.extend(
-                        session
-                            .waited
-                            .iter()
-                            .map(|waited| ((waited.session.clone(), id), waited.mark)),
-                    );
+                    waited.extend(handed_out(root_session_id, id, &session));
                     if matches!(session.stored_runtime, StoredRuntime::Unstarted(_)) {
                         report.unstarted.push(id);
                     }
@@ -612,12 +607,7 @@ pub(super) fn thaw<'a>(
             if session.conversation && !store.records_sessions() {
                 session.marks.captured.store(true, Ordering::Release);
             }
-            waited.extend(
-                session
-                    .waited
-                    .iter()
-                    .map(|waited| ((waited.session.clone(), id), waited.mark)),
-            );
+            waited.extend(handed_out(root_session_id, id, &session));
             sessions.push((id, session, cached));
         }
         let root = root_session_id.to_owned();
@@ -685,4 +675,17 @@ pub(super) fn await_restored<'a>(
         }
         Ok(())
     })
+}
+
+fn handed_out<'a>(
+    root_session_id: &'a str,
+    id: AgentId,
+    session: &'a ChildSession,
+) -> impl Iterator<Item = ((String, AgentId), u64)> + 'a {
+    let unread = session.completion.revision().is_some() && session.status.wakes_parent();
+    session
+        .waited
+        .iter()
+        .filter(move |waited| !(unread && waited.session == root_session_id))
+        .map(move |waited| ((waited.session.clone(), id), waited.mark))
 }
