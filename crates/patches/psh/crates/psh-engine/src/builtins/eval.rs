@@ -245,12 +245,6 @@ pub(super) async fn source(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     vp.xtrace_level += 1;
     let r = Box::pin(run_text(vp, &text, 0, Origin::File)).await;
     vp.xtrace_level -= 1;
-    if let Some(t) = debug {
-        let traps = Rc::make_mut(&mut vp.traps);
-        if !traps.fn_hidden.contains_key(&super::trap::TrapKey::Debug) {
-            traps.map.entry(super::trap::TrapKey::Debug).or_insert(t);
-        }
-    }
     vp.calls.pop();
     vp.line = line;
     if let Some(a) = saved_args {
@@ -262,15 +256,26 @@ pub(super) async fn source(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         Err(Unwind::Return(st)) => Ok(st),
         r => r,
     };
-    // The RETURN trap runs when a sourced file finishes (D1283).
+    // The RETURN trap runs when a sourced file finishes (D1283), still without the
+    // DEBUG trap it hid.
+    let mut ran = Ok(());
     if let Ok(st) = r
         && vp.traps.live()
     {
         if !returned {
             vp.status = st;
         }
-        Box::pin(super::trap::run_trap(vp, super::trap::TrapKey::Return)).await?;
+        ran = Box::pin(super::trap::run_trap(vp, super::trap::TrapKey::Return))
+            .await
+            .map(|_| ());
     }
+    if let Some(t) = debug {
+        let traps = Rc::make_mut(&mut vp.traps);
+        if !traps.fn_hidden.contains_key(&super::trap::TrapKey::Debug) {
+            traps.map.entry(super::trap::TrapKey::Debug).or_insert(t);
+        }
+    }
+    ran?;
     r
 }
 

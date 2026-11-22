@@ -328,3 +328,9 @@ fn extdebug_turns_functrace_and_errtrace_on_and_off() {
         "hBETc\nhBEc\nhBc\n"
     );
 }
+
+#[test]
+fn the_return_trap_after_source_runs_without_the_hidden_debug_trap() {
+    let script = "echo : > s.sub\ntrap 'echo debug' DEBUG\ntrap 'echo ret' RETURN\n. ./s.sub\ntrap - DEBUG\n";
+    assert_eq!(out(script), "debug\ndebug\nret\ndebug\n");
+}
