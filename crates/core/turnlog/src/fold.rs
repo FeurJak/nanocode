@@ -157,6 +157,14 @@ pub fn tag(text: &str) -> u128 {
     })
 }
 
+const RETIRED_ROW: usize = 97;
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct RetiredIndex {
+    hands: BTreeMap<String, Box<str>>,
+    rows: String,
+}
+
 const fn outcome_code(outcome: Outcome) -> &'static str {
     match outcome {
         Outcome::Cancelled => "x",
@@ -1156,40 +1164,60 @@ impl Fold {
     }
 
     fn retired_value(&self) -> Result<Box<RawValue>, StoreError> {
-        let entries = self
-            .retired
-            .iter()
-            .map(|(id, entry)| {
-                serde_json::json!([
-                    format!("{id:032x}"),
-                    format!("{:032x}", entry.digest),
-                    entry.first,
-                    entry.last,
-                    outcome_code(entry.outcome),
-                    entry.hand.as_deref(),
-                ])
-            })
-            .collect::<Vec<_>>();
-        serde_json::value::to_raw_value(&entries).map_err(invalid)
+        use std::fmt::Write as _;
+        let mut rows = String::with_capacity(self.retired.len() * RETIRED_ROW);
+        let mut hands = BTreeMap::new();
+        for (id, entry) in &self.retired {
+            write!(
+                rows,
+                "{id:032x}{:032x}{:016x}{:016x}{}",
+                entry.digest,
+                entry.first,
+                entry.last,
+                outcome_code(entry.outcome)
+            )
+            .map_err(invalid)?;
+            if let Some(hand) = &entry.hand {
+                hands.insert(format!("{id:032x}"), hand.clone());
+            }
+        }
+        serde_json::value::to_raw_value(&RetiredIndex { hands, rows }).map_err(invalid)
     }
 
     fn retired_from(&mut self, value: &RawValue) -> Result<(), StoreError> {
-        type Row = (String, String, u64, u64, String, Option<Box<str>>);
-        let rows: Vec<Row> = serde_json::from_str(value.get()).map_err(invalid)?;
-        for (id, digest, first, last, outcome, hand) in rows {
-            let hex = |text: &str| u128::from_str_radix(text, 16).map_err(invalid);
-            let outcome = outcome_of(&outcome)
-                .ok_or_else(|| invalid(format!("retired turn outcome {outcome}")))?;
-            self.retired.insert(
-                hex(&id)?,
+        let index: RetiredIndex = serde_json::from_str(value.get()).map_err(invalid)?;
+        let rows = index.rows.as_bytes();
+        if !index.rows.is_ascii() || rows.len() % RETIRED_ROW != 0 {
+            return Err(invalid("retired index rows are malformed"));
+        }
+        let text = |row: &[u8], from: usize, to: usize| {
+            std::str::from_utf8(&row[from..to]).map_err(invalid)
+        };
+        let mut entries = Vec::with_capacity(rows.len() / RETIRED_ROW);
+        for row in rows.chunks_exact(RETIRED_ROW) {
+            let id = u128::from_str_radix(text(row, 0, 32)?, 16).map_err(invalid)?;
+            let digest = u128::from_str_radix(text(row, 32, 64)?, 16).map_err(invalid)?;
+            let first = u64::from_str_radix(text(row, 64, 80)?, 16).map_err(invalid)?;
+            let last = u64::from_str_radix(text(row, 80, 96)?, 16).map_err(invalid)?;
+            let code = text(row, 96, 97)?;
+            let outcome =
+                outcome_of(code).ok_or_else(|| invalid(format!("retired turn outcome {code}")))?;
+            let hand = index.hands.get(text(row, 0, 32)?).cloned();
+            entries.push((
+                id,
                 Retired {
-                    digest: hex(&digest)?,
+                    digest,
                     first,
                     hand,
                     last,
                     outcome,
                 },
-            );
+            ));
+        }
+        if self.retired.is_empty() {
+            self.retired = entries.into_iter().collect();
+        } else {
+            self.retired.extend(entries);
         }
         Ok(())
     }

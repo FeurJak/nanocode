@@ -47,12 +47,14 @@ pub struct Policy {
     pub max_row_bytes: Option<usize>,
     pub restarts: u64,
     pub retain_finished: Option<usize>,
+    pub retired_max: Option<usize>,
     pub snapshot_ratio: usize,
     pub snapshot_rows: Option<usize>,
 }
 
 pub struct OneLog {
     answered: Atom<BTreeMap<(String, u64), u64>>,
+    retired_max: Option<usize>,
     dispatched: Atom<BTreeMap<(String, u64), BTreeSet<u64>>>,
     deferred_settles: Atom<bool>,
     durable_settles: Atom<bool>,
@@ -322,6 +324,7 @@ impl OneLog {
             owners: Atom::default(),
             recovering: Atom::new(recovering),
             restarts: policy.restarts,
+            retired_max: policy.retired_max,
             unsaved: Atom::default(),
         }))
     }
@@ -507,6 +510,14 @@ impl OneLog {
             } else {
                 Submitted::Conflict(record)
             });
+        }
+        let retired = lease.fold().retired_turns();
+        if let Some(max) = self.retired_max
+            && retired >= max
+        {
+            return Err(StoreError::NotCommitted(format!(
+                "turn {id} refused: this log already holds {retired} finished turns, the most one log keeps ({max}); start a new thread"
+            )));
         }
         if !durable {
             lease.secure().await?;

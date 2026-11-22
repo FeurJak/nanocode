@@ -277,6 +277,7 @@ async fn open(disk: &Arc<Disk>, wire: &Arc<Wire>, host: &Arc<Host>) -> Result<Pr
         max_row_bytes: None,
         restarts: u64::MAX,
         retain_finished: None,
+        retired_max: None,
         snapshot_ratio: 2,
         snapshot_rows: None,
     };
