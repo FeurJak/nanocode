@@ -1106,9 +1106,11 @@ impl PyType {
     /// changes its bases, so a static base such as object kept a dead
     /// weak reference for every class that any dropped interpreter had
     /// defined: about 2 KB per interpreter, for the life of the process.
-    /// Dead entries are dropped whenever the list reaches a power of two,
-    /// which keeps it within twice its live entries at a cost amortized
-    /// over the pushes.
+    /// Dead entries are dropped when the list is full, and the list then
+    /// makes room for as many entries again as it kept: a scan of n entries
+    /// comes at least n / 2 pushes after the last one, so pruning costs at
+    /// most two entries scanned per push however many stay live, and the
+    /// dead entries never outnumber the list's peak length.
     pub(crate) fn add_subclass(&self, sub: &Py<Self>) {
         let weak = sub
             .as_object()
@@ -1119,17 +1121,19 @@ impl PyType {
         {
             let mut subclasses = self.subclasses.write();
             let len = subclasses.len();
-            if len >= 16 && len.is_power_of_two() {
-                let mut kept = Vec::with_capacity(len);
-                for weak in subclasses.drain(..) {
-                    if let Some(live) = weak.upgrade() {
-                        released.push(live);
-                        kept.push(weak);
-                    } else {
-                        released.push(weak.into());
+            if len == subclasses.capacity() {
+                let mut live = Vec::new();
+                let dead = subclasses.extract_if(.., |weak| match weak.upgrade() {
+                    Some(class) => {
+                        live.push(class);
+                        false
                     }
-                }
-                *subclasses = kept;
+                    None => true,
+                });
+                released.extend(dead.map(Into::into));
+                released.extend(live);
+                let kept = subclasses.len();
+                subclasses.reserve(kept);
             }
             subclasses.push(weak);
         }
