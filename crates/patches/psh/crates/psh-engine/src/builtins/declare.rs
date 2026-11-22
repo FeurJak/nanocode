@@ -535,8 +535,10 @@ declare -fx {n}
                     None => String::new(),
                 };
                 vp.error(&format!("{prefix}{msg}")).await;
-                // Under localvar_inherit bash also fails making the local itself.
-                if local && inherit_shopt(vp) {
+                // Under localvar_inherit bash also fails making the local itself; in a
+                // function, -g goes on to the declare itself, which fails again.
+                let in_function = matches!(vp.cmd_name, Some(crate::state::CmdName::Function));
+                if (local && inherit_shopt(vp)) || (o.global && in_function) {
                     vp.error(&format!("{bname}: {msg}")).await;
                 }
                 status = 1;

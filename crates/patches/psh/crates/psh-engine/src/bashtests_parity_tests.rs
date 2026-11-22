@@ -377,3 +377,14 @@ fn a_substring_arithmetic_error_names_the_parameter() {
          psh: line 4: !r: 1/0: division by 0 (error token is \"0\")\n"
     );
 }
+
+#[test]
+fn declare_g_converting_an_array_in_a_function_fails_twice() {
+    let (_, o, e) = run("u=(1)\nf() { declare -g -A u=(); echo in=$?; }\nf\n");
+    assert_eq!(String::from_utf8_lossy(&o), "in=1\n");
+    assert_eq!(
+        String::from_utf8_lossy(&e),
+        "environment: line 2: f: u: cannot convert indexed to associative array\n\
+         environment: line 2: declare: u: cannot convert indexed to associative array\n"
+    );
+}
