@@ -366,3 +366,14 @@ fn quoted_chars_in_a_regex_bracket_expression_stand_bare() {
 "#;
     assert_eq!(out(script), "ok1\nok2\nok3\nrc=2\n");
 }
+
+#[test]
+fn a_substring_arithmetic_error_names_the_parameter() {
+    let (_, _, e) = run("x=abc; a=(p q); r=x\n: ${x:%}\n: ${a[@]:1:%}\n: ${!r:1/0}\n");
+    assert_eq!(
+        String::from_utf8_lossy(&e),
+        "psh: line 2: x: %: syntax error: operand expected (error token is \"%\")\n\
+         psh: line 3: a[@]: %: syntax error: operand expected (error token is \"%\")\n\
+         psh: line 4: !r: 1/0: division by 0 (error token is \"0\")\n"
+    );
+}

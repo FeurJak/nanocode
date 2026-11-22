@@ -2003,9 +2003,10 @@ async fn param(
         && (is_list || matches!(p.name, ParamName::Special(b'@' | b'*')))
         && !(p.name == ParamName::Var && is_scalar(vp, code.ast.text(p.name_span)))
     {
-        let off = arith_word(vp, code, offset).await?;
+        let label = substring_label(code, p, offset);
+        let off = arith_word_in(vp, code, offset, &label).await?;
         let len = match length {
-            Some(w) => Some(arith_word(vp, code, w).await?),
+            Some(w) => Some(arith_word_in(vp, code, w, &label).await?),
             None => None,
         };
         let star = matches!(p.index, Some(Subscript::Star)) || p.name == ParamName::Special(b'*');
@@ -2489,9 +2490,10 @@ async fn param(
             emit_val(vp, f, val, quoted)
         }
         ParamOp::Substring { offset, length } => {
-            let off = arith_word(vp, code, offset).await?;
+            let label = substring_label(code, p, offset);
+            let off = arith_word_in(vp, code, offset, &label).await?;
             let len = match length {
-                Some(w) => Some(arith_word(vp, code, w).await?),
+                Some(w) => Some(arith_word_in(vp, code, w, &label).await?),
                 None => None,
             };
             let mut err = None;
@@ -2971,14 +2973,36 @@ fn quotes_closed(s: &[u8]) -> bool {
 }
 
 /// An arithmetic word (offsets, lengths): expanded, then evaluated.
-async fn arith_word(vp: &mut Vp, code: &Rc<Code>, w: &Word) -> Result<i64, Unwind> {
+/// The parameter of ${x:offset:length} as written (!r, a[@], #), which bash names
+/// before an arithmetic error in the offset or length (it sets this_command_name to it).
+fn substring_label(code: &Rc<Code>, p: &psh_syntax::Param, offset: &Word) -> String {
+    let start = p.name_span.start - u32::from(p.prefix == ParamPrefix::Indirect);
+    if offset.span.start < start {
+        return String::new();
+    }
+    let text = code.ast.bytes(psh_syntax::Span::new(start, offset.span.start));
+    let end = text.iter().rposition(|&b| b == b':').unwrap_or(text.len());
+    String::from_utf8_lossy(&text[..end]).into_owned()
+}
+
+/// An offset or length of ${x:offset:length}: an arithmetic error names the parameter.
+async fn arith_word_in(
+    vp: &mut Vp,
+    code: &Rc<Code>,
+    w: &Word,
+    label: &str,
+) -> Result<i64, Unwind> {
     let (text, _) = expand_single(vp, code, w, Ctx::Arith).await?;
     let r = crate::arith::expanding!(vp, |vp| crate::arith::eval(vp, &text))?;
     crate::arith::notes(vp).await;
     match r {
         Ok(v) => Ok(v),
-        Err(msg) => {
+        Err(msg) if label.is_empty() => {
             vp.error(&msg).await;
+            Err(Unwind::Abort(1))
+        }
+        Err(msg) => {
+            vp.error(&format!("{label}: {msg}")).await;
             Err(Unwind::Abort(1))
         }
     }
