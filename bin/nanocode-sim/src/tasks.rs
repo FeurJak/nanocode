@@ -563,6 +563,7 @@ fn simulate(seed: u64, mutation: TasksMutation) -> TasksOutcome {
         .expect("a current-thread runtime builds");
     let notes = Arc::new(Notes(Slot::new(Some(Vec::new()))));
     sim::mutate(mutation.executor());
+    let guard = drive::Guard::start();
     let (joined, detached) = runtime.block_on(control(&script, &notes, mutation));
     drop(runtime);
     let busy = script.busy.map_or(Ok(()), |plan| {
@@ -573,6 +574,7 @@ fn simulate(seed: u64, mutation: TasksMutation) -> TasksOutcome {
     });
     let threaded = script.threads.map(drive::threads);
     let slept = script.sleepers.as_ref().map(drive::sleepers);
+    let rescued = guard.finish();
     sim::mutate(sim::Mutation::None);
     let notes = notes.read();
     let mut digest = fnv(FNV_OFFSET, shape.as_bytes());
@@ -605,7 +607,8 @@ fn simulate(seed: u64, mutation: TasksMutation) -> TasksOutcome {
                 Some(stalled) => Err(stalled),
                 None => Ok(()),
             },
-        );
+        )
+        .and_then(|()| rescued.map_or(Ok(()), Err));
     let count =
         |test: fn(&(usize, Joined)) -> bool| wide(joined.iter().filter(|item| test(item)).count());
     TasksOutcome {
