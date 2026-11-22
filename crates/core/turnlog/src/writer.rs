@@ -1393,6 +1393,15 @@ impl Lease<'_> {
         self.writer.fold.next_event()
     }
 
+    pub fn retire_finished(&mut self) -> usize {
+        let Some(keep) = self.retain else {
+            return 0;
+        };
+        let retired = self.writer.fold.retire(keep);
+        self.writer.stats.retired += retired as u64;
+        retired
+    }
+
     pub fn collect_unreachable(&mut self, state: &str) {
         if !self.writer.collectable.contains(state) {
             self.writer.collectable.insert(state.to_owned());

@@ -300,6 +300,7 @@ impl OneLog {
             .row_limit(policy.max_row_bytes)
             .snapshot_ratio(policy.snapshot_ratio)
             .snapshot_rows(policy.snapshot_rows);
+        log.lease().await.retire_finished();
         let recovering = log
             .read(|fold| {
                 fold.turns()
