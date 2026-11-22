@@ -15,7 +15,8 @@ use nanocode_tool_host::{
     embedded::HostFuture,
 };
 use nanocode_turnlog::{
-    EffectClass, Effects, Fold, LogHost, Outcome, Phase, Point, Record, Rider, Stats, Status, Turn,
+    EffectClass, Effects, Fold, LogHost, Outcome, Phase, Point, Record, Retired, Rider, Stats,
+    Status, Turn, tag,
 };
 use serde::Serialize;
 use serde_json::{Map, Value, json, value::RawValue};
@@ -160,6 +161,35 @@ fn retry_of(retry: Option<&nanocode_turnlog::Retry>) -> Option<TurnRetry> {
         error: retry.error.clone(),
         kind: retry.kind.clone(),
         retry_at: retry.retry_at,
+    })
+}
+
+const fn state_of(outcome: Outcome) -> TurnState {
+    match outcome {
+        Outcome::Cancelled => TurnState::Cancelled,
+        Outcome::Completed => TurnState::Completed,
+        Outcome::Failed => TurnState::Failed,
+    }
+}
+
+fn retired_record(
+    id: &str,
+    retired: &Retired,
+    result: Option<Box<RawValue>>,
+) -> Result<TurnRecord, StoreError> {
+    Ok(TurnRecord {
+        request_id: id.to_owned(),
+        state: state_of(retired.outcome),
+        digest: format!("retired:{:032x}", retired.digest),
+        prompt: None,
+        hand: retired.hand.as_deref().map(str::to_owned),
+        metadata: raw(&Value::Null)?,
+        cancel_requested: false,
+        note: None,
+        first_seq: retired.first,
+        last_seq: Some(retired.last),
+        result,
+        retry: None,
     })
 }
 
@@ -461,6 +491,22 @@ impl OneLog {
                 Submitted::Conflict(record)
             });
         }
+        if let Some(same) = lease
+            .fold()
+            .retired(id)
+            .map(|old| old.digest == tag(&digest))
+        {
+            drop(lease);
+            let record = self
+                .retired_turn(id)
+                .await?
+                .ok_or_else(|| invalid(format!("retired turn {id} is missing")))?;
+            return Ok(if same {
+                Submitted::Existing(record)
+            } else {
+                Submitted::Conflict(record)
+            });
+        }
         if !durable {
             lease.secure().await?;
         }
@@ -524,9 +570,35 @@ impl OneLog {
     }
 
     pub async fn turn(&self, request_id: &str) -> Result<Option<TurnRecord>, StoreError> {
-        self.log
+        let held = self
+            .log
             .read(|fold| fold.turn(request_id).map(record_of).transpose())
+            .await?;
+        match held {
+            Some(record) => Ok(Some(record)),
+            None => self.retired_turn(request_id).await,
+        }
+    }
+
+    async fn retired_turn(&self, request_id: &str) -> Result<Option<TurnRecord>, StoreError> {
+        let Some(retired) = self
+            .log
+            .read(|fold| fold.retired(request_id).cloned())
             .await
+        else {
+            return Ok(None);
+        };
+        let last = retired.last;
+        let mut result = None;
+        self.log
+            .history(last.saturating_sub(1), |event| {
+                if event.seq == last {
+                    result = Some(event.event.clone());
+                }
+                event.seq < last
+            })
+            .await?;
+        retired_record(request_id, &retired, result).map(Some)
     }
 
     pub async fn pending(&self) -> Result<Vec<TurnRecord>, StoreError> {
@@ -685,7 +757,9 @@ impl OneLog {
     ) -> Result<Option<(TurnRecord, Option<LoggedEvent>)>, StoreError> {
         let mut lease = self.log.lease().await;
         let Some(turn) = lease.fold().turn(request_id) else {
-            return Ok(None);
+            drop(lease);
+            let retired = self.retired_turn(request_id).await?;
+            return Ok(retired.map(|record| (record, None)));
         };
         match turn.phase {
             Phase::Running {
@@ -756,7 +830,9 @@ impl OneLog {
     ) -> Result<Option<(TurnRecord, Option<LoggedEvent>)>, StoreError> {
         let mut lease = self.log.lease().await;
         let Some(turn) = lease.fold().turn(request_id) else {
-            return Ok(None);
+            drop(lease);
+            let retired = self.retired_turn(request_id).await?;
+            return Ok(retired.map(|record| (record, None)));
         };
         let previous = match &turn.phase {
             Phase::Finished { .. } => return Ok(Some((record_of(turn)?, None))),
@@ -809,7 +885,8 @@ impl OneLog {
         let mut imported = false;
         let mut highest = 0;
         for turn in turns {
-            if lease.fold().turn(&turn.request_id).is_some() {
+            let fold = lease.fold();
+            if fold.turn(&turn.request_id).is_some() || fold.retired(&turn.request_id).is_some() {
                 continue;
             }
             let id = turn.request_id.as_str();
@@ -1059,7 +1136,9 @@ impl OneLog {
                 self.log
                     .read(|fold| {
                         fold.turn(id)
-                            .map_or(after, |turn| after.max(turn.first.saturating_sub(1)))
+                            .map(|turn| turn.first)
+                            .or_else(|| fold.retired(id).map(|retired| retired.first))
+                            .map_or(after, |first| after.max(first.saturating_sub(1)))
                     })
                     .await
             }
