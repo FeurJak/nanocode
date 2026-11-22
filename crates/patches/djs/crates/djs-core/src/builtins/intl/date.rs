@@ -532,11 +532,16 @@ pub(super) fn resolve(locale: &str, tags: &[String], raw: &Spec) -> Result<Spec,
     }
     if ds.is_none() && ts.is_none() {
         for (name, letter) in [("weekday", 'E'), ("era", 'G'), ("year", 'y'), ("month", 'M'), ("day", 'd'), ("dayPeriod", 'B'), ("hour", 'j'), ("minute", 'm'), ("second", 's'), ("fractionalSecondDigits", 'S'), ("timeZoneName", 'z')] {
-            let count = field_width(&pattern, letter);
+            let mut count = field_width(&pattern, letter);
+            if count == 0 && matches!(letter, 'E' | 'G' | 'y' | 'M' | 'd' | 'm' | 's') {
+                // V8 finds a field by substring over the whole pattern, quoted text included,
+                // so pt "MMM 'de' y" also reports day: numeric.
+                count = quoted_width(&pattern, letter);
+            }
             if count == 0 {
                 continue;
             }
-            let v: &str = match letter {
+            let mut v: &str = match letter {
                 'E' | 'G' => match count { 4 => "long", 5 => "narrow", _ => "short" },
                 'B' => match fields[5] { 3 => "narrow", 2 => "short", _ => "long" },
                 'M' => match count { 1 => "numeric", 2 => "2-digit", 3 => "short", 4 => "long", _ => "narrow" },
@@ -547,6 +552,18 @@ pub(super) fn resolve(locale: &str, tags: &[String], raw: &Spec) -> Result<Spec,
                 'z' => tzn.unwrap_or("short"),
                 _ => if count == 2 { "2-digit" } else { "numeric" },
             };
+            // The locale tables are inferred from ICU's output, so where two widths print the same
+            // names they can hold the other width's letters. ICU's own pattern has the requested
+            // width then, and that is what V8 reports.
+            let asked = match letter {
+                'E' => WIDTHS[fields[0]],
+                'G' => WIDTHS[fields[1]],
+                'M' => MONTHS[fields[3]],
+                _ => "",
+            };
+            if !asked.is_empty() && asked != v && dl.is_some_and(|i| same_names(&DATE_LOCALES[i], &pattern, letter, asked, v)) {
+                v = asked;
+            }
             out.put(name, v);
         }
     } else {
@@ -598,6 +615,88 @@ fn local_pattern(l: &LocaleDates, f: &[usize; 10], fsd: usize, custom: bool) -> 
         (None, Some(t)) => Some(t.to_string()),
         (None, None) => None,
     }
+}
+
+/// The longest run of a field's letter anywhere in the pattern, quoted text included.
+fn quoted_width(p: &str, letter: char) -> usize {
+    let mut best = 0;
+    let mut run = 0;
+    for c in p.chars() {
+        run = if c == letter { run + 1 } else { 0 };
+        best = best.max(run);
+    }
+    best
+}
+
+/// Whether a locale prints a text field the same at two widths (format and stand-alone forms).
+/// Only the form the pattern prints counts: format (E, M) or stand-alone (c, L).
+fn same_names(l: &DateLocale, pattern: &str, letter: char, a: &str, b: &str) -> bool {
+    let w = |s: &str| match s {
+        "long" => Some(0),
+        "short" => Some(1),
+        "narrow" => Some(2),
+        _ => None,
+    };
+    let standalone = |alt: char| usize::from(field_width(pattern, alt) != 0 && unquoted_count(pattern, letter) == 0) * 3;
+    match letter {
+        'E' => match (w(a), w(b)) {
+            (Some(x), Some(y)) => {
+                let s = standalone('c');
+                l.days[s + x] == l.days[s + y]
+            }
+            _ => false,
+        },
+        'G' => match (w(a), w(b)) {
+            (Some(x), Some(y)) => l.eras[x] == l.eras[y],
+            _ => false,
+        },
+        'M' => {
+            let s = standalone('L');
+            match (w(a), w(b)) {
+                (Some(x), Some(y)) => l.months[s + x] == l.months[s + y],
+                // Narrow months that are bare numbers print like M. ICU's pattern has MMMMM unless text
+                // is glued to the number (ja M月, cs d. M.), which V8 reports as numeric.
+                (Some(2), None) if b == "numeric" => {
+                    l.months[s + 2].iter().enumerate().all(|(i, m)| *m == (i + 1).to_string()) && !month_has_suffix(pattern)
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// How many times a letter appears outside quotes.
+fn unquoted_count(p: &str, letter: char) -> usize {
+    let mut quoted = false;
+    p.chars()
+        .filter(|&c| {
+            if c == '\'' {
+                quoted = !quoted;
+            }
+            !quoted && c == letter
+        })
+        .count()
+}
+
+/// Whether a numeric month field has text glued to it (ja M月, cs M.), not a space or the pattern's end.
+fn month_has_suffix(p: &str) -> bool {
+    let cs: alloc::vec::Vec<char> = p.chars().collect();
+    let mut quoted = false;
+    for (i, &c) in cs.iter().enumerate() {
+        if c == '\'' {
+            quoted = !quoted;
+            continue;
+        }
+        if !quoted && (c == 'M' || c == 'L') && cs.get(i + 1).is_some_and(|&n| n != c) {
+            let mut j = i + 1;
+            if cs.get(j) == Some(&'\'') {
+                j += 1;
+            }
+            return cs.get(j).is_some_and(|n| !n.is_whitespace());
+        }
+    }
+    false
 }
 
 /// The longest run of a field's letter outside quotes (`j`: any hour letter).
