@@ -1,16 +1,18 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::OpenOptions,
+    io::Read as _,
+    os::unix::process::ExitStatusExt as _,
     path::{Path, PathBuf},
-    process::ExitCode,
-    sync::Arc,
+    process::{Command, ExitCode},
+    sync::{Arc, mpsc},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use nanocode_board::{
     Board, BoardError, ClaimId, Entry, NewTask, Op, Outcome, Phase, Rejection, Task, TaskId,
     access::{Can, Grant, Identity, Verifier, Who},
-    tasks::{OnFail, TaskOp, Terms},
+    tasks::{OnFail, Planned, TaskOp, Terms},
     watch::{Filter, Kind, Plan},
 };
 use nanocode_turnlog::{FileLog, FileOptions};
@@ -28,8 +30,15 @@ usage: nc-board [--dir DIR] [--as ACTOR] COMMAND
   list [--label K=V]... [--status open|claimed|done|failed|cancelled|blocked|ready]...
   show ID
   claim ID --lease SECS
-  claim-next [--label K=V]... [--spread K] --lease SECS  claim a ready task matching every label: best rank, then ACTOR's own,
-                                           then one of the K (default 8) oldest; retries the oldest after a lost race; exits 2 when none is ready
+  claim-next [--label K=V]... [--spread K] --lease SECS [--wait SECS --poll-ms MS]
+                                           claim a ready task matching every label: best rank, then ACTOR's own,
+                                           then one of the K (default 8) oldest; retries the oldest after a lost race; exits 2 when none is
+                                           ready, or with --wait when none became ready in SECS
+  plan NAME FILE                           post a JSON array of {key, spec, labels?, needs?: [{key}|{task}], parent?} as tasks NAME/key
+                                           in one write; FILE - reads stdin, and the same NAME and FILE again posts nothing
+  run (ID | next [--label K=V]... [--spread K]) --lease SECS [--result TEXT] -- COMMAND...
+                                           claim, run COMMAND with NC_BOARD_TASK and NC_BOARD_CLAIM set, renew every third of the
+                                           lease, then finish on exit 0 or fail; exits with COMMAND's code, or 1 when the claim is lost
   renew ID --lease SECS [--claim CLAIM]
   finish ID [--claim CLAIM] DETAIL
   fail ID [--claim CLAIM] DETAIL
@@ -299,6 +308,49 @@ fn held(board: &Board, id: &TaskId, given: Option<String>) -> Result<ClaimId, Fa
     }
 }
 
+async fn claim_next(
+    parsed: &Parsed,
+    board: &mut Board,
+    at_ms: u64,
+) -> Result<Option<TaskId>, Failure> {
+    let lease_ms = parsed.lease_ms()?;
+    let labels = parsed.labels()?;
+    let spread = match parsed.one("spread")? {
+        Some(spread) => spread
+            .parse::<usize>()
+            .ok()
+            .filter(|spread| *spread > 0)
+            .ok_or(format!("--spread {spread} is not a positive count"))?,
+        None => SPREAD,
+    };
+    let Some(task) = board
+        .fold()
+        .spread(board.writer(), &labels, at_ms, spread)
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    let claim = |task: &TaskId| Op::Claim {
+        task: task.clone(),
+        lease_ms,
+        fence: None,
+        cap: None,
+    };
+    match board.submit(at_ms, claim(&task)).await {
+        Err(BoardError::Rejected(Rejection::Held { .. } | Rejection::Terminal)) if spread > 1 => {
+            let Some(head) = board.fold().pick(board.writer(), &labels, at_ms).cloned() else {
+                return Ok(None);
+            };
+            submit(board, at_ms, claim(&head)).await?;
+            Ok(Some(head))
+        }
+        landed => {
+            landed.map_err(|error| error.to_string())?;
+            Ok(Some(task))
+        }
+    }
+}
+
 async fn submit(board: &mut Board, at_ms: u64, op: Op) -> Result<(), Failure> {
     board
         .submit(at_ms, op)
@@ -365,47 +417,42 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
             return shown(board, &id(&task), at_ms).map(Some);
         }
         "claim-next" => {
-            parsed.allow(&["label", "lease", "spread"])?;
+            parsed.allow(&["label", "lease", "spread", "wait", "poll-ms"])?;
             parsed.words::<0>()?;
-            let lease_ms = parsed.lease_ms()?;
-            let labels = parsed.labels()?;
-            let spread = match parsed.one("spread")? {
-                Some(spread) => spread
-                    .parse::<usize>()
-                    .ok()
-                    .filter(|spread| *spread > 0)
-                    .ok_or(format!("--spread {spread} is not a positive count"))?,
-                None => SPREAD,
-            };
-            let Some(task) = board
-                .fold()
-                .spread(board.writer(), &labels, at_ms, spread)
-                .cloned()
-            else {
+            let Some(task) = claim_next(parsed, board, at_ms).await? else {
                 return Ok(None);
             };
-            let claim = |task: &TaskId| Op::Claim {
-                task: task.clone(),
-                lease_ms,
-                fence: None,
-                cap: None,
-            };
-            match board.submit(at_ms, claim(&task)).await {
-                Err(BoardError::Rejected(Rejection::Held { .. } | Rejection::Terminal))
-                    if spread > 1 =>
-                {
-                    let Some(head) = board.fold().pick(board.writer(), &labels, at_ms).cloned()
-                    else {
-                        return Ok(None);
-                    };
-                    submit(board, at_ms, claim(&head)).await?;
-                    head
-                }
-                landed => {
-                    landed.map_err(|error| error.to_string())?;
-                    task
+            task
+        }
+        "plan" => {
+            parsed.allow(&[])?;
+            let [name, file] = parsed.words()?;
+            let mut text = String::new();
+            if file == "-" {
+                std::io::stdin().read_to_string(&mut text)?;
+            } else {
+                text =
+                    std::fs::read_to_string(&file).map_err(|error| format!("{file}: {error}"))?;
+            }
+            let mut plan =
+                serde_json::from_str::<Value>(&text).map_err(|error| format!("{file}: {error}"))?;
+            for planned in plan.as_array_mut().into_iter().flatten() {
+                if let Value::Object(planned) = planned {
+                    planned.entry("labels").or_insert_with(|| json!({}));
+                    planned.entry("needs").or_insert_with(|| json!([]));
                 }
             }
+            let tasks = serde_json::from_value::<Vec<Planned>>(plan)
+                .map_err(|error| format!("{file}: {error}"))?;
+            let placed = board
+                .batch(at_ms, id(&name), tasks)
+                .await
+                .map_err(|error| error.to_string())?;
+            return placed
+                .iter()
+                .map(|task| shown(board, task, at_ms))
+                .collect::<Result<Vec<_>, _>>()
+                .map(|tasks| Some(Value::Array(tasks)));
         }
         "post" => {
             parsed.allow(&["parent", "label", "needs", "assignee", "on-fail"])?;
@@ -664,6 +711,146 @@ async fn opened(dir: &Path, identity: Identity) -> Result<Board, Failure> {
         .map_err(|error| error.to_string().into())
 }
 
+fn locked<T>(
+    dir: &Path,
+    identity: &Identity,
+    runtime: &nanocode_executor::Runtime,
+    work: impl AsyncFnOnce(&mut Board) -> Result<T, Failure>,
+) -> Result<T, Failure> {
+    let lock = open(dir)?;
+    let result = runtime.block_on(async {
+        let mut board = opened(dir, identity.clone()).await?;
+        work(&mut board).await
+    });
+    drop(lock);
+    result
+}
+
+fn pulling(
+    parsed: &Parsed,
+    dir: &Path,
+    identity: &Identity,
+    runtime: &nanocode_executor::Runtime,
+) -> Result<Option<Value>, Failure> {
+    let wait_ms = parsed.secs_ms("wait")?.ok_or("--wait SECS is required")?;
+    let poll_ms = parsed
+        .count("poll-ms")?
+        .filter(|poll| *poll > 0)
+        .ok_or("--wait needs --poll-ms MS, positive")?;
+    let deadline_ms = now_ms()?.saturating_add(wait_ms);
+    loop {
+        if let Some(found) = locked(dir, identity, runtime, async |board| {
+            run(parsed, board).await
+        })? {
+            return Ok(Some(found));
+        }
+        let now = now_ms()?;
+        if now >= deadline_ms {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(poll_ms.min(deadline_ms - now)));
+    }
+}
+
+fn running(
+    parsed: &Parsed,
+    dir: &Path,
+    actor: &str,
+    identity: &Identity,
+    runtime: &nanocode_executor::Runtime,
+) -> Result<Option<Value>, Failure> {
+    parsed.allow(&["lease", "label", "spread", "result"])?;
+    let lease_ms = parsed.lease_ms()?;
+    let renew_every = Duration::from_millis(lease_ms / 3);
+    if renew_every.is_zero() {
+        return Err("run needs a lease of at least 3 ms to renew every third of it".into());
+    }
+    let (target, command) = parsed.words[1..]
+        .split_first()
+        .ok_or("run takes ID or next, then -- COMMAND")?;
+    let (program, arguments) = command.split_first().ok_or("run needs -- COMMAND")?;
+    let (task, claim) = locked(dir, identity, runtime, async |board| {
+        let at_ms = now_ms()?;
+        let task = if target == "next" {
+            claim_next(parsed, board, at_ms)
+                .await?
+                .ok_or("no ready task matches")?
+        } else {
+            let task = TaskId(target.clone());
+            submit(
+                board,
+                at_ms,
+                Op::Claim {
+                    task: task.clone(),
+                    lease_ms,
+                    fence: None,
+                    cap: None,
+                },
+            )
+            .await?;
+            task
+        };
+        let claim = held(board, &task, None)?;
+        Ok((task, claim))
+    })?;
+    let mut child = Command::new(program)
+        .args(arguments)
+        .env("NC_BOARD_TASK", &task.0)
+        .env("NC_BOARD_CLAIM", &claim.0)
+        .env("NC_BOARD_DIR", dir)
+        .env("NC_BOARD_AS", actor)
+        .spawn()
+        .map_err(|error| format!("{program}: {error}"))?;
+    let pid = child.id();
+    let (exited, exit) = mpsc::channel();
+    std::thread::spawn(move || exited.send(child.wait()));
+    let status = loop {
+        match exit.recv_timeout(renew_every) {
+            Ok(status) => break status?,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("lost the command's exit status".into());
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        let renewed = locked(dir, identity, runtime, async |board| {
+            let op = Op::Renew {
+                task: task.clone(),
+                claim: claim.clone(),
+                lease_ms,
+            };
+            board
+                .submit(now_ms()?, op)
+                .await
+                .map(drop)
+                .map_err(|error| error.to_string().into())
+        });
+        if let Err(error) = renewed {
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+            let _ = exit.recv();
+            return Err(format!("claim of {task} lost, command stopped: {error}").into());
+        }
+    };
+    let code = status
+        .code()
+        .unwrap_or_else(|| status.signal().map_or(1, |signal| 128 + signal));
+    let outcome = if status.success() {
+        Outcome::Done(parsed.one("result")?.unwrap_or_else(|| "exit 0".to_owned()))
+    } else {
+        Outcome::Failed(format!("exit {code}"))
+    };
+    locked(dir, identity, runtime, async |board| {
+        let op = Op::Finish {
+            task: task.clone(),
+            claim: claim.clone(),
+            outcome,
+        };
+        submit(board, now_ms()?, op).await?;
+        Ok(Some(
+            json!({"task": shown(board, &task, now_ms()?)?, "exit_code": code}),
+        ))
+    })
+}
+
 fn waiting(
     parsed: &Parsed,
     dir: &Path,
@@ -717,8 +904,13 @@ fn session(parsed: &Parsed) -> Result<Option<Value>, Failure> {
     };
     let identity = identity(&actor)?;
     let runtime = nanocode_executor::Runtime::new()?;
-    if parsed.words[0] == "wait" {
-        return waiting(parsed, &dir, &identity, &runtime);
+    match parsed.words[0].as_str() {
+        "wait" => return waiting(parsed, &dir, &identity, &runtime),
+        "run" => return running(parsed, &dir, &actor, &identity, &runtime),
+        "claim-next" if parsed.flags.contains_key("wait") => {
+            return pulling(parsed, &dir, &identity, &runtime);
+        }
+        _ => {}
     }
     let lock = open(&dir)?;
     let result = runtime.block_on(async {
@@ -748,7 +940,10 @@ pub fn main() -> ExitCode {
     match session(&parsed) {
         Ok(Some(value)) => {
             println!("{value}");
-            ExitCode::SUCCESS
+            match value.get("exit_code").and_then(Value::as_i64) {
+                Some(0) | None => ExitCode::SUCCESS,
+                Some(code) => u8::try_from(code).map_or(ExitCode::FAILURE, ExitCode::from),
+            }
         }
         Ok(None) if parsed.words[0] == "wait" => {
             eprintln!("nc-board: no change matched before the timeout");
