@@ -177,7 +177,7 @@ impl From<Refusal> for Rejection {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Said {
-    messages: BTreeMap<MessageId, Message>,
+    messages: BTreeMap<MessageId, Box<Message>>,
     order: BTreeSet<(u64, MessageId)>,
     replies: BTreeMap<MessageId, Vec<MessageId>>,
     channels: BTreeMap<String, Channel>,
@@ -265,7 +265,7 @@ impl Said {
             None => channel.threads += 1,
         }
         self.order.insert((message.seq, message.id.clone()));
-        self.messages.insert(message.id.clone(), message);
+        self.messages.insert(message.id.clone(), Box::new(message));
     }
 }
 
@@ -884,14 +884,14 @@ impl Fold {
     }
 
     pub fn message(&self, id: &MessageId) -> Option<&Message> {
-        self.said.messages.get(id)
+        self.said.messages.get(id).map(|message| &**message)
     }
 
     pub fn messages(&self) -> impl Iterator<Item = &Message> + '_ {
         self.said
             .order
             .iter()
-            .map(|(_, id)| &self.said.messages[id])
+            .map(|(_, id)| &*self.said.messages[id])
     }
 
     pub fn thread(&self, root: &MessageId) -> Vec<&Message> {
@@ -904,8 +904,8 @@ impl Fold {
             return Vec::new();
         };
         let replies = self.said.replies.get(root).into_iter().flatten();
-        std::iter::once(found)
-            .chain(replies.map(|id| &self.said.messages[id]))
+        std::iter::once(&**found)
+            .chain(replies.map(|id| &*self.said.messages[id]))
             .collect()
     }
 
@@ -1024,6 +1024,7 @@ impl Fold {
             .said
             .messages
             .values()
+            .map(|message| &**message)
             .filter(|message| message.version > after)
             .collect::<Vec<_>>();
         changed.sort_by_key(|message| message.version);

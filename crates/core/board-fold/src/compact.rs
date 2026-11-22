@@ -73,7 +73,7 @@ fn map<K: Ord, V>(pairs: Vec<(K, V)>) -> BTreeMap<K, V> {
     pairs.into_iter().collect()
 }
 
-type Labelled = BTreeMap<String, BTreeMap<String, BTreeSet<TaskId>>>;
+type Labelled = BTreeMap<String, BTreeMap<String, crate::ids::Ids>>;
 
 type Head = (
     u64,
@@ -81,13 +81,13 @@ type Head = (
     Vec<(TaskId, BTreeSet<TaskId>)>,
     Vec<(TaskId, BTreeSet<TaskId>)>,
     BTreeSet<TaskId>,
-    Vec<(String, BTreeMap<String, BTreeSet<TaskId>>)>,
+    Vec<(String, BTreeMap<String, crate::ids::Ids>)>,
     watch::Marks,
 );
 
 enum Part {
     Head(Head),
-    Tasks(Vec<(TaskId, Task)>),
+    Tasks(Vec<(TaskId, Box<Task>)>),
     Seen(Vec<(EventId, Result<u64, Rejection>)>),
     Entries(Vec<Entry>),
     Access(access::Access),

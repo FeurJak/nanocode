@@ -131,6 +131,7 @@ impl<'a> Merged<'a> {
     pub fn tasks(&self) -> BTreeMap<&'a TaskId, &'a Task> {
         self.shown()
             .flat_map(|(_, fold)| fold.tasks().iter())
+            .map(|(id, task)| (id, &**task))
             .collect()
     }
 

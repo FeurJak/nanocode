@@ -44,6 +44,7 @@ id!(EventId);
 
 pub mod blocks;
 pub mod group;
+mod ids;
 pub mod messages;
 
 pub use compact::Spread;
@@ -389,7 +390,7 @@ pub struct Fold {
     next: u64,
     now_ms: u64,
     #[serde(with = "crate::pairs")]
-    tasks: BTreeMap<TaskId, Task>,
+    tasks: BTreeMap<TaskId, Box<Task>>,
     #[serde(with = "crate::pairs")]
     children: BTreeMap<TaskId, BTreeSet<TaskId>>,
     #[serde(with = "crate::pairs")]
@@ -403,7 +404,7 @@ pub struct Fold {
     #[serde(skip)]
     posted: BTreeMap<TaskId, usize>,
     #[serde(with = "crate::pairs")]
-    labelled: BTreeMap<String, BTreeMap<String, BTreeSet<TaskId>>>,
+    labelled: BTreeMap<String, BTreeMap<String, ids::Ids>>,
     said: messages::Said,
     marks: watch::Marks,
     #[serde(default)]
@@ -460,12 +461,12 @@ impl Fold {
         self.now_ms
     }
 
-    pub const fn tasks(&self) -> &BTreeMap<TaskId, Task> {
+    pub const fn tasks(&self) -> &BTreeMap<TaskId, Box<Task>> {
         &self.tasks
     }
 
     pub fn task(&self, id: &TaskId) -> Option<&Task> {
-        self.tasks.get(id)
+        self.tasks.get(id).map(|task| &**task)
     }
 
     pub fn epoch(&self, partition: u32) -> u64 {
@@ -609,7 +610,7 @@ impl Fold {
     }
 
     pub fn settled(&self) -> bool {
-        self.tasks.values().all(Task::finished)
+        self.tasks.values().all(|task| task.finished())
     }
 
     fn holder(&self, id: &TaskId, held: &ClaimId) -> Result<&Task, Rejection> {
@@ -1120,7 +1121,7 @@ impl Fold {
     }
 
     pub(crate) fn cancel(&mut self, seq: u64, event: &Event, id: &TaskId, reason: String) {
-        if self.tasks.get(id).is_none_or(Task::finished) {
+        if self.tasks.get(id).is_none_or(|task| task.finished()) {
             return;
         }
         let cancelled = Phase::Cancelled {

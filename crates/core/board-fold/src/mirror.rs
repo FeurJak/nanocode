@@ -476,7 +476,7 @@ pub struct Mirror {
     #[serde(with = "crate::pairs")]
     threads: BTreeMap<Target, Target>,
     #[serde(with = "crate::pairs")]
-    messages: BTreeMap<EventId, Message>,
+    messages: BTreeMap<EventId, Box<Message>>,
     #[serde(with = "crate::pairs")]
     by_task: BTreeMap<TaskId, Vec<EventId>>,
     #[serde(with = "crate::pairs")]
@@ -612,7 +612,7 @@ impl Mirror {
         &self.links
     }
 
-    pub const fn messages(&self) -> &BTreeMap<EventId, Message> {
+    pub const fn messages(&self) -> &BTreeMap<EventId, Box<Message>> {
         &self.messages
     }
 
@@ -993,7 +993,7 @@ impl Fold {
             .entry(message.task.clone())
             .or_default()
             .push(id.clone());
-        self.mirror.messages.insert(id, message);
+        self.mirror.messages.insert(id, Box::new(message));
     }
 
     fn fresh(&self, task: &TaskId, seq: u64, kind: Kind, author: String, body: String) -> Message {
@@ -1046,7 +1046,7 @@ impl Fold {
                 Some(_) => {}
                 None => {
                     let status = self.fresh(task, seq, Kind::Status, event.by.clone(), text);
-                    self.mirror.messages.insert(id.clone(), status);
+                    self.mirror.messages.insert(id.clone(), Box::new(status));
                     self.mirror.status.insert(task.clone(), id);
                 }
             }
