@@ -35,6 +35,7 @@ usage: nc-board [--dir DIR | --sql URL] [--as ACTOR] COMMAND
   $NC_BOARD_AS; ACTOR is a principal such as agent:b1, optionally with +profile. A Postgres board is shared by every
   machine that reaches the database: its tables are created on first use, and wait, claim-next --wait and run next
   --wait wake on its LISTEN/NOTIFY, re-reading every --poll-ms as well
+  whoami                                   ACTOR, the board, what ACTOR may do on it and the claims ACTOR holds
   init                                     charter the board as ACTOR and let everyone read, post, claim and manage
   post ID [--parent ID] [--label K=V]... [--needs ID]... [--assignee ACTOR] [--on-fail cascade|wait] SPEC
   list [--label K=V]... [--status open|claimed|done|failed|cancelled|blocked|ready]...
@@ -844,6 +845,13 @@ impl Store {
         }
     }
 
+    fn shown(&self) -> Value {
+        match self {
+            Self::Dir(dir) => json!({"dir": dir}),
+            Self::Postgres(postgres) => json!({"postgres": postgres.shown()}),
+        }
+    }
+
     fn wake(&self, runtime: &nanocode_executor::Runtime) -> Wake {
         let Self::Postgres(postgres) = self else {
             return Wake::Poll;
@@ -1222,6 +1230,49 @@ fn waiting(
     )
 }
 
+fn whoami(
+    parsed: &Parsed,
+    store: &Store,
+    identity: &Identity,
+    runtime: &nanocode_executor::Runtime,
+) -> Result<Option<Value>, Failure> {
+    parsed.allow(&[])?;
+    parsed.words::<0>()?;
+    locked(store, identity, runtime, Access::Read, async |board| {
+        let at_ms = now_ms()?;
+        let actor = identity.actor();
+        let claims = board
+            .tasks()
+            .filter_map(|(id, task)| match &task.phase {
+                Phase::Claimed {
+                    claim,
+                    worker,
+                    until_ms,
+                } if *worker == board.writer() => Some(json!({
+                    "task": id,
+                    "claim": claim,
+                    "until_ms": until_ms,
+                    "expired": *until_ms <= at_ms,
+                })),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let can = Can::ALL
+            .into_iter()
+            .filter(|can| board.may("*", *can))
+            .collect::<Vec<_>>();
+        Ok(Some(json!({
+            "actor": board.writer(),
+            "kind": actor.kind(),
+            "profile": actor.profile(),
+            "board": store.shown(),
+            "owner": board.fold().access().owner(),
+            "can": can,
+            "claims": claims,
+        })))
+    })
+}
+
 fn session(parsed: &Parsed) -> Result<Option<Value>, Failure> {
     let actor = match parsed.words[0].as_str() {
         "list" | "show" | "events" | "may" => parsed
@@ -1233,6 +1284,7 @@ fn session(parsed: &Parsed) -> Result<Option<Value>, Failure> {
     let runtime = nanocode_executor::Runtime::new()?;
     let store = Store::open(parsed, &runtime)?;
     match parsed.words[0].as_str() {
+        "whoami" => return whoami(parsed, &store, &identity, &runtime),
         "wait" => return waiting(parsed, &store, &identity, &runtime),
         "run" => return running(parsed, &store, &actor, &identity, &runtime),
         "claim-next" if parsed.flags.contains_key("wait") => {
