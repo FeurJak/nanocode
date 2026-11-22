@@ -2364,23 +2364,39 @@ fn run_simple<'a>(
                     .collect();
                 // `v=x export v`: bash exports the temporary binding and copies it to the
                 // shell's own variable, so it outlives the command.
-                let promoted: Vec<String> = match which.name() {
-                    "export" => args
-                        .iter()
-                        .filter_map(|a| match a {
-                            builtins::declare::DeclArg::Word(w) => {
-                                old.iter().find(|(n, _)| n.as_bytes() == w.as_slice())
-                            }
-                            _ => None,
+                // So does any declaration that makes it exported or readonly
+                // (`v=x readonly v=y`, `v=x declare -r v`).
+                let attr = matches!(which.name(), "export" | "readonly")
+                    || args.iter().any(|a| {
+                        matches!(a, builtins::declare::DeclArg::Word(w)
+                            if w.first() == Some(&b'-')
+                                && w[1..].iter().any(|c| matches!(c, b'x' | b'r')))
+                    });
+                let promoted: Vec<String> = if attr {
+                    args.iter()
+                        .filter_map(|a| {
+                            let w = match a {
+                                builtins::declare::DeclArg::Word(w) => w,
+                                builtins::declare::DeclArg::Assign {
+                                    name, index: None, ..
+                                } => name,
+                                _ => return None,
+                            };
+                            old.iter().find(|(n, _)| n.as_bytes() == w.as_slice())
                         })
                         .map(|(n, _)| n.clone())
-                        .collect(),
-                    _ => Vec::new(),
+                        .collect()
+                } else {
+                    Vec::new()
                 };
                 for (n, v) in assigns {
                     vp.set_var(&n, v);
                     vp.vars.entry(&n).exported = true;
                 }
+                vp.decl_temps = old
+                    .iter()
+                    .map(|(n, v)| (n.clone(), v.clone(), false))
+                    .collect();
                 let saved = vp.fds.clone();
                 vp.bad_assign = false;
                 let r = if cmd.redirects.is_empty()
@@ -2405,9 +2421,13 @@ fn run_simple<'a>(
                     builtins::special_outcome(vp, which.name().as_bytes(), r)
                 };
                 restore_fds(vp, saved);
+                let localized: Vec<String> = std::mem::take(&mut vp.decl_temps)
+                    .into_iter()
+                    .filter_map(|(n, _, local)| local.then_some(n))
+                    .collect();
                 for (n, v) in old {
                     match v {
-                        _ if special || promoted.contains(&n) => {}
+                        _ if special || promoted.contains(&n) || localized.contains(&n) => {}
                         Some(v) => vp.vars.insert(&n, v),
                         None => {
                             vp.vars.remove(&n);
@@ -2645,6 +2665,7 @@ pub(crate) async fn run_builtin(
             vp.assigned_dynamic(&n);
         }
         vp.bad_assign = false;
+        vp.decl_temps.clear();
         let r = builtins::call(vp, b, &argv).await;
         if scoped && let Some(frame) = vp.frames.pop() {
             saved = frame.saved;

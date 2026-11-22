@@ -485,6 +485,10 @@ pub(crate) struct Vp {
     /// one (D1281).
     pub no_errexit: bool,
     pub bad_assign: bool,
+    /// The assignments in front of the running declaration builtin, with the values
+    /// they hide: one it makes local keeps its temporary value (`v=t local v`, bash),
+    /// and is marked so it is not put back afterwards.
+    pub decl_temps: Vec<(String, Option<Var>, bool)>,
     pub err_trap_new: bool,
     /// Traps (D1283); shared with subshells until one changes them.
     pub traps: Rc<crate::builtins::trap::Traps>,
@@ -574,6 +578,9 @@ pub(crate) struct Frame {
     pub saved: Vec<(String, Option<Var>)>,
     /// The names of `saved` that are assignments in front of the call, not locals.
     pub temps: Vec<String>,
+    /// Locals made from a temporary binding (`v=t f`, f runs `local v`): unsetting
+    /// one keeps its export attribute (bash).
+    pub from_temp: Vec<String>,
     pub builtin: bool,
 }
 

@@ -646,16 +646,38 @@ async fn declare_one(
         // A temporary binding (`x=t f`) made local is a local from now on: unset no
         // longer reveals what it shadowed.
         if let Some(k) = k {
+            let n = vp.frames[k].temps.len();
             vp.frames[k].temps.retain(|t| t != name);
+            // `v=t local v` over the function's own `v=c f`: the local keeps t.
+            if vp.frames[k].temps.len() != n {
+                vp.frames[k].from_temp.push(name.to_string());
+                if let Some(t) = vp.decl_temps.iter_mut().find(|(t, _, _)| t == name) {
+                    t.2 = true;
+                }
+            }
         }
         if fresh {
-            let tempenv = vp
-                .frames
-                .iter()
-                .rev()
-                .find(|f| f.saved.iter().any(|(n, _)| n == name))
-                .is_some_and(|f| f.temps.iter().any(|t| t == name));
+            // An assignment in front of this builtin (`v=t local v`): the local starts
+            // with its value and attributes, and saves what the assignment hid.
+            let prefix = vp.decl_temps.iter().position(|(n, _, l)| n == name && !l);
+            let tempenv = prefix.is_some()
+                || vp
+                    .frames
+                    .iter()
+                    .rev()
+                    .find(|f| f.saved.iter().any(|(n, _)| n == name))
+                    .is_some_and(|f| f.temps.iter().any(|t| t == name));
             vp.make_local(name);
+            if let (true, Some(k)) = (tempenv, k) {
+                vp.frames[k].from_temp.push(name.to_string());
+            }
+            if let (Some(i), Some(k)) = (prefix, k) {
+                vp.decl_temps[i].2 = true;
+                let hidden = vp.decl_temps[i].1.clone();
+                if let Some(s) = vp.frames[k].saved.iter_mut().find(|(n, _)| n == name) {
+                    s.1 = hidden;
+                }
+            }
             // A new local starts without a value and gets only the attributes given
             // now, unless -I copies the shadowed one or it shadows a temporary binding
             // of a caller (`v=t f`, `v=t eval f`), which it copies as bash does.
@@ -888,7 +910,28 @@ async fn declare_one(
     if Opts::on(o.readonly) {
         vp.vars.entry(&target).readonly = true;
     }
+    if o.export_like && !local {
+        propagate_temp(vp, &target);
+    }
     Ok(())
+}
+
+/// `export` or `readonly` of an assignment in front of the running function
+/// (`v=t f`, f runs `export v`): the binding outlives the call (bash).
+fn propagate_temp(vp: &mut Vp, name: &str) {
+    let Some(k) = vp
+        .frames
+        .iter()
+        .rposition(|f| f.saved.iter().any(|(n, _)| n == name))
+    else {
+        return;
+    };
+    let f = &mut vp.frames[k];
+    if f.builtin || !f.temps.iter().any(|t| t == name) {
+        return;
+    }
+    f.temps.retain(|t| t != name);
+    f.saved.retain(|(n, _)| n != name);
 }
 
 /// `declare -f` / `-F`: function definitions or names.

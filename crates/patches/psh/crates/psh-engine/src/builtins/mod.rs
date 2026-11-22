@@ -717,7 +717,15 @@ async fn unset(vp: &mut Vp, args: &[Vec<u8>]) -> R {
             let current = vp.frames[k + 1..].iter().all(|f| f.builtin);
             let frame = &mut vp.frames[k];
             if current && !frame.temps.contains(&n) {
-                vp.vars.insert(&n, crate::vars::Var::default());
+                let exported = frame.from_temp.contains(&n)
+                    && vp.vars.get(&n).is_some_and(|v| v.exported);
+                vp.vars.insert(
+                    &n,
+                    crate::vars::Var {
+                        exported,
+                        ..Default::default()
+                    },
+                );
                 continue;
             }
             frame.temps.retain(|t| *t != n);

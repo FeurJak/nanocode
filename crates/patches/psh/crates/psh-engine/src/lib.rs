@@ -369,6 +369,7 @@ impl Shell {
             no_errexit: false,
             err_trap_new: false,
             bad_assign: false,
+            decl_temps: Vec::new(),
             traps: Rc::new(builtins::trap::Traps::ignored_at_start(
                 &cfg.host.ignored_at_start(),
             )),

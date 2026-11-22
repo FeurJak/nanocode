@@ -185,3 +185,17 @@ fn xtrace_of_arith_for_clauses_keeps_trailing_blanks() {
         "+ (( i=0  ))\n+ (( i<1  ))\n+ :\n+ (( i++ ))\n+ (( i<1  ))\n+ (( 1 ))\n+ (( 1 ))\n+ break\n"
     );
 }
+
+#[test]
+fn assignments_in_front_of_declaration_builtins_scope_like_bash() {
+    let script = r#"f5(){ z=y typeset z; echo "|$z|"; }; f5; z=42 f5
+f2(){ export x; }; x=4 f2; echo "x=$x"
+b=1 declare -r b=2; declare -p b
+a=1 declare a=2; echo "${a-unset}"
+f(){ local v=x; unset v; declare -p v; }; v=t f
+"#;
+    assert_eq!(
+        out(script),
+        "|y|\n|y|\nx=4\ndeclare -rx b=\"2\"\nunset\ndeclare -x v\n"
+    );
+}
