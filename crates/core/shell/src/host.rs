@@ -751,6 +751,14 @@ impl psh_engine::Host for Host {
         self.0.identity.pid
     }
 
+    /// Every process here is the shell's own, so a nested shell or subshell gets the
+    /// next id, as a spawned command does.
+    fn own_pid(&self) -> Option<u32> {
+        let spawned = self.0.spawned.get() + 1;
+        self.0.spawned.set(spawned);
+        Some(self.0.identity.pid + spawned)
+    }
+
     fn home_dir(&self, user: &[u8]) -> Option<Vec<u8>> {
         (user == self.0.identity.user).then(|| self.0.identity.home.clone())
     }

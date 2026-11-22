@@ -611,7 +611,7 @@ impl Vp {
         sub.stage_subshell = false;
         sub.stage_gate = None;
         sub.time_subshell = None;
-        sub.bashpid = None;
+        sub.bashpid = self.core.host.own_pid();
         sub
     }
 

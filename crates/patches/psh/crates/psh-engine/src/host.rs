@@ -693,6 +693,13 @@ pub trait Host {
     fn sleep(&self, duration: Duration) -> HostFuture<()>;
     /// The shell's process id (`$$`).
     fn pid(&self) -> u32;
+    /// A process id for a shell psh runs inside itself (`bash script`, a subshell)
+    /// where it has no process of its own (D1413). A host whose processes are all
+    /// psh's own (a sandbox) gives each a fresh one; the default is none, and `$$` or
+    /// `BASHPID` there is an error.
+    fn own_pid(&self) -> Option<u32> {
+        None
+    }
     fn ignored_at_start(&self) -> Vec<Signal> {
         Vec::new()
     }

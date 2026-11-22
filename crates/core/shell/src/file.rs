@@ -741,6 +741,15 @@ mod tests {
     }
 
     #[test]
+    fn nested_shells_and_subshells_have_process_ids() {
+        // $$ in bash script (temp-file names), and BASHPID in a subshell.
+        let script = r#"bash -c 'echo $$ $BASHPID' | awk '$1 == $2 && $1 > 1 { print "same" }'
+echo "$$ $BASHPID" > a; (echo "$$ $BASHPID") > b
+read p q < a; read r t < b; [ $p = $r ] && [ $q != $t ] && echo sub"#;
+        assert_eq!(out(script), "same\nsub\n");
+    }
+
+    #[test]
     fn reading_a_directory() {
         assert_eq!(out("let n=1 < .; echo $n"), "1\n");
         let (stdout, stderr) = run("cat < .; echo $?");

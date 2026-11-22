@@ -212,8 +212,9 @@ async fn shell(mut sub: Vp, argv: Vec<Vec<u8>>, ignore: Vec<Signal>, caller: Cal
             var.value = crate::vars::Value::Str(value);
         }
     } else {
-        sub.shell_pid = None;
-        sub.bashpid = None;
+        let pid = sub.core.host.own_pid();
+        sub.shell_pid = pid;
+        sub.bashpid = pid;
         set_ppid(
             &mut sub,
             caller.shell_pid.map(|p| p.to_string().into_bytes()),
