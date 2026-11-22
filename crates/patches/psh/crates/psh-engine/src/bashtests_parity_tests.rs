@@ -224,3 +224,17 @@ fn exit_trap_after_exit_in_a_function_sees_the_function() {
     assert_eq!(out(script), "trap:f:1:a:3 4\n");
 }
 
+#[test]
+fn double_quoted_expansion_in_an_arithmetic_subscript_is_one_key() {
+    let script = r#"declare -A assoc; key='x],b[$(echo uname >&2)'
+(( assoc["$key"]++ )); (( "assoc[$key]++" )); declare -p assoc
+typeset -A a; b="80's"; ((++a["$b"])); [[ $((++a["$b"])) ]]; echo ${a[$b]}
+"#;
+    let (_, o, e) = run(script);
+    assert_eq!(
+        String::from_utf8_lossy(&o),
+        "declare -A assoc=([\"x],b[\\$(echo uname >&2)\"]=\"2\" )\n2\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&e), "");
+}
+

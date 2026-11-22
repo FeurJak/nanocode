@@ -1455,7 +1455,24 @@ async fn expand_part(
                         .await;
                         return Err(Unwind::Abort(1));
                     }
-                    self::part(vp, code, p, true, f, inner_ctx, false).await?;
+                    // `(( a["$k"]++ ))`: an expansion in double quotes inside a
+                    // subscript is quoted as one outside them is.
+                    let pctx = if ctx == Ctx::Arith
+                        && matches!(
+                            p.kind,
+                            Part::Param(_)
+                                | Part::CmdSubst(_)
+                                | Part::FunSub { .. }
+                                | Part::Backtick
+                                | Part::Arith(_)
+                        )
+                        && in_subscript(&f.cur.text)
+                    {
+                        Ctx::Arith
+                    } else {
+                        inner_ctx
+                    };
+                    self::part(vp, code, p, true, f, pctx, false).await?;
                 }
                 Ok(())
             })
