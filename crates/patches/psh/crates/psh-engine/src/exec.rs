@@ -1870,8 +1870,12 @@ pub(crate) async fn call_function(
     vp.calls.pop();
     if let Some(frame) = vp.frames.pop() {
         if let Some(set) = frame.options {
+            let eof = vp.opts.get(SetOpt::Ignoreeof);
             vp.opts.restore_set_bits(set);
             crate::options::sync(vp);
+            if vp.opts.get(SetOpt::Ignoreeof) != eof {
+                builtins::set::ignoreeof_var(vp, !eof);
+            }
         }
         for (n, old) in frame.saved.into_iter().rev() {
             match old {

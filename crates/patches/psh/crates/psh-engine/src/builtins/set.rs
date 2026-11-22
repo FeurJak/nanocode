@@ -147,6 +147,18 @@ async fn apply(vp: &mut Vp, steps: Vec<Step>) -> R {
 pub(crate) fn set_opt(vp: &mut Vp, opt: SetOpt, on: bool) {
     vp.opts.set(opt, on);
     options::sync(vp);
+    if opt == SetOpt::Ignoreeof {
+        ignoreeof_var(vp, on);
+    }
+}
+
+/// `set -o ignoreeof` sets `IGNOREEOF` to 10 and `set +o ignoreeof` unsets it
+/// (bash's set_ignoreeof).
+pub(crate) fn ignoreeof_var(vp: &mut Vp, on: bool) {
+    vp.vars.remove("IGNOREEOF");
+    if on {
+        vp.vars.insert("IGNOREEOF", crate::state::Var::scalar(b"10".to_vec()));
+    }
 }
 
 /// `set -o` (`on`) or `set +o`.

@@ -209,3 +209,10 @@ shopt -s localvar_inherit; s=X; f(){ local -a s; declare -p s; }; f
 "#;
     assert_eq!(out(script), "declare -x E\naaa 1\ndeclare -a s=([0]=\"X\")\n");
 }
+
+#[test]
+fn ignoreeof_and_ignoreeof_variable_follow_each_other() {
+    let script = "IGNOREEOF=0; shopt -o ignoreeof; f(){ local -; set +o ignoreeof; }; f\n\
+                  echo $IGNOREEOF; set +o ignoreeof; echo ${IGNOREEOF-unset}\n";
+    assert_eq!(out(script), "ignoreeof      \ton\n10\nunset\n");
+}

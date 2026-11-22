@@ -744,6 +744,10 @@ async fn unset(vp: &mut Vp, args: &[Vec<u8>]) -> R {
         if n == "POSIXLY_CORRECT" {
             vp.opts.set(crate::options::SetOpt::Posix, false);
         }
+        if n == "IGNOREEOF" {
+            vp.opts.set(crate::options::SetOpt::Ignoreeof, false);
+            crate::options::sync(vp);
+        }
     }
     Ok(status)
 }

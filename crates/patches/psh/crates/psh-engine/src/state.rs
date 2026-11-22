@@ -1127,6 +1127,11 @@ impl Vp {
         if name == "POSIXLY_CORRECT" {
             self.opts.set(crate::options::SetOpt::Posix, true);
         }
+        // Assigning IGNOREEOF turns on ignoreeof (bash's sv_ignoreeof).
+        if name == "IGNOREEOF" {
+            self.opts.set(crate::options::SetOpt::Ignoreeof, true);
+            crate::options::sync(self);
+        }
         Ok(())
     }
 
