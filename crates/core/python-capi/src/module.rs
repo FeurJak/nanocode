@@ -81,20 +81,43 @@ pub fn run_constructors() {
 pub fn run_constructors() {}
 
 pub fn module_defs(ctx: &rustpython_vm::Context) -> Vec<&'static PyModuleDef> {
+    rustpython_vm::common::static_cell! {
+        static BUILT: Vec<&'static PyModuleDef>;
+        static BUILT_ADDED: Vec<&'static PyModuleDef>;
+    }
     run_constructors();
-    extensions()
-        .map(|extension| {
-            &*Box::leak(Box::new(PyModuleDef {
-                name: ctx.intern_str(extension.name),
-                doc: None,
-                methods: &[],
-                slots: PyModuleSlots {
-                    create: Some(create),
-                    exec: None,
-                },
-            }))
+    if rustpython_vm::sim::mutated(rustpython_vm::sim::Mutation::DefsPerInterpreter) {
+        return extensions()
+            .map(|extension| define(ctx, extension))
+            .collect();
+    }
+    let built = BUILT.get_or_init(|| {
+        EXTENSIONS
+            .iter()
+            .map(|extension| define(ctx, extension))
+            .collect()
+    });
+    let added = ADDED.get().map_or(&[][..], |added| {
+        BUILT_ADDED.get_or_init(|| {
+            added
+                .iter()
+                .map(|extension| define(ctx, extension))
+                .collect()
         })
-        .collect()
+    });
+    built.iter().chain(added).copied().collect()
+}
+
+fn define(ctx: &rustpython_vm::Context, extension: &'static Extension) -> &'static PyModuleDef {
+    Box::leak(Box::new(PyModuleDef {
+        name: ctx.intern_str(extension.name),
+        doc: None,
+        methods: &[],
+        slots: PyModuleSlots {
+            create: Some(create),
+            exec: None,
+        },
+    }))
 }
 
 fn create(

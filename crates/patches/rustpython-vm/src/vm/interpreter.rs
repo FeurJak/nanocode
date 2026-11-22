@@ -237,7 +237,7 @@ fn create_subinterpreter_from_parent(
         },
         |_| {},
     );
-    let interp = Interpreter { global_state, vm };
+    let interp = Interpreter { global_state, vm, finalized: core::cell::Cell::new(false) };
     // Every interpreter has a `__main__` module once it is initialized.
     interp.enter(|vm| {
         let _ = vm.ensure_main_module();
@@ -368,7 +368,7 @@ impl InterpreterBuilder {
             },
             |_| {}, // No additional init needed
         );
-        Interpreter { global_state, vm }
+        Interpreter { global_state, vm, finalized: core::cell::Cell::new(false) }
     }
 
     /// Alias for `build()` for compatibility with the `interpreter()` pattern.
@@ -411,6 +411,24 @@ impl Default for InterpreterBuilder {
 pub struct Interpreter {
     pub global_state: PyRc<PyGlobalState>,
     vm: VirtualMachine,
+    /// Set once [Interpreter::finalize] ran, so that drop does not run it again.
+    finalized: core::cell::Cell<bool>,
+}
+
+/// An interpreter dropped without [Interpreter::finalize] finalizes here, so
+/// that no caller can leave its modules behind by forgetting to: their
+/// dictionaries are what tie an interpreter's objects into cycles, and only
+/// module finalization clears them. Skipped while unwinding from a panic,
+/// which must not run Python code.
+impl Drop for Interpreter {
+    fn drop(&mut self) {
+        if !self.finalized.get()
+            && !std::thread::panicking()
+            && !crate::sim::mutated(crate::sim::Mutation::DropSkipsFinalize)
+        {
+            self.shut_down(None);
+        }
+    }
 }
 
 impl Interpreter {
@@ -459,7 +477,7 @@ impl Interpreter {
             },
             init,
         );
-        Self { global_state, vm }
+        Self { global_state, vm, finalized: core::cell::Cell::new(false) }
     }
 
     /// Process-global interpreter id (main is [`super::MAIN_INTERPRETER_ID`]).
@@ -590,6 +608,11 @@ impl Interpreter {
     ///
     /// Note that calling `finalize` is not necessary by purpose though.
     pub fn finalize(self, exc: Option<PyBaseExceptionRef>) -> u32 {
+        self.shut_down(exc)
+    }
+
+    fn shut_down(&self, exc: Option<PyBaseExceptionRef>) -> u32 {
+        self.finalized.set(true);
         self.enter(|vm| {
             let mut flush_status = vm.flush_std();
 

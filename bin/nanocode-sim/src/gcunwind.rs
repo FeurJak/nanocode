@@ -9,8 +9,9 @@ use std::{
 };
 
 use nanocode_python::rustpython_vm::{
-    Interpreter, PyObjectRef, PyRef, Settings, VirtualMachine,
+    Context, Interpreter, PyObjectRef, PyRef, Settings, VirtualMachine,
     builtins::PyWeak,
+    gc_state::gc_state,
     import::{ExternalFrozen, set_external_frozen},
     sim::{self as vm_sim, Mutation as Rule, UNWOUND},
 };
@@ -27,16 +28,31 @@ const HELD_MAX: u64 = 1 << 20;
 const UNWIND_PPM: u64 = 750_000;
 const GENERATIONS: u64 = 3;
 const FULL: usize = 2;
+const CHURN: u64 = 32;
+const CHURN_TRACKED_SLACK: usize = 512;
+const CHURN_DEAD_SLACK: usize = 64;
+const CHURN_SOURCE: &str = "for i in range(32):
+    type('K%d' % i, (), {})
+";
 const SETUP: &str = "class C:\n    pass\ndef ring(n):\n    nodes = [C() for _ in range(n)]\n    for i in range(n):\n        nodes[i].next = nodes[(i + 1) % n]\n    return nodes[0]\n";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GcUnwindMutation {
     None,
     KeepsLeftoverBits,
+    DropSkipsFinalize,
+    SubclassesKeepDead,
+    DefsPerInterpreter,
 }
 
 impl GcUnwindMutation {
-    const ALL: [Self; 2] = [Self::None, Self::KeepsLeftoverBits];
+    const ALL: [Self; 5] = [
+        Self::None,
+        Self::KeepsLeftoverBits,
+        Self::DropSkipsFinalize,
+        Self::SubclassesKeepDead,
+        Self::DefsPerInterpreter,
+    ];
 
     pub fn parse(name: &str) -> Option<Self> {
         Self::ALL
@@ -48,6 +64,9 @@ impl GcUnwindMutation {
         match self {
             Self::None => "none",
             Self::KeepsLeftoverBits => "keeps_leftover_bits",
+            Self::DropSkipsFinalize => "drop_skips_finalize",
+            Self::SubclassesKeepDead => "subclasses_keep_dead",
+            Self::DefsPerInterpreter => "defs_per_interpreter",
         }
     }
 
@@ -63,6 +82,9 @@ impl GcUnwindMutation {
         match self {
             Self::None => Rule::None,
             Self::KeepsLeftoverBits => Rule::KeepsLeftoverBits,
+            Self::DropSkipsFinalize => Rule::DropSkipsFinalize,
+            Self::SubclassesKeepDead => Rule::SubclassesKeepDead,
+            Self::DefsPerInterpreter => Rule::DefsPerInterpreter,
         }
     }
 }
@@ -249,6 +271,63 @@ fn build(
     Ok(weaks)
 }
 
+fn tracked() -> usize {
+    let (young, old, oldest) = gc_state().get_count();
+    young + old + oldest
+}
+
+fn churn(rng: &mut Rng) -> Result<(), String> {
+    let settle = interpreter(rng);
+    settle.enter(|vm| collect(vm, FULL))?;
+    settle.finalize(None);
+    let before = tracked();
+    for _ in 0..CHURN {
+        let interpreter = interpreter(rng);
+        interpreter.enter(|vm| {
+            let scope = vm.new_scope_with_builtins();
+            vm.run_string(scope, CHURN_SOURCE, "<gc_unwind churn>")
+                .map(drop)
+                .map_err(|_| "the churn classes raised".to_owned())
+        })?;
+        drop(interpreter);
+    }
+    let after = tracked();
+    if after > before + CHURN_TRACKED_SLACK {
+        return Err(format!(
+            "{CHURN} interpreters dropped without finalize() left {} tracked objects behind ({before} before, {after} after)",
+            after - before
+        ));
+    }
+    let object = Context::genesis().types.object_type;
+    let (len, live) = {
+        let subclasses = object.subclasses.read();
+        let live = subclasses
+            .iter()
+            .filter(|weak| weak.upgrade().is_some())
+            .count();
+        (subclasses.len(), live)
+    };
+    if len > 2 * live + CHURN_DEAD_SLACK {
+        return Err(format!(
+            "object's subclass list holds {} dead entries beside {live} live ones",
+            len - live
+        ));
+    }
+    let first = nanocode_python_capi::module_defs(Context::genesis());
+    let second = nanocode_python_capi::module_defs(Context::genesis());
+    if first.len() != second.len()
+        || first
+            .iter()
+            .zip(&second)
+            .any(|(a, b)| !std::ptr::eq(*a, *b))
+    {
+        return Err(
+            "python-capi built its module definitions again for a second interpreter".to_owned(),
+        );
+    }
+    Ok(())
+}
+
 fn run_seed(seed: u64, mutation: GcUnwindMutation) -> Outcome {
     vm_sim::mutate(mutation.rule());
     quiet_unwinds();
@@ -305,6 +384,16 @@ fn run_seed(seed: u64, mutation: GcUnwindMutation) -> Outcome {
             BROKEN.store(true, Ordering::SeqCst);
             std::mem::forget(std::mem::take(&mut pending));
             break;
+        }
+    }
+    if wrong.is_none() {
+        shape.push_str("churn ");
+        match catch_unwind(AssertUnwindSafe(|| churn(&mut rng))) {
+            Ok(Ok(())) => {}
+            Ok(Err(message)) => wrong = Some(format!("churn: {message}")),
+            Err(payload) => {
+                wrong = Some(format!("churn panicked: {}", panic_text(payload.as_ref())));
+            }
         }
     }
     let digest = fnv(

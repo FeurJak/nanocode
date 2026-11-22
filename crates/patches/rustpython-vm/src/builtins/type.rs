@@ -1093,17 +1093,50 @@ impl PyType {
             new_type.init_slots(ctx);
         }
 
-        let weakref_type = super::PyWeak::static_type();
         for base in new_type.bases.read().as_slice() {
-            base.subclasses.write().push(
-                new_type
-                    .as_object()
-                    .downgrade_with_weakref_typ_opt(None, weakref_type.to_owned())
-                    .unwrap(),
-            );
+            base.add_subclass(&new_type);
         }
 
         Ok(new_type)
+    }
+
+    /// Record sub in this type's subclasses, as a weak reference.
+    ///
+    /// The list only shrinks when someone asks for subclasses or a class
+    /// changes its bases, so a static base such as object kept a dead
+    /// weak reference for every class that any dropped interpreter had
+    /// defined: about 2 KB per interpreter, for the life of the process.
+    /// Dead entries are dropped whenever the list reaches a power of two,
+    /// which keeps it within twice its live entries at a cost amortized
+    /// over the pushes.
+    pub(crate) fn add_subclass(&self, sub: &Py<Self>) {
+        let weak = sub
+            .as_object()
+            .downgrade_with_weakref_typ_opt(None, super::PyWeak::static_type().to_owned())
+            .unwrap();
+        // Released only after the lock: dropping either may run arbitrary drops.
+        let mut released: Vec<PyObjectRef> = Vec::new();
+        {
+            let mut subclasses = self.subclasses.write();
+            let len = subclasses.len();
+            if len >= 16
+                && len.is_power_of_two()
+                && !crate::sim::mutated(crate::sim::Mutation::SubclassesKeepDead)
+            {
+                let mut kept = Vec::with_capacity(len);
+                for weak in subclasses.drain(..) {
+                    if let Some(live) = weak.upgrade() {
+                        released.push(live);
+                        kept.push(weak);
+                    } else {
+                        released.push(weak.into());
+                    }
+                }
+                *subclasses = kept;
+            }
+            subclasses.push(weak);
+        }
+        drop(released);
     }
 
     pub fn new_static(
@@ -1170,14 +1203,8 @@ impl PyType {
         Self::set_new(&new_type.slots, new_type.base.deref());
         Self::set_alloc(&new_type.slots, new_type.base.deref());
 
-        let weakref_type = super::PyWeak::static_type();
         for base in new_type.bases.read().as_slice() {
-            base.subclasses.write().push(
-                new_type
-                    .as_object()
-                    .downgrade_with_weakref_typ_opt(None, weakref_type.to_owned())
-                    .unwrap(),
-            );
+            base.add_subclass(&new_type);
         }
 
         Ok(new_type)
@@ -2656,13 +2683,8 @@ impl Py<PyType> {
         };
 
         let add_as_subclass = |bases: &[PyTypeRef]| {
-            let weakref_type = super::PyWeak::static_type();
             for base in bases {
-                base.subclasses.write().push(
-                    zelf.as_object()
-                        .downgrade_with_weakref_typ_opt(None, weakref_type.to_owned())
-                        .unwrap(),
-                );
+                base.add_subclass(zelf);
             }
         };
 

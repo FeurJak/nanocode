@@ -6,6 +6,12 @@ use core::sync::atomic::{AtomicU8, Ordering};
 pub enum Mutation {
     None,
     KeepsLeftoverBits,
+    /// An interpreter dropped without finalize() skips finalizing.
+    DropSkipsFinalize,
+    /// A type's subclass list never drops its dead entries.
+    SubclassesKeepDead,
+    /// python-capi builds and leaks its module definitions for every interpreter.
+    DefsPerInterpreter,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

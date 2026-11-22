@@ -320,6 +320,9 @@ default_table='
 4 gc_unwind pass --scenario gc_unwind
 1 gc_unwind_twice pass --scenario gc_unwind --twice
 1 canary_gc_unwind_keeps_leftover_bits canary:8 --scenario gc_unwind --mutation keeps_leftover_bits
+1 canary_gc_unwind_drop_skips_finalize canary:8 --scenario gc_unwind --mutation drop_skips_finalize
+1 canary_gc_unwind_subclasses_keep_dead canary:8 --scenario gc_unwind --mutation subclasses_keep_dead
+1 canary_gc_unwind_defs_per_interpreter canary:8 --scenario gc_unwind --mutation defs_per_interpreter
 8 repo_cache pass --scenario repo_cache
 2 repo_cache_twice pass --scenario repo_cache --twice
 1 canary_repo_cache_shared_head canary:8 --scenario repo_cache --mutation shared_head
