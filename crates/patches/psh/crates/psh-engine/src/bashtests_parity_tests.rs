@@ -270,3 +270,11 @@ fn a_compound_indexed_key_drops_its_ctlesc_bytes() {
         "declare -a b=([3]=\"1\")\n"
     );
 }
+
+#[test]
+fn a_scalar_converted_to_an_associative_array_keeps_bash_s_table_size() {
+    assert_eq!(
+        out("foo=help; declare -A foo=([zero]=zero [one]=one); declare -p foo\n"),
+        "declare -A foo=([zero]=\"zero\" [one]=\"one\" )\n"
+    );
+}

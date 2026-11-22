@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use crate::state::{Vp, apply_case};
-use crate::vars::{Assoc, Value};
+use crate::vars::Value;
 
 /// One element of a compound assignment `(…)`, expanded: `[key]=value`, `[key]+=value`
 /// or a plain `value`.
@@ -181,8 +181,8 @@ impl Vp {
         if self.vars.get(&name).is_some_and(|v| v.is_assoc()) {
             let var = self.vars.entry(&name);
             var.declared_only = false;
-            if !append {
-                var.value = Value::Assoc(Assoc::default());
+            if !append && let Value::Assoc(a) = &var.value {
+                var.value = Value::Assoc(a.flushed());
             }
             // Without keys, the items are key-value pairs (bash 5.1+).
             let pairs = items.first().is_some_and(|i| i.key.is_none());

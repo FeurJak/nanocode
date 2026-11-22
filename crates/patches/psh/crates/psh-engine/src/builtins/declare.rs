@@ -787,8 +787,9 @@ async fn declare_one(
         if converts && Opts::on(o.assoc) && !var.is_assoc() {
             var.declared_only = matches!(var.value, Value::Unset);
             var.value = match std::mem::take(&mut var.value) {
+                // bash converts a scalar into a table of its default 128 buckets.
                 Value::Str(s) => {
-                    let mut a = crate::vars::Assoc::default();
+                    let mut a = crate::vars::Assoc::with_buckets(128);
                     a.insert(b"0".to_vec(), s);
                     Value::Assoc(a)
                 }

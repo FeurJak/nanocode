@@ -257,6 +257,15 @@ impl Assoc {
         }
     }
 
+    /// The array emptied, keeping its buckets (bash's assoc_flush): a compound
+    /// assignment refills the same table.
+    pub(crate) fn flushed(&self) -> Assoc {
+        match self.buckets.len() {
+            0 => Assoc::default(),
+            n => Assoc::with_buckets(n),
+        }
+    }
+
     fn bucket(&self, key: &[u8]) -> usize {
         fnv1(key) as usize & (self.buckets.len() - 1)
     }
