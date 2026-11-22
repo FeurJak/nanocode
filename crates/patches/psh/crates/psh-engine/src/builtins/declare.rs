@@ -649,6 +649,10 @@ async fn declare_one(
                 .iter()
                 .any(|f| !f.builtin && f.saved.iter().any(|(n, _)| n == name))
         {
+            // `local v=(…)`: bash also fails the compound assignment itself.
+            if matches!(a, DeclArg::Array { .. }) {
+                vp.error(&format!("{name}: readonly variable")).await;
+            }
             return Err(format!("{name}: readonly variable").into());
         }
         let k = vp.local_frame(name);

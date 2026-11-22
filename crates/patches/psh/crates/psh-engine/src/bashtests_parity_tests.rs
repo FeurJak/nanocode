@@ -278,3 +278,11 @@ fn a_scalar_converted_to_an_associative_array_keeps_bash_s_table_size() {
         "declare -A foo=([zero]=\"zero\" [one]=\"one\" )\n"
     );
 }
+
+#[test]
+fn a_readonly_compound_local_fails_twice() {
+    let (_, _, e) = run("readonly q=1; f(){ local q=(a); }; f\n");
+    let e = String::from_utf8_lossy(&e);
+    assert_eq!(e.lines().count(), 2, "{e}");
+    assert!(e.ends_with("local: q: readonly variable\n"), "{e}");
+}
