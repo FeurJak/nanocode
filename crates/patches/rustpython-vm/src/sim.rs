@@ -16,6 +16,14 @@ pub enum Mutation {
     PrunesEveryPush,
     /// A type's subclass list is scanned whenever its length is a power of two.
     PrunesAtPowersOfTwo,
+    /// A dropped interpreter runs Python code while it finalizes.
+    DropRunsCode,
+    /// A panic while a dropped interpreter finalizes leaves its drop.
+    DropLetsPanicOut,
+    /// Drop finalizes again after an explicit finalize().
+    DropFinalizesTwice,
+    /// Drop finalizes while unwinding from a panic.
+    DropFinalizesWhileUnwinding,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);
@@ -39,6 +47,19 @@ pub fn subclass_scans() -> u64 {
 
 pub(crate) fn note_subclass_scan(entries: usize) {
     SUBCLASS_SCANS.set(SUBCLASS_SCANS.get() + entries as u64);
+}
+
+std::thread_local! {
+    static SHUT_DOWNS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Interpreters finalized on this thread so far, explicitly or by drop.
+pub fn shut_downs() -> u64 {
+    SHUT_DOWNS.get()
+}
+
+pub(crate) fn note_shut_down() {
+    SHUT_DOWNS.set(SHUT_DOWNS.get() + 1);
 }
 
 pub const UNWOUND: &str =

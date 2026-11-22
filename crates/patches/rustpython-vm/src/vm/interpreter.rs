@@ -1,6 +1,7 @@
 use super::{
     Context, PyConfig, PyGlobalState, VirtualMachine,
     runtime::{self, InterpreterWhence},
+    limit::Limiter,
     setting::Settings,
     thread,
 };
@@ -418,16 +419,55 @@ pub struct Interpreter {
 /// An interpreter dropped without [Interpreter::finalize] finalizes here, so
 /// that no caller can leave its modules behind by forgetting to: their
 /// dictionaries are what tie an interpreter's objects into cycles, and only
-/// module finalization clears them. Skipped while unwinding from a panic,
-/// which must not run Python code.
+/// module finalization clears them.
+///
+/// It runs no Python code: its atexit handlers are dropped unrun, and a
+/// limiter refuses every step, so finalizers that raise or never return are
+/// refused rather than run, and drop always returns. A panic while it finalizes is reported on
+/// stderr and stays inside drop. It does nothing after an explicit
+/// finalize() or while unwinding from a panic.
 impl Drop for Interpreter {
     fn drop(&mut self) {
-        if !self.finalized.get()
-            && !std::thread::panicking()
-            && !crate::sim::mutated(crate::sim::Mutation::DropSkipsFinalize)
-        {
-            self.shut_down(None);
+        use crate::sim::{Mutation, mutated};
+        let finalized = self.finalized.get() && !mutated(Mutation::DropFinalizesTwice);
+        let unwinding =
+            std::thread::panicking() && !mutated(Mutation::DropFinalizesWhileUnwinding);
+        if finalized || unwinding || mutated(Mutation::DropSkipsFinalize) {
+            return;
         }
+        if !mutated(Mutation::DropRunsCode) {
+            self.enter(|vm| {
+                vm.set_limiter(Some(PyRc::new(Refuse) as PyRc<dyn Limiter>));
+                let handlers = core::mem::take(&mut *vm.state.atexit_funcs.lock());
+                drop(handlers);
+            });
+        }
+        if mutated(Mutation::DropLetsPanicOut) {
+            self.shut_down(None);
+            return;
+        }
+        let shut = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.shut_down(None)));
+        if let Err(payload) = shut {
+            let message = payload
+                .downcast_ref::<&str>()
+                .map(|text| (*text).to_owned())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "a panic without a message".to_owned());
+            eprintln!("rustpython: finalizing a dropped interpreter panicked: {message}");
+        }
+    }
+}
+
+/// The limiter a dropped interpreter finalizes under: every step is refused.
+struct Refuse;
+
+impl Limiter for Refuse {
+    fn refuel(&self, vm: &VirtualMachine) -> PyResult<u64> {
+        Err(vm.new_exception_empty(vm.ctx.exceptions.system_exit.to_owned()))
+    }
+
+    fn reserve(&self, vm: &VirtualMachine, _: usize) -> PyResult<()> {
+        Err(vm.new_exception_empty(vm.ctx.exceptions.system_exit.to_owned()))
     }
 }
 
@@ -613,6 +653,7 @@ impl Interpreter {
 
     fn shut_down(&self, exc: Option<PyBaseExceptionRef>) -> u32 {
         self.finalized.set(true);
+        crate::sim::note_shut_down();
         self.enter(|vm| {
             let mut flush_status = vm.flush_std();
 

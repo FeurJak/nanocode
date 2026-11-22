@@ -10,8 +10,8 @@ use std::{
 
 use nanocode_python::rustpython_vm::{
     Context, Interpreter, PyObjectRef, PyRef, Settings, VirtualMachine,
-    builtins::PyType,
     builtins::PyWeak,
+    builtins::{PyList, PyType},
     gc_state::gc_state,
     import::{ExternalFrozen, set_external_frozen},
     sim::{self as vm_sim, Mutation as Rule, UNWOUND},
@@ -45,10 +45,14 @@ pub enum GcUnwindMutation {
     DefsPerInterpreter,
     PrunesEveryPush,
     PrunesAtPowersOfTwo,
+    DropRunsCode,
+    DropLetsPanicOut,
+    DropFinalizesTwice,
+    DropFinalizesWhileUnwinding,
 }
 
 impl GcUnwindMutation {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 11] = [
         Self::None,
         Self::KeepsLeftoverBits,
         Self::DropSkipsFinalize,
@@ -56,6 +60,10 @@ impl GcUnwindMutation {
         Self::DefsPerInterpreter,
         Self::PrunesEveryPush,
         Self::PrunesAtPowersOfTwo,
+        Self::DropRunsCode,
+        Self::DropLetsPanicOut,
+        Self::DropFinalizesTwice,
+        Self::DropFinalizesWhileUnwinding,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -73,6 +81,10 @@ impl GcUnwindMutation {
             Self::DefsPerInterpreter => "defs_per_interpreter",
             Self::PrunesEveryPush => "prunes_every_push",
             Self::PrunesAtPowersOfTwo => "prunes_at_powers_of_two",
+            Self::DropRunsCode => "drop_runs_code",
+            Self::DropLetsPanicOut => "drop_lets_panic_out",
+            Self::DropFinalizesTwice => "drop_finalizes_twice",
+            Self::DropFinalizesWhileUnwinding => "drop_finalizes_while_unwinding",
         }
     }
 
@@ -93,6 +105,10 @@ impl GcUnwindMutation {
             Self::DefsPerInterpreter => Rule::DefsPerInterpreter,
             Self::PrunesEveryPush => Rule::PrunesEveryPush,
             Self::PrunesAtPowersOfTwo => Rule::PrunesAtPowersOfTwo,
+            Self::DropRunsCode => Rule::DropRunsCode,
+            Self::DropLetsPanicOut => Rule::DropLetsPanicOut,
+            Self::DropFinalizesTwice => Rule::DropFinalizesTwice,
+            Self::DropFinalizesWhileUnwinding => Rule::DropFinalizesWhileUnwinding,
         }
     }
 }
@@ -341,6 +357,167 @@ fn subclass_cost(rng: &mut Rng) -> Result<(), String> {
     checked
 }
 
+const AT_EXIT: &str = "import atexit
+hits = []
+atexit.register(hits.append, 1)
+";
+const AT_EXIT_STUCK: &str = "import atexit
+hits = []
+def spin():
+    while True:
+        pass
+def fail():
+    raise RuntimeError('at exit')
+atexit.register(spin)
+atexit.register(fail)
+class D:
+    def __del__(self):
+        while True:
+            pass
+d = D()
+d.me = d
+del d
+";
+const HELD_THREAD: &str = "import _thread
+lock = _thread.allocate_lock()
+lock.acquire()
+_thread.start_new_thread(lock.acquire, ())
+";
+
+fn prepared(rng: &mut Rng, source: &str) -> Result<(Interpreter, PyObjectRef), String> {
+    let interpreter = interpreter(rng);
+    let hits = interpreter.enter(|vm| {
+        let scope = vm.new_scope_with_builtins();
+        vm.run_string(scope.clone(), source, "<gc_unwind drop>")
+            .map_err(|_| "the drop setup raised".to_owned())?;
+        scope
+            .globals
+            .get_item("hits", vm)
+            .map_err(|_| "hits is not defined".to_owned())
+    })?;
+    Ok((interpreter, hits))
+}
+
+fn hit_count(hits: &PyObjectRef) -> usize {
+    hits.downcast_ref::<PyList>()
+        .map_or(usize::MAX, |list| list.borrow_vec().len())
+}
+
+fn drop_checked(
+    case: &str,
+    rng: &mut Rng,
+    source: &str,
+    finish: impl FnOnce(Interpreter) -> std::thread::Result<()>,
+    shut_downs: u64,
+    hits: usize,
+) -> Result<(), String> {
+    let (interpreter, made) = prepared(rng, source)?;
+    let before = vm_sim::shut_downs();
+    finish(interpreter).map_err(|payload| {
+        format!(
+            "{case}: the panic left drop: {}",
+            panic_text(payload.as_ref())
+        )
+    })?;
+    let finalized = vm_sim::shut_downs() - before;
+    if finalized != shut_downs {
+        return Err(format!(
+            "{case}: finalized {finalized} times, not {shut_downs}"
+        ));
+    }
+    let ran = hit_count(&made);
+    if ran != hits {
+        return Err(format!("{case}: {ran} atexit handlers ran, not {hits}"));
+    }
+    Ok(())
+}
+
+fn drop_safety(rng: &mut Rng) -> Result<(), String> {
+    drop_checked(
+        "finalize() then drop",
+        rng,
+        AT_EXIT,
+        |interpreter| {
+            interpreter.finalize(None);
+            Ok(())
+        },
+        1,
+        1,
+    )?;
+    drop_checked(
+        "drop without finalize()",
+        rng,
+        AT_EXIT,
+        |interpreter| {
+            drop(interpreter);
+            Ok(())
+        },
+        1,
+        0,
+    )?;
+    drop_checked(
+        "drop with atexit handlers and a finalizer that raise or never return",
+        rng,
+        AT_EXIT_STUCK,
+        |interpreter| {
+            drop(interpreter);
+            Ok(())
+        },
+        1,
+        0,
+    )?;
+    drop_checked(
+        "drop while unwinding",
+        rng,
+        AT_EXIT,
+        |interpreter| {
+            let unwound = catch_unwind(AssertUnwindSafe(move || {
+                let _held = interpreter;
+                std::panic::panic_any(UNWOUND)
+            }));
+            if unwound.is_ok() {
+                return Err(Box::new("the panic did not unwind"));
+            }
+            Ok(())
+        },
+        0,
+        0,
+    )?;
+    drop_checked(
+        "drop whose finalize panics",
+        rng,
+        AT_EXIT,
+        |interpreter| {
+            vm_sim::unwind_next_collection();
+            catch_unwind(AssertUnwindSafe(move || drop(interpreter)))
+        },
+        1,
+        0,
+    )?;
+    held_thread(rng)
+}
+
+fn held_thread(rng: &mut Rng) -> Result<(), String> {
+    static ONCE: Once = Once::new();
+    let mut checked = Ok(());
+    ONCE.call_once(|| {
+        let interpreter = interpreter(rng);
+        let started = interpreter.enter(|vm| {
+            let scope = vm.new_scope_with_builtins();
+            vm.run_string(scope, HELD_THREAD, "<gc_unwind drop>")
+                .is_ok()
+        });
+        if started {
+            let before = vm_sim::shut_downs();
+            drop(interpreter);
+            if vm_sim::shut_downs() - before != 1 {
+                checked = Err("drop with a thread still running did not finalize once".to_owned());
+            }
+        }
+    });
+    checked
+}
+
 fn tracked() -> usize {
     let (young, old, oldest) = gc_state().get_count();
     young + old + oldest
@@ -466,7 +643,8 @@ fn run_seed(seed: u64, mutation: GcUnwindMutation) -> Outcome {
         shape.push_str("churn ");
         match catch_unwind(AssertUnwindSafe(|| {
             churn(&mut rng)?;
-            subclass_cost(&mut rng)
+            subclass_cost(&mut rng)?;
+            drop_safety(&mut rng)
         })) {
             Ok(Ok(())) => {}
             Ok(Err(message)) => wrong = Some(format!("churn: {message}")),
