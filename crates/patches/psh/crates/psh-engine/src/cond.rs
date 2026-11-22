@@ -286,15 +286,8 @@ async fn regex_match(vp: &mut Vp, text: &[u8], re: &[u8]) -> R {
     };
     let re_c = match psh_regex::Regex::new(re, opts) {
         Ok(r) => r,
-        Err(e) => {
-            let msg = format!(
-                "[[: invalid regular expression `{}': {}",
-                String::from_utf8_lossy(re),
-                e.message()
-            );
-            vp.error(&msg).await;
-            return Ok(2);
-        }
+        // bash 5.2 says nothing about it (shmatch.c: regcomp fails, status 2).
+        Err(_) => return Ok(2),
     };
     let caps = re_c.exec(text, psh_regex::ExecOptions::default());
     let elems: std::collections::BTreeMap<i64, Vec<u8>> = caps
@@ -339,6 +332,8 @@ enum Mode {
 struct Rhs {
     text: Vec<u8>,
     trace: Vec<u8>,
+    /// Each char and whether it was quoted, from which a regex's text is made.
+    marked: Vec<(u8, bool)>,
 }
 
 /// Expands the right side part by part, so that the quoted parts can be escaped for
@@ -347,6 +342,7 @@ async fn rhs_pieces(vp: &mut Vp, code: &Rc<Code>, w: &Word, mode: Mode) -> Resul
     let mut out = Rhs {
         text: Vec::new(),
         trace: Vec::new(),
+        marked: Vec::new(),
     };
     for (i, part) in w.parts.iter().enumerate() {
         let one = |p: &WordPart| Word {
@@ -374,6 +370,7 @@ async fn rhs_pieces(vp: &mut Vp, code: &Rc<Code>, w: &Word, mode: Mode) -> Resul
                 }
                 out.text.extend_from_slice(src);
                 out.trace.extend_from_slice(src);
+                out.marked.extend(src.iter().map(|&b| (b, false)));
             }
             Part::Escaped | Part::Single | Part::AnsiC | Part::Double(_) | Part::Locale(_) => {
                 let v = single(vp, code, &one(part)).await?;
@@ -387,8 +384,12 @@ async fn rhs_pieces(vp: &mut Vp, code: &Rc<Code>, w: &Word, mode: Mode) -> Resul
                 };
                 out.text.extend_from_slice(&v);
                 out.trace.extend_from_slice(&v);
+                out.marked.extend(v.iter().map(|&b| (b, false)));
             }
         }
+    }
+    if mode == Mode::Regex {
+        out.text = regex_text(&out.marked);
     }
     if out.trace.is_empty() {
         out.trace.extend_from_slice(b"''");
@@ -403,6 +404,7 @@ fn push_quoted(out: &mut Rhs, v: &[u8], mode: Mode) {
         Mode::Pattern => (b"*?[]\\@!+()|", b"!#%()*-.:=?[\\]^|"),
         Mode::Regex => (b"$()*+.?[\\^{|", b"$()*+.?[\\^{|"),
     };
+    out.marked.extend(v.iter().map(|&b| (b, true)));
     for &b in v {
         // In a pattern, any quoted punctuation is literal, also inside a bracket
         // expression (`[a\-z]`, `[\^]`).
@@ -415,6 +417,106 @@ fn push_quoted(out: &mut Rhs, v: &[u8], mode: Mode) {
         }
         out.trace.push(b);
     }
+}
+
+/// The regex text of the right side of =~, as bash 5.2's quote_string_for_globbing
+/// makes it: a quoted char that is special in an ERE gets a backslash, except inside
+/// a bracket expression, where it stands bare (a backslash there would be literal).
+/// A bracket expression without its closing bracket is read again as plain text.
+fn regex_text(s: &[(u8, bool)]) -> Vec<u8> {
+    const ERE: &[u8] = b"$()*+.?[\\^{|";
+    let unq = |j: usize, c: u8| s.get(j) == Some(&(c, false));
+    let mut out = Vec::with_capacity(s.len() * 2);
+    let mut i = 0;
+    while i < s.len() {
+        let (c, q) = s[i];
+        if q {
+            if ERE.contains(&c) {
+                out.push(b'\\');
+            }
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c != b'[' {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        let save = out.len();
+        out.push(b'[');
+        let mut j = i + 1;
+        if unq(j, b'^') {
+            out.push(b'^');
+            j += 1;
+        }
+        if unq(j, b']') {
+            out.push(b']');
+            j += 1;
+        }
+        let (mut cclass, mut equiv, mut collsym) = (false, false, false);
+        let mut closed = false;
+        // bash's do-while: the first char is in the expression even if it is ].
+        let mut first = true;
+        while let Some(&(c, q)) = s.get(j) {
+            j += 1;
+            let at_first = core::mem::take(&mut first);
+            if q {
+                out.push(c);
+                continue;
+            }
+            match c {
+                b']' if !at_first => {
+                    out.push(c);
+                    closed = true;
+                    break;
+                }
+                b'[' if unq(j, b':') => {
+                    out.extend_from_slice(b"[:");
+                    j += 1;
+                    cclass = true;
+                }
+                b':' if cclass && unq(j, b']') => {
+                    out.extend_from_slice(b":]");
+                    j += 1;
+                    cclass = false;
+                }
+                b'[' if unq(j, b'=') || unq(j, b'.') => {
+                    let k = s[j].0;
+                    out.push(b'[');
+                    out.push(k);
+                    j += 1;
+                    if unq(j, b']') {
+                        out.push(b']');
+                        j += 1;
+                    }
+                    if k == b'=' {
+                        equiv = true;
+                    } else {
+                        collsym = true;
+                    }
+                }
+                b'=' if equiv && unq(j, b']') => {
+                    out.extend_from_slice(b"=]");
+                    j += 1;
+                    equiv = false;
+                }
+                b'.' if collsym && unq(j, b']') => {
+                    out.extend_from_slice(b".]");
+                    j += 1;
+                    collsym = false;
+                }
+                _ => out.push(c),
+            }
+        }
+        if closed {
+            i = j;
+        } else {
+            out.truncate(save + 1);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// An operand as the trace line shows it: as is, an empty one as `''`.

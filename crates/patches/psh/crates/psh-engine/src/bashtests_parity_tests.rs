@@ -354,3 +354,15 @@ a|cat
 "#;
     assert_eq!(out(script), "Error: bar\n<|cat>\n");
 }
+
+#[test]
+fn quoted_chars_in_a_regex_bracket_expression_stand_bare() {
+    let script = r#"[[ '\' =~ ["."] ]] && echo bad1
+[[ . =~ ["."] ]] && echo ok1
+[[ '\' =~ [\.] ]] && echo bad2
+[[ '\' =~ [^]"."] ]] && echo ok2
+[[ ']' =~ [']'] ]] && echo ok3
+[[ x =~ [\. ]]; echo "rc=$?"
+"#;
+    assert_eq!(out(script), "ok1\nok2\nok3\nrc=2\n");
+}
