@@ -6,6 +6,7 @@ use std::{
     task::Poll,
 };
 
+use nanocode_bytes::Bytes;
 use nanocode_digest::Sha256;
 use nanocode_shell::{
     Commands, Config as ShellConfig, Credentials, Fetch, FileDownload, FileSystem, FileUpload,
@@ -23,6 +24,7 @@ pub type Reply<T> = oneshot::Sender<Result<T, String>>;
 
 pub enum Job {
     Read(Vec<u8>, Reply<Option<Vec<u8>>>),
+    List(Vec<u8>, Reply<Option<Vec<(Vec<u8>, Kind)>>>),
     Write(Vec<u8>, Vec<u8>, Reply<()>),
     Remove(Vec<u8>, Reply<()>),
     Run(Command, Reply<Finished>),
@@ -106,6 +108,9 @@ struct Kept {
     identity: Identity,
     limits: Limits,
     env: Vec<(Vec<u8>, Vec<u8>)>,
+    without: Vec<Vec<u8>>,
+    strict: bool,
+    git: bool,
     slice: u32,
 }
 
@@ -120,6 +125,9 @@ impl Kept {
             identity: config.identity,
             limits: config.limits,
             env: config.env,
+            without: config.without,
+            strict: config.strict,
+            git: config.git,
             slice: config.slice,
         }
     }
@@ -128,6 +136,8 @@ impl Kept {
         Found {
             network: self.fetch.is_some(),
             commands: self.commands.names(),
+            without: self.without.clone(),
+            git: self.git,
         }
     }
 }
@@ -158,6 +168,9 @@ impl Kept {
             Job::Read(path, reply) => {
                 let _ = reply.send(self.read(&path).await);
             }
+            Job::List(path, reply) => {
+                let _ = reply.send(self.list(&path).await);
+            }
             Job::Write(path, data, reply) => {
                 let _ = reply.send(self.write(&path, &data).await);
             }
@@ -169,6 +182,7 @@ impl Kept {
                     script: command.script.clone(),
                     cwd: command.cwd.clone(),
                     env: command.env.clone(),
+                    stdin: command.stdin.clone(),
                     timeout: command.timeout,
                 });
                 let mut finished = self.run(command, &mut reply).await;
@@ -279,6 +293,25 @@ impl Kept {
         .map_err(|error| said(path, &error))
     }
 
+    async fn list(&self, path: &[u8]) -> Result<Option<Vec<(Vec<u8>, Kind)>>, String> {
+        let names = match self.files.list(path).get().await {
+            Ok(names) => names,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(said(path, &error)),
+        };
+        let mut entries = Vec::with_capacity(names.len());
+        for name in names {
+            let mut entry = path.to_vec();
+            if !entry.ends_with(b"/") {
+                entry.push(b'/');
+            }
+            entry.extend_from_slice(&name);
+            let found = self.files.stat(&entry, false).get().await;
+            entries.push((name, found.map_err(|error| said(&entry, &error))?.kind));
+        }
+        Ok(Some(entries))
+    }
+
     async fn write(&self, path: &[u8], data: &[u8]) -> Result<(), String> {
         self.parents(path).await?;
         let written = self.files.write(path, data, Write::Replace).get().await;
@@ -324,7 +357,7 @@ impl Kept {
     async fn run(&self, command: Command, reply: &mut Reply<Finished>) -> Result<Finished, String> {
         let mut env = self.env.clone();
         env.extend(command.env);
-        let mut shell = Shell::new(ShellConfig {
+        let config = ShellConfig {
             fs: self.files.clone(),
             commands: self.commands.clone(),
             machine: self.machine.clone(),
@@ -332,9 +365,13 @@ impl Kept {
             limits: self.limits,
             env,
             cwd: command.cwd,
-            without: Vec::new(),
-            strict: false,
-        });
+            without: self.without.clone(),
+            strict: self.strict,
+        };
+        let mut shell = match self.git {
+            true => Shell::new(config),
+            false => Shell::without_git(config, None),
+        };
         if let Some(fetch) = &self.fetch {
             shell.set_fetch(fetch.clone());
         }
@@ -346,7 +383,7 @@ impl Kept {
             name: b"bash".to_vec(),
             args: Vec::new(),
             options: Vec::new(),
-            stdin: None,
+            stdin: command.stdin.map(Bytes::from),
         });
         let mut timer = command.timeout.map(|timeout| self.machine.sleep(timeout));
         let mut timed_out = false;

@@ -104,6 +104,9 @@ pub async fn tools(backing: &Backing, root: PathBuf) -> Result<Tools> {
             (b"USER".to_vec(), user.into_bytes()),
             (b"PATH".to_vec(), PATH.as_bytes().to_vec()),
         ],
+        without: Vec::new(),
+        strict: false,
+        git: true,
         slice: SLICE,
     })?;
     let tools = nanocode_backend_codex::builtin_tools::host_tools(

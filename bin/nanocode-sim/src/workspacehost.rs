@@ -207,6 +207,9 @@ fn start(seed: u64) -> Workspace {
             depth: DEPTH,
         },
         env: Vec::new(),
+        without: Vec::new(),
+        strict: false,
+        git: true,
         slice: SLICE,
     })
     .expect("the workspace's worker starts")
@@ -231,6 +234,7 @@ fn simulate(seed: u64, mutation: WorkspaceHostMutation) -> WorkspaceHostOutcome 
                 script: format!("g(){{ (( $1 <= 0 )) && return; g $(( $1 - 1 )); }}; g {deep}; echo deep"),
                 cwd: ROOT.as_bytes().to_vec(),
                 env: Vec::new(),
+                stdin: None,
                 timeout: None,
             })
             .await?;

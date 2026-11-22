@@ -12,7 +12,7 @@ use nanocode_sync::{oneshot, unbounded};
 
 pub use cells::WorkspaceHost;
 pub use machine::Platform;
-pub use nanocode_shell::{Changes, Ended, Limit, Ran};
+pub use nanocode_shell::{Changes, Ended, Kind, Limit, Ran};
 pub use stream::Uploading;
 
 use worker::Job;
@@ -29,6 +29,9 @@ pub struct Config {
     pub limits: Limits,
     pub commands: Make<dyn Commands>,
     pub env: Vec<(Vec<u8>, Vec<u8>)>,
+    pub without: Vec<Vec<u8>>,
+    pub strict: bool,
+    pub git: bool,
     pub slice: u32,
 }
 
@@ -36,6 +39,7 @@ pub struct Command {
     pub script: String,
     pub cwd: Vec<u8>,
     pub env: Vec<(Vec<u8>, Vec<u8>)>,
+    pub stdin: Option<Vec<u8>>,
     pub timeout: Option<Duration>,
 }
 
@@ -55,6 +59,8 @@ pub struct Workspace {
 pub(crate) struct Found {
     pub(crate) network: bool,
     pub(crate) commands: Vec<Vec<u8>>,
+    pub(crate) without: Vec<Vec<u8>>,
+    pub(crate) git: bool,
 }
 
 impl Workspace {
@@ -71,6 +77,10 @@ impl Workspace {
     #[must_use]
     pub fn has(&self, command: &str) -> bool {
         let name = command.as_bytes();
+        let off = self.found.without.iter().any(|off| off == name);
+        if off || (!self.found.git && name == b"git") {
+            return false;
+        }
         nanocode_shell::has(name, self.found.network)
             || self.found.commands.iter().any(|known| known == name)
     }
@@ -88,6 +98,10 @@ impl Workspace {
 
     pub async fn read(&self, path: &[u8]) -> Result<Option<Vec<u8>>, String> {
         self.ask(|reply| Job::Read(path.to_vec(), reply)).await
+    }
+
+    pub async fn list(&self, path: &[u8]) -> Result<Option<Vec<(Vec<u8>, Kind)>>, String> {
+        self.ask(|reply| Job::List(path.to_vec(), reply)).await
     }
 
     pub async fn write(&self, path: &[u8], data: &[u8]) -> Result<(), String> {

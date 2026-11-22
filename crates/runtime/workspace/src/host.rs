@@ -128,6 +128,7 @@ impl ForegroundExecutor for Workspace {
                     script: command.command.to_owned(),
                     cwd: absolute(command.workspace)?,
                     env,
+                    stdin: None,
                     timeout: Some(command.timeout),
                 })
                 .await?;
@@ -173,6 +174,7 @@ impl ShellExecutor for Workspace {
                 script: command.script,
                 cwd,
                 env: Vec::new(),
+                stdin: None,
                 timeout: None,
             });
             let finished = match run.await {

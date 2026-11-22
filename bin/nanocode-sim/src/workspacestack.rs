@@ -381,6 +381,9 @@ fn open(seed: u64, store: &Arc<Crashing>, hand: &Arc<Hand>) -> Result<Stack, Str
             depth: DEPTH,
         },
         env: Vec::new(),
+        without: Vec::new(),
+        strict: false,
+        git: true,
         slice: SLICE,
     })
     .map_err(|error| format!("the workspace's worker starts: {error}"))?;
