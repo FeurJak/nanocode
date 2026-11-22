@@ -3291,7 +3291,20 @@ fn is_pattern(pat: &[u8], extglob: bool) -> bool {
             b'\\' => i += 2,
             b'*' | b'?' => return true,
             b'+' | b'@' | b'!' if extglob && pat.get(i + 1) == Some(&b'(') => return true,
-            b'[' if pat[i + 1..].contains(&b']') => return true,
+            b'[' if closes_before_slash(&pat[i + 1..]) => return true,
+            _ => i += 1,
+        }
+    }
+    false
+}
+
+fn closes_before_slash(rest: &[u8]) -> bool {
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            b'\\' => i += 2,
+            b']' => return true,
+            b'/' => return false,
             _ => i += 1,
         }
     }
@@ -3318,7 +3331,7 @@ fn ignore_specs(v: &[u8]) -> Vec<&[u8]> {
     out
 }
 
-fn bracket_end(v: &[u8], mut i: usize) -> Option<usize> {
+pub(crate) fn bracket_end(v: &[u8], mut i: usize) -> Option<usize> {
     if matches!(v.get(i), Some(b'!' | b'^')) {
         i += 1;
     }

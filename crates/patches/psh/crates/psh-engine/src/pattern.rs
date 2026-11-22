@@ -498,17 +498,33 @@ pub(crate) fn escape(text: &[u8], out: &mut Vec<u8>) {
         }
         special
     };
+    let in_bracket = in_open_bracket(out);
     // The text between two pattern chars is copied in one piece.
     out.reserve(text.len());
     let mut copied = 0;
     for (i, &b) in text.iter().enumerate() {
-        if SPECIAL[b as usize] {
+        if SPECIAL[b as usize] || (in_bracket && b == b'/') {
             out.extend_from_slice(&text[copied..i]);
             out.push(b'\\');
             copied = i;
         }
     }
     out.extend_from_slice(&text[copied..]);
+}
+
+fn in_open_bracket(pat: &[u8]) -> bool {
+    let mut i = 0;
+    while i < pat.len() {
+        match pat[i] {
+            b'\\' => i += 2,
+            b'[' => match crate::expand::bracket_end(pat, i + 1) {
+                Some(end) => i = end,
+                None => return true,
+            },
+            _ => i += 1,
+        }
+    }
+    false
 }
 
 /// `has_glob_chars`, also counting extglob groups (`@(…)`) when extglob is on.

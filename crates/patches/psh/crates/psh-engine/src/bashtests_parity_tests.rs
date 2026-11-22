@@ -425,3 +425,14 @@ fn getopts_state_is_saved_with_a_function_local_optind() {
         "opt: x\nopt: y\nopt: a\nopt: b\nopt: c\nopt: z\n"
     );
 }
+
+#[test]
+fn a_slash_inside_a_bracket_expression_leaves_the_word_literal_under_nullglob() {
+    let script = "shopt -s nullglob\n\
+        echo 1: [qwe/qwe]\necho 2: [qwe/\necho 3: [qwe/]\n\
+        echo 4: [qwe\\/qwe]\necho 5: [qwe\\/\necho 6: [qwe\\/]\n";
+    assert_eq!(
+        out(script),
+        "1: [qwe/qwe]\n2: [qwe/\n3: [qwe/]\n4:\n5: [qwe/\n6:\n"
+    );
+}
