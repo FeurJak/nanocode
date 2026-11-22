@@ -2197,9 +2197,13 @@ async fn param(
             {
                 // Through a chain of namerefs: the last name.
                 let first = v.get().map(<[u8]>::to_vec);
-                val = match vp.resolve_checked(code.ast.text(p.name_span)) {
-                    Ok(n) if first.is_some() => Val::Str(n.as_bytes().to_vec()),
-                    _ => first.map_or(Val::Unset, Val::Str),
+                val = if matches!(p.index, Some(Subscript::Expr(_))) {
+                    Val::Unset
+                } else {
+                    match vp.resolve_checked(code.ast.text(p.name_span)) {
+                        Ok(n) if first.is_some() => Val::Str(n.as_bytes().to_vec()),
+                        _ => first.map_or(Val::Unset, Val::Str),
+                    }
                 };
             } else if matches!(val, Val::Unset)
                 && p.name == ParamName::Var

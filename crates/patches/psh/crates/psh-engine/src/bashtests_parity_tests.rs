@@ -388,3 +388,11 @@ fn declare_g_converting_an_array_in_a_function_fails_twice() {
          environment: line 2: declare: u: cannot convert indexed to associative array\n"
     );
 }
+
+#[test]
+fn indirect_expansion_of_a_nameref_with_a_subscript_is_empty() {
+    assert_eq!(
+        out("unset foo bar\nbar=one\nfoo=bar\ntypeset -n foo\necho ${foo}\necho ${!foo}\necho ${!foo[0]}\n"),
+        "one\nbar\n\n"
+    );
+}
