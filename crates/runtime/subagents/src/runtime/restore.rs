@@ -369,11 +369,12 @@ pub(super) fn restore_inner<'a>(
         let registry = reg.shared();
         let root = root_session_id.to_owned();
         let records_sessions = store.records_sessions();
-        let (report, restored_sessions, written) = reg
+        let (report, restored_sessions, waited, written) = reg
             .state
             .call(move |state| -> std::io::Result<_> {
                 let root_session_id = root.as_str();
                 let mut report = RestoreReport::default();
+                let mut waited = Vec::new();
                 let mut checkpoints = Vec::new();
                 if state
                     .scopes
@@ -424,6 +425,7 @@ pub(super) fn restore_inner<'a>(
                         (None, None) => {}
                     }
                     restored_sessions.push(session.descriptor.session_id.clone());
+                    waited.extend(remembered(id, &session));
                     if matches!(session.stored_runtime, StoredRuntime::Unstarted(_)) {
                         report.unstarted.push(id);
                     }
@@ -470,7 +472,7 @@ pub(super) fn restore_inner<'a>(
                         });
                     }
                 }
-                Ok((report, restored_sessions, written))
+                Ok((report, restored_sessions, waited, written))
             })
             .await?;
         if let Some(written) = written {
@@ -484,6 +486,10 @@ pub(super) fn restore_inner<'a>(
                 roots.insert(session_id.clone(), root_session_id.to_owned());
             }
         });
+        if !waited.is_empty() {
+            reg.wait_reported
+                .update(|reported| reported.extend(waited.iter().cloned()));
+        }
 
         if !report.interrupted.is_empty() || !report.completed.is_empty() {
             reg.save_scope(root_session_id).await.map_err(|error| {
@@ -663,4 +669,15 @@ pub(super) fn await_restored<'a>(
         }
         Ok(())
     })
+}
+
+fn remembered(id: AgentId, session: &ChildSession) -> Vec<((String, AgentId), u64)> {
+    if !crate::sim::mutated(crate::sim::Mutation::RestoreRemembersWaits) {
+        return Vec::new();
+    }
+    session
+        .waited
+        .iter()
+        .map(|waited| ((waited.session.clone(), id), waited.mark))
+        .collect()
 }

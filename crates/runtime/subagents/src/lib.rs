@@ -23,6 +23,7 @@ pub use pool::{Ended, PoolClock, SubagentPool};
 mod roster;
 mod routing;
 mod runtime;
+pub mod sim;
 pub use authority::{AuthorityError, RootAgentAuthority};
 pub use policy::{SpawnPolicy, SpawnPolicyError, SpawnProvider};
 pub use roster::{SubagentNode, SubagentRoster};

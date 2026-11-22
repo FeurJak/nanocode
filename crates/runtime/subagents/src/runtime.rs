@@ -3100,6 +3100,14 @@ fn board_status(board: &crate::board::BoardAgents, id: AgentId, status: &mut Age
     }
 }
 
+fn distinct(ids: &[AgentId]) -> Vec<AgentId> {
+    if crate::sim::mutated(crate::sim::Mutation::WaitRepeatsIds) {
+        return ids.to_vec();
+    }
+    let mut seen = HashSet::with_capacity(ids.len());
+    ids.iter().copied().filter(|id| seen.insert(*id)).collect()
+}
+
 fn wait_mark(status: &AgentStatus, revision: u64) -> u64 {
     use std::hash::{Hash as _, Hasher as _};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -7452,7 +7460,7 @@ impl Registry {
         ids: &[AgentId],
         duration: Duration,
     ) -> std::io::Result<AgentWait> {
-        self.wait_inner(session_id, call_id, ids, duration)
+        self.wait_inner(session_id, call_id, &distinct(ids), duration)
             .instrument(nanocode_trace::info_span!(
                 "subagent.wait",
                 session.id = session_id,
@@ -7696,6 +7704,7 @@ impl Registry {
         call_id: &str,
         ids: &[AgentId],
     ) -> std::io::Result<Option<AgentWait>> {
+        let ids = &distinct(ids);
         self.await_restored(session_id).await?;
         let _warm = self.warm(&self.root_of(session_id), ids.to_vec()).await?;
         let session = session_id.to_owned();
