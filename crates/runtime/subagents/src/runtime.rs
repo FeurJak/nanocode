@@ -4351,14 +4351,6 @@ impl Registry {
                 checkpoints.remove(&key(id));
             }
         });
-        self.wait_reported.update(|reported| {
-            for (id, waiters) in cooled {
-                reported.remove(&key(id));
-                for waiter in waiters {
-                    reported.remove(&(waiter.clone(), *id));
-                }
-            }
-        });
     }
 
     pub(super) async fn warm(
