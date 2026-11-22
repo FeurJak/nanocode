@@ -159,6 +159,10 @@ pub fn tag(text: &str) -> u128 {
 
 const RETIRED_ROW: usize = 97;
 
+fn text(row: &[u8], from: usize, to: usize) -> Result<&str, StoreError> {
+    std::str::from_utf8(&row[from..to]).map_err(invalid)
+}
+
 #[derive(serde::Deserialize, serde::Serialize)]
 struct RetiredIndex {
     hands: BTreeMap<String, Box<str>>,
@@ -1190,9 +1194,7 @@ impl Fold {
         if !index.rows.is_ascii() || rows.len() % RETIRED_ROW != 0 {
             return Err(invalid("retired index rows are malformed"));
         }
-        let text = |row: &[u8], from: usize, to: usize| {
-            std::str::from_utf8(&row[from..to]).map_err(invalid)
-        };
+
         let mut entries = Vec::with_capacity(rows.len() / RETIRED_ROW);
         for row in rows.chunks_exact(RETIRED_ROW) {
             let id = u128::from_str_radix(text(row, 0, 32)?, 16).map_err(invalid)?;
