@@ -287,7 +287,7 @@ pub(super) fn dispatch_parent<'a>(
             }
             Err(error) => {
                 reg.release_route(root_session_id, id, revision);
-                if matches!(error, NanocodeError::InvalidRequest(_)) {
+                if refused_input(&error) {
                     reg.next_completion_attempt(root_session_id, id, revision)
                         .await;
                 }
@@ -411,6 +411,28 @@ pub(super) fn dispatch_parent_batch<'a>(
     })
 }
 
+/// A completion request the parent can never admit under its current ID: an invalid request, or
+/// a durable operation that already holds a different input. The second happens when the parent
+/// ran this completion under an earlier status and the journal write acknowledging it was lost:
+/// the retry carries the new status, so the same ID conflicts on every attempt. Both move the
+/// completion to its next attempt's ID instead of retrying the refused one forever.
+fn refused_input(error: &NanocodeError) -> bool {
+    match error {
+        NanocodeError::InvalidRequest(_) => true,
+        NanocodeError::ExecutionPolicy { source, .. } => {
+            source
+                .downcast_ref::<NanocodeError>()
+                .is_some_and(refused_input)
+                || matches!(
+                    source.downcast_ref::<nanocode_durability_core::Error>(),
+                    Some(nanocode_durability_core::Error::OperationConflict { .. })
+                )
+        }
+        NanocodeError::Shutdown(source) => refused_input(source),
+        _ => false,
+    }
+}
+
 #[inline(never)]
 pub(super) fn route_completions<'a>(
     reg: &'a Arc<Registry>,
@@ -499,7 +521,7 @@ pub(super) fn route_completions<'a>(
                     NanocodeError::AgentStopped | NanocodeError::TurnStopped
                 ) {
                     for (id, revision, _, _, _) in group {
-                        if matches!(error, NanocodeError::InvalidRequest(_)) {
+                        if refused_input(&error) {
                             reg.next_completion_attempt(root_session_id, id, revision)
                                 .await;
                         }
