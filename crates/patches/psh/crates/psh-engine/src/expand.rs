@@ -1945,6 +1945,19 @@ async fn param(
         }
     };
     let is_list = matches!(p.index, Some(Subscript::At | Subscript::Star));
+    // `${!BASH_CMDS[@]}`: the keys of a table the shell keeps elsewhere are those it
+    // holds now.
+    if p.prefix == ParamPrefix::Indirect && is_list && p.name == ParamName::Var {
+        let name = vp.resolve(code.ast.text(p.name_span)).into_owned();
+        if vp.vars.get(&name).is_some_and(|v| {
+            matches!(
+                v.dynamic,
+                Some(crate::vars::Dynamic::BashCmds | crate::vars::Dynamic::BashAliases)
+            )
+        }) {
+            vp.refresh_dynamic(&name);
+        }
+    }
     // `${!a[@]}`: the keys of an array.
     if p.prefix == ParamPrefix::Indirect
         && is_list

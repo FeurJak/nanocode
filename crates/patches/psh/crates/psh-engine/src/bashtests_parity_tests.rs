@@ -238,3 +238,10 @@ typeset -A a; b="80's"; ((++a["$b"])); [[ $((++a["$b"])) ]]; echo ${a[$b]}
     assert_eq!(String::from_utf8_lossy(&e), "");
 }
 
+#[test]
+fn keys_of_bash_cmds_and_bash_aliases_are_the_current_tables() {
+    assert_eq!(
+        out("hash -p /usr/sbin/foo foo; alias q=r; echo ${!BASH_CMDS[@]} ${!BASH_ALIASES[@]}\n"),
+        "foo q\n"
+    );
+}
