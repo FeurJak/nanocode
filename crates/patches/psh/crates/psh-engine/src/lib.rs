@@ -1294,7 +1294,16 @@ pub(crate) fn parse_error_line(
             .lines()
             .last()
             .is_some_and(|l| l.starts_with("syntax error: unexpected end of file"));
-    lines.line(e.span.start) + u32::from(unterminated_line)
+    // Text that ends with a backslash: bash counts the newline it adds after it
+    // once more.
+    lines.line(e.span.start)
+        + u32::from(unterminated_line)
+        + u32::from(unterminated_line && ends_with_backslash(source))
+}
+
+/// Whether text ends with a backslash that escapes nothing (an odd run of them).
+pub(crate) fn ends_with_backslash(text: &[u8]) -> bool {
+    text.iter().rev().take_while(|&&b| b == b'\\').count() % 2 == 1
 }
 
 fn source_line(source: &[u8], line: u32) -> &[u8] {

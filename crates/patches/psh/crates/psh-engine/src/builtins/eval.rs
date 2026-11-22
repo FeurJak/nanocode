@@ -129,7 +129,11 @@ pub(super) async fn eval(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     // Ends with a newline, as bash's eval text does: an unexpected end of file is
     // reported on the line after the last.
     let mut text = rest.join(&b' ');
-    text.push(b'\n');
+    // A backslash that ends the text stays a backslash (`eval 'echo x\'`): bash's
+    // newline after it does not make a line continuation.
+    if !crate::ends_with_backslash(&text) {
+        text.push(b'\n');
+    }
     let line_base = vp.line.saturating_sub(1);
     // `set -x` shows one more `+` inside eval (D1285).
     vp.xtrace_level += 1;

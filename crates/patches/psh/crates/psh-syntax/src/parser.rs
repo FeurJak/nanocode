@@ -459,7 +459,6 @@ enum Term {
 #[derive(Clone, Copy)]
 struct Opener {
     what: &'static str,
-    pos: usize,
     /// "unexpected EOF while looking for matching" rather than "unexpected end of file
     /// from … command".
     matching: bool,
@@ -772,10 +771,6 @@ impl<'a> P<'a> {
         String::from_utf8_lossy(&self.b[start..end]).into_owned()
     }
 
-    fn line_of(&self, pos: usize) -> usize {
-        self.b[..pos].iter().filter(|&&c| c == b'\n').count() + 1
-    }
-
     fn eof_from(&self, opener: Opener) -> ParseError {
         if opener.matching {
             ParseError {
@@ -783,11 +778,8 @@ impl<'a> P<'a> {
                 ..self.unterminated(opener.what)
             }
         } else {
-            self.eof_error(format!(
-                "syntax error: unexpected end of file from `{}' command on line {}",
-                opener.what,
-                self.line_of(opener.pos)
-            ))
+            // bash 5.2's text (5.3 adds "from `if' command on line N").
+            self.eof_error(String::from("syntax error: unexpected end of file"))
         }
     }
 
@@ -1058,9 +1050,11 @@ impl<'a> P<'a> {
                 self.pos = self.end;
             }
             if !terminated {
+                // bash names the line it was on when it began reading the body: the
+                // one whose newline came just before it, not the line of the `<<`.
                 self.warnings.push(Warning::HereDocEof {
                     at: at as u32,
-                    start: p.start as u32,
+                    start: body_start.saturating_sub(1).max(p.start) as u32,
                     delimiter: p.delim.clone(),
                     from: None,
                 });
@@ -1665,7 +1659,6 @@ impl<'a> P<'a> {
                         Term::Words(&["}"]),
                         Opener {
                             what: "{",
-                            pos: start,
                             matching: false,
                         },
                         false,
@@ -1678,7 +1671,6 @@ impl<'a> P<'a> {
                     self.pos += w.len();
                     let opener = Opener {
                         what: w,
-                        pos: start,
                         matching: false,
                     };
                     let cond = self.parse_compound_list(Term::Words(&["do"]), opener, false)?;
@@ -1689,8 +1681,8 @@ impl<'a> P<'a> {
                         body,
                     })
                 }
-                Some(w @ ("for" | "select")) => self.parse_for(start, w)?,
-                Some("case") => self.parse_case(start)?,
+                Some(w @ ("for" | "select")) => self.parse_for(w)?,
+                Some("case") => self.parse_case()?,
                 Some("[[") => self.parse_cond_command()?,
                 Some("function") => return self.parse_function_keyword(start),
                 Some("coproc") => return self.parse_coproc(start),
@@ -1723,13 +1715,11 @@ impl<'a> P<'a> {
     }
 
     fn parse_subshell(&mut self) -> R<CommandKind> {
-        let start = self.pos;
         self.pos += 1;
         let body = self.parse_compound_list(
             Term::Paren,
             Opener {
                 what: "(",
-                pos: start,
                 matching: false,
             },
             false,
@@ -1823,7 +1813,6 @@ impl<'a> P<'a> {
     fn parse_if(&mut self, start: usize) -> R<CommandKind> {
         let opener = Opener {
             what: "if",
-            pos: start,
             matching: false,
         };
         self.pos += 2;
@@ -1880,13 +1869,11 @@ impl<'a> P<'a> {
     fn parse_loop_body(&mut self, opener: Opener) -> R<ListId> {
         self.skip_blanks();
         if self.at_reserved("{") {
-            let start = self.pos;
             self.pos += 1;
             let body = self.parse_compound_list(
                 Term::Words(&["}"]),
                 Opener {
                     what: "{",
-                    pos: start,
                     matching: false,
                 },
                 false,
@@ -1897,10 +1884,9 @@ impl<'a> P<'a> {
         self.parse_do_group(opener)
     }
 
-    fn parse_for(&mut self, start: usize, kw: &'static str) -> R<CommandKind> {
+    fn parse_for(&mut self, kw: &'static str) -> R<CommandKind> {
         let opener = Opener {
             what: kw,
-            pos: start,
             matching: false,
         };
         self.pos += kw.len();
@@ -2013,10 +1999,9 @@ impl<'a> P<'a> {
         Ok(true)
     }
 
-    fn parse_case(&mut self, start: usize) -> R<CommandKind> {
+    fn parse_case(&mut self) -> R<CommandKind> {
         let opener = Opener {
             what: "case",
-            pos: start,
             matching: false,
         };
         self.pos += 4;
@@ -2580,9 +2565,8 @@ impl<'a> P<'a> {
         self.skip_linebreaks()?;
         if !self.at_reserved("]]") {
             if self.at_eof() {
-                return Err(self.eof_error(format!(
-                    "unexpected EOF while looking for `]]'\nsyntax error: unexpected end of file from `[[' command on line {}",
-                    self.line_of(open)
+                return Err(self.eof_error(String::from(
+                    "unexpected EOF while looking for `]]'\nsyntax error: unexpected end of file",
                 )));
             }
             let (s, e, text) = self.cond_token();
@@ -2661,12 +2645,11 @@ impl<'a> P<'a> {
     }
 
     /// A primary was expected at the cursor.
-    fn cond_primary_error(&self, open: usize) -> ParseError {
+    fn cond_primary_error(&self) -> ParseError {
         let (s, e, text) = self.cond_token();
         if self.at_eof() {
-            return self.eof_error(format!(
-                "unexpected token `EOF' in conditional command\nsyntax error: unexpected end of file from `[[' command on line {}",
-                self.line_of(open)
+            return self.eof_error(String::from(
+                "unexpected token `EOF' in conditional command\nsyntax error: unexpected end of file",
             ));
         }
         let message = if text == "]]" {
@@ -2795,10 +2778,10 @@ impl<'a> P<'a> {
         }
         let plain = Ctx::Pattern { ext: false };
         if !self.at_cond_word() {
-            return Err(self.cond_primary_error(open));
+            return Err(self.cond_primary_error());
         }
         let Some(first) = self.read_word(plain, false)? else {
-            return Err(self.cond_primary_error(open));
+            return Err(self.cond_primary_error());
         };
         let first_text = &*self.lossy(first.span.start as usize, first.span.end as usize);
         let first_plain = first.parts.len() == 1 && matches!(first.parts[0].kind, Part::Lit);
@@ -3259,7 +3242,6 @@ impl<'a> P<'a> {
             Term::Paren,
             Opener {
                 what,
-                pos: start,
                 matching: true,
             },
             true,
@@ -3369,7 +3351,6 @@ impl<'a> P<'a> {
             Term::End,
             Opener {
                 what: ")",
-                pos: start,
                 matching: true,
             },
             true,
@@ -3599,7 +3580,6 @@ impl<'a> P<'a> {
                 Term::FunSubClose,
                 Opener {
                     what: "}",
-                    pos: start,
                     matching: true,
                 },
                 true,

@@ -297,3 +297,14 @@ fn a_syntax_error_inside_a_command_substitution_reads_as_bash_5_2() {
     );
     assert_eq!(st, 127);
 }
+
+#[test]
+fn end_of_input_diagnostics_read_as_bash_5_2() {
+    let (_, o, e) = run("eval 'echo x\\'\neval 'X() { (a)>\\'\nif true; then\n");
+    assert_eq!(String::from_utf8_lossy(&o), "x\\\n");
+    assert_eq!(
+        String::from_utf8_lossy(&e),
+        "psh: eval: line 4: syntax error: unexpected end of file\n\
+         psh: -c: line 4: syntax error: unexpected end of file\n"
+    );
+}
