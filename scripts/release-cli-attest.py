@@ -65,6 +65,11 @@ if action == 'begin':
            'binary_cache_restore': False, 'bolt': os.environ.get('NANOCODE_BOLT') == '1',
            'command': 'scripts/release-cli.sh lane ' + lane,
            'scope': 'unsigned local build receipt; not independently verified provenance'}
+    if os.environ.get('GITHUB_ACTIONS') == 'true':
+        att['github_actions'] = {name.lower(): os.environ[name] for name in (
+            'GITHUB_REPOSITORY', 'GITHUB_SHA', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT',
+            'GITHUB_WORKFLOW_REF', 'GITHUB_WORKFLOW_SHA', 'RUNNER_OS', 'RUNNER_ARCH')}
+        require(att['github_actions']['github_sha'] == att['core_sha'], 'CI revision differs from build source')
     with path.open('x') as stream:
         json.dump(att, stream, indent=2)
 else:

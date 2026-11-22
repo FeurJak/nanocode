@@ -105,6 +105,9 @@ lane() {
       docker build -q --platform "linux/$host" -t "$image" -f scripts/cli-builder.Dockerfile scripts >&2
       docker run --rm --platform "linux/$host" -v "$root:/src" -v "nanocode-cargo-$host:/usr/local/cargo/registry" -w /src \
         -e CARGO_TARGET_DIR="/src/target/linux-$arch" -e RUSTC_WRAPPER= -e RUSTC_WORKSPACE_WRAPPER= -e CARGO_INCREMENTAL=0 \
+        -e GITHUB_ACTIONS -e GITHUB_REPOSITORY -e GITHUB_SHA -e GITHUB_RUN_ID -e GITHUB_RUN_ATTEMPT \
+        -e GITHUB_WORKFLOW_REF -e GITHUB_WORKFLOW_SHA -e RUNNER_OS -e RUNNER_ARCH \
+        -e NANOCODE_ARTIFACT_ONLY -e NANOCODE_BUILDCACHE_URL \
         -e NANOCODE_BOLT="${NANOCODE_BOLT:-}" -e NANOCODE_NO_CACHE="${NANOCODE_NO_CACHE:-}" -e NANOCODE_RELEASE="$url" \
         "$image" scripts/release-cli.sh inside "$name" >&2
       if [ "$out" != "$root/target/release-cli" ]; then
@@ -228,7 +231,11 @@ pack() {
   for pid in $pids; do wait "$pid" || status=1; done
   return $status
 }
+require_publication() {
+  [ "${NANOCODE_ARTIFACT_ONLY:-}" != 1 ] || { echo "release-cli.sh: publication is disabled in artifact-only mode" >&2; exit 1; }
+}
 upload() {
+  require_publication
   [ $# -gt 0 ] || set -- $all
   for name in "$@"; do
     gh release upload nanocode-cli --repo "$repo" --clobber "$out/dist/$name"/*
@@ -237,6 +244,7 @@ upload() {
   done
 }
 publish() {
+  require_publication
   staged="$out/publish"
   rm -rf "$staged"
   mkdir -p "$staged"
@@ -274,6 +282,7 @@ publish() {
 }
 command="${1:-all}"
 [ $# -gt 0 ] && shift
+case $command in upload | publish | ship | --publish) require_publication ;; esac
 case $command in
   lane) lane "$1" ;;
   inside) inside "$1" ;;

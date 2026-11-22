@@ -1,0 +1,141 @@
+name: CLI artifacts
+run-name: CLI artifacts ${{ inputs.source_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Confirmed master commit to build (full SHA)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cli-artifacts-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.lane }}
+    if: github.ref == 'refs/heads/master'
+    permissions:
+      contents: read
+      id-token: write # Secure runner policy identity
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: darwin-aarch64
+            runner: macos-15
+            target: aarch64-apple-darwin
+          - lane: darwin-x86_64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - lane: linux-arm64
+            runner: ubuntu-24.04
+            target: aarch64-unknown-linux-gnu
+          - lane: linux-amd64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - lane: windows-x86_64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            msvc: amd64
+          - lane: windows-aarch64
+            runner: windows-2025
+            target: aarch64-pc-windows-msvc
+            msvc: arm64
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      SHIPPY_REMOTE_BUILD: '0'
+      NANOCODE_ARTIFACT_ONLY: '1'
+      NANOCODE_NO_CACHE: '1'
+      NANOCODE_BOLT: ''
+      NANOCODE_BUILDCACHE_URL: 'off'
+      PROFILE: dist
+      RUSTUP_TOOLCHAIN: 1.97.0
+      LANE: ${{ matrix.lane }}
+      TARGET: ${{ matrix.target }}
+      EXPECTED_SHA: ${{ inputs.source_sha }}
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@ed19c99c6a586f683c3cc2d20684788d450f4fce # 2026-11-21T06-40-16Z-ed19c99c
+      - name: Require Aegis service
+        shell: pwsh
+        if: runner.os == 'Windows'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $services = Get-Service | Where-Object { $_.Name -eq 'Aegis' }
+          if (-not $services -or $services.Status -ne 'Running') { throw 'Aegis service is required' }
+      - name: Require Aegis service
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            systemctl is-active --quiet aegis
+          else
+            status="$(sudo launchctl print system/dev.socket.aegis)"
+            grep -q 'state = running' <<< "$status"
+          fi
+      - name: Check out exact dispatched revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require confirmed master revision
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$EXPECTED_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git ls-remote origin refs/heads/master | cut -f1)" = "$GITHUB_SHA"
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Set up Windows MSVC tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          MSVC_ARCH: ${{ matrix.msvc }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $component = if ($env:MSVC_ARCH -eq 'arm64') { 'Microsoft.VisualStudio.Component.VC.Tools.ARM64' } else { 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64' }
+          $vs = & $vswhere -latest -products '*' -requires $component -property installationPath
+          if (-not $vs) { throw "Missing MSVC component: $component" }
+          $devcmd = Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
+          $values = & cmd /d /s /c "`"$devcmd`" -no_logo -arch=$env:MSVC_ARCH -host_arch=amd64 && set"
+          if ($LASTEXITCODE -ne 0) { throw 'VsDevCmd failed' }
+          $names = 'INCLUDE|LIB|LIBPATH|PATH|VCINSTALLDIR|VCToolsInstallDir|WindowsSdkDir|WindowsSDKVersion|UCRTVersion|UniversalCRTSdkDir|VSCMD_ARG_TGT_ARCH|VSCMD_ARG_HOST_ARCH'
+          $values | Where-Object { $_ -match "^(?:$names)=" } | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Install locked Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.97.0 --profile minimal --target "$TARGET"
+          rustc --version --verbose
+          cargo --version
+      - name: Build lane
+        run: scripts/release-cli.sh build "$LANE"
+      - name: Pack lane and receipt
+        run: scripts/release-cli.sh pack "$LANE"
+      - name: Upload lane archives and receipts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cli-${{ github.sha }}-${{ matrix.lane }}
+          if-no-files-found: error
+          path: |
+            target/release-cli/dist/${{ matrix.lane }}/*
+            target/release-cli/dist/parts-*-${{ matrix.lane }}.*
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cli-${{ github.sha }}-${{ matrix.lane }}-failure-log
+          if-no-files-found: ignore
+          path: target/release-cli/logs/${{ matrix.lane }}.log
