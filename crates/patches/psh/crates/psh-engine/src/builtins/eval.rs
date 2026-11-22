@@ -227,8 +227,7 @@ pub(super) async fn source(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     }));
     // Without functrace a sourced file runs without the DEBUG trap, which comes back
     // after it unless the file set its own (bash).
-    let functrace = vp.opts.get(crate::options::SetOpt::Functrace)
-        || vp.opts.shopt(crate::options::Shopt::Extdebug);
+    let functrace = vp.opts.get(crate::options::SetOpt::Functrace);
     let debug = match functrace {
         true => None,
         false => vp

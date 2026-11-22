@@ -610,8 +610,7 @@ impl Vp {
             .is_some_and(|t| t.active && !t.action.is_empty());
         sub.traps = self.traps.for_subshell(
             self.opts.get(crate::options::SetOpt::Errtrace),
-            self.opts.get(crate::options::SetOpt::Functrace)
-                || self.opts.shopt(crate::options::Shopt::Extdebug),
+            self.opts.get(crate::options::SetOpt::Functrace),
         );
         sub.jobs = Default::default();
         sub.subshell_level += 1;

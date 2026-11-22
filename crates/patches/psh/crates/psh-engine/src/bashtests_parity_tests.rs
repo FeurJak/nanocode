@@ -320,3 +320,11 @@ fn entering_a_traced_function_runs_the_debug_trap_at_its_definition_line() {
     let script = "set -T\ntrap 'echo \"d $LINENO\"' DEBUG\nf() {\n  :\n}\nf\ntrap - DEBUG\n";
     assert_eq!(out(script), "d 6\nd 3\nd 4\nd 7\n");
 }
+
+#[test]
+fn extdebug_turns_functrace_and_errtrace_on_and_off() {
+    assert_eq!(
+        out("shopt -s extdebug; echo \"$-\"; set +T; echo \"$-\"; shopt -u extdebug; echo \"$-\"\n"),
+        "hBETc\nhBEc\nhBc\n"
+    );
+}

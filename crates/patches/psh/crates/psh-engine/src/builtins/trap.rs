@@ -305,9 +305,7 @@ pub(crate) fn enter_function(vp: &mut Vp, traced: bool) -> Option<Hidden> {
     if vp.traps.map.is_empty() {
         return None;
     }
-    let functrace = traced
-        || vp.opts.get(crate::options::SetOpt::Functrace)
-        || vp.opts.shopt(crate::options::Shopt::Extdebug);
+    let functrace = traced || vp.opts.get(crate::options::SetOpt::Functrace);
     let errtrace = vp.opts.get(crate::options::SetOpt::Errtrace);
     let hide = |k: &TrapKey| match k {
         TrapKey::Debug | TrapKey::Return => !functrace,

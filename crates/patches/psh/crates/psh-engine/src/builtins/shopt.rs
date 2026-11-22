@@ -62,6 +62,12 @@ pub(crate) async fn shopt(vp: &mut Vp, args: &[Vec<u8>]) -> R {
                 {
                     Some(idx) => {
                         vp.opts.set_shopt_at(idx, set);
+                        // extdebug turns functrace and errtrace on or off with it;
+                        // `set +T` can turn functrace off again (bash).
+                        if name.as_slice() == b"extdebug" {
+                            vp.opts.set(crate::options::SetOpt::Functrace, set);
+                            vp.opts.set(crate::options::SetOpt::Errtrace, set);
+                        }
                         options::sync(vp);
                     }
                     None => {
