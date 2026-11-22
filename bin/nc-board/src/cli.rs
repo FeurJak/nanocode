@@ -14,10 +14,12 @@ use nanocode_board::{
     Board, BoardError, ClaimId, Entry, EventId, NewTask, Op, Outcome, Phase, Rejection, Task,
     TaskId,
     access::{Can, Grant, Identity, Verifier, Who},
+    schedule::Retry,
     tasks::{OnFail, Planned, TaskOp, Terms},
     watch::{Filter, Kind, Plan},
 };
 use nanocode_durability_core::{Sql as _, SqlStatement, StoreError};
+use nanocode_executor::signal::unix::{SignalKind, signal};
 use nanocode_store_sql::{Host, PgConnection, PgError, PgOptions, PgPool, PgSql, log_wake};
 use nanocode_turnlog::{
     FileLog, FileOptions, LogHost,
@@ -37,7 +39,11 @@ usage: nc-board [--dir DIR | --sql URL] [--as ACTOR] COMMAND
   --wait wake on its LISTEN/NOTIFY, re-reading every --poll-ms as well
   whoami                                   ACTOR, the board, what ACTOR may do on it and the claims ACTOR holds
   init                                     charter the board as ACTOR and let everyone read, post, claim and manage
-  post ID [--parent ID] [--label K=V]... [--needs ID]... [--assignee ACTOR] [--on-fail cascade|wait] SPEC
+  post ID [--parent ID] [--label K=V]... [--needs ID]... [--assignee ACTOR] [--on-fail cascade|wait]
+          [--attempts N [--backoff SECS]] SPEC
+                                           --attempts: a failure before the Nth claim opens the task again after SECS (default
+                                           0), doubling each time, instead of failing it; --on-fail wait: a failure stalls the
+                                           task until reopen instead of cancelling what needs it
   list [--label K=V]... [--status open|claimed|done|failed|cancelled|blocked|ready]...
   show ID
   claim ID --lease SECS
@@ -45,12 +51,15 @@ usage: nc-board [--dir DIR | --sql URL] [--as ACTOR] COMMAND
                                            claim a ready task matching every label: best rank, then ACTOR's own,
                                            then one of the K (default 8) oldest; after a lost race retries the oldest until a claim lands
                                            or none is ready; exits 2 when none is ready, or with --wait when none became ready in SECS
-  plan NAME FILE                           post a JSON array of {key, spec, labels?, needs?: [{key}|{task}], parent?} as tasks NAME/key
+  plan NAME FILE                           post a JSON array of {key, spec, labels?, needs?: [{key}|{task}], parent?, terms?: {on_fail?:
+                                           wait, retry?: {max_attempts, backoff_ms}}} as tasks NAME/key
                                            in one write; FILE - reads stdin, and the same NAME and FILE again posts nothing
-  run (ID | next [--label K=V]... [--spread K] [--wait SECS --poll-ms MS]) --lease SECS [--result TEXT] -- COMMAND...
-                                           claim, run COMMAND with NC_BOARD_TASK and NC_BOARD_CLAIM set, renew every third of the
-                                           lease, then finish on exit 0 or fail; exits with COMMAND's code, or 1 when the claim is lost;
-                                           with --wait, exits 2 when no task became ready in SECS
+  run (ID | next [--label K=V]... [--spread K] [--wait SECS --poll-ms MS]) --lease SECS [--result TEXT]
+      [--on-exit finish|release] -- COMMAND...
+                                           claim, then run COMMAND with NC_BOARD_TASK and NC_BOARD_CLAIM set, renewing every third of
+                                           the lease; when COMMAND exits still holding the claim, finish on exit 0 or fail (finish), or
+                                           release (release); on SIGTERM, SIGINT or SIGHUP stop COMMAND and release; exits with
+                                           COMMAND's code, 1 when the claim is lost, or 2 with --wait when no task became ready in SECS
   renew ID --lease SECS [--claim CLAIM]
   finish ID [--claim CLAIM] DETAIL
   fail ID [--claim CLAIM] DETAIL
@@ -476,7 +485,9 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
                 .map(|tasks| Some(Value::Array(tasks)));
         }
         "post" => {
-            parsed.allow(&["parent", "label", "needs", "assignee", "on-fail"])?;
+            parsed.allow(&[
+                "parent", "label", "needs", "assignee", "on-fail", "attempts", "backoff",
+            ])?;
             let [task, spec] = parsed.words()?;
             let on_fail = match parsed.one("on-fail")?.as_deref() {
                 None | Some("cascade") => OnFail::Cascade,
@@ -484,6 +495,14 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
                 Some(other) => {
                     return Err(format!("--on-fail {other} is not cascade or wait").into());
                 }
+            };
+            let retry = match (parsed.count("attempts")?, parsed.secs_ms("backoff")?) {
+                (None, None) => None,
+                (None, Some(_)) => return Err("--backoff needs --attempts".into()),
+                (Some(attempts), backoff_ms) => Some(Retry {
+                    max_attempts: attempts,
+                    backoff_ms: backoff_ms.unwrap_or(0),
+                }),
             };
             let new = NewTask {
                 id: id(&task),
@@ -494,6 +513,7 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
                 terms: Terms {
                     assignee: parsed.one("assignee")?,
                     on_fail,
+                    retry,
                     ..Terms::default()
                 },
             };
@@ -1067,7 +1087,9 @@ fn running(
     identity: &Identity,
     runtime: &nanocode_executor::Runtime,
 ) -> Result<Option<Value>, Failure> {
-    parsed.allow(&["lease", "label", "spread", "result", "wait", "poll-ms"])?;
+    parsed.allow(&[
+        "lease", "label", "spread", "result", "wait", "poll-ms", "on-exit",
+    ])?;
     let lease_ms = parsed.lease_ms()?;
     let renew_every = Duration::from_millis(lease_ms / 3);
     if renew_every.is_zero() {
@@ -1130,6 +1152,40 @@ fn running(
     let Some((task, claim)) = claimed else {
         return Ok(None);
     };
+    let ending = match parsed.one("on-exit")?.as_deref() {
+        None | Some("finish") => Ending::Finish,
+        Some("release") => Ending::Release,
+        Some(other) => return Err(format!("--on-exit {other} is not finish or release").into()),
+    };
+    let (events, heard) = mpsc::channel();
+    let stops = [
+        SignalKind::terminate(),
+        SignalKind::interrupt(),
+        SignalKind::hangup(),
+    ]
+    .map(|kind| signal(kind).map(|listener| (kind, listener)))
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|error| format!("listening for signals: {error}"))?;
+    let stopping = events.clone();
+    std::thread::spawn(move || {
+        let mut stops = stops;
+        let Ok(runtime) = nanocode_executor::Runtime::new() else {
+            return;
+        };
+        let stopped = runtime.block_on(std::future::poll_fn(|context| {
+            stops
+                .iter_mut()
+                .find_map(|(kind, listener)| {
+                    listener
+                        .poll_recv(context)
+                        .is_ready()
+                        .then_some(kind.as_raw_value())
+                })
+                .map_or(std::task::Poll::Pending, std::task::Poll::Ready)
+        }));
+        let _ = stopping.send(Ended::Signalled(stopped));
+    });
     let mut child = Command::new(program);
     child
         .args(arguments)
@@ -1146,11 +1202,23 @@ fn running(
         .spawn()
         .map_err(|error| format!("{program}: {error}"))?;
     let pid = child.id();
-    let (exited, exit) = mpsc::channel();
-    std::thread::spawn(move || exited.send(child.wait()));
-    let status = loop {
-        match exit.recv_timeout(renew_every) {
-            Ok(status) => break status?,
+    std::thread::spawn(move || events.send(Ended::Exited(child.wait())));
+    let stop = |exits: &mpsc::Receiver<Ended>| {
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+        loop {
+            match exits.recv() {
+                Ok(Ended::Exited(_)) | Err(_) => return,
+                Ok(Ended::Signalled(_)) => {}
+            }
+        }
+    };
+    let ended = loop {
+        match heard.recv_timeout(renew_every) {
+            Ok(Ended::Exited(status)) => break Exit::Status(status?),
+            Ok(Ended::Signalled(signal)) => {
+                stop(&heard);
+                break Exit::Signalled(signal);
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 return Err("lost the command's exit status".into());
             }
@@ -1169,30 +1237,68 @@ fn running(
                 .map_err(|error| error.to_string().into())
         });
         if let Err(error) = renewed {
-            let _ = Command::new("kill").arg(pid.to_string()).status();
-            let _ = exit.recv();
+            stop(&heard);
             return Err(format!("claim of {task} lost, command stopped: {error}").into());
         }
     };
-    let code = status
-        .code()
-        .unwrap_or_else(|| status.signal().map_or(1, |signal| 128 + signal));
-    let outcome = if status.success() {
-        Outcome::Done(parsed.one("result")?.unwrap_or_else(|| "exit 0".to_owned()))
-    } else {
-        Outcome::Failed(format!("exit {code}"))
+    let code = match &ended {
+        Exit::Status(status) => status
+            .code()
+            .unwrap_or_else(|| status.signal().map_or(1, |signal| 128 + signal)),
+        Exit::Signalled(signal) => 128 + signal,
     };
+    let result = parsed.one("result")?;
     locked(store, identity, runtime, Access::Write, async |board| {
-        let op = Op::Finish {
-            task: task.clone(),
-            claim: claim.clone(),
-            outcome,
-        };
-        submit(board, now_ms()?, op).await?;
+        let holding = matches!(
+            board.task(&task).map(|task| &task.phase),
+            Some(Phase::Claimed { claim: held, .. }) if *held == claim
+        );
+        if holding {
+            let (task, claim) = (task.clone(), claim.clone());
+            let op = match (&ended, ending) {
+                (Exit::Signalled(signal), _) => Op::Release {
+                    task,
+                    claim,
+                    note: format!("nc-board run stopped by signal {signal}"),
+                },
+                (Exit::Status(_), Ending::Release) => Op::Release {
+                    task,
+                    claim,
+                    note: format!("exit {code} without finishing"),
+                },
+                (Exit::Status(status), Ending::Finish) if status.success() => Op::Finish {
+                    task,
+                    claim,
+                    outcome: Outcome::Done(result.unwrap_or_else(|| "exit 0".to_owned())),
+                },
+                (Exit::Status(_), Ending::Finish) => Op::Finish {
+                    task,
+                    claim,
+                    outcome: Outcome::Failed(format!("exit {code}")),
+                },
+            };
+            submit(board, now_ms()?, op).await?;
+        }
         Ok(Some(
             json!({"task": shown(board, &task, now_ms()?)?, "exit_code": code}),
         ))
     })
+}
+
+#[derive(Clone, Copy)]
+enum Ending {
+    Finish,
+    Release,
+}
+
+enum Ended {
+    Exited(std::io::Result<std::process::ExitStatus>),
+    Signalled(i32),
+}
+
+enum Exit {
+    Status(std::process::ExitStatus),
+    Signalled(i32),
 }
 
 fn waiting(
