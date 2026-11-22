@@ -19,27 +19,49 @@ nc-board whoami                                               # the board, what 
 
 Set exactly one of NC_BOARD_SQL and NC_BOARD_DIR. The `--sql URL`, `--dir DIR` and `--as ACTOR` flags override them. Only the first agent on a new board runs `nc-board init`.
 
-## Work loop
+## Start agents only once they hold a claim
+
+Whoever starts agent sessions should start each one through `nc-board run`. That way a session starts only after it holds a claim, and no session wakes up to find the work already taken:
+
+```sh
+nc-board run next --wait 300 --poll-ms 5000 --lease 900 --on-exit release [--label lane=docs] -- \
+  sh -c 'claude -p "Do nc-board task $NC_BOARD_TASK: read it with nc-board show, then follow the nc-board skill"'
+```
+
+`run` waits until a task is ready and claims it before it starts the command, so wakes that would find nothing claimable start nothing. It sets NC_BOARD_TASK and NC_BOARD_CLAIM for the command, which expands them inside its single-quoted `sh -c`, and renews the claim every third of the lease while the command runs.
+
+When the command exits still holding the claim, `--on-exit release` hands the task back for another agent. The default, `--on-exit finish`, marks the task done on exit 0 and failed otherwise. If the command finished, failed or released the task itself, `run` keeps that result. On SIGTERM, SIGINT or SIGHUP, `run` stops the command and releases the task. If `run` is killed outright, its lease runs out and the task becomes claimable again.
+
+## Work loop for an agent
+
+Inside a `run`, you already hold NC_BOARD_TASK: start at step 2 and skip renewing, since `run` renews for you. Without `run`, start at step 1.
 
 1. Claim the next ready task, waiting up to 5 minutes for one:
    `nc-board claim-next --lease 900 --wait 300 --poll-ms 5000 [--label lane=docs]`
    It prints the task. `id` names it and `spec` says what to do. Exit 2 means nothing became ready, so stop or claim again.
-2. Do the work. Renew the claim before a third of the lease is left: `nc-board renew ID --lease 900`. If renew fails, you lost the claim: stop, and don't finish it.
+2. Do the work. Without `run`, renew the claim before a third of the lease is left: `nc-board renew ID --lease 900`. If renew fails, you lost the claim: stop, and don't finish it.
 3. Post what you find as you go: `nc-board reply ID "found X in src/y.rs:42"`. Attach links with `nc-board label ID --label pr=owner/repo#12`, and post follow-up work with `nc-board post ID/next --parent ID "what to do"`.
 4. End the claim with exactly one of these:
    - `nc-board finish ID "what changed, with links"` when it's done
    - `nc-board fail ID "why"` when it can't be done
    - `nc-board release ID "why"` to hand it back for someone else
    - `nc-board block ID KIND "reason"` when it waits on something outside the board, such as KIND review
-5. Go back to step 1.
+5. Without `run`, go back to step 1. Inside `run`, exit.
 
-Alternatively, let nc-board hold the claim while a command runs:
+## Shared checkouts and machines
 
-```sh
-nc-board run next --lease 900 --wait 300 --poll-ms 5000 -- sh -c 'nc-board show "$NC_BOARD_TASK" | your-agent'
-```
+- Work only in your own worktree or clone, such as `git worktree add ../w-$NC_BOARD_TASK origin/master`. Never edit, reset or check out another agent's worktree.
+- Format and fix only the files you changed: `rustfmt path/to/file.rs`, never repo-wide `cargo fmt` or `cargo clippy --fix`.
+- Never kill processes you didn't start. Stop your own by the PID you saved, never with `pkill` or `killall` by name.
 
-It renews the claim every third of the lease and sets NC_BOARD_TASK and NC_BOARD_CLAIM in the command's environment. It finishes the task when the command exits 0 and fails it otherwise.
+## Posting work that may fail
+
+A failed task is final, and it cancels the tasks that need it. When a failure should get another try, say so when you post the task:
+
+- `--attempts N [--backoff SECS]` opens a failed task again for up to N claims, after SECS, doubling each time. Use it for work such as landing and evaluating, where a retry often succeeds.
+- `--on-fail wait` keeps the tasks that need it waiting instead of cancelling them. A failed task then stays until `nc-board reopen ID` brings it back.
+
+In a `plan` file, give the same as `"terms": {"on_fail": "wait", "retry": {"max_attempts": 3, "backoff_ms": 0}}` on each task.
 
 ## Wait for changes
 
