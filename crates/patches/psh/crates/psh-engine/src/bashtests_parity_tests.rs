@@ -245,3 +245,20 @@ fn keys_of_bash_cmds_and_bash_aliases_are_the_current_tables() {
         "foo q\n"
     );
 }
+
+#[test]
+fn a_subscript_arithmetic_error_in_a_script_abandons_only_its_line() {
+    let script = r#"cat > s.sh <<'EOF'
+a=( [1+]=x ); echo same
+echo next
+unset 'a[1+]'; echo same
+echo ${a[1+]}
+echo end
+EOF
+bash s.sh; echo "rc=$?"
+a=( [1+]=x ); echo "-c ends here"
+"#;
+    let (st, o, _) = run(script);
+    assert_eq!(String::from_utf8_lossy(&o), "next\nend\nrc=0\n");
+    assert_eq!(st, 1);
+}

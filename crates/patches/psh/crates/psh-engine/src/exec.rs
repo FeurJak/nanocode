@@ -2044,7 +2044,7 @@ async fn prefix_assigns(
         if let Err(msg) = r {
             vp.error(&msg).await;
             if std::mem::take(&mut vp.sub_fatal) {
-                return Err(Unwind::Exit(1));
+                return Err(vp.subscript_unwind());
             }
             if (vp.opts.get(SetOpt::Posix) || vp.opts.get(SetOpt::Errexit))
                 && argv.first().is_none_or(|n| builtins::is_special(vp, n))

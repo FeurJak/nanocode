@@ -2124,7 +2124,7 @@ async fn param(
                         Err(msg) => {
                             vp.error(&msg).await;
                             return Err(match std::mem::take(&mut vp.sub_fatal) {
-                                true => Unwind::Exit(1),
+                                true => vp.subscript_unwind(),
                                 false => Unwind::Abort(1),
                             });
                         }
@@ -2885,9 +2885,9 @@ async fn element(vp: &mut Vp, name: &str, sub: &[u8]) -> Result<Val, Unwind> {
         }
         Err(msg) => {
             vp.error(&msg).await;
-            // A subscript that is not arithmetic ends the script (bash).
+            // A subscript that is not arithmetic ends a `-c` script (bash).
             match std::mem::take(&mut vp.sub_fatal) {
-                true => Err(Unwind::Exit(1)),
+                true => Err(vp.subscript_unwind()),
                 false => Err(Unwind::Abort(1)),
             }
         }

@@ -651,7 +651,7 @@ async fn unset(vp: &mut Vp, args: &[Vec<u8>]) -> R {
             if let Err(msg) = vp.unset_elem(&name, &sub) {
                 if std::mem::take(&mut vp.sub_fatal) {
                     vp.error(&msg).await;
-                    return Err(Unwind::Exit(1));
+                    return Err(vp.subscript_unwind());
                 }
                 vp.error(&format!("unset: {msg}")).await;
                 status = 1;

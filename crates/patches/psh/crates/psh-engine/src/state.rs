@@ -443,8 +443,8 @@ pub(crate) struct Vp {
     /// The last arithmetic error was in the expression itself (syntax, division by 0),
     /// not from a variable it read.
     pub arith_syntax: bool,
-    /// An array subscript failed to evaluate as arithmetic: bash abandons the whole
-    /// script (or subshell) with status 1, not only the command line.
+    /// An array subscript failed to evaluate as arithmetic: see
+    /// [`Vp::subscript_unwind`].
     pub sub_fatal: bool,
     /// The names of the functions `export -f` marked: a `bash` psh runs itself starts
     /// with them, and a program gets them as bash passes them (`BASH_FUNC_name%%`).
@@ -859,6 +859,16 @@ impl Vp {
         self.frames
             .iter()
             .rposition(|f| !f.builtin || f.saved.iter().any(|(n, _)| n == name))
+    }
+
+    /// How a subscript that fails as arithmetic unwinds: bash discards the command
+    /// it is in and goes back to the top, which ends a `-c` string (or a subshell)
+    /// with status 1 but in a script read line by line only abandons the line.
+    pub(crate) fn subscript_unwind(&self) -> Unwind {
+        match self.opts.dash_c {
+            true => Unwind::Exit(1),
+            false => Unwind::Abort(1),
+        }
     }
 
     pub(crate) fn in_function(&self) -> bool {
