@@ -216,3 +216,11 @@ fn ignoreeof_and_ignoreeof_variable_follow_each_other() {
                   echo $IGNOREEOF; set +o ignoreeof; echo ${IGNOREEOF-unset}\n";
     assert_eq!(out(script), "ignoreeof      \ton\n10\nunset\n");
 }
+
+#[test]
+fn exit_trap_after_exit_in_a_function_sees_the_function() {
+    let script = "trap 'echo \"trap:$FUNCNAME:$x:$1:${BASH_LINENO[*]}\"' EXIT\n\
+                  f(){ local x=1; exit 3; }\ng(){ f a; }\ng b\n";
+    assert_eq!(out(script), "trap:f:1:a:3 4\n");
+}
+

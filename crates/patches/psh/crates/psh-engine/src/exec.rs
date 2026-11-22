@@ -1867,6 +1867,11 @@ pub(crate) async fn call_function(
     {
         r = Err(u);
     }
+    // `exit` leaves the call in place: the EXIT trap sees the function's FUNCNAME,
+    // locals and positional parameters (bash does not unwind them).
+    if matches!(r, Err(Unwind::Exit(_))) {
+        return r;
+    }
     vp.calls.pop();
     if let Some(frame) = vp.frames.pop() {
         if let Some(set) = frame.options {
