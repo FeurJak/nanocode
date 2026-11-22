@@ -10,7 +10,8 @@ use std::{
 };
 
 use nanocode_board::{
-    Board, BoardError, ClaimId, Entry, NewTask, Op, Outcome, Phase, Rejection, Task, TaskId,
+    Board, BoardError, ClaimId, Entry, EventId, NewTask, Op, Outcome, Phase, Rejection, Task,
+    TaskId,
     access::{Can, Grant, Identity, Verifier, Who},
     tasks::{OnFail, Planned, TaskOp, Terms},
     watch::{Filter, Kind, Plan},
@@ -55,6 +56,11 @@ usage: nc-board [--dir DIR] [--as ACTOR] COMMAND
   wait --timeout SECS --poll-ms MS [--after SEQ] [--label K=V]... [--kind KIND]... [--under ID]
                                            fire due schedules and print the changes after SEQ (default: the head when it
                                            starts) once one matches; exits 2 when none comes before the timeout
+  grant KEY --who WHO... --can PATTERN=CAN[,CAN]...  WHO is everyone, kind:KIND or a principal; PATTERN a task id, a
+                                           subtree such as security/ or *; an empty CAN list closes PATTERN to WHO; the grant's id is ACTOR#KEY
+  revoke GRANT                             remove the grant with that id
+  grants                                   every grant on the board, with its id
+  may ID                                   what ACTOR may do on the task or pattern ID
 every command prints JSON: a task, or a list of tasks; CLAIM defaults to ACTOR's current claim on the task";
 
 type Failure = Box<dyn std::error::Error>;
@@ -674,6 +680,85 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
                 json!({"schedule": schedule, "task": task, "due_ms": first_ms}),
             ));
         }
+        "grant" => {
+            parsed.allow(&["who", "can"])?;
+            let [key] = parsed.words()?;
+            let who = parsed
+                .many("who")
+                .iter()
+                .map(|who| match who.as_str() {
+                    "everyone" => Who::Everyone,
+                    other => other.strip_prefix("kind:").map_or_else(
+                        || Who::Principal(other.to_owned()),
+                        |kind| Who::Kind(kind.to_owned()),
+                    ),
+                })
+                .collect::<Vec<_>>();
+            if who.is_empty() {
+                return Err("grant needs --who WHO".into());
+            }
+            let can = parsed
+                .many("can")
+                .iter()
+                .map(|entry| {
+                    let (pattern, cans) = entry
+                        .split_once('=')
+                        .ok_or_else(|| format!("--can {entry} is not PATTERN=CAN[,CAN]..."))?;
+                    let cans = cans
+                        .split(',')
+                        .filter(|can| !can.is_empty())
+                        .map(|can| {
+                            serde_json::from_value::<Can>(Value::String(can.to_owned()))
+                                .map_err(|_| format!("--can {entry}: {can} is not a permission"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok((pattern.to_owned(), cans))
+                })
+                .collect::<Result<BTreeMap<_, _>, Failure>>()?;
+            if can.is_empty() {
+                return Err("grant needs --can PATTERN=CAN[,CAN]...".into());
+            }
+            let grant = Grant { who, can };
+            board
+                .grant(&key, at_ms, grant.clone())
+                .await
+                .map_err(|error| error.to_string())?;
+            return Ok(Some(
+                json!({"grant": format!("{}#{key}", board.writer()), "who": grant.who, "can": grant.can}),
+            ));
+        }
+        "revoke" => {
+            parsed.allow(&[])?;
+            let [grant] = parsed.words()?;
+            board
+                .revoke(&format!("revoke:{grant}"), at_ms, EventId(grant.clone()))
+                .await
+                .map_err(|error| error.to_string())?;
+            return Ok(Some(json!({"revoked": grant})));
+        }
+        "grants" => {
+            parsed.allow(&[])?;
+            parsed.words::<0>()?;
+            let grants = board
+                .fold()
+                .access()
+                .grants()
+                .iter()
+                .map(|(id, grant)| json!({"grant": id, "who": grant.who, "can": grant.can}))
+                .collect();
+            return Ok(Some(Value::Array(grants)));
+        }
+        "may" => {
+            parsed.allow(&[])?;
+            let [channel] = parsed.words()?;
+            let can = Can::ALL
+                .into_iter()
+                .filter(|can| board.may(&channel, *can))
+                .collect::<Vec<_>>();
+            return Ok(Some(
+                json!({"actor": board.writer(), "channel": channel, "can": can}),
+            ));
+        }
         "events" => {
             parsed.allow(&["after", "label", "kind", "under"])?;
             parsed.words::<0>()?;
@@ -897,7 +982,7 @@ fn waiting(
 fn session(parsed: &Parsed) -> Result<Option<Value>, Failure> {
     let dir = PathBuf::from(parsed.setting("dir", "NC_BOARD_DIR")?);
     let actor = match parsed.words[0].as_str() {
-        "list" | "show" | "events" => parsed
+        "list" | "show" | "events" | "may" => parsed
             .setting("as", "NC_BOARD_AS")
             .unwrap_or_else(|_| "agent:reader".to_owned()),
         _ => parsed.setting("as", "NC_BOARD_AS")?,
