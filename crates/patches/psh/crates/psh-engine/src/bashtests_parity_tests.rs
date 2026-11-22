@@ -396,3 +396,13 @@ fn indirect_expansion_of_a_nameref_with_a_subscript_is_empty() {
         "one\nbar\n\n"
     );
 }
+
+#[test]
+fn an_unterminated_command_substitution_after_a_here_document_counts_the_added_newline() {
+    let (_, _, e) = run("foo=$(cat <<EOF\nhi\n)\necho $foo");
+    assert_eq!(
+        String::from_utf8_lossy(&e),
+        "psh: line 4: warning: here-document at line 1 delimited by end-of-file (wanted `EOF')\n\
+         psh: -c: line 5: unexpected EOF while looking for matching `)'\n"
+    );
+}

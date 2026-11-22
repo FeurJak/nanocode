@@ -1293,7 +1293,10 @@ pub(crate) fn parse_error_line(
         && e.message
             .lines()
             .last()
-            .is_some_and(|l| l.starts_with("syntax error: unexpected end of file"));
+            .is_some_and(|l| {
+            l.starts_with("syntax error: unexpected end of file")
+                || l.starts_with("unexpected EOF while looking for matching `)'")
+        });
     // Text that ends with a backslash: bash counts the newline it adds after it
     // once more.
     lines.line(e.span.start)
