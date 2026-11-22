@@ -1406,8 +1406,18 @@ impl<'a> P<'a> {
     /// Parses one top-level line into `items`. Returns false at the end of input.
     fn parse_line(&mut self, items: &mut Vec<AndOr>) -> R<bool> {
         self.skip_linebreaks()?;
-        self.maybe_alias();
-        self.skip_linebreaks()?;
+        loop {
+            let used = self.uses.len();
+            self.maybe_alias();
+            self.skip_linebreaks()?;
+            // An alias whose text is a comment can leave nothing on its line: the first
+            // word of the next line is in command position again.
+            let Some(u) = self.uses.get(used) else { break };
+            let ret = u.word.end as usize;
+            if !(self.segs.is_empty() && ret <= self.pos && self.b[ret..self.pos].contains(&b'\n')) {
+                break;
+            }
+        }
         if self.at_eof() {
             return Ok(false);
         }
@@ -2934,6 +2944,27 @@ impl<'a> P<'a> {
             match c {
                 b'\\' => match self.peek_at(1) {
                     Some(b'\n') => self.pos = self.after_gap(self.pos + 2),
+                    None if !dq && self.pos + 1 >= self.end && !self.segs.is_empty() => {
+                        // An unquoted backslash that ends an alias text quotes the first
+                        // char after the alias word, as bash reads the text as input.
+                        let seg = self.segs.pop().expect("checked");
+                        self.pos = seg.ret;
+                        self.end = seg.end;
+                        match self.peek() {
+                            Some(b'\n') => self.pos = self.after_gap(self.pos + 1),
+                            Some(_) => {
+                                let s = self.pos;
+                                self.pos += char_len(self.b, s, self.end);
+                                let mut piece = Vec::new();
+                                push_lit(&mut piece, s, self.pos);
+                                out.push(WordPart {
+                                    span: sp(s, self.pos),
+                                    kind: Part::Double(piece),
+                                });
+                            }
+                            None => {}
+                        }
+                    }
                     None => {
                         self.pos += 1;
                         push_lit(out, start, self.pos);
@@ -3011,6 +3042,12 @@ impl<'a> P<'a> {
                         self.pos += 1;
                         while self.peek().is_some_and(|c| c != b'\'') {
                             self.pos += 1;
+                        }
+                        if self.pos >= self.end && !self.segs.is_empty() {
+                            // A quote opened in alias text runs on into the text after
+                            // the alias word, as bash reads the alias text as input.
+                            out.push(self.single_quoted_past_alias(start)?);
+                            continue;
                         }
                         if self.at_eof() {
                             return Err(self.unterminated_from("'", start));
@@ -3165,6 +3202,37 @@ impl<'a> P<'a> {
             }
         }
         Ok(())
+    }
+
+    /// A single-quoted string opened in alias text at `start` whose closing quote is in
+    /// the text after the alias word (or further out): literal pieces of each text it
+    /// spans, in double quotes, so nothing in it is expanded or split.
+    fn single_quoted_past_alias(&mut self, start: usize) -> R<WordPart> {
+        let mut pieces = Vec::new();
+        let mut from = start + 1;
+        loop {
+            if self.pos > from {
+                push_lit(&mut pieces, from, self.pos);
+            }
+            if self.pos < self.end {
+                break;
+            }
+            let Some(seg) = self.segs.pop() else {
+                return Err(self.unterminated_from("'", start));
+            };
+            self.pos = seg.ret;
+            self.end = seg.end;
+            from = self.pos;
+            while self.peek().is_some_and(|c| c != b'\'') {
+                self.pos += 1;
+            }
+        }
+        let first_end = pieces.first().map_or(start + 1, |p| p.span.end as usize);
+        self.pos += 1;
+        Ok(WordPart {
+            span: sp(start, first_end),
+            kind: Part::Double(pieces),
+        })
     }
 
     /// `'…'` from `start` to `end`. In a here-doc body its line continuations are gone

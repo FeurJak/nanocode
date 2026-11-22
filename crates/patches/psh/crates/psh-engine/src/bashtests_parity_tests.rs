@@ -340,3 +340,17 @@ fn a_strip_tabs_heredoc_delimiter_may_start_with_a_tab() {
     let script = "cat <<-'\tEND'\n\thello\n\tEND\ncat <<-END\n\tx\n\t\tEND\necho done\n";
     assert_eq!(out(script), "hello\nx\ndone\n");
 }
+
+#[test]
+fn alias_text_is_read_as_input_across_its_end() {
+    let script = r#"shopt -s expand_aliases
+alias foo="echo 'Error:"
+foo bar'
+alias c=#
+c a
+c b
+alias a='printf "<%s>\n" \'
+a|cat
+"#;
+    assert_eq!(out(script), "Error: bar\n<|cat>\n");
+}
