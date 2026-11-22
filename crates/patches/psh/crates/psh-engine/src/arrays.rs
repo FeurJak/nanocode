@@ -256,7 +256,7 @@ impl Vp {
                     ));
                     continue;
                 }
-                Some(k) => match (k.is_empty(), self.resolve_index(&name, k)?) {
+                Some(k) => match (k.is_empty(), self.resolve_index(&name, &ctlesc_dequote(k))?) {
                     (false, Some(i)) => i,
                     _ => {
                         self.arith_notes.push(format!(
@@ -366,6 +366,24 @@ impl Vp {
         }
         Ok(())
     }
+}
+
+/// The arithmetic text of an indexed array's key in a compound assignment: bash
+/// takes each \x01 in it as its quoting escape, so the byte is dropped and the one
+/// after it kept (`a=( [$'x\001y']=1 )` sets `a[xy]`).
+fn ctlesc_dequote(k: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    if !k.contains(&1) {
+        return std::borrow::Cow::Borrowed(k);
+    }
+    let mut out = Vec::with_capacity(k.len());
+    let mut it = k.iter();
+    while let Some(&b) = it.next() {
+        match b {
+            1 => out.extend(it.next()),
+            _ => out.push(b),
+        }
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 /// bash finds the subscript of an indexed array's `[key]=value` element in the

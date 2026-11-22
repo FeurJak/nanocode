@@ -262,3 +262,11 @@ a=( [1+]=x ); echo "-c ends here"
     assert_eq!(String::from_utf8_lossy(&o), "next\nend\nrc=0\n");
     assert_eq!(st, 1);
 }
+
+#[test]
+fn a_compound_indexed_key_drops_its_ctlesc_bytes() {
+    assert_eq!(
+        out("xy=3; b=( [$'x\\001y']=1 ); declare -p b\n"),
+        "declare -a b=([3]=\"1\")\n"
+    );
+}
