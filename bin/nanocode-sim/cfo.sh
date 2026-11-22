@@ -323,6 +323,8 @@ default_table='
 1 canary_gc_unwind_drop_skips_finalize canary:8 --scenario gc_unwind --mutation drop_skips_finalize
 1 canary_gc_unwind_subclasses_keep_dead canary:8 --scenario gc_unwind --mutation subclasses_keep_dead
 1 canary_gc_unwind_defs_per_interpreter canary:8 --scenario gc_unwind --mutation defs_per_interpreter
+1 canary_gc_unwind_prunes_every_push canary:8 --scenario gc_unwind --mutation prunes_every_push
+1 canary_gc_unwind_prunes_at_powers_of_two canary:8 --scenario gc_unwind --mutation prunes_at_powers_of_two
 8 repo_cache pass --scenario repo_cache
 2 repo_cache_twice pass --scenario repo_cache --twice
 1 canary_repo_cache_shared_head canary:8 --scenario repo_cache --mutation shared_head

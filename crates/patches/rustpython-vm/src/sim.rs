@@ -12,6 +12,10 @@ pub enum Mutation {
     SubclassesKeepDead,
     /// python-capi builds and leaks its module definitions for every interpreter.
     DefsPerInterpreter,
+    /// A type's subclass list is scanned for dead entries on every push.
+    PrunesEveryPush,
+    /// A type's subclass list is scanned whenever its length is a power of two.
+    PrunesAtPowersOfTwo,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);
@@ -22,6 +26,19 @@ pub fn mutate(mutation: Mutation) {
 
 pub fn mutated(mutation: Mutation) -> bool {
     MUTATION.load(Ordering::Relaxed) == mutation as u8
+}
+
+std::thread_local! {
+    static SUBCLASS_SCANS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Subclass-list entries scanned for dead ones on this thread so far.
+pub fn subclass_scans() -> u64 {
+    SUBCLASS_SCANS.get()
+}
+
+pub(crate) fn note_subclass_scan(entries: usize) {
+    SUBCLASS_SCANS.set(SUBCLASS_SCANS.get() + entries as u64);
 }
 
 pub const UNWOUND: &str =

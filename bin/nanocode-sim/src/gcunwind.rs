@@ -10,6 +10,7 @@ use std::{
 
 use nanocode_python::rustpython_vm::{
     Context, Interpreter, PyObjectRef, PyRef, Settings, VirtualMachine,
+    builtins::PyType,
     builtins::PyWeak,
     gc_state::gc_state,
     import::{ExternalFrozen, set_external_frozen},
@@ -30,7 +31,6 @@ const GENERATIONS: u64 = 3;
 const FULL: usize = 2;
 const CHURN: u64 = 32;
 const CHURN_TRACKED_SLACK: usize = 512;
-const CHURN_DEAD_SLACK: usize = 64;
 const CHURN_SOURCE: &str = "for i in range(32):
     type('K%d' % i, (), {})
 ";
@@ -43,15 +43,19 @@ pub enum GcUnwindMutation {
     DropSkipsFinalize,
     SubclassesKeepDead,
     DefsPerInterpreter,
+    PrunesEveryPush,
+    PrunesAtPowersOfTwo,
 }
 
 impl GcUnwindMutation {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 7] = [
         Self::None,
         Self::KeepsLeftoverBits,
         Self::DropSkipsFinalize,
         Self::SubclassesKeepDead,
         Self::DefsPerInterpreter,
+        Self::PrunesEveryPush,
+        Self::PrunesAtPowersOfTwo,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -67,6 +71,8 @@ impl GcUnwindMutation {
             Self::DropSkipsFinalize => "drop_skips_finalize",
             Self::SubclassesKeepDead => "subclasses_keep_dead",
             Self::DefsPerInterpreter => "defs_per_interpreter",
+            Self::PrunesEveryPush => "prunes_every_push",
+            Self::PrunesAtPowersOfTwo => "prunes_at_powers_of_two",
         }
     }
 
@@ -85,6 +91,8 @@ impl GcUnwindMutation {
             Self::DropSkipsFinalize => Rule::DropSkipsFinalize,
             Self::SubclassesKeepDead => Rule::SubclassesKeepDead,
             Self::DefsPerInterpreter => Rule::DefsPerInterpreter,
+            Self::PrunesEveryPush => Rule::PrunesEveryPush,
+            Self::PrunesAtPowersOfTwo => Rule::PrunesAtPowersOfTwo,
         }
     }
 }
@@ -271,6 +279,68 @@ fn build(
     Ok(weaks)
 }
 
+const CHURNED_CLASSES: usize = 2000;
+const CHURN_ONE_CLASS: &str =
+    "import gc\nfor i in range(2000):\n    type('T', (B,), {})\n    gc.collect(0)\n";
+
+fn object_subclasses() -> (usize, usize, usize) {
+    let subclasses = Context::genesis().types.object_type.subclasses.read();
+    let live = subclasses
+        .iter()
+        .filter(|weak| weak.upgrade().is_some())
+        .count();
+    (subclasses.len(), subclasses.capacity(), live)
+}
+
+fn subclass_cost_at(vm: &VirtualMachine, rng: &mut Rng, above: bool) -> Result<(), String> {
+    let trigger = 1usize << (7 + rng.below(4));
+    let offset = 1 + rng.below(4) as usize;
+    let wanted = if above {
+        trigger + offset
+    } else {
+        trigger - offset
+    };
+    let scope = vm.new_scope_with_builtins();
+    let keep = format!(
+        "class B:
+    pass
+keep = [type('L%d' % i, (B,), {{}}) for i in range({wanted})]
+"
+    );
+    vm.run_string(scope.clone(), &keep, "<gc_unwind subclasses>")
+        .map_err(|_| "making the live classes raised".to_owned())?;
+    let base = scope
+        .globals
+        .get_item("B", vm)
+        .ok()
+        .and_then(|base| base.downcast::<PyType>().ok())
+        .ok_or_else(|| "B is not a class".to_owned())?;
+    let capacity = base.subclasses.read().capacity();
+    let before = vm_sim::subclass_scans();
+    vm.run_string(scope.clone(), CHURN_ONE_CLASS, "<gc_unwind subclasses>")
+        .map_err(|_| "churning classes raised".to_owned())?;
+    let scanned = vm_sim::subclass_scans() - before;
+    drop(scope);
+    let bound = 2 * CHURNED_CLASSES + 2 * capacity;
+    if scanned as usize > bound {
+        return Err(format!(
+            "{CHURNED_CLASSES} subclasses made and dropped beside {wanted} live ones ({} the trigger at {trigger}) scanned {scanned} entries, over {bound}",
+            if above { "above" } else { "below" }
+        ));
+    }
+    Ok(())
+}
+
+fn subclass_cost(rng: &mut Rng) -> Result<(), String> {
+    let interpreter = interpreter(rng);
+    let checked = interpreter.enter(|vm| {
+        subclass_cost_at(vm, rng, false)?;
+        subclass_cost_at(vm, rng, true)
+    });
+    interpreter.finalize(None);
+    checked
+}
+
 fn tracked() -> usize {
     let (young, old, oldest) = gc_state().get_count();
     young + old + oldest
@@ -298,19 +368,25 @@ fn churn(rng: &mut Rng) -> Result<(), String> {
             after - before
         ));
     }
-    let object = Context::genesis().types.object_type;
-    let (len, live) = {
-        let subclasses = object.subclasses.read();
-        let live = subclasses
-            .iter()
-            .filter(|weak| weak.upgrade().is_some())
-            .count();
-        (subclasses.len(), live)
-    };
-    if len > 2 * live + CHURN_DEAD_SLACK {
+    let (len, capacity, _) = object_subclasses();
+    let fill = capacity - len + 1;
+    let before = vm_sim::subclass_scans();
+    let filler = interpreter(rng);
+    filler.enter(|vm| {
+        let scope = vm.new_scope_with_builtins();
+        let source = format!(
+            "for i in range({fill}):
+    type('F', (), {{}})
+"
+        );
+        vm.run_string(scope, &source, "<gc_unwind churn>")
+            .map(drop)
+            .map_err(|_| "filling object's subclass list raised".to_owned())
+    })?;
+    filler.finalize(None);
+    if vm_sim::subclass_scans() == before {
         return Err(format!(
-            "object's subclass list holds {} dead entries beside {live} live ones",
-            len - live
+            "object's subclass list filled its capacity of {capacity} without dropping its dead entries"
         ));
     }
     let first = nanocode_python_capi::module_defs(Context::genesis());
@@ -388,7 +464,10 @@ fn run_seed(seed: u64, mutation: GcUnwindMutation) -> Outcome {
     }
     if wrong.is_none() {
         shape.push_str("churn ");
-        match catch_unwind(AssertUnwindSafe(|| churn(&mut rng))) {
+        match catch_unwind(AssertUnwindSafe(|| {
+            churn(&mut rng)?;
+            subclass_cost(&mut rng)
+        })) {
             Ok(Ok(())) => {}
             Ok(Err(message)) => wrong = Some(format!("churn: {message}")),
             Err(payload) => {
