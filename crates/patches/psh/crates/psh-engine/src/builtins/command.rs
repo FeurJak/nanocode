@@ -486,6 +486,22 @@ pub(super) async fn exec_(vp: &mut Vp, args: &[Vec<u8>]) -> R {
     }
     // A utility runs in place of the shell: then the shell ends with its status.
     if let Some(e) = crate::util::lookup(vp, name).await {
+        // `exec -c`: it starts with an empty environment.
+        if opts.clear_env {
+            let names: Vec<String> = vp
+                .vars
+                .iter()
+                .filter(|(_, v)| v.exported)
+                .map(|(n, _)| n.clone())
+                .collect();
+            for n in names {
+                if let Some(v) = vp.vars.get_mut(&n) {
+                    v.exported = false;
+                }
+            }
+            vp.foreign_env = Default::default();
+            vp.exported_funcs = Default::default();
+        }
         let mut argv = rest.to_vec();
         // A shell psh runs (D1410) has `-a`'s name, and `-l`'s, as its `$0`.
         if crate::util::is_nested_shell(e)

@@ -760,6 +760,14 @@ read p q < a; read r t < b; [ $p = $r ] && [ $q != $t ] && echo sub"#;
     }
 
     #[test]
+    fn exec_c_runs_a_utility_with_an_empty_environment() {
+        let script = "(export FOO=BAR; exec -c printenv) | grep -c FOO
+(FOO=BAR exec -c printenv) | grep -c FOO
+(export FOO=BAR; exec printenv FOO)";
+        assert_eq!(out(script), "0\n0\nBAR\n");
+    }
+
+    #[test]
     fn reading_a_directory() {
         assert_eq!(out("let n=1 < .; echo $n"), "1\n");
         let (stdout, stderr) = run("cat < .; echo $?");
