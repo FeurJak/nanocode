@@ -334,3 +334,9 @@ fn the_return_trap_after_source_runs_without_the_hidden_debug_trap() {
     let script = "echo : > s.sub\ntrap 'echo debug' DEBUG\ntrap 'echo ret' RETURN\n. ./s.sub\ntrap - DEBUG\n";
     assert_eq!(out(script), "debug\ndebug\nret\ndebug\n");
 }
+
+#[test]
+fn a_strip_tabs_heredoc_delimiter_may_start_with_a_tab() {
+    let script = "cat <<-'\tEND'\n\thello\n\tEND\ncat <<-END\n\tx\n\t\tEND\necho done\n";
+    assert_eq!(out(script), "hello\nx\ndone\n");
+}

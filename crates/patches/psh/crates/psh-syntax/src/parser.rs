@@ -1016,18 +1016,25 @@ impl<'a> P<'a> {
                         content += 1;
                     }
                 }
-                let joined: Vec<u8>;
-                let line = if self.b[content..line_end].contains(&b'\n') {
-                    joined = self.b[content..line_end]
+                let join = |from: usize| -> Vec<u8> {
+                    self.b[from..line_end]
                         .split(|&b| b == b'\n')
                         .flat_map(|l| l.strip_suffix(b"\\").unwrap_or(l))
                         .copied()
-                        .collect();
+                        .collect()
+                };
+                let joined: Vec<u8>;
+                let line = if self.b[content..line_end].contains(&b'\n') {
+                    joined = join(content);
                     &joined[..]
                 } else {
                     &self.b[content..line_end]
                 };
-                if line == &p.delim[..] {
+                // With <<-, bash compares the line with the delimiter before it strips
+                // the leading tabs too, so a delimiter that itself starts with a tab
+                // (<<-'<tab>END') still ends the body.
+                let unstripped = content > line_start && join(line_start) == p.delim;
+                if line == &p.delim[..] || unstripped {
                     body_end = line_start;
                     self.pos = (line_end + 1).min(self.end);
                     terminated = true;
