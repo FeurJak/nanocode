@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::OpenOptions,
     io::Read as _,
+    num::NonZeroU32,
     os::unix::process::ExitStatusExt as _,
     path::{Path, PathBuf},
     process::{Command, ExitCode},
@@ -16,16 +17,24 @@ use nanocode_board::{
     tasks::{OnFail, Planned, TaskOp, Terms},
     watch::{Filter, Kind, Plan},
 };
-use nanocode_turnlog::{FileLog, FileOptions};
+use nanocode_durability_core::{Sql as _, SqlStatement, StoreError};
+use nanocode_store_sql::{Host, PgConnection, PgError, PgOptions, PgPool, PgSql, log_wake};
+use nanocode_turnlog::{
+    FileLog, FileOptions, LogHost,
+    parted::{PartedLog, SqlParts},
+};
 use serde_json::{Value, json};
 
 const SCOPE: &str = "board";
 
 const SPREAD: usize = 8;
 
-const HELP: &str = "nc-board: a nanocode task board kept in a directory
-usage: nc-board [--dir DIR] [--as ACTOR] COMMAND
-  DIR defaults to $NC_BOARD_DIR, ACTOR to $NC_BOARD_AS; ACTOR is a principal such as agent:b1, optionally with +profile
+const HELP: &str = "nc-board: a nanocode task board kept in a directory or on Postgres
+usage: nc-board [--dir DIR | --sql URL] [--as ACTOR] COMMAND
+  DIR defaults to $NC_BOARD_DIR, URL (postgres://user[:password]@host[:port]/database) to $NC_BOARD_SQL, ACTOR to
+  $NC_BOARD_AS; ACTOR is a principal such as agent:b1, optionally with +profile. A Postgres board is shared by every
+  machine that reaches the database: its tables are created on first use, and wait, claim-next --wait and run next
+  --wait wake on its LISTEN/NOTIFY, re-reading every --poll-ms as well
   init                                     charter the board as ACTOR and let everyone read, post, claim and manage
   post ID [--parent ID] [--label K=V]... [--needs ID]... [--assignee ACTOR] [--on-fail cascade|wait] SPEC
   list [--label K=V]... [--status open|claimed|done|failed|cancelled|blocked|ready]...
@@ -33,13 +42,14 @@ usage: nc-board [--dir DIR] [--as ACTOR] COMMAND
   claim ID --lease SECS
   claim-next [--label K=V]... [--spread K] --lease SECS [--wait SECS --poll-ms MS]
                                            claim a ready task matching every label: best rank, then ACTOR's own,
-                                           then one of the K (default 8) oldest; retries the oldest after a lost race; exits 2 when none is
-                                           ready, or with --wait when none became ready in SECS
+                                           then one of the K (default 8) oldest; after a lost race retries the oldest until a claim lands
+                                           or none is ready; exits 2 when none is ready, or with --wait when none became ready in SECS
   plan NAME FILE                           post a JSON array of {key, spec, labels?, needs?: [{key}|{task}], parent?} as tasks NAME/key
                                            in one write; FILE - reads stdin, and the same NAME and FILE again posts nothing
-  run (ID | next [--label K=V]... [--spread K]) --lease SECS [--result TEXT] -- COMMAND...
+  run (ID | next [--label K=V]... [--spread K] [--wait SECS --poll-ms MS]) --lease SECS [--result TEXT] -- COMMAND...
                                            claim, run COMMAND with NC_BOARD_TASK and NC_BOARD_CLAIM set, renew every third of the
-                                           lease, then finish on exit 0 or fail; exits with COMMAND's code, or 1 when the claim is lost
+                                           lease, then finish on exit 0 or fail; exits with COMMAND's code, or 1 when the claim is lost;
+                                           with --wait, exits 2 when no task became ready in SECS
   renew ID --lease SECS [--claim CLAIM]
   finish ID [--claim CLAIM] DETAIL
   fail ID [--claim CLAIM] DETAIL
@@ -93,11 +103,9 @@ impl Parsed {
     }
 
     fn allow(&self, names: &[&str]) -> Result<(), Failure> {
-        match self
-            .flags
-            .keys()
-            .find(|name| !names.contains(&name.as_str()) && !matches!(name.as_str(), "dir" | "as"))
-        {
+        match self.flags.keys().find(|name| {
+            !names.contains(&name.as_str()) && !matches!(name.as_str(), "dir" | "sql" | "as")
+        }) {
             Some(name) => Err(format!("--{name} does not apply here").into()),
             None => Ok(()),
         }
@@ -329,30 +337,36 @@ async fn claim_next(
             .ok_or(format!("--spread {spread} is not a positive count"))?,
         None => SPREAD,
     };
-    let Some(task) = board
+    let Some(mut task) = board
         .fold()
         .spread(board.writer(), &labels, at_ms, spread)
         .cloned()
     else {
         return Ok(None);
     };
-    let claim = |task: &TaskId| Op::Claim {
-        task: task.clone(),
-        lease_ms,
-        fence: None,
-        cap: None,
-    };
-    match board.submit(at_ms, claim(&task)).await {
-        Err(BoardError::Rejected(Rejection::Held { .. } | Rejection::Terminal)) if spread > 1 => {
-            let Some(head) = board.fold().pick(board.writer(), &labels, at_ms).cloned() else {
-                return Ok(None);
-            };
-            submit(board, at_ms, claim(&head)).await?;
-            Ok(Some(head))
-        }
-        landed => {
-            landed.map_err(|error| error.to_string())?;
-            Ok(Some(task))
+    loop {
+        let claim = Op::Claim {
+            task: task.clone(),
+            lease_ms,
+            fence: None,
+            cap: None,
+        };
+        match board.submit(at_ms, claim).await {
+            Err(BoardError::Rejected(
+                rejection @ (Rejection::Held { .. } | Rejection::Terminal),
+            )) => {
+                let Some(head) = board.fold().pick(board.writer(), &labels, at_ms).cloned() else {
+                    return Ok(None);
+                };
+                if head == task {
+                    return Err(BoardError::Rejected(rejection).to_string().into());
+                }
+                task = head;
+            }
+            landed => {
+                landed.map_err(|error| error.to_string())?;
+                return Ok(Some(task));
+            }
         }
     }
 }
@@ -770,6 +784,175 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
     shown(board, &written, now_ms()?).map(Some)
 }
 
+enum Store {
+    Dir(PathBuf),
+    Postgres(Postgres),
+}
+
+struct Postgres {
+    url: String,
+    options: PgOptions,
+    sql: Arc<PgSql>,
+    log: Arc<PartedLog<SqlParts<PgSql>>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Access {
+    Read,
+    Write,
+}
+
+enum Wake {
+    Poll,
+    Listen(PgConnection),
+}
+
+const PREPARED: &str = "SELECT CAST(to_regclass('nanocode_plog_p0') IS NOT NULL AS TEXT)";
+
+const HOLD: &str = "SELECT CAST(count(*) AS TEXT) FROM (SELECT pg_advisory_lock(hashtextextended($1::text, 0))) AS held";
+
+const UNHOLD: &str = "SELECT CAST(pg_advisory_unlock(hashtextextended($1::text, 0)) AS TEXT)";
+
+impl Store {
+    fn open(parsed: &Parsed, runtime: &nanocode_executor::Runtime) -> Result<Self, Failure> {
+        let given = (parsed.one("dir")?, parsed.one("sql")?);
+        let (dir, url) = match given {
+            (Some(_), Some(_)) => return Err("give --dir or --sql, not both".into()),
+            (None, None) => match (
+                std::env::var("NC_BOARD_DIR").ok(),
+                std::env::var("NC_BOARD_SQL").ok(),
+            ) {
+                (Some(_), Some(_)) => {
+                    return Err(
+                        "NC_BOARD_DIR and NC_BOARD_SQL are both set; unset one or pass --dir or --sql"
+                            .into(),
+                    );
+                }
+                (None, None) => {
+                    return Err(
+                        "give --dir DIR or --sql URL, or set NC_BOARD_DIR or NC_BOARD_SQL".into(),
+                    );
+                }
+                given => given,
+            },
+            given => given,
+        };
+        match (dir, url) {
+            (Some(dir), _) => Ok(Self::Dir(PathBuf::from(dir))),
+            (None, Some(url)) => Postgres::connect(url, runtime).map(Self::Postgres),
+            (None, None) => Err("give --dir DIR or --sql URL".into()),
+        }
+    }
+
+    fn wake(&self, runtime: &nanocode_executor::Runtime) -> Wake {
+        let Self::Postgres(postgres) = self else {
+            return Wake::Poll;
+        };
+        let listening = runtime.block_on(async {
+            let mut connection = PgConnection::connect(&postgres.options).await?;
+            connection.listen(log_wake::CHANNEL).await?;
+            Ok::<_, PgError>(connection)
+        });
+        match listening {
+            Ok(connection) => Wake::Listen(connection),
+            Err(error) => {
+                eprintln!("nc-board: no Postgres wake ({error}); polling");
+                Wake::Poll
+            }
+        }
+    }
+}
+
+impl Postgres {
+    fn connect(url: String, runtime: &nanocode_executor::Runtime) -> Result<Self, Failure> {
+        let options = PgOptions::parse(&url).map_err(|error| format!("--sql: {error}"))?;
+        let pool = PgPool::new(options.clone(), 1);
+        let sql = Arc::new(PgSql::reading(pool.clone(), pool));
+        let log = Arc::new(PartedLog::new(
+            Arc::new(SqlParts::new(Arc::clone(&sql))),
+            NonZeroU32::MIN,
+        ));
+        runtime
+            .block_on(async {
+                let statements = [SqlStatement {
+                    sql: PREPARED,
+                    params: Vec::new(),
+                }];
+                let answer = sql.transaction("nc_board_prepared", &statements).await?;
+                let prepared = answer
+                    .first()
+                    .and_then(|rows| rows.first())
+                    .and_then(|cells| cells.first())
+                    .is_some_and(|cell| cell.as_deref() == Some("true"));
+                if !prepared {
+                    log.prepare().await?;
+                }
+                Ok::<_, StoreError>(())
+            })
+            .map_err(|error| format!("{}: {error}", address(&options)))?;
+        Ok(Self {
+            url,
+            options,
+            sql,
+            log,
+        })
+    }
+
+    fn shown(&self) -> String {
+        address(&self.options)
+    }
+
+    async fn advise(&self, statement: &'static str, actor: &str) -> Result<(), Failure> {
+        let key = format!("nc-board:{SCOPE}:{actor}");
+        let statements = [SqlStatement {
+            sql: statement,
+            params: vec![&key],
+        }];
+        self.sql
+            .transaction("nc_board_hold", &statements)
+            .await
+            .map(drop)
+            .map_err(|error| format!("{}: {error}", self.shown()).into())
+    }
+}
+
+fn address(options: &PgOptions) -> String {
+    let PgOptions {
+        user,
+        port,
+        database,
+        ..
+    } = options;
+    match &options.host {
+        Host::Tcp(host) => format!("postgres://{user}@{host}:{port}/{database}"),
+        Host::Unix(path) => format!(
+            "postgres://{user}@/{database}?host={}&port={port}",
+            path.display()
+        ),
+    }
+}
+
+impl Wake {
+    fn nap(&mut self, runtime: &nanocode_executor::Runtime, wait: Duration) {
+        let Self::Listen(connection) = self else {
+            std::thread::sleep(wait);
+            return;
+        };
+        let heard = runtime.block_on(nanocode_executor::timeout(wait, async {
+            loop {
+                let notification = connection.notification().await?;
+                if log_wake::parse(&notification.payload).is_some_and(|(scope, _)| scope == SCOPE) {
+                    return Ok::<_, PgError>(());
+                }
+            }
+        }));
+        if let Ok(Err(error)) = heard {
+            eprintln!("nc-board: lost the Postgres wake ({error}); polling");
+            *self = Self::Poll;
+        }
+    }
+}
+
 fn open(dir: &Path) -> Result<std::fs::File, Failure> {
     std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
     let lock = OpenOptions::new()
@@ -783,49 +966,69 @@ fn open(dir: &Path) -> Result<std::fs::File, Failure> {
     Ok(lock)
 }
 
-async fn opened(dir: &Path, identity: Identity) -> Result<Board, Failure> {
-    let host = Arc::new(FileLog::open(
-        &dir.join("board.log"),
-        FileOptions {
-            scope: SCOPE,
-            sync: true,
-        },
-    )?);
+async fn opened(store: &Store, identity: Identity) -> Result<Board, Failure> {
+    let host: Arc<dyn LogHost> = match store {
+        Store::Dir(dir) => Arc::new(FileLog::open(
+            &dir.join("board.log"),
+            FileOptions {
+                scope: SCOPE,
+                sync: true,
+            },
+        )?),
+        Store::Postgres(postgres) => Arc::clone(&postgres.log) as Arc<dyn LogHost>,
+    };
     Board::open(host, SCOPE, identity)
         .await
         .map_err(|error| error.to_string().into())
 }
 
 fn locked<T>(
-    dir: &Path,
+    store: &Store,
     identity: &Identity,
     runtime: &nanocode_executor::Runtime,
+    access: Access,
     work: impl AsyncFnOnce(&mut Board) -> Result<T, Failure>,
 ) -> Result<T, Failure> {
-    let lock = open(dir)?;
-    let result = runtime.block_on(async {
-        let mut board = opened(dir, identity.clone()).await?;
-        work(&mut board).await
-    });
-    drop(lock);
-    result
+    match store {
+        Store::Dir(dir) => {
+            let lock = open(dir)?;
+            let result = runtime.block_on(async {
+                let mut board = opened(store, identity.clone()).await?;
+                work(&mut board).await
+            });
+            drop(lock);
+            result
+        }
+        Store::Postgres(postgres) => runtime.block_on(async {
+            let actor = identity.actor().to_string();
+            if access == Access::Write {
+                postgres.advise(HOLD, &actor).await?;
+            }
+            let result = async {
+                let mut board = opened(store, identity.clone()).await?;
+                work(&mut board).await
+            }
+            .await;
+            if access == Access::Write {
+                postgres.advise(UNHOLD, &actor).await?;
+            }
+            result
+        }),
+    }
 }
 
-fn pulling(
-    parsed: &Parsed,
-    dir: &Path,
+fn pulling<T>(
+    store: &Store,
     identity: &Identity,
     runtime: &nanocode_executor::Runtime,
-) -> Result<Option<Value>, Failure> {
-    let wait_ms = parsed.secs_ms("wait")?.ok_or("--wait SECS is required")?;
-    let poll_ms = parsed
-        .count("poll-ms")?
-        .filter(|poll| *poll > 0)
-        .ok_or("--wait needs --poll-ms MS, positive")?;
+    (access, wait_ms, poll_ms): (Access, u64, u64),
+    mut pass: impl AsyncFnMut(&mut Board) -> Result<Option<T>, Failure>,
+) -> Result<Option<T>, Failure> {
+    let mut wake = store.wake(runtime);
     let deadline_ms = now_ms()?.saturating_add(wait_ms);
     loop {
-        if let Some(found) = locked(dir, identity, runtime, async |board| {
-            run(parsed, board).await
+        if let Some(found) = locked(store, identity, runtime, access, async |board| {
+            pass(board).await
         })? {
             return Ok(Some(found));
         }
@@ -833,18 +1036,30 @@ fn pulling(
         if now >= deadline_ms {
             return Ok(None);
         }
-        std::thread::sleep(Duration::from_millis(poll_ms.min(deadline_ms - now)));
+        wake.nap(
+            runtime,
+            Duration::from_millis(poll_ms.min(deadline_ms - now)),
+        );
     }
+}
+
+fn wait_poll(parsed: &Parsed) -> Result<(u64, u64), Failure> {
+    let wait_ms = parsed.secs_ms("wait")?.ok_or("--wait SECS is required")?;
+    let poll_ms = parsed
+        .count("poll-ms")?
+        .filter(|poll| *poll > 0)
+        .ok_or("--wait needs --poll-ms MS, positive")?;
+    Ok((wait_ms, poll_ms))
 }
 
 fn running(
     parsed: &Parsed,
-    dir: &Path,
+    store: &Store,
     actor: &str,
     identity: &Identity,
     runtime: &nanocode_executor::Runtime,
 ) -> Result<Option<Value>, Failure> {
-    parsed.allow(&["lease", "label", "spread", "result"])?;
+    parsed.allow(&["lease", "label", "spread", "result", "wait", "poll-ms"])?;
     let lease_ms = parsed.lease_ms()?;
     let renew_every = Duration::from_millis(lease_ms / 3);
     if renew_every.is_zero() {
@@ -854,36 +1069,72 @@ fn running(
         .split_first()
         .ok_or("run takes ID or next, then -- COMMAND")?;
     let (program, arguments) = command.split_first().ok_or("run needs -- COMMAND")?;
-    let (task, claim) = locked(dir, identity, runtime, async |board| {
-        let at_ms = now_ms()?;
-        let task = if target == "next" {
-            claim_next(parsed, board, at_ms)
-                .await?
-                .ok_or("no ready task matches")?
-        } else {
-            let task = TaskId(target.clone());
-            submit(
-                board,
-                at_ms,
-                Op::Claim {
-                    task: task.clone(),
-                    lease_ms,
-                    fence: None,
-                    cap: None,
-                },
-            )
-            .await?;
-            task
-        };
-        let claim = held(board, &task, None)?;
-        Ok((task, claim))
-    })?;
-    let mut child = Command::new(program)
+    let claimed = if parsed.flags.contains_key("wait") {
+        if target != "next" {
+            return Err("--wait applies to run next".into());
+        }
+        let (wait_ms, poll_ms) = wait_poll(parsed)?;
+        pulling(
+            store,
+            identity,
+            runtime,
+            (Access::Write, wait_ms, poll_ms),
+            async |board| {
+                let Some(task) = claim_next(parsed, board, now_ms()?).await? else {
+                    return Ok(None);
+                };
+                let claim = held(board, &task, None)?;
+                Ok(Some((task, claim)))
+            },
+        )?
+    } else {
+        Some(locked(
+            store,
+            identity,
+            runtime,
+            Access::Write,
+            async |board| {
+                let at_ms = now_ms()?;
+                let task = if target == "next" {
+                    claim_next(parsed, board, at_ms)
+                        .await?
+                        .ok_or("no ready task matches")?
+                } else {
+                    let task = TaskId(target.clone());
+                    submit(
+                        board,
+                        at_ms,
+                        Op::Claim {
+                            task: task.clone(),
+                            lease_ms,
+                            fence: None,
+                            cap: None,
+                        },
+                    )
+                    .await?;
+                    task
+                };
+                let claim = held(board, &task, None)?;
+                Ok((task, claim))
+            },
+        )?)
+    };
+    let Some((task, claim)) = claimed else {
+        return Ok(None);
+    };
+    let mut child = Command::new(program);
+    child
         .args(arguments)
         .env("NC_BOARD_TASK", &task.0)
         .env("NC_BOARD_CLAIM", &claim.0)
-        .env("NC_BOARD_DIR", dir)
-        .env("NC_BOARD_AS", actor)
+        .env("NC_BOARD_AS", actor);
+    match store {
+        Store::Dir(dir) => child.env("NC_BOARD_DIR", dir).env_remove("NC_BOARD_SQL"),
+        Store::Postgres(postgres) => child
+            .env("NC_BOARD_SQL", &postgres.url)
+            .env_remove("NC_BOARD_DIR"),
+    };
+    let mut child = child
         .spawn()
         .map_err(|error| format!("{program}: {error}"))?;
     let pid = child.id();
@@ -897,7 +1148,7 @@ fn running(
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
-        let renewed = locked(dir, identity, runtime, async |board| {
+        let renewed = locked(store, identity, runtime, Access::Write, async |board| {
             let op = Op::Renew {
                 task: task.clone(),
                 claim: claim.clone(),
@@ -923,7 +1174,7 @@ fn running(
     } else {
         Outcome::Failed(format!("exit {code}"))
     };
-    locked(dir, identity, runtime, async |board| {
+    locked(store, identity, runtime, Access::Write, async |board| {
         let op = Op::Finish {
             task: task.clone(),
             claim: claim.clone(),
@@ -938,7 +1189,7 @@ fn running(
 
 fn waiting(
     parsed: &Parsed,
-    dir: &Path,
+    store: &Store,
     identity: &Identity,
     runtime: &nanocode_executor::Runtime,
 ) -> Result<Option<Value>, Failure> {
@@ -952,35 +1203,26 @@ fn waiting(
         .count("poll-ms")?
         .filter(|poll| *poll > 0)
         .ok_or("--poll-ms MS is required and positive")?;
-    let deadline_ms = now_ms()?.saturating_add(timeout_ms);
     let mut after = parsed.count("after")?;
-    loop {
-        let lock = open(dir)?;
-        let pass = runtime.block_on(async {
-            let mut board = opened(dir, identity.clone()).await?;
+    pulling(
+        store,
+        identity,
+        runtime,
+        (Access::Read, timeout_ms, poll_ms),
+        async |board| {
             let from = after.unwrap_or_else(|| board.fold().next().saturating_sub(1));
             board
                 .fire_due(now_ms()?)
                 .await
                 .map_err(|error| error.to_string())?;
-            Ok::<_, Failure>((from, changes(&board, from, &filter)))
-        });
-        drop(lock);
-        let (from, found) = pass?;
-        if !found.is_empty() {
-            return Ok(Some(Value::Array(found)));
-        }
-        after = Some(from);
-        let now = now_ms()?;
-        if now >= deadline_ms {
-            return Ok(None);
-        }
-        std::thread::sleep(Duration::from_millis(poll_ms.min(deadline_ms - now)));
-    }
+            after = Some(from);
+            let found = changes(board, from, &filter);
+            Ok((!found.is_empty()).then_some(Value::Array(found)))
+        },
+    )
 }
 
 fn session(parsed: &Parsed) -> Result<Option<Value>, Failure> {
-    let dir = PathBuf::from(parsed.setting("dir", "NC_BOARD_DIR")?);
     let actor = match parsed.words[0].as_str() {
         "list" | "show" | "events" | "may" => parsed
             .setting("as", "NC_BOARD_AS")
@@ -989,25 +1231,34 @@ fn session(parsed: &Parsed) -> Result<Option<Value>, Failure> {
     };
     let identity = identity(&actor)?;
     let runtime = nanocode_executor::Runtime::new()?;
+    let store = Store::open(parsed, &runtime)?;
     match parsed.words[0].as_str() {
-        "wait" => return waiting(parsed, &dir, &identity, &runtime),
-        "run" => return running(parsed, &dir, &actor, &identity, &runtime),
+        "wait" => return waiting(parsed, &store, &identity, &runtime),
+        "run" => return running(parsed, &store, &actor, &identity, &runtime),
         "claim-next" if parsed.flags.contains_key("wait") => {
-            return pulling(parsed, &dir, &identity, &runtime);
+            let (wait_ms, poll_ms) = wait_poll(parsed)?;
+            return pulling(
+                &store,
+                &identity,
+                &runtime,
+                (Access::Write, wait_ms, poll_ms),
+                async |board| run(parsed, board).await,
+            );
         }
         _ => {}
     }
-    let lock = open(&dir)?;
-    let result = runtime.block_on(async {
-        let mut board = opened(&dir, identity).await?;
-        let reader = matches!(parsed.words[0].as_str(), "list" | "show" | "events");
+    let reader = matches!(parsed.words[0].as_str(), "list" | "show" | "events");
+    let access = if reader || matches!(parsed.words[0].as_str(), "grants" | "may") {
+        Access::Read
+    } else {
+        Access::Write
+    };
+    locked(&store, &identity, &runtime, access, async |board| {
         if reader && board.fold().access().owner().is_some() && !board.may("*", Can::Read) {
             return Err(format!("{actor} may not read this board").into());
         }
-        run(parsed, &mut board).await
-    });
-    drop(lock);
-    result
+        run(parsed, board).await
+    })
 }
 
 pub fn main() -> ExitCode {

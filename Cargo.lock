@@ -1516,7 +1516,9 @@ name = "nc-board"
 version = "0.7.0"
 dependencies = [
  "nanocode-board",
+ "nanocode-durability-core",
  "nanocode-executor",
+ "nanocode-store-sql",
  "nanocode-turnlog",
  "serde_json",
 ]

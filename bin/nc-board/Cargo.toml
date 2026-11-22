@@ -8,7 +8,7 @@ rust-version.workspace = true
 publish = false
 license = "Apache-2.0"
 repository.workspace = true
-description = "A command line over a nanocode task board kept in a local directory"
+description = "A command line over a nanocode task board kept in a local directory or on Postgres"
 
 [[bin]]
 name = "nc-board"
@@ -18,7 +18,9 @@ bench = false
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 nanocode-board.workspace = true
+nanocode-durability-core.workspace = true
 nanocode-executor.workspace = true
+nanocode-store-sql = { version = "0.7.0", path = "../../crates/integrations/store-sql" }
 nanocode-turnlog.workspace = true
 serde_json.workspace = true
 
