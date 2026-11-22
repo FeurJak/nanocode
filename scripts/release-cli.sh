@@ -106,7 +106,10 @@ lane() {
         -e CARGO_TARGET_DIR="/src/target/linux-$arch" -e RUSTC_WRAPPER= -e RUSTC_WORKSPACE_WRAPPER= -e CARGO_INCREMENTAL=0 \
         -e NANOCODE_BOLT="${NANOCODE_BOLT:-}" -e NANOCODE_NO_CACHE="${NANOCODE_NO_CACHE:-}" -e NANOCODE_RELEASE="$url" \
         "$image" scripts/release-cli.sh inside "$name" >&2
-      [ "$out" = "$root/target/release-cli" ] || cp -R "$root/target/release-cli/lanes/$name/." "$dest/"
+      if [ "$out" != "$root/target/release-cli" ]; then
+        mkdir -p "$dest"
+        cp -R "$root/target/release-cli/lanes/$name/." "$dest/"
+      fi
       ;;
     windows-x86_64 | windows-aarch64)
       triple="${name#windows-}-pc-windows-msvc"
@@ -242,6 +245,11 @@ publish() {
   gh release view nanocode-cli --repo "$repo" --json assets -q '.assets[].name' > "$staged/assets"
   missing="$(cut -d' ' -f3 "$staged/SHA256SUMS" | grep -vxF -f "$staged/assets" || true)"
   [ -z "$missing" ] || { echo "release-cli.sh: the release lacks $missing" >&2; exit 1; }
+  while read -r checksum file; do
+    case "$file" in "" | *[!a-zA-Z0-9._-]*) echo "release-cli.sh: invalid asset name" >&2; exit 1 ;; esac
+    gh release download nanocode-cli --repo "$repo" --pattern "$file" --dir "$staged"
+  done < "$staged/SHA256SUMS"
+  python3 scripts/reference-cli-guard.py "$staged" --core "$(git rev-parse HEAD)"
   gh release download nanocode-cli --repo "$repo" --pattern SHA256SUMS --output "$staged/previous" 2>/dev/null || : > "$staged/previous"
   git push -f origin "$(git rev-parse HEAD):refs/tags/nanocode-cli"
   awk -v sums="$staged/SHA256SUMS" '$0 == "sums=" { printf "sums=\047"; while ((getline line < sums) > 0) print line; print "\047"; next } 1' install > "$staged/install.sh"

@@ -11,7 +11,6 @@ import sys
 import zipfile
 
 CORE = '6ed92be87b3a2f704a7af857a2237b3fccafbb27'
-SHORT = CORE[:12]
 LANES = {'darwin-aarch64': ('aarch64-apple-darwin', 'macho', 0x100000c), 'darwin-x86_64': ('x86_64-apple-darwin', 'macho', 0x1000007), 'linux-arm64': ('aarch64-unknown-linux-gnu', 'elf', 183), 'linux-amd64': ('x86_64-unknown-linux-gnu', 'elf', 62), 'windows-x86_64': ('x86_64-pc-windows-msvc', 'pe', 0x8664), 'windows-aarch64': ('aarch64-pc-windows-msvc', 'pe', 0xaa64)}
 HEX = re.compile(r'[0-9a-fA-F]{64}\Z')
 
@@ -54,14 +53,16 @@ def architecture(data, lane, label):
     require(actual == expected, label + ': wrong architecture for ' + lane + ': ' + str(actual))
 
 
-def verify(root, attestations=False):
+def verify(root, attestations=False, core=CORE):
+    require(re.fullmatch(r'[0-9a-f]{40}', core) is not None, 'core must be a full lowercase commit SHA')
+    short = core[:12]
     require(root.is_dir(), 'staging directory not found')
     base = root / 'dist' if (root / 'dist').is_dir() else root
     errors, lanes, checksums, keys = [], {}, {}, {}
     checked = set()
     for lane, (triple, _, _) in LANES.items():
         try:
-            prefix = 'parts-' + SHORT + '-' + lane
+            prefix = 'parts-' + short + '-' + lane
             sums_path, inputs_path = base / (prefix + '.sums'), base / (prefix + '.inputs')
             require(sums_path.is_file() and inputs_path.is_file(), lane + ': missing sums/inputs')
             require(not sums_path.is_symlink() and not inputs_path.is_symlink(), lane + ': symlink manifest rejected')
@@ -93,22 +94,22 @@ def verify(root, attestations=False):
             require(bool(inputs), lane + ': empty inputs')
             names = set(sums)
             if lane.startswith('windows-'):
-                expected = 'nanocode-' + triple + '.' + SHORT + '.zip'
+                expected = 'nanocode-' + triple + '.' + short + '.zip'
                 require(names == {expected}, lane + ': unexpected/missing Windows assets')
                 require(set(inputs) == {(expected, 'nanocode.exe'), (expected, 'nanocode-python.exe')}, lane + ': missing/unexpected Windows input members')
             else:
-                stem = 'nanocode-' + triple + '.' + SHORT
+                stem = 'nanocode-' + triple + '.' + short
                 required = {stem + '.gz', stem + '.xz'}
                 python = [a for a in names if re.fullmatch(r'nanocode-python-[0-9a-f]{64}\.xz', a)]
                 require(len(python) == 1, lane + ': requires one content-addressed Python asset')
                 required.add(python[0])
                 if lane.startswith('darwin-'):
-                    required.add('nanocode-cua-driver-' + triple + '.' + SHORT + '.gz')
-                optional = {'nanocode-exec-' + triple + '.' + SHORT + ext for ext in ('.gz', '.xz')} | {'nanocode-front-' + triple + '.' + SHORT + '.gz'} if lane.startswith('linux-') else set()
+                    required.add('nanocode-cua-driver-' + triple + '.' + short + '.gz')
+                optional = {'nanocode-exec-' + triple + '.' + short + ext for ext in ('.gz', '.xz')} | {'nanocode-front-' + triple + '.' + short + '.gz'} if lane.startswith('linux-') else set()
                 require(required <= names and names <= required | optional, lane + ': missing/unexpected assets or revision')
                 required_inputs = {(stem + '.xz', None), (python[0], None)}
                 if lane.startswith('darwin-'):
-                    required_inputs.add(('nanocode-cua-driver-' + triple + '.' + SHORT + '.gz', None))
+                    required_inputs.add(('nanocode-cua-driver-' + triple + '.' + short + '.gz', None))
                 require(set(inputs) == required_inputs, lane + ': missing/unexpected input associations')
             contents = {}
             for asset, digest in sums.items():
@@ -140,7 +141,7 @@ def verify(root, attestations=False):
             for path in found:
                 require(not path.is_symlink(), lane + ': symlink attestation rejected')
                 att = json.loads(path.read_text())
-                require(att.get('core_sha') == CORE and att.get('tracked_clean') is True, lane + ': attestation revision/cleanliness mismatch')
+                require(att.get('core_sha') == core and att.get('tracked_clean') is True, lane + ': attestation revision/cleanliness mismatch')
             lanes[lane] = {'ok': True, 'archives': len(sums), 'inputs': len(inputs), 'attestations': [str(p) for p in found]}
         except Exception as e:
             errors.append(lane + ': ' + str(e))
@@ -150,22 +151,23 @@ def verify(root, attestations=False):
             if path.name.endswith(('.gz', '.xz', '.zip')) and str(path) not in checked:
                 errors.append('unverified archive: ' + str(path))
             if path.name.startswith('parts-') and path.name.endswith(('.sums', '.inputs')):
-                allowed = {'parts-' + SHORT + '-' + lane + suffix for lane in LANES for suffix in ('.sums', '.inputs')}
+                allowed = {'parts-' + short + '-' + lane + suffix for lane in LANES for suffix in ('.sums', '.inputs')}
                 if path.name not in allowed:
                     errors.append('unexpected part/revision: ' + path.name)
-    return {'ok': not errors, 'core_sha': CORE, 'short_sha': SHORT, 'validation_scope': 'archive integrity, manifest consistency, thin executable header architecture; not execution or provenance', 'lanes': lanes, 'errors': errors, 'verified_archive_paths': len(checked)}
+    return {'ok': not errors, 'core_sha': core, 'short_sha': short, 'validation_scope': 'archive integrity, manifest consistency, thin executable header architecture; not execution or provenance', 'lanes': lanes, 'errors': errors, 'verified_archive_paths': len(checked)}
 
 
 def main():
     parser = argparse.ArgumentParser(description='Read-only six-lane Nanocode CLI artifact guard; thin 64-bit executable architecture checks, not executable validity or provenance.')
     parser.add_argument('staging', type=Path)
     parser.add_argument('--require-attestations', action='store_true')
+    parser.add_argument('--core', default=CORE, help='full source commit SHA; defaults to the pinned reference revision')
     parser.add_argument('--report', type=Path)
     args = parser.parse_args()
     try:
-        report = verify(args.staging, args.require_attestations)
+        report = verify(args.staging, args.require_attestations, args.core)
     except Exception as e:
-        report = {'ok': False, 'core_sha': CORE, 'errors': [str(e)]}
+        report = {'ok': False, 'core_sha': args.core, 'errors': [str(e)]}
     output = json.dumps(report, indent=2, sort_keys=True) + '\n'
     if args.report:
         try:

@@ -21,7 +21,7 @@ for entry in reference['files']:
 spec = importlib.util.spec_from_file_location('reference_guard', root / 'scripts/reference-cli-guard.py')
 guard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guard)
-report = guard.verify(vendor, attestations=False)
+report = guard.verify(vendor, attestations=False, core=reference['core'])
 if not report['ok']:
     raise SystemExit(json.dumps(report, indent=2))
 if len(sys.argv) != 2 or sys.argv[1] not in ('verify', 'stage'):
