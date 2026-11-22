@@ -2733,6 +2733,16 @@ pub(crate) async fn run_external_with(
             }
         }
     };
+    // A sandbox's /bin/echo or /usr/bin/printf: the builtin stands in for the program.
+    if !opts.shell
+        && !opts.exec
+        && let Some(base) = crate::util::sandbox_program(vp, &name).await
+        && builtins::hash::PROGRAM_BUILTINS.contains(&base)
+        && let Some(b) = builtins::get(vp, base)
+    {
+        argv[0] = base.to_vec();
+        return builtins::call(vp, b, &argv).await;
+    }
     let program = match opts.exec && !opts.shell {
         true => vp.abs_path(program.strip_prefix(b"./").unwrap_or(&program)),
         false => program,

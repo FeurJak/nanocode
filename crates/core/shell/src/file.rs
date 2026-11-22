@@ -750,6 +750,16 @@ read p q < a; read r t < b; [ $p = $r ] && [ $q != $t ] && echo sub"#;
     }
 
     #[test]
+    fn bin_paths_name_the_programs_utilities_stand_in_for() {
+        let script = "type -t /bin/sh; type /bin/sh; command -v /bin/sh; command -V /usr/bin/cat
+/bin/echo hi; /bin/sh -c 'echo sh'; echo x | /bin/cat";
+        assert_eq!(
+            out(script),
+            "file\n/bin/sh is /bin/sh\n/bin/sh\n/usr/bin/cat is /usr/bin/cat\nhi\nsh\nx\n"
+        );
+    }
+
+    #[test]
     fn reading_a_directory() {
         assert_eq!(out("let n=1 < .; echo $n"), "1\n");
         let (stdout, stderr) = run("cat < .; echo $?");

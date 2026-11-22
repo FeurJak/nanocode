@@ -97,16 +97,27 @@ pub struct UtilPolicy {
 /// The utility that runs for `name`, if any: off switches and modes applied.
 pub(crate) async fn lookup(vp: &Vp, name: &[u8]) -> Option<&'static UtilEntry> {
     // In a sandbox, the /usr/bin path `type -P` and `command -v` give for a utility
-    // (`awk="$(type -P gawk)"; "$awk" ...`) runs it while no file is there.
-    if vp.core.utilities.sandbox
-        && let Some(base) = name.strip_prefix(b"/usr/bin/")
-        && !base.is_empty()
-        && !base.contains(&b'/')
-        && vp.host().stat(name, true).await.is_err()
-    {
+    // (`awk="$(type -P gawk)"; "$awk" ...`), or its /bin path (`/bin/sh`), runs it
+    // while no file is there.
+    if let Some(base) = sandbox_program(vp, name).await {
         return lookup_name(vp, base).await;
     }
     lookup_name(vp, name).await
+}
+
+/// In a sandbox, the utility name of a /bin or /usr/bin path with no file there
+/// (`/bin/sh` is `sh`, psh itself).
+pub(crate) async fn sandbox_program<'a>(vp: &Vp, name: &'a [u8]) -> Option<&'a [u8]> {
+    if !vp.core.utilities.sandbox {
+        return None;
+    }
+    let base = name
+        .strip_prefix(b"/usr/bin/")
+        .or_else(|| name.strip_prefix(b"/bin/"))?;
+    if base.is_empty() || base.contains(&b'/') || vp.host().stat(name, true).await.is_ok() {
+        return None;
+    }
+    Some(base)
 }
 
 async fn lookup_name(vp: &Vp, name: &[u8]) -> Option<&'static UtilEntry> {

@@ -79,7 +79,7 @@ async fn lookup(vp: &Vp, name: &[u8], o: Lookup) -> Vec<Kind> {
         if super::is_builtin(vp, name) {
             found.push(Kind::Builtin);
         }
-        if crate::util::lookup(vp, name).await.is_some() {
+        if !name.contains(&b'/') && crate::util::lookup(vp, name).await.is_some() {
             let hashed = match o.all {
                 true => None,
                 false => hash::hashed(vp, name).await,
@@ -99,7 +99,8 @@ async fn lookup(vp: &Vp, name: &[u8], o: Lookup) -> Vec<Kind> {
     }
     if name.contains(&b'/') {
         let p = vp.abs_path(name);
-        if is_executable(vp, &p).await {
+        // A sandbox's /bin/sh or /usr/bin/awk is the program its utility stands in for.
+        if is_executable(vp, &p).await || hash::stands_in_at(vp, name).await {
             found.push(Kind::File(name.to_vec(), false));
         }
         return found;

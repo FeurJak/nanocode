@@ -110,7 +110,7 @@ pub(crate) async fn hashed(vp: &Vp, name: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Builtins a real system also has as programs in /usr/bin (coreutils, procps).
-const PROGRAM_BUILTINS: &[&[u8]] = &[
+pub(crate) const PROGRAM_BUILTINS: &[&[u8]] = &[
     b"[", b"echo", b"false", b"kill", b"printf", b"pwd", b"test", b"true",
 ];
 
@@ -136,6 +136,19 @@ pub(crate) async fn stand_in(vp: &Vp, name: &[u8], path: Option<&[u8]>) -> Optio
         return None;
     }
     Some([b"/usr/bin/".as_slice(), name].concat())
+}
+
+/// Whether `path` is a sandbox's /bin or /usr/bin path for a program a utility (or
+/// psh itself, for `sh` and `bash`) stands in for, with no file there.
+pub(crate) async fn stands_in_at(vp: &Vp, path: &[u8]) -> bool {
+    match crate::util::sandbox_program(vp, path).await {
+        Some(base) => {
+            PROGRAM_BUILTINS.contains(&base)
+                || matches!(base, b"sh" | b"bash")
+                || crate::util::lookup(vp, base).await.is_some()
+        }
+        None => false,
+    }
 }
 
 pub(crate) async fn names_program(vp: &Vp, name: &[u8]) -> bool {
