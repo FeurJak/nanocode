@@ -24,6 +24,12 @@ pub struct Retain {
     /// task; a writer that must refuse one keeps its own record.
     #[serde(default)]
     pub gone: usize,
+    /// Tasks labelled key = value keep at most this many events (fewer than events, or in place of
+    /// it when that is 0), open or settled, as events does: a kind whose tasks hear many events no
+    /// reader needs once folded (a lease's renewals) holds a few of them rather than up to events
+    /// each. 0 keeps events' bound.
+    #[serde(default)]
+    pub label_events: Option<(String, String, usize)>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,7 +185,7 @@ impl Fold {
     /// Keep task's newest policy.events events: the older ones leave seen (raising their writer's
     /// minted floor, as an eviction does), and its replies and said thread keep as many.
     fn cap(&mut self, id: &TaskId) {
-        let keep = self.retention.policy.as_ref().map_or(0, |policy| policy.events);
+        let keep = self.events_kept(id);
         if keep == 0 || mutated(Mutation::EventsUncapped) {
             return;
         }
@@ -205,6 +211,26 @@ impl Fold {
         }
         if !self.mirror.holds(id) {
             self.said.trim(&id.0, keep);
+        }
+    }
+
+    /// How many events task id keeps (0: every one): policy.events, or fewer for a task with its
+    /// label_events label.
+    fn events_kept(&self, id: &TaskId) -> usize {
+        let Some(policy) = self.retention.policy.as_ref() else {
+            return 0;
+        };
+        let few = policy.label_events.as_ref().and_then(|(key, value, few)| {
+            let labelled = self
+                .tasks
+                .get(id)
+                .is_some_and(|task| task.spec.labels.get(key) == Some(value));
+            (labelled && *few > 0).then_some(*few)
+        });
+        match (policy.events, few) {
+            (0, Some(few)) => few,
+            (events, Some(few)) => events.min(few),
+            (events, None) => events,
         }
     }
 
@@ -536,6 +562,7 @@ mod tests {
             only: None,
             events: 4,
             gone: 0,
+            label_events: None,
         };
         let mut fold = board(policy, 0);
         let mut minted = 2;
@@ -562,6 +589,49 @@ mod tests {
     }
 
     #[test]
+    fn a_labelled_task_keeps_fewer_events_open_and_settled() {
+        let policy = Retain {
+            settled: 8,
+            entries: 1_000,
+            only: None,
+            events: 6,
+            gone: 0,
+            label_events: Some(("kind".to_owned(), "land".to_owned(), 3)),
+        };
+        let mut fold = board(policy, 0);
+        let mut minted = 2;
+        for id in ["job", "chat"] {
+            let kind = if id == "job" { "land" } else { "thread" };
+            assert!(write(&mut fold, &mut minted, post(id, kind)).is_ok());
+            for n in 0..20 {
+                let reply = Op::Reply {
+                    task: TaskId(id.to_owned()),
+                    body: format!("line {n}"),
+                };
+                assert!(write(&mut fold, &mut minted, reply).is_ok());
+            }
+        }
+        let replies =
+            |fold: &Fold, id: &str| fold.task(&TaskId(id.to_owned())).map(|t| t.replies.len());
+        assert_eq!(
+            replies(&fold, "job"),
+            Some(3),
+            "the labelled task keeps label_events"
+        );
+        assert_eq!(replies(&fold, "chat"), Some(6), "the rest keep events");
+        assert_eq!(fold.holding().tracked, 3 + 6);
+        assert!(write(&mut fold, &mut minted, cancel("job")).is_ok());
+        let task = fold
+            .task(&TaskId("job".to_owned()))
+            .expect("settled, not evicted");
+        assert!(task.phase.terminal());
+        assert_eq!(fold.holding().tracked, 3 + 6, "settled it still keeps 3");
+        assert_eq!(fold.minted("user:lead"), minted, "the writer's floor holds");
+        let restored = Fold::restore(&fold.snapshot()).expect("a snapshot restores");
+        assert_eq!(restored, fold);
+    }
+
+    #[test]
     fn evicts_the_oldest_settled_past_the_policy() {
         let policy = Retain {
             settled: 3,
@@ -569,6 +639,7 @@ mod tests {
             only: None,
             events: 0,
             gone: 0,
+            label_events: None,
         };
         let mut fold = board(policy, 20);
         assert_eq!(
@@ -606,6 +677,7 @@ mod tests {
                 only,
                 events: 0,
                 gone: 0,
+                label_events: None,
             },
             20,
         );
