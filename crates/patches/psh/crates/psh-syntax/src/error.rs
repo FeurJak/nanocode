@@ -22,6 +22,9 @@ pub struct ParseError {
     pub keeps_status: bool,
     pub warnings: alloc::vec::Vec<crate::Warning>,
     pub alias_text: Option<Vec<u8>>,
+    /// A syntax error in the list of a `$(…)`: bash's `-c` and `eval` text then end
+    /// the shell with status 127.
+    pub in_comsub: bool,
 }
 
 impl fmt::Display for ParseError {

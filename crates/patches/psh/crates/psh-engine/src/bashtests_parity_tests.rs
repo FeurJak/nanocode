@@ -286,3 +286,14 @@ fn a_readonly_compound_local_fails_twice() {
     assert_eq!(e.lines().count(), 2, "{e}");
     assert!(e.ends_with("local: q: readonly variable\n"), "{e}");
 }
+
+#[test]
+fn a_syntax_error_inside_a_command_substitution_reads_as_bash_5_2() {
+    let (st, _, e) = run(": $(case x in x) done esac)\n");
+    assert_eq!(
+        String::from_utf8_lossy(&e),
+        "psh: -c: line 1: syntax error near unexpected token `done'\n\
+         psh: -c: line 1: `: $(case x in x) done esac)'\n"
+    );
+    assert_eq!(st, 127);
+}

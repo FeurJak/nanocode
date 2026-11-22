@@ -97,6 +97,11 @@ pub(crate) async fn run_text(vp: &mut Vp, text: &[u8], line_base: u32, origin: O
                     msg.extend_from_slice(b"'\n");
                 }
                 vp.error_raw(&msg).await;
+                // A syntax error inside `$(…)` in eval text ends the shell with
+                // status 127 in bash.
+                if e.in_comsub && matches!(origin, Origin::Eval) {
+                    return Err(Unwind::Exit(127));
+                }
                 if e.resume.is_some() && !vp.opts.get(crate::options::SetOpt::Posix) {
                     status = 1;
                     vp.status = status;

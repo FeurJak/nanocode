@@ -1274,6 +1274,10 @@ async fn run_chunk(
             if !(e.keeps_status && vp.status != 0) {
                 vp.status = 2;
             }
+            // One inside `$(…)` ends a `-c` string with status 127 in bash.
+            if e.in_comsub && vp.opts.dash_c {
+                vp.status = 127;
+            }
             Some(vp.status)
         }
     }

@@ -602,6 +602,7 @@ impl<'a> P<'a> {
                 keeps_status: false,
                 warnings: Vec::new(),
                 alias_text: None,
+            in_comsub: false,
             });
         }
         Ok(P {
@@ -729,6 +730,7 @@ impl<'a> P<'a> {
             keeps_status: false,
             warnings: Vec::new(),
             alias_text: None,
+            in_comsub: false,
         }
     }
 
@@ -745,6 +747,7 @@ impl<'a> P<'a> {
             keeps_status: false,
             warnings: Vec::new(),
             alias_text: None,
+            in_comsub: false,
         }
     }
 
@@ -845,10 +848,10 @@ impl<'a> P<'a> {
         } else {
             &lossy
         };
-        // Inside a substitution bash names what it was looking for, unless the
-        // unexpected token is that closer itself.
+        // Inside `${ …; }` bash names what it was looking for, unless the unexpected
+        // token is that closer itself; bash 5.2 does not inside `$(…)` or `<(…)`.
         let message = match self.closer {
-            Some(c) if c != text => {
+            Some(c) if c != text && c != ")" => {
                 format!(
                     "syntax error near unexpected token `{text}' while looking for matching `{c}'"
                 )
@@ -3266,10 +3269,17 @@ impl<'a> P<'a> {
         self.closer = closer;
         self.note_subst_error(&r, start);
         self.unstash_pending(outer, r.is_ok())?;
-        let list = r?;
+        // A syntax error in the list of `$(…)` (not `<(…)`), where more input
+        // would not help.
+        let comsub = self.b.get(start) == Some(&b'$');
+        let mark = |mut e: ParseError| {
+            e.in_comsub |= comsub && !e.incomplete;
+            e
+        };
+        let list = r.map_err(mark)?;
         self.skip_blanks();
         if self.peek() != Some(b')') {
-            return Err(self.unexpected());
+            return Err(mark(self.unexpected()));
         }
         self.pos += 1;
         Ok(list)
