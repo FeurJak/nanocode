@@ -1,16 +1,17 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::OpenOptions,
     path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use nanocode_board::{
-    Board, BoardError, ClaimId, NewTask, Op, Outcome, Phase, Rejection, Task, TaskId,
+    Board, BoardError, ClaimId, Entry, NewTask, Op, Outcome, Phase, Rejection, Task, TaskId,
     access::{Can, Grant, Identity, Verifier, Who},
     tasks::{OnFail, TaskOp, Terms},
+    watch::{Filter, Kind, Plan},
 };
 use nanocode_turnlog::{FileLog, FileOptions};
 use serde_json::{Value, json};
@@ -38,6 +39,13 @@ usage: nc-board [--dir DIR] [--as ACTOR] COMMAND
   reopen ID
   cancel ID REASON
   reply ID BODY
+  label ID [--label K=V]... [--unset K]...  set and remove labels on a task, such as pr=owner/repo#12 or status=review
+  assign ID [--to ACTOR]                   keep a task for one actor; without --to, return it to anyone who may claim it
+  schedule ID --in SECS [--every SECS] [--times N] BODY  reply BODY on the task when due, and every SECS after with --every
+  events [--after SEQ] [--label K=V]... [--kind KIND]... [--under ID]  the log's changes after SEQ, each with who wrote it
+  wait --timeout SECS --poll-ms MS [--after SEQ] [--label K=V]... [--kind KIND]... [--under ID]
+                                           fire due schedules and print the changes after SEQ (default: the head when it
+                                           starts) once one matches; exits 2 when none comes before the timeout
 every command prints JSON: a task, or a list of tasks; CLAIM defaults to ACTOR's current claim on the task";
 
 type Failure = Box<dyn std::error::Error>;
@@ -116,13 +124,47 @@ impl Parsed {
     }
 
     fn lease_ms(&self) -> Result<u64, Failure> {
-        let secs = self.one("lease")?.ok_or("--lease SECS is required")?;
+        self.secs_ms("lease")?
+            .ok_or_else(|| "--lease SECS is required".into())
+    }
+
+    fn secs_ms(&self, name: &str) -> Result<Option<u64>, Failure> {
+        let Some(secs) = self.one(name)? else {
+            return Ok(None);
+        };
         let secs = secs
             .parse::<u64>()
-            .map_err(|error| format!("--lease {secs}: {error}"))?;
-        Ok(secs
-            .checked_mul(1000)
-            .ok_or("--lease overflows milliseconds")?)
+            .map_err(|error| format!("--{name} {secs}: {error}"))?;
+        Ok(Some(secs.checked_mul(1000).ok_or_else(|| {
+            format!("--{name} overflows milliseconds")
+        })?))
+    }
+
+    fn count(&self, name: &str) -> Result<Option<u64>, Failure> {
+        self.one(name)?
+            .map(|value| {
+                value
+                    .parse::<u64>()
+                    .map_err(|error| format!("--{name} {value}: {error}").into())
+            })
+            .transpose()
+    }
+
+    fn filter(&self) -> Result<Filter, Failure> {
+        let kinds = self
+            .many("kind")
+            .iter()
+            .map(|kind| {
+                serde_json::from_value::<Kind>(Value::String(kind.clone())).map_err(|_| {
+                    format!("--kind {kind} is not a change kind such as replied").into()
+                })
+            })
+            .collect::<Result<BTreeSet<_>, Failure>>()?;
+        Ok(Filter {
+            under: self.one("under")?.map(TaskId),
+            labels: self.labels()?,
+            kinds,
+        })
     }
 
     fn setting(&self, flag: &str, variable: &str) -> Result<String, Failure> {
@@ -205,6 +247,31 @@ fn render(board: &Board, id: &TaskId, task: &Task, at_ms: u64) -> Value {
         out.extend(phase);
     }
     out
+}
+
+fn author(event: &str) -> &str {
+    event
+        .split_once('#')
+        .or_else(|| event.rsplit_once('.'))
+        .map_or(event, |(by, _)| by)
+}
+
+fn changes(board: &Board, after: u64, filter: &Filter) -> Vec<Value> {
+    let tasks = board.fold().tasks();
+    board
+        .entries()
+        .filter(|entry| entry.seq > after && filter.matches(tasks, entry))
+        .map(|entry: &Entry| {
+            json!({
+                "seq": entry.seq,
+                "event": entry.event,
+                "by": author(&entry.event.0),
+                "at_ms": entry.at_ms,
+                "task": entry.task,
+                "change": entry.change,
+            })
+        })
+        .collect()
 }
 
 fn shown(board: &Board, id: &TaskId, at_ms: u64) -> Result<Value, Failure> {
@@ -497,6 +564,75 @@ async fn run(parsed: &Parsed, board: &mut Board) -> Result<Option<Value>, Failur
             .await?;
             id(&task)
         }
+        "label" => {
+            parsed.allow(&["label", "unset"])?;
+            let [task] = parsed.words()?;
+            let set = parsed.labels()?;
+            let unset = parsed.many("unset").into_iter().collect::<BTreeSet<_>>();
+            if set.is_empty() && unset.is_empty() {
+                return Err("label needs --label K=V or --unset K".into());
+            }
+            submit(
+                board,
+                at_ms,
+                Op::Relabel {
+                    task: id(&task),
+                    set,
+                    unset,
+                },
+            )
+            .await?;
+            id(&task)
+        }
+        "assign" => {
+            parsed.allow(&["to"])?;
+            let [task] = parsed.words()?;
+            submit(
+                board,
+                at_ms,
+                Op::Tasks(TaskOp::Assign {
+                    task: id(&task),
+                    to: parsed.one("to")?,
+                }),
+            )
+            .await?;
+            id(&task)
+        }
+        "schedule" => {
+            parsed.allow(&["in", "every", "times"])?;
+            let [task, body] = parsed.words()?;
+            let wait_ms = parsed.secs_ms("in")?.ok_or("--in SECS is required")?;
+            let first_ms = at_ms
+                .checked_add(wait_ms)
+                .ok_or("--in overflows the clock")?;
+            let schedule = format!("{}/{task}/{at_ms}", board.writer());
+            board
+                .schedule(
+                    at_ms,
+                    Plan {
+                        id: schedule.clone(),
+                        send: Op::Reply {
+                            task: id(&task),
+                            body,
+                        },
+                        first_ms,
+                        every_ms: parsed.secs_ms("every")?,
+                        until_ms: None,
+                        times: parsed.count("times")?,
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            return Ok(Some(
+                json!({"schedule": schedule, "task": task, "due_ms": first_ms}),
+            ));
+        }
+        "events" => {
+            parsed.allow(&["after", "label", "kind", "under"])?;
+            parsed.words::<0>()?;
+            let after = parsed.count("after")?.unwrap_or(0);
+            return Ok(Some(Value::Array(changes(board, after, &parsed.filter()?))));
+        }
         other => return Err(format!("unknown command {other}; see nc-board --help").into()),
     };
     shown(board, &written, now_ms()?).map(Some)
@@ -515,29 +651,79 @@ fn open(dir: &Path) -> Result<std::fs::File, Failure> {
     Ok(lock)
 }
 
+async fn opened(dir: &Path, identity: Identity) -> Result<Board, Failure> {
+    let host = Arc::new(FileLog::open(
+        &dir.join("board.log"),
+        FileOptions {
+            scope: SCOPE,
+            sync: true,
+        },
+    )?);
+    Board::open(host, SCOPE, identity)
+        .await
+        .map_err(|error| error.to_string().into())
+}
+
+fn waiting(
+    parsed: &Parsed,
+    dir: &Path,
+    identity: &Identity,
+    runtime: &nanocode_executor::Runtime,
+) -> Result<Option<Value>, Failure> {
+    parsed.allow(&["after", "label", "kind", "under", "timeout", "poll-ms"])?;
+    parsed.words::<0>()?;
+    let filter = parsed.filter()?;
+    let timeout_ms = parsed
+        .secs_ms("timeout")?
+        .ok_or("--timeout SECS is required")?;
+    let poll_ms = parsed
+        .count("poll-ms")?
+        .filter(|poll| *poll > 0)
+        .ok_or("--poll-ms MS is required and positive")?;
+    let deadline_ms = now_ms()?.saturating_add(timeout_ms);
+    let mut after = parsed.count("after")?;
+    loop {
+        let lock = open(dir)?;
+        let pass = runtime.block_on(async {
+            let mut board = opened(dir, identity.clone()).await?;
+            let from = after.unwrap_or_else(|| board.fold().next().saturating_sub(1));
+            board
+                .fire_due(now_ms()?)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok::<_, Failure>((from, changes(&board, from, &filter)))
+        });
+        drop(lock);
+        let (from, found) = pass?;
+        if !found.is_empty() {
+            return Ok(Some(Value::Array(found)));
+        }
+        after = Some(from);
+        let now = now_ms()?;
+        if now >= deadline_ms {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(poll_ms.min(deadline_ms - now)));
+    }
+}
+
 fn session(parsed: &Parsed) -> Result<Option<Value>, Failure> {
     let dir = PathBuf::from(parsed.setting("dir", "NC_BOARD_DIR")?);
     let actor = match parsed.words[0].as_str() {
-        "list" | "show" => parsed
+        "list" | "show" | "events" => parsed
             .setting("as", "NC_BOARD_AS")
             .unwrap_or_else(|_| "agent:reader".to_owned()),
         _ => parsed.setting("as", "NC_BOARD_AS")?,
     };
     let identity = identity(&actor)?;
-    let lock = open(&dir)?;
     let runtime = nanocode_executor::Runtime::new()?;
+    if parsed.words[0] == "wait" {
+        return waiting(parsed, &dir, &identity, &runtime);
+    }
+    let lock = open(&dir)?;
     let result = runtime.block_on(async {
-        let host = Arc::new(FileLog::open(
-            &dir.join("board.log"),
-            FileOptions {
-                scope: SCOPE,
-                sync: true,
-            },
-        )?);
-        let mut board = Board::open(host, SCOPE, identity)
-            .await
-            .map_err(|error| error.to_string())?;
-        let reader = parsed.words[0] == "list" || parsed.words[0] == "show";
+        let mut board = opened(&dir, identity).await?;
+        let reader = matches!(parsed.words[0].as_str(), "list" | "show" | "events");
         if reader && board.fold().access().owner().is_some() && !board.may("*", Can::Read) {
             return Err(format!("{actor} may not read this board").into());
         }
@@ -563,6 +749,10 @@ pub fn main() -> ExitCode {
         Ok(Some(value)) => {
             println!("{value}");
             ExitCode::SUCCESS
+        }
+        Ok(None) if parsed.words[0] == "wait" => {
+            eprintln!("nc-board: no change matched before the timeout");
+            ExitCode::from(2)
         }
         Ok(None) => {
             eprintln!("nc-board: no ready task matches");
