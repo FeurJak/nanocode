@@ -1218,17 +1218,45 @@ impl Vp {
         false
     }
 
+    /// The value of the nearest exported variable with a value that locals of the
+    /// running functions shadow.
+    fn shadowed_export(&self, name: &str) -> Option<&[u8]> {
+        for f in self.frames.iter().rev() {
+            let Some((_, old)) = f.saved.iter().find(|(n, _)| n == name) else {
+                continue;
+            };
+            match old {
+                Some(v) if matches!(v.value, Value::Unset) => continue,
+                Some(Var {
+                    value: Value::Str(s),
+                    exported: true,
+                    ..
+                }) => return Some(s),
+                _ => return None,
+            }
+        }
+        None
+    }
+
     /// The environment for an external: exported variables with values, plus
     /// `extra` (assignments in front of the command), which win.
     pub(crate) fn env(&self, extra: &[(String, Vec<u8>)]) -> Vec<(Vec<u8>, Vec<u8>)> {
         let mut env: Vec<(Vec<u8>, Vec<u8>)> = self.foreign_env.as_ref().clone();
         for (name, var) in self.vars.iter() {
             // Arrays are not exported (bash).
+            if extra.iter().any(|(n, _)| n == name) {
+                continue;
+            }
             if var.exported
                 && let Value::Str(v) = &var.value
-                && !extra.iter().any(|(n, _)| n == name)
             {
                 env.push((name.as_bytes().to_vec(), v.clone()));
+            } else if matches!(var.value, Value::Unset)
+                && let Some(v) = self.shadowed_export(name)
+            {
+                // A local without a value (`local v`) hides nothing from what the
+                // function runs: the exported variable under it shows through (bash).
+                env.push((name.as_bytes().to_vec(), v.to_vec()));
             }
         }
         for (n, v) in extra {

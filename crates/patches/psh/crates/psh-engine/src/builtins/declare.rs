@@ -535,6 +535,10 @@ declare -fx {n}
                     None => String::new(),
                 };
                 vp.error(&format!("{prefix}{msg}")).await;
+                // Under localvar_inherit bash also fails making the local itself.
+                if local && inherit_shopt(vp) {
+                    vp.error(&format!("{bname}: {msg}")).await;
+                }
                 status = 1;
             }
             Err(DeclError::Msg(msg)) => {
@@ -637,8 +641,14 @@ async fn declare_one(
     local: bool,
 ) -> Result<(), DeclError> {
     if local {
-        // A readonly variable cannot be shadowed either.
-        if vp.vars.get(name).is_some_and(|v| v.readonly) {
+        // A readonly variable cannot be shadowed either, unless it is a caller's local
+        // (bash).
+        if vp.vars.get(name).is_some_and(|v| v.readonly)
+            && !vp
+                .frames
+                .iter()
+                .any(|f| !f.builtin && f.saved.iter().any(|(n, _)| n == name))
+        {
             return Err(format!("{name}: readonly variable").into());
         }
         let k = vp.local_frame(name);
@@ -681,9 +691,14 @@ async fn declare_one(
             // A new local starts without a value and gets only the attributes given
             // now, unless -I copies the shadowed one or it shadows a temporary binding
             // of a caller (`v=t f`, `v=t eval f`), which it copies as bash does.
+            // Otherwise it keeps only the export attribute (bash).
             let start = match vp.vars.get(name) {
-                Some(v) if (o.inherit || tempenv) && !v.nameref => v.clone(),
-                _ => Var::default(),
+                Some(v) if (o.inherit || tempenv || inherit_shopt(vp)) && !v.nameref => v.clone(),
+                Some(v) => Var {
+                    exported: v.exported,
+                    ..Var::default()
+                },
+                None => Var::default(),
             };
             vp.vars.insert(name, start);
         }
@@ -914,6 +929,11 @@ async fn declare_one(
         propagate_temp(vp, &target);
     }
     Ok(())
+}
+
+/// `shopt -s localvar_inherit`: a new local starts as a copy of what it shadows.
+fn inherit_shopt(vp: &Vp) -> bool {
+    crate::options::shopt_index("localvar_inherit").is_some_and(|i| vp.opts.shopt_at(i))
 }
 
 /// `export` or `readonly` of an assignment in front of the running function

@@ -199,3 +199,13 @@ f(){ local v=x; unset v; declare -p v; }; v=t f
         "|y|\n|y|\nx=4\ndeclare -rx b=\"2\"\nunset\ndeclare -x v\n"
     );
 }
+
+#[test]
+fn new_locals_keep_the_export_attribute_and_may_shadow_a_callers_readonly() {
+    let script = r#"export E=abc
+g(){ local E; declare -p E; }; g
+aaa(){ local x=1; echo "aaa $x"; }; ddd(){ local -r x=0; aaa; }; ddd
+shopt -s localvar_inherit; s=X; f(){ local -a s; declare -p s; }; f
+"#;
+    assert_eq!(out(script), "declare -x E\naaa 1\ndeclare -a s=([0]=\"X\")\n");
+}
