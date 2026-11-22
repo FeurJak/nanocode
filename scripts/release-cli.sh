@@ -13,7 +13,6 @@ digest() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
 key() {
-  [ -z "${NANOCODE_NO_CACHE:-}" ] || return 0
   python3 scripts/input-key.py "$@" 2>/dev/null || true
 }
 remote() {
@@ -30,6 +29,7 @@ save() {
   cp "$2" "$cache/$1"
 }
 restore() {
+  [ -z "${NANOCODE_NO_CACHE:-}" ] || return 1
   [ -n "$1" ] || return 1
   if [ -f "$cache/$1" ]; then
     cp "$cache/$1" "$2"
@@ -68,8 +68,7 @@ cli() {
     save "$pkey" "$python"
   fi
   bolt="${NANOCODE_BOLT:-}"
-  nkey=
-  [ "$bolt" = 1 ] || nkey="$(key nanocode-cli "$triple" "python=$(digest "$python")")"
+  nkey="$(key nanocode-cli "$triple" "python=$(digest "$python")" "bolt=$bolt")"
   if ! restore "$nkey" "$work/nanocode$exe"; then
     built="$(NANOCODE_PYTHON="$python" scripts/build-cli.sh nanocode-cli nanocode "$triple")"
     cp "$built" "$work/nanocode$exe"
@@ -80,6 +79,8 @@ lane() {
   name=$1
   dest="$out/lanes/$name"
   case $name in linux-*) ;; *) rm -rf "$dest" && mkdir -p "$dest" ;; esac
+  export NANOCODE_NO_CACHE=1
+  case $name in linux-*) ;; *) python3 scripts/release-cli-attest.py begin "$name" "$dest" ;; esac
   case $name in
     darwin-aarch64 | darwin-x86_64)
       triple="${name#darwin-}-apple-darwin"
@@ -125,12 +126,15 @@ lane() {
       exit 1
       ;;
   esac
+  case $name in linux-*) ;; *) python3 scripts/release-cli-attest.py finish "$name" "$dest" ;; esac
 }
 inside() {
   name=$1
   dest="$out/lanes/$name"
   rm -rf "$dest"
   mkdir -p "$dest"
+  export NANOCODE_NO_CACHE=1
+  python3 scripts/release-cli-attest.py begin "$name" "$dest"
   case $name in linux-arm64) triple=aarch64-unknown-linux-gnu ;; linux-amd64) triple=x86_64-unknown-linux-gnu ;; esac
   cli "$triple" ""
   hash="$(digest "$python")"
@@ -144,6 +148,7 @@ inside() {
     cp "$work/nanocode" "$dest/nanocode-$triple"
   fi
   printf '%s %s\n' "$pkey" "nanocode-python-$hash" "$nkey" "nanocode-$triple" > "$dest/.keys"
+  python3 scripts/release-cli-attest.py finish "$name" "$dest"
   owner="$(stat -c %u:%g "$root")"
   chown -R "$owner" "$out" "$cache" "$CARGO_TARGET_DIR" 2>/dev/null || true
 }
@@ -213,6 +218,7 @@ pack_lane() {
   else
     : > "$out/dist/parts-$short-$name.inputs"
   fi
+  python3 scripts/release-cli-attest.py pack "$name" "$src" "$out/dist"
 }
 pack() {
   [ $# -gt 0 ] || set -- $all
@@ -226,7 +232,7 @@ upload() {
   [ $# -gt 0 ] || set -- $all
   for name in "$@"; do
     gh release upload nanocode-cli --repo "$repo" --clobber "$out/dist/$name"/*
-    gh release upload nanocode-cli --repo "$repo" --clobber "$out/dist/parts-$short-$name.sums" "$out/dist/parts-$short-$name.inputs"
+    gh release upload nanocode-cli --repo "$repo" --clobber "$out/dist/parts-$short-$name.sums" "$out/dist/parts-$short-$name.inputs" "$out/dist/parts-$short-$name.attestation.json"
     echo "release-cli.sh: uploaded $name for $short" >&2
   done
 }
@@ -235,7 +241,7 @@ publish() {
   rm -rf "$staged"
   mkdir -p "$staged"
   for name in $all; do
-    for part in sums inputs; do
+    for part in sums inputs attestation.json; do
       gh release download nanocode-cli --repo "$repo" --pattern "parts-$short-$name.$part" --dir "$staged" 2>/dev/null \
         || { echo "release-cli.sh: $name isn't uploaded for $short yet; run release-cli.sh ship $name on its host" >&2; exit 1; }
     done
@@ -249,14 +255,18 @@ publish() {
     case "$file" in "" | *[!a-zA-Z0-9._-]*) echo "release-cli.sh: invalid asset name" >&2; exit 1 ;; esac
     gh release download nanocode-cli --repo "$repo" --pattern "$file" --dir "$staged"
   done < "$staged/SHA256SUMS"
-  python3 scripts/reference-cli-guard.py "$staged" --core "$(git rev-parse HEAD)"
+  python3 scripts/reference-cli-guard.py "$staged" --require-attestations --core "$(git rev-parse HEAD)"
   gh release download nanocode-cli --repo "$repo" --pattern SHA256SUMS --output "$staged/previous" 2>/dev/null || : > "$staged/previous"
-  git push -f origin "$(git rev-parse HEAD):refs/tags/nanocode-cli"
+  [ -z "$(git status --porcelain --untracked-files=no)" ] || { echo "release-cli.sh: tracked source must be clean" >&2; exit 1; }
+  current="$(git rev-parse HEAD)"
+  master="$(git ls-remote origin refs/heads/master | cut -f1)"
+  [ "$current" = "$master" ] || { echo "release-cli.sh: publication requires current origin/master" >&2; exit 1; }
+  git push -f origin "$current:refs/tags/nanocode-cli"
   awk -v sums="$staged/SHA256SUMS" '$0 == "sums=" { printf "sums=\047"; while ((getline line < sums) > 0) print line; print "\047"; next } 1' install > "$staged/install.sh"
   cp install.ps1 "$staged/install.ps1"
   gh release upload nanocode-cli --repo "$repo" --clobber "$staged/SHA256SUMS" "$staged/INPUTS" "$staged/install.sh" "$staged/install.ps1"
   keep="$staged/keep"
-  { cut -d' ' -f3 "$staged/SHA256SUMS"; cut -d' ' -f3 "$staged/previous"; printf '%s\n' SHA256SUMS INPUTS install.sh install.ps1; } > "$keep"
+  { cut -d' ' -f3 "$staged/SHA256SUMS"; cut -d' ' -f3 "$staged/previous"; printf '%s\n' SHA256SUMS INPUTS install.sh install.ps1; for name in $all; do printf '%s\n' "parts-$short-$name.sums" "parts-$short-$name.inputs" "parts-$short-$name.attestation.json"; done; } > "$keep"
   grep -vxF -f "$keep" "$staged/assets" | grep -v '^nanocode-python-' | while read -r stale; do
     gh release delete-asset nanocode-cli "$stale" --repo "$repo" -y >/dev/null
   done

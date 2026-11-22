@@ -112,6 +112,7 @@ def verify(root, attestations=False, core=CORE):
                     required_inputs.add(('nanocode-cua-driver-' + triple + '.' + short + '.gz', None))
                 require(set(inputs) == required_inputs, lane + ': missing/unexpected input associations')
             contents = {}
+            binary_hashes = set()
             for asset, digest in sums.items():
                 path = assets_dir / asset
                 require(path.is_file() and not path.is_symlink() and path.resolve().is_relative_to(base.resolve()), 'missing, symlink or escaped artifact: ' + str(path))
@@ -122,13 +123,16 @@ def verify(root, attestations=False, core=CORE):
                         require(len(members) == 2 and {m.filename for m in members} == {'nanocode.exe', 'nanocode-python.exe'}, 'ZIP members must be exactly nanocode.exe,nanocode-python.exe')
                         for member in members:
                             require(not member.is_dir() and (member.external_attr >> 16) & 0xf000 != 0xa000, 'ZIP symlink/directory rejected')
-                            architecture(archive.read(member), lane, asset + ':' + member.filename)
+                            data = archive.read(member)
+                            architecture(data, lane, asset + ':' + member.filename)
+                            binary_hashes.add(sha(data))
                 else:
                     opener = lzma.open if asset.endswith('.xz') else gzip.open
                     with opener(path, 'rb') as stream:
                         data = stream.read()
                     architecture(data, lane, asset)
                     digest_plain = sha(data)
+                    binary_hashes.add(digest_plain)
                     contents[asset.rsplit('.', 1)[0]] = contents.get(asset.rsplit('.', 1)[0], digest_plain)
                     require(contents[asset.rsplit('.', 1)[0]] == digest_plain, 'gzip/xz CLI contents differ: ' + asset)
                     if asset.startswith('nanocode-python-'):
@@ -142,6 +146,12 @@ def verify(root, attestations=False, core=CORE):
                 require(not path.is_symlink(), lane + ': symlink attestation rejected')
                 att = json.loads(path.read_text())
                 require(att.get('core_sha') == core and att.get('tracked_clean') is True, lane + ': attestation revision/cleanliness mismatch')
+                require(att.get('schema') == 1 and att.get('lane') == lane, lane + ': attestation schema/lane mismatch')
+                require(att.get('binary_cache_restore') is False and bool(att.get('toolchains', {}).get('rustc')) and bool(att.get('toolchains', {}).get('cargo')), lane + ': build/toolchain receipt required')
+                require(att.get('manifests') == {p.name: filehash(p) for p in (sums_path, inputs_path)}, lane + ': attestation manifest mismatch')
+                binaries = att.get('binaries', {})
+                require(isinstance(binaries, dict) and bool(binaries) and all(isinstance(h, str) and HEX.fullmatch(h) for h in binaries.values()), lane + ': invalid attested binaries')
+                require(set(binaries.values()) == binary_hashes, lane + ': attestation binary hash mismatch')
             lanes[lane] = {'ok': True, 'archives': len(sums), 'inputs': len(inputs), 'attestations': [str(p) for p in found]}
         except Exception as e:
             errors.append(lane + ': ' + str(e))
