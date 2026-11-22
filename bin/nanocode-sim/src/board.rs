@@ -1887,6 +1887,7 @@ fn retains(seed: u64, rows: &[(u64, String)]) -> Result<u64, String> {
         only: None,
         events: rng.below(4) as usize,
         gone: rng.below(3) as usize,
+        label_events: None,
     };
     // Fold row by row, and at every cut restore the fold from its own compact snapshot: a restore
     // must give back exactly the fold that wrote it, retention bookkeeping included, or the restored
