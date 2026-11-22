@@ -30,7 +30,9 @@
 //! at the first fenced write and counts them as fenced.
 //! Prints one METRIC line: claims/s over the whole claim phase and over its first 90% (before the
 //! tail where only some partitions still have tasks), claim latency, Postgres transactions per
-//! claim, board writes per log append and log appends per Postgres commit.
+//! claim, board writes per log append and log appends per Postgres commit. checkpoint_every (0, the
+//! default: none) turns fold checkpoints on at that cadence, as nanocode_board::checkpoint's
+//! checkpoint_every does.
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -212,6 +214,7 @@ struct Options {
     start_ms: u64,
     adopt: Option<u32>,
     adopt_ms: u64,
+    checkpoint_every: u64,
 }
 
 impl Options {
@@ -246,6 +249,7 @@ impl Options {
             "start_ms",
             "adopt",
             "adopt_ms",
+            "checkpoint_every",
         ];
         if let Some(key) = values.keys().find(|key| !known.contains(&key.as_str())) {
             return Err(format!("unknown option {key}"));
@@ -290,6 +294,7 @@ impl Options {
             start_ms: get("start_ms", 0) as u64,
             adopt,
             adopt_ms: get("adopt_ms", 0) as u64,
+            checkpoint_every: get("checkpoint_every", 0) as u64,
         })
     }
 }
@@ -757,6 +762,7 @@ fn main() -> std::process::ExitCode {
     ) else {
         return fail("parts and log_parts must be at least 1");
     };
+    nanocode_board::checkpoint::checkpoint_every(options.checkpoint_every);
     let Ok(runtime) = nanocode_executor::Builder::new_multi_thread()
         .worker_threads(options.threads)
         .build()
