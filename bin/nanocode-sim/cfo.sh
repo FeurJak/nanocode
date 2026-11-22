@@ -352,6 +352,12 @@ default_table='
 1 canary_plog_snapshot_skipped canary:50 --scenario plog --mutation snapshot_skipped
 1 canary_plog_prune_ignores_cursors canary:400 --scenario plog --mutation prune_ignores_cursors
 1 canary_plog_lost_ack_rejected canary:100 --scenario plog --mutation lost_ack_rejected
+8 wakes pass --scenario wakes
+2 wakes_twice pass --scenario wakes --twice
+1 canary_wakes_fired_apart canary:100 --scenario wakes --mutation fired_apart
+1 canary_wakes_snapshot_drops_wakes canary:50 --scenario wakes --mutation snapshot_drops_wakes
+1 canary_wakes_index_skips_hear canary:100 --scenario wakes --mutation index_skips_hear
+1 canary_wakes_unbounded canary:100 --scenario wakes --mutation unbounded
 8 imports pass --scenario imports
 2 imports_twice pass --scenario imports --twice
 1 canary_imports_held_skips_commit canary:100 --scenario imports --mutation held_skips_commit

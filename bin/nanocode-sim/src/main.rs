@@ -62,6 +62,7 @@ mod tasks;
 mod tidy;
 mod turnlog;
 mod turns;
+mod wakes;
 mod websocket;
 mod whole;
 mod workload;
@@ -114,6 +115,7 @@ use crate::{
     sync::{SyncMutation, SyncStats},
     tasks::{TasksMutation, TasksStats},
     turns::{Invariant, PolicyKind, TurnMutation, TurnOptions, TurnStats},
+    wakes::{WakesMutation, WakesStats},
     websocket::{WebSocketMutation, WebSocketStats},
     whole::{ChildMode, StoreKind, WholeOptions, WholeStats, WireKind},
     workspacecrash::{WorkspaceCrashMutation, WorkspaceCrashStats},
@@ -152,6 +154,7 @@ enum Scenario {
     Controlplane,
     Cost,
     Plog,
+    Wakes,
     Imports,
     BoardShards,
     HandRouter,
@@ -205,6 +208,7 @@ struct Args {
     controlplane: ControlplaneMutation,
     cost: CostMutation,
     plog: PlogMutation,
+    wakes: WakesMutation,
     imports: ImportsMutation,
     board_shards: ShardsMutation,
     hand_router: HandRouterMutation,
@@ -240,7 +244,7 @@ type Caught = BTreeMap<Invariant, (u64, u64, (u64, u64))>;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|inbox_stress|capture|executor|dns|board|board_shards|controlplane|cost|plog|imports|hand_router|workspace_host|board_sync|dispatcher|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|workspace_crash|live|partitions|scale|gc_unwind|interp_drop|holds] [--ops N] [--twice] [--seed-lines] [--jobs N] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
+        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|inbox_stress|capture|executor|dns|board|board_shards|controlplane|cost|plog|wakes|imports|hand_router|workspace_host|board_sync|dispatcher|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|workspace_crash|live|partitions|scale|gc_unwind|interp_drop|holds] [--ops N] [--twice] [--seed-lines] [--jobs N] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
        websocket: [--mutation {}]
        http_server: [--mutation {}]
        alloc: [--mutation overstate_size|forget_free|scribble]
@@ -258,6 +262,7 @@ fn usage() -> ExitCode {
        board: [--mutation {}]
        cost: [--mutation {}]
        plog: [--mutation {}]
+       wakes: [--mutation {}]
        imports: [--mutation {}]
        board_shards: [--mutation {}] | --board-shards-bench [RTT_US [ROW_US [BATCH [PARTITIONS [WRITERS]]]]]
        hand_router: [--mutation {}]
@@ -295,6 +300,7 @@ fn usage() -> ExitCode {
         BoardMutation::names(),
         CostMutation::names(),
         plog::names(),
+        wakes::names(),
         imports::names(),
         ShardsMutation::names(),
         HandRouterMutation::names(),
@@ -374,6 +380,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
     let mut controlplane = ControlplaneMutation::None;
     let mut cost = CostMutation::None;
     let mut plog = PlogMutation::None;
+    let mut wakes = WakesMutation::None;
     let mut imports = ImportsMutation::None;
     let mut board_shards = ShardsMutation::None;
     let mut hand_router = HandRouterMutation::None;
@@ -472,6 +479,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
                     "controlplane" => Scenario::Controlplane,
                     "cost" => Scenario::Cost,
                     "plog" => Scenario::Plog,
+                    "wakes" => Scenario::Wakes,
                     "imports" => Scenario::Imports,
                     "board_shards" => Scenario::BoardShards,
                     "hand_router" => Scenario::HandRouter,
@@ -544,6 +552,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         }
         (Scenario::Cost, Some(name)) => cost = CostMutation::parse(name)?,
         (Scenario::Plog, Some(name)) => plog = PlogMutation::parse(name)?,
+        (Scenario::Wakes, Some(name)) => wakes = WakesMutation::parse(name)?,
         (Scenario::Imports, Some(name)) => imports = ImportsMutation::parse(name)?,
         (Scenario::BoardShards, Some(name)) => board_shards = ShardsMutation::parse(name)?,
         (Scenario::HandRouter, Some(name)) => hand_router = HandRouterMutation::parse(name)?,
@@ -625,6 +634,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         controlplane,
         cost,
         plog,
+        wakes,
         imports,
         board_shards,
         hand_router,
@@ -735,6 +745,9 @@ fn scenario_replay(seed: u64, args: &Args) -> String {
     }
     if args.scenario == Scenario::Plog {
         return plog::replay(seed, args.plog);
+    }
+    if args.scenario == Scenario::Wakes {
+        return wakes::replay(seed, args.wakes);
     }
     if args.scenario == Scenario::Imports {
         return imports::replay(seed, args.imports);
@@ -1134,6 +1147,7 @@ fn mutations() -> ExitCode {
     add("controlplane", ControlplaneMutation::names());
     add("cost", CostMutation::names());
     add("plog", plog::names());
+    add("wakes", wakes::names());
     add("imports", imports::names());
     add("board_shards", ShardsMutation::names());
     add("hand_router", HandRouterMutation::names());
@@ -1210,6 +1224,7 @@ struct Totals {
     controlplane_totals: ControlplaneStats,
     cost_totals: CostStats,
     plog_totals: PlogStats,
+    wakes_totals: WakesStats,
     imports_totals: ImportsStats,
     shards_totals: ShardsStats,
     hand_router_totals: HandRouterStats,
@@ -1263,6 +1278,7 @@ impl Totals {
         self.controlplane_totals.add(&other.controlplane_totals);
         self.cost_totals.add(&other.cost_totals);
         self.plog_totals.add(&other.plog_totals);
+        self.wakes_totals.add(&other.wakes_totals);
         self.imports_totals.add(&other.imports_totals);
         self.shards_totals.add(&other.shards_totals);
         self.hand_router_totals.add(&other.hand_router_totals);
@@ -1429,6 +1445,13 @@ fn judge_one(seed: u64, args: &Args, totals: &mut Totals, caught: &mut Caught) -
             args.twice,
             args.options.verbose,
             &mut totals.plog_totals,
+        ),
+        Scenario::Wakes => wakes::judge(
+            seed,
+            args.wakes,
+            args.twice,
+            args.options.verbose,
+            &mut totals.wakes_totals,
         ),
         Scenario::Imports => imports::judge(
             seed,
@@ -1754,6 +1777,7 @@ fn main() -> ExitCode {
             && args.controlplane != ControlplaneMutation::None)
         || (args.scenario == Scenario::Cost && args.cost != CostMutation::None)
         || (args.scenario == Scenario::Plog && args.plog != PlogMutation::None)
+        || (args.scenario == Scenario::Wakes && args.wakes != WakesMutation::None)
         || (args.scenario == Scenario::Imports && args.imports != ImportsMutation::None)
         || (args.scenario == Scenario::BoardShards && args.board_shards != ShardsMutation::None)
         || (args.scenario == Scenario::HandRouter && args.hand_router != HandRouterMutation::None)
@@ -1848,6 +1872,7 @@ fn main() -> ExitCode {
         controlplane_totals,
         cost_totals,
         plog_totals,
+        wakes_totals,
         imports_totals,
         shards_totals,
         hand_router_totals,
@@ -1980,6 +2005,16 @@ fn main() -> ExitCode {
             args.twice,
             args.plog,
             &plog_totals,
+        );
+    }
+    if args.scenario == Scenario::Wakes {
+        return wakes::report(
+            &args.seeds,
+            passed,
+            failed,
+            args.twice,
+            args.wakes,
+            &wakes_totals,
         );
     }
     if args.scenario == Scenario::Imports {

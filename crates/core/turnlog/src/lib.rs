@@ -10,6 +10,8 @@ pub mod parted;
 mod patch;
 mod record;
 pub mod sim;
+mod wake;
+mod wake_index;
 mod writer;
 
 pub use effect::{EffectClass, Effects};
@@ -23,4 +25,6 @@ pub use host::{
 };
 pub use image::{FileIo, Header, Image, ImageOptions, Medium};
 pub use record::{Outcome, Record, Status, decode, encode};
+pub use wake::{ArmedWake, Trigger, Unfit, Wake, Wakes, sim as wake_sim};
+pub use wake_index::{Statements, WakeIndex, WakeRider, WakeSummary};
 pub use writer::{EVENT_GAP, Follower, Lease, Point, Row, Stats, TurnLog, rows};
