@@ -308,3 +308,9 @@ fn end_of_input_diagnostics_read_as_bash_5_2() {
          psh: -c: line 4: syntax error: unexpected end of file\n"
     );
 }
+
+#[test]
+fn a_command_s_line_counts_continuations_its_second_word_ends_with() {
+    let (_, _, e) = run("nosuch a\\\n  foo\n");
+    assert_eq!(String::from_utf8_lossy(&e), "psh: line 2: nosuch: command not found\n");
+}

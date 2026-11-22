@@ -2111,9 +2111,24 @@ pub(crate) fn simple_line(code: &Code, cmd: &Command, s: &SimpleCommand) -> u32 
         .chain(cmd.redirects.iter().map(|r| (r.span, true)))
         .collect();
     elems.sort_by_key(|(sp, _)| sp.start);
+    // A token ends after the line continuations that follow it, which reading it
+    // consumed (`recho $(echo a)\<newline>   foo` is line 2).
+    let end_line = |end: u32| {
+        let src = code.ast.source_bytes();
+        let mut e = end as usize;
+        while src.get(e..e + 2) == Some(b"\\\n") {
+            e += 2;
+        }
+        // The span may hold them already.
+        let held = e >= 2 && src.get(e - 2..e) == Some(b"\\\n");
+        match e > end as usize || held {
+            true => code.line(e as u32),
+            false => code.line(end - 1),
+        }
+    };
     match (elems.first(), elems.get(1)) {
         (_, Some((sp, true))) => code.line(sp.start),
-        (_, Some((sp, false))) if sp.end > sp.start => code.line(sp.end - 1),
+        (_, Some((sp, false))) if sp.end > sp.start => end_line(sp.end),
         (Some((sp, _)), _) if sp.end > sp.start => code.line(sp.end - 1),
         _ => code.line(cmd.span.start),
     }
