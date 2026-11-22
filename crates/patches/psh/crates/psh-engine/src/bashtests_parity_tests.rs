@@ -314,3 +314,9 @@ fn a_command_s_line_counts_continuations_its_second_word_ends_with() {
     let (_, _, e) = run("nosuch a\\\n  foo\n");
     assert_eq!(String::from_utf8_lossy(&e), "psh: line 2: nosuch: command not found\n");
 }
+
+#[test]
+fn entering_a_traced_function_runs_the_debug_trap_at_its_definition_line() {
+    let script = "set -T\ntrap 'echo \"d $LINENO\"' DEBUG\nf() {\n  :\n}\nf\ntrap - DEBUG\n";
+    assert_eq!(out(script), "d 6\nd 3\nd 4\nd 7\n");
+}

@@ -1846,9 +1846,13 @@ pub(crate) async fn call_function(
         .any(|n| n.as_bytes() == argv0.as_slice());
     let err_before = vp.traps.live() && vp.traps.action(TrapKey::Err).is_some();
     let hidden = trap::enter_function(vp, traced);
+    // The DEBUG trap on entry and the RETURN trap see the line the function was
+    // defined on as LINENO (bash).
+    let def_line = f.code.line(f.code.ast.cmd(f.def).span.start);
     let entered = match vp.traps.action(TrapKey::Debug) {
         Some(a) if !a.is_empty() && !vp.in_debug_trap => {
             let line = vp.line;
+            vp.line = def_line;
             let st = vp.status;
             vp.in_debug_trap = true;
             let r = trap::run_action_status(vp, TrapKey::Debug, &a, st).await;
@@ -1862,6 +1866,9 @@ pub(crate) async fn call_function(
         Ok(()) => run_command(vp, &f.code, f.body).await,
         Err(u) => Err(u),
     };
+    if vp.traps.live() {
+        vp.line = def_line;
+    }
     if let Some(t) = function_return(vp, &r, hidden)
         && let Err(u) = t.await
     {
