@@ -45,6 +45,7 @@ const STORED_MARK: &str = "$nanocode_stored";
 pub struct Policy {
     pub effects: Effects,
     pub max_row_bytes: Option<usize>,
+    pub max_tail_bytes: Option<usize>,
     pub restarts: u64,
     pub retain_finished: Option<usize>,
     pub retired_max: Option<usize>,
@@ -300,6 +301,7 @@ impl OneLog {
         let log = log
             .retain_finished(policy.retain_finished)
             .row_limit(policy.max_row_bytes)
+            .max_tail_bytes(policy.max_tail_bytes)
             .snapshot_ratio(policy.snapshot_ratio)
             .snapshot_rows(policy.snapshot_rows);
         log.lease().await.retire_finished();
@@ -1833,3 +1835,7 @@ impl StateStore for OneLogStore {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "one_log_tail_tests.rs"]
+mod tail_tests;

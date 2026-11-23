@@ -275,6 +275,7 @@ async fn open(disk: &Arc<Disk>, wire: &Arc<Wire>, host: &Arc<Host>) -> Result<Pr
     let policy = nanocode::turnlog::Policy {
         effects: nanocode::turnlog::Effects::default(),
         max_row_bytes: None,
+        max_tail_bytes: None,
         restarts: u64::MAX,
         retain_finished: None,
         retired_max: None,

@@ -822,6 +822,7 @@ pub struct Follower {
     state: usize,
     stats: Stats,
     tail: usize,
+    tail_plain: usize,
 }
 
 impl Follower {
@@ -929,6 +930,7 @@ impl Follower {
                 self.snapshot_row = Some(row.seq);
                 self.state = row.plain.len();
                 self.tail = 0;
+                self.tail_plain = 0;
             } else {
                 if row.boundary {
                     let keep = row
@@ -943,6 +945,7 @@ impl Follower {
                     self.history.clear();
                 }
                 self.tail += row.bytes;
+                self.tail_plain += row.plain.len();
             }
             if extensible
                 .as_ref()
@@ -994,6 +997,7 @@ impl Follower {
             state,
             mut stats,
             tail,
+            tail_plain,
             ..
         } = self;
         for owner in fold.forgetting() {
@@ -1005,6 +1009,7 @@ impl Follower {
         Ok(TurnLog {
             host,
             limit: None,
+            max_tail: None,
             ratio: 2,
             retain: None,
             riding,
@@ -1030,6 +1035,7 @@ impl Follower {
                 stats,
                 stream: None,
                 tail,
+                tail_plain,
                 tail_row,
                 tail_rows,
                 tails: BTreeMap::new(),
@@ -1064,6 +1070,7 @@ struct Writer {
     stats: Stats,
     stream: Option<Stream>,
     tail: usize,
+    tail_plain: usize,
     tail_row: Option<TailRow>,
     tail_rows: usize,
     tails: BTreeMap<String, u64>,
@@ -1073,6 +1080,7 @@ struct Writer {
 pub struct TurnLog {
     host: Arc<dyn LogHost>,
     limit: Option<usize>,
+    max_tail: Option<usize>,
     ratio: usize,
     retain: Option<usize>,
     riding: mpsc::UnboundedSender<Riding>,
@@ -1085,6 +1093,7 @@ pub struct TurnLog {
 pub struct Lease<'a> {
     host: &'a dyn LogHost,
     limit: Option<usize>,
+    max_tail: Option<usize>,
     ratio: usize,
     retain: Option<usize>,
     rows: Option<usize>,
@@ -1122,6 +1131,7 @@ impl TurnLog {
             state: 0,
             stats: Stats::default(),
             tail: 0,
+            tail_plain: 0,
         };
         follower.take(stored)?;
         Ok(follower)
@@ -1142,6 +1152,12 @@ impl TurnLog {
     #[must_use]
     pub const fn snapshot_rows(mut self, rows: Option<usize>) -> Self {
         self.rows = rows;
+        self
+    }
+
+    #[must_use]
+    pub const fn max_tail_bytes(mut self, max: Option<usize>) -> Self {
+        self.max_tail = max;
         self
     }
 
@@ -1182,6 +1198,7 @@ impl TurnLog {
         Lease {
             host: &*self.host,
             limit: self.limit,
+            max_tail: self.max_tail,
             ratio: self.ratio,
             retain: self.retain,
             rows: self.rows,
@@ -1541,7 +1558,10 @@ impl Lease<'_> {
         }
         let mut snapshot = None;
         let due = self.rows.is_some_and(|rows| writer.tail_rows >= rows);
-        if due || writer.tail + body.len() >= writer.check {
+        let bound = self
+            .max_tail
+            .is_some_and(|max| writer.tail_plain + plain.len() >= max);
+        if due || bound || writer.tail + body.len() >= writer.check {
             for owner in writer.fold.forgetting() {
                 warm(
                     self.host,
@@ -1569,7 +1589,7 @@ impl Lease<'_> {
                 writer.stats.index_loads += 1;
             }
             writer.stats.collected += writer.fold.collect(&writer.collectable) as u64;
-            let level = if due {
+            let level = if due || bound {
                 codec::FAST_LEVEL
             } else {
                 codec::DEFAULT_LEVEL
@@ -1625,6 +1645,7 @@ impl Lease<'_> {
             let size = packed.packed.len() - inline.min(packed.packed.len()) + rewrite;
             let tail = writer.tail + body.len();
             if due
+                || bound
                 || (writer.snapshot + writer.tail > self.ratio * size
                     && tail >= self.ratio * rewrite)
             {
@@ -1884,6 +1905,7 @@ impl Lease<'_> {
                 writer.snapshot = bytes + part.rewrite;
                 writer.check = bytes + part.rewrite;
                 writer.tail = 0;
+                writer.tail_plain = 0;
                 writer.tail_rows = stored.len() - 1;
                 writer.tried = None;
                 writer.stream = Some(stream);
@@ -1903,6 +1925,7 @@ impl Lease<'_> {
                     .history
                     .extend(if boundary.is_some() { &plain } else { &framed });
                 writer.tail += added;
+                writer.tail_plain += plain.len();
                 writer.tail_rows += stored.len();
                 writer.stats.row_bytes += added as u64;
             }
