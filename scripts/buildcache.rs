@@ -814,6 +814,10 @@ fn stable(cache: &Path, directory: &Path) -> Option<PathBuf> {
                     (true, Some(content)) => fs::write(staging.join(name), content)?,
                     (true, None) => clone(&directory.join(relative), &staging.join(name))?,
                 }
+                if *is_file {
+                    let time = fs::metadata(directory.join(relative))?.modified()?;
+                    fs::File::open(staging.join(name))?.set_modified(time)?;
+                }
             }
             Ok(())
         })();
