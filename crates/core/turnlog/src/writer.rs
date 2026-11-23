@@ -1115,6 +1115,15 @@ impl Follower {
     }
 }
 
+impl Writer {
+    fn live(&self) -> Result<(), StoreError> {
+        if self.fenced && !crate::sim::mutated(crate::sim::Mutation::FencedServesReads) {
+            return Err(StoreError::Fenced);
+        }
+        Ok(())
+    }
+}
+
 struct Riding {
     host: usize,
     statements: Vec<(&'static str, Vec<String>)>,
@@ -1282,6 +1291,7 @@ impl TurnLog {
     pub async fn load_owner(&self, owner: &str) -> Result<(), StoreError> {
         let mut writer = self.writer.acquire().await;
         let writer = &mut *writer;
+        writer.live()?;
         warm_state(
             &*self.host,
             &self.scope,
@@ -1295,6 +1305,7 @@ impl TurnLog {
     pub async fn load_index(&self) -> Result<(), StoreError> {
         let mut writer = self.writer.acquire().await;
         let writer = &mut *writer;
+        writer.live()?;
         root(
             &*self.host,
             &self.scope,
@@ -1317,9 +1328,7 @@ impl TurnLog {
     ) -> Result<R, StoreError> {
         let mut writer = self.writer.acquire().await;
         let writer = &mut *writer;
-        if writer.fenced {
-            return Err(StoreError::Fenced);
-        }
+        writer.live()?;
         for owner in owners {
             warm(
                 &*self.host,
@@ -1340,6 +1349,7 @@ impl TurnLog {
     ) -> Result<R, StoreError> {
         let mut writer = self.writer.acquire().await;
         let writer = &mut *writer;
+        writer.live()?;
         warm_state(
             &*self.host,
             &self.scope,
@@ -1361,6 +1371,7 @@ impl TurnLog {
         mut take: impl FnMut(&Event) -> bool,
     ) -> Result<(), StoreError> {
         let mut writer = self.writer.acquire().await;
+        writer.live()?;
         let unsealed = writer.fold.unsealed();
         let end = match unsealed {
             Some(_) => writer.next,
@@ -1404,6 +1415,7 @@ impl Lease<'_> {
         mut take: impl FnMut(&Event) -> bool,
     ) -> Result<(), StoreError> {
         let writer = &mut *self.writer;
+        writer.live()?;
         if let Some(segment) = writer.fold.unsealed()
             && !scan(
                 self.host,
@@ -1432,6 +1444,7 @@ impl Lease<'_> {
 
     pub async fn load_owners(&mut self, owners: &[String]) -> Result<(), StoreError> {
         let writer = &mut *self.writer;
+        writer.live()?;
         for owner in owners {
             warm(
                 self.host,
@@ -1448,6 +1461,7 @@ impl Lease<'_> {
 
     pub async fn load_owner(&mut self, owner: &str) -> Result<(), StoreError> {
         let writer = &mut *self.writer;
+        writer.live()?;
         warm_state(
             self.host,
             self.scope,
@@ -1563,9 +1577,7 @@ impl Lease<'_> {
         rider: Option<Rider<'_>>,
     ) -> Result<(u64, bool), StoreError> {
         let writer = &mut *self.writer;
-        if writer.fenced {
-            return Err(StoreError::Fenced);
-        }
+        writer.live()?;
         let revived = writer.fold.revive(&writer.buffer);
         writer.buffer.extend(revived);
         let seq = writer.next;

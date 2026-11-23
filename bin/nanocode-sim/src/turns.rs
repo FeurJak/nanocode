@@ -70,6 +70,7 @@ pub enum TurnMutation {
     OpenDropsJournals,
     PartReadUnloaded,
     PlacedInline,
+    FencedServesReads,
     RecoverySkipsClientless,
     ResumeRedispatchesRunning,
     RetireSkipped,
@@ -86,7 +87,7 @@ pub enum TurnMutation {
 }
 
 impl TurnMutation {
-    const ALL: [Self; 29] = [
+    const ALL: [Self; 30] = [
         Self::None,
         Self::AckBufferedAdmission,
         Self::AckBufferedResult,
@@ -103,6 +104,7 @@ impl TurnMutation {
         Self::OpenDropsJournals,
         Self::PartReadUnloaded,
         Self::PlacedInline,
+        Self::FencedServesReads,
         Self::RecoverySkipsClientless,
         Self::ResumeRedispatchesRunning,
         Self::RetireSkipped,
@@ -142,6 +144,7 @@ impl TurnMutation {
             Self::OpenDropsJournals => "open_drops_journals",
             Self::PartReadUnloaded => "part_read_unloaded",
             Self::PlacedInline => "placed_inline",
+            Self::FencedServesReads => "fenced_serves_reads",
             Self::RecoverySkipsClientless => "recovery_skips_clientless",
             Self::ResumeRedispatchesRunning => "resume_redispatches_running",
             Self::RetireSkipped => "retire_skipped",
@@ -1227,6 +1230,7 @@ impl Sim {
         }
         nanocode_turnlog::sim::mutate(match self.options.mutation {
             TurnMutation::PlacedInline => nanocode_turnlog::sim::Mutation::PlacedInline,
+            TurnMutation::FencedServesReads => nanocode_turnlog::sim::Mutation::FencedServesReads,
             _ => nanocode_turnlog::sim::Mutation::None,
         });
         let policy: Box<dyn TurnDurability> = match self.options.policy {

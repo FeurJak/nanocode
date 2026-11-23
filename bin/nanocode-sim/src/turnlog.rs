@@ -765,6 +765,11 @@ impl TurnLogPolicy {
             matches!(fenced, Err(StoreError::Fenced)),
             "{scope} accepts a commit from its stale writer after a takeover at commit {seq}: {fenced:?}"
         );
+        let served = ready(stale.read_owner(scope, |_| ()));
+        assert!(
+            matches!(served, Err(StoreError::Fenced)),
+            "{scope} serves a read from its fenced writer after a takeover at commit {seq}: {served:?}"
+        );
         let cold = refused(ready(TurnLog::open(Arc::clone(&self.host), scope)));
         let read = |fold: &Fold| {
             (
