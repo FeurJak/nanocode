@@ -187,6 +187,11 @@ impl SequenceLog {
     }
 
     #[must_use]
+    pub fn floor(&self) -> usize {
+        self.skipped(0)
+    }
+
+    #[must_use]
     pub fn held(&self) -> usize {
         self.levels.iter().map(Vec::len).sum()
     }
@@ -413,6 +418,104 @@ pub async fn sequence_references(
     };
     for reference in &references {
         keys.insert(reference.key().to_owned());
+    }
+    Ok(references)
+}
+
+pub async fn load_sequence_from<T: DeserializeOwned>(
+    reader: PayloadReader<'_>,
+    sequence: Sequence,
+    from: usize,
+    keys: &mut HashSet<String>,
+) -> Result<Vec<T>> {
+    let references = sequence_references_from(reader, sequence, from, keys).await?;
+    if references.is_empty() {
+        return Ok(Vec::new());
+    }
+    reader
+        .load_payloads(references)
+        .await?
+        .into_iter()
+        .map(|payload| payload.decode())
+        .collect()
+}
+
+pub async fn sequence_references_from(
+    reader: PayloadReader<'_>,
+    sequence: Sequence,
+    from: usize,
+    keys: &mut HashSet<String>,
+) -> Result<Vec<EncodedPayload>> {
+    let references = match sequence.tail {
+        Some(Tail::Sealed(sealed)) if from > 0 => suffix(reader, sealed, from, keys).await?,
+        tail => {
+            let mut references = sequence_references(reader, Sequence { tail }, keys).await?;
+            if from > references.len() {
+                return Err(crate::Error::InvalidState(format!(
+                    "a sequence of {} entries cannot skip its first {from}",
+                    references.len()
+                )));
+            }
+            references.drain(..from);
+            return Ok(references);
+        }
+    };
+    for reference in &references {
+        keys.insert(reference.key().to_owned());
+    }
+    Ok(references)
+}
+
+async fn suffix(
+    reader: PayloadReader<'_>,
+    sealed: Sealed,
+    from: usize,
+    keys: &mut HashSet<String>,
+) -> Result<Vec<EncodedPayload>> {
+    let total = sealed.counts()[0];
+    if from > total {
+        return Err(crate::Error::InvalidState(format!(
+            "a sequence of {total} entries cannot skip its first {from}"
+        )));
+    }
+    let mut pending = sealed
+        .items
+        .into_iter()
+        .rev()
+        .map(|item| (item, 1))
+        .collect::<Vec<_>>();
+    for (level, groups) in sealed.levels.into_iter().enumerate() {
+        let span = GROUP.pow(u32::try_from(level + 1).expect("a sequence has few levels"));
+        pending.extend(groups.into_iter().rev().map(|group| (group, span)));
+    }
+    let mut offset = 0;
+    let mut references = Vec::with_capacity(total - from);
+    while let Some((entry, span)) = pending.pop() {
+        if offset + span <= from {
+            offset += span;
+            continue;
+        }
+        if span == 1 {
+            references.push(entry);
+            offset += 1;
+            continue;
+        }
+        keys.insert(entry.key().to_owned());
+        let group = reader.load_payload(entry).await?.decode::<Group>()?;
+        if group.entries.len() != GROUP {
+            return Err(crate::Error::InvalidState(format!(
+                "a sealed sequence group holds {} entries, not {GROUP}",
+                group.entries.len()
+            )));
+        }
+        let child = span / GROUP;
+        pending.extend(group.entries.into_iter().rev().map(|entry| (entry, child)));
+    }
+    if references.len() != total - from {
+        return Err(crate::Error::InvalidState(format!(
+            "a sequence of {total} entries held {} after skipping its first {from}",
+            references.len() + from
+        )));
     }
     Ok(references)
 }

@@ -1122,6 +1122,8 @@ const PAGED_VERSION: u32 = 4;
 struct PagedConversation {
     messages: Sequence,
     code_calls: Sequence,
+    #[serde(skip_serializing_if = "unskipped")]
+    code_calls_skip: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     compacted: Option<Sequence>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1160,9 +1162,14 @@ struct AdmittedBase<'a> {
     ids: &'a BTreeSet<Arc<str>>,
 }
 
+const fn unskipped(skip: &usize) -> bool {
+    *skip == 0
+}
+
 struct Detached {
     messages: Vec<HistoryMessage>,
     code_calls: Vec<history::CodeRound>,
+    code_calls_omitted: u64,
     compacted: Vec<HistoryMessage>,
     compacted_pages: Option<Sequence>,
     admitted_tool_ids: history::AdmittedIds,
@@ -1173,6 +1180,7 @@ impl Detached {
         Self {
             messages: std::mem::take(&mut conversation.messages),
             code_calls: std::mem::take(&mut conversation.code_calls),
+            code_calls_omitted: conversation.code_calls_omitted_rounds,
             compacted: std::mem::take(&mut conversation.compacted),
             compacted_pages: conversation.compacted_pages.take(),
             admitted_tool_ids: std::mem::take(&mut conversation.admitted_tool_ids),
@@ -1193,7 +1201,7 @@ impl Detached {
         paging: &mut Paging,
         settled: bool,
     ) -> Result<PagedConversation> {
-        let unchanged = paging.messages.unchanged(&self.messages);
+        let unchanged = paging.messages.unchanged(&self.messages, 0);
         let tools = &mut paging.tools;
         if tools.epoch != self.admitted_tool_ids.epoch()
             || tools.seen > self.admitted_tool_ids.len()
@@ -1217,22 +1225,22 @@ impl Detached {
         if let Some(base) = &admitted_base {
             records.push(base.clone());
         }
+        let (code_calls, code_calls_skip) = paging.code_calls.page(
+            &self.code_calls,
+            self.code_calls_omitted,
+            records,
+            paging.stored.as_ref(),
+        )?;
         Ok(PagedConversation {
             messages: paging.messages.page(
                 &self.messages,
+                0,
                 unchanged,
                 records,
                 paging.stored.as_ref(),
             )?,
-            code_calls: {
-                let unchanged = paging.code_calls.unchanged(&self.code_calls);
-                paging.code_calls.page(
-                    &self.code_calls,
-                    unchanged,
-                    records,
-                    paging.stored.as_ref(),
-                )?
-            },
+            code_calls,
+            code_calls_skip,
             compacted: paging.compacted.page(
                 &mut self.compacted,
                 &mut self.compacted_pages,
@@ -1418,25 +1426,26 @@ impl<T> Default for Pages<T> {
 }
 
 impl<T: Paged> Pages<T> {
-    fn unchanged(&self, items: &[T]) -> usize {
+    fn unchanged(&self, items: &[T], base: usize) -> usize {
         self.items
             .iter()
             .zip(items)
             .take_while(|(cached, item)| cached.same(item))
             .count()
-            .min(self.log.len())
+            .min(self.log.len() - base)
     }
 
     fn page(
         &mut self,
         items: &[T],
+        base: usize,
         unchanged: usize,
         records: &mut Vec<EncodedPayload>,
         stored: Option<&HashSet<String>>,
     ) -> Result<Sequence> {
         self.log
             .sync_known(
-                unchanged,
+                base + unchanged,
                 items[unchanged..].iter().map(|item| {
                     let record = item
                         .record()
@@ -1460,6 +1469,53 @@ impl<T: Paged> Pages<T> {
         self.items[self.released..].iter().for_each(T::committed);
         self.released = self.items.len();
         self.log.release();
+    }
+}
+
+#[derive(Default)]
+pub(super) struct RoundPages {
+    pages: Pages<history::CodeRound>,
+    omitted: u64,
+    skip: usize,
+}
+
+impl RoundPages {
+    fn page(
+        &mut self,
+        rounds: &[history::CodeRound],
+        omitted: u64,
+        records: &mut Vec<EncodedPayload>,
+        stored: Option<&HashSet<String>>,
+    ) -> Result<(Sequence, usize)> {
+        let dropped = omitted
+            .checked_sub(self.omitted)
+            .and_then(|dropped| usize::try_from(dropped).ok())
+            .filter(|dropped| *dropped <= self.pages.items.len());
+        match dropped {
+            Some(dropped) => {
+                self.pages.items.drain(..dropped);
+                self.pages.released = self.pages.released.saturating_sub(dropped);
+                self.skip += dropped;
+            }
+            None => *self = Self::default(),
+        }
+        self.omitted = omitted;
+        let unchanged = self.pages.unchanged(rounds, self.skip);
+        if self.skip + unchanged < self.pages.log.floor() {
+            *self = Self {
+                omitted,
+                ..Self::default()
+            };
+        }
+        let unchanged = self.pages.unchanged(rounds, self.skip);
+        let sequence = self
+            .pages
+            .page(rounds, self.skip, unchanged, records, stored)?;
+        Ok((sequence, self.skip))
+    }
+
+    fn committed(&mut self) {
+        self.pages.committed();
     }
 }
 
@@ -1518,7 +1574,7 @@ impl CompactedLog {
 #[derive(Default)]
 pub(super) struct Paging {
     messages: Pages<HistoryMessage>,
-    code_calls: Pages<history::CodeRound>,
+    code_calls: RoundPages,
     compacted: CompactedLog,
     pending: Pages<HistoryMessage>,
     tools: ToolIds,
@@ -1663,10 +1719,11 @@ fn paged_cursor(
 ) -> Result<EncodedState> {
     let mut records = Vec::new();
     let conversation = detached.page(&mut records, paging, false)?;
-    let unchanged = paging.pending.unchanged(pending);
-    let pending = paging
-        .pending
-        .page(pending, unchanged, &mut records, paging.stored.as_ref())?;
+    let unchanged = paging.pending.unchanged(pending, 0);
+    let pending =
+        paging
+            .pending
+            .page(pending, 0, unchanged, &mut records, paging.stored.as_ref())?;
     let template = template_record(prompt, paging)?;
     let inner = serde_json::value::to_raw_value(cursor).map_err(provider_error)?;
     let json = serde_json::value::to_raw_value(&PagedCursor {

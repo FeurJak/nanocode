@@ -50,8 +50,8 @@ pub use nanocode_durability_core::{
     migrate_format_then,
 };
 pub use paged::{
-    PagedWriter, PayloadReader, Prepared, Sequence, SequenceLog, load_sequence,
-    load_sequence_payloads, sequence_references,
+    PagedWriter, PayloadReader, Prepared, Sequence, SequenceLog, load_sequence, load_sequence_from,
+    load_sequence_payloads, sequence_references, sequence_references_from,
 };
 pub use pool::pool_state;
 pub use record_cache::{CachedStore, RecordCache};

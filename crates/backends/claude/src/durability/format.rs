@@ -7,7 +7,7 @@ use nanocode_agent_core::{
 use nanocode_durability::{
     AdmittedTurn, Advanced, Checkpoint, CheckpointFormat, EncodedPayload, Error, FormatFuture,
     Hydrated, PayloadReader, Previous, RenderCheckpoint, Result, Sequence, SessionRecord,
-    load_sequence, sequence_references,
+    load_sequence, load_sequence_from, sequence_references_from,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -45,6 +45,8 @@ struct PagedConversation {
     messages: Sequence,
     #[serde(default)]
     code_calls: Option<Sequence>,
+    #[serde(default)]
+    code_calls_skip: usize,
     #[serde(default)]
     compacted: Option<Sequence>,
     #[serde(default)]
@@ -157,11 +159,12 @@ struct Reuse {
 async fn advance_sequence(
     reader: PayloadReader<'_>,
     sequence: Sequence,
+    skip: usize,
     read: &mut HashSet<String>,
     kept: Option<LoadedSequence>,
     reuse: &mut Reuse,
 ) -> Result<LoadedSequence> {
-    let references = sequence_references(reader, sequence, read).await?;
+    let references = sequence_references_from(reader, sequence, skip, read).await?;
     let mut loaded = match kept {
         Some(kept) if kept.references.len() == kept.loaded.len() => {
             let reused = kept
@@ -208,8 +211,15 @@ impl PagedConversation {
         lazy: bool,
     ) -> Result<HydratedConversation> {
         let previous = previous.unwrap_or_default();
-        let messages =
-            advance_sequence(reader, self.messages, read, Some(previous.messages), reuse).await?;
+        let messages = advance_sequence(
+            reader,
+            self.messages,
+            0,
+            read,
+            Some(previous.messages),
+            reuse,
+        )
+        .await?;
         let mut hydrated = HydratedConversation {
             messages,
             code_calls: None,
@@ -217,8 +227,17 @@ impl PagedConversation {
             compacted_pages: None,
         };
         if let Some(code_calls) = self.code_calls {
-            hydrated.code_calls =
-                Some(advance_sequence(reader, code_calls, read, previous.code_calls, reuse).await?);
+            hydrated.code_calls = Some(
+                advance_sequence(
+                    reader,
+                    code_calls,
+                    self.code_calls_skip,
+                    read,
+                    previous.code_calls,
+                    reuse,
+                )
+                .await?,
+            );
         }
         if let Some(compacted) = self.compacted {
             let resumable = compacted.count().is_some();
@@ -227,7 +246,7 @@ impl PagedConversation {
             }
             if !(lazy && resumable) {
                 hydrated.compacted = Some(
-                    advance_sequence(reader, compacted, read, previous.compacted, reuse).await?,
+                    advance_sequence(reader, compacted, 0, read, previous.compacted, reuse).await?,
                 );
             }
         }
@@ -269,7 +288,8 @@ impl PagedConversation {
         Box::pin(async move {
             let messages: Vec<Value> = load_sequence(reader, self.messages, read).await?;
             if let Some(code_calls) = self.code_calls {
-                let rounds = load_sequence(reader, code_calls, read).await?;
+                let rounds =
+                    load_sequence_from(reader, code_calls, self.code_calls_skip, read).await?;
                 conversation.insert("code_calls".into(), Value::Array(rounds));
             }
             if let Some(compacted) = self.compacted {
