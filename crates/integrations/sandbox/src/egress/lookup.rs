@@ -45,22 +45,17 @@ impl Client {
     }
 
     #[must_use]
-    pub fn bound(&self, host: &str) -> Vec<&Secret> {
-        self.grant
-            .secrets
-            .iter()
-            .filter(|secret| secret.injects(host))
-            .collect()
+    pub fn bound(&self, host: &str, path: &str) -> Vec<&Secret> {
+        self.grant.bound(host, path)
     }
 
     #[must_use]
-    pub fn set(&self, host: &str) -> Vec<&Secret> {
-        self.grant
-            .secrets
-            .iter()
-            .filter(|secret| secret.sets(host))
-            .take(1)
-            .collect()
+    pub fn set(&self, host: &str, path: &str) -> Vec<&Secret> {
+        self.grant.set(host, path)
+    }
+
+    pub(crate) fn sets_any(&self, host: &str) -> bool {
+        self.grant.secrets.iter().any(|secret| secret.sets(host))
     }
 }
 
@@ -239,10 +234,17 @@ impl<A: Authority> Asker<A> {
             at: Instant::now(),
         };
         let verdict = match self.authority.grant(key).await {
-            Ok(Some(grant)) => Verdict::Granted(Arc::new(Client {
-                credential: Arc::clone(key),
-                grant,
-            })),
+            Ok(Some(grant)) => match grant.invalid_path() {
+                Some(path) => {
+                    let (client, name) = (self.client, &key.name);
+                    error!(%name, "{client} {name}'s grant scopes a secret to {path:?}, which is not a path");
+                    Verdict::Unreachable
+                }
+                None => Verdict::Granted(Arc::new(Client {
+                    credential: Arc::clone(key),
+                    grant,
+                })),
+            },
             Ok(None) => Verdict::Refused,
             Err(error) => {
                 let (client, name) = (self.client, &key.name);
