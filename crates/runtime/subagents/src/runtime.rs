@@ -3100,6 +3100,14 @@ fn board_status(board: &crate::board::BoardAgents, id: AgentId, status: &mut Age
     }
 }
 
+fn distinct(ids: &[AgentId]) -> Vec<AgentId> {
+    if crate::sim::mutated(crate::sim::Mutation::WaitRepeatsIds) {
+        return ids.to_vec();
+    }
+    let mut seen = HashSet::with_capacity(ids.len());
+    ids.iter().copied().filter(|id| seen.insert(*id)).collect()
+}
+
 fn wait_mark(status: &AgentStatus, revision: u64) -> u64 {
     use std::hash::{Hash as _, Hasher as _};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -3277,6 +3285,9 @@ impl Registry {
         root_session_id: &str,
         entries: Vec<AgentDirectoryEntry>,
     ) -> std::io::Result<Vec<AgentDirectoryEntry>> {
+        if entries.is_empty() {
+            return Ok(entries);
+        }
         let Some(board) = self.board_agents(root_session_id).await? else {
             return Ok(entries);
         };
@@ -4349,14 +4360,6 @@ impl Registry {
         self.checkpoints.update(|checkpoints| {
             for (id, _) in cooled {
                 checkpoints.remove(&key(id));
-            }
-        });
-        self.wait_reported.update(|reported| {
-            for (id, waiters) in cooled {
-                reported.remove(&key(id));
-                for waiter in waiters {
-                    reported.remove(&(waiter.clone(), *id));
-                }
             }
         });
     }
@@ -7460,7 +7463,7 @@ impl Registry {
         ids: &[AgentId],
         duration: Duration,
     ) -> std::io::Result<AgentWait> {
-        self.wait_inner(session_id, call_id, ids, duration)
+        self.wait_inner(session_id, call_id, &distinct(ids), duration)
             .instrument(nanocode_trace::info_span!(
                 "subagent.wait",
                 session.id = session_id,
@@ -7507,11 +7510,28 @@ impl Registry {
         loop {
             let session = session_id.to_owned();
             let wanted = ids.to_vec();
-            let (mut snapshot, root) = self
+            let (mut snapshot, root, unread) = self
                 .state
                 .call(move |state| -> std::io::Result<_> {
                     let root = state.root_session_id(&session).to_owned();
-                    Ok((state.wait_snapshot(&session, &wanted)?, root))
+                    let snapshot = state.wait_snapshot(&session, &wanted)?;
+                    let unread = state
+                        .scopes
+                        .get(&root)
+                        .filter(|_| root == session)
+                        .map_or_else(HashSet::new, |scope| {
+                            wanted
+                                .iter()
+                                .copied()
+                                .filter(|id| {
+                                    scope.sessions.get(id).is_some_and(|child| {
+                                        child.completion.revision().is_some()
+                                            && child.status.wakes_parent()
+                                    })
+                                })
+                                .collect::<HashSet<_>>()
+                        });
+                    Ok((snapshot, root, unread))
                 })
                 .await?;
             if let Some(board) = self.board_agents(&root).await? {
@@ -7539,9 +7559,10 @@ impl Registry {
             let summaries = snapshot.into_iter().map(|(summary, _)| summary).collect();
 
             let reported = |reported: &AgentMap<u64>| {
-                terminal
-                    .iter()
-                    .all(|&(id, mark)| reported.get(&(session_id.to_owned(), id)) == Some(&mark))
+                terminal.iter().all(|&(id, mark)| {
+                    !unread.contains(&id)
+                        && reported.get(&(session_id.to_owned(), id)) == Some(&mark)
+                })
             };
             let (fresh, delivered) = if self.wait_reported.read(reported) {
                 (false, terminal.iter().map(|&(id, _)| id).collect())
@@ -7550,7 +7571,9 @@ impl Registry {
                     let mut fresh = false;
                     let mut delivered = HashSet::new();
                     for &(id, mark) in &terminal {
-                        if reported.insert((session_id.to_owned(), id), mark) == Some(mark) {
+                        if reported.insert((session_id.to_owned(), id), mark) == Some(mark)
+                            && !unread.contains(&id)
+                        {
                             delivered.insert(id);
                         } else {
                             fresh = true;
@@ -7684,6 +7707,7 @@ impl Registry {
         call_id: &str,
         ids: &[AgentId],
     ) -> std::io::Result<Option<AgentWait>> {
+        let ids = &distinct(ids);
         self.await_restored(session_id).await?;
         let _warm = self.warm(&self.root_of(session_id), ids.to_vec()).await?;
         let session = session_id.to_owned();

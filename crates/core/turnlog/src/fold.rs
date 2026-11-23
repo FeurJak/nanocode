@@ -137,6 +137,55 @@ struct Links {
     references: Vec<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Retired {
+    pub digest: u128,
+    pub first: u64,
+    pub hand: Option<Box<str>>,
+    pub last: u64,
+    pub outcome: Outcome,
+}
+
+pub const RETIRED_KEY: &str = "$turnlog_retired";
+
+#[must_use]
+pub fn tag(text: &str) -> u128 {
+    const OFFSET: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+    const PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
+    text.bytes().fold(OFFSET, |hash, byte| {
+        (hash ^ u128::from(byte)).wrapping_mul(PRIME)
+    })
+}
+
+const RETIRED_ROW: usize = 97;
+
+fn text(row: &[u8], from: usize, to: usize) -> Result<&str, StoreError> {
+    std::str::from_utf8(&row[from..to]).map_err(invalid)
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct RetiredIndex {
+    hands: BTreeMap<String, Box<str>>,
+    rows: String,
+}
+
+const fn outcome_code(outcome: Outcome) -> &'static str {
+    match outcome {
+        Outcome::Cancelled => "x",
+        Outcome::Completed => "c",
+        Outcome::Failed => "f",
+    }
+}
+
+fn outcome_of(code: &str) -> Option<Outcome> {
+    match code {
+        "x" => Some(Outcome::Cancelled),
+        "c" => Some(Outcome::Completed),
+        "f" => Some(Outcome::Failed),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Recovered {
     pub at: Option<u64>,
@@ -184,6 +233,7 @@ pub struct Fold {
     segments: Vec<Segment>,
     seq: u64,
     stored: BTreeMap<String, String>,
+    retired: BTreeMap<u128, Retired>,
     turns: Vec<Turn>,
     wakes: Wakes,
 }
@@ -1109,6 +1159,73 @@ impl Fold {
         self.index.get(id).map(|&position| &self.turns[position])
     }
 
+    #[must_use]
+    pub fn retired(&self, id: &str) -> Option<&Retired> {
+        self.retired.get(&tag(id))
+    }
+
+    #[must_use]
+    pub fn retired_turns(&self) -> usize {
+        self.retired.len()
+    }
+
+    fn retired_value(&self) -> Result<Box<RawValue>, StoreError> {
+        use std::fmt::Write as _;
+        let mut rows = String::with_capacity(self.retired.len() * RETIRED_ROW);
+        let mut hands = BTreeMap::new();
+        for (id, entry) in &self.retired {
+            write!(
+                rows,
+                "{id:032x}{:032x}{:016x}{:016x}{}",
+                entry.digest,
+                entry.first,
+                entry.last,
+                outcome_code(entry.outcome)
+            )
+            .map_err(invalid)?;
+            if let Some(hand) = &entry.hand {
+                hands.insert(format!("{id:032x}"), hand.clone());
+            }
+        }
+        serde_json::value::to_raw_value(&RetiredIndex { hands, rows }).map_err(invalid)
+    }
+
+    fn retired_from(&mut self, value: &RawValue) -> Result<(), StoreError> {
+        let index: RetiredIndex = serde_json::from_str(value.get()).map_err(invalid)?;
+        let rows = index.rows.as_bytes();
+        if !index.rows.is_ascii() || rows.len() % RETIRED_ROW != 0 {
+            return Err(invalid("retired index rows are malformed"));
+        }
+
+        let mut entries = Vec::with_capacity(rows.len() / RETIRED_ROW);
+        for row in rows.chunks_exact(RETIRED_ROW) {
+            let id = u128::from_str_radix(text(row, 0, 32)?, 16).map_err(invalid)?;
+            let digest = u128::from_str_radix(text(row, 32, 64)?, 16).map_err(invalid)?;
+            let first = u64::from_str_radix(text(row, 64, 80)?, 16).map_err(invalid)?;
+            let last = u64::from_str_radix(text(row, 80, 96)?, 16).map_err(invalid)?;
+            let code = text(row, 96, 97)?;
+            let outcome =
+                outcome_of(code).ok_or_else(|| invalid(format!("retired turn outcome {code}")))?;
+            let hand = index.hands.get(text(row, 0, 32)?).cloned();
+            entries.push((
+                id,
+                Retired {
+                    digest,
+                    first,
+                    hand,
+                    last,
+                    outcome,
+                },
+            ));
+        }
+        if self.retired.is_empty() {
+            self.retired = entries.into_iter().collect();
+        } else {
+            self.retired.extend(entries);
+        }
+        Ok(())
+    }
+
     fn turn_mut(&mut self, id: &str) -> Option<&mut Turn> {
         self.index
             .get(id)
@@ -1430,6 +1547,22 @@ impl Fold {
         }
         finished.sort_unstable();
         let cutoff = finished[excess - 1];
+        for turn in &self.turns {
+            if let Phase::Finished { last, outcome, .. } = turn.phase
+                && last <= cutoff
+            {
+                self.retired.insert(
+                    tag(&turn.id),
+                    Retired {
+                        digest: tag(&turn.digest),
+                        first: turn.first,
+                        hand: turn.hand.as_deref().map(Box::from),
+                        last,
+                        outcome,
+                    },
+                );
+            }
+        }
         self.drop_turns(
             |turn| matches!(turn.phase, Phase::Finished { last, .. } if last <= cutoff),
         );
@@ -1468,6 +1601,15 @@ impl Fold {
             .range::<str, _>((Bound::Included(prefix.as_str()), Bound::Unbounded))
             .take_while(move |(key, _)| key.starts_with(&prefix))
             .map(move |(key, value)| (&key[start..], value.as_str()))
+    }
+
+    #[must_use]
+    pub fn stored_bytes(&self) -> usize {
+        self.stored
+            .iter()
+            .chain(&self.dead)
+            .map(|(key, value)| key.len() + value.len())
+            .sum()
     }
 
     #[must_use]
@@ -1590,6 +1732,7 @@ impl Fold {
                     }
                     self.drop_turns(|old| old.id == *turn);
                 }
+                self.retired.remove(&tag(turn));
                 self.index.insert(turn.clone(), self.turns.len());
                 self.turns.push(Turn {
                     digest: digest.clone(),
@@ -1734,6 +1877,7 @@ impl Fold {
                     self.holds.insert(key.clone(), hold.clone());
                 }
             }
+            Record::Host { key, value } if key == RETIRED_KEY => self.retired_from(value)?,
             Record::Host { key, value } => {
                 self.hosts.insert(key.clone(), value.clone());
             }
@@ -1974,6 +2118,12 @@ impl Fold {
                 state: state.clone(),
             })?;
         }
+        if !self.retired.is_empty() {
+            take(Record::Host {
+                key: RETIRED_KEY.to_owned(),
+                value: self.retired_value()?,
+            })?;
+        }
         for turn in &self.turns {
             take(Record::Admitted {
                 digest: turn.digest.clone(),
@@ -2095,5 +2245,61 @@ fn retrying(retry: &Retry) -> Status {
         error: retry.error.clone(),
         kind: retry.kind.clone(),
         retry_at: retry.retry_at,
+    }
+}
+
+#[cfg(test)]
+mod stored_bytes_tests {
+    use super::*;
+
+    #[test]
+    fn stored_bytes_counts_every_stored_record_once() {
+        let mut fold = Fold::default();
+        assert_eq!(fold.stored_bytes(), 0);
+        let stored = |key: &str, value: &str| Record::Stored {
+            key: key.to_owned(),
+            value: value.to_owned(),
+        };
+        fold.apply(
+            &stored(
+                "state
+b3:a",
+                "1234",
+            ),
+            None,
+        )
+        .unwrap();
+        fold.apply(
+            &stored(
+                "state
+b3:b",
+                "12",
+            ),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            fold.stored_bytes(),
+            2 * "state
+b3:a"
+                .len()
+                + 6
+        );
+        fold.apply(
+            &stored(
+                "state
+b3:a",
+                "1",
+            ),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            fold.stored_bytes(),
+            2 * "state
+b3:a"
+                .len()
+                + 3
+        );
     }
 }

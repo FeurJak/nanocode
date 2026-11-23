@@ -535,8 +535,10 @@ impl Media {
                 let policy = nanocode::turnlog::Policy {
                     effects: nanocode::turnlog::Effects::default(),
                     max_row_bytes: None,
+                    max_tail_bytes: None,
                     restarts: u64::MAX,
                     retain_finished: None,
+                    retired_max: None,
                     snapshot_ratio: 2,
                     snapshot_rows: None,
                     wakes_max: None,

@@ -177,7 +177,7 @@ impl From<Refusal> for Rejection {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Said {
-    messages: BTreeMap<MessageId, Message>,
+    messages: BTreeMap<MessageId, Box<Message>>,
     order: BTreeSet<(u64, MessageId)>,
     replies: BTreeMap<MessageId, Vec<MessageId>>,
     channels: BTreeMap<String, Channel>,
@@ -187,6 +187,51 @@ pub struct Said {
 }
 
 impl Said {
+    pub(crate) fn forget(&mut self, task: &str) {
+        let root = MessageId(task.to_owned());
+        if !self.messages.get(&root).is_some_and(|message| message.task) {
+            return;
+        }
+        let mut doomed = vec![root];
+        while let Some(id) = doomed.pop() {
+            doomed.extend(self.replies.remove(&id).unwrap_or_default());
+            if let Some(message) = self.messages.remove(&id) {
+                self.order.remove(&(message.seq, id));
+            }
+        }
+    }
+
+    /// Messages held.
+    pub(crate) fn len(&self) -> usize {
+        self.messages.len()
+    }
+
+    /// Replies held under task's root message.
+    #[cfg(test)]
+    pub(crate) fn replies_to(&self, task: &str) -> usize {
+        self.replies.get(&MessageId(task.to_owned())).map_or(0, Vec::len)
+    }
+
+    /// Keep the newest keep replies under task's root message, dropping older ones and their own
+    /// replies (Retain::events).
+    pub(crate) fn trim(&mut self, task: &str, keep: usize) {
+        let root = MessageId(task.to_owned());
+        if !self.messages.get(&root).is_some_and(|message| message.task) {
+            return;
+        }
+        let Some(list) = self.replies.get_mut(&root) else {
+            return;
+        };
+        let over = list.len().saturating_sub(keep);
+        let mut doomed = list.drain(..over).collect::<Vec<_>>();
+        while let Some(id) = doomed.pop() {
+            doomed.extend(self.replies.remove(&id).unwrap_or_default());
+            if let Some(message) = self.messages.remove(&id) {
+                self.order.remove(&(message.seq, id));
+            }
+        }
+    }
+
     pub const fn new() -> Self {
         Self {
             messages: BTreeMap::new(),
@@ -220,7 +265,7 @@ impl Said {
             None => channel.threads += 1,
         }
         self.order.insert((message.seq, message.id.clone()));
-        self.messages.insert(message.id.clone(), message);
+        self.messages.insert(message.id.clone(), Box::new(message));
     }
 }
 
@@ -839,14 +884,14 @@ impl Fold {
     }
 
     pub fn message(&self, id: &MessageId) -> Option<&Message> {
-        self.said.messages.get(id)
+        self.said.messages.get(id).map(|message| &**message)
     }
 
     pub fn messages(&self) -> impl Iterator<Item = &Message> + '_ {
         self.said
             .order
             .iter()
-            .map(|(_, id)| &self.said.messages[id])
+            .map(|(_, id)| &*self.said.messages[id])
     }
 
     pub fn thread(&self, root: &MessageId) -> Vec<&Message> {
@@ -859,8 +904,8 @@ impl Fold {
             return Vec::new();
         };
         let replies = self.said.replies.get(root).into_iter().flatten();
-        std::iter::once(found)
-            .chain(replies.map(|id| &self.said.messages[id]))
+        std::iter::once(&**found)
+            .chain(replies.map(|id| &*self.said.messages[id]))
             .collect()
     }
 
@@ -979,6 +1024,7 @@ impl Fold {
             .said
             .messages
             .values()
+            .map(|message| &**message)
             .filter(|message| message.version > after)
             .collect::<Vec<_>>();
         changed.sort_by_key(|message| message.version);

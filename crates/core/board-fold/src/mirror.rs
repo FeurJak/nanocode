@@ -476,7 +476,7 @@ pub struct Mirror {
     #[serde(with = "crate::pairs")]
     threads: BTreeMap<Target, Target>,
     #[serde(with = "crate::pairs")]
-    messages: BTreeMap<EventId, Message>,
+    messages: BTreeMap<EventId, Box<Message>>,
     #[serde(with = "crate::pairs")]
     by_task: BTreeMap<TaskId, Vec<EventId>>,
     #[serde(with = "crate::pairs")]
@@ -551,6 +551,23 @@ fn tally(tally: &Tally, id: &EventId, target: &Target, action: &Action, revision
 }
 
 impl Mirror {
+    pub(crate) fn holds(&self, task: &TaskId) -> bool {
+        self.ever.iter().any(|(held, _)| held == task)
+    }
+
+    pub(crate) fn forget(&mut self, task: &TaskId) {
+        for id in self.by_task.remove(task).unwrap_or_default() {
+            self.messages.remove(&id);
+        }
+        if let Some(id) = self.status.remove(task) {
+            self.messages.remove(&id);
+        }
+        self.worded.remove(task);
+        self.labels.retain(|(held, _), _| held != task);
+        self.read.retain(|(held, _), _| held != task);
+        self.owned.retain(|(held, _), _| held != task);
+    }
+
     pub const fn new() -> Self {
         Self {
             links: BTreeMap::new(),
@@ -595,7 +612,7 @@ impl Mirror {
         &self.links
     }
 
-    pub const fn messages(&self) -> &BTreeMap<EventId, Message> {
+    pub const fn messages(&self) -> &BTreeMap<EventId, Box<Message>> {
         &self.messages
     }
 
@@ -976,7 +993,7 @@ impl Fold {
             .entry(message.task.clone())
             .or_default()
             .push(id.clone());
-        self.mirror.messages.insert(id, message);
+        self.mirror.messages.insert(id, Box::new(message));
     }
 
     fn fresh(&self, task: &TaskId, seq: u64, kind: Kind, author: String, body: String) -> Message {
@@ -1029,7 +1046,7 @@ impl Fold {
                 Some(_) => {}
                 None => {
                     let status = self.fresh(task, seq, Kind::Status, event.by.clone(), text);
-                    self.mirror.messages.insert(id.clone(), status);
+                    self.mirror.messages.insert(id.clone(), Box::new(status));
                     self.mirror.status.insert(task.clone(), id);
                 }
             }

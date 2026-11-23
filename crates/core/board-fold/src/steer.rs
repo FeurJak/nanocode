@@ -73,6 +73,10 @@ pub struct Steers {
 }
 
 impl Steers {
+    pub(crate) fn holds(&self, task: &TaskId) -> bool {
+        self.queues.contains_key(task)
+    }
+
     pub const fn new() -> Self {
         Self {
             queues: BTreeMap::new(),

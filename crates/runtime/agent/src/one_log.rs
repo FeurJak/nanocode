@@ -17,7 +17,7 @@ use nanocode_tool_host::{
 };
 use nanocode_turnlog::{
     Answer, EffectClass, Effects, Fold, HeldCall, Hold, LogHost, Outcome, Phase, Point, Record,
-    Resumption, Rider, Stats, Status, Turn, WakeRider,
+    Resumption, Retired, Rider, Stats, Status, Turn, WakeRider, tag,
 };
 use serde::Serialize;
 use serde_json::{Map, Value, json, value::RawValue};
@@ -54,8 +54,10 @@ const STORED_MARK: &str = "$nanocode_stored";
 pub struct Policy {
     pub effects: Effects,
     pub max_row_bytes: Option<usize>,
+    pub max_tail_bytes: Option<usize>,
     pub restarts: u64,
     pub retain_finished: Option<usize>,
+    pub retired_max: Option<usize>,
     pub snapshot_ratio: usize,
     pub snapshot_rows: Option<usize>,
     pub wakes_max: Option<usize>,
@@ -63,6 +65,7 @@ pub struct Policy {
 
 pub struct OneLog {
     answered: Atom<BTreeMap<(String, u64), u64>>,
+    retired_max: Option<usize>,
     dispatched: Atom<BTreeMap<(String, u64), BTreeSet<u64>>>,
     deferred_settles: Atom<bool>,
     durable_settles: Atom<bool>,
@@ -177,6 +180,35 @@ fn retry_of(retry: Option<&nanocode_turnlog::Retry>) -> Option<TurnRetry> {
     })
 }
 
+const fn state_of(outcome: Outcome) -> TurnState {
+    match outcome {
+        Outcome::Cancelled => TurnState::Cancelled,
+        Outcome::Completed => TurnState::Completed,
+        Outcome::Failed => TurnState::Failed,
+    }
+}
+
+fn retired_record(
+    id: &str,
+    retired: &Retired,
+    result: Option<Box<RawValue>>,
+) -> Result<TurnRecord, StoreError> {
+    Ok(TurnRecord {
+        request_id: id.to_owned(),
+        state: state_of(retired.outcome),
+        digest: format!("retired:{:032x}", retired.digest),
+        prompt: None,
+        hand: retired.hand.as_deref().map(str::to_owned),
+        metadata: raw(&Value::Null)?,
+        cancel_requested: false,
+        note: None,
+        first_seq: retired.first,
+        last_seq: Some(retired.last),
+        result,
+        retry: None,
+    })
+}
+
 fn record_of(turn: &Turn) -> Result<TurnRecord, StoreError> {
     let prompt = || {
         serde_json::from_str::<Prompt>(turn.prompt.get())
@@ -282,8 +314,10 @@ impl OneLog {
         let log = log
             .retain_finished(policy.retain_finished)
             .row_limit(policy.max_row_bytes)
+            .max_tail_bytes(policy.max_tail_bytes)
             .snapshot_ratio(policy.snapshot_ratio)
             .snapshot_rows(policy.snapshot_rows);
+        log.lease().await.retire_finished();
         let recovering = log
             .read(|fold| {
                 fold.turns()
@@ -306,6 +340,7 @@ impl OneLog {
             recovering: Atom::new(recovering),
             resolved: Atom::default(),
             restarts: policy.restarts,
+            retired_max: policy.retired_max,
             unsaved: Atom::default(),
             wake_index: Atom::new(None),
             wakes_max: policy.wakes_max,
@@ -517,6 +552,30 @@ impl OneLog {
                 Submitted::Conflict(record)
             });
         }
+        if let Some(same) = lease
+            .fold()
+            .retired(id)
+            .map(|old| old.digest == tag(&digest))
+        {
+            drop(lease);
+            let record = self
+                .retired_turn(id)
+                .await?
+                .ok_or_else(|| invalid(format!("retired turn {id} is missing")))?;
+            return Ok(if same {
+                Submitted::Existing(record)
+            } else {
+                Submitted::Conflict(record)
+            });
+        }
+        let retired = lease.fold().retired_turns();
+        if let Some(max) = self.retired_max
+            && retired >= max
+        {
+            return Err(StoreError::NotCommitted(format!(
+                "turn {id} refused: this log already holds {retired} finished turns, the most one log keeps ({max}); start a new thread"
+            )));
+        }
         if !durable {
             lease.secure().await?;
         }
@@ -580,9 +639,35 @@ impl OneLog {
     }
 
     pub async fn turn(&self, request_id: &str) -> Result<Option<TurnRecord>, StoreError> {
-        self.log
+        let held = self
+            .log
             .read(|fold| fold.turn(request_id).map(record_of).transpose())
+            .await?;
+        match held {
+            Some(record) => Ok(Some(record)),
+            None => self.retired_turn(request_id).await,
+        }
+    }
+
+    async fn retired_turn(&self, request_id: &str) -> Result<Option<TurnRecord>, StoreError> {
+        let Some(retired) = self
+            .log
+            .read(|fold| fold.retired(request_id).cloned())
             .await
+        else {
+            return Ok(None);
+        };
+        let last = retired.last;
+        let mut result = None;
+        self.log
+            .history(last.saturating_sub(1), |event| {
+                if event.seq == last {
+                    result = Some(event.event.clone());
+                }
+                event.seq < last
+            })
+            .await?;
+        retired_record(request_id, &retired, result).map(Some)
     }
 
     pub async fn pending(&self) -> Result<Vec<TurnRecord>, StoreError> {
@@ -741,7 +826,9 @@ impl OneLog {
     ) -> Result<Option<(TurnRecord, Option<LoggedEvent>)>, StoreError> {
         let mut lease = self.log.lease().await;
         let Some(turn) = lease.fold().turn(request_id) else {
-            return Ok(None);
+            drop(lease);
+            let retired = self.retired_turn(request_id).await?;
+            return Ok(retired.map(|record| (record, None)));
         };
         match turn.phase {
             Phase::Running {
@@ -812,7 +899,9 @@ impl OneLog {
     ) -> Result<Option<(TurnRecord, Option<LoggedEvent>)>, StoreError> {
         let mut lease = self.log.lease().await;
         let Some(turn) = lease.fold().turn(request_id) else {
-            return Ok(None);
+            drop(lease);
+            let retired = self.retired_turn(request_id).await?;
+            return Ok(retired.map(|record| (record, None)));
         };
         let previous = match &turn.phase {
             Phase::Finished { .. } => return Ok(Some((record_of(turn)?, None))),
@@ -865,7 +954,8 @@ impl OneLog {
         let mut imported = false;
         let mut highest = 0;
         for turn in turns {
-            if lease.fold().turn(&turn.request_id).is_some() {
+            let fold = lease.fold();
+            if fold.turn(&turn.request_id).is_some() || fold.retired(&turn.request_id).is_some() {
                 continue;
             }
             let id = turn.request_id.as_str();
@@ -1115,7 +1205,9 @@ impl OneLog {
                 self.log
                     .read(|fold| {
                         fold.turn(id)
-                            .map_or(after, |turn| after.max(turn.first.saturating_sub(1)))
+                            .map(|turn| turn.first)
+                            .or_else(|| fold.retired(id).map(|retired| retired.first))
+                            .map_or(after, |first| after.max(first.saturating_sub(1)))
                     })
                     .await
             }
@@ -1898,3 +1990,7 @@ impl StateStore for OneLogStore {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "one_log_tail_tests.rs"]
+mod tail_tests;

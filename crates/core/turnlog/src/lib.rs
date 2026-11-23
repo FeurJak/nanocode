@@ -17,7 +17,10 @@ mod writer;
 pub use effect::{EffectClass, Effects};
 #[cfg(not(target_family = "wasm"))]
 pub use file::{FileLog, FileOptions};
-pub use fold::{Checkpoint, Event, Fold, OpenCall, Phase, Recovered, Retry, Segment, Turn};
+pub use fold::{
+    Checkpoint, Event, Fold, OpenCall, Phase, RETIRED_KEY, Recovered, Retired, Retry, Segment,
+    Turn, tag,
+};
 pub use hold::{Answer, Answered, HeldCall, Hold, HoldError, Resumption};
 pub use host::{
     CHECKPOINT_PART_BYTES, Compaction, Extension, LogHost, MemoryLog, MemoryWrites, Rider,

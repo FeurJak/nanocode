@@ -56,10 +56,12 @@ pub enum AgentsMutation {
     BoardFailuresUnread,
     PoolRetireKeepsAgent,
     PoolForgetsIntent,
+    WaitRepeatsIds,
+    RestoreRemembersWaits,
 }
 
 impl AgentsMutation {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 10] = [
         Self::None,
         Self::CancelIgnored,
         Self::ShutdownHangs,
@@ -68,6 +70,8 @@ impl AgentsMutation {
         Self::BoardFailuresUnread,
         Self::PoolRetireKeepsAgent,
         Self::PoolForgetsIntent,
+        Self::WaitRepeatsIds,
+        Self::RestoreRemembersWaits,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -86,6 +90,8 @@ impl AgentsMutation {
             Self::BoardFailuresUnread => "board_failures_unread",
             Self::PoolRetireKeepsAgent => "pool_retire_keeps_agent",
             Self::PoolForgetsIntent => "pool_forgets_intent",
+            Self::WaitRepeatsIds => "wait_repeats_ids",
+            Self::RestoreRemembersWaits => "restore_remembers_waits",
         }
     }
 
@@ -796,6 +802,122 @@ async fn steer_running(run: &Run) -> Result<(), String> {
     Ok(())
 }
 
+const REDELIVER_SESSION: &str = "redeliver";
+
+async fn handed_out(
+    registry: &Arc<Registry>,
+    call: &str,
+    ids: &[AgentId],
+    bound: Duration,
+    handed: &mut std::collections::BTreeMap<AgentId, u64>,
+) -> Result<bool, String> {
+    let asked = ids.iter().chain(ids).copied().collect::<Vec<_>>();
+    let (summaries, delivered, ..) = registry
+        .wait(REDELIVER_SESSION, call, &asked, bound)
+        .await
+        .map_err(|error| format!("wait_agent {call} failed: {error}"))?;
+    let mut listed = std::collections::BTreeSet::new();
+    let mut fresh = false;
+    for summary in summaries {
+        if !listed.insert(summary.agent_id) {
+            return Err(format!(
+                "wait_agent {call} asked for each child twice and listed agent {} twice",
+                summary.agent_id
+            ));
+        }
+        if !summary.status.is_active() && !delivered.contains(&summary.agent_id) {
+            *handed.entry(summary.agent_id).or_default() += 1;
+            fresh = true;
+        }
+    }
+    Ok(fresh)
+}
+
+async fn redelivered(shape: &Shape, ledger: &Arc<Ledger>) -> Result<(), String> {
+    let store: Arc<dyn nanocode_subagents::SubagentStore> =
+        Arc::new(ScriptedStore::new(Arc::clone(ledger)));
+    let open = || {
+        let (registry, control, updates) = nanocode_subagents::channel(DEFAULT_MAX_SUBAGENTS);
+        control.set_hibernation(true);
+        control.set_max_resident(shape.resident_max);
+        registry.set_store(Arc::clone(&store));
+        (registry, control, updates)
+    };
+    let (registry, control, updates) = open();
+    let root = AgentHandle::new(
+        REDELIVER_SESSION,
+        simulated_model(),
+        Arc::new(ScriptedFactory::new(Arc::clone(ledger))),
+    );
+    let ids = nanocode_subagents::start_agents(
+        &root,
+        &registry,
+        REDELIVER_SESSION,
+        tasks(shape.children),
+    )
+    .await
+    .map_err(|error| format!("start_agents for the restart check failed: {error}"))?
+    .into_iter()
+    .map(|report| report.agent_id)
+    .collect::<Vec<_>>();
+    let turn = Duration::from_millis(shape.script.steps_max * shape.script.step_latency_ms_max);
+    let mut before = std::collections::BTreeMap::new();
+    handed_out(&registry, "before", &ids, turn, &mut before).await?;
+    if let Some((id, times)) = before.iter().find(|(_, times)| **times > 1) {
+        return Err(format!(
+            "one wait_agent handed agent {id}'s result out {times} times"
+        ));
+    }
+    let poll = Duration::from_millis(shape.script.step_latency_ms_min);
+    loop {
+        let listed = registry
+            .directory(REDELIVER_SESSION, true, false)
+            .await
+            .map_err(|error| format!("the directory did not answer before the restart: {error}"))?;
+        if listed.iter().all(|entry| !entry.status.is_active()) {
+            break;
+        }
+        nanocode_platform::sleep(poll).await;
+    }
+    control
+        .persist(REDELIVER_SESSION)
+        .await
+        .map_err(|error| format!("the journal did not persist before the restart: {error}"))?;
+    ledger.trace("redeliver restart");
+    drop((registry, control, updates, root));
+    let (registry, control, updates) = open();
+    let report = registry
+        .restore(REDELIVER_SESSION)
+        .await
+        .map_err(|error| format!("the restart did not restore its children: {error}"))?;
+    if report.restored != ids.len() {
+        return Err(format!(
+            "the restart restored {} of {} children",
+            report.restored,
+            ids.len()
+        ));
+    }
+    let mut after = std::collections::BTreeMap::new();
+    for call in ["after", "after-again", "after-idle"] {
+        handed_out(&registry, call, &ids, turn, &mut after).await?;
+    }
+    for id in &ids {
+        let times = after.get(id).copied().unwrap_or(0);
+        if times != 1 {
+            return Err(format!(
+                "after a restart the root's waits handed agent {id}'s result out {times} times, not once (before the restart: {})",
+                before.get(id).copied().unwrap_or(0)
+            ));
+        }
+    }
+    control
+        .close_all(REDELIVER_SESSION)
+        .await
+        .map_err(|error| format!("close_all after the restart check failed: {error}"))?;
+    drop((registry, updates));
+    Ok(())
+}
+
 async fn drive(shape: &Shape, ledger: &Arc<Ledger>, clock: &Arc<Clock>) -> Result<u64, String> {
     let run = build(ledger, shape);
     nanocode_subagents::start_agents(
@@ -828,6 +950,8 @@ async fn drive(shape: &Shape, ledger: &Arc<Ledger>, clock: &Arc<Clock>) -> Resul
     nanocode_platform::sleep(RUNTIME_STOP_TIMEOUT).await;
     judge(&run, shape, ledger, &retired, hosted).await?;
     drop(run.updates);
+    redelivered(shape, ledger).await?;
+    ledger.trace("redelivered");
     Ok(took_ms)
 }
 
@@ -840,6 +964,12 @@ pub fn simulate(seed: u64, mutation: AgentsMutation) -> AgentOutcome {
     }
     if mutation == AgentsMutation::PoolForgetsIntent {
         nanocode_board::sim::mutate(nanocode_board::sim::Mutation::PoolForgetsIntent);
+    }
+    if mutation == AgentsMutation::WaitRepeatsIds {
+        nanocode_subagents::sim::mutate(nanocode_subagents::sim::Mutation::WaitRepeatsIds);
+    }
+    if mutation == AgentsMutation::RestoreRemembersWaits {
+        nanocode_subagents::sim::mutate(nanocode_subagents::sim::Mutation::RestoreRemembersWaits);
     }
     let shape = Shape::of(seed, mutation);
     let clock = Clock::new();
@@ -859,6 +989,7 @@ pub fn simulate(seed: u64, mutation: AgentsMutation) -> AgentOutcome {
     };
     let stop_ms = *outcome.as_ref().unwrap_or(&0);
     nanocode_board::sim::mutate(nanocode_board::sim::Mutation::None);
+    nanocode_subagents::sim::mutate(nanocode_subagents::sim::Mutation::None);
     AgentOutcome {
         digest: ledger.digest(),
         wrong: outcome.err(),

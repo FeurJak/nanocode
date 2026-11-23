@@ -246,6 +246,11 @@ pub struct Access {
 }
 
 impl Access {
+    pub(crate) fn forget(&mut self, task: &TaskId) {
+        self.posters.remove(task);
+        self.holders.remove(task);
+    }
+
     pub const fn new() -> Self {
         Self {
             owner: None,
@@ -613,6 +618,7 @@ impl Fold {
     ) -> impl Iterator<Item = (&'a TaskId, &'a Task)> + 'a {
         self.tasks()
             .iter()
+            .map(|(id, task)| (id, &**task))
             .filter(move |(id, _)| self.access.reads(actor, &id.0))
     }
 

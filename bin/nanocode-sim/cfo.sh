@@ -231,6 +231,9 @@ default_table='
 1 canary_board_checkpoint_tail_unchecked canary:20 --scenario board --mutation checkpoint_tail_unchecked
 1 canary_board_checkpoint_ahead canary:20 --scenario board --mutation checkpoint_ahead
 1 canary_board_checkpoint_every_fixed canary:50 --scenario board --mutation checkpoint_every_fixed
+1 canary_board_eviction_differs_by_replica canary:50 --scenario board --mutation eviction_differs_by_replica
+1 canary_board_events_uncapped canary:50 --scenario board --mutation events_uncapped
+1 canary_board_gone_unbounded canary:50 --scenario board --mutation gone_unbounded
 1 canary_board_steer_by_claim_follows canary:40 --scenario board_steer --mutation steer_by_claim_follows
 1 canary_board_steer_to_terminal canary:40 --scenario board_steer --mutation steer_to_terminal
 1 canary_board_finish_ignores_steers canary:40 --scenario board_steer --mutation finish_ignores_steers
@@ -291,6 +294,8 @@ default_table='
 1 canary_agents_shutdown_keeps_harness canary:200 --scenario agents --mutation shutdown_keeps_harness
 1 canary_agents_pool_retire_keeps_agent canary:40 --scenario agents --mutation pool_retire_keeps_agent
 1 canary_agents_pool_forgets_intent canary:40 --scenario agents --mutation pool_forgets_intent
+1 canary_agents_wait_repeats_ids canary:40 --scenario agents --mutation wait_repeats_ids
+1 canary_agents_restore_remembers_waits canary:40 --scenario agents --mutation restore_remembers_waits
 1 canary_agents_board_pool_forgets_intent canary:40 --scenario agents --subagents-board --mutation pool_forgets_intent
 4 agents_subagents_board_delayed pass --scenario agents --subagents-board-delayed
 4 agents_subagents_board_lagging pass --scenario agents --subagents-board-lagging

@@ -315,6 +315,12 @@ pub struct Marks {
 }
 
 impl Marks {
+    pub(crate) fn lanes_hold(&self, task: &TaskId) -> bool {
+        self.watchers
+            .values()
+            .any(|watcher| watcher.lanes.contains_key(task))
+    }
+
     pub const fn new() -> Self {
         Self {
             cursors: BTreeMap::new(),
@@ -377,7 +383,7 @@ mod pairs {
 /// links acyclic, so a chain longer than the board has tasks means a move let
 /// a cycle in: stop there with a panic that says so rather than walk it forever.
 pub fn ancestors<'a>(
-    tasks: &'a BTreeMap<TaskId, Task>,
+    tasks: &'a BTreeMap<TaskId, Box<Task>>,
     id: &'a TaskId,
 ) -> impl Iterator<Item = &'a TaskId> + 'a {
     std::iter::successors(Some(id), |at| {
@@ -393,16 +399,16 @@ pub fn ancestors<'a>(
     })
 }
 
-pub fn root(tasks: &BTreeMap<TaskId, Task>, id: &TaskId) -> TaskId {
+pub fn root(tasks: &BTreeMap<TaskId, Box<Task>>, id: &TaskId) -> TaskId {
     ancestors(tasks, id).last().unwrap_or(id).clone()
 }
 
-pub fn under(tasks: &BTreeMap<TaskId, Task>, id: &TaskId, above: &TaskId) -> bool {
+pub fn under(tasks: &BTreeMap<TaskId, Box<Task>>, id: &TaskId, above: &TaskId) -> bool {
     ancestors(tasks, id).any(|at| at == above)
 }
 
 impl Filter {
-    pub fn matches(&self, tasks: &BTreeMap<TaskId, Task>, entry: &Entry) -> bool {
+    pub fn matches(&self, tasks: &BTreeMap<TaskId, Box<Task>>, entry: &Entry) -> bool {
         if !self.kinds.is_empty() && !self.kinds.contains(&entry.change.kind()) {
             return false;
         }
@@ -938,6 +944,7 @@ impl Fold {
     }
 
     pub(crate) fn index_marks(&mut self) {
+        let base = self.retention.base();
         let Self {
             entries,
             tasks,
@@ -945,7 +952,8 @@ impl Fold {
             access,
             ..
         } = self;
-        for entry in &entries[marks.indexed..] {
+        let from = marks.indexed.saturating_sub(base).min(entries.len());
+        for entry in &entries[from..] {
             let author = marks.authors.get(&entry.event);
             let thread = root(tasks, &entry.task);
             for (name, watcher) in &mut marks.watchers {
@@ -967,7 +975,7 @@ impl Fold {
                 }
             }
         }
-        marks.indexed = entries.len();
+        marks.indexed = base + entries.len();
     }
 }
 

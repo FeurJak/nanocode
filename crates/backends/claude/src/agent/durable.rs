@@ -89,6 +89,9 @@ impl Snapshot {
         if let Some(compacted) = pages.compacted {
             snapshot.conversation.compacted = decode_pages(compacted)?;
         }
+        if let Some(sequence) = pages.compacted_pages {
+            snapshot.conversation.compacted_pages = Some(sequence);
+        }
         snapshot.validated()
     }
 
@@ -502,6 +505,9 @@ impl State {
                 }
                 if let Some(compacted) = pages.compacted {
                     conversation.compacted = decode_pages(compacted)?;
+                }
+                if let Some(sequence) = pages.compacted_pages {
+                    conversation.compacted_pages = Some(sequence);
                 }
             }
             if let Some(base) = cursor.pending_base.take() {
@@ -1087,7 +1093,9 @@ impl State {
     }
 }
 
-fn decode_pages<T: serde::de::DeserializeOwned>(payloads: Vec<EncodedPayload>) -> Result<Vec<T>> {
+pub(super) fn decode_pages<T: serde::de::DeserializeOwned>(
+    payloads: Vec<EncodedPayload>,
+) -> Result<Vec<T>> {
     let mut decoded = Vec::with_capacity(payloads.len());
     for payload in payloads {
         let value = payload.decode::<Value>().map_err(provider_error)?;
@@ -1095,6 +1103,17 @@ fn decode_pages<T: serde::de::DeserializeOwned>(payloads: Vec<EncodedPayload>) -
         decoded.push(serde_json::from_value(value).map_err(provider_error)?);
     }
     Ok(decoded)
+}
+
+pub(super) fn prepend_compacted(
+    conversation: &mut Conversation,
+    persisted: Vec<EncodedPayload>,
+) -> Result<()> {
+    let mut compacted: Vec<HistoryMessage> = decode_pages(persisted)?;
+    compacted.append(&mut conversation.compacted);
+    conversation.compacted = compacted;
+    conversation.compacted_pages = None;
+    Ok(())
 }
 
 const PAGED_VERSION: u32 = 4;
@@ -1145,6 +1164,7 @@ struct Detached {
     messages: Vec<HistoryMessage>,
     code_calls: Vec<history::CodeRound>,
     compacted: Vec<HistoryMessage>,
+    compacted_pages: Option<Sequence>,
     admitted_tool_ids: history::AdmittedIds,
 }
 
@@ -1154,6 +1174,7 @@ impl Detached {
             messages: std::mem::take(&mut conversation.messages),
             code_calls: std::mem::take(&mut conversation.code_calls),
             compacted: std::mem::take(&mut conversation.compacted),
+            compacted_pages: conversation.compacted_pages.take(),
             admitted_tool_ids: std::mem::take(&mut conversation.admitted_tool_ids),
         }
     }
@@ -1162,11 +1183,12 @@ impl Detached {
         conversation.messages = self.messages;
         conversation.code_calls = self.code_calls;
         conversation.compacted = self.compacted;
+        conversation.compacted_pages = self.compacted_pages;
         conversation.admitted_tool_ids = self.admitted_tool_ids;
     }
 
     fn page(
-        &self,
+        &mut self,
         records: &mut Vec<EncodedPayload>,
         paging: &mut Paging,
         settled: bool,
@@ -1211,17 +1233,12 @@ impl Detached {
                     paging.stored.as_ref(),
                 )?
             },
-            compacted: if self.compacted.is_empty() {
-                None
-            } else {
-                let unchanged = paging.compacted.unchanged(&self.compacted);
-                Some(paging.compacted.page(
-                    &self.compacted,
-                    unchanged,
-                    records,
-                    paging.stored.as_ref(),
-                )?)
-            },
+            compacted: paging.compacted.page(
+                &mut self.compacted,
+                &mut self.compacted_pages,
+                records,
+                paging.stored.as_ref(),
+            )?,
             admitted_base: admitted_base.as_ref().map(EncodedPayload::reference),
             admitted_tool_ids: tools.recent.iter().cloned().collect(),
             unadmitted_tool_ids: tools.unadmitted.iter().cloned().collect(),
@@ -1447,10 +1464,62 @@ impl<T: Paged> Pages<T> {
 }
 
 #[derive(Default)]
+pub(super) struct CompactedLog {
+    log: SequenceLog,
+}
+
+impl CompactedLog {
+    fn page(
+        &mut self,
+        tail: &mut Vec<HistoryMessage>,
+        pages: &mut Option<Sequence>,
+        records: &mut Vec<EncodedPayload>,
+        stored: Option<&HashSet<String>>,
+    ) -> Result<Option<Sequence>> {
+        if tail.is_empty() && pages.is_none() {
+            return Ok(None);
+        }
+        let base = pages.take().unwrap_or_default();
+        if self.log.sequence() != base {
+            self.log = SequenceLog::resume(&base).ok_or_else(|| {
+                provider_error("Claude compacted history pages are not resumable")
+            })?;
+        }
+        let unchanged = self.log.len();
+        self.log
+            .sync_known(
+                unchanged,
+                tail.drain(..).map(|item| {
+                    let record = item
+                        .record()
+                        .map_err(nanocode_durability::Error::InvalidPayload)?;
+                    Ok(match stored {
+                        Some(stored) if stored.contains(record.key()) => record.reference(),
+                        _ => record,
+                    })
+                }),
+                stored,
+            )
+            .map_err(provider_error)?;
+        records.extend(self.log.frontier().cloned());
+        let sequence = self.log.sequence();
+        *pages = Some(sequence.clone());
+        Ok(Some(sequence))
+    }
+
+    fn committed(&mut self) {
+        self.log.release();
+        if let Some(log) = self.log.forget_sealed() {
+            self.log = log;
+        }
+    }
+}
+
+#[derive(Default)]
 pub(super) struct Paging {
     messages: Pages<HistoryMessage>,
     code_calls: Pages<history::CodeRound>,
-    compacted: Pages<HistoryMessage>,
+    compacted: CompactedLog,
     pending: Pages<HistoryMessage>,
     tools: ToolIds,
     template: Option<Arc<EncodedTemplate>>,
@@ -1528,15 +1597,15 @@ fn encode_snapshot(
             })
             .map_err(provider_error);
     }
-    let detached = Detached::take(&mut snapshot.conversation);
-    let encoded = paged_snapshot(snapshot, &detached, paging);
+    let mut detached = Detached::take(&mut snapshot.conversation);
+    let encoded = paged_snapshot(snapshot, &mut detached, paging);
     detached.restore(&mut snapshot.conversation);
     encoded
 }
 
 fn paged_snapshot(
     snapshot: &Snapshot,
-    detached: &Detached,
+    detached: &mut Detached,
     paging: &mut Paging,
 ) -> Result<EncodedState> {
     let mut records = Vec::new();
@@ -1587,7 +1656,7 @@ fn paged_snapshot(
 
 fn paged_cursor(
     cursor: &Cursor,
-    detached: &Detached,
+    detached: &mut Detached,
     pending: &[HistoryMessage],
     prompt: &TemplatePrompt<'_>,
     paging: &mut Paging,
@@ -1616,7 +1685,7 @@ fn paged_cursor(
 
 fn encode_cursor(cursor: &mut Cursor, paged: bool, paging: &mut Paging) -> Result<EncodedState> {
     if paged {
-        let detached = Detached::take(&mut cursor.snapshot.conversation);
+        let mut detached = Detached::take(&mut cursor.snapshot.conversation);
         let pending = std::mem::take(&mut cursor.pending);
         let system = cursor.template.system.take();
         let tools = std::mem::take(&mut cursor.template.tools);
@@ -1624,7 +1693,7 @@ fn encode_cursor(cursor: &mut Cursor, paged: bool, paging: &mut Paging) -> Resul
             system: system.as_ref(),
             tools: &tools,
         };
-        let encoded = paged_cursor(cursor, &detached, &pending, &prompt, paging);
+        let encoded = paged_cursor(cursor, &mut detached, &pending, &prompt, paging);
         detached.restore(&mut cursor.snapshot.conversation);
         cursor.pending = pending;
         cursor.template.system = system;
@@ -2120,5 +2189,207 @@ mod scan_tests {
                 .collect::<Vec<_>>();
             assert!(stopped_background_notices(session, &messages, &queued).is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod compacted_tests {
+    use super::*;
+
+    const KEY_BYTES: usize = 64;
+    const TURNS: usize = 500;
+    const PER_TURN: usize = 4;
+
+    fn compacted_message(turn: usize, index: usize) -> HistoryMessage {
+        HistoryMessage::from(Message::text(
+            Role::User,
+            format!("turn {turn} message {index} {}", "x".repeat(2048)),
+        ))
+    }
+
+    fn held_compacted_bytes(snapshot: &Snapshot, paging: &Paging) -> usize {
+        let tail = snapshot
+            .conversation
+            .compacted
+            .iter()
+            .map(|message| serde_json::to_string(message).unwrap().len())
+            .sum::<usize>();
+        tail + paging.compacted.log.held() * KEY_BYTES
+    }
+
+    #[test]
+    fn a_running_conversation_holds_only_its_unpersisted_compacted_tail() {
+        let mut paging = Paging::default();
+        let mut snapshot = Snapshot::default();
+        for turn in 0..TURNS {
+            for index in 0..PER_TURN {
+                snapshot
+                    .conversation
+                    .compacted
+                    .push(compacted_message(turn, index));
+            }
+            encode_snapshot(&mut snapshot, true, &mut paging).unwrap();
+            paging.committed();
+            let held = held_compacted_bytes(&snapshot, &paging);
+            assert!(
+                held <= 64 * 1024,
+                "turn {turn}: the conversation holds {held} bytes of compacted history"
+            );
+        }
+    }
+
+    #[test]
+    fn paged_compacted_history_round_trips_without_decoding() {
+        let mut paging = Paging::default();
+        let mut snapshot = Snapshot::default();
+        let mut staged = HashSet::new();
+        let mut full = SequenceLog::default();
+        let mut refs = Vec::new();
+        let mut last = None;
+        for turn in 0..TURNS {
+            for index in 0..PER_TURN {
+                let message = compacted_message(turn, index);
+                let reference = message.record().unwrap().reference();
+                full.push(reference.clone()).unwrap();
+                refs.push(reference);
+                snapshot.conversation.compacted.push(message);
+            }
+            let encoded = encode_snapshot(&mut snapshot, true, &mut paging).unwrap();
+            let mut records: Vec<nanocode_durability::StoreRecord> = Vec::new();
+            for mut record in encoded.records {
+                record.stage(&mut records);
+            }
+            staged.extend(records.into_iter().map(|record| record.key));
+            last = Some(encoded.json);
+            paging.committed();
+        }
+        let sequence = snapshot.conversation.compacted_pages.clone().unwrap();
+        assert!(snapshot.conversation.compacted.is_empty());
+        assert_eq!(sequence.count(), Some(TURNS * PER_TURN));
+        assert_eq!(
+            serde_json::to_string(&sequence).unwrap(),
+            serde_json::to_string(&full.sequence()).unwrap()
+        );
+        let missing = refs
+            .iter()
+            .filter(|reference| !staged.contains(reference.key()))
+            .count();
+        assert_eq!(missing, 0, "compacted messages never staged for the store");
+        let stored: Value = serde_json::from_str(last.unwrap().get()).unwrap();
+        assert_eq!(
+            stored["compacted"],
+            serde_json::to_value(&sequence).unwrap()
+        );
+        let decoded = Snapshot::decode_paged(
+            stored["snapshot"].clone(),
+            ContinuationPages {
+                messages: Vec::new(),
+                code_calls: None,
+                compacted: None,
+                compacted_pages: Some(sequence.clone()),
+            },
+        )
+        .unwrap();
+        assert!(decoded.conversation.compacted.is_empty());
+        assert_eq!(
+            decoded
+                .conversation
+                .compacted_pages
+                .as_ref()
+                .and_then(Sequence::count),
+            Some(TURNS * PER_TURN)
+        );
+        let whole = Snapshot::decode(serde_json::to_value(&snapshot).unwrap()).unwrap();
+        assert!(whole == snapshot);
+    }
+
+    fn page_turns(
+        snapshot: &mut Snapshot,
+        paging: &mut Paging,
+        turns: std::ops::Range<usize>,
+        paged: bool,
+    ) -> Vec<HistoryMessage> {
+        let mut added = Vec::new();
+        for turn in turns {
+            for index in 0..PER_TURN {
+                let message = compacted_message(turn, index);
+                added.push(message.clone());
+                snapshot.conversation.compacted.push(message);
+            }
+            encode_snapshot(snapshot, paged, paging).unwrap();
+            paging.committed();
+        }
+        added
+    }
+
+    fn full_sequence(messages: &[HistoryMessage]) -> String {
+        let mut full = SequenceLog::default();
+        for message in messages {
+            full.push(message.record().unwrap().reference()).unwrap();
+        }
+        serde_json::to_string(&full.sequence()).unwrap()
+    }
+
+    #[test]
+    fn restoring_an_earlier_snapshot_resumes_its_compacted_pages() {
+        let mut paging = Paging::default();
+        let mut snapshot = Snapshot::default();
+        let mut kept = page_turns(&mut snapshot, &mut paging, 0..10, true);
+        let earlier = snapshot.clone();
+        page_turns(&mut snapshot, &mut paging, 10..20, true);
+        snapshot = earlier;
+        kept.extend(page_turns(&mut snapshot, &mut paging, 100..101, true));
+        assert!(snapshot.conversation.compacted.is_empty());
+        let sequence = snapshot.conversation.compacted_pages.clone().unwrap();
+        assert_eq!(sequence.count(), Some(kept.len()));
+        assert_eq!(
+            serde_json::to_string(&sequence).unwrap(),
+            full_sequence(&kept)
+        );
+    }
+
+    #[test]
+    fn a_non_paged_policy_keeps_every_compacted_message() {
+        let mut paging = Paging::default();
+        let mut snapshot = Snapshot::default();
+        let added = page_turns(&mut snapshot, &mut paging, 0..10, false);
+        assert!(snapshot.conversation.compacted_pages.is_none());
+        assert_eq!(snapshot.conversation.compacted.len(), added.len());
+        let encoded = encode_snapshot(&mut snapshot, false, &mut paging).unwrap();
+        let stored: Value = serde_json::from_str(encoded.json.get()).unwrap();
+        assert_eq!(
+            stored["conversation"]["compacted"].as_array().map(Vec::len),
+            Some(added.len())
+        );
+        assert!(stored["conversation"].get("compacted_pages").is_none());
+    }
+
+    #[test]
+    fn a_fork_writes_the_whole_compacted_history_into_its_child() {
+        let mut paging = Paging::default();
+        let mut snapshot = Snapshot::default();
+        let persisted = page_turns(&mut snapshot, &mut paging, 0..10, true);
+        let tail = (0..PER_TURN)
+            .map(|index| compacted_message(10, index))
+            .collect::<Vec<_>>();
+        snapshot.conversation.compacted.extend(tail.iter().cloned());
+        let pages = snapshot.conversation.compacted_pages.clone().unwrap();
+        assert_eq!(
+            serde_json::to_string(&pages).unwrap(),
+            full_sequence(&persisted)
+        );
+        let loaded = persisted
+            .iter()
+            .map(|message| message.record().unwrap())
+            .collect();
+        prepend_compacted(&mut snapshot.conversation, loaded).unwrap();
+        let child = serde_json::to_value(&snapshot).unwrap();
+        assert!(child["conversation"].get("compacted_pages").is_none());
+        let expected = persisted
+            .iter()
+            .chain(&tail)
+            .map(|message| serde_json::to_value(message).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(child["conversation"]["compacted"], Value::Array(expected));
     }
 }

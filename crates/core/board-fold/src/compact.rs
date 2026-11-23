@@ -29,9 +29,10 @@ const SEQ_OPEN: u8 = 12;
 const MAP_OPEN: u8 = 13;
 const END: u8 = 14;
 
-const SECTIONS: [&str; 9] = [
-    "head", "tasks", "seen", "entries", "access", "mirror", "said", "steers", "intents",
+const SECTIONS: [&str; 10] = [
+    "head", "tasks", "seen", "entries", "access", "mirror", "said", "steers", "intents", "retain",
 ];
+const SECTIONS_BEFORE_RETAIN: usize = 9;
 
 #[derive(Debug)]
 pub struct Error(String);
@@ -72,7 +73,7 @@ fn map<K: Ord, V>(pairs: Vec<(K, V)>) -> BTreeMap<K, V> {
     pairs.into_iter().collect()
 }
 
-type Labelled = BTreeMap<String, BTreeMap<String, BTreeSet<TaskId>>>;
+type Labelled = BTreeMap<String, BTreeMap<String, crate::ids::Ids>>;
 
 type Head = (
     u64,
@@ -80,13 +81,13 @@ type Head = (
     Vec<(TaskId, BTreeSet<TaskId>)>,
     Vec<(TaskId, BTreeSet<TaskId>)>,
     BTreeSet<TaskId>,
-    Vec<(String, BTreeMap<String, BTreeSet<TaskId>>)>,
+    Vec<(String, BTreeMap<String, crate::ids::Ids>)>,
     watch::Marks,
 );
 
 enum Part {
     Head(Head),
-    Tasks(Vec<(TaskId, Task)>),
+    Tasks(Vec<(TaskId, Box<Task>)>),
     Seen(Vec<(EventId, Result<u64, Rejection>)>),
     Entries(Vec<Entry>),
     Access(access::Access),
@@ -94,6 +95,7 @@ enum Part {
     Said(messages::Said),
     Steers(steer::Steers),
     Intents(intent::Intents),
+    Retain(crate::retain::Retention),
 }
 
 type Job<'a, T> = Box<dyn FnOnce() -> T + Send + 'a>;
@@ -171,6 +173,7 @@ pub fn snapshot(fold: &Fold, spread: Spread) -> Result<Vec<u8>, Error> {
         marks,
         steers,
         intents,
+        retention,
         refused: _,
     } = fold;
     let jobs: Vec<Job<'_, Result<Vec<u8>, Error>>> = vec![
@@ -193,6 +196,7 @@ pub fn snapshot(fold: &Fold, spread: Spread) -> Result<Vec<u8>, Error> {
         Box::new(move || encode(said)),
         Box::new(move || encode(steers)),
         Box::new(move || encode(intents)),
+        Box::new(move || encode(retention)),
     ];
     let bodies = all(spread, jobs)
         .into_iter()
@@ -219,17 +223,17 @@ pub fn restore(snapshot: &[u8], spread: Spread) -> Result<Fold, Error> {
     };
     let mut reader = Reader::new(rest);
     let count = reader.len()?;
-    if count != SECTIONS.len() {
+    if count != SECTIONS.len() && count != SECTIONS_BEFORE_RETAIN {
         return fail(format!(
             "snapshot has {count} sections, expected {}",
             SECTIONS.len()
         ));
     }
     let mut lengths = Vec::with_capacity(count);
-    for expected in SECTIONS {
+    for expected in &SECTIONS[..count] {
         let size = reader.len()?;
         let name = reader.str(size)?;
-        if name != expected {
+        if name != *expected {
             return fail(format!("snapshot section {name}, expected {expected}"));
         }
         lengths.push(reader.len()?);
@@ -241,6 +245,9 @@ pub fn restore(snapshot: &[u8], spread: Spread) -> Result<Fold, Error> {
     if reader.at != rest.len() {
         return fail("snapshot has bytes after its last section");
     }
+    if bodies.len() == SECTIONS_BEFORE_RETAIN {
+        bodies.push(&[]);
+    }
     let [
         head,
         tasks,
@@ -251,7 +258,8 @@ pub fn restore(snapshot: &[u8], spread: Spread) -> Result<Fold, Error> {
         said,
         steers,
         intents,
-    ] = <[&[u8]; 9]>::try_from(bodies).map_err(|_| Error("snapshot sections".to_owned()))?;
+        retain,
+    ] = <[&[u8]; 10]>::try_from(bodies).map_err(|_| Error("snapshot sections".to_owned()))?;
     let jobs: Vec<Job<'_, Result<Part, Error>>> = vec![
         Box::new(move || decode(head).map(Part::Head)),
         Box::new(move || decode(tasks).map(Part::Tasks)),
@@ -262,6 +270,13 @@ pub fn restore(snapshot: &[u8], spread: Spread) -> Result<Fold, Error> {
         Box::new(move || decode(said).map(Part::Said)),
         Box::new(move || decode(steers).map(Part::Steers)),
         Box::new(move || decode(intents).map(Part::Intents)),
+        Box::new(move || {
+            if retain.is_empty() {
+                Ok(Part::Retain(crate::retain::Retention::new()))
+            } else {
+                decode(retain).map(Part::Retain)
+            }
+        }),
     ];
     let mut parts = all(spread, jobs).into_iter().zip(SECTIONS);
     let mut part = || match parts.next() {
@@ -296,6 +311,9 @@ pub fn restore(snapshot: &[u8], spread: Spread) -> Result<Fold, Error> {
     let Part::Intents(intents) = part()? else {
         return fail("snapshot intents out of order");
     };
+    let Part::Retain(retention) = part()? else {
+        return fail("snapshot retain out of order");
+    };
     let labelled: Labelled = map(labelled);
     Ok(Fold {
         next,
@@ -314,6 +332,7 @@ pub fn restore(snapshot: &[u8], spread: Spread) -> Result<Fold, Error> {
         marks,
         steers,
         intents,
+        retention,
         refused: None,
     })
 }

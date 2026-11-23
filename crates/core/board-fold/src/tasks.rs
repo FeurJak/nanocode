@@ -276,7 +276,7 @@ impl Fold {
     }
 
     pub(crate) fn cascades(&self, id: &TaskId) -> bool {
-        self.tasks.get(id).is_some_and(Task::cascades)
+        self.tasks.get(id).is_some_and(|task| task.cascades())
     }
 
     pub fn admits(&self, task: &TaskId, actor: &str) -> Result<(), Rejection> {
@@ -327,10 +327,11 @@ impl Fold {
             .iter()
             .map(|(key, value)| self.labelled.get(key).and_then(|values| values.get(value)))
             .collect::<Option<Vec<_>>>()?;
-        let candidates = sets
-            .into_iter()
-            .min_by_key(|ids| ids.len())
-            .unwrap_or(&self.live);
+        let candidates = sets.into_iter().min_by_key(|ids| ids.len());
+        let candidates: Box<dyn Iterator<Item = &TaskId>> = match candidates {
+            Some(ids) => Box::new(ids.iter()),
+            None => Box::new(self.live.iter()),
+        };
         let mut tier = None;
         let mut head: Vec<(usize, &TaskId)> = Vec::new();
         for id in candidates {
@@ -479,7 +480,7 @@ impl Fold {
                 .or_default()
                 .insert(task.id.clone());
         }
-        self.tasks.insert(task.id.clone(), Task::new(task, series));
+        self.tasks.insert(task.id.clone(), Box::new(Task::new(task, series)));
         self.record(seq, event, &task.id, Change::Posted);
     }
 

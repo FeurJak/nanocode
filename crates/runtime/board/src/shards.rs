@@ -131,6 +131,7 @@ impl<'a> Merged<'a> {
     pub fn tasks(&self) -> BTreeMap<&'a TaskId, &'a Task> {
         self.shown()
             .flat_map(|(_, fold)| fold.tasks().iter())
+            .map(|(id, task)| (id, &**task))
             .collect()
     }
 
@@ -200,6 +201,11 @@ impl<'a> Merged<'a> {
     /// Rows folded across every partition.
     pub fn rows(&self) -> u64 {
         self.shown().map(|(_, fold)| fold.next()).sum()
+    }
+
+    /// Records held across every partition (Fold::records).
+    pub fn held(&self) -> u64 {
+        self.shown().map(|(_, fold)| fold.records() as u64).sum()
     }
 
     /// Where a write goes, given what the folds know about the tasks it names.

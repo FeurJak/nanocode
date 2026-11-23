@@ -73,6 +73,24 @@ pub struct Intents {
 }
 
 impl Intents {
+    pub(crate) fn holds_goal(&self, task: &TaskId) -> bool {
+        self.goals.contains(task)
+    }
+
+    pub(crate) fn forget(&mut self, task: &TaskId, parent: Option<&TaskId>) {
+        self.posts.remove(task);
+        self.goals.remove(task);
+        self.reports.remove(task);
+        if let Some(parent) = parent
+            && let Some(reports) = self.reports.get_mut(parent)
+        {
+            reports.remove(task);
+            if reports.is_empty() {
+                self.reports.remove(parent);
+            }
+        }
+    }
+
     pub const fn new() -> Self {
         Self {
             posts: BTreeMap::new(),

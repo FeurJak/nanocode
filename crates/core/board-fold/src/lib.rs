@@ -10,6 +10,7 @@ pub mod deliver;
 pub mod delivery;
 pub mod intent;
 pub mod mirror;
+pub mod retain;
 pub mod schedule;
 pub mod sim;
 pub mod stage;
@@ -43,9 +44,11 @@ id!(EventId);
 
 pub mod blocks;
 pub mod group;
+mod ids;
 pub mod messages;
 
 pub use compact::Spread;
+pub use retain::{Evicted, Retain};
 
 /// The version a board writes its fold checkpoints under, and the only one it reopens from: the
 /// snapshot format and a hash of the fold's source, so a build whose fold changed replays the
@@ -387,7 +390,7 @@ pub struct Fold {
     next: u64,
     now_ms: u64,
     #[serde(with = "crate::pairs")]
-    tasks: BTreeMap<TaskId, Task>,
+    tasks: BTreeMap<TaskId, Box<Task>>,
     #[serde(with = "crate::pairs")]
     children: BTreeMap<TaskId, BTreeSet<TaskId>>,
     #[serde(with = "crate::pairs")]
@@ -401,13 +404,15 @@ pub struct Fold {
     #[serde(skip)]
     posted: BTreeMap<TaskId, usize>,
     #[serde(with = "crate::pairs")]
-    labelled: BTreeMap<String, BTreeMap<String, BTreeSet<TaskId>>>,
+    labelled: BTreeMap<String, BTreeMap<String, ids::Ids>>,
     said: messages::Said,
     marks: watch::Marks,
     #[serde(default)]
     steers: steer::Steers,
     #[serde(default)]
     intents: intent::Intents,
+    #[serde(default)]
+    retention: retain::Retention,
     #[serde(skip)]
     refused: Option<nanocode_machine::Illegal<Stage>>,
 }
@@ -437,6 +442,7 @@ impl Fold {
             marks: watch::Marks::new(),
             steers: steer::Steers::new(),
             intents: intent::Intents::new(),
+            retention: retain::Retention::new(),
             refused: None,
         }
     }
@@ -445,16 +451,22 @@ impl Fold {
         self.next
     }
 
+    /// What the fold holds now, in records: tasks, entries, dedupe outcomes and said messages. Unlike
+    /// next (every row ever folded), it stays flat on a board whose retention keeps up.
+    pub fn records(&self) -> usize {
+        self.tasks.len() + self.entries.len() + self.seen.len() + self.said.len()
+    }
+
     pub const fn now_ms(&self) -> u64 {
         self.now_ms
     }
 
-    pub const fn tasks(&self) -> &BTreeMap<TaskId, Task> {
+    pub const fn tasks(&self) -> &BTreeMap<TaskId, Box<Task>> {
         &self.tasks
     }
 
     pub fn task(&self, id: &TaskId) -> Option<&Task> {
-        self.tasks.get(id)
+        self.tasks.get(id).map(|task| &**task)
     }
 
     pub fn epoch(&self, partition: u32) -> u64 {
@@ -477,6 +489,7 @@ impl Fold {
             .filter_map(|count| count.parse::<u64>().ok())
             .max()
             .unwrap_or(0)
+            .max(self.retention.minted(writer))
     }
 
     pub fn claimable(&self, id: &TaskId, at_ms: u64) -> Result<Option<ClaimId>, Rejection> {
@@ -597,7 +610,7 @@ impl Fold {
     }
 
     pub fn settled(&self) -> bool {
-        self.tasks.values().all(Task::finished)
+        self.tasks.values().all(|task| task.finished())
     }
 
     fn holder(&self, id: &TaskId, held: &ClaimId) -> Result<&Task, Rejection> {
@@ -620,6 +633,9 @@ impl Fold {
                     && !mutated(Mutation::PostOverwrites)
                     && !self.reposted(task)
                 {
+                    return Err(Rejection::Exists);
+                }
+                if self.retention.gone(&task.id) {
                     return Err(Rejection::Exists);
                 }
                 if let Some(parent) = &task.parent
@@ -778,16 +794,6 @@ impl Fold {
         Ok(())
     }
 
-    fn posted_order(&self) -> BTreeMap<TaskId, usize> {
-        let mut posted = BTreeMap::new();
-        for (index, entry) in self.entries.iter().enumerate() {
-            if entry.change == Change::Posted {
-                posted.entry(entry.task.clone()).or_insert(index);
-            }
-        }
-        posted
-    }
-
     pub fn snapshot(&self) -> Vec<u8> {
         self.snapshot_spread(Spread::for_fold(self))
     }
@@ -814,7 +820,8 @@ impl Fold {
         } else {
             serde_json::from_slice(snapshot).map_err(|error| corrupt(error.to_string()))?
         };
-        fold.posted = fold.posted_order();
+        fold.posted = fold.restored_posts();
+        fold.restore_retention();
         if mutated(Mutation::SnapshotSkipsRows) {
             fold.next += 1;
         }
@@ -851,17 +858,21 @@ impl Fold {
         }
         let verdict = self.judge(event).map(|()| seq);
         self.seen.insert(event.id.clone(), verdict.clone());
+        self.heard(&event.id, &event.op);
+        let from = self.entry_count();
         if verdict.is_ok() {
             self.access.record(&event.by, &event.id, &event.op);
             self.transition(seq, event);
             if let Some(illegal) = self.refused.take() {
                 self.seen
                     .insert(event.id.clone(), Err(stage::rejection(illegal)));
+                self.retained(from, seq);
                 return Ok(());
             }
             self.intend(seq, event);
             self.hear(seq, event);
             self.index_marks();
+            self.retained(from, seq);
         } else if mutated(Mutation::RefusalsCountAttempts) {
             self.miscount(&event.op);
         } else if mutated(Mutation::DeliveryRefusalsWrite) {
@@ -877,9 +888,8 @@ impl Fold {
         }
         let terminal = change.terminal().then(|| change.clone());
         if change == Change::Posted {
-            self.posted
-                .entry(task.clone())
-                .or_insert(self.entries.len());
+            let at = self.entry_count();
+            self.posted.entry(task.clone()).or_insert(at);
         }
         self.entries.push(Entry {
             seq,
@@ -1111,7 +1121,7 @@ impl Fold {
     }
 
     pub(crate) fn cancel(&mut self, seq: u64, event: &Event, id: &TaskId, reason: String) {
-        if self.tasks.get(id).is_none_or(Task::finished) {
+        if self.tasks.get(id).is_none_or(|task| task.finished()) {
             return;
         }
         let cancelled = Phase::Cancelled {
