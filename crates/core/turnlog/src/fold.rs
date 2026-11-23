@@ -227,6 +227,7 @@ pub struct Fold {
     models: BTreeMap<String, Vec<Box<RawValue>>>,
     owners: BTreeMap<String, Owner>,
     pages: BTreeMap<String, Page>,
+    placed: BTreeMap<u64, (u64, u64)>,
     read: BTreeSet<String>,
     root: Option<Page>,
     segment_row: u64,
@@ -235,6 +236,7 @@ pub struct Fold {
     stored: BTreeMap<String, String>,
     retired: BTreeMap<u128, Retired>,
     turns: Vec<Turn>,
+    unindexed: BTreeSet<String>,
     wakes: Wakes,
 }
 
@@ -515,6 +517,11 @@ impl Fold {
                 pages.insert(first.clone(), *section);
             }
         }
+        for owner in &self.unindexed {
+            if let Some((first, Page::Cold(section))) = self.page_of(owner) {
+                pages.insert(first.clone(), *section);
+            }
+        }
         pages.into_iter().collect()
     }
 
@@ -743,8 +750,9 @@ impl Fold {
                 Page::Cold(_) => None,
             })
             .filter(|(first, _)| {
-                self.page_owners(first).all(|(_, state)| {
+                self.page_owners(first).all(|(owner, state)| {
                     matches!(state, Owner::Cold { entry, pending } if pending.is_empty() && !entry.legacy && !entry.sections.is_empty())
+                        && !self.unindexed.contains(owner)
                 })
             })
             .collect::<Vec<_>>();
@@ -870,6 +878,7 @@ impl Fold {
             )));
         }
         let mut refs = self.groups.clone();
+        refs.extend(&self.placed);
         for (owner, entry) in written {
             let Some(old) = self.entry(owner) else {
                 continue;
@@ -912,7 +921,9 @@ impl Fold {
             written
                 .iter()
                 .filter(|(owner, entry)| entry.as_ref() != self.entry(owner))
-                .filter_map(|(owner, _)| self.page_of(owner).map(|(first, _)| first.clone()))
+                .map(|(owner, _)| owner)
+                .chain(&self.unindexed)
+                .filter_map(|owner| self.page_of(owner).map(|(first, _)| first.clone()))
                 .collect()
         };
         let mut kept = self.pages.clone();
@@ -1004,6 +1015,90 @@ impl Fold {
         self.filters.retain(|row, _| cold.contains(row));
         self.groups = groups;
         self.root = root.map(Page::Loaded);
+        self.placed.clear();
+        self.unindexed.clear();
+    }
+
+    pub(crate) fn waits(&self, owner: &str) -> bool {
+        matches!(self.owners.get(owner), Some(Owner::Waiting { .. }))
+    }
+
+    pub(crate) fn placeable(&self, key: &str) -> bool {
+        key.contains('\n')
+            && self.stored.contains_key(key)
+            && matches!(
+                self.owners.get(key),
+                Some(Owner::Warm { delta, entry })
+                    if entry.sections.is_empty()
+                        && !entry.legacy
+                        && delta.cells.is_empty()
+                        && !delta.checkpoint
+                        && delta.keys.len() == 1
+                        && delta.keys.contains(key)
+            )
+    }
+
+    pub(crate) fn place(&mut self, section: Section, owners: &[(String, u64)]) {
+        for (owner, bytes) in owners {
+            let Some(Owner::Warm { delta, entry }) = self.owners.get_mut(owner) else {
+                panic!("turn log placed owner {owner} is not warm");
+            };
+            assert!(entry.sections.is_empty(), "turn log placed owner {owner} twice");
+            assert!(delta.keys.remove(owner), "turn log placed owner {owner} had no delta");
+            assert!(delta.is_empty(), "turn log placed owner {owner} holds more than its value");
+            *entry = Entry {
+                checkpoint: false,
+                full: *bytes,
+                legacy: false,
+                sections: vec![section],
+                written: *bytes,
+            };
+            self.unindexed.insert(owner.clone());
+        }
+        self.place_group(section, owners.len() as u64);
+    }
+
+    fn place_group(&mut self, section: Section, count: u64) {
+        assert!(count > 0, "turn log placed an empty section at row {}", section.row);
+        let previous = self.placed.insert(section.row, (section.rows, count));
+        assert!(previous.is_none(), "turn log placed row {} twice", section.row);
+    }
+
+    fn placed_in_tail(
+        &mut self,
+        owners: &[(String, u64)],
+        section: Section,
+    ) -> Result<(), StoreError> {
+        if owners.is_empty() || self.placed.contains_key(&section.row) {
+            return Err(invalid(format!(
+                "placed section at row {} is empty or listed twice",
+                section.row
+            )));
+        }
+        for (owner, bytes) in owners {
+            if !owner.contains('\n') || self.owners.contains_key(owner) {
+                return Err(invalid(format!(
+                    "owner {owner} is placed at row {} but is not a new stored value",
+                    section.row
+                )));
+            }
+            self.owners.insert(
+                owner.clone(),
+                Owner::Cold {
+                    entry: Entry {
+                        checkpoint: false,
+                        full: *bytes,
+                        legacy: false,
+                        sections: vec![section],
+                        written: *bytes,
+                    },
+                    pending: Vec::new(),
+                },
+            );
+            self.unindexed.insert(owner.clone());
+        }
+        self.place_group(section, owners.len() as u64);
+        Ok(())
     }
 
     pub(crate) fn delta_records(
@@ -1933,6 +2028,13 @@ impl Fold {
                     "owner {owner} is listed outside an index page"
                 )));
             }
+            Record::Placed { owners, row, rows } => self.placed_in_tail(
+                owners,
+                Section {
+                    row: *row,
+                    rows: *rows,
+                },
+            )?,
             Record::Section { owners, row, rows } => {
                 let section = Section {
                     row: *row,

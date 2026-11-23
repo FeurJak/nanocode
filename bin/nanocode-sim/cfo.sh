@@ -289,6 +289,7 @@ default_table='
 1 canary_forgets_other_cell canary:20 --scenario turns --policy turnlog --mutation forgets_other_cell
 1 canary_content_rewritten_stale canary:20 --scenario turns --policy turnlog --mutation content_rewritten_stale
 1 canary_content_collected_live canary:20 --scenario turns --policy turnlog --mutation content_collected_live
+1 canary_placed_inline canary:20 --scenario turns --policy turnlog --mutation placed_inline
 1 canary_agents_cancel_ignored canary:200 --scenario agents --mutation cancel_ignored
 1 canary_agents_shutdown_hangs canary:200 --scenario agents --mutation shutdown_hangs
 1 canary_agents_shutdown_keeps_harness canary:200 --scenario agents --mutation shutdown_keeps_harness

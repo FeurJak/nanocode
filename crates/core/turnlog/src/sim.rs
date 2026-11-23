@@ -6,6 +6,7 @@ pub enum Mutation {
     None,
     HoldForgetsAnswer,
     HoldPrunesUnsettled,
+    PlacedInline,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

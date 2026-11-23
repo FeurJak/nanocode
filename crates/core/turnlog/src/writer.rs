@@ -43,6 +43,7 @@ pub struct Stats {
     pub page_rows: u64,
     pub pages: u64,
     pub parts: u64,
+    pub placed_bytes: u64,
     pub plain_bytes: u64,
     pub progress: u64,
     pub recoveries: u64,
@@ -183,6 +184,62 @@ fn line(lines: &mut Vec<u8>, record: &Record) -> Result<(), StoreError> {
         lines.push(b'\n');
     }
     crate::record::write(record, lines)
+}
+
+struct Placing {
+    keys: BTreeSet<String>,
+    owners: Vec<(String, u64)>,
+    rows: Vec<(u64, String)>,
+    section: Section,
+}
+
+fn placing(
+    spare: &mut codec::Spare,
+    fold: &Fold,
+    buffer: &[Record],
+    seq: u64,
+    limit: Option<usize>,
+) -> Result<Option<Placing>, StoreError> {
+    let mut values = BTreeMap::new();
+    for record in buffer {
+        if let Record::Stored { key, value } = record
+            && fold.placeable(key)
+        {
+            values.insert(key.as_str(), value.as_str());
+        }
+    }
+    if values.is_empty() {
+        return Ok(None);
+    }
+    let mut packer = codec::Packer::new(spare, codec::DEFAULT_LEVEL, &[])?;
+    let mut lines = Vec::new();
+    let mut owners = Vec::with_capacity(values.len());
+    for (key, value) in values {
+        lines.clear();
+        line(
+            &mut lines,
+            &Record::Stored {
+                key: key.to_owned(),
+                value: value.to_owned(),
+            },
+        )?;
+        if packer.plain() > 0 {
+            packer.write(b"\n")?;
+        }
+        packer.write(&lines)?;
+        owners.push((key.to_owned(), lines.len() as u64));
+    }
+    let rows = stored(seq, packer.finish(SECTION, spare)?.packed, limit)?;
+    let section = Section {
+        row: seq,
+        rows: rows.len() as u64,
+    };
+    Ok(Some(Placing {
+        keys: owners.iter().map(|(owner, _)| owner.clone()).collect(),
+        owners,
+        rows,
+        section,
+    }))
 }
 
 fn sections(
@@ -676,13 +733,17 @@ fn decode_row(logical: Logical, history: &mut History) -> Result<Row, StoreError
         text,
     } = logical;
     let snapshot = tag == SNAPSHOT;
-    let boundary = snapshot || tag == BOUNDARY || tag == ARCHIVE || tag == SECTION;
+    let section = tag == SECTION;
+    let boundary = snapshot || tag == BOUNDARY || tag == ARCHIVE;
     if boundary {
         history.clear();
     }
-    let plain = codec::unpack(&text[tag.len_utf8()..], history.bytes())?;
+    let dictionary: &[u8] = if section { &[] } else { history.bytes() };
+    let plain = codec::unpack(&text[tag.len_utf8()..], dictionary)?;
     drop(text);
-    history.extend(&plain);
+    if !section {
+        history.extend(&plain);
+    }
     let plain = String::from_utf8(plain).map_err(|error| {
         StoreError::Backend(format!("turn log row {seq} is not UTF-8: {error}"))
     })?;
@@ -726,7 +787,7 @@ async fn scan(
     if segment.last <= after {
         return Ok(true);
     }
-    let stored = host.scan(scope, segment.row, end).await?;
+    let stored = unsectioned(host.scan(scope, segment.row, end).await?);
     stats.pages += 1;
     stats.page_rows += stored.len() as u64;
     each_row(stored, &mut History::default(), |row| {
@@ -751,6 +812,19 @@ async fn scan(
         }
         Ok(true)
     })
+}
+
+fn unsectioned(stored: Vec<(u64, String)>) -> Vec<(u64, String)> {
+    let mut section = false;
+    stored
+        .into_iter()
+        .filter(|(_, body)| {
+            if !body.starts_with(PART) {
+                section = body.starts_with(SECTION);
+            }
+            !section
+        })
+        .collect()
 }
 
 fn suffix(plain: &str, events: usize) -> Option<&str> {
@@ -886,16 +960,7 @@ impl Follower {
             self.fold.start_segment(first);
         }
         self.next = last + 1;
-        let mut section = false;
-        let mut stored: Vec<(u64, String)> = stored
-            .into_iter()
-            .filter(|(_, body)| {
-                if !body.starts_with(PART) {
-                    section = body.starts_with(SECTION);
-                }
-                !section
-            })
-            .collect();
+        let mut stored = unsectioned(stored);
         if stored.is_empty() {
             self.held = Vec::new();
             return Ok(0);
@@ -1033,15 +1098,15 @@ impl Follower {
                 floor,
                 fold,
                 history,
+                spare: codec::Spare::default(),
+                stale: false,
+                stream: None,
                 next,
                 previous,
                 riders,
                 snapshot,
-                spare: codec::Spare::default(),
                 state,
-                stale: false,
                 stats,
-                stream: None,
                 tail,
                 tail_plain,
                 tail_row,
@@ -1073,10 +1138,10 @@ struct Writer {
     riders: mpsc::UnboundedReceiver<Riding>,
     snapshot: usize,
     spare: codec::Spare,
-    state: usize,
     stale: bool,
-    stats: Stats,
     stream: Option<Stream>,
+    state: usize,
+    stats: Stats,
     tail: usize,
     tail_plain: usize,
     tail_row: Option<TailRow>,
@@ -1524,9 +1589,47 @@ impl Lease<'_> {
             })
             .collect::<Vec<_>>();
         let floor = writer.floor.map(|seq| Record::Floor { seq });
+        let unpaged = writer
+            .buffer
+            .iter()
+            .filter_map(|record| match record {
+                Record::Stored { key, .. } if writer.fold.waits(key) => Some(key.clone()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        for key in unpaged {
+            page(
+                self.host,
+                self.scope,
+                &mut writer.fold,
+                &mut writer.stats,
+                &key,
+            )
+            .await?;
+        }
+        let mut placing = placing(
+            &mut writer.spare,
+            &writer.fold,
+            &writer.buffer,
+            seq,
+            self.limit,
+        )?;
+        let placed = placing.as_ref().map(|placing| Record::Placed {
+            owners: placing.owners.clone(),
+            row: placing.section.row,
+            rows: placing.section.rows,
+        });
         let plain = {
             let mut written = Vec::with_capacity(writer.buffer.len());
             for record in &writer.buffer {
+                if let Record::Stored { key, .. } = record
+                    && placing
+                        .as_ref()
+                        .is_some_and(|placing| placing.keys.contains(key))
+                    && !crate::sim::mutated(crate::sim::Mutation::PlacedInline)
+                {
+                    continue;
+                }
                 written.push(match record {
                     Record::Checkpoint {
                         payload,
@@ -1549,7 +1652,12 @@ impl Lease<'_> {
                     record => Cow::Borrowed(record),
                 });
             }
-            crate::record::encode_all(floor.iter().chain(written.iter().map(|record| &**record)))?
+            crate::record::encode_all(
+                floor
+                    .iter()
+                    .chain(placed.iter())
+                    .chain(written.iter().map(|record| &**record)),
+            )?
         };
         let mut stream = match writer.stream.take() {
             Some(stream) if writer.stale => stream.restart(writer.history.bytes())?,
@@ -1577,7 +1685,12 @@ impl Lease<'_> {
             writer.fold.start_segment(seq);
         }
         let mut snapshot = None;
-        let due = self.rows.is_some_and(|rows| writer.tail_rows >= rows);
+        let placed_rows = placing
+            .as_ref()
+            .map_or(0, |placing| placing.section.rows as usize);
+        let due = self
+            .rows
+            .is_some_and(|rows| writer.tail_rows + placed_rows >= rows);
         let bound = self
             .max_tail
             .is_some_and(|max| writer.tail_plain + plain.len() >= max);
@@ -1698,6 +1811,9 @@ impl Lease<'_> {
                     .max(self.ratio * rewrite);
             }
         }
+        if snapshot.is_some() {
+            placing = None;
+        }
         let mut boundary = None;
         if snapshot.is_none() && writer.fold.hot_bytes() > writer.state {
             writer.state = measured(&writer.fold, keep)?;
@@ -1705,7 +1821,10 @@ impl Lease<'_> {
                 boundary = Some(codec::pack(&mut writer.spare, BOUNDARY, &plain, &[])?);
             }
         }
-        let seq = snapshot.as_ref().map_or(seq, |part| part.seq);
+        let seq = snapshot.as_ref().map_or_else(
+            || seq + placing.as_ref().map_or(0, |placing| placing.section.rows),
+            |part| part.seq,
+        );
         let body_len = body.len();
         let written = match (&mut snapshot, &mut boundary) {
             (Some(part), _) => std::mem::take(&mut part.head.packed),
@@ -1724,6 +1843,7 @@ impl Lease<'_> {
         let extension = match (&snapshot, &boundary, &writer.tail_row) {
             (None, None, Some(tail))
                 if self.rows.is_some()
+                    && placing.is_none()
                     && recovered.is_empty()
                     && stored.len() == 1
                     && self
@@ -1749,9 +1869,18 @@ impl Lease<'_> {
                 rows.append(&mut part.index.rows);
                 (rows, std::mem::take(&mut part.index.superseded))
             }
-            None => (Vec::new(), Vec::new()),
+            None => (
+                placing
+                    .as_mut()
+                    .map_or_else(Vec::new, |placing| std::mem::take(&mut placing.rows)),
+                Vec::new(),
+            ),
         };
         let sectioned_rows = sectioned.len() as u64;
+        let sectioned_bytes = sectioned
+            .iter()
+            .map(|(_, body)| body.len() as u64)
+            .sum::<u64>();
         let appended = if sectioned.is_empty() {
             Cow::Borrowed(stored.as_slice())
         } else {
@@ -1872,6 +2001,12 @@ impl Lease<'_> {
         };
         writer.next = seq + stored.len() as u64;
         writer.fold.committed(seq);
+        if let Some(placing) = &placing {
+            writer.fold.place(placing.section, &placing.owners);
+            writer.tail_rows += sectioned_rows as usize;
+            writer.stats.sections += sectioned_rows;
+            writer.stats.placed_bytes += sectioned_bytes;
+        }
         for turn in &recovered {
             writer.fold.recovered_at(turn, seq);
         }

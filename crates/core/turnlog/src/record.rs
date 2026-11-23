@@ -129,6 +129,11 @@ pub enum Record {
         sections: Vec<(u64, u64)>,
         written: u64,
     },
+    Placed {
+        owners: Vec<(String, u64)>,
+        row: u64,
+        rows: u64,
+    },
     Patched {
         base: u64,
         edits: Box<RawValue>,

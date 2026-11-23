@@ -422,6 +422,70 @@ fn contents_kept(fold: &Fold, scope: &str, when: &str) -> Vec<u64> {
     ids
 }
 
+fn written_once(
+    disk: &Disk,
+    scope: &str,
+    end: u64,
+    seq: u64,
+    fresh: &BTreeSet<String>,
+    pushed: &BTreeSet<String>,
+) {
+    let stored = disk.with(|rows| rows.view(scope));
+    let start = stored
+        .iter()
+        .rposition(|(row, body)| *row <= end && (body.starts_with('s') || body.starts_with('a')))
+        .unwrap_or(0);
+    let mut section = false;
+    let sections = stored[start..]
+        .iter()
+        .filter(|(_, body)| {
+            if !body.starts_with('+') {
+                section = body.starts_with('p');
+            }
+            section && !body.starts_with('+')
+        })
+        .map(|(row, _)| *row)
+        .collect::<BTreeSet<_>>();
+    let decoded = nanocode_turnlog::rows(&stored[start..])
+        .unwrap_or_else(|error| panic!("a turn log row of {scope} does not decode: {error}"));
+    let prefix = format!("{scope}:gc\n");
+    let mut holders = BTreeMap::<String, Vec<u64>>::new();
+    let mut inline = BTreeSet::new();
+    for row in &decoded {
+        let records = row
+            .records()
+            .unwrap_or_else(|error| panic!("a turn log row of {scope} does not decode: {error}"));
+        for record in records {
+            if let LogRecord::Stored { key, .. } = record
+                && key.starts_with(&prefix)
+            {
+                if row.seq > end {
+                    holders.entry(key).or_default().push(row.seq);
+                } else if !sections.contains(&row.seq) {
+                    inline.insert(key);
+                }
+            }
+        }
+    }
+    for key in fresh {
+        let rows = holders.get(key).map_or(&[][..], Vec::as_slice);
+        assert!(
+            rows.len() == 1,
+            "{scope} commit {seq} wrote new content {key:?} into rows {rows:?}, not exactly once"
+        );
+    }
+    for (key, rows) in &holders {
+        let sectioned = rows
+            .iter()
+            .filter(|row| sections.contains(row))
+            .collect::<Vec<_>>();
+        assert!(
+            sectioned.is_empty() || pushed.contains(key) || inline.contains(key),
+            "{scope} commit {seq} rewrote content {key:?} into sections {sectioned:?}, though no row since its last snapshot holds it inline"
+        );
+    }
+}
+
 fn owners_written(revision: u64, owners: u64) -> impl Iterator<Item = u64> {
     (0..OWNERS_PER_COMMIT.min(owners))
         .map(move |offset| (revision * OWNERS_PER_COMMIT + offset) % owners)
@@ -1057,19 +1121,25 @@ impl TurnDurability for TurnLogPolicy {
         let top = next * 5 % 13 + 1;
         let cached = self.cached.entry(scope.to_owned()).or_default();
         let ids = chain(top);
+        let mut fresh = BTreeSet::new();
+        let mut pushed = BTreeSet::new();
         let again = ids
             .iter()
             .copied()
             .find(|id| !self.collect_live && cached.contains(id));
         for id in ids {
             if cached.insert(id) {
+                let key = format!("{contents}\n{}", content(id));
+                fresh.insert(key.clone());
+                pushed.insert(key.clone());
                 refused(lease.push(LogRecord::Stored {
-                    key: format!("{contents}\n{}", content(id)),
+                    key,
                     value: content_value(scope, id),
                 }));
             }
         }
         if let Some(id) = again {
+            pushed.insert(format!("{contents}\n{}", content(id)));
             let value = content_value(scope, id);
             refused(lease.push(LogRecord::Stored {
                 key: format!("{contents}\n{}", content(id)),
@@ -1092,7 +1162,11 @@ impl TurnDurability for TurnLogPolicy {
             }),
         );
         let viewed = self.rows.map(|_| self.disk.with(|rows| rows.view(scope)));
+        let end = self
+            .disk
+            .with(|rows| rows.view(scope).last().map_or(0, |(seq, _)| *seq));
         let seq = refused(ready(lease.commit(log_point)));
+        written_once(&self.disk, scope, end, seq, &fresh, &pushed);
         let keys = content_keys(lease.fold(), scope);
         refused(ready(lease.load_owners(&keys)));
         contents_kept(lease.fold(), scope, &format!("after commit {seq}"));
@@ -1228,7 +1302,17 @@ impl TurnDurability for TurnLogPolicy {
                 .filter(|(seq, _)| *seq > end)
                 .map(|(_, body)| body.len())
                 .sum::<usize>();
-            let tail = stored.iter().map(|(_, body)| body.len()).sum::<usize>();
+            let mut section = false;
+            let tail = stored
+                .iter()
+                .filter(|(_, body)| {
+                    if !body.starts_with('+') {
+                        section = body.starts_with('p');
+                    }
+                    !section
+                })
+                .map(|(_, body)| body.len())
+                .sum::<usize>();
             let last = stored
                 .iter()
                 .rposition(|(_, body)| !body.starts_with('+'))
