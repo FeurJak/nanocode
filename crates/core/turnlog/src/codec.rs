@@ -205,13 +205,6 @@ impl Stream {
         })
     }
 
-    pub(crate) fn restart(self, dictionary: &[u8]) -> Result<Self, StoreError> {
-        Ok(Self {
-            chunk: self.chunk,
-            deflate: reused(self.deflate, STREAM_LEVEL, dictionary)?,
-        })
-    }
-
     pub(crate) fn pack(&mut self, tag: char, plain: &[u8]) -> Result<String, StoreError> {
         let deflate = &mut self.deflate;
         let chunk = &mut self.chunk;

@@ -1098,9 +1098,6 @@ impl Follower {
                 floor,
                 fold,
                 history,
-                spare: codec::Spare::default(),
-                stale: false,
-                stream: None,
                 next,
                 previous,
                 riders,
@@ -1137,9 +1134,6 @@ struct Writer {
     previous: Option<Previous>,
     riders: mpsc::UnboundedReceiver<Riding>,
     snapshot: usize,
-    spare: codec::Spare,
-    stale: bool,
-    stream: Option<Stream>,
     state: usize,
     stats: Stats,
     tail: usize,
@@ -1607,8 +1601,9 @@ impl Lease<'_> {
             )
             .await?;
         }
+        let mut spare = codec::Spare::default();
         let mut placing = placing(
-            &mut writer.spare,
+            &mut spare,
             &writer.fold,
             &writer.buffer,
             seq,
@@ -1659,11 +1654,7 @@ impl Lease<'_> {
                     .chain(written.iter().map(|record| &**record)),
             )?
         };
-        let mut stream = match writer.stream.take() {
-            Some(stream) if writer.stale => stream.restart(writer.history.bytes())?,
-            Some(stream) => stream,
-            None => Stream::new(writer.history.bytes())?,
-        };
+        let mut stream = Stream::new(writer.history.bytes())?;
         let framed = if self.rows.is_some() && recovered.is_empty() && writer.tail_row.is_some() {
             let mut framed = Vec::with_capacity(plain.len() + 1);
             framed.push(b'\n');
@@ -1724,7 +1715,7 @@ impl Lease<'_> {
             writer.stats.collected += writer.fold.collect(&writer.collectable) as u64;
             let level = snapshot_level(due, bound);
             let sections = sections(
-                &mut writer.spare,
+                &mut spare,
                 &writer.fold,
                 seq,
                 level,
@@ -1732,7 +1723,7 @@ impl Lease<'_> {
                 self.ratio,
             )?;
             let index = index(
-                &mut writer.spare,
+                &mut spare,
                 &writer.fold,
                 &sections,
                 level,
@@ -1743,7 +1734,7 @@ impl Lease<'_> {
                 writer.fold.recovered_at(turn, head);
             }
             writer.fold.committed(head);
-            let packed = packed(&mut writer.spare, &writer.fold, keep, level, index.root);
+            let packed = packed(&mut spare, &writer.fold, keep, level, index.root);
             writer.fold.committed(previous);
             let packed = packed?;
             writer.state = packed.plain;
@@ -1818,7 +1809,7 @@ impl Lease<'_> {
         if snapshot.is_none() && writer.fold.hot_bytes() > writer.state {
             writer.state = measured(&writer.fold, keep)?;
             if writer.fold.hot_bytes() > writer.state {
-                boundary = Some(codec::pack(&mut writer.spare, BOUNDARY, &plain, &[])?);
+                boundary = Some(codec::pack(&mut spare, BOUNDARY, &plain, &[])?);
             }
         }
         let seq = snapshot.as_ref().map_or_else(
@@ -1836,7 +1827,7 @@ impl Lease<'_> {
         let bytes = stored.iter().map(|(_, body)| body.len()).sum::<usize>();
         let archived = match (&snapshot, &writer.previous) {
             (Some(_), Some(previous)) => previous
-                .archive(&mut writer.spare, self.limit)?
+                .archive(&mut spare, self.limit)?
                 .map(|rows| (rows, previous.seq, previous.parts)),
             _ => None,
         };
@@ -2059,8 +2050,6 @@ impl Lease<'_> {
                 writer.tail_plain = 0;
                 writer.tail_rows = stored.len() - 1;
                 writer.tried = None;
-                writer.stream = Some(stream);
-                writer.stale = true;
                 writer.stats.snapshots += 1;
                 writer.stats.snapshot_bytes += written_len as u64;
             }
@@ -2070,8 +2059,6 @@ impl Lease<'_> {
                     writer.history.clear();
                     writer.stats.boundaries += 1;
                 }
-                writer.stream = Some(stream);
-                writer.stale = boundary.is_some();
                 writer
                     .history
                     .extend(if boundary.is_some() { &plain } else { &framed });
