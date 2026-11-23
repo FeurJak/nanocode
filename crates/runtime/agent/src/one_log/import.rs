@@ -64,13 +64,12 @@ impl OneLog {
                 "state {state_id} is imported at revision 0, which holds no checkpoint"
             )));
         }
-        if self
-            .owners
-            .read(|owners| owners.get(state_id).is_some())
-        {
+        // Checked under the lease, which acquire also holds while it adds an owner, so no session
+        // can take the state between this check and the import's commit.
+        let mut lease = self.log.lease().await;
+        if self.owners.read(|owners| owners.get(state_id).is_some()) {
             return Err(StoreError::Fenced);
         }
-        let mut lease = self.log.lease().await;
         lease.load_owners(&owned(state_id, records)).await?;
         let fold = lease.fold();
         let unsaved = records
@@ -124,7 +123,10 @@ impl OneLog {
             })?;
         }
         let owed = lease.buffered() > 0;
-        assert!(!pushed || owed, "an import that pushed records has them buffered");
+        assert!(
+            !pushed || owed,
+            "an import that pushed records has them buffered"
+        );
         if owed && (pushed || !sim::mutated(sim::Mutation::HeldSkipsCommit)) {
             lease.commit(Point::Progress).await?;
         }
