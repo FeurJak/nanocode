@@ -345,6 +345,12 @@ pub(crate) fn padded(text: &str) -> Option<String> {
     Some(padded)
 }
 
+pub(crate) fn binary(body: &str) -> Option<(&str, String)> {
+    let tag = body.chars().next().filter(char::is_ascii)?;
+    let (tag, text) = body.split_at(tag.len_utf8());
+    padded(text).map(|padded| (tag, padded))
+}
+
 pub(crate) fn decoded_bytes(chars: usize) -> usize {
     assert_ne!(
         chars % BASE64_CHARS,

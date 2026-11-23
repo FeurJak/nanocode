@@ -239,7 +239,12 @@ impl<H: Sql + ?Sized> SqlLog<H> {
         let (seqs, payloads) = rows
             .iter()
             .chain(compaction.archived)
-            .map(|(seq, body)| (seq.to_string(), binary.then(|| payload(body)).flatten()))
+            .map(|(seq, body)| {
+                (
+                    seq.to_string(),
+                    binary.then(|| crate::codec::binary(body)).flatten(),
+                )
+            })
             .unzip();
         let ranges = std::iter::once(&compaction.dropped)
             .chain(compaction.superseded)
@@ -329,12 +334,6 @@ struct Stored<'a> {
     seqs: Vec<String>,
     payloads: Vec<Option<(&'a str, String)>>,
     ranges: Vec<(String, String)>,
-}
-
-fn payload(body: &str) -> Option<(&str, String)> {
-    let tag = body.chars().next().filter(char::is_ascii)?;
-    let (tag, text) = body.split_at(tag.len_utf8());
-    crate::codec::padded(text).map(|padded| (tag, padded))
 }
 
 struct Extending {

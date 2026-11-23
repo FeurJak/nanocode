@@ -24,13 +24,14 @@ use crate::host::{
 /// The channel Postgres notifies on, with payload "scope:head" per committed scope.
 pub const CHANNEL: &str = "nanocode_log";
 
-const PREPARE_PG: [&str; 9] = [
+const PREPARE_PG: [&str; 10] = [
     "SELECT CAST(pg_advisory_xact_lock(7_061_636_192) AS TEXT)",
     "CREATE SEQUENCE IF NOT EXISTS nanocode_log_pos",
     "CREATE TABLE IF NOT EXISTS nanocode_log_fence (part INTEGER PRIMARY KEY, epoch BIGINT NOT NULL DEFAULT 0, holder TEXT, expires_ms BIGINT NOT NULL DEFAULT 0)",
     "CREATE TABLE IF NOT EXISTS nanocode_log_cursor (part INTEGER NOT NULL, reader TEXT NOT NULL, pos BIGINT NOT NULL, PRIMARY KEY (part, reader))",
     "CREATE TABLE IF NOT EXISTS nanocode_plog (part INTEGER NOT NULL, scope TEXT NOT NULL, seq BIGINT NOT NULL, pos BIGINT NOT NULL, snap BOOLEAN NOT NULL, body TEXT COMPRESSION lz4 NOT NULL, PRIMARY KEY (part, scope, seq)) PARTITION BY LIST (part)",
     "CREATE INDEX IF NOT EXISTS nanocode_plog_pos ON nanocode_plog (part, pos)",
+    "DO $data$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'nanocode_plog'::regclass AND attname = 'data' AND NOT attisdropped) THEN ALTER TABLE nanocode_plog ADD COLUMN data BYTEA COMPRESSION lz4; END IF; END $data$",
     CHECKPOINT_CREATE[1],
     "CREATE OR REPLACE FUNCTION nanocode_plog_parts(n integer) RETURNS integer LANGUAGE plpgsql AS $parts$ BEGIN FOR i IN 0..n - 1 LOOP EXECUTE format('CREATE TABLE IF NOT EXISTS nanocode_plog_p%s PARTITION OF nanocode_plog FOR VALUES IN (%s)', i, i); INSERT INTO nanocode_log_fence (part) VALUES (i) ON CONFLICT DO NOTHING; END LOOP; RETURN n; END $parts$",
     "SELECT nanocode_plog_parts(CAST($1::text AS INTEGER))",
@@ -52,7 +53,7 @@ const LOCK: Dialects = [
 ];
 const INSERT: Dialects = [
     "WITH input AS (SELECT CAST(a.key AS INTEGER) AS app, json_extract(a.value, '$[0]') AS scope, CAST(json_extract(r.value, '$[0]') AS INTEGER) AS seq, json_extract(r.value, '$[1]') AS body, CAST(r.key AS INTEGER) AS rord FROM json_each(?3) AS a, json_each(a.value, '$[1]') AS r), keep AS (SELECT i.* FROM input i WHERE EXISTS (SELECT 1 FROM nanocode_log_fence f WHERE f.part = CAST(?1 AS INTEGER) AND (CAST(?2 AS INTEGER) < 0 OR (f.holder IS NOT NULL AND f.epoch = CAST(?2 AS INTEGER)))) AND i.app NOT IN (SELECT j.app FROM input j JOIN nanocode_plog p ON p.part = CAST(?1 AS INTEGER) AND p.scope = j.scope AND p.seq = j.seq)) INSERT INTO nanocode_plog (part, scope, seq, pos, snap, body) SELECT CAST(?1 AS INTEGER), scope, seq, (SELECT COALESCE(MAX(pos), 0) FROM nanocode_plog WHERE part = CAST(?1 AS INTEGER)) + row_number() OVER (ORDER BY app, rord), substr(body, 1, 1) = 's', body FROM keep WHERE true RETURNING scope, CAST(seq AS TEXT)",
-    "WITH input AS (SELECT a.ord AS app, a.e ->> 0 AS scope, CAST(r.e ->> 0 AS BIGINT) AS seq, r.e ->> 1 AS body, r.ord AS rord FROM jsonb_array_elements(CAST($3::text AS jsonb)) WITH ORDINALITY AS a(e, ord) CROSS JOIN LATERAL jsonb_array_elements(a.e -> 1) WITH ORDINALITY AS r(e, ord)), clash AS (SELECT DISTINCT i.app FROM input i WHERE (SELECT true FROM nanocode_plog p WHERE p.part = CAST($1::text AS INTEGER) AND p.scope = i.scope AND p.seq = i.seq LIMIT 1)), ins AS (INSERT INTO nanocode_plog (part, scope, seq, pos, snap, body) SELECT CAST($1::text AS INTEGER), s.scope, s.seq, nextval('nanocode_log_pos'), substr(s.body, 1, 1) = 's', s.body FROM (SELECT i.scope, i.seq, i.body FROM input i WHERE EXISTS (SELECT 1 FROM nanocode_log_fence f WHERE f.part = CAST($1::text AS INTEGER) AND (CAST($2::text AS BIGINT) < 0 OR (f.holder IS NOT NULL AND f.epoch = CAST($2::text AS BIGINT)))) AND NOT EXISTS (SELECT 1 FROM clash c WHERE c.app = i.app) ORDER BY i.app, i.rord) s RETURNING scope, seq), note AS (SELECT count(*) AS n FROM (SELECT pg_notify('nanocode_log', h.scope || ':' || h.head) FROM (SELECT scope, max(seq) AS head FROM ins GROUP BY scope) h WHERE CAST($4::text AS INTEGER) = 1) notified) SELECT ins.scope, CAST(ins.seq AS TEXT) FROM ins, note",
+    "WITH input AS (SELECT a.ord AS app, a.e ->> 0 AS scope, CAST(r.e ->> 0 AS BIGINT) AS seq, r.e ->> 1 AS body, r.e ->> 2 AS data, r.ord AS rord FROM jsonb_array_elements(CAST($3::text AS jsonb)) WITH ORDINALITY AS a(e, ord) CROSS JOIN LATERAL jsonb_array_elements(a.e -> 1) WITH ORDINALITY AS r(e, ord)), clash AS (SELECT DISTINCT i.app FROM input i WHERE (SELECT true FROM nanocode_plog p WHERE p.part = CAST($1::text AS INTEGER) AND p.scope = i.scope AND p.seq = i.seq LIMIT 1)), ins AS (INSERT INTO nanocode_plog (part, scope, seq, pos, snap, body, data) SELECT CAST($1::text AS INTEGER), s.scope, s.seq, nextval('nanocode_log_pos'), substr(s.body, 1, 1) = 's', CASE WHEN s.data IS NULL THEN s.body ELSE substr(s.body, 1, 1) END, decode(s.data, 'base64') FROM (SELECT i.scope, i.seq, i.body, i.data FROM input i WHERE EXISTS (SELECT 1 FROM nanocode_log_fence f WHERE f.part = CAST($1::text AS INTEGER) AND (CAST($2::text AS BIGINT) < 0 OR (f.holder IS NOT NULL AND f.epoch = CAST($2::text AS BIGINT)))) AND NOT EXISTS (SELECT 1 FROM clash c WHERE c.app = i.app) ORDER BY i.app, i.rord) s RETURNING scope, seq), note AS (SELECT count(*) AS n FROM (SELECT pg_notify('nanocode_log', h.scope || ':' || h.head) FROM (SELECT scope, max(seq) AS head FROM ins GROUP BY scope) h WHERE CAST($4::text AS INTEGER) = 1) notified) SELECT ins.scope, CAST(ins.seq AS TEXT) FROM ins, note",
 ];
 /// Wakes listeners after a commit landed, in its own unsynced transaction: NOTIFY in the commit
 /// itself holds Postgres's global notify lock across the WAL flush and serialises every
@@ -61,16 +62,17 @@ const NOTIFY_PG: &str = "SELECT count(pg_notify('nanocode_log', p)) FROM json_ar
 
 const SCAN: Dialects = [
     "SELECT CAST(seq AS TEXT), body FROM nanocode_plog WHERE part = CAST(?1 AS INTEGER) AND scope = ?2 AND seq >= CAST(?3 AS INTEGER) AND seq < CAST(?4 AS INTEGER) ORDER BY seq",
-    "SELECT CAST(seq AS TEXT), body FROM nanocode_plog WHERE part = CAST($1::text AS INTEGER) AND scope = $2::text AND seq >= CAST($3::text AS BIGINT) AND seq < CAST($4::text AS BIGINT) ORDER BY nanocode_plog.seq",
+    "SELECT CAST(seq AS TEXT), CASE WHEN data IS NULL THEN body ELSE body || rtrim(translate(encode(data, 'base64'), chr(10), ''), '=') END FROM nanocode_plog WHERE part = CAST($1::text AS INTEGER) AND scope = $2::text AND seq >= CAST($3::text AS BIGINT) AND seq < CAST($4::text AS BIGINT) ORDER BY nanocode_plog.seq",
 ];
 const LOAD: Dialects = [
     "SELECT CAST(seq AS TEXT), body FROM nanocode_plog WHERE part = CAST(?1 AS INTEGER) AND scope = ?2 AND seq >= COALESCE((SELECT MAX(seq) FROM nanocode_plog WHERE part = CAST(?1 AS INTEGER) AND scope = ?2 AND snap), 0) ORDER BY seq",
-    "SELECT CAST(seq AS TEXT), body FROM nanocode_plog WHERE part = CAST($1::text AS INTEGER) AND scope = $2::text AND seq >= COALESCE((SELECT max(seq) FROM nanocode_plog WHERE part = CAST($1::text AS INTEGER) AND scope = $2::text AND snap), 0) ORDER BY nanocode_plog.seq",
+    "SELECT CAST(seq AS TEXT), CASE WHEN data IS NULL THEN body ELSE body || rtrim(translate(encode(data, 'base64'), chr(10), ''), '=') END FROM nanocode_plog WHERE part = CAST($1::text AS INTEGER) AND scope = $2::text AND seq >= COALESCE((SELECT max(seq) FROM nanocode_plog WHERE part = CAST($1::text AS INTEGER) AND scope = $2::text AND snap), 0) ORDER BY nanocode_plog.seq",
 ];
 const ARCHIVE: Dialects = [
     "UPDATE nanocode_plog SET body = ?4, snap = substr(?4, 1, 1) = 's' WHERE part = CAST(?1 AS INTEGER) AND scope = ?2 AND seq = CAST(?3 AS INTEGER) AND EXISTS (SELECT 1 FROM nanocode_log_fence f WHERE f.part = CAST(?1 AS INTEGER) AND (CAST(?5 AS INTEGER) < 0 OR (f.holder IS NOT NULL AND f.epoch = CAST(?5 AS INTEGER))))",
-    "UPDATE nanocode_plog SET body = $4::text, snap = substr($4::text, 1, 1) = 's' WHERE part = CAST($1::text AS INTEGER) AND scope = $2::text AND seq = CAST($3::text AS BIGINT) AND EXISTS (SELECT 1 FROM nanocode_log_fence f WHERE f.part = CAST($1::text AS INTEGER) AND (CAST($5::text AS BIGINT) < 0 OR (f.holder IS NOT NULL AND f.epoch = CAST($5::text AS BIGINT))))",
+    "UPDATE nanocode_plog SET body = $4::text, data = NULL, snap = substr($4::text, 1, 1) = 's' WHERE part = CAST($1::text AS INTEGER) AND scope = $2::text AND seq = CAST($3::text AS BIGINT) AND EXISTS (SELECT 1 FROM nanocode_log_fence f WHERE f.part = CAST($1::text AS INTEGER) AND (CAST($5::text AS BIGINT) < 0 OR (f.holder IS NOT NULL AND f.epoch = CAST($5::text AS BIGINT))))",
 ];
+const ARCHIVE_DATA: &str = "UPDATE nanocode_plog SET body = substr($4::text, 1, 1), data = decode($6::text, 'base64'), snap = substr($4::text, 1, 1) = 's' WHERE part = CAST($1::text AS INTEGER) AND scope = $2::text AND seq = CAST($3::text AS BIGINT) AND EXISTS (SELECT 1 FROM nanocode_log_fence f WHERE f.part = CAST($1::text AS INTEGER) AND (CAST($5::text AS BIGINT) < 0 OR (f.holder IS NOT NULL AND f.epoch = CAST($5::text AS BIGINT))))";
 const DROP: Dialects = [
     "DELETE FROM nanocode_plog WHERE part = CAST(?1 AS INTEGER) AND scope = ?2 AND seq >= CAST(?3 AS INTEGER) AND seq < CAST(?4 AS INTEGER) AND pos <= COALESCE((SELECT MIN(pos) FROM nanocode_log_cursor WHERE part = CAST(?1 AS INTEGER)), 9223372036854775807) AND EXISTS (SELECT 1 FROM nanocode_log_fence f WHERE f.part = CAST(?1 AS INTEGER) AND (CAST(?5 AS INTEGER) < 0 OR (f.holder IS NOT NULL AND f.epoch = CAST(?5 AS INTEGER))))",
     "DELETE FROM nanocode_plog WHERE part = CAST($1::text AS INTEGER) AND scope = $2::text AND seq >= CAST($3::text AS BIGINT) AND seq < CAST($4::text AS BIGINT) AND pos <= COALESCE((SELECT min(pos) FROM nanocode_log_cursor WHERE part = CAST($1::text AS INTEGER)), 9223372036854775807) AND EXISTS (SELECT 1 FROM nanocode_log_fence f WHERE f.part = CAST($1::text AS INTEGER) AND (CAST($5::text AS BIGINT) < 0 OR (f.holder IS NOT NULL AND f.epoch = CAST($5::text AS BIGINT))))",
@@ -81,11 +83,11 @@ const PRUNE: Dialects = [
 ];
 const EXTEND: Dialects = [
     "UPDATE nanocode_plog SET seq = CAST(?4 AS INTEGER), pos = (SELECT COALESCE(MAX(pos), 0) + 1 FROM nanocode_plog WHERE part = CAST(?1 AS INTEGER)), body = substr(CAST(body AS BLOB), 1, length(CAST(body AS BLOB)) - CAST(?5 AS INTEGER)) || ?6 WHERE part = CAST(?1 AS INTEGER) AND scope = ?2 AND seq = CAST(?3 AS INTEGER) AND EXISTS (SELECT 1 FROM nanocode_log_fence f WHERE f.part = CAST(?1 AS INTEGER) AND (CAST(?7 AS INTEGER) < 0 OR (f.holder IS NOT NULL AND f.epoch = CAST(?7 AS INTEGER)))) RETURNING CAST(seq AS TEXT)",
-    "UPDATE nanocode_plog SET seq = CAST($4::text AS BIGINT), pos = nextval('nanocode_log_pos'), body = substr(body, 1, length(body) - CAST($5::text AS INTEGER)) || $6::text WHERE part = CAST($1::text AS INTEGER) AND scope = $2::text AND seq = CAST($3::text AS BIGINT) AND EXISTS (SELECT 1 FROM nanocode_log_fence f WHERE f.part = CAST($1::text AS INTEGER) AND (CAST($7::text AS BIGINT) < 0 OR (f.holder IS NOT NULL AND f.epoch = CAST($7::text AS BIGINT)))) RETURNING CAST(seq AS TEXT)",
+    "UPDATE nanocode_plog SET seq = CAST($4::text AS BIGINT), pos = nextval('nanocode_log_pos'), body = CASE WHEN data IS NULL THEN substr(body, 1, length(body) - CAST($5::text AS INTEGER)) || $6::text ELSE body END, data = CASE WHEN data IS NULL THEN NULL ELSE substr(data, 1, length(data) - CAST($8::text AS INTEGER)) || decode($9::text, 'base64') END WHERE part = CAST($1::text AS INTEGER) AND scope = $2::text AND seq = CAST($3::text AS BIGINT) AND EXISTS (SELECT 1 FROM nanocode_log_fence f WHERE f.part = CAST($1::text AS INTEGER) AND (CAST($7::text AS BIGINT) < 0 OR (f.holder IS NOT NULL AND f.epoch = CAST($7::text AS BIGINT)))) RETURNING CAST(seq AS TEXT)",
 ];
 const FOLLOW: Dialects = [
     "SELECT CAST(pos AS TEXT), scope, CAST(seq AS TEXT), body FROM nanocode_plog WHERE part = CAST(?1 AS INTEGER) AND pos > CAST(?2 AS INTEGER) ORDER BY pos LIMIT CAST(?3 AS INTEGER)",
-    "SELECT CAST(pos AS TEXT), scope, CAST(seq AS TEXT), body FROM nanocode_plog WHERE part = CAST($1::text AS INTEGER) AND pos > CAST($2::text AS BIGINT) ORDER BY nanocode_plog.pos LIMIT CAST($3::text AS BIGINT)",
+    "SELECT CAST(pos AS TEXT), scope, CAST(seq AS TEXT), CASE WHEN data IS NULL THEN body ELSE body || rtrim(translate(encode(data, 'base64'), chr(10), ''), '=') END FROM nanocode_plog WHERE part = CAST($1::text AS INTEGER) AND pos > CAST($2::text AS BIGINT) ORDER BY nanocode_plog.pos LIMIT CAST($3::text AS BIGINT)",
 ];
 const FENCE: Dialects = [
     "SELECT CAST(epoch AS TEXT), COALESCE(holder, ''), CAST(expires_ms AS TEXT) FROM nanocode_log_fence WHERE part = CAST(?1 AS INTEGER)",
@@ -323,7 +325,8 @@ impl<H: Sql + Send + Sync + ?Sized> PartStore for SqlParts<H> {
         batch: &'a [Append],
     ) -> StoreFuture<'a, Result<Vec<Verdict>, StoreError>> {
         Box::pin(async move {
-            let encoded: Vec<(&str, Vec<(u64, &str)>)> = batch
+            let postgres = self.postgres();
+            let encoded: Vec<(&str, Vec<(u64, &str, Option<String>)>)> = batch
                 .iter()
                 .map(|append| {
                     (
@@ -331,7 +334,13 @@ impl<H: Sql + Send + Sync + ?Sized> PartStore for SqlParts<H> {
                         append
                             .rows
                             .iter()
-                            .map(|(seq, body)| (*seq, body.as_str()))
+                            .map(|(seq, body)| {
+                                let data = postgres
+                                    .then(|| crate::codec::binary(body))
+                                    .flatten()
+                                    .map(|(_, padded)| padded);
+                                (*seq, body.as_str(), data)
+                            })
                             .collect(),
                     )
                 })
@@ -455,11 +464,28 @@ impl<H: Sql + Send + Sync + ?Sized> PartStore for SqlParts<H> {
                     )
                 })
                 .collect();
+            let payloads: Vec<Option<String>> = compaction
+                .archived
+                .iter()
+                .map(|(_, body)| {
+                    self.postgres()
+                        .then(|| crate::codec::binary(body))
+                        .flatten()
+                        .map(|(_, padded)| padded)
+                })
+                .collect();
             let mut statements = Vec::new();
-            for ((_, body), seq) in compaction.archived.iter().zip(&seqs) {
-                statements.push(SqlStatement {
-                    sql: self.pick(&ARCHIVE),
-                    params: vec![&part, scope, seq, body, &epoch_text],
+            for (((_, body), seq), payload) in compaction.archived.iter().zip(&seqs).zip(&payloads)
+            {
+                statements.push(match payload {
+                    Some(padded) => SqlStatement {
+                        sql: ARCHIVE_DATA,
+                        params: vec![&part, scope, seq, body, &epoch_text, padded],
+                    },
+                    None => SqlStatement {
+                        sql: self.pick(&ARCHIVE),
+                        params: vec![&part, scope, seq, body, &epoch_text],
+                    },
                 });
             }
             for (from, to) in &ranges {
@@ -488,9 +514,18 @@ impl<H: Sql + Send + Sync + ?Sized> PartStore for SqlParts<H> {
                 extension.seq.to_string(),
                 extension.cut.to_string(),
             );
+            let binary = self.postgres().then(|| {
+                let tail = crate::codec::padded(extension.tail)
+                    .expect("an extension's tail is one whole row's encoding");
+                (crate::codec::decoded_bytes(extension.cut).to_string(), tail)
+            });
+            let mut params = vec![&*part, scope, &row, &seq, &cut, extension.tail, &epoch_text];
+            if let Some((cut, tail)) = &binary {
+                params.extend([cut.as_str(), tail.as_str()]);
+            }
             let statements = vec![SqlStatement {
                 sql: self.pick(&EXTEND),
-                params: vec![&part, scope, &row, &seq, &cut, extension.tail, &epoch_text],
+                params,
             }];
             let answer = self.fenced("plog_extend", &part, epoch, statements).await?;
             if result(&answer, 1)?.is_empty() {
