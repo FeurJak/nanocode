@@ -302,3 +302,54 @@ pub(crate) fn parts(body: &str, limit: Option<usize>) -> Result<Vec<&str>, Store
     }
     Ok(parts)
 }
+
+const SEXTET_BITS: usize = 6;
+const BYTE_BITS: usize = 8;
+const PAD: char = '=';
+
+const ALPHABET: &[u8; 1 << SEXTET_BITS] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const NOT_BASE64: u8 = u8::MAX;
+const SEXTETS: [u8; 1 << BYTE_BITS] = {
+    let mut sextets = [NOT_BASE64; 1 << BYTE_BITS];
+    let mut index = 0;
+    while index < ALPHABET.len() {
+        sextets[ALPHABET[index] as usize] = index as u8;
+        index += 1;
+    }
+    sextets
+};
+
+pub(crate) fn padded(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let remainder = bytes.len() % BASE64_CHARS;
+    if bytes.is_empty() || remainder == 1 {
+        return None;
+    }
+    let mut last = 0;
+    for &byte in bytes {
+        last = SEXTETS[usize::from(byte)];
+        if last == NOT_BASE64 {
+            return None;
+        }
+    }
+    let spare = (remainder * SEXTET_BITS) % BYTE_BITS;
+    if last & ((1 << spare) - 1) != 0 {
+        return None;
+    }
+    let mut padded = String::with_capacity(bytes.len() + BASE64_CHARS);
+    padded.push_str(text);
+    while !padded.len().is_multiple_of(BASE64_CHARS) {
+        padded.push(PAD);
+    }
+    Some(padded)
+}
+
+pub(crate) fn decoded_bytes(chars: usize) -> usize {
+    assert_ne!(
+        chars % BASE64_CHARS,
+        1,
+        "a cut of whole base64 groups and a final partial group"
+    );
+    chars * SEXTET_BITS / BYTE_BITS
+}

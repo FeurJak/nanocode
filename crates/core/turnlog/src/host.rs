@@ -1,6 +1,6 @@
 use std::{ops::Range, sync::Arc};
 
-use nanocode_durability_core::{Sql, SqlAccess, SqlStatement, StoreError, StoreFuture};
+use nanocode_durability_core::{Sql, SqlAccess, SqlDialect, SqlStatement, StoreError, StoreFuture};
 use nanocode_sync::Atom;
 
 /// One scope's rows as `(seq, row)` pairs, in seq order.
@@ -134,10 +134,17 @@ type Dialects = [&'static str; 2];
 
 /// Serializes schema preparation across processes on Postgres: two loads that create nanocode_log at once otherwise
 /// race in CREATE TABLE IF NOT EXISTS (duplicate key in pg_type for the table's row type). SQLite has one writer.
-const PREPARE_LOCK: Dialects = ["SELECT NULL", "SELECT CAST(pg_advisory_xact_lock(7_061_636_193) AS TEXT)"];
+const PREPARE_LOCK: Dialects = [
+    "SELECT NULL",
+    "SELECT CAST(pg_advisory_xact_lock(7_061_636_193) AS TEXT)",
+];
 const CREATE: Dialects = [
     "CREATE TABLE IF NOT EXISTS nanocode_log (scope TEXT NOT NULL, seq INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (scope, seq)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS nanocode_log (scope TEXT NOT NULL, seq BIGINT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (scope, seq))",
+];
+const DATA: Dialects = [
+    "SELECT NULL",
+    "DO $data$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'nanocode_log'::regclass AND attname = 'data' AND NOT attisdropped) THEN ALTER TABLE nanocode_log ADD COLUMN data BYTEA; END IF; END $data$",
 ];
 const INDEX: Dialects = [
     "CREATE INDEX IF NOT EXISTS nanocode_log_snapshots ON nanocode_log (scope, seq) WHERE substr(body, 1, 1) = 's'",
@@ -145,23 +152,25 @@ const INDEX: Dialects = [
 ];
 const LOAD: Dialects = [
     "SELECT CAST(seq AS TEXT), body FROM nanocode_log WHERE scope = ?1 AND seq >= COALESCE((SELECT seq FROM nanocode_log INDEXED BY nanocode_log_snapshots WHERE scope = ?1 AND substr(body, 1, 1) = 's' ORDER BY seq DESC LIMIT 1), 0) ORDER BY seq",
-    "SELECT CAST(seq AS TEXT), body FROM nanocode_log WHERE scope = $1::text AND seq >= COALESCE((SELECT seq FROM nanocode_log WHERE scope = $1::text AND substr(body, 1, 1) = 's' ORDER BY seq DESC LIMIT 1), 0) ORDER BY nanocode_log.seq",
+    "SELECT CAST(seq AS TEXT), CASE WHEN data IS NULL THEN body ELSE body || rtrim(translate(encode(data, 'base64'), chr(10), ''), '=') END FROM nanocode_log WHERE scope = $1::text AND seq >= COALESCE((SELECT seq FROM nanocode_log WHERE scope = $1::text AND substr(body, 1, 1) = 's' ORDER BY seq DESC LIMIT 1), 0) ORDER BY nanocode_log.seq",
 ];
 const SCAN: Dialects = [
     "SELECT CAST(seq AS TEXT), body FROM nanocode_log WHERE scope = ?1 AND seq >= CAST(?2 AS INTEGER) AND seq < CAST(?3 AS INTEGER) ORDER BY seq",
-    "SELECT CAST(seq AS TEXT), body FROM nanocode_log WHERE scope = $1::text AND seq >= CAST($2::text AS BIGINT) AND seq < CAST($3::text AS BIGINT) ORDER BY nanocode_log.seq",
+    "SELECT CAST(seq AS TEXT), CASE WHEN data IS NULL THEN body ELSE body || rtrim(translate(encode(data, 'base64'), chr(10), ''), '=') END FROM nanocode_log WHERE scope = $1::text AND seq >= CAST($2::text AS BIGINT) AND seq < CAST($3::text AS BIGINT) ORDER BY nanocode_log.seq",
 ];
 const APPEND: Dialects = [
     "INSERT INTO nanocode_log (scope, seq, body) VALUES (?1, CAST(?2 AS INTEGER), ?3)",
     "INSERT INTO nanocode_log (scope, seq, body) VALUES ($1::text, CAST($2::text AS BIGINT), $3::text)",
 ];
+const APPEND_DATA: &str = "INSERT INTO nanocode_log (scope, seq, body, data) VALUES ($1::text, CAST($2::text AS BIGINT), $3::text, decode($4::text, 'base64'))";
 const ARCHIVE: Dialects = [
     "UPDATE nanocode_log SET body = ?3 WHERE scope = ?1 AND seq = CAST(?2 AS INTEGER)",
-    "UPDATE nanocode_log SET body = $3::text WHERE scope = $1::text AND seq = CAST($2::text AS BIGINT)",
+    "UPDATE nanocode_log SET body = $3::text, data = NULL WHERE scope = $1::text AND seq = CAST($2::text AS BIGINT)",
 ];
+const ARCHIVE_DATA: &str = "UPDATE nanocode_log SET body = $3::text, data = decode($4::text, 'base64') WHERE scope = $1::text AND seq = CAST($2::text AS BIGINT)";
 const EXTEND: Dialects = [
     "UPDATE nanocode_log SET seq = CAST(?3 AS INTEGER), body = substr(CAST(body AS BLOB), 1, length(CAST(body AS BLOB)) - CAST(?4 AS INTEGER)) || ?5 WHERE scope = ?1 AND seq = CAST(?2 AS INTEGER) RETURNING CAST(seq AS TEXT)",
-    "UPDATE nanocode_log SET seq = CAST($3::text AS BIGINT), body = substr(body, 1, length(body) - CAST($4::text AS INTEGER)) || $5::text WHERE scope = $1::text AND seq = CAST($2::text AS BIGINT) RETURNING CAST(seq AS TEXT)",
+    "UPDATE nanocode_log SET seq = CAST($3::text AS BIGINT), body = CASE WHEN data IS NULL THEN substr(body, 1, length(body) - CAST($4::text AS INTEGER)) || $5::text ELSE body END, data = CASE WHEN data IS NULL THEN NULL ELSE substr(data, 1, length(data) - CAST($6::text AS INTEGER)) || decode($7::text, 'base64') END WHERE scope = $1::text AND seq = CAST($2::text AS BIGINT) RETURNING CAST(seq AS TEXT)",
 ];
 pub(crate) const CHECKPOINT_CREATE: Dialects = [
     "CREATE TABLE IF NOT EXISTS nanocode_checkpoint (scope TEXT NOT NULL, part INTEGER NOT NULL, parts INTEGER NOT NULL, seq INTEGER NOT NULL, version TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (scope, part)) WITHOUT ROWID",
@@ -204,9 +213,11 @@ impl<H: Sql + ?Sized> SqlLog<H> {
             return Ok(());
         }
         let statements =
-            [&PREPARE_LOCK, &CREATE, &INDEX, &CHECKPOINT_CREATE].map(|statement| SqlStatement {
-                sql: self.pick(statement),
-                params: Vec::new(),
+            [&PREPARE_LOCK, &CREATE, &DATA, &INDEX, &CHECKPOINT_CREATE].map(|statement| {
+                SqlStatement {
+                    sql: self.pick(statement),
+                    params: Vec::new(),
+                }
             });
         self.host
             .transaction("turn_log_prepare", &statements)
@@ -219,29 +230,56 @@ impl<H: Sql + ?Sized> SqlLog<H> {
         self.host.dialect().pick(statements)
     }
 
+    fn binary(&self) -> bool {
+        self.host.dialect() == SqlDialect::Postgres
+    }
+
+    fn stored<'a>(&self, rows: &'a [(u64, String)], compaction: &Compaction<'a>) -> Stored<'a> {
+        let binary = self.binary();
+        let (seqs, payloads) = rows
+            .iter()
+            .chain(compaction.archived)
+            .map(|(seq, body)| (seq.to_string(), binary.then(|| payload(body)).flatten()))
+            .unzip();
+        let ranges = std::iter::once(&compaction.dropped)
+            .chain(compaction.superseded)
+            .filter(|range| !range.is_empty())
+            .map(|range| (range.start.to_string(), range.end.to_string()))
+            .collect();
+        Stored {
+            seqs,
+            payloads,
+            ranges,
+        }
+    }
+
     fn appending<'a>(
         &self,
         scope: &'a str,
         rows: &'a [(u64, String)],
         compaction: &Compaction<'a>,
-        seqs: &'a [String],
-        ranges: &'a [(String, String)],
+        stored: &'a Stored<'a>,
     ) -> Vec<SqlStatement<'a>> {
         let mut statements = rows
             .iter()
             .chain(compaction.archived)
-            .zip(seqs)
+            .zip(stored.seqs.iter().zip(&stored.payloads))
             .enumerate()
-            .map(|(index, ((_, body), seq))| SqlStatement {
-                sql: self.pick(if index < rows.len() {
-                    &APPEND
-                } else {
-                    &ARCHIVE
-                }),
-                params: vec![scope, seq, body],
+            .map(|(index, ((_, body), (seq, payload)))| {
+                let appended = index < rows.len();
+                match payload {
+                    Some((tag, padded)) => SqlStatement {
+                        sql: if appended { APPEND_DATA } else { ARCHIVE_DATA },
+                        params: vec![scope, seq, tag, padded],
+                    },
+                    None => SqlStatement {
+                        sql: self.pick(if appended { &APPEND } else { &ARCHIVE }),
+                        params: vec![scope, seq, body],
+                    },
+                }
             })
             .collect::<Vec<_>>();
-        for (from, to) in ranges {
+        for (from, to) in &stored.ranges {
             statements.push(SqlStatement {
                 sql: self.pick(&DROP),
                 params: vec![scope, from, to],
@@ -249,35 +287,65 @@ impl<H: Sql + ?Sized> SqlLog<H> {
         }
         statements
     }
+
+    fn extending<'a>(
+        &self,
+        scope: &'a str,
+        extension: &Extension<'a>,
+        numbers: &'a Extending,
+    ) -> SqlStatement<'a> {
+        let mut params = vec![
+            scope,
+            numbers.row.as_str(),
+            numbers.seq.as_str(),
+            numbers.cut.as_str(),
+            extension.tail,
+        ];
+        if let Some((cut, tail)) = &numbers.binary {
+            params.extend([cut.as_str(), tail.as_str()]);
+        }
+        SqlStatement {
+            sql: self.pick(&EXTEND),
+            params,
+        }
+    }
+
+    fn numbers(&self, extension: &Extension<'_>) -> Extending {
+        let binary = self.binary().then(|| {
+            let tail = crate::codec::padded(extension.tail)
+                .expect("an extension's tail is one whole row's encoding");
+            (crate::codec::decoded_bytes(extension.cut).to_string(), tail)
+        });
+        Extending {
+            row: extension.row.to_string(),
+            seq: extension.seq.to_string(),
+            cut: extension.cut.to_string(),
+            binary,
+        }
+    }
+}
+
+struct Stored<'a> {
+    seqs: Vec<String>,
+    payloads: Vec<Option<(&'a str, String)>>,
+    ranges: Vec<(String, String)>,
+}
+
+fn payload(body: &str) -> Option<(&str, String)> {
+    let tag = body.chars().next().filter(char::is_ascii)?;
+    let (tag, text) = body.split_at(tag.len_utf8());
+    crate::codec::padded(text).map(|padded| (tag, padded))
+}
+
+struct Extending {
+    row: String,
+    seq: String,
+    cut: String,
+    binary: Option<(String, String)>,
 }
 
 pub fn host_id<H: ?Sized>(host: &Arc<H>) -> usize {
     Arc::as_ptr(host).cast::<()>() as usize
-}
-
-fn seqs(
-    rows: &[(u64, String)],
-    compaction: &Compaction<'_>,
-) -> (Vec<String>, Vec<(String, String)>) {
-    (
-        rows.iter()
-            .chain(compaction.archived)
-            .map(|(seq, _)| seq.to_string())
-            .collect(),
-        std::iter::once(&compaction.dropped)
-            .chain(compaction.superseded)
-            .filter(|range| !range.is_empty())
-            .map(|range| (range.start.to_string(), range.end.to_string()))
-            .collect(),
-    )
-}
-
-fn extending(extension: &Extension<'_>) -> [String; 3] {
-    [
-        extension.row.to_string(),
-        extension.seq.to_string(),
-        extension.cut.to_string(),
-    ]
 }
 
 fn invalid(detail: impl std::fmt::Display) -> StoreError {
@@ -306,6 +374,7 @@ impl<H: Sql + Send + Sync + ?Sized> LogHost for SqlLog<H> {
         to: u64,
     ) -> StoreFuture<'a, Result<Vec<(u64, String)>, StoreError>> {
         Box::pin(async move {
+            self.prepare().await?;
             let (from, to) = (from.to_string(), to.to_string());
             let statements = [SqlStatement {
                 sql: self.pick(&SCAN),
@@ -333,6 +402,7 @@ impl<H: Sql + Send + Sync + ?Sized> LogHost for SqlLog<H> {
             if scans.is_empty() {
                 return Ok(Vec::new());
             }
+            self.prepare().await?;
             let bounds: Vec<(String, String)> = scans
                 .iter()
                 .map(|(_, from)| (from.to_string(), SCAN_END.to_string()))
@@ -406,8 +476,9 @@ impl<H: Sql + Send + Sync + ?Sized> LogHost for SqlLog<H> {
         compaction: Compaction<'a>,
     ) -> StoreFuture<'a, Result<(), StoreError>> {
         Box::pin(async move {
-            let (seqs, dropped) = seqs(rows, &compaction);
-            let statements = self.appending(scope, rows, &compaction, &seqs, &dropped);
+            self.prepare().await?;
+            let stored = self.stored(rows, &compaction);
+            let statements = self.appending(scope, rows, &compaction, &stored);
             self.host
                 .transaction("turn_log_append", &statements)
                 .await
@@ -421,11 +492,9 @@ impl<H: Sql + Send + Sync + ?Sized> LogHost for SqlLog<H> {
         extension: Extension<'a>,
     ) -> Option<StoreFuture<'a, Result<(), StoreError>>> {
         Some(Box::pin(async move {
-            let [row, seq, cut] = extending(&extension);
-            let statements = [SqlStatement {
-                sql: self.pick(&EXTEND),
-                params: vec![scope, &row, &seq, &cut, extension.tail],
-            }];
+            self.prepare().await?;
+            let numbers = self.numbers(&extension);
+            let statements = [self.extending(scope, &extension, &numbers)];
             let rows = self
                 .host
                 .transaction("turn_log_extend", &statements)
@@ -447,10 +516,11 @@ impl<H: Sql + Send + Sync + ?Sized> LogHost for SqlLog<H> {
             return None;
         }
         Some(Box::pin(async move {
+            self.prepare().await?;
             match write {
                 Write::Append { rows, compaction } => {
-                    let (seqs, dropped) = seqs(rows, &compaction);
-                    let mut statements = self.appending(scope, rows, &compaction, &seqs, &dropped);
+                    let stored = self.stored(rows, &compaction);
+                    let mut statements = self.appending(scope, rows, &compaction, &stored);
                     statements.extend(rider.statements.iter().cloned());
                     self.host
                         .transaction("turn_log_carry", &statements)
@@ -458,11 +528,8 @@ impl<H: Sql + Send + Sync + ?Sized> LogHost for SqlLog<H> {
                         .map(drop)
                 }
                 Write::Extend(extension) => {
-                    let [row, seq, cut] = extending(&extension);
-                    let mut statements = vec![SqlStatement {
-                        sql: self.pick(&EXTEND),
-                        params: vec![scope, &row, &seq, &cut, extension.tail],
-                    }];
+                    let numbers = self.numbers(&extension);
+                    let mut statements = vec![self.extending(scope, &extension, &numbers)];
                     statements.extend(rider.statements.iter().cloned());
                     let rows = self.host.transaction("turn_log_carry", &statements).await?;
                     match rows.first() {
