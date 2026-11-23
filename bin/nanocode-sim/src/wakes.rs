@@ -42,6 +42,7 @@ const SNAPSHOT_ROWS_MAX: u64 = 6;
 const DOOM_APPENDS_MAX: u64 = 3;
 const WAKES_MAX_MIN: u64 = 2;
 const INDEX_HOST: usize = 1;
+const FOREIGN_HOST: usize = 2;
 const INDEX_STATEMENT: &str = "wake_index";
 
 pub fn names() -> String {
@@ -171,15 +172,20 @@ impl Host {
     }
 }
 
-struct Index(Arc<Host>);
+/// The wake index; a foreign one sits on another host than the log's, so the log never carries
+/// its rider and the index is written on its own after each wake commit.
+struct Index(Arc<Host>, bool);
 
 impl WakeRider for Index {
     fn host(&self) -> usize {
-        INDEX_HOST
+        if self.1 { FOREIGN_HOST } else { INDEX_HOST }
     }
 
     fn statements(&self, scope: &str, summary: &WakeSummary) -> Statements {
-        let due = summary.next_due.map(|at| at.to_string()).unwrap_or_default();
+        let due = summary
+            .next_due
+            .map(|at| at.to_string())
+            .unwrap_or_default();
         vec![(
             INDEX_STATEMENT,
             vec![scope.to_owned(), due, summary.topics.join(",")],
@@ -335,6 +341,7 @@ struct Run {
     digest: u64,
     expected: BTreeMap<String, Expected>,
     fired: BTreeMap<u64, u64>,
+    foreign: bool,
     host: Arc<Host>,
     log: Option<Arc<OneLog>>,
     policy: Policy,
@@ -361,8 +368,11 @@ impl Run {
             .map_err(|error| format!("reopen refused the log: {error}"))?;
         self.log = Some(Arc::clone(&log));
         self.recovered(&log)?;
-        self.indexed()?;
-        ready(log.index_wakes(Arc::new(Index(Arc::clone(&self.host)))))
+        // Only a carried index is current before index_wakes backfills it.
+        if !self.foreign {
+            self.indexed()?;
+        }
+        ready(log.index_wakes(Arc::new(Index(Arc::clone(&self.host), self.foreign))))
             .map_err(|error| format!("indexing the wakes refused: {error}"))?;
         self.indexed()?;
         Ok(log)
@@ -455,6 +465,11 @@ impl Run {
     }
 
     fn indexed(&mut self) -> Result<(), String> {
+        // A foreign index is written after the log's commit, so a host that died in between
+        // leaves it stale until the reopen's index_wakes, which this checks again.
+        if self.foreign && self.host.dead.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         let held = self
             .host
             .index
@@ -502,9 +517,10 @@ impl Run {
         let log = self.open()?;
         let key = KEYS[self.rng.pick(KEYS.len())];
         let (wake, mut expected) = self.wake();
-        let full = self.policy.wakes_max.is_some_and(|max| {
-            !self.expected.contains_key(key) && self.expected.len() >= max
-        });
+        let full = self
+            .policy
+            .wakes_max
+            .is_some_and(|max| !self.expected.contains_key(key) && self.expected.len() >= max);
         match ready(log.arm(key, wake)) {
             Ok(generation) if full => Err(format!(
                 "arm {key} took generation {generation} past the bound of {:?} wakes",
@@ -747,12 +763,14 @@ fn run(seed: u64, verbose: bool, stats: &mut WakesStats) -> Result<u64, String> 
         usize::try_from(rng.range(WAKES_MAX_MIN, KEYS.len() as u64)).expect("a bound fits")
     });
     let ops = rng.range(OPS_MIN, OPS_MAX);
+    let foreign = rng.below(4) == 0;
     let mut state = Run {
         attempts: 0,
         clock: 0,
         digest: FNV_OFFSET,
         expected: BTreeMap::new(),
         fired: BTreeMap::new(),
+        foreign,
         host: Arc::new(Host::default()),
         log: None,
         policy: Policy {

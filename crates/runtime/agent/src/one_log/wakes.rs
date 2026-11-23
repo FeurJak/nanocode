@@ -87,11 +87,18 @@ impl OneLog {
             statements: &statements,
         };
         let (_, carried) = lease.commit_carrying(point, rider).await?;
+        // An error from here on would make the caller unwind a commit that is already durable, so
+        // a rider the log's host did not carry is written on its own instead, and its failure
+        // only leaves the index stale until the next index_wakes.
         if !carried {
-            return Err(StoreError::NotCommitted(format!(
-                "turn log {} committed its wakes, but its host did not carry the wake index's rider; index_wakes with an index on the log's own SQL host",
-                self.scope()
-            )));
+            let summary = lease.fold().wakes().summary();
+            if let Err(error) = index.write(self.scope(), &summary).await {
+                nanocode_trace::warn!(
+                    %error,
+                    scope = self.scope(),
+                    "turn log committed its wakes, but its host did not carry the wake index's rider and writing the index on its own failed; it stays stale until index_wakes"
+                );
+            }
         }
         Ok(())
     }
