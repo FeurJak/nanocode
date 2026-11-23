@@ -697,6 +697,16 @@ impl Fold {
         if known && !self.read.contains(state) {
             self.read.insert(state.to_owned());
         }
+        let keys = format!("{state}\n");
+        if known && !state.contains('\n') && !self.read.contains(&keys) {
+            self.read.insert(keys);
+        }
+    }
+
+    pub(crate) fn read_owner(&mut self, owner: &str) {
+        if self.owners.contains_key(owner) && !self.read.contains(owner) {
+            self.read.insert(owner.to_owned());
+        }
     }
 
     pub(crate) fn evict(&mut self) {
@@ -706,11 +716,10 @@ impl Fold {
             .iter()
             .filter(|(owner, state)| {
                 matches!(state, Owner::Warm { delta, entry } if delta.is_empty() && !entry.legacy)
-                    && !read.contains(
-                        owner
-                            .split_once('\n')
-                            .map_or(owner.as_str(), |(state, _)| state),
-                    )
+                    && !read.contains(owner.as_str())
+                    && !owner.split_once('\n').is_some_and(|(state, _)| {
+                        read.contains(&format!("{state}\n"))
+                    })
             })
             .map(|(owner, _)| owner.clone())
             .collect::<Vec<_>>();
