@@ -981,6 +981,7 @@ impl RunnerPool {
         Box::pin(async move {
             super::install_default_rustls_crypto_provider();
             config.validate()?;
+            let supplied = config.token.is_some();
             let token = match config.token {
                 Some(token) if !token.trim().is_empty() => token,
                 Some(_) => {
@@ -1037,6 +1038,7 @@ impl RunnerPool {
             let inner = Arc::new(ServerInner {
                 endpoint,
                 token,
+                supplied,
                 cancel,
                 task: Slot::new(Some(task)),
                 pool: Arc::downgrade(&self.inner),
@@ -1395,6 +1397,7 @@ pub struct RunnerServer {
 struct ServerInner {
     endpoint: String,
     token: String,
+    supplied: bool,
     cancel: Arc<Signal>,
     task: Slot<JoinHandle<()>>,
     pool: Weak<PoolInner>,
@@ -1414,6 +1417,10 @@ impl RunnerServer {
     }
     pub fn token(&self) -> &str {
         &self.inner.token
+    }
+    /// Whether the token came from the caller's configuration rather than being generated.
+    pub fn token_supplied(&self) -> bool {
+        self.inner.supplied
     }
     pub fn stop<'call>(
         &'call self,

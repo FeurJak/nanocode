@@ -667,12 +667,15 @@ pub struct Host {
 }
 
 pub fn listener_notice(server: &nanocode::RunnerServer) -> String {
+    let endpoint = server.endpoint();
+    if server.token_supplied() {
+        return format!(
+            "listening {endpoint} · token from NANOCODE_RUNNER_TOKEN or --runner-token\nStart a hand: NANOCODE_RUNNER_TOKEN=… nc hand {endpoint}"
+        );
+    }
+    let token = server.token();
     format!(
-        "listening {} · token {}\nStart a hand: nc hand {} --token {}",
-        server.endpoint(),
-        server.token(),
-        server.endpoint(),
-        server.token()
+        "listening {endpoint} · token {token}\nStart a hand: NANOCODE_RUNNER_TOKEN={token} nc hand {endpoint}"
     )
 }
 
