@@ -1362,6 +1362,13 @@ impl HoldLedger for OneLog {
         })
     }
 
+    fn claim<'a>(&'a self, key: &'a str) -> HostFuture<'a, bool> {
+        // Taking the key out of `resolved` is the claim: whatever happens to the release after
+        // this, no later call in this process can resume the hold again, and until the release is
+        // saved `uncertain_holds` lists it.
+        Box::pin(async move { self.resolved.update(|resolved| resolved.remove(key)) })
+    }
+
     fn release<'a>(&'a self, key: &'a str) -> HostFuture<'a, Result<(), LedgerError>> {
         Box::pin(async move {
             self.journal_hold(key, |existing| {
@@ -1369,11 +1376,7 @@ impl HoldLedger for OneLog {
                     .map(Some)
                     .map_err(LedgerError::Hold)
             })
-            .await?;
-            self.resolved.update(|resolved| {
-                resolved.remove(key);
-            });
-            Ok(())
+            .await
         })
     }
 }

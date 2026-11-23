@@ -70,6 +70,11 @@ pub trait HoldLedger: Send + Sync + 'static {
 
     fn running<'a>(&'a self, call_id: &'a str) -> HostFuture<'a, Option<Running>>;
 
+    /// Takes the right to run the resumed call of `key`, once: true for the one caller that may
+    /// run it, false for every later or concurrent caller, and after the right was taken even if
+    /// its release was never saved.
+    fn claim<'a>(&'a self, key: &'a str) -> HostFuture<'a, bool>;
+
     fn release<'a>(&'a self, key: &'a str) -> HostFuture<'a, Result<(), LedgerError>>;
 }
 
@@ -155,7 +160,12 @@ impl Holds {
             if same_input(raw, &approved)
                 || crate::sim::mutated(crate::sim::Mutation::ResumeIgnoresAnswer)
             {
-                return Admission::Resume { key };
+                if self.ledger.claim(&key).await {
+                    return Admission::Resume { key };
+                }
+                return Admission::Answer(ToolOutput::error(format!(
+                    "tool `{name}` was not run: the call answered on hold `{key}` already ran or is running"
+                )));
             }
             return Admission::Answer(ToolOutput::error(format!(
                 "tool `{name}` was not run: its input differs from the input answered on hold `{key}`"
