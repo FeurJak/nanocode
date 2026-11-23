@@ -807,6 +807,14 @@ struct TailRow {
     seq: u64,
 }
 
+const fn snapshot_level(due: bool, bound: bool) -> i32 {
+    if due && !bound {
+        codec::FAST_LEVEL
+    } else {
+        codec::DEFAULT_LEVEL
+    }
+}
+
 pub struct Follower {
     decoded: History,
     first: Option<u64>,
@@ -1589,11 +1597,7 @@ impl Lease<'_> {
                 writer.stats.index_loads += 1;
             }
             writer.stats.collected += writer.fold.collect(&writer.collectable) as u64;
-            let level = if due || bound {
-                codec::FAST_LEVEL
-            } else {
-                codec::DEFAULT_LEVEL
-            };
+            let level = snapshot_level(due, bound);
             let sections = sections(
                 &mut writer.spare,
                 &writer.fold,
@@ -1941,5 +1945,18 @@ impl Lease<'_> {
             Point::Recovery => writer.stats.recoveries += 1,
         }
         Ok((seq, carried && explicit))
+    }
+}
+
+#[cfg(test)]
+mod level_tests {
+    use super::{codec, snapshot_level};
+
+    #[test]
+    fn a_snapshot_the_tail_bound_forces_packs_at_the_default_level() {
+        assert_eq!(snapshot_level(false, true), codec::DEFAULT_LEVEL);
+        assert_eq!(snapshot_level(true, true), codec::DEFAULT_LEVEL);
+        assert_eq!(snapshot_level(false, false), codec::DEFAULT_LEVEL);
+        assert_eq!(snapshot_level(true, false), codec::FAST_LEVEL);
     }
 }

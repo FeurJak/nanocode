@@ -16,6 +16,7 @@ const BODY_BYTES: usize = 4 * 1024;
 const MESSAGE_BYTES: usize = 3 * 1024;
 const PAGE_MESSAGES: usize = 32;
 const BOUNDED_FROM: usize = 250;
+const FAST_BOUND_BYTES: u64 = 2_046_911;
 
 fn block_on<F: Future>(future: F) -> F::Output {
     let mut future = std::pin::pin!(future);
@@ -101,7 +102,17 @@ async fn open(host: &Arc<MemoryLog>, max: Option<usize>) -> (Arc<OneLog>, OneLog
 }
 
 async fn turn(log: &OneLog, store: &mut OneLogStore, owner: &OwnerToken, i: usize) -> u64 {
-    let before = log.stats().await.snapshots;
+    turn_bytes(log, store, owner, i).await.0
+}
+
+async fn turn_bytes(
+    log: &OneLog,
+    store: &mut OneLogStore,
+    owner: &OwnerToken,
+    i: usize,
+) -> (u64, u64) {
+    let stats = log.stats().await;
+    let (before, bytes_before) = (stats.snapshots, stats.snapshot_bytes);
     let request = format!("turn-{i}");
     let submission = Submission {
         request_id: request.clone(),
@@ -136,7 +147,11 @@ async fn turn(log: &OneLog, store: &mut OneLogStore, owner: &OwnerToken, i: usiz
         .await
         .expect("finishes")
         .expect("was running");
-    log.stats().await.snapshots - before
+    let stats = log.stats().await;
+    (
+        stats.snapshots - before,
+        stats.snapshot_bytes - bytes_before,
+    )
 }
 
 struct Tail {
@@ -212,28 +227,21 @@ fn a_reopened_log_holds_a_bounded_tail_as_its_state_grows() {
         let mut opened = open(&host, Some(BOUND)).await;
         let mut written = Vec::new();
         let mut snapshots = 0;
-        let mut collected = 0;
+        let mut bound_bytes = 0;
         for i in 0..TURNS {
             if i % REOPEN_EVERY == 0 {
                 opened = open(&host, Some(BOUND)).await;
             }
             let (log, store, owner) = &mut opened;
             let before = host.writes().bytes;
-            let snapshotted = turn(log, store, owner, i).await;
+            let (snapshotted, packed) = turn_bytes(log, store, owner, i).await;
             snapshots += snapshotted;
+            if i >= BOUNDED_FROM {
+                bound_bytes += packed;
+            }
             written.push(host.writes().bytes - before);
             let Tail { rows, plain, .. } = tail(&host).await;
-            let (reopened, mut store, _) = open(&host, Some(BOUND)).await;
-            if snapshotted > 0
-                && i >= BOUNDED_FROM
-                && store
-                    .read_record(STATE, &hash(3, i - 1))
-                    .await
-                    .expect("reads")
-                    .is_none()
-            {
-                collected += 1;
-            }
+            let reopened = open(&host, Some(BOUND)).await.0;
             let held = held(&reopened).await;
             worst = (worst.0.max(rows), worst.1.max(plain), worst.2.max(held));
             assert!(
@@ -256,9 +264,10 @@ fn a_reopened_log_holds_a_bounded_tail_as_its_state_grows() {
             snapshots <= 2 * plain_total / BOUND as u64 + 16,
             "{snapshots} snapshots in {TURNS} turns"
         );
+        eprintln!("bound snapshots from turn {BOUNDED_FROM} packed {bound_bytes} bytes");
         assert!(
-            collected > 0,
-            "no snapshot the bound forced collected the unreachable history"
+            bound_bytes * 5 <= FAST_BOUND_BYTES * 4,
+            "bound snapshots packed {bound_bytes} bytes, over 0.8 x {FAST_BOUND_BYTES} at the fast level"
         );
     });
 }
