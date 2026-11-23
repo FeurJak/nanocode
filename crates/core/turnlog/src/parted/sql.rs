@@ -55,6 +55,10 @@ const INSERT: Dialects = [
     "WITH input AS (SELECT CAST(a.key AS INTEGER) AS app, json_extract(a.value, '$[0]') AS scope, CAST(json_extract(r.value, '$[0]') AS INTEGER) AS seq, json_extract(r.value, '$[1]') AS body, CAST(r.key AS INTEGER) AS rord FROM json_each(?3) AS a, json_each(a.value, '$[1]') AS r), keep AS (SELECT i.* FROM input i WHERE EXISTS (SELECT 1 FROM nanocode_log_fence f WHERE f.part = CAST(?1 AS INTEGER) AND (CAST(?2 AS INTEGER) < 0 OR (f.holder IS NOT NULL AND f.epoch = CAST(?2 AS INTEGER)))) AND i.app NOT IN (SELECT j.app FROM input j JOIN nanocode_plog p ON p.part = CAST(?1 AS INTEGER) AND p.scope = j.scope AND p.seq = j.seq)) INSERT INTO nanocode_plog (part, scope, seq, pos, snap, body) SELECT CAST(?1 AS INTEGER), scope, seq, (SELECT COALESCE(MAX(pos), 0) FROM nanocode_plog WHERE part = CAST(?1 AS INTEGER)) + row_number() OVER (ORDER BY app, rord), substr(body, 1, 1) = 's', body FROM keep WHERE true RETURNING scope, CAST(seq AS TEXT)",
     "WITH input AS (SELECT a.ord AS app, a.e ->> 0 AS scope, CAST(r.e ->> 0 AS BIGINT) AS seq, r.e ->> 1 AS body, r.e ->> 2 AS data, r.ord AS rord FROM jsonb_array_elements(CAST($3::text AS jsonb)) WITH ORDINALITY AS a(e, ord) CROSS JOIN LATERAL jsonb_array_elements(a.e -> 1) WITH ORDINALITY AS r(e, ord)), clash AS (SELECT DISTINCT i.app FROM input i WHERE (SELECT true FROM nanocode_plog p WHERE p.part = CAST($1::text AS INTEGER) AND p.scope = i.scope AND p.seq = i.seq LIMIT 1)), ins AS (INSERT INTO nanocode_plog (part, scope, seq, pos, snap, body, data) SELECT CAST($1::text AS INTEGER), s.scope, s.seq, nextval('nanocode_log_pos'), substr(s.body, 1, 1) = 's', CASE WHEN s.data IS NULL THEN s.body ELSE substr(s.body, 1, 1) END, decode(s.data, 'base64') FROM (SELECT i.scope, i.seq, i.body, i.data FROM input i WHERE EXISTS (SELECT 1 FROM nanocode_log_fence f WHERE f.part = CAST($1::text AS INTEGER) AND (CAST($2::text AS BIGINT) < 0 OR (f.holder IS NOT NULL AND f.epoch = CAST($2::text AS BIGINT)))) AND NOT EXISTS (SELECT 1 FROM clash c WHERE c.app = i.app) ORDER BY i.app, i.rord) s RETURNING scope, seq), note AS (SELECT count(*) AS n FROM (SELECT pg_notify('nanocode_log', h.scope || ':' || h.head) FROM (SELECT scope, max(seq) AS head FROM ins GROUP BY scope) h WHERE CAST($4::text AS INTEGER) = 1) notified) SELECT ins.scope, CAST(ins.seq AS TEXT) FROM ins, note",
 ];
+/// INSERT on Postgres, then in the same statement each landed append's compaction: its archived
+/// rows rewritten and its dropped and superseded ranges deleted, never a row some cursor has not
+/// consumed. An append that conflicted lands nothing and compacts nothing.
+const INSERT_COMPACTING: &str = "WITH input AS (SELECT a.ord AS app, a.e ->> 0 AS scope, CAST(r.e ->> 0 AS BIGINT) AS seq, r.e ->> 1 AS body, r.e ->> 2 AS data, r.ord AS rord FROM jsonb_array_elements(CAST($3::text AS jsonb)) WITH ORDINALITY AS a(e, ord) CROSS JOIN LATERAL jsonb_array_elements(a.e -> 1) WITH ORDINALITY AS r(e, ord)), clash AS (SELECT DISTINCT i.app FROM input i WHERE (SELECT true FROM nanocode_plog p WHERE p.part = CAST($1::text AS INTEGER) AND p.scope = i.scope AND p.seq = i.seq LIMIT 1)), ins AS (INSERT INTO nanocode_plog (part, scope, seq, pos, snap, body, data) SELECT CAST($1::text AS INTEGER), s.scope, s.seq, nextval('nanocode_log_pos'), substr(s.body, 1, 1) = 's', CASE WHEN s.data IS NULL THEN s.body ELSE substr(s.body, 1, 1) END, decode(s.data, 'base64') FROM (SELECT i.scope, i.seq, i.body, i.data FROM input i WHERE EXISTS (SELECT 1 FROM nanocode_log_fence f WHERE f.part = CAST($1::text AS INTEGER) AND (CAST($2::text AS BIGINT) < 0 OR (f.holder IS NOT NULL AND f.epoch = CAST($2::text AS BIGINT)))) AND NOT EXISTS (SELECT 1 FROM clash c WHERE c.app = i.app) ORDER BY i.app, i.rord) s RETURNING scope, seq), note AS (SELECT count(*) AS n FROM (SELECT pg_notify('nanocode_log', h.scope || ':' || h.head) FROM (SELECT scope, max(seq) AS head FROM ins GROUP BY scope) h WHERE CAST($4::text AS INTEGER) = 1) notified), compaction AS (SELECT c.e ->> 0 AS scope, CAST(c.e ->> 1 AS BIGINT) AS first, c.e -> 2 AS archived, c.e -> 3 AS ranges FROM jsonb_array_elements(CAST($5::text AS jsonb)) AS c(e)), landed AS (SELECT c.* FROM compaction c WHERE EXISTS (SELECT 1 FROM ins WHERE ins.scope = c.scope AND ins.seq = c.first)), archived AS (UPDATE nanocode_plog p SET body = CASE WHEN x.data IS NULL THEN x.body ELSE substr(x.body, 1, 1) END, data = decode(x.data, 'base64'), snap = substr(x.body, 1, 1) = 's' FROM (SELECT l.scope, CAST(a.e ->> 0 AS BIGINT) AS seq, a.e ->> 1 AS body, a.e ->> 2 AS data FROM landed l CROSS JOIN LATERAL jsonb_array_elements(l.archived) AS a(e)) x WHERE p.part = CAST($1::text AS INTEGER) AND p.scope = x.scope AND p.seq = x.seq RETURNING 1), dropped AS (DELETE FROM nanocode_plog p USING (SELECT l.scope, CAST(d.e ->> 0 AS BIGINT) AS low, CAST(d.e ->> 1 AS BIGINT) AS high FROM landed l CROSS JOIN LATERAL jsonb_array_elements(l.ranges) AS d(e)) y WHERE p.part = CAST($1::text AS INTEGER) AND p.scope = y.scope AND p.seq >= y.low AND p.seq < y.high AND p.pos <= COALESCE((SELECT min(pos) FROM nanocode_log_cursor WHERE part = CAST($1::text AS INTEGER)), 9223372036854775807) RETURNING 1) SELECT ins.scope, CAST(ins.seq AS TEXT) FROM ins, note";
 /// Wakes listeners after a commit landed, in its own unsynced transaction: NOTIFY in the commit
 /// itself holds Postgres's global notify lock across the WAL flush and serialises every
 /// partition's commits (P=16, 64 claimers: 2.5k vs 13.7k claims/s with it off).
@@ -256,6 +260,52 @@ fn result(answer: &[Vec<SqlRow>], index: usize) -> Result<&Vec<SqlRow>, StoreErr
         .ok_or_else(|| invalid(format!("no result {index}")))
 }
 
+fn data(postgres: bool, body: &str) -> Option<String> {
+    postgres
+        .then(|| crate::codec::binary(body))
+        .flatten()
+        .map(|(_, padded)| padded)
+}
+
+type Compacted<'a> = (
+    &'a str,
+    u64,
+    Vec<(u64, &'a str, Option<String>)>,
+    Vec<(u64, u64)>,
+);
+
+fn compacting(
+    batch: &[Append],
+    compactions: &[Option<Compaction<'_>>],
+) -> Result<String, StoreError> {
+    let entries: Vec<Compacted<'_>> = batch
+        .iter()
+        .zip(compactions)
+        .filter_map(|(append, compaction)| {
+            compaction.as_ref().map(|compaction| (append, compaction))
+        })
+        .map(|(append, compaction)| {
+            let (first, _) = append
+                .rows
+                .first()
+                .expect("a compacting append carries rows");
+            let archived = compaction
+                .archived
+                .iter()
+                .map(|(seq, body)| (*seq, body.as_str(), data(true, body)))
+                .collect();
+            let ranges = std::iter::once(&compaction.dropped)
+                .chain(compaction.superseded)
+                .filter(|range| !range.is_empty())
+                .map(|range| (range.start, range.end.min(i64::MAX as u64)))
+                .collect();
+            (append.scope.as_ref(), *first, archived, ranges)
+        })
+        .collect();
+    serde_json::to_string(&entries)
+        .map_err(|error| StoreError::Backend(format!("encode compactions: {error}")))
+}
+
 fn fence_parts(row: &Row<String>) -> [String; 3] {
     match row {
         Row::Free { epoch } => [epoch.to_string(), String::new(), "0".to_owned()],
@@ -268,6 +318,89 @@ fn fence_parts(row: &Row<String>) -> [String; 3] {
 }
 
 impl<H: Sql + Send + Sync + ?Sized> SqlParts<H> {
+    /// One transaction: the fence, every append, and with compactions each landed append's
+    /// compaction (INSERT_COMPACTING).
+    async fn committing(
+        &self,
+        part: Partition,
+        epoch: Option<u64>,
+        batch: &[Append],
+        compactions: Option<&str>,
+    ) -> Result<Vec<Verdict>, StoreError> {
+        let postgres = self.postgres();
+        let encoded: Vec<(&str, Vec<(u64, &str, Option<String>)>)> = batch
+            .iter()
+            .map(|append| {
+                (
+                    append.scope.as_ref(),
+                    append
+                        .rows
+                        .iter()
+                        .map(|(seq, body)| (*seq, body.as_str(), data(postgres, body)))
+                        .collect(),
+                )
+            })
+            .collect();
+        let json = serde_json::to_string(&encoded)
+            .map_err(|error| StoreError::Backend(format!("encode batch: {error}")))?;
+        let (part, epoch_text) = (part.0.to_string(), token(epoch));
+        let mut params = vec![part.as_str(), epoch_text.as_str(), json.as_str()];
+        if self.postgres() {
+            params.push("0");
+        }
+        let sql = match compactions {
+            Some(compactions) => {
+                params.push(compactions);
+                INSERT_COMPACTING
+            }
+            None => self.pick(&INSERT),
+        };
+        let insert = SqlStatement { sql, params };
+        let answer = match self.fenced("plog_commit", &part, epoch, vec![insert]).await {
+            Err(StoreError::Fenced) if epoch.is_none() => {
+                return Err(StoreError::Backend(format!(
+                    "log partition {part} is not prepared"
+                )));
+            }
+            answer => answer?,
+        };
+        let mut landed = HashSet::new();
+        let mut heads = std::collections::BTreeMap::new();
+        for cells in result(&answer, 1)? {
+            let (scope, seq) = (cell(cells, 0)?, number(cells, 1)?);
+            let head = heads.entry(scope).or_insert(seq);
+            *head = (*head).max(seq);
+            landed.insert((scope.to_owned(), seq));
+        }
+        if self.notify && self.postgres() && !heads.is_empty() {
+            let queued = self.outbox.pending.update(|pending| {
+                if pending.driven {
+                    for (scope, head) in &heads {
+                        let queued = pending.heads.entry((*scope).to_owned()).or_insert(*head);
+                        *queued = (*queued).max(*head);
+                    }
+                }
+                pending.driven
+            });
+            if queued {
+                self.outbox.ready.notify_one();
+            } else {
+                send_notify(&*self.host, &notify_payloads(heads.into_iter())?).await;
+            }
+        }
+        Ok(batch
+            .iter()
+            .map(|append| {
+                let first = append.rows.first().map_or(0, |(seq, _)| *seq);
+                if landed.contains(&(append.scope.to_string(), first)) {
+                    Verdict::Committed
+                } else {
+                    Verdict::Conflict
+                }
+            })
+            .collect())
+    }
+
     /// Runs LOCK then the statements in one transaction; a stale token is Fenced.
     async fn fenced(
         &self,
@@ -324,82 +457,24 @@ impl<H: Sql + Send + Sync + ?Sized> PartStore for SqlParts<H> {
         epoch: Option<u64>,
         batch: &'a [Append],
     ) -> StoreFuture<'a, Result<Vec<Verdict>, StoreError>> {
-        Box::pin(async move {
-            let postgres = self.postgres();
-            let encoded: Vec<(&str, Vec<(u64, &str, Option<String>)>)> = batch
-                .iter()
-                .map(|append| {
-                    (
-                        append.scope.as_ref(),
-                        append
-                            .rows
-                            .iter()
-                            .map(|(seq, body)| {
-                                let data = postgres
-                                    .then(|| crate::codec::binary(body))
-                                    .flatten()
-                                    .map(|(_, padded)| padded);
-                                (*seq, body.as_str(), data)
-                            })
-                            .collect(),
-                    )
-                })
-                .collect();
-            let json = serde_json::to_string(&encoded)
-                .map_err(|error| StoreError::Backend(format!("encode batch: {error}")))?;
-            let (part, epoch_text) = (part.0.to_string(), token(epoch));
-            let mut params = vec![part.as_str(), epoch_text.as_str(), json.as_str()];
-            if self.postgres() {
-                params.push("0");
-            }
-            let insert = SqlStatement {
-                sql: self.pick(&INSERT),
-                params,
-            };
-            let answer = match self.fenced("plog_commit", &part, epoch, vec![insert]).await {
-                Err(StoreError::Fenced) if epoch.is_none() => {
-                    return Err(StoreError::Backend(format!(
-                        "log partition {part} is not prepared"
-                    )));
-                }
-                answer => answer?,
-            };
-            let mut landed = HashSet::new();
-            let mut heads = std::collections::BTreeMap::new();
-            for cells in result(&answer, 1)? {
-                let (scope, seq) = (cell(cells, 0)?, number(cells, 1)?);
-                let head = heads.entry(scope).or_insert(seq);
-                *head = (*head).max(seq);
-                landed.insert((scope.to_owned(), seq));
-            }
-            if self.notify && self.postgres() && !heads.is_empty() {
-                let queued = self.outbox.pending.update(|pending| {
-                    if pending.driven {
-                        for (scope, head) in &heads {
-                            let queued = pending.heads.entry((*scope).to_owned()).or_insert(*head);
-                            *queued = (*queued).max(*head);
-                        }
-                    }
-                    pending.driven
-                });
-                if queued {
-                    self.outbox.ready.notify_one();
-                } else {
-                    send_notify(&*self.host, &notify_payloads(heads.into_iter())?).await;
-                }
-            }
-            Ok(batch
-                .iter()
-                .map(|append| {
-                    let first = append.rows.first().map_or(0, |(seq, _)| *seq);
-                    if landed.contains(&(append.scope.to_string(), first)) {
-                        Verdict::Committed
-                    } else {
-                        Verdict::Conflict
-                    }
-                })
-                .collect())
-        })
+        Box::pin(self.committing(part, epoch, batch, None))
+    }
+
+    fn commit_compacting<'a>(
+        &'a self,
+        part: Partition,
+        epoch: Option<u64>,
+        batch: &'a [Append],
+        compactions: &'a [Option<Compaction<'a>>],
+    ) -> Option<StoreFuture<'a, Result<Vec<Verdict>, StoreError>>> {
+        if !self.postgres() {
+            return None;
+        }
+        Some(Box::pin(async move {
+            let compactions = compacting(batch, compactions)?;
+            self.committing(part, epoch, batch, Some(&compactions))
+                .await
+        }))
     }
 
     fn scan<'a>(

@@ -10,6 +10,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     num::NonZeroU32,
+    ops::Range,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
@@ -94,6 +95,18 @@ pub trait PartStore: Send + Sync {
         scope: &'a str,
         extension: Extension<'a>,
     ) -> StoreFuture<'a, Result<(), StoreError>>;
+
+    /// commit with each landed append's compaction in the same transaction, compactions[i]
+    /// belonging to batch[i]; None when this store compacts only in a transaction of its own.
+    fn commit_compacting<'a>(
+        &'a self,
+        _part: Partition,
+        _epoch: Option<u64>,
+        _batch: &'a [Append],
+        _compactions: &'a [Option<Compaction<'a>>],
+    ) -> Option<StoreFuture<'a, Result<Vec<Verdict>, StoreError>>> {
+        None
+    }
 
     /// Rows of the partition after position after, in position order: the follower feed.
     fn follow(
@@ -194,13 +207,42 @@ pub struct Stats {
     pub fenced: u64,
 }
 
+#[derive(Clone)]
+struct Compacting {
+    archived: Rows,
+    dropped: Range<u64>,
+    superseded: Vec<Range<u64>>,
+}
+
+impl Compacting {
+    fn of(compaction: &Compaction<'_>) -> Option<Self> {
+        let empty = compaction.archived.is_empty()
+            && compaction.dropped.is_empty()
+            && compaction.superseded.iter().all(Range::is_empty);
+        (!empty).then(|| Self {
+            archived: compaction.archived.to_vec(),
+            dropped: compaction.dropped.clone(),
+            superseded: compaction.superseded.to_vec(),
+        })
+    }
+
+    fn borrowed(&self) -> Compaction<'_> {
+        Compaction {
+            archived: &self.archived,
+            dropped: self.dropped.clone(),
+            superseded: &self.superseded,
+        }
+    }
+}
+
 enum Turn {
     Done(Result<(), StoreError>),
-    Lead(Append),
+    Lead(Append, Option<Compacting>),
 }
 
 struct Waiter {
     append: Append,
+    compacting: Option<Compacting>,
     reply: oneshot::Sender<Turn>,
 }
 
@@ -381,6 +423,7 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
                     scope: Arc::from(""),
                     rows: Vec::new(),
                 },
+                None,
             )
             .await;
     }
@@ -404,24 +447,37 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
         self.store.prune(part, epoch, scope, before).await
     }
 
-    async fn submit(&self, part: Partition, append: Append) -> Result<(), StoreError> {
+    async fn submit(
+        &self,
+        part: Partition,
+        append: Append,
+        compacting: Option<Compacting>,
+    ) -> Result<(), StoreError> {
         let (reply, mut answer) = oneshot::channel();
         let lead = {
             let mut queues = lock(&self.queues);
             let queue = queues.entry(part).or_default();
-            queue.waiting.push_back(Waiter { append, reply });
+            queue.waiting.push_back(Waiter {
+                append,
+                compacting,
+                reply,
+            });
             !std::mem::replace(&mut queue.leading, true)
         };
         if !lead {
             match (&mut answer).await {
                 Ok(Turn::Done(result)) => return result,
-                Ok(Turn::Lead(append)) => {
+                Ok(Turn::Lead(append, compacting)) => {
                     let (reply, next) = oneshot::channel();
                     lock(&self.queues)
                         .entry(part)
                         .or_default()
                         .waiting
-                        .push_front(Waiter { append, reply });
+                        .push_front(Waiter {
+                            append,
+                            compacting,
+                            reply,
+                        });
                     answer = next;
                 }
                 Err(_) => return Err(uncertain()),
@@ -430,7 +486,7 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
         self.lead(part).await;
         match answer.await {
             Ok(Turn::Done(result)) => result,
-            Ok(Turn::Lead(_)) | Err(_) => Err(uncertain()),
+            Ok(Turn::Lead(..)) | Err(_) => Err(uncertain()),
         }
     }
 
@@ -464,9 +520,58 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
         }
     }
 
+    /// The batch's verdicts and, per append, how its compaction went: in the commit's own
+    /// transaction when the store can, else in one fenced transaction each once the batch
+    /// landed. Compaction only shrinks the log, so a crash between the two leaves an
+    /// uncompacted but complete log.
+    async fn committed(
+        &self,
+        part: Partition,
+        sent: &[Append],
+        compactings: &[Option<&Compacting>],
+    ) -> (
+        Result<Vec<Verdict>, StoreError>,
+        Vec<Result<(), StoreError>>,
+    ) {
+        let mut compacted = vec![Ok(()); sent.len()];
+        if sent.is_empty() {
+            return (Ok(Vec::new()), compacted);
+        }
+        let epoch = match self.epoch(part) {
+            Ok(epoch) => epoch,
+            Err(error) => return (Err(error), compacted),
+        };
+        let compactions: Vec<Option<Compaction<'_>>> = compactings
+            .iter()
+            .map(|compacting| compacting.map(Compacting::borrowed))
+            .collect();
+        if compactions.iter().any(Option::is_some)
+            && let Some(together) = self
+                .store
+                .commit_compacting(part, epoch, sent, &compactions)
+        {
+            return (together.await, compacted);
+        }
+        let answer = self.store.commit(part, epoch, sent).await;
+        if let Ok(verdicts) = &answer {
+            for (index, compaction) in compactions.into_iter().enumerate() {
+                if let (Some(compaction), Some(Verdict::Committed)) =
+                    (compaction, verdicts.get(index))
+                {
+                    compacted[index] = self
+                        .store
+                        .compact(part, epoch, &sent[index].scope, compaction)
+                        .await;
+                }
+            }
+        }
+        (answer, compacted)
+    }
+
     async fn commit(&self, part: Partition, batch: Vec<Waiter>) {
         let mut seen: HashSet<(Arc<str>, u64)> = HashSet::new();
         let mut sent = Vec::new();
+        let mut compactings = Vec::new();
         let mut slots = Vec::with_capacity(batch.len());
         for waiter in &batch {
             let append = &waiter.append;
@@ -490,15 +595,9 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
             );
             slots.push(Some(Ok(sent.len())));
             sent.push(append.clone());
+            compactings.push(waiter.compacting.as_ref());
         }
-        let answer = if sent.is_empty() {
-            Ok(Vec::new())
-        } else {
-            match self.epoch(part) {
-                Ok(epoch) => self.store.commit(part, epoch, &sent).await,
-                Err(error) => Err(error),
-            }
-        };
+        let (answer, compacted) = self.committed(part, &sent, &compactings).await;
         let answer = match answer {
             Err(StoreError::Backend(_)) if sim::mutated(sim::Mutation::LostAckRejected) => {
                 Ok(vec![Verdict::Conflict; sent.len()])
@@ -517,6 +616,10 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
         };
         let mut rung = 0;
         for (waiter, slot) in batch.into_iter().zip(slots) {
+            let compaction = match slot {
+                Some(Ok(at)) => compacted[at].clone(),
+                _ => Ok(()),
+            };
             let result = match slot {
                 None => Ok(()),
                 Some(Err(error)) => Err(error),
@@ -545,7 +648,7 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
                 Err(StoreError::Fenced) => stats.conflicts += 1,
                 _ => {}
             }
-            let _ = waiter.reply.send(Turn::Done(result));
+            let _ = waiter.reply.send(Turn::Done(result.and(compaction)));
         }
         let mut total = lock(&self.stats);
         total.commits += stats.commits;
@@ -572,7 +675,11 @@ impl Drop for Leading<'_> {
         let mut queues = lock(self.queues);
         let queue = queues.entry(self.part).or_default();
         while let Some(waiter) = queue.waiting.pop_front() {
-            if waiter.reply.send(Turn::Lead(waiter.append)).is_ok() {
+            if waiter
+                .reply
+                .send(Turn::Lead(waiter.append, waiter.compacting))
+                .is_ok()
+            {
                 return;
             }
         }
@@ -610,13 +717,12 @@ impl<S: PartStore + ?Sized> LogHost for PartedLog<S> {
                 scope: Arc::from(scope),
                 rows: rows.to_vec(),
             };
-            self.submit(self.partition(scope), append).await
+            self.submit(self.partition(scope), append, None).await
         })
     }
 
-    /// The rows go down through the partition's group commit; the archive and drops follow in a
-    /// second fenced transaction once the rows landed. Compaction only shrinks the log, so a
-    /// crash between the two leaves an uncompacted but complete log.
+    /// The rows and their compaction go down through the partition's group commit, in one
+    /// transaction where the store can (PartStore::commit_compacting).
     fn append_compacting<'a>(
         &'a self,
         scope: &'a str,
@@ -624,16 +730,23 @@ impl<S: PartStore + ?Sized> LogHost for PartedLog<S> {
         compaction: Compaction<'a>,
     ) -> StoreFuture<'a, Result<(), StoreError>> {
         Box::pin(async move {
-            self.append(scope, rows).await?;
-            if compaction.archived.is_empty()
-                && compaction.dropped.is_empty()
-                && compaction.superseded.iter().all(std::ops::Range::is_empty)
-            {
-                return Ok(());
+            let compacting = Compacting::of(&compaction);
+            if rows.is_empty() {
+                let Some(compacting) = compacting else {
+                    return Ok(());
+                };
+                let part = self.partition(scope);
+                let epoch = self.epoch(part)?;
+                return self
+                    .store
+                    .compact(part, epoch, scope, compacting.borrowed())
+                    .await;
             }
-            let part = self.partition(scope);
-            let epoch = self.epoch(part)?;
-            self.store.compact(part, epoch, scope, compaction).await
+            let append = Append {
+                scope: Arc::from(scope),
+                rows: rows.to_vec(),
+            };
+            self.submit(self.partition(scope), append, compacting).await
         })
     }
 
