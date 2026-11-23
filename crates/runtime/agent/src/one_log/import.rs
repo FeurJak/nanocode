@@ -83,9 +83,11 @@ impl OneLog {
         let fold = lease.fold();
         let unsaved = records
             .iter()
-            .filter(|record| {
-                fold.stored(&stored_key(state_id, &record.key)) != Some(&*record.value)
+            .map(|record| (record, super::shared::staged(fold, state_id, record)))
+            .filter(|(record, value)| {
+                fold.stored(&stored_key(state_id, &record.key)) != Some(&**value)
             })
+            .map(|(record, value)| (record, value.into_owned()))
             .collect::<Vec<_>>();
         let (imported, written) = match fold.checkpoint(state_id) {
             None => (Imported::Copied, revision),
@@ -105,7 +107,7 @@ impl OneLog {
                 return Err(StoreError::NotCommitted(format!(
                     "turn log {} holds state {state_id} at revision {revision} with a different record {}",
                     self.scope(),
-                    unsaved[0].key
+                    unsaved[0].0.key
                 )));
             }
             Some(_) if sim::mutated(sim::Mutation::ReimportAdvances) => {
@@ -117,9 +119,9 @@ impl OneLog {
         if pushed {
             let unsaved = unsaved
                 .into_iter()
-                .map(|record| Record::Stored {
+                .map(|(record, value)| Record::Stored {
                     key: stored_key(state_id, &record.key),
-                    value: record.value.to_string(),
+                    value,
                 })
                 .collect::<Vec<_>>();
             for record in unsaved {

@@ -60,6 +60,7 @@ pub enum TurnMutation {
     ArchiveDropsEvents,
     BufferedAdmissionWritten,
     CellBeforeCheckpoint,
+    CellRootsSkipped,
     ContentCollectedLive,
     ContentRewrittenStale,
     DurableSeqBeforeCommit,
@@ -87,13 +88,14 @@ pub enum TurnMutation {
 }
 
 impl TurnMutation {
-    const ALL: [Self; 30] = [
+    const ALL: [Self; 31] = [
         Self::None,
         Self::AckBufferedAdmission,
         Self::AckBufferedResult,
         Self::ArchiveDropsEvents,
         Self::BufferedAdmissionWritten,
         Self::CellBeforeCheckpoint,
+        Self::CellRootsSkipped,
         Self::ContentCollectedLive,
         Self::ContentRewrittenStale,
         Self::DurableSeqBeforeCommit,
@@ -134,6 +136,7 @@ impl TurnMutation {
             Self::ArchiveDropsEvents => "archive_drops_events",
             Self::BufferedAdmissionWritten => "buffered_admission_written",
             Self::CellBeforeCheckpoint => "cell_before_checkpoint",
+            Self::CellRootsSkipped => "cell_roots_skipped",
             Self::ContentCollectedLive => "content_collected_live",
             Self::ContentRewrittenStale => "content_rewritten_stale",
             Self::DurableSeqBeforeCommit => "durable_seq_before_commit",
@@ -174,6 +177,7 @@ pub enum Invariant {
     CellLost,
     CellModelOnce,
     CellResultKept,
+    CellResultShared,
     CellRows,
     EventKept,
     ExternalOnce,
@@ -195,6 +199,7 @@ impl Invariant {
             Self::CellLost => "cell_lost",
             Self::CellModelOnce => "cell_model_once",
             Self::CellResultKept => "cell_result_kept",
+            Self::CellResultShared => "cell_result_shared",
             Self::CellRows => "cell_rows",
             Self::EventKept => "event_kept",
             Self::ExternalOnce => "external_once",
@@ -1231,6 +1236,7 @@ impl Sim {
         nanocode_turnlog::sim::mutate(match self.options.mutation {
             TurnMutation::PlacedInline => nanocode_turnlog::sim::Mutation::PlacedInline,
             TurnMutation::FencedServesReads => nanocode_turnlog::sim::Mutation::FencedServesReads,
+            TurnMutation::CellRootsSkipped => nanocode_turnlog::sim::Mutation::CellRootsSkipped,
             _ => nanocode_turnlog::sim::Mutation::None,
         });
         let policy: Box<dyn TurnDurability> = match self.options.policy {

@@ -1442,6 +1442,20 @@ impl Fold {
                     .map(|(content, _)| *content),
             );
         }
+        if !crate::sim::mutated(crate::sim::Mutation::CellRootsSkipped) {
+            let live = self
+                .cells
+                .iter()
+                .filter(|((session, _), _)| collectable(session))
+                .flat_map(|(_, updates)| updates);
+            for update in live {
+                queue.extend(
+                    EncodedPayload::references(update.get())
+                        .filter_map(|content| firsts.get_key_value(content))
+                        .map(|(content, _)| *content),
+                );
+            }
+        }
         let mut visited = vec![false; holders.len()];
         while let Some(content) = queue.pop() {
             let Some(&first) = firsts.get(content) else {

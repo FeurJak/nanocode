@@ -17,7 +17,8 @@ use nanocode_code_mode::code_mode::{
     JournalEntry, JournaledCall, JournaledCallState,
 };
 use nanocode_durability_core::{
-    OwnerId, OwnerToken, Settle, StateCommit, StateStore, StoreError, StoreFuture, SummaryUpdate,
+    EncodedPayload, OwnerId, OwnerToken, Settle, StateCommit, StateStore, StoreError, StoreFuture,
+    SummaryUpdate,
 };
 use nanocode_sync::Atom;
 use nanocode_sync::FutureExt;
@@ -34,6 +35,8 @@ use crate::{
 };
 
 const CHARGE: &str = "charge";
+const ANSWERED: &str = "ok";
+const UNANSWERED: &str = "unknown";
 const CRASHES_MAX: u64 = RESTART_CAP - 1;
 const READ: &str = "Read";
 const SCOPE: &str = "cells";
@@ -439,6 +442,11 @@ fn call_entry(turn: &Turn) -> JournalEntry {
     }
 }
 
+fn answer(word: &str) -> String {
+    serde_json::to_string(&word.repeat(EncodedPayload::SHARED_BYTES_MIN))
+        .expect("a string encodes as JSON")
+}
+
 fn completed(turn: &Turn, cell: u64, encoded: &str) -> (JournalEntry, JournaledCall) {
     (
         JournalEntry::Result {
@@ -494,6 +502,9 @@ impl Cells {
 
     fn live(&mut self) -> &mut Live {
         if self.live.is_none() {
+            if self.options.mutation == TurnMutation::CellRootsSkipped {
+                nanocode_turnlog::sim::mutate(nanocode_turnlog::sim::Mutation::CellRootsSkipped);
+            }
             let policy = Policy {
                 max_row_bytes: self.options.row_limit,
                 restarts: RESTART_CAP,
@@ -594,7 +605,7 @@ impl Cells {
                     ops.push(writer.save(header, vec![call_entry(turn)], vec![running], false));
                 }
                 ops.push(Op::Call);
-                let (entry, done) = completed(turn, cell, "\"ok\"");
+                let (entry, done) = completed(turn, cell, &answer(ANSWERED));
                 ops.push(writer.save(None, vec![entry], vec![done], false));
                 ops.push(writer.save(None, Vec::new(), Vec::new(), true));
             }
@@ -642,7 +653,7 @@ impl Cells {
                         && turn.kind == Kind::External
                         && self.options.mutation != TurnMutation::ResumeRedispatchesRunning
                     {
-                        let (entry, done) = completed(turn, cell, "\"unknown\"");
+                        let (entry, done) = completed(turn, cell, &answer(UNANSWERED));
                         ops.push(Op::Unknown(writer.update(
                             None,
                             vec![entry],
@@ -659,7 +670,7 @@ impl Cells {
                         let calls = vec![call(turn, cell, JournaledCallState::Running)];
                         ops.push(writer.save(None, entries, calls, false));
                         ops.push(Op::Call);
-                        let (entry, done) = completed(turn, cell, "\"ok\"");
+                        let (entry, done) = completed(turn, cell, &answer(ANSWERED));
                         ops.push(writer.save(None, vec![entry], vec![done], false));
                         ops.push(writer.save(None, Vec::new(), Vec::new(), true));
                     }
@@ -685,7 +696,28 @@ impl Cells {
 
     fn journal(&mut self, cell: u64) -> Option<(CellJournal, u64)> {
         let live = self.live();
-        let journals = refused(ready(live.sink.load(SESSION)));
+        let journals = match ready(live.sink.load(SESSION)) {
+            Ok(journals) => journals,
+            Err(error) => {
+                self.wrong(
+                    Invariant::CellResultShared,
+                    format!("cell {cell} journal did not load: {error}"),
+                );
+                return None;
+            }
+        };
+        let answers = [answer(ANSWERED), answer(UNANSWERED)];
+        let altered = journals.iter().flat_map(|journal| &journal.entries).any(|entry| {
+            matches!(entry, JournalEntry::Result { encoded, .. } if !answers.contains(encoded))
+        });
+        if altered {
+            self.wrong(
+                Invariant::CellResultShared,
+                format!("cell {cell} journal loaded a result that was never saved"),
+            );
+            return None;
+        }
+        let live = self.live();
         let saved = ready(live.log.read(|fold| {
             fold.cells()
                 .find(|(session, id, _)| *session == SESSION && *id == cell)
@@ -826,6 +858,13 @@ impl Cells {
     fn save(&mut self, turn: &Turn, update: &CellJournalUpdate) -> bool {
         let live = self.live();
         let result = ready(live.sink.save(update.clone()));
+        let answers = update
+            .entries
+            .iter()
+            .any(|entry| matches!(entry, JournalEntry::Result { .. }));
+        if answers {
+            refused(ready(live.store.collect_unreachable(SESSION)));
+        }
         let saved = self.settled(result).is_some();
         if saved && waits(update) {
             self.started.insert((turn.id.clone(), update.cell_id));

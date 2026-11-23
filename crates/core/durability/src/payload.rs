@@ -294,7 +294,10 @@ impl EncodedPayload {
     ) -> Option<Cow<'a, str>> {
         match record.strip_prefix('=') {
             Some(content) => Some(Cow::Borrowed(content)),
-            None => manifest(record, chunk).map(Cow::Owned),
+            None => match spliced_parts(record) {
+                Ok((_, json)) => Some(Cow::Borrowed(json)),
+                Err(_) => manifest(record, chunk).map(Cow::Owned),
+            },
         }
     }
 
@@ -1203,6 +1206,172 @@ fn sha256_key(value: &str) -> String {
         encoded.push(HEX[(byte & 15) as usize] as char);
     }
     encoded
+}
+
+const SPLICED_PREFIX: char = '&';
+
+const SPLICE_SEPARATOR: char = ',';
+
+const SPLICE_END: char = ';';
+
+fn string_literals(json: &str) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
+    let bytes = json.as_bytes();
+    let mut at = 0;
+    std::iter::from_fn(move || {
+        while at < bytes.len() && bytes[at] != b'"' {
+            at += 1;
+        }
+        let start = at;
+        at += 1;
+        while at < bytes.len() {
+            match bytes[at] {
+                b'\\' => at += 2,
+                b'"' => {
+                    at += 1;
+                    return Some(start..at);
+                }
+                _ => at += 1,
+            }
+        }
+        None
+    })
+}
+
+fn shared_literal(literal: &str) -> bool {
+    (STEP_INLINE_BYTES..INLINE_BYTES).contains(&literal.len())
+        && literal.starts_with('"')
+        && literal.ends_with('"')
+}
+
+fn spliced_parts(record: &str) -> Result<(&str, &str)> {
+    record
+        .strip_prefix(SPLICED_PREFIX)
+        .and_then(|rest| rest.split_once(SPLICE_END))
+        .ok_or_else(|| Error::InvalidState("a spliced payload record has no splice list".into()))
+}
+
+fn splice_offsets(offsets: &str) -> impl Iterator<Item = Result<usize>> + '_ {
+    offsets
+        .split(SPLICE_SEPARATOR)
+        .filter(|offset| !offset.is_empty())
+        .map(|offset| {
+            offset.parse::<usize>().map_err(|error| {
+                Error::InvalidState(format!("a spliced payload offset {offset}: {error}"))
+            })
+        })
+}
+
+fn splice_placeholder(json: &str, offset: usize) -> Result<&str> {
+    let end = offset + 1 + KEY_PREFIX.len() + HASH_HEX + 1;
+    let placeholder = json.get(offset..end).ok_or_else(|| {
+        Error::InvalidState(format!("a spliced payload offset {offset} is out of range"))
+    })?;
+    let key = placeholder
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .filter(|key| key.starts_with(KEY_PREFIX) && EncodedPayload::is_key(key))
+        .ok_or_else(|| {
+            Error::InvalidState(format!(
+                "a spliced payload offset {offset} does not name a shared value"
+            ))
+        })?;
+    Ok(key)
+}
+
+impl EncodedPayload {
+    pub const SHARED_BYTES_MIN: usize = STEP_INLINE_BYTES;
+
+    #[must_use]
+    pub fn shared_value(literal: &str) -> Option<(String, String)> {
+        shared_literal(literal).then(|| (record_key(literal), format!("={literal}")))
+    }
+
+    #[must_use]
+    pub fn shareable(record: &str) -> Vec<String> {
+        let Some(json) = record.strip_prefix('=') else {
+            return Vec::new();
+        };
+        string_literals(json)
+            .filter(|range| shared_literal(&json[range.clone()]))
+            .map(|range| record_key(&json[range]))
+            .collect()
+    }
+
+    #[must_use]
+    pub fn splice(record: &str, held: &dyn Fn(&str) -> bool) -> Option<String> {
+        let json = record.strip_prefix('=')?;
+        let mut spliced = String::with_capacity(json.len());
+        let mut offsets = String::new();
+        let mut last = 0;
+        for range in string_literals(json) {
+            let literal = &json[range.clone()];
+            if range.len() == json.len() || !shared_literal(literal) {
+                continue;
+            }
+            let key = record_key(literal);
+            if !held(&key) {
+                continue;
+            }
+            spliced.push_str(&json[last..range.start]);
+            if !offsets.is_empty() {
+                offsets.push(SPLICE_SEPARATOR);
+            }
+            offsets.push_str(&spliced.len().to_string());
+            spliced.push('"');
+            spliced.push_str(&key);
+            spliced.push('"');
+            last = range.end;
+        }
+        if offsets.is_empty() {
+            return None;
+        }
+        spliced.push_str(&json[last..]);
+        Some(format!("{SPLICED_PREFIX}{offsets}{SPLICE_END}{spliced}"))
+    }
+
+    #[must_use]
+    pub fn is_spliced(record: &str) -> bool {
+        record.starts_with(SPLICED_PREFIX)
+    }
+
+    pub fn spliced_keys(record: &str) -> Result<Vec<&str>> {
+        let (offsets, json) = spliced_parts(record)?;
+        splice_offsets(offsets)
+            .map(|offset| splice_placeholder(json, offset?))
+            .collect()
+    }
+
+    pub fn unspliced<'a>(record: &str, shared: &dyn Fn(&str) -> Option<&'a str>) -> Result<String> {
+        let (offsets, json) = spliced_parts(record)?;
+        let mut whole = String::with_capacity(1 + json.len());
+        whole.push('=');
+        let mut last = 0;
+        for offset in splice_offsets(offsets) {
+            let offset = offset?;
+            if offset < last {
+                return Err(Error::InvalidState(format!(
+                    "a spliced payload offset {offset} goes backwards"
+                )));
+            }
+            let key = splice_placeholder(json, offset)?;
+            let value = shared(key).ok_or_else(|| {
+                Error::InvalidState(format!("a spliced payload's shared value {key} is missing"))
+            })?;
+            let literal = value.strip_prefix('=').ok_or_else(|| {
+                Error::InvalidState(format!("shared value {key} is not an inline payload"))
+            })?;
+            if record_key(literal) != key {
+                return Err(Error::InvalidState(format!(
+                    "shared value {key} does not hold the content its key names"
+                )));
+            }
+            whole.push_str(&json[last..offset]);
+            whole.push_str(literal);
+            last = offset + key.len() + 2;
+        }
+        whole.push_str(&json[last..]);
+        Ok(whole)
+    }
 }
 
 impl PartialEq for EncodedPayload {

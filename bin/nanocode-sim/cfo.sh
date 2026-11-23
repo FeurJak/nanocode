@@ -287,6 +287,7 @@ default_table='
 1 canary_sections_kept canary:100 --scenario turns --policy turnlog --event-bytes 4096 --mutation sections_kept
 1 canary_part_read_unloaded canary:100 --scenario turns --policy turnlog --snapshot-rows 4 --mutation part_read_unloaded
 1 canary_forgets_other_cell canary:20 --scenario turns --policy turnlog --mutation forgets_other_cell
+1 canary_cell_roots_skipped canary:20 --scenario turns --policy turnlog --snapshot-rows 4 --mutation cell_roots_skipped
 1 canary_content_rewritten_stale canary:20 --scenario turns --policy turnlog --mutation content_rewritten_stale
 1 canary_content_collected_live canary:20 --scenario turns --policy turnlog --mutation content_collected_live
 1 canary_placed_inline canary:20 --scenario turns --policy turnlog --mutation placed_inline

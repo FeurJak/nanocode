@@ -41,6 +41,7 @@ use crate::{
 
 mod export;
 mod import;
+mod shared;
 mod wakes;
 
 pub use export::Exported;
@@ -284,7 +285,24 @@ fn logged(seq: u64, request_id: Option<&str>, at: u64, event: Box<RawValue>) -> 
 fn owned(state: &str, records: &[StoreRecord]) -> Vec<String> {
     std::iter::once(state.to_owned())
         .chain(records.iter().map(|record| stored_key(state, &record.key)))
+        .chain(shared::candidates(state, records))
         .collect()
+}
+
+fn put(
+    lease: &mut nanocode_turnlog::Lease<'_>,
+    state: &str,
+    records: &[StoreRecord],
+) -> Result<(), StoreError> {
+    for record in records {
+        let key = stored_key(state, &record.key);
+        let value = shared::staged(lease.fold(), state, record);
+        if lease.fold().stored(&key) != Some(&*value) {
+            let value = value.into_owned();
+            lease.push(Record::Stored { key, value })?;
+        }
+    }
+    Ok(())
 }
 
 fn stored_key(state: &str, key: &str) -> String {
@@ -477,13 +495,19 @@ impl OneLog {
         let mut lease = self.log.lease().await;
         lease.load_owner(TOOLS_MARK).await?;
         lease.load_owner(only).await?;
+        let mut shared = Vec::new();
+        for (session, _, updates) in lease.fold().cells_of(Some(only)) {
+            shared.extend(shared::result_keys(session, updates)?);
+        }
+        lease.load_owners(&shared).await?;
         let fold = lease.fold();
         let mut sessions: BTreeMap<String, Vec<CellJournal>> = BTreeMap::new();
         let mut catalogs: HashMap<String, Arc<[Value]>> = HashMap::new();
         for (session, _, updates) in fold.cells_of(Some(only)) {
             let mut decoded = Vec::with_capacity(updates.len());
             for update in updates {
-                let mut update = serde_json::from_str::<CellJournalUpdate>(update.get())
+                let update = shared::with_results(fold, session, update)?;
+                let mut update = serde_json::from_str::<CellJournalUpdate>(&update)
                     .map_err(|error| invalid(format!("cell journal update: {error}")))?;
                 if let Some(header) = update.header.as_mut()
                     && let [Value::Object(mark)] = &*header.tools
@@ -514,6 +538,29 @@ impl OneLog {
             }
         }
         Ok(sessions)
+    }
+
+    async fn whole(
+        &self,
+        state: &str,
+        values: Vec<Option<String>>,
+    ) -> Result<Vec<Option<String>>, StoreError> {
+        let keys = shared::spliced_keys(state, &values)?;
+        if keys.is_empty() {
+            return Ok(values);
+        }
+        self.log
+            .read_owners(&keys, |fold| {
+                values
+                    .into_iter()
+                    .map(|value| {
+                        value
+                            .map(|value| shared::whole(fold, state, value))
+                            .transpose()
+                    })
+                    .collect()
+            })
+            .await?
     }
 
     pub async fn field(&self, key: &str, value: Box<RawValue>) -> Result<(), StoreError> {
@@ -1543,12 +1590,35 @@ impl CellJournalSink for OneLogJournals {
                 }
                 header.tools = [json!({ (TOOLS_MARK): digest })].into();
             }
+            let shared = shared::shared_results(&update).map_err(|error| error.to_string())?;
+            let encoded = match shared {
+                Some(shared) => {
+                    let keys = shared
+                        .values
+                        .iter()
+                        .map(|(key, _)| stored_key(&update.session_id, key))
+                        .collect::<Vec<_>>();
+                    lease
+                        .load_owners(&keys)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    for ((_, value), key) in shared.values.into_iter().zip(keys) {
+                        if lease.fold().stored(&key) != Some(&*value) {
+                            lease
+                                .push(Record::Stored { key, value })
+                                .map_err(|error| error.to_string())?;
+                        }
+                    }
+                    shared.update
+                }
+                None => raw(&update).map_err(|error| error.to_string())?,
+            };
             lease
                 .push(Record::Cell {
                     cell: update.cell_id,
                     fresh,
                     session: update.session_id.clone(),
-                    update: raw(&update).map_err(|error| error.to_string())?,
+                    update: encoded,
                 })
                 .map_err(|error| error.to_string())?;
             let cell = (update.session_id.clone(), update.cell_id);
@@ -1740,15 +1810,7 @@ impl OneLogStore {
             });
         }
         let revision = actual + 1;
-        for record in records {
-            let key = stored_key(state_id, &record.key);
-            if lease.fold().stored(&key) != Some(&*record.value) {
-                lease.push(Record::Stored {
-                    key,
-                    value: record.value.to_string(),
-                })?;
-            }
-        }
+        put(lease, state_id, records)?;
         lease.push(Record::Checkpoint {
             payload: payload.to_owned(),
             revision,
@@ -1775,12 +1837,14 @@ impl StateStore for OneLogStore {
     ) -> StoreFuture<'a, Result<Option<String>, StoreError>> {
         Box::pin(async move {
             let owned = stored_key(state_id, key);
-            self.0
+            let value = self
+                .0
                 .log
                 .read_owners(std::slice::from_ref(&owned), |fold| {
                     fold.stored(&owned).map(str::to_owned)
                 })
-                .await
+                .await?;
+            Ok(self.0.whole(state_id, vec![value]).await?.pop().flatten())
         })
     }
 
@@ -1794,7 +1858,8 @@ impl StateStore for OneLogStore {
                 .iter()
                 .map(|key| stored_key(state_id, key))
                 .collect::<Vec<_>>();
-            self.0
+            let values = self
+                .0
                 .log
                 .read_owners(&owned, |fold| {
                     owned
@@ -1802,7 +1867,8 @@ impl StateStore for OneLogStore {
                         .map(|key| fold.stored(key).map(str::to_owned))
                         .collect()
                 })
-                .await
+                .await?;
+            self.0.whole(state_id, values).await
         })
     }
 
@@ -1977,15 +2043,7 @@ impl StateStore for OneLogStore {
         Box::pin(async move {
             let mut lease = self.0.log.lease().await;
             lease.load_owners(&owned(state_id, records)).await?;
-            for record in records {
-                let key = stored_key(state_id, &record.key);
-                if lease.fold().stored(&key) != Some(&*record.value) {
-                    lease.push(Record::Stored {
-                        key,
-                        value: record.value.to_string(),
-                    })?;
-                }
-            }
+            put(&mut lease, state_id, records)?;
             Ok(true)
         })
     }
