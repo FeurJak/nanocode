@@ -375,6 +375,7 @@ default_table='
 1 canary_one_log_facts_host_copied canary:8 --scenario one_log_facts --mutation host_copied
 1 canary_one_log_facts_cancel_leaves_intent canary:8 --scenario one_log_facts --mutation cancel_leaves_intent
 1 canary_one_log_facts_scoped_input_lowered canary:8 --scenario one_log_facts --mutation scoped_input_lowered
+1 canary_one_log_facts_intent_optional canary:8 --scenario one_log_facts --mutation intent_optional
 8 repo_cache pass --scenario repo_cache
 2 repo_cache_twice pass --scenario repo_cache --twice
 1 canary_repo_cache_shared_head canary:8 --scenario repo_cache --mutation shared_head

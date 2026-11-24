@@ -85,6 +85,8 @@ pub enum Record {
     Folded {
         through: u64,
         values: Values,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        states: Vec<String>,
     },
     Fact {
         fact: StoredFact,

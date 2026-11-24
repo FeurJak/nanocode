@@ -40,6 +40,7 @@ const SNAPSHOT_ROWS_MAX: u64 = 8;
 const SWAP_PPM: u64 = 300_000;
 const HOST_PPM: u64 = 100_000;
 const CANCEL_PPM: u64 = 100_000;
+const STRAY_PPM: u64 = 50_000;
 const HOST_KEYS: u64 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,10 +58,11 @@ pub enum OneLogFactsMutation {
     HostCopied,
     CancelLeavesIntent,
     ScopedInputLowered,
+    IntentOptional,
 }
 
 impl OneLogFactsMutation {
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 14] = [
         Self::None,
         Self::FoldReadsUnlogged,
         Self::CommitBuffered,
@@ -74,6 +76,7 @@ impl OneLogFactsMutation {
         Self::HostCopied,
         Self::CancelLeavesIntent,
         Self::ScopedInputLowered,
+        Self::IntentOptional,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -97,6 +100,7 @@ impl OneLogFactsMutation {
             Self::HostCopied => "host_copied",
             Self::CancelLeavesIntent => "cancel_leaves_intent",
             Self::ScopedInputLowered => "scoped_input_lowered",
+            Self::IntentOptional => "intent_optional",
         }
     }
 
@@ -119,6 +123,7 @@ impl OneLogFactsMutation {
             Self::CacheGap => facts_sim::Mutation::CacheGap,
             Self::HostCopied => facts_sim::Mutation::HostCopied,
             Self::CancelLeavesIntent => facts_sim::Mutation::CancelLeavesIntent,
+            Self::IntentOptional => facts_sim::Mutation::IntentOptional,
             Self::None
             | Self::FoldReadsUnlogged
             | Self::CacheNeverDue
@@ -145,6 +150,7 @@ pub struct OneLogFactsStats {
     pub replayed: u64,
     pub hosts: u64,
     pub cancelled: u64,
+    pub refused: u64,
 }
 
 impl OneLogFactsStats {
@@ -165,6 +171,7 @@ impl OneLogFactsStats {
         self.replayed += other.replayed;
         self.hosts += other.hosts;
         self.cancelled += other.cancelled;
+        self.refused += other.refused;
     }
 }
 
@@ -506,7 +513,8 @@ impl World {
     fn check(&mut self) -> Result<(), String> {
         self.stats.refolds += 1;
         self.check_scoped_inputs()?;
-        if self.expected > 0 {
+        let log = Arc::clone(self.log.as_ref().expect("the facts log is open"));
+        if block_on(log.read(|fold| fold.logs_facts(SCOPE))) {
             self.check_cached()?;
         }
         let folded = block_on(fold_facts::<Ledger>(self.facts()))
@@ -714,6 +722,32 @@ impl World {
         self.turns_hold()
     }
 
+    fn stray(&mut self) -> Result<(), String> {
+        let log = Arc::clone(self.log.as_ref().expect("the facts log is open"));
+        if !block_on(log.read(|fold| fold.logs_facts(SCOPE))) {
+            return Ok(());
+        }
+        self.calls += 1;
+        let call_id = format!("stray-{}", self.calls);
+        let input = ToolInput::Function(to_raw_value(&()).expect("null encodes"));
+        let refused = block_on(log.gate().before(EffectCall {
+            call_id: &call_id,
+            effect: EffectClass::External,
+            input: &input,
+            session_id: SCOPE,
+            tool: TOOL,
+            turn_id: None,
+        }))
+        .is_err();
+        if !refused {
+            return Err(format!(
+                "the gate let call {call_id} run in a session that logs facts without an intent"
+            ));
+        }
+        self.stats.refused += 1;
+        Ok(())
+    }
+
     fn cancel(&mut self, rng: &mut Rng) -> Result<(), String> {
         let running = self
             .submitted
@@ -790,6 +824,9 @@ impl World {
         }
         if rng.chance(CANCEL_PPM) {
             self.cancel(rng)?;
+        }
+        if rng.chance(STRAY_PPM) {
+            self.stray()?;
         }
         match rng.below(100) {
             0..88 => self.commit(rng),

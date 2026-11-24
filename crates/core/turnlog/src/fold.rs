@@ -2389,6 +2389,11 @@ impl Fold {
     }
 
     #[must_use]
+    pub fn logs_facts(&self, state: &str) -> bool {
+        self.state_index.contains_key(state)
+    }
+
+    #[must_use]
     pub fn cache_due(&self, state: &str) -> bool {
         if crate::sim::mutated(crate::sim::Mutation::CacheNeverDue) {
             return false;
@@ -2536,7 +2541,14 @@ impl Fold {
                     row: *row,
                 });
             }
-            Record::Folded { through, values } => {
+            Record::Folded {
+                through,
+                values,
+                states,
+            } => {
+                for state in states {
+                    self.state_id(state);
+                }
                 if *through < self.fact_base {
                     return Err(invalid(format!(
                         "a fold through fact {through} precedes sealed fact {}",
@@ -2978,6 +2990,7 @@ impl Fold {
         take(Record::Folded {
             through: self.next_fact() - 1,
             values: self.values.clone(),
+            states: self.state_names.clone(),
         })?;
         for (state, checkpoint) in self.checkpoints.iter().filter(|_| owned) {
             take(Record::Checkpoint {

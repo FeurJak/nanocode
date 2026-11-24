@@ -1541,6 +1541,14 @@ impl EffectGate for OneLog {
                     self.owed.set(false);
                     return Ok(());
                 }
+                None if lease.fold().logs_facts(call.session_id)
+                    && !facts::sim::mutated(facts::sim::Mutation::IntentOptional) =>
+                {
+                    return Err(format!(
+                        "call {} to {} has no durable intent, and session {} commits one before each external call",
+                        call.call_id, call.tool, call.session_id
+                    ));
+                }
                 None => {}
             }
             let input = tool_input(call.input).map_err(|error| error.to_string())?;

@@ -32,10 +32,11 @@ pub mod sim {
         CacheGap,
         HostCopied,
         CancelLeavesIntent,
+        IntentOptional,
     }
 
     impl Mutation {
-        pub const ALL: [Self; 9] = [
+        pub const ALL: [Self; 10] = [
             Self::CommitBuffered,
             Self::UnseenSkipped,
             Self::IntentReplayed,
@@ -45,6 +46,7 @@ pub mod sim {
             Self::CacheGap,
             Self::HostCopied,
             Self::CancelLeavesIntent,
+            Self::IntentOptional,
         ];
 
         #[must_use]
@@ -60,6 +62,7 @@ pub mod sim {
                 Self::CacheGap => "cache_gap",
                 Self::HostCopied => "host_copied",
                 Self::CancelLeavesIntent => "cancel_leaves_intent",
+                Self::IntentOptional => "intent_optional",
             }
         }
 
