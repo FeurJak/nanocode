@@ -517,6 +517,7 @@ async fn page(
     stats: &mut Stats,
     owner: &str,
 ) -> Result<(), StoreError> {
+    fold.unshelve_owner(owner);
     root(host, scope, fold, stats).await?;
     if let Some((first, section)) = fold.unpaged(owner) {
         let records = section_records(host, scope, &first, section).await?;
@@ -633,6 +634,7 @@ async fn warm_state(
     state: &str,
 ) -> Result<(), StoreError> {
     warm(host, scope, fold, stats, state).await?;
+    fold.unshelve_state(state);
     for (first, section) in fold.key_pages(state) {
         let records = section_records(host, scope, &first, section).await?;
         fold.paged(&first, records)?;
@@ -1463,6 +1465,7 @@ impl TurnLog {
             writer.fold.paged(&first, records)?;
             writer.stats.index_loads += 1;
         }
+        writer.fold.unshelve_all();
         Ok(())
     }
 
@@ -1867,6 +1870,7 @@ impl Lease<'_> {
                 )
                 .await?;
             }
+            writer.fold.unshelve_all();
             for owner in writer.fold.waiting() {
                 page(
                     self.host,

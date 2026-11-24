@@ -43,6 +43,11 @@ pub fn probe(scope: &str, stored: &[(u64, String)], seq: u64, limit: Option<usiz
         loaded == 0,
         "{scope} keeps {loaded} index pages resident past a commit that read none of the owners they list, probed after commit {seq}"
     );
+    let owners = ready(log.read(Fold::resident_owners));
+    assert!(
+        owners == 0,
+        "{scope} keeps {owners} owners resident past a commit that read none of them, probed after commit {seq}"
+    );
 }
 
 fn committed(log: &TurnLog, scope: &str, seq: u64, record: Option<Record>, loads: &[String]) {

@@ -132,6 +132,39 @@ pub(crate) struct Plan {
 }
 
 #[derive(Clone, Debug)]
+struct Shelf {
+    bytes: Box<[u64]>,
+    ends: Box<[usize]>,
+    keys: Box<str>,
+}
+
+impl Shelf {
+    fn key(&self, index: usize) -> &str {
+        let start = index.checked_sub(1).map_or(0, |before| self.ends[before]);
+        &self.keys[start..self.ends[index]]
+    }
+
+    fn position(&self, owner: &str) -> Result<usize, usize> {
+        let (mut low, mut high) = (0, self.ends.len());
+        while low < high {
+            let middle = low + (high - low) / 2;
+            match self.key(middle).cmp(owner) {
+                std::cmp::Ordering::Less => low = middle + 1,
+                std::cmp::Ordering::Greater => high = middle,
+                std::cmp::Ordering::Equal => return Ok(middle),
+            }
+        }
+        Err(low)
+    }
+
+    fn holds_state(&self, state: &str) -> bool {
+        let prefix = format!("{state}\n");
+        let at = self.position(&prefix).unwrap_or_else(|at| at);
+        at < self.ends.len() && self.key(at).starts_with(&prefix)
+    }
+}
+
+#[derive(Clone, Debug)]
 struct Links {
     chunks: Vec<String>,
     references: Vec<String>,
@@ -233,6 +266,7 @@ pub struct Fold {
     root: Option<Page>,
     segment_row: u64,
     segments: Vec<Segment>,
+    shelved: BTreeMap<u64, Shelf>,
     seq: u64,
     stored: BTreeMap<String, String>,
     retired: BTreeMap<u128, Retired>,
@@ -397,6 +431,7 @@ impl Fold {
 
     fn defer(&mut self, record: &Record) -> Option<&mut Vec<Record>> {
         let owner = owner_of(record)?;
+        self.unshelve_owner(owner);
         if !self.owners.contains_key(owner) {
             let state =
                 if matches!(self.root, Some(Page::Cold(_))) || self.cold_page(owner).is_some() {
@@ -593,6 +628,132 @@ impl Fold {
         Ok(())
     }
 
+    fn shelf_of(&self, owner: &str) -> Option<u64> {
+        self.shelved
+            .iter()
+            .find(|(_, shelf)| shelf.position(owner).is_ok())
+            .map(|(row, _)| *row)
+    }
+
+    fn unshelve_row(&mut self, row: u64) {
+        let Some(shelf) = self.shelved.remove(&row) else {
+            return;
+        };
+        let Some((rows, count)) = self.placed.get(&row).copied() else {
+            panic!("turn log shelved row {row}, which it did not place since the last snapshot");
+        };
+        assert!(
+            count == shelf.ends.len() as u64,
+            "turn log shelved {} owners of row {row}, which holds {count}",
+            shelf.ends.len()
+        );
+        let section = Section { row, rows };
+        for (index, bytes) in shelf.bytes.iter().enumerate() {
+            let owner = shelf.key(index);
+            assert!(
+                !self.owners.contains_key(owner),
+                "turn log owner {owner} is resident while its row {row} is shelved"
+            );
+            self.owners.insert(
+                owner.to_owned(),
+                Owner::Cold {
+                    entry: Entry {
+                        checkpoint: false,
+                        full: *bytes,
+                        legacy: false,
+                        sections: vec![section],
+                        written: *bytes,
+                    },
+                    pending: Vec::new(),
+                },
+            );
+        }
+    }
+
+    pub(crate) fn unshelve_owner(&mut self, owner: &str) {
+        if owner.contains('\n')
+            && !self.owners.contains_key(owner)
+            && let Some(row) = self.shelf_of(owner)
+        {
+            self.unshelve_row(row);
+        }
+    }
+
+    pub(crate) fn unshelve_state(&mut self, state: &str) {
+        let rows = self
+            .shelved
+            .iter()
+            .filter(|(_, shelf)| shelf.holds_state(state))
+            .map(|(row, _)| *row)
+            .collect::<Vec<_>>();
+        for row in rows {
+            self.unshelve_row(row);
+        }
+    }
+
+    pub(crate) fn unshelve_all(&mut self) {
+        let rows = self.shelved.keys().copied().collect::<Vec<_>>();
+        for row in rows {
+            self.unshelve_row(row);
+        }
+    }
+
+    fn shelve(&mut self) {
+        if crate::sim::mutated(crate::sim::Mutation::PlacedStayResident) {
+            return;
+        }
+        let mut rows: BTreeMap<u64, (bool, Vec<(&String, u64)>)> = BTreeMap::new();
+        for (owner, state) in &self.owners {
+            let (Owner::Cold { entry, .. } | Owner::Warm { entry, .. }) = state else {
+                continue;
+            };
+            let [section] = entry.sections.as_slice() else {
+                continue;
+            };
+            if !self.placed.contains_key(&section.row) {
+                continue;
+            }
+            let clean = matches!(state, Owner::Cold { entry, pending } if pending.is_empty() && !entry.legacy && !entry.checkpoint && entry.full == entry.written);
+            let row = rows.entry(section.row).or_insert((true, Vec::new()));
+            row.0 &= clean;
+            row.1.push((owner, entry.full));
+        }
+        let mut shelves = Vec::new();
+        for (row, (clean, owners)) in rows {
+            let placed = self.placed.get(&row).map(|(_, count)| *count);
+            if !clean || placed != Some(owners.len() as u64) {
+                continue;
+            }
+            let mut keys = String::with_capacity(owners.iter().map(|(owner, _)| owner.len()).sum());
+            let mut ends = Vec::with_capacity(owners.len());
+            let mut bytes = Vec::with_capacity(owners.len());
+            for (owner, full) in owners {
+                keys.push_str(owner);
+                ends.push(keys.len());
+                bytes.push(full);
+            }
+            shelves.push((
+                row,
+                Shelf {
+                    bytes: bytes.into_boxed_slice(),
+                    ends: ends.into_boxed_slice(),
+                    keys: keys.into_boxed_str(),
+                },
+            ));
+        }
+        for (row, shelf) in shelves {
+            for index in 0..shelf.ends.len() {
+                self.owners.remove(shelf.key(index));
+            }
+            self.shelved.insert(row, shelf);
+        }
+    }
+
+    #[must_use]
+    pub fn resident_owners(&self) -> usize {
+        self.owners.len()
+    }
+
     pub(crate) fn cold(&self, owner: &str) -> Option<&[Section]> {
         match self.owners.get(owner) {
             Some(Owner::Cold { entry, .. }) => Some(&entry.sections),
@@ -786,6 +947,7 @@ impl Fold {
             self.filters.insert(section.row, filter.into_boxed_slice());
             self.pages.insert(first, Page::Cold(section));
         }
+        self.shelve();
     }
 
     fn placed_owner(&self, state: &Owner) -> bool {
@@ -840,10 +1002,12 @@ impl Fold {
     }
 
     fn complete(&self, state: &str) -> bool {
-        !matches!(
-            self.owners.get(state),
-            Some(Owner::Cold { .. } | Owner::Waiting { .. })
-        ) && self.cold_page(state).is_none()
+        self.shelved.is_empty()
+            && !matches!(
+                self.owners.get(state),
+                Some(Owner::Cold { .. } | Owner::Waiting { .. })
+            )
+            && self.cold_page(state).is_none()
             && self.key_pages(state).is_empty()
             && self.cold_keys(state).is_empty()
     }
@@ -1074,6 +1238,11 @@ impl Fold {
         self.filters.retain(|row, _| cold.contains(row));
         self.groups = groups;
         self.root = root.map(Page::Loaded);
+        assert!(
+            self.shelved.is_empty(),
+            "turn log indexed a snapshot while {} placed sections were shelved",
+            self.shelved.len()
+        );
         self.placed.clear();
         let groups = &self.groups;
         self.chains.retain(|row, _| groups.contains_key(row));
@@ -1813,6 +1982,7 @@ impl Fold {
     #[must_use]
     pub fn contains(&self, key: &str) -> bool {
         self.stored(key).is_some()
+            || self.shelf_of(key).is_some()
             || matches!(
                 self.owners.get(key),
                 Some(Owner::Cold { entry, .. }) if !entry.legacy && !entry.sections.is_empty()
@@ -2274,7 +2444,6 @@ impl Fold {
         }
         Ok(())
     }
-
 
     pub fn snapshot(&self, keep: u64) -> Result<String, StoreError> {
         let mut body = String::new();

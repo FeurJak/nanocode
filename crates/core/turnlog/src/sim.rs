@@ -16,6 +16,7 @@ pub enum Mutation {
     ChainMemberDropped,
     ResidentUntilSnapshot,
     UnindexedPinsPages,
+    PlacedStayResident,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);
