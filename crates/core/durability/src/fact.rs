@@ -98,14 +98,25 @@ pub enum Outcome {
     Failed,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnStatus {
     Running,
     Cancelling,
-    Interrupted,
-    Retrying { attempts: u64 },
-    Finished { outcome: Outcome },
+    Interrupted {
+        note: String,
+    },
+    Retrying {
+        attempts: u64,
+        error: String,
+        kind: String,
+        retry_at: u64,
+    },
+    Finished {
+        last: u64,
+        outcome: Outcome,
+        result: Box<RawValue>,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -160,12 +171,17 @@ pub enum Decision<D> {
     Backend(D),
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Marker {
     Status {
         turn: String,
         status: TurnStatus,
+    },
+    Recovery {
+        turn: String,
+        attempt: u64,
+        at: Option<u64>,
     },
     Fence {
         owner: String,

@@ -18,6 +18,7 @@ use crate::{
     rng::{FNV_OFFSET, Rng, fnv},
 };
 
+const INTENDED_INPUT: &str = "{\"tool_use\"";
 const SCOPE: &str = "one_log_facts";
 const TOOL: &str = "charge";
 const STEPS: Range<u64> = 40..240;
@@ -207,6 +208,8 @@ struct World {
     outputs: Vec<u64>,
     open: Vec<String>,
     calls: u64,
+    turns: u64,
+    running: Vec<String>,
     stats: OneLogFactsStats,
     shape: String,
 }
@@ -254,13 +257,18 @@ impl World {
     fn fact(&mut self, rng: &mut Rng) -> OwnedFact<u64> {
         let turn = format!("turn-{}", rng.below(TURNS));
         match rng.below(100) {
-            0..15 => Fact::Input(Input {
-                turn,
-                kind: InputKind::Prompt,
-                value: value(rng),
-                metadata: to_raw_value(&()).expect("null encodes"),
-                hand: None,
-            }),
+            0..15 => {
+                self.turns += 1;
+                let turn = format!("admitted-{}", self.turns);
+                self.running.push(turn.clone());
+                Fact::Input(Input {
+                    turn,
+                    kind: InputKind::Prompt,
+                    value: value(rng),
+                    metadata: to_raw_value(&()).expect("null encodes"),
+                    hand: None,
+                })
+            }
             15..40 => Fact::ModelOut(ModelOut {
                 turn,
                 response: value(rng),
@@ -285,13 +293,15 @@ impl World {
                     output: value(rng),
                 })
             }
-            80..92 => Fact::Decision(Decision::Backend(rng.below(DECISIONS))),
-            _ => Fact::Marker(Marker::Status {
-                turn,
+            92.. if !self.running.is_empty() => Fact::Marker(Marker::Status {
+                turn: self.running.swap_remove(rng.pick(self.running.len())),
                 status: TurnStatus::Finished {
+                    last: self.calls,
                     outcome: Finished::Completed,
+                    result: to_raw_value(&()).expect("null encodes"),
                 },
             }),
+            _ => Fact::Decision(Decision::Backend(rng.below(DECISIONS))),
         }
     }
 
@@ -386,7 +396,10 @@ impl World {
             turn_id: None,
         }))
         .map_err(|error| format!("the gate refused intended call {call_id}: {error}"))?;
-        let copied = block_on(log.read(|fold| fold.open_calls().any(|(id, _)| id == call_id)));
+        let copied = block_on(log.read(|fold| {
+            fold.open_calls()
+                .any(|(id, call)| id == call_id && !call.input.get().starts_with(INTENDED_INPUT))
+        }));
         if copied {
             return Err(format!(
                 "the gate copied intended call {call_id} into a call record beside its intent"
@@ -457,6 +470,8 @@ fn run_seed(seed: u64, mutation: OneLogFactsMutation) -> Outcome {
             ..Policy::default()
         },
         outputs: Vec::new(),
+        turns: 0,
+        running: Vec::new(),
         open: Vec::new(),
         calls: 0,
         stats: OneLogFactsStats {

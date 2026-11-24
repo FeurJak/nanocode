@@ -11,10 +11,11 @@ use std::{
 
 use nanocode_durability_core::{
     Base, BlockRef, Decision, DurableFold, EffectResult, Fact, FoldError, Folded, Input, InputKind,
-    Intent, IntentTarget, ModelOut, OwnedFact, Seen, Snapshot, StoredFact, VALUE_INLINE_BYTES,
+    Intent, IntentTarget, Marker, ModelOut, Outcome, OwnedFact, Seen, Snapshot, StoredFact,
+    TurnStatus, VALUE_INLINE_BYTES,
 };
 use nanocode_sync::FutureExt;
-use nanocode_turnlog::{LogHost, MemoryLog, Point, Record, TurnLog};
+use nanocode_turnlog::{LogHost, MemoryLog, Phase, Point, Record, TurnLog};
 use serde::{Deserialize, Serialize};
 use serde_json::value::{RawValue, to_raw_value};
 
@@ -37,6 +38,10 @@ const TICK_MS_MAX: u64 = 90_000;
 const WORDS_MAX: u64 = 12;
 const UNDECIDED_EVERY: u64 = 3;
 const ROUTES: [&str; 2] = ["small", "large"];
+const FINISH_PPM: u64 = 400_000;
+const SNAPSHOT_ROWS_MIN: u64 = 2;
+const SNAPSHOT_ROWS_MAX: u64 = 8;
+const RETAIN_MAX: u64 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -47,15 +52,17 @@ pub enum FactsMutation {
     ReplaysIntent,
     StaleSnapshotTrusted,
     BaseIgnored,
+    DerivedReemitted,
 }
 
 impl FactsMutation {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::UndecidedCompaction,
         Self::DispatchBeforeIntent,
         Self::ReplaysIntent,
         Self::StaleSnapshotTrusted,
         Self::BaseIgnored,
+        Self::DerivedReemitted,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -66,6 +73,7 @@ impl FactsMutation {
             Self::ReplaysIntent => "replays_intent",
             Self::StaleSnapshotTrusted => "stale_snapshot_trusted",
             Self::BaseIgnored => "base_ignored",
+            Self::DerivedReemitted => "derived_reemitted",
         }
     }
 
@@ -237,7 +245,15 @@ struct World {
     turns: u64,
     clock: u64,
     digest: u64,
+    shape: Shape,
+    finished: BTreeMap<String, bool>,
     stats: FactsStats,
+}
+
+#[derive(Clone, Copy)]
+struct Shape {
+    snapshot_rows: usize,
+    retain: usize,
 }
 
 fn ready<T>(future: impl Future<Output = T>) -> T {
@@ -254,13 +270,18 @@ fn failed(what: &str) -> impl Fn(FoldError) -> String + '_ {
     move |error| format!("{what}: {error}")
 }
 
-fn open(host: &Arc<MemoryLog>) -> Result<TurnLog, String> {
+fn open(host: &Arc<MemoryLog>, shape: Shape) -> Result<TurnLog, String> {
     let host: Arc<dyn LogHost> = host.clone();
-    ready(TurnLog::open(host, SCOPE)).map_err(|error| format!("open the log: {error}"))
+    ready(TurnLog::open(host, SCOPE))
+        .map(|log| {
+            log.snapshot_rows(Some(shape.snapshot_rows))
+                .retain_finished(Some(shape.retain))
+        })
+        .map_err(|error| format!("open the log: {error}"))
 }
 
-fn legacy_log(rng: &mut Rng, host: &Arc<MemoryLog>) -> Result<Vec<String>, String> {
-    let log = open(host)?;
+fn legacy_log(rng: &mut Rng, host: &Arc<MemoryLog>, shape: Shape) -> Result<Vec<String>, String> {
+    let log = open(host, shape)?;
     let mut messages = Vec::new();
     for revision in 1..=rng.range(1, LEGACY_CHECKPOINTS_MAX) {
         messages.push(format!("\"legacy {revision} {}\"", rng.draw()));
@@ -283,12 +304,17 @@ impl World {
     fn new(seed: u64) -> Result<Self, String> {
         let mut rng = Rng::derive(seed, SCOPE);
         let host = Arc::new(MemoryLog::new());
+        let shape = Shape {
+            snapshot_rows: usize::try_from(rng.range(SNAPSHOT_ROWS_MIN, SNAPSHOT_ROWS_MAX))
+                .expect("a row count fits"),
+            retain: usize::try_from(rng.range(1, RETAIN_MAX)).expect("a turn count fits"),
+        };
         let legacy = if rng.chance(LEGACY_PPM) {
-            Some(legacy_log(&mut rng, &host)?)
+            Some(legacy_log(&mut rng, &host, shape)?)
         } else {
             None
         };
-        let log = open(&host)?;
+        let log = open(&host, shape)?;
         let mut world = Self {
             rng,
             host,
@@ -301,6 +327,8 @@ impl World {
             turns: 0,
             clock: 0,
             digest: FNV_OFFSET,
+            shape,
+            finished: BTreeMap::new(),
             stats: FactsStats::default(),
         };
         world.durable = Durable::of(world.fold())?;
@@ -314,7 +342,11 @@ impl World {
             .expect("the world holds a fold between steps")
     }
 
-    fn commit(&mut self, fact: OwnedFact<ChatDecision>, point: Point) -> Result<u64, String> {
+    fn commit(
+        &mut self,
+        fact: OwnedFact<ChatDecision>,
+        point: Point,
+    ) -> Result<Option<u64>, String> {
         let mut lease = ready(self.log.lease());
         let folded = self
             .folded
@@ -343,19 +375,20 @@ impl World {
             self.stats.lost += 1;
             self.folded = Some(folded);
             self.reopen()?;
-            return Ok(seq);
+            return Ok(None);
         }
+        lease.retire_finished();
         ready(lease.commit(point)).map_err(|error| format!("commit the log: {error}"))?;
         drop(lease);
         self.durable = Durable::of(&folded)?;
         self.digest = fnv(self.digest, self.durable.request.as_slice());
         self.folded = Some(folded);
-        Ok(seq)
+        Ok(Some(seq))
     }
 
     fn reopen(&mut self) -> Result<(), String> {
         self.folded = None;
-        self.log = open(&self.host)?;
+        self.log = open(&self.host, self.shape)?;
         let mut lease = ready(self.log.lease());
         if self.legacy.is_some() {
             ready(lease.load_owner(LEGACY_STATE))
@@ -397,6 +430,7 @@ impl World {
                 return Err(format!("call {call} was dispatched {times} times"));
             }
         }
+        self.check_views(fold, &folded)?;
         let checkpoint = fold.checkpoint(LEGACY_STATE).cloned();
         let based = facts
             .iter()
@@ -463,6 +497,33 @@ impl World {
         Ok(())
     }
 
+    fn check_views(
+        &self,
+        fold: &nanocode_turnlog::Fold,
+        folded: &Folded<Chat>,
+    ) -> Result<(), String> {
+        let open: Vec<&str> = fold.open_calls().map(|(call, _)| call).collect();
+        let held: Vec<&str> = folded.state().open.keys().map(String::as_str).collect();
+        if open != held {
+            return Err(format!(
+                "the log's open calls {open:?} differ from the fold's {held:?}"
+            ));
+        }
+        for (turn, finished) in &self.finished {
+            match fold.turn(turn).map(|turn| &turn.phase) {
+                Some(Phase::Finished { .. }) if *finished => {}
+                Some(Phase::Running { .. }) if !*finished => {}
+                None if fold.retired(turn).is_some() && *finished => {}
+                phase => {
+                    return Err(format!(
+                        "turn {turn} reads back as {phase:?} after a restart, finished={finished}"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn dispatch(&mut self, call: &str) {
         *self.dispatched.entry(call.to_owned()).or_default() += 1;
     }
@@ -477,14 +538,43 @@ impl World {
             text.push_str(&"x".repeat(VALUE_INLINE_BYTES));
         }
         let value = to_raw_value(&text).map_err(|error| error.to_string())?;
+        let turn = format!("turn-{}", self.turns);
         let fact = Fact::Input(Input {
-            turn: format!("turn-{}", self.turns),
+            turn: turn.clone(),
             kind: InputKind::Prompt,
             value,
             metadata: raw("{}".to_owned()),
             hand: None,
         });
-        self.commit(fact, Point::Admission).map(drop)
+        if self.commit(fact, Point::Admission)?.is_none() {
+            return Ok(());
+        }
+        let running = Fact::Marker(Marker::Status {
+            turn: turn.clone(),
+            status: TurnStatus::Running,
+        });
+        if self.commit(running, Point::Progress)?.is_some() {
+            self.finished.insert(turn, false);
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self, turn: String, last: u64) -> Result<(), String> {
+        if self.finished.get(&turn) != Some(&false) {
+            return Ok(());
+        }
+        let finished = Fact::Marker(Marker::Status {
+            turn: turn.clone(),
+            status: TurnStatus::Finished {
+                last,
+                outcome: Outcome::Completed,
+                result: raw("{}".to_owned()),
+            },
+        });
+        if self.commit(finished, Point::Finish)?.is_some() {
+            self.finished.insert(turn, true);
+        }
+        Ok(())
     }
 
     fn model(&mut self) -> Result<(), String> {
@@ -508,13 +598,19 @@ impl World {
             turn: turn.clone(),
             response,
         });
-        let model_out = self.commit(out, Point::Progress)?;
+        let Some(model_out) = self.commit(out, Point::Progress)? else {
+            return Ok(());
+        };
         for (index, call) in calls.into_iter().enumerate() {
             let block = u32::try_from(index + 1).expect("a block index fits");
+            let crashes = self.stats.crashes;
             self.call(&turn, call, BlockRef { model_out, block })?;
-            if self.folded.is_none() || !self.fold().state().open.is_empty() {
+            if self.stats.crashes != crashes {
                 return Ok(());
             }
+        }
+        if self.rng.chance(FINISH_PPM) {
+            return self.finish(turn, model_out);
         }
         Ok(())
     }
@@ -532,9 +628,7 @@ impl World {
                 return self.crash();
             }
         }
-        let crashes = self.stats.crashes;
-        self.commit(intent, Point::Call)?;
-        if self.stats.crashes != crashes {
+        if self.commit(intent, Point::Call)?.is_none() {
             return Ok(());
         }
         if !mutated(FactsMutation::DispatchBeforeIntent) {
@@ -634,7 +728,11 @@ fn run(seed: u64, verbose: bool) -> Result<u64, String> {
 
 fn run_seed(seed: u64, mutation: FactsMutation, verbose: bool) -> Result<u64, String> {
     MUTATION.store(mutation as u8, Ordering::SeqCst);
+    if mutation == FactsMutation::DerivedReemitted {
+        nanocode_turnlog::sim::mutate(nanocode_turnlog::sim::Mutation::DerivedReemitted);
+    }
     let outcome = std::panic::catch_unwind(|| run(seed, verbose));
+    nanocode_turnlog::sim::mutate(nanocode_turnlog::sim::Mutation::None);
     MUTATION.store(FactsMutation::None as u8, Ordering::SeqCst);
     outcome.unwrap_or_else(|panic| {
         Err(format!(

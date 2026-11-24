@@ -18,6 +18,7 @@ pub enum Mutation {
     UnindexedPinsPages,
     PlacedStayResident,
     FinishedKeepsPrompt,
+    DerivedReemitted,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

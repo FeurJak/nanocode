@@ -6,7 +6,8 @@ use std::{
 };
 
 use nanocode_durability_core::{
-    Digest, EncodedPayload, FoldError, Snapshot, StoreError, StoredFact,
+    Digest, EncodedPayload, Fact, FoldError, Input, InputKind, Marker, Outcome as FactOutcome,
+    Snapshot, StoreError, StoredFact, TurnStatus, Value,
 };
 use serde_json::value::RawValue;
 
@@ -256,6 +257,9 @@ pub struct Fold {
     ends: u64,
     events: Vec<Event>,
     facts: Vec<StoredFact>,
+    derived_calls: BTreeSet<String>,
+    derived_turns: BTreeSet<String>,
+    interned: Vec<Digest>,
     filters: BTreeMap<u64, Box<[u64]>>,
     forgets: BTreeSet<String>,
     groups: BTreeMap<u64, (u64, u64)>,
@@ -2118,6 +2122,92 @@ impl Fold {
         (1..).zip(&self.facts)
     }
 
+    fn value<'a>(&'a self, value: &'a Value) -> Result<&'a RawValue, StoreError> {
+        match value {
+            Value::Inline(json) => Ok(json),
+            Value::Blob(blob) => {
+                let digest = self
+                    .interned
+                    .get(blob.index() as usize)
+                    .ok_or_else(|| invalid(format!("blob {} was never interned", blob.index())))?;
+                self.blob(digest).map_err(StoreError::from)
+            }
+        }
+    }
+
+    fn lower(&mut self, seq: u64, fact: &StoredFact) -> Result<(), StoreError> {
+        match fact {
+            Fact::Input(input) => self.lower_input(seq, input),
+            Fact::Marker(Marker::Status { turn, status }) => {
+                if self.turn(turn).is_none() && self.retired.contains_key(&tag(turn)) {
+                    return Ok(());
+                }
+                self.status(turn, &lowered(status))
+            }
+            Fact::Marker(Marker::Recovery { turn, attempt, at }) => self.fold_in(
+                &Record::Recovery {
+                    at: *at,
+                    attempt: *attempt,
+                    turn: turn.clone(),
+                    unknown: Vec::new(),
+                },
+                None,
+            ),
+            Fact::Intent(intent) => {
+                let input = serde_json::value::to_raw_value(&intent.target).map_err(invalid)?;
+                self.derived_calls.insert(intent.call_id.clone());
+                self.calls.insert(
+                    intent.call_id.clone(),
+                    OpenCall {
+                        effect: EffectClass::External,
+                        input,
+                        tool: intent.tool.clone(),
+                        turn: intent.turn.clone(),
+                    },
+                );
+                Ok(())
+            }
+            Fact::EffectResult(result) => {
+                self.derived_calls.remove(&result.call_id);
+                self.calls.remove(&result.call_id);
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn lower_input(&mut self, seq: u64, input: &Input<Value>) -> Result<(), StoreError> {
+        let prompt = self.value(&input.value)?.to_owned();
+        let metadata = self.value(&input.metadata)?.to_owned();
+        let record = match &input.kind {
+            InputKind::Prompt => {
+                self.derived_turns.insert(input.turn.clone());
+                Record::Admitted {
+                    digest: input_digest(&prompt, input.hand.as_deref()),
+                    first: seq,
+                    hand: input.hand.clone(),
+                    metadata,
+                    prompt,
+                    turn: input.turn.clone(),
+                }
+            }
+            InputKind::Edit { edit_id } => {
+                let hand = self.turn(&input.turn).and_then(|turn| turn.hand.as_deref());
+                Record::Status {
+                    status: Status::Replaced {
+                        digest: input_digest(&prompt, hand),
+                        edit: input_digest(&metadata, None),
+                        edit_id: edit_id.clone(),
+                        prompt,
+                    },
+                    turn: input.turn.clone(),
+                }
+            }
+            InputKind::Steer { .. } => return Ok(()),
+        };
+        self.fold_in(&record, None)
+    }
+
     pub fn cached(&self) -> Result<Option<Snapshot>, StoreError> {
         self.hosts
             .get(FOLD_SNAPSHOT_KEY)
@@ -2184,6 +2274,10 @@ impl Fold {
                         next - 1
                     )));
                 }
+                if let Fact::Marker(Marker::Blob { digest, .. }) = fact {
+                    self.interned.push(*digest);
+                }
+                self.lower(*seq, fact)?;
                 self.facts.push(fact.clone());
             }
             Record::Call {
@@ -2317,7 +2411,19 @@ impl Fold {
                     self.holds.insert(key.clone(), hold.clone());
                 }
             }
-            Record::Host { key, value } if key == RETIRED_KEY => self.retired_from(value)?,
+            Record::Host { key, value } if key == RETIRED_KEY => {
+                self.retired_from(value)?;
+                let retired = &self.retired;
+                self.derived_turns
+                    .retain(|turn| !retired.contains_key(&tag(turn)));
+                let gone: BTreeSet<String> = self
+                    .turns
+                    .iter()
+                    .filter(|turn| self.retired.contains_key(&tag(&turn.id)))
+                    .map(|turn| turn.id.clone())
+                    .collect();
+                self.drop_turns(|turn| gone.contains(&turn.id));
+            }
             Record::Host { key, value } => {
                 self.hosts.insert(key.clone(), value.clone());
             }
@@ -2587,7 +2693,10 @@ impl Fold {
                 value: self.retired_value()?,
             })?;
         }
-        for turn in &self.turns {
+        for turn in self.turns.iter().filter(|turn| {
+            !self.derived_turns.contains(&turn.id)
+                || crate::sim::mutated(crate::sim::Mutation::DerivedReemitted)
+        }) {
             take(Record::Admitted {
                 digest: turn.digest.clone(),
                 first: turn.first,
@@ -2655,7 +2764,11 @@ impl Fold {
                 })?;
             }
         }
-        for (call_id, call) in &self.calls {
+        for (call_id, call) in self
+            .calls
+            .iter()
+            .filter(|(call_id, _)| !self.derived_calls.contains(*call_id))
+        {
             take(Record::Call {
                 call_id: call_id.clone(),
                 effect: call.effect,
@@ -2699,6 +2812,48 @@ impl Fold {
             seq: self.last_event,
         })?;
         Ok(())
+    }
+}
+
+#[must_use]
+pub fn input_digest(value: &RawValue, hand: Option<&str>) -> String {
+    let mut bytes = value.get().as_bytes().to_vec();
+    if let Some(hand) = hand {
+        bytes.push(0);
+        bytes.extend_from_slice(hand.as_bytes());
+    }
+    Digest::of(&bytes).key().as_str().to_owned()
+}
+
+fn lowered(status: &TurnStatus) -> Status {
+    match status {
+        TurnStatus::Running => Status::Running,
+        TurnStatus::Cancelling => Status::Cancelling,
+        TurnStatus::Interrupted { note } => Status::Interrupted { note: note.clone() },
+        TurnStatus::Retrying {
+            attempts,
+            error,
+            kind,
+            retry_at,
+        } => Status::Retrying {
+            attempts: *attempts,
+            error: error.clone(),
+            kind: kind.clone(),
+            retry_at: *retry_at,
+        },
+        TurnStatus::Finished {
+            last,
+            outcome,
+            result,
+        } => Status::Finished {
+            last: *last,
+            outcome: match outcome {
+                FactOutcome::Cancelled => Outcome::Cancelled,
+                FactOutcome::Completed => Outcome::Completed,
+                FactOutcome::Failed => Outcome::Failed,
+            },
+            result: result.clone(),
+        },
     }
 }
 
