@@ -32,6 +32,12 @@ pub enum CodexDecision {
         item: ResponseItem,
         initial_context: Vec<ResponseItem>,
     },
+    Splice {
+        from: u32,
+        to: u32,
+        items: Vec<ResponseItem>,
+    },
+    Prefix(Vec<ResponseItem>),
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -43,6 +49,7 @@ pub struct CodexFold {
     previous_response_id: Option<String>,
     queued: Vec<ResponseItem>,
     nested: BTreeSet<String>,
+    abandoned: BTreeSet<String>,
     phase: Phase,
 }
 
@@ -78,7 +85,6 @@ enum Kind {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct Call {
     id: String,
-    source: String,
     kind: Kind,
     block: u32,
     intended: bool,
@@ -129,7 +135,7 @@ fn decode<T: serde::de::DeserializeOwned>(
 
 impl DurableFold for CodexFold {
     const FAMILY: &'static str = "codex";
-    const FORMAT: u32 = 1;
+    const FORMAT: u32 = 2;
     type Decision = CodexDecision;
 
     fn apply(&mut self, seq: u64, fact: Seen<'_, CodexDecision>) -> Result<(), FoldError> {
@@ -157,7 +163,66 @@ impl DurableFold for CodexFold {
     }
 }
 
+pub(crate) struct OpenCall {
+    pub(crate) block: BlockRef,
+    pub(crate) intended: bool,
+    pub(crate) output: bool,
+}
+
 impl CodexFold {
+    pub(crate) fn prefix(&self) -> &[ResponseItem] {
+        &self.prefix
+    }
+
+    pub(crate) fn history(&self) -> &[ResponseItem] {
+        &self.history
+    }
+
+    pub(crate) fn template(&self) -> Option<(&Map<String, Value>, usize)> {
+        self.template
+            .as_ref()
+            .map(|template| (&template.request, template.tool_output_tokens))
+    }
+
+    pub(crate) fn previous_response_id(&self) -> Option<&str> {
+        self.previous_response_id.as_deref()
+    }
+
+    pub(crate) const fn ready(&self) -> bool {
+        matches!(self.phase, Phase::Ready)
+    }
+
+    pub(crate) fn open_call(&self, id: &str) -> Option<OpenCall> {
+        let Phase::Tools { model_out, calls } = &self.phase else {
+            return None;
+        };
+        calls
+            .iter()
+            .find(|call| call.id == id)
+            .map(|call| OpenCall {
+                block: BlockRef {
+                    model_out: *model_out,
+                    block: call.block,
+                },
+                intended: call.intended,
+                output: call.output,
+            })
+    }
+
+    pub(crate) fn settled_output(&self, id: &str) -> Option<&ResponseItem> {
+        let answers = |item: &&ResponseItem| match item {
+            ResponseItem::FunctionCallOutput { call_id, .. }
+            | ResponseItem::CustomToolCallOutput { call_id, .. } => **call_id == *id,
+            _ => false,
+        };
+        if let Phase::Tools { calls, .. } = &self.phase
+            && let Some(call) = calls.iter().find(|call| call.id == id)
+        {
+            return call.items.iter().flatten().find(answers);
+        }
+        self.history.iter().rev().find(answers)
+    }
+
     fn tokens(&self) -> usize {
         self.template
             .as_ref()
@@ -287,7 +352,7 @@ impl CodexFold {
         seq: u64,
         result: &EffectResult<&RawValue>,
     ) -> Result<(), FoldError> {
-        if self.nested.remove(&result.call_id) {
+        if self.nested.remove(&result.call_id) || self.abandoned.remove(&result.call_id) {
             return Ok(());
         }
         let wire: ToolOutputWire = decode(seq, "tool output", result.output)?;
@@ -331,7 +396,7 @@ impl CodexFold {
             let items = call.items.expect("a settled Codex call has its output");
             self.history
                 .extend(items.into_iter().enumerate().filter_map(|(index, item)| {
-                    folded_item(item, tokens, &format!("{}:{index}", call.source))
+                    folded_item(item, tokens, &format!("{}:{index}", call.id))
                 }));
         }
         if finished {
@@ -382,7 +447,37 @@ impl CodexFold {
                 item,
                 initial_context,
             } => self.compacted(seq, item, initial_context),
+            CodexDecision::Splice { from, to, items } => self.splice(seq, *from, *to, items),
+            CodexDecision::Prefix(items) => {
+                self.prefix.clone_from(items);
+                Ok(())
+            }
         }
+    }
+
+    fn splice(
+        &mut self,
+        seq: u64,
+        from: u32,
+        to: u32,
+        items: &[ResponseItem],
+    ) -> Result<(), FoldError> {
+        let from = usize::try_from(from).expect("u32 fits usize");
+        let to = usize::try_from(to).expect("u32 fits usize");
+        if from > to || to > self.history.len() {
+            return Err(rejected(seq, "a Codex splice falls outside the history"));
+        }
+        if let Phase::Tools { calls, .. } = std::mem::take(&mut self.phase) {
+            self.abandoned.extend(
+                calls
+                    .into_iter()
+                    .filter(|call| call.intended && !call.output)
+                    .map(|call| call.id),
+            );
+        }
+        self.queued.clear();
+        self.history.splice(from..to, items.iter().cloned());
+        Ok(())
     }
 
     fn client_items(&mut self, seq: u64, items: &[ResponseItem]) -> Result<(), FoldError> {
@@ -469,9 +564,6 @@ fn call(block: usize, item: &ResponseItem) -> Option<Call> {
         _ => return None,
     };
     Some(Call {
-        source: item
-            .id()
-            .map_or_else(|| id.clone(), |source| source.to_string()),
         id,
         kind,
         block: u32::try_from(block).expect("a Codex response holds fewer items than u32 counts"),

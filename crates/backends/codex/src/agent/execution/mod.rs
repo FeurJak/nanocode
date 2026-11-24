@@ -99,6 +99,11 @@ pub trait ExecutionPolicy: Send + Sync {
         None
     }
 
+    #[doc(hidden)]
+    fn facts(&self) -> Option<&crate::durability::CodexFacts> {
+        None
+    }
+
     fn commits_initial(&self) -> bool {
         false
     }
@@ -977,6 +982,10 @@ pub(crate) enum ExecutionStep<O> {
 impl ExecutionSteps {
     pub(crate) fn operation_id(&self) -> &str {
         &self.operation_id
+    }
+
+    pub(crate) fn facts(&self) -> Option<&crate::durability::CodexFacts> {
+        self.policy.facts()
     }
 
     pub(crate) async fn continuation<T: DeserializeOwned>(

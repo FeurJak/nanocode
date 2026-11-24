@@ -400,14 +400,14 @@ fn logged_nested_result(call: &NestedToolCall) -> Option<LoggedResult> {
     })
 }
 
-const fn tool_output_tokens(model: Model, custom: Option<usize>) -> usize {
+pub(super) const fn tool_output_tokens(model: Model, custom: Option<usize>) -> usize {
     match (model, custom) {
         (Model::Custom(_), Some(tokens)) => tokens,
         _ => model.tool_output_token_budget(),
     }
 }
 
-const fn history_tool_output_tokens(model: Model, budget: usize) -> usize {
+pub(super) const fn history_tool_output_tokens(model: Model, budget: usize) -> usize {
     use crate::client::session::{TOOL_OUTPUT_TOKEN_LIMIT, with_serialization_allowance};
     if model.truncates_tool_output_by_bytes() {
         with_serialization_allowance(budget)
@@ -763,9 +763,10 @@ impl ModelRun {
         let session_id = events.request_id().to_owned();
         let model = self.model;
         let output_tokens = tool_output_tokens(model, self.config.custom_tool_output_tokens);
+        let history_tokens = history_tool_output_tokens(model, output_tokens);
         conversation
             .managed
-            .set_tool_output_token_limit(history_tool_output_tokens(model, output_tokens));
+            .set_tool_output_token_limit(history_tokens);
         let host_context = self.host_context.clone();
         let before_tool_call = self.before_tool_call.clone();
 
@@ -845,9 +846,24 @@ impl ModelRun {
                                 Cap::Expired(text) => Err(text),
                                 Cap::Unchanged => Ok(None),
                             };
-                            let result = match notice {
-                                Err(text) => Ok(Self::expired_tool_call(&active, text)),
-                                Ok(notice) => {
+                            let settled = match &execution_steps {
+                                Some(steps) if recover => {
+                                    super::facts::settled_output(steps, &call.call_id).await?
+                                }
+                                _ => None,
+                            };
+                            let result = match (settled, notice) {
+                                (Some(item), _) => Ok(Self::settled_tool_call(&active, item)),
+                                (None, Err(text)) => Ok(Self::expired_tool_call(&active, text)),
+                                (None, Ok(notice)) => {
+                                    if !recover && let Some(steps) = &execution_steps {
+                                        super::facts::fact_intent(
+                                            steps,
+                                            &call.call_id,
+                                            &qualified_tool_name(&call),
+                                        )
+                                        .await?;
+                                    }
                                     let dispatch = async {
                                         active
                                             .execution_started_at
@@ -894,6 +910,9 @@ impl ModelRun {
                     };
                     match result {
                         Ok(mut completed) => {
+                            if persist_result && let Some(steps) = &execution_steps {
+                                super::facts::fact_result(steps, &completed).await?;
+                            }
                             if persist_result {
                                 completed.work_duration_ns =
                                     Self::completed_tool_work_duration(&active);
@@ -941,7 +960,9 @@ impl ModelRun {
                 });
             };
             self.active_tool_calls.remove(active_index);
-            conversation.append(self.finish_completed_tool_call(completed, &active.progress)?);
+            let call_id = completed.call_id.clone();
+            let items = self.finish_completed_tool_call(completed, &active.progress)?;
+            conversation.append(super::facts::named_outputs(&call_id, history_tokens, items));
         }
         self.finish_active_tool_batch_wall();
         Ok(())
@@ -1171,6 +1192,12 @@ impl ModelRun {
             structured_result,
             metadata: None,
         }
+    }
+
+    fn settled_tool_call(active: &ActiveToolCall, item: ResponseItem) -> CompletedToolCall {
+        let mut completed = Self::interrupted_tool_call(active.kind, &active.call_id, &active.name);
+        completed.response_items = vec![item];
+        completed
     }
 
     fn interrupted_tool_call(kind: CodeCallKind, call_id: &str, name: &str) -> CompletedToolCall {

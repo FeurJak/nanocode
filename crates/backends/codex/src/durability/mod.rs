@@ -29,11 +29,13 @@ use crate::{
 };
 
 mod context;
+mod facts;
 mod fold;
 mod format;
 mod registration;
 mod session;
 
+pub use facts::CodexFacts;
 pub use fold::{CodexDecision, CodexFold};
 pub use format::CodexCheckpointFormat;
 pub use session::DurableSessionExt;
@@ -78,6 +80,7 @@ impl<F> DurableAgentExt for CodexBuilder<F> {
         };
         let mut known_records = HashSet::new();
         let mut continuation = context::ContinuationCache::default();
+        let mut based = None;
         if let Some(checkpoint) = checkpoint {
             let preloaded = state
                 .take_checkpoint_preload_hydrated(checkpoint.key())
@@ -105,6 +108,7 @@ impl<F> DurableAgentExt for CodexBuilder<F> {
             }
             known_records = keys;
             continuation = cache;
+            based = Some(restored.clone());
             builder = builder.resume_native_snapshot(restored);
         } else if let Some(snapshot) = builder.resume_snapshot() {
             let prepared =
@@ -129,16 +133,27 @@ impl<F> DurableAgentExt for CodexBuilder<F> {
 
             builder = builder.default_prompt_cache_key(state_id.clone());
         }
+        let facts = match state.facts() {
+            Some(log) => {
+                let facts = CodexFacts::open(log).await?;
+                if let Some(snapshot) = &based {
+                    import_base(&facts, &state_id, snapshot).await?;
+                }
+                Some(facts)
+            }
+            None => None,
+        };
         let owner = Arc::new(Slot::new(Some((
             owner,
             known_records,
             branches,
             state,
             continuation,
+            facts,
         ))));
         Ok(builder
             .execution_policy_factory(move || {
-                let (owner, keys, branches, state, continuation) = owner
+                let (owner, keys, branches, state, continuation, facts) = owner
                     .take()
                     .ok_or_else(|| {
                         NanocodeError::InvalidExecutionPolicy(
@@ -146,8 +161,9 @@ impl<F> DurableAgentExt for CodexBuilder<F> {
                                 .to_owned(),
                         )
                     })?;
-                let policy =
+                let mut policy =
                     DurableExecution::ready(owner, state, state_id.clone(), Some(branches));
+                policy.facts = facts;
                 drop(policy.continuation_cache.put(continuation));
                 policy.remember(keys)?;
                 let policy: Arc<dyn ExecutionPolicy> = Arc::new(policy);
@@ -193,6 +209,7 @@ struct DurableExecution {
     branches: Option<Branches>,
     context_records: Swap<HashSet<String>>,
     continuation_cache: Slot<context::ContinuationCache>,
+    facts: Option<CodexFacts>,
 }
 
 fn recovery(kind: &str) -> StepRecovery {
@@ -217,6 +234,7 @@ impl DurableExecution {
             branches,
             context_records: Swap::default(),
             continuation_cache: Slot::default(),
+            facts: None,
         }
     }
 
@@ -280,6 +298,10 @@ async fn step_admission(
 impl ExecutionPolicy for DurableExecution {
     fn durable_state_id(&self) -> Option<String> {
         Some(self.state_id.clone())
+    }
+
+    fn facts(&self) -> Option<&CodexFacts> {
+        self.facts.as_ref()
     }
 
     fn branch(
@@ -887,6 +909,7 @@ impl LazyExecution {
 
     async fn acquire(&self, initial: Option<EncodedPayload>) -> AgentResult<(&Acquired, bool)> {
         let committed = AtomicBool::new(false);
+        let seeded = initial.clone();
         let policy = self
             .ready
             .get_or_try_init(|| async {
@@ -959,16 +982,31 @@ impl LazyExecution {
                         .map_err(agent_error)?
                         .pending_operations()
                         .is_empty();
+                let based = checkpoint
+                    .clone()
+                    .or_else(|| seeded.filter(|_| committed.load(Ordering::SeqCst)));
+                let facts = match state.facts() {
+                    Some(log) => {
+                        let facts = CodexFacts::open(log).await?;
+                        if let Some(payload) = &based {
+                            import_payload(&facts, &owner, &record.session_id, payload).await?;
+                        }
+                        Some(facts)
+                    }
+                    None => None,
+                };
+                let mut execution = DurableExecution::ready(
+                    owner,
+                    state,
+                    record.session_id.clone(),
+                    Some(Branches {
+                        store: self.store.clone(),
+                        record: Some(record),
+                    }),
+                );
+                execution.facts = facts;
                 Ok::<_, NanocodeError>(Acquired {
-                    execution: DurableExecution::ready(
-                        owner,
-                        state,
-                        record.session_id.clone(),
-                        Some(Branches {
-                            store: self.store.clone(),
-                            record: Some(record),
-                        }),
-                    ),
+                    execution,
                     reopened,
                 })
             })
@@ -980,6 +1018,10 @@ impl LazyExecution {
 impl ExecutionPolicy for LazyExecution {
     fn durable_state_id(&self) -> Option<String> {
         Some(self.record.session_id.clone())
+    }
+
+    fn facts(&self) -> Option<&CodexFacts> {
+        self.acquired()?.facts.as_ref()
     }
 
     fn commits_initial(&self) -> bool {
@@ -1436,6 +1478,39 @@ async fn restore_cached(
     let restored = context::restore_cached_snapshot(owner.into(), checkpoint, &mut kept).await;
     drop(cache.put(kept));
     restored.map_err(agent_error)
+}
+
+async fn import_base(
+    facts: &CodexFacts,
+    state_id: &str,
+    snapshot: &SessionSnapshot,
+) -> AgentResult<()> {
+    if facts.seq().await? != 0 {
+        return Ok(());
+    }
+    let base = nanocode_durability::facts::Fact::Base(nanocode_durability::facts::Base {
+        state: state_id.to_owned(),
+        revision: 0,
+        checkpoint: serde_json::value::to_raw_value(snapshot)
+            .map_err(|error| NanocodeError::InvalidCheckpoint(error.to_string()))?,
+    });
+    facts.commit(base).await.map(drop)
+}
+
+async fn import_payload(
+    facts: &CodexFacts,
+    owner: &DurableOwner,
+    state_id: &str,
+    payload: &EncodedPayload,
+) -> AgentResult<()> {
+    if facts.seq().await? != 0 {
+        return Ok(());
+    }
+    let (snapshot, _, _) =
+        context::load_resumed(owner.into(), payload.decode().map_err(agent_error)?)
+            .await
+            .map_err(agent_error)?;
+    import_base(facts, state_id, &snapshot).await
 }
 
 fn raw(json: String) -> AgentResult<Box<RawValue>> {

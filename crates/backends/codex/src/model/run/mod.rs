@@ -1,5 +1,6 @@
 use crate::__private::model_contract as model_tool_contract;
 mod continuation;
+mod facts;
 mod images;
 mod lifecycle;
 mod responses;

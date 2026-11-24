@@ -131,6 +131,27 @@ impl ModelRun {
         );
         let trace = trace_content_enabled().then(|| span.clone());
         let execution_steps = self.execution_steps.clone();
+        let facts = execution_steps.as_ref().and_then(ExecutionSteps::facts);
+        let history_tokens = history_tool_output_tokens(
+            model,
+            tool_output_tokens(model, self.config.custom_tool_output_tokens),
+        );
+        if let Some(facts) = facts {
+            let mut template = serde_json::Map::new();
+            template.insert("model".into(), Value::from(model.as_str()));
+            template.insert("service_tier".into(), Value::from(service_tier.as_str()));
+            let items = sent.full().iter().collect::<Vec<_>>();
+            super::facts::sync_facts(
+                facts,
+                super::facts::FactRequest {
+                    template,
+                    tool_output_tokens: history_tokens,
+                    prefix: factory.profile().prefix(),
+                    sent: &items,
+                },
+            )
+            .await?;
+        }
         let recovered = if let Some(steps) = &execution_steps {
             let admitted = match admitted {
                 Some(admitted) => admitted,
@@ -245,6 +266,15 @@ impl ModelRun {
             preparation_ns,
         } = recorded_result;
         validate_provider_response_id(&response.id)?;
+        if let (Some(facts), Some(steps)) = (facts, &execution_steps) {
+            super::facts::fact_model(
+                facts,
+                steps.operation_id(),
+                &response.id,
+                &response.output_items,
+            )
+            .await?;
+        }
         record_model_response(&span, &response);
         span.record("status", "completed");
         span.record("otel.status_code", "OK");
