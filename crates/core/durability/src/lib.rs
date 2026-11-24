@@ -2,7 +2,6 @@ mod blob;
 mod fact;
 mod fact_log;
 mod kv;
-mod lock;
 mod payload;
 mod row;
 mod sql;
@@ -19,7 +18,6 @@ pub use fact::{
 };
 pub use fact_log::{Append, FactLog, FactLogs, Replay, commit_fact, fold_facts};
 pub use kv::{KeyValue, KeyValueStore, Versioned};
-pub use lock::{LockKey, LocksHeld};
 pub use payload::EncodedPayload;
 pub use row::{Examined, PageCodec, RowStore};
 pub use sql::{
