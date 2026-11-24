@@ -300,6 +300,7 @@ default_table='
 1 canary_resident_until_snapshot canary:20 --scenario turns --policy turnlog --snapshot-rows 4 --mutation resident_until_snapshot
 1 canary_unindexed_pins_pages canary:20 --scenario turns --policy turnlog --snapshot-rows 4 --mutation unindexed_pins_pages
 1 canary_placed_stay_resident canary:20 --scenario turns --policy turnlog --snapshot-rows 4 --mutation placed_stay_resident
+1 canary_finished_keeps_prompt canary:20 --scenario turns --policy turnlog --mutation finished_keeps_prompt
 1 canary_agents_cancel_ignored canary:200 --scenario agents --mutation cancel_ignored
 1 canary_agents_shutdown_hangs canary:200 --scenario agents --mutation shutdown_hangs
 1 canary_agents_shutdown_keeps_harness canary:200 --scenario agents --mutation shutdown_keeps_harness

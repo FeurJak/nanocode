@@ -2399,6 +2399,9 @@ impl Fold {
                     outcome: *outcome,
                     result: result.clone(),
                 };
+                if !crate::sim::mutated(crate::sim::Mutation::FinishedKeepsPrompt) {
+                    turn.prompt = RawValue::NULL.to_owned();
+                }
                 self.calls
                     .retain(|_, call| call.turn.as_deref() != Some(id));
             }

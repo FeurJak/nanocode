@@ -80,6 +80,7 @@ pub enum TurnMutation {
     ResidentUntilSnapshot,
     UnindexedPinsPages,
     PlacedStayResident,
+    FinishedKeepsPrompt,
     RecoverySkipsClientless,
     ResumeRedispatchesRunning,
     RetireSkipped,
@@ -96,7 +97,7 @@ pub enum TurnMutation {
 }
 
 impl TurnMutation {
-    const ALL: [Self; 39] = [
+    const ALL: [Self; 40] = [
         Self::None,
         Self::AckBufferedAdmission,
         Self::AckBufferedResult,
@@ -123,6 +124,7 @@ impl TurnMutation {
         Self::ResidentUntilSnapshot,
         Self::UnindexedPinsPages,
         Self::PlacedStayResident,
+        Self::FinishedKeepsPrompt,
         Self::RecoverySkipsClientless,
         Self::ResumeRedispatchesRunning,
         Self::RetireSkipped,
@@ -172,6 +174,7 @@ impl TurnMutation {
             Self::ResidentUntilSnapshot => "resident_until_snapshot",
             Self::UnindexedPinsPages => "unindexed_pins_pages",
             Self::PlacedStayResident => "placed_stay_resident",
+            Self::FinishedKeepsPrompt => "finished_keeps_prompt",
             Self::RecoverySkipsClientless => "recovery_skips_clientless",
             Self::ResumeRedispatchesRunning => "resume_redispatches_running",
             Self::RetireSkipped => "retire_skipped",
@@ -1271,6 +1274,7 @@ impl Sim {
             }
             TurnMutation::UnindexedPinsPages => nanocode_turnlog::sim::Mutation::UnindexedPinsPages,
             TurnMutation::PlacedStayResident => nanocode_turnlog::sim::Mutation::PlacedStayResident,
+            TurnMutation::FinishedKeepsPrompt => nanocode_turnlog::sim::Mutation::FinishedKeepsPrompt,
             _ => nanocode_turnlog::sim::Mutation::None,
         });
         let policy: Box<dyn TurnDurability> = match self.options.policy {

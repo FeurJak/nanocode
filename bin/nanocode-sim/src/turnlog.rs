@@ -1210,6 +1210,13 @@ impl TurnDurability for TurnLogPolicy {
                 );
             }
         }
+        for turn in lease.fold().turns() {
+            assert!(
+                !matches!(turn.phase, Phase::Finished { .. }) || turn.prompt.get() == "null",
+                "{scope} keeps the prompt of finished turn {} in the fold",
+                turn.id
+            );
+        }
         if let Some(keep) = self.retention {
             let finished = lease
                 .fold()
