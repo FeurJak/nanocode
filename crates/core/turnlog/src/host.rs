@@ -1,6 +1,8 @@
 use std::{ops::Range, sync::Arc};
 
-use nanocode_durability_core::{Sql, SqlAccess, SqlDialect, SqlStatement, StoreError, StoreFuture};
+use nanocode_durability_core::{
+    Migration, Sql, SqlAccess, SqlDialect, SqlStatement, StoreError, StoreFuture, migrate_format,
+};
 use nanocode_sync::Atom;
 
 /// One scope's rows as `(seq, row)` pairs, in seq order.
@@ -136,24 +138,21 @@ type Dialects = [&'static str; 2];
 
 const SQL_TRANSACTIONS_PER_CALL: u32 = 2;
 
-/// Serializes schema preparation across processes on Postgres: two loads that create nanocode_log at once otherwise
-/// race in CREATE TABLE IF NOT EXISTS (duplicate key in pg_type for the table's row type). SQLite has one writer.
-const PREPARE_LOCK: Dialects = [
-    "SELECT NULL",
-    "SELECT CAST(pg_advisory_xact_lock(7_061_636_193) AS TEXT)",
-];
 const CREATE: Dialects = [
     "CREATE TABLE IF NOT EXISTS nanocode_log (scope TEXT NOT NULL, seq INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (scope, seq)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS nanocode_log (scope TEXT NOT NULL, seq BIGINT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (scope, seq))",
 ];
-const DATA: Dialects = [
-    "SELECT NULL",
-    "DO $data$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'nanocode_log'::regclass AND attname = 'data' AND NOT attisdropped) THEN ALTER TABLE nanocode_log ADD COLUMN data BYTEA; END IF; END $data$",
-];
+const DATA: &str = "DO $data$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'nanocode_log'::regclass AND attname = 'data' AND NOT attisdropped) THEN ALTER TABLE nanocode_log ADD COLUMN data BYTEA; END IF; END $data$";
 const INDEX: Dialects = [
     "CREATE INDEX IF NOT EXISTS nanocode_log_snapshots ON nanocode_log (scope, seq) WHERE substr(body, 1, 1) = 's'",
     "CREATE INDEX IF NOT EXISTS nanocode_log_snapshots ON nanocode_log (scope, seq) WHERE substr(body, 1, 1) = 's'",
 ];
+const SCHEMA_SQLITE: &[&str] = &[CREATE[0], INDEX[0], CHECKPOINT_CREATE[0]];
+const SCHEMA_POSTGRES: &[&str] = &[CREATE[1], DATA, INDEX[1], CHECKPOINT_CREATE[1]];
+const MIGRATIONS: [Migration; 1] = [Migration {
+    statements: [SCHEMA_SQLITE, SCHEMA_POSTGRES],
+    adopt: None,
+}];
 const LOAD: Dialects = [
     "SELECT CAST(seq AS TEXT), body FROM nanocode_log WHERE scope = ?1 AND seq >= COALESCE((SELECT seq FROM nanocode_log INDEXED BY nanocode_log_snapshots WHERE scope = ?1 AND substr(body, 1, 1) = 's' ORDER BY seq DESC LIMIT 1), 0) ORDER BY seq",
     "SELECT CAST(seq AS TEXT), CASE WHEN data IS NULL THEN body ELSE body || rtrim(translate(encode(data, 'base64'), chr(10), ''), '=') END FROM nanocode_log WHERE scope = $1::text AND seq >= COALESCE((SELECT seq FROM nanocode_log WHERE scope = $1::text AND substr(body, 1, 1) = 's' ORDER BY seq DESC LIMIT 1), 0) ORDER BY nanocode_log.seq",
@@ -210,22 +209,12 @@ impl<H: Sql + ?Sized> SqlLog<H> {
         }
     }
 
-    /// Creates nanocode_log, its index and nanocode_checkpoint under PREPARE_LOCK, once per log.
     async fn prepare(&self) -> Result<(), StoreError> {
         use std::sync::atomic::Ordering;
         if self.prepared.load(Ordering::Acquire) {
             return Ok(());
         }
-        let statements =
-            [&PREPARE_LOCK, &CREATE, &DATA, &INDEX, &CHECKPOINT_CREATE].map(|statement| {
-                SqlStatement {
-                    sql: self.pick(statement),
-                    params: Vec::new(),
-                }
-            });
-        self.host
-            .transaction("turn_log_prepare", &statements)
-            .await?;
+        migrate_format(&*self.host, "turn_log", &MIGRATIONS).await?;
         self.prepared.store(true, Ordering::Release);
         Ok(())
     }

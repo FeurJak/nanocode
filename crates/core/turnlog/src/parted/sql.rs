@@ -11,7 +11,8 @@ use std::{
 };
 
 use nanocode_durability_core::{
-    Settle, Sql, SqlDialect, SqlRow, SqlStatement, StoreError, StoreFuture,
+    Migration, Settle, Sql, SqlDialect, SqlRow, SqlStatement, StoreError, StoreFuture,
+    migrate_format_then,
 };
 use nanocode_partitions::{Partition, Row};
 use nanocode_sync::{Atom, Notify};
@@ -24,8 +25,7 @@ use crate::host::{
 /// The channel Postgres notifies on, with payload "scope:head" per committed scope.
 pub const CHANNEL: &str = "nanocode_log";
 
-const PREPARE_PG: [&str; 10] = [
-    "SELECT CAST(pg_advisory_xact_lock(7_061_636_192) AS TEXT)",
+const SCHEMA_PG: &[&str] = &[
     "CREATE SEQUENCE IF NOT EXISTS nanocode_log_pos",
     "CREATE TABLE IF NOT EXISTS nanocode_log_fence (part INTEGER PRIMARY KEY, epoch BIGINT NOT NULL DEFAULT 0, holder TEXT, expires_ms BIGINT NOT NULL DEFAULT 0)",
     "CREATE TABLE IF NOT EXISTS nanocode_log_cursor (part INTEGER NOT NULL, reader TEXT NOT NULL, pos BIGINT NOT NULL, PRIMARY KEY (part, reader))",
@@ -34,15 +34,21 @@ const PREPARE_PG: [&str; 10] = [
     "DO $data$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'nanocode_plog'::regclass AND attname = 'data' AND NOT attisdropped) THEN ALTER TABLE nanocode_plog ADD COLUMN data BYTEA COMPRESSION lz4; END IF; END $data$",
     CHECKPOINT_CREATE[1],
     "CREATE OR REPLACE FUNCTION nanocode_plog_parts(n integer) RETURNS integer LANGUAGE plpgsql AS $parts$ BEGIN FOR i IN 0..n - 1 LOOP EXECUTE format('CREATE TABLE IF NOT EXISTS nanocode_plog_p%s PARTITION OF nanocode_plog FOR VALUES IN (%s)', i, i); INSERT INTO nanocode_log_fence (part) VALUES (i) ON CONFLICT DO NOTHING; END LOOP; RETURN n; END $parts$",
-    "SELECT nanocode_plog_parts(CAST($1::text AS INTEGER))",
 ];
-const PREPARE_SQLITE: [&str; 6] = [
+const SCHEMA_SQLITE: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS nanocode_log_fence (part INTEGER PRIMARY KEY, epoch INTEGER NOT NULL DEFAULT 0, holder TEXT, expires_ms INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE IF NOT EXISTS nanocode_log_cursor (part INTEGER NOT NULL, reader TEXT NOT NULL, pos INTEGER NOT NULL, PRIMARY KEY (part, reader)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS nanocode_plog (part INTEGER NOT NULL, scope TEXT NOT NULL, seq INTEGER NOT NULL, pos INTEGER NOT NULL, snap INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (part, scope, seq)) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS nanocode_plog_pos ON nanocode_plog (part, pos)",
     CHECKPOINT_CREATE[0],
+];
+const MIGRATIONS: [Migration; 1] = [Migration {
+    statements: [SCHEMA_SQLITE, SCHEMA_PG],
+    adopt: None,
+}];
+const PARTS: Dialects = [
     "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i + 1 < CAST(?1 AS INTEGER)) INSERT OR IGNORE INTO nanocode_log_fence (part) SELECT i FROM n",
+    "SELECT nanocode_plog_parts(CAST($1::text AS INTEGER))",
 ];
 
 type Dialects = [&'static str; 2];
@@ -419,25 +425,11 @@ impl<H: Sql + Send + Sync + ?Sized> PartStore for SqlParts<H> {
     fn prepare(&self, count: NonZeroU32) -> StoreFuture<'_, Result<(), StoreError>> {
         Box::pin(async move {
             let count = count.get().to_string();
-            let list: &[&'static str] = if self.postgres() {
-                &PREPARE_PG
-            } else {
-                &PREPARE_SQLITE
-            };
-            let statements: Vec<_> = list
-                .iter()
-                .enumerate()
-                .map(|(index, sql)| SqlStatement {
-                    sql,
-                    params: if index + 1 == list.len() {
-                        vec![count.as_str()]
-                    } else {
-                        Vec::new()
-                    },
-                })
-                .collect();
-            self.host
-                .transaction("plog_prepare", &statements)
+            let parts = [SqlStatement {
+                sql: self.pick(&PARTS),
+                params: vec![count.as_str()],
+            }];
+            migrate_format_then(&*self.host, "plog", &MIGRATIONS, &parts)
                 .await
                 .map(drop)
         })

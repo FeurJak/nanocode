@@ -215,7 +215,20 @@ pub async fn migrate_format_then<H: Sql + ?Sized>(
                 .chain([write])
                 .chain(trailing.iter().cloned())
                 .collect();
-            let mut results = run_checked(host, SqlAccess::Schema, "format", &statements).await?;
+            let mut results =
+                match run_checked(host, SqlAccess::Schema, "format", &statements).await {
+                    Ok(results) => results,
+                    Err(_) if stored_format(host, component).await? > index as u64 => {
+                        if index == last && !trailing.is_empty() {
+                            return run_checked(host, SqlAccess::Schema, "format", trailing).await;
+                        }
+                        if index == last {
+                            return Ok(Vec::new());
+                        }
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
             if index == last {
                 return Ok(results.split_off(statements.len() - trailing.len()));
             }
@@ -244,6 +257,16 @@ pub async fn migrate_format_then<H: Sql + ?Sized>(
         }
     }
     Ok(Vec::new())
+}
+
+async fn stored_format<H: Sql + ?Sized>(host: &H, component: &str) -> Result<u64, StoreError> {
+    let read = [statement(host.dialect(), &READ_FORMAT, vec![component])];
+    Ok(
+        match single(&run_checked(host, SqlAccess::Schema, "format", &read).await?[0])? {
+            Some(row) => counter(row, 0)?,
+            None => 0,
+        },
+    )
 }
 
 fn column_present(rows: &[SqlRow]) -> Result<bool, StoreError> {

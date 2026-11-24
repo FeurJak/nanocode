@@ -3,16 +3,14 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use nanocode_durability_core::{Sql, SqlAccess, SqlStatement, StoreError, StoreFuture};
+use nanocode_durability_core::{
+    Migration, Sql, SqlAccess, SqlStatement, StoreError, StoreFuture, migrate_format,
+};
 
 use crate::{Wakes, host::host_id};
 
 type Dialects = [&'static str; 2];
 
-const PREPARE_LOCK: Dialects = [
-    "SELECT NULL",
-    "SELECT CAST(pg_advisory_xact_lock(7_061_636_194) AS TEXT)",
-];
 const CREATE_DUE: Dialects = [
     "CREATE TABLE IF NOT EXISTS nanocode_wake_due (scope TEXT PRIMARY KEY, due_ms INTEGER NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS nanocode_wake_due (scope TEXT PRIMARY KEY, due_ms BIGINT NOT NULL)",
@@ -29,6 +27,12 @@ const INDEX_TOPIC: Dialects = [
     "CREATE INDEX IF NOT EXISTS nanocode_wake_topic_scope ON nanocode_wake_topic (scope)",
     "CREATE INDEX IF NOT EXISTS nanocode_wake_topic_scope ON nanocode_wake_topic (scope)",
 ];
+const SCHEMA_SQLITE: &[&str] = &[CREATE_DUE[0], INDEX_DUE[0], CREATE_TOPIC[0], INDEX_TOPIC[0]];
+const SCHEMA_POSTGRES: &[&str] = &[CREATE_DUE[1], INDEX_DUE[1], CREATE_TOPIC[1], INDEX_TOPIC[1]];
+const MIGRATIONS: [Migration; 1] = [Migration {
+    statements: [SCHEMA_SQLITE, SCHEMA_POSTGRES],
+    adopt: None,
+}];
 const CLEAR_DUE: Dialects = [
     "DELETE FROM nanocode_wake_due WHERE scope = ?1",
     "DELETE FROM nanocode_wake_due WHERE scope = $1::text",
@@ -218,20 +222,7 @@ impl<H: Sql + Send + Sync + ?Sized + 'static> WakeRider for WakeIndex<H> {
             if self.prepared.load(Ordering::Acquire) {
                 return Ok(());
             }
-            let statements = [
-                &PREPARE_LOCK,
-                &CREATE_DUE,
-                &INDEX_DUE,
-                &CREATE_TOPIC,
-                &INDEX_TOPIC,
-            ]
-            .map(|statement| SqlStatement {
-                sql: self.pick(statement),
-                params: Vec::new(),
-            });
-            self.host
-                .transaction("wake_index_prepare", &statements)
-                .await?;
+            migrate_format(&*self.host, "wake_index", &MIGRATIONS).await?;
             self.prepared.store(true, Ordering::Release);
             Ok(())
         })
