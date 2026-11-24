@@ -2,11 +2,12 @@ use crate::files;
 use crate::format::{duration_label, go_json, timestamp};
 use crate::schedule::Cron;
 use nanocode_process_contracts::{ExecCommand, FileHost, OutputUnit, ShellExecutor, WriteStdin};
+use nanocode_sync::Atom;
 use serde_json::{Value, json};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 #[cfg(not(target_family = "wasm"))]
@@ -86,8 +87,8 @@ struct Inner {
     brain: PathBuf,
     conversation: String,
     web: Option<Arc<dyn WebSearch>>,
-    tasks: Mutex<Vec<Task>>,
-    messages: Mutex<Vec<Message>>,
+    tasks: Atom<Vec<Arc<Task>>>,
+    messages: Atom<Vec<Message>>,
 }
 
 #[derive(Clone)]
@@ -141,8 +142,8 @@ impl Engine {
                 brain,
                 conversation,
                 web,
-                tasks: Mutex::new(Vec::new()),
-                messages: Mutex::new(Vec::new()),
+                tasks: Atom::default(),
+                messages: Atom::default(),
             }),
         }
     }
@@ -305,7 +306,7 @@ impl Engine {
                 let log = self.task_log(step);
                 let _ = self.inner.files.write(&log, &output).await;
                 let at = now();
-                self.lock_tasks().push(Task {
+                self.add_task(Task {
                     id: id.clone(),
                     tool: "run_command",
                     summary,
@@ -418,7 +419,7 @@ impl Engine {
                 let condition = text(args, "TimerCondition")
                     .filter(|condition| !condition.is_empty() && *condition != "never")
                     .map(str::to_owned);
-                self.lock_tasks().push(task(
+                self.add_task(task(
                     format!("{label} timer"),
                     format!("Timer: {label}, Prompt: {prompt}"),
                     false,
@@ -435,7 +436,7 @@ impl Engine {
                 let cron = Cron::parse(expression)?;
                 let limit =
                     integer(args, "MaxIterations").and_then(|limit| u64::try_from(limit).ok());
-                self.lock_tasks().push(task(
+                self.add_task(task(
                     format!("cron ({})", cron.label()),
                     format!("Cron: {expression}, Prompt: {prompt}"),
                     flag(args, "IsDaemon"),
@@ -519,7 +520,7 @@ impl Engine {
             return Err(format!("invalid task ID format: {id:?}"));
         }
         let task = self
-            .lock_tasks()
+            .tasks()
             .iter()
             .find(|task| task.id == id)
             .cloned()
@@ -585,7 +586,7 @@ impl Engine {
     }
 
     fn list(&self) -> String {
-        let tasks = self.lock_tasks();
+        let tasks = self.tasks();
         let running = tasks
             .iter()
             .filter(|task| task.state == State::Running)
@@ -617,7 +618,7 @@ impl Engine {
     }
 
     pub fn snapshots(&self) -> Vec<String> {
-        self.lock_tasks()
+        self.tasks()
             .iter()
             .filter(|task| task.state == State::Running)
             .map(|task| {
@@ -633,23 +634,26 @@ impl Engine {
             .collect()
     }
 
-    fn lock_tasks(&self) -> std::sync::MutexGuard<'_, Vec<Task>> {
-        self.inner
-            .tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn tasks(&self) -> Arc<Vec<Arc<Task>>> {
+        self.inner.tasks.get()
     }
 
-    fn with_task<T>(&self, id: &str, update: impl FnOnce(&mut Task) -> T) -> Option<T> {
-        self.lock_tasks()
-            .iter_mut()
-            .find(|task| task.id == id)
-            .map(update)
+    fn add_task(&self, task: Task) {
+        let task = Arc::new(task);
+        self.inner
+            .tasks
+            .update(|tasks| tasks.push(Arc::clone(&task)));
+    }
+
+    fn with_task<T>(&self, id: &str, mut update: impl FnMut(&mut Task) -> T) -> Option<T> {
+        self.inner.tasks.try_update(|tasks| {
+            let task = tasks.iter_mut().find(|task| task.id == id)?;
+            Some(update(Arc::make_mut(task)))
+        })
     }
 
     pub fn push_message(&self, message: Message) {
-        {
-            let mut tasks = self.lock_tasks();
+        self.inner.tasks.update(|tasks| {
             for task in tasks.iter_mut() {
                 let Kind::Timer {
                     condition: Some(condition),
@@ -661,44 +665,36 @@ impl Engine {
                     && task.id != message.sender
                     && (condition == "any" || *condition == message.sender);
                 if cancels {
-                    task.state = State::Canceled;
+                    Arc::make_mut(task).state = State::Canceled;
                 }
             }
-        }
+        });
         self.inner
             .messages
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(message);
+            .update(|messages| messages.push(message.clone()));
     }
 
     pub fn take_messages(&self) -> Vec<Message> {
-        let mut queue = self
-            .inner
-            .messages
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (ready, mut waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut *queue)
-            .into_iter()
-            .partition(|message| message.high || message.seen);
-        for message in &mut waiting {
-            message.seen = true;
-        }
-        *queue = waiting;
-        ready
+        self.inner.messages.update(|queue| {
+            let (ready, mut waiting): (Vec<_>, Vec<_>) = std::mem::take(queue)
+                .into_iter()
+                .partition(|message| message.high || message.seen);
+            for message in &mut waiting {
+                message.seen = true;
+            }
+            *queue = waiting;
+            ready
+        })
     }
 
     pub fn has_urgent(&self) -> bool {
         self.inner
             .messages
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .any(|message| message.high)
+            .read(|messages| messages.iter().any(|message| message.high))
     }
 
     pub fn blocking(&self) -> bool {
-        self.lock_tasks()
+        self.tasks()
             .iter()
             .any(|task| task.state == State::Running && !task.daemon)
     }
@@ -710,11 +706,13 @@ impl Engine {
     }
 
     pub async fn shutdown(&self) {
-        for task in self.lock_tasks().iter_mut() {
-            if task.state == State::Running {
-                task.state = State::Canceled;
+        self.inner.tasks.update(|tasks| {
+            for task in tasks.iter_mut() {
+                if task.state == State::Running {
+                    Arc::make_mut(task).state = State::Canceled;
+                }
             }
-        }
+        });
         self.inner.shell.terminate_all().await;
     }
 }

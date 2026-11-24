@@ -2,7 +2,7 @@ use crate::http::Client;
 use crate::json::Json;
 use nanocode_http::Method;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::Mutex;
+use nanocode_sync::Atom;
 use std::time::{Duration, SystemTime};
 
 #[derive(Clone, Copy, Debug)]
@@ -22,6 +22,7 @@ impl Default for CacheConfig {
     }
 }
 
+#[derive(Clone)]
 struct Entry {
     name: String,
     key: u64,
@@ -30,14 +31,14 @@ struct Entry {
 
 pub struct ExplicitCache {
     config: CacheConfig,
-    entry: Mutex<Option<Entry>>,
+    entry: Atom<Option<Entry>>,
 }
 
 impl ExplicitCache {
-    pub const fn new(config: CacheConfig) -> Self {
+    pub fn new(config: CacheConfig) -> Self {
         Self {
             config,
-            entry: Mutex::new(None),
+            entry: Atom::new(None),
         }
     }
 
@@ -78,11 +79,12 @@ impl ExplicitCache {
     }
 
     fn current(&self, key: u64) -> Option<(String, SystemTime)> {
-        let entry = self.entry.lock().ok()?;
-        entry
-            .as_ref()
-            .filter(|entry| entry.key == key)
-            .map(|entry| (entry.name.clone(), entry.expires))
+        self.entry.read(|entry| {
+            entry
+                .as_ref()
+                .filter(|entry| entry.key == key)
+                .map(|entry| (entry.name.clone(), entry.expires))
+        })
     }
 
     fn ttl(&self) -> String {
@@ -95,11 +97,12 @@ impl ExplicitCache {
         if client.json(Method::PATCH, &path, &body).await.is_err() {
             return false;
         }
-        if let Ok(mut entry) = self.entry.lock()
-            && let Some(entry) = entry.as_mut()
-        {
-            entry.expires = nanocode_platform::system_time() + self.config.ttl;
-        }
+        let expires = nanocode_platform::system_time() + self.config.ttl;
+        self.entry.update(|entry| {
+            if let Some(entry) = entry.as_mut() {
+                entry.expires = expires;
+            }
+        });
         true
     }
 
@@ -121,13 +124,11 @@ impl ExplicitCache {
         let collection = client.endpoint().cache_collection()?;
         let created = client.json(Method::POST, &collection, &body).await.ok()?;
         let name = created.get("name")?.as_str()?.to_owned();
-        if let Ok(mut entry) = self.entry.lock() {
-            *entry = Some(Entry {
-                name: name.clone(),
-                key,
-                expires: nanocode_platform::system_time() + self.config.ttl,
-            });
-        }
+        self.entry.set(Some(Entry {
+            name: name.clone(),
+            key,
+            expires: nanocode_platform::system_time() + self.config.ttl,
+        }));
         Some(name)
     }
 }

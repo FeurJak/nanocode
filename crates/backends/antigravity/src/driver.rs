@@ -17,13 +17,13 @@ use nanocode_backend_antigravity_client::{Client, Content, ExplicitCache, Part, 
 use nanocode_backend_antigravity_tools::{
     Engine, NAMES, Outcome, REMINDER, local_timestamp, system_message, with_header,
 };
-use nanocode_sync::Signal;
+use nanocode_sync::{Atom, Signal};
 use nanocode_sync::future::{Either, select};
 use nanocode_tool_host::ToolContext;
 use serde_json::{Value, json, value::RawValue};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 pub const USAGE_LOG: &str = "usage.jsonl";
 
@@ -58,8 +58,8 @@ pub struct State {
 
 struct Inner {
     config: Config,
-    state: Mutex<State>,
-    cancel: Mutex<Option<Arc<Signal>>>,
+    state: Atom<State>,
+    cancel: Atom<Option<Arc<Signal>>>,
     stopped: AtomicBool,
     noticed: AtomicBool,
 }
@@ -146,16 +146,11 @@ impl Inner {
     }
 
     fn load(&self) -> State {
-        self.state
-            .lock()
-            .map(|state| state.clone())
-            .unwrap_or_default()
+        State::clone(&self.state.get())
     }
 
     fn save(&self, state: &State) {
-        if let Ok(mut current) = self.state.lock() {
-            *current = state.clone();
-        }
+        self.state.set(state.clone());
     }
 
     async fn request(
@@ -671,8 +666,8 @@ impl Driver {
         Self {
             inner: Arc::new(Inner {
                 config,
-                state: Mutex::new(State::default()),
-                cancel: Mutex::new(None),
+                state: Atom::default(),
+                cancel: Atom::new(None),
                 stopped: AtomicBool::new(false),
                 noticed: AtomicBool::new(false),
             }),
@@ -703,14 +698,15 @@ impl Driver {
                     .collect()
             })
             .unwrap_or_default();
-        if let Ok(mut state) = self.inner.state.lock() {
+        let (step, calls) = (number("step"), number("calls"));
+        self.inner.state.update(|state| {
             state.settings_sent = !contents.is_empty();
-            state.transcript = contents.clone();
-            state.contents = contents;
-            state.step = number("step");
-            state.calls = number("calls");
-            state.requests = requests;
-        }
+            state.transcript.clone_from(&contents);
+            state.contents.clone_from(&contents);
+            state.step = step;
+            state.calls = calls;
+            state.requests.clone_from(&requests);
+        });
         Ok(self)
     }
 
@@ -721,9 +717,7 @@ impl Driver {
             .clone()
             .unwrap_or_else(|| format!("{}-{}", inner.config.session, prompt.key.0));
         let cancel = Arc::new(Signal::new());
-        if let Ok(mut slot) = inner.cancel.lock() {
-            *slot = Some(Arc::clone(&cancel));
-        }
+        inner.cancel.set(Some(Arc::clone(&cancel)));
         let events = prompt.events.clone();
         let id = request_id.clone();
         let (sender, receiver) = nanocode_sync::oneshot::channel();
@@ -755,9 +749,7 @@ impl Driver {
     }
 
     fn cancel_turn(&self) -> BackendFuture<Result<()>> {
-        if let Ok(slot) = self.inner.cancel.lock()
-            && let Some(cancel) = slot.as_ref()
-        {
+        if let Some(cancel) = self.inner.cancel.get().as_ref() {
             cancel.fire();
         }
         done()
