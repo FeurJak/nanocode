@@ -212,18 +212,34 @@ impl State {
         facts.commit(fact).await.map(drop)
     }
 
-    pub(super) async fn cancelled_fact(&self, id: &str) -> Result<Option<ContentBlock>> {
+    pub(super) async fn abandoned(&self, id: &str) -> Result<Option<ContentBlock>> {
         let Some(facts) = self.facts() else {
             return Ok(None);
         };
-        let intended = facts
-            .read(|fold| fold.open_call(id).is_some_and(|call| call.intended))
+        let open = facts
+            .read(|fold| {
+                fold.open_call(id)
+                    .is_some_and(|call| call.intended && !call.output)
+            })
             .await?;
-        if !intended {
-            return Ok(None);
+        if !open {
+            return facts.read(|fold| fold.result(id).cloned()).await;
         }
+        let settled = match &self.abandon {
+            Some(abandon) => abandon(id.to_owned())
+                .await
+                .map_err(durable::recovery_error)?
+                .is_some(),
+            None => false,
+        };
         facts.refresh().await?;
-        facts.read(|fold| fold.result(id).cloned()).await
+        let result = facts.read(|fold| fold.result(id).cloned()).await?;
+        if settled && result.is_none() {
+            return Err(durable::recovery_error(
+                "a Claude call the runtime abandoned has no result in its fact log",
+            ));
+        }
+        Ok(result)
     }
 
     pub(super) async fn settled_fact(&self, id: &str) -> Result<Option<ContentBlock>> {

@@ -150,7 +150,7 @@ pub(super) fn call_tool<'a>(
                 content: settled,
                 is_error: settled_error,
                 ..
-            }) = state.cancelled_fact(id).await?
+            }) = state.abandoned(id).await?
         {
             content = settled;
             is_error = settled_error.unwrap_or(false);

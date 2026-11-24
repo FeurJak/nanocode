@@ -204,6 +204,7 @@ pub(super) async fn settled_output(
 
 pub(super) async fn settled_aborts(
     steps: &ExecutionSteps,
+    tools: Option<&ToolRuntime>,
     open: Vec<String>,
 ) -> Result<HashMap<String, ResponseItem>> {
     let Some(facts) = steps.facts() else {
@@ -212,25 +213,44 @@ pub(super) async fn settled_aborts(
     let intended = facts
         .read(|fold| {
             open.into_iter()
-                .filter(|id| fold.open_call(id).is_some_and(|call| call.intended))
+                .filter(|id| {
+                    fold.open_call(id)
+                        .is_some_and(|call| call.intended && !call.output)
+                })
                 .collect::<Vec<_>>()
         })
         .await?;
     if intended.is_empty() {
         return Ok(HashMap::new());
     }
+    let mut abandoned = Vec::new();
+    if let Some(tools) = tools {
+        for id in &intended {
+            if tools
+                .abandon(id)
+                .await
+                .map_err(NanocodeError::InvalidExecutionPolicy)?
+                .is_some()
+            {
+                abandoned.push(id.as_str());
+            }
+        }
+    }
     facts.refresh().await?;
-    facts
+    let settled = facts
         .read(|fold| {
             intended
-                .into_iter()
-                .filter_map(|id| {
-                    let settled = fold.settled_output(&id).cloned()?;
-                    Some((id, settled))
-                })
-                .collect()
+                .iter()
+                .filter_map(|id| Some((id.clone(), fold.settled_output(id).cloned()?)))
+                .collect::<HashMap<_, _>>()
         })
-        .await
+        .await?;
+    if abandoned.iter().any(|id| !settled.contains_key(*id)) {
+        return Err(NanocodeError::InvalidExecutionPolicy(
+            "a Codex call the runtime abandoned has no result in its fact log".into(),
+        ));
+    }
+    Ok(settled)
 }
 
 pub(super) fn named_outputs(

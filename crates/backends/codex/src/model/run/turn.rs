@@ -834,21 +834,17 @@ impl ModelRun {
         self.commit_interrupted_checkpoint(settled)
     }
 
-    fn settled_aborts(
-        &self,
-    ) -> impl Future<Output = Result<HashMap<String, ResponseItem>>> + use<> {
+    async fn settled_aborts(&mut self) -> Result<HashMap<String, ResponseItem>> {
         let open = self
             .active_tool_calls
             .iter()
             .map(|call| call.call_id.clone())
             .collect::<Vec<_>>();
-        let steps = self.execution_steps.clone();
-        async move {
-            match &steps {
-                Some(steps) => super::facts::settled_aborts(steps, open).await,
-                None => Ok(HashMap::new()),
-            }
-        }
+        let Some(steps) = self.execution_steps.clone() else {
+            return Ok(HashMap::new());
+        };
+        let tools = self.session.as_ref().map(|session| &session.tools);
+        super::facts::settled_aborts(&steps, tools, open).await
     }
 
     pub(super) fn checkpoint_from_session(

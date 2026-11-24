@@ -268,6 +268,11 @@ type CodeQuiet = Arc<dyn Fn() -> bool + Send + Sync>;
 type CodeTurnCleanup = Arc<dyn Fn(ClaudeToolProgress) -> BackendFuture<()> + Send + Sync>;
 type NestedToolLookup = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 type ToolRecovery = Arc<dyn Fn(&str, ClaudeToolInvocation) -> ToolResultFuture + Send + Sync>;
+type ToolAbandon = Arc<
+    dyn Fn(String) -> BackendFuture<std::result::Result<Option<nanocode_tool_host::ToolOutput>, String>>
+        + Send
+        + Sync,
+>;
 
 pub(crate) const NOT_DISPATCHED: &str =
     "the hand never received this operation; it was not dispatched";
@@ -374,6 +379,7 @@ pub struct ClaudeTools {
     pub(crate) code_quiet: Vec<CodeQuiet>,
     pub(crate) nested_tools: Option<NestedToolLookup>,
     pub(crate) recovery: Option<ToolRecovery>,
+    pub(crate) abandon: Option<ToolAbandon>,
     pub(crate) shared_catalog: Option<(nanocode_tool_host::Tools, std::path::PathBuf, AgentHandle)>,
     pub(crate) shared_tool_names: HashSet<String>,
     pub(crate) shared_shutdown: Option<ToolCleanup>,
@@ -420,6 +426,7 @@ impl nanocode_tools::ToolCollection for ClaudeTools {
             self.code_quiet = replacement.code_quiet;
             self.nested_tools = replacement.nested_tools;
             self.recovery = replacement.recovery;
+            self.abandon = replacement.abandon;
             self.shared_catalog = replacement.shared_catalog;
             return Ok(self);
         }
@@ -3682,6 +3689,7 @@ struct State {
     code_only: bool,
     nested_tools: Option<NestedToolLookup>,
     recovery: Option<ToolRecovery>,
+    abandon: Option<ToolAbandon>,
     parallel_tools: bool,
 
     parallel_safe_tools: HashSet<String>,

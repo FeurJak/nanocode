@@ -1008,7 +1008,7 @@ impl State {
         } else if let Some(handler) = handler {
             nanocode_sync::select! {
                 result = self.call_tool(id, name, called, handler, events, (cursor, cancel, None)) => result?,
-                () = cancel.cancelled() => match self.cancelled_fact(id).await? {
+                () = cancel.cancelled() => match self.abandoned(id).await? {
                     Some(settled) => settled,
                     None => unknown(),
                 },

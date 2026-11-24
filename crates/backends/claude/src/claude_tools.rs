@@ -150,6 +150,11 @@ pub(super) fn install(
         let name = name.to_owned();
         Box::pin(async move { Call::recover(&runtime, &name, &invocation).await })
     }));
+    let abandon = Arc::clone(&runtime);
+    native.abandon = Some(Arc::new(move |call_id| {
+        let runtime = Arc::clone(&abandon);
+        Box::pin(async move { runtime.abandon(&call_id).await })
+    }));
     let preempt = Arc::clone(&guard);
     native.code_turn_preempt.push(Arc::new(move || {
         let guard = Arc::clone(&preempt);

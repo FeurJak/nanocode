@@ -666,6 +666,13 @@ impl EmbeddedToolRuntime {
             .collect()
     }
 
+    pub async fn abandon(&self, call_id: &str) -> Result<Option<ToolOutput>, String> {
+        match &self.effect_gate {
+            Some(gate) => gate.abandon(call_id).await,
+            None => Ok(None),
+        }
+    }
+
     pub async fn recover_tool(&self, name: &str, context: ToolContext<'_>) -> Option<ToolOutput> {
         self.recovery
             .as_ref()?

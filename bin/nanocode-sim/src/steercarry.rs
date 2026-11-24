@@ -51,15 +51,17 @@ pub enum CarryMutation {
     IgnoresEarlierRead,
     IgnoresPrunedReceipts,
     CodexFactDropped,
+    GateDropped,
 }
 
 impl CarryMutation {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::None,
         Self::CarryAsText,
         Self::IgnoresEarlierRead,
         Self::IgnoresPrunedReceipts,
         Self::CodexFactDropped,
+        Self::GateDropped,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -75,6 +77,7 @@ impl CarryMutation {
             Self::IgnoresEarlierRead => "carry_ignores_earlier_read",
             Self::IgnoresPrunedReceipts => "carry_ignores_pruned_receipts",
             Self::CodexFactDropped => "codex_fact_dropped",
+            Self::GateDropped => "carry_gate_dropped",
         }
     }
 
@@ -84,7 +87,7 @@ impl CarryMutation {
             Self::IgnoresPrunedReceipts => {
                 nanocode_durability::sim::Mutation::CarryIgnoresPrunedReceipts
             }
-            Self::None | Self::CarryAsText | Self::CodexFactDropped => {
+            Self::None | Self::CarryAsText | Self::CodexFactDropped | Self::GateDropped => {
                 nanocode_durability::sim::Mutation::None
             }
         }
@@ -196,17 +199,21 @@ impl nanocode::FunctionHandler for Hold {
     }
 }
 
-fn tools(wire: &Arc<Wire>) -> Tools {
-    Tools::builder()
+fn tools(wire: &Arc<Wire>, gate: Option<Arc<dyn nanocode::turnlog::EffectGate>>) -> Tools {
+    let builder = Tools::builder()
         .without_defaults()
         .tool(nanocode::FunctionTool::new(
             TOOL,
             "Wait until the operator releases the hold",
             json!({"type": "object", "properties": {}}),
             Arc::new(Hold(Arc::clone(wire))),
-        ))
-        .build()
-        .expect("the steer carry tools build")
+        ));
+    match gate {
+        Some(gate) => builder.effect_gate(gate),
+        None => builder,
+    }
+    .build()
+    .expect("the steer carry tools build")
 }
 
 struct ClaudeWire(Arc<Wire>);
@@ -344,9 +351,14 @@ fn event_stream() -> nanocode_http::types::HeaderMap {
     headers
 }
 
-fn runtime(backend: Backend, wire: &Arc<Wire>, store: SessionStore) -> Result<Nanocode, String> {
+fn runtime(
+    backend: Backend,
+    wire: &Arc<Wire>,
+    store: SessionStore,
+    gate: Option<Arc<dyn nanocode::turnlog::EffectGate>>,
+) -> Result<Nanocode, String> {
     let builder = Nanocode::builder()
-        .tools(tools(wire))
+        .tools(tools(wire, gate))
         .runner_management(false)
         .thinking(Thinking::Low)
         .workspace(std::env::temp_dir())
@@ -440,6 +452,22 @@ async fn first_turn(agent: &nanocode::Agent, wire: &Wire, first: First) -> Resul
     }
 }
 
+async fn settled_first(log: &nanocode::turnlog::OneLog) -> Result<(), String> {
+    let open = log
+        .read(|fold| {
+            fold.intents()
+                .map(|(call_id, _, _)| call_id.to_owned())
+                .collect::<Vec<_>>()
+        })
+        .await;
+    if open.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "the first turn ended with intents {open:?} and no result for them"
+    ))
+}
+
 async fn carry_turn(
     agent: &nanocode::Agent,
     wire: &Wire,
@@ -450,7 +478,7 @@ async fn carry_turn(
     wire.plan(&[false]);
     wire.hang.store(hang, Ordering::Release);
     let request = match mutation {
-        CarryMutation::None | CarryMutation::CodexFactDropped => {
+        CarryMutation::None | CarryMutation::CodexFactDropped | CarryMutation::GateDropped => {
             PromptRequest::new("NEXTTURN continue").carry_steer(STEER_ID, Prompt::new(STEER_TEXT))
         }
         CarryMutation::IgnoresEarlierRead | CarryMutation::IgnoresPrunedReceipts => {
@@ -582,12 +610,19 @@ async fn epoch_work(
     media: &Media,
     seen: &Seen,
 ) -> Result<(), String> {
-    let (store, _parts) = media.open(case.store).await?;
-    let runtime = runtime(case.backend, wire, store.clone())?;
+    let (store, parts) = media.open(case.store).await?;
+    let gate = parts
+        .as_ref()
+        .filter(|_| mutation != CarryMutation::GateDropped)
+        .map(|parts| Arc::clone(&parts.gate));
+    let runtime = runtime(case.backend, wire, store.clone(), gate)?;
     let at = *seen.stage.get();
     let agent = open(&runtime, case.backend, at == Stage::Fresh).await?;
     if at == Stage::Fresh {
         first_turn(&agent, wire, case.first).await?;
+        if let Some(parts) = &parts {
+            settled_first(&parts.log).await?;
+        }
         seen.first_read.set(Some(read(&store).await?));
         seen.stage.set(Stage::BetweenTurns);
         if case.crash == Crash::BetweenTurns {
