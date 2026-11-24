@@ -81,7 +81,7 @@ pub(crate) struct Entry {
 
 #[derive(Clone, Debug, Default)]
 struct Delta {
-    cells: Vec<Record>,
+    cells: BTreeMap<u64, bool>,
     checkpoint: bool,
     keys: BTreeSet<String>,
 }
@@ -89,7 +89,12 @@ struct Delta {
 impl Delta {
     fn note(&mut self, record: &Record) {
         match record {
-            Record::Cell { .. } | Record::Forget { .. } => self.cells.push(record.clone()),
+            Record::Cell { cell, .. } => {
+                self.cells.entry(*cell).or_insert(false);
+            }
+            Record::Forget { cell, .. } => {
+                self.cells.insert(*cell, true);
+            }
             Record::Checkpoint { .. } | Record::Patched { .. } => self.checkpoint = true,
             Record::Stored { key, .. } if !self.keys.contains(key) => {
                 self.keys.insert(key.clone());
@@ -1394,8 +1399,22 @@ impl Fold {
                         state: owner.to_owned(),
                     })?;
                 }
-                for record in &delta.cells {
-                    take(record.clone())?;
+                for (cell, forgotten) in &delta.cells {
+                    if *forgotten {
+                        take(Record::Forget {
+                            cell: *cell,
+                            session: owner.to_owned(),
+                        })?;
+                    }
+                    let updates = self.cells.get(&(owner.to_owned(), *cell));
+                    for (position, update) in updates.into_iter().flatten().enumerate() {
+                        take(Record::Cell {
+                            cell: *cell,
+                            fresh: position == 0,
+                            session: owner.to_owned(),
+                            update: update.clone(),
+                        })?;
+                    }
                 }
                 Ok(checkpoint.is_some())
             }
