@@ -14,6 +14,7 @@ mod cellcalls;
 mod cells;
 mod children;
 mod claudefacts;
+mod codexfacts;
 mod controlplane;
 mod cost;
 mod disk;

@@ -50,14 +50,16 @@ pub enum CarryMutation {
     CarryAsText,
     IgnoresEarlierRead,
     IgnoresPrunedReceipts,
+    CodexFactDropped,
 }
 
 impl CarryMutation {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::None,
         Self::CarryAsText,
         Self::IgnoresEarlierRead,
         Self::IgnoresPrunedReceipts,
+        Self::CodexFactDropped,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -72,6 +74,7 @@ impl CarryMutation {
             Self::CarryAsText => "carry_steer_as_text",
             Self::IgnoresEarlierRead => "carry_ignores_earlier_read",
             Self::IgnoresPrunedReceipts => "carry_ignores_pruned_receipts",
+            Self::CodexFactDropped => "codex_fact_dropped",
         }
     }
 
@@ -81,7 +84,9 @@ impl CarryMutation {
             Self::IgnoresPrunedReceipts => {
                 nanocode_durability::sim::Mutation::CarryIgnoresPrunedReceipts
             }
-            Self::None | Self::CarryAsText => nanocode_durability::sim::Mutation::None,
+            Self::None | Self::CarryAsText | Self::CodexFactDropped => {
+                nanocode_durability::sim::Mutation::None
+            }
         }
     }
 
@@ -102,6 +107,7 @@ pub struct CarryStats {
     pub epochs: u64,
     pub crashes: u64,
     pub model_calls: u64,
+    pub fact_requests: u64,
 }
 
 impl CarryStats {
@@ -111,6 +117,7 @@ impl CarryStats {
         self.epochs += other.epochs;
         self.crashes += other.crashes;
         self.model_calls += other.model_calls;
+        self.fact_requests += other.fact_requests;
     }
 }
 
@@ -443,7 +450,7 @@ async fn carry_turn(
     wire.plan(&[false]);
     wire.hang.store(hang, Ordering::Release);
     let request = match mutation {
-        CarryMutation::None => {
+        CarryMutation::None | CarryMutation::CodexFactDropped => {
             PromptRequest::new("NEXTTURN continue").carry_steer(STEER_ID, Prompt::new(STEER_TEXT))
         }
         CarryMutation::IgnoresEarlierRead | CarryMutation::IgnoresPrunedReceipts => {
@@ -559,6 +566,7 @@ struct Run {
     wrong: Vec<String>,
     epochs: u64,
     crashes: u64,
+    fact_requests: u64,
 }
 
 struct Seen {
@@ -605,12 +613,12 @@ async fn epoch_work(
     Ok(())
 }
 
-fn epoch(
+fn epoch<T>(
     seed: u64,
     clock: &Arc<Clock>,
     label: &str,
-    work: impl Future<Output = Result<(), String>>,
-) -> (Ended, Option<Result<(), String>>) {
+    work: impl Future<Output = Result<T, String>>,
+) -> (Ended, Option<Result<T, String>>) {
     let result = std::cell::RefCell::new(None);
     let mut executor = Executor::new(Arc::clone(clock), Rng::derive(seed, label));
     let task: Task<'_> = Box::pin(async {
@@ -686,6 +694,32 @@ fn simulate_case(seed: u64, case: &Case, mutation: CarryMutation) -> (Run, u64) 
     let calls = wire.calls.load(Ordering::Acquire);
     if !run.wrong.is_empty() {
         return (run, calls);
+    }
+    if case.store == Store::Log && case.backend == Backend::Codex {
+        let bodies = wire.bodies.get();
+        let checked = epoch(seed, &clock, &format!("{label} facts"), async {
+            let (_, parts) = media.open(Store::Log).await?;
+            let parts = parts.ok_or("a log store opened without its turn log")?;
+            crate::codexfacts::check(
+                &parts.log,
+                SESSION,
+                &bodies,
+                mutation == CarryMutation::CodexFactDropped,
+            )
+            .await
+        });
+        match checked {
+            (Ended::Finished, Some(Ok(checked))) => run.fact_requests += checked.matched,
+            (Ended::Finished, Some(Err(error))) => {
+                run.wrong.push(error);
+                return (run, calls);
+            }
+            (ended, _) => {
+                run.wrong
+                    .push(format!("the fact check ended {ended:?} without a result"));
+                return (run, calls);
+            }
+        }
     }
     let stage = *seen.stage.get();
     if stage != Stage::Done {
@@ -800,6 +834,7 @@ fn simulate(seed: u64, mutation: CarryMutation) -> Outcome {
         stats.epochs += run.epochs;
         stats.crashes += run.crashes;
         stats.model_calls += calls;
+        stats.fact_requests += run.fact_requests;
         let name = format!(
             "{:?} {:?} {:?} {:?}",
             case.backend, case.first, case.crash, case.store

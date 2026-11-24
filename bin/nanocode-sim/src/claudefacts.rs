@@ -30,7 +30,7 @@ pub fn normalized(mut value: Value) -> Value {
     value
 }
 
-fn json<'a>(
+pub fn json<'a>(
     value: &'a FactValue,
     digests: &[Digest],
     blobs: &'a BTreeMap<Digest, Box<RawValue>>,
