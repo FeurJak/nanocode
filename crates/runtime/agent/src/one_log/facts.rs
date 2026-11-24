@@ -31,10 +31,11 @@ pub mod sim {
         AdmissionCopied,
         CacheGap,
         HostCopied,
+        CancelLeavesIntent,
     }
 
     impl Mutation {
-        pub const ALL: [Self; 8] = [
+        pub const ALL: [Self; 9] = [
             Self::CommitBuffered,
             Self::UnseenSkipped,
             Self::IntentReplayed,
@@ -43,6 +44,7 @@ pub mod sim {
             Self::AdmissionCopied,
             Self::CacheGap,
             Self::HostCopied,
+            Self::CancelLeavesIntent,
         ];
 
         #[must_use]
@@ -57,6 +59,7 @@ pub mod sim {
                 Self::AdmissionCopied => "admission_copied",
                 Self::CacheGap => "cache_gap",
                 Self::HostCopied => "host_copied",
+                Self::CancelLeavesIntent => "cancel_leaves_intent",
             }
         }
 
@@ -327,28 +330,52 @@ fn unknown_outcome() -> Result<Box<RawValue>, StoreError> {
         .map_err(|error| StoreError::NotCommitted(format!("encode an unknown outcome: {error}")))
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum Owners {
+    TurnOrNone,
+    Turn,
+}
+
+pub(super) fn settle(
+    lease: &mut Lease<'_>,
+    turn: &str,
+    owners: Owners,
+) -> Result<Vec<String>, StoreError> {
+    let dangling = lease
+        .fold()
+        .intents()
+        .filter(|(_, _, call)| match (owners, call.turn.as_deref()) {
+            (_, Some(owner)) => owner == turn,
+            (Owners::TurnOrNone, None) => true,
+            (Owners::Turn, None) => false,
+        })
+        .map(|(call_id, state, _)| (call_id.to_owned(), state.map(str::to_owned)))
+        .collect::<Vec<_>>();
+    if dangling.is_empty() {
+        return Ok(Vec::new());
+    }
+    let output = unknown_outcome()?;
+    for (call_id, state) in &dangling {
+        let result: OwnedFact<Box<RawValue>> = Fact::EffectResult(EffectResult {
+            call_id: call_id.clone(),
+            output: output.clone(),
+        });
+        lease.append_owned(state.as_deref(), &result)?;
+    }
+    Ok(dangling.into_iter().map(|(call_id, _)| call_id).collect())
+}
+
 impl OneLog {
     pub async fn settle_intents(&self, turn: &str) -> Result<Vec<String>, StoreError> {
         let mut lease = self.log.lease_within().await?;
         lease.secure().await?;
-        let dangling = lease
-            .fold()
-            .intents()
-            .filter(|(_, _, call)| call.turn.as_deref().is_none_or(|owner| owner == turn))
-            .map(|(call_id, state, _)| (call_id.to_owned(), state.map(str::to_owned)))
-            .collect::<Vec<_>>();
-        if dangling.is_empty() || sim::mutated(sim::Mutation::IntentReplayed) {
+        if sim::mutated(sim::Mutation::IntentReplayed) {
             return Ok(Vec::new());
         }
-        let output = unknown_outcome()?;
-        for (call_id, state) in &dangling {
-            let result: OwnedFact<Box<RawValue>> = Fact::EffectResult(EffectResult {
-                call_id: call_id.clone(),
-                output: output.clone(),
-            });
-            lease.append_owned(state.as_deref(), &result)?;
+        let settled = settle(&mut lease, turn, Owners::TurnOrNone)?;
+        if !settled.is_empty() {
+            lease.commit(Point::Recovery).await?;
         }
-        lease.commit(Point::Recovery).await?;
-        Ok(dangling.into_iter().map(|(call_id, _)| call_id).collect())
+        Ok(settled)
     }
 }

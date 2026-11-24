@@ -21,6 +21,7 @@ pub enum Mutation {
     SealedRelowered,
     FactsResident,
     CacheNeverDue,
+    ScopedInputLowered,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

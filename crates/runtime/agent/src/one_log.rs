@@ -362,6 +362,13 @@ fn put_host(
     put_fact(lease, &fact).map(drop)
 }
 
+fn settle_stopped(lease: &mut nanocode_turnlog::Lease<'_>, turn: &str) -> Result<(), StoreError> {
+    if facts::sim::mutated(facts::sim::Mutation::CancelLeavesIntent) {
+        return Ok(());
+    }
+    facts::settle(lease, turn, facts::Owners::Turn).map(drop)
+}
+
 fn status_fact(turn: &str, status: TurnStatus) -> RuntimeFact {
     Fact::Marker(Marker::Status {
         turn: turn.to_owned(),
@@ -983,6 +990,7 @@ impl OneLog {
             Phase::Running {
                 cancelling: false, ..
             } => {
+                settle_stopped(&mut lease, request_id)?;
                 put_fact(&mut lease, &status_fact(request_id, TurnStatus::Cancelling))?;
                 lease.commit(Point::Cancel).await?;
                 let record = lease.fold().turn(request_id).map(record_of).transpose()?;
@@ -1028,6 +1036,7 @@ impl OneLog {
         if !running {
             return Ok(());
         }
+        settle_stopped(&mut lease, request_id)?;
         put_fact(
             &mut lease,
             &status_fact(

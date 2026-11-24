@@ -39,6 +39,7 @@ const SNAPSHOT_ROWS_MIN: u64 = 2;
 const SNAPSHOT_ROWS_MAX: u64 = 8;
 const SWAP_PPM: u64 = 300_000;
 const HOST_PPM: u64 = 100_000;
+const CANCEL_PPM: u64 = 100_000;
 const HOST_KEYS: u64 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,10 +55,12 @@ pub enum OneLogFactsMutation {
     CacheGap,
     CacheNeverDue,
     HostCopied,
+    CancelLeavesIntent,
+    ScopedInputLowered,
 }
 
 impl OneLogFactsMutation {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 13] = [
         Self::None,
         Self::FoldReadsUnlogged,
         Self::CommitBuffered,
@@ -69,6 +72,8 @@ impl OneLogFactsMutation {
         Self::CacheGap,
         Self::CacheNeverDue,
         Self::HostCopied,
+        Self::CancelLeavesIntent,
+        Self::ScopedInputLowered,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -90,6 +95,8 @@ impl OneLogFactsMutation {
             Self::CacheGap => "cache_gap",
             Self::CacheNeverDue => "cache_never_due",
             Self::HostCopied => "host_copied",
+            Self::CancelLeavesIntent => "cancel_leaves_intent",
+            Self::ScopedInputLowered => "scoped_input_lowered",
         }
     }
 
@@ -111,7 +118,11 @@ impl OneLogFactsMutation {
             Self::AdmissionCopied => facts_sim::Mutation::AdmissionCopied,
             Self::CacheGap => facts_sim::Mutation::CacheGap,
             Self::HostCopied => facts_sim::Mutation::HostCopied,
-            Self::None | Self::FoldReadsUnlogged | Self::CacheNeverDue => facts_sim::Mutation::None,
+            Self::CancelLeavesIntent => facts_sim::Mutation::CancelLeavesIntent,
+            Self::None
+            | Self::FoldReadsUnlogged
+            | Self::CacheNeverDue
+            | Self::ScopedInputLowered => facts_sim::Mutation::None,
         }
     }
 }
@@ -133,6 +144,7 @@ pub struct OneLogFactsStats {
     pub skipped: u64,
     pub replayed: u64,
     pub hosts: u64,
+    pub cancelled: u64,
 }
 
 impl OneLogFactsStats {
@@ -152,6 +164,7 @@ impl OneLogFactsStats {
         self.skipped += other.skipped;
         self.replayed += other.replayed;
         self.hosts += other.hosts;
+        self.cancelled += other.cancelled;
     }
 }
 
@@ -474,8 +487,25 @@ impl World {
         Ok(())
     }
 
+    fn check_scoped_inputs(&self) -> Result<(), String> {
+        let log = self.log.as_ref().expect("the facts log is open");
+        let turns = self.turns;
+        let phantom = block_on(log.read(|fold| {
+            (1..=turns)
+                .map(|turn| format!("admitted-{turn}"))
+                .find(|turn| fold.turn(turn).is_some())
+        }));
+        match phantom {
+            Some(turn) => Err(format!(
+                "a session's own Input for {turn} became a turn of the log"
+            )),
+            None => Ok(()),
+        }
+    }
+
     fn check(&mut self) -> Result<(), String> {
         self.stats.refolds += 1;
+        self.check_scoped_inputs()?;
         if self.expected > 0 {
             self.check_cached()?;
         }
@@ -684,6 +714,57 @@ impl World {
         self.turns_hold()
     }
 
+    fn cancel(&mut self, rng: &mut Rng) -> Result<(), String> {
+        let running = self
+            .submitted
+            .iter()
+            .filter(|(_, state)| *state == TurnState::Running)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        if running.is_empty() || self.outputs.is_empty() {
+            return Ok(());
+        }
+        let id = running[rng.pick(running.len())].clone();
+        let log = Arc::clone(self.log.as_ref().expect("the facts log is open"));
+        let cancelling = block_on(log.turn(&id))
+            .map_err(|error| format!("read turn {id}: {error}"))?
+            .is_some_and(|record| record.cancel_requested);
+        if cancelling {
+            return Ok(());
+        }
+        self.calls += 1;
+        let call_id = format!("call-{}", self.calls);
+        let model_out = self.outputs[rng.pick(self.outputs.len())];
+        let block = u32::try_from(rng.below(BLOCKS)).expect("a block index fits in u32");
+        let intent = Fact::Intent(Intent {
+            turn: Some(id.clone()),
+            call_id: call_id.clone(),
+            tool: TOOL.to_owned(),
+            target: IntentTarget::ToolUse(BlockRef { model_out, block }),
+        });
+        let live = self.live.take().expect("the facts fold is live");
+        let (live, _) = block_on(commit_fact(self.facts(), live, intent))
+            .map_err(|error| format!("commit the intent of {call_id}: {error}"))?;
+        self.live = Some(live);
+        self.expected += 1;
+        block_on(log.cancel(&id, &serde_json::Map::new()))
+            .map_err(|error| format!("cancel {id}: {error}"))?;
+        let open = block_on(log.read(|fold| fold.intent(&call_id).is_some()));
+        if open {
+            return Err(format!(
+                "cancelling {id} left its dispatched call {call_id} without a result"
+            ));
+        }
+        self.expected += 2;
+        self.durable = self.expected;
+        self.stats.cancelled += 1;
+        self.live = Some(
+            block_on(fold_facts::<Ledger>(self.facts()))
+                .map_err(|error| format!("refold after a cancel: {error}"))?,
+        );
+        self.check()
+    }
+
     fn turns_hold(&self) -> Result<(), String> {
         let log = self.log.as_ref().expect("the facts log is open");
         for (id, state) in &self.submitted {
@@ -707,6 +788,9 @@ impl World {
         if rng.chance(HOST_PPM) {
             self.host_field(rng)?;
         }
+        if rng.chance(CANCEL_PPM) {
+            self.cancel(rng)?;
+        }
         match rng.below(100) {
             0..88 => self.commit(rng),
             88..94 => {
@@ -723,10 +807,12 @@ impl World {
 
 fn run_seed(seed: u64, mutation: OneLogFactsMutation) -> Outcome {
     facts_sim::mutate(mutation.log_rule());
-    nanocode_turnlog::sim::mutate(if mutation == OneLogFactsMutation::CacheNeverDue {
-        nanocode_turnlog::sim::Mutation::CacheNeverDue
-    } else {
-        nanocode_turnlog::sim::Mutation::None
+    nanocode_turnlog::sim::mutate(match mutation {
+        OneLogFactsMutation::CacheNeverDue => nanocode_turnlog::sim::Mutation::CacheNeverDue,
+        OneLogFactsMutation::ScopedInputLowered => {
+            nanocode_turnlog::sim::Mutation::ScopedInputLowered
+        }
+        _ => nanocode_turnlog::sim::Mutation::None,
     });
     MUTATION.store(mutation as u8, std::sync::atomic::Ordering::SeqCst);
     crate::host::enter(seed, &Clock::new());

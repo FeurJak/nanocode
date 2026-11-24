@@ -2305,7 +2305,14 @@ impl Fold {
     }
 
     fn lower(&mut self, seq: u64, state: Option<u32>, fact: &StoredFact) -> Result<(), StoreError> {
+        let runtime =
+            state.is_none() || crate::sim::mutated(crate::sim::Mutation::ScopedInputLowered);
         match fact {
+            Fact::Input(_) | Fact::Marker(Marker::Status { .. } | Marker::Recovery { .. })
+                if !runtime =>
+            {
+                Ok(())
+            }
             Fact::Input(input) => self.lower_input(seq, input),
             Fact::Marker(Marker::Status { turn, status }) => {
                 if self.turn(turn).is_none() && self.retired.contains_key(&tag(turn)) {
