@@ -262,6 +262,7 @@ pub struct Fold {
     fact_row: u64,
     fact_segments: Vec<Segment>,
     folded_through: u64,
+    uncached: BTreeMap<String, u64>,
     state_names: Vec<String>,
     state_index: BTreeMap<String, u32>,
     derived_calls: BTreeMap<String, Option<u32>>,
@@ -2373,6 +2374,58 @@ impl Fold {
         self.fold_in(&record, None)
     }
 
+    #[must_use]
+    pub fn cache_due(&self, state: &str) -> bool {
+        if crate::sim::mutated(crate::sim::Mutation::CacheNeverDue) {
+            return false;
+        }
+        let cached = self
+            .hosts
+            .get(&cache_key(state))
+            .map_or(0, |value| value.get().len() as u64);
+        let ratio = crate::SNAPSHOT_RATIO as u64;
+        self.uncached
+            .get(state)
+            .is_some_and(|bytes| *bytes > ratio * cached)
+    }
+
+    pub fn cached_state(&self, state: &str) -> Result<Option<Snapshot>, StoreError> {
+        self.hosts
+            .get(&cache_key(state))
+            .map(|value| {
+                serde_json::from_str(value.get()).map_err(|error| {
+                    invalid(format!("cached fold of {state} does not decode: {error}"))
+                })
+            })
+            .transpose()
+    }
+
+    fn fact_bytes(&self, fact: &StoredFact) -> u64 {
+        let bytes = std::cell::Cell::new(0);
+        let measured: Result<_, std::convert::Infallible> = fact.try_map(
+            |value| {
+                bytes.set(
+                    bytes.get()
+                        + match value {
+                            Value::Inline(json) => json.get().len() as u64,
+                            Value::Blob(blob) => self
+                                .values
+                                .digest(*blob)
+                                .and_then(|digest| self.stored.get(digest.key().as_str()))
+                                .map_or(0, |json| json.len() as u64),
+                        },
+                );
+                Ok(())
+            },
+            |decision| {
+                bytes.set(bytes.get() + decision.get().len() as u64);
+                Ok(())
+            },
+        );
+        let Ok(_) = measured;
+        bytes.get()
+    }
+
     pub fn cached(&self) -> Result<Option<Snapshot>, StoreError> {
         self.hosts
             .get(FOLD_SNAPSHOT_KEY)
@@ -2438,6 +2491,10 @@ impl Fold {
                         "fact {seq} does not follow fact {}",
                         next - 1
                     )));
+                }
+                if let Some(state) = state.as_deref() {
+                    let bytes = self.fact_bytes(fact);
+                    *self.uncached.entry(state.to_owned()).or_default() += bytes;
                 }
                 let state = state.as_deref().map(|state| self.state_id(state));
                 if *seq > self.folded_through
@@ -2637,6 +2694,9 @@ impl Fold {
                 self.drop_turns(|turn| gone.contains(&turn.id));
             }
             Record::Host { key, value } => {
+                if let Some(state) = cached_state_of(key) {
+                    self.uncached.remove(state);
+                }
                 self.hosts.insert(key.clone(), value.clone());
             }
             Record::Model { response, turn } => {
@@ -3052,6 +3112,15 @@ impl Fold {
         })?;
         Ok(())
     }
+}
+
+#[must_use]
+pub fn cache_key(state: &str) -> String {
+    format!("{FOLD_SNAPSHOT_KEY}\n{state}")
+}
+
+fn cached_state_of(key: &str) -> Option<&str> {
+    key.strip_prefix(FOLD_SNAPSHOT_KEY)?.strip_prefix('\n')
 }
 
 #[must_use]

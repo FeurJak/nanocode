@@ -1635,6 +1635,20 @@ impl Lease<'_> {
         .await
     }
 
+    pub fn cache_state(&mut self, state: &str, snapshot: &FoldSnapshot) -> Result<(), StoreError> {
+        assert!(
+            snapshot.seq < self.writer.fold.next_fact(),
+            "a cached fold names a fact the log holds"
+        );
+        let value = serde_json::value::to_raw_value(snapshot).map_err(|error| {
+            StoreError::NotCommitted(format!("encode the cached fold of {state}: {error}"))
+        })?;
+        self.push(Record::Host {
+            key: crate::fold::cache_key(state),
+            value,
+        })
+    }
+
     pub fn cache(&mut self, snapshot: &FoldSnapshot) -> Result<(), StoreError> {
         assert!(
             snapshot.seq < self.writer.fold.next_fact(),

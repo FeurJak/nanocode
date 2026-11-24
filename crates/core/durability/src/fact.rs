@@ -364,6 +364,14 @@ pub trait FactSink {
     fn put_blob(&mut self, digest: &Digest, json: &RawValue) -> Result<(), FoldError>;
 
     fn append(&mut self, fact: StoredFact) -> Result<u64, FoldError>;
+
+    fn cache_due(&self) -> bool {
+        false
+    }
+
+    fn cache(&mut self, _snapshot: &Snapshot) -> Result<(), FoldError> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

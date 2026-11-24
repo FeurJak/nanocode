@@ -261,9 +261,9 @@ impl Hold {
     #[must_use]
     pub fn turn(&self) -> Option<&str> {
         match self {
-            Self::Waiting { turn, .. } | Self::Running { turn, .. } | Self::Settled { turn, .. } => {
-                turn.as_deref()
-            }
+            Self::Waiting { turn, .. }
+            | Self::Running { turn, .. }
+            | Self::Settled { turn, .. } => turn.as_deref(),
         }
     }
 
@@ -277,8 +277,12 @@ impl Hold {
         let Some(previous) = previous else {
             return true;
         };
-        if let (Self::Settled { turn: Some(pruned), .. }, Self::Waiting { turn, .. }) =
-            (previous, self)
+        if let (
+            Self::Settled {
+                turn: Some(pruned), ..
+            },
+            Self::Waiting { turn, .. },
+        ) = (previous, self)
             && previous.call_id() != self.call_id()
         {
             return turn.as_deref() != Some(pruned.as_str());

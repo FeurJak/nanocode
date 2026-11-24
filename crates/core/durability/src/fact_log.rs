@@ -28,6 +28,14 @@ pub trait FactLogs: Send + Sync {
 pub trait FactLog: Send + Sync {
     fn replay(&self) -> StoreFuture<'_, Result<Replay, StoreError>>;
 
+    fn replay_cached<'a>(
+        &'a self,
+        _family: &'a str,
+        _format: u32,
+    ) -> StoreFuture<'a, Result<Replay, StoreError>> {
+        self.replay()
+    }
+
     fn append<'a>(
         &'a self,
         after: u64,
@@ -48,6 +56,14 @@ impl FactSink for Forward<'_> {
 
     fn append(&mut self, fact: StoredFact) -> Result<u64, FoldError> {
         self.0.append(fact)
+    }
+
+    fn cache_due(&self) -> bool {
+        self.0.cache_due()
+    }
+
+    fn cache(&mut self, snapshot: &Snapshot) -> Result<(), FoldError> {
+        self.0.cache(snapshot)
     }
 }
 
@@ -86,7 +102,7 @@ fn caught_up<F: DurableFold>(
 }
 
 pub async fn fold_facts<F: DurableFold>(log: &dyn FactLog) -> Result<Folded<F>, StoreError> {
-    folded(log.replay().await?).map_err(StoreError::from)
+    folded(log.replay_cached(F::FAMILY, F::FORMAT).await?).map_err(StoreError::from)
 }
 
 pub async fn commit_fact<F>(
@@ -106,7 +122,11 @@ where
             after,
             Box::new(move |unseen, sink| {
                 let folded = caught_up(folded, unseen)?;
-                let (folded, seq) = folded.commit(&mut Forward(sink), fact)?;
+                let mut forward = Forward(sink);
+                let (folded, seq) = folded.commit(&mut forward, fact)?;
+                if forward.cache_due() {
+                    forward.cache(&folded.snapshot()?)?;
+                }
                 *slot = Some(folded);
                 Ok(seq)
             }),

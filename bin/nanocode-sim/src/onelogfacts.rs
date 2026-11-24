@@ -49,10 +49,12 @@ pub enum OneLogFactsMutation {
     IntentCopied,
     ScopeLeaks,
     AdmissionCopied,
+    CacheGap,
+    CacheNeverDue,
 }
 
 impl OneLogFactsMutation {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 10] = [
         Self::None,
         Self::FoldReadsUnlogged,
         Self::CommitBuffered,
@@ -61,6 +63,8 @@ impl OneLogFactsMutation {
         Self::IntentCopied,
         Self::ScopeLeaks,
         Self::AdmissionCopied,
+        Self::CacheGap,
+        Self::CacheNeverDue,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -79,6 +83,8 @@ impl OneLogFactsMutation {
             Self::IntentCopied => "intent_copied",
             Self::ScopeLeaks => "scope_leaks",
             Self::AdmissionCopied => "admission_copied",
+            Self::CacheGap => "cache_gap",
+            Self::CacheNeverDue => "cache_never_due",
         }
     }
 
@@ -98,7 +104,8 @@ impl OneLogFactsMutation {
             Self::IntentCopied => facts_sim::Mutation::IntentCopied,
             Self::ScopeLeaks => facts_sim::Mutation::ScopeLeaks,
             Self::AdmissionCopied => facts_sim::Mutation::AdmissionCopied,
-            Self::None | Self::FoldReadsUnlogged => facts_sim::Mutation::None,
+            Self::CacheGap => facts_sim::Mutation::CacheGap,
+            Self::None | Self::FoldReadsUnlogged | Self::CacheNeverDue => facts_sim::Mutation::None,
         }
     }
 }
@@ -116,6 +123,9 @@ pub struct OneLogFactsStats {
     pub children: u64,
     pub submitted: u64,
     pub crashes: u64,
+    pub cached: u64,
+    pub skipped: u64,
+    pub replayed: u64,
 }
 
 impl OneLogFactsStats {
@@ -131,6 +141,9 @@ impl OneLogFactsStats {
         self.children += other.children;
         self.submitted += other.submitted;
         self.crashes += other.crashes;
+        self.cached += other.cached;
+        self.skipped += other.skipped;
+        self.replayed += other.replayed;
     }
 }
 
@@ -399,8 +412,26 @@ impl World {
         self.check()
     }
 
+    fn check_cached(&mut self) -> Result<(), String> {
+        let replay = block_on(self.facts().replay_cached(Ledger::FAMILY, Ledger::FORMAT))
+            .map_err(|error| format!("replay the session's facts from its cache: {error}"))?;
+        let Some(snapshot) = replay.snapshot else {
+            return Err(format!(
+                "the session committed {} facts but replays them without a cached fold",
+                self.expected
+            ));
+        };
+        self.stats.cached += 1;
+        self.stats.skipped += snapshot.applied;
+        self.stats.replayed += replay.facts.len() as u64;
+        Ok(())
+    }
+
     fn check(&mut self) -> Result<(), String> {
         self.stats.refolds += 1;
+        if self.expected > 0 {
+            self.check_cached()?;
+        }
         let folded = block_on(fold_facts::<Ledger>(self.facts()))
             .map_err(|error| format!("refold the log: {error}"))?;
         let live = self.live.as_ref().expect("the facts fold is live");
@@ -640,6 +671,11 @@ impl World {
 
 fn run_seed(seed: u64, mutation: OneLogFactsMutation) -> Outcome {
     facts_sim::mutate(mutation.log_rule());
+    nanocode_turnlog::sim::mutate(if mutation == OneLogFactsMutation::CacheNeverDue {
+        nanocode_turnlog::sim::Mutation::CacheNeverDue
+    } else {
+        nanocode_turnlog::sim::Mutation::None
+    });
     MUTATION.store(mutation as u8, std::sync::atomic::Ordering::SeqCst);
     crate::host::enter(seed, &Clock::new());
     let mut rng = Rng::derive(seed, "one_log_facts");
@@ -685,6 +721,7 @@ fn run_seed(seed: u64, mutation: OneLogFactsMutation) -> Outcome {
             .map(|message| format!("step {step}: {message}"));
     }
     facts_sim::mutate(facts_sim::Mutation::None);
+    nanocode_turnlog::sim::mutate(nanocode_turnlog::sim::Mutation::None);
     MUTATION.store(
         OneLogFactsMutation::None as u8,
         std::sync::atomic::Ordering::SeqCst,

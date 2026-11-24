@@ -331,12 +331,7 @@ impl<H: Sql + Send + Sync + ?Sized> SqlParts<H> {
         let postgres = self.postgres();
         let encoded: Vec<(&str, Vec<(u64, &str, Option<String>)>)> = batch
             .iter()
-            .map(|append| {
-                (
-                    append.scope.as_ref(),
-                    data(postgres, &append.rows),
-                )
-            })
+            .map(|append| (append.scope.as_ref(), data(postgres, &append.rows)))
             .collect();
         let json = serde_json::to_string(&encoded)
             .map_err(|error| StoreError::Backend(format!("encode batch: {error}")))?;

@@ -21,7 +21,7 @@ pub use effect::{EffectClass, Effects};
 pub use file::{FileLog, FileOptions};
 pub use fold::{
     Checkpoint, Event, FOLD_SNAPSHOT_KEY, Fold, OpenCall, Phase, RETIRED_KEY, Recovered, Retired,
-    Retry, Segment, Turn, input_digest, tag,
+    Retry, Segment, Turn, cache_key, input_digest, tag,
 };
 pub use hold::{Answer, Answered, HeldCall, Hold, HoldError, Resumption};
 pub use host::{

@@ -153,7 +153,10 @@ impl<H: Sql + ?Sized> WakeIndex<H> {
                     .cloned()
                     .flatten()
                     .ok_or_else(|| invalid("a due row has no scope"))?;
-                Ok((scope, number(row.get(1).and_then(Option::as_ref), "due_ms")?))
+                Ok((
+                    scope,
+                    number(row.get(1).and_then(Option::as_ref), "due_ms")?,
+                ))
             })
             .collect()
     }
@@ -173,16 +176,20 @@ impl<H: Sql + ?Sized> WakeIndex<H> {
         limit: usize,
     ) -> Result<Vec<String>, StoreError> {
         let limit = limit.to_string();
-        self.read("wake_index_listening", &LISTENING, vec![topic, after, &limit])
-            .await?
-            .into_iter()
-            .map(|row| {
-                row.into_iter()
-                    .next()
-                    .flatten()
-                    .ok_or_else(|| invalid("a listening row has no scope"))
-            })
-            .collect()
+        self.read(
+            "wake_index_listening",
+            &LISTENING,
+            vec![topic, after, &limit],
+        )
+        .await?
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .next()
+                .flatten()
+                .ok_or_else(|| invalid("a listening row has no scope"))
+        })
+        .collect()
     }
 }
 
@@ -192,9 +199,12 @@ impl<H: Sql + Send + Sync + ?Sized + 'static> WakeRider for WakeIndex<H> {
     }
 
     fn statements(&self, scope: &str, summary: &WakeSummary) -> Statements {
-        let due = summary.next_due.map(|at| at.to_string()).unwrap_or_default();
-        let topics = serde_json::to_string(&summary.topics)
-            .expect("a list of topics encodes as JSON");
+        let due = summary
+            .next_due
+            .map(|at| at.to_string())
+            .unwrap_or_default();
+        let topics =
+            serde_json::to_string(&summary.topics).expect("a list of topics encodes as JSON");
         vec![
             (self.pick(&CLEAR_DUE), vec![scope.to_owned()]),
             (self.pick(&SET_DUE), vec![scope.to_owned(), due]),

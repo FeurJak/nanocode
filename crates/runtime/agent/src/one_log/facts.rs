@@ -12,7 +12,7 @@ use crate::durability::{
     StoreError, StoreFuture,
     facts::{
         Append, Digest, EffectResult, Fact, FactLog, FactLogs, FactSink, FoldError, Marker,
-        OwnedFact, Replay, StoredFact, Value,
+        OwnedFact, Replay, Snapshot, StoredFact, Value,
     },
 };
 
@@ -29,16 +29,18 @@ pub mod sim {
         IntentCopied,
         ScopeLeaks,
         AdmissionCopied,
+        CacheGap,
     }
 
     impl Mutation {
-        pub const ALL: [Self; 6] = [
+        pub const ALL: [Self; 7] = [
             Self::CommitBuffered,
             Self::UnseenSkipped,
             Self::IntentReplayed,
             Self::IntentCopied,
             Self::ScopeLeaks,
             Self::AdmissionCopied,
+            Self::CacheGap,
         ];
 
         #[must_use]
@@ -51,6 +53,7 @@ pub mod sim {
                 Self::IntentCopied => "intent_copied",
                 Self::ScopeLeaks => "scope_leaks",
                 Self::AdmissionCopied => "admission_copied",
+                Self::CacheGap => "cache_gap",
             }
         }
 
@@ -155,13 +158,49 @@ impl FactSink for Observed<'_, '_> {
         };
         self.lease.append_in(state, fact)
     }
+
+    fn cache_due(&self) -> bool {
+        self.lease.fold().cache_due(self.state)
+    }
+
+    fn cache(&mut self, snapshot: &Snapshot) -> Result<(), FoldError> {
+        self.lease
+            .cache_state(self.state, snapshot)
+            .map_err(FoldError::Sink)
+    }
 }
 
 impl OneLog {
     async fn replayed(&self, scope: &Scope) -> Result<Replay, StoreError> {
+        self.replayed_after(scope, None).await
+    }
+
+    async fn replayed_cached(
+        &self,
+        scope: &Scope,
+        family: &str,
+        format: u32,
+    ) -> Result<Replay, StoreError> {
+        let cached = self
+            .log
+            .read(|fold| fold.cached_state(&scope.state))
+            .await?
+            .filter(|snapshot| snapshot.family == family && snapshot.format == format);
+        self.replayed_after(scope, cached).await
+    }
+
+    async fn replayed_after(
+        &self,
+        scope: &Scope,
+        snapshot: Option<Snapshot>,
+    ) -> Result<Replay, StoreError> {
+        let mut after = snapshot.as_ref().map_or(0, |snapshot| snapshot.seq);
+        if snapshot.is_some() && sim::mutated(sim::Mutation::CacheGap) {
+            after += 1;
+        }
         let mut facts = Vec::new();
         self.log
-            .facts_from(0, |seq, held, fact| {
+            .facts_from(after, |seq, held, fact| {
                 if in_scope(scope, held, fact) {
                     facts.push((seq, fact.clone()));
                 }
@@ -182,7 +221,7 @@ impl OneLog {
             })
             .await??;
         Ok(Replay {
-            snapshot: None,
+            snapshot,
             facts,
             blobs,
         })
@@ -238,6 +277,14 @@ impl OneLog {
 impl FactLog for Scoped {
     fn replay(&self) -> StoreFuture<'_, Result<Replay, StoreError>> {
         Box::pin(self.log.replayed(&self.scope))
+    }
+
+    fn replay_cached<'a>(
+        &'a self,
+        family: &'a str,
+        format: u32,
+    ) -> StoreFuture<'a, Result<Replay, StoreError>> {
+        Box::pin(self.log.replayed_cached(&self.scope, family, format))
     }
 
     fn append<'a>(

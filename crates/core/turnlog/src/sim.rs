@@ -20,6 +20,7 @@ pub enum Mutation {
     FinishedKeepsPrompt,
     SealedRelowered,
     FactsResident,
+    CacheNeverDue,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);
