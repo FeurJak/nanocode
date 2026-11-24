@@ -237,7 +237,6 @@ pub struct Fold {
     stored: BTreeMap<String, String>,
     retired: BTreeMap<u128, Retired>,
     turns: Vec<Turn>,
-    unindexed: BTreeSet<String>,
     wakes: Wakes,
 }
 
@@ -519,7 +518,7 @@ impl Fold {
                 pages.insert(first.clone(), *section);
             }
         }
-        for owner in &self.unindexed {
+        for owner in self.unindexed() {
             if let Some((first, Page::Cold(section))) = self.page_of(owner) {
                 pages.insert(first.clone(), *section);
             }
@@ -761,8 +760,8 @@ impl Fold {
                 Page::Cold(_) => None,
             })
             .filter(|(first, _)| {
-                self.page_owners(first).all(|(owner, state)| {
-                    let listed = !self.unindexed.contains(owner);
+                self.page_owners(first).all(|(_, state)| {
+                    let listed = !self.placed_owner(state);
                     let pins = crate::sim::mutated(crate::sim::Mutation::UnindexedPinsPages);
                     (!listed && !pins)
                         || (listed
@@ -773,7 +772,7 @@ impl Fold {
         for (first, section) in idle {
             let owners = self
                 .page_owners(&first)
-                .filter(|(owner, _)| !self.unindexed.contains(*owner))
+                .filter(|(_, state)| !self.placed_owner(state))
                 .map(|(owner, _)| owner.clone())
                 .collect::<Vec<_>>();
             let mut filter = owners
@@ -787,6 +786,18 @@ impl Fold {
             self.filters.insert(section.row, filter.into_boxed_slice());
             self.pages.insert(first, Page::Cold(section));
         }
+    }
+
+    fn placed_owner(&self, state: &Owner) -> bool {
+        matches!(state, Owner::Cold { entry, .. } | Owner::Warm { entry, .. }
+            if matches!(entry.sections.as_slice(), [section] if self.placed.contains_key(&section.row)))
+    }
+
+    fn unindexed(&self) -> impl Iterator<Item = &String> {
+        self.owners
+            .iter()
+            .filter(|(_, state)| self.placed_owner(state))
+            .map(|(owner, _)| owner)
     }
 
     fn page_owners(&self, first: &str) -> impl Iterator<Item = (&String, &Owner)> {
@@ -970,7 +981,7 @@ impl Fold {
                 .iter()
                 .filter(|(owner, entry)| entry.as_ref() != self.entry(owner))
                 .map(|(owner, _)| owner)
-                .chain(&self.unindexed)
+                .chain(self.unindexed())
                 .filter_map(|owner| self.page_of(owner).map(|(first, _)| first.clone()))
                 .collect()
         };
@@ -1064,7 +1075,6 @@ impl Fold {
         self.groups = groups;
         self.root = root.map(Page::Loaded);
         self.placed.clear();
-        self.unindexed.clear();
         let groups = &self.groups;
         self.chains.retain(|row, _| groups.contains_key(row));
     }
@@ -1103,7 +1113,6 @@ impl Fold {
                 sections: vec![section],
                 written: *bytes,
             };
-            self.unindexed.insert(owner.clone());
         }
         self.place_group(section, owners.len() as u64, Some(chain));
     }
@@ -1168,7 +1177,6 @@ impl Fold {
                     pending: Vec::new(),
                 },
             );
-            self.unindexed.insert(owner.clone());
         }
         self.place_group(section, owners.len() as u64, chain);
         Ok(())
