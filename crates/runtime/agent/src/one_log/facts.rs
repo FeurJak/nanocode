@@ -1,16 +1,18 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use nanocode_tool_host::ToolOutput;
 use nanocode_turnlog::{Fold, Lease, Point};
-use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use super::OneLog;
 use crate::durability::{
     StoreError, StoreFuture,
     facts::{
-        Append, Digest, DurableFold, EffectResult, Fact, FactLog, FactSink, FoldError, Marker,
-        Replay, Seen, StoredFact, Value, commit_fact, fold_facts, referenced,
+        Append, Digest, EffectResult, Fact, FactLog, FactLogs, FactSink, FoldError, Marker,
+        OwnedFact, Replay, StoredFact, Value,
     },
 };
 
@@ -25,14 +27,16 @@ pub mod sim {
         UnseenSkipped,
         IntentReplayed,
         IntentCopied,
+        ScopeLeaks,
     }
 
     impl Mutation {
-        pub const ALL: [Self; 4] = [
+        pub const ALL: [Self; 5] = [
             Self::CommitBuffered,
             Self::UnseenSkipped,
             Self::IntentReplayed,
             Self::IntentCopied,
+            Self::ScopeLeaks,
         ];
 
         #[must_use]
@@ -43,6 +47,7 @@ pub mod sim {
                 Self::UnseenSkipped => "unseen_skipped",
                 Self::IntentReplayed => "intent_replayed",
                 Self::IntentCopied => "intent_copied",
+                Self::ScopeLeaks => "scope_leaks",
             }
         }
 
@@ -78,18 +83,27 @@ const fn point_of(fact: &StoredFact) -> Point {
     }
 }
 
-fn unseen(fold: &Fold, after: u64) -> (Vec<(u64, StoredFact)>, Vec<Digest>) {
-    let facts = fold
-        .facts()
-        .filter(|(seq, _)| *seq > after && !sim::mutated(sim::Mutation::UnseenSkipped))
-        .map(|(seq, fact)| (seq, fact.clone()))
-        .collect::<Vec<_>>();
+fn scoped(fold: &Fold, scope: &Scope, after: u64) -> (Vec<(u64, StoredFact)>, Vec<Digest>) {
+    if after > 0 && sim::mutated(sim::Mutation::UnseenSkipped) {
+        return (Vec::new(), Vec::new());
+    }
+    let facts = if sim::mutated(sim::Mutation::ScopeLeaks) {
+        fold.facts_after(after)
+            .map(|(seq, fact)| (seq, fact.clone()))
+            .collect::<Vec<_>>()
+    } else {
+        fold.facts_of(&scope.state, scope.turns, after)
+            .map(|(seq, fact)| (seq, fact.clone()))
+            .collect::<Vec<_>>()
+    };
     let mut wanted = BTreeSet::new();
     for (_, fact) in &facts {
         let named: Result<_, std::convert::Infallible> = fact.try_map(
             |value| {
-                if let Value::Blob(blob) = value {
-                    wanted.insert(blob.index());
+                if let Value::Blob(blob) = value
+                    && let Some(digest) = fold.values().digest(*blob)
+                {
+                    wanted.insert(*digest);
                 }
                 Ok(())
             },
@@ -97,31 +111,29 @@ fn unseen(fold: &Fold, after: u64) -> (Vec<(u64, StoredFact)>, Vec<Digest>) {
         );
         let Ok(_) = named;
     }
-    let digests = fold
-        .facts()
-        .filter_map(|(_, fact)| match fact {
-            Fact::Marker(Marker::Blob { digest, .. }) => Some(*digest),
-            _ => None,
-        })
-        .zip(0..)
-        .filter(|(_, index)| wanted.contains(index))
-        .map(|(digest, _)| digest)
-        .collect();
-    (facts, digests)
+    (facts, wanted.into_iter().collect())
 }
 
 pub(super) fn intended(fold: &Fold, call_id: &str) -> Option<String> {
     if sim::mutated(sim::Mutation::IntentCopied) {
         return None;
     }
-    fold.facts().find_map(|(_, fact)| match fact {
-        Fact::Intent(intent) if intent.call_id == call_id => Some(intent.tool.clone()),
-        _ => None,
-    })
+    fold.intent(call_id).map(|call| call.tool.clone())
+}
+
+struct Scope {
+    state: String,
+    turns: bool,
+}
+
+struct Scoped {
+    log: Arc<OneLog>,
+    scope: Scope,
 }
 
 struct Observed<'l, 'a> {
     lease: &'l mut Lease<'a>,
+    state: &'l str,
     point: Point,
 }
 
@@ -136,23 +148,17 @@ impl FactSink for Observed<'_, '_> {
 
     fn append(&mut self, fact: StoredFact) -> Result<u64, FoldError> {
         self.point = point_of(&fact);
-        self.lease.append(fact)
+        let state = match fact {
+            Fact::Marker(Marker::Blob { .. }) => None,
+            _ => Some(self.state),
+        };
+        self.lease.append_in(state, fact)
     }
 }
 
 impl OneLog {
-    async fn replayed(&self) -> Result<Replay, StoreError> {
-        let (snapshot, facts) = self
-            .log
-            .read(|fold| {
-                let facts = fold
-                    .facts()
-                    .map(|(seq, fact)| (seq, fact.clone()))
-                    .collect::<Vec<_>>();
-                fold.cached().map(|snapshot| (snapshot, facts))
-            })
-            .await?;
-        let digests = referenced(facts.iter().map(|(_, fact)| fact));
+    async fn replayed(&self, scope: &Scope) -> Result<Replay, StoreError> {
+        let (facts, digests) = self.log.read(|fold| scoped(fold, scope, 0)).await;
         let keys = digests
             .iter()
             .map(|digest| digest.key().as_str().to_owned())
@@ -167,16 +173,21 @@ impl OneLog {
             })
             .await??;
         Ok(Replay {
-            snapshot,
+            snapshot: None,
             facts,
             blobs,
         })
     }
 
-    async fn appended(&self, after: u64, write: Append<'_>) -> Result<u64, StoreError> {
+    async fn appended(
+        &self,
+        scope: &Scope,
+        after: u64,
+        write: Append<'_>,
+    ) -> Result<u64, StoreError> {
         let mut lease = self.log.lease_within().await?;
         lease.secure().await?;
-        let (facts, digests) = unseen(lease.fold(), after);
+        let (facts, digests) = scoped(lease.fold(), scope, after);
         let keys = digests
             .iter()
             .map(|digest| digest.key().as_str().to_owned())
@@ -193,6 +204,7 @@ impl OneLog {
         };
         let mut sink = Observed {
             lease: &mut lease,
+            state: &scope.state,
             point: Point::Progress,
         };
         let seq = write(unseen, &mut sink)?;
@@ -204,9 +216,9 @@ impl OneLog {
     }
 }
 
-impl FactLog for OneLog {
+impl FactLog for Scoped {
     fn replay(&self) -> StoreFuture<'_, Result<Replay, StoreError>> {
-        Box::pin(self.replayed())
+        Box::pin(self.log.replayed(&self.scope))
     }
 
     fn append<'a>(
@@ -214,48 +226,25 @@ impl FactLog for OneLog {
         after: u64,
         write: Append<'a>,
     ) -> StoreFuture<'a, Result<u64, StoreError>> {
-        Box::pin(self.appended(after, write))
+        Box::pin(self.log.appended(&self.scope, after, write))
+    }
+}
+
+pub(super) struct Logs(pub(super) Arc<OneLog>);
+
+impl FactLogs for Logs {
+    fn scoped(&self, state: &str, turns: bool) -> Arc<dyn FactLog> {
+        Arc::new(Scoped {
+            log: Arc::clone(&self.0),
+            scope: Scope {
+                state: state.to_owned(),
+                turns,
+            },
+        })
     }
 }
 
 const UNKNOWN_OUTCOME: &str = "Tool execution interrupted by a host crash; outcome unknown. Do not assume it did not run or automatically repeat it.";
-
-#[derive(Default, Deserialize, Serialize)]
-struct Calls {
-    open: BTreeMap<String, Option<String>>,
-}
-
-impl DurableFold for Calls {
-    const FAMILY: &'static str = "nanocode.calls";
-    const FORMAT: u32 = 1;
-    type Decision = Box<RawValue>;
-
-    fn apply(&mut self, seq: u64, fact: Seen<'_, Box<RawValue>>) -> Result<(), FoldError> {
-        match fact {
-            Fact::Intent(intent) => {
-                if self.open.insert(intent.call_id, intent.turn).is_some() {
-                    return Err(FoldError::Rejected {
-                        seq,
-                        reason: "an intent repeats a call that has no result yet".to_owned(),
-                    });
-                }
-            }
-            Fact::EffectResult(result) => {
-                self.open.remove(&result.call_id);
-            }
-            Fact::Base(_)
-            | Fact::Input(_)
-            | Fact::ModelOut(_)
-            | Fact::Decision(_)
-            | Fact::Marker(_) => {}
-        }
-        Ok(())
-    }
-
-    fn request(&self) -> Result<Vec<u8>, FoldError> {
-        serde_json::to_vec(&self.open).map_err(|error| FoldError::Encode(error.to_string()))
-    }
-}
 
 fn unknown_outcome() -> Result<Box<RawValue>, StoreError> {
     let wire = ToolOutput::error(UNKNOWN_OUTCOME)
@@ -267,24 +256,26 @@ fn unknown_outcome() -> Result<Box<RawValue>, StoreError> {
 
 impl OneLog {
     pub async fn settle_intents(&self, turn: &str) -> Result<Vec<String>, StoreError> {
-        let mut calls = fold_facts::<Calls>(self).await?;
-        let dangling = calls
-            .state()
-            .open
-            .iter()
-            .filter(|(_, owner)| owner.as_deref().is_none_or(|owner| owner == turn))
-            .map(|(call_id, _)| call_id.clone())
+        let mut lease = self.log.lease_within().await?;
+        lease.secure().await?;
+        let dangling = lease
+            .fold()
+            .intents()
+            .filter(|(_, _, call)| call.turn.as_deref().is_none_or(|owner| owner == turn))
+            .map(|(call_id, state, _)| (call_id.to_owned(), state.map(str::to_owned)))
             .collect::<Vec<_>>();
-        if sim::mutated(sim::Mutation::IntentReplayed) {
+        if dangling.is_empty() || sim::mutated(sim::Mutation::IntentReplayed) {
             return Ok(Vec::new());
         }
-        for call_id in &dangling {
-            let result = Fact::EffectResult(EffectResult {
+        let output = unknown_outcome()?;
+        for (call_id, state) in &dangling {
+            let result: OwnedFact<Box<RawValue>> = Fact::EffectResult(EffectResult {
                 call_id: call_id.clone(),
-                output: unknown_outcome()?,
+                output: output.clone(),
             });
-            calls = commit_fact(self, calls, result).await?.0;
+            lease.append_owned(state.as_deref(), &result)?;
         }
-        Ok(dangling)
+        lease.commit(Point::Recovery).await?;
+        Ok(dangling.into_iter().map(|(call_id, _)| call_id).collect())
     }
 }

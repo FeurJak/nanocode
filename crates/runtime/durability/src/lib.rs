@@ -20,8 +20,8 @@ mod state;
 pub mod facts {
     pub use nanocode_durability_core::{
         Append, Base, BlobRef, BlockRef, DIGEST_BYTES, Decision, Digest, Divergence, DurableFold,
-        EffectResult, Fact, FactLog, FactSink, FoldError, Folded, Input, InputKind, Intent,
-        IntentTarget, Marker, ModelOut, Outcome, OwnedFact, Replay, Seen, Snapshot, Start,
+        EffectResult, Fact, FactLog, FactLogs, FactSink, FoldError, Folded, Input, InputKind,
+        Intent, IntentTarget, Marker, ModelOut, Outcome, OwnedFact, Replay, Seen, Snapshot, Start,
         StoredFact, TurnStatus, VALUE_INLINE_BYTES, Value, Values, commit_fact, fold_facts,
         referenced,
     };
@@ -49,11 +49,11 @@ pub use memory::MemoryStore;
 pub use nanocode_agent_core::backend::{ContinuationAhead, Prefetched};
 pub use nanocode_durability_core::{
     BlobKey, BlobStore, BlobUrl, BriefFilter, BriefState, Colocation, Committed, EncodedPayload,
-    Error, EventCursor, FactLog, EventHit, EventHits, EventOrder, EventPage, EventQuery, EventRange,
-    Examined, IndexedState, KeyValue, KeyValueStore, KnownSummary, ListedState, ListedSummary,
-    LockKey, LocksHeld, Migration, MissingColumn, OwnedCommit, OwnedState, OwnerId, OwnerToken,
-    PageCodec, Result, RowStore, Settle, SharedBlobStore, Sql, SqlAccess, SqlDialect, SqlRow,
-    SqlStatement, SqlStore, StagedStore, StagedWrites, StateCommit, StateCursor, StatePage,
+    Error, EventCursor, EventHit, EventHits, EventOrder, EventPage, EventQuery, EventRange,
+    Examined, FactLog, FactLogs, IndexedState, KeyValue, KeyValueStore, KnownSummary, ListedState,
+    ListedSummary, LockKey, LocksHeld, Migration, MissingColumn, OwnedCommit, OwnedState, OwnerId,
+    OwnerToken, PageCodec, Result, RowStore, Settle, SharedBlobStore, Sql, SqlAccess, SqlDialect,
+    SqlRow, SqlStatement, SqlStore, StagedStore, StagedWrites, StateCommit, StateCursor, StatePage,
     StateQuery, StateReader, StateStore, StateSummary, StoreError, StoreEvent, StoreFuture,
     StoreHandles, StoreRecord, StoreReplacement, StoreUpdate, StoredEvent, StoredState,
     SummaryFilter, SummaryUpdate, Versioned, base64_data_url, get_blob, migrate_format,

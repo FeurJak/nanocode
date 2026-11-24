@@ -3327,7 +3327,11 @@ impl DurableSession {
 
     #[must_use]
     pub fn facts(&self) -> Option<Arc<dyn crate::FactLog>> {
-        StateStore::facts(&self.store)
+        let turns = self.described.as_ref().is_none_or(|record| {
+            record.lineage.parent_session_id.is_none()
+                && record.lineage.origin == nanocode_agent_core::Origin::Root
+        });
+        StateStore::facts(&self.store).map(|logs| logs.scoped(&self.state_id, turns))
     }
 
     pub async fn pool(&self, mut payload: EncodedPayload) -> Result<()> {

@@ -80,6 +80,8 @@ pub enum Record {
     Fact {
         fact: StoredFact,
         seq: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
     },
     Event {
         at: u64,

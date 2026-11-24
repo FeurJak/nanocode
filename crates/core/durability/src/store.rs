@@ -494,7 +494,7 @@ pub trait StateStore: MaybeSend {
         None
     }
 
-    fn facts(&self) -> Option<Arc<dyn crate::FactLog>> {
+    fn facts(&self) -> Option<Arc<dyn crate::FactLogs>> {
         None
     }
 

@@ -21,6 +21,10 @@ pub type Append<'a> =
 #[cfg(target_family = "wasm")]
 pub type Append<'a> = Box<dyn FnOnce(Replay, &mut dyn FactSink) -> Result<u64, FoldError> + 'a>;
 
+pub trait FactLogs: Send + Sync {
+    fn scoped(&self, state: &str, turns: bool) -> std::sync::Arc<dyn FactLog>;
+}
+
 pub trait FactLog: Send + Sync {
     fn replay(&self) -> StoreFuture<'_, Result<Replay, StoreError>>;
 
@@ -62,7 +66,10 @@ fn folded<F: DurableFold>(replay: Replay) -> Result<Folded<F>, FoldError> {
     Folded::open(snapshot, facts, blob).map(|(folded, _)| folded)
 }
 
-fn caught_up<F: DurableFold>(folded: Folded<F>, mut unseen: Replay) -> Result<Folded<F>, FoldError> {
+fn caught_up<F: DurableFold>(
+    folded: Folded<F>,
+    mut unseen: Replay,
+) -> Result<Folded<F>, FoldError> {
     assert!(
         unseen.snapshot.is_none(),
         "the facts a fold has not seen come without a snapshot"
@@ -95,12 +102,15 @@ where
     let slot = &mut committed;
     let after = folded.seq();
     let seq = log
-        .append(after, Box::new(move |unseen, sink| {
-            let folded = caught_up(folded, unseen)?;
-            let (folded, seq) = folded.commit(&mut Forward(sink), fact)?;
-            *slot = Some(folded);
-            Ok(seq)
-        }))
+        .append(
+            after,
+            Box::new(move |unseen, sink| {
+                let folded = caught_up(folded, unseen)?;
+                let (folded, seq) = folded.commit(&mut Forward(sink), fact)?;
+                *slot = Some(folded);
+                Ok(seq)
+            }),
+        )
         .await?;
     let folded = committed.expect("an append that returned a seq committed its fold");
     Ok((folded, seq))

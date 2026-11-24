@@ -378,6 +378,11 @@ impl Values {
     }
 
     #[must_use]
+    pub fn blob(&self, digest: &Digest) -> Option<BlobRef> {
+        self.known.get(digest).copied()
+    }
+
+    #[must_use]
     pub fn len(&self) -> usize {
         self.digests.len()
     }

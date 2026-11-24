@@ -7,7 +7,7 @@ use std::{
 
 use nanocode_durability_core::{
     Digest, EncodedPayload, Fact, FoldError, Input, InputKind, Marker, Outcome as FactOutcome,
-    Snapshot, StoreError, StoredFact, TurnStatus, Value,
+    Snapshot, StoreError, StoredFact, TurnStatus, Value, Values,
 };
 use serde_json::value::RawValue;
 
@@ -257,9 +257,12 @@ pub struct Fold {
     ends: u64,
     events: Vec<Event>,
     facts: Vec<StoredFact>,
-    derived_calls: BTreeSet<String>,
+    fact_states: Vec<Option<u32>>,
+    state_names: Vec<String>,
+    state_index: BTreeMap<String, u32>,
+    derived_calls: BTreeMap<String, Option<u32>>,
     derived_turns: BTreeSet<String>,
-    interned: Vec<Digest>,
+    values: Values,
     filters: BTreeMap<u64, Box<[u64]>>,
     forgets: BTreeSet<String>,
     groups: BTreeMap<u64, (u64, u64)>,
@@ -1285,9 +1288,18 @@ impl Fold {
             let Some(Owner::Warm { delta, entry }) = self.owners.get_mut(owner) else {
                 panic!("turn log placed owner {owner} is not warm");
             };
-            assert!(entry.sections.is_empty(), "turn log placed owner {owner} twice");
-            assert!(delta.keys.remove(owner), "turn log placed owner {owner} had no delta");
-            assert!(delta.is_empty(), "turn log placed owner {owner} holds more than its value");
+            assert!(
+                entry.sections.is_empty(),
+                "turn log placed owner {owner} twice"
+            );
+            assert!(
+                delta.keys.remove(owner),
+                "turn log placed owner {owner} had no delta"
+            );
+            assert!(
+                delta.is_empty(),
+                "turn log placed owner {owner} holds more than its value"
+            );
             *entry = Entry {
                 checkpoint: false,
                 full: *bytes,
@@ -1300,9 +1312,17 @@ impl Fold {
     }
 
     fn place_group(&mut self, section: Section, count: u64, chain: Option<u64>) {
-        assert!(count > 0, "turn log placed an empty section at row {}", section.row);
+        assert!(
+            count > 0,
+            "turn log placed an empty section at row {}",
+            section.row
+        );
         let previous = self.placed.insert(section.row, (section.rows, count));
-        assert!(previous.is_none(), "turn log placed row {} twice", section.row);
+        assert!(
+            previous.is_none(),
+            "turn log placed row {} twice",
+            section.row
+        );
         if let Some(keyframe) = chain {
             assert!(
                 keyframe <= section.row,
@@ -2122,20 +2142,79 @@ impl Fold {
         (1..).zip(&self.facts)
     }
 
+    #[must_use]
+    pub const fn values(&self) -> &Values {
+        &self.values
+    }
+
+    fn state_id(&mut self, state: &str) -> u32 {
+        if let Some(id) = self.state_index.get(state) {
+            return *id;
+        }
+        let id = u32::try_from(self.state_names.len())
+            .expect("a log holds fewer states than u32 counts");
+        self.state_names.push(state.to_owned());
+        self.state_index.insert(state.to_owned(), id);
+        id
+    }
+
+    pub fn facts_after(&self, after: u64) -> impl Iterator<Item = (u64, &StoredFact)> {
+        let skipped =
+            usize::try_from(after).map_or(self.facts.len(), |after| after.min(self.facts.len()));
+        (after + 1..).zip(&self.facts[skipped..])
+    }
+
+    pub fn facts_of<'a>(
+        &'a self,
+        state: &str,
+        turns: bool,
+        after: u64,
+    ) -> impl Iterator<Item = (u64, &'a StoredFact)> + 'a {
+        let own = self.state_index.get(state).copied();
+        let skipped =
+            usize::try_from(after).map_or(self.facts.len(), |after| after.min(self.facts.len()));
+        (after + 1..)
+            .zip(
+                self.facts[skipped..]
+                    .iter()
+                    .zip(&self.fact_states[skipped..]),
+            )
+            .filter(move |(_, (fact, held))| match held {
+                Some(_) => own.is_some() && **held == own,
+                None => turns || matches!(fact, Fact::Marker(Marker::Blob { .. })),
+            })
+            .map(|(seq, (fact, _))| (seq, fact))
+    }
+
+    pub fn intents(&self) -> impl Iterator<Item = (&str, Option<&str>, &OpenCall)> {
+        self.derived_calls.iter().filter_map(|(call_id, state)| {
+            let state = state.map(|state| self.state_names[state as usize].as_str());
+            Some((call_id.as_str(), state, self.calls.get(call_id)?))
+        })
+    }
+
+    #[must_use]
+    pub fn intent(&self, call_id: &str) -> Option<&OpenCall> {
+        self.derived_calls
+            .contains_key(call_id)
+            .then(|| self.calls.get(call_id))
+            .flatten()
+    }
+
     fn value<'a>(&'a self, value: &'a Value) -> Result<&'a RawValue, StoreError> {
         match value {
             Value::Inline(json) => Ok(json),
             Value::Blob(blob) => {
                 let digest = self
-                    .interned
-                    .get(blob.index() as usize)
+                    .values
+                    .digest(*blob)
                     .ok_or_else(|| invalid(format!("blob {} was never interned", blob.index())))?;
                 self.blob(digest).map_err(StoreError::from)
             }
         }
     }
 
-    fn lower(&mut self, seq: u64, fact: &StoredFact) -> Result<(), StoreError> {
+    fn lower(&mut self, seq: u64, state: Option<u32>, fact: &StoredFact) -> Result<(), StoreError> {
         match fact {
             Fact::Input(input) => self.lower_input(seq, input),
             Fact::Marker(Marker::Status { turn, status }) => {
@@ -2155,7 +2234,7 @@ impl Fold {
             ),
             Fact::Intent(intent) => {
                 let input = serde_json::value::to_raw_value(&intent.target).map_err(invalid)?;
-                self.derived_calls.insert(intent.call_id.clone());
+                self.derived_calls.insert(intent.call_id.clone(), state);
                 self.calls.insert(
                     intent.call_id.clone(),
                     OpenCall {
@@ -2266,7 +2345,7 @@ impl Fold {
                     recovered: None,
                 });
             }
-            Record::Fact { fact, seq } => {
+            Record::Fact { fact, seq, state } => {
                 let next = self.next_fact();
                 if *seq != next {
                     return Err(invalid(format!(
@@ -2274,11 +2353,13 @@ impl Fold {
                         next - 1
                     )));
                 }
-                if let Fact::Marker(Marker::Blob { digest, .. }) = fact {
-                    self.interned.push(*digest);
-                }
-                self.lower(*seq, fact)?;
+                self.values
+                    .observe(*seq, fact)
+                    .map_err(|error| invalid(error.to_string()))?;
+                let state = state.as_deref().map(|state| self.state_id(state));
+                self.lower(*seq, state, fact)?;
                 self.facts.push(fact.clone());
+                self.fact_states.push(state);
             }
             Record::Call {
                 call_id,
@@ -2674,10 +2755,11 @@ impl Fold {
                 value: value.clone(),
             })?;
         }
-        for (seq, fact) in self.facts() {
+        for ((seq, fact), state) in self.facts().zip(&self.fact_states) {
             take(Record::Fact {
                 fact: fact.clone(),
                 seq,
+                state: state.map(|state| self.state_names[state as usize].clone()),
             })?;
         }
         for (state, checkpoint) in self.checkpoints.iter().filter(|_| owned) {
@@ -2767,7 +2849,7 @@ impl Fold {
         for (call_id, call) in self
             .calls
             .iter()
-            .filter(|(call_id, _)| !self.derived_calls.contains(*call_id))
+            .filter(|(call_id, _)| !self.derived_calls.contains_key(*call_id))
         {
             take(Record::Call {
                 call_id: call_id.clone(),

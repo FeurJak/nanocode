@@ -7,7 +7,8 @@ use std::{
 };
 
 use nanocode_durability_core::{
-    Digest, FactSink, FoldError, Snapshot as FoldSnapshot, SqlStatement, StoreError, StoredFact,
+    Digest, Fact, FactSink, FoldError, Marker, OwnedFact, Snapshot as FoldSnapshot, SqlStatement,
+    StoreError, StoredFact, VALUE_INLINE_BYTES, Value,
 };
 use nanocode_sync::{Held, Owned, mpsc, oneshot};
 use serde_json::value::RawValue;
@@ -1559,6 +1560,70 @@ impl Lease<'_> {
     }
 }
 
+impl Lease<'_> {
+    pub fn append_owned<D: serde::Serialize>(
+        &mut self,
+        state: Option<&str>,
+        fact: &OwnedFact<D>,
+    ) -> Result<u64, FoldError> {
+        let mut fresh: Vec<(Digest, &RawValue)> = Vec::new();
+        let named: Result<_, FoldError> = fact.try_map(
+            |json| {
+                if json.get().len() >= VALUE_INLINE_BYTES {
+                    let digest = Digest::of(json.get().as_bytes());
+                    let known = self.writer.fold.values().blob(&digest).is_some()
+                        || fresh.iter().any(|(held, _)| *held == digest);
+                    if !known {
+                        fresh.push((digest, &**json));
+                    }
+                }
+                Ok(())
+            },
+            |_| Ok(()),
+        );
+        named?;
+        for (digest, json) in fresh {
+            self.put_blob(&digest, json)?;
+            let bytes = json.get().len() as u64;
+            self.append(Fact::Marker(Marker::Blob { digest, bytes }))?;
+        }
+        let values = self.writer.fold.values();
+        let stored: StoredFact = fact.try_map(
+            |json| {
+                if json.get().len() < VALUE_INLINE_BYTES {
+                    return Ok(Value::Inline(json.clone()));
+                }
+                let digest = Digest::of(json.get().as_bytes());
+                let blob = values
+                    .blob(&digest)
+                    .expect("a value past the inline bound was interned before its fact");
+                Ok(Value::Blob(blob))
+            },
+            |decision| {
+                serde_json::value::to_raw_value(decision)
+                    .map_err(|error| FoldError::Encode(error.to_string()))
+            },
+        )?;
+        self.append_in(state, stored)
+    }
+
+    pub fn append_in(&mut self, state: Option<&str>, fact: StoredFact) -> Result<u64, FoldError> {
+        let seq = self.writer.fold.next_fact();
+        self.push(Record::Fact {
+            fact,
+            seq,
+            state: state.map(str::to_owned),
+        })
+        .map_err(FoldError::Sink)?;
+        assert_eq!(
+            self.writer.fold.next_fact(),
+            seq + 1,
+            "an appended fact folds at once"
+        );
+        Ok(seq)
+    }
+}
+
 impl FactSink for Lease<'_> {
     fn next(&self) -> u64 {
         self.writer.fold.next_fact()
@@ -1582,15 +1647,7 @@ impl FactSink for Lease<'_> {
     }
 
     fn append(&mut self, fact: StoredFact) -> Result<u64, FoldError> {
-        let seq = self.writer.fold.next_fact();
-        self.push(Record::Fact { fact, seq })
-            .map_err(FoldError::Sink)?;
-        assert_eq!(
-            self.writer.fold.next_fact(),
-            seq + 1,
-            "an appended fact folds at once"
-        );
-        Ok(seq)
+        self.append_in(None, fact)
     }
 }
 
@@ -1926,21 +1983,8 @@ impl Lease<'_> {
             }
             writer.stats.collected += writer.fold.collect(&writer.collectable) as u64;
             let level = snapshot_level(due, bound);
-            let sections = sections(
-                &mut spare,
-                &writer.fold,
-                seq,
-                level,
-                self.limit,
-                self.ratio,
-            )?;
-            let index = index(
-                &mut spare,
-                &writer.fold,
-                &sections,
-                level,
-                self.limit,
-            )?;
+            let sections = sections(&mut spare, &writer.fold, seq, level, self.limit, self.ratio)?;
+            let index = index(&mut spare, &writer.fold, &sections, level, self.limit)?;
             let head = index.next;
             for turn in &recovered {
                 writer.fold.recovered_at(turn, head);

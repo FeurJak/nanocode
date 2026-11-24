@@ -1,14 +1,14 @@
 use std::{collections::BTreeMap, ops::Range, process::ExitCode, sync::Arc};
 
 use nanocode::turnlog::{EffectCall, LogHost, OneLog, Policy, facts_sim};
-use nanocode_tool_runtime::ToolInput;
-use nanocode_turnlog::EffectClass;
 use nanocode_durability_core::{
     BlockRef, Decision, DurableFold, EffectResult, Fact, FactLog, FoldError, Folded, Input,
     InputKind, Intent, IntentTarget, Marker, ModelOut, Outcome as Finished, OwnedFact, Seen,
     StateStore, TurnStatus, VALUE_INLINE_BYTES, commit_fact, fold_facts,
 };
 use nanocode_sync::block_on;
+use nanocode_tool_runtime::ToolInput;
+use nanocode_turnlog::EffectClass;
 use nanocode_turnlog::MemoryLog;
 use serde::{Deserialize, Serialize};
 use serde_json::value::{RawValue, to_raw_value};
@@ -21,6 +21,8 @@ use crate::{
 const INTENDED_INPUT: &str = "{\"tool_use\"";
 const SCOPE: &str = "one_log_facts";
 const TOOL: &str = "charge";
+const CHILD: &str = "one_log_facts:child";
+const CHILD_PPM: u64 = 150_000;
 const STEPS: Range<u64> = 40..240;
 const TURNS: u64 = 6;
 const BLOCKS: u64 = 4;
@@ -39,16 +41,18 @@ pub enum OneLogFactsMutation {
     UnseenSkipped,
     IntentReplayed,
     IntentCopied,
+    ScopeLeaks,
 }
 
 impl OneLogFactsMutation {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::None,
         Self::FoldReadsUnlogged,
         Self::CommitBuffered,
         Self::UnseenSkipped,
         Self::IntentReplayed,
         Self::IntentCopied,
+        Self::ScopeLeaks,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -65,6 +69,7 @@ impl OneLogFactsMutation {
             Self::UnseenSkipped => "unseen_skipped",
             Self::IntentReplayed => "intent_replayed",
             Self::IntentCopied => "intent_copied",
+            Self::ScopeLeaks => "scope_leaks",
         }
     }
 
@@ -82,6 +87,7 @@ impl OneLogFactsMutation {
             Self::UnseenSkipped => facts_sim::Mutation::UnseenSkipped,
             Self::IntentReplayed => facts_sim::Mutation::IntentReplayed,
             Self::IntentCopied => facts_sim::Mutation::IntentCopied,
+            Self::ScopeLeaks => facts_sim::Mutation::ScopeLeaks,
             Self::None | Self::FoldReadsUnlogged => facts_sim::Mutation::None,
         }
     }
@@ -97,6 +103,7 @@ pub struct OneLogFactsStats {
     pub swaps: u64,
     pub unknown: u64,
     pub gated: u64,
+    pub children: u64,
 }
 
 impl OneLogFactsStats {
@@ -109,6 +116,7 @@ impl OneLogFactsStats {
         self.swaps += other.swaps;
         self.unknown += other.unknown;
         self.gated += other.gated;
+        self.children += other.children;
     }
 }
 
@@ -116,7 +124,8 @@ static UNLOGGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::ne
 static MUTATION: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 fn reads_unlogged() -> bool {
-    MUTATION.load(std::sync::atomic::Ordering::Relaxed) == OneLogFactsMutation::FoldReadsUnlogged as u8
+    MUTATION.load(std::sync::atomic::Ordering::Relaxed)
+        == OneLogFactsMutation::FoldReadsUnlogged as u8
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -128,6 +137,7 @@ struct Ledger {
     calls: BTreeMap<String, Option<u64>>,
     decisions: Vec<u64>,
     unlogged: u64,
+    applied: u64,
 }
 
 impl Ledger {
@@ -187,6 +197,7 @@ impl DurableFold for Ledger {
             }
             Fact::Base(_) | Fact::Decision(_) | Fact::Marker(_) => {}
         }
+        self.applied += 1;
         if reads_unlogged() {
             self.unlogged = UNLOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
@@ -202,6 +213,10 @@ struct World {
     host: Arc<MemoryLog>,
     log: Option<Arc<OneLog>>,
     facts: Option<Arc<dyn FactLog>>,
+    child: Option<Arc<dyn FactLog>>,
+    child_live: Option<Folded<Ledger>>,
+    expected: u64,
+    child_expected: u64,
     live: Option<Folded<Ledger>>,
     stale: Option<Folded<Ledger>>,
     policy: Policy,
@@ -224,7 +239,8 @@ struct Outcome {
 fn value(rng: &mut Rng) -> Box<RawValue> {
     let text = if rng.chance(200_000) {
         let pick = rng.below(VALUES);
-        let bytes = usize::try_from(pick + 1).expect("a value index fits in usize") * VALUE_INLINE_BYTES;
+        let bytes =
+            usize::try_from(pick + 1).expect("a value index fits in usize") * VALUE_INLINE_BYTES;
         format!("{pick}:{}", "x".repeat(bytes))
     } else {
         format!("v{}", rng.below(DECISIONS))
@@ -241,8 +257,14 @@ impl World {
         let host: Arc<dyn LogHost> = Arc::clone(&self.host) as Arc<dyn LogHost>;
         let log = block_on(OneLog::open(host, SCOPE, self.policy.clone()))
             .map_err(|error| format!("the facts log opens: {error}"))?;
-        let facts = StateStore::facts(&log.store())
+        let logs = StateStore::facts(&log.store())
             .ok_or_else(|| "a OneLog store offers no fact log".to_owned())?;
+        let facts = logs.scoped(SCOPE, true);
+        let child = logs.scoped(CHILD, false);
+        let child_live = block_on(fold_facts::<Ledger>(&*child))
+            .map_err(|error| format!("the child's facts fold on open: {error}"))?;
+        self.child = Some(child);
+        self.child_live = Some(child_live);
         let live = block_on(fold_facts::<Ledger>(&*facts))
             .map_err(|error| format!("the facts log folds on open: {error}"))?;
         let stale = block_on(fold_facts::<Ledger>(&*facts))
@@ -305,8 +327,34 @@ impl World {
         }
     }
 
+    fn commit_child(&mut self, rng: &mut Rng) -> Result<(), String> {
+        let fact = Fact::ModelOut(ModelOut {
+            turn: "child".to_owned(),
+            response: value(rng),
+        });
+        let child = Arc::clone(self.child.as_ref().expect("the child's fact log is open"));
+        let live = self.child_live.take().expect("the child's fold is live");
+        let (live, _) = block_on(commit_fact(&*child, live, fact))
+            .map_err(|error| format!("commit a child fact: {error}"))?;
+        self.child_expected += 1;
+        if live.state().applied != self.child_expected {
+            return Err(format!(
+                "the child's fold applied {} facts, but {} were committed to it",
+                live.state().applied,
+                self.child_expected
+            ));
+        }
+        self.child_live = Some(live);
+        self.stats.children += 1;
+        Ok(())
+    }
+
     fn commit(&mut self, rng: &mut Rng) -> Result<(), String> {
+        if rng.chance(CHILD_PPM) {
+            self.commit_child(rng)?;
+        }
         let fact = self.fact(rng);
+        self.expected += 1;
         let model_out = matches!(fact, Fact::ModelOut(_));
         let intent = match &fact {
             Fact::Intent(intent) => Some(intent.call_id.clone()),
@@ -338,6 +386,13 @@ impl World {
         let folded = block_on(fold_facts::<Ledger>(self.facts()))
             .map_err(|error| format!("refold the log: {error}"))?;
         let live = self.live.as_ref().expect("the facts fold is live");
+        if folded.state().applied != self.expected {
+            return Err(format!(
+                "the session's facts fold {} facts, but {} were committed to it",
+                folded.state().applied,
+                self.expected
+            ));
+        }
         if folded.seq() != live.seq() {
             return Err(format!(
                 "the log folds to fact {}, the live fold is at fact {}",
@@ -370,6 +425,8 @@ impl World {
         self.shape.push('!');
         let before = self.live.take().expect("the facts fold is live");
         self.facts = None;
+        self.child = None;
+        self.child_live = None;
         self.log = None;
         self.open()?;
         let after = self.live.as_ref().expect("the facts fold is live");
@@ -428,6 +485,7 @@ impl World {
             ));
         }
         self.stats.unknown += settled.len() as u64;
+        self.expected += settled.len() as u64;
         let again = block_on(log.settle_intents("turn-0"))
             .map_err(|error| format!("settle again: {error}"))?;
         if !again.is_empty() {
@@ -462,6 +520,10 @@ fn run_seed(seed: u64, mutation: OneLogFactsMutation) -> Outcome {
         host: Arc::new(MemoryLog::new()),
         log: None,
         facts: None,
+        child: None,
+        child_live: None,
+        expected: 0,
+        child_expected: 0,
         live: None,
         stale: None,
         policy: Policy {
@@ -492,7 +554,10 @@ fn run_seed(seed: u64, mutation: OneLogFactsMutation) -> Outcome {
             .map(|message| format!("step {step}: {message}"));
     }
     facts_sim::mutate(facts_sim::Mutation::None);
-    MUTATION.store(OneLogFactsMutation::None as u8, std::sync::atomic::Ordering::SeqCst);
+    MUTATION.store(
+        OneLogFactsMutation::None as u8,
+        std::sync::atomic::Ordering::SeqCst,
+    );
     Outcome {
         digest: fnv(FNV_OFFSET, world.shape.as_bytes()),
         wrong,

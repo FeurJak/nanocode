@@ -17,7 +17,7 @@ pub use fact::{
     Outcome, OwnedFact, Seen, Snapshot, Start, StoredFact, TurnStatus, VALUE_INLINE_BYTES, Value,
     Values, referenced,
 };
-pub use fact_log::{Append, FactLog, Replay, commit_fact, fold_facts};
+pub use fact_log::{Append, FactLog, FactLogs, Replay, commit_fact, fold_facts};
 pub use kv::{KeyValue, KeyValueStore, Versioned};
 pub use lock::{LockKey, LocksHeld};
 pub use payload::EncodedPayload;

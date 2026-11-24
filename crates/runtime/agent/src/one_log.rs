@@ -1912,8 +1912,8 @@ impl OneLogStore {
 }
 
 impl StateStore for OneLogStore {
-    fn facts(&self) -> Option<Arc<dyn crate::durability::FactLog>> {
-        Some(Arc::clone(&self.0) as Arc<dyn crate::durability::FactLog>)
+    fn facts(&self) -> Option<Arc<dyn crate::durability::FactLogs>> {
+        Some(Arc::new(facts::Logs(Arc::clone(&self.0))))
     }
 
     fn read_record<'a>(

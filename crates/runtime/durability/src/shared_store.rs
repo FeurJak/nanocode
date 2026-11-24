@@ -184,7 +184,7 @@ struct StoreRequest {
 pub struct SharedStore {
     commands: mpsc::UnboundedSender<StoreRequest>,
     colocation: Option<std::sync::Arc<dyn crate::Colocation>>,
-    facts: Option<std::sync::Arc<dyn crate::FactLog>>,
+    facts: Option<std::sync::Arc<dyn crate::FactLogs>>,
     batches_companion_acquisition: bool,
     supports_events: bool,
     supports_summaries: bool,
@@ -1459,7 +1459,7 @@ impl StateStore for SharedStore {
         self.colocation.clone()
     }
 
-    fn facts(&self) -> Option<std::sync::Arc<dyn crate::FactLog>> {
+    fn facts(&self) -> Option<std::sync::Arc<dyn crate::FactLogs>> {
         self.facts.clone()
     }
 

@@ -326,7 +326,7 @@ impl<S: StateStore + ?Sized + 'static> StateStore for CachedStore<S> {
         self.base.colocation()
     }
 
-    fn facts(&self) -> Option<std::sync::Arc<dyn crate::FactLog>> {
+    fn facts(&self) -> Option<std::sync::Arc<dyn crate::FactLogs>> {
         self.base.facts()
     }
 
