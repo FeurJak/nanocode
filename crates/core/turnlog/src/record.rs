@@ -87,6 +87,8 @@ pub enum Record {
         values: Values,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         states: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        blob_seqs: Vec<u64>,
     },
     Fact {
         fact: StoredFact,

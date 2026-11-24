@@ -6,7 +6,7 @@ use std::{
 };
 
 use nanocode_durability_core::{
-    Decision, Digest, EncodedPayload, Fact, FoldError, Input, InputKind, Marker,
+    BlobRef, Decision, Digest, EncodedPayload, Fact, FoldError, Input, InputKind, Marker,
     Outcome as FactOutcome, Snapshot, StoreError, StoredFact, TurnStatus, Value, Values,
 };
 use serde_json::value::RawValue;
@@ -263,6 +263,8 @@ pub struct Fold {
     fact_segments: Vec<Segment>,
     folded_through: u64,
     uncached: BTreeMap<String, u64>,
+    blob_seqs: Vec<u64>,
+    unsequenced_blobs: u32,
     state_names: Vec<String>,
     state_index: BTreeMap<String, u32>,
     derived_calls: BTreeMap<String, Option<u32>>,
@@ -1712,8 +1714,50 @@ impl Fold {
             self.fact_base = segment.last;
             self.fact_segments.push(segment);
         }
+        if !crate::sim::mutated(crate::sim::Mutation::BlobsResident) {
+            let cut = self.fact_cut(keep);
+            for key in self.blob_keys(|seq| seq < cut) {
+                self.stored.remove(&key);
+            }
+        }
         self.fact_row = row;
         self.folded_through = self.next_fact() - 1;
+    }
+
+    fn blob_keys(&self, sealed: impl Fn(u64) -> bool) -> Vec<String> {
+        self.blob_seqs
+            .iter()
+            .zip(self.unsequenced_blobs..)
+            .filter(|(seq, _)| sealed(**seq))
+            .filter_map(|(_, index)| {
+                let digest = self.values.digest(BlobRef::from_index(index))?;
+                Some(digest.key().as_str().to_owned())
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn sealed_blob(&self, digest: &Digest) -> Option<Segment> {
+        let index = self
+            .values
+            .blob(digest)?
+            .index()
+            .checked_sub(self.unsequenced_blobs)?;
+        let seq = *self.blob_seqs.get(index as usize)?;
+        self.fact_segments
+            .iter()
+            .copied()
+            .find(|segment| segment.first <= seq && seq <= segment.last)
+    }
+
+    #[must_use]
+    pub fn blob_resident(&self, digest: &Digest) -> bool {
+        self.stored.contains_key(digest.key().as_str())
+    }
+
+    #[must_use]
+    pub fn unowned_stored(&self) -> usize {
+        self.stored.keys().filter(|key| !key.contains('\n')).count()
     }
 
     #[must_use]
@@ -2522,6 +2566,9 @@ impl Fold {
                     self.values
                         .observe(*seq, fact)
                         .map_err(|error| invalid(error.to_string()))?;
+                    if matches!(fact, Fact::Marker(Marker::Blob { .. })) {
+                        self.blob_seqs.push(*seq);
+                    }
                     self.lower(*seq, state, fact)?;
                 }
                 self.facts.push(fact.clone());
@@ -2545,7 +2592,21 @@ impl Fold {
                 through,
                 values,
                 states,
+                blob_seqs,
             } => {
+                let unsequenced = values.len().checked_sub(blob_seqs.len()).ok_or_else(|| {
+                    invalid(format!(
+                        "a fold places {} blob facts but holds {} blobs",
+                        blob_seqs.len(),
+                        values.len()
+                    ))
+                })?;
+                self.unsequenced_blobs = u32::try_from(unsequenced).map_err(|_| {
+                    invalid(format!(
+                        "a fold holds {unsequenced} blobs placed by no fact"
+                    ))
+                })?;
+                self.blob_seqs.clone_from(blob_seqs);
                 for state in states {
                     self.state_id(state);
                 }
@@ -2966,8 +3027,23 @@ impl Fold {
                 row: segment.row,
             })?;
         }
+        let cut = self.fact_cut(keep_fact);
+        let resident_blobs = self
+            .blob_keys(|seq| seq >= cut)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let sealed_blobs = if crate::sim::mutated(crate::sim::Mutation::BlobsResident) {
+            BTreeSet::new()
+        } else {
+            self.blob_keys(|seq| seq < cut)
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        };
         for (key, value) in &self.stored {
-            if !owned && key.contains('\n') {
+            if (!owned && key.contains('\n'))
+                || resident_blobs.contains(key)
+                || sealed_blobs.contains(key)
+            {
                 continue;
             }
             take(Record::Stored {
@@ -2991,6 +3067,7 @@ impl Fold {
             through: self.next_fact() - 1,
             values: self.values.clone(),
             states: self.state_names.clone(),
+            blob_seqs: self.blob_seqs.clone(),
         })?;
         for (state, checkpoint) in self.checkpoints.iter().filter(|_| owned) {
             take(Record::Checkpoint {
@@ -3115,7 +3192,14 @@ impl Fold {
             })?;
         }
         self.wakes.records(&mut take)?;
-        let cut = self.fact_cut(keep_fact);
+        for key in &resident_blobs {
+            if let Some(value) = self.stored.get(key) {
+                take(Record::Stored {
+                    key: key.clone(),
+                    value: value.clone(),
+                })?;
+            }
+        }
         for ((seq, fact), state) in self.facts().zip(&self.fact_states) {
             if seq < cut {
                 continue;

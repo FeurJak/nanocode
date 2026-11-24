@@ -414,6 +414,7 @@ default_table='
 1 canary_facts_base_ignored canary:20 --scenario facts --mutation base_ignored
 1 canary_facts_sealed_relowered canary:20 --scenario facts --mutation sealed_relowered
 1 canary_facts_facts_resident canary:20 --scenario facts --mutation facts_resident
+1 canary_facts_blobs_resident canary:20 --scenario facts --mutation blobs_resident
 8 backend_facts pass --scenario backend_facts
 2 backend_facts_twice pass --scenario backend_facts --twice
 1 canary_backend_facts_result_without_intent canary:20 --scenario backend_facts --mutation result_without_intent

@@ -894,8 +894,12 @@ fn unsectioned(stored: Vec<(u64, String)>) -> Vec<(u64, String)> {
         .collect()
 }
 
-const fn sealed(record: &Record) -> bool {
-    matches!(record, Record::Event { .. } | Record::Fact { .. })
+fn sealed(record: &Record) -> bool {
+    match record {
+        Record::Event { .. } | Record::Fact { .. } => true,
+        Record::Stored { key, .. } => !key.contains('\n'),
+        _ => false,
+    }
 }
 
 fn suffix(plain: &str, events: usize) -> Option<&str> {
@@ -1109,7 +1113,9 @@ impl Follower {
                     parts,
                     row.bytes,
                     &row.plain,
-                    self.fold.events().len() + self.fold.facts().count(),
+                    self.fold.events().len()
+                        + self.fold.facts().count()
+                        + self.fold.unowned_stored(),
                 );
             }
             self.fold.release();
@@ -1550,6 +1556,22 @@ impl TurnLog {
         Ok(())
     }
 
+    pub async fn blobs(
+        &self,
+        digests: &[Digest],
+    ) -> Result<BTreeMap<Digest, Box<RawValue>>, StoreError> {
+        let mut writer = self.acquired(true).await?;
+        writer.live()?;
+        let writer = &mut *writer;
+        blobs(
+            &*self.host,
+            &self.scope,
+            (&writer.fold, &mut writer.stats),
+            digests,
+        )
+        .await
+    }
+
     pub async fn facts_from(
         &self,
         after: u64,
@@ -1567,6 +1589,61 @@ impl TurnLog {
         )
         .await
     }
+}
+
+async fn blobs(
+    host: &dyn LogHost,
+    scope: &str,
+    (fold, stats): (&Fold, &mut Stats),
+    digests: &[Digest],
+) -> Result<BTreeMap<Digest, Box<RawValue>>, StoreError> {
+    let mut found = BTreeMap::new();
+    let mut sealed: BTreeMap<u64, (Segment, Vec<Digest>)> = BTreeMap::new();
+    for digest in digests {
+        if fold.blob_resident(digest) {
+            found.insert(*digest, fold.blob(digest)?.to_owned());
+            continue;
+        }
+        let segment = fold
+            .sealed_blob(digest)
+            .ok_or(FoldError::MissingBlob { digest: *digest })?;
+        sealed
+            .entry(segment.row)
+            .or_insert_with(|| (segment, Vec::new()))
+            .1
+            .push(*digest);
+    }
+    for (segment, wanted) in sealed.into_values() {
+        let end = fold
+            .fact_segments()
+            .iter()
+            .find(|later| later.row > segment.row)
+            .map_or(fold.fact_row(), |later| later.row);
+        let stored = unsectioned(host.scan(scope, segment.row, end).await?);
+        stats.pages += 1;
+        stats.page_rows += stored.len() as u64;
+        let keys = wanted
+            .iter()
+            .map(|digest| (digest.key().as_str().to_owned(), *digest))
+            .collect::<BTreeMap<_, _>>();
+        each_row(stored, &mut History::default(), |row| {
+            for record in row.records()? {
+                if let Record::Stored { key, value } = record
+                    && let Some(digest) = keys.get(&key)
+                    && Digest::of(value.as_bytes()) == *digest
+                {
+                    let json = serde_json::from_str::<Box<RawValue>>(&value)
+                        .map_err(|_| FoldError::CorruptBlob { digest: *digest })?;
+                    found.insert(*digest, json);
+                }
+            }
+            Ok(true)
+        })?;
+        if let Some(missing) = wanted.iter().find(|digest| !found.contains_key(*digest)) {
+            return Err(FoldError::MissingBlob { digest: *missing }.into());
+        }
+    }
+    Ok(found)
 }
 
 async fn facts_from(
@@ -1619,6 +1696,20 @@ async fn facts_from(
 }
 
 impl Lease<'_> {
+    pub async fn blobs(
+        &mut self,
+        digests: &[Digest],
+    ) -> Result<BTreeMap<Digest, Box<RawValue>>, StoreError> {
+        let writer = &mut *self.writer;
+        blobs(
+            self.host,
+            self.scope,
+            (&writer.fold, &mut writer.stats),
+            digests,
+        )
+        .await
+    }
+
     pub async fn facts_from(
         &mut self,
         after: u64,
@@ -1670,14 +1761,18 @@ impl Lease<'_> {
         fact: &OwnedFact<D>,
     ) -> Result<u64, FoldError> {
         let mut fresh: Vec<(Digest, &RawValue)> = Vec::new();
+        let mut sealed: Vec<(Digest, &RawValue)> = Vec::new();
         let named: Result<_, FoldError> = fact.try_map(
             |json| {
                 if json.get().len() >= VALUE_INLINE_BYTES {
                     let digest = Digest::of(json.get().as_bytes());
-                    let known = self.writer.fold.values().blob(&digest).is_some()
-                        || fresh.iter().any(|(held, _)| *held == digest);
+                    let fold = &self.writer.fold;
+                    let interned = fold.values().blob(&digest).is_some();
+                    let known = interned || fresh.iter().any(|(held, _)| *held == digest);
                     if !known {
                         fresh.push((digest, &**json));
+                    } else if interned && state.is_none() && !fold.blob_resident(&digest) {
+                        sealed.push((digest, &**json));
                     }
                 }
                 Ok(())
@@ -1685,6 +1780,9 @@ impl Lease<'_> {
             |_| Ok(()),
         );
         named?;
+        for (digest, json) in sealed {
+            self.put_blob(&digest, json)?;
+        }
         for (digest, json) in fresh {
             self.put_blob(&digest, json)?;
             let bytes = json.get().len() as u64;

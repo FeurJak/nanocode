@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::{collections::BTreeSet, sync::Arc};
 
 use nanocode_tool_host::ToolOutput;
 use nanocode_turnlog::{Fold, Lease, Point};
@@ -223,19 +220,7 @@ impl OneLog {
             })
             .await?;
         let digests = self.log.read(|fold| wanted(fold, &facts)).await;
-        let keys = digests
-            .iter()
-            .map(|digest| digest.key().as_str().to_owned())
-            .collect::<Vec<_>>();
-        let blobs = self
-            .log
-            .read_owners(&keys, |fold| {
-                digests
-                    .iter()
-                    .map(|digest| Ok((*digest, fold.blob(digest)?.to_owned())))
-                    .collect::<Result<BTreeMap<_, _>, FoldError>>()
-            })
-            .await??;
+        let blobs = self.log.blobs(&digests).await?;
         Ok(Replay {
             snapshot,
             facts,
@@ -262,15 +247,7 @@ impl OneLog {
                 .await?;
         }
         let digests = wanted(lease.fold(), &facts);
-        let keys = digests
-            .iter()
-            .map(|digest| digest.key().as_str().to_owned())
-            .collect::<Vec<_>>();
-        lease.load_owners(&keys).await?;
-        let blobs = digests
-            .iter()
-            .map(|digest| Ok((*digest, lease.fold().blob(digest)?.to_owned())))
-            .collect::<Result<BTreeMap<_, _>, FoldError>>()?;
+        let blobs = lease.blobs(&digests).await?;
         let unseen = Replay {
             snapshot: None,
             facts,

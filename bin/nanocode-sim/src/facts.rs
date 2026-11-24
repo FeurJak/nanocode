@@ -10,9 +10,9 @@ use std::{
 };
 
 use nanocode_durability_core::{
-    Base, BlockRef, Decision, DurableFold, EffectResult, Fact, FoldError, Folded, Input, InputKind,
-    Intent, IntentTarget, Marker, ModelOut, Outcome, OwnedFact, Seen, Snapshot, StoredFact,
-    TurnStatus, VALUE_INLINE_BYTES,
+    Base, BlockRef, Decision, Digest, DurableFold, EffectResult, Fact, FoldError, Folded, Input,
+    InputKind, Intent, IntentTarget, Marker, ModelOut, Outcome, OwnedFact, Seen, Snapshot,
+    StoredFact, TurnStatus, VALUE_INLINE_BYTES, referenced,
 };
 use nanocode_sync::FutureExt;
 use nanocode_turnlog::{Lease, LogHost, MemoryLog, Phase, Point, Record, TurnLog};
@@ -54,10 +54,11 @@ pub enum FactsMutation {
     BaseIgnored,
     SealedRelowered,
     FactsResident,
+    BlobsResident,
 }
 
 impl FactsMutation {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::UndecidedCompaction,
         Self::DispatchBeforeIntent,
         Self::ReplaysIntent,
@@ -65,6 +66,7 @@ impl FactsMutation {
         Self::BaseIgnored,
         Self::SealedRelowered,
         Self::FactsResident,
+        Self::BlobsResident,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -77,6 +79,7 @@ impl FactsMutation {
             Self::BaseIgnored => "base_ignored",
             Self::SealedRelowered => "sealed_relowered",
             Self::FactsResident => "facts_resident",
+            Self::BlobsResident => "blobs_resident",
         }
     }
 
@@ -295,6 +298,24 @@ pub fn logged(lease: &mut Lease<'_>) -> Result<Vec<(u64, StoredFact)>, String> {
     Ok(facts)
 }
 
+pub fn logged_blobs(
+    lease: &mut Lease<'_>,
+    facts: &[(u64, StoredFact)],
+) -> Result<BTreeMap<Digest, Box<RawValue>>, String> {
+    let digests = referenced(facts.iter().map(|(_, fact)| fact));
+    ready(lease.blobs(&digests)).map_err(|error| format!("read the log's blobs: {error}"))
+}
+
+pub fn blob<'a>(
+    blobs: &'a BTreeMap<Digest, Box<RawValue>>,
+    digest: &Digest,
+) -> Result<&'a RawValue, FoldError> {
+    blobs
+        .get(digest)
+        .map(|json| &**json)
+        .ok_or(FoldError::MissingBlob { digest: *digest })
+}
+
 fn open(host: &Arc<MemoryLog>, shape: Shape) -> Result<TurnLog, String> {
     let host: Arc<dyn LogHost> = host.clone();
     ready(TurnLog::open(host, SCOPE))
@@ -386,9 +407,9 @@ impl World {
         self.stats.facts += 1;
         self.stats.blobs += (folded.values().len() - blobs) as u64;
         let facts = logged(&mut lease)?;
-        let fold = lease.fold();
+        let blobs = crate::facts::logged_blobs(&mut lease, &facts)?;
         if let Some(divergence) = folded
-            .diverges(facts, |digest| fold.blob(digest))
+            .diverges(facts, |digest| crate::facts::blob(&blobs, digest))
             .map_err(failed("refold the log"))?
         {
             return Err(format!("{divergence} after a commit"));
@@ -416,10 +437,23 @@ impl World {
             return Ok(());
         }
         self.snapshots = snapshots;
-        let (resident, next) = ready(
-            self.log
-                .read(|fold| (fold.facts().count() as u64, fold.next_fact())),
-        );
+        let (resident, next, bodies, markers) = ready(self.log.read(|fold| {
+            let markers = fold
+                .facts()
+                .filter(|(_, fact)| matches!(fact, Fact::Marker(Marker::Blob { .. })))
+                .count();
+            (
+                fold.facts().count() as u64,
+                fold.next_fact(),
+                fold.unowned_stored(),
+                markers,
+            )
+        }));
+        if bodies > markers {
+            return Err(format!(
+                "after a snapshot the log keeps {bodies} blob bodies resident for {markers} resident blob facts"
+            ));
+        }
         let written = next - unsealed;
         if resident > written {
             return Err(format!(
@@ -440,12 +474,15 @@ impl World {
                 .map_err(|error| format!("load the legacy owner: {error}"))?;
         }
         let facts = logged(&mut lease)?;
+        let blobs = crate::facts::logged_blobs(&mut lease, &facts)?;
         let fold = lease.fold();
         let cached = fold
             .cached()
             .map_err(|error| format!("read the cached fold: {error}"))?;
-        let (folded, _) = Folded::<Chat>::open(cached, facts.clone(), |digest| fold.blob(digest))
-            .map_err(failed("reopen the fold"))?;
+        let (folded, _) = Folded::<Chat>::open(cached, facts.clone(), |digest| {
+            crate::facts::blob(&blobs, digest)
+        })
+        .map_err(failed("reopen the fold"))?;
         if Durable::of(&folded)? != self.durable {
             return Err(format!(
                 "after a restart at fact {} the fold differs from the live state at fact {}",
@@ -454,7 +491,7 @@ impl World {
             ));
         }
         if let Some(divergence) = folded
-            .diverges(facts.clone(), |digest| fold.blob(digest))
+            .diverges(facts.clone(), |digest| crate::facts::blob(&blobs, digest))
             .map_err(failed("refold after a restart"))?
         {
             return Err(format!("{divergence} after a restart"));
@@ -779,6 +816,9 @@ fn run_seed(seed: u64, mutation: FactsMutation, verbose: bool) -> Result<u64, St
         }
         FactsMutation::FactsResident => {
             nanocode_turnlog::sim::mutate(nanocode_turnlog::sim::Mutation::FactsResident);
+        }
+        FactsMutation::BlobsResident => {
+            nanocode_turnlog::sim::mutate(nanocode_turnlog::sim::Mutation::BlobsResident);
         }
         _ => {}
     }

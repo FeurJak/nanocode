@@ -403,9 +403,9 @@ impl<F: Family> World<F> {
             .commit(&mut lease, fact)
             .map_err(failed("commit a fact"))?;
         let facts = crate::facts::logged(&mut lease)?;
-        let fold = lease.fold();
+        let blobs = crate::facts::logged_blobs(&mut lease, &facts)?;
         if let Some(divergence) = folded
-            .diverges(facts, |digest| fold.blob(digest))
+            .diverges(facts, |digest| crate::facts::blob(&blobs, digest))
             .map_err(failed("refold the log"))?
         {
             return Err(format!("{divergence} after a commit"));
@@ -442,12 +442,15 @@ impl<F: Family> World<F> {
                 .map_err(|error| format!("load the legacy owner: {error}"))?;
         }
         let facts = crate::facts::logged(&mut lease)?;
+        let blobs = crate::facts::logged_blobs(&mut lease, &facts)?;
         let fold = lease.fold();
         let cached = fold
             .cached()
             .map_err(|error| format!("read the cached fold: {error}"))?;
-        let (folded, _) = Folded::<F>::open(cached, facts.clone(), |digest| fold.blob(digest))
-            .map_err(failed("reopen the fold"))?;
+        let (folded, _) = Folded::<F>::open(cached, facts.clone(), |digest| {
+            crate::facts::blob(&blobs, digest)
+        })
+        .map_err(failed("reopen the fold"))?;
         self.oracle = self.durable.oracle.clone();
         self.round = self.durable.round.clone();
         self.queued = self.durable.queued.clone();

@@ -22,6 +22,7 @@ pub enum Mutation {
     FactsResident,
     CacheNeverDue,
     ScopedInputLowered,
+    BlobsResident,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

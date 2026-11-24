@@ -67,6 +67,11 @@ impl BlobRef {
     pub const fn index(self) -> u32 {
         self.0
     }
+
+    #[must_use]
+    pub const fn from_index(index: u32) -> Self {
+        Self(index)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
