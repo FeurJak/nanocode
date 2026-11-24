@@ -1,4 +1,5 @@
 mod blob;
+mod fact;
 mod kv;
 mod lock;
 mod payload;
@@ -9,6 +10,12 @@ mod state;
 mod store;
 
 pub use blob::{BlobKey, BlobStore, BlobUrl, SharedBlobStore, base64_data_url, get_blob};
+pub use fact::{
+    Base, BlobRef, BlockRef, DIGEST_BYTES, Decision, Digest, Divergence, DurableFold, EffectResult,
+    Fact, FactSink, FoldError, Folded, Input, InputKind, Intent, IntentTarget, Marker, ModelOut,
+    Outcome, OwnedFact, Seen, Snapshot, Start, StoredFact, TurnStatus, VALUE_INLINE_BYTES, Value,
+    Values, referenced,
+};
 pub use kv::{KeyValue, KeyValueStore, Versioned};
 pub use lock::{LockKey, LocksHeld};
 pub use payload::EncodedPayload;

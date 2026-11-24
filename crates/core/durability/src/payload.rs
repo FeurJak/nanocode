@@ -8,7 +8,7 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{Error, Result};
 
-const INLINE_BYTES: usize = 16 * 1024;
+pub(crate) const INLINE_BYTES: usize = 16 * 1024;
 
 const STEP_INLINE_BYTES: usize = 1024;
 
