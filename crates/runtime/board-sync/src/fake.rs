@@ -1,9 +1,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::Mutex,
+    ops::{Deref, DerefMut},
 };
 
 use nanocode_board::EventId;
+use nanocode_sync::Slot;
 
 use super::{Call, Platform, PlatformError, PlatformFuture, Posted, Rendered, Target};
 
@@ -72,14 +73,48 @@ pub struct State {
 
 pub struct Fake {
     pub sync: String,
-    state: Mutex<State>,
+    state: Slot<State>,
+}
+
+pub struct Held<'a> {
+    home: &'a Slot<State>,
+    state: Option<State>,
+}
+
+impl Deref for Held<'_> {
+    type Target = State;
+
+    fn deref(&self) -> &State {
+        self.state
+            .as_ref()
+            .expect("a held fake keeps its state until it is dropped")
+    }
+}
+
+impl DerefMut for Held<'_> {
+    fn deref_mut(&mut self) -> &mut State {
+        self.state
+            .as_mut()
+            .expect("a held fake keeps its state until it is dropped")
+    }
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.take() {
+            assert!(
+                self.home.put(state).is_none(),
+                "the fake's state has one home"
+            );
+        }
+    }
 }
 
 impl Fake {
     pub fn new(sync: &str) -> Self {
         Self {
             sync: sync.to_owned(),
-            state: Mutex::new(State {
+            state: Slot::new(Some(State {
                 copies: Vec::new(),
                 echoes: Vec::new(),
                 calls: 0,
@@ -91,7 +126,7 @@ impl Fake {
                 minted: 0,
                 faults: None,
                 poisoned: BTreeSet::new(),
-            }),
+            })),
         }
     }
 
@@ -116,10 +151,15 @@ impl Fake {
         self.lock().told = false;
     }
 
-    pub fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    pub fn lock(&self) -> Held<'_> {
+        let state = self
+            .state
+            .take()
+            .expect("the simulator polls one task at a time, so a fake is held once");
+        Held {
+            home: &self.state,
+            state: Some(state),
+        }
     }
 
     pub fn copies(&self) -> Vec<Copy> {

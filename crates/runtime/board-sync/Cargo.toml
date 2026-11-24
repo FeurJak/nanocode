@@ -12,6 +12,7 @@ description = "Two-way sync between a nanocode board and outside threads: webhoo
 [dependencies]
 nanocode-board.workspace = true
 nanocode-durability-core.workspace = true
+nanocode-sync.workspace = true
 nanocode-turnlog.workspace = true
 serde.workspace = true
 serde_json.workspace = true
