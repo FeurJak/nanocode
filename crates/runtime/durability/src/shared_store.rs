@@ -184,6 +184,7 @@ struct StoreRequest {
 pub struct SharedStore {
     commands: mpsc::UnboundedSender<StoreRequest>,
     colocation: Option<std::sync::Arc<dyn crate::Colocation>>,
+    facts: Option<std::sync::Arc<dyn crate::FactLog>>,
     batches_companion_acquisition: bool,
     supports_events: bool,
     supports_summaries: bool,
@@ -235,6 +236,7 @@ impl SharedStore {
         let supports_events = store.supports_events();
         let supports_summaries = store.supports_summaries();
         let colocation = store.colocation();
+        let facts = store.facts();
         let readers = store.handles();
         let (commands, receiver) = mpsc::unbounded_channel();
         if store.concurrent_handle().is_some() {
@@ -245,6 +247,7 @@ impl SharedStore {
         Ok(Self {
             commands,
             colocation,
+            facts,
             batches_companion_acquisition,
             supports_events,
             supports_summaries,
@@ -1454,6 +1457,10 @@ impl StateStore for SharedStore {
 
     fn colocation(&self) -> Option<std::sync::Arc<dyn crate::Colocation>> {
         self.colocation.clone()
+    }
+
+    fn facts(&self) -> Option<std::sync::Arc<dyn crate::FactLog>> {
+        self.facts.clone()
     }
 
     fn batches_companion_acquisition(&self) -> bool {

@@ -1,0 +1,107 @@
+use std::collections::BTreeMap;
+
+use nanocode_platform::MaybeSend;
+use serde_json::value::RawValue;
+
+use crate::{
+    Digest, DurableFold, FactSink, FoldError, Folded, OwnedFact, Snapshot, StoreError, StoreFuture,
+    StoredFact,
+};
+
+pub struct Replay {
+    pub snapshot: Option<Snapshot>,
+    pub facts: Vec<(u64, StoredFact)>,
+    pub blobs: BTreeMap<Digest, Box<RawValue>>,
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub type Append<'a> =
+    Box<dyn FnOnce(Replay, &mut dyn FactSink) -> Result<u64, FoldError> + Send + 'a>;
+
+#[cfg(target_family = "wasm")]
+pub type Append<'a> = Box<dyn FnOnce(Replay, &mut dyn FactSink) -> Result<u64, FoldError> + 'a>;
+
+pub trait FactLog: Send + Sync {
+    fn replay(&self) -> StoreFuture<'_, Result<Replay, StoreError>>;
+
+    fn append<'a>(
+        &'a self,
+        after: u64,
+        write: Append<'a>,
+    ) -> StoreFuture<'a, Result<u64, StoreError>>;
+}
+
+struct Forward<'a>(&'a mut dyn FactSink);
+
+impl FactSink for Forward<'_> {
+    fn next(&self) -> u64 {
+        self.0.next()
+    }
+
+    fn put_blob(&mut self, digest: &Digest, json: &RawValue) -> Result<(), FoldError> {
+        self.0.put_blob(digest, json)
+    }
+
+    fn append(&mut self, fact: StoredFact) -> Result<u64, FoldError> {
+        self.0.append(fact)
+    }
+}
+
+fn folded<F: DurableFold>(replay: Replay) -> Result<Folded<F>, FoldError> {
+    let Replay {
+        snapshot,
+        facts,
+        blobs,
+    } = replay;
+    let blob = |digest: &Digest| {
+        blobs
+            .get(digest)
+            .map(|json| &**json)
+            .ok_or(FoldError::MissingBlob { digest: *digest })
+    };
+    Folded::open(snapshot, facts, blob).map(|(folded, _)| folded)
+}
+
+fn caught_up<F: DurableFold>(folded: Folded<F>, mut unseen: Replay) -> Result<Folded<F>, FoldError> {
+    assert!(
+        unseen.snapshot.is_none(),
+        "the facts a fold has not seen come without a snapshot"
+    );
+    assert!(
+        unseen.facts.iter().all(|(seq, _)| *seq > folded.seq()),
+        "the facts a fold has not seen follow it"
+    );
+    if unseen.facts.is_empty() {
+        return Ok(folded);
+    }
+    unseen.snapshot = Some(folded.snapshot()?);
+    self::folded(unseen)
+}
+
+pub async fn fold_facts<F: DurableFold>(log: &dyn FactLog) -> Result<Folded<F>, StoreError> {
+    folded(log.replay().await?).map_err(StoreError::from)
+}
+
+pub async fn commit_fact<F>(
+    log: &dyn FactLog,
+    folded: Folded<F>,
+    fact: OwnedFact<F::Decision>,
+) -> Result<(Folded<F>, u64), StoreError>
+where
+    F: DurableFold + MaybeSend,
+    F::Decision: MaybeSend,
+{
+    let mut committed = None;
+    let slot = &mut committed;
+    let after = folded.seq();
+    let seq = log
+        .append(after, Box::new(move |unseen, sink| {
+            let folded = caught_up(folded, unseen)?;
+            let (folded, seq) = folded.commit(&mut Forward(sink), fact)?;
+            *slot = Some(folded);
+            Ok(seq)
+        }))
+        .await?;
+    let folded = committed.expect("an append that returned a seq committed its fold");
+    Ok((folded, seq))
+}

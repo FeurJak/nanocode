@@ -494,6 +494,10 @@ pub trait StateStore: MaybeSend {
         None
     }
 
+    fn facts(&self) -> Option<Arc<dyn crate::FactLog>> {
+        None
+    }
+
     fn read_record<'a>(
         &'a mut self,
         state_id: &'a str,

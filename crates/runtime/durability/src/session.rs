@@ -3325,6 +3325,11 @@ impl DurableSession {
         self.store.clone()
     }
 
+    #[must_use]
+    pub fn facts(&self) -> Option<Arc<dyn crate::FactLog>> {
+        StateStore::facts(&self.store)
+    }
+
     pub async fn pool(&self, mut payload: EncodedPayload) -> Result<()> {
         let mut records = Vec::new();
         payload.stage(&mut records);

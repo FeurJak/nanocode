@@ -326,6 +326,10 @@ impl<S: StateStore + ?Sized + 'static> StateStore for CachedStore<S> {
         self.base.colocation()
     }
 
+    fn facts(&self) -> Option<std::sync::Arc<dyn crate::FactLog>> {
+        self.base.facts()
+    }
+
     fn batches_companion_acquisition(&self) -> bool {
         self.base.batches_companion_acquisition()
     }
