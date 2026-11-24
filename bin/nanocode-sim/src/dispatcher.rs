@@ -1,8 +1,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    ops::Range,
+    ops::{Deref, DerefMut, Range},
     process::ExitCode,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::Arc,
 };
 
 use nanocode_board::{Board, ClaimId, NewTask, Op, Outcome, Phase, TaskId};
@@ -11,6 +11,7 @@ use nanocode_dispatcher::{
     BRIEF, Dispatcher, Pool, PoolError, PoolFuture, Start,
     sim::{self as dispatcher_sim, Mutation as DispatcherRule},
 };
+use nanocode_sync::Slot;
 use nanocode_turnlog::{LogHost, MemoryLog};
 
 use crate::{
@@ -112,11 +113,52 @@ struct Shared {
     stats: DispatcherStats,
 }
 
-struct SimPool(Mutex<Shared>);
+struct SimPool(Slot<Shared>);
+
+struct Borrowed<'a> {
+    home: &'a Slot<Shared>,
+    shared: Option<Shared>,
+}
+
+impl Deref for Borrowed<'_> {
+    type Target = Shared;
+
+    fn deref(&self) -> &Shared {
+        self.shared
+            .as_ref()
+            .expect("a borrowed pool holds its state until it is dropped")
+    }
+}
+
+impl DerefMut for Borrowed<'_> {
+    fn deref_mut(&mut self) -> &mut Shared {
+        self.shared
+            .as_mut()
+            .expect("a borrowed pool holds its state until it is dropped")
+    }
+}
+
+impl Drop for Borrowed<'_> {
+    fn drop(&mut self) {
+        if let Some(shared) = self.shared.take() {
+            assert!(
+                self.home.put(shared).is_none(),
+                "the pool state has one home"
+            );
+        }
+    }
+}
 
 impl SimPool {
-    fn borrow(&self) -> MutexGuard<'_, Shared> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    fn borrow(&self) -> Borrowed<'_> {
+        let shared = self
+            .0
+            .take()
+            .expect("the simulator polls one task at a time, so the pool is borrowed once");
+        Borrowed {
+            home: &self.0,
+            shared: Some(shared),
+        }
     }
 }
 
@@ -225,7 +267,7 @@ fn shown(error: impl std::fmt::Debug) -> String {
 }
 
 impl World {
-    fn shared(&self) -> MutexGuard<'_, Shared> {
+    fn shared(&self) -> Borrowed<'_> {
         self.pool.borrow()
     }
 
@@ -682,7 +724,7 @@ pub fn simulate(seed: u64, mutation: DispatcherMutation) -> DispatcherOutcome {
             poster,
             probe,
             workers: BTreeMap::new(),
-            pool: SimPool(Mutex::new(Shared {
+            pool: SimPool(Slot::new(Some(Shared {
                 rng,
                 now: 1_000,
                 bots: Vec::new(),
@@ -696,7 +738,7 @@ pub fn simulate(seed: u64, mutation: DispatcherMutation) -> DispatcherOutcome {
                     seeds: 1,
                     ..DispatcherStats::default()
                 },
-            })),
+            }))),
             policy,
             crash_ppm,
             posted: Vec::new(),

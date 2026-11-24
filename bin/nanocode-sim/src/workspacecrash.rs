@@ -69,7 +69,7 @@ use std::{
     process::ExitCode,
     rc::Rc,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     task::{Context, Poll, Waker},
@@ -83,6 +83,7 @@ use nanocode_shell::{
     FileUpload, HostInfo, Identity, Kind, Limits, Links, Machine, NoCommands, Remove, Reply,
     SHA256_BYTES, Script, Shell, Stat, WholeFile, Write, Wrote,
 };
+use nanocode_sync::{Atom, Vector};
 use nanocode_sys::base64::STANDARD;
 use nanocode_workspace_fs::{
     Batch, Blob, Caps, Digest, Failure, Manifest, MemStore, Store, WorkspaceFs,
@@ -556,8 +557,8 @@ struct Dying {
     dead: AtomicBool,
     commits: AtomicU64,
     yields: AtomicU64,
-    rng: Mutex<Option<Rng>>,
-    states: Mutex<Vec<State>>,
+    rng: Option<Atom<Rng>>,
+    states: Atom<Vector<State>>,
 }
 
 impl Dying {
@@ -570,14 +571,16 @@ impl Dying {
             dead: AtomicBool::new(false),
             commits: AtomicU64::new(0),
             yields: AtomicU64::new(0),
-            rng: Mutex::new(rng),
-            states: Mutex::new(Vec::new()),
+            rng: rng.map(Atom::new),
+            states: Atom::new(Vector::new()),
         })
     }
 
     fn yields(&self) -> bool {
-        let mut rng = self.rng.lock().expect("the yield rng is not poisoned");
-        let yields = rng.as_mut().is_some_and(|rng| rng.chance(YIELD_PPM));
+        let yields = self
+            .rng
+            .as_ref()
+            .is_some_and(|rng| rng.update(|rng| rng.chance(YIELD_PPM)));
         if yields {
             self.yields.fetch_add(1, Ordering::SeqCst);
         }
@@ -595,10 +598,7 @@ impl Dying {
     }
 
     fn states(&self) -> Vec<State> {
-        self.states
-            .lock()
-            .expect("the recorded states are not poisoned")
-            .clone()
+        self.states.read(|states| states.iter().cloned().collect())
     }
 }
 
@@ -650,10 +650,8 @@ impl Store for Dying {
             }
             let committed = self.inner.commit(workspace, batch).await;
             let held = self.inner.load(workspace).await?;
-            self.states
-                .lock()
-                .expect("the recorded states are not poisoned")
-                .push(state(&held));
+            let held = state(&held);
+            self.states.update(|states| states.push_back(held.clone()));
             if plan == PLAN_AFTER {
                 self.dead.store(true, Ordering::SeqCst);
                 self.fired.store(plan, Ordering::SeqCst);

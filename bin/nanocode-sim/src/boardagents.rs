@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 use nanocode_durability_core::{StoreError, StoreFuture};
 use nanocode_subagents::{AgentId, BoardCoordination, BoardStats, Coordination, Dispatching};
+use nanocode_sync::SwapOption;
 use nanocode_turnlog::{LogHost, MemoryLog};
 
 const HOSTED_IDLE_RETIRE_MS: u64 = 24 * 60 * 60 * 1_000;
@@ -14,7 +15,7 @@ const HOSTED_IDLE_RETIRE_MS: u64 = 24 * 60 * 60 * 1_000;
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static DELAYED: AtomicBool = AtomicBool::new(false);
 static LAGGING: AtomicBool = AtomicBool::new(false);
-static MUTATION: Mutex<HostMutation> = Mutex::new(HostMutation::None);
+static MUTATION: AtomicU8 = AtomicU8::new(HostMutation::None as u8);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HostMutation {
@@ -54,7 +55,7 @@ impl HostMutation {
 thread_local! {
     static SEED: std::cell::RefCell<Option<Seed>> = const { std::cell::RefCell::new(None) };
 }
-static TOTALS: Mutex<Option<(u64, BoardStats)>> = Mutex::new(None);
+static TOTALS: SwapOption<(u64, BoardStats)> = SwapOption::const_empty();
 
 struct Seed {
     host: Arc<dyn LogHost>,
@@ -76,7 +77,7 @@ impl Seed {
                 log,
                 state: AtomicU64::new(seed | 1),
                 appends: AtomicU64::new(0),
-                mutation: *lock(&MUTATION),
+                mutation: host_mutation(),
                 lag: Arc::clone(&lag),
                 stale: AtomicBool::new(false),
                 failed: AtomicBool::new(false),
@@ -210,8 +211,14 @@ impl LogHost for Delayed {
     }
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+fn host_mutation() -> HostMutation {
+    let stored = MUTATION.load(Ordering::Relaxed);
+    let mutation = HostMutation::ALL[usize::from(stored)];
+    assert_eq!(
+        mutation as u8, stored,
+        "HostMutation::ALL lists the mutations in order"
+    );
+    mutation
 }
 
 pub fn enable() {
@@ -245,7 +252,7 @@ pub fn mutate(name: &str) -> bool {
     if mutation == HostMutation::RefreshOnce {
         enable_lagging();
     }
-    *lock(&MUTATION) = mutation;
+    MUTATION.store(mutation as u8, Ordering::Relaxed);
     true
 }
 
@@ -255,7 +262,7 @@ pub fn replay_flags() -> String {
     if !enabled() {
         return String::new();
     }
-    let mutation = *lock(&MUTATION);
+    let mutation = host_mutation();
     let lagging = LAGGING.load(Ordering::Relaxed);
     if mutation != HostMutation::None {
         let mut flags = String::new();
@@ -276,7 +283,7 @@ pub fn replay_flags() -> String {
 }
 
 pub fn mutation() -> Option<String> {
-    let mutation = *lock(&MUTATION);
+    let mutation = host_mutation();
     (mutation != HostMutation::None).then(|| format!("subagents_board_{}", mutation.name()))
 }
 
@@ -286,7 +293,7 @@ pub fn enabled() -> bool {
 
 pub fn begin(seed: u64) {
     if enabled() {
-        let board = match *lock(&MUTATION) {
+        let board = match host_mutation() {
             HostMutation::PolledOnce => Some(nanocode_board::sim::Mutation::BoardPolledOnce),
             HostMutation::SteersTakenMidTurn => {
                 Some(nanocode_board::sim::Mutation::SteersTakenMidTurn)
@@ -308,7 +315,7 @@ pub fn plane() -> Option<Arc<dyn Coordination>> {
     if !enabled() {
         return None;
     }
-    let reopen_lost = *lock(&MUTATION) == HostMutation::ReopenLost;
+    let reopen_lost = host_mutation() == HostMutation::ReopenLost;
     SEED.with_borrow_mut(|seed| {
         let seed = seed.get_or_insert_with(|| Seed::new(0));
         let scope = if seed.planes.is_empty() || !reopen_lost {
@@ -453,10 +460,14 @@ pub fn finish() -> Option<String> {
     if !seed.planes.is_empty() && seed.audits == 0 {
         return Some("board: the run ended without auditing its board".to_owned());
     }
-    let mut totals = lock(&TOTALS);
-    let totals = totals.get_or_insert_with(|| (0, BoardStats::default()));
-    totals.0 += 1;
-    totals.1.add(&seed.stats);
+    TOTALS.rcu(|totals| {
+        let (seeds, mut stats) = totals
+            .as_deref()
+            .cloned()
+            .unwrap_or_else(|| (0, BoardStats::default()));
+        stats.add(&seed.stats);
+        Some(Arc::new((seeds + 1, stats)))
+    });
     None
 }
 
@@ -464,7 +475,7 @@ pub fn report() {
     if !enabled() {
         return;
     }
-    if let Some((seeds, stats)) = lock(&TOTALS).as_ref() {
+    if let Some((seeds, stats)) = TOTALS.load_full().as_deref() {
         println!("BOARD seeds={seeds} {stats:?}");
     } else {
         println!("BOARD seeds=0");

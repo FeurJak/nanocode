@@ -20,7 +20,7 @@ use std::{
     ops::Range,
     process::ExitCode,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -373,7 +373,7 @@ struct ShardLog {
     before_ppm: u64,
     after_ppm: u64,
     read_ppm: u64,
-    calls: Mutex<BTreeMap<String, Vec<Call>>>,
+    calls: Slot<BTreeMap<String, Vec<Call>>>,
     appends: AtomicU64,
     rows: AtomicU64,
     faults: AtomicU64,
@@ -389,6 +389,23 @@ impl ShardLog {
         let value = each(&mut rng);
         assert!(self.rng.put(rng).is_none(), "the fault rng has one home");
         value
+    }
+
+    fn calls<T>(&self, each: impl FnOnce(&mut BTreeMap<String, Vec<Call>>) -> T) -> T {
+        let mut calls = self
+            .calls
+            .take()
+            .expect("the simulator polls one task at a time");
+        let value = each(&mut calls);
+        assert!(
+            self.calls.put(calls).is_none(),
+            "the call record has one home"
+        );
+        value
+    }
+
+    fn record(&self, scope: &str, call: Call) {
+        self.calls(|calls| calls.entry(scope.to_owned()).or_default().push(call));
     }
 
     async fn wait(&self, rows: usize) {
@@ -473,15 +490,13 @@ impl LogHost for ShardLog {
             self.wait(rows.len()).await;
             self.appends.fetch_add(1, Ordering::SeqCst);
             if self.roll(|rng| rng.chance(self.before_ppm)) {
-                self.calls
-                    .lock()
-                    .expect("calls lock")
-                    .entry(scope.to_owned())
-                    .or_default()
-                    .push(Call {
+                self.record(
+                    scope,
+                    Call {
                         rows: rows.to_vec(),
                         ok: false,
-                    });
+                    },
+                );
                 return Err(self.injected("append before"));
             }
             let appended = self.inner.append(scope, rows).await;
@@ -490,15 +505,13 @@ impl LogHost for ShardLog {
             } else {
                 self.rows.fetch_add(rows.len() as u64, Ordering::SeqCst);
             }
-            self.calls
-                .lock()
-                .expect("calls lock")
-                .entry(scope.to_owned())
-                .or_default()
-                .push(Call {
+            self.record(
+                scope,
+                Call {
                     rows: rows.to_vec(),
                     ok: appended.is_ok(),
-                });
+                },
+            );
             self.wait(0).await;
             if appended.is_ok() && self.roll(|rng| rng.chance(self.after_ppm)) {
                 return Err(self.injected("append after"));
@@ -1341,37 +1354,38 @@ fn check(world: &World, logs: &[Vec<(u64, String)>]) -> Result<ShardsStats, Stri
         }
         folds.push(fold);
     }
-    let calls = world.host.calls.lock().expect("calls lock");
-    for (index, log) in logs.iter().enumerate() {
-        let scope = world.scope(Partition(index as u32));
-        let by_seq: BTreeMap<u64, &String> = log.iter().map(|(seq, body)| (*seq, body)).collect();
-        for call in calls.get(&scope).into_iter().flatten() {
-            let present = call
-                .rows
+    world.host.calls(|calls| -> Result<(), String> {
+        for (index, log) in logs.iter().enumerate() {
+            let scope = world.scope(Partition(index as u32));
+            let by_seq: BTreeMap<u64, &String> = log.iter().map(|(seq, body)| (*seq, body)).collect();
+            for call in calls.get(&scope).into_iter().flatten() {
+                let present = call
+                    .rows
+                    .iter()
+                    .filter(|(seq, body)| by_seq.get(seq).is_some_and(|landed| *landed == body))
+                    .count();
+                if call.ok && present != call.rows.len() {
+                    return Err(format!(
+                        "partition {index}: an acknowledged append of {} rows has only {present} in the log",
+                        call.rows.len()
+                    ));
+                }
+            }
+            let rounds: u64 = oracle
+                .commits
                 .iter()
-                .filter(|(seq, body)| by_seq.get(seq).is_some_and(|landed| *landed == body))
-                .count();
-            if call.ok && present != call.rows.len() {
+                .filter(|(partition, _)| partition.0 as usize == index)
+                .map(|(_, stats)| stats.appends)
+                .sum();
+            let appends = calls.get(&scope).map_or(0, Vec::len) as u64;
+            if appends != rounds {
                 return Err(format!(
-                    "partition {index}: an acknowledged append of {} rows has only {present} in the log",
-                    call.rows.len()
+                    "partition {index}: committers made {rounds} group rounds but the host took {appends} appends"
                 ));
             }
         }
-        let rounds: u64 = oracle
-            .commits
-            .iter()
-            .filter(|(partition, _)| partition.0 as usize == index)
-            .map(|(_, stats)| stats.appends)
-            .sum();
-        let appends = calls.get(&scope).map_or(0, Vec::len) as u64;
-        if appends != rounds {
-            return Err(format!(
-                "partition {index}: committers made {rounds} group rounds but the host took {appends} appends"
-            ));
-        }
-    }
-    drop(calls);
+        Ok(())
+    })?;
     let mut stats = oracle.stats;
     stats.lapsed_renews = lapsed_renews;
     stats.renews_full = renews_full;
@@ -1594,7 +1608,7 @@ fn simulate_shape(seed: u64, shape: Shape, mutation: ShardsMutation) -> ShardsOu
         before_ppm: shape.before_ppm,
         after_ppm: shape.after_ppm,
         read_ppm: shape.read_ppm,
-        calls: Mutex::new(BTreeMap::new()),
+        calls: Slot::new(Some(BTreeMap::new())),
         appends: AtomicU64::new(0),
         rows: AtomicU64::new(0),
         faults: AtomicU64::new(0),

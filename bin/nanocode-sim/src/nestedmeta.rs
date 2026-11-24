@@ -1,12 +1,7 @@
-use std::{
-    collections::BTreeSet,
-    ops::Range,
-    process::ExitCode,
-    sync::{Arc, Mutex},
-};
+use std::{collections::BTreeSet, ops::Range, process::ExitCode, sync::Arc};
 
 use nanocode_code_mode::{ToolContext, ToolOutput};
-use nanocode_sync::block_on;
+use nanocode_sync::{Slot, block_on};
 use nanocode_tool_runtime::{
     CodeModeToolPolicy, ESCALATION_INPUTS, FileAccess, Tools,
     runtime::ToolRuntime,
@@ -127,7 +122,7 @@ impl nanocode::FunctionHandler for Touch {
     }
 }
 
-struct Escalate(Arc<Mutex<Vec<String>>>);
+struct Escalate(Arc<Slot<Vec<String>>>);
 
 impl nanocode::FunctionHandler for Escalate {
     fn call<'a>(
@@ -140,7 +135,7 @@ impl nanocode::FunctionHandler for Escalate {
             .as_object()
             .map(|fields| fields.keys().cloned().collect())
             .unwrap_or_default();
-        *self.0.lock().expect("the escalate log is not poisoned") = keys;
+        drop(self.0.put(keys));
         Box::pin(async move { Ok(json!({ "ok": true })) })
     }
 }
@@ -202,7 +197,7 @@ impl CodeModeToolPolicy for Declares {
     }
 }
 
-fn tools(unescalated: bool, seen: &Arc<Mutex<Vec<String>>>) -> Tools {
+fn tools(unescalated: bool, seen: &Arc<Slot<Vec<String>>>) -> Tools {
     let schema = json!({ "type": "object", "properties": { "files": { "type": "array" }, "fail": { "type": "boolean" } } });
     let builder = Tools::builder()
         .without_defaults()
@@ -251,7 +246,7 @@ fn run_seed(seed: u64, mutation: NestedMetaMutation) -> Outcome {
     let shape = format!("calls={calls}");
     let mut esc = Rng::derive(seed, "nested_meta escalation calls");
     let unescalated = Rng::derive(seed, "nested_meta escalation").below(2) == 0;
-    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::new(Slot::default());
     let runtime =
         ToolRuntime::new_with_tools(std::env::temp_dir(), Vec::new(), &tools(unescalated, &seen));
     let mut stats = NestedMetaStats {
@@ -317,7 +312,7 @@ fn run_seed(seed: u64, mutation: NestedMetaMutation) -> Outcome {
             let context = ToolContext::new("", SESSION, &step, &[], usize::MAX);
             let output =
                 block_on(runtime.execute_nested_tool(ESCALATE, Value::Object(input), context));
-            let keys = std::mem::take(&mut *seen.lock().expect("the escalate log is not poisoned"));
+            let keys = seen.take().unwrap_or_default();
             digest = fnv(
                 digest,
                 format!("{step}:{}:{keys:?}", output.success).as_bytes(),

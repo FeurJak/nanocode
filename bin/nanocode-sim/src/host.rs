@@ -1,10 +1,11 @@
 use std::{
     cell::RefCell,
-    sync::{Arc, Mutex, PoisonError, atomic::AtomicU64},
+    sync::{Arc, atomic::AtomicU64},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use nanocode_platform::{Host, HostFuture, Lent};
+use nanocode_sync::Slot;
 
 use crate::{executor::Clock, rng::Rng};
 
@@ -18,7 +19,7 @@ struct Simulation {
     stamps: &'static AtomicU64,
 }
 
-type Shared = Arc<Mutex<Simulation>>;
+type Shared = Arc<Slot<Simulation>>;
 
 thread_local! {
     // Shared so a thread that works for this one while it waits (the native Python
@@ -28,11 +29,23 @@ thread_local! {
 
 fn with<R>(use_simulation: impl FnOnce(&mut Simulation) -> R) -> R {
     CURRENT.with_borrow(|current| {
-        let simulation = current
+        let shared = current
             .as_ref()
             .expect("the platform host is used only inside a simulated seed");
-        use_simulation(&mut simulation.lock().unwrap_or_else(PoisonError::into_inner))
+        within(shared, use_simulation)
     })
+}
+
+fn within<R>(shared: &Shared, use_simulation: impl FnOnce(&mut Simulation) -> R) -> R {
+    let mut simulation = shared
+        .take()
+        .expect("a lending thread and the one it lends to never use the simulation at once");
+    let result = use_simulation(&mut simulation);
+    assert!(
+        shared.put(simulation).is_none(),
+        "the simulation has one home"
+    );
+    result
 }
 
 /// Gives the borrowing thread back the simulation it had before it took on a lent one.
@@ -142,13 +155,13 @@ pub fn enter(seed: u64, clock: &Arc<Clock>) {
     let stamps = UUID_STAMPS.with(|stamps| *stamps);
     stamps.store(0, std::sync::atomic::Ordering::Relaxed);
     CURRENT.with_borrow_mut(|current| {
-        *current = Some(Arc::new(Mutex::new(Simulation {
+        *current = Some(Arc::new(Slot::new(Some(Simulation {
             clock: Arc::clone(clock),
             random: Rng::derive(seed, "host"),
             spawned: Vec::new(),
             started: origin(),
             stamps,
-        })));
+        }))));
     });
 }
 
@@ -164,14 +177,7 @@ pub fn spawned() -> Vec<(HostFuture, String)> {
     CURRENT.with_borrow(|current| {
         current
             .as_ref()
-            .map(|simulation| {
-                std::mem::take(
-                    &mut simulation
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .spawned,
-                )
-            })
+            .map(|shared| within(shared, |simulation| std::mem::take(&mut simulation.spawned)))
             .unwrap_or_default()
     })
 }
