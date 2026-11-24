@@ -1308,6 +1308,7 @@ impl TurnLog {
         answer: impl std::future::Future<Output = Result<T, StoreError>>,
     ) -> Result<T, StoreError> {
         match self.within {
+            Some(_) if crate::sim::mutated(crate::sim::Mutation::AnswersUnbounded) => answer.await,
             Some(within) => crate::bound::within(within, call, &self.scope, answer).await,
             None => answer.await,
         }
