@@ -2195,6 +2195,7 @@ impl Lease<'_> {
         }
         writer.stats.parts += stored.len() as u64 - 1;
         writer.stats.plain_bytes += plain.len() as u64;
+        let snapshotted = snapshot.is_some();
         match snapshot {
             Some(part) => {
                 let packed = part.head;
@@ -2205,7 +2206,6 @@ impl Lease<'_> {
                     part.index.groups,
                     part.index.root,
                 );
-                writer.fold.evict();
                 writer.stats.sections += sectioned_rows;
                 writer.stats.snapshot_bytes += rewritten as u64;
                 writer.fold.seal(seq, keep);
@@ -2241,6 +2241,9 @@ impl Lease<'_> {
                 writer.tail_rows += stored.len();
                 writer.stats.row_bytes += added as u64;
             }
+        }
+        if snapshotted || !crate::sim::mutated(crate::sim::Mutation::ResidentUntilSnapshot) {
+            writer.fold.evict();
         }
         writer.fold.release();
         match point {

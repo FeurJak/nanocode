@@ -717,11 +717,11 @@ impl Fold {
             .owners
             .iter()
             .filter(|(owner, state)| {
-                matches!(state, Owner::Warm { delta, entry } if delta.is_empty() && !entry.legacy)
+                matches!(state, Owner::Warm { delta, entry } if delta.is_empty() && !entry.legacy && !entry.sections.is_empty())
                     && !read.contains(owner.as_str())
-                    && !owner.split_once('\n').is_some_and(|(state, _)| {
-                        read.contains(&format!("{state}\n"))
-                    })
+                    && !owner
+                        .find('\n')
+                        .is_some_and(|end| read.contains(&owner[..=end]))
             })
             .map(|(owner, _)| owner.clone())
             .collect::<Vec<_>>();

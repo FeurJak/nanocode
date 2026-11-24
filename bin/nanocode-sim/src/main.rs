@@ -49,6 +49,7 @@ mod partitions;
 mod plog;
 mod repocache;
 mod requestclose;
+mod resident;
 mod rng;
 mod scale;
 mod scripted;

@@ -1340,6 +1340,7 @@ impl TurnDurability for TurnLogPolicy {
         if after.snapshots > before.snapshots {
             let stored = self.disk.with(|rows| rows.view(scope));
             crate::stall::bounded(scope, &stored, seq);
+            crate::resident::probe(scope, &stored, seq, self.limit, self.ratio);
             let referenced = referenced(&stored);
             for (row, body) in &stored {
                 assert!(
