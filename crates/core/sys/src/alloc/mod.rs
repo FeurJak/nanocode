@@ -20,7 +20,35 @@ pub use local::Census;
 
 /// Tests that read the process-wide heap counters, or move many pages, run one at a time.
 #[cfg(all(test, unix))]
-static HEAP_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static HEAP_TESTS: HeapTests = HeapTests(core::sync::atomic::AtomicBool::new(false));
+
+#[cfg(all(test, unix))]
+struct HeapTests(core::sync::atomic::AtomicBool);
+
+#[cfg(all(test, unix))]
+struct Alone(&'static HeapTests);
+
+#[cfg(all(test, unix))]
+impl HeapTests {
+    fn alone(&'static self) -> Alone {
+        use core::sync::atomic::Ordering;
+        while self
+            .0
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            std::thread::yield_now();
+        }
+        Alone(self)
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for Alone {
+    fn drop(&mut self) {
+        self.0.0.store(false, core::sync::atomic::Ordering::Release);
+    }
+}
 
 pub struct Heap;
 

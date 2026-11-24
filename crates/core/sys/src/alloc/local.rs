@@ -677,9 +677,7 @@ mod collect_tests {
     /// must collect them within COLLECT_PAGES_MAX, however many pages it holds, or they stay allocated forever.
     #[test]
     fn an_owner_collects_pages_another_thread_freed_within_collect_pages_max_new_pages() {
-        let _alone = super::super::HEAP_TESTS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _alone = super::super::HEAP_TESTS.alone();
         let owner = State::new();
         let freed = Layout::from_size_align(640, 8).unwrap();
         let blocks: Vec<usize> = (0..(256usize << 20) / 640)

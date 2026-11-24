@@ -47,9 +47,7 @@ mod tests {
 
     #[test]
     fn allocated_follows_pages_and_large_mappings() {
-        let _alone = super::super::HEAP_TESTS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _alone = super::super::HEAP_TESTS.alone();
         let local = Local::new();
         let before = stats();
         let layout = Layout::from_size_align(1024, 8).unwrap();
