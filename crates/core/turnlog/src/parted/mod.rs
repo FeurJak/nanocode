@@ -7,16 +7,11 @@
 //! already exists rejects only its own append, and a stale fence rejects the whole batch. The
 //! store behind it is a PartStore: SqlParts for Postgres and SQLite, ModelParts for the simulator.
 
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    num::NonZeroU32,
-    ops::Range,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
-};
+use std::{collections::HashSet, num::NonZeroU32, ops::Range, sync::Arc};
 
 use nanocode_durability_core::{StoreError, StoreFuture};
 use nanocode_partitions::{Partition, Row, partition_of};
-use nanocode_sync::oneshot;
+use nanocode_sync::{Atom, Map, Slot, Vector, oneshot};
 
 use crate::host::{Compaction, Extension, LogHost, Rider, StoredCheckpoint, Write};
 
@@ -246,26 +241,46 @@ struct Waiter {
     reply: oneshot::Sender<Turn>,
 }
 
-#[derive(Default)]
+#[derive(Clone)]
+struct Queued {
+    rows: usize,
+    waiter: Arc<Slot<Waiter>>,
+}
+
+impl Queued {
+    fn new(waiter: Waiter) -> Self {
+        Self {
+            rows: waiter.append.rows.len(),
+            waiter: Arc::new(Slot::new(Some(waiter))),
+        }
+    }
+
+    fn take(&self) -> Waiter {
+        let Some(waiter) = self.waiter.take() else {
+            panic!("a queued append leaves its queue once");
+        };
+        waiter
+    }
+}
+
+#[derive(Clone, Default)]
 struct Queue {
     leading: bool,
-    waiting: VecDeque<Waiter>,
+    waiting: Vector<Queued>,
 }
+
+type Queues = Atom<Map<Partition, Queue>>;
 
 pub struct PartedLog<S: ?Sized> {
     store: Arc<S>,
     count: NonZeroU32,
     place: Place,
     node: Option<Arc<str>>,
-    held: Mutex<HashMap<Partition, u64>>,
-    queues: Mutex<HashMap<Partition, Queue>>,
-    ring: Mutex<Option<RingFn>>,
-    stats: Mutex<Stats>,
+    held: Atom<Map<Partition, u64>>,
+    queues: Queues,
+    ring: Atom<Option<RingFn>>,
+    stats: Atom<Stats>,
     max_rows: usize,
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn uncertain() -> StoreError {
@@ -280,10 +295,10 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
             count,
             place: Arc::new(place),
             node: None,
-            held: Mutex::new(HashMap::new()),
-            queues: Mutex::new(HashMap::new()),
-            ring: Mutex::new(None),
-            stats: Mutex::new(Stats::default()),
+            held: Atom::default(),
+            queues: Atom::default(),
+            ring: Atom::default(),
+            stats: Atom::default(),
             max_rows: 512,
         }
     }
@@ -311,7 +326,7 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
     /// Calls ring(scope, head) after every committed append, for local watchers. Postgres also
     /// notifies other nodes on the nanocode_log channel inside the transaction.
     pub fn set_ring(&self, ring: RingFn) {
-        *lock(&self.ring) = Some(ring);
+        self.ring.set(Some(ring));
     }
 
     pub const fn store(&self) -> &Arc<S> {
@@ -327,11 +342,11 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
     }
 
     pub fn stats(&self) -> Stats {
-        *lock(&self.stats)
+        self.stats.read(|stats| *stats)
     }
 
     pub fn held(&self, part: Partition) -> Option<u64> {
-        lock(&self.held).get(&part).copied()
+        self.held.read(|held| held.get(&part).copied())
     }
 
     pub async fn prepare(&self) -> Result<(), StoreError> {
@@ -369,7 +384,7 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
         if !self.store.swap_fence(part, &row, &next).await? {
             return Err(StoreError::Fenced);
         }
-        lock(&self.held).insert(part, epoch);
+        self.held.update(|held| held.insert(part, epoch));
         Ok(epoch)
     }
 
@@ -393,7 +408,7 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
     /// flight lands or fails), then frees the fence row at the epoch it held.
     pub async fn release(&self, part: Partition) -> Result<(), StoreError> {
         let node = self.node()?;
-        let Some(epoch) = lock(&self.held).remove(&part) else {
+        let Some(epoch) = self.held.update(|held| held.remove(&part)) else {
             return Ok(());
         };
         self.drain(part).await;
@@ -411,7 +426,7 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
 
     /// Forgets the partition without touching its row (the node lost it).
     pub fn forget(&self, part: Partition) {
-        lock(&self.held).remove(&part);
+        self.held.update(|held| held.remove(&part));
     }
 
     /// Resolves once every append queued on the partition before the call has its answer.
@@ -454,30 +469,33 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
         compacting: Option<Compacting>,
     ) -> Result<(), StoreError> {
         let (reply, mut answer) = oneshot::channel();
-        let lead = {
-            let mut queues = lock(&self.queues);
+        let queued = Queued::new(Waiter {
+            append,
+            compacting,
+            reply,
+        });
+        let lead = self.queues.update(|queues| {
             let queue = queues.entry(part).or_default();
-            queue.waiting.push_back(Waiter {
-                append,
-                compacting,
-                reply,
-            });
+            queue.waiting.push_back(queued.clone());
             !std::mem::replace(&mut queue.leading, true)
-        };
+        });
         if !lead {
             match (&mut answer).await {
                 Ok(Turn::Done(result)) => return result,
                 Ok(Turn::Lead(append, compacting)) => {
                     let (reply, next) = oneshot::channel();
-                    lock(&self.queues)
-                        .entry(part)
-                        .or_default()
-                        .waiting
-                        .push_front(Waiter {
-                            append,
-                            compacting,
-                            reply,
-                        });
+                    let queued = Queued::new(Waiter {
+                        append,
+                        compacting,
+                        reply,
+                    });
+                    self.queues.update(|queues| {
+                        let queue = queues.entry(part).or_default();
+                        let mut waiting = Vector::new();
+                        waiting.push_back(queued.clone());
+                        waiting.extend(queue.waiting.iter().cloned());
+                        queue.waiting = waiting;
+                    });
                     answer = next;
                 }
                 Err(_) => return Err(uncertain()),
@@ -497,26 +515,28 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
             done: false,
         };
         loop {
-            let batch = {
-                let mut queues = lock(&self.queues);
+            let batch = self.queues.update(|queues| {
                 let queue = queues.entry(part).or_default();
                 let mut batch = Vec::new();
                 let mut rows = 0;
-                while let Some(waiter) = queue.waiting.front() {
-                    if !batch.is_empty() && rows + waiter.append.rows.len() > self.max_rows {
+                while let Some(queued) = queue.waiting.front() {
+                    if !batch.is_empty() && rows + queued.rows > self.max_rows {
                         break;
                     }
-                    rows += waiter.append.rows.len();
+                    rows += queued.rows;
                     batch.extend(queue.waiting.pop_front());
                 }
                 if batch.is_empty() {
                     queue.leading = false;
-                    leading.done = true;
-                    return;
                 }
                 batch
-            };
-            self.commit(part, batch).await;
+            });
+            if batch.is_empty() {
+                leading.done = true;
+                return;
+            }
+            self.commit(part, batch.iter().map(Queued::take).collect())
+                .await;
         }
     }
 
@@ -608,7 +628,7 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
         if fenced {
             self.forget(part);
         }
-        let ring = lock(&self.ring).clone();
+        let ring = self.ring.read(Clone::clone);
         let mut stats = Stats {
             commits: u64::from(!sent.is_empty()),
             fenced: u64::from(fenced),
@@ -650,19 +670,20 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
             }
             let _ = waiter.reply.send(Turn::Done(result.and(compaction)));
         }
-        let mut total = lock(&self.stats);
-        total.commits += stats.commits;
-        total.appends += stats.appends;
-        total.rows += stats.rows;
-        total.conflicts += stats.conflicts;
-        total.fenced += stats.fenced;
+        self.stats.update(|total| {
+            total.commits += stats.commits;
+            total.appends += stats.appends;
+            total.rows += stats.rows;
+            total.conflicts += stats.conflicts;
+            total.fenced += stats.fenced;
+        });
     }
 }
 
 /// Hands the partition's lead to the next waiter when the leading future is dropped mid-batch;
 /// the batch in flight answers uncertain through its dropped replies.
 struct Leading<'a> {
-    queues: &'a Mutex<HashMap<Partition, Queue>>,
+    queues: &'a Queues,
     part: Partition,
     done: bool,
 }
@@ -672,9 +693,15 @@ impl Drop for Leading<'_> {
         if self.done {
             return;
         }
-        let mut queues = lock(self.queues);
-        let queue = queues.entry(self.part).or_default();
-        while let Some(waiter) = queue.waiting.pop_front() {
+        while let Some(queued) = self.queues.update(|queues| {
+            let queue = queues.entry(self.part).or_default();
+            let next = queue.waiting.pop_front();
+            if next.is_none() {
+                queue.leading = false;
+            }
+            next
+        }) {
+            let waiter = queued.take();
             if waiter
                 .reply
                 .send(Turn::Lead(waiter.append, waiter.compacting))
@@ -683,7 +710,6 @@ impl Drop for Leading<'_> {
                 return;
             }
         }
-        queue.leading = false;
     }
 }
 
@@ -763,7 +789,7 @@ impl<S: PartStore + ?Sized> LogHost for PartedLog<S> {
             let part = self.partition(scope);
             let epoch = self.epoch(part)?;
             self.store.extend(part, epoch, scope, extension).await?;
-            if let Some(ring) = lock(&self.ring).clone() {
+            if let Some(ring) = self.ring.read(Clone::clone) {
                 ring(scope, extension.seq);
             }
             Ok(())
