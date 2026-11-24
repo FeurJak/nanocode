@@ -402,11 +402,7 @@ impl<F: Family> World<F> {
         let (folded, seq) = folded
             .commit(&mut lease, fact)
             .map_err(failed("commit a fact"))?;
-        let facts: Vec<(u64, StoredFact)> = lease
-            .fold()
-            .facts()
-            .map(|(seq, fact)| (seq, fact.clone()))
-            .collect();
+        let facts = crate::facts::logged(&mut lease)?;
         let fold = lease.fold();
         if let Some(divergence) = folded
             .diverges(facts, |digest| fold.blob(digest))
@@ -445,14 +441,11 @@ impl<F: Family> World<F> {
             ready(lease.load_owner(LEGACY_STATE))
                 .map_err(|error| format!("load the legacy owner: {error}"))?;
         }
+        let facts = crate::facts::logged(&mut lease)?;
         let fold = lease.fold();
         let cached = fold
             .cached()
             .map_err(|error| format!("read the cached fold: {error}"))?;
-        let facts: Vec<(u64, StoredFact)> = fold
-            .facts()
-            .map(|(seq, fact)| (seq, fact.clone()))
-            .collect();
         let (folded, _) = Folded::<F>::open(cached, facts.clone(), |digest| fold.blob(digest))
             .map_err(failed("reopen the fold"))?;
         self.oracle = self.durable.oracle.clone();

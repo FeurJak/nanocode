@@ -86,21 +86,19 @@ const fn point_of(fact: &StoredFact) -> Point {
     }
 }
 
-fn scoped(fold: &Fold, scope: &Scope, after: u64) -> (Vec<(u64, StoredFact)>, Vec<Digest>) {
-    if after > 0 && sim::mutated(sim::Mutation::UnseenSkipped) {
-        return (Vec::new(), Vec::new());
+fn in_scope(scope: &Scope, held: Option<&str>, fact: &StoredFact) -> bool {
+    if sim::mutated(sim::Mutation::ScopeLeaks) {
+        return true;
     }
-    let facts = if sim::mutated(sim::Mutation::ScopeLeaks) {
-        fold.facts_after(after)
-            .map(|(seq, fact)| (seq, fact.clone()))
-            .collect::<Vec<_>>()
-    } else {
-        fold.facts_of(&scope.state, scope.turns, after)
-            .map(|(seq, fact)| (seq, fact.clone()))
-            .collect::<Vec<_>>()
-    };
+    match held {
+        Some(state) => state == scope.state,
+        None => scope.turns || matches!(fact, Fact::Marker(Marker::Blob { .. })),
+    }
+}
+
+fn wanted(fold: &Fold, facts: &[(u64, StoredFact)]) -> Vec<Digest> {
     let mut wanted = BTreeSet::new();
-    for (_, fact) in &facts {
+    for (_, fact) in facts {
         let named: Result<_, std::convert::Infallible> = fact.try_map(
             |value| {
                 if let Value::Blob(blob) = value
@@ -114,7 +112,7 @@ fn scoped(fold: &Fold, scope: &Scope, after: u64) -> (Vec<(u64, StoredFact)>, Ve
         );
         let Ok(_) = named;
     }
-    (facts, wanted.into_iter().collect())
+    wanted.into_iter().collect()
 }
 
 pub(super) fn intended(fold: &Fold, call_id: &str) -> Option<String> {
@@ -161,7 +159,15 @@ impl FactSink for Observed<'_, '_> {
 
 impl OneLog {
     async fn replayed(&self, scope: &Scope) -> Result<Replay, StoreError> {
-        let (facts, digests) = self.log.read(|fold| scoped(fold, scope, 0)).await;
+        let mut facts = Vec::new();
+        self.log
+            .facts_from(0, |seq, held, fact| {
+                if in_scope(scope, held, fact) {
+                    facts.push((seq, fact.clone()));
+                }
+            })
+            .await?;
+        let digests = self.log.read(|fold| wanted(fold, &facts)).await;
         let keys = digests
             .iter()
             .map(|digest| digest.key().as_str().to_owned())
@@ -190,7 +196,17 @@ impl OneLog {
     ) -> Result<u64, StoreError> {
         let mut lease = self.log.lease_within().await?;
         lease.secure().await?;
-        let (facts, digests) = scoped(lease.fold(), scope, after);
+        let mut facts = Vec::new();
+        if after == 0 || !sim::mutated(sim::Mutation::UnseenSkipped) {
+            lease
+                .facts_from(after, |seq, held, fact| {
+                    if in_scope(scope, held, fact) {
+                        facts.push((seq, fact.clone()));
+                    }
+                })
+                .await?;
+        }
+        let digests = wanted(lease.fold(), &facts);
         let keys = digests
             .iter()
             .map(|digest| digest.key().as_str().to_owned())

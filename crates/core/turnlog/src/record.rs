@@ -1,4 +1,4 @@
-use nanocode_durability_core::{StoreError, StoredFact};
+use nanocode_durability_core::{StoreError, StoredFact, Values};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
@@ -77,6 +77,15 @@ pub enum Record {
         generation: u64,
         key: String,
     },
+    Facts {
+        first: u64,
+        last: u64,
+        row: u64,
+    },
+    Folded {
+        through: u64,
+        values: Values,
+    },
     Fact {
         fact: StoredFact,
         seq: u64,
@@ -118,6 +127,13 @@ pub enum Record {
     Host {
         key: String,
         value: Box<RawValue>,
+    },
+    Intended {
+        call_id: String,
+        input: Box<RawValue>,
+        state: Option<String>,
+        tool: String,
+        turn: Option<String>,
     },
     Index {
         first: String,

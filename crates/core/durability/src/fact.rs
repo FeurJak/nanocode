@@ -395,7 +395,7 @@ impl Values {
         self.digests.is_empty()
     }
 
-    fn reindex(&mut self) {
+    pub fn reindex(&mut self) {
         self.known = self
             .digests
             .iter()

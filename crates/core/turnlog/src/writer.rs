@@ -652,7 +652,7 @@ async fn warm_state(
 fn packed(
     spare: &mut codec::Spare,
     fold: &Fold,
-    keep: u64,
+    (keep, keep_fact): (u64, u64),
     level: i32,
     index: Option<Section>,
 ) -> Result<Snapshot, StoreError> {
@@ -661,7 +661,7 @@ fn packed(
     let mut base = 0;
     let mut starts = VecDeque::new();
     let mut tail = Vec::new();
-    fold.head_records(keep, index, |record| {
+    fold.head_records(keep, keep_fact, index, |record| {
         if packer.plain() > 0 {
             line.push(b'\n');
         }
@@ -670,7 +670,7 @@ fn packed(
         packer.write(&line)?;
         tail.extend_from_slice(&line);
         line.clear();
-        starts.push_back((start, matches!(record, Record::Event { .. })));
+        starts.push_back((start, sealed(&record)));
         let end = base + tail.len();
         while let (Some(&(_, false)), Some(&(next, _))) = (starts.front(), starts.get(1)) {
             if end - next < WINDOW {
@@ -697,10 +697,10 @@ fn packed(
     })
 }
 
-fn measured(fold: &Fold, keep: u64) -> Result<usize, StoreError> {
+fn measured(fold: &Fold, keep: u64, keep_fact: u64) -> Result<usize, StoreError> {
     let mut bytes = 0;
     let mut line = Vec::new();
-    fold.head_records(keep, None, |record| {
+    fold.head_records(keep, keep_fact, None, |record| {
         crate::record::write(&record, &mut line)?;
         bytes += line.len() + usize::from(bytes > 0);
         line.clear();
@@ -894,6 +894,10 @@ fn unsectioned(stored: Vec<(u64, String)>) -> Vec<(u64, String)> {
         .collect()
 }
 
+const fn sealed(record: &Record) -> bool {
+    matches!(record, Record::Event { .. } | Record::Fact { .. })
+}
+
 fn suffix(plain: &str, events: usize) -> Option<&str> {
     let floor = plain.len().saturating_sub(WINDOW);
     if floor == 0 {
@@ -903,10 +907,7 @@ fn suffix(plain: &str, events: usize) -> Option<&str> {
     while start > floor || found < events {
         let boundary = plain[..cut].rfind('\n')? + 1;
         if let Ok(records) = crate::decode(&plain[boundary..start]) {
-            found += records
-                .iter()
-                .filter(|record| matches!(record, Record::Event { .. }))
-                .count();
+            found += records.iter().filter(|record| sealed(record)).count();
             start = boundary;
         }
         cut = boundary - 1;
@@ -1103,8 +1104,13 @@ impl Follower {
             if let Some((seq, parts)) = last
                 && row.seq == seq
             {
-                self.previous =
-                    Previous::of(seq, parts, row.bytes, &row.plain, self.fold.events().len());
+                self.previous = Previous::of(
+                    seq,
+                    parts,
+                    row.bytes,
+                    &row.plain,
+                    self.fold.events().len() + self.fold.facts().count(),
+                );
             }
             self.fold.release();
             self.history.extend(row.plain.as_bytes());
@@ -1543,9 +1549,92 @@ impl TurnLog {
         }
         Ok(())
     }
+
+    pub async fn facts_from(
+        &self,
+        after: u64,
+        take: impl FnMut(u64, Option<&str>, &StoredFact),
+    ) -> Result<(), StoreError> {
+        let mut writer = self.acquired(true).await?;
+        writer.live()?;
+        let writer = &mut *writer;
+        facts_from(
+            &*self.host,
+            &self.scope,
+            (&writer.fold, &mut writer.stats),
+            after,
+            take,
+        )
+        .await
+    }
+}
+
+async fn facts_from(
+    host: &dyn LogHost,
+    scope: &str,
+    (fold, stats): (&Fold, &mut Stats),
+    after: u64,
+    mut take: impl FnMut(u64, Option<&str>, &StoredFact),
+) -> Result<(), StoreError> {
+    let segments = fold.fact_segments();
+    let ends = segments
+        .iter()
+        .skip(1)
+        .map(|segment| segment.row)
+        .chain([fold.fact_row()]);
+    for (segment, end) in segments.iter().zip(ends) {
+        if segment.last <= after {
+            continue;
+        }
+        let stored = unsectioned(host.scan(scope, segment.row, end).await?);
+        stats.pages += 1;
+        stats.page_rows += stored.len() as u64;
+        let mut next = segment.first.max(after + 1);
+        each_row(stored, &mut History::default(), |row| {
+            for record in row.records()? {
+                if let Record::Fact { fact, seq, state } = record
+                    && seq == next
+                    && seq <= segment.last
+                {
+                    take(seq, state.as_deref(), &fact);
+                    next += 1;
+                }
+            }
+            Ok(true)
+        })?;
+        if next <= segment.last {
+            return Err(StoreError::Backend(format!(
+                "turn log rows {}..{end} of {scope} hold sealed facts up to {} of {}..={}",
+                segment.row,
+                next - 1,
+                segment.first,
+                segment.last
+            )));
+        }
+    }
+    for (seq, state, fact) in fold.resident_facts(after) {
+        take(seq, state, fact);
+    }
+    Ok(())
 }
 
 impl Lease<'_> {
+    pub async fn facts_from(
+        &mut self,
+        after: u64,
+        take: impl FnMut(u64, Option<&str>, &StoredFact),
+    ) -> Result<(), StoreError> {
+        let writer = &mut *self.writer;
+        facts_from(
+            self.host,
+            self.scope,
+            (&writer.fold, &mut writer.stats),
+            after,
+            take,
+        )
+        .await
+    }
+
     pub fn cache(&mut self, snapshot: &FoldSnapshot) -> Result<(), StoreError> {
         assert!(
             snapshot.seq < self.writer.fold.next_fact(),
@@ -1954,6 +2043,14 @@ impl Lease<'_> {
                 _ => None,
             })
             .unwrap_or(u64::MAX);
+        let keep_fact = writer
+            .buffer
+            .iter()
+            .find_map(|record| match record {
+                Record::Fact { seq, .. } => Some(*seq),
+                _ => None,
+            })
+            .unwrap_or(u64::MAX);
         if writer.fold.segment_row() == 0 {
             writer.fold.start_segment(seq);
         }
@@ -2004,7 +2101,13 @@ impl Lease<'_> {
                 writer.fold.recovered_at(turn, head);
             }
             writer.fold.committed(head);
-            let packed = packed(&mut spare, &writer.fold, keep, level, index.root);
+            let packed = packed(
+                &mut spare,
+                &writer.fold,
+                (keep, keep_fact),
+                level,
+                index.root,
+            );
             writer.fold.committed(previous);
             let packed = packed?;
             writer.state = packed.plain;
@@ -2077,7 +2180,7 @@ impl Lease<'_> {
         }
         let mut boundary = None;
         if snapshot.is_none() && writer.fold.hot_bytes() > writer.state {
-            writer.state = measured(&writer.fold, keep)?;
+            writer.state = measured(&writer.fold, keep, keep_fact)?;
             if writer.fold.hot_bytes() > writer.state {
                 boundary = Some(codec::pack(&mut spare, BOUNDARY, &plain, &[])?);
             }
@@ -2314,6 +2417,7 @@ impl Lease<'_> {
                 writer.stats.sections += sectioned_rows;
                 writer.stats.snapshot_bytes += rewritten as u64;
                 writer.fold.seal(seq, keep);
+                writer.fold.seal_facts(seq, keep_fact);
                 writer.history.clear();
                 writer.history.extend(packed.suffix());
                 writer.previous = packed.trimmed().then(|| Previous {

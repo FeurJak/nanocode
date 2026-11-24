@@ -15,7 +15,7 @@ use nanocode_durability_core::{
     TurnStatus, VALUE_INLINE_BYTES,
 };
 use nanocode_sync::FutureExt;
-use nanocode_turnlog::{LogHost, MemoryLog, Phase, Point, Record, TurnLog};
+use nanocode_turnlog::{Lease, LogHost, MemoryLog, Phase, Point, Record, TurnLog};
 use serde::{Deserialize, Serialize};
 use serde_json::value::{RawValue, to_raw_value};
 
@@ -52,17 +52,19 @@ pub enum FactsMutation {
     ReplaysIntent,
     StaleSnapshotTrusted,
     BaseIgnored,
-    DerivedReemitted,
+    SealedRelowered,
+    FactsResident,
 }
 
 impl FactsMutation {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::UndecidedCompaction,
         Self::DispatchBeforeIntent,
         Self::ReplaysIntent,
         Self::StaleSnapshotTrusted,
         Self::BaseIgnored,
-        Self::DerivedReemitted,
+        Self::SealedRelowered,
+        Self::FactsResident,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -73,7 +75,8 @@ impl FactsMutation {
             Self::ReplaysIntent => "replays_intent",
             Self::StaleSnapshotTrusted => "stale_snapshot_trusted",
             Self::BaseIgnored => "base_ignored",
-            Self::DerivedReemitted => "derived_reemitted",
+            Self::SealedRelowered => "sealed_relowered",
+            Self::FactsResident => "facts_resident",
         }
     }
 
@@ -228,6 +231,9 @@ struct FactsStats {
     lost: u64,
     unknown: u64,
     blobs: u64,
+    sealed: u64,
+    resident: u64,
+    written: u64,
     cached: u64,
     stale: u64,
     imported: u64,
@@ -247,6 +253,7 @@ struct World {
     digest: u64,
     shape: Shape,
     finished: BTreeMap<String, bool>,
+    snapshots: u64,
     stats: FactsStats,
 }
 
@@ -268,6 +275,24 @@ fn raw(json: String) -> Box<RawValue> {
 
 fn failed(what: &str) -> impl Fn(FoldError) -> String + '_ {
     move |error| format!("{what}: {error}")
+}
+
+pub fn logged(lease: &mut Lease<'_>) -> Result<Vec<(u64, StoredFact)>, String> {
+    let mut facts = Vec::new();
+    ready(lease.facts_from(0, |seq, _, fact| facts.push((seq, fact.clone()))))
+        .map_err(|error| format!("read the log's facts: {error}"))?;
+    if let Some(gap) = facts
+        .iter()
+        .zip(1..)
+        .find(|((seq, _), expected)| seq != expected)
+    {
+        return Err(format!(
+            "the log reads fact {} where fact {} belongs",
+            (gap.0).0,
+            gap.1
+        ));
+    }
+    Ok(facts)
 }
 
 fn open(host: &Arc<MemoryLog>, shape: Shape) -> Result<TurnLog, String> {
@@ -329,6 +354,7 @@ impl World {
             digest: FNV_OFFSET,
             shape,
             finished: BTreeMap::new(),
+            snapshots: 0,
             stats: FactsStats::default(),
         };
         world.durable = Durable::of(world.fold())?;
@@ -353,16 +379,13 @@ impl World {
             .take()
             .expect("the world holds a fold between steps");
         let blobs = folded.values().len();
+        let unsealed = lease.fold().next_fact();
         let (folded, seq) = folded
             .commit(&mut lease, fact)
             .map_err(failed("commit a fact"))?;
         self.stats.facts += 1;
         self.stats.blobs += (folded.values().len() - blobs) as u64;
-        let facts: Vec<(u64, StoredFact)> = lease
-            .fold()
-            .facts()
-            .map(|(seq, fact)| (seq, fact.clone()))
-            .collect();
+        let facts = logged(&mut lease)?;
         let fold = lease.fold();
         if let Some(divergence) = folded
             .diverges(facts, |digest| fold.blob(digest))
@@ -380,13 +403,35 @@ impl World {
         lease.retire_finished();
         ready(lease.commit(point)).map_err(|error| format!("commit the log: {error}"))?;
         drop(lease);
+        self.check_sealed(unsealed)?;
         self.durable = Durable::of(&folded)?;
         self.digest = fnv(self.digest, self.durable.request.as_slice());
         self.folded = Some(folded);
         Ok(Some(seq))
     }
 
+    fn check_sealed(&mut self, unsealed: u64) -> Result<(), String> {
+        let snapshots = ready(self.log.stats()).snapshots;
+        if snapshots == self.snapshots {
+            return Ok(());
+        }
+        self.snapshots = snapshots;
+        let (resident, next) = ready(
+            self.log
+                .read(|fold| (fold.facts().count() as u64, fold.next_fact())),
+        );
+        let written = next - unsealed;
+        if resident > written {
+            return Err(format!(
+                "after a snapshot the log keeps {resident} facts resident, more than the {written} its commit wrote"
+            ));
+        }
+        self.stats.sealed = self.stats.sealed.max(next - 1 - resident);
+        Ok(())
+    }
+
     fn reopen(&mut self) -> Result<(), String> {
+        self.snapshots = 0;
         self.folded = None;
         self.log = open(&self.host, self.shape)?;
         let mut lease = ready(self.log.lease());
@@ -394,14 +439,11 @@ impl World {
             ready(lease.load_owner(LEGACY_STATE))
                 .map_err(|error| format!("load the legacy owner: {error}"))?;
         }
+        let facts = logged(&mut lease)?;
         let fold = lease.fold();
         let cached = fold
             .cached()
             .map_err(|error| format!("read the cached fold: {error}"))?;
-        let facts: Vec<(u64, StoredFact)> = fold
-            .facts()
-            .map(|(seq, fact)| (seq, fact.clone()))
-            .collect();
         let (folded, _) = Folded::<Chat>::open(cached, facts.clone(), |digest| fold.blob(digest))
             .map_err(failed("reopen the fold"))?;
         if Durable::of(&folded)? != self.durable {
@@ -721,6 +763,8 @@ fn run(seed: u64, verbose: bool) -> Result<u64, String> {
         world.step()?;
     }
     world.crash()?;
+    world.stats.written = world.host.writes().bytes;
+    world.stats.resident = ready(world.log.read(|fold| fold.facts().count() as u64));
     if verbose {
         println!("seed {seed} ops={ops} stats={:?}", world.stats);
     }
@@ -729,8 +773,14 @@ fn run(seed: u64, verbose: bool) -> Result<u64, String> {
 
 fn run_seed(seed: u64, mutation: FactsMutation, verbose: bool) -> Result<u64, String> {
     MUTATION.store(mutation as u8, Ordering::SeqCst);
-    if mutation == FactsMutation::DerivedReemitted {
-        nanocode_turnlog::sim::mutate(nanocode_turnlog::sim::Mutation::DerivedReemitted);
+    match mutation {
+        FactsMutation::SealedRelowered => {
+            nanocode_turnlog::sim::mutate(nanocode_turnlog::sim::Mutation::SealedRelowered);
+        }
+        FactsMutation::FactsResident => {
+            nanocode_turnlog::sim::mutate(nanocode_turnlog::sim::Mutation::FactsResident);
+        }
+        _ => {}
     }
     let outcome = std::panic::catch_unwind(|| run(seed, verbose));
     nanocode_turnlog::sim::mutate(nanocode_turnlog::sim::Mutation::None);

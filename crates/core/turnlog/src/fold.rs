@@ -258,10 +258,13 @@ pub struct Fold {
     events: Vec<Event>,
     facts: Vec<StoredFact>,
     fact_states: Vec<Option<u32>>,
+    fact_base: u64,
+    fact_row: u64,
+    fact_segments: Vec<Segment>,
+    folded_through: u64,
     state_names: Vec<String>,
     state_index: BTreeMap<String, u32>,
     derived_calls: BTreeMap<String, Option<u32>>,
-    derived_turns: BTreeSet<String>,
     values: Values,
     filters: BTreeMap<u64, Box<[u64]>>,
     forgets: BTreeSet<String>,
@@ -1665,6 +1668,51 @@ impl Fold {
 
     pub(crate) const fn start_segment(&mut self, row: u64) {
         self.segment_row = row;
+        self.fact_row = row;
+    }
+
+    #[must_use]
+    pub fn fact_segments(&self) -> &[Segment] {
+        &self.fact_segments
+    }
+
+    #[must_use]
+    pub const fn fact_row(&self) -> u64 {
+        self.fact_row
+    }
+
+    #[must_use]
+    pub const fn sealed_facts(&self) -> u64 {
+        self.fact_base
+    }
+
+    fn fact_cut(&self, keep: u64) -> u64 {
+        if crate::sim::mutated(crate::sim::Mutation::FactsResident) {
+            return self.fact_base + 1;
+        }
+        keep.min(self.next_fact())
+    }
+
+    fn sealed_fact_segment(&self, keep: u64) -> Option<Segment> {
+        let last = self.fact_cut(keep).checked_sub(1)?;
+        (last > self.fact_base).then_some(Segment {
+            first: self.fact_base + 1,
+            last,
+            row: self.fact_row,
+        })
+    }
+
+    pub(crate) fn seal_facts(&mut self, row: u64, keep: u64) {
+        if let Some(segment) = self.sealed_fact_segment(keep) {
+            let sealed = usize::try_from(segment.last - self.fact_base)
+                .expect("a sealed fact count fits in usize");
+            self.facts.drain(..sealed);
+            self.fact_states.drain(..sealed);
+            self.fact_base = segment.last;
+            self.fact_segments.push(segment);
+        }
+        self.fact_row = row;
+        self.folded_through = self.next_fact() - 1;
     }
 
     #[must_use]
@@ -1933,7 +1981,6 @@ impl Fold {
 
     pub(crate) fn unadmit(&mut self, id: &str, seq: u64) {
         self.drop_turns(|turn| turn.id == id);
-        self.derived_turns.remove(id);
         if let Some(position) = self.events.iter().rposition(|event| event.seq == seq) {
             self.hot_bytes -= self.events.remove(position).event.get().len();
         }
@@ -2136,11 +2183,20 @@ impl Fold {
 
     #[must_use]
     pub fn next_fact(&self) -> u64 {
-        self.facts.len() as u64 + 1
+        self.fact_base + self.facts.len() as u64 + 1
     }
 
     pub fn facts(&self) -> impl Iterator<Item = (u64, &StoredFact)> {
-        (1..).zip(&self.facts)
+        (self.fact_base + 1..).zip(&self.facts)
+    }
+
+    fn resident_from(&self, after: u64) -> usize {
+        assert!(
+            after >= self.fact_base,
+            "a reader of resident facts starts at or after the sealed ones"
+        );
+        usize::try_from(after - self.fact_base)
+            .map_or(self.facts.len(), |skipped| skipped.min(self.facts.len()))
     }
 
     #[must_use]
@@ -2160,7 +2216,12 @@ impl Fold {
     }
 
     pub(crate) fn withdraw_facts(&mut self, from: u64) {
-        let kept = usize::try_from(from.saturating_sub(1)).expect("a fact position fits in usize");
+        assert!(
+            from > self.fact_base,
+            "a withdrawn admission was never sealed"
+        );
+        let kept =
+            usize::try_from(from - 1 - self.fact_base).expect("a fact position fits in usize");
         assert!(
             self.facts[kept..]
                 .iter()
@@ -2171,10 +2232,26 @@ impl Fold {
         self.fact_states.truncate(kept);
     }
 
+    pub fn resident_facts(
+        &self,
+        after: u64,
+    ) -> impl Iterator<Item = (u64, Option<&str>, &StoredFact)> {
+        let skipped = self.resident_from(after.max(self.fact_base));
+        (self.fact_base + skipped as u64 + 1..)
+            .zip(
+                self.facts[skipped..]
+                    .iter()
+                    .zip(&self.fact_states[skipped..]),
+            )
+            .map(|(seq, (fact, state))| {
+                let state = state.map(|state| self.state_names[state as usize].as_str());
+                (seq, state, fact)
+            })
+    }
+
     pub fn facts_after(&self, after: u64) -> impl Iterator<Item = (u64, &StoredFact)> {
-        let skipped =
-            usize::try_from(after).map_or(self.facts.len(), |after| after.min(self.facts.len()));
-        (after + 1..).zip(&self.facts[skipped..])
+        let skipped = self.resident_from(after);
+        (self.fact_base + skipped as u64 + 1..).zip(&self.facts[skipped..])
     }
 
     pub fn facts_of<'a>(
@@ -2184,9 +2261,8 @@ impl Fold {
         after: u64,
     ) -> impl Iterator<Item = (u64, &'a StoredFact)> + 'a {
         let own = self.state_index.get(state).copied();
-        let skipped =
-            usize::try_from(after).map_or(self.facts.len(), |after| after.min(self.facts.len()));
-        (after + 1..)
+        let skipped = self.resident_from(after);
+        (self.fact_base + skipped as u64 + 1..)
             .zip(
                 self.facts[skipped..]
                     .iter()
@@ -2272,17 +2348,14 @@ impl Fold {
         let prompt = self.value(&input.value)?.to_owned();
         let metadata = self.value(&input.metadata)?.to_owned();
         let record = match &input.kind {
-            InputKind::Prompt => {
-                self.derived_turns.insert(input.turn.clone());
-                Record::Admitted {
-                    digest: input_digest(&prompt, input.hand.as_deref()),
-                    first: input.first.unwrap_or(seq),
-                    hand: input.hand.clone(),
-                    metadata,
-                    prompt,
-                    turn: input.turn.clone(),
-                }
-            }
+            InputKind::Prompt => Record::Admitted {
+                digest: input_digest(&prompt, input.hand.as_deref()),
+                first: input.first.unwrap_or(seq),
+                hand: input.hand.clone(),
+                metadata,
+                prompt,
+                turn: input.turn.clone(),
+            },
             InputKind::Edit { edit_id } => {
                 let hand = self.turn(&input.turn).and_then(|turn| turn.hand.as_deref());
                 Record::Status {
@@ -2366,13 +2439,61 @@ impl Fold {
                         next - 1
                     )));
                 }
-                self.values
-                    .observe(*seq, fact)
-                    .map_err(|error| invalid(error.to_string()))?;
                 let state = state.as_deref().map(|state| self.state_id(state));
-                self.lower(*seq, state, fact)?;
+                if *seq > self.folded_through
+                    || crate::sim::mutated(crate::sim::Mutation::SealedRelowered)
+                {
+                    self.values
+                        .observe(*seq, fact)
+                        .map_err(|error| invalid(error.to_string()))?;
+                    self.lower(*seq, state, fact)?;
+                }
                 self.facts.push(fact.clone());
                 self.fact_states.push(state);
+            }
+            Record::Facts { first, last, row } => {
+                if !self.facts.is_empty() || *first != self.fact_base + 1 || last < first {
+                    return Err(invalid(format!(
+                        "sealed facts {first}..={last} do not follow fact {}",
+                        self.next_fact() - 1
+                    )));
+                }
+                self.fact_base = *last;
+                self.fact_segments.push(Segment {
+                    first: *first,
+                    last: *last,
+                    row: *row,
+                });
+            }
+            Record::Folded { through, values } => {
+                if *through < self.fact_base {
+                    return Err(invalid(format!(
+                        "a fold through fact {through} precedes sealed fact {}",
+                        self.fact_base
+                    )));
+                }
+                self.folded_through = *through;
+                self.values = values.clone();
+                self.values.reindex();
+            }
+            Record::Intended {
+                call_id,
+                input,
+                state,
+                tool,
+                turn,
+            } => {
+                let state = state.as_deref().map(|state| self.state_id(state));
+                self.derived_calls.insert(call_id.clone(), state);
+                self.calls.insert(
+                    call_id.clone(),
+                    OpenCall {
+                        effect: EffectClass::External,
+                        input: input.clone(),
+                        tool: tool.clone(),
+                        turn: turn.clone(),
+                    },
+                );
             }
             Record::Call {
                 call_id,
@@ -2507,9 +2628,6 @@ impl Fold {
             }
             Record::Host { key, value } if key == RETIRED_KEY => {
                 self.retired_from(value)?;
-                let retired = &self.retired;
-                self.derived_turns
-                    .retain(|turn| !retired.contains_key(&tag(turn)));
                 let gone: BTreeSet<String> = self
                     .turns
                     .iter()
@@ -2713,7 +2831,7 @@ impl Fold {
 
     pub fn snapshot(&self, keep: u64) -> Result<String, StoreError> {
         let mut body = String::new();
-        self.snapshot_records(keep, |record| {
+        self.snapshot_records(keep, self.fact_base + 1, |record| {
             if !body.is_empty() {
                 body.push('\n');
             }
@@ -2726,14 +2844,16 @@ impl Fold {
     pub(crate) fn snapshot_records(
         &self,
         keep: u64,
+        keep_fact: u64,
         take: impl FnMut(Record) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
-        self.records(keep, true, take)
+        self.records(keep, keep_fact, true, take)
     }
 
     pub(crate) fn head_records(
         &self,
         keep: u64,
+        keep_fact: u64,
         index: Option<Section>,
         mut take: impl FnMut(Record) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
@@ -2743,12 +2863,13 @@ impl Fold {
                 rows: section.rows,
             })?;
         }
-        self.records(keep, false, take)
+        self.records(keep, keep_fact, false, take)
     }
 
     fn records(
         &self,
         keep: u64,
+        keep_fact: u64,
         owned: bool,
         mut take: impl FnMut(Record) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
@@ -2768,13 +2889,22 @@ impl Fold {
                 value: value.clone(),
             })?;
         }
-        for ((seq, fact), state) in self.facts().zip(&self.fact_states) {
-            take(Record::Fact {
-                fact: fact.clone(),
-                seq,
-                state: state.map(|state| self.state_names[state as usize].clone()),
+        for segment in self
+            .fact_segments
+            .iter()
+            .copied()
+            .chain(self.sealed_fact_segment(keep_fact))
+        {
+            take(Record::Facts {
+                first: segment.first,
+                last: segment.last,
+                row: segment.row,
             })?;
         }
+        take(Record::Folded {
+            through: self.next_fact() - 1,
+            values: self.values.clone(),
+        })?;
         for (state, checkpoint) in self.checkpoints.iter().filter(|_| owned) {
             take(Record::Checkpoint {
                 payload: checkpoint.payload.clone(),
@@ -2788,10 +2918,7 @@ impl Fold {
                 value: self.retired_value()?,
             })?;
         }
-        for turn in self.turns.iter().filter(|turn| {
-            !self.derived_turns.contains(&turn.id)
-                || crate::sim::mutated(crate::sim::Mutation::DerivedReemitted)
-        }) {
+        for turn in &self.turns {
             take(Record::Admitted {
                 digest: turn.digest.clone(),
                 first: turn.first,
@@ -2859,11 +2986,17 @@ impl Fold {
                 })?;
             }
         }
-        for (call_id, call) in self
-            .calls
-            .iter()
-            .filter(|(call_id, _)| !self.derived_calls.contains_key(*call_id))
-        {
+        for (call_id, call) in &self.calls {
+            if let Some(state) = self.derived_calls.get(call_id) {
+                take(Record::Intended {
+                    call_id: call_id.clone(),
+                    input: call.input.clone(),
+                    state: state.map(|state| self.state_names[state as usize].clone()),
+                    tool: call.tool.clone(),
+                    turn: call.turn.clone(),
+                })?;
+                continue;
+            }
             take(Record::Call {
                 call_id: call_id.clone(),
                 effect: call.effect,
@@ -2895,6 +3028,17 @@ impl Fold {
             })?;
         }
         self.wakes.records(&mut take)?;
+        let cut = self.fact_cut(keep_fact);
+        for ((seq, fact), state) in self.facts().zip(&self.fact_states) {
+            if seq < cut {
+                continue;
+            }
+            take(Record::Fact {
+                fact: fact.clone(),
+                seq,
+                state: state.map(|state| self.state_names[state as usize].clone()),
+            })?;
+        }
         for event in self.events.iter().filter(|event| event.seq >= keep) {
             take(Record::Event {
                 at: event.at,
