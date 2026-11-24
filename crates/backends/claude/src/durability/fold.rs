@@ -404,7 +404,7 @@ impl ClaudeFold {
                 let template = self.template.as_mut().ok_or_else(|| {
                     rejected(seq, "a Claude route switch arrived before its template")
                 })?;
-                template.request.model.clone_from(&model);
+                template.request.model = model;
                 Ok(())
             }
             Decision::Backend(decision) => self.backend(seq, decision),

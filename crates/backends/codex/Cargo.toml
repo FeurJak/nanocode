@@ -21,6 +21,7 @@ nanocode-agent-core.workspace = true
 nanocode-backend-codex-client.workspace = true
 nanocode-code-mode.workspace = true
 nanocode-durability.workspace = true
+nanocode-durability-core.workspace = true
 nanocode-home.workspace = true
 nanocode-image.workspace = true
 nanocode-platform.workspace = true

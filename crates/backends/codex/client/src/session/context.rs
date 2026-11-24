@@ -609,6 +609,24 @@ fn synthetic_output_id(prefix: &str, source_id: Option<&ResponseItemId>) -> Opti
 }
 
 #[must_use]
+pub fn folded_item(mut item: ResponseItem, token_limit: usize, name: &str) -> Option<ResponseItem> {
+    if !is_api_item(&item) {
+        return None;
+    }
+    truncate_tool_output(&mut item, token_limit);
+    if !item.id().is_some_and(|id| !id.is_empty())
+        && let Some(prefix) = item.id_prefix()
+    {
+        let name = format!("{prefix}:{name}");
+        item.set_id(Some(ResponseItemId::with_suffix(
+            prefix,
+            nanocode_platform::Uuid::new_v5(&SYNTHETIC_OUTPUT_ID_NAMESPACE, name.as_bytes()),
+        )));
+    }
+    Some(item)
+}
+
+#[must_use]
 pub fn has_well_formed_tool_calls(items: &[ResponseItem]) -> bool {
     let mut function_calls = HashSet::new();
     let mut function_outputs = HashSet::new();

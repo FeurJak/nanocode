@@ -21,7 +21,7 @@ pub(in crate::model) fn task_input(
     input
 }
 
-pub(in crate::model) fn prompt_messages(
+pub(crate) fn prompt_messages(
     prompt: &Prompt,
     user_content: Vec<ContentItem>,
 ) -> Vec<ResponseItem> {
@@ -110,10 +110,7 @@ fn permissions_instructions() -> String {
     )
 }
 
-pub(in crate::model) fn custom_tool_output(
-    call_id: String,
-    output: ToolOutputBody,
-) -> ResponseItem {
+pub(crate) fn custom_tool_output(call_id: String, output: ToolOutputBody) -> ResponseItem {
     ResponseItem::custom_tool_output(call_id, None, function_output(output))
 }
 
@@ -125,10 +122,7 @@ pub(in crate::model) fn custom_tool_notification(call_id: String, text: String) 
     )
 }
 
-pub(in crate::model) fn function_tool_output(
-    call_id: String,
-    output: ToolOutputBody,
-) -> ResponseItem {
+pub(crate) fn function_tool_output(call_id: String, output: ToolOutputBody) -> ResponseItem {
     ResponseItem::function_call_output(call_id, function_output(output))
 }
 

@@ -29,10 +29,12 @@ use crate::{
 };
 
 mod context;
+mod fold;
 mod format;
 mod registration;
 mod session;
 
+pub use fold::{CodexDecision, CodexFold};
 pub use format::CodexCheckpointFormat;
 pub use session::DurableSessionExt;
 

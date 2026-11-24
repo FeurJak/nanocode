@@ -416,6 +416,7 @@ dependencies = [
  "nanocode-code-mode",
  "nanocode-digest",
  "nanocode-durability",
+ "nanocode-durability-core",
  "nanocode-executor",
  "nanocode-home",
  "nanocode-http",
