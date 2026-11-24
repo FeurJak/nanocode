@@ -6,8 +6,11 @@ use std::{
     time::Duration,
 };
 
-use nanocode_durability_core::{SqlStatement, StoreError};
+use nanocode_durability_core::{
+    Digest, FactSink, FoldError, Snapshot as FoldSnapshot, SqlStatement, StoreError, StoredFact,
+};
 use nanocode_sync::{Held, Owned, mpsc, oneshot};
+use serde_json::value::RawValue;
 
 use crate::{
     Checkpoint, Compaction, Event, Extension, Fold, LogHost, Record, Rider, Segment, Write,
@@ -15,7 +18,7 @@ use crate::{
         self, ARCHIVE, BOUNDARY, History, LINKED, PART, RECORDS, SEAL, SECTION, SNAPSHOT, Stream,
         WINDOW,
     },
-    fold::{Entry, Page, Section, legacy_name},
+    fold::{Entry, FOLD_SNAPSHOT_KEY, Page, Section, legacy_name},
 };
 
 pub const EVENT_GAP: u64 = 1 << 14;
@@ -1538,6 +1541,56 @@ impl TurnLog {
             }
         }
         Ok(())
+    }
+}
+
+impl Lease<'_> {
+    pub fn cache(&mut self, snapshot: &FoldSnapshot) -> Result<(), StoreError> {
+        assert!(
+            snapshot.seq < self.writer.fold.next_fact(),
+            "a cached fold names a fact the log holds"
+        );
+        let value = serde_json::value::to_raw_value(snapshot)
+            .map_err(|error| StoreError::NotCommitted(format!("encode a cached fold: {error}")))?;
+        self.push(Record::Host {
+            key: FOLD_SNAPSHOT_KEY.to_owned(),
+            value,
+        })
+    }
+}
+
+impl FactSink for Lease<'_> {
+    fn next(&self) -> u64 {
+        self.writer.fold.next_fact()
+    }
+
+    fn put_blob(&mut self, digest: &Digest, json: &RawValue) -> Result<(), FoldError> {
+        assert_eq!(
+            Digest::of(json.get().as_bytes()),
+            *digest,
+            "a blob is put under the digest of its value"
+        );
+        let key = digest.key().as_str().to_owned();
+        if self.writer.fold.contains(&key) {
+            return Ok(());
+        }
+        self.push(Record::Stored {
+            key,
+            value: json.get().to_owned(),
+        })
+        .map_err(FoldError::Sink)
+    }
+
+    fn append(&mut self, fact: StoredFact) -> Result<u64, FoldError> {
+        let seq = self.writer.fold.next_fact();
+        self.push(Record::Fact { fact, seq })
+            .map_err(FoldError::Sink)?;
+        assert_eq!(
+            self.writer.fold.next_fact(),
+            seq + 1,
+            "an appended fact folds at once"
+        );
+        Ok(seq)
     }
 }
 

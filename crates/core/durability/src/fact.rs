@@ -163,12 +163,29 @@ pub enum Decision<D> {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Marker {
-    Status { turn: String, status: TurnStatus },
-    Fence { owner: String },
-    Floor { seq: u64 },
-    Wake { key: String, generation: u64, armed: bool },
-    Hold { key: String, held: bool },
-    Blob { digest: Digest, bytes: u64 },
+    Status {
+        turn: String,
+        status: TurnStatus,
+    },
+    Fence {
+        owner: String,
+    },
+    Floor {
+        seq: u64,
+    },
+    Wake {
+        key: String,
+        generation: u64,
+        armed: bool,
+    },
+    Hold {
+        key: String,
+        held: bool,
+    },
+    Blob {
+        digest: Digest,
+        bytes: u64,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -261,6 +278,7 @@ pub enum FoldError {
     Decode { seq: u64, reason: String },
     UnknownBlob { seq: u64, blob: BlobRef },
     MissingBlob { digest: Digest },
+    CorruptBlob { digest: Digest },
     OutOfOrder { seq: u64, after: u64 },
     Encode(String),
     Sink(StoreError),
@@ -280,6 +298,13 @@ impl std::fmt::Display for FoldError {
             ),
             Self::MissingBlob { digest } => {
                 write!(formatter, "blob {} is missing", digest.key())
+            }
+            Self::CorruptBlob { digest } => {
+                write!(
+                    formatter,
+                    "blob {} does not hold the value its digest names",
+                    digest.key()
+                )
             }
             Self::OutOfOrder { seq, after } => {
                 write!(formatter, "fact {seq} arrived after fact {after}")
@@ -319,7 +344,7 @@ pub trait FactSink {
 
     fn put_blob(&mut self, digest: &Digest, json: &RawValue) -> Result<(), FoldError>;
 
-    fn append(&mut self, fact: &StoredFact) -> Result<u64, FoldError>;
+    fn append(&mut self, fact: StoredFact) -> Result<u64, FoldError>;
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -398,6 +423,7 @@ pub struct Snapshot {
     pub family: String,
     pub format: u32,
     pub seq: u64,
+    pub applied: u64,
     pub values: Values,
     pub state: Box<RawValue>,
 }
@@ -441,6 +467,7 @@ impl std::fmt::Display for Divergence {
 pub struct Folded<F: DurableFold> {
     state: F,
     seq: u64,
+    applied: u64,
     values: Values,
 }
 
@@ -449,6 +476,7 @@ impl<F: DurableFold> Default for Folded<F> {
         Self {
             state: F::default(),
             seq: 0,
+            applied: 0,
             values: Values::default(),
         }
     }
@@ -477,7 +505,7 @@ impl<F: DurableFold> Folded<F> {
     pub fn open<'b>(
         snapshot: Option<Snapshot>,
         facts: impl IntoIterator<Item = (u64, StoredFact)>,
-        blob: impl Fn(&Digest) -> Option<&'b RawValue>,
+        blob: impl Fn(&Digest) -> Result<&'b RawValue, FoldError>,
     ) -> Result<(Self, Start), FoldError> {
         let (mut folded, mut start) = Self::start(snapshot)?;
         for (seq, fact) in facts {
@@ -500,23 +528,29 @@ impl<F: DurableFold> Folded<F> {
             let stale = Some(snapshot.format);
             return Ok((Self::default(), Start::Replayed { stale }));
         }
-        let state = serde_json::from_str(snapshot.state.get()).map_err(|error| {
-            FoldError::Decode {
+        let state =
+            serde_json::from_str(snapshot.state.get()).map_err(|error| FoldError::Decode {
                 seq: snapshot.seq,
                 reason: format!("snapshot does not decode: {error}"),
-            }
-        })?;
+            })?;
         let mut values = snapshot.values;
         values.reindex();
         let seq = snapshot.seq;
-        Ok((Self { state, seq, values }, Start::Snapshot { seq }))
+        let applied = snapshot.applied;
+        let folded = Self {
+            state,
+            seq,
+            applied,
+            values,
+        };
+        Ok((folded, Start::Snapshot { seq }))
     }
 
     fn replay<'b>(
         &mut self,
         seq: u64,
         fact: &StoredFact,
-        blob: &impl Fn(&Digest) -> Option<&'b RawValue>,
+        blob: &impl Fn(&Digest) -> Result<&'b RawValue, FoldError>,
     ) -> Result<(), FoldError> {
         if seq <= self.seq {
             return Err(FoldError::OutOfOrder {
@@ -538,7 +572,7 @@ impl<F: DurableFold> Folded<F> {
                         seq,
                         blob: *reference,
                     })?;
-                    let json = blob(digest).ok_or(FoldError::MissingBlob { digest: *digest })?;
+                    let json = blob(digest)?;
                     Ok(json.to_owned())
                 }
             },
@@ -549,7 +583,24 @@ impl<F: DurableFold> Folded<F> {
                 })
             },
         )?;
-        self.state.apply(seq, owned.seen())
+        self.fold(seq, &owned)
+    }
+
+    fn fold(&mut self, seq: u64, fact: &OwnedFact<F::Decision>) -> Result<(), FoldError> {
+        if matches!(fact, Fact::Base(_)) && self.applied > 0 {
+            return Err(FoldError::Decode {
+                seq,
+                reason: format!("a base follows {} folded facts", self.applied),
+            });
+        }
+        self.state.apply(seq, fact.seen())?;
+        self.applied += 1;
+        Ok(())
+    }
+
+    #[must_use]
+    pub const fn applied(&self) -> u64 {
+        self.applied
     }
 
     pub fn commit(
@@ -558,7 +609,10 @@ impl<F: DurableFold> Folded<F> {
         fact: OwnedFact<F::Decision>,
     ) -> Result<(Self, u64), FoldError> {
         let next = sink.next();
-        assert!(next > self.seq, "a sink hands out sequence numbers past the fold");
+        assert!(
+            next > self.seq,
+            "a sink hands out sequence numbers past the fold"
+        );
         let mut fresh: Vec<(Digest, &RawValue)> = Vec::new();
         let values = &mut self.values;
         let stored: StoredFact = fact.try_map(
@@ -579,17 +633,24 @@ impl<F: DurableFold> Folded<F> {
             },
         )?;
         let seq = next + fresh.len() as u64;
-        self.state.apply(seq, fact.seen())?;
+        assert!(
+            !matches!(fact, Fact::Base(_)) || self.applied == 0,
+            "a base is committed before any other fact"
+        );
+        self.fold(seq, &fact)?;
         for (digest, json) in &fresh {
             sink.put_blob(digest, json)?;
             let marker = Fact::Marker(Marker::Blob {
                 digest: *digest,
                 bytes: json.get().len() as u64,
             });
-            sink.append(&marker)?;
+            sink.append(marker)?;
         }
-        let written = sink.append(&stored)?;
-        assert_eq!(written, seq, "the sink appended the fact where it said it would");
+        let written = sink.append(stored)?;
+        assert_eq!(
+            written, seq,
+            "the sink appended the fact where it said it would"
+        );
         self.seq = written;
         Ok((self, written))
     }
@@ -601,6 +662,7 @@ impl<F: DurableFold> Folded<F> {
             family: F::FAMILY.to_owned(),
             format: F::FORMAT,
             seq: self.seq,
+            applied: self.applied,
             values: self.values.clone(),
             state,
         })
@@ -609,7 +671,7 @@ impl<F: DurableFold> Folded<F> {
     pub fn diverges<'b>(
         &self,
         facts: impl IntoIterator<Item = (u64, StoredFact)>,
-        blob: impl Fn(&Digest) -> Option<&'b RawValue>,
+        blob: impl Fn(&Digest) -> Result<&'b RawValue, FoldError>,
     ) -> Result<Option<Divergence>, FoldError> {
         let (folded, _) = Self::open(None, facts, blob)?;
         let live = serde_json::to_string(&self.state)

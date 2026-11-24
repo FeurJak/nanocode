@@ -5,7 +5,9 @@ use std::{
     ops::Bound,
 };
 
-use nanocode_durability_core::{EncodedPayload, StoreError};
+use nanocode_durability_core::{
+    Digest, EncodedPayload, FoldError, Snapshot, StoreError, StoredFact,
+};
 use serde_json::value::RawValue;
 
 use crate::{ArmedWake, EffectClass, Hold, Outcome, Record, Status, Wakes};
@@ -185,6 +187,7 @@ pub struct Retired {
 }
 
 pub const RETIRED_KEY: &str = "$turnlog_retired";
+pub const FOLD_SNAPSHOT_KEY: &str = "$fold_snapshot";
 
 #[must_use]
 pub fn tag(text: &str) -> u128 {
@@ -252,6 +255,7 @@ pub struct Fold {
     dead: BTreeMap<String, String>,
     ends: u64,
     events: Vec<Event>,
+    facts: Vec<StoredFact>,
     filters: BTreeMap<u64, Box<[u64]>>,
     forgets: BTreeSet<String>,
     groups: BTreeMap<u64, (u64, u64)>,
@@ -2105,6 +2109,36 @@ impl Fold {
         }
     }
 
+    #[must_use]
+    pub fn next_fact(&self) -> u64 {
+        self.facts.len() as u64 + 1
+    }
+
+    pub fn facts(&self) -> impl Iterator<Item = (u64, &StoredFact)> {
+        (1..).zip(&self.facts)
+    }
+
+    pub fn cached(&self) -> Result<Option<Snapshot>, StoreError> {
+        self.hosts
+            .get(FOLD_SNAPSHOT_KEY)
+            .map(|value| {
+                serde_json::from_str(value.get())
+                    .map_err(|error| invalid(format!("cached fold does not decode: {error}")))
+            })
+            .transpose()
+    }
+
+    pub fn blob(&self, digest: &Digest) -> Result<&RawValue, FoldError> {
+        let value = self
+            .stored
+            .get(digest.key().as_str())
+            .ok_or(FoldError::MissingBlob { digest: *digest })?;
+        if Digest::of(value.as_bytes()) != *digest {
+            return Err(FoldError::CorruptBlob { digest: *digest });
+        }
+        serde_json::from_str(value).map_err(|_| FoldError::CorruptBlob { digest: *digest })
+    }
+
     pub fn apply(&mut self, record: &Record, row: Option<u64>) -> Result<(), StoreError> {
         if let Some(pending) = self.defer(record) {
             return wait(pending, record.clone());
@@ -2141,6 +2175,16 @@ impl Fold {
                     prompt: prompt.clone(),
                     recovered: None,
                 });
+            }
+            Record::Fact { fact, seq } => {
+                let next = self.next_fact();
+                if *seq != next {
+                    return Err(invalid(format!(
+                        "fact {seq} does not follow fact {}",
+                        next - 1
+                    )));
+                }
+                self.facts.push(fact.clone());
             }
             Record::Call {
                 call_id,
@@ -2522,6 +2566,12 @@ impl Fold {
             take(Record::Stored {
                 key: key.clone(),
                 value: value.clone(),
+            })?;
+        }
+        for (seq, fact) in self.facts() {
+            take(Record::Fact {
+                fact: fact.clone(),
+                seq,
             })?;
         }
         for (state, checkpoint) in self.checkpoints.iter().filter(|_| owned) {

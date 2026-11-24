@@ -1,4 +1,4 @@
-use nanocode_durability_core::StoreError;
+use nanocode_durability_core::{StoreError, StoredFact};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
@@ -76,6 +76,10 @@ pub enum Record {
     Disarmed {
         generation: u64,
         key: String,
+    },
+    Fact {
+        fact: StoredFact,
+        seq: u64,
     },
     Event {
         at: u64,
