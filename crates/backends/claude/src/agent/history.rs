@@ -599,9 +599,8 @@ impl WireMessage for HistoryMessage {
 pub(super) struct CodeRound(Arc<Round>);
 
 struct Round {
-    value: serde_json::Value,
-    record: OnceLock<EncodedPayload>,
-    bytes: OnceLock<usize>,
+    record: EncodedPayload,
+    bytes: usize,
 }
 
 impl CodeRound {
@@ -610,48 +609,39 @@ impl CodeRound {
     }
 
     pub(super) fn record(&self) -> serde_json::Result<EncodedPayload> {
-        if let Some(record) = self.0.record.get() {
-            return Ok(record.clone());
-        }
-        let record = EncodedPayload::from_json(serde_json::to_string(&self.0.value)?.into());
-        Ok(self.0.record.get_or_init(|| record).clone())
+        Ok(self.0.record.clone())
     }
 
     pub(super) fn bytes(&self) -> usize {
-        *self
-            .0
-            .bytes
-            .get_or_init(|| super::bounded_json_len(&self.0.value, usize::MAX))
+        self.0.bytes
+    }
+
+    fn json(&self) -> &str {
+        self.0.record.json().expect("a code round keeps its bytes")
     }
 }
 
 impl From<serde_json::Value> for CodeRound {
     fn from(value: serde_json::Value) -> Self {
+        let json = serde_json::to_string(&value).expect("a JSON value serializes");
         Self(Arc::new(Round {
-            value,
-            record: OnceLock::new(),
-            bytes: OnceLock::new(),
+            bytes: super::bounded_json_len(&value, usize::MAX),
+            record: EncodedPayload::from_json(json.into()),
         }))
-    }
-}
-
-impl Deref for CodeRound {
-    type Target = serde_json::Value;
-
-    fn deref(&self) -> &serde_json::Value {
-        &self.0.value
     }
 }
 
 impl PartialEq for CodeRound {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0) || self.0.value == other.0.value
+        Arc::ptr_eq(&self.0, &other.0) || self.json() == other.json()
     }
 }
 
 impl Serialize for CodeRound {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.0.value.serialize(serializer)
+        serde_json::from_str::<&serde_json::value::RawValue>(self.json())
+            .map_err(serde::ser::Error::custom)?
+            .serialize(serializer)
     }
 }
 
