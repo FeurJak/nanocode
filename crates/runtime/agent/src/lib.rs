@@ -18,7 +18,7 @@ pub use handoff::{
 };
 pub use one_log::{
     Exported, Fire, Heard, Imported, OneLog, OneLogJournals, OneLogStore, Policy, WakeError,
-    import_sim,
+    facts_sim, import_sim,
 };
 pub use remote::{ChildHost, ChildSpec, ChildToolCall, ChildTurn, RemoteChildren};
 pub use router::{

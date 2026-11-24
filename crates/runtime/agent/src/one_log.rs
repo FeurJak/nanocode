@@ -40,11 +40,13 @@ use crate::{
 };
 
 mod export;
+mod facts;
 mod import;
 mod shared;
 mod wakes;
 
 pub use export::Exported;
+pub use facts::sim as facts_sim;
 pub use import::{Imported, sim as import_sim};
 pub use wakes::{Fire, Heard, WakeError};
 
@@ -1882,6 +1884,10 @@ impl OneLogStore {
 }
 
 impl StateStore for OneLogStore {
+    fn facts(&self) -> Option<Arc<dyn crate::durability::FactLog>> {
+        Some(Arc::clone(&self.0) as Arc<dyn crate::durability::FactLog>)
+    }
+
     fn read_record<'a>(
         &'a mut self,
         state_id: &'a str,
