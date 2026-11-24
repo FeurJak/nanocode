@@ -1,6 +1,6 @@
 use nanocode_turnlog::{Point, Record};
 
-use super::{OneLog, owned, stored_key};
+use super::{OneLog, staging, stored_key};
 use crate::durability::{StoreError, StoreRecord};
 
 pub mod sim {
@@ -79,7 +79,7 @@ impl OneLog {
         if self.owners.read(|owners| owners.get(state_id).is_some()) {
             return Err(StoreError::Fenced);
         }
-        lease.load_owners(&owned(state_id, records)).await?;
+        staging(&mut lease, state_id, records).await?;
         let fold = lease.fold();
         let unsaved = records
             .iter()

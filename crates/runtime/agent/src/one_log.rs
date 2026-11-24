@@ -300,11 +300,18 @@ fn logged(seq: u64, request_id: Option<&str>, at: u64, event: Box<RawValue>) -> 
     }
 }
 
-fn owned(state: &str, records: &[StoreRecord]) -> Vec<String> {
-    std::iter::once(state.to_owned())
+async fn staging(
+    lease: &mut nanocode_turnlog::Lease<'_>,
+    state: &str,
+    records: &[StoreRecord],
+) -> Result<(), StoreError> {
+    let owned = std::iter::once(state.to_owned())
         .chain(records.iter().map(|record| stored_key(state, &record.key)))
-        .chain(shared::candidates(state, records))
-        .collect()
+        .collect::<Vec<_>>();
+    lease.load_owners(&owned).await?;
+    lease
+        .index_owners(&shared::candidates(state, records))
+        .await
 }
 
 fn put(
@@ -1606,10 +1613,6 @@ impl CellJournalSink for OneLogJournals {
                 .lease_within()
                 .await
                 .map_err(|error| error.to_string())?;
-            lease
-                .load_owner(TOOLS_MARK)
-                .await
-                .map_err(|error| error.to_string())?;
             let fresh = update.header.is_some();
             if let Some(header) = update.header.as_mut() {
                 let catalog =
@@ -1618,7 +1621,11 @@ impl CellJournalSink for OneLogJournals {
                     .to_hex()
                     .to_string();
                 let key = stored_key(TOOLS_MARK, &digest);
-                if lease.fold().stored(&key).is_none() {
+                lease
+                    .index_owners(std::slice::from_ref(&key))
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if !lease.fold().contains(&key) {
                     lease
                         .push(Record::Stored {
                             key,
@@ -2006,7 +2013,7 @@ impl StateStore for OneLogStore {
     ) -> StoreFuture<'a, Result<u64, StoreError>> {
         Box::pin(async move {
             let mut lease = self.0.log.lease_within().await?;
-            lease.load_owners(&owned(state_id, records)).await?;
+            staging(&mut lease, state_id, records).await?;
             let revision = self.replaced(
                 &mut lease,
                 state_id,
@@ -2036,7 +2043,7 @@ impl StateStore for OneLogStore {
                 ));
             }
             let mut lease = self.0.log.lease_within().await?;
-            lease.load_owners(&owned(state_id, commit.records)).await?;
+            staging(&mut lease, state_id, commit.records).await?;
             let revision = self.replaced(
                 &mut lease,
                 state_id,
@@ -2091,7 +2098,7 @@ impl StateStore for OneLogStore {
     ) -> StoreFuture<'a, Result<bool, StoreError>> {
         Box::pin(async move {
             let mut lease = self.0.log.lease_within().await?;
-            lease.load_owners(&owned(state_id, records)).await?;
+            staging(&mut lease, state_id, records).await?;
             put(&mut lease, state_id, records)?;
             Ok(true)
         })

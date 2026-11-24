@@ -570,13 +570,24 @@ async fn warm(
     stats: &mut Stats,
     owner: &str,
 ) -> Result<(), StoreError> {
+    locate(host, scope, fold, stats, owner).await?;
+    load(host, scope, fold, stats, owner).await
+}
+
+async fn locate(
+    host: &dyn LogHost,
+    scope: &str,
+    fold: &mut Fold,
+    stats: &mut Stats,
+    owner: &str,
+) -> Result<(), StoreError> {
     if let Some(legacy) = legacy_name(owner) {
         page(host, scope, fold, stats, &legacy).await?;
         if fold.is_legacy(&legacy) {
             load(host, scope, fold, stats, &legacy).await?;
         }
     }
-    load(host, scope, fold, stats, owner).await
+    page(host, scope, fold, stats, owner).await
 }
 
 async fn load(
@@ -1589,6 +1600,22 @@ impl Lease<'_> {
             )
             .await?;
             writer.fold.read_owner(owner);
+        }
+        Ok(())
+    }
+
+    pub async fn index_owners(&mut self, owners: &[String]) -> Result<(), StoreError> {
+        let writer = &mut *self.writer;
+        writer.live()?;
+        for owner in owners {
+            locate(
+                self.host,
+                self.scope,
+                &mut writer.fold,
+                &mut writer.stats,
+                owner,
+            )
+            .await?;
         }
         Ok(())
     }

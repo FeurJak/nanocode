@@ -35,7 +35,7 @@ pub(super) fn staged<'a>(fold: &Fold, state: &str, record: &'a StoreRecord) -> C
     if !content(record) {
         return Cow::Borrowed(&record.value);
     }
-    let held = |key: &str| fold.stored(&stored_key(state, key)).is_some();
+    let held = |key: &str| fold.contains(&stored_key(state, key));
     EncodedPayload::splice(&record.value, &held).map_or(Cow::Borrowed(&record.value), Cow::Owned)
 }
 

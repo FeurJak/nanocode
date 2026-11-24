@@ -1791,6 +1791,15 @@ impl Fold {
     }
 
     #[must_use]
+    pub fn contains(&self, key: &str) -> bool {
+        self.stored(key).is_some()
+            || matches!(
+                self.owners.get(key),
+                Some(Owner::Cold { entry, .. }) if !entry.legacy && !entry.sections.is_empty()
+            )
+    }
+
+    #[must_use]
     pub fn stored(&self, key: &str) -> Option<&str> {
         self.stored
             .get(key)
