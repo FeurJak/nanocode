@@ -476,6 +476,21 @@ enum Nested {
     Refuse(u64),
 }
 
+impl Nested {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::Recover => "recover",
+            Self::Refuse(_) => "refuse",
+        }
+    }
+}
+
+struct NestedTrace {
+    traced: bool,
+    queued_ns: u64,
+}
+
 impl Drop for UnloggedCalls {
     fn drop(&mut self) {
         let mut counts = self
@@ -956,6 +971,8 @@ impl CodeModeRuntime {
             source.lines = source.lines().count(),
             output.max_tokens = nanocode_trace::field::Empty,
             nested.count = nanocode_trace::field::Empty,
+            nested.busy_ns = nanocode_trace::field::Empty,
+            nested.max_concurrent = nanocode_trace::field::Empty,
             running = nanocode_trace::field::Empty,
             status = nanocode_trace::field::Empty,
             duration_ns = nanocode_trace::field::Empty,
@@ -1127,6 +1144,8 @@ impl CodeModeRuntime {
             cell.id = nanocode_trace::field::Empty,
             wait.yield_time_ms = nanocode_trace::field::Empty,
             wait.terminate = nanocode_trace::field::Empty,
+            nested.busy_ns = nanocode_trace::field::Empty,
+            nested.max_concurrent = nanocode_trace::field::Empty,
             running = nanocode_trace::field::Empty,
             status = nanocode_trace::field::Empty,
             duration_ns = nanocode_trace::field::Empty,
@@ -1302,6 +1321,42 @@ fn finish_cell_span(
         "duration_ns",
         u64::try_from(nanocode_platform::elapsed(started_at).as_nanos()).unwrap_or(u64::MAX),
     );
+    let (busy_ns, max_concurrent) = nested_overlap(&execution.nested_calls);
+    span.record("nested.busy_ns", busy_ns);
+    span.record("nested.max_concurrent", max_concurrent);
+}
+
+fn nested_overlap(calls: &[NestedToolCall]) -> (u64, u64) {
+    let mut edges = calls
+        .iter()
+        .flat_map(|call| {
+            [
+                (call.started_after_ns, true),
+                (
+                    call.started_after_ns.saturating_add(call.duration_ns),
+                    false,
+                ),
+            ]
+        })
+        .collect::<Vec<_>>();
+    edges.sort_unstable();
+    let (mut running, mut max_concurrent, mut busy_ns, mut busy_since) =
+        (0_u64, 0_u64, 0_u64, 0_u64);
+    for (at, starts) in edges {
+        if starts {
+            if running == 0 {
+                busy_since = at;
+            }
+            running += 1;
+            max_concurrent = max_concurrent.max(running);
+        } else {
+            running -= 1;
+            if running == 0 {
+                busy_ns += at - busy_since;
+            }
+        }
+    }
+    (busy_ns, max_concurrent)
 }
 
 fn observer_yield_timeout(yield_time: Duration) -> Duration {
@@ -2578,7 +2633,7 @@ struct CellCalls<'a, 'b> {
     unstarted: &'b Arc<AtomicUsize>,
     pending_receipts: &'b mut PendingCallReceipts,
     unlogged: &'b mut UnloggedCalls,
-    deferred: &'b mut std::collections::VecDeque<(u64, String, Box<str>, bool)>,
+    deferred: &'b mut std::collections::VecDeque<(u64, String, Box<str>, bool, Instant)>,
     limits: Limits,
     updates: &'b mpsc::UnboundedSender<CellUpdate>,
     record: Option<&'b CellRecord>,
@@ -2595,18 +2650,19 @@ impl CellCalls<'_, '_> {
             if self.record.is_some() {
                 self.queue(id, name.clone(), input, host);
             }
-            self.deferred.push_back((id, name, text, host));
+            self.deferred
+                .push_back((id, name, text, host, nanocode_platform::now()));
             return;
         }
-        self.start(id, name, input, host, false);
+        self.start(id, name, input, host, false, None);
     }
 
     fn resume_deferred(&mut self) {
         while self.pending_calls.len() < self.limits.nested
-            && let Some((id, name, text, host)) = self.deferred.pop_front()
+            && let Some((id, name, text, host, queued_at)) = self.deferred.pop_front()
         {
             let input = serde_json::from_str(&text).expect("a JSON value's text parses");
-            self.start(id, name, input, host, false);
+            self.start(id, name, input, host, false, Some(queued_at));
         }
     }
 
@@ -2617,10 +2673,19 @@ impl CellCalls<'_, '_> {
             call.input.clone(),
             call.host,
             true,
+            None,
         );
     }
 
-    fn start(&mut self, id: u64, name: String, input: Value, host: bool, recovering: bool) {
+    fn start(
+        &mut self,
+        id: u64,
+        name: String,
+        input: Value,
+        host: bool,
+        recovering: bool,
+        queued_at: Option<Instant>,
+    ) {
         let nested_call_id = format!("{}/code-{id}", self.context.call_id);
         let persists = self
             .journal
@@ -2688,6 +2753,12 @@ impl CellCalls<'_, '_> {
                 self.context,
                 self.actor_started_at,
                 how,
+                NestedTrace {
+                    traced: logged,
+                    queued_ns: queued_at.map_or(0, |at| {
+                        u64::try_from(started.duration_since(at).as_nanos()).unwrap_or(u64::MAX)
+                    }),
+                },
             ),
         )));
     }
@@ -3482,11 +3553,29 @@ async fn execute_nested_call(
     context: &OwnedToolContext,
     cell_started_at: Instant,
     how: Nested,
+    trace: NestedTrace,
 ) -> CompletedNestedCall {
     let started_at = nanocode_platform::now();
     let started_after_ns =
         u64::try_from(started_at.duration_since(cell_started_at).as_nanos()).unwrap_or(u64::MAX);
     let call_id = format!("{}/code-{id}", context.call_id);
+    let span = if trace.traced {
+        info_span!(
+            target: "nanocode_code_mode",
+            "code_mode.nested_call",
+            otel.kind = "internal",
+            otel.status_code = nanocode_trace::field::Empty,
+            tool.name = name.as_str(),
+            tool.call_id = call_id.as_str(),
+            nested.mode = how.label(),
+            started_after_ns = started_after_ns,
+            queued_ns = trace.queued_ns,
+            status = nanocode_trace::field::Empty,
+            duration_ns = nanocode_trace::field::Empty,
+        )
+    } else {
+        nanocode_trace::Span::none()
+    };
     let owned = context;
     let context = owned.as_context();
     let context = ToolContext::new(
@@ -3501,32 +3590,49 @@ async fn execute_nested_call(
     .with_host_context(context.host_context())
     .with_turn_id(context.turn_id())
     .with_tool_settings(context.tool_settings());
-    let mut execution = match how {
-        Nested::Recover => {
-            let recovered = match tools.recover_nested(&name, Value::clone(&input), context) {
-                Some(recovered) => recovered.await,
-                None => None,
-            };
-            recovered.unwrap_or_else(|| {
-                ToolOutput::error(replay::UNKNOWN_OUTCOME)
-                    .with_structured_result(replay::unknown_outcome())
-            })
+    let mut execution = async {
+        match how {
+            Nested::Recover => {
+                let recovered = match tools.recover_nested(&name, Value::clone(&input), context) {
+                    Some(recovered) => recovered.await,
+                    None => None,
+                };
+                recovered.unwrap_or_else(|| {
+                    ToolOutput::error(replay::UNKNOWN_OUTCOME)
+                        .with_structured_result(replay::unknown_outcome())
+                })
+            }
+            Nested::Refuse(cap) => {
+                let text = format!(
+                    "This cell already called {name} {cap} times, so this call didn't run. Batch the work into fewer calls or split it across cells, or the cell is stopped."
+                );
+                ToolOutput::error(text.clone()).with_structured_result(serde_json::json!({
+                    "isError": true, "code": CALL_LIMIT, "retryable": false, "error": text,
+                }))
+            }
+            Nested::Run if host => {
+                caught(tools.execute_host_nested(&name, Value::clone(&input), context)).await
+            }
+            Nested::Run => caught(tools.execute_nested(&name, Value::clone(&input), context)).await,
         }
-        Nested::Refuse(cap) => {
-            let text = format!(
-                "This cell already called {name} {cap} times, so this call didn't run. Batch the work into fewer calls or split it across cells, or the cell is stopped."
-            );
-            ToolOutput::error(text.clone()).with_structured_result(serde_json::json!({
-                "isError": true, "code": CALL_LIMIT, "retryable": false, "error": text,
-            }))
-        }
-        Nested::Run if host => {
-            caught(tools.execute_host_nested(&name, Value::clone(&input), context)).await
-        }
-        Nested::Run => caught(tools.execute_nested(&name, Value::clone(&input), context)).await,
-    };
+    }
+    .instrument(span.clone())
+    .await;
     let duration_ns =
         u64::try_from(nanocode_platform::elapsed(started_at).as_nanos()).unwrap_or(u64::MAX);
+    span.record(
+        "status",
+        if execution.success {
+            "completed"
+        } else {
+            "failed"
+        },
+    );
+    span.record(
+        "otel.status_code",
+        if execution.success { "OK" } else { "ERROR" },
+    );
+    span.record("duration_ns", duration_ns);
     let encoded = execution.structured_json().map(str::to_owned);
     let value = execution.take_structured_result();
     let process_trace = execution.process_trace().copied().map(Into::into);
