@@ -208,6 +208,23 @@ impl MatchFinder {
         })
     }
 
+    pub(super) fn prime(&mut self, window: &[u8]) {
+        assert!(
+            self.write_pos == 0,
+            "a match finder is primed before any input"
+        );
+        let kept = &window[window.len().saturating_sub(self.cyclic_size as usize - 1)..];
+        if kept.is_empty() {
+            return;
+        }
+        self.buffer.extend_from_slice(kept);
+        self.write_pos = u32::try_from(kept.len()).expect("a window fits in 32 bits");
+        self.action = Action::SyncFlush;
+        self.skip_positions(self.write_pos);
+        self.action = Action::Run;
+        assert_eq!(self.read_pos, self.write_pos);
+    }
+
     pub(super) fn buffer(&self) -> &[u8] {
         &self.buffer
     }

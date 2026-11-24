@@ -1,6 +1,7 @@
 use nanocode_compression::{
     deflate::{Deflate, DeflateConfig, DeflateFlush, DeflateStatus, Strategy},
     inflate::{Inflate, InflateFlush, InflateStatus},
+    xz::{self, LzmaOptions, LzmaState, MatchFinder, PRESET_DEFAULT},
 };
 use nanocode_durability_core::StoreError;
 use nanocode_sys::base64::{STANDARD, STANDARD_NO_PAD};
@@ -9,10 +10,8 @@ pub(crate) const WINDOW: usize = 1 << WINDOW_BITS;
 const WINDOW_BITS: i32 = 15;
 pub(crate) const DEFAULT_LEVEL: i32 = -1;
 pub(crate) const FAST_LEVEL: i32 = 1;
-const STREAM_LEVEL: i32 = 7;
 const DEFAULT_MEM_LEVEL: i32 = 8;
 const FINAL_EMPTY_BLOCK: [u8; 2] = [0x03, 0x00];
-const EMPTY_STORED_BLOCK: [u8; 5] = [0x00, 0x00, 0x00, 0xff, 0xff];
 const BASE64_GROUP: usize = 3;
 const BASE64_CHARS: usize = 4;
 pub(crate) const SEAL: usize = (FINAL_EMPTY_BLOCK.len() * BASE64_CHARS).div_ceil(BASE64_GROUP);
@@ -34,8 +33,26 @@ const BASE85_DIGITS: [u8; 1 << BYTE_BITS] = {
 const BASE85_TOP_DIGIT: u64 = BASE85_RADIX - 1;
 const _: () = assert!(FINAL_EMPTY_BLOCK.len() < BASE85_GROUP);
 const _: () = assert!(SEAL == FINAL_EMPTY_BLOCK.len() + 1);
-const _: () = assert!(EMPTY_STORED_BLOCK.len() % BASE85_GROUP == 1);
 pub(crate) const SEGMENT: char = '~';
+const DEFLATE_FINAL_BLOCK: u8 = 1;
+const DEFLATE_BLOCK_TYPE_SHIFT: u32 = 1;
+const DEFLATE_RESERVED_BLOCK_TYPE: u8 = 0b11;
+const LZMA_CONTINUED: u8 = DEFLATE_RESERVED_BLOCK_TYPE << DEFLATE_BLOCK_TYPE_SHIFT;
+const LZMA_RESTARTED: u8 = LZMA_CONTINUED | DEFLATE_FINAL_BLOCK;
+const LZMA2_CHUNK_BYTES_MAX: usize = 1 << 16;
+const LZMA2_END: u8 = 0x00;
+const LZMA2_UNCOMPRESSED_RESET: u8 = 0x01;
+const LZMA2_UNCOMPRESSED: u8 = 0x02;
+const LZMA2_COMPRESSED: u8 = 0x80;
+const LZMA2_PROPERTIES_RESET: u8 = 0xC0;
+const LZMA2_UNCOMPRESSED_HEADER_BYTES: usize = 3;
+const LZMA2_COMPRESSED_HEADER_BYTES: usize = 5;
+const LZMA2_PROPERTIES_BYTES: usize = 1;
+const LZMA2_UNCOMPRESSED_SIZE_AT: usize = 1;
+const LZMA2_COMPRESSED_SIZE_AT: usize = 3;
+const LZMA2_SIZE_BYTES: usize = 2;
+const LZMA_SEAL: [u8; 2] = [LZMA2_END, LZMA2_END];
+const _: () = assert!(LZMA_SEAL.len() == FINAL_EMPTY_BLOCK.len());
 
 pub(crate) const ARCHIVE: char = 'a';
 pub(crate) const RECORDS: char = 'r';
@@ -59,24 +76,244 @@ impl Window {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Default)]
+struct Lzma {
+    state: Option<LzmaState>,
+    decoder: Option<xz::Stream>,
+}
+
+#[derive(Default)]
 pub(crate) struct History {
     records: Window,
+    records_lzma: Lzma,
     chain: Option<(u64, Window)>,
+    chain_lzma: Lzma,
+}
+
+fn lzma_options() -> LzmaOptions {
+    let mut options =
+        LzmaOptions::preset(PRESET_DEFAULT).expect("the default preset is a valid preset");
+    options.dict_size = u32::try_from(WINDOW).expect("the window fits in 32 bits");
+    options.match_finder = MatchFinder::HashChain4;
+    options
+}
+
+fn lzma_failed(action: &str, error: xz::Error) -> StoreError {
+    failed(action, &error.to_string())
+}
+
+fn lzma_encode(
+    window: &[u8],
+    state: Option<&LzmaState>,
+    plain: &[u8],
+) -> Result<(Vec<u8>, LzmaState), StoreError> {
+    let position = state.map_or(window.len() as u64, LzmaState::position);
+    let mut encoder = xz::Stream::lzma2_resumed(&lzma_options(), window, position, state)
+        .map_err(|error| lzma_failed("compression", error))?;
+    let mut compressed = Vec::with_capacity(plain.len() / 2 + LZMA2_CHUNK_BYTES_MAX);
+    compressed.push(if state.is_some() {
+        LZMA_CONTINUED
+    } else {
+        LZMA_RESTARTED
+    });
+    let mut consumed = 0;
+    loop {
+        compressed.reserve(LZMA2_CHUNK_BYTES_MAX);
+        let before = encoder.total_in();
+        let status = encoder
+            .process_vec(&plain[consumed..], &mut compressed, xz::Action::SyncFlush)
+            .map_err(|error| lzma_failed("compression", error))?;
+        consumed +=
+            usize::try_from(encoder.total_in() - before).expect("consumed input fits in usize");
+        if status == xz::Status::StreamEnd {
+            break;
+        }
+    }
+    assert_eq!(
+        consumed,
+        plain.len(),
+        "a flushed encoder took the whole row"
+    );
+    let state = encoder.lzma_state().expect("a flushed encoder has a state");
+    assert_eq!(state.position(), position + plain.len() as u64);
+    Ok((compressed, state))
+}
+
+fn lzma2_chunk_bytes(chunk: &[u8]) -> Result<usize, StoreError> {
+    let control = chunk[0];
+    let (header, size_at) = match control {
+        LZMA2_UNCOMPRESSED_RESET | LZMA2_UNCOMPRESSED => {
+            (LZMA2_UNCOMPRESSED_HEADER_BYTES, LZMA2_UNCOMPRESSED_SIZE_AT)
+        }
+        LZMA2_PROPERTIES_RESET.. => (
+            LZMA2_COMPRESSED_HEADER_BYTES + LZMA2_PROPERTIES_BYTES,
+            LZMA2_COMPRESSED_SIZE_AT,
+        ),
+        LZMA2_COMPRESSED.. => (LZMA2_COMPRESSED_HEADER_BYTES, LZMA2_COMPRESSED_SIZE_AT),
+        _ => {
+            return Err(failed(
+                "decoding",
+                "a compressed chunk has no known control",
+            ));
+        }
+    };
+    let size = chunk
+        .get(size_at..size_at + LZMA2_SIZE_BYTES)
+        .ok_or_else(|| failed("decoding", "the row ends inside a chunk header"))?;
+    let size = usize::from(u16::from_be_bytes([size[0], size[1]])) + 1;
+    Ok(header + size)
+}
+
+fn lzma_packs(bytes: &[u8]) -> Result<Vec<(u8, std::ops::Range<usize>)>, StoreError> {
+    let mut packs: Vec<(u8, std::ops::Range<usize>)> = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            format @ (LZMA_CONTINUED | LZMA_RESTARTED) => {
+                at += 1;
+                packs.push((format, at..at));
+            }
+            LZMA2_END if bytes[at..] == LZMA_SEAL => return Ok(packs),
+            LZMA2_END => return Err(failed("decoding", "the row ends past its seal")),
+            _ => {
+                let Some((_, range)) = packs.last_mut() else {
+                    return Err(failed("decoding", "a chunk comes before its format"));
+                };
+                at += lzma2_chunk_bytes(&bytes[at..])?;
+                if at > bytes.len() {
+                    return Err(failed("decoding", "the row ends inside a chunk"));
+                }
+                range.end = at;
+            }
+        }
+    }
+    Ok(packs)
+}
+
+fn lzma_decode(
+    lzma: &mut Lzma,
+    window: &[u8],
+    seq: u64,
+    format: u8,
+    compressed: &[u8],
+) -> Result<Vec<u8>, StoreError> {
+    if format == LZMA_RESTARTED {
+        lzma.decoder = Some(
+            xz::Stream::lzma2_primed_decoder(&lzma_options(), window)
+                .map_err(|error| lzma_failed("decompression", error))?,
+        );
+    }
+    let Some(decoder) = lzma.decoder.as_mut() else {
+        return Err(StoreError::Backend(format!(
+            "turn log row {seq} continues a compressed stream this read does not hold"
+        )));
+    };
+    let mut plain = Vec::with_capacity(compressed.len() * 2);
+    let mut fed = 0;
+    loop {
+        plain.reserve(LZMA2_CHUNK_BYTES_MAX);
+        let (before_in, before_out) = (decoder.total_in(), decoder.total_out());
+        let status = decoder
+            .process_vec(&compressed[fed..], &mut plain, xz::Action::Run)
+            .map_err(|error| lzma_failed("decompression", error))?;
+        fed +=
+            usize::try_from(decoder.total_in() - before_in).expect("consumed input fits in usize");
+        if status != xz::Status::Ok {
+            return Err(failed(
+                "decompression",
+                "the row ends its compressed stream",
+            ));
+        }
+        if fed == compressed.len() && decoder.total_out() == before_out {
+            return Ok(plain);
+        }
+    }
 }
 
 impl History {
     pub(crate) fn extend(&mut self, plain: &[u8]) {
         self.records.extend(plain);
+        self.records_lzma = Lzma::default();
     }
 
     pub(crate) fn clear(&mut self) {
         self.records.0.clear();
+        self.records_lzma = Lzma::default();
         self.chain = None;
+        self.chain_lzma = Lzma::default();
     }
 
-    pub(crate) fn bytes(&self) -> &[u8] {
-        &self.records.0
+    pub(crate) fn resume_records(&mut self, state: LzmaState) {
+        self.records_lzma.state = Some(state);
+    }
+
+    pub(crate) fn resume_chain(&mut self, keyframe: u64, state: LzmaState) {
+        assert_eq!(
+            self.keyframe(),
+            Some(keyframe),
+            "a chain resumes after its link"
+        );
+        self.chain_lzma.state = Some(state);
+    }
+
+    pub(crate) fn decode_records(&mut self, seq: u64, text: &str) -> Result<Vec<u8>, StoreError> {
+        let compressed = decoded(text)?;
+        let plain = match compressed.first().copied() {
+            Some(LZMA_CONTINUED | LZMA_RESTARTED) => {
+                let mut lzma = std::mem::take(&mut self.records_lzma);
+                let mut plain = Vec::new();
+                for (format, range) in lzma_packs(&compressed)? {
+                    let piece =
+                        lzma_decode(&mut lzma, &self.records.0, seq, format, &compressed[range])?;
+                    self.records.extend(&piece);
+                    plain.extend_from_slice(&piece);
+                }
+                lzma.state = None;
+                self.records_lzma = lzma;
+                return Ok(plain);
+            }
+            _ => inflate(&compressed, &self.records.0)?,
+        };
+        self.extend(&plain);
+        Ok(plain)
+    }
+
+    pub(crate) fn decode_linked(
+        &mut self,
+        seq: u64,
+        keyframe: u64,
+        compressed: &[u8],
+    ) -> Result<Vec<u8>, StoreError> {
+        let held = self.chained(keyframe);
+        if keyframe < seq && held.is_none() {
+            return Err(StoreError::Backend(format!(
+                "turn log row {seq} links to rows from {keyframe} that this read does not hold"
+            )));
+        }
+        let window = held.unwrap_or_default().to_vec();
+        match compressed.first().copied() {
+            Some(LZMA_CONTINUED | LZMA_RESTARTED) => {
+                let mut lzma = std::mem::take(&mut self.chain_lzma);
+                if keyframe == seq {
+                    lzma = Lzma::default();
+                }
+                let packs = lzma_packs(compressed)?;
+                let [(format, range)] = packs.as_slice() else {
+                    return Err(failed("decoding", "a linked row holds one compressed run"));
+                };
+                let plain =
+                    lzma_decode(&mut lzma, &window, seq, *format, &compressed[range.clone()])?;
+                self.link(keyframe, &plain);
+                lzma.state = None;
+                self.chain_lzma = lzma;
+                Ok(plain)
+            }
+            _ => {
+                let plain = inflate(compressed, &window)?;
+                self.link(keyframe, &plain);
+                Ok(plain)
+            }
+        }
     }
 
     pub(crate) fn keyframe(&self) -> Option<u64> {
@@ -91,6 +328,7 @@ impl History {
     }
 
     pub(crate) fn link(&mut self, keyframe: u64, plain: &[u8]) {
+        self.chain_lzma = Lzma::default();
         match &mut self.chain {
             Some((current, window)) if *current == keyframe => window.extend(plain),
             _ => {
@@ -247,25 +485,6 @@ impl Packer {
         })
     }
 
-    pub(crate) fn linked(
-        spare: &mut Spare,
-        dictionary: &[u8],
-        back: u64,
-    ) -> Result<Self, StoreError> {
-        let mut packer = Self::new(spare, DEFAULT_LEVEL, dictionary)?;
-        let mut rest = back;
-        loop {
-            let low =
-                u8::try_from(rest & u64::from(VARINT_MORE - 1)).expect("seven bits fit a byte");
-            rest >>= VARINT_BITS;
-            if rest == 0 {
-                packer.compressed.push(low);
-                return Ok(packer);
-            }
-            packer.compressed.push(low | VARINT_MORE);
-        }
-    }
-
     pub(crate) const fn plain(&self) -> usize {
         self.plain
     }
@@ -323,60 +542,81 @@ impl Packer {
 }
 
 pub(crate) struct Stream {
-    chunk: Vec<u8>,
-    deflate: Deflate,
+    window: Vec<u8>,
+    state: Option<LzmaState>,
+    packed: Option<LzmaState>,
 }
 
 impl Stream {
-    pub(crate) fn new(dictionary: &[u8]) -> Result<Self, StoreError> {
-        Ok(Self {
-            chunk: vec![0; WINDOW],
-            deflate: compressor(STREAM_LEVEL, dictionary)?,
-        })
+    pub(crate) fn new(history: &History) -> Self {
+        Self {
+            window: history.records.0.clone(),
+            state: history.records_lzma.state.clone(),
+            packed: None,
+        }
     }
 
     pub(crate) fn pack(&mut self, tag: char, plain: &[u8]) -> Result<String, StoreError> {
-        let deflate = &mut self.deflate;
-        let chunk = &mut self.chunk;
-        let start = deflate.total_in();
-        let mut compressed = Vec::new();
-        loop {
-            let consumed =
-                usize::try_from(deflate.total_in() - start).expect("consumed input fits in usize");
-            let before = deflate.total_out();
-            deflate
-                .deflate(&plain[consumed..], chunk, DeflateFlush::SyncFlush)
-                .map_err(|error| failed("compression", error.as_str()))?;
-            let produced = usize::try_from(deflate.total_out() - before)
-                .expect("one call produces at most its chunk");
-            compressed.extend_from_slice(&chunk[..produced]);
-            let taken =
-                usize::try_from(deflate.total_in() - start).expect("consumed input fits in usize");
-            if taken == plain.len() && produced < chunk.len() {
-                break;
-            }
-            if produced == 0 && taken == consumed {
-                return Err(failed("compression", "no progress"));
-            }
-        }
-        while !compressed.len().is_multiple_of(BASE85_GROUP) {
-            compressed.extend_from_slice(&EMPTY_STORED_BLOCK);
-        }
-        compressed.extend_from_slice(&FINAL_EMPTY_BLOCK);
-        Ok(encode(tag, &compressed))
+        assert!(self.packed.is_none(), "a stream packs one row");
+        let (compressed, state) = lzma_encode(&self.window, self.state.as_ref(), plain)?;
+        self.packed = Some(state);
+        let mut body = encode(tag, &compressed);
+        let seal = encode(SEGMENT, &LZMA_SEAL);
+        let seal = &seal[SEGMENT.len_utf8()..];
+        assert_eq!(seal.len(), SEGMENT.len_utf8() + SEAL);
+        body.push_str(seal);
+        Ok(body)
+    }
+
+    pub(crate) fn state(self) -> LzmaState {
+        self.packed.expect("a stream's state follows its row")
     }
 }
 
-pub(crate) fn extensible(body: &str) -> bool {
+pub(crate) fn link(
+    history: &History,
+    keyframe: u64,
+    back: u64,
+    plain: &[u8],
+) -> Result<(String, LzmaState), StoreError> {
+    let (window, state) = match &history.chain {
+        Some((current, window)) if *current == keyframe => {
+            (window.0.as_slice(), history.chain_lzma.state.as_ref())
+        }
+        _ => (&[][..], None),
+    };
+    let mut compressed = Vec::new();
+    let mut rest = back;
+    loop {
+        let low = u8::try_from(rest & u64::from(VARINT_MORE - 1)).expect("seven bits fit a byte");
+        rest >>= VARINT_BITS;
+        if rest == 0 {
+            compressed.push(low);
+            break;
+        }
+        compressed.push(low | VARINT_MORE);
+    }
+    let (packed, state) = lzma_encode(window, state, plain)?;
+    compressed.extend_from_slice(&packed);
+    Ok((encode(LINKED, &compressed), state))
+}
+
+#[must_use]
+pub fn extensible(body: &str) -> bool {
     if !body.starts_with(RECORDS) {
         return false;
     }
-    match body.rsplit_once(SEGMENT) {
+    let text = &body[RECORDS.len_utf8()..];
+    let lzma = decoded(text).is_ok_and(|bytes| {
+        matches!(
+            bytes.first().copied(),
+            Some(LZMA_CONTINUED | LZMA_RESTARTED)
+        ) && bytes.ends_with(&LZMA_SEAL)
+    });
+    match text.rsplit_once(SEGMENT) {
+        Some((_, last)) if lzma => last.len() == SEAL,
         Some((_, last)) => last.len() > SEAL && (last.len() - SEAL).is_multiple_of(BASE85_CHARS),
-        None => {
-            body.len() > RECORDS.len_utf8() + SEAL
-                && (body.len() - RECORDS.len_utf8() - SEAL).is_multiple_of(BASE64_CHARS)
-        }
+        None => text.len() > SEAL && (text.len() - SEAL).is_multiple_of(BASE64_CHARS),
     }
 }
 
@@ -499,7 +739,10 @@ fn binary(body: &str, whole: bool) -> Option<(&str, String)> {
     let tag = body.chars().next().filter(char::is_ascii)?;
     let (tag, text) = body.split_at(tag.len_utf8());
     if text.contains(SEGMENT) {
-        return whole.then(|| tail(text)).flatten().map(|padded| (tag, padded));
+        return whole
+            .then(|| tail(text))
+            .flatten()
+            .map(|padded| (tag, padded));
     }
     padded(text).map(|padded| (tag, padded))
 }

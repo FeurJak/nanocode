@@ -9,6 +9,10 @@ pub(crate) trait Code: Send + Sync {
         output_position: &mut usize,
         action: Action,
     ) -> Result<Status, Error>;
+
+    fn lzma_state(&self) -> Option<super::lz_encoder::LzmaState> {
+        None
+    }
 }
 
 pub(crate) type Coder = alloc::boxed::Box<dyn Code>;

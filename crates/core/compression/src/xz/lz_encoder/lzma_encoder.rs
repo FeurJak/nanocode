@@ -185,6 +185,44 @@ impl LzmaEncoder {
         Ok((encoder, settings))
     }
 
+    pub(super) fn resume(&mut self, position: u64, primed: bool, state: Option<&super::LzmaState>) {
+        assert!(
+            primed || state.is_none(),
+            "a resumed encoder sees the window its state saw"
+        );
+        if primed {
+            self.phase = Phase::Encoding;
+        }
+        self.uncompressed_size = position;
+        if let Some(state) = state {
+            assert_eq!(
+                state.position, position,
+                "a resumed encoder continues at its state"
+            );
+            self.model.probabilities = *state.probabilities;
+            self.state = state.state;
+            self.reps = state.reps;
+            if let Parser::Normal(normal) = &mut self.parser {
+                normal.reset(&self.model.probabilities, 1 << self.options.pb);
+            }
+        }
+    }
+
+    pub(super) fn snapshot(&self, reset: bool, properties: bool) -> super::LzmaState {
+        assert!(
+            self.phase != Phase::Flushed,
+            "a snapshot is taken between chunks"
+        );
+        super::LzmaState {
+            probabilities: Box::new(self.model.probabilities),
+            state: self.state,
+            reps: self.reps,
+            position: self.uncompressed_size,
+            reset,
+            properties,
+        }
+    }
+
     pub(super) fn reset(&mut self) {
         let options = self.options;
         self.model.pos_mask = (1 << options.pb) - 1;

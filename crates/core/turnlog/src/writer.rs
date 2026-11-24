@@ -196,10 +196,10 @@ struct Placing {
     plain: Vec<u8>,
     rows: Vec<(u64, String)>,
     section: Section,
+    state: nanocode_compression::xz::LzmaState,
 }
 
 fn placing(
-    spare: &mut codec::Spare,
     fold: &Fold,
     history: &History,
     buffer: &[Record],
@@ -218,8 +218,6 @@ fn placing(
         return Ok(None);
     }
     let keyframe = history.keyframe().unwrap_or(seq);
-    let dictionary = history.chained(keyframe).unwrap_or_default();
-    let mut packer = codec::Packer::linked(spare, dictionary, seq - keyframe)?;
     let mut plain = Vec::new();
     let mut lines = Vec::new();
     let mut owners = Vec::with_capacity(values.len());
@@ -232,15 +230,14 @@ fn placing(
                 value: value.to_owned(),
             },
         )?;
-        if packer.plain() > 0 {
-            packer.write(b"\n")?;
+        if !plain.is_empty() {
             plain.push(b'\n');
         }
-        packer.write(&lines)?;
         plain.extend_from_slice(&lines);
         owners.push((key.to_owned(), lines.len() as u64));
     }
-    let rows = stored(seq, packer.finish(LINKED, spare)?.packed, limit)?;
+    let (body, state) = codec::link(history, keyframe, seq - keyframe, &plain)?;
+    let rows = stored(seq, body, limit)?;
     let section = Section {
         row: seq,
         rows: rows.len() as u64,
@@ -252,6 +249,7 @@ fn placing(
         plain,
         rows,
         section,
+        state,
     }))
 }
 
@@ -789,26 +787,13 @@ fn decode_row(logical: Logical, history: &mut History) -> Result<Row, StoreError
                 "turn log row {seq} links back past the log's start"
             ))
         })?;
-        let dictionary = if back == 0 {
-            &[][..]
-        } else {
-            history.chained(keyframe).ok_or_else(|| {
-                StoreError::Backend(format!(
-                    "turn log row {seq} links to rows from {keyframe} that this read does not hold"
-                ))
-            })?
-        };
-        let plain = codec::inflate(&compressed, dictionary)?;
-        history.link(keyframe, &plain);
-        plain
+        history.decode_linked(seq, keyframe, &compressed)?
+    } else if section {
+        codec::unpack(&text[tag.len_utf8()..], &[])?
     } else {
-        let dictionary: &[u8] = if section { &[] } else { history.bytes() };
-        codec::unpack(&text[tag.len_utf8()..], dictionary)?
+        history.decode_records(seq, &text[tag.len_utf8()..])?
     };
     drop(text);
-    if !section {
-        history.extend(&plain);
-    }
     let plain = String::from_utf8(plain).map_err(|error| {
         StoreError::Backend(format!("turn log row {seq} is not UTF-8: {error}"))
     })?;
@@ -1775,7 +1760,6 @@ impl Lease<'_> {
         }
         let mut spare = codec::Spare::default();
         let mut placing = placing(
-            &mut spare,
             &writer.fold,
             &writer.history,
             &writer.buffer,
@@ -1828,7 +1812,7 @@ impl Lease<'_> {
                     .chain(written.iter().map(|record| &**record)),
             )?
         };
-        let mut stream = Stream::new(writer.history.bytes())?;
+        let mut stream = Stream::new(&writer.history);
         let framed = if self.rows.is_some() && recovered.is_empty() && writer.tail_row.is_some() {
             let mut framed = Vec::with_capacity(plain.len() + 1);
             framed.push(b'\n');
@@ -2012,6 +1996,7 @@ impl Lease<'_> {
                     && placing.is_none()
                     && recovered.is_empty()
                     && stored.len() == 1
+                    && codec::extensible(&stored[0].1)
                     && self
                         .limit
                         .is_none_or(|limit| tail.bytes - SEAL + body_len - 1 <= limit) =>
@@ -2160,7 +2145,9 @@ impl Lease<'_> {
         let writer = &mut *self.writer;
         writer.tail_row = match (extended, &snapshot, &boundary) {
             (Some(merged), _, _) => Some(TailRow { bytes: merged, seq }),
-            (None, None, None) if recovered.is_empty() && stored.len() == 1 => {
+            (None, None, None)
+                if recovered.is_empty() && stored.len() == 1 && codec::extensible(&stored[0].1) =>
+            {
                 Some(TailRow { bytes, seq })
             }
             _ => None,
@@ -2172,6 +2159,9 @@ impl Lease<'_> {
                 .fold
                 .place(placing.section, &placing.owners, placing.keyframe);
             writer.history.link(placing.keyframe, &placing.plain);
+            writer
+                .history
+                .resume_chain(placing.keyframe, placing.state.clone());
             writer.tail_rows += sectioned_rows as usize;
             writer.stats.sections += sectioned_rows;
             writer.stats.placed_bytes += sectioned_bytes;
@@ -2240,6 +2230,9 @@ impl Lease<'_> {
                 writer
                     .history
                     .extend(if boundary.is_some() { &plain } else { &framed });
+                if boundary.is_none() {
+                    writer.history.resume_records(stream.state());
+                }
                 writer.tail += added;
                 writer.tail_plain += plain.len();
                 writer.tail_rows += stored.len();

@@ -9,6 +9,7 @@ mod range_encoder;
 use alloc::boxed::Box;
 
 use super::coder::{Code, Coder};
+use super::lzma_common::{REPS, State};
 use super::options::LzmaOptions;
 use super::stream::{Action, Error, Status};
 use lzma_encoder::LzmaEncoder;
@@ -18,6 +19,23 @@ use match_finder::MatchFinder;
 enum Payload {
     Lzma1(Box<LzmaEncoder>),
     Lzma2(Box<Lzma2Encoder>),
+}
+
+#[derive(Clone)]
+pub struct LzmaState {
+    probabilities: Box<[u16; lzma_encoder::PROBABILITIES]>,
+    state: State,
+    reps: [u32; REPS],
+    position: u64,
+    reset: bool,
+    properties: bool,
+}
+
+impl LzmaState {
+    #[must_use]
+    pub const fn position(&self) -> u64 {
+        self.position
+    }
 }
 
 struct LzEncoder {
@@ -46,7 +64,31 @@ pub(crate) fn lzma2_encoder(options: &LzmaOptions, next: Option<Coder>) -> Resul
     }))
 }
 
+pub(crate) fn lzma2_resumed(
+    options: &LzmaOptions,
+    window: &[u8],
+    position: u64,
+    state: Option<&LzmaState>,
+) -> Result<Coder, Error> {
+    let (mut encoder, settings) = Lzma2Encoder::new(options)?;
+    let mut mf = MatchFinder::new(&settings)?;
+    mf.prime(window);
+    encoder.resume(position, mf.read_pos > 0, state);
+    Ok(Box::new(LzEncoder {
+        mf,
+        payload: Payload::Lzma2(encoder),
+        next: None,
+    }))
+}
+
 impl Code for LzEncoder {
+    fn lzma_state(&self) -> Option<LzmaState> {
+        match &self.payload {
+            Payload::Lzma2(encoder) if self.next.is_none() => encoder.snapshot(&self.mf),
+            Payload::Lzma1(_) | Payload::Lzma2(_) => None,
+        }
+    }
+
     fn code(
         &mut self,
         input: &[u8],

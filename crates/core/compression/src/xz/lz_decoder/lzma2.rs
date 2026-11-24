@@ -99,6 +99,12 @@ impl Lzma2Decoder {
         }
     }
 
+    pub(super) fn primed() -> Self {
+        let mut decoder = Self::new();
+        decoder.need_dictionary_reset = false;
+        decoder
+    }
+
     fn control(
         &mut self,
         dictionary: &mut Dictionary,

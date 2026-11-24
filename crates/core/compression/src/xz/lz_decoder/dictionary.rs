@@ -44,6 +44,15 @@ impl Dictionary {
         Ok(dictionary)
     }
 
+    pub(super) fn prime(&mut self, window: &[u8]) {
+        assert!(self.position == INITIAL_POSITION && self.full == 0);
+        let kept = &window[window.len().saturating_sub(self.size - REPEAT_AREA_BYTES)..];
+        self.buffer.extend_from_slice(kept);
+        self.position += kept.len();
+        self.limit = self.position;
+        self.full = kept.len();
+    }
+
     pub(super) fn reset(&mut self) {
         self.position = INITIAL_POSITION;
         self.full = 0;

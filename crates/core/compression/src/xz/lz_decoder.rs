@@ -116,6 +116,15 @@ pub(crate) fn lzma2_decoder(options: &LzmaOptions) -> Result<Coder, Error> {
     }))
 }
 
+pub(crate) fn lzma2_decoder_primed(options: &LzmaOptions, window: &[u8]) -> Result<Coder, Error> {
+    let mut dictionary = Dictionary::new(options.dict_size)?;
+    dictionary.prime(window);
+    Ok(alloc::boxed::Box::new(LzDecoder {
+        dictionary,
+        decoder: Lzma2Decoder::primed(),
+    }))
+}
+
 pub(crate) fn lzma1_decoder_memusage(options: &LzmaOptions) -> Option<u64> {
     if !is_lclppb_valid(options.lc, options.lp, options.pb) {
         return None;

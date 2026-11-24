@@ -23,6 +23,7 @@ pub use fold::{
     Turn, tag,
 };
 pub use hold::{Answer, Answered, HeldCall, Hold, HoldError, Resumption};
+pub use codec::extensible;
 pub use host::{
     CHECKPOINT_PART_BYTES, Compaction, Extension, LogHost, MemoryLog, MemoryWrites, Rider,
     SCAN_END, ScopeRows, SqlLog, StoredCheckpoint, Write, host_id,

@@ -6,6 +6,8 @@ use super::alone::{AloneDecoder, AloneEncoder};
 use super::auto_decoder::AutoDecoder;
 use super::coder::Coder;
 use super::filter_chain;
+use super::lz_decoder;
+use super::lz_encoder::{self, LzmaState};
 use super::options::{Check, Filter, LzmaOptions};
 use super::stream_decoder::StreamDecoder;
 use super::stream_encoder::StreamEncoder;
@@ -16,6 +18,7 @@ const CHECK_ID_MAX: u32 = 15;
 pub enum Action {
     Run,
     Finish,
+    SyncFlush,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,12 +65,14 @@ pub const fn check_is_supported(check_id: u32) -> bool {
 enum Sequence {
     Run,
     Finish { input_remaining: usize },
+    Flush { input_remaining: usize },
     End,
     Failed,
 }
 
 pub struct Stream {
     coder: Coder,
+    flushable: bool,
     sequence: Sequence,
     total_in: u64,
     total_out: u64,
@@ -77,6 +82,7 @@ impl Stream {
     pub(crate) fn new(coder: Coder) -> Self {
         Self {
             coder,
+            flushable: false,
             sequence: Sequence::Run,
             total_in: 0,
             total_out: 0,
@@ -114,7 +120,34 @@ impl Stream {
     }
 
     pub fn raw_encoder(filters: &[Filter]) -> Result<Self, Error> {
-        filter_chain::raw_encoder(filters).map(Self::new)
+        let mut stream = filter_chain::raw_encoder(filters).map(Self::new)?;
+        stream.flushable = matches!(filters, [Filter::Lzma2(_)]);
+        Ok(stream)
+    }
+
+    pub fn lzma2_resumed(
+        options: &LzmaOptions,
+        window: &[u8],
+        position: u64,
+        state: Option<&LzmaState>,
+    ) -> Result<Self, Error> {
+        let mut stream = Self::new(lz_encoder::lzma2_resumed(options, window, position, state)?);
+        stream.flushable = true;
+        Ok(stream)
+    }
+
+    pub fn lzma2_primed_decoder(options: &LzmaOptions, window: &[u8]) -> Result<Self, Error> {
+        lz_decoder::lzma2_decoder_primed(options, window).map(Self::new)
+    }
+
+    #[must_use]
+    pub fn lzma_state(&self) -> Option<LzmaState> {
+        match self.sequence {
+            Sequence::Run => self.coder.lzma_state(),
+            Sequence::Finish { .. } | Sequence::Flush { .. } | Sequence::End | Sequence::Failed => {
+                None
+            }
+        }
     }
 
     pub fn raw_decoder(filters: &[Filter]) -> Result<Self, Error> {
@@ -127,11 +160,17 @@ impl Stream {
         output: &mut [u8],
         action: Action,
     ) -> Result<Status, Error> {
+        if action == Action::SyncFlush && !self.flushable {
+            return Err(Error::Program);
+        }
         match (self.sequence, action) {
             (Sequence::Run, _) => {}
             (Sequence::Finish { input_remaining }, Action::Finish)
+            | (Sequence::Flush { input_remaining }, Action::SyncFlush)
                 if input_remaining == input.len() => {}
-            (Sequence::Finish { .. }, _) | (Sequence::Failed, _) => return Err(Error::Program),
+            (Sequence::Finish { .. } | Sequence::Flush { .. }, _) | (Sequence::Failed, _) => {
+                return Err(Error::Program);
+            }
             (Sequence::End, _) => return Ok(Status::StreamEnd),
         }
         let mut input_position = 0;
@@ -148,9 +187,13 @@ impl Stream {
         self.total_in += u64::try_from(input_position).expect("a slice length fits in 64 bits");
         self.total_out += u64::try_from(output_position).expect("a slice length fits in 64 bits");
         self.sequence = match (&result, action) {
+            (Ok(Status::StreamEnd), Action::SyncFlush) => Sequence::Run,
             (Ok(Status::StreamEnd), _) => Sequence::End,
             (Ok(_) | Err(Error::MemoryLimit), Action::Run) => Sequence::Run,
             (Ok(_) | Err(Error::MemoryLimit), Action::Finish) => Sequence::Finish {
+                input_remaining: input.len() - input_position,
+            },
+            (Ok(_) | Err(Error::MemoryLimit), Action::SyncFlush) => Sequence::Flush {
                 input_remaining: input.len() - input_position,
             },
             (Err(_), _) => Sequence::Failed,

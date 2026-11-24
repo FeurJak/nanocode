@@ -1185,8 +1185,7 @@ impl TurnDurability for TurnLogPolicy {
                 (viewed.as_slice(), stored.as_slice())
                 && stored.len() == viewed.len() + 1
                 && written.starts_with('r')
-                && previous.starts_with('r')
-                && (previous.len() - 1 - SEAL).is_multiple_of(4)
+                && nanocode_turnlog::extensible(previous)
                 && self
                     .limit
                     .is_none_or(|limit| previous.len() - SEAL + written.len() - 1 <= limit)

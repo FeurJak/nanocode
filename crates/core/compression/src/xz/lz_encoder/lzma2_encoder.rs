@@ -66,6 +66,25 @@ impl Lzma2Encoder {
         Ok((encoder, settings))
     }
 
+    pub(super) fn resume(&mut self, position: u64, primed: bool, state: Option<&super::LzmaState>) {
+        self.need_dictionary_reset = false;
+        match state {
+            Some(state) => {
+                self.need_properties = state.properties;
+                self.need_state_reset = state.reset;
+            }
+            None => self.need_properties = true,
+        }
+        self.lzma.resume(position, primed, state);
+    }
+
+    pub(super) fn snapshot(&self, mf: &MatchFinder) -> Option<super::LzmaState> {
+        (self.sequence == Sequence::Init && mf.unencoded() == 0).then(|| {
+            self.lzma
+                .snapshot(self.need_state_reset, self.need_properties)
+        })
+    }
+
     fn header_lzma(&mut self) {
         let mut position;
         if self.need_properties {

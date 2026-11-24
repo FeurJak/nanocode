@@ -25,6 +25,7 @@ mod stream_encoder;
 mod stream_flags;
 mod vli;
 
+pub use lz_encoder::LzmaState;
 pub use options::{
     BcjArchitecture, Check, FILTER_ID_ARM, FILTER_ID_ARM64, FILTER_ID_ARMTHUMB, FILTER_ID_DELTA,
     FILTER_ID_IA64, FILTER_ID_LZMA1, FILTER_ID_LZMA2, FILTER_ID_POWERPC, FILTER_ID_RISCV,
