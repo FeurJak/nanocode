@@ -1,6 +1,7 @@
 mod agents;
 #[cfg(unix)]
 mod alloc;
+mod backendfacts;
 mod board;
 mod board_brief;
 mod board_shards;
@@ -83,6 +84,7 @@ use std::{collections::BTreeMap, ops::Range, process::ExitCode};
 
 use crate::{
     agents::{AgentStats, AgentsMutation},
+    backendfacts::BackendFactsMutation,
     board::{BoardMutation, BoardStats},
     board_brief::{BriefMutation as BoardBriefMutation, BriefStats as BoardBriefStats},
     board_shards::{ShardsMutation, ShardsStats},
@@ -169,6 +171,7 @@ enum Scenario {
     Wakes,
     Imports,
     Facts,
+    BackendFacts,
     BoardShards,
     HandRouter,
     WorkspaceHost,
@@ -226,6 +229,7 @@ struct Args {
     wakes: WakesMutation,
     imports: ImportsMutation,
     facts: FactsMutation,
+    backend_facts: BackendFactsMutation,
     board_shards: ShardsMutation,
     hand_router: HandRouterMutation,
     workspace_host: WorkspaceHostMutation,
@@ -262,7 +266,7 @@ type Caught = BTreeMap<Invariant, (u64, u64, (u64, u64))>;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|steer_carry|inbox_stress|capture|executor|dns|board|board_shards|controlplane|cost|plog|secrets|wakes|imports|facts|hand_router|workspace_host|board_sync|dispatcher|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|workspace_crash|live|partitions|scale|gc_unwind|interp_drop|holds|one_log_facts] [--ops N] [--twice] [--seed-lines] [--jobs N] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
+        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|steer_carry|inbox_stress|capture|executor|dns|board|board_shards|controlplane|cost|plog|secrets|wakes|imports|facts|backend_facts|hand_router|workspace_host|board_sync|dispatcher|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|workspace_crash|live|partitions|scale|gc_unwind|interp_drop|holds|one_log_facts] [--ops N] [--twice] [--seed-lines] [--jobs N] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
        websocket: [--mutation {}]
        http_server: [--mutation {}]
        alloc: [--mutation overstate_size|forget_free|scribble]
@@ -284,6 +288,7 @@ fn usage() -> ExitCode {
        wakes: [--mutation {}]
        imports: [--mutation {}]
        facts: [--mutation {}]
+       backend_facts: [--mutation {}]
        board_shards: [--mutation {}] | --board-shards-bench [RTT_US [ROW_US [BATCH [PARTITIONS [WRITERS]]]]]
        hand_router: [--mutation {}]
        board_sync: [--mutation {}]
@@ -325,6 +330,7 @@ fn usage() -> ExitCode {
         wakes::names(),
         imports::names(),
         facts::names(),
+        backendfacts::names(),
         ShardsMutation::names(),
         HandRouterMutation::names(),
         BoardSyncMutation::names(),
@@ -408,6 +414,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
     let mut wakes = WakesMutation::None;
     let mut imports = ImportsMutation::None;
     let mut facts = FactsMutation::None;
+    let mut backend_facts = BackendFactsMutation::None;
     let mut board_shards = ShardsMutation::None;
     let mut hand_router = HandRouterMutation::None;
     let mut workspace_host = WorkspaceHostMutation::None;
@@ -512,6 +519,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
                     "wakes" => Scenario::Wakes,
                     "imports" => Scenario::Imports,
                     "facts" => Scenario::Facts,
+                    "backend_facts" => Scenario::BackendFacts,
                     "board_shards" => Scenario::BoardShards,
                     "hand_router" => Scenario::HandRouter,
                     "workspace_host" => Scenario::WorkspaceHost,
@@ -589,6 +597,9 @@ fn parse_args(args: &[String]) -> Option<Args> {
         (Scenario::Wakes, Some(name)) => wakes = WakesMutation::parse(name)?,
         (Scenario::Imports, Some(name)) => imports = ImportsMutation::parse(name)?,
         (Scenario::Facts, Some(name)) => facts = FactsMutation::parse(name)?,
+        (Scenario::BackendFacts, Some(name)) => {
+            backend_facts = BackendFactsMutation::parse(name)?;
+        }
         (Scenario::BoardShards, Some(name)) => board_shards = ShardsMutation::parse(name)?,
         (Scenario::HandRouter, Some(name)) => hand_router = HandRouterMutation::parse(name)?,
         (Scenario::Partitions, Some(name)) => partitions = PartitionsMutation::parse(name)?,
@@ -676,6 +687,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         wakes,
         imports,
         facts,
+        backend_facts,
         board_shards,
         hand_router,
         workspace_host,
@@ -802,6 +814,9 @@ fn scenario_replay(seed: u64, args: &Args) -> String {
     }
     if args.scenario == Scenario::Facts {
         return facts::replay(seed, args.facts);
+    }
+    if args.scenario == Scenario::BackendFacts {
+        return backendfacts::replay(seed, args.backend_facts);
     }
     if args.scenario == Scenario::HandRouter {
         return handrouter::replay(seed, args.hand_router);
@@ -1205,6 +1220,7 @@ fn mutations() -> ExitCode {
     add("wakes", wakes::names());
     add("imports", imports::names());
     add("facts", facts::names());
+    add("backend_facts", backendfacts::names());
     add("board_shards", ShardsMutation::names());
     add("hand_router", HandRouterMutation::names());
     add("workspace_host", WorkspaceHostMutation::names());
@@ -1532,6 +1548,7 @@ fn judge_one(seed: u64, args: &Args, totals: &mut Totals, caught: &mut Caught) -
             &mut totals.wakes_totals,
         ),
         Scenario::Facts => facts::judge(seed, args.facts, args.twice, args.options.verbose),
+        Scenario::BackendFacts => backendfacts::judge(seed, args.backend_facts, args.twice),
         Scenario::Imports => imports::judge(
             seed,
             args.imports,
@@ -1867,6 +1884,8 @@ fn main() -> ExitCode {
         || (args.scenario == Scenario::Wakes && args.wakes != WakesMutation::None)
         || (args.scenario == Scenario::Imports && args.imports != ImportsMutation::None)
         || (args.scenario == Scenario::Facts && args.facts != FactsMutation::None)
+        || (args.scenario == Scenario::BackendFacts
+            && args.backend_facts != BackendFactsMutation::None)
         || (args.scenario == Scenario::BoardShards && args.board_shards != ShardsMutation::None)
         || (args.scenario == Scenario::HandRouter && args.hand_router != HandRouterMutation::None)
         || (args.scenario == Scenario::Partitions && args.partitions != PartitionsMutation::None)
@@ -2133,6 +2152,9 @@ fn main() -> ExitCode {
     }
     if args.scenario == Scenario::Facts {
         return facts::report(&args.seeds, passed, failed, args.twice, args.facts);
+    }
+    if args.scenario == Scenario::BackendFacts {
+        return backendfacts::report(&args.seeds, passed, failed, args.twice, args.backend_facts);
     }
     if args.scenario == Scenario::Imports {
         return imports::report(

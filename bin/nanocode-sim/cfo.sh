@@ -398,6 +398,11 @@ default_table='
 1 canary_facts_replays_intent canary:20 --scenario facts --mutation replays_intent
 1 canary_facts_stale_snapshot_trusted canary:20 --scenario facts --mutation stale_snapshot_trusted
 1 canary_facts_base_ignored canary:20 --scenario facts --mutation base_ignored
+8 backend_facts pass --scenario backend_facts
+2 backend_facts_twice pass --scenario backend_facts --twice
+1 canary_backend_facts_result_without_intent canary:20 --scenario backend_facts --mutation result_without_intent
+1 canary_backend_facts_media_unrendered canary:20 --scenario backend_facts --mutation media_unrendered
+1 canary_backend_facts_undecided_notice canary:20 --scenario backend_facts --mutation undecided_notice
 8 secrets pass --scenario secrets
 2 secrets_twice pass --scenario secrets --twice
 1 canary_secrets_paths_ignored canary:20 --scenario secrets --mutation paths_ignored

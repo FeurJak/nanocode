@@ -1174,6 +1174,7 @@ dependencies = [
  "graviola",
  "nanocode",
  "nanocode-agent-core",
+ "nanocode-backend-codex",
  "nanocode-board",
  "nanocode-board-sync",
  "nanocode-bytes",

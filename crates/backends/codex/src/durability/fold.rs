@@ -145,11 +145,10 @@ impl DurableFold for CodexFold {
     }
 
     fn request(&self) -> Result<Vec<u8>, FoldError> {
-        let template = self
+        let mut request = self
             .template
             .as_ref()
-            .ok_or_else(|| FoldError::Encode("the Codex fold has no request template".into()))?;
-        let mut request = template.request.clone();
+            .map_or_else(Map::new, |template| template.request.clone());
         let input = self.prefix.iter().chain(&self.history).collect::<Vec<_>>();
         let input =
             serde_json::to_value(input).map_err(|error| FoldError::Encode(error.to_string()))?;

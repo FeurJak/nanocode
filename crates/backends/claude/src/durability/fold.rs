@@ -67,6 +67,11 @@ struct Call {
     result: Option<ContentBlock>,
 }
 
+#[derive(Serialize)]
+struct Undecided {
+    messages: Vec<Message>,
+}
+
 #[derive(Deserialize)]
 struct Legacy {
     #[serde(default)]
@@ -132,14 +137,18 @@ impl DurableFold for ClaudeFold {
     }
 
     fn request(&self) -> Result<Vec<u8>, FoldError> {
-        let template = self
-            .template
-            .as_ref()
-            .ok_or_else(|| FoldError::Encode("the Claude fold has no request template".into()))?;
-        let mut request = template.request.clone();
-        request.messages = self.packed();
-        request.container.clone_from(&self.container);
-        serde_json::to_vec(&request).map_err(|error| FoldError::Encode(error.to_string()))
+        let encoded = match &self.template {
+            Some(template) => {
+                let mut request = template.request.clone();
+                request.messages = self.packed();
+                request.container.clone_from(&self.container);
+                serde_json::to_vec(&request)
+            }
+            None => serde_json::to_vec(&Undecided {
+                messages: self.packed(),
+            }),
+        };
+        encoded.map_err(|error| FoldError::Encode(error.to_string()))
     }
 }
 
