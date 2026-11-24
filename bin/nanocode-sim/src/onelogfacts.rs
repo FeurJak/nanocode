@@ -1,6 +1,10 @@
 use std::{collections::BTreeMap, ops::Range, process::ExitCode, sync::Arc};
 
-use nanocode::turnlog::{EffectCall, LogHost, OneLog, Policy, facts_sim};
+use nanocode::{
+    backend::Prompt,
+    session_host::{Submission, Submitted, TurnState},
+    turnlog::{EffectCall, LogHost, OneLog, Policy, facts_sim},
+};
 use nanocode_durability_core::{
     BlockRef, Decision, DurableFold, EffectResult, Fact, FactLog, FoldError, Folded, Input,
     InputKind, Intent, IntentTarget, Marker, ModelOut, Outcome as Finished, OwnedFact, Seen,
@@ -23,6 +27,8 @@ const SCOPE: &str = "one_log_facts";
 const TOOL: &str = "charge";
 const CHILD: &str = "one_log_facts:child";
 const CHILD_PPM: u64 = 150_000;
+const SUBMIT_PPM: u64 = 100_000;
+const FINISH_PPM: u64 = 500_000;
 const STEPS: Range<u64> = 40..240;
 const TURNS: u64 = 6;
 const BLOCKS: u64 = 4;
@@ -42,10 +48,11 @@ pub enum OneLogFactsMutation {
     IntentReplayed,
     IntentCopied,
     ScopeLeaks,
+    AdmissionCopied,
 }
 
 impl OneLogFactsMutation {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::None,
         Self::FoldReadsUnlogged,
         Self::CommitBuffered,
@@ -53,6 +60,7 @@ impl OneLogFactsMutation {
         Self::IntentReplayed,
         Self::IntentCopied,
         Self::ScopeLeaks,
+        Self::AdmissionCopied,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -70,6 +78,7 @@ impl OneLogFactsMutation {
             Self::IntentReplayed => "intent_replayed",
             Self::IntentCopied => "intent_copied",
             Self::ScopeLeaks => "scope_leaks",
+            Self::AdmissionCopied => "admission_copied",
         }
     }
 
@@ -88,6 +97,7 @@ impl OneLogFactsMutation {
             Self::IntentReplayed => facts_sim::Mutation::IntentReplayed,
             Self::IntentCopied => facts_sim::Mutation::IntentCopied,
             Self::ScopeLeaks => facts_sim::Mutation::ScopeLeaks,
+            Self::AdmissionCopied => facts_sim::Mutation::AdmissionCopied,
             Self::None | Self::FoldReadsUnlogged => facts_sim::Mutation::None,
         }
     }
@@ -104,6 +114,8 @@ pub struct OneLogFactsStats {
     pub unknown: u64,
     pub gated: u64,
     pub children: u64,
+    pub submitted: u64,
+    pub crashes: u64,
 }
 
 impl OneLogFactsStats {
@@ -117,6 +129,8 @@ impl OneLogFactsStats {
         self.unknown += other.unknown;
         self.gated += other.gated;
         self.children += other.children;
+        self.submitted += other.submitted;
+        self.crashes += other.crashes;
     }
 }
 
@@ -217,6 +231,8 @@ struct World {
     child_live: Option<Folded<Ledger>>,
     expected: u64,
     child_expected: u64,
+    submitted: Vec<(String, TurnState)>,
+    durable: u64,
     live: Option<Folded<Ledger>>,
     stale: Option<Folded<Ledger>>,
     policy: Policy,
@@ -289,6 +305,7 @@ impl World {
                     value: value(rng),
                     metadata: to_raw_value(&()).expect("null encodes"),
                     hand: None,
+                    first: None,
                 })
             }
             15..40 => Fact::ModelOut(ModelOut {
@@ -368,6 +385,7 @@ impl World {
         let before = live.values().len();
         let (live, seq) = block_on(commit_fact(self.facts(), live, fact))
             .map_err(|error| format!("commit a fact: {error}"))?;
+        self.durable = self.expected;
         self.stats.facts += 1;
         self.stats.blobs += live.values().len().saturating_sub(before) as u64;
         if model_out {
@@ -420,10 +438,56 @@ impl World {
         Ok(())
     }
 
+    fn crash(&mut self) -> Result<(), String> {
+        self.stats.crashes += 1;
+        self.shape.push('x');
+        self.live = None;
+        self.stale = None;
+        self.facts = None;
+        self.child = None;
+        self.child_live = None;
+        self.log = None;
+        self.open()?;
+        let applied = self
+            .live
+            .as_ref()
+            .expect("the facts fold is live")
+            .state()
+            .applied;
+        if applied < self.durable || applied > self.expected {
+            return Err(format!(
+                "after a crash the session's facts fold {applied} facts, outside the {} committed durably and the {} written",
+                self.durable, self.expected
+            ));
+        }
+        self.expected = applied;
+        let log = Arc::clone(self.log.as_ref().expect("the facts log is open"));
+        for (id, state) in &mut self.submitted {
+            let record = block_on(log.turn(id))
+                .map_err(|error| format!("read turn {id}: {error}"))?
+                .ok_or_else(|| format!("submitted turn {id} is missing after a crash"))?;
+            match (*state, record.state) {
+                (TurnState::Running, TurnState::Queued) => *state = TurnState::Queued,
+                (held, read) if held == read => {}
+                (held, read) => {
+                    return Err(format!(
+                        "after a crash submitted turn {id} reads {read:?}, not {held:?}"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn restart(&mut self) -> Result<(), String> {
         self.stats.restarts += 1;
         self.shape.push('!');
-        let before = self.live.take().expect("the facts fold is live");
+        let mut store = self.log.as_ref().expect("the facts log is open").store();
+        block_on(StateStore::flush(&mut store))
+            .map_err(|error| format!("flush before a restart: {error}"))?;
+        let before = block_on(fold_facts::<Ledger>(self.facts()))
+            .map_err(|error| format!("refold before a restart: {error}"))?;
+        self.live = None;
         self.facts = None;
         self.child = None;
         self.child_live = None;
@@ -433,11 +497,12 @@ impl World {
         let encode = |state: &Ledger| serde_json::to_string(state).expect("a ledger encodes");
         if after.seq() != before.seq() || encode(after.state()) != encode(before.state()) {
             return Err(format!(
-                "after a restart the log folds to fact {}, not the fact {} the live fold had",
+                "after a restart the log folds to fact {}, not the fact {} it folded to before",
                 after.seq(),
                 before.seq()
             ));
         }
+        self.durable = self.expected;
         Ok(())
     }
 
@@ -467,6 +532,7 @@ impl World {
     }
 
     fn recover(&mut self) -> Result<(), String> {
+        self.turns_hold()?;
         let log = Arc::clone(self.log.as_ref().expect("the facts log is open"));
         let mut settled = Vec::new();
         for turn in 0..TURNS {
@@ -498,9 +564,72 @@ impl World {
         self.check()
     }
 
+    fn submit(&mut self, rng: &mut Rng) -> Result<(), String> {
+        let log = Arc::clone(self.log.as_ref().expect("the facts log is open"));
+        let id = format!("submitted-{}", self.submitted.len());
+        let submission = Submission {
+            request_id: id.clone(),
+            prompt: Prompt::new(format!("prompt {}", rng.below(DECISIONS))),
+            hand: None,
+            metadata: to_raw_value(&()).expect("null encodes"),
+        };
+        match block_on(log.submit(&submission)) {
+            Ok(Submitted::Accepted { .. }) => {}
+            other => return Err(format!("submit {id}: {other:?}")),
+        }
+        self.expected += 1;
+        self.durable = self.expected;
+        match block_on(log.submit(&submission)) {
+            Ok(Submitted::Existing(_)) => {}
+            other => return Err(format!("resubmit {id}: {other:?}")),
+        }
+        if block_on(log.start(&id))
+            .map_err(|error| format!("start {id}: {error}"))?
+            .is_none()
+        {
+            return Err(format!("submitted turn {id} did not start"));
+        }
+        self.expected += 1;
+        let mut state = TurnState::Running;
+        if rng.chance(FINISH_PPM) {
+            block_on(log.finish(&id, TurnState::Completed, &serde_json::Map::new()))
+                .map_err(|error| format!("finish {id}: {error}"))?
+                .ok_or_else(|| format!("submitted turn {id} did not finish"))?;
+            self.expected += 1;
+            self.durable = self.expected;
+            state = TurnState::Completed;
+        }
+        self.submitted.push((id, state));
+        self.stats.submitted += 1;
+        self.turns_hold()
+    }
+
+    fn turns_hold(&self) -> Result<(), String> {
+        let log = self.log.as_ref().expect("the facts log is open");
+        for (id, state) in &self.submitted {
+            let record = block_on(log.turn(id))
+                .map_err(|error| format!("read turn {id}: {error}"))?
+                .ok_or_else(|| format!("submitted turn {id} is missing"))?;
+            if record.state != *state {
+                return Err(format!(
+                    "submitted turn {id} reads back {:?}, not {state:?}",
+                    record.state
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn step(&mut self, rng: &mut Rng) -> Result<(), String> {
+        if rng.chance(SUBMIT_PPM) {
+            self.submit(rng)?;
+        }
         match rng.below(100) {
-            0..90 => self.commit(rng),
+            0..88 => self.commit(rng),
+            88..94 => {
+                self.crash()?;
+                self.recover()
+            }
             _ => {
                 self.restart()?;
                 self.recover()
@@ -524,6 +653,8 @@ fn run_seed(seed: u64, mutation: OneLogFactsMutation) -> Outcome {
         child_live: None,
         expected: 0,
         child_expected: 0,
+        submitted: Vec::new(),
+        durable: 0,
         live: None,
         stale: None,
         policy: Policy {

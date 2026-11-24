@@ -545,6 +545,7 @@ impl World {
             value,
             metadata: raw("{}".to_owned()),
             hand: None,
+            first: None,
         });
         if self.commit(fact, Point::Admission)?.is_none() {
             return Ok(());

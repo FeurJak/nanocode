@@ -7,8 +7,8 @@ use std::{
 };
 
 use nanocode_durability_core::{
-    Digest, Fact, FactSink, FoldError, Marker, OwnedFact, Snapshot as FoldSnapshot, SqlStatement,
-    StoreError, StoredFact, VALUE_INLINE_BYTES, Value,
+    Digest, Fact, FactSink, FoldError, InputKind, Marker, OwnedFact, Snapshot as FoldSnapshot,
+    SqlStatement, StoreError, StoredFact, VALUE_INLINE_BYTES, Value,
 };
 use nanocode_sync::{Held, Owned, mpsc, oneshot};
 use serde_json::value::RawValue;
@@ -1786,6 +1786,20 @@ impl Lease<'_> {
 
     pub fn unadmit(&mut self, turn: &str, seq: u64) {
         let writer = &mut *self.writer;
+        let withdrawn = writer.buffer.iter().find_map(|record| match record {
+            Record::Fact {
+                fact: Fact::Input(input),
+                seq,
+                ..
+            } if input.turn == turn && matches!(input.kind, InputKind::Prompt) => Some(*seq),
+            _ => None,
+        });
+        if let Some(from) = withdrawn {
+            writer.buffer.retain(
+                |record| !matches!(record, Record::Fact { seq: fact, .. } if *fact >= from),
+            );
+            writer.fold.withdraw_facts(from);
+        }
         writer.buffer.retain(|record| match record {
             Record::Admitted { turn: admitted, .. } => admitted != turn,
             Record::Event { seq: event, .. } => *event != seq,

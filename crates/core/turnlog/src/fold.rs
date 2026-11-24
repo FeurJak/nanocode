@@ -1933,6 +1933,7 @@ impl Fold {
 
     pub(crate) fn unadmit(&mut self, id: &str, seq: u64) {
         self.drop_turns(|turn| turn.id == id);
+        self.derived_turns.remove(id);
         if let Some(position) = self.events.iter().rposition(|event| event.seq == seq) {
             self.hot_bytes -= self.events.remove(position).event.get().len();
         }
@@ -2158,6 +2159,18 @@ impl Fold {
         id
     }
 
+    pub(crate) fn withdraw_facts(&mut self, from: u64) {
+        let kept = usize::try_from(from.saturating_sub(1)).expect("a fact position fits in usize");
+        assert!(
+            self.facts[kept..]
+                .iter()
+                .all(|fact| !matches!(fact, Fact::Marker(Marker::Blob { .. }) | Fact::Intent(_))),
+            "a withdrawn admission takes back no blob or intent"
+        );
+        self.facts.truncate(kept);
+        self.fact_states.truncate(kept);
+    }
+
     pub fn facts_after(&self, after: u64) -> impl Iterator<Item = (u64, &StoredFact)> {
         let skipped =
             usize::try_from(after).map_or(self.facts.len(), |after| after.min(self.facts.len()));
@@ -2263,7 +2276,7 @@ impl Fold {
                 self.derived_turns.insert(input.turn.clone());
                 Record::Admitted {
                     digest: input_digest(&prompt, input.hand.as_deref()),
-                    first: seq,
+                    first: input.first.unwrap_or(seq),
                     hand: input.hand.clone(),
                     metadata,
                     prompt,

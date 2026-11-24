@@ -17,7 +17,7 @@ use nanocode_tool_host::{
 };
 use nanocode_turnlog::{
     Answer, EffectClass, Effects, Fold, HeldCall, Hold, LogHost, Outcome, Phase, Point, Record,
-    Resumption, Retired, Rider, Stats, Status, Turn, WakeRider, tag,
+    Resumption, Retired, Rider, Stats, Status, Turn, WakeRider, input_digest, tag,
 };
 use serde::Serialize;
 use serde_json::{Map, Value, json, value::RawValue};
@@ -27,6 +27,7 @@ use crate::{
     durability::{
         Committed, OwnedState, OwnerId, OwnerToken, Settle, SqlStatement, StateCommit, StateStore,
         StoreError, StoreFuture, StoreRecord, StoredState,
+        facts::{Fact, Input, InputKind, Marker, Outcome as FactOutcome, OwnedFact, TurnStatus},
     },
     events::AgentEventKind,
     input::Prompt,
@@ -332,6 +333,30 @@ fn put(
     Ok(())
 }
 
+type RuntimeFact = OwnedFact<Box<RawValue>>;
+
+fn put_fact(
+    lease: &mut nanocode_turnlog::Lease<'_>,
+    fact: &RuntimeFact,
+) -> Result<u64, StoreError> {
+    lease.append_owned(None, fact).map_err(StoreError::from)
+}
+
+fn status_fact(turn: &str, status: TurnStatus) -> RuntimeFact {
+    Fact::Marker(Marker::Status {
+        turn: turn.to_owned(),
+        status,
+    })
+}
+
+const fn fact_outcome(outcome: Outcome) -> FactOutcome {
+    match outcome {
+        Outcome::Cancelled => FactOutcome::Cancelled,
+        Outcome::Completed => FactOutcome::Completed,
+        Outcome::Failed => FactOutcome::Failed,
+    }
+}
+
 fn stored_key(state: &str, key: &str) -> String {
     format!("{state}\n{key}")
 }
@@ -618,10 +643,12 @@ impl OneLog {
     async fn admit(&self, submission: &Submission, durable: bool) -> Result<Submitted, StoreError> {
         let id = submission.request_id.as_str();
         let digest = submission_digest(&submission.prompt, submission.hand.as_deref())?;
+        let prompt = raw(&submission.prompt)?;
+        let derived = input_digest(&prompt, submission.hand.as_deref());
         let mut lease = self.log.lease_within().await?;
         if let Some(turn) = lease.fold().turn(id) {
             let record = record_of(turn)?;
-            return Ok(if turn.digest == digest {
+            return Ok(if turn.digest == digest || turn.digest == derived {
                 Submitted::Existing(record)
             } else {
                 Submitted::Conflict(record)
@@ -630,7 +657,7 @@ impl OneLog {
         if let Some(same) = lease
             .fold()
             .retired(id)
-            .map(|old| old.digest == tag(&digest))
+            .map(|old| old.digest == tag(&digest) || old.digest == tag(&derived))
         {
             drop(lease);
             let record = self
@@ -660,14 +687,27 @@ impl OneLog {
             kind: "queued",
             request_id: id,
         })?;
-        lease.push(Record::Admitted {
-            digest,
-            first,
-            hand: submission.hand.clone(),
-            metadata: submission.metadata.clone(),
-            prompt: raw(&submission.prompt)?,
-            turn: id.to_owned(),
-        })?;
+        if facts::sim::mutated(facts::sim::Mutation::AdmissionCopied) {
+            lease.push(Record::Admitted {
+                digest: digest.clone(),
+                first,
+                hand: submission.hand.clone(),
+                metadata: submission.metadata.clone(),
+                prompt: prompt.clone(),
+                turn: id.to_owned(),
+            })?;
+        }
+        put_fact(
+            &mut lease,
+            &Fact::Input(Input {
+                turn: id.to_owned(),
+                kind: InputKind::Prompt,
+                value: prompt,
+                metadata: submission.metadata.clone(),
+                hand: submission.hand.clone(),
+                first: Some(first),
+            }),
+        )?;
         lease.push(Record::Event {
             at,
             event: body.clone(),
@@ -789,14 +829,17 @@ impl OneLog {
             seq: last,
             turn: Some(request_id.to_owned()),
         })?;
-        lease.push(Record::Status {
-            status: Status::Finished {
-                last,
-                outcome,
-                result: body.clone(),
-            },
-            turn: request_id.to_owned(),
-        })?;
+        put_fact(
+            lease,
+            &status_fact(
+                request_id,
+                TurnStatus::Finished {
+                    last,
+                    outcome: fact_outcome(outcome),
+                    result: body.clone(),
+                },
+            ),
+        )?;
         finished.phase = Phase::Finished {
             last,
             outcome,
@@ -811,11 +854,9 @@ impl OneLog {
     }
 
     pub async fn start(&self, request_id: &str) -> Result<Option<Started>, StoreError> {
-        let settled = if self.recovering.read(|turns| turns.contains(request_id)) {
-            self.settle_intents(request_id).await?
-        } else {
-            Vec::new()
-        };
+        if self.recovering.read(|turns| turns.contains(request_id)) {
+            self.settle_intents(request_id).await?;
+        }
         let mut lease = self.log.lease_within().await?;
         let Some(turn) = lease.fold().turn(request_id) else {
             return Ok(None);
@@ -840,14 +881,29 @@ impl OneLog {
                     .await?;
                 return Ok(None);
             }
-            let mut unknown = lease.fold().unknown();
-            unknown.extend(settled);
-            lease.push(Record::Recovery {
-                at: None,
-                attempt,
-                turn: request_id.to_owned(),
-                unknown,
-            })?;
+            let fold = lease.fold();
+            let unknown = fold
+                .unknown()
+                .into_iter()
+                .filter(|call_id| fold.intent(call_id).is_none())
+                .collect::<Vec<_>>();
+            if unknown.is_empty() {
+                put_fact(
+                    &mut lease,
+                    &Fact::Marker(Marker::Recovery {
+                        turn: request_id.to_owned(),
+                        attempt,
+                        at: None,
+                    }),
+                )?;
+            } else {
+                lease.push(Record::Recovery {
+                    at: None,
+                    attempt,
+                    turn: request_id.to_owned(),
+                    unknown,
+                })?;
+            }
         } else {
             lease.secure().await?;
         }
@@ -857,10 +913,7 @@ impl OneLog {
             kind: "running",
             request_id,
         })?;
-        lease.push(Record::Status {
-            status: Status::Running,
-            turn: request_id.to_owned(),
-        })?;
+        put_fact(&mut lease, &status_fact(request_id, TurnStatus::Running))?;
         lease.push(Record::Event {
             at,
             event: body.clone(),
@@ -915,10 +968,7 @@ impl OneLog {
             Phase::Running {
                 cancelling: false, ..
             } => {
-                lease.push(Record::Status {
-                    status: Status::Cancelling,
-                    turn: request_id.to_owned(),
-                })?;
+                put_fact(&mut lease, &status_fact(request_id, TurnStatus::Cancelling))?;
                 lease.commit(Point::Cancel).await?;
                 let record = lease.fold().turn(request_id).map(record_of).transpose()?;
                 Ok(record.map(|record| (record, None)))
@@ -963,12 +1013,16 @@ impl OneLog {
         if !running {
             return Ok(());
         }
-        lease.push(Record::Status {
-            status: Status::Interrupted {
-                note: note.to_owned(),
-            },
-            turn: request_id.to_owned(),
-        })
+        put_fact(
+            &mut lease,
+            &status_fact(
+                request_id,
+                TurnStatus::Interrupted {
+                    note: note.to_owned(),
+                },
+            ),
+        )
+        .map(drop)
     }
 
     pub async fn retry(
@@ -1014,15 +1068,18 @@ impl OneLog {
         } else {
             None
         };
-        lease.push(Record::Status {
-            status: Status::Retrying {
-                attempts,
-                error: error.to_owned(),
-                kind: kind.to_owned(),
-                retry_at,
-            },
-            turn: request_id.to_owned(),
-        })?;
+        put_fact(
+            &mut lease,
+            &status_fact(
+                request_id,
+                TurnStatus::Retrying {
+                    attempts,
+                    error: error.to_owned(),
+                    kind: kind.to_owned(),
+                    retry_at,
+                },
+            ),
+        )?;
         let record = lease.fold().turn(request_id).map(record_of).transpose()?;
         Ok(record.map(|record| (record, event)))
     }
@@ -1188,12 +1245,14 @@ impl OneLog {
             ));
         }
         let edit = submission_digest(&Prompt::new(text), None)?;
+        let request = raw(&Prompt::new(text))?;
+        let derived = input_digest(&request, None);
         let mut lease = self.log.lease_within().await?;
         let Some(turn) = lease.fold().turn(request_id) else {
             return Ok(Replaced::NotQueued);
         };
         if let Some(applied) = turn.edits.get(edit_id) {
-            return Ok(if *applied == edit {
+            return Ok(if *applied == edit || *applied == derived {
                 Replaced::Applied(None)
             } else {
                 Replaced::Conflict
@@ -1205,7 +1264,6 @@ impl OneLog {
         let prompt = serde_json::from_str::<Prompt>(turn.prompt.get())
             .map_err(|error| invalid(format!("prompt of turn {request_id}: {error}")))?;
         let prompt = edited(&prompt, text)?;
-        let digest = submission_digest(&prompt, turn.hand.as_deref())?;
         let body = raw(&Replacement {
             digest: &edit,
             edit_id,
@@ -1220,15 +1278,19 @@ impl OneLog {
             seq,
             turn: Some(request_id.to_owned()),
         })?;
-        lease.push(Record::Status {
-            status: Status::Replaced {
-                digest,
-                edit,
-                edit_id: edit_id.to_owned(),
-                prompt: raw(&prompt)?,
-            },
-            turn: request_id.to_owned(),
-        })?;
+        put_fact(
+            &mut lease,
+            &Fact::Input(Input {
+                turn: request_id.to_owned(),
+                kind: InputKind::Edit {
+                    edit_id: edit_id.to_owned(),
+                },
+                value: raw(&prompt)?,
+                metadata: request,
+                hand: None,
+                first: None,
+            }),
+        )?;
         lease.commit(Point::Admission).await?;
         Ok(Replaced::Applied(Some(logged(
             seq,

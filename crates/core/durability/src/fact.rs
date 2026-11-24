@@ -133,6 +133,8 @@ pub struct Input<V> {
     pub value: V,
     pub metadata: V,
     pub hand: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -240,6 +242,7 @@ impl<V, D> Fact<V, D> {
                 value: value(&input.value)?,
                 metadata: value(&input.metadata)?,
                 hand: input.hand.clone(),
+                first: input.first,
             }),
             Self::ModelOut(out) => Fact::ModelOut(ModelOut {
                 turn: out.turn.clone(),

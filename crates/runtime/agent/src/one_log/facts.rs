@@ -28,15 +28,17 @@ pub mod sim {
         IntentReplayed,
         IntentCopied,
         ScopeLeaks,
+        AdmissionCopied,
     }
 
     impl Mutation {
-        pub const ALL: [Self; 5] = [
+        pub const ALL: [Self; 6] = [
             Self::CommitBuffered,
             Self::UnseenSkipped,
             Self::IntentReplayed,
             Self::IntentCopied,
             Self::ScopeLeaks,
+            Self::AdmissionCopied,
         ];
 
         #[must_use]
@@ -48,6 +50,7 @@ pub mod sim {
                 Self::IntentReplayed => "intent_replayed",
                 Self::IntentCopied => "intent_copied",
                 Self::ScopeLeaks => "scope_leaks",
+                Self::AdmissionCopied => "admission_copied",
             }
         }
 

@@ -662,6 +662,7 @@ impl<F: Family> World<F> {
             value: raw(&nanocode::backend::Prompt::new(text))?,
             metadata: raw(&json!({}))?,
             hand: None,
+            first: None,
         });
         self.commit(fact, Point::Admission).map(drop)
     }
