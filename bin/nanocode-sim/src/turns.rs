@@ -73,6 +73,8 @@ pub enum TurnMutation {
     PlacedInline,
     FencedServesReads,
     HostUnbounded,
+    HostBoundIgnored,
+    ReadsUnbounded,
     RecoverySkipsClientless,
     ResumeRedispatchesRunning,
     RetireSkipped,
@@ -89,7 +91,7 @@ pub enum TurnMutation {
 }
 
 impl TurnMutation {
-    const ALL: [Self; 32] = [
+    const ALL: [Self; 34] = [
         Self::None,
         Self::AckBufferedAdmission,
         Self::AckBufferedResult,
@@ -109,6 +111,8 @@ impl TurnMutation {
         Self::PlacedInline,
         Self::FencedServesReads,
         Self::HostUnbounded,
+        Self::HostBoundIgnored,
+        Self::ReadsUnbounded,
         Self::RecoverySkipsClientless,
         Self::ResumeRedispatchesRunning,
         Self::RetireSkipped,
@@ -151,6 +155,8 @@ impl TurnMutation {
             Self::PlacedInline => "placed_inline",
             Self::FencedServesReads => "fenced_serves_reads",
             Self::HostUnbounded => "host_unbounded",
+            Self::HostBoundIgnored => "host_bound_ignored",
+            Self::ReadsUnbounded => "reads_unbounded",
             Self::RecoverySkipsClientless => "recovery_skips_clientless",
             Self::ResumeRedispatchesRunning => "resume_redispatches_running",
             Self::RetireSkipped => "retire_skipped",
@@ -1241,6 +1247,8 @@ impl Sim {
             TurnMutation::FencedServesReads => nanocode_turnlog::sim::Mutation::FencedServesReads,
             TurnMutation::CellRootsSkipped => nanocode_turnlog::sim::Mutation::CellRootsSkipped,
             TurnMutation::HostUnbounded => nanocode_turnlog::sim::Mutation::HostUnbounded,
+            TurnMutation::HostBoundIgnored => nanocode_turnlog::sim::Mutation::HostBoundIgnored,
+            TurnMutation::ReadsUnbounded => nanocode_turnlog::sim::Mutation::ReadsUnbounded,
             _ => nanocode_turnlog::sim::Mutation::None,
         });
         let policy: Box<dyn TurnDurability> = match self.options.policy {

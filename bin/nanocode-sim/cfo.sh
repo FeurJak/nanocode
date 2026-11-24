@@ -293,6 +293,8 @@ default_table='
 1 canary_placed_inline canary:20 --scenario turns --policy turnlog --mutation placed_inline
 1 canary_fenced_serves_reads canary:20 --scenario turns --policy turnlog --snapshot-rows 4 --state-bytes 131072 --takeover --mutation fenced_serves_reads
 1 canary_host_unbounded canary:20 --scenario turns --policy turnlog --snapshot-rows 4 --mutation host_unbounded
+1 canary_host_bound_ignored canary:20 --scenario turns --policy turnlog --snapshot-rows 4 --mutation host_bound_ignored
+1 canary_reads_unbounded canary:20 --scenario turns --policy turnlog --snapshot-rows 4 --mutation reads_unbounded
 1 canary_agents_cancel_ignored canary:200 --scenario agents --mutation cancel_ignored
 1 canary_agents_shutdown_hangs canary:200 --scenario agents --mutation shutdown_hangs
 1 canary_agents_shutdown_keeps_harness canary:200 --scenario agents --mutation shutdown_keeps_harness
