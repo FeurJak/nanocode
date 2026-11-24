@@ -208,6 +208,7 @@ pub struct Turn {
 #[derive(Clone, Debug, Default)]
 pub struct Fold {
     calls: BTreeMap<String, OpenCall>,
+    chains: BTreeMap<u64, u64>,
     cells: BTreeMap<(String, u64), Vec<Box<RawValue>>>,
     checkpoints: BTreeMap<String, Checkpoint>,
     dead: BTreeMap<String, String>,
@@ -454,11 +455,12 @@ impl Fold {
         };
         for record in records {
             match record {
-                Record::Groups { groups } => {
+                Record::Groups { groups, chains } => {
                     self.groups = groups
                         .into_iter()
                         .map(|(row, rows, count)| (row, (rows, count)))
                         .collect();
+                    self.chains.extend(chains);
                 }
                 Record::Index { first, row, rows } => {
                     self.pages.insert(first, Page::Cold(Section { row, rows }));
@@ -913,13 +915,46 @@ impl Fold {
         for (section, count) in groups {
             refs.insert(section.row, (section.rows, *count));
         }
+        let living: BTreeSet<u64> = refs
+            .iter()
+            .filter(|(_, (_, count))| *count > 0)
+            .filter_map(|(row, _)| self.chains.get(row).copied())
+            .collect();
+        let alive = |row: &u64| {
+            !crate::sim::mutated(crate::sim::Mutation::ChainMemberDropped)
+                && self
+                    .chains
+                    .get(row)
+                    .is_some_and(|keyframe| living.contains(keyframe))
+        };
         let mut superseded = Vec::new();
+        let mut dropped = BTreeSet::new();
         refs.retain(|row, (rows, count)| {
-            if *count == 0 {
+            let kept = *count > 0 || alive(row);
+            if !kept {
                 superseded.push(*row..*row + *rows);
+                dropped.insert(*row);
             }
-            *count > 0
+            kept
         });
+        for row in &dropped {
+            if let Some(keyframe) = self.chains.get(row) {
+                assert!(
+                    !living.contains(keyframe),
+                    "turn log drops row {row} of the chain from {keyframe} while a member lives"
+                );
+            }
+        }
+        for (row, (_, count)) in &refs {
+            if let Some(keyframe) = self.chains.get(row)
+                && *count == 0
+            {
+                assert!(
+                    living.contains(keyframe),
+                    "turn log keeps row {row} of the chain from {keyframe} with no member alive"
+                );
+            }
+        }
         let touched = if self.pages.is_empty() {
             if self.owners.is_empty() && written.is_empty() {
                 BTreeSet::new()
@@ -1026,6 +1061,8 @@ impl Fold {
         self.root = root.map(Page::Loaded);
         self.placed.clear();
         self.unindexed.clear();
+        let groups = &self.groups;
+        self.chains.retain(|row, _| groups.contains_key(row));
     }
 
     pub(crate) fn waits(&self, owner: &str) -> bool {
@@ -1047,7 +1084,7 @@ impl Fold {
             )
     }
 
-    pub(crate) fn place(&mut self, section: Section, owners: &[(String, u64)]) {
+    pub(crate) fn place(&mut self, section: Section, owners: &[(String, u64)], chain: u64) {
         for (owner, bytes) in owners {
             let Some(Owner::Warm { delta, entry }) = self.owners.get_mut(owner) else {
                 panic!("turn log placed owner {owner} is not warm");
@@ -1064,20 +1101,43 @@ impl Fold {
             };
             self.unindexed.insert(owner.clone());
         }
-        self.place_group(section, owners.len() as u64);
+        self.place_group(section, owners.len() as u64, Some(chain));
     }
 
-    fn place_group(&mut self, section: Section, count: u64) {
+    fn place_group(&mut self, section: Section, count: u64, chain: Option<u64>) {
         assert!(count > 0, "turn log placed an empty section at row {}", section.row);
         let previous = self.placed.insert(section.row, (section.rows, count));
         assert!(previous.is_none(), "turn log placed row {} twice", section.row);
+        if let Some(keyframe) = chain {
+            assert!(
+                keyframe <= section.row,
+                "turn log chain at row {} starts after it",
+                section.row
+            );
+            self.chains.insert(section.row, keyframe);
+        }
+    }
+
+    pub(crate) fn chains_of(&self, groups: &BTreeMap<u64, (u64, u64)>) -> Vec<(u64, u64)> {
+        self.chains
+            .iter()
+            .filter(|(row, _)| groups.contains_key(row))
+            .map(|(&row, &keyframe)| (row, keyframe))
+            .collect()
     }
 
     fn placed_in_tail(
         &mut self,
         owners: &[(String, u64)],
         section: Section,
+        chain: Option<u64>,
     ) -> Result<(), StoreError> {
+        if chain.is_some_and(|keyframe| keyframe > section.row) {
+            return Err(invalid(format!(
+                "placed section at row {} links to a chain that starts after it",
+                section.row
+            )));
+        }
         if owners.is_empty() || self.placed.contains_key(&section.row) {
             return Err(invalid(format!(
                 "placed section at row {} is empty or listed twice",
@@ -1106,7 +1166,7 @@ impl Fold {
             );
             self.unindexed.insert(owner.clone());
         }
-        self.place_group(section, owners.len() as u64);
+        self.place_group(section, owners.len() as u64, chain);
         Ok(())
     }
 
@@ -2025,11 +2085,12 @@ impl Fold {
             Record::Result { call_id, .. } => {
                 self.calls.remove(call_id);
             }
-            Record::Groups { groups } => {
+            Record::Groups { groups, chains } => {
                 self.groups = groups
                     .iter()
                     .map(|&(row, rows, count)| (row, (rows, count)))
                     .collect();
+                self.chains.extend(chains.iter().copied());
             }
             Record::Index { first, row, rows } => {
                 self.pages.insert(
@@ -2051,12 +2112,18 @@ impl Fold {
                     "owner {owner} is listed outside an index page"
                 )));
             }
-            Record::Placed { owners, row, rows } => self.placed_in_tail(
+            Record::Placed {
+                chain,
+                owners,
+                row,
+                rows,
+            } => self.placed_in_tail(
                 owners,
                 Section {
                     row: *row,
                     rows: *rows,
                 },
+                *chain,
             )?,
             Record::Section { owners, row, rows } => {
                 let section = Section {

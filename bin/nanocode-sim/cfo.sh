@@ -291,6 +291,7 @@ default_table='
 1 canary_content_rewritten_stale canary:20 --scenario turns --policy turnlog --mutation content_rewritten_stale
 1 canary_content_collected_live canary:20 --scenario turns --policy turnlog --mutation content_collected_live
 1 canary_placed_inline canary:20 --scenario turns --policy turnlog --mutation placed_inline
+1 canary_chain_member_dropped canary:20 --scenario turns --policy turnlog --snapshot-rows 4 --state-bytes 131072 --mutation chain_member_dropped
 1 canary_fenced_serves_reads canary:20 --scenario turns --policy turnlog --snapshot-rows 4 --state-bytes 131072 --takeover --mutation fenced_serves_reads
 1 canary_host_unbounded canary:20 --scenario turns --policy turnlog --snapshot-rows 4 --mutation host_unbounded
 1 canary_host_bound_ignored canary:20 --scenario turns --policy turnlog --snapshot-rows 4 --mutation host_bound_ignored

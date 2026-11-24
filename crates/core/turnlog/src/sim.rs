@@ -13,6 +13,7 @@ pub enum Mutation {
     HostBoundIgnored,
     ReadsUnbounded,
     AnswersUnbounded,
+    ChainMemberDropped,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

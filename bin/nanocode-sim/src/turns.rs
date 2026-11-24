@@ -61,6 +61,7 @@ pub enum TurnMutation {
     BufferedAdmissionWritten,
     CellBeforeCheckpoint,
     CellRootsSkipped,
+    ChainMemberDropped,
     ContentCollectedLive,
     ContentRewrittenStale,
     DurableSeqBeforeCommit,
@@ -92,7 +93,7 @@ pub enum TurnMutation {
 }
 
 impl TurnMutation {
-    const ALL: [Self; 35] = [
+    const ALL: [Self; 36] = [
         Self::None,
         Self::AckBufferedAdmission,
         Self::AckBufferedResult,
@@ -100,6 +101,7 @@ impl TurnMutation {
         Self::BufferedAdmissionWritten,
         Self::CellBeforeCheckpoint,
         Self::CellRootsSkipped,
+        Self::ChainMemberDropped,
         Self::ContentCollectedLive,
         Self::ContentRewrittenStale,
         Self::DurableSeqBeforeCommit,
@@ -145,6 +147,7 @@ impl TurnMutation {
             Self::BufferedAdmissionWritten => "buffered_admission_written",
             Self::CellBeforeCheckpoint => "cell_before_checkpoint",
             Self::CellRootsSkipped => "cell_roots_skipped",
+            Self::ChainMemberDropped => "chain_member_dropped",
             Self::ContentCollectedLive => "content_collected_live",
             Self::ContentRewrittenStale => "content_rewritten_stale",
             Self::DurableSeqBeforeCommit => "durable_seq_before_commit",
@@ -1253,6 +1256,7 @@ impl Sim {
             TurnMutation::HostBoundIgnored => nanocode_turnlog::sim::Mutation::HostBoundIgnored,
             TurnMutation::ReadsUnbounded => nanocode_turnlog::sim::Mutation::ReadsUnbounded,
             TurnMutation::AnswersUnbounded => nanocode_turnlog::sim::Mutation::AnswersUnbounded,
+            TurnMutation::ChainMemberDropped => nanocode_turnlog::sim::Mutation::ChainMemberDropped,
             _ => nanocode_turnlog::sim::Mutation::None,
         });
         let policy: Box<dyn TurnDurability> = match self.options.policy {

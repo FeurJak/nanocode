@@ -534,7 +534,7 @@ fn referenced(stored: &[(u64, String)]) -> Vec<std::ops::Range<u64>> {
                             LogRecord::Index { row, rows, .. } => {
                                 std::iter::once(row..row + rows).collect()
                             }
-                            LogRecord::Groups { groups } => groups
+                            LogRecord::Groups { groups, .. } => groups
                                 .into_iter()
                                 .map(|(row, rows, _)| row..row + rows)
                                 .collect(),
@@ -544,7 +544,7 @@ fn referenced(stored: &[(u64, String)]) -> Vec<std::ops::Range<u64>> {
                     .collect()
             }
             LogRecord::Index { row, rows, .. } => std::iter::once(row..row + rows).collect(),
-            LogRecord::Groups { groups } => groups
+            LogRecord::Groups { groups, .. } => groups
                 .into_iter()
                 .map(|(row, rows, _)| row..row + rows)
                 .collect(),

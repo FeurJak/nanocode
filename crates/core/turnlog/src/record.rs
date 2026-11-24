@@ -97,6 +97,8 @@ pub enum Record {
     },
     Groups {
         groups: Vec<(u64, u64, u64)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        chains: Vec<(u64, u64)>,
     },
     Heard {
         event: Box<RawValue>,
@@ -130,6 +132,8 @@ pub enum Record {
         written: u64,
     },
     Placed {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chain: Option<u64>,
         owners: Vec<(String, u64)>,
         row: u64,
         rows: u64,

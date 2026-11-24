@@ -23,24 +23,62 @@ pub(crate) const SECTION: char = 'p';
 pub(crate) const SNAPSHOT: char = 's';
 pub(crate) const PART: char = '+';
 pub(crate) const BOUNDARY: char = 'b';
+pub(crate) const LINKED: char = 'P';
+const VARINT_BITS: u32 = 7;
+const VARINT_MORE: u8 = 1 << VARINT_BITS;
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct History(Vec<u8>);
+struct Window(Vec<u8>);
 
-impl History {
-    pub(crate) fn extend(&mut self, plain: &[u8]) {
+impl Window {
+    fn extend(&mut self, plain: &[u8]) {
         let kept = &plain[plain.len().saturating_sub(WINDOW)..];
         let excess = (self.0.len() + kept.len()).saturating_sub(WINDOW);
         self.0.drain(..excess);
         self.0.extend_from_slice(kept);
     }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct History {
+    records: Window,
+    chain: Option<(u64, Window)>,
+}
+
+impl History {
+    pub(crate) fn extend(&mut self, plain: &[u8]) {
+        self.records.extend(plain);
+    }
 
     pub(crate) fn clear(&mut self) {
-        self.0.clear();
+        self.records.0.clear();
+        self.chain = None;
     }
 
     pub(crate) fn bytes(&self) -> &[u8] {
-        &self.0
+        &self.records.0
+    }
+
+    pub(crate) fn keyframe(&self) -> Option<u64> {
+        self.chain.as_ref().map(|(keyframe, _)| *keyframe)
+    }
+
+    pub(crate) fn chained(&self, keyframe: u64) -> Option<&[u8]> {
+        match &self.chain {
+            Some((current, window)) if *current == keyframe => Some(&window.0),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn link(&mut self, keyframe: u64, plain: &[u8]) {
+        match &mut self.chain {
+            Some((current, window)) if *current == keyframe => window.extend(plain),
+            _ => {
+                let mut window = Window::default();
+                window.extend(plain);
+                self.chain = Some((keyframe, window));
+            }
+        }
     }
 }
 
@@ -134,6 +172,25 @@ impl Packer {
             deflate,
             plain: 0,
         })
+    }
+
+    pub(crate) fn linked(
+        spare: &mut Spare,
+        dictionary: &[u8],
+        back: u64,
+    ) -> Result<Self, StoreError> {
+        let mut packer = Self::new(spare, DEFAULT_LEVEL, dictionary)?;
+        let mut rest = back;
+        loop {
+            let low =
+                u8::try_from(rest & u64::from(VARINT_MORE - 1)).expect("seven bits fit a byte");
+            rest >>= VARINT_BITS;
+            if rest == 0 {
+                packer.compressed.push(low);
+                return Ok(packer);
+            }
+            packer.compressed.push(low | VARINT_MORE);
+        }
     }
 
     pub(crate) const fn plain(&self) -> usize {
@@ -247,6 +304,31 @@ pub(crate) fn unpack(text: &str, dictionary: &[u8]) -> Result<Vec<u8>, StoreErro
     let compressed = STANDARD_NO_PAD
         .decode(text)
         .map_err(|error| failed("decoding", &error.to_string()))?;
+    inflate(&compressed, dictionary)
+}
+
+pub(crate) fn linked(text: &str) -> Result<(u64, Vec<u8>), StoreError> {
+    let mut compressed = STANDARD_NO_PAD
+        .decode(text)
+        .map_err(|error| failed("decoding", &error.to_string()))?;
+    let mut back: u64 = 0;
+    let mut shift = 0;
+    for (index, &byte) in compressed.iter().enumerate() {
+        let low = u64::from(byte & (VARINT_MORE - 1));
+        if shift >= u64::BITS || (low << shift) >> shift != low {
+            return Err(failed("decoding", "the link back overflows"));
+        }
+        back |= low << shift;
+        shift += VARINT_BITS;
+        if byte & VARINT_MORE == 0 {
+            compressed.drain(..=index);
+            return Ok((back, compressed));
+        }
+    }
+    Err(failed("decoding", "the row ends inside its link back"))
+}
+
+pub(crate) fn inflate(compressed: &[u8], dictionary: &[u8]) -> Result<Vec<u8>, StoreError> {
     let mut inflate =
         Inflate::new(-WINDOW_BITS).map_err(|error| failed("decompression", error.as_str()))?;
     if !dictionary.is_empty() {

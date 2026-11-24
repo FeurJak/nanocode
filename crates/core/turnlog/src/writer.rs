@@ -12,7 +12,8 @@ use nanocode_sync::{Held, Owned, mpsc, oneshot};
 use crate::{
     Checkpoint, Compaction, Event, Extension, Fold, LogHost, Record, Rider, Segment, Write,
     codec::{
-        self, ARCHIVE, BOUNDARY, History, PART, RECORDS, SEAL, SECTION, SNAPSHOT, Stream, WINDOW,
+        self, ARCHIVE, BOUNDARY, History, LINKED, PART, RECORDS, SEAL, SECTION, SNAPSHOT, Stream,
+        WINDOW,
     },
     fold::{Entry, Page, Section, legacy_name},
 };
@@ -189,8 +190,10 @@ fn line(lines: &mut Vec<u8>, record: &Record) -> Result<(), StoreError> {
 }
 
 struct Placing {
+    keyframe: u64,
     keys: BTreeSet<String>,
     owners: Vec<(String, u64)>,
+    plain: Vec<u8>,
     rows: Vec<(u64, String)>,
     section: Section,
 }
@@ -198,6 +201,7 @@ struct Placing {
 fn placing(
     spare: &mut codec::Spare,
     fold: &Fold,
+    history: &History,
     buffer: &[Record],
     seq: u64,
     limit: Option<usize>,
@@ -213,7 +217,10 @@ fn placing(
     if values.is_empty() {
         return Ok(None);
     }
-    let mut packer = codec::Packer::new(spare, codec::DEFAULT_LEVEL, &[])?;
+    let keyframe = history.keyframe().unwrap_or(seq);
+    let dictionary = history.chained(keyframe).unwrap_or_default();
+    let mut packer = codec::Packer::linked(spare, dictionary, seq - keyframe)?;
+    let mut plain = Vec::new();
     let mut lines = Vec::new();
     let mut owners = Vec::with_capacity(values.len());
     for (key, value) in values {
@@ -227,18 +234,22 @@ fn placing(
         )?;
         if packer.plain() > 0 {
             packer.write(b"\n")?;
+            plain.push(b'\n');
         }
         packer.write(&lines)?;
+        plain.extend_from_slice(&lines);
         owners.push((key.to_owned(), lines.len() as u64));
     }
-    let rows = stored(seq, packer.finish(SECTION, spare)?.packed, limit)?;
+    let rows = stored(seq, packer.finish(LINKED, spare)?.packed, limit)?;
     let section = Section {
         row: seq,
         rows: rows.len() as u64,
     };
     Ok(Some(Placing {
+        keyframe,
         keys: owners.iter().map(|(owner, _)| owner.clone()).collect(),
         owners,
+        plain,
         rows,
         section,
     }))
@@ -416,6 +427,7 @@ fn index(
                                 .iter()
                                 .map(|(&row, &(rows, count))| (row, rows, count))
                                 .collect(),
+                            chains: fold.chains_of(&index.groups),
                         },
                     )?;
                     if packer.plain() > 0 {
@@ -445,10 +457,13 @@ async fn section_records(
     section: Section,
 ) -> Result<Vec<Record>, StoreError> {
     let end = section.row + section.rows;
-    let stored = host.scan(scope, section.row, end).await?;
+    let mut stored = host.scan(scope, section.row, end).await?;
+    let linked = stored
+        .first()
+        .is_some_and(|(_, body)| body.starts_with(LINKED));
     if stored.first().map(|(seq, _)| *seq) != Some(section.row)
         || stored.len() as u64 != section.rows
-        || !stored[0].1.starts_with(SECTION)
+        || !(linked || stored[0].1.starts_with(SECTION))
     {
         return Err(StoreError::Backend(format!(
             "turn log section of {owner} at rows {}..{end} reads {} rows",
@@ -456,12 +471,26 @@ async fn section_records(
             stored.len()
         )));
     }
+    if linked {
+        let (back, _) = codec::linked(&stored[0].1[LINKED.len_utf8()..])?;
+        let keyframe = section.row.checked_sub(back).ok_or_else(|| {
+            StoreError::Backend(format!(
+                "turn log section of {owner} at row {} links back past the log's start",
+                section.row
+            ))
+        })?;
+        if keyframe < section.row {
+            stored = chain_rows(host.scan(scope, keyframe, end).await?);
+        }
+    }
     let mut records = Vec::new();
     each_row(stored, &mut History::default(), |row| {
-        crate::record::each(&row.plain, |record| {
-            records.push(record);
-            Ok(())
-        })?;
+        if row.seq >= section.row {
+            crate::record::each(&row.plain, |record| {
+                records.push(record);
+                Ok(())
+            })?;
+        }
         Ok(true)
     })?;
     Ok(records)
@@ -701,7 +730,7 @@ fn each_row(
                     )));
                 }
             },
-            Some(tag @ (ARCHIVE | BOUNDARY | RECORDS | SECTION | SNAPSHOT)) => {
+            Some(tag @ (ARCHIVE | BOUNDARY | LINKED | RECORDS | SECTION | SNAPSHOT)) => {
                 if let Some(logical) = pending.take()
                     && !take(decode_row(logical, history)?)?
                 {
@@ -735,13 +764,34 @@ fn decode_row(logical: Logical, history: &mut History) -> Result<Row, StoreError
         text,
     } = logical;
     let snapshot = tag == SNAPSHOT;
-    let section = tag == SECTION;
+    let section = tag == SECTION || tag == LINKED;
     let boundary = snapshot || tag == BOUNDARY || tag == ARCHIVE;
     if boundary {
         history.clear();
     }
-    let dictionary: &[u8] = if section { &[] } else { history.bytes() };
-    let plain = codec::unpack(&text[tag.len_utf8()..], dictionary)?;
+    let plain = if tag == LINKED {
+        let (back, compressed) = codec::linked(&text[tag.len_utf8()..])?;
+        let keyframe = seq.checked_sub(back).ok_or_else(|| {
+            StoreError::Backend(format!(
+                "turn log row {seq} links back past the log's start"
+            ))
+        })?;
+        let dictionary = if back == 0 {
+            &[][..]
+        } else {
+            history.chained(keyframe).ok_or_else(|| {
+                StoreError::Backend(format!(
+                    "turn log row {seq} links to rows from {keyframe} that this read does not hold"
+                ))
+            })?
+        };
+        let plain = codec::inflate(&compressed, dictionary)?;
+        history.link(keyframe, &plain);
+        plain
+    } else {
+        let dictionary: &[u8] = if section { &[] } else { history.bytes() };
+        codec::unpack(&text[tag.len_utf8()..], dictionary)?
+    };
     drop(text);
     if !section {
         history.extend(&plain);
@@ -816,13 +866,26 @@ async fn scan(
     })
 }
 
+fn chain_rows(stored: Vec<(u64, String)>) -> Vec<(u64, String)> {
+    let mut linked = false;
+    stored
+        .into_iter()
+        .filter(|(_, body)| {
+            if !body.starts_with(PART) {
+                linked = body.starts_with(LINKED);
+            }
+            linked
+        })
+        .collect()
+}
+
 fn unsectioned(stored: Vec<(u64, String)>) -> Vec<(u64, String)> {
     let mut section = false;
     stored
         .into_iter()
         .filter(|(_, body)| {
             if !body.starts_with(PART) {
-                section = body.starts_with(SECTION);
+                section = body.starts_with(SECTION) || body.starts_with(LINKED);
             }
             !section
         })
@@ -1684,11 +1747,13 @@ impl Lease<'_> {
         let mut placing = placing(
             &mut spare,
             &writer.fold,
+            &writer.history,
             &writer.buffer,
             seq,
             self.limit,
         )?;
         let placed = placing.as_ref().map(|placing| Record::Placed {
+            chain: Some(placing.keyframe),
             owners: placing.owners.clone(),
             row: placing.section.row,
             rows: placing.section.rows,
@@ -2072,7 +2137,10 @@ impl Lease<'_> {
         writer.next = seq + stored.len() as u64;
         writer.fold.committed(seq);
         if let Some(placing) = &placing {
-            writer.fold.place(placing.section, &placing.owners);
+            writer
+                .fold
+                .place(placing.section, &placing.owners, placing.keyframe);
+            writer.history.link(placing.keyframe, &placing.plain);
             writer.tail_rows += sectioned_rows as usize;
             writer.stats.sections += sectioned_rows;
             writer.stats.placed_bytes += sectioned_bytes;
