@@ -13,7 +13,7 @@ use nanocode_durability_core::{
 use nanocode_sync::block_on;
 use nanocode_tool_runtime::ToolInput;
 use nanocode_turnlog::MemoryLog;
-use nanocode_turnlog::{EffectClass, Record};
+use nanocode_turnlog::{CachedAt, EffectClass, Record};
 use serde::{Deserialize, Serialize};
 use serde_json::value::{RawValue, to_raw_value};
 
@@ -61,10 +61,11 @@ pub enum OneLogFactsMutation {
     ScopedInputLowered,
     IntentOptional,
     AbandonUnsettled,
+    CacheInline,
 }
 
 impl OneLogFactsMutation {
-    const ALL: [Self; 15] = [
+    const ALL: [Self; 16] = [
         Self::None,
         Self::FoldReadsUnlogged,
         Self::CommitBuffered,
@@ -80,6 +81,7 @@ impl OneLogFactsMutation {
         Self::ScopedInputLowered,
         Self::IntentOptional,
         Self::AbandonUnsettled,
+        Self::CacheInline,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -105,6 +107,7 @@ impl OneLogFactsMutation {
             Self::ScopedInputLowered => "scoped_input_lowered",
             Self::IntentOptional => "intent_optional",
             Self::AbandonUnsettled => "abandon_unsettled",
+            Self::CacheInline => "cache_inline",
         }
     }
 
@@ -132,7 +135,8 @@ impl OneLogFactsMutation {
             Self::None
             | Self::FoldReadsUnlogged
             | Self::CacheNeverDue
-            | Self::ScopedInputLowered => facts_sim::Mutation::None,
+            | Self::ScopedInputLowered
+            | Self::CacheInline => facts_sim::Mutation::None,
         }
     }
 }
@@ -495,6 +499,17 @@ impl World {
                 self.expected
             ));
         };
+        let log = self.log.as_ref().expect("the facts log is open");
+        let inline = block_on(log.read(|fold| {
+            fold.host(&nanocode_turnlog::cache_key(SCOPE))
+                .filter(|value| serde_json::from_str::<CachedAt>(value.get()).is_err())
+                .map(|value| value.get().len())
+        }));
+        if let Some(bytes) = inline {
+            return Err(format!(
+                "the cached fold of {SCOPE} is held inline in the turn log ({bytes} bytes), so every snapshot copies it"
+            ));
+        }
         self.stats.cached += 1;
         self.stats.skipped += snapshot.applied;
         self.stats.replayed += replay.facts.len() as u64;
@@ -903,6 +918,7 @@ fn run_seed(seed: u64, mutation: OneLogFactsMutation) -> Outcome {
     facts_sim::mutate(mutation.log_rule());
     nanocode_turnlog::sim::mutate(match mutation {
         OneLogFactsMutation::CacheNeverDue => nanocode_turnlog::sim::Mutation::CacheNeverDue,
+        OneLogFactsMutation::CacheInline => nanocode_turnlog::sim::Mutation::CacheInline,
         OneLogFactsMutation::ScopedInputLowered => {
             nanocode_turnlog::sim::Mutation::ScopedInputLowered
         }

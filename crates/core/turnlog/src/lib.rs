@@ -20,8 +20,8 @@ pub use effect::{EffectClass, Effects};
 #[cfg(not(target_family = "wasm"))]
 pub use file::{FileLog, FileOptions};
 pub use fold::{
-    Checkpoint, Event, FOLD_SNAPSHOT_KEY, Fold, OpenCall, Phase, RETIRED_KEY, Recovered, Retired,
-    Retry, Segment, Turn, cache_key, input_digest, tag,
+    CachedAt, CachedFold, Checkpoint, Event, FOLD_SNAPSHOT_KEY, Fold, OpenCall, Phase, RETIRED_KEY,
+    Recovered, Retired, Retry, Segment, Turn, cache_key, input_digest, tag,
 };
 pub use hold::{Answer, Answered, HeldCall, Hold, HoldError, Resumption};
 pub use host::{

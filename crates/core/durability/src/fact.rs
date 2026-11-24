@@ -379,8 +379,8 @@ pub trait FactSink {
         false
     }
 
-    fn cache(&mut self, _snapshot: &Snapshot) -> Result<(), FoldError> {
-        Ok(())
+    fn cache(&mut self, _snapshot: &Snapshot) -> Result<Vec<(u64, StoredFact)>, FoldError> {
+        Ok(Vec::new())
     }
 }
 
@@ -695,6 +695,19 @@ impl<F: DurableFold> Folded<F> {
         );
         self.seq = written;
         Ok((self, written))
+    }
+
+    pub fn cache(mut self, sink: &mut impl FactSink) -> Result<Self, FoldError> {
+        for (seq, fact) in sink.cache(&self.snapshot()?)? {
+            assert!(
+                matches!(fact, Fact::Marker(Marker::Blob { .. })),
+                "a cached fold appends only the marker of its own blob"
+            );
+            assert!(seq > self.seq, "a cached fold's marker follows the fold");
+            self.values.observe(seq, &fact)?;
+            self.seq = seq;
+        }
+        Ok(self)
     }
 
     pub fn snapshot(&self) -> Result<Snapshot, FoldError> {

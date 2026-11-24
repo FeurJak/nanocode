@@ -62,7 +62,7 @@ impl FactSink for Forward<'_> {
         self.0.cache_due()
     }
 
-    fn cache(&mut self, snapshot: &Snapshot) -> Result<(), FoldError> {
+    fn cache(&mut self, snapshot: &Snapshot) -> Result<Vec<(u64, StoredFact)>, FoldError> {
         self.0.cache(snapshot)
     }
 }
@@ -123,9 +123,9 @@ where
             Box::new(move |unseen, sink| {
                 let folded = caught_up(folded, unseen)?;
                 let mut forward = Forward(sink);
-                let (folded, seq) = folded.commit(&mut forward, fact)?;
+                let (mut folded, seq) = folded.commit(&mut forward, fact)?;
                 if forward.cache_due() {
-                    forward.cache(&folded.snapshot()?)?;
+                    folded = folded.cache(&mut forward)?;
                 }
                 *slot = Some(folded);
                 Ok(seq)

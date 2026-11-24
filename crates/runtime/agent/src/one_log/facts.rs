@@ -176,7 +176,7 @@ impl FactSink for Observed<'_, '_> {
         self.lease.fold().cache_due(self.state)
     }
 
-    fn cache(&mut self, snapshot: &Snapshot) -> Result<(), FoldError> {
+    fn cache(&mut self, snapshot: &Snapshot) -> Result<Vec<(u64, StoredFact)>, FoldError> {
         self.lease
             .cache_state(self.state, snapshot)
             .map_err(FoldError::Sink)
@@ -196,7 +196,7 @@ impl OneLog {
     ) -> Result<Replay, StoreError> {
         let cached = self
             .log
-            .read(|fold| fold.cached_state(&scope.state))
+            .cached_state(&scope.state)
             .await?
             .filter(|snapshot| snapshot.family == family && snapshot.format == format);
         self.replayed_after(scope, cached).await

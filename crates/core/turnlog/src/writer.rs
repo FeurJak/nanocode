@@ -19,7 +19,7 @@ use crate::{
         self, ARCHIVE, BOUNDARY, History, LINKED, PART, RECORDS, SEAL, SECTION, SNAPSHOT, Stream,
         WINDOW,
     },
-    fold::{Entry, FOLD_SNAPSHOT_KEY, Page, Section, legacy_name},
+    fold::{CachedAt, CachedFold, Entry, FOLD_SNAPSHOT_KEY, Page, Section, legacy_name},
 };
 
 pub const EVENT_GAP: u64 = 1 << 14;
@@ -1572,6 +1572,21 @@ impl TurnLog {
         .await
     }
 
+    pub async fn cached_state(&self, state: &str) -> Result<Option<FoldSnapshot>, StoreError> {
+        let at = match self.read(|fold| fold.cached_state(state)).await? {
+            None => return Ok(None),
+            Some(CachedFold::Inline(snapshot)) => return Ok(Some(snapshot)),
+            Some(CachedFold::At(at)) => at,
+        };
+        let blobs = self.blobs(&[at.blob]).await?;
+        let json = blobs
+            .get(&at.blob)
+            .ok_or(FoldError::MissingBlob { digest: at.blob })?;
+        serde_json::from_str(json.get()).map(Some).map_err(|error| {
+            StoreError::Backend(format!("cached fold of {state} does not decode: {error}"))
+        })
+    }
+
     pub async fn facts_from(
         &self,
         after: u64,
@@ -1726,18 +1741,43 @@ impl Lease<'_> {
         .await
     }
 
-    pub fn cache_state(&mut self, state: &str, snapshot: &FoldSnapshot) -> Result<(), StoreError> {
+    pub fn cache_state(
+        &mut self,
+        state: &str,
+        snapshot: &FoldSnapshot,
+    ) -> Result<Vec<(u64, StoredFact)>, StoreError> {
         assert!(
             snapshot.seq < self.writer.fold.next_fact(),
             "a cached fold names a fact the log holds"
         );
-        let value = serde_json::value::to_raw_value(snapshot).map_err(|error| {
+        let encode = |error: serde_json::Error| {
             StoreError::NotCommitted(format!("encode the cached fold of {state}: {error}"))
-        })?;
+        };
+        let value = serde_json::value::to_raw_value(snapshot).map_err(encode)?;
+        if crate::sim::mutated(crate::sim::Mutation::CacheInline) {
+            self.push(Record::Host {
+                key: crate::fold::cache_key(state),
+                value,
+            })?;
+            return Ok(Vec::new());
+        }
+        let blob = Digest::of(value.get().as_bytes());
+        let bytes = value.get().len() as u64;
+        let mut appended = Vec::new();
+        if self.writer.fold.values().blob(&blob).is_none() {
+            self.put_blob(&blob, &value)?;
+            let marker: StoredFact = Fact::Marker(Marker::Blob {
+                digest: blob,
+                bytes,
+            });
+            appended.push((self.append(marker.clone())?, marker));
+        }
+        let at = serde_json::value::to_raw_value(&CachedAt { blob, bytes }).map_err(encode)?;
         self.push(Record::Host {
             key: crate::fold::cache_key(state),
-            value,
-        })
+            value: at,
+        })?;
+        Ok(appended)
     }
 
     pub fn cache(&mut self, snapshot: &FoldSnapshot) -> Result<(), StoreError> {

@@ -9,6 +9,7 @@ use nanocode_durability_core::{
     BlobRef, Decision, Digest, EncodedPayload, Fact, FoldError, Input, InputKind, Marker,
     Outcome as FactOutcome, Snapshot, StoreError, StoredFact, TurnStatus, Value, Values,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use crate::{ArmedWake, EffectClass, Hold, Outcome, Record, Status, Wakes};
@@ -189,6 +190,22 @@ pub struct Retired {
 
 pub const RETIRED_KEY: &str = "$turnlog_retired";
 pub const FOLD_SNAPSHOT_KEY: &str = "$fold_snapshot";
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CachedAt {
+    pub blob: Digest,
+    pub bytes: u64,
+}
+
+pub enum CachedFold {
+    At(CachedAt),
+    Inline(Snapshot),
+}
+
+fn cached_at(value: &RawValue) -> Option<CachedAt> {
+    serde_json::from_str(value.get()).ok()
+}
 
 #[must_use]
 pub fn tag(text: &str) -> u128 {
@@ -2442,25 +2459,25 @@ impl Fold {
         if crate::sim::mutated(crate::sim::Mutation::CacheNeverDue) {
             return false;
         }
-        let cached = self
-            .hosts
-            .get(&cache_key(state))
-            .map_or(0, |value| value.get().len() as u64);
+        let cached = self.hosts.get(&cache_key(state)).map_or(0, |value| {
+            cached_at(value).map_or(value.get().len() as u64, |at| at.bytes)
+        });
         let ratio = crate::SNAPSHOT_RATIO as u64;
         self.uncached
             .get(state)
             .is_some_and(|bytes| *bytes > ratio * cached)
     }
 
-    pub fn cached_state(&self, state: &str) -> Result<Option<Snapshot>, StoreError> {
-        self.hosts
-            .get(&cache_key(state))
-            .map(|value| {
-                serde_json::from_str(value.get()).map_err(|error| {
-                    invalid(format!("cached fold of {state} does not decode: {error}"))
-                })
-            })
-            .transpose()
+    pub fn cached_state(&self, state: &str) -> Result<Option<CachedFold>, StoreError> {
+        let Some(value) = self.hosts.get(&cache_key(state)) else {
+            return Ok(None);
+        };
+        if let Some(at) = cached_at(value) {
+            return Ok(Some(CachedFold::At(at)));
+        }
+        serde_json::from_str(value.get())
+            .map(|snapshot| Some(CachedFold::Inline(snapshot)))
+            .map_err(|error| invalid(format!("cached fold of {state} does not decode: {error}")))
     }
 
     fn fact_bytes(&self, fact: &StoredFact) -> u64 {
