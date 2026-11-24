@@ -8,18 +8,20 @@
 //! drops a row a cursor still needs, and an uncertain append is checked, never re-run.
 
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet, HashMap},
     future::Future,
     num::NonZeroU32,
     ops::Range,
     pin::Pin,
     process::ExitCode,
-    sync::{Arc, Mutex},
+    sync::Arc,
     task::{Context, Poll},
 };
 
 use nanocode_durability_core::{StoreError, StoreFuture};
 use nanocode_partitions::Partition;
+use nanocode_sync::{Atom, OrdSet};
 use nanocode_turnlog::{
     LogHost,
     parted::{Entry, Fault, ModelParts, PartStore, PartedLog, sim as parted_sim},
@@ -88,7 +90,7 @@ impl Future for Yield {
     }
 }
 
-type Rung = Arc<Mutex<BTreeSet<(String, u64)>>>;
+type Rung = Arc<Atom<OrdSet<(String, u64)>>>;
 type Task<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
 
 /// Polls the tasks in a seeded random order until all finish; every wait in this scenario is a
@@ -226,7 +228,7 @@ async fn append_step(
     id: String,
     count: usize,
     value: i64,
-    ledger: &Mutex<Ledger>,
+    ledger: &RefCell<Ledger>,
 ) {
     let mut tries = 0;
     loop {
@@ -239,9 +241,7 @@ async fn append_step(
             .collect();
         let last = at + count as u64 - 1;
         let answer = node.log.append(scope, &rows).await;
-        let mut ledger = ledger
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut ledger = ledger.borrow_mut();
         ledger.stats.appends += 1;
         let step = |ack| Step {
             id: id.clone(),
@@ -304,7 +304,7 @@ async fn worker(
     index: usize,
     worker: usize,
     seed: u64,
-    ledger: &Mutex<Ledger>,
+    ledger: &RefCell<Ledger>,
 ) {
     let mut rng = Rng::derive(seed, &format!("plog worker {index}/{worker}"));
     let node = &nodes[index];
@@ -320,11 +320,7 @@ async fn worker(
                     .await
                     .is_ok()
                 {
-                    ledger
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .stats
-                        .claims += 1;
+                    ledger.borrow_mut().stats.claims += 1;
                 }
             }
             10..=14 => {
@@ -336,11 +332,7 @@ async fn worker(
                     && let Some((last, _)) = rows.last()
                     && let Ok(dropped) = node.log.prune(scope, *last).await
                 {
-                    ledger
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .stats
-                        .pruned += dropped;
+                    ledger.borrow_mut().stats.pruned += dropped;
                 }
             }
             24..=29 => follow(node, index, part, ledger).await,
@@ -354,7 +346,7 @@ async fn worker(
     }
 }
 
-async fn follow(node: &Node, index: usize, part: Partition, ledger: &Mutex<Ledger>) {
+async fn follow(node: &Node, index: usize, part: Partition, ledger: &RefCell<Ledger>) {
     let reader = format!("reader{index}");
     let mut after = node.log.store().cursor_of(part, &reader);
     loop {
@@ -371,10 +363,8 @@ async fn follow(node: &Node, index: usize, part: Partition, ledger: &Mutex<Ledge
     }
 }
 
-fn record(after: &mut u64, index: usize, entries: &[Entry], ledger: &Mutex<Ledger>) {
-    let mut ledger = ledger
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+fn record(after: &mut u64, index: usize, entries: &[Entry], ledger: &RefCell<Ledger>) {
+    let mut ledger = ledger.borrow_mut();
     for entry in entries {
         if entry.pos <= *after {
             ledger.wrong.push(format!(
@@ -403,8 +393,8 @@ fn run(seed: u64, mutation: PlogMutation, stats: &mut PlogStats) -> Result<u64, 
     let mut rng = Rng::derive(seed, "plog");
     let shape = Shape::of(&mut rng);
     let count = NonZeroU32::new(shape.parts).ok_or("no partitions")?;
-    let faults_rng = Arc::new(Mutex::new(Rng::derive(seed, "plog faults")));
-    let pause_rng = Arc::new(Mutex::new(Rng::derive(seed, "plog pauses")));
+    let faults_rng = Arc::new(Atom::new(Rng::derive(seed, "plog faults")));
+    let pause_rng = Arc::new(Atom::new(Rng::derive(seed, "plog pauses")));
     let (before, after) = (shape.before_ppm, shape.after_ppm);
     let model = Arc::new(
         ModelParts::new()
@@ -412,22 +402,18 @@ fn run(seed: u64, mutation: PlogMutation, stats: &mut PlogStats) -> Result<u64, 
                 if op != "commit" {
                     return Fault::None;
                 }
-                let mut rng = faults_rng
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if rng.chance(before) {
-                    Fault::Before
-                } else if rng.chance(after) {
-                    Fault::After
-                } else {
-                    Fault::None
-                }
+                faults_rng.update(|rng| {
+                    if rng.chance(before) {
+                        Fault::Before
+                    } else if rng.chance(after) {
+                        Fault::After
+                    } else {
+                        Fault::None
+                    }
+                })
             }))
             .with_sleep(Arc::new(move || -> StoreFuture<'static, ()> {
-                let yields = pause_rng
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .below(3);
+                let yields = pause_rng.update(|rng| rng.below(3));
                 Box::pin(async move {
                     for _ in 0..yields {
                         Yield(false).await;
@@ -436,7 +422,7 @@ fn run(seed: u64, mutation: PlogMutation, stats: &mut PlogStats) -> Result<u64, 
             })),
     );
     nanocode_sync::block_on(model.prepare(count)).map_err(|error| error.to_string())?;
-    let ledger = Mutex::new(Ledger {
+    let ledger = RefCell::new(Ledger {
         rung: vec![BTreeSet::new(); shape.nodes],
         ..Ledger::default()
     });
@@ -447,9 +433,7 @@ fn run(seed: u64, mutation: PlogMutation, stats: &mut PlogStats) -> Result<u64, 
                 .with_max_rows(shape.max_rows * 3);
             let rung = Arc::clone(&rungs[index]);
             log.set_ring(Arc::new(move |scope, head| {
-                rung.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert((scope.to_owned(), head));
+                rung.update(|rung| rung.insert((scope.to_owned(), head)));
             }));
             Node { log }
         })
@@ -479,14 +463,9 @@ fn run(seed: u64, mutation: PlogMutation, stats: &mut PlogStats) -> Result<u64, 
     parted_sim::mutate(PlogMutation::None);
     driven?;
     drained?;
-    let mut ledger = ledger
-        .into_inner()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut ledger = ledger.into_inner();
     for (index, rung) in rungs.iter().enumerate() {
-        ledger.rung[index] = rung
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        ledger.rung[index] = rung.read(|rung| rung.iter().cloned().collect());
     }
     let model_stats = model.stats();
     for node in &nodes {

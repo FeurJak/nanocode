@@ -8,7 +8,7 @@
 use std::{
     num::NonZeroU32,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -17,12 +17,13 @@ use std::{
 use nanocode_durability_core::{Sql, StoreError};
 use nanocode_partitions::Partition;
 use nanocode_store_sql::{PgOptions, PgPool, PgSql, log_wake};
+use nanocode_sync::SwapOption;
 use nanocode_turnlog::{
     LogHost,
     parted::{PartedLog, SqlParts},
 };
 
-static FIRST_ERROR: Mutex<Option<String>> = Mutex::new(None);
+static FIRST_ERROR: SwapOption<String> = SwapOption::const_empty();
 
 type Log = PartedLog<SqlParts<Counted>>;
 
@@ -272,19 +273,13 @@ fn measure(
     run: &str,
 ) {
     let stop = Arc::new(AtomicBool::new(false));
-    let latencies = Arc::new(Mutex::new(Vec::new()));
     let retries = Arc::new(AtomicU64::new(0));
     let trips_before = sql.trips.load(Ordering::Relaxed);
     let stats_before = log.stats();
     let started = Instant::now();
     let handles: Vec<_> = (0..workers)
         .map(|worker| {
-            let (log, stop, latencies, retries) = (
-                Arc::clone(log),
-                Arc::clone(&stop),
-                Arc::clone(&latencies),
-                Arc::clone(&retries),
-            );
+            let (log, stop, retries) = (Arc::clone(log), Arc::clone(&stop), Arc::clone(&retries));
             let scope = match kind {
                 Kind::Append => format!("bench/{run}/{workers}/{worker}"),
                 Kind::Claim => format!("claim/{run}"),
@@ -300,10 +295,9 @@ fn measure(
                                 .append(&scope, &[(next, format!("d{worker}#{next}:1"))])
                                 .await
                                 .inspect_err(|error| {
-                                    FIRST_ERROR
-                                        .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                        .get_or_insert_with(|| error.to_string());
+                                    FIRST_ERROR.rcu(|first| {
+                                        first.clone().or_else(|| Some(Arc::new(error.to_string())))
+                                    });
                                 })
                                 .is_ok()
                             {
@@ -336,25 +330,21 @@ fn measure(
                     }
                     mine.push(u64::try_from(began.elapsed().as_micros()).unwrap_or(u64::MAX));
                 }
-                latencies
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .extend(mine);
+                mine
             })
         })
         .collect();
+    let mut all = Vec::new();
     runtime.block_on(async {
         nanocode_executor::sleep(Duration::from_secs(seconds)).await;
         stop.store(true, Ordering::Relaxed);
         for handle in handles {
-            let _ = handle.await;
+            if let Ok(mine) = handle.await {
+                all.extend(mine);
+            }
         }
     });
     let elapsed = started.elapsed().as_secs_f64();
-    let mut all = latencies
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
     all.sort_unstable();
     let stats = log.stats();
     let commits = stats.commits - stats_before.commits;
@@ -373,10 +363,7 @@ fn measure(
         trips as f64 / ops.max(1.0),
         appends as f64 / (commits as f64).max(1.0),
         retries.load(Ordering::Relaxed),
-        FIRST_ERROR
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take(),
+        FIRST_ERROR.swap(None),
     );
 }
 
