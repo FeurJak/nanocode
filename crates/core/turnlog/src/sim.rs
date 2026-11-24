@@ -9,6 +9,7 @@ pub enum Mutation {
     PlacedInline,
     FencedServesReads,
     CellRootsSkipped,
+    HostUnbounded,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

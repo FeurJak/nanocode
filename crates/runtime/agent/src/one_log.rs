@@ -54,6 +54,7 @@ const STORED_MARK: &str = "$nanocode_stored";
 #[derive(Clone, Debug, Default)]
 pub struct Policy {
     pub effects: Effects,
+    pub host_call_bound: Option<std::time::Duration>,
     pub max_row_bytes: Option<usize>,
     pub max_tail_bytes: Option<usize>,
     pub restarts: u64,
@@ -331,11 +332,12 @@ impl OneLog {
     ) -> Result<Arc<Self>, StoreError> {
         let log = log
             .retain_finished(policy.retain_finished)
+            .host_calls_within(policy.host_call_bound)
             .row_limit(policy.max_row_bytes)
             .max_tail_bytes(policy.max_tail_bytes)
             .snapshot_ratio(policy.snapshot_ratio)
             .snapshot_rows(policy.snapshot_rows);
-        log.lease().await.retire_finished();
+        log.lease_within().await?.retire_finished();
         let recovering = log
             .read(|fold| {
                 fold.turns()
@@ -381,7 +383,7 @@ impl OneLog {
     }
 
     pub async fn settle_deferred(&self) -> Result<(), StoreError> {
-        let mut lease = self.log.lease().await;
+        let mut lease = self.log.lease_within().await?;
         if *self.owed.get() && lease.buffered() > 0 {
             lease.commit(Point::Progress).await?;
         } else {
@@ -392,7 +394,7 @@ impl OneLog {
     }
 
     async fn carried(&self, carried: Carried) -> Result<bool, StoreError> {
-        let mut lease = self.log.lease().await;
+        let mut lease = self.log.lease_within().await?;
         if !*self.owed.get() || lease.buffered() == 0 {
             self.owed.set(false);
             return Ok(false);
@@ -463,7 +465,7 @@ impl OneLog {
         next: impl FnOnce(Option<&Hold>) -> Result<Option<Hold>, LedgerError>,
     ) -> Result<(), LedgerError> {
         let journal = |error: StoreError| LedgerError::Journal(error.to_string());
-        let mut lease = self.log.lease().await;
+        let mut lease = self.log.lease_within().await.map_err(journal)?;
         let Some(hold) = next(lease.fold().hold(key))? else {
             return Ok(());
         };
@@ -492,7 +494,7 @@ impl OneLog {
     }
 
     async fn cells(&self, only: &str) -> Result<BTreeMap<String, Vec<CellJournal>>, StoreError> {
-        let mut lease = self.log.lease().await;
+        let mut lease = self.log.lease_within().await?;
         lease.load_owner(TOOLS_MARK).await?;
         lease.load_owner(only).await?;
         let mut shared = Vec::new();
@@ -564,14 +566,14 @@ impl OneLog {
     }
 
     pub async fn field(&self, key: &str, value: Box<RawValue>) -> Result<(), StoreError> {
-        self.log.lease().await.push(Record::Host {
+        self.log.lease_within().await?.push(Record::Host {
             key: key.to_owned(),
             value,
         })
     }
 
     pub async fn effect(&self, key: &str, value: Box<RawValue>) -> Result<u64, StoreError> {
-        let mut lease = self.log.lease().await;
+        let mut lease = self.log.lease_within().await?;
         lease.push(Record::Host {
             key: key.to_owned(),
             value,
@@ -590,7 +592,7 @@ impl OneLog {
     async fn admit(&self, submission: &Submission, durable: bool) -> Result<Submitted, StoreError> {
         let id = submission.request_id.as_str();
         let digest = submission_digest(&submission.prompt, submission.hand.as_deref())?;
-        let mut lease = self.log.lease().await;
+        let mut lease = self.log.lease_within().await?;
         if let Some(turn) = lease.fold().turn(id) {
             let record = record_of(turn)?;
             return Ok(if turn.digest == digest {
@@ -663,7 +665,7 @@ impl OneLog {
     }
 
     pub async fn append(&self, entries: &[LogEntry]) -> Result<Vec<LoggedEvent>, StoreError> {
-        let mut lease = self.log.lease().await;
+        let mut lease = self.log.lease_within().await?;
         lease.secure().await?;
         let mut events = Vec::with_capacity(entries.len());
         for entry in entries {
@@ -783,7 +785,7 @@ impl OneLog {
     }
 
     pub async fn start(&self, request_id: &str) -> Result<Option<Started>, StoreError> {
-        let mut lease = self.log.lease().await;
+        let mut lease = self.log.lease_within().await?;
         let Some(turn) = lease.fold().turn(request_id) else {
             return Ok(None);
         };
@@ -856,7 +858,7 @@ impl OneLog {
         state: TurnState,
         fields: &Map<String, Value>,
     ) -> Result<Option<(TurnRecord, LoggedEvent)>, StoreError> {
-        let mut lease = self.log.lease().await;
+        let mut lease = self.log.lease_within().await?;
         match lease.fold().turn(request_id).map(|turn| &turn.phase) {
             None | Some(Phase::Finished { .. }) => Ok(None),
             Some(_) => self
@@ -871,7 +873,7 @@ impl OneLog {
         request_id: &str,
         fields: &Map<String, Value>,
     ) -> Result<Option<(TurnRecord, Option<LoggedEvent>)>, StoreError> {
-        let mut lease = self.log.lease().await;
+        let mut lease = self.log.lease_within().await?;
         let Some(turn) = lease.fold().turn(request_id) else {
             drop(lease);
             let retired = self.retired_turn(request_id).await?;
@@ -904,7 +906,7 @@ impl OneLog {
         request_id: &str,
         digest: &str,
     ) -> Result<Option<(TurnRecord, LoggedEvent)>, StoreError> {
-        let mut lease = self.log.lease().await;
+        let mut lease = self.log.lease_within().await?;
         let queued = lease.fold().turn(request_id).is_some_and(|turn| {
             matches!(turn.phase, Phase::Queued { .. }) && turn.digest == digest
         });
@@ -921,7 +923,7 @@ impl OneLog {
     }
 
     pub async fn interrupted(&self, request_id: &str, note: &str) -> Result<(), StoreError> {
-        let mut lease = self.log.lease().await;
+        let mut lease = self.log.lease_within().await?;
         let running = lease
             .fold()
             .turn(request_id)
@@ -944,7 +946,7 @@ impl OneLog {
         kind: &str,
         retry_at: u64,
     ) -> Result<Option<(TurnRecord, Option<LoggedEvent>)>, StoreError> {
-        let mut lease = self.log.lease().await;
+        let mut lease = self.log.lease_within().await?;
         let Some(turn) = lease.fold().turn(request_id) else {
             drop(lease);
             let retired = self.retired_turn(request_id).await?;
@@ -997,7 +999,7 @@ impl OneLog {
         if turns.is_empty() {
             return Ok(0);
         }
-        let mut lease = self.log.lease().await;
+        let mut lease = self.log.lease_within().await?;
         let mut imported = false;
         let mut highest = 0;
         for turn in turns {
@@ -1088,7 +1090,7 @@ impl OneLog {
             }
             previous = event.seq;
         }
-        let mut lease = self.log.lease().await;
+        let mut lease = self.log.lease_within().await?;
         let ends = lease.fold().ends();
         if ends < after {
             return Err(StoreError::NotCommitted(format!(
@@ -1154,7 +1156,7 @@ impl OneLog {
             ));
         }
         let edit = submission_digest(&Prompt::new(text), None)?;
-        let mut lease = self.log.lease().await;
+        let mut lease = self.log.lease_within().await?;
         let Some(turn) = lease.fold().turn(request_id) else {
             return Ok(Replaced::NotQueued);
         };
@@ -1290,7 +1292,11 @@ impl OneLog {
     }
 
     async fn recorded(&self, recording: Recording<'_>) -> Result<Vec<LoggedEvent>, String> {
-        let mut lease = self.log.lease().await;
+        let mut lease = self
+            .log
+            .lease_within()
+            .await
+            .map_err(|error| error.to_string())?;
         lease.secure().await.map_err(|error| error.to_string())?;
         let mut logged_events = Vec::with_capacity(recording.events.len());
         for (event, request_id) in recording.events.iter().zip(recording.request_ids) {
@@ -1396,7 +1402,11 @@ impl EffectGate for OneLog {
     fn before<'a>(&'a self, call: EffectCall<'a>) -> HostFuture<'a, Result<(), String>> {
         Box::pin(async move {
             let input = tool_input(call.input).map_err(|error| error.to_string())?;
-            let mut lease = self.log.lease().await;
+            let mut lease = self
+                .log
+                .lease_within()
+                .await
+                .map_err(|error| error.to_string())?;
             lease
                 .push(Record::Call {
                     call_id: call.call_id.to_owned(),
@@ -1428,7 +1438,14 @@ impl EffectGate for OneLog {
             let Ok(output) = raw(&json!({"success": output.success})) else {
                 return;
             };
-            if let Err(error) = self.log.lease().await.push(Record::Result {
+            let mut lease = match self.log.lease_within().await {
+                Ok(lease) => lease,
+                Err(error) => {
+                    nanocode_trace::warn!(%error, call_id, "turn log could not record a tool result");
+                    return;
+                }
+            };
+            if let Err(error) = lease.push(Record::Result {
                 call_id: call_id.to_owned(),
                 output,
             }) {
@@ -1567,7 +1584,11 @@ impl CellJournalSink for OneLogJournals {
                 })
                 .collect::<Result<Vec<_>, StoreError>>()
                 .map_err(|error| error.to_string())?;
-            let mut lease = log.log.lease().await;
+            let mut lease = log
+                .log
+                .lease_within()
+                .await
+                .map_err(|error| error.to_string())?;
             lease
                 .load_owner(TOOLS_MARK)
                 .await
@@ -1709,7 +1730,13 @@ impl CellJournalSink for OneLogJournals {
             .live
             .update(|live| live.remove(&(session.clone(), cell_id)));
         Box::pin(async move {
-            let mut lease = log.log.lease().await;
+            let mut lease = match log.log.lease_within().await {
+                Ok(lease) => lease,
+                Err(error) => {
+                    nanocode_trace::warn!(%error, "turn log could not load a cell journal to forget");
+                    return;
+                }
+            };
             if let Err(error) = lease.load_owners(std::slice::from_ref(&session)).await {
                 nanocode_trace::warn!(%error, "turn log could not load a cell journal to forget");
                 return;
@@ -1749,8 +1776,9 @@ impl CellJournalSink for OneLogJournals {
         let key = stored_key(session_id, STORED_MARK);
         Box::pin(async move {
             log.log
-                .lease()
+                .lease_within()
                 .await
+                .map_err(|error| error.to_string())?
                 .push(Record::Stored { key, value: stored })
                 .map_err(|error| error.to_string())
         })
@@ -1936,7 +1964,7 @@ impl StateStore for OneLogStore {
         owner_id: OwnerId,
     ) -> StoreFuture<'a, Result<OwnedState, StoreError>> {
         Box::pin(async move {
-            let mut lease = self.0.log.lease().await;
+            let mut lease = self.0.log.lease_within().await?;
             lease.load_owners(&[state_id.to_owned()]).await?;
             let owner = self.0.owners.update(|owners| {
                 let fence = owners.get(state_id).map_or(0, OwnerToken::fence) + 1;
@@ -1960,7 +1988,7 @@ impl StateStore for OneLogStore {
         records: &'a [StoreRecord],
     ) -> StoreFuture<'a, Result<u64, StoreError>> {
         Box::pin(async move {
-            let mut lease = self.0.log.lease().await;
+            let mut lease = self.0.log.lease_within().await?;
             lease.load_owners(&owned(state_id, records)).await?;
             let revision = self.replaced(
                 &mut lease,
@@ -1990,7 +2018,7 @@ impl StateStore for OneLogStore {
                     "this store does not record state events".to_owned(),
                 ));
             }
-            let mut lease = self.0.log.lease().await;
+            let mut lease = self.0.log.lease_within().await?;
             lease.load_owners(&owned(state_id, commit.records)).await?;
             let revision = self.replaced(
                 &mut lease,
@@ -2020,14 +2048,18 @@ impl StateStore for OneLogStore {
         state_id: &'a str,
     ) -> StoreFuture<'a, Result<(), StoreError>> {
         Box::pin(async move {
-            self.0.log.lease().await.collect_unreachable(state_id);
+            self.0
+                .log
+                .lease_within()
+                .await?
+                .collect_unreachable(state_id);
             Ok(())
         })
     }
 
     fn flush(&mut self) -> StoreFuture<'_, Result<(), StoreError>> {
         Box::pin(async move {
-            let mut lease = self.0.log.lease().await;
+            let mut lease = self.0.log.lease_within().await?;
             if lease.buffered() > 0 {
                 lease.commit(Point::Progress).await?;
             }
@@ -2041,7 +2073,7 @@ impl StateStore for OneLogStore {
         records: &'a [StoreRecord],
     ) -> StoreFuture<'a, Result<bool, StoreError>> {
         Box::pin(async move {
-            let mut lease = self.0.log.lease().await;
+            let mut lease = self.0.log.lease_within().await?;
             lease.load_owners(&owned(state_id, records)).await?;
             put(&mut lease, state_id, records)?;
             Ok(true)
