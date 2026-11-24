@@ -25,6 +25,13 @@ pub trait EffectGate: Send + Sync + 'static {
     fn settle(&self) -> HostFuture<'_, Result<(), String>> {
         Box::pin(async { Ok(()) })
     }
+
+    fn abandon<'a>(
+        &'a self,
+        _call_id: &'a str,
+    ) -> HostFuture<'a, Result<Option<ToolOutput>, String>> {
+        Box::pin(async { Ok(None) })
+    }
 }
 
 pub(crate) async fn gated<'c, E, F>(

@@ -41,6 +41,7 @@ const SWAP_PPM: u64 = 300_000;
 const HOST_PPM: u64 = 100_000;
 const CANCEL_PPM: u64 = 100_000;
 const STRAY_PPM: u64 = 50_000;
+const ABANDON_PPM: u64 = 50_000;
 const HOST_KEYS: u64 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,10 +60,11 @@ pub enum OneLogFactsMutation {
     CancelLeavesIntent,
     ScopedInputLowered,
     IntentOptional,
+    AbandonUnsettled,
 }
 
 impl OneLogFactsMutation {
-    const ALL: [Self; 14] = [
+    const ALL: [Self; 15] = [
         Self::None,
         Self::FoldReadsUnlogged,
         Self::CommitBuffered,
@@ -77,6 +79,7 @@ impl OneLogFactsMutation {
         Self::CancelLeavesIntent,
         Self::ScopedInputLowered,
         Self::IntentOptional,
+        Self::AbandonUnsettled,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -101,6 +104,7 @@ impl OneLogFactsMutation {
             Self::CancelLeavesIntent => "cancel_leaves_intent",
             Self::ScopedInputLowered => "scoped_input_lowered",
             Self::IntentOptional => "intent_optional",
+            Self::AbandonUnsettled => "abandon_unsettled",
         }
     }
 
@@ -124,6 +128,7 @@ impl OneLogFactsMutation {
             Self::HostCopied => facts_sim::Mutation::HostCopied,
             Self::CancelLeavesIntent => facts_sim::Mutation::CancelLeavesIntent,
             Self::IntentOptional => facts_sim::Mutation::IntentOptional,
+            Self::AbandonUnsettled => facts_sim::Mutation::AbandonUnsettled,
             Self::None
             | Self::FoldReadsUnlogged
             | Self::CacheNeverDue
@@ -151,6 +156,7 @@ pub struct OneLogFactsStats {
     pub hosts: u64,
     pub cancelled: u64,
     pub refused: u64,
+    pub abandoned: u64,
 }
 
 impl OneLogFactsStats {
@@ -172,6 +178,7 @@ impl OneLogFactsStats {
         self.hosts += other.hosts;
         self.cancelled += other.cancelled;
         self.refused += other.refused;
+        self.abandoned += other.abandoned;
     }
 }
 
@@ -722,6 +729,53 @@ impl World {
         self.turns_hold()
     }
 
+    fn abandon(&mut self, rng: &mut Rng) -> Result<(), String> {
+        if self.outputs.is_empty() {
+            return Ok(());
+        }
+        self.calls += 1;
+        let call_id = format!("abandoned-{}", self.calls);
+        let model_out = self.outputs[rng.pick(self.outputs.len())];
+        let block = u32::try_from(rng.below(BLOCKS)).expect("a block index fits in u32");
+        let intent = Fact::Intent(Intent {
+            turn: Some(format!("direct-{}", self.calls)),
+            call_id: call_id.clone(),
+            tool: TOOL.to_owned(),
+            target: IntentTarget::ToolUse(BlockRef { model_out, block }),
+        });
+        let live = self.live.take().expect("the facts fold is live");
+        let (live, _) = block_on(commit_fact(self.facts(), live, intent))
+            .map_err(|error| format!("commit the intent of {call_id}: {error}"))?;
+        self.live = Some(live);
+        self.expected += 1;
+        self.durable = self.expected;
+        let log = Arc::clone(self.log.as_ref().expect("the facts log is open"));
+        let settled = block_on(log.gate().abandon(&call_id))
+            .map_err(|error| format!("abandon {call_id}: {error}"))?;
+        if settled.is_none_or(|output| output.success) {
+            return Err(format!(
+                "abandoning intended call {call_id} returned no unknown outcome"
+            ));
+        }
+        let open = block_on(log.read(|fold| fold.intent(&call_id).is_some()));
+        if open {
+            return Err(format!("abandoned call {call_id} has no durable result"));
+        }
+        let again = block_on(log.gate().abandon(&call_id))
+            .map_err(|error| format!("abandon {call_id} again: {error}"))?;
+        if again.is_some() {
+            return Err(format!("abandoned call {call_id} was settled twice"));
+        }
+        self.expected += 1;
+        self.durable = self.expected;
+        self.stats.abandoned += 1;
+        self.live = Some(
+            block_on(fold_facts::<Ledger>(self.facts()))
+                .map_err(|error| format!("refold after abandoning: {error}"))?,
+        );
+        self.check()
+    }
+
     fn stray(&mut self) -> Result<(), String> {
         let log = Arc::clone(self.log.as_ref().expect("the facts log is open"));
         if !block_on(log.read(|fold| fold.logs_facts(SCOPE))) {
@@ -827,6 +881,9 @@ impl World {
         }
         if rng.chance(STRAY_PPM) {
             self.stray()?;
+        }
+        if rng.chance(ABANDON_PPM) {
+            self.abandon(rng)?;
         }
         match rng.below(100) {
             0..88 => self.commit(rng),

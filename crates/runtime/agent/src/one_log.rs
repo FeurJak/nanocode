@@ -832,6 +832,7 @@ impl OneLog {
                 state.as_str()
             )));
         };
+        settle_stopped(lease, request_id)?;
         let body = raw(&Finished {
             kind: "result",
             request_id,
@@ -1573,6 +1574,17 @@ impl EffectGate for OneLog {
     fn settle(&self) -> HostFuture<'_, Result<(), String>> {
         Box::pin(async move {
             self.settle_deferred()
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn abandon<'a>(
+        &'a self,
+        call_id: &'a str,
+    ) -> HostFuture<'a, Result<Option<ToolOutput>, String>> {
+        Box::pin(async move {
+            self.abandoned(call_id)
                 .await
                 .map_err(|error| error.to_string())
         })

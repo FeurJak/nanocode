@@ -33,10 +33,11 @@ pub mod sim {
         HostCopied,
         CancelLeavesIntent,
         IntentOptional,
+        AbandonUnsettled,
     }
 
     impl Mutation {
-        pub const ALL: [Self; 10] = [
+        pub const ALL: [Self; 11] = [
             Self::CommitBuffered,
             Self::UnseenSkipped,
             Self::IntentReplayed,
@@ -47,6 +48,7 @@ pub mod sim {
             Self::HostCopied,
             Self::CancelLeavesIntent,
             Self::IntentOptional,
+            Self::AbandonUnsettled,
         ];
 
         #[must_use]
@@ -63,6 +65,7 @@ pub mod sim {
                 Self::HostCopied => "host_copied",
                 Self::CancelLeavesIntent => "cancel_leaves_intent",
                 Self::IntentOptional => "intent_optional",
+                Self::AbandonUnsettled => "abandon_unsettled",
             }
         }
 
@@ -369,6 +372,28 @@ pub(super) fn settle(
 }
 
 impl OneLog {
+    pub(super) async fn abandoned(&self, call_id: &str) -> Result<Option<ToolOutput>, StoreError> {
+        let mut lease = self.log.lease_within().await?;
+        let Some(state) = lease
+            .fold()
+            .intents()
+            .find(|(open, _, _)| *open == call_id)
+            .map(|(_, state, _)| state.map(str::to_owned))
+        else {
+            return Ok(None);
+        };
+        if sim::mutated(sim::Mutation::AbandonUnsettled) {
+            return Ok(Some(ToolOutput::error(UNKNOWN_OUTCOME)));
+        }
+        let result: OwnedFact<Box<RawValue>> = Fact::EffectResult(EffectResult {
+            call_id: call_id.to_owned(),
+            output: unknown_outcome()?,
+        });
+        lease.append_owned(state.as_deref(), &result)?;
+        lease.commit(Point::Cancel).await?;
+        Ok(Some(ToolOutput::error(UNKNOWN_OUTCOME)))
+    }
+
     pub async fn settle_intents(&self, turn: &str) -> Result<Vec<String>, StoreError> {
         let mut lease = self.log.lease_within().await?;
         lease.secure().await?;

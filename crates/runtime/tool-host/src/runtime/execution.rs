@@ -27,6 +27,13 @@ enum RuntimeControl {
 }
 
 impl ToolRuntime {
+    pub async fn abandon(&self, call_id: &str) -> Result<Option<ToolOutput>, String> {
+        match &self.effect_gate {
+            Some(gate) => gate.abandon(call_id).await,
+            None => Ok(None),
+        }
+    }
+
     async fn barrier(&self) -> Result<(), CodeModeHostError> {
         let Some(gate) = &self.effect_gate else {
             return Ok(());
