@@ -61,6 +61,7 @@ nanocode-live.workspace = true
 nanocode-live-fold.workspace = true
 nanocode-tool-runtime.workspace = true
 nanocode-websocket.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 nanocode-trace.workspace = true
 

@@ -22,6 +22,7 @@ mod drive;
 #[cfg(unix)]
 mod egress;
 mod executor;
+mod facts;
 mod faults;
 mod gcunwind;
 mod gitremote;
@@ -30,9 +31,9 @@ mod handrouter;
 mod hands;
 mod holds;
 mod host;
-mod imports;
 mod httpd;
 mod httpserver;
+mod imports;
 mod inboxstress;
 mod interpdrop;
 mod live;
@@ -91,15 +92,16 @@ use crate::{
     controlplane::{ControlplaneMutation, ControlplaneStats},
     cost::{CostMutation, CostStats},
     dispatcher::{DispatcherMutation, DispatcherStats},
+    facts::FactsMutation,
     gcunwind::{GcUnwindMutation, GcUnwindStats},
     gitremote::{GitRemoteMutation, GitRemoteStats},
     handauto::{HandAutoMutation, HandAutoStats},
-    imports::{ImportsMutation, ImportsStats},
     handrouter::{HandRouterMutation, HandRouterStats},
     hands::{HandsMutation, HandsStats},
     holds::{HoldsMutation, HoldsStats},
     httpd::WireMutation,
     httpserver::{HttpServerMutation, HttpServerStats},
+    imports::{ImportsMutation, ImportsStats},
     inboxstress::InboxStressStats,
     interpdrop::{InterpDropMutation, InterpDropStats},
     live::{LiveMutation, LiveStats},
@@ -110,10 +112,10 @@ use crate::{
     onelog::{LiveSeqs, Protections},
     partitions::{PartitionsMutation, PartitionsStats},
     plog::{PlogMutation, PlogStats},
-    secrets::{SecretsMutation, SecretsStats},
     repocache::{RepoCacheMutation, RepoCacheStats},
     requestclose::RequestCloseStats,
     scale::{ScaleConfig, ScaleLoad, ScaleMutation, ScaleStats},
+    secrets::{SecretsMutation, SecretsStats},
     simulate::{Options, run_seed},
     steercarry::{CarryMutation, CarryStats},
     store::Mutation,
@@ -164,6 +166,7 @@ enum Scenario {
     Secrets,
     Wakes,
     Imports,
+    Facts,
     BoardShards,
     HandRouter,
     WorkspaceHost,
@@ -219,6 +222,7 @@ struct Args {
     secrets: SecretsMutation,
     wakes: WakesMutation,
     imports: ImportsMutation,
+    facts: FactsMutation,
     board_shards: ShardsMutation,
     hand_router: HandRouterMutation,
     workspace_host: WorkspaceHostMutation,
@@ -254,7 +258,7 @@ type Caught = BTreeMap<Invariant, (u64, u64, (u64, u64))>;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|steer_carry|inbox_stress|capture|executor|dns|board|board_shards|controlplane|cost|plog|secrets|wakes|imports|hand_router|workspace_host|board_sync|dispatcher|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|workspace_crash|live|partitions|scale|gc_unwind|interp_drop|holds] [--ops N] [--twice] [--seed-lines] [--jobs N] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
+        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|steer_carry|inbox_stress|capture|executor|dns|board|board_shards|controlplane|cost|plog|secrets|wakes|imports|facts|hand_router|workspace_host|board_sync|dispatcher|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|workspace_crash|live|partitions|scale|gc_unwind|interp_drop|holds] [--ops N] [--twice] [--seed-lines] [--jobs N] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
        websocket: [--mutation {}]
        http_server: [--mutation {}]
        alloc: [--mutation overstate_size|forget_free|scribble]
@@ -275,6 +279,7 @@ fn usage() -> ExitCode {
        secrets: [--mutation {}]
        wakes: [--mutation {}]
        imports: [--mutation {}]
+       facts: [--mutation {}]
        board_shards: [--mutation {}] | --board-shards-bench [RTT_US [ROW_US [BATCH [PARTITIONS [WRITERS]]]]]
        hand_router: [--mutation {}]
        board_sync: [--mutation {}]
@@ -314,6 +319,7 @@ fn usage() -> ExitCode {
         secrets::names(),
         wakes::names(),
         imports::names(),
+        facts::names(),
         ShardsMutation::names(),
         HandRouterMutation::names(),
         BoardSyncMutation::names(),
@@ -395,6 +401,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
     let mut secrets = SecretsMutation::None;
     let mut wakes = WakesMutation::None;
     let mut imports = ImportsMutation::None;
+    let mut facts = FactsMutation::None;
     let mut board_shards = ShardsMutation::None;
     let mut hand_router = HandRouterMutation::None;
     let mut workspace_host = WorkspaceHostMutation::None;
@@ -497,6 +504,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
                     "secrets" => Scenario::Secrets,
                     "wakes" => Scenario::Wakes,
                     "imports" => Scenario::Imports,
+                    "facts" => Scenario::Facts,
                     "board_shards" => Scenario::BoardShards,
                     "hand_router" => Scenario::HandRouter,
                     "workspace_host" => Scenario::WorkspaceHost,
@@ -572,6 +580,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         (Scenario::Secrets, Some(name)) => secrets = SecretsMutation::parse(name)?,
         (Scenario::Wakes, Some(name)) => wakes = WakesMutation::parse(name)?,
         (Scenario::Imports, Some(name)) => imports = ImportsMutation::parse(name)?,
+        (Scenario::Facts, Some(name)) => facts = FactsMutation::parse(name)?,
         (Scenario::BoardShards, Some(name)) => board_shards = ShardsMutation::parse(name)?,
         (Scenario::HandRouter, Some(name)) => hand_router = HandRouterMutation::parse(name)?,
         (Scenario::Partitions, Some(name)) => partitions = PartitionsMutation::parse(name)?,
@@ -655,6 +664,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         secrets,
         wakes,
         imports,
+        facts,
         board_shards,
         hand_router,
         workspace_host,
@@ -777,6 +787,9 @@ fn scenario_replay(seed: u64, args: &Args) -> String {
     }
     if args.scenario == Scenario::Imports {
         return imports::replay(seed, args.imports);
+    }
+    if args.scenario == Scenario::Facts {
+        return facts::replay(seed, args.facts);
     }
     if args.scenario == Scenario::HandRouter {
         return handrouter::replay(seed, args.hand_router);
@@ -1176,6 +1189,7 @@ fn mutations() -> ExitCode {
     add("secrets", secrets::names());
     add("wakes", wakes::names());
     add("imports", imports::names());
+    add("facts", facts::names());
     add("board_shards", ShardsMutation::names());
     add("hand_router", HandRouterMutation::names());
     add("workspace_host", WorkspaceHostMutation::names());
@@ -1499,6 +1513,7 @@ fn judge_one(seed: u64, args: &Args, totals: &mut Totals, caught: &mut Caught) -
             args.options.verbose,
             &mut totals.wakes_totals,
         ),
+        Scenario::Facts => facts::judge(seed, args.facts, args.twice, args.options.verbose),
         Scenario::Imports => imports::judge(
             seed,
             args.imports,
@@ -1826,6 +1841,7 @@ fn main() -> ExitCode {
         || (args.scenario == Scenario::Secrets && args.secrets != SecretsMutation::None)
         || (args.scenario == Scenario::Wakes && args.wakes != WakesMutation::None)
         || (args.scenario == Scenario::Imports && args.imports != ImportsMutation::None)
+        || (args.scenario == Scenario::Facts && args.facts != FactsMutation::None)
         || (args.scenario == Scenario::BoardShards && args.board_shards != ShardsMutation::None)
         || (args.scenario == Scenario::HandRouter && args.hand_router != HandRouterMutation::None)
         || (args.scenario == Scenario::Partitions && args.partitions != PartitionsMutation::None)
@@ -2086,6 +2102,9 @@ fn main() -> ExitCode {
             args.wakes,
             &wakes_totals,
         );
+    }
+    if args.scenario == Scenario::Facts {
+        return facts::report(&args.seeds, passed, failed, args.twice, args.facts);
     }
     if args.scenario == Scenario::Imports {
         return imports::report(

@@ -1215,6 +1215,7 @@ dependencies = [
  "nanocode-workspace",
  "nanocode-workspace-fs",
  "rustls",
+ "serde",
  "serde_json",
 ]
 
