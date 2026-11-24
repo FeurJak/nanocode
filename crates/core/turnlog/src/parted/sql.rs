@@ -260,11 +260,16 @@ fn result(answer: &[Vec<SqlRow>], index: usize) -> Result<&Vec<SqlRow>, StoreErr
         .ok_or_else(|| invalid(format!("no result {index}")))
 }
 
-fn data(postgres: bool, body: &str) -> Option<String> {
-    postgres
-        .then(|| crate::codec::binary(body))
-        .flatten()
-        .map(|(_, padded)| padded)
+fn data(postgres: bool, rows: &[(u64, String)]) -> Vec<(u64, &str, Option<String>)> {
+    let payloads = if postgres {
+        crate::codec::binaries(rows)
+    } else {
+        vec![None; rows.len()]
+    };
+    rows.iter()
+        .zip(payloads)
+        .map(|((seq, body), payload)| (*seq, body.as_str(), payload.map(|(_, padded)| padded)))
+        .collect()
 }
 
 type Compacted<'a> = (
@@ -289,11 +294,7 @@ fn compacting(
                 .rows
                 .first()
                 .expect("a compacting append carries rows");
-            let archived = compaction
-                .archived
-                .iter()
-                .map(|(seq, body)| (*seq, body.as_str(), data(true, body)))
-                .collect();
+            let archived = data(true, compaction.archived);
             let ranges = std::iter::once(&compaction.dropped)
                 .chain(compaction.superseded)
                 .filter(|range| !range.is_empty())
@@ -333,11 +334,7 @@ impl<H: Sql + Send + Sync + ?Sized> SqlParts<H> {
             .map(|append| {
                 (
                     append.scope.as_ref(),
-                    append
-                        .rows
-                        .iter()
-                        .map(|(seq, body)| (*seq, body.as_str(), data(postgres, body)))
-                        .collect(),
+                    data(postgres, &append.rows),
                 )
             })
             .collect();
@@ -539,16 +536,14 @@ impl<H: Sql + Send + Sync + ?Sized> PartStore for SqlParts<H> {
                     )
                 })
                 .collect();
-            let payloads: Vec<Option<String>> = compaction
-                .archived
-                .iter()
-                .map(|(_, body)| {
-                    self.postgres()
-                        .then(|| crate::codec::binary(body))
-                        .flatten()
-                        .map(|(_, padded)| padded)
-                })
-                .collect();
+            let payloads: Vec<Option<String>> = if self.postgres() {
+                crate::codec::binaries(compaction.archived)
+                    .into_iter()
+                    .map(|payload| payload.map(|(_, padded)| padded))
+                    .collect()
+            } else {
+                vec![None; compaction.archived.len()]
+            };
             let mut statements = Vec::new();
             for (((_, body), seq), payload) in compaction.archived.iter().zip(&seqs).zip(&payloads)
             {
@@ -590,7 +585,7 @@ impl<H: Sql + Send + Sync + ?Sized> PartStore for SqlParts<H> {
                 extension.cut.to_string(),
             );
             let binary = self.postgres().then(|| {
-                let tail = crate::codec::padded(extension.tail)
+                let tail = crate::codec::tail(extension.tail)
                     .expect("an extension's tail is one whole row's encoding");
                 (crate::codec::decoded_bytes(extension.cut).to_string(), tail)
             });

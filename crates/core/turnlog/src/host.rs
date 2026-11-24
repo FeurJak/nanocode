@@ -239,17 +239,18 @@ impl<H: Sql + ?Sized> SqlLog<H> {
     }
 
     fn stored<'a>(&self, rows: &'a [(u64, String)], compaction: &Compaction<'a>) -> Stored<'a> {
-        let binary = self.binary();
-        let (seqs, payloads) = rows
+        let seqs = rows
             .iter()
             .chain(compaction.archived)
-            .map(|(seq, body)| {
-                (
-                    seq.to_string(),
-                    binary.then(|| crate::codec::binary(body)).flatten(),
-                )
-            })
-            .unzip();
+            .map(|(seq, _)| seq.to_string())
+            .collect();
+        let payloads = if self.binary() {
+            let mut payloads = crate::codec::binaries(rows);
+            payloads.extend(crate::codec::binaries(compaction.archived));
+            payloads
+        } else {
+            vec![None; rows.len() + compaction.archived.len()]
+        };
         let ranges = std::iter::once(&compaction.dropped)
             .chain(compaction.superseded)
             .filter(|range| !range.is_empty())
@@ -321,7 +322,7 @@ impl<H: Sql + ?Sized> SqlLog<H> {
 
     fn numbers(&self, extension: &Extension<'_>) -> Extending {
         let binary = self.binary().then(|| {
-            let tail = crate::codec::padded(extension.tail)
+            let tail = crate::codec::tail(extension.tail)
                 .expect("an extension's tail is one whole row's encoding");
             (crate::codec::decoded_bytes(extension.cut).to_string(), tail)
         });

@@ -3,7 +3,7 @@ use nanocode_compression::{
     inflate::{Inflate, InflateFlush, InflateStatus},
 };
 use nanocode_durability_core::StoreError;
-use nanocode_sys::base64::STANDARD_NO_PAD;
+use nanocode_sys::base64::{STANDARD, STANDARD_NO_PAD};
 
 pub(crate) const WINDOW: usize = 1 << WINDOW_BITS;
 const WINDOW_BITS: i32 = 15;
@@ -16,6 +16,26 @@ const EMPTY_STORED_BLOCK: [u8; 5] = [0x00, 0x00, 0x00, 0xff, 0xff];
 const BASE64_GROUP: usize = 3;
 const BASE64_CHARS: usize = 4;
 pub(crate) const SEAL: usize = (FINAL_EMPTY_BLOCK.len() * BASE64_CHARS).div_ceil(BASE64_GROUP);
+const BASE85_GROUP: usize = 4;
+const BASE85_CHARS: usize = 5;
+const BASE85_RADIX: u64 = 85;
+const BASE85_ALPHABET: &[u8; BASE85_RADIX as usize] =
+    b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?&<>()[]{}@%$#";
+const NOT_BASE85: u8 = u8::MAX;
+const BASE85_DIGITS: [u8; 1 << BYTE_BITS] = {
+    let mut digits = [NOT_BASE85; 1 << BYTE_BITS];
+    let mut index = 0;
+    while index < BASE85_ALPHABET.len() {
+        digits[BASE85_ALPHABET[index] as usize] = index as u8;
+        index += 1;
+    }
+    digits
+};
+const BASE85_TOP_DIGIT: u64 = BASE85_RADIX - 1;
+const _: () = assert!(FINAL_EMPTY_BLOCK.len() < BASE85_GROUP);
+const _: () = assert!(SEAL == FINAL_EMPTY_BLOCK.len() + 1);
+const _: () = assert!(EMPTY_STORED_BLOCK.len() % BASE85_GROUP == 1);
+pub(crate) const SEGMENT: char = '~';
 
 pub(crate) const ARCHIVE: char = 'a';
 pub(crate) const RECORDS: char = 'r';
@@ -117,10 +137,63 @@ fn compressor(level: i32, dictionary: &[u8]) -> Result<Deflate, StoreError> {
 }
 
 fn encode(tag: char, compressed: &[u8]) -> String {
-    let mut body = String::with_capacity(1 + compressed.len().div_ceil(3) * 4);
+    let mut body = String::with_capacity(
+        tag.len_utf8()
+            + SEGMENT.len_utf8()
+            + compressed.len().div_ceil(BASE85_GROUP) * BASE85_CHARS,
+    );
     body.push(tag);
-    STANDARD_NO_PAD.encode_string(compressed, &mut body);
+    body.push(SEGMENT);
+    let mut chars = [0; BASE85_CHARS];
+    for group in compressed.chunks(BASE85_GROUP) {
+        let mut word = [0; BASE85_GROUP];
+        word[..group.len()].copy_from_slice(group);
+        let mut value = u64::from(u32::from_be_bytes(word));
+        for char in chars.iter_mut().rev() {
+            *char = BASE85_ALPHABET[usize::try_from(value % BASE85_RADIX).expect("a digit")];
+            value /= BASE85_RADIX;
+        }
+        assert_eq!(value, 0, "four bytes fit five base85 digits");
+        for &char in &chars[..=group.len()] {
+            body.push(char::from(char));
+        }
+    }
     body
+}
+
+fn base85(segment: &str, bytes: &mut Vec<u8>) -> Result<(), StoreError> {
+    for group in segment.as_bytes().chunks(BASE85_CHARS) {
+        if group.len() == 1 {
+            return Err(failed("decoding", "a base85 group holds one character"));
+        }
+        let mut value: u64 = 0;
+        for index in 0..BASE85_CHARS {
+            let digit = match group.get(index) {
+                Some(&char) => match BASE85_DIGITS[usize::from(char)] {
+                    NOT_BASE85 => return Err(failed("decoding", "a character is not base85")),
+                    digit => u64::from(digit),
+                },
+                None => BASE85_TOP_DIGIT,
+            };
+            value = value * BASE85_RADIX + digit;
+        }
+        let word = u32::try_from(value)
+            .map_err(|_| failed("decoding", "a base85 group overflows four bytes"))?;
+        bytes.extend_from_slice(&word.to_be_bytes()[..group.len() - 1]);
+    }
+    Ok(())
+}
+
+fn decoded(text: &str) -> Result<Vec<u8>, StoreError> {
+    let mut segments = text.split(SEGMENT);
+    let first = segments.next().unwrap_or_default();
+    let mut bytes = STANDARD_NO_PAD
+        .decode(first)
+        .map_err(|error| failed("decoding", &error.to_string()))?;
+    for segment in segments {
+        base85(segment, &mut bytes)?;
+    }
+    Ok(bytes)
 }
 
 pub(crate) fn pack(
@@ -286,7 +359,7 @@ impl Stream {
                 return Err(failed("compression", "no progress"));
             }
         }
-        while !compressed.len().is_multiple_of(BASE64_GROUP) {
+        while !compressed.len().is_multiple_of(BASE85_GROUP) {
             compressed.extend_from_slice(&EMPTY_STORED_BLOCK);
         }
         compressed.extend_from_slice(&FINAL_EMPTY_BLOCK);
@@ -295,22 +368,24 @@ impl Stream {
 }
 
 pub(crate) fn extensible(body: &str) -> bool {
-    body.starts_with(RECORDS)
-        && body.len() > 1 + SEAL
-        && (body.len() - 1 - SEAL).is_multiple_of(BASE64_CHARS)
+    if !body.starts_with(RECORDS) {
+        return false;
+    }
+    match body.rsplit_once(SEGMENT) {
+        Some((_, last)) => last.len() > SEAL && (last.len() - SEAL).is_multiple_of(BASE85_CHARS),
+        None => {
+            body.len() > RECORDS.len_utf8() + SEAL
+                && (body.len() - RECORDS.len_utf8() - SEAL).is_multiple_of(BASE64_CHARS)
+        }
+    }
 }
 
 pub(crate) fn unpack(text: &str, dictionary: &[u8]) -> Result<Vec<u8>, StoreError> {
-    let compressed = STANDARD_NO_PAD
-        .decode(text)
-        .map_err(|error| failed("decoding", &error.to_string()))?;
-    inflate(&compressed, dictionary)
+    inflate(&decoded(text)?, dictionary)
 }
 
 pub(crate) fn linked(text: &str) -> Result<(u64, Vec<u8>), StoreError> {
-    let mut compressed = STANDARD_NO_PAD
-        .decode(text)
-        .map_err(|error| failed("decoding", &error.to_string()))?;
+    let mut compressed = decoded(text)?;
     let mut back: u64 = 0;
     let mut shift = 0;
     for (index, &byte) in compressed.iter().enumerate() {
@@ -420,10 +495,34 @@ pub(crate) fn padded(text: &str) -> Option<String> {
     Some(padded)
 }
 
-pub(crate) fn binary(body: &str) -> Option<(&str, String)> {
+fn binary(body: &str, whole: bool) -> Option<(&str, String)> {
     let tag = body.chars().next().filter(char::is_ascii)?;
     let (tag, text) = body.split_at(tag.len_utf8());
+    if text.contains(SEGMENT) {
+        return whole.then(|| tail(text)).flatten().map(|padded| (tag, padded));
+    }
     padded(text).map(|padded| (tag, padded))
+}
+
+pub(crate) fn binaries(rows: &[(u64, String)]) -> Vec<Option<(&str, String)>> {
+    rows.iter()
+        .enumerate()
+        .map(|(index, (_, body))| {
+            let whole = !body.starts_with(PART)
+                && rows
+                    .get(index + 1)
+                    .is_none_or(|(_, next)| !next.starts_with(PART));
+            binary(body, whole)
+        })
+        .collect()
+}
+
+pub(crate) fn tail(text: &str) -> Option<String> {
+    if !text.contains(SEGMENT) {
+        return padded(text);
+    }
+    let bytes = decoded(text).ok().filter(|bytes| !bytes.is_empty())?;
+    Some(STANDARD.encode(bytes))
 }
 
 pub(crate) fn decoded_bytes(chars: usize) -> usize {
