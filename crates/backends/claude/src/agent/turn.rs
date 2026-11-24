@@ -127,7 +127,7 @@ pub(super) fn call_tool<'a>(
         } else {
             handler(input.clone(), invocation).await
         };
-        let (content, is_error, metadata, structured_result) = match outcome {
+        let (mut content, mut is_error, metadata, structured_result) = match outcome {
             Ok(reply) => (
                 reply.content,
                 reply.is_error,
@@ -145,6 +145,16 @@ pub(super) fn call_tool<'a>(
                 (ToolResultContent::Text(reason), true, None, None)
             }
         };
+        if stopped
+            && let Some(ContentBlock::ToolResult {
+                content: settled,
+                is_error: settled_error,
+                ..
+            }) = state.cancelled_fact(id).await?
+        {
+            content = settled;
+            is_error = settled_error.unwrap_or(false);
+        }
         state
             .fact_result(id, &content, is_error, metadata.as_ref())
             .await?;

@@ -147,7 +147,9 @@ pub(super) async fn fact_intent(steps: &ExecutionSteps, call_id: &str, tool: &st
         })
         .await?;
     let Some(block) = open else {
-        return Ok(());
+        return Err(NanocodeError::InvalidExecutionPolicy(
+            "the Codex fact log holds no open call for a tool about to run".into(),
+        ));
     };
     let fact = Fact::Intent(Intent {
         turn: Some(steps.operation_id().to_owned()),
@@ -197,6 +199,37 @@ pub(super) async fn settled_output(
     };
     facts
         .read(|fold| fold.settled_output(call_id).cloned())
+        .await
+}
+
+pub(super) async fn settled_aborts(
+    steps: &ExecutionSteps,
+    open: Vec<String>,
+) -> Result<HashMap<String, ResponseItem>> {
+    let Some(facts) = steps.facts() else {
+        return Ok(HashMap::new());
+    };
+    let intended = facts
+        .read(|fold| {
+            open.into_iter()
+                .filter(|id| fold.open_call(id).is_some_and(|call| call.intended))
+                .collect::<Vec<_>>()
+        })
+        .await?;
+    if intended.is_empty() {
+        return Ok(HashMap::new());
+    }
+    facts.refresh().await?;
+    facts
+        .read(|fold| {
+            intended
+                .into_iter()
+                .filter_map(|id| {
+                    let settled = fold.settled_output(&id).cloned()?;
+                    Some((id, settled))
+                })
+                .collect()
+        })
         .await
 }
 

@@ -347,7 +347,8 @@ impl ModelRun {
                     })
                 } else {
                     self.terminate_turn_cells().await;
-                    Some(self.commit_interrupted_checkpoint()?)
+                    let settled = self.settled_aborts().await?;
+                    Some(self.commit_interrupted_checkpoint(settled)?)
                 };
                 let message = error.to_string();
                 self.events
@@ -756,7 +757,10 @@ impl ModelRun {
         ))
     }
 
-    pub(super) fn commit_interrupted_checkpoint(&mut self) -> Result<ModelCheckpoint> {
+    pub(super) fn commit_interrupted_checkpoint(
+        &mut self,
+        mut settled: HashMap<String, ResponseItem>,
+    ) -> Result<ModelCheckpoint> {
         let mut aborted_outputs = Vec::with_capacity(self.active_tool_calls.len());
         let mut terminated = std::mem::take(&mut self.terminated_cell_output);
         for call in std::mem::take(&mut self.active_tool_calls) {
@@ -798,6 +802,10 @@ impl ModelRun {
                 Some(&call.span),
                 partial.as_deref(),
             )?;
+            if let Some(item) = settled.remove(&call.call_id) {
+                aborted_outputs.push(item);
+                continue;
+            }
             aborted_outputs.push(match call.kind {
                 CodeCallKind::Custom => custom_tool_output(call.call_id, output),
                 CodeCallKind::Function => function_tool_output(call.call_id, output),
@@ -822,7 +830,25 @@ impl ModelRun {
     }
 
     async fn commit_cancelled_checkpoint(&mut self) -> Result<ModelCheckpoint> {
-        self.commit_interrupted_checkpoint()
+        let settled = self.settled_aborts().await?;
+        self.commit_interrupted_checkpoint(settled)
+    }
+
+    fn settled_aborts(
+        &self,
+    ) -> impl Future<Output = Result<HashMap<String, ResponseItem>>> + use<> {
+        let open = self
+            .active_tool_calls
+            .iter()
+            .map(|call| call.call_id.clone())
+            .collect::<Vec<_>>();
+        let steps = self.execution_steps.clone();
+        async move {
+            match &steps {
+                Some(steps) => super::facts::settled_aborts(steps, open).await,
+                None => Ok(HashMap::new()),
+            }
+        }
     }
 
     pub(super) fn checkpoint_from_session(

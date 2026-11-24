@@ -212,6 +212,20 @@ impl State {
         facts.commit(fact).await.map(drop)
     }
 
+    pub(super) async fn cancelled_fact(&self, id: &str) -> Result<Option<ContentBlock>> {
+        let Some(facts) = self.facts() else {
+            return Ok(None);
+        };
+        let intended = facts
+            .read(|fold| fold.open_call(id).is_some_and(|call| call.intended))
+            .await?;
+        if !intended {
+            return Ok(None);
+        }
+        facts.refresh().await?;
+        facts.read(|fold| fold.result(id).cloned()).await
+    }
+
     pub(super) async fn settled_fact(&self, id: &str) -> Result<Option<ContentBlock>> {
         let Some(facts) = self.facts() else {
             return Ok(None);
@@ -231,7 +245,9 @@ impl State {
             })
             .await?;
         let Some((block, tool)) = open else {
-            return Ok(());
+            return Err(durable::recovery_error(
+                "the Claude fact log holds no open call for a tool about to run",
+            ));
         };
         let fact = Fact::Intent(Intent {
             turn: turn.map(str::to_owned),

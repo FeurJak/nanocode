@@ -42,6 +42,16 @@ impl CodexFacts {
         Ok(seq)
     }
 
+    pub(crate) async fn refresh(&self) -> Result<()> {
+        let _turn = self.order.enter().await;
+        let folded = fold_facts::<CodexFold>(&*self.log)
+            .await
+            .map_err(store_error)?;
+        self.folded.take();
+        self.folded.put(folded);
+        Ok(())
+    }
+
     fn taken(&self) -> Result<Folded<CodexFold>> {
         self.folded.take().ok_or_else(|| {
             NanocodeError::InvalidExecutionPolicy(

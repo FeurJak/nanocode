@@ -70,6 +70,17 @@ impl ClaudeFacts {
         }
     }
 
+    pub(crate) async fn refresh(&self) -> Result<()> {
+        let _turn = self.order.enter().await;
+        let folded = fold_facts::<ClaudeFold>(&*self.log)
+            .await
+            .map_err(store_error)?;
+        self.synced.take();
+        self.folded.take();
+        self.folded.put(folded);
+        Ok(())
+    }
+
     pub(crate) fn take_synced(&self) -> Vec<u64> {
         self.synced.take().unwrap_or_default()
     }
