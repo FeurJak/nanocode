@@ -95,6 +95,10 @@ impl HydratedConversation {
             .map(|sequence| sequence.loaded.as_slice())
     }
 
+    pub(crate) fn whole(&self, head: &Value) -> Result<Value> {
+        self.assemble(head)
+    }
+
     fn assemble(&self, head: &Value) -> Result<Value> {
         let decode = |payloads: &[EncodedPayload]| -> Result<Value> {
             payloads

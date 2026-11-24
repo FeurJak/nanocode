@@ -952,6 +952,8 @@ impl State {
         };
         let result = if let Some(recovered) = recovered {
             recovered
+        } else if interrupted && let Some(settled) = self.settled_fact(id).await? {
+            settled
         } else if interrupted {
             ContentBlock::tool_result_content(id, ToolResultContent::Text("Tool execution interrupted by a host crash; outcome unknown. Do not assume it did not run or automatically repeat it.".into()), true)
         } else if cancel.is_cancelled() {

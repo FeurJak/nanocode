@@ -47,6 +47,9 @@ pub(super) fn call_tool<'a>(
             unknown: Vec::new(),
         };
         let mut stopped = false;
+        if recovered.is_none() {
+            state.fact_intent(cursor.operation.as_deref(), id).await?;
+        }
         let outcome = if let Some(reply) = recovered {
             Ok(reply)
         } else if matches!(name, "exec" | "wait") {
@@ -142,6 +145,9 @@ pub(super) fn call_tool<'a>(
                 (ToolResultContent::Text(reason), true, None, None)
             }
         };
+        state
+            .fact_result(id, &content, is_error, metadata.as_ref())
+            .await?;
 
         started.open = false;
         let is_error = is_error || stopped;
@@ -450,6 +456,13 @@ pub(super) fn summarize_locked<'a>(
                 if summary.trim().is_empty() {
                     return Err(provider_error("compaction returned empty summary"));
                 }
+                state
+                    .fact_compaction(
+                        cursor.operation.as_deref().unwrap_or_default(),
+                        retained.len(),
+                        &response,
+                    )
+                    .await?;
                 let mut continued = format!(
                     "{COMPACT_TOOLS_OPEN}{}{COMPACT_TOOLS_CLOSE}\n{}",
                     tools_used(&messages),

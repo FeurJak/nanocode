@@ -113,6 +113,7 @@ trait Family: DurableFold + Clone {
     fn response(seq: u64, text: &str, calls: &[String]) -> Value;
     fn notice(text: &str) -> Result<Self::Decision, String>;
     fn rendered(call: &str) -> Result<Option<Self::Decision>, String>;
+    fn admitted() -> Option<Self::Decision>;
     fn messages(request: &[u8]) -> Result<Vec<String>, String>;
     fn expect_response(text: &str, calls: &[String], oracle: &mut Vec<Vec<String>>);
     fn expect_result(calls: &[String], index: usize, oracle: &mut Vec<Vec<String>>);
@@ -158,6 +159,10 @@ impl Family for ClaudeFold {
         serde_json::from_value(json!({"role": "user", "content": [{"type": "text", "text": text}]}))
             .map(ClaudeDecision::Message)
             .map_err(|error| error.to_string())
+    }
+
+    fn admitted() -> Option<ClaudeDecision> {
+        Some(ClaudeDecision::Admitted)
     }
 
     fn rendered(call: &str) -> Result<Option<ClaudeDecision>, String> {
@@ -219,6 +224,10 @@ impl Family for CodexFold {
             .map_err(|error| error.to_string())
     }
 
+    fn admitted() -> Option<CodexDecision> {
+        None
+    }
+
     fn rendered(_call: &str) -> Result<Option<CodexDecision>, String> {
         Ok(None)
     }
@@ -266,6 +275,7 @@ struct Durable {
     seq: u64,
     oracle: Vec<Vec<String>>,
     round: Option<Round>,
+    queued: Vec<String>,
 }
 
 struct World<F: Family> {
@@ -276,6 +286,7 @@ struct World<F: Family> {
     durable: Durable,
     oracle: Vec<Vec<String>>,
     round: Option<Round>,
+    queued: Vec<String>,
     dispatched: BTreeMap<String, u64>,
     legacy: Option<Vec<String>>,
     turns: u64,
@@ -301,6 +312,7 @@ impl<F: Family> World<F> {
             durable: Durable::default(),
             oracle: Vec::new(),
             round: None,
+            queued: Vec::new(),
             dispatched: BTreeMap::new(),
             legacy,
             turns: 0,
@@ -344,6 +356,7 @@ impl<F: Family> World<F> {
             seq: folded.seq(),
             oracle: self.oracle.clone(),
             round: self.round.clone(),
+            queued: self.queued.clone(),
         })
     }
 
@@ -444,6 +457,7 @@ impl<F: Family> World<F> {
             .map_err(failed("reopen the fold"))?;
         self.oracle = self.durable.oracle.clone();
         self.round = self.durable.round.clone();
+        self.queued = self.durable.queued.clone();
         let reopened = self.durable(&folded)?;
         if reopened != self.durable {
             return Err(format!(
@@ -655,7 +669,11 @@ impl<F: Family> World<F> {
     fn prompt(&mut self) -> Result<(), String> {
         self.turns += 1;
         let text = self.words("prompt");
-        self.oracle.push(vec![text.clone()]);
+        if F::admitted().is_some() {
+            self.queued.push(text.clone());
+        } else {
+            self.oracle.push(vec![text.clone()]);
+        }
         let fact = Fact::Input(Input {
             turn: format!("turn-{}", self.turns),
             kind: InputKind::Prompt,
@@ -664,7 +682,26 @@ impl<F: Family> World<F> {
             hand: None,
             first: None,
         });
-        self.commit(fact, Point::Admission).map(drop)
+        if self.commit(fact, Point::Admission)?.is_none() {
+            return Ok(());
+        }
+        self.admit()
+    }
+
+    fn admit(&mut self) -> Result<(), String> {
+        while let Some(decision) = F::admitted()
+            && !self.queued.is_empty()
+        {
+            let text = self.queued.remove(0);
+            self.oracle.push(vec![text]);
+            if self
+                .commit(Fact::Decision(Decision::Backend(decision)), Point::Progress)?
+                .is_none()
+            {
+                return Ok(());
+            }
+        }
+        Ok(())
     }
 
     fn model(&mut self) -> Result<(), String> {
@@ -740,6 +777,9 @@ impl<F: Family> World<F> {
     fn step(&mut self) -> Result<(), String> {
         if self.round.is_some() {
             return self.finish_round();
+        }
+        if !self.queued.is_empty() {
+            return self.admit();
         }
         match self.rng.below(6) {
             0 | 1 => self.prompt(),

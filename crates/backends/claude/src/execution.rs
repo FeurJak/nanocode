@@ -415,6 +415,11 @@ pub trait ClaudeExecutionPolicy: Send + Sync {
         Box::pin(async { Ok(()) })
     }
 
+    #[doc(hidden)]
+    fn facts(&self) -> Option<&crate::durability::ClaudeFacts> {
+        None
+    }
+
     fn branch(&self, _child: &SessionInfo) -> Result<Option<Arc<dyn ClaudeExecutionPolicy>>> {
         Ok(None)
     }

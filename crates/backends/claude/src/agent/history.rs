@@ -207,6 +207,10 @@ struct StoredMessage {
 }
 
 impl HistoryMessage {
+    pub(super) const fn wire(&self) -> u64 {
+        self.1
+    }
+
     pub(super) fn make_mut(&mut self) -> MessageMut<'_> {
         let message = Arc::unwrap_or_clone(self.typed());
         self.1 = wire_id();

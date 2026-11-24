@@ -1,11 +1,14 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use nanocode_agent_core::input::Prompt;
 use nanocode_durability_core::{
     Base, BlockRef, Decision, DurableFold, EffectResult, Fact, FoldError, Input, Intent,
     IntentTarget, ModelOut, Seen,
 };
-use nanocode_tool_host::{ToolOutput, contract::ToolOutputWire};
+use nanocode_tool_host::{
+    ToolOutput,
+    contract::{ToolOutputContent, ToolOutputWire},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
 
@@ -19,21 +22,31 @@ pub enum ClaudeDecision {
         tool_result_tokens: u64,
     },
     Message(Message),
+    Admitted,
     Rendered(ContentBlock),
     Compacting {
         retained: u32,
+    },
+    Splice {
+        from: u32,
+        to: u32,
+        messages: Vec<Message>,
+    },
+    Carried {
+        container: Option<String>,
+        previous_message_id: Option<String>,
     },
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ClaudeFold {
     template: Option<Template>,
-    summary: String,
     messages: Vec<Message>,
     previous_message_id: Option<String>,
     container: Option<String>,
-    queued: Vec<Message>,
+    inputs: VecDeque<Message>,
     nested: BTreeSet<String>,
+    abandoned: BTreeSet<String>,
     phase: Phase,
 }
 
@@ -53,6 +66,7 @@ enum Phase {
     },
     Tools {
         model_out: u64,
+        assistant: usize,
         calls: Vec<Call>,
     },
 }
@@ -67,9 +81,11 @@ struct Call {
     result: Option<ContentBlock>,
 }
 
-#[derive(Serialize)]
-struct Undecided {
-    messages: Vec<Message>,
+pub(crate) struct OpenCall<'a> {
+    pub(crate) block: BlockRef,
+    pub(crate) name: &'a str,
+    pub(crate) intended: bool,
+    pub(crate) output: bool,
 }
 
 #[derive(Deserialize)]
@@ -101,6 +117,11 @@ struct LegacyConversation {
     container: Option<String>,
 }
 
+#[derive(Serialize)]
+struct Undecided<'a> {
+    messages: &'a [Message],
+}
+
 fn rejected(seq: u64, reason: impl Into<String>) -> FoldError {
     FoldError::Rejected {
         seq,
@@ -119,9 +140,28 @@ fn decode<T: serde::de::DeserializeOwned>(
     })
 }
 
+const fn is_thinking(block: &ContentBlock) -> bool {
+    matches!(
+        block,
+        ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
+    )
+}
+
+fn summarized(summary: &str, messages: Vec<Message>) -> Vec<Message> {
+    let mut packed = vec![Message::text(
+        Role::User,
+        format!("{}\n\n{summary}", crate::agent::COMPACT_CONTINUED),
+    )];
+    packed.extend(messages.into_iter().filter_map(|mut message| {
+        message.content.retain(|block| !is_thinking(block));
+        (!message.content.is_empty() || message.is_effort_update()).then_some(message)
+    }));
+    packed
+}
+
 impl DurableFold for ClaudeFold {
     const FAMILY: &'static str = "claude";
-    const FORMAT: u32 = 1;
+    const FORMAT: u32 = 2;
     type Decision = ClaudeDecision;
 
     fn apply(&mut self, seq: u64, fact: Seen<'_, ClaudeDecision>) -> Result<(), FoldError> {
@@ -140,12 +180,16 @@ impl DurableFold for ClaudeFold {
         let encoded = match &self.template {
             Some(template) => {
                 let mut request = template.request.clone();
-                request.messages = self.packed();
+                request.messages.clone_from(&self.messages);
                 request.container.clone_from(&self.container);
+                if request.diagnostics.is_some() {
+                    request.diagnostics =
+                        Some(serde_json::json!({"previous_message_id": self.previous_message_id}));
+                }
                 serde_json::to_vec(&request)
             }
             None => serde_json::to_vec(&Undecided {
-                messages: self.packed(),
+                messages: &self.messages,
             }),
         };
         encoded.map_err(|error| FoldError::Encode(error.to_string()))
@@ -153,20 +197,77 @@ impl DurableFold for ClaudeFold {
 }
 
 impl ClaudeFold {
-    fn packed(&self) -> Vec<Message> {
-        let mut messages = Vec::with_capacity(self.messages.len().saturating_add(1));
-        if !self.summary.is_empty() {
-            messages.push(Message::text(
-                Role::User,
-                format!("{}\n\n{}", crate::agent::COMPACT_CONTINUED, self.summary),
-            ));
+    pub(crate) fn messages(&self) -> &[Message] {
+        &self.messages
+    }
+
+    pub(crate) fn template(&self) -> Option<(&MessagesRequest, u64)> {
+        self.template
+            .as_ref()
+            .map(|template| (&template.request, template.tool_result_tokens))
+    }
+
+    pub(crate) fn previous_message_id(&self) -> Option<&str> {
+        self.previous_message_id.as_deref()
+    }
+
+    pub(crate) fn container(&self) -> Option<&str> {
+        self.container.as_deref()
+    }
+
+    pub(crate) fn result(&self, id: &str) -> Option<&ContentBlock> {
+        let answered = |block: &&ContentBlock| matches!(block, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id);
+        if let Phase::Tools { calls, .. } = &self.phase {
+            return calls
+                .iter()
+                .filter_map(|call| call.result.as_ref())
+                .find(answered);
         }
-        messages.extend(self.messages.iter().cloned());
-        messages
+        self.messages
+            .iter()
+            .rev()
+            .filter(|message| message.role == Role::User)
+            .find_map(|message| message.content.iter().find(answered))
+    }
+
+    pub(crate) fn next_input(&self) -> Option<&Message> {
+        self.inputs.front()
+    }
+
+    pub(crate) fn open_call(&self, id: &str) -> Option<OpenCall<'_>> {
+        let Phase::Tools {
+            model_out, calls, ..
+        } = &self.phase
+        else {
+            return None;
+        };
+        calls
+            .iter()
+            .find(|call| call.id == id)
+            .map(|call| OpenCall {
+                block: BlockRef {
+                    model_out: *model_out,
+                    block: call.block,
+                },
+                name: &call.name,
+                intended: call.intended,
+                output: call.output,
+            })
+    }
+
+    pub(crate) fn unrendered(&self) -> Vec<String> {
+        match &self.phase {
+            Phase::Tools { calls, .. } => calls
+                .iter()
+                .filter(|call| call.result.is_none())
+                .map(|call| call.id.clone())
+                .collect(),
+            Phase::Ready | Phase::Compacting { .. } => Vec::new(),
+        }
     }
 
     fn base(&mut self, seq: u64, base: &Base<&RawValue>) -> Result<(), FoldError> {
-        if !self.messages.is_empty() || self.template.is_some() || !self.summary.is_empty() {
+        if !self.messages.is_empty() || self.template.is_some() || !self.inputs.is_empty() {
             return Err(rejected(seq, "a Claude base seeds only an empty fold"));
         }
         let legacy: Legacy = decode(seq, "checkpoint", base.checkpoint)?;
@@ -176,14 +277,20 @@ impl ClaudeFold {
             (Some(_), Some(_)) => {
                 return Err(rejected(seq, "a Claude checkpoint holds two conversations"));
             }
-            (None, None) => return Err(rejected(seq, "a Claude checkpoint holds no conversation")),
+            (None, None) => {
+                return Err(rejected(seq, "a Claude checkpoint holds no conversation"));
+            }
         };
-        self.messages = if legacy.pending.is_empty() {
+        let messages = if legacy.pending.is_empty() {
             conversation.messages
         } else {
             legacy.pending
         };
-        self.summary = conversation.summary;
+        self.messages = if conversation.summary.is_empty() {
+            messages
+        } else {
+            summarized(&conversation.summary, messages)
+        };
         self.previous_message_id = conversation.previous_message_id;
         self.container = conversation.container;
         self.template = legacy.template.map(|mut request| {
@@ -200,10 +307,7 @@ impl ClaudeFold {
         let prompt: Prompt = decode(seq, "prompt", input.value)?;
         let messages =
             crate::prompt::messages(&prompt).map_err(|error| rejected(seq, error.to_string()))?;
-        match self.phase {
-            Phase::Ready => self.messages.extend(messages),
-            Phase::Compacting { .. } | Phase::Tools { .. } => self.queued.extend(messages),
-        }
+        self.inputs.extend(messages);
         Ok(())
     }
 
@@ -254,6 +358,7 @@ impl ClaudeFold {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        let assistant = self.messages.len();
         self.messages.push(Message {
             role: Role::Assistant,
             content,
@@ -262,6 +367,7 @@ impl ClaudeFold {
         if !calls.is_empty() {
             self.phase = Phase::Tools {
                 model_out: seq,
+                assistant,
                 calls,
             };
         }
@@ -293,9 +399,8 @@ impl ClaudeFold {
                 "a Claude compaction response holds no summary",
             ));
         }
-        self.messages.drain(..start);
-        self.summary = summary;
-        self.flush_queued();
+        let kept = self.messages.split_off(start);
+        self.messages = summarized(&summary, kept);
         Ok(())
     }
 
@@ -309,8 +414,7 @@ impl ClaudeFold {
             }
             IntentTarget::ToolUse(block) => *block,
         };
-        let call = self.call(seq, &intent.call_id)?;
-        let (model_out, call) = call;
+        let (model_out, call) = self.call(seq, &intent.call_id)?;
         if (BlockRef {
             model_out,
             block: call.block,
@@ -335,7 +439,10 @@ impl ClaudeFold {
     }
 
     fn call(&mut self, seq: u64, id: &str) -> Result<(u64, &mut Call), FoldError> {
-        let Phase::Tools { model_out, calls } = &mut self.phase else {
+        let Phase::Tools {
+            model_out, calls, ..
+        } = &mut self.phase
+        else {
             return Err(rejected(
                 seq,
                 "a Claude tool call arrived outside a tool round",
@@ -354,7 +461,7 @@ impl ClaudeFold {
         seq: u64,
         result: &EffectResult<&RawValue>,
     ) -> Result<(), FoldError> {
-        if self.nested.remove(&result.call_id) {
+        if self.nested.remove(&result.call_id) || self.abandoned.remove(&result.call_id) {
             return Ok(());
         }
         let wire: ToolOutputWire = decode(seq, "tool output", result.output)?;
@@ -371,7 +478,7 @@ impl ClaudeFold {
                 "a Claude tool result has no intent before it",
             ));
         }
-        if call.output {
+        if call.output || call.result.is_some() {
             return Err(rejected(seq, "a Claude tool result arrived twice"));
         }
         call.output = true;
@@ -399,11 +506,6 @@ impl ClaudeFold {
             })
             .collect();
         self.messages.push(Message::tool_results(results));
-        self.flush_queued();
-    }
-
-    fn flush_queued(&mut self) {
-        self.messages.append(&mut self.queued);
     }
 
     fn decision(&mut self, seq: u64, decision: Decision<&ClaudeDecision>) -> Result<(), FoldError> {
@@ -421,7 +523,7 @@ impl ClaudeFold {
     }
 
     fn backend(&mut self, seq: u64, decision: &ClaudeDecision) -> Result<(), FoldError> {
-        match (decision, &mut self.phase) {
+        match (decision, &self.phase) {
             (
                 ClaudeDecision::Template {
                     request,
@@ -438,8 +540,30 @@ impl ClaudeFold {
                 });
                 Ok(())
             }
+            (ClaudeDecision::Splice { from, to, messages }, _) => {
+                self.splice(seq, *from, *to, messages)
+            }
+            (
+                ClaudeDecision::Carried {
+                    container,
+                    previous_message_id,
+                },
+                _,
+            ) => {
+                self.container.clone_from(container);
+                self.previous_message_id.clone_from(previous_message_id);
+                Ok(())
+            }
             (ClaudeDecision::Message(message), Phase::Ready) => {
                 self.messages.push(message.clone());
+                Ok(())
+            }
+            (ClaudeDecision::Admitted, Phase::Ready) => {
+                let input = self
+                    .inputs
+                    .pop_front()
+                    .ok_or_else(|| rejected(seq, "a Claude admission has no input waiting"))?;
+                self.messages.push(input);
                 Ok(())
             }
             (ClaudeDecision::Compacting { retained }, Phase::Ready) => {
@@ -449,7 +573,12 @@ impl ClaudeFold {
                 Ok(())
             }
             (ClaudeDecision::Rendered(block), Phase::Tools { .. }) => self.rendered(seq, block),
-            (ClaudeDecision::Message(_) | ClaudeDecision::Compacting { .. }, _) => Err(rejected(
+            (
+                ClaudeDecision::Message(_)
+                | ClaudeDecision::Admitted
+                | ClaudeDecision::Compacting { .. },
+                _,
+            ) => Err(rejected(
                 seq,
                 "a Claude decision arrived inside a round that it cannot change",
             )),
@@ -460,6 +589,38 @@ impl ClaudeFold {
         }
     }
 
+    fn splice(
+        &mut self,
+        seq: u64,
+        from: u32,
+        to: u32,
+        messages: &[Message],
+    ) -> Result<(), FoldError> {
+        let from = usize::try_from(from).expect("u32 fits usize");
+        let to = usize::try_from(to).expect("u32 fits usize");
+        if from > to || to > self.messages.len() {
+            return Err(rejected(
+                seq,
+                "a Claude splice falls outside the conversation",
+            ));
+        }
+        if let Phase::Tools {
+            assistant, calls, ..
+        } = &self.phase
+            && from <= *assistant
+        {
+            self.abandoned.extend(
+                calls
+                    .iter()
+                    .filter(|call| call.intended && !call.output)
+                    .map(|call| call.id.clone()),
+            );
+            self.phase = Phase::Ready;
+        }
+        self.messages.splice(from..to, messages.iter().cloned());
+        Ok(())
+    }
+
     fn rendered(&mut self, seq: u64, block: &ContentBlock) -> Result<(), FoldError> {
         let ContentBlock::ToolResult { tool_use_id, .. } = block else {
             return Err(rejected(
@@ -468,13 +629,17 @@ impl ClaudeFold {
             ));
         };
         let (_, call) = self.call(seq, tool_use_id)?;
-        if !call.output || call.result.is_some() {
+        if call.result.is_some() {
             return Err(rejected(
                 seq,
-                "a rendered Claude tool result has no unrendered output",
+                "a rendered Claude tool result has its result already",
             ));
         }
+        let unanswered = call.intended && !call.output;
         call.result = Some(block.clone());
+        if unanswered {
+            self.abandoned.insert(tool_use_id.clone());
+        }
         self.settle();
         Ok(())
     }
@@ -510,4 +675,30 @@ fn rendered(
         is_error: (reply.is_error || name == "Bash").then_some(reply.is_error),
         extra: BTreeMap::new(),
     }))
+}
+
+pub(crate) fn tool_output(
+    content: &ToolResultContent,
+    is_error: bool,
+    metadata: Option<&Value>,
+) -> serde_json::Result<ToolOutputWire> {
+    let mut output = match content {
+        ToolResultContent::Text(text) => ToolOutput::text(text.clone()),
+        ToolResultContent::Blocks(blocks) => ToolOutput::content(
+            blocks
+                .iter()
+                .map(|block| match block["text"].as_str() {
+                    Some(text) if block["type"] == "text" => ToolOutputContent::InputText {
+                        text: text.to_owned(),
+                    },
+                    _ => ToolOutputContent::InputText {
+                        text: Value::to_string(block),
+                    },
+                })
+                .collect(),
+        ),
+    };
+    output.success = !is_error;
+    output.metadata = metadata.map(serde_json::value::to_raw_value).transpose()?;
+    output.into_wire()
 }

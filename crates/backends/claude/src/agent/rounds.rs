@@ -389,6 +389,16 @@ pub(super) fn run_rounds<'a>(
             let mut compacted = false;
             let mut attempted_scope = String::new();
             let response = loop {
+                state
+                    .sync_facts(
+                        &cursor.template,
+                        (
+                            conversation.container.as_deref(),
+                            previous_message_id.as_deref(),
+                        ),
+                        &pending,
+                    )
+                    .await?;
                 let effect = cursor.effect(state, &step);
                 let scope = [
                     (stripped_thinking, "unsigned-thinking"),
@@ -617,6 +627,12 @@ pub(super) fn run_rounds<'a>(
                 }
             };
 
+            state
+                .fact_model(
+                    cursor.operation.as_deref().unwrap_or_default(),
+                    &response.message,
+                )
+                .await?;
             if !response.replayed && cursor.recovered_code_index == Some(index) {
                 cursor.recovered_code_index = None;
             }

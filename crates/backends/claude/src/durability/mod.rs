@@ -27,8 +27,11 @@ use crate::{
     },
 };
 
+mod facts;
 mod fold;
 mod format;
+pub use facts::ClaudeFacts;
+pub(crate) use fold::tool_output;
 pub use fold::{ClaudeDecision, ClaudeFold};
 pub(crate) use format::{Prefix, keep_prefix, prefix};
 
@@ -179,6 +182,20 @@ impl DurableAgentExt for ClaudeBuilder {
                 (imported, None)
             }
         };
+        let facts = match state.facts() {
+            Some(log) => {
+                let facts = ClaudeFacts::open(log).await?;
+                if let Some(head) = &checkpoint {
+                    let whole = match &pages {
+                        Some(pages) => pages.whole(head).map_err(agent_error)?,
+                        None => head.clone(),
+                    };
+                    import_base(&facts, &state_id, &whole).await?;
+                }
+                Some(facts)
+            }
+            None => None,
+        };
         let _decode =
             nanocode_trace::info_span!(target: "nanocode", "claude.open.decode").entered();
         let pages = pages.map(format::HydratedConversation::into_pages);
@@ -191,11 +208,39 @@ impl DurableAgentExt for ClaudeBuilder {
                 hydrated: nanocode_sync::Slot::default(),
                 hydrating: nanocode_sync::Sequencer::new(),
                 stored: nanocode_sync::Slot::new(Some(read).filter(|read| !read.is_empty())),
+                facts,
             }),
             checkpoint,
             pages,
         )
     }
+}
+
+async fn import_base(facts: &ClaudeFacts, state_id: &str, whole: &Value) -> AgentResult<()> {
+    if facts.seq().await? != 0 {
+        return Ok(());
+    }
+    let base = nanocode_durability::facts::Fact::Base(nanocode_durability::facts::Base {
+        state: state_id.to_owned(),
+        revision: 0,
+        checkpoint: serde_json::value::to_raw_value(whole)
+            .map_err(|error| agent_error(nanocode_durability::Error::InvalidPayload(error)))?,
+    });
+    facts.commit(base).await.map(drop)
+}
+
+async fn import_payload(
+    facts: &ClaudeFacts,
+    owner: &DurableOwner,
+    state_id: &str,
+    payload: &EncodedPayload,
+) -> AgentResult<()> {
+    if facts.seq().await? != 0 {
+        return Ok(());
+    }
+    let stored = payload.decode().map_err(agent_error)?;
+    let whole = hydrate(PayloadReader::from(owner), stored, &mut HashSet::new()).await?;
+    import_base(facts, state_id, &whole).await
 }
 
 impl ClaudeBuilder {
@@ -240,6 +285,7 @@ struct ClaudeExecution {
     hydrated: nanocode_sync::Slot<(String, ClaudeContinuation, bool)>,
     hydrating: nanocode_sync::Sequencer,
     stored: nanocode_sync::Slot<HashSet<String>>,
+    facts: Option<ClaudeFacts>,
 }
 
 struct Deferred {
@@ -328,6 +374,7 @@ impl LazyClaudeExecution {
                 )
                 .await
                 .map_err(agent_error)?;
+                let seeded = initial.clone();
                 let (owner, checkpoint) = match (
                     initial,
                     self.deferred.as_ref().map(|deferred| deferred.initial),
@@ -380,6 +427,19 @@ impl LazyClaudeExecution {
                         .map_err(agent_error)?
                         .pending_operations()
                         .is_empty();
+                let based = checkpoint
+                    .clone()
+                    .or_else(|| seeded.filter(|_| committed.load(Ordering::SeqCst)));
+                let facts = match state.facts() {
+                    Some(log) => {
+                        let facts = ClaudeFacts::open(log).await?;
+                        if let Some(payload) = &based {
+                            import_payload(&facts, &owner, &record.session_id, payload).await?;
+                        }
+                        Some(facts)
+                    }
+                    None => None,
+                };
                 let hydrated = nanocode_sync::Slot::default();
                 if let Some((key, cursor)) = self.ahead.take() {
                     hydrated.put((key, ClaudeContinuation::whole(cursor), true));
@@ -396,6 +456,7 @@ impl LazyClaudeExecution {
                         hydrated,
                         hydrating: nanocode_sync::Sequencer::new(),
                         stored: nanocode_sync::Slot::default(),
+                        facts,
                     },
                     reopened,
                 })
@@ -419,6 +480,10 @@ fn branch_child(
 }
 
 impl ClaudeExecutionPolicy for LazyClaudeExecution {
+    fn facts(&self) -> Option<&ClaudeFacts> {
+        self.acquired()?.facts.as_ref()
+    }
+
     fn state_id(&self) -> &str {
         &self.record.session_id
     }
@@ -795,6 +860,10 @@ impl ClaudeExecution {
 impl ClaudeExecutionPolicy for ClaudeExecution {
     fn state_id(&self) -> &str {
         &self.state_id
+    }
+
+    fn facts(&self) -> Option<&ClaudeFacts> {
+        self.facts.as_ref()
     }
 
     fn branch(

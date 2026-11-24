@@ -28,6 +28,7 @@ mod driver;
 mod durable;
 mod event;
 mod factory;
+mod facts;
 mod history;
 mod images;
 mod keep;
