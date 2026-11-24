@@ -72,7 +72,7 @@ fn estimate_text_tokens(text: &str) -> u64 {
 }
 
 pub(crate) const TOOL_RESULT_TOKEN_LIMIT: u64 = 12_000;
-const DIRECT_TOOL_RESULT_TOKEN_LIMIT: u64 = 25_000;
+pub(crate) const DIRECT_TOOL_RESULT_TOKEN_LIMIT: u64 = 25_000;
 const RETRY_BASE_MS: u64 = 500;
 const RETRY_CAP_MS: u64 = 32_000;
 const RETRY_JITTER_PERCENT: u64 = 25;
@@ -113,7 +113,19 @@ fn truncate_middle(text: &str, max_tokens: u64) -> String {
     )
 }
 
-fn bound_tool_result(content: ToolResultContent, limit: u64) -> (ToolResultContent, Option<usize>) {
+pub(crate) fn stored_messages<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<Message>, D::Error> {
+    Ok(Vec::<HistoryMessage>::deserialize(deserializer)?
+        .into_iter()
+        .map(HistoryMessage::into_message)
+        .collect())
+}
+
+pub(crate) fn bound_tool_result(
+    content: ToolResultContent,
+    limit: u64,
+) -> (ToolResultContent, Option<usize>) {
     match content {
         ToolResultContent::Text(text) => {
             if estimate_text_tokens(&text) <= limit {

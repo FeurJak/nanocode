@@ -27,7 +27,9 @@ use crate::{
     },
 };
 
+mod fold;
 mod format;
+pub use fold::{ClaudeDecision, ClaudeFold};
 pub(crate) use format::{Prefix, keep_prefix, prefix};
 
 pub use format::{ClaudeCheckpointFormat, forget_templates};

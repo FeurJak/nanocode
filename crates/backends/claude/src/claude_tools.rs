@@ -841,7 +841,7 @@ fn tool_context(invocation: &ClaudeToolInvocation) -> ToolContext<'_> {
     .with_instruction_revision(invocation.instruction_revision)
 }
 
-fn tool_reply(mut output: ToolOutput) -> std::result::Result<ClaudeToolReply, String> {
+pub(crate) fn tool_reply(mut output: ToolOutput) -> std::result::Result<ClaudeToolReply, String> {
     let structured_result = Some(output.take_structured_result());
     let metadata = output
         .metadata

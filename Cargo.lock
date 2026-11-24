@@ -346,6 +346,7 @@ dependencies = [
  "nanocode-backend-claude-tools",
  "nanocode-code-mode",
  "nanocode-durability",
+ "nanocode-durability-core",
  "nanocode-executor",
  "nanocode-home",
  "nanocode-http",
