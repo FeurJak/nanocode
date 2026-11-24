@@ -1,11 +1,10 @@
 use crate::{
     ClaudeError, ContentBlock, Encoded, Message, MessageLayout, MessageView, OutputConfig, Role,
-    WireMessage,
+    ToolResultContent, WireMessage,
 };
 use nanocode_durability::EncodedPayload;
 use nanocode_sync::SwapOption;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::value::RawValue;
 use std::{
     ops::{Deref, DerefMut},
     sync::{
@@ -29,11 +28,41 @@ const SAME_WIRE_KNOWN: u8 = 1;
 const SAME_WIRE: u8 = 2;
 const COMPANIONS_KNOWN: u8 = 4;
 const COMPANIONS: u8 = 8;
+const STORED: u8 = 16;
+const WIRE_CLEARED: u8 = 32;
 const IMAGES_UNKNOWN: u32 = u32::MAX;
+
+enum Content {
+    Full(EncodedPayload),
+    Paged {
+        original: Arc<str>,
+        cleared: EncodedPayload,
+    },
+}
+
+impl Content {
+    fn payload(&self) -> &EncodedPayload {
+        match self {
+            Self::Full(record) => record,
+            Self::Paged { cleared, .. } => cleared,
+        }
+    }
+
+    fn json(&self) -> Option<&str> {
+        self.payload().json().ok()
+    }
+
+    fn original(&self) -> Option<&Arc<str>> {
+        match self {
+            Self::Full(_) => None,
+            Self::Paged { original, .. } => Some(original),
+        }
+    }
+}
 
 struct Entry {
     typed: SwapOption<Message>,
-    record: OnceLock<EncodedPayload>,
+    content: SwapOption<Content>,
     results: OnceLock<Box<[(usize, u64)]>>,
     images: AtomicU32,
     role: Role,
@@ -45,7 +74,7 @@ impl Entry {
     fn new(message: &Message, typed: Option<Arc<Message>>, record: Option<EncodedPayload>) -> Self {
         Self {
             typed: SwapOption::new(typed),
-            record: record.map_or_else(OnceLock::new, OnceLock::from),
+            content: SwapOption::new(record.map(|record| Arc::new(Content::Full(record)))),
             results: OnceLock::new(),
             images: AtomicU32::new(IMAGES_UNKNOWN),
             role: message.role,
@@ -54,20 +83,24 @@ impl Entry {
         }
     }
 
+    fn content(&self) -> Option<Arc<Content>> {
+        self.content.load_full()
+    }
+
     fn typed(&self) -> Arc<Message> {
         if let Some(message) = self.typed.load_full() {
             return message;
         }
-        let json = self
-            .record
-            .get()
-            .and_then(|record| record.json().ok())
+        let content = self
+            .content()
             .expect("a message keeps its typed form or its bytes");
+        let json = content.json().expect("a message's bytes are resolved");
         Arc::new(serde_json::from_str(json).expect("a recorded message parses"))
     }
 
-    fn json(&self) -> Option<&str> {
-        self.record.get().and_then(|record| record.json().ok())
+    fn original(&self) -> Option<Arc<str>> {
+        self.content()
+            .and_then(|content| content.original().map(Arc::clone))
     }
 
     fn flag(&self, known: u8, set: u8, check: impl FnOnce() -> bool) -> bool {
@@ -80,12 +113,46 @@ impl Entry {
             .fetch_or(known | if value { set } else { 0 }, Ordering::AcqRel);
         value
     }
+
+    fn page(&self) {
+        let Some(content) = self.content() else {
+            return;
+        };
+        let Content::Full(record) = &*content else {
+            return;
+        };
+        let Some(results) = self.results.get() else {
+            return;
+        };
+        if self.role != Role::User || results.is_empty() {
+            return;
+        }
+        let mut cleared = Message::clone(&self.typed());
+        if results.len() != cleared.content.len() {
+            return;
+        }
+        for block in &mut cleared.content {
+            match block {
+                ContentBlock::ToolResult { content, .. } => {
+                    *content = ToolResultContent::Text(super::clearing::CLEARED.to_owned());
+                }
+                _ => return,
+            }
+        }
+        let json = serde_json::to_string(&cleared).expect("a cleared message serializes");
+        let paged = Content::Paged {
+            original: Arc::from(record.key()),
+            cleared: EncodedPayload::from_json(json.into()),
+        };
+        self.content.compare_and_swap(&content, Some(Arc::new(paged)));
+        self.typed.store(None);
+    }
 }
 
 impl Clone for Entry {
     fn clone(&self) -> Self {
         let typed = self.typed();
-        Self::new(&typed, Some(Arc::clone(&typed)), self.record.get().cloned())
+        Self::new(&typed, Some(Arc::clone(&typed)), None)
     }
 }
 
@@ -117,6 +184,28 @@ impl Drop for MessageMut<'_> {
     }
 }
 
+#[derive(Serialize)]
+struct PagedOut<'a> {
+    role: Role,
+    content: &'a [ContentBlock],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<&'a OutputConfig>,
+    paged: &'a str,
+    results: &'a [(usize, u64)],
+}
+
+#[derive(Deserialize)]
+struct StoredMessage {
+    role: Role,
+    content: Vec<ContentBlock>,
+    #[serde(default)]
+    output_config: Option<OutputConfig>,
+    #[serde(default)]
+    paged: Option<Arc<str>>,
+    #[serde(default)]
+    results: Option<Box<[(usize, u64)]>>,
+}
+
 impl HistoryMessage {
     pub(super) fn make_mut(&mut self) -> MessageMut<'_> {
         let message = Arc::unwrap_or_clone(self.typed());
@@ -133,8 +222,29 @@ impl HistoryMessage {
         self.0.role
     }
 
-    const fn is_cleared(&self) -> bool {
+    const fn has_cleared_bit(&self) -> bool {
         self.1 & CLEARED_WIRE != 0
+    }
+
+    fn is_cleared(&self) -> bool {
+        self.has_cleared_bit() && self.0.original().is_none()
+    }
+
+    pub(super) fn paged_original(&self) -> Option<Arc<str>> {
+        self.0.original()
+    }
+
+    pub(super) fn paged_parts(&self) -> Option<(&[(usize, u64)], Arc<str>)> {
+        let content = self.0.content()?;
+        let Content::Paged { cleared, .. } = &*content else {
+            return None;
+        };
+        let results = self.0.results.get()?;
+        Some((results, cleared.shared_json().ok()?))
+    }
+
+    pub(super) fn reaches_wire_uncleared(&self) -> bool {
+        !self.has_cleared_bit() && self.0.original().is_some()
     }
 
     fn typed(&self) -> Arc<Message> {
@@ -145,7 +255,7 @@ impl HistoryMessage {
         let mut message = Message::clone(&typed);
         for &(block, _) in self.0.results.get().map_or(&[][..], |results| &results[..]) {
             if let Some(ContentBlock::ToolResult { content, .. }) = message.content.get_mut(block) {
-                *content = crate::ToolResultContent::Text(super::clearing::CLEARED.to_owned());
+                *content = ToolResultContent::Text(super::clearing::CLEARED.to_owned());
             }
         }
         Arc::new(message)
@@ -171,7 +281,10 @@ impl HistoryMessage {
         if self.is_cleared() || self.0.typed.load().is_some() {
             return true;
         }
-        let Some(json) = self.0.json() else {
+        let Some(content) = self.0.content() else {
+            return true;
+        };
+        let Some(json) = content.json() else {
             return true;
         };
         match serde_json::to_string(text) {
@@ -194,8 +307,51 @@ impl HistoryMessage {
         }
     }
 
+    pub(super) fn loaded(json: &str) -> serde_json::Result<Self> {
+        serde_json::from_str::<Message>(json).map(Self::settled)
+    }
+
+    fn stored(stored: StoredMessage) -> std::result::Result<Self, String> {
+        let message = Message {
+            role: stored.role,
+            content: stored.content,
+            output_config: stored.output_config,
+        };
+        let Some(original) = stored.paged else {
+            return Ok(Self::settled(message));
+        };
+        let results = stored
+            .results
+            .ok_or("a paged message lists its cleared results")?;
+        if !EncodedPayload::is_key(&original) {
+            return Err(format!("a paged message names {original:?}, which is not a record key"));
+        }
+        let json = serde_json::to_string(&message).map_err(|error| error.to_string())?;
+        let entry = Entry::new(&message, None, None);
+        entry.content.store(Some(Arc::new(Content::Paged {
+            original,
+            cleared: EncodedPayload::from_json(json.into()),
+        })));
+        entry
+            .results
+            .set(results)
+            .expect("a new entry has no results yet");
+        entry.flags.store(STORED | WIRE_CLEARED, Ordering::Release);
+        Ok(Self(Arc::new(entry), wire_id()))
+    }
+
     pub(super) fn cleared(&self) -> Self {
         Self(Arc::clone(&self.0), self.1 | CLEARED_WIRE)
+    }
+
+    pub(super) fn mark_wire_cleared(&self) {
+        if !self.has_cleared_bit() {
+            return;
+        }
+        let flags = self.0.flags.fetch_or(WIRE_CLEARED, Ordering::AcqRel);
+        if flags & (STORED | WIRE_CLEARED) == STORED {
+            self.0.page();
+        }
     }
 
     pub(super) fn image_count(&self, count: impl FnOnce(&Self) -> usize) -> usize {
@@ -239,7 +395,7 @@ impl HistoryMessage {
     }
 
     pub(super) fn ptr_eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0) && self.is_cleared() == other.is_cleared()
+        Arc::ptr_eq(&self.0, &other.0) && self.has_cleared_bit() == other.has_cleared_bit()
     }
 
     pub(super) fn into_message(self) -> Message {
@@ -258,31 +414,58 @@ impl HistoryMessage {
                 serde_json::to_string(&*self.typed())?.into(),
             ));
         }
-        if let Some(record) = self.0.record.get() {
-            return Ok(record.clone());
+        let held = self.0.content();
+        match held.as_deref() {
+            Some(Content::Full(record)) => return Ok(record.clone()),
+            Some(Content::Paged { original, .. }) => return Ok(EncodedPayload::from_key(original)),
+            None => {}
         }
         let record = EncodedPayload::from_json(serde_json::to_string(&*self.0.typed())?.into());
-        Ok(self.0.record.get_or_init(|| record).clone())
+        let previous = self.0.content.compare_and_swap(
+            &held,
+            Some(Arc::new(Content::Full(record.clone()))),
+        );
+        match previous.as_deref() {
+            None => Ok(record),
+            Some(_) => self.record(),
+        }
     }
 
-    fn json(&self) -> serde_json::Result<&str> {
-        if self.0.json().is_none() {
-            self.record()?;
+    fn json(&self) -> serde_json::Result<Arc<Content>> {
+        if let Some(content) = self.0.content() {
+            return Ok(content);
         }
-        Ok(self.0.json().expect("a recorded message keeps its bytes"))
+        self.record()?;
+        Ok(self
+            .0
+            .content()
+            .expect("a recorded message keeps its bytes"))
     }
 
     pub(super) fn with_json<R>(&self, read: impl FnOnce(&str) -> R) -> serde_json::Result<R> {
         if self.is_cleared() {
             return Ok(read(&serde_json::to_string(&*self.typed())?));
         }
-        Ok(read(self.json()?))
+        let content = self.json()?;
+        Ok(read(content.json().expect("a message's bytes are resolved")))
     }
 
     pub(super) fn committed(&self) {
-        if !self.is_cleared() && self.0.record.get().is_some() {
-            self.0.typed.store(None);
+        if self.has_cleared_bit() || self.0.content().is_none() {
+            return;
         }
+        self.0.typed.store(None);
+        let flags = self.0.flags.fetch_or(STORED, Ordering::AcqRel);
+        if flags & WIRE_CLEARED != 0 {
+            self.0.page();
+        }
+    }
+
+    fn durable_key(&self) -> Option<Arc<str>> {
+        if let Some(original) = self.0.original() {
+            return Some(original);
+        }
+        self.record().ok().map(|record| Arc::from(record.key()))
     }
 }
 
@@ -301,9 +484,14 @@ impl PartialEq for HistoryMessage {
         if self.ptr_eq(other) {
             return true;
         }
-        if !self.is_cleared()
-            && !other.is_cleared()
-            && let (Some(left), Some(right)) = (self.0.json(), other.0.json())
+        if self.is_cleared() || other.is_cleared() {
+            return *self.typed() == *other.typed();
+        }
+        if self.0.original().is_some() || other.0.original().is_some() {
+            return self.durable_key().is_some() && self.durable_key() == other.durable_key();
+        }
+        if let (Some(left), Some(right)) = (self.0.content(), other.0.content())
+            && let (Some(left), Some(right)) = (left.json(), right.json())
         {
             return left == right;
         }
@@ -313,18 +501,37 @@ impl PartialEq for HistoryMessage {
 
 impl Serialize for HistoryMessage {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self.0.json().filter(|_| !self.is_cleared()) {
-            Some(json) => serde_json::from_str::<&RawValue>(json)
-                .map_err(serde::ser::Error::custom)?
-                .serialize(serializer),
-            None => self.typed().serialize(serializer),
+        if self.is_cleared() {
+            return self.typed().serialize(serializer);
+        }
+        let Some(content) = self.0.content() else {
+            return self.typed().serialize(serializer);
+        };
+        match &*content {
+            Content::Full(record) => match record.json() {
+                Ok(json) => serde_json::from_str::<&serde_json::value::RawValue>(json)
+                    .map_err(serde::ser::Error::custom)?
+                    .serialize(serializer),
+                Err(_) => self.typed().serialize(serializer),
+            },
+            Content::Paged { original, .. } => {
+                let typed = self.0.typed();
+                PagedOut {
+                    role: typed.role,
+                    content: &typed.content,
+                    output_config: typed.output_config.as_ref(),
+                    paged: original,
+                    results: self.0.results.get().map_or(&[][..], |results| &results[..]),
+                }
+                .serialize(serializer)
+            }
         }
     }
 }
 
 impl<'de> Deserialize<'de> for HistoryMessage {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Message::deserialize(deserializer).map(Self::settled)
+        Self::stored(StoredMessage::deserialize(deserializer)?).map_err(serde::de::Error::custom)
     }
 }
 
@@ -346,6 +553,10 @@ impl WireMessage for HistoryMessage {
         subscription: bool,
         encode: &dyn Fn(&Message) -> Result<String, ClaudeError>,
     ) -> Result<Encoded<'a>, ClaudeError> {
+        assert!(
+            !self.reaches_wire_uncleared(),
+            "a paged message reached the wire without its clearing"
+        );
         if self.is_cleared() {
             let typed = self.typed();
             return match subscription {
@@ -353,10 +564,20 @@ impl WireMessage for HistoryMessage {
                 false => Ok(Encoded::Owned(serde_json::to_string(&*typed)?)),
             };
         }
-        let json = self.json()?;
+        let content = self.json()?;
+        let payload = content.payload();
+        let shared = || {
+            payload
+                .shared_json()
+                .map_err(|error| ClaudeError::Protocol(error.to_string()))
+        };
         if !subscription {
-            return Ok(Encoded::Borrowed(json));
+            return shared().map(Encoded::Shared);
         }
+        if content.original().is_some() {
+            return encode(&self.0.typed()).map(Encoded::Owned);
+        }
+        let json = content.json().expect("a message's bytes are resolved");
         let mut wire = None;
         let same = self.0.flag(SAME_WIRE_KNOWN, SAME_WIRE, || {
             let encoded = encode(&self.0.typed());
@@ -365,7 +586,7 @@ impl WireMessage for HistoryMessage {
             same
         });
         if same {
-            return Ok(Encoded::Borrowed(json));
+            return shared().map(Encoded::Shared);
         }
         match wire {
             Some(wire) => wire.map(Encoded::Owned),

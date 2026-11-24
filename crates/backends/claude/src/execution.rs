@@ -337,6 +337,18 @@ pub trait ClaudeExecutionPolicy: Send + Sync {
     }
 
     #[doc(hidden)]
+    fn load_records(
+        &self,
+        _records: Vec<nanocode_durability::EncodedPayload>,
+    ) -> PolicyFuture<'_, Vec<nanocode_durability::EncodedPayload>> {
+        Box::pin(async {
+            Err(NanocodeError::UnsupportedCapability {
+                capability: "load_records",
+            })
+        })
+    }
+
+    #[doc(hidden)]
     fn pool(&self, _payload: nanocode_durability::EncodedPayload) -> PolicyFuture<'_, bool> {
         Box::pin(async { Ok(false) })
     }

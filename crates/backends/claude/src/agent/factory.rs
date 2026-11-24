@@ -101,6 +101,9 @@ pub(super) fn fork(
             let persisted = parent.load_sequence(sequence).await?;
             durable::prepend_compacted(&mut snapshot.conversation, persisted)?;
         }
+        if let Some(parent) = &state.policy {
+            durable::unpage(&mut snapshot.conversation, parent.as_ref()).await?;
+        }
 
         snapshot.tasks = None;
         snapshot.conversation.pending_continuation = false;

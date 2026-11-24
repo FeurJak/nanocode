@@ -5389,6 +5389,36 @@ impl State {
                 .parse::<nanocode_agent_core::ClaudeModel>()
                 .is_ok_and(nanocode_agent_core::ClaudeModel::supports_effort_updates)
     }
+    async fn wire_cleared(
+        &self,
+        messages: &[HistoryMessage],
+        suffix: &[HistoryMessage],
+        effort_updates: bool,
+    ) -> Result<(Vec<HistoryMessage>, [Option<usize>; 2])> {
+        let (mut sent, floors) = self.cleared(wire_messages(messages, suffix, effort_updates));
+        let uncleared = sent
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.reaches_wire_uncleared())
+            .map(|(at, _)| at)
+            .collect::<Vec<_>>();
+        if !uncleared.is_empty() {
+            let policy = self.policy.as_deref().ok_or_else(|| {
+                NanocodeError::InvalidRequest(
+                    "a paged message needs its session's execution policy".into(),
+                )
+            })?;
+            let paged = uncleared.iter().map(|&at| &sent[at]).collect::<Vec<_>>();
+            let loaded = durable::load_paged(policy, &paged).await?;
+            for (at, message) in uncleared.into_iter().zip(loaded) {
+                sent[at] = message;
+            }
+        }
+        for message in &sent {
+            message.mark_wire_cleared();
+        }
+        Ok((sent, floors))
+    }
     fn cleared(
         &self,
         mut messages: Vec<HistoryMessage>,

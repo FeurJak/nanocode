@@ -50,6 +50,8 @@ struct PagedConversation {
     #[serde(default)]
     compacted: Option<Sequence>,
     #[serde(default)]
+    paged: Option<Sequence>,
+    #[serde(default)]
     admitted_base: Option<EncodedPayload>,
     #[serde(default)]
     admitted_tool_ids: Vec<String>,
@@ -150,6 +152,41 @@ fn typed_checkpoint(
     }
 }
 
+#[derive(Deserialize)]
+struct PagedRecord {
+    entries: Vec<(usize, Value, serde_json::Map<String, Value>)>,
+}
+
+type PagedMessages = std::collections::BTreeMap<usize, (Value, serde_json::Map<String, Value>)>;
+
+async fn paged_messages(
+    reader: PayloadReader<'_>,
+    sequence: Option<Sequence>,
+    read: &mut HashSet<String>,
+) -> Result<PagedMessages> {
+    let Some(sequence) = sequence else {
+        return Ok(PagedMessages::new());
+    };
+    let records: Vec<PagedRecord> = load_sequence(reader, sequence, read).await?;
+    Ok(records
+        .into_iter()
+        .flat_map(|record| record.entries)
+        .map(|(at, results, message)| (at, (results, message)))
+        .collect())
+}
+
+fn paged_payload(
+    (results, message): &(Value, serde_json::Map<String, Value>),
+    original: &EncodedPayload,
+) -> Result<EncodedPayload> {
+    let mut message = message.clone();
+    message.insert("paged".into(), Value::String(original.key().to_owned()));
+    message.insert("results".into(), results.clone());
+    serde_json::to_string(&message)
+        .map(|json| EncodedPayload::from_json(json.into()))
+        .map_err(Error::InvalidPayload)
+}
+
 #[derive(Default)]
 struct Reuse {
     reused: usize,
@@ -163,6 +200,7 @@ async fn advance_sequence(
     read: &mut HashSet<String>,
     kept: Option<LoadedSequence>,
     reuse: &mut Reuse,
+    paged: &PagedMessages,
 ) -> Result<LoadedSequence> {
     let references = sequence_references_from(reader, sequence, skip, read).await?;
     let mut loaded = match kept {
@@ -183,7 +221,22 @@ async fn advance_sequence(
     reuse.reused += reused;
     reuse.decoded += references.len() - reused;
     if reused < references.len() {
-        loaded.extend(reader.take_payloads(references[reused..].to_vec()).await?);
+        let wanted = (reused..references.len())
+            .filter(|at| !paged.contains_key(at))
+            .map(|at| references[at].clone())
+            .collect::<Vec<_>>();
+        let mut fetched = reader.take_payloads(wanted).await?.into_iter();
+        for (at, reference) in references.iter().enumerate().skip(reused) {
+            match paged.get(&at) {
+                Some(entry) => {
+                    read.insert(reference.key().to_owned());
+                    loaded.push(paged_payload(entry, reference)?);
+                }
+                None => loaded.push(fetched.next().ok_or_else(|| {
+                    Error::InvalidState("loading a sequence lost a payload".into())
+                })?),
+            }
+        }
     }
     Ok(LoadedSequence { references, loaded })
 }
@@ -211,6 +264,7 @@ impl PagedConversation {
         lazy: bool,
     ) -> Result<HydratedConversation> {
         let previous = previous.unwrap_or_default();
+        let paged = paged_messages(reader, self.paged, read).await?;
         let messages = advance_sequence(
             reader,
             self.messages,
@@ -218,6 +272,7 @@ impl PagedConversation {
             read,
             Some(previous.messages),
             reuse,
+            &paged,
         )
         .await?;
         let mut hydrated = HydratedConversation {
@@ -235,6 +290,7 @@ impl PagedConversation {
                     read,
                     previous.code_calls,
                     reuse,
+                    &PagedMessages::new(),
                 )
                 .await?,
             );
@@ -246,7 +302,16 @@ impl PagedConversation {
             }
             if !(lazy && resumable) {
                 hydrated.compacted = Some(
-                    advance_sequence(reader, compacted, 0, read, previous.compacted, reuse).await?,
+                    advance_sequence(
+                        reader,
+                        compacted,
+                        0,
+                        read,
+                        previous.compacted,
+                        reuse,
+                        &PagedMessages::new(),
+                    )
+                    .await?,
                 );
             }
         }
@@ -286,7 +351,21 @@ impl PagedConversation {
         read: &'a mut HashSet<String>,
     ) -> crate::agent::AgentFuture<'a, Result<()>> {
         Box::pin(async move {
-            let messages: Vec<Value> = load_sequence(reader, self.messages, read).await?;
+            let paged = paged_messages(reader, self.paged, read).await?;
+            let messages: Vec<Value> = advance_sequence(
+                reader,
+                self.messages,
+                0,
+                read,
+                None,
+                &mut Reuse::default(),
+                &paged,
+            )
+            .await?
+            .loaded
+            .iter()
+            .map(EncodedPayload::decode)
+            .collect::<Result<_>>()?;
             if let Some(code_calls) = self.code_calls {
                 let rounds =
                     load_sequence_from(reader, code_calls, self.code_calls_skip, read).await?;

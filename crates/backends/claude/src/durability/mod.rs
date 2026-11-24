@@ -628,6 +628,10 @@ impl ClaudeExecutionPolicy for LazyClaudeExecution {
         Box::pin(async move { self.get().await?.load_sequence(sequence).await })
     }
 
+    fn load_records(&self, records: Vec<EncodedPayload>) -> PolicyFuture<'_, Vec<EncodedPayload>> {
+        Box::pin(async move { self.get().await?.load_records(records).await })
+    }
+
     fn holds_back_formats(&self) -> bool {
         self.store.holds_back_formats()
     }
@@ -1359,6 +1363,15 @@ impl ClaudeExecutionPolicy for ClaudeExecution {
             )
             .await
             .map_err(agent_error)
+        })
+    }
+
+    fn load_records(&self, records: Vec<EncodedPayload>) -> PolicyFuture<'_, Vec<EncodedPayload>> {
+        Box::pin(async move {
+            PayloadReader::from(&self.owner)
+                .take_payloads(records)
+                .await
+                .map_err(agent_error)
         })
     }
 

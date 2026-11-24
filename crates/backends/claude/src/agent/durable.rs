@@ -82,7 +82,7 @@ impl Default for Snapshot {
 impl Snapshot {
     pub(super) fn decode_paged(head: Value, pages: ContinuationPages) -> Result<Self> {
         let mut snapshot = serde_json::from_value::<Self>(head).map_err(provider_error)?;
-        snapshot.conversation.messages = decode_pages(pages.messages)?;
+        snapshot.conversation.messages = decode_stored(pages.messages)?;
         if let Some(code_calls) = pages.code_calls {
             snapshot.conversation.code_calls = decode_pages(code_calls)?;
         }
@@ -499,7 +499,7 @@ impl State {
                 serde_json::from_value(continuation.head).map_err(recovery_error)?;
             if let Some(pages) = continuation.pages {
                 let conversation = &mut cursor.snapshot.conversation;
-                conversation.messages = decode_pages(pages.messages)?;
+                conversation.messages = decode_stored(pages.messages)?;
                 if let Some(code_calls) = pages.code_calls {
                     conversation.code_calls = decode_pages(code_calls)?;
                 }
@@ -1105,6 +1105,12 @@ pub(super) fn decode_pages<T: serde::de::DeserializeOwned>(
     Ok(decoded)
 }
 
+fn decode_stored(payloads: Vec<EncodedPayload>) -> Result<Vec<HistoryMessage>> {
+    let messages: Vec<HistoryMessage> = decode_pages(payloads)?;
+    messages.iter().for_each(HistoryMessage::committed);
+    Ok(messages)
+}
+
 pub(super) fn prepend_compacted(
     conversation: &mut Conversation,
     persisted: Vec<EncodedPayload>,
@@ -1113,6 +1119,62 @@ pub(super) fn prepend_compacted(
     compacted.append(&mut conversation.compacted);
     conversation.compacted = compacted;
     conversation.compacted_pages = None;
+    Ok(())
+}
+
+pub(super) async fn load_paged(
+    policy: &dyn ClaudeExecutionPolicy,
+    messages: &[&HistoryMessage],
+) -> Result<Vec<HistoryMessage>> {
+    let records = messages
+        .iter()
+        .map(|message| {
+            let original = message
+                .paged_original()
+                .expect("only paged messages are loaded");
+            EncodedPayload::from_key(&original)
+        })
+        .collect::<Vec<_>>();
+    let loaded = policy.load_records(records).await?;
+    if loaded.len() != messages.len() {
+        return Err(recovery_error(format!(
+            "loading {} paged messages returned {}",
+            messages.len(),
+            loaded.len()
+        )));
+    }
+    loaded
+        .iter()
+        .map(|record| {
+            let json = record.json().map_err(provider_error)?;
+            HistoryMessage::loaded(json).map_err(provider_error)
+        })
+        .collect()
+}
+
+pub(super) async fn unpage(
+    conversation: &mut Conversation,
+    policy: &dyn ClaudeExecutionPolicy,
+) -> Result<()> {
+    for messages in [&mut conversation.messages, &mut conversation.compacted] {
+        let paged = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.paged_original().is_some())
+            .map(|(at, _)| at)
+            .collect::<Vec<_>>();
+        if paged.is_empty() {
+            continue;
+        }
+        let loaded = load_paged(
+            policy,
+            &paged.iter().map(|&at| &messages[at]).collect::<Vec<_>>(),
+        )
+        .await?;
+        for (at, message) in paged.into_iter().zip(loaded) {
+            messages[at] = message;
+        }
+    }
     Ok(())
 }
 
@@ -1126,6 +1188,8 @@ struct PagedConversation {
     code_calls_skip: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     compacted: Option<Sequence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    paged: Option<Sequence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     admitted_base: Option<EncodedPayload>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1231,6 +1295,18 @@ impl Detached {
             records,
             paging.stored.as_ref(),
         )?;
+        let groups = paged_groups(&self.messages);
+        let paged = if groups.is_empty() {
+            paging.paged = Pages::default();
+            None
+        } else {
+            let unchanged = paging.paged.unchanged(&groups, 0);
+            Some(
+                paging
+                    .paged
+                    .page(&groups, 0, unchanged, records, paging.stored.as_ref())?,
+            )
+        };
         Ok(PagedConversation {
             messages: paging.messages.page(
                 &self.messages,
@@ -1247,6 +1323,7 @@ impl Detached {
                 records,
                 paging.stored.as_ref(),
             )?,
+            paged,
             admitted_base: admitted_base.as_ref().map(EncodedPayload::reference),
             admitted_tool_ids: tools.recent.iter().cloned().collect(),
             unadmitted_tool_ids: tools.unadmitted.iter().cloned().collect(),
@@ -1396,6 +1473,89 @@ impl Paged for HistoryMessage {
 
     fn committed(&self) {
         Self::committed(self);
+    }
+}
+
+const PAGED_GROUP_MESSAGES: usize = 16;
+
+#[derive(Clone)]
+pub(super) struct PagedGroup(Arc<PagedEntries>);
+
+struct PagedEntries {
+    entries: Vec<(usize, HistoryMessage)>,
+    record: std::sync::OnceLock<EncodedPayload>,
+}
+
+#[derive(Serialize)]
+struct PagedRecord<'a> {
+    entries: Vec<(usize, &'a [(usize, u64)], &'a RawValue)>,
+}
+
+fn paged_groups(messages: &[HistoryMessage]) -> Vec<PagedGroup> {
+    let mut groups: Vec<Vec<(usize, HistoryMessage)>> = Vec::new();
+    for (at, message) in messages.iter().enumerate() {
+        if message.paged_parts().is_none() {
+            continue;
+        }
+        match groups.last_mut() {
+            Some(group)
+                if group.first().map(|(first, _)| first / PAGED_GROUP_MESSAGES)
+                    == Some(at / PAGED_GROUP_MESSAGES) =>
+            {
+                group.push((at, message.clone()));
+            }
+            _ => groups.push(vec![(at, message.clone())]),
+        }
+    }
+    groups.pop();
+    groups
+        .into_iter()
+        .map(|entries| {
+            PagedGroup(Arc::new(PagedEntries {
+                entries,
+                record: std::sync::OnceLock::new(),
+            }))
+        })
+        .collect()
+}
+
+impl Paged for PagedGroup {
+    fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+            || (self.0.entries.len() == other.0.entries.len()
+                && self
+                    .0
+                    .entries
+                    .iter()
+                    .zip(&other.0.entries)
+                    .all(|((at, message), (other_at, other))| {
+                        at == other_at && message.ptr_eq(other)
+                    }))
+    }
+
+    fn record(&self) -> serde_json::Result<EncodedPayload> {
+        if let Some(record) = self.0.record.get() {
+            return Ok(record.clone());
+        }
+        let parts = self
+            .0
+            .entries
+            .iter()
+            .map(|(at, message)| {
+                let (results, cleared) = message
+                    .paged_parts()
+                    .expect("a paged group holds paged messages");
+                Ok((*at, results, serde_json::from_str::<&RawValue>(&cleared)?.to_owned()))
+            })
+            .collect::<serde_json::Result<Vec<_>>>()?;
+        let json = serde_json::to_string(&PagedRecord {
+            entries: parts
+                .iter()
+                .map(|(at, results, cleared)| (*at, *results, &**cleared))
+                .collect(),
+        })?;
+        let record = EncodedPayload::from_json(json.into());
+        Ok(self.0.record.get_or_init(|| record).clone())
     }
 }
 
@@ -1573,6 +1733,7 @@ impl CompactedLog {
 
 #[derive(Default)]
 pub(super) struct Paging {
+    paged: Pages<PagedGroup>,
     messages: Pages<HistoryMessage>,
     code_calls: RoundPages,
     compacted: CompactedLog,
@@ -1596,6 +1757,7 @@ impl Paging {
         self.code_calls.committed();
         self.compacted.committed();
         self.pending.committed();
+        self.paged.committed();
     }
 }
 
