@@ -762,14 +762,18 @@ impl Fold {
             })
             .filter(|(first, _)| {
                 self.page_owners(first).all(|(owner, state)| {
-                    matches!(state, Owner::Cold { entry, pending } if pending.is_empty() && !entry.legacy && !entry.sections.is_empty())
-                        && !self.unindexed.contains(owner)
+                    let listed = !self.unindexed.contains(owner);
+                    let pins = crate::sim::mutated(crate::sim::Mutation::UnindexedPinsPages);
+                    (!listed && !pins)
+                        || (listed
+                            && matches!(state, Owner::Cold { entry, pending } if pending.is_empty() && !entry.legacy && !entry.sections.is_empty()))
                 })
             })
             .collect::<Vec<_>>();
         for (first, section) in idle {
             let owners = self
                 .page_owners(&first)
+                .filter(|(owner, _)| !self.unindexed.contains(*owner))
                 .map(|(owner, _)| owner.clone())
                 .collect::<Vec<_>>();
             let mut filter = owners
@@ -1326,6 +1330,14 @@ impl Fold {
     #[must_use]
     pub fn retired(&self, id: &str) -> Option<&Retired> {
         self.retired.get(&tag(id))
+    }
+
+    #[must_use]
+    pub fn loaded_pages(&self) -> usize {
+        self.pages
+            .values()
+            .filter(|page| matches!(page, Page::Loaded(_)))
+            .count()
     }
 
     #[must_use]
@@ -2254,6 +2266,7 @@ impl Fold {
         }
         Ok(())
     }
+
 
     pub fn snapshot(&self, keep: u64) -> Result<String, StoreError> {
         let mut body = String::new();

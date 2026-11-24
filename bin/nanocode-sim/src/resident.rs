@@ -2,7 +2,7 @@ use std::{future::Future, sync::Arc};
 
 use nanocode_durability_core::StoreError;
 use nanocode_sync::FutureExt;
-use nanocode_turnlog::{LogHost, Point, Record, TurnLog};
+use nanocode_turnlog::{Fold, LogHost, Point, Record, TurnLog};
 use serde_json::value::to_raw_value;
 
 use crate::{disk::Disk, turnlog::SimHost};
@@ -37,6 +37,11 @@ pub fn probe(scope: &str, stored: &[(u64, String)], seq: u64, limit: Option<usiz
     assert!(
         held(&log, &key).is_none(),
         "{scope} keeps a loaded value resident past the commit after its load, probed after commit {seq}"
+    );
+    let loaded = ready(log.read(Fold::loaded_pages));
+    assert!(
+        loaded == 0,
+        "{scope} keeps {loaded} index pages resident past a commit that read none of the owners they list, probed after commit {seq}"
     );
 }
 
