@@ -1,0 +1,63 @@
+# Written by `uphill --update`: the accepted sizes, counts, checks, and line targets of each
+# metric. Each run reports what changed since.
+
+footprint:
+  cli-size:
+    nanocode: 111347584B
+    nanocode-exec: 111346416B
+
+memory:
+  retained-ratio:
+    claude/memo: 0.61
+    claude/paged: 0.61
+    claude/reload: 0.61
+    claude/replay: 0.5
+    codex/memo: 1.15
+    codex/paged: 1.2
+    codex/reload: 1.15
+    codex/replay: 1.14
+  transient-xbody:
+    claude/memo: 3.4
+    claude/paged: 3
+    claude/reload: 3.4
+    claude/replay: 6.1
+    codex/memo: 1.1
+    codex/paged: 1
+    codex/reload: 1.1
+    codex/replay: 1.1
+  invariant:
+    claude/memo: pass
+    claude/paged: pass
+    claude/reload: pass
+    claude/replay: pass
+    codex/memo: pass
+    codex/paged: pass
+    codex/reload: pass
+    codex/replay: pass
+  retained:
+    claude/memo: 4299162B
+    claude/paged: 3879731B
+    claude/reload: 4299162B
+    claude/replay: 2516582B
+    codex/memo: 11744051B
+    codex/paged: 11848909B
+    codex/reload: 11744051B
+    codex/replay: 11639194B
+  transient:
+    claude/memo: 2202010B
+    claude/paged: 1992294B
+    claude/reload: 2202010B
+    claude/replay: 4089446B
+    codex/memo: 11114906B
+    codex/paged: 10695475B
+    codex/reload: 11114906B
+    codex/replay: 11534336B
+  bytes-per-message:
+    claude/memo: 0
+    claude/paged: 0
+    claude/reload: 0
+    claude/replay: 0
+    codex/memo: 615
+    codex/paged: 692
+    codex/reload: 615
+    codex/replay: 569

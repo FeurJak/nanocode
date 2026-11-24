@@ -1,0 +1,34 @@
+timeout: 30m
+
+speed:
+  run: python3 .agents/metrics/cli.py
+  description: Release CLI against a local Anthropic mock that answers at once, median of 9 runs per round.
+  startup: { title: nanocode-exec --version }
+  tui-first-frame: { target: 1.3ms }
+  tui-ready: {}
+  tui-ttft: { title: TUI time to first token }
+  exec-ttft: { title: Exec time to first token }
+  exec-turn: {}
+
+footprint:
+  run: python3 .agents/metrics/cli.py
+  description: Release CLI binaries and resident memory.
+  cli-size: {}
+  tui-rss: { varies: true }
+  exec-peak-rss: { varies: true }
+
+wasm:
+  run: sh .agents/metrics/wasm.sh
+  description: nanocode-ts's nanocode_wasm.wasm built against this checkout with its wasm profile, before wasm-opt.
+  wasm-size: {}
+  wasm-gzip: {}
+
+memory:
+  run: python3 .agents/metrics/memory.py
+  description: nanocode-sim --memory against docs/memory-invariant.md.
+  retained-ratio: { target: 1.05, score: max }
+  transient-xbody: { target: 1, score: max }
+  invariant: {}
+  retained: {}
+  transient: {}
+  bytes-per-message: {}
