@@ -51,7 +51,7 @@ pub use wakes::{Fire, Heard, WakeError};
 const TOOLS_MARK: &str = "$nanocode_tools";
 const STORED_MARK: &str = "$nanocode_stored";
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Policy {
     pub effects: Effects,
     pub host_call_bound: Option<std::time::Duration>,
@@ -63,6 +63,23 @@ pub struct Policy {
     pub snapshot_ratio: usize,
     pub snapshot_rows: Option<usize>,
     pub wakes_max: Option<usize>,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self {
+            effects: Effects::default(),
+            host_call_bound: None,
+            max_row_bytes: None,
+            max_tail_bytes: None,
+            restarts: 0,
+            retain_finished: None,
+            retired_max: None,
+            snapshot_ratio: nanocode_turnlog::SNAPSHOT_RATIO,
+            snapshot_rows: None,
+            wakes_max: None,
+        }
+    }
 }
 
 pub struct OneLog {

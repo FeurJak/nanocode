@@ -18,6 +18,7 @@ use crate::{
 };
 
 pub const EVENT_GAP: u64 = 1 << 14;
+pub const SNAPSHOT_RATIO: usize = 2;
 const CLAIM: &str = "writer";
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1085,7 +1086,7 @@ impl Follower {
             raw: host,
             limit: None,
             max_tail: None,
-            ratio: 2,
+            ratio: SNAPSHOT_RATIO,
             retain: None,
             riding,
             rows: None,
