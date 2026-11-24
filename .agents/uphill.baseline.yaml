@@ -3,8 +3,61 @@
 
 footprint:
   cli-size:
-    nanocode: 111347584B
-    nanocode-exec: 111346416B
+    nanocode: 111414832B
+    nanocode-exec: 111413728B
+
+requests:
+  request-bytes:
+    claude: 37355B
+    codex: 44841B
+  request-section-bytes:
+    claude/messages: 61B
+    claude/system: 5834B
+    claude/tools: 30944B
+    codex/input: 44140B
+    codex/instructions: 0B
+    codex/tools: 0B
+  turn2-added-bytes:
+    claude: 135B
+    codex: 2317B
+  cached-prefix:
+    claude: 99.6
+    codex: 95
+  requests-per-turn:
+    claude: 1
+    codex: 1
+
+size:
+  section-size:
+    ".bss": 10148B
+    ".data": 69584B
+    ".data.rel.ro": 6610104B
+    ".eh_frame": 6542888B
+    ".eh_frame_hdr": 1027308B
+    ".gcc_except_table": 4818236B
+    ".rodata": 17658660B
+    ".text": 40329304B
+  download-size:
+    gzip: 34441797B
+    xz: 23202040B
+  crate-size:
+    alloc: 4198957B
+    core: 7560528B
+    djs_core: 3131270B
+    nanocode_backend_claude: 1408128B
+    nanocode_backend_codex: 1049438B
+    nanocode_cli: 884459B
+    nanocode_mpp: 739967B
+    nanocode_subagents: 769161B
+    nanocode_sync: 1342960B
+    nanocode_sys: 1250537B
+    psh_engine: 1472679B
+    psh_utils: 3016876B
+    serde: 869542B
+    serde_json: 2688944B
+    std: 740068B
+  dependencies: 99
+  duplicate-dependencies: 0
 
 memory:
   retained-ratio:
@@ -61,3 +114,15 @@ memory:
     codex/paged: 692
     codex/reload: 615
     codex/replay: 569
+
+long-session:
+  long-retained-ratio:
+    claude/memo: 0.4
+    codex/memo: 1.12
+  retained-per-turn:
+    claude/memo: 71653B
+    codex/memo: 196608B
+
+build:
+  clippy-warnings: 28
+  unsafe-blocks: 1842
