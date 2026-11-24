@@ -157,6 +157,15 @@ enum Wire {
     Http(Arc<HttpServer>),
 }
 
+impl Wire {
+    fn mutation(&self) -> WireMutation {
+        match self {
+            Self::Transport(network) => network.mutation(),
+            Self::Http(server) => server.mutation(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stop {
     Never,
@@ -1103,6 +1112,13 @@ async fn verify(
         agents.push(open_root(&runtime, &store, root, number, world).await?);
         check_acked(&store, root, world).await;
     }
+    if let Some(parts) = &parts {
+        let checked = crate::claudefacts::check(&parts.log, world, wire.mutation()).await;
+        world.trace(&format!(
+            "claude facts rebuilt {} of {} model requests from {:?}",
+            checked.matched, checked.calls, checked.kinds
+        ));
+    }
     let (after, completed) = listing(&runtime, shape).await?;
     if shape.stop != Stop::Close
         && let Some(difference) = difference(&before, &after)
@@ -1196,6 +1212,13 @@ async fn epoch(
     stopped?;
     settle(&runtime, &store, shape, world).await?;
     settled(&runtime, shape, world).await?;
+    if let Some(parts) = &parts {
+        let checked = crate::claudefacts::check(&parts.log, world, wire.mutation()).await;
+        world.trace(&format!(
+            "claude facts rebuilt {} of {} model requests from {:?}",
+            checked.matched, checked.calls, checked.kinds
+        ));
+    }
     if shape.stop == Stop::Never && shape.cancel_turn.is_none() && *pending.get() {
         world.wrong("the restored root never made the call its mapped root image made".to_owned());
     }

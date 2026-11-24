@@ -4,6 +4,7 @@ use std::{
 };
 
 use nanocode_sync::Slot;
+use serde_json::Value;
 
 use crate::{
     executor::Clock,
@@ -39,6 +40,7 @@ struct State {
     holds_receipts: bool,
     crash_pending: bool,
     violations: Vec<String>,
+    requests: BTreeMap<String, Value>,
     counts: WorldCounts,
     digest: u64,
     verbose: bool,
@@ -104,6 +106,16 @@ impl World {
         if runs > 1 {
             self.wrong(format!("effect {key} ran {runs} times"));
         }
+    }
+
+    pub fn requested(&self, response: String, request: Value) {
+        self.with(|state| {
+            state.requests.insert(response, request);
+        });
+    }
+
+    pub fn request_for(&self, response: &str) -> Option<Value> {
+        self.with(|state| state.requests.get(response).cloned())
     }
 
     pub fn sent(&self, label: &str, message: u64) {

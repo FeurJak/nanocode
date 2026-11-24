@@ -571,6 +571,10 @@ impl ModelServer {
             self.check_root(&label, turn, &messages);
         }
         let id = format!("{:016x}", fnv(conversation.prefix, label.as_bytes()));
+        self.world.requested(
+            format!("msg_{id}"),
+            crate::claudefacts::normalized(request.clone()),
+        );
         let (block, delta, stop, message) = self.decide(&conversation, &id);
         self.world.sent(&label, message_digest(&label, &message));
         self.world.trace(&format!(

@@ -139,6 +139,10 @@ fn transport(detail: &str, unsent: bool) -> HttpError {
 }
 
 impl Network {
+    pub const fn mutation(&self) -> WireMutation {
+        self.mutation
+    }
+
     pub fn new(
         seed: u64,
         world: Arc<World>,

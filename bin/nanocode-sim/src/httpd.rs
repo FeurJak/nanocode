@@ -86,6 +86,7 @@ pub enum WireMutation {
     AcksUnflushed,
     CodingPassthrough,
     ReopenForgetsAgents,
+    DropFactDecision,
 }
 
 impl WireMutation {
@@ -103,6 +104,7 @@ impl WireMutation {
             "acks-unflushed" => Some(Self::AcksUnflushed),
             "http-coding-passthrough" => Some(Self::CodingPassthrough),
             "reopen-forgets-agents" => Some(Self::ReopenForgetsAgents),
+            "drop-fact-decision" => Some(Self::DropFactDecision),
             _ => None,
         }
     }
@@ -122,10 +124,11 @@ impl WireMutation {
             Self::AcksUnflushed => "acks-unflushed",
             Self::CodingPassthrough => "http-coding-passthrough",
             Self::ReopenForgetsAgents => "reopen-forgets-agents",
+            Self::DropFactDecision => "drop-fact-decision",
         }
     }
 
-    pub const NAMES: &'static str = "http-reuse-dirty|http-no-read-timeout|tool-result-twice|drop-cancelled-prompt|hedge-unmarked|http-real-elapsed|drop-acked-answer|drop-tool-result|rewrite-assistant|acks-unflushed|http-coding-passthrough|reopen-forgets-agents";
+    pub const NAMES: &'static str = "http-reuse-dirty|http-no-read-timeout|tool-result-twice|drop-cancelled-prompt|hedge-unmarked|http-real-elapsed|drop-acked-answer|drop-tool-result|rewrite-assistant|acks-unflushed|http-coding-passthrough|reopen-forgets-agents|drop-fact-decision";
 }
 
 #[derive(Clone, Copy, Debug)]

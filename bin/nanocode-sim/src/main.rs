@@ -13,6 +13,7 @@ mod capture;
 mod cellcalls;
 mod cells;
 mod children;
+mod claudefacts;
 mod controlplane;
 mod cost;
 mod disk;
@@ -29,7 +30,6 @@ mod gcunwind;
 mod gitremote;
 mod handauto;
 mod handrouter;
-mod onelogfacts;
 mod hands;
 mod holds;
 mod host;
@@ -48,6 +48,7 @@ mod mpp;
 mod nestedmeta;
 mod network;
 mod onelog;
+mod onelogfacts;
 mod partitions;
 mod plog;
 mod repocache;
@@ -101,7 +102,6 @@ use crate::{
     handauto::{HandAutoMutation, HandAutoStats},
     handrouter::{HandRouterMutation, HandRouterStats},
     hands::{HandsMutation, HandsStats},
-    onelogfacts::{OneLogFactsMutation, OneLogFactsStats},
     holds::{HoldsMutation, HoldsStats},
     httpd::WireMutation,
     httpserver::{HttpServerMutation, HttpServerStats},
@@ -114,6 +114,7 @@ use crate::{
     mpp::{MppMutation, MppStats},
     nestedmeta::{NestedMetaMutation, NestedMetaStats},
     onelog::{LiveSeqs, Protections},
+    onelogfacts::{OneLogFactsMutation, OneLogFactsStats},
     partitions::{PartitionsMutation, PartitionsStats},
     plog::{PlogMutation, PlogStats},
     repocache::{RepoCacheMutation, RepoCacheStats},
