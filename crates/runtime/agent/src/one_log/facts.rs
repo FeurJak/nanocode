@@ -11,8 +11,8 @@ use super::OneLog;
 use crate::durability::{
     StoreError, StoreFuture,
     facts::{
-        Append, Digest, EffectResult, Fact, FactLog, FactLogs, FactSink, FoldError, Marker,
-        OwnedFact, Replay, Snapshot, StoredFact, Value,
+        Append, Decision, Digest, EffectResult, Fact, FactLog, FactLogs, FactSink, FoldError,
+        Marker, OwnedFact, Replay, Snapshot, StoredFact, Value,
     },
 };
 
@@ -30,10 +30,11 @@ pub mod sim {
         ScopeLeaks,
         AdmissionCopied,
         CacheGap,
+        HostCopied,
     }
 
     impl Mutation {
-        pub const ALL: [Self; 7] = [
+        pub const ALL: [Self; 8] = [
             Self::CommitBuffered,
             Self::UnseenSkipped,
             Self::IntentReplayed,
@@ -41,6 +42,7 @@ pub mod sim {
             Self::ScopeLeaks,
             Self::AdmissionCopied,
             Self::CacheGap,
+            Self::HostCopied,
         ];
 
         #[must_use]
@@ -54,6 +56,7 @@ pub mod sim {
                 Self::ScopeLeaks => "scope_leaks",
                 Self::AdmissionCopied => "admission_copied",
                 Self::CacheGap => "cache_gap",
+                Self::HostCopied => "host_copied",
             }
         }
 
@@ -95,7 +98,11 @@ fn in_scope(scope: &Scope, held: Option<&str>, fact: &StoredFact) -> bool {
     }
     match held {
         Some(state) => state == scope.state,
-        None => scope.turns || matches!(fact, Fact::Marker(Marker::Blob { .. })),
+        None => match fact {
+            Fact::Marker(Marker::Blob { .. }) => true,
+            Fact::Decision(Decision::Host { .. }) => false,
+            _ => scope.turns,
+        },
     }
 }
 

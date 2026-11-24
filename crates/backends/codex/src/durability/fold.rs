@@ -341,7 +341,7 @@ impl CodexFold {
 
     fn decision(&mut self, seq: u64, decision: Decision<&CodexDecision>) -> Result<(), FoldError> {
         match decision {
-            Decision::Time { .. } | Decision::Id { .. } => Ok(()),
+            Decision::Time { .. } | Decision::Id { .. } | Decision::Host { .. } => Ok(()),
             Decision::Route { model } => {
                 let template = self.template.as_mut().ok_or_else(|| {
                     rejected(seq, "a Codex route switch arrived before its template")

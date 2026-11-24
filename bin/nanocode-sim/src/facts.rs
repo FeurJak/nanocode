@@ -192,7 +192,7 @@ impl DurableFold for Chat {
             }
             Fact::Decision(Decision::Time { unix_millis }) => self.clock = unix_millis,
             Fact::Decision(Decision::Route { model }) => self.route = model,
-            Fact::Decision(Decision::Id { .. }) | Fact::Marker(_) => {}
+            Fact::Decision(Decision::Id { .. } | Decision::Host { .. }) | Fact::Marker(_) => {}
         }
         Ok(())
     }

@@ -27,7 +27,9 @@ use crate::{
     durability::{
         Committed, OwnedState, OwnerId, OwnerToken, Settle, SqlStatement, StateCommit, StateStore,
         StoreError, StoreFuture, StoreRecord, StoredState,
-        facts::{Fact, Input, InputKind, Marker, Outcome as FactOutcome, OwnedFact, TurnStatus},
+        facts::{
+            Decision, Fact, Input, InputKind, Marker, Outcome as FactOutcome, OwnedFact, TurnStatus,
+        },
     },
     events::AgentEventKind,
     input::Prompt,
@@ -342,6 +344,24 @@ fn put_fact(
     lease.append_owned(None, fact).map_err(StoreError::from)
 }
 
+fn put_host(
+    lease: &mut nanocode_turnlog::Lease<'_>,
+    key: &str,
+    value: Box<RawValue>,
+) -> Result<(), StoreError> {
+    if facts::sim::mutated(facts::sim::Mutation::HostCopied) {
+        lease.push(Record::Host {
+            key: key.to_owned(),
+            value: value.clone(),
+        })?;
+    }
+    let fact = Fact::Decision(Decision::Host {
+        key: key.to_owned(),
+        value,
+    });
+    put_fact(lease, &fact).map(drop)
+}
+
 fn status_fact(turn: &str, status: TurnStatus) -> RuntimeFact {
     Fact::Marker(Marker::Status {
         turn: turn.to_owned(),
@@ -617,18 +637,13 @@ impl OneLog {
     }
 
     pub async fn field(&self, key: &str, value: Box<RawValue>) -> Result<(), StoreError> {
-        self.log.lease_within().await?.push(Record::Host {
-            key: key.to_owned(),
-            value,
-        })
+        let mut lease = self.log.lease_within().await?;
+        put_host(&mut lease, key, value)
     }
 
     pub async fn effect(&self, key: &str, value: Box<RawValue>) -> Result<u64, StoreError> {
         let mut lease = self.log.lease_within().await?;
-        lease.push(Record::Host {
-            key: key.to_owned(),
-            value,
-        })?;
+        put_host(&mut lease, key, value)?;
         lease.commit(Point::Call).await
     }
 

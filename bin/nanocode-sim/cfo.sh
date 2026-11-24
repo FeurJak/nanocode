@@ -371,6 +371,7 @@ default_table='
 1 canary_one_log_facts_admission_copied canary:8 --scenario one_log_facts --mutation admission_copied
 1 canary_one_log_facts_cache_gap canary:8 --scenario one_log_facts --mutation cache_gap
 1 canary_one_log_facts_cache_never_due canary:8 --scenario one_log_facts --mutation cache_never_due
+1 canary_one_log_facts_host_copied canary:8 --scenario one_log_facts --mutation host_copied
 8 repo_cache pass --scenario repo_cache
 2 repo_cache_twice pass --scenario repo_cache --twice
 1 canary_repo_cache_shared_head canary:8 --scenario repo_cache --mutation shared_head

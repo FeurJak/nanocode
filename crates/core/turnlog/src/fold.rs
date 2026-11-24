@@ -6,8 +6,8 @@ use std::{
 };
 
 use nanocode_durability_core::{
-    Digest, EncodedPayload, Fact, FoldError, Input, InputKind, Marker, Outcome as FactOutcome,
-    Snapshot, StoreError, StoredFact, TurnStatus, Value, Values,
+    Decision, Digest, EncodedPayload, Fact, FoldError, Input, InputKind, Marker,
+    Outcome as FactOutcome, Snapshot, StoreError, StoredFact, TurnStatus, Value, Values,
 };
 use serde_json::value::RawValue;
 
@@ -2341,6 +2341,13 @@ impl Fold {
                 self.calls.remove(&result.call_id);
                 Ok(())
             }
+            Fact::Decision(Decision::Host { key, value }) => {
+                if internal_host(key) {
+                    return Err(invalid(format!("host field {key} names a turn log key")));
+                }
+                self.hosts.insert(key.clone(), value.clone());
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -3112,6 +3119,10 @@ impl Fold {
         })?;
         Ok(())
     }
+}
+
+fn internal_host(key: &str) -> bool {
+    key == RETIRED_KEY || key == FOLD_SNAPSHOT_KEY || cached_state_of(key).is_some()
 }
 
 #[must_use]

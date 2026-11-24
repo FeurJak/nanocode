@@ -170,6 +170,7 @@ pub enum Decision<D> {
     Time { unix_millis: u64 },
     Id { id: String },
     Route { model: String },
+    Host { key: String, value: Box<RawValue> },
     Backend(D),
 }
 
@@ -271,6 +272,10 @@ impl<V, D> Fact<V, D> {
                 Decision::Id { id } => Decision::Id { id: id.clone() },
                 Decision::Route { model } => Decision::Route {
                     model: model.clone(),
+                },
+                Decision::Host { key, value } => Decision::Host {
+                    key: key.clone(),
+                    value: value.clone(),
                 },
                 Decision::Backend(backend) => Decision::Backend(decision(backend)?),
             }),

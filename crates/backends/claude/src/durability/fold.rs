@@ -543,7 +543,7 @@ impl ClaudeFold {
 
     fn decision(&mut self, seq: u64, decision: Decision<&ClaudeDecision>) -> Result<(), FoldError> {
         match decision {
-            Decision::Time { .. } | Decision::Id { .. } => Ok(()),
+            Decision::Time { .. } | Decision::Id { .. } | Decision::Host { .. } => Ok(()),
             Decision::Route { model } => {
                 let template = self.template.as_mut().ok_or_else(|| {
                     rejected(seq, "a Claude route switch arrived before its template")

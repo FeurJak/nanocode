@@ -12,8 +12,8 @@ use nanocode_durability_core::{
 };
 use nanocode_sync::block_on;
 use nanocode_tool_runtime::ToolInput;
-use nanocode_turnlog::EffectClass;
 use nanocode_turnlog::MemoryLog;
+use nanocode_turnlog::{EffectClass, Record};
 use serde::{Deserialize, Serialize};
 use serde_json::value::{RawValue, to_raw_value};
 
@@ -38,6 +38,8 @@ const SNAPSHOT_RATIO: usize = 2;
 const SNAPSHOT_ROWS_MIN: u64 = 2;
 const SNAPSHOT_ROWS_MAX: u64 = 8;
 const SWAP_PPM: u64 = 300_000;
+const HOST_PPM: u64 = 100_000;
+const HOST_KEYS: u64 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OneLogFactsMutation {
@@ -51,10 +53,11 @@ pub enum OneLogFactsMutation {
     AdmissionCopied,
     CacheGap,
     CacheNeverDue,
+    HostCopied,
 }
 
 impl OneLogFactsMutation {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::None,
         Self::FoldReadsUnlogged,
         Self::CommitBuffered,
@@ -65,6 +68,7 @@ impl OneLogFactsMutation {
         Self::AdmissionCopied,
         Self::CacheGap,
         Self::CacheNeverDue,
+        Self::HostCopied,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -85,6 +89,7 @@ impl OneLogFactsMutation {
             Self::AdmissionCopied => "admission_copied",
             Self::CacheGap => "cache_gap",
             Self::CacheNeverDue => "cache_never_due",
+            Self::HostCopied => "host_copied",
         }
     }
 
@@ -105,6 +110,7 @@ impl OneLogFactsMutation {
             Self::ScopeLeaks => facts_sim::Mutation::ScopeLeaks,
             Self::AdmissionCopied => facts_sim::Mutation::AdmissionCopied,
             Self::CacheGap => facts_sim::Mutation::CacheGap,
+            Self::HostCopied => facts_sim::Mutation::HostCopied,
             Self::None | Self::FoldReadsUnlogged | Self::CacheNeverDue => facts_sim::Mutation::None,
         }
     }
@@ -126,6 +132,7 @@ pub struct OneLogFactsStats {
     pub cached: u64,
     pub skipped: u64,
     pub replayed: u64,
+    pub hosts: u64,
 }
 
 impl OneLogFactsStats {
@@ -144,6 +151,7 @@ impl OneLogFactsStats {
         self.cached += other.cached;
         self.skipped += other.skipped;
         self.replayed += other.replayed;
+        self.hosts += other.hosts;
     }
 }
 
@@ -238,6 +246,7 @@ impl DurableFold for Ledger {
 
 struct World {
     host: Arc<MemoryLog>,
+    hosts: BTreeMap<String, String>,
     log: Option<Arc<OneLog>>,
     facts: Option<Arc<dyn FactLog>>,
     child: Option<Arc<dyn FactLog>>,
@@ -412,6 +421,44 @@ impl World {
         self.check()
     }
 
+    fn host_field(&mut self, rng: &mut Rng) -> Result<(), String> {
+        let log = Arc::clone(self.log.as_ref().expect("the facts log is open"));
+        let key = format!("field-{}", rng.below(HOST_KEYS));
+        let value = value(rng);
+        block_on(log.effect(&key, value.clone()))
+            .map_err(|error| format!("write host field {key}: {error}"))?;
+        self.hosts.insert(key.clone(), value.get().to_owned());
+        self.stats.hosts += 1;
+        let stored = block_on(self.host.load(SCOPE))
+            .map_err(|error| format!("read the log's rows: {error}"))?;
+        let rows = nanocode_turnlog::rows(&stored).map_err(|error| error.to_string())?;
+        for row in rows.iter().filter(|row| !row.snapshot) {
+            let records = row.records().map_err(|error| error.to_string())?;
+            if records
+                .iter()
+                .any(|record| matches!(record, Record::Host { key: held, .. } if *held == key))
+            {
+                return Err(format!(
+                    "host field {key} was written as a host record beside its decision"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn check_hosts(&self) -> Result<(), String> {
+        let log = self.log.as_ref().expect("the facts log is open");
+        for (key, value) in &self.hosts {
+            let held = block_on(log.read(|fold| fold.host(key).map(|held| held.get().to_owned())));
+            if held.as_deref() != Some(value.as_str()) {
+                return Err(format!(
+                    "host field {key} reads back as {held:?} after a restart"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn check_cached(&mut self) -> Result<(), String> {
         let replay = block_on(self.facts().replay_cached(Ledger::FAMILY, Ledger::FORMAT))
             .map_err(|error| format!("replay the session's facts from its cache: {error}"))?;
@@ -479,6 +526,7 @@ impl World {
         self.child_live = None;
         self.log = None;
         self.open()?;
+        self.check_hosts()?;
         let applied = self
             .live
             .as_ref()
@@ -524,6 +572,7 @@ impl World {
         self.child_live = None;
         self.log = None;
         self.open()?;
+        self.check_hosts()?;
         let after = self.live.as_ref().expect("the facts fold is live");
         let encode = |state: &Ledger| serde_json::to_string(state).expect("a ledger encodes");
         if after.seq() != before.seq() || encode(after.state()) != encode(before.state()) {
@@ -655,6 +704,9 @@ impl World {
         if rng.chance(SUBMIT_PPM) {
             self.submit(rng)?;
         }
+        if rng.chance(HOST_PPM) {
+            self.host_field(rng)?;
+        }
         match rng.below(100) {
             0..88 => self.commit(rng),
             88..94 => {
@@ -683,6 +735,7 @@ fn run_seed(seed: u64, mutation: OneLogFactsMutation) -> Outcome {
         .expect("a snapshot row count fits in usize");
     let mut world = World {
         host: Arc::new(MemoryLog::new()),
+        hosts: BTreeMap::new(),
         log: None,
         facts: None,
         child: None,
