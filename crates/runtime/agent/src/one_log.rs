@@ -1433,12 +1433,31 @@ impl EffectGate for OneLog {
 
     fn before<'a>(&'a self, call: EffectCall<'a>) -> HostFuture<'a, Result<(), String>> {
         Box::pin(async move {
-            let input = tool_input(call.input).map_err(|error| error.to_string())?;
             let mut lease = self
                 .log
                 .lease_within()
                 .await
                 .map_err(|error| error.to_string())?;
+            match facts::intended(lease.fold(), call.call_id) {
+                Some(tool) if tool != call.tool => {
+                    return Err(format!(
+                        "call {} was intended for tool {tool}, not {}",
+                        call.call_id, call.tool
+                    ));
+                }
+                Some(_) => {
+                    if lease.buffered() > 0 {
+                        lease
+                            .commit(Point::Call)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                    }
+                    self.owed.set(false);
+                    return Ok(());
+                }
+                None => {}
+            }
+            let input = tool_input(call.input).map_err(|error| error.to_string())?;
             lease
                 .push(Record::Call {
                     call_id: call.call_id.to_owned(),
@@ -1477,6 +1496,9 @@ impl EffectGate for OneLog {
                     return;
                 }
             };
+            if facts::intended(lease.fold(), call_id).is_some() {
+                return;
+            }
             if let Err(error) = lease.push(Record::Result {
                 call_id: call_id.to_owned(),
                 output,

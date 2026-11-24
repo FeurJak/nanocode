@@ -24,13 +24,15 @@ pub mod sim {
         CommitBuffered,
         UnseenSkipped,
         IntentReplayed,
+        IntentCopied,
     }
 
     impl Mutation {
-        pub const ALL: [Self; 3] = [
+        pub const ALL: [Self; 4] = [
             Self::CommitBuffered,
             Self::UnseenSkipped,
             Self::IntentReplayed,
+            Self::IntentCopied,
         ];
 
         #[must_use]
@@ -40,6 +42,7 @@ pub mod sim {
                 Self::CommitBuffered => "commit_buffered",
                 Self::UnseenSkipped => "unseen_skipped",
                 Self::IntentReplayed => "intent_replayed",
+                Self::IntentCopied => "intent_copied",
             }
         }
 
@@ -105,6 +108,16 @@ fn unseen(fold: &Fold, after: u64) -> (Vec<(u64, StoredFact)>, Vec<Digest>) {
         .map(|(digest, _)| digest)
         .collect();
     (facts, digests)
+}
+
+pub(super) fn intended(fold: &Fold, call_id: &str) -> Option<String> {
+    if sim::mutated(sim::Mutation::IntentCopied) {
+        return None;
+    }
+    fold.facts().find_map(|(_, fact)| match fact {
+        Fact::Intent(intent) if intent.call_id == call_id => Some(intent.tool.clone()),
+        _ => None,
+    })
 }
 
 struct Observed<'l, 'a> {

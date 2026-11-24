@@ -1,6 +1,8 @@
 use std::{collections::BTreeMap, ops::Range, process::ExitCode, sync::Arc};
 
-use nanocode::turnlog::{LogHost, OneLog, Policy, facts_sim};
+use nanocode::turnlog::{EffectCall, LogHost, OneLog, Policy, facts_sim};
+use nanocode_tool_runtime::ToolInput;
+use nanocode_turnlog::EffectClass;
 use nanocode_durability_core::{
     BlockRef, Decision, DurableFold, EffectResult, Fact, FactLog, FoldError, Folded, Input,
     InputKind, Intent, IntentTarget, Marker, ModelOut, Outcome as Finished, OwnedFact, Seen,
@@ -17,6 +19,7 @@ use crate::{
 };
 
 const SCOPE: &str = "one_log_facts";
+const TOOL: &str = "charge";
 const STEPS: Range<u64> = 40..240;
 const TURNS: u64 = 6;
 const BLOCKS: u64 = 4;
@@ -34,15 +37,17 @@ pub enum OneLogFactsMutation {
     CommitBuffered,
     UnseenSkipped,
     IntentReplayed,
+    IntentCopied,
 }
 
 impl OneLogFactsMutation {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::None,
         Self::FoldReadsUnlogged,
         Self::CommitBuffered,
         Self::UnseenSkipped,
         Self::IntentReplayed,
+        Self::IntentCopied,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -58,6 +63,7 @@ impl OneLogFactsMutation {
             Self::CommitBuffered => "commit_buffered",
             Self::UnseenSkipped => "unseen_skipped",
             Self::IntentReplayed => "intent_replayed",
+            Self::IntentCopied => "intent_copied",
         }
     }
 
@@ -74,6 +80,7 @@ impl OneLogFactsMutation {
             Self::CommitBuffered => facts_sim::Mutation::CommitBuffered,
             Self::UnseenSkipped => facts_sim::Mutation::UnseenSkipped,
             Self::IntentReplayed => facts_sim::Mutation::IntentReplayed,
+            Self::IntentCopied => facts_sim::Mutation::IntentCopied,
             Self::None | Self::FoldReadsUnlogged => facts_sim::Mutation::None,
         }
     }
@@ -88,6 +95,7 @@ pub struct OneLogFactsStats {
     pub refolds: u64,
     pub swaps: u64,
     pub unknown: u64,
+    pub gated: u64,
 }
 
 impl OneLogFactsStats {
@@ -99,6 +107,7 @@ impl OneLogFactsStats {
         self.refolds += other.refolds;
         self.swaps += other.swaps;
         self.unknown += other.unknown;
+        self.gated += other.gated;
     }
 }
 
@@ -265,7 +274,7 @@ impl World {
                 Fact::Intent(Intent {
                     turn: Some(turn),
                     call_id,
-                    tool: "charge".to_owned(),
+                    tool: TOOL.to_owned(),
                     target: IntentTarget::ToolUse(BlockRef { model_out, block }),
                 })
             }
@@ -289,6 +298,10 @@ impl World {
     fn commit(&mut self, rng: &mut Rng) -> Result<(), String> {
         let fact = self.fact(rng);
         let model_out = matches!(fact, Fact::ModelOut(_));
+        let intent = match &fact {
+            Fact::Intent(intent) => Some(intent.call_id.clone()),
+            _ => None,
+        };
         if rng.chance(SWAP_PPM) {
             self.stats.swaps += 1;
             std::mem::swap(&mut self.live, &mut self.stale);
@@ -301,6 +314,9 @@ impl World {
         self.stats.blobs += live.values().len().saturating_sub(before) as u64;
         if model_out {
             self.outputs.push(seq);
+        }
+        if let Some(call_id) = intent {
+            self.gate(&call_id)?;
         }
         self.shape.push('f');
         self.live = Some(live);
@@ -355,6 +371,28 @@ impl World {
                 before.seq()
             ));
         }
+        Ok(())
+    }
+
+    fn gate(&mut self, call_id: &str) -> Result<(), String> {
+        let log = Arc::clone(self.log.as_ref().expect("the facts log is open"));
+        let input = ToolInput::Function(to_raw_value(&()).expect("null encodes"));
+        block_on(log.gate().before(EffectCall {
+            call_id,
+            effect: EffectClass::External,
+            input: &input,
+            session_id: SCOPE,
+            tool: TOOL,
+            turn_id: None,
+        }))
+        .map_err(|error| format!("the gate refused intended call {call_id}: {error}"))?;
+        let copied = block_on(log.read(|fold| fold.open_calls().any(|(id, _)| id == call_id)));
+        if copied {
+            return Err(format!(
+                "the gate copied intended call {call_id} into a call record beside its intent"
+            ));
+        }
+        self.stats.gated += 1;
         Ok(())
     }
 
