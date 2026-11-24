@@ -811,6 +811,11 @@ impl OneLog {
     }
 
     pub async fn start(&self, request_id: &str) -> Result<Option<Started>, StoreError> {
+        let settled = if self.recovering.read(|turns| turns.contains(request_id)) {
+            self.settle_intents(request_id).await?
+        } else {
+            Vec::new()
+        };
         let mut lease = self.log.lease_within().await?;
         let Some(turn) = lease.fold().turn(request_id) else {
             return Ok(None);
@@ -835,7 +840,8 @@ impl OneLog {
                     .await?;
                 return Ok(None);
             }
-            let unknown = lease.fold().unknown();
+            let mut unknown = lease.fold().unknown();
+            unknown.extend(settled);
             lease.push(Record::Recovery {
                 at: None,
                 attempt,

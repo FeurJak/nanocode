@@ -1,14 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use nanocode_tool_host::ToolOutput;
 use nanocode_turnlog::{Fold, Lease, Point};
+use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use super::OneLog;
 use crate::durability::{
     StoreError, StoreFuture,
     facts::{
-        Append, Digest, Fact, FactLog, FactSink, FoldError, Marker, Replay, StoredFact, Value,
-        referenced,
+        Append, Digest, DurableFold, EffectResult, Fact, FactLog, FactSink, FoldError, Marker,
+        Replay, Seen, StoredFact, Value, commit_fact, fold_facts, referenced,
     },
 };
 
@@ -21,10 +23,15 @@ pub mod sim {
         None,
         CommitBuffered,
         UnseenSkipped,
+        IntentReplayed,
     }
 
     impl Mutation {
-        pub const ALL: [Self; 2] = [Self::CommitBuffered, Self::UnseenSkipped];
+        pub const ALL: [Self; 3] = [
+            Self::CommitBuffered,
+            Self::UnseenSkipped,
+            Self::IntentReplayed,
+        ];
 
         #[must_use]
         pub const fn name(self) -> &'static str {
@@ -32,6 +39,7 @@ pub mod sim {
                 Self::None => "none",
                 Self::CommitBuffered => "commit_buffered",
                 Self::UnseenSkipped => "unseen_skipped",
+                Self::IntentReplayed => "intent_replayed",
             }
         }
 
@@ -194,5 +202,76 @@ impl FactLog for OneLog {
         write: Append<'a>,
     ) -> StoreFuture<'a, Result<u64, StoreError>> {
         Box::pin(self.appended(after, write))
+    }
+}
+
+const UNKNOWN_OUTCOME: &str = "Tool execution interrupted by a host crash; outcome unknown. Do not assume it did not run or automatically repeat it.";
+
+#[derive(Default, Deserialize, Serialize)]
+struct Calls {
+    open: BTreeMap<String, Option<String>>,
+}
+
+impl DurableFold for Calls {
+    const FAMILY: &'static str = "nanocode.calls";
+    const FORMAT: u32 = 1;
+    type Decision = Box<RawValue>;
+
+    fn apply(&mut self, seq: u64, fact: Seen<'_, Box<RawValue>>) -> Result<(), FoldError> {
+        match fact {
+            Fact::Intent(intent) => {
+                if self.open.insert(intent.call_id, intent.turn).is_some() {
+                    return Err(FoldError::Rejected {
+                        seq,
+                        reason: "an intent repeats a call that has no result yet".to_owned(),
+                    });
+                }
+            }
+            Fact::EffectResult(result) => {
+                self.open.remove(&result.call_id);
+            }
+            Fact::Base(_)
+            | Fact::Input(_)
+            | Fact::ModelOut(_)
+            | Fact::Decision(_)
+            | Fact::Marker(_) => {}
+        }
+        Ok(())
+    }
+
+    fn request(&self) -> Result<Vec<u8>, FoldError> {
+        serde_json::to_vec(&self.open).map_err(|error| FoldError::Encode(error.to_string()))
+    }
+}
+
+fn unknown_outcome() -> Result<Box<RawValue>, StoreError> {
+    let wire = ToolOutput::error(UNKNOWN_OUTCOME)
+        .into_wire()
+        .map_err(|error| StoreError::NotCommitted(format!("encode an unknown outcome: {error}")))?;
+    serde_json::value::to_raw_value(&wire)
+        .map_err(|error| StoreError::NotCommitted(format!("encode an unknown outcome: {error}")))
+}
+
+impl OneLog {
+    pub async fn settle_intents(&self, turn: &str) -> Result<Vec<String>, StoreError> {
+        let mut calls = fold_facts::<Calls>(self).await?;
+        let dangling = calls
+            .state()
+            .open
+            .iter()
+            .filter(|(_, owner)| owner.as_deref().is_none_or(|owner| owner == turn))
+            .map(|(call_id, _)| call_id.clone())
+            .collect::<Vec<_>>();
+        if sim::mutated(sim::Mutation::IntentReplayed) {
+            return Ok(Vec::new());
+        }
+        for call_id in &dangling {
+            let result = Fact::EffectResult(EffectResult {
+                call_id: call_id.clone(),
+                output: unknown_outcome()?,
+            });
+            calls = commit_fact(self, calls, result).await?.0;
+        }
+        Ok(dangling)
     }
 }

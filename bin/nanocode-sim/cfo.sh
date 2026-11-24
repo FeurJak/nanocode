@@ -364,6 +364,7 @@ default_table='
 1 canary_one_log_facts_fold_reads_unlogged canary:8 --scenario one_log_facts --mutation fold_reads_unlogged
 1 canary_one_log_facts_commit_buffered canary:20 --scenario one_log_facts --mutation commit_buffered
 1 canary_one_log_facts_unseen_skipped canary:8 --scenario one_log_facts --mutation unseen_skipped
+1 canary_one_log_facts_intent_replayed canary:20 --scenario one_log_facts --mutation intent_replayed
 8 repo_cache pass --scenario repo_cache
 2 repo_cache_twice pass --scenario repo_cache --twice
 1 canary_repo_cache_shared_head canary:8 --scenario repo_cache --mutation shared_head

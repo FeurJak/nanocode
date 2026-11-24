@@ -33,14 +33,16 @@ pub enum OneLogFactsMutation {
     FoldReadsUnlogged,
     CommitBuffered,
     UnseenSkipped,
+    IntentReplayed,
 }
 
 impl OneLogFactsMutation {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::None,
         Self::FoldReadsUnlogged,
         Self::CommitBuffered,
         Self::UnseenSkipped,
+        Self::IntentReplayed,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -55,6 +57,7 @@ impl OneLogFactsMutation {
             Self::FoldReadsUnlogged => "fold_reads_unlogged",
             Self::CommitBuffered => "commit_buffered",
             Self::UnseenSkipped => "unseen_skipped",
+            Self::IntentReplayed => "intent_replayed",
         }
     }
 
@@ -70,6 +73,7 @@ impl OneLogFactsMutation {
         match self {
             Self::CommitBuffered => facts_sim::Mutation::CommitBuffered,
             Self::UnseenSkipped => facts_sim::Mutation::UnseenSkipped,
+            Self::IntentReplayed => facts_sim::Mutation::IntentReplayed,
             Self::None | Self::FoldReadsUnlogged => facts_sim::Mutation::None,
         }
     }
@@ -83,6 +87,7 @@ pub struct OneLogFactsStats {
     pub restarts: u64,
     pub refolds: u64,
     pub swaps: u64,
+    pub unknown: u64,
 }
 
 impl OneLogFactsStats {
@@ -93,6 +98,7 @@ impl OneLogFactsStats {
         self.restarts += other.restarts;
         self.refolds += other.refolds;
         self.swaps += other.swaps;
+        self.unknown += other.unknown;
     }
 }
 
@@ -184,6 +190,7 @@ impl DurableFold for Ledger {
 
 struct World {
     host: Arc<MemoryLog>,
+    log: Option<Arc<OneLog>>,
     facts: Option<Arc<dyn FactLog>>,
     live: Option<Folded<Ledger>>,
     stale: Option<Folded<Ledger>>,
@@ -229,6 +236,7 @@ impl World {
         let stale = block_on(fold_facts::<Ledger>(&*facts))
             .map_err(|error| format!("the facts log folds on open: {error}"))?;
         self.stale = Some(stale);
+        self.log = Some(log);
         self.facts = Some(facts);
         self.live = Some(live);
         Ok(())
@@ -336,6 +344,7 @@ impl World {
         self.shape.push('!');
         let before = self.live.take().expect("the facts fold is live");
         self.facts = None;
+        self.log = None;
         self.open()?;
         let after = self.live.as_ref().expect("the facts fold is live");
         let encode = |state: &Ledger| serde_json::to_string(state).expect("a ledger encodes");
@@ -349,10 +358,44 @@ impl World {
         Ok(())
     }
 
+    fn recover(&mut self) -> Result<(), String> {
+        let log = Arc::clone(self.log.as_ref().expect("the facts log is open"));
+        let mut settled = Vec::new();
+        for turn in 0..TURNS {
+            let turn = format!("turn-{turn}");
+            settled.extend(
+                block_on(log.settle_intents(&turn))
+                    .map_err(|error| format!("settle the intents of {turn}: {error}"))?,
+            );
+        }
+        settled.sort();
+        let mut open = std::mem::take(&mut self.open);
+        open.sort();
+        if settled != open {
+            return Err(format!(
+                "recovery settled {settled:?} as outcome unknown, but {open:?} had no result"
+            ));
+        }
+        self.stats.unknown += settled.len() as u64;
+        let again = block_on(log.settle_intents("turn-0"))
+            .map_err(|error| format!("settle again: {error}"))?;
+        if !again.is_empty() {
+            return Err(format!("recovery settled {again:?} twice"));
+        }
+        self.live = Some(
+            block_on(fold_facts::<Ledger>(self.facts()))
+                .map_err(|error| format!("refold after recovery: {error}"))?,
+        );
+        self.check()
+    }
+
     fn step(&mut self, rng: &mut Rng) -> Result<(), String> {
         match rng.below(100) {
             0..90 => self.commit(rng),
-            _ => self.restart(),
+            _ => {
+                self.restart()?;
+                self.recover()
+            }
         }
     }
 }
@@ -366,6 +409,7 @@ fn run_seed(seed: u64, mutation: OneLogFactsMutation) -> Outcome {
         .expect("a snapshot row count fits in usize");
     let mut world = World {
         host: Arc::new(MemoryLog::new()),
+        log: None,
         facts: None,
         live: None,
         stale: None,
