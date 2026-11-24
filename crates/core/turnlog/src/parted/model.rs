@@ -3,17 +3,14 @@
 //! inside a batch aborts the whole transaction (a unique violation), and faults land before the
 //! effect (serialization failure, reconnect) or after it (lost acknowledgement).
 
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    num::NonZeroU32,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashSet, num::NonZeroU32, sync::Arc};
 
 use nanocode_durability_core::{StoreError, StoreFuture};
 use nanocode_partitions::{Partition, Row};
+use nanocode_sync::{Atom, OrdMap};
 
 use super::{
-    Append, Entry, PartStore, Rows, Verdict, lock,
+    Append, Entry, PartStore, Rows, Verdict,
     sim::{Mutation, mutated},
 };
 use crate::host::{Compaction, Extension};
@@ -48,12 +45,12 @@ pub struct ModelStats {
     pub after: u64,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Model {
-    rows: BTreeMap<(Partition, Arc<str>, u64), Stored>,
+    rows: OrdMap<(Partition, Arc<str>, u64), Stored>,
     next_pos: u64,
-    fences: HashMap<Partition, Row<String>>,
-    cursors: HashMap<(Partition, String), u64>,
+    fences: OrdMap<Partition, Row<String>>,
+    cursors: OrdMap<(Partition, String), u64>,
     stats: ModelStats,
 }
 
@@ -114,7 +111,7 @@ impl Model {
 
 #[derive(Default)]
 pub struct ModelParts {
-    model: Mutex<Model>,
+    model: Atom<Model>,
     faults: Option<Faults>,
     sleep: Option<Sleep>,
 }
@@ -138,30 +135,34 @@ impl ModelParts {
     }
 
     pub fn stats(&self) -> ModelStats {
-        lock(&self.model).stats
+        self.model.read(|model| model.stats)
     }
 
     /// Every row of the partition, by scope and seq.
     pub fn rows(&self, part: Partition) -> Vec<(Arc<str>, u64, Stored)> {
-        lock(&self.model)
-            .rows
-            .iter()
-            .filter(|((row_part, _, _), _)| *row_part == part)
-            .map(|((_, scope, seq), stored)| (Arc::clone(scope), *seq, stored.clone()))
-            .collect()
+        self.model.read(|model| {
+            model
+                .rows
+                .iter()
+                .filter(|((row_part, _, _), _)| *row_part == part)
+                .map(|((_, scope, seq), stored)| (Arc::clone(scope), *seq, stored.clone()))
+                .collect()
+        })
     }
 
     /// The position reader consumed the partition through (0 before its first cursor).
     pub fn cursor_of(&self, part: Partition, reader: &str) -> u64 {
-        lock(&self.model)
-            .cursors
-            .get(&(part, reader.to_owned()))
-            .copied()
-            .unwrap_or(0)
+        self.model.read(|model| {
+            model
+                .cursors
+                .get(&(part, reader.to_owned()))
+                .copied()
+                .unwrap_or(0)
+        })
     }
 
     pub fn fence_row(&self, part: Partition) -> Option<Row<String>> {
-        lock(&self.model).fences.get(&part).cloned()
+        self.model.read(|model| model.fences.get(&part).cloned())
     }
 
     async fn pause(&self) {
@@ -180,24 +181,23 @@ impl ModelParts {
     async fn write<T>(
         &self,
         op: &'static str,
-        effect: impl FnOnce(&mut Model) -> Result<T, StoreError>,
+        mut effect: impl FnMut(&mut Model) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
         self.pause().await;
         let fault = self.fault(op);
         if fault == Fault::Before {
-            lock(&self.model).stats.before += 1;
+            self.model.update(|model| model.stats.before += 1);
             return Err(StoreError::Backend(format!(
                 "{op}: could not serialize access due to concurrent update"
             )));
         }
-        let answer = {
-            let mut model = lock(&self.model);
+        let answer = self.model.update(|model| {
             model.stats.transactions += 1;
-            effect(&mut model)
-        };
+            effect(model)
+        });
         self.pause().await;
         if fault == Fault::After && answer.is_ok() {
-            lock(&self.model).stats.after += 1;
+            self.model.update(|model| model.stats.after += 1);
             return Err(StoreError::Backend(format!(
                 "{op}: connection reset after commit was sent"
             )));
@@ -207,21 +207,21 @@ impl ModelParts {
 
     async fn read<T>(&self, effect: impl FnOnce(&Model) -> T) -> T {
         self.pause().await;
-        let model = lock(&self.model);
-        effect(&model)
+        self.model.read(effect)
     }
 }
 
 impl PartStore for ModelParts {
     fn prepare(&self, count: NonZeroU32) -> StoreFuture<'_, Result<(), StoreError>> {
         Box::pin(async move {
-            let mut model = lock(&self.model);
-            for part in 0..count.get() {
-                model
-                    .fences
-                    .entry(Partition(part))
-                    .or_insert(Row::Free { epoch: 0 });
-            }
+            self.model.update(|model| {
+                for part in 0..count.get() {
+                    model
+                        .fences
+                        .entry(Partition(part))
+                        .or_insert(Row::Free { epoch: 0 });
+                }
+            });
             Ok(())
         })
     }
