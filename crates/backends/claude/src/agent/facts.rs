@@ -147,13 +147,13 @@ impl State {
             .await?;
         if prefix == folded && !open {
             for message in &live[prefix..] {
-                let admitted = facts
-                    .read(|fold| fold.next_input() == Some(message))
+                let queued = facts
+                    .read(|fold| fold.queued().position(|queued| queued == message))
                     .await?;
-                let decision = if admitted {
-                    ClaudeDecision::Admitted
-                } else {
-                    ClaudeDecision::Message(message.clone())
+                let decision = match queued.map(u32::try_from).transpose() {
+                    Ok(Some(input)) => ClaudeDecision::Admitted { input },
+                    Ok(None) => ClaudeDecision::Message(message.clone()),
+                    Err(_) => return Err(provider_error("queued inputs outgrow u32")),
                 };
                 facts.commit(decided(decision)).await?;
             }

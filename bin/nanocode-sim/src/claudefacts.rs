@@ -46,7 +46,7 @@ fn json<'a>(
 
 fn authored(fact: &StoredFact) -> bool {
     matches!(fact, Fact::Decision(Decision::Backend(decision))
-        if decision.get() == "\"admitted\""
+        if decision.get().starts_with("{\"admitted\"")
             || decision.get().starts_with("{\"message\"")
             || decision.get().starts_with("{\"splice\""))
 }

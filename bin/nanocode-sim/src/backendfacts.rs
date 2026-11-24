@@ -162,7 +162,7 @@ impl Family for ClaudeFold {
     }
 
     fn admitted() -> Option<ClaudeDecision> {
-        Some(ClaudeDecision::Admitted)
+        Some(ClaudeDecision::Admitted { input: 0 })
     }
 
     fn rendered(call: &str) -> Result<Option<ClaudeDecision>, String> {

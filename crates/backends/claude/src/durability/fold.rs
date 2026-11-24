@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use nanocode_agent_core::input::Prompt;
 use nanocode_durability_core::{
-    Base, BlockRef, Decision, DurableFold, EffectResult, Fact, FoldError, Input, Intent,
-    IntentTarget, ModelOut, Seen,
+    Base, BlockRef, Decision, DurableFold, EffectResult, Fact, FoldError, Input, InputKind, Intent,
+    IntentTarget, Marker, ModelOut, Seen, TurnStatus,
 };
 use nanocode_tool_host::{
     ToolOutput,
@@ -22,7 +22,9 @@ pub enum ClaudeDecision {
         tool_result_tokens: u64,
     },
     Message(Message),
-    Admitted,
+    Admitted {
+        input: u32,
+    },
     Rendered(ContentBlock),
     Compacting {
         retained: u32,
@@ -44,10 +46,16 @@ pub struct ClaudeFold {
     messages: Vec<Message>,
     previous_message_id: Option<String>,
     container: Option<String>,
-    inputs: VecDeque<Message>,
+    inputs: VecDeque<Queued>,
     nested: BTreeSet<String>,
     abandoned: BTreeSet<String>,
     phase: Phase,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct Queued {
+    turn: String,
+    message: Message,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -161,7 +169,7 @@ fn summarized(summary: &str, messages: Vec<Message>) -> Vec<Message> {
 
 impl DurableFold for ClaudeFold {
     const FAMILY: &'static str = "claude";
-    const FORMAT: u32 = 2;
+    const FORMAT: u32 = 3;
     type Decision = ClaudeDecision;
 
     fn apply(&mut self, seq: u64, fact: Seen<'_, ClaudeDecision>) -> Result<(), FoldError> {
@@ -172,6 +180,13 @@ impl DurableFold for ClaudeFold {
             Fact::Intent(intent) => self.intent(seq, &intent),
             Fact::EffectResult(result) => self.effect_result(seq, &result),
             Fact::Decision(decision) => self.decision(seq, decision),
+            Fact::Marker(Marker::Status {
+                turn,
+                status: TurnStatus::Finished { .. },
+            }) => {
+                self.inputs.retain(|queued| queued.turn != turn);
+                Ok(())
+            }
             Fact::Marker(_) => Ok(()),
         }
     }
@@ -230,8 +245,8 @@ impl ClaudeFold {
             .find_map(|message| message.content.iter().find(answered))
     }
 
-    pub(crate) fn next_input(&self) -> Option<&Message> {
-        self.inputs.front()
+    pub(crate) fn queued(&self) -> impl Iterator<Item = &Message> {
+        self.inputs.iter().map(|queued| &queued.message)
     }
 
     pub(crate) fn open_call(&self, id: &str) -> Option<OpenCall<'_>> {
@@ -307,7 +322,25 @@ impl ClaudeFold {
         let prompt: Prompt = decode(seq, "prompt", input.value)?;
         let messages =
             crate::prompt::messages(&prompt).map_err(|error| rejected(seq, error.to_string()))?;
-        self.inputs.extend(messages);
+        let queued = messages.into_iter().map(|message| Queued {
+            turn: input.turn.clone(),
+            message,
+        });
+        if !matches!(input.kind, InputKind::Edit { .. }) {
+            self.inputs.extend(queued);
+            return Ok(());
+        }
+        let Some(at) = self
+            .inputs
+            .iter()
+            .position(|queued| queued.turn == input.turn)
+        else {
+            return Err(rejected(seq, "a Claude edit names no queued turn"));
+        };
+        self.inputs.retain(|queued| queued.turn != input.turn);
+        for (offset, queued) in queued.enumerate() {
+            self.inputs.insert(at + offset, queued);
+        }
         Ok(())
     }
 
@@ -558,12 +591,13 @@ impl ClaudeFold {
                 self.messages.push(message.clone());
                 Ok(())
             }
-            (ClaudeDecision::Admitted, Phase::Ready) => {
-                let input = self
+            (ClaudeDecision::Admitted { input }, Phase::Ready) => {
+                let input = usize::try_from(*input).expect("u32 fits usize");
+                let queued = self
                     .inputs
-                    .pop_front()
-                    .ok_or_else(|| rejected(seq, "a Claude admission has no input waiting"))?;
-                self.messages.push(input);
+                    .remove(input)
+                    .ok_or_else(|| rejected(seq, "a Claude admission names no queued input"))?;
+                self.messages.push(queued.message);
                 Ok(())
             }
             (ClaudeDecision::Compacting { retained }, Phase::Ready) => {
@@ -575,7 +609,7 @@ impl ClaudeFold {
             (ClaudeDecision::Rendered(block), Phase::Tools { .. }) => self.rendered(seq, block),
             (
                 ClaudeDecision::Message(_)
-                | ClaudeDecision::Admitted
+                | ClaudeDecision::Admitted { .. }
                 | ClaudeDecision::Compacting { .. },
                 _,
             ) => Err(rejected(
