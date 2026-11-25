@@ -11,7 +11,7 @@ use std::{
 
 use nanocode_subagents::{AgentId, AgentUpdate, COMPLETION_REQUEST_PREFIX, ScopedAgentUpdate};
 use nanocode_sync::future::{Either, select};
-use nanocode_sync::{Atom, Owned};
+use nanocode_sync::{Atom, Mailbox};
 use nanocode_tool_host::embedded::HostFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -313,7 +313,7 @@ struct Shared<L: ?Sized> {
     host: Arc<dyn InboxHost>,
     state: Atom<Requests>,
     session_id: String,
-    streams: Owned<Vec<Stream>>,
+    streams: Mailbox<Vec<Stream>>,
     delivery: Atom<Delivery>,
     recording: AtomicBool,
 }
@@ -583,6 +583,57 @@ fn flush(
     Ok(merged)
 }
 
+fn route(
+    streams: &mut Vec<Stream>,
+    events: Vec<SessionEvent>,
+    deltas: bool,
+    progress: bool,
+) -> Result<Vec<(bool, Vec<SessionEvent>)>, String> {
+    let encode = |error: serde_json::Error| format!("encode agent event: {error}");
+    let mut segments: Vec<(bool, Vec<SessionEvent>)> = Vec::new();
+    let mut push = |live: bool, event: SessionEvent| match segments.last_mut() {
+        Some((kind, events)) if *kind == live => events.push(event),
+        _ => segments.push((live, vec![event])),
+    };
+    for event in events {
+        match role(&event) {
+            Role::Delta(scope, kind, key, text) if deltas => {
+                push(
+                    true,
+                    stream(streams, scope, kind, key, &text, event).map_err(encode)?,
+                );
+            }
+            Role::Progress if progress => push(true, event),
+            Role::Final(scope, kind, key) => {
+                for merged in
+                    flush(streams, &scope, Some(Streamed::Reasoning), false).map_err(encode)?
+                {
+                    push(false, merged);
+                }
+                streams
+                    .retain(|entry| entry.scope != scope || entry.kind != kind || entry.key != key);
+                push(false, event);
+            }
+            Role::Settled(scope) => {
+                for merged in
+                    flush(streams, &scope, Some(Streamed::Reasoning), false).map_err(encode)?
+                {
+                    push(false, merged);
+                }
+                push(false, event);
+            }
+            Role::Boundary { scope, ends_run } => {
+                for merged in flush(streams, &scope, None, ends_run).map_err(encode)? {
+                    push(false, merged);
+                }
+                push(false, event);
+            }
+            Role::Delta(..) | Role::Progress | Role::Other => push(false, event),
+        }
+    }
+    Ok(segments)
+}
+
 #[derive(Deserialize)]
 struct Nested {
     #[serde(default)]
@@ -774,58 +825,6 @@ impl<L: EventLog + ?Sized> LogSink<L> {
             .map_err(|error| format!("encode agent event: {error}"))?;
         self.0.host.publish_live(live).await
     }
-
-    fn route(
-        streams: &mut Vec<Stream>,
-        events: Vec<SessionEvent>,
-        deltas: bool,
-        progress: bool,
-    ) -> Result<Vec<(bool, Vec<SessionEvent>)>, String> {
-        let encode = |error: serde_json::Error| format!("encode agent event: {error}");
-        let mut segments: Vec<(bool, Vec<SessionEvent>)> = Vec::new();
-        let mut push = |live: bool, event: SessionEvent| match segments.last_mut() {
-            Some((kind, events)) if *kind == live => events.push(event),
-            _ => segments.push((live, vec![event])),
-        };
-        for event in events {
-            match role(&event) {
-                Role::Delta(scope, kind, key, text) if deltas => {
-                    push(
-                        true,
-                        stream(streams, scope, kind, key, &text, event).map_err(encode)?,
-                    );
-                }
-                Role::Progress if progress => push(true, event),
-                Role::Final(scope, kind, key) => {
-                    for merged in
-                        flush(streams, &scope, Some(Streamed::Reasoning), false).map_err(encode)?
-                    {
-                        push(false, merged);
-                    }
-                    streams.retain(|entry| {
-                        entry.scope != scope || entry.kind != kind || entry.key != key
-                    });
-                    push(false, event);
-                }
-                Role::Settled(scope) => {
-                    for merged in
-                        flush(streams, &scope, Some(Streamed::Reasoning), false).map_err(encode)?
-                    {
-                        push(false, merged);
-                    }
-                    push(false, event);
-                }
-                Role::Boundary { scope, ends_run } => {
-                    for merged in flush(streams, &scope, None, ends_run).map_err(encode)? {
-                        push(false, merged);
-                    }
-                    push(false, event);
-                }
-                Role::Delta(..) | Role::Progress | Role::Other => push(false, event),
-            }
-        }
-        Ok(segments)
-    }
 }
 
 impl<L: EventLog + ?Sized> EventSink for LogSink<L> {
@@ -852,12 +851,11 @@ impl<L: EventLog + ?Sized> EventSink for LogSink<L> {
             if !deltas && !progress {
                 return self.persist(events).await;
             }
-            let segments = Self::route(
-                &mut *self.0.streams.acquire().await,
-                events,
-                deltas,
-                progress,
-            )?;
+            let segments = self
+                .0
+                .streams
+                .call(move |streams| route(streams, events, deltas, progress))
+                .await?;
             for (live, events) in segments {
                 if live {
                     self.publish_live(events).await?;
@@ -958,7 +956,7 @@ impl<L: EventLog + ?Sized> TurnInbox<L> {
             host,
             state: Atom::default(),
             session_id: agent.session_id().to_owned(),
-            streams: Owned::new(Vec::new()),
+            streams: Mailbox::new(Vec::new()),
             delivery: Atom::default(),
             recording: AtomicBool::new(true),
         });
