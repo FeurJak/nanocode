@@ -19,9 +19,7 @@ pub(super) fn close<'a>(
         {
             return Ok(None);
         }
-        let _process = this.acquire_payment_lock(&challenge).await?;
         let (expected_key, expected_chain_id) = this.expected_channel_key(&challenge)?;
-        let _store = this.acquire_store_lease(&expected_key, &challenge).await?;
         let Some(entry) = this.channel(&expected_key).filter(|entry| entry.opened) else {
             return Ok(None);
         };

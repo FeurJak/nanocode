@@ -1,11 +1,10 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::Duration;
 
 use nanocode_http::Url;
 use nanocode_http::header::{HeaderMap, HeaderName, HeaderValue};
-use nanocode_sync::Atom;
-use nanocode_sync::{OwnedSemaphorePermit, Semaphore};
+use nanocode_sync::{Atom, Signal};
 use nanocode_tempo::{Address, Call, SignedKeyAuthorization, U256, hex, keccak256};
 use serde_json::{Value, json};
 
@@ -22,7 +21,7 @@ use super::signing::{
     PrimitiveSigner, TempoSigningMode, resolve_key_authorization,
     sign_and_encode_fee_payer_envelope_primitive_async, sign_and_encode_primitive_async,
 };
-use super::store::{ChannelStore, StoreLease, StoredChannelEntry, channel_key, live_lock};
+use super::store::{ChannelStore, StoredChannelEntry, channel_key};
 use super::tx::{self, TempoTransactionRequest, TempoTxOptions, build_tempo_tx};
 
 pub(crate) mod channel;
@@ -133,10 +132,28 @@ struct PrepaidVoucher {
     price: u128,
 }
 
-struct PaymentLease {
+struct IssuedPayment {
     channel_id: Option<String>,
-    _process: OwnedSemaphorePermit,
-    _store: StoreLease,
+}
+
+struct Funding {
+    shared: Arc<Shared>,
+    key: String,
+    done: Arc<Signal>,
+}
+
+impl Drop for Funding {
+    fn drop(&mut self) {
+        self.shared
+            .funding
+            .update(|funding| match funding.get(&self.key) {
+                Some(running) if Arc::ptr_eq(running, &self.done) => {
+                    funding.remove(&self.key).map(drop)
+                }
+                _ => None,
+            });
+        self.done.fire();
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -179,9 +196,8 @@ struct Shared {
     channel_keys: Atom<HashMap<String, String>>,
     pending_opens: Atom<HashMap<String, PendingOpen>>,
     last_challenge: Atom<Option<Challenge>>,
-    payment_lock: Arc<Semaphore>,
-    funding_locks: Atom<HashMap<String, Weak<Semaphore>>>,
-    leases: Atom<HashMap<String, Arc<PaymentLease>>>,
+    funding: Atom<HashMap<String, Arc<Signal>>>,
+    issued: Atom<HashMap<String, Arc<IssuedPayment>>>,
     prepaid: Atom<HashMap<String, PrepaidVoucher>>,
     topping_up: Atom<HashSet<String>>,
     spend: Atom<SpendLedger>,
@@ -196,9 +212,8 @@ impl Default for Shared {
             channel_keys: Atom::default(),
             pending_opens: Atom::default(),
             last_challenge: Atom::default(),
-            payment_lock: Arc::new(Semaphore::new(1)),
-            funding_locks: Atom::default(),
-            leases: Atom::default(),
+            funding: Atom::default(),
+            issued: Atom::default(),
             prepaid: Atom::default(),
             topping_up: Atom::default(),
             spend: Atom::default(),
@@ -522,10 +537,10 @@ impl SessionProvider {
             .as_deref()
             .is_some_and(|id| self.knows_channel(id));
         self.shared
-            .leases
-            .read(|leases| match leases.get(&challenge.id) {
-                Some(lease) => {
-                    let on_channel = match (&lease.channel_id, &channel_id) {
+            .issued
+            .read(|issued| match issued.get(&challenge.id) {
+                Some(payment) => {
+                    let on_channel = match (&payment.channel_id, &channel_id) {
                         (Some(leased), Some(paid)) => leased.eq_ignore_ascii_case(paid),
                         (None, Some(_)) => knows,
                         _ => false,
@@ -713,7 +728,7 @@ impl SessionProvider {
         Ok(entry)
     }
 
-    async fn store_set(&self, entry: &StoredChannelEntry) -> Result<(), Fault> {
+    fn bound_entry(&self, entry: &StoredChannelEntry) -> Result<StoredChannelEntry, Fault> {
         let bound = self.shared.origin.get();
         let mut entry = entry.clone();
         match (&entry.origin, bound.as_ref()) {
@@ -726,6 +741,11 @@ impl SessionProvider {
             (_, Some(bound)) => entry.origin = Some(bound.clone()),
             (_, None) => {}
         }
+        Ok(entry)
+    }
+
+    async fn store_set(&self, entry: &StoredChannelEntry) -> Result<(), Fault> {
+        let entry = self.bound_entry(entry)?;
         Ok(self.channel_store.set(&entry).await?)
     }
 
@@ -770,6 +790,20 @@ impl SessionProvider {
         self.shared
             .channels
             .update(|channels| channels.insert(key.to_owned(), entry.clone()).map(drop));
+    }
+
+    fn track_raised(&self, key: &str, entry: &ChannelEntry) {
+        self.shared.channels.update(|channels| {
+            let mut entry = entry.clone();
+            if let Some(current) = channels
+                .get(key)
+                .filter(|current| current.channel_id == entry.channel_id)
+            {
+                entry.cumulative_amount = entry.cumulative_amount.max(current.cumulative_amount);
+                entry.deposit = entry.deposit.max(current.deposit);
+            }
+            channels.insert(key.to_owned(), entry).map(drop)
+        });
     }
 
     fn forget(&self, key: &str, channel_id: &str) {
@@ -850,15 +884,44 @@ impl SessionProvider {
         })
     }
 
-    async fn persist_channel(&self, entry: &ChannelEntry) -> Result<(), Fault> {
-        if !is_precompile_escrow(entry.escrow_contract) {
-            return Ok(());
-        }
+    fn persisted_entry(&self, entry: &ChannelEntry) -> StoredChannelEntry {
         let mut stored = Self::stored_entry(entry);
         stored.pending_open = self
             .pending_open(&entry.id())
             .map(|pending| pending.challenge_id);
-        self.store_set(&stored).await
+        stored
+    }
+
+    async fn persist_channel(&self, entry: &ChannelEntry) -> Result<(), Fault> {
+        if !is_precompile_escrow(entry.escrow_contract) {
+            return Ok(());
+        }
+        self.store_set(&self.persisted_entry(entry)).await
+    }
+
+    async fn reserve(
+        &self,
+        key: &str,
+        entry: &mut ChannelEntry,
+        base: u128,
+    ) -> Result<bool, Fault> {
+        if is_precompile_escrow(entry.escrow_contract) {
+            let stored = self.bound_entry(&self.persisted_entry(entry))?;
+            if !self.channel_store.reserve(&stored, base).await? {
+                return Ok(false);
+            }
+        }
+        self.insert_signed_entry(key, entry);
+        Ok(true)
+    }
+
+    async fn refreshed_entry(&self, key: &str, channel_id: &Hash) -> Result<ChannelEntry, Fault> {
+        let mut entry = self
+            .channel(key)
+            .filter(|entry| entry.channel_id == *channel_id)
+            .ok_or_else(|| Fault::config("channel changed during payment"))?;
+        self.merge_stored_channel(key, &mut entry).await?;
+        Ok(entry)
     }
 
     fn commit_referenced_open(&self, channel_id: &str) {
@@ -1253,11 +1316,6 @@ impl SessionProvider {
         if self.channel(&key).is_some() {
             return Ok(true);
         }
-        let _process = self.acquire_payment_lock(challenge).await?;
-        let _store = self.acquire_store_lease(&key, challenge).await?;
-        if self.channel(&key).is_some() {
-            return Ok(true);
-        }
         let restored = self
             .restore_precompile_channel(
                 &key,
@@ -1399,6 +1457,7 @@ impl SessionProvider {
                 .filter(|current| current.channel_id == stored.channel_id)
             {
                 stored.deposit = stored.deposit.max(current.deposit);
+                stored.cumulative_amount = stored.cumulative_amount.max(current.cumulative_amount);
             }
             channels.insert(key.to_owned(), stored);
         });
@@ -1408,7 +1467,7 @@ impl SessionProvider {
         &self,
         challenge: &Challenge,
         channel_id: &str,
-        required: u128,
+        required: impl Fn(u128) -> Option<u128>,
     ) -> Result<Credential, Fault> {
         let key = self
             .channel_key_of(channel_id)
@@ -1417,35 +1476,44 @@ impl SessionProvider {
         if key != expected_key {
             return Err(Fault::config("channel does not match active session"));
         }
-        let mut entry = self
-            .channel(&key)
-            .ok_or_else(|| Fault::config("channel not found"))?;
-        if entry.chain_id != expected_chain_id || entry.id() != channel_id {
-            return Err(Fault::config("channel does not match active session"));
+        loop {
+            let mut entry = self
+                .channel(&key)
+                .ok_or_else(|| Fault::config("channel not found"))?;
+            if entry.chain_id != expected_chain_id || entry.id() != channel_id {
+                return Err(Fault::config("channel does not match active session"));
+            }
+            self.merge_stored_channel(&key, &mut entry).await?;
+            let base = entry.cumulative_amount;
+            let required = required(base)
+                .ok_or_else(|| Fault::config("session cumulative amount overflowed"))?;
+            if required > base && self.is_pending_open(channel_id) {
+                return Err(Fault::config(
+                    "pending channel open requires settlement reconciliation before another payment",
+                ));
+            }
+            entry.cumulative_amount = base.max(required);
+            if entry.cumulative_amount > entry.deposit {
+                return Err(Fault::config(
+                    "voucher cumulative amount exceeds channel deposit",
+                ));
+            }
+            if !is_precompile_escrow(entry.escrow_contract) {
+                return Err(Self::legacy_unsupported());
+            }
+            let payload = self.voucher_payload(
+                entry.descriptor.clone(),
+                entry.cumulative_amount,
+                entry.chain_id,
+            )?;
+            if entry.cumulative_amount == base {
+                self.persist_channel(&entry).await?;
+                self.insert_signed_entry(&key, &mut entry);
+            } else if !self.reserve(&key, &mut entry, base).await? {
+                continue;
+            }
+            return build_credential(challenge, &payload, entry.chain_id, self.payer());
         }
-        self.merge_stored_channel(&key, &mut entry).await?;
-        if required > entry.cumulative_amount && self.is_pending_open(channel_id) {
-            return Err(Fault::config(
-                "pending channel open requires settlement reconciliation before another payment",
-            ));
-        }
-        entry.cumulative_amount = entry.cumulative_amount.max(required);
-        if entry.cumulative_amount > entry.deposit {
-            return Err(Fault::config(
-                "voucher cumulative amount exceeds channel deposit",
-            ));
-        }
-        if !is_precompile_escrow(entry.escrow_contract) {
-            return Err(Self::legacy_unsupported());
-        }
-        let payload = self.voucher_payload(
-            entry.descriptor.clone(),
-            entry.cumulative_amount,
-            entry.chain_id,
-        )?;
-        self.persist_channel(&entry).await?;
-        self.insert_signed_entry(&key, &mut entry);
-        build_credential(challenge, &payload, entry.chain_id, self.payer())
     }
 
     async fn sign_transaction(
@@ -1679,7 +1747,7 @@ impl SessionProvider {
         build_credential(challenge, &payload, entry.chain_id, payer)
     }
 
-    async fn top_up_with_lease(
+    async fn top_up_over_http(
         &self,
         client: &nanocode_http::Client,
         url: &str,
@@ -1753,12 +1821,22 @@ impl SessionProvider {
         let Some(key) = self.channel_key_of(channel_id) else {
             return Ok(());
         };
-        let funding = self.acquire_funding_lock(&key, challenge).await?;
-        let covered = self
-            .channel(&key)
-            .filter(|entry| entry.id() == channel_id)
-            .is_none_or(|entry| entry.deposit.saturating_sub(entry.cumulative_amount) >= reserve);
-        if covered {
+        let covered = || {
+            self.channel(&key)
+                .filter(|entry| entry.id() == channel_id)
+                .is_none_or(|entry| {
+                    entry.deposit.saturating_sub(entry.cumulative_amount) >= reserve
+                })
+        };
+        let funding = loop {
+            if covered() {
+                return Ok(());
+            }
+            if let Some(funding) = self.fund(&key, challenge).await? {
+                break funding;
+            }
+        };
+        if covered() {
             return Ok(());
         }
         let prepared = self
@@ -1768,7 +1846,6 @@ impl SessionProvider {
             .await?;
         let previous = self.raise_local_deposit(&prepared, channel_id);
         drop(funding);
-        let _process = self.acquire_payment_lock(challenge).await?;
         self.record_top_up(url, &prepared, previous).await
     }
 
@@ -1928,12 +2005,7 @@ impl SessionProvider {
         entry.cumulative_amount = entry.cumulative_amount.max(prepared.cumulative_amount);
         entry.opened = true;
         self.persist_channel(&entry).await?;
-        let stored = entry.clone();
-        self.shared.channels.update(|channels| {
-            channels
-                .insert(prepared.key.clone(), stored.clone())
-                .map(drop)
-        });
+        self.track_raised(&prepared.key, &entry);
         if amount > 0 {
             self.report_deposit(url, &entry, amount, false);
         }
@@ -2047,7 +2119,7 @@ impl SessionProvider {
         let challenge = self.last_challenge("voucher")?;
         ensure_redirect_safe_credential_header(&challenge)?;
         let credential = self
-            .voucher_credential_for_challenge(&challenge, channel_id, required)
+            .voucher_credential_for_challenge(&challenge, channel_id, |_| Some(required))
             .await?;
         let mut response = self
             .post_credential(client, url, &challenge, &credential, "voucher POST failed")
@@ -2056,7 +2128,7 @@ impl SessionProvider {
         if let Some(refreshed) = &refreshed {
             ensure_redirect_safe_credential_header(refreshed)?;
             let credential = self
-                .voucher_credential_for_challenge(refreshed, channel_id, required)
+                .voucher_credential_for_challenge(refreshed, channel_id, |_| Some(required))
                 .await?;
             response = self
                 .post_credential(client, url, refreshed, &credential, "voucher POST failed")
@@ -2159,54 +2231,32 @@ impl SessionProvider {
         })
     }
 
-    async fn lock_until_expiry(
-        lock: Arc<Semaphore>,
-        challenge: &Challenge,
-    ) -> Result<OwnedSemaphorePermit, Fault> {
-        let closed = |_| Fault::Internal("session payment lock closed".into());
-        let Some(expires) = challenge.expires_at() else {
-            return lock.acquire_owned().await.map_err(closed);
-        };
-        let remaining = u64::try_from(expires - protocol::now_seconds()).unwrap_or(0);
-        match nanocode_platform::timeout(Duration::from_secs(remaining), lock.acquire_owned()).await
-        {
-            Ok(permit) => permit.map_err(closed),
-            Err(_) => Err(Fault::Expired(challenge.expires.clone())),
-        }
-    }
-
-    async fn acquire_payment_lock(
-        &self,
-        challenge: &Challenge,
-    ) -> Result<OwnedSemaphorePermit, Fault> {
-        Self::lock_until_expiry(self.shared.payment_lock.clone(), challenge).await
-    }
-
-    async fn acquire_funding_lock(
-        &self,
-        key: &str,
-        challenge: &Challenge,
-    ) -> Result<OwnedSemaphorePermit, Fault> {
-        let fresh = Arc::new(Semaphore::new(1));
-        let lock = self
+    async fn fund(&self, key: &str, challenge: &Challenge) -> Result<Option<Funding>, Fault> {
+        let done = Arc::new(Signal::new());
+        let running = self
             .shared
-            .funding_locks
-            .update(|locks| live_lock(locks, key, &fresh));
-        Self::lock_until_expiry(lock, challenge).await
-    }
-
-    async fn acquire_store_lease(
-        &self,
-        key: &str,
-        challenge: &Challenge,
-    ) -> Result<StoreLease, Fault> {
-        let lease = self.channel_store.acquire(key);
+            .funding
+            .update(|funding| match funding.get(key) {
+                Some(running) => Some(running.clone()),
+                None => {
+                    funding.insert(key.to_owned(), done.clone());
+                    None
+                }
+            });
+        let Some(running) = running else {
+            return Ok(Some(Funding {
+                shared: self.shared.clone(),
+                key: key.to_owned(),
+                done,
+            }));
+        };
         let Some(expires) = challenge.expires_at() else {
-            return Ok(lease.await?);
+            running.wait().await;
+            return Ok(None);
         };
         let remaining = u64::try_from(expires - protocol::now_seconds()).unwrap_or(0);
-        match nanocode_platform::timeout(Duration::from_secs(remaining), lease).await {
-            Ok(lease) => Ok(lease?),
+        match nanocode_platform::timeout(Duration::from_secs(remaining), running.wait()).await {
+            Ok(()) => Ok(None),
             Err(_) => Err(Fault::Expired(challenge.expires.clone())),
         }
     }
@@ -2221,19 +2271,15 @@ impl SessionProvider {
         top_up: Option<TopUpRoute<'_>>,
     ) -> Result<Credential, Fault> {
         validate_for_session(challenge)?;
-        let process = self.acquire_payment_lock(challenge).await?;
-        let (key, _) = self.expected_channel_key(challenge)?;
-        let store = self.acquire_store_lease(&key, challenge).await?;
+        self.expected_channel_key(challenge)?;
         let credential = self.payment_credential_inner(challenge, top_up).await?;
-        let lease = Arc::new(PaymentLease {
+        let payment = Arc::new(IssuedPayment {
             channel_id: SessionCredentialPayload::channel_id(&credential.payload),
-            _process: process,
-            _store: store,
         });
         let id = challenge.id.clone();
         self.shared
-            .leases
-            .update(|leases| leases.insert(id.clone(), lease.clone()).map(drop));
+            .issued
+            .update(|issued| issued.insert(id.clone(), payment.clone()).map(drop));
         Ok(credential)
     }
 
@@ -2358,59 +2404,91 @@ impl SessionProvider {
             return build_credential(challenge, &payload, chain_id, payer);
         }
         let pending = self.is_pending_open(&entry.id());
-        if !includes_request && !pending {
-            entry.cumulative_amount = entry
-                .cumulative_amount
-                .checked_add(amount)
-                .ok_or_else(|| Fault::config("session cumulative amount overflowed"))?;
+        let advances = !includes_request && !pending;
+        loop {
+            let base = entry.cumulative_amount;
+            if advances {
+                entry.cumulative_amount = base
+                    .checked_add(amount)
+                    .ok_or_else(|| Fault::config("session cumulative amount overflowed"))?;
+            }
+            if entry.cumulative_amount > entry.deposit {
+                let Some(top_up) = top_up.as_ref() else {
+                    return Err(Fault::config(
+                        "session cumulative amount exceeds channel deposit",
+                    ));
+                };
+                self.cover(challenge, key, &mut entry, request, top_up)
+                    .await?;
+            }
+            let payload =
+                self.voucher_payload(entry.descriptor.clone(), entry.cumulative_amount, chain_id)?;
+            if !advances {
+                self.persist_channel(&entry).await?;
+                self.insert_signed_entry(key, &mut entry);
+            } else if !self.reserve(key, &mut entry, base).await? {
+                entry = self.refreshed_entry(key, &entry.channel_id).await?;
+                continue;
+            }
+            return build_credential(challenge, &payload, chain_id, payer);
         }
-        if entry.cumulative_amount > entry.deposit {
-            let Some(top_up) = top_up else {
-                return Err(Fault::config(
-                    "session cumulative amount exceeds channel deposit",
-                ));
-            };
-            let _funding = self.acquire_funding_lock(key, challenge).await?;
+    }
+
+    async fn cover(
+        &self,
+        challenge: &Challenge,
+        key: &str,
+        entry: &mut ChannelEntry,
+        request: &SessionRequest,
+        top_up: &TopUpRoute<'_>,
+    ) -> Result<(), Fault> {
+        let raise = |entry: &mut ChannelEntry| {
             if let Some(current) = self
                 .channel(key)
                 .filter(|current| current.channel_id == entry.channel_id)
             {
                 entry.deposit = entry.deposit.max(current.deposit);
             }
-            if entry.cumulative_amount > entry.deposit {
-                let size = self
-                    .required_top_up(
-                        entry.cumulative_amount,
-                        entry.deposit,
-                        request.suggested_deposit.as_deref(),
-                    )?
-                    .ok_or_else(|| Fault::config("session top-up amount underflowed"))?;
-                let channel_id = entry.id();
-                match top_up {
-                    TopUpRoute::Http {
-                        client,
-                        url,
-                        headers,
-                    } => {
-                        self.top_up_with_lease(client, url, headers, challenge, &channel_id, size)
-                            .await?;
-                    }
-                    TopUpRoute::Management { transport, url } => {
-                        self.top_up_with_management(transport, url, challenge, &channel_id, size)
-                            .await?;
-                    }
-                }
-                entry.deposit = self
-                    .channel(key)
-                    .ok_or_else(|| Fault::config("channel disappeared after top-up"))?
-                    .deposit;
+            entry.cumulative_amount > entry.deposit
+        };
+        let _funding = loop {
+            if !raise(entry) {
+                return Ok(());
+            }
+            if let Some(funding) = self.fund(key, challenge).await? {
+                break funding;
+            }
+        };
+        if !raise(entry) {
+            return Ok(());
+        }
+        let size = self
+            .required_top_up(
+                entry.cumulative_amount,
+                entry.deposit,
+                request.suggested_deposit.as_deref(),
+            )?
+            .ok_or_else(|| Fault::config("session top-up amount underflowed"))?;
+        let channel_id = entry.id();
+        match top_up {
+            TopUpRoute::Http {
+                client,
+                url,
+                headers,
+            } => {
+                self.top_up_over_http(client, url, headers.clone(), challenge, &channel_id, size)
+                    .await?;
+            }
+            TopUpRoute::Management { transport, url } => {
+                self.top_up_with_management(*transport, url, challenge, &channel_id, size)
+                    .await?;
             }
         }
-        let payload =
-            self.voucher_payload(entry.descriptor.clone(), entry.cumulative_amount, chain_id)?;
-        self.persist_channel(&entry).await?;
-        self.insert_signed_entry(key, &mut entry);
-        build_credential(challenge, &payload, chain_id, payer)
+        entry.deposit = self
+            .channel(key)
+            .ok_or_else(|| Fault::config("channel disappeared after top-up"))?
+            .deposit;
+        Ok(())
     }
 
     async fn payment_credential_inner(
@@ -2526,10 +2604,10 @@ impl SessionProvider {
         .await
     }
 
-    fn take_lease(&self, challenge: &Challenge) -> Option<Arc<PaymentLease>> {
+    fn take_issued(&self, challenge: &Challenge) -> Option<Arc<IssuedPayment>> {
         self.shared
-            .leases
-            .update(|leases| leases.remove(&challenge.id))
+            .issued
+            .update(|issued| issued.remove(&challenge.id))
     }
 
     pub(crate) async fn commit_payment(
@@ -2537,7 +2615,7 @@ impl SessionProvider {
         challenge: &Challenge,
         credential: &Credential,
     ) -> Result<(), Fault> {
-        let lease = self.take_lease(challenge);
+        self.take_issued(challenge);
         if let Some(id) = SessionCredentialPayload::channel_id(&credential.payload)
             && let Some(entry) = self
                 .channel_by_id(&id)
@@ -2549,7 +2627,6 @@ impl SessionProvider {
         if let Some(id) = SessionCredentialPayload::channel_id(&credential.payload) {
             self.commit_referenced_open(&id);
         }
-        drop(lease);
         Ok(())
     }
 
@@ -2558,10 +2635,8 @@ impl SessionProvider {
         challenge: &Challenge,
         credential: &Credential,
     ) -> Result<(), Fault> {
-        let lease = self.take_lease(challenge);
-        let result = self.rollback_credential(challenge, credential).await;
-        drop(lease);
-        result
+        self.take_issued(challenge);
+        self.rollback_credential(challenge, credential).await
     }
 
     pub(crate) async fn invalidate_payment(
@@ -2569,14 +2644,12 @@ impl SessionProvider {
         challenge: &Challenge,
         credential: &Credential,
     ) -> Result<(), Fault> {
-        let lease = self.take_lease(challenge);
-        let result = self.invalidate_credential(challenge, credential).await;
-        drop(lease);
-        result
+        self.take_issued(challenge);
+        self.invalidate_credential(challenge, credential).await
     }
 
     pub(crate) fn abandon_payment(&self, challenge: &Challenge, _credential: &Credential) {
-        drop(self.take_lease(challenge));
+        self.take_issued(challenge);
     }
 
     pub(crate) async fn prepaid_credential(
@@ -2610,20 +2683,14 @@ impl SessionProvider {
                 return None;
             }
         }
-        let _lock = self.acquire_payment_lock(&state.challenge).await.ok()?;
-        let key = self.channel_key_of(&state.channel_id)?;
-        let mut entry = self.channel(&key)?;
-        self.merge_stored_channel(&key, &mut entry).await.ok()?;
         let target = state
             .price
             .checked_mul(u128::from(self.prepaid_requests))
             .and_then(|headroom| state.spent.checked_add(headroom))?;
-        let cumulative = target.max(entry.cumulative_amount.checked_add(1)?);
-        if cumulative > entry.deposit {
-            return None;
-        }
         let credential = self
-            .voucher_credential_for_challenge(&state.challenge, &state.channel_id, cumulative)
+            .voucher_credential_for_challenge(&state.challenge, &state.channel_id, |base| {
+                Some(target.max(base.checked_add(1)?))
+            })
             .await
             .ok()?;
         self.shared

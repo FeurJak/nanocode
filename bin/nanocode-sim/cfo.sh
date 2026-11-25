@@ -119,7 +119,7 @@ default_table='
 1 canary_mpp_drop_abandon canary --scenario mpp --mutation drop_abandon
 1 canary_mpp_receipt_on_refusal canary --scenario mpp --mutation receipt_on_refusal
 1 canary_mpp_spent_save_regresses canary --scenario mpp --mutation spent_save_regresses
-1 canary_mpp_leases_kept canary --scenario mpp --mutation leases_kept
+1 canary_mpp_reserve_skips_compare canary --scenario mpp --mutation reserve_skips_compare
 1 canary_sync_skip_notify canary --scenario sync --mutation skip_notify
 1 canary_sync_leak_permit canary --scenario sync --mutation leak_permit
 1 canary_sync_reverse_queue canary --scenario sync --mutation reverse_queue

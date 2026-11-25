@@ -1,12 +1,11 @@
 use std::collections::{BTreeMap, HashMap};
-use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Write};
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
+use nanocode_platform::Revisioned;
 use nanocode_sync::Atom;
-use nanocode_sync::{OwnedSemaphorePermit, Semaphore};
-use nanocode_tempo::{Address, Sha256, hex};
+use nanocode_tempo::{Address, hex};
 use serde::{Deserialize, Serialize};
 
 use super::accounts;
@@ -19,8 +18,6 @@ mod sqlite;
 
 const DATABASE_FILE: &str = "channels.db";
 const DOCUMENT_EXTENSION: &str = "json";
-const LOCK_EXTENSION: &str = "lock";
-const TEMPORARY_EXTENSION: &str = "tmp";
 const DOCUMENT_VERSION: u32 = 1;
 const SCHEMA_VERSION: i64 = 2;
 const LEGACY_VERSION: i64 = 1;
@@ -30,8 +27,6 @@ const LEGACY_PROTOCOL: &str = "v1";
 const EMPTY_ECHO: &str = "{}";
 const ZERO_AMOUNT: &str = "0";
 const CHANNELS_TABLE: &str = "channels";
-#[cfg(unix)]
-const PRIVATE_FILE_MODE: u32 = 0o600;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredChannelEntry {
@@ -105,6 +100,12 @@ fn io_error(error: impl std::fmt::Display) -> StoreFault {
     StoreFault::Io(error.to_string())
 }
 
+impl From<std::io::Error> for StoreFault {
+    fn from(error: std::io::Error) -> Self {
+        io_error(error)
+    }
+}
+
 fn origin_mismatch() -> StoreFault {
     StoreFault::InvalidEntry("stored channel origin mismatch".into())
 }
@@ -144,30 +145,10 @@ fn spent_advances(recorded: Option<u128>, spent: u128) -> bool {
     mutated(Mutation::SpentSaveRegresses) || recorded.is_none_or(|recorded| recorded <= spent)
 }
 
-pub(crate) fn live_lock(
-    locks: &mut HashMap<String, Weak<Semaphore>>,
-    key: &str,
-    fresh: &Arc<Semaphore>,
-) -> Arc<Semaphore> {
-    if !mutated(Mutation::LeasesKept) {
-        locks.retain(|_, lock| lock.strong_count() > 0);
-    }
-    if let Some(lock) = locks.get(key).and_then(Weak::upgrade) {
-        return lock;
-    }
-    locks.insert(key.to_owned(), Arc::downgrade(fresh));
-    Arc::clone(fresh)
-}
-
 pub fn default_channel_database_path() -> Result<PathBuf, Fault> {
     accounts::default_credentials_path()
         .map(|path| path.with_file_name(DATABASE_FILE))
         .map_err(|error| Fault::Io(error.to_string()))
-}
-
-pub(crate) enum StoreLease {
-    Process { _permit: OwnedSemaphorePermit },
-    File { _file: File },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -240,24 +221,10 @@ impl TryFrom<JsonChannelEntry> for StoredChannelEntry {
 #[derive(Default)]
 pub struct MemoryChannelStore {
     entries: Atom<HashMap<String, StoredChannelEntry>>,
-    leases: Atom<HashMap<String, Weak<Semaphore>>>,
     server_spent: Atom<HashMap<String, (Hash, u128, u128)>>,
 }
 
 impl MemoryChannelStore {
-    async fn acquire(&self, key: &str) -> Result<StoreLease, StoreFault> {
-        let fresh = Arc::new(Semaphore::new(1));
-        let lock = self.leases.update(|leases| live_lock(leases, key, &fresh));
-        lock.acquire_owned()
-            .await
-            .map(|permit| StoreLease::Process { _permit: permit })
-            .map_err(io_error)
-    }
-
-    pub(crate) fn lease_count(&self) -> usize {
-        self.leases.read(HashMap::len)
-    }
-
     fn get(&self, key: &str) -> Option<StoredChannelEntry> {
         self.entries.read(|entries| entries.get(key).cloned())
     }
@@ -267,6 +234,18 @@ impl MemoryChannelStore {
             let merged = merged(entries.get(&entry.key()).cloned(), entry)?;
             entries.insert(merged.key(), merged);
             Ok(())
+        })
+    }
+
+    fn reserve(&self, entry: &StoredChannelEntry, base: u128) -> Result<bool, StoreFault> {
+        self.entries.modify(|entries| {
+            let current = entries.get(&entry.key()).cloned();
+            if reserved_past(current.as_ref(), entry, base) {
+                return Ok(false);
+            }
+            let merged = merged(current, entry)?;
+            entries.insert(merged.key(), merged);
+            Ok(true)
         })
     }
 
@@ -311,6 +290,17 @@ impl MemoryChannelStore {
             true
         })
     }
+}
+
+fn reserved_past(
+    current: Option<&StoredChannelEntry>,
+    entry: &StoredChannelEntry,
+    base: u128,
+) -> bool {
+    !mutated(Mutation::ReserveSkipsCompare)
+        && current.is_some_and(|current| {
+            current.channel_id == entry.channel_id && current.cumulative_amount > base
+        })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -361,33 +351,13 @@ struct FileStore {
     namespace: String,
     origin: String,
     database: PathBuf,
-    document: PathBuf,
+    document: Revisioned,
     request_url: String,
 }
 
 #[derive(Clone)]
 pub struct FileChannelStore {
     inner: Arc<FileStore>,
-}
-
-fn with_extension(path: &Path, extension: &str) -> PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(".");
-    name.push(extension);
-    PathBuf::from(name)
-}
-
-fn lock_file(path: &Path) -> Result<File, StoreFault> {
-    let mut options = OpenOptions::new();
-    options.create(true).truncate(false).read(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(PRIVATE_FILE_MODE);
-    }
-    let file = options.open(path).map_err(io_error)?;
-    file.lock().map_err(io_error)?;
-    Ok(file)
 }
 
 fn unix_now() -> Result<i64, StoreFault> {
@@ -408,33 +378,22 @@ impl FileStore {
         format!("{}\n{}", self.namespace, key)
     }
 
-    fn payment_lock_path(&self, key: &str) -> PathBuf {
-        let mut digest = Sha256::new();
-        digest.update(self.scoped_key(key).as_bytes());
-        let name = self
-            .database
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(DATABASE_FILE);
-        self.database.with_file_name(format!(
-            "{name}.{}.{LOCK_EXTENSION}",
-            hex::encode(digest.finalize())
-        ))
-    }
-
     fn read(&self) -> Result<Document, StoreFault> {
-        read_document(&self.document)
+        let revision = self.document.read()?;
+        parse_document(self.document.path(), revision.bytes.as_deref())
     }
 
     fn change<T>(
         &self,
-        change: impl FnOnce(&mut Document) -> Result<T, StoreFault>,
+        mut change: impl FnMut(&mut Document) -> Result<T, StoreFault>,
     ) -> Result<T, StoreFault> {
-        let _lock = lock_file(&with_extension(&self.document, LOCK_EXTENSION))?;
-        let mut document = self.read()?;
-        let output = change(&mut document)?;
-        write_document(&self.document, &document)?;
-        Ok(output)
+        self.document.update(|bytes| {
+            let mut document = parse_document(self.document.path(), bytes)?;
+            let output = change(&mut document)?;
+            let bytes = serde_json::to_vec(&document)
+                .map_err(|error| StoreFault::InvalidEntry(error.to_string()))?;
+            Ok((Some(bytes), output))
+        })
     }
 
     fn get(&self, key: &str) -> Result<Option<StoredChannelEntry>, StoreFault> {
@@ -478,6 +437,14 @@ impl FileStore {
     }
 
     fn set(&self, entry: &StoredChannelEntry) -> Result<(), StoreFault> {
+        self.write(entry, None).map(drop)
+    }
+
+    fn reserve(&self, entry: &StoredChannelEntry, base: u128) -> Result<bool, StoreFault> {
+        self.write(entry, Some(base))
+    }
+
+    fn write(&self, entry: &StoredChannelEntry, base: Option<u128>) -> Result<bool, StoreFault> {
         let scope_key = self.scoped_key(&entry.key());
         self.change(|document| {
             let current: Option<StoredChannelEntry> = document
@@ -491,6 +458,9 @@ impl FileStore {
                         .try_into()
                 })
                 .transpose()?;
+            if base.is_some_and(|base| reserved_past(current.as_ref(), entry, base)) {
+                return Ok(false);
+            }
             let mut entry = entry.clone();
             if let Some(origin) = self.http_origin() {
                 if entry.origin.as_ref().is_some_and(|entry| *entry != origin) {
@@ -577,7 +547,7 @@ impl FileStore {
                 }
                 None => document.channels.push(fresh),
             }
-            Ok(())
+            Ok(true)
         })
     }
 
@@ -637,18 +607,14 @@ impl FileStore {
     }
 }
 
-fn read_document(path: &Path) -> Result<Document, StoreFault> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            return Ok(Document {
-                version: DOCUMENT_VERSION,
-                ..Document::default()
-            });
-        }
-        Err(error) => return Err(io_error(error)),
+fn parse_document(path: &Path, bytes: Option<&[u8]>) -> Result<Document, StoreFault> {
+    let Some(bytes) = bytes else {
+        return Ok(Document {
+            version: DOCUMENT_VERSION,
+            ..Document::default()
+        });
     };
-    let document: Document = serde_json::from_slice(&bytes)
+    let document: Document = serde_json::from_slice(bytes)
         .map_err(|error| StoreFault::InvalidEntry(format!("{}: {error}", path.display())))?;
     if document.version != DOCUMENT_VERSION {
         return Err(StoreFault::InvalidEntry(format!(
@@ -658,24 +624,6 @@ fn read_document(path: &Path) -> Result<Document, StoreFault> {
         )));
     }
     Ok(document)
-}
-
-fn write_document(path: &Path, document: &Document) -> Result<(), StoreFault> {
-    let bytes = serde_json::to_vec(document)
-        .map_err(|error| StoreFault::InvalidEntry(error.to_string()))?;
-    let temporary = with_extension(path, TEMPORARY_EXTENSION);
-    let mut options = OpenOptions::new();
-    options.create(true).truncate(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(PRIVATE_FILE_MODE);
-    }
-    let mut file = options.open(&temporary).map_err(io_error)?;
-    file.write_all(&bytes).map_err(io_error)?;
-    file.sync_all().map_err(io_error)?;
-    drop(file);
-    fs::rename(&temporary, path).map_err(io_error)
 }
 
 fn text(row: &BTreeMap<String, sqlite::Value>, column: &str) -> Option<String> {
@@ -820,7 +768,7 @@ impl FileChannelStore {
             namespace: options.namespace,
             origin,
             database,
-            document,
+            document: Revisioned::new(document),
             request_url,
         };
         store.import()?;
@@ -887,20 +835,6 @@ impl From<FileChannelStore> for ChannelStore {
 }
 
 impl ChannelStore {
-    pub(crate) async fn acquire(&self, key: &str) -> Result<StoreLease, StoreFault> {
-        match self {
-            Self::Memory(store) => store.acquire(key).await,
-            Self::File(store) => {
-                let path = store.inner.payment_lock_path(key);
-                store
-                    .blocking(move |_| {
-                        lock_file(&path).map(|file| StoreLease::File { _file: file })
-                    })
-                    .await
-            }
-        }
-    }
-
     pub(crate) async fn get(&self, key: &str) -> Result<Option<StoredChannelEntry>, StoreFault> {
         match self {
             Self::Memory(store) => Ok(store.get(key)),
@@ -917,6 +851,22 @@ impl ChannelStore {
             Self::File(store) => {
                 let entry = entry.clone();
                 store.blocking(move |store| store.set(&entry)).await
+            }
+        }
+    }
+
+    pub(crate) async fn reserve(
+        &self,
+        entry: &StoredChannelEntry,
+        base: u128,
+    ) -> Result<bool, StoreFault> {
+        match self {
+            Self::Memory(store) => store.reserve(entry, base),
+            Self::File(store) => {
+                let entry = entry.clone();
+                store
+                    .blocking(move |store| store.reserve(&entry, base))
+                    .await
             }
         }
     }

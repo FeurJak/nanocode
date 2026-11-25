@@ -18,10 +18,10 @@ use nanocode_mpp::{
     protocol::{Challenge, Credential, Receipt},
     provider::{ManagementTransport, PaymentContext, PaymentEventFuture, PaymentProvider},
     sim::{
-        Mutation as StoreMutation, hold_lease, leases, mutate, open_channel, save_server_spent,
+        Mutation as StoreMutation, cumulative, mutate, open_channel, reserve, save_server_spent,
         server_spent,
     },
-    store::{ChannelStore, MemoryChannelStore},
+    store::ChannelStore,
 };
 use nanocode_sync::Atom;
 use nanocode_sys::base64::URL_SAFE_NO_PAD;
@@ -62,9 +62,8 @@ const PAYMENT_REQUIRED: u16 = 402;
 const SPENT_SAVERS_MAX: u64 = 6;
 const SPENT_STEP_MAX: u64 = 100;
 const SPENT_DELAY_US_MAX: u64 = 1000;
-const LEASE_HOLDERS_MAX: u64 = 5;
-const LEASE_ROUNDS_MAX: u64 = 5;
-const LEASE_SHARED_PPM: u64 = 300_000;
+const PAYERS_MAX: u64 = 5;
+const PAYER_ROUNDS_MAX: u64 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MppMutation {
@@ -80,7 +79,7 @@ pub enum MppMutation {
     StatusRewritten,
     SupportsAny,
     SpentSaveRegresses,
-    LeasesKept,
+    ReserveSkipsCompare,
 }
 
 impl MppMutation {
@@ -97,7 +96,7 @@ impl MppMutation {
         Self::StatusRewritten,
         Self::SupportsAny,
         Self::SpentSaveRegresses,
-        Self::LeasesKept,
+        Self::ReserveSkipsCompare,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -120,7 +119,7 @@ impl MppMutation {
             Self::StatusRewritten => "status_rewritten",
             Self::SupportsAny => "supports_any",
             Self::SpentSaveRegresses => "spent_save_regresses",
-            Self::LeasesKept => "leases_kept",
+            Self::ReserveSkipsCompare => "reserve_skips_compare",
         }
     }
 
@@ -844,65 +843,85 @@ fn spent_saves(seed: u64, clock: &Arc<Clock>) -> Result<(), String> {
     Ok(())
 }
 
-fn lease_registry(seed: u64, clock: &Arc<Clock>) -> Result<(), String> {
-    let mut rng = Rng::derive(seed, "store leases");
-    let holders: Vec<Vec<(bool, u64)>> = (0..rng.range(2, LEASE_HOLDERS_MAX))
+fn reservations(seed: u64, clock: &Arc<Clock>) -> Result<(), String> {
+    let mut rng = Rng::derive(seed, "reservations");
+    let payers: Vec<Vec<(u64, u64)>> = (0..rng.range(2, PAYERS_MAX))
         .map(|_| {
-            (0..rng.range(2, LEASE_ROUNDS_MAX))
-                .map(|_| (rng.chance(LEASE_SHARED_PPM), rng.below(SPENT_DELAY_US_MAX)))
+            (0..rng.range(1, PAYER_ROUNDS_MAX))
+                .map(|_| (rng.range(1, SPENT_STEP_MAX), rng.below(SPENT_DELAY_US_MAX)))
                 .collect()
         })
         .collect();
-    let memory = Arc::new(MemoryChannelStore::default());
-    let store = ChannelStore::Memory(Arc::clone(&memory));
-    let live = Cell::new(0_usize);
+    let store = ChannelStore::default();
+    let channel = [u8::try_from(seed % 256).expect("below 256"); 32];
+    let key = nanocode_sync::block_on(open_channel(&store, channel, 0))
+        .map_err(|error| format!("opening the channel failed: {error}"))?;
+    let landed = RefCell::new(Vec::new());
     let wrong = RefCell::new(None);
-    let tasks: Vec<Task<'_>> = holders
+    let tasks: Vec<Task<'_>> = payers
         .iter()
-        .enumerate()
-        .map(|(holder, rounds)| {
-            let (store, memory, live, wrong) = (&store, &memory, &live, &wrong);
+        .map(|rounds| {
+            let (store, key, landed, wrong) = (&store, &key, &landed, &wrong);
             Box::pin(async move {
-                for (round, &(shared, hold)) in rounds.iter().enumerate() {
-                    let key = if shared {
-                        "shared".to_owned()
-                    } else {
-                        format!("{holder}-{round}")
-                    };
-                    live.set(live.get() + 1);
-                    let lease = match hold_lease(store, &key).await {
-                        Ok(lease) => lease,
-                        Err(error) => {
-                            wrong.replace(Some(format!("a store lease failed: {error}")));
-                            return;
+                for &(price, delay) in rounds {
+                    loop {
+                        let base = match cumulative(store, key).await {
+                            Ok(base) => base.unwrap_or_default(),
+                            Err(error) => {
+                                wrong.replace(Some(format!("reading the channel failed: {error}")));
+                                return;
+                            }
+                        };
+                        clock.sleep(Duration::from_micros(delay)).await;
+                        let next = base + u128::from(price);
+                        match reserve(store, channel, base, next).await {
+                            Ok(true) => {
+                                landed.borrow_mut().push((next, u128::from(price)));
+                                break;
+                            }
+                            Ok(false) => {}
+                            Err(error) => {
+                                wrong.replace(Some(format!("a reservation failed: {error}")));
+                                return;
+                            }
                         }
-                    };
-                    if !shared && leases(memory) > live.get() {
-                        wrong.replace(Some(format!(
-                            "the store keeps {} lease locks for {} live holders and waiters",
-                            leases(memory),
-                            live.get()
-                        )));
                     }
-                    clock.sleep(Duration::from_micros(hold)).await;
-                    drop(lease);
-                    live.set(live.get() - 1);
                 }
             }) as Task<'_>
         })
         .collect();
-    let ended =
-        Executor::new(Arc::clone(clock), Rng::derive(seed, "lease scheduler")).run(tasks, None);
-    if let Ended::Stuck = ended {
-        return Err("stuck: the store lease holders never finished".to_owned());
+    if let Ended::Stuck =
+        Executor::new(Arc::clone(clock), Rng::derive(seed, "payer scheduler")).run(tasks, None)
+    {
+        return Err("stuck: the payers never finished".to_owned());
     }
-    wrong.take().map_or(Ok(()), Err)
+    if let Some(wrong) = wrong.take() {
+        return Err(wrong);
+    }
+    let mut landed = landed.take();
+    landed.sort_unstable();
+    if let Some(pair) = landed.windows(2).find(|pair| pair[0].0 == pair[1].0) {
+        return Err(format!(
+            "two payments reserved the same cumulative amount {}",
+            pair[0].0
+        ));
+    }
+    let paid: u128 = landed.iter().map(|(_, price)| price).sum();
+    let stored = nanocode_sync::block_on(cumulative(&store, &key))
+        .map_err(|error| format!("reading the channel failed: {error}"))?
+        .unwrap_or_default();
+    if stored != paid {
+        return Err(format!(
+            "the channel's cumulative amount is {stored} after reservations paying {paid}"
+        ));
+    }
+    Ok(())
 }
 
 fn simulate(seed: u64, mutation: MppMutation) -> MppOutcome {
     mutate(match mutation {
         MppMutation::SpentSaveRegresses => StoreMutation::SpentSaveRegresses,
-        MppMutation::LeasesKept => StoreMutation::LeasesKept,
+        MppMutation::ReserveSkipsCompare => StoreMutation::ReserveSkipsCompare,
         _ => StoreMutation::None,
     });
     let script = Script::of(seed);
@@ -966,7 +985,7 @@ fn simulate(seed: u64, mutation: MppMutation) -> MppOutcome {
     let entries = ledger.get().as_ref().clone();
     let wrong = judge(&script, &exchange.sent, &entries, &result, mutation)
         .and_then(|()| spent_saves(seed, &clock))
-        .and_then(|()| lease_registry(seed, &clock))
+        .and_then(|()| reservations(seed, &clock))
         .err();
     let count = |wanted: Settled| {
         u64::try_from(

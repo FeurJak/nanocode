@@ -3,14 +3,14 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use nanocode_tempo::Address;
 
 use super::session::wire::ChannelDescriptor;
-use super::store::{ChannelStore, MemoryChannelStore, StoreFault, StoreLease, StoredChannelEntry};
+use super::store::{ChannelStore, StoreFault, StoredChannelEntry};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Mutation {
     None,
     SpentSaveRegresses,
-    LeasesKept,
+    ReserveSkipsCompare,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);
@@ -28,7 +28,13 @@ pub async fn open_channel(
     channel_id: [u8; 32],
     cumulative_amount: u128,
 ) -> Result<String, StoreFault> {
-    let entry = StoredChannelEntry {
+    let entry = entry(channel_id, cumulative_amount);
+    store.set(&entry).await?;
+    Ok(entry.key())
+}
+
+fn entry(channel_id: [u8; 32], cumulative_amount: u128) -> StoredChannelEntry {
+    StoredChannelEntry {
         channel_id,
         cumulative_amount,
         deposit: cumulative_amount,
@@ -47,9 +53,7 @@ pub async fn open_channel(
         opened: true,
         pending_open: None,
         origin: None,
-    };
-    store.set(&entry).await?;
-    Ok(entry.key())
+    }
 }
 
 pub async fn save_server_spent(
@@ -69,17 +73,17 @@ pub async fn server_spent(
     store.server_spent(key, channel_id).await
 }
 
-pub struct Lease {
-    _lease: StoreLease,
+pub async fn cumulative(store: &ChannelStore, key: &str) -> Result<Option<u128>, StoreFault> {
+    Ok(store.get(key).await?.map(|entry| entry.cumulative_amount))
 }
 
-pub async fn hold_lease(store: &ChannelStore, key: &str) -> Result<Lease, StoreFault> {
+pub async fn reserve(
+    store: &ChannelStore,
+    channel_id: [u8; 32],
+    base: u128,
+    cumulative_amount: u128,
+) -> Result<bool, StoreFault> {
     store
-        .acquire(key)
+        .reserve(&entry(channel_id, cumulative_amount), base)
         .await
-        .map(|lease| Lease { _lease: lease })
-}
-
-pub fn leases(store: &MemoryChannelStore) -> usize {
-    store.lease_count()
 }
