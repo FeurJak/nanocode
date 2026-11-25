@@ -19,7 +19,7 @@ use std::{
 
 use nanocode_executor::{TcpListener, TcpStream};
 use nanocode_io::{AsyncRead, AsyncWrite};
-use nanocode_sync::{Atom, Owned, Signal};
+use nanocode_sync::{Actor, Atom, Signal};
 use nanocode_sync::{mpsc, watch};
 use nanocode_websocket::{IntoClientRequest, Message, WebSocketStream};
 
@@ -752,12 +752,14 @@ impl SocketTransport {
             Arc::clone(&liveness),
             Arc::clone(&shutdown.reason),
         );
+        let reader = Actor::spawn(SocketReader {
+            socket,
+            writer: Some(writer),
+        })
+        .map_err(error)?;
         let (client, driver) = RemoteClient::new(
             SocketLink {
-                reader: Owned::new(SocketReader {
-                    socket,
-                    writer: Some(writer),
-                }),
+                reader,
                 wire: Atom::new(Some(wire)),
                 liveness,
                 window: policy.request_timeout / 2,
@@ -800,7 +802,7 @@ struct SocketReader<S> {
 }
 
 struct SocketLink<S> {
-    reader: Owned<SocketReader<S>>,
+    reader: Actor<SocketReader<S>>,
     wire: Atom<Option<mpsc::UnboundedSender<String>>>,
     liveness: Arc<Liveness>,
     window: Duration,
@@ -865,47 +867,65 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> RemoteLink for SocketLi
     }
 
     fn receive(&self) -> HostFuture<'_, Result<Vec<Frame>, CodeModeHostError>> {
-        Box::pin(async move {
-            let mut reader = self.reader.acquire().await;
-            let SocketReader { socket, writer } = &mut *reader;
-            let Some(task) = writer.as_mut() else {
-                return Err(error(LOCAL_CLOSED));
-            };
-            let received = nanocode_sync::select! {
-                () = self.stopped.wait() => Received::Stopped,
-                result = &mut task.0 => Received::Written(result),
-                frame = read(socket, &self.liveness) => Received::Frame(frame),
-                () = self.liveness.watch(self.window) => Received::Unresponsive,
-            };
-            match received {
-                Received::Stopped => Err(error(LOCAL_CLOSED)),
-                Received::Written(result) => {
-                    *writer = None;
-                    Err(match result {
-                        Ok(Ok(())) => error(LOCAL_CLOSED),
-                        Ok(Err(issue)) => issue,
-                        Err(issue) => error(issue),
-                    })
-                }
-                Received::Frame(Ok(Some(frame))) => Ok(vec![frame]),
-                Received::Frame(Ok(None)) => Err(error(PEER_CLOSED)),
-                Received::Frame(Err(issue)) => {
-                    Err(error(format!("runner connection failed: {issue}")))
-                }
-                Received::Unresponsive => {
-                    Err(error(format!("runner connection failed: {UNRESPONSIVE}")))
-                }
-            }
-        })
+        let (stopped, liveness, window) = (
+            Arc::clone(&self.stopped),
+            Arc::clone(&self.liveness),
+            self.window,
+        );
+        let received = self
+            .reader
+            .run(move |reader| Box::pin(reader.receive(stopped, liveness, window)));
+        Box::pin(async move { received.await.map_err(error)? })
     }
 
     fn close<'a>(&'a self, _reason: &'a str) -> HostFuture<'a, ()> {
         Box::pin(async move {
             self.wire.set(None);
-            if let Some(mut writer) = self.reader.acquire().await.writer.take() {
+            let writer = self
+                .reader
+                .run(|reader| Box::pin(std::future::ready(reader.writer.take())))
+                .await;
+            if let Ok(Some(mut writer)) = writer {
                 let _ = (&mut writer.0).await;
             }
         })
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> SocketReader<S> {
+    async fn receive(
+        &mut self,
+        stopped: Arc<Signal>,
+        liveness: Arc<Liveness>,
+        window: Duration,
+    ) -> Result<Vec<Frame>, CodeModeHostError> {
+        let SocketReader { socket, writer } = self;
+        let Some(task) = writer.as_mut() else {
+            return Err(error(LOCAL_CLOSED));
+        };
+        let received = nanocode_sync::select! {
+            () = stopped.wait() => Received::Stopped,
+            result = &mut task.0 => Received::Written(result),
+            frame = read(socket, &liveness) => Received::Frame(frame),
+            () = liveness.watch(window) => Received::Unresponsive,
+        };
+        match received {
+            Received::Stopped => Err(error(LOCAL_CLOSED)),
+            Received::Written(result) => {
+                *writer = None;
+                Err(match result {
+                    Ok(Ok(())) => error(LOCAL_CLOSED),
+                    Ok(Err(issue)) => issue,
+                    Err(issue) => error(issue),
+                })
+            }
+            Received::Frame(Ok(Some(frame))) => Ok(vec![frame]),
+            Received::Frame(Ok(None)) => Err(error(PEER_CLOSED)),
+            Received::Frame(Err(issue)) => Err(error(format!("runner connection failed: {issue}"))),
+            Received::Unresponsive => {
+                Err(error(format!("runner connection failed: {UNRESPONSIVE}")))
+            }
+        }
     }
 }
 
