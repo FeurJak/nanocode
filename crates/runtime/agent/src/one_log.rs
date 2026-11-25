@@ -164,6 +164,40 @@ fn raw(value: &impl Serialize) -> Result<Box<RawValue>, StoreError> {
     serde_json::value::to_raw_value(value).map_err(encoding)
 }
 
+fn restored(
+    fold: &nanocode_turnlog::Fold,
+    session: &str,
+    whole: &BTreeSet<u64>,
+    shared: &[String],
+) {
+    let (mut cells, mut finished, mut updates, mut finished_updates) = (0_u64, 0_u64, 0_u64, 0_u64);
+    for (_, cell, held) in fold.cells_of(Some(session)) {
+        let bytes = held
+            .iter()
+            .map(|update| update.get().len() as u64)
+            .sum::<u64>();
+        cells += 1;
+        updates += bytes;
+        if !whole.contains(&cell) {
+            finished += 1;
+            finished_updates += bytes;
+        }
+    }
+    let results = shared
+        .iter()
+        .filter_map(|key| fold.stored(key))
+        .map(|value| value.len() as u64)
+        .sum::<u64>();
+    nanocode_trace::event!(target: "nc_metrics", nanocode_trace::Level::INFO, {
+        monotonic_counter.nc.cells.restored = cells,
+        monotonic_counter.nc.cells.restored_finished = finished,
+        monotonic_counter.nc.cells.restored_results = shared.len() as u64,
+        histogram.nc.cells.restore_update_bytes = updates,
+        histogram.nc.cells.restore_finished_update_bytes = finished_updates,
+        histogram.nc.cells.restore_result_bytes = results
+    });
+}
+
 fn invalid(detail: impl std::fmt::Display) -> StoreError {
     StoreError::Backend(format!("turn log state is invalid: {detail}"))
 }
@@ -698,6 +732,7 @@ impl OneLog {
                     }
                     writing.load_owners(&shared).await?;
                     let fold = writing.fold();
+                    restored(fold, only, &whole, &shared);
                     let mut sessions: BTreeMap<String, Vec<CellJournal>> = BTreeMap::new();
                     let mut catalogs: HashMap<String, Arc<[Value]>> = HashMap::new();
                     for (session, id, updates) in fold.cells_of(Some(only)) {
@@ -2231,7 +2266,11 @@ impl CellJournalSink for OneLogJournals {
                 .await
                 .map_err(|error| error.to_string())?
                 .remove(&session)
-                .and_then(|journals| journals.into_iter().find(|journal| journal.cell_id == cell_id)))
+                .and_then(|journals| {
+                    journals
+                        .into_iter()
+                        .find(|journal| journal.cell_id == cell_id)
+                }))
         })
     }
 
