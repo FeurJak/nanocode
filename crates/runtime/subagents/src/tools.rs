@@ -1002,7 +1002,6 @@ fn build_unstarted<'a>(
         let Some(child) = registry.unstarted(root_session_id, id).await else {
             return Ok(());
         };
-        let _resident = child.lock.enter().await;
         if let Some(parent) = child.descriptor.parent {
             registry.ensure_resident(root_session_id, parent).await?;
         }

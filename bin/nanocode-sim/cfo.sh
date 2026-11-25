@@ -317,6 +317,7 @@ default_table='
 1 canary_agents_restore_remembers_waits canary:40 --scenario agents --mutation restore_remembers_waits
 1 canary_agents_route_skips_claim canary:40 --scenario agents --mutation route_skips_claim
 1 canary_agents_scope_jobs_overlap canary:40 --scenario agents --mutation scope_jobs_overlap
+1 canary_agents_restore_shares_claim canary:40 --scenario agents --mutation restore_shares_claim
 1 canary_agents_board_pool_forgets_intent canary:40 --scenario agents --subagents-board --mutation pool_forgets_intent
 4 agents_subagents_board_delayed pass --scenario agents --subagents-board-delayed
 4 agents_subagents_board_lagging pass --scenario agents --subagents-board-lagging

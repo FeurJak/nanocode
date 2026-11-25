@@ -494,7 +494,7 @@ pub(super) fn hibernated<'a>(
     id: AgentId,
     stored: StoredRuntime,
     hibernated: Hibernated,
-    lock: Turn,
+    lock: Claimed,
 ) -> RegistryFuture<'a, ()> {
     Box::pin(async move {
         let finished = hibernated.call.finished();

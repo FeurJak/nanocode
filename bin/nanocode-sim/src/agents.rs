@@ -6,8 +6,8 @@ use nanocode_dispatch::{Budgets, IntentState, Policy, Role};
 use nanocode_dispatcher::{BRIEF, Dispatcher, Pool};
 use nanocode_subagents::{
     AgentId, AgentStatus, AgentTask, Coordination, DEFAULT_MAX_SUBAGENTS, DISPATCH_LABEL,
-    DISPATCH_POLL_MS, DISPATCH_ROLE, HostedView, Registry, ScopedAgentUpdate, SubagentControl,
-    SubagentPool,
+    DISPATCH_POLL_MS, DISPATCH_ROLE, HostedView, MessagePriority, MessagePurpose, Registry,
+    ScopedAgentUpdate, SubagentControl, SubagentPool,
 };
 use nanocode_sync::mpsc::UnboundedReceiver;
 use nanocode_turnlog::{LogHost, MemoryLog};
@@ -60,10 +60,11 @@ pub enum AgentsMutation {
     RestoreRemembersWaits,
     RouteSkipsClaim,
     ScopeJobsOverlap,
+    RestoreSharesClaim,
 }
 
 impl AgentsMutation {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::None,
         Self::CancelIgnored,
         Self::ShutdownHangs,
@@ -76,6 +77,7 @@ impl AgentsMutation {
         Self::RestoreRemembersWaits,
         Self::RouteSkipsClaim,
         Self::ScopeJobsOverlap,
+        Self::RestoreSharesClaim,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -98,6 +100,7 @@ impl AgentsMutation {
             Self::RestoreRemembersWaits => "restore_remembers_waits",
             Self::RouteSkipsClaim => "route_skips_claim",
             Self::ScopeJobsOverlap => "scope_jobs_overlap",
+            Self::RestoreSharesClaim => "restore_shares_claim",
         }
     }
 
@@ -1033,6 +1036,61 @@ async fn scoped_in_order(ledger: &Arc<Ledger>) -> Result<(), String> {
     Ok(())
 }
 
+const CLAIM_SESSION: &str = "residency-claims";
+const CLAIM_SENDS: usize = 4;
+const CLAIM_SETTLE: Duration = Duration::from_secs(600);
+
+async fn restored_once(ledger: &Arc<Ledger>) -> Result<(), String> {
+    let (registry, control, updates) = nanocode_subagents::channel(DEFAULT_MAX_SUBAGENTS);
+    registry.set_max_resident(0);
+    let root = AgentHandle::new(
+        CLAIM_SESSION,
+        simulated_model(),
+        Arc::new(ScriptedFactory::new(Arc::clone(ledger))),
+    );
+    let ids = nanocode_subagents::start_agents(&root, &registry, CLAIM_SESSION, tasks(1))
+        .await
+        .map_err(|error| format!("start_agents for the residency claim check failed: {error}"))?
+        .into_iter()
+        .map(|report| report.agent_id)
+        .collect::<Vec<_>>();
+    let [id] = ids[..] else {
+        return Err(format!(
+            "start_agents started {} agents for one task",
+            ids.len()
+        ));
+    };
+    nanocode_platform::sleep(CLAIM_SETTLE).await;
+    let before = ledger.counts().restored;
+    let sent = nanocode_sync::future::join_all((0..CLAIM_SENDS).map(|send| {
+        registry.send_message(
+            CLAIM_SESSION,
+            None,
+            id,
+            MessagePriority::Deferred,
+            MessagePurpose::Coordinate,
+            None,
+            format!("message {send}"),
+        )
+    }))
+    .await;
+    let restored = ledger.counts().restored - before;
+    if restored > 1 {
+        return Err(format!(
+            "{CLAIM_SENDS} messages to evicted agent {id} restored it {restored} times: a restore ran while another held its residency claim"
+        ));
+    }
+    if let Some(error) = sent.into_iter().find_map(Result::err) {
+        return Err(format!("a message to evicted agent {id} failed: {error}"));
+    }
+    control
+        .close_all(CLAIM_SESSION)
+        .await
+        .map_err(|error| format!("close_all after the residency claim check failed: {error}"))?;
+    drop((registry, updates, root));
+    Ok(())
+}
+
 async fn drive(shape: &Shape, ledger: &Arc<Ledger>, clock: &Arc<Clock>) -> Result<u64, String> {
     let run = build(ledger, shape);
     nanocode_subagents::start_agents(
@@ -1071,6 +1129,8 @@ async fn drive(shape: &Shape, ledger: &Arc<Ledger>, clock: &Arc<Clock>) -> Resul
     ledger.trace("routed once");
     scoped_in_order(ledger).await?;
     ledger.trace("scoped in order");
+    restored_once(ledger).await?;
+    ledger.trace("restored once");
     Ok(took_ms)
 }
 
@@ -1095,6 +1155,9 @@ pub fn simulate(seed: u64, mutation: AgentsMutation) -> AgentOutcome {
     }
     if mutation == AgentsMutation::ScopeJobsOverlap {
         nanocode_subagents::sim::mutate(nanocode_subagents::sim::Mutation::ScopeJobsOverlap);
+    }
+    if mutation == AgentsMutation::RestoreSharesClaim {
+        nanocode_subagents::sim::mutate(nanocode_subagents::sim::Mutation::RestoreSharesClaim);
     }
     let shape = Shape::of(seed, mutation);
     let clock = Clock::new();

@@ -8,15 +8,17 @@ pub enum Mutation {
     RestoreRemembersWaits,
     RouteSkipsClaim,
     ScopeJobsOverlap,
+    RestoreSharesClaim,
 }
 
 impl Mutation {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::None,
         Self::WaitRepeatsIds,
         Self::RestoreRemembersWaits,
         Self::RouteSkipsClaim,
         Self::ScopeJobsOverlap,
+        Self::RestoreSharesClaim,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -26,6 +28,7 @@ impl Mutation {
             Self::RestoreRemembersWaits => "subagents_restore_remembers_waits",
             Self::RouteSkipsClaim => "subagents_route_skips_claim",
             Self::ScopeJobsOverlap => "subagents_scope_jobs_overlap",
+            Self::RestoreSharesClaim => "subagents_restore_shares_claim",
         }
     }
 }

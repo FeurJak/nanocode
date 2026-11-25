@@ -172,7 +172,7 @@ pub(super) fn rehydrate<'a>(
     session_id: &'a str,
     to: AgentId,
     purpose: MessagePurpose,
-) -> RegistryFuture<'a, std::io::Result<Turn>> {
+) -> RegistryFuture<'a, std::io::Result<Claimed>> {
     Box::pin(async move {
         let _warm = reg.warm(&reg.root_of(session_id), vec![to]).await?;
         let session = session_id.to_owned();
@@ -186,7 +186,7 @@ pub(super) fn rehydrate<'a>(
             Box::pin(crate::tools::start_unstarted(reg, &root, to, turn)).await;
         }
         let session = session_id.to_owned();
-        let (root, target) = reg
+        let root = reg
             .state
             .call(move |state| -> std::io::Result<_> {
                 let session_id = session.as_str();
@@ -201,67 +201,71 @@ pub(super) fn rehydrate<'a>(
                 if purpose == MessagePurpose::Delegate {
                     scope.topology.authorize(session_id, to)?;
                 }
-                let target = scope
+                scope
                     .sessions
                     .get(&to)
-                    .ok_or_else(|| std::io::Error::other(format!("unknown agent_id {to}")))?
-                    .residency_lock
-                    .clone();
-                Ok((root, target))
+                    .ok_or_else(|| std::io::Error::other(format!("unknown agent_id {to}")))?;
+                Ok(root)
             })
             .await?;
-        let guard = target.enter().await;
         let hibernates = reg.hibernates();
-        let mut ancestors = HashMap::new();
-        let mut missing = loop {
-            let held = ancestors.keys().copied().collect::<HashSet<_>>();
+        let (mut missing, claimed) = loop {
             let scoped = root.clone();
-            let (missing, locks) =
-                reg.state
-                    .call(move |state| -> std::io::Result<_> {
-                        let root = scoped;
-                        let scope = state.scopes.get(&root).ok_or_else(|| {
-                            std::io::Error::other(format!("unknown agent_id {to}"))
-                        })?;
-                        let missing = Registry::missing_runtimes(scope, &root, to)?;
-                        let parents = std::iter::successors(
+            let mailbox = reg.state.clone();
+            let claimed = reg
+                .state
+                .call(move |state| -> std::io::Result<_> {
+                    let scope = state
+                        .scopes
+                        .get_mut(&scoped)
+                        .ok_or_else(|| std::io::Error::other(format!("unknown agent_id {to}")))?;
+                    let missing = Registry::missing_runtimes(scope, &scoped, to)?;
+                    let parents = std::iter::successors(
+                        scope
+                            .sessions
+                            .get(&to)
+                            .and_then(|session| session.descriptor.parent),
+                        |id| {
                             scope
                                 .sessions
-                                .get(&to)
-                                .and_then(|session| session.descriptor.parent),
-                            |id| {
-                                scope
-                                    .sessions
-                                    .get(id)
-                                    .and_then(|session| session.descriptor.parent)
+                                .get(id)
+                                .and_then(|session| session.descriptor.parent)
+                        },
+                    )
+                    .filter(|_| hibernates);
+                    let mut wants = parents
+                        .chain([to])
+                        .map(|id| (id, ClaimKind::Pin))
+                        .collect::<BTreeMap<_, _>>();
+                    let restore = if crate::sim::mutated(crate::sim::Mutation::RestoreSharesClaim) {
+                        ClaimKind::Pin
+                    } else {
+                        ClaimKind::Move
+                    };
+                    wants.extend(missing.iter().map(|(id, ..)| (*id, restore)));
+                    Ok(match scope.claim(wants) {
+                        Some(held) => Ok((
+                            missing,
+                            Claimed {
+                                state: mailbox,
+                                root: scoped,
+                                held,
                             },
-                        )
-                        .filter(|_| hibernates);
-                        let locks = missing
-                            .iter()
-                            .map(|(id, ..)| *id)
-                            .filter(|id| *id != to)
-                            .chain(parents)
-                            .filter(|id| !held.contains(id))
-                            .collect::<BTreeSet<_>>()
-                            .into_iter()
-                            .filter_map(|id| {
-                                Some((id, scope.sessions.get(&id)?.residency_lock.clone()))
-                            })
-                            .collect::<Vec<_>>();
-                        Ok((missing, locks))
+                        )),
+                        None => Err(scope.residency.subscribe()),
                     })
-                    .await?;
-            if locks.is_empty() {
-                break missing;
-            }
-            for (id, lock) in locks {
-                ancestors.insert(id, lock.enter().await);
+                })
+                .await?;
+            match claimed {
+                Ok(claimed) => break claimed,
+                Err(mut released) => released
+                    .changed()
+                    .await
+                    .map_err(|_| std::io::Error::other("subagent scope disappeared"))?,
             }
         };
         reg.restore_missing(&root, &mut missing).await?;
-        drop(ancestors);
-        Ok(guard)
+        Ok(claimed.pin(to))
     })
 }
 

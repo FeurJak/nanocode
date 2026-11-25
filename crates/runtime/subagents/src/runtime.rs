@@ -23,7 +23,7 @@ use nanocode_agent_core::{
 use nanocode_durability_core::StoreError;
 use nanocode_platform::Instant;
 use nanocode_schema::Validator;
-use nanocode_sync::{Atom, Sequencer, Signal, Turn};
+use nanocode_sync::{Atom, Signal};
 use nanocode_sync::{mpsc, oneshot, watch};
 use nanocode_tool_contracts::ToolReceipt;
 use nanocode_trace::Instrument;
@@ -175,12 +175,119 @@ impl Completion {
 }
 
 pub(super) struct UnstartedChild {
-    pub(super) lock: Sequencer,
+    pub(super) _claim: Claimed,
     pub(super) descriptor: AgentDescriptor,
     pub(super) parent_session: String,
     pub(super) host_context: Option<Arc<str>>,
     pub(super) output_schema: Arc<Value>,
     pub(super) unstarted: Arc<durable::Unstarted>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum ResidencyClaim {
+    #[default]
+    Free,
+    Starting,
+    Moving,
+    Pinned(std::num::NonZeroU32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ClaimKind {
+    Start,
+    Move,
+    Pin,
+}
+
+impl ResidencyClaim {
+    const fn admits(self, kind: ClaimKind) -> bool {
+        matches!(
+            (self, kind),
+            (Self::Free, _) | (Self::Pinned(_), ClaimKind::Pin)
+        )
+    }
+
+    fn take(&mut self, kind: ClaimKind) {
+        assert!(self.admits(kind), "a {kind:?} claim over {self:?}");
+        *self = match (*self, kind) {
+            (Self::Pinned(holders), ClaimKind::Pin) => Self::Pinned(
+                holders
+                    .checked_add(1)
+                    .expect("residency pins are counted in u32"),
+            ),
+            (_, ClaimKind::Pin) => Self::Pinned(std::num::NonZeroU32::MIN),
+            (_, ClaimKind::Move) => Self::Moving,
+            (_, ClaimKind::Start) => Self::Starting,
+        };
+    }
+
+    fn release(&mut self, kind: ClaimKind) {
+        *self = match (*self, kind) {
+            (Self::Pinned(holders), ClaimKind::Pin) => {
+                std::num::NonZeroU32::new(holders.get() - 1).map_or(Self::Free, Self::Pinned)
+            }
+            (Self::Moving, ClaimKind::Move) | (Self::Starting, ClaimKind::Start) => Self::Free,
+            (claim, kind) => panic!("a {kind:?} claim released from {claim:?}"),
+        };
+    }
+}
+
+pub(super) struct Claimed {
+    state: StateMailbox,
+    root: String,
+    held: Vec<(AgentId, ClaimKind)>,
+}
+
+impl Claimed {
+    fn pin(mut self, id: AgentId) -> Self {
+        let held = std::mem::take(&mut self.held);
+        assert!(
+            held.iter().any(|(claimed, _)| *claimed == id),
+            "agent {id} is pinned only from a claim it holds"
+        );
+        let root = std::mem::take(&mut self.root);
+        let scoped = root.clone();
+        self.state.send(move |state| {
+            let Some(scope) = state.scopes.get_mut(&scoped) else {
+                return;
+            };
+            for (claimed, kind) in held {
+                if let Some(claim) = scope.sessions.claim_mut(&claimed) {
+                    claim.release(kind);
+                    if claimed == id {
+                        claim.take(ClaimKind::Pin);
+                    }
+                }
+            }
+            scope.residency_released();
+        });
+        Self {
+            state: self.state.clone(),
+            root,
+            held: vec![(id, ClaimKind::Pin)],
+        }
+    }
+}
+
+impl Drop for Claimed {
+    fn drop(&mut self) {
+        if self.held.is_empty() {
+            return;
+        }
+        let root = std::mem::take(&mut self.root);
+        let held = std::mem::take(&mut self.held);
+        self.state.send(move |state| {
+            let Some(scope) = state.scopes.get_mut(&root) else {
+                return;
+            };
+            for (claimed, kind) in held {
+                if let Some(claim) = scope.sessions.claim_mut(&claimed) {
+                    claim.release(kind);
+                }
+            }
+            scope.residency_released();
+        });
+    }
 }
 
 pub(super) struct ChildSession {
@@ -224,7 +331,7 @@ pub(super) struct ChildSession {
 
     pub(super) hibernations: u64,
 
-    residency_lock: Sequencer,
+    claim: ResidencyClaim,
 
     marks: Arc<AgentMarks>,
 
@@ -296,6 +403,10 @@ impl Sessions {
         }
         self.changed.insert(*id);
         Some(session)
+    }
+
+    fn claim_mut(&mut self, id: &AgentId) -> Option<&mut ResidencyClaim> {
+        self.sessions.get_mut(id).map(|session| &mut session.claim)
     }
 
     fn subscribe(&mut self, id: &AgentId) -> Option<watch::Receiver<u64>> {
@@ -1139,6 +1250,8 @@ struct AgentScope {
     recheck: BTreeSet<u64>,
 
     thawing: BTreeSet<u64>,
+
+    residency: watch::Sender<u64>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1574,6 +1687,32 @@ fn journal_writer<'a>(
 }
 
 impl AgentScope {
+    fn claim(&mut self, wants: BTreeMap<AgentId, ClaimKind>) -> Option<Vec<(AgentId, ClaimKind)>> {
+        let wants = wants
+            .into_iter()
+            .filter(|(id, _)| self.sessions.get(id).is_some())
+            .collect::<Vec<_>>();
+        let admitted = wants.iter().all(|(id, kind)| {
+            self.sessions
+                .get(id)
+                .is_some_and(|session| session.claim.admits(*kind))
+        });
+        if !admitted {
+            return None;
+        }
+        for (id, kind) in &wants {
+            if let Some(claim) = self.sessions.claim_mut(id) {
+                claim.take(*kind);
+            }
+        }
+        Some(wants)
+    }
+
+    fn residency_released(&self) {
+        self.residency
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+
     fn insert_cold_leaf(
         &mut self,
         leaf: u64,
@@ -2071,7 +2210,7 @@ struct ResidentEviction {
     id: AgentId,
     harness: HarnessHandle,
     marks: Arc<AgentMarks>,
-    _lock: Turn,
+    _lock: Claimed,
 }
 
 impl TurnSteer {
@@ -3020,6 +3159,7 @@ impl RegistryState {
 
     fn take_resident_evictions(
         &mut self,
+        mailbox: &StateMailbox,
         root_session_id: &str,
         limit: usize,
     ) -> Vec<ResidentEviction> {
@@ -3044,12 +3184,20 @@ impl RegistryState {
                 if scope.holds_descendants(id)? {
                     return None;
                 }
-                Some((id, session.residency_lock.try_enter()?))
+                session.claim.admits(ClaimKind::Move).then_some(id)
             })
             .take(excess)
             .collect::<Vec<_>>();
         let mut evictions = Vec::with_capacity(candidates.len());
-        for (id, lock) in candidates {
+        for id in candidates {
+            let Some(held) = scope.claim(BTreeMap::from([(id, ClaimKind::Move)])) else {
+                continue;
+            };
+            let lock = Claimed {
+                state: mailbox.clone(),
+                root: root_session_id.to_owned(),
+                held,
+            };
             let Some(session) = scope.sessions.get_mut(&id) else {
                 continue;
             };
@@ -4728,8 +4876,9 @@ impl Registry {
         &self,
         root_session_id: &str,
         id: AgentId,
-    ) -> Option<Turn> {
+    ) -> Option<Claimed> {
         let root = root_session_id.to_owned();
+        let mailbox = self.state.clone();
         self.state
             .call(move |state| {
                 let scope = state.scopes.get_mut(&root)?;
@@ -4748,7 +4897,12 @@ impl Registry {
                 if scope.holds_descendants(id)? {
                     return None;
                 }
-                session.residency_lock.try_enter()
+                let held = scope.claim(BTreeMap::from([(id, ClaimKind::Move)]))?;
+                Some(Claimed {
+                    state: mailbox,
+                    root,
+                    held,
+                })
             })
             .await
     }
@@ -4771,7 +4925,7 @@ impl Registry {
         id: AgentId,
         stored: StoredRuntime,
         hibernated: Hibernated,
-        lock: Turn,
+        lock: Claimed,
     ) {
         lifecycle::hibernated(self, root_session_id, id, stored, hibernated, lock).await
     }
@@ -5563,7 +5717,7 @@ impl Registry {
                         in_flight_progress: durable::OmittedProgress::default(),
                         hibernated: None,
                         hibernations: 0,
-                        residency_lock: Sequencer::new(),
+                        claim: ResidencyClaim::Free,
                         marks,
                         changes: None,
                         announce: false,
@@ -5704,35 +5858,55 @@ impl Registry {
         root_session_id: &str,
         id: AgentId,
     ) -> Option<UnstartedChild> {
-        let root = root_session_id.to_owned();
-        self.state
-            .call(move |state| {
-                let scope = state.scopes.get(&root)?;
-                let session = scope.sessions.get(&id)?;
-                let StoredRuntime::Unstarted(unstarted) = &session.stored_runtime else {
-                    return None;
-                };
-                if !matches!(session.status, AgentStatus::Pending) || session.harness().is_some() {
-                    return None;
-                }
-                let parent_session = session
-                    .descriptor
-                    .parent
-                    .and_then(|parent| scope.sessions.get(&parent))
-                    .map_or_else(
-                        || root.clone(),
-                        |parent| parent.descriptor.session_id.clone(),
-                    );
-                Some(UnstartedChild {
-                    lock: session.residency_lock.clone(),
-                    descriptor: session.descriptor.clone(),
-                    parent_session,
-                    host_context: session.host_context.clone(),
-                    output_schema: session.output_schema.clone(),
-                    unstarted: Arc::clone(unstarted),
+        loop {
+            let root = root_session_id.to_owned();
+            let mailbox = self.state.clone();
+            let claimed = self
+                .state
+                .call(move |state| {
+                    let scope = state.scopes.get_mut(&root)?;
+                    let session = scope.sessions.get(&id)?;
+                    let StoredRuntime::Unstarted(unstarted) = &session.stored_runtime else {
+                        return None;
+                    };
+                    if !matches!(session.status, AgentStatus::Pending)
+                        || session.harness().is_some()
+                    {
+                        return None;
+                    }
+                    let unstarted = Arc::clone(unstarted);
+                    let descriptor = session.descriptor.clone();
+                    let host_context = session.host_context.clone();
+                    let output_schema = session.output_schema.clone();
+                    let parent_session = descriptor
+                        .parent
+                        .and_then(|parent| scope.sessions.get(&parent))
+                        .map_or_else(
+                            || root.clone(),
+                            |parent| parent.descriptor.session_id.clone(),
+                        );
+                    let Some(held) = scope.claim(BTreeMap::from([(id, ClaimKind::Start)])) else {
+                        return Some(Err(scope.residency.subscribe()));
+                    };
+                    Some(Ok(UnstartedChild {
+                        _claim: Claimed {
+                            state: mailbox,
+                            root,
+                            held,
+                        },
+                        descriptor,
+                        parent_session,
+                        host_context,
+                        output_schema,
+                        unstarted,
+                    }))
                 })
-            })
-            .await
+                .await?;
+            match claimed {
+                Ok(child) => return Some(child),
+                Err(mut released) => released.changed().await.ok()?,
+            }
+        }
     }
 
     pub(super) async fn reissue_unstarted(
@@ -6053,9 +6227,10 @@ impl Registry {
         loop {
             let root = root_session_id.to_owned();
             let limit = self.max_resident.load(Ordering::Relaxed);
+            let mailbox = self.state.clone();
             let Ok(evictions) = self
                 .when_messages_flow(root_session_id, move |state| {
-                    state.take_resident_evictions(&root, limit)
+                    state.take_resident_evictions(&mailbox, &root, limit)
                 })
                 .await
             else {
@@ -7088,7 +7263,7 @@ impl Registry {
         session_id: &str,
         to: AgentId,
         purpose: MessagePurpose,
-    ) -> std::io::Result<Turn> {
+    ) -> std::io::Result<Claimed> {
         restore::rehydrate(self, session_id, to, purpose).await
     }
 
@@ -8351,7 +8526,7 @@ impl ChildSession {
             in_flight_progress: durable::OmittedProgress::default(),
             hibernated: None,
             hibernations: 0,
-            residency_lock: Sequencer::new(),
+            claim: ResidencyClaim::Free,
             marks: Arc::default(),
             changes: None,
             announce: true,
@@ -8384,7 +8559,7 @@ impl ChildSession {
             && self.in_flight_omitted == 0
             && self.follow_up_output.is_none()
             && !self.delegated_turn
-            && self.residency_lock.is_unshared()
+            && self.claim == ResidencyClaim::Free
             && self
                 .changes
                 .as_ref()
