@@ -259,6 +259,33 @@ pub async fn migrate_format_then<H: Sql + ?Sized>(
     Ok(Vec::new())
 }
 
+pub(crate) async fn check_format<H: Sql + ?Sized>(
+    host: &H,
+    component: &'static str,
+    known: u32,
+) -> Result<(), StoreError> {
+    let read = [statement(host.dialect(), &READ_FORMAT, vec![component])];
+    let stored = match single(&run_checked(host, SqlAccess::Read, "format", &read).await?[0])? {
+        Some(row) => counter(row, 0)?,
+        None => 0,
+    };
+    if stored > u64::from(known) {
+        return Err(StoreError::UnsupportedFormat {
+            component,
+            stored,
+            known,
+        });
+    }
+    if stored < u64::from(known) {
+        return Err(StoreError::SchemaBehind {
+            component,
+            stored,
+            known,
+        });
+    }
+    Ok(())
+}
+
 async fn stored_format<H: Sql + ?Sized>(host: &H, component: &str) -> Result<u64, StoreError> {
     let read = [statement(host.dialect(), &READ_FORMAT, vec![component])];
     Ok(
@@ -802,6 +829,15 @@ impl<H: Sql + ?Sized> SqlStore<H> {
         &self.host
     }
 
+    async fn checked(&self) -> Result<(), StoreError> {
+        if self.ready.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(());
+        }
+        check_format(&*self.host, "records", Self::FORMAT).await?;
+        self.ready.store(true, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
     async fn transaction(
         &mut self,
         operation: &'static str,
@@ -816,9 +852,7 @@ impl<H: Sql + ?Sized> SqlStore<H> {
         operation: &'static str,
         statements: Vec<SqlStatement<'_>>,
     ) -> Result<Vec<Vec<SqlRow>>, StoreError> {
-        if !self.ready.load(std::sync::atomic::Ordering::Acquire) {
-            self.migrate().await?;
-        }
+        self.checked().await?;
         run_checked(&*self.host, access, operation, &statements).await
     }
 
@@ -828,9 +862,7 @@ impl<H: Sql + ?Sized> SqlStore<H> {
         operation: &'static str,
         statements: Vec<SqlStatement<'_>>,
     ) -> Result<Vec<Vec<SqlRow>>, StoreError> {
-        if !self.ready.load(std::sync::atomic::Ordering::Acquire) {
-            self.migrate().await?;
-        }
+        self.checked().await?;
         written(&*self.host, settle, operation, &statements).await
     }
 
@@ -871,9 +903,7 @@ impl<H: Sql + ?Sized> SqlStore<H> {
             let encoded = keys_json(keys.iter())?;
             self.query("read_records", &RECORDS, vec![&encoded]).await?
         } else {
-            if !self.ready.load(std::sync::atomic::Ordering::Acquire) {
-                self.migrate().await?;
-            }
+            self.checked().await?;
             let dialect = self.host.dialect();
             let encoded = keys
                 .chunks(keys.len().div_ceil(parts))

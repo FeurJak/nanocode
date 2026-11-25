@@ -16,7 +16,7 @@ use crate::{
     SqlRow, SqlStatement, SqlStore, StateCommit, StateStore, StoreError, StoreFuture, StoreRecord,
     StoredState, Unreachable,
     sql::{
-        SqlAccess, counter, invalid, keys_json, limit_param, migrate_format, names, run_checked,
+        SqlAccess, check_format, counter, invalid, keys_json, limit_param, migrate_format, names, run_checked,
         single, text, unreachable_in, written,
     },
 };
@@ -741,6 +741,15 @@ impl<H: Sql + ?Sized> RowStore<H> {
         Ok(())
     }
 
+    async fn checked(&self) -> Result<(), StoreError> {
+        if self.ready.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        check_format(&*self.host, self.format().component, Self::FORMAT).await?;
+        self.ready.store(true, Ordering::Release);
+        Ok(())
+    }
+
     async fn transaction(
         &mut self,
         operation: &'static str,
@@ -755,9 +764,7 @@ impl<H: Sql + ?Sized> RowStore<H> {
         operation: &'static str,
         statements: Vec<SqlStatement<'_>>,
     ) -> Result<Vec<Vec<SqlRow>>, StoreError> {
-        if !self.ready.load(Ordering::Acquire) {
-            self.migrate().await?;
-        }
+        self.checked().await?;
         run_checked(&*self.host, access, operation, &statements).await
     }
 
@@ -767,9 +774,7 @@ impl<H: Sql + ?Sized> RowStore<H> {
         operation: &'static str,
         statements: Vec<SqlStatement<'_>>,
     ) -> Result<Vec<Vec<SqlRow>>, StoreError> {
-        if !self.ready.load(Ordering::Acquire) {
-            self.migrate().await?;
-        }
+        self.checked().await?;
         written(&*self.host, settle, operation, &statements).await
     }
 

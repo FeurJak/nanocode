@@ -79,6 +79,12 @@ pub enum StoreError {
         known: u32,
     },
 
+    SchemaBehind {
+        component: &'static str,
+        stored: u64,
+        known: u32,
+    },
+
     Backend(String),
 }
 
@@ -101,6 +107,14 @@ impl std::fmt::Display for StoreError {
             } => write!(
                 formatter,
                 "{component} storage format {stored} is newer than this release supports (format {known}); upgrade before opening it"
+            ),
+            Self::SchemaBehind {
+                component,
+                stored,
+                known,
+            } => write!(
+                formatter,
+                "{component} storage format {stored} is older than this release's format {known}; run its migrate step before serving"
             ),
             Self::Backend(value) => write!(formatter, "durability store failed: {value}"),
         }
