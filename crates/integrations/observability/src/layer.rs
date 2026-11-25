@@ -1,12 +1,14 @@
 use std::{
     borrow::Cow,
     fmt, mem,
-    sync::Arc,
-    task::{Context as TaskContext, Poll, Wake, Waker},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Instant, SystemTime},
 };
 
-use nanocode_sync::{Sequencer, Slot};
+use nanocode_sync::{Inbox, Slot};
 use nanocode_trace::{
     Event,
     field::{Field, Visit},
@@ -95,7 +97,7 @@ const fn status(text: &str) -> Status {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Updates {
     name: Option<Text>,
     kind: Option<SpanKind>,
@@ -315,11 +317,7 @@ impl OtelLayer {
     }
 
     fn started(span: &SpanRef<'_, OtelSpan>) -> Option<(SpanContext, Parent)> {
-        let data = span.data()?;
-        data.0.with(|slot| {
-            let started = slot.data.as_mut()?.start();
-            Some((started.context(), started.children()))
-        })
+        span.data()?.started()
     }
 
     fn parent(&self, attributes: &Attributes<'_>, context: &Context<'_, OtelSpan>) -> Parent {
@@ -352,64 +350,232 @@ fn location(metadata: &nanocode_trace::Metadata<'_>, attributes: &mut Vec<KeyVal
     }
 }
 
-struct Exclusive<T> {
-    turns: Sequencer,
-    value: Slot<T>,
+#[derive(Clone)]
+enum Change {
+    Enter(Instant),
+    Exit {
+        at: Instant,
+        ended: SystemTime,
+    },
+    Record(Updates),
+    Link(SpanContext),
+    Event {
+        name: Text,
+        timestamp: SystemTime,
+        attributes: Vec<KeyValue>,
+        updates: Option<Updates>,
+        error: bool,
+    },
+    Start,
+    Close,
 }
 
-struct Unpark(std::thread::Thread);
-
-impl Wake for Unpark {
-    fn wake(self: Arc<Self>) {
-        self.0.unpark();
-    }
+enum Changed {
+    Applied,
+    Started(Option<(SpanContext, Parent)>),
+    Closed(Option<OtelData>, Option<Timings>),
 }
 
-fn wait_for<F: Future>(future: F) -> F::Output {
-    let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
-    let mut context = TaskContext::from_waker(&waker);
-    let mut future = std::pin::pin!(future);
-    loop {
-        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
-            return output;
-        }
-        std::thread::park();
-    }
+#[derive(Clone)]
+struct Queued {
+    change: Change,
+    done: Arc<Slot<Changed>>,
 }
 
-impl<T> Exclusive<T> {
-    fn new(value: T) -> Self {
+pub struct OtelSpan {
+    busy: AtomicBool,
+    queued: Inbox<Queued>,
+    slot: Slot<OtelSlot>,
+}
+
+impl OtelSpan {
+    fn new(slot: OtelSlot) -> Self {
         Self {
-            turns: Sequencer::new(),
-            value: Slot::new(Some(value)),
+            busy: AtomicBool::new(false),
+            queued: Inbox::default(),
+            slot: Slot::new(Some(slot)),
         }
     }
 
-    fn with<R>(&self, change: impl FnOnce(&mut T) -> R) -> R {
-        let turn = self
-            .turns
-            .try_enter()
-            .unwrap_or_else(|| wait_for(self.turns.enter()));
-        let mut value = self
-            .value
+    fn enter(&self) -> bool {
+        self.busy
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    fn change(&self, change: Change) -> Changed {
+        if self.enter() {
+            let mut slot = self.taken();
+            self.drain(&mut slot);
+            let changed = slot.apply(change);
+            self.leave(slot);
+            return changed;
+        }
+        let done = Arc::new(Slot::default());
+        self.queued.push(Queued {
+            change,
+            done: Arc::clone(&done),
+        });
+        loop {
+            if let Some(changed) = done.take() {
+                return changed;
+            }
+            if self.enter() {
+                let mut slot = self.taken();
+                self.drain(&mut slot);
+                self.leave(slot);
+                continue;
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    fn taken(&self) -> OtelSlot {
+        self.slot
             .take()
-            .expect("the holder of a span's turn owns its OpenTelemetry data");
-        let output = change(&mut value);
-        let previous = self.value.put(value);
-        assert!(
-            previous.is_none(),
-            "only the holder of a span's turn puts its data back"
-        );
-        drop(turn);
-        output
+            .expect("the thread that entered a span's changes owns its OpenTelemetry data")
+    }
+
+    fn drain(&self, slot: &mut OtelSlot) {
+        for Queued { change, done } in self.queued.drain() {
+            let previous = done.put(slot.apply(change));
+            assert!(previous.is_none(), "a queued span change is answered once");
+        }
+    }
+
+    fn leave(&self, mut slot: OtelSlot) {
+        loop {
+            let previous = self.slot.put(slot);
+            assert!(
+                previous.is_none(),
+                "only the thread that entered a span's changes puts its data back"
+            );
+            self.busy.store(false, Ordering::Release);
+            if self.queued.is_empty() || !self.enter() {
+                return;
+            }
+            slot = self.taken();
+            self.drain(&mut slot);
+        }
+    }
+
+    fn started(&self) -> Option<(SpanContext, Parent)> {
+        match self.change(Change::Start) {
+            Changed::Started(started) => started,
+            Changed::Applied | Changed::Closed(..) => {
+                unreachable!("a span's start answers with what it started")
+            }
+        }
     }
 }
-
-pub struct OtelSpan(Exclusive<OtelSlot>);
 
 struct OtelSlot {
     data: Option<OtelData>,
     timings: Option<Timings>,
+}
+
+impl OtelSlot {
+    fn apply(&mut self, change: Change) -> Changed {
+        match change {
+            Change::Enter(now) => {
+                if let Some(timings) = &mut self.timings {
+                    if timings.entered == 0 {
+                        timings.idle += nanos(timings.last, now);
+                        timings.last = now;
+                    }
+                    timings.entered += 1;
+                }
+            }
+            Change::Exit { at, ended } => {
+                if let Some(data) = &mut self.data {
+                    data.end_time = Some(ended);
+                }
+                if let Some(timings) = &mut self.timings {
+                    timings.entered -= 1;
+                    if timings.entered == 0 {
+                        timings.busy += nanos(timings.last, at);
+                        timings.last = at;
+                    }
+                }
+            }
+            Change::Record(updates) => {
+                if let Some(data) = &mut self.data {
+                    match &mut data.state {
+                        State::Building {
+                            builder, status, ..
+                        } => updates.apply(builder, status),
+                        State::Started(started) => updates.apply_started(started),
+                    }
+                }
+            }
+            Change::Link(link) => {
+                if let Some(data) = &mut self.data {
+                    match &mut data.state {
+                        State::Building { builder, .. } => builder.links.push(link),
+                        State::Started(started) => started.add_link(link),
+                    }
+                }
+            }
+            Change::Event {
+                name,
+                timestamp,
+                attributes,
+                updates,
+                error,
+            } => {
+                if let Some(data) = &mut self.data {
+                    data.event(name, timestamp, attributes, updates, error);
+                }
+            }
+            Change::Start => {
+                return Changed::Started(self.data.as_mut().map(|data| {
+                    let started = data.start();
+                    (started.context(), started.children())
+                }));
+            }
+            Change::Close => return Changed::Closed(self.data.take(), self.timings.take()),
+        }
+        Changed::Applied
+    }
+}
+
+impl OtelData {
+    fn event(
+        &mut self,
+        name: Text,
+        timestamp: SystemTime,
+        attributes: Vec<KeyValue>,
+        updates: Option<Updates>,
+        error: bool,
+    ) {
+        match &mut self.state {
+            State::Building {
+                builder, status, ..
+            } => {
+                if *status == Status::Unset && error {
+                    *status = Status::Error(Cow::Borrowed(""));
+                }
+                if let Some(updates) = updates {
+                    updates.apply(builder, status);
+                }
+                builder.events.push(SpanEvent {
+                    name,
+                    timestamp,
+                    attributes,
+                    dropped_attributes_count: 0,
+                });
+            }
+            State::Started(started) => {
+                if error {
+                    started.set_status(Status::Error(Cow::Borrowed("")));
+                }
+                if let Some(updates) = updates {
+                    updates.apply_started(started);
+                }
+                started.add_event(name, attributes);
+            }
+        }
+    }
 }
 
 impl Layer for OtelLayer {
@@ -451,7 +617,7 @@ impl Layer for OtelLayer {
         attributes.record(&mut SpanAttributes(&mut updates));
         let mut status = Status::Unset;
         updates.apply(&mut builder, &mut status);
-        OtelSpan(Exclusive::new(OtelSlot {
+        OtelSpan::new(OtelSlot {
             data: Some(OtelData {
                 state: State::Building {
                     builder,
@@ -462,37 +628,19 @@ impl Layer for OtelLayer {
                 tracer: self.tracer.clone(),
             }),
             timings: Some(timings),
-        }))
+        })
     }
 
     fn on_enter(&self, span: &SpanRef<'_, OtelSpan>, _context: &Context<'_, OtelSpan>) {
         let data = span.data().expect("a visible span has its layer's data");
-        data.0.with(|slot| {
-            if let Some(timings) = &mut slot.timings {
-                if timings.entered == 0 {
-                    let now = Instant::now();
-                    timings.idle += nanos(timings.last, now);
-                    timings.last = now;
-                }
-                timings.entered += 1;
-            }
-        });
+        data.change(Change::Enter(Instant::now()));
     }
 
     fn on_exit(&self, span: &SpanRef<'_, OtelSpan>, _context: &Context<'_, OtelSpan>) {
         let data = span.data().expect("a visible span has its layer's data");
-        data.0.with(|slot| {
-            if let Some(data) = &mut slot.data {
-                data.end_time = Some(SystemTime::now());
-            }
-            if let Some(timings) = &mut slot.timings {
-                timings.entered -= 1;
-                if timings.entered == 0 {
-                    let now = Instant::now();
-                    timings.busy += nanos(timings.last, now);
-                    timings.last = now;
-                }
-            }
+        data.change(Change::Exit {
+            at: Instant::now(),
+            ended: SystemTime::now(),
         });
     }
 
@@ -505,16 +653,7 @@ impl Layer for OtelLayer {
         let mut updates = Updates::default();
         values.record(&mut SpanAttributes(&mut updates));
         let data = span.data().expect("a visible span has its layer's data");
-        data.0.with(|slot| {
-            if let Some(data) = &mut slot.data {
-                match &mut data.state {
-                    State::Building {
-                        builder, status, ..
-                    } => updates.apply(builder, status),
-                    State::Started(started) => updates.apply_started(started),
-                }
-            }
-        });
+        data.change(Change::Record(updates));
     }
 
     fn on_follows_from(
@@ -524,21 +663,10 @@ impl Layer for OtelLayer {
         _context: &Context<'_, OtelSpan>,
     ) {
         let data = span.data().expect("a visible span has its layer's data");
-        if data.0.with(|slot| slot.data.is_none()) {
-            return;
-        }
         let Some(followed) = Self::started(follows) else {
             return;
         };
-        let link = followed.0;
-        data.0.with(|slot| {
-            if let Some(data) = &mut slot.data {
-                match &mut data.state {
-                    State::Building { builder, .. } => builder.links.push(link),
-                    State::Started(started) => started.add_link(link),
-                }
-            }
-        });
+        data.change(Change::Link(followed.0));
     }
 
     fn on_event(&self, event: &Event<'_>, context: &Context<'_, OtelSpan>) {
@@ -561,46 +689,22 @@ impl Layer for OtelLayer {
         if name.is_empty() {
             name = Cow::Borrowed(metadata.name());
         }
+        location(metadata, &mut attributes);
         let data = span.data().expect("a visible span has its layer's data");
-        data.0.with(|slot| {
-            let Some(data) = &mut slot.data else {
-                return;
-            };
-            location(metadata, &mut attributes);
-            let error = *metadata.level() == nanocode_trace::Level::ERROR;
-            match &mut data.state {
-                State::Building {
-                    builder, status, ..
-                } => {
-                    if *status == Status::Unset && error {
-                        *status = Status::Error(Cow::Borrowed(""));
-                    }
-                    if let Some(updates) = updates {
-                        updates.apply(builder, status);
-                    }
-                    builder.events.push(SpanEvent {
-                        name,
-                        timestamp,
-                        attributes,
-                        dropped_attributes_count: 0,
-                    });
-                }
-                State::Started(started) => {
-                    if error {
-                        started.set_status(Status::Error(Cow::Borrowed("")));
-                    }
-                    if let Some(updates) = updates {
-                        updates.apply_started(started);
-                    }
-                    started.add_event(name, attributes);
-                }
-            }
+        data.change(Change::Event {
+            name,
+            timestamp,
+            attributes,
+            updates,
+            error: *metadata.level() == nanocode_trace::Level::ERROR,
         });
     }
 
     fn on_close(&self, span: &SpanRef<'_, OtelSpan>, _context: &Context<'_, OtelSpan>) {
         let held = span.data().expect("a visible span has its layer's data");
-        let (data, timings) = held.0.with(|slot| (slot.data.take(), slot.timings.take()));
+        let Changed::Closed(data, timings) = held.change(Change::Close) else {
+            unreachable!("a span's close answers with its data");
+        };
         let Some(data) = data else {
             return;
         };
@@ -633,36 +737,25 @@ impl Layer for OtelLayer {
     }
 }
 
-fn with_data(span: &nanocode_trace::Span, change: impl FnOnce(&mut OtelData)) {
+fn change(span: &nanocode_trace::Span, change: Change) -> Option<Changed> {
     span.with_subscriber(|(id, dispatch)| {
-        let Some(registry) = dispatch.downcast_ref::<Registry>() else {
-            return;
-        };
-        registry.data::<OtelSpan, _>(id, |otel| {
-            otel.0.with(|slot| {
-                if let Some(data) = &mut slot.data {
-                    change(data);
-                }
-            });
-        });
-    });
+        let registry = dispatch.downcast_ref::<Registry>()?;
+        registry.data::<OtelSpan, _>(id, |otel| otel.change(change))
+    })
+    .flatten()
 }
 
 #[must_use]
 pub fn span_context(span: &nanocode_trace::Span) -> SpanContext {
-    let mut context = SpanContext::INVALID;
-    with_data(span, |data| {
-        context = data.start().context();
-    });
-    context
+    match change(span, Change::Start) {
+        Some(Changed::Started(Some((context, _)))) => context,
+        _ => SpanContext::INVALID,
+    }
 }
 
 pub fn add_link(span: &nanocode_trace::Span, link: SpanContext) {
     if !link.is_valid() {
         return;
     }
-    with_data(span, |data| match &mut data.state {
-        State::Building { builder, .. } => builder.links.push(link),
-        State::Started(started) => started.add_link(link),
-    });
+    change(span, Change::Link(link));
 }
