@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     fmt,
-    fs::{File, OpenOptions},
+    fs::{File, OpenOptions, TryLockError},
     io::{self, ErrorKind, Write},
     path::{Path, PathBuf},
     sync::Arc,
@@ -14,6 +14,7 @@ use super::{
 };
 use nanocode_digest::Sha256;
 use nanocode_executor::TcpListener;
+use nanocode_home::claim::Claimed;
 use nanocode_io::{AsyncReadExt, AsyncWriteExt};
 use nanocode_platform::{Duration, timeout};
 use nanocode_sync::{SingleFlight, Swap};
@@ -37,6 +38,10 @@ const CALLBACK_PORTS: [u16; 2] = [1455, 1457];
 const REFRESH_EARLY_SECONDS: i64 = 5 * 60;
 const LOGIN_TIMEOUT: Duration = Duration::from_mins(5);
 const AUTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const COMMIT_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+const COMMIT_LOCK_RETRY: Duration = Duration::from_millis(10);
+const REFRESH_CLAIM_LIFETIME: Duration = AUTH_REQUEST_TIMEOUT.saturating_add(COMMIT_LOCK_TIMEOUT);
+const REFRESH_CLAIM_POLL: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChatGptAuthStatus {
@@ -727,16 +732,55 @@ impl ManagedAuthInner {
         if self.state().snapshot.revision() != rejected_revision {
             return Ok(());
         }
-        let (lock, stored) = run_blocking(self.auth_file.clone(), |path| {
-            let lock = lock_auth_file(path)?;
-            Ok((lock, read_stored_auth(path)?))
-        })
-        .await
-        .map_err(|error| auth_store_error(&error))?;
-        if self.reload_if_changed(stored)? {
+        let claim = nanocode_home::claim::Claim::new(
+            refresh_claim_path(&self.auth_file),
+            REFRESH_CLAIM_LIFETIME,
+        );
+        let started = nanocode_platform::now();
+        loop {
+            let taken = claim.take().await.map_err(|source| {
+                auth_store_error(&ChatGptAuthError::Storage {
+                    path: refresh_claim_path(&self.auth_file),
+                    source,
+                })
+            })?;
+            match taken {
+                Claimed::Won(revision) => {
+                    let refreshed = self.refresh_claimed().await;
+                    if let Err(error) = claim.release(revision).await {
+                        nanocode_trace::warn!(
+                            target: "nanocode_codex",
+                            %error,
+                            "ChatGPT refresh claim release failed; it lapses at its expiry"
+                        );
+                    }
+                    return refreshed;
+                }
+                Claimed::Busy => {
+                    if self.reload_if_changed(self.read_stored().await?)? {
+                        return Ok(());
+                    }
+                    if nanocode_platform::elapsed(started) >= REFRESH_CLAIM_LIFETIME {
+                        return Err(OpenAiAuthError::Refresh(Arc::from(
+                            "another process held the ChatGPT refresh claim past its lifetime",
+                        )));
+                    }
+                    nanocode_platform::sleep(REFRESH_CLAIM_POLL).await;
+                }
+            }
+        }
+    }
+
+    async fn read_stored(&self) -> Result<(StoredCredentials, CodexAuthDocument), OpenAiAuthError> {
+        run_blocking(self.auth_file.clone(), read_stored_auth)
+            .await
+            .map_err(|error| auth_store_error(&error))
+    }
+
+    async fn refresh_claimed(&self) -> Result<(), OpenAiAuthError> {
+        if self.reload_if_changed(self.read_stored().await?)? {
             return Ok(());
         }
-
         let attempted = self.state();
         attempted.checked_snapshot()?;
         let refresh_token = attempted.credentials.refresh_token.clone();
@@ -771,10 +815,7 @@ impl ManagedAuthInner {
             let detail: Arc<str> =
                 Arc::from(code.unwrap_or_else(|| format!("token endpoint returned HTTP {status}")));
             if permanent {
-                let (_lock, stored) = read_stored_auth_locked(lock, self.auth_file.clone())
-                    .await
-                    .map_err(|error| auth_store_error(&error))?;
-                if self.reload_if_changed(stored)? {
+                if self.reload_if_changed(self.read_stored().await?)? {
                     return Ok(());
                 }
                 if self.record_permanent_failure_if_unchanged(&attempted, Arc::clone(&detail))? {
@@ -786,24 +827,37 @@ impl ManagedAuthInner {
         }
         let refreshed: RefreshResponse = serde_json::from_slice(&body)
             .map_err(|error| OpenAiAuthError::Refresh(Arc::from(error.to_string())))?;
-        let (lock, stored) = read_stored_auth_locked(lock, self.auth_file.clone())
-            .await
-            .map_err(|error| auth_store_error(&error))?;
-        if self.reload_if_changed(stored)? {
+        if self.reload_if_changed(self.read_stored().await?)? {
             return Ok(());
         }
         let current = self.state();
         let next = refreshed_credentials(&current.credentials, refreshed)?;
-        let saved = next.clone();
-        let auth_record = run_blocking(self.auth_file.clone(), move |path| {
-            let auth_record = write_store(path, &saved);
-            drop(lock);
-            auth_record
+        self.commit_refreshed(&current, next).await
+    }
+
+    async fn commit_refreshed(
+        &self,
+        current: &ManagedState,
+        next: StoredCredentials,
+    ) -> Result<(), OpenAiAuthError> {
+        let (saved, expected) = (next.clone(), current.auth_record.clone());
+        let committed = run_blocking(self.auth_file.clone(), move |path| {
+            let _lock = lock_auth_file(path)?;
+            let stored = read_stored_auth(path)?;
+            if stored.1 != expected {
+                return Ok(Commit::Changed(stored));
+            }
+            write_store(path, &saved).map(Commit::Written)
         })
         .await
         .map_err(|error| auth_store_error(&error))?;
-        self.replace_state(current.next(next, auth_record));
-        Ok(())
+        match committed {
+            Commit::Changed(stored) => self.reload_if_changed(stored).map(drop),
+            Commit::Written(auth_record) => {
+                self.replace_state(current.next(next, auth_record));
+                Ok(())
+            }
+        }
     }
 
     fn reload_if_changed(
@@ -1054,20 +1108,45 @@ async fn run_blocking<T: Send + 'static>(
         })?
 }
 
-async fn read_stored_auth_locked(
-    lock: File,
-    path: PathBuf,
-) -> Result<(File, (StoredCredentials, CodexAuthDocument)), ChatGptAuthError> {
-    run_blocking(path, move |path| Ok((lock, read_stored_auth(path)?))).await
+enum Commit {
+    Changed((StoredCredentials, CodexAuthDocument)),
+    Written(CodexAuthDocument),
+}
+
+fn refresh_claim_path(path: &Path) -> PathBuf {
+    let mut claim = path.as_os_str().to_os_string();
+    claim.push(".nanocode-refresh");
+    PathBuf::from(claim)
 }
 
 fn lock_auth_file(path: &Path) -> Result<File, ChatGptAuthError> {
     let file = open_auth_lock_file(path)?;
-    file.lock().map_err(|source| ChatGptAuthError::Storage {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    Ok(file)
+    let started = nanocode_platform::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock)
+                if nanocode_platform::elapsed(started) < COMMIT_LOCK_TIMEOUT =>
+            {
+                std::thread::sleep(COMMIT_LOCK_RETRY);
+            }
+            Err(TryLockError::WouldBlock) => {
+                return Err(ChatGptAuthError::Storage {
+                    path: path.to_path_buf(),
+                    source: io::Error::new(
+                        ErrorKind::TimedOut,
+                        "the Codex credential commit lock stayed held past its deadline",
+                    ),
+                });
+            }
+            Err(TryLockError::Error(source)) => {
+                return Err(ChatGptAuthError::Storage {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        }
+    }
 }
 
 fn open_auth_lock_file(path: &Path) -> Result<File, ChatGptAuthError> {
