@@ -25,6 +25,7 @@ use serde_json::{
 use crate::rng::{FNV_OFFSET, Rng, fnv};
 
 mod abandoned;
+mod prefetch;
 
 const SCOPE: &str = "backend-facts";
 const LEGACY_STATE: &str = "session";
@@ -51,14 +52,16 @@ pub enum BackendFactsMutation {
     MediaUnrendered,
     UndecidedNotice,
     AbandonedCommitPoisons,
+    DemandWaitsAnyPrefetch,
 }
 
 impl BackendFactsMutation {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::ResultWithoutIntent,
         Self::MediaUnrendered,
         Self::UndecidedNotice,
         Self::AbandonedCommitPoisons,
+        Self::DemandWaitsAnyPrefetch,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -68,6 +71,7 @@ impl BackendFactsMutation {
             Self::MediaUnrendered => "media_unrendered",
             Self::UndecidedNotice => "undecided_notice",
             Self::AbandonedCommitPoisons => "abandoned_commit_poisons",
+            Self::DemandWaitsAnyPrefetch => "demand_waits_any_prefetch",
         }
     }
 
@@ -812,16 +816,19 @@ impl<F: Family> World<F> {
 }
 
 fn owned_mutation(mutation: BackendFactsMutation) {
-    let (claude, codex) = if mutation == BackendFactsMutation::AbandonedCommitPoisons {
-        (
+    let (claude, codex) = match mutation {
+        BackendFactsMutation::AbandonedCommitPoisons => (
             nanocode::claude::sim::Mutation::AbandonedCommitPoisons,
             nanocode_backend_codex::sim::Mutation::AbandonedCommitPoisons,
-        )
-    } else {
-        (
+        ),
+        BackendFactsMutation::DemandWaitsAnyPrefetch => (
+            nanocode::claude::sim::Mutation::DemandWaitsAnyPrefetch,
+            nanocode_backend_codex::sim::Mutation::None,
+        ),
+        _ => (
             nanocode::claude::sim::Mutation::None,
             nanocode_backend_codex::sim::Mutation::None,
-        )
+        ),
     };
     nanocode::claude::sim::mutate(claude);
     nanocode_backend_codex::sim::mutate(codex);
@@ -839,7 +846,8 @@ fn run_seed(seed: u64, mutation: BackendFactsMutation) -> Result<u64, String> {
             World::<CodexFold>::run(seed)
         }?;
         let owned = abandoned::run(seed, claude)?;
-        Ok(fnv(digest, &owned.to_le_bytes()))
+        let prefetched = prefetch::run(seed)?;
+        Ok(fnv(fnv(digest, &owned.to_le_bytes()), &prefetched.to_le_bytes()))
     });
     MUTATION.store(BackendFactsMutation::None as u8, Ordering::SeqCst);
     owned_mutation(BackendFactsMutation::None);

@@ -30,10 +30,13 @@ use crate::{
 mod facts;
 mod fold;
 mod format;
+mod prefetch;
 pub use facts::ClaudeFacts;
 pub(crate) use fold::tool_output;
 pub use fold::{ClaudeDecision, ClaudeFold};
 pub(crate) use format::{Prefix, keep_prefix, prefix};
+#[doc(hidden)]
+pub use prefetch::{Prefetch, Prefetches};
 
 pub use format::{ClaudeCheckpointFormat, forget_templates};
 
@@ -206,7 +209,7 @@ impl DurableAgentExt for ClaudeBuilder {
                 session: state,
                 branches,
                 hydrated: nanocode_sync::Slot::default(),
-                hydrating: nanocode_sync::Sequencer::new(),
+                prefetching: Prefetches::default(),
                 stored: nanocode_sync::Slot::new(Some(read).filter(|read| !read.is_empty())),
                 facts,
             }),
@@ -283,7 +286,7 @@ struct ClaudeExecution {
     session: DurableSession,
     branches: Branches,
     hydrated: nanocode_sync::Slot<(String, ClaudeContinuation, bool)>,
-    hydrating: nanocode_sync::Sequencer,
+    prefetching: Prefetches,
     stored: nanocode_sync::Slot<HashSet<String>>,
     facts: Option<ClaudeFacts>,
 }
@@ -454,7 +457,7 @@ impl LazyClaudeExecution {
                             record: Some(record),
                         },
                         hydrated,
-                        hydrating: nanocode_sync::Sequencer::new(),
+                        prefetching: Prefetches::default(),
                         stored: nanocode_sync::Slot::default(),
                         facts,
                     },
@@ -1101,7 +1104,7 @@ impl ClaudeExecutionPolicy for ClaudeExecution {
                 "agent.continuation",
                 hydrated = nanocode_trace::field::Empty,
             );
-            let _hydrating = self.hydrating.enter().instrument(span.clone()).await;
+            self.prefetching.settled(&id).instrument(span.clone()).await;
             let Some(value) = self
                 .owner
                 .continuation(id)
@@ -1137,7 +1140,7 @@ impl ClaudeExecutionPolicy for ClaudeExecution {
                 hydrated = nanocode_trace::field::Empty,
                 model_only = true,
             );
-            let _hydrating = self.hydrating.enter().instrument(span.clone()).await;
+            self.prefetching.settled(&id).instrument(span.clone()).await;
             let Some(value) = self
                 .owner
                 .continuation(id)
@@ -1173,7 +1176,7 @@ impl ClaudeExecutionPolicy for ClaudeExecution {
 
     fn prefetch_continuation(&self, id: String) -> PolicyFuture<'_, bool> {
         Box::pin(async move {
-            let _hydrating = self.hydrating.enter().await;
+            let _prefetch = self.prefetching.claim(&id);
             let Some(value) = self
                 .owner
                 .peek_continuation(id)
@@ -1203,7 +1206,7 @@ impl ClaudeExecutionPolicy for ClaudeExecution {
         ahead: BackendFuture<Option<ContinuationAhead>>,
     ) -> PolicyFuture<'_, Prefetched> {
         Box::pin(async move {
-            let _hydrating = self.hydrating.enter().await;
+            let _prefetch = self.prefetching.claim(&id);
             let ahead = ahead.await;
             let Some(value) = self
                 .owner

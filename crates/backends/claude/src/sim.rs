@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 pub enum Mutation {
     None,
     AbandonedCommitPoisons,
+    DemandWaitsAnyPrefetch,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);
