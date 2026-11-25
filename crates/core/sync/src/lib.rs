@@ -22,8 +22,6 @@ mod reentry;
 #[doc(hidden)]
 pub mod select;
 mod semaphore;
-#[cfg(not(target_family = "wasm"))]
-mod session;
 mod set_once;
 mod shared;
 pub mod sink;
@@ -63,8 +61,6 @@ pub use reentry::{Claim, Reentry};
 pub use semaphore::{
     AcquireError, OwnedSemaphorePermit, Semaphore, SemaphorePermit, TryAcquireError,
 };
-#[cfg(not(target_family = "wasm"))]
-pub use session::{Locker, SessionLock, SessionLockError, SessionLocks};
 pub use set_once::{SetOnce, SetOnceError};
 pub use shared::{Map, Set};
 pub use sink::{Sink, SinkExt};
@@ -1177,46 +1173,6 @@ where
             });
         }
         value
-    }
-}
-
-#[derive(Clone, Default)]
-struct Keyed {
-    lines: crate::Map<Arc<str>, std::sync::Weak<Line>>,
-    swept: usize,
-}
-
-#[derive(Default)]
-pub struct Lines(Atom<Keyed>);
-
-impl Lines {
-    pub async fn enter(&self, key: &str) -> Turn {
-        self.line(key).enter().await
-    }
-
-    pub fn try_enter(&self, key: &str) -> Option<Turn> {
-        self.line(key).try_enter()
-    }
-
-    fn line(&self, key: &str) -> Sequencer {
-        if let Some(line) = self
-            .0
-            .read(|keyed| keyed.lines.get(key).and_then(std::sync::Weak::upgrade))
-        {
-            return Sequencer(line);
-        }
-        Sequencer(self.0.update(|keyed| {
-            if let Some(line) = keyed.lines.get(key).and_then(std::sync::Weak::upgrade) {
-                return line;
-            }
-            if keyed.lines.len() >= 2 * keyed.swept {
-                keyed.lines.retain(|_, line| line.strong_count() > 0);
-                keyed.swept = keyed.lines.len();
-            }
-            let line = Arc::new(Line::default());
-            keyed.lines.insert(key.into(), Arc::downgrade(&line));
-            line
-        }))
     }
 }
 
