@@ -4,7 +4,7 @@ use std::{
 };
 
 use nanocode_durability_core::{
-    Migrated, Sql, SqlDialect, SqlRow, SqlStatement, StoreError, StoreFuture,
+    Migrated, Sql, drop_index_concurrently, SqlDialect, SqlRow, SqlStatement, StoreError, StoreFuture,
     sim::{self as durability_sim, Mutation as DurabilityRule},
 };
 use nanocode_sync::{Atom, block_on};
@@ -31,6 +31,8 @@ const READ_FORMAT: &str = "FROM nanocode_formats WHERE component";
 const WRITE_FORMAT: &str = "INSERT INTO nanocode_formats";
 const CREATE_FORMATS: &str = "CREATE TABLE IF NOT EXISTS nanocode_formats";
 const FORMATS_PRESENT: &str = "to_regclass('nanocode_formats')";
+const LOCK_TIMEOUT: &str = "set_config('lock_timeout'";
+const SUPERSEDED_INDEX: &str = "DROP INDEX CONCURRENTLY IF EXISTS nanocode_sim_superseded";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MigratedMutation {
@@ -38,14 +40,16 @@ pub enum MigratedMutation {
     OpenMigrates,
     CheckMissesFormats,
     PrepareMigrates,
+    ConcurrentSkipsLockTimeout,
 }
 
 impl MigratedMutation {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::None,
         Self::OpenMigrates,
         Self::CheckMissesFormats,
         Self::PrepareMigrates,
+        Self::ConcurrentSkipsLockTimeout,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -60,6 +64,7 @@ impl MigratedMutation {
             Self::OpenMigrates => "open_migrates",
             Self::CheckMissesFormats => "check_misses_formats",
             Self::PrepareMigrates => "prepare_migrates",
+            Self::ConcurrentSkipsLockTimeout => "concurrent_skips_lock_timeout",
         }
     }
 
@@ -74,7 +79,7 @@ impl MigratedMutation {
 
     const fn rule(self) -> Rule {
         match self {
-            Self::None | Self::CheckMissesFormats => Rule::None,
+            Self::None | Self::CheckMissesFormats | Self::ConcurrentSkipsLockTimeout => Rule::None,
             Self::OpenMigrates => Rule::OpenMigrates,
             Self::PrepareMigrates => Rule::PrepareMigrates,
         }
@@ -83,6 +88,7 @@ impl MigratedMutation {
     const fn durability(self) -> DurabilityRule {
         match self {
             Self::CheckMissesFormats => DurabilityRule::CheckMissesFormats,
+            Self::ConcurrentSkipsLockTimeout => DurabilityRule::ConcurrentSkipsLockTimeout,
             Self::None | Self::OpenMigrates | Self::PrepareMigrates => DurabilityRule::None,
         }
     }
@@ -123,6 +129,7 @@ struct Database {
     formats_table: bool,
     formats: BTreeMap<String, u64>,
     issued: Vec<(Phase, String)>,
+    unbounded: Vec<String>,
 }
 
 struct Recorder {
@@ -141,8 +148,13 @@ impl Recorder {
         self.database.modify(|database| {
             let mut next = database.clone();
             let mut results = Vec::with_capacity(statements.len());
+            let mut bounded = false;
             for statement in statements {
                 next.issued.push((phase, statement.sql.to_owned()));
+                bounded |= statement.sql.contains(LOCK_TIMEOUT);
+                if phase == Phase::Migrate && is_ddl(statement.sql) && !bounded {
+                    next.unbounded.push(statement.sql.to_owned());
+                }
                 let param = |at: usize| statement.params.get(at).map(|param| (*param).to_owned());
                 if statement.sql.starts_with(CREATE_FORMATS) {
                     next.formats_table = true;
@@ -349,6 +361,12 @@ fn run_seed(seed: u64, mutation: MigratedMutation) -> Outcome {
             host.phase.set(Phase::Migrate);
             stats.migrations += 1;
             let migrated = migrations(&host).await;
+            if let Err(error) = drop_index_concurrently(&*host, SUPERSEDED_INDEX).await {
+                return Some(format!("dropping a superseded index answered {error:?}"));
+            }
+            if let Some(sql) = host.database.get().unbounded.first() {
+                return Some(format!("migrate waited on a lock with no lock_timeout: {sql}"));
+            }
             if wants.contains(&Expect::Ahead) {
                 return migrated
                     .iter()

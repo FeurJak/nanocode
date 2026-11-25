@@ -7,6 +7,7 @@ pub enum Mutation {
     KvClaimStealsLive,
     KvClaimSkipsGrace,
     CheckMissesFormats,
+    ConcurrentSkipsLockTimeout,
 }
 
 static MUTATION: AtomicU8 = AtomicU8::new(Mutation::None as u8);

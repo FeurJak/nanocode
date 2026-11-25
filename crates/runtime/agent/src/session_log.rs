@@ -17,8 +17,8 @@ use serde_json::{Map, Value, value::RawValue};
 use crate::{
     durability::{
         BlobKey, BlobUrl, ConcurrentIndex, EncodedPayload, Migrated, Migration, MissingColumn,
-        SharedBlobStore, Sql, SqlAccess, SqlDialect, SqlRow, SqlStatement, StoreError,
-        build_index_concurrently, get_blob, migrate_format,
+        SharedBlobStore, Sql, SqlDialect, SqlRow, SqlStatement, StoreError,
+        build_index_concurrently, drop_index_concurrently, get_blob, migrate_format,
     },
     input::{Prompt, PromptInput, UserInput},
     stored_event::Stored,
@@ -2856,11 +2856,7 @@ impl<H: Sql + ?Sized> SessionLog<H> {
         if host.dialect() == SqlDialect::Postgres {
             build_index_concurrently(host, &ORDER_INDEX).await?;
             for sql in TURN_ORDER_DROPS {
-                let drop = [SqlStatement {
-                    sql,
-                    params: Vec::new(),
-                }];
-                host.run(SqlAccess::Autocommit, "log_index", &drop).await?;
+                drop_index_concurrently(host, sql).await?;
             }
         }
         migrate_format(host, ORDER_COMPONENT, &ORDER).await?;

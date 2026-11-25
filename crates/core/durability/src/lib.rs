@@ -25,7 +25,7 @@ pub use row::{Examined, PageCodec, RowStore};
 pub use migrated::Migrated;
 pub use sql::{
     Collected, ConcurrentIndex, Migration, MissingColumn, Sql, SqlAccess, SqlDialect, SqlRow,
-    SqlStatement, SqlStore, Unreachable, build_index_concurrently, migrate_format,
+    SqlStatement, SqlStore, Unreachable, build_index_concurrently, drop_index_concurrently, migrate_format,
     migrate_format_then,
 };
 pub use staged::{StagedStore, StagedWrites};

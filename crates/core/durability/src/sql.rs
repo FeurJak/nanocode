@@ -224,18 +224,7 @@ pub async fn build_index_concurrently<H: Sql + ?Sized>(
         )));
     }
     let timeout = MIGRATE_LOCK_TIMEOUT_MS.to_string();
-    let bounded = |sql| {
-        [
-            SqlStatement {
-                sql: SESSION_LOCK_TIMEOUT_PG,
-                params: vec![timeout.as_str()],
-            },
-            SqlStatement {
-                sql,
-                params: Vec::new(),
-            },
-        ]
-    };
+    let bounded = |sql| lock_bounded(&timeout, sql);
     for build in 1..=MIGRATE_LOCK_TRIES {
         match run_checked(host, SqlAccess::Autocommit, "index", &bounded(index.create)).await {
             Ok(_) => {}
@@ -267,6 +256,43 @@ pub async fn build_index_concurrently<H: Sql + ?Sized>(
         "index {} is still not valid after {MIGRATE_LOCK_TRIES} builds",
         index.name
     )))
+}
+
+fn lock_bounded<'a>(timeout: &'a str, sql: &'static str) -> Vec<SqlStatement<'a>> {
+    let bound = SqlStatement {
+        sql: SESSION_LOCK_TIMEOUT_PG,
+        params: vec![timeout],
+    };
+    let statement = SqlStatement {
+        sql,
+        params: Vec::new(),
+    };
+    if crate::sim::mutated(crate::sim::Mutation::ConcurrentSkipsLockTimeout) {
+        return vec![statement];
+    }
+    vec![bound, statement]
+}
+
+pub async fn drop_index_concurrently<H: Sql + ?Sized>(
+    host: &H,
+    drop: &'static str,
+) -> Result<(), StoreError> {
+    if host.dialect() != SqlDialect::Postgres {
+        return Err(StoreError::Backend(format!(
+            "{drop} runs CONCURRENTLY, which only Postgres has"
+        )));
+    }
+    let timeout = MIGRATE_LOCK_TIMEOUT_MS.to_string();
+    for attempt in 1..=MIGRATE_LOCK_TRIES {
+        match run_checked(host, SqlAccess::Autocommit, "index", &lock_bounded(&timeout, drop)).await {
+            Ok(_) => return Ok(()),
+            Err(error) if attempt < MIGRATE_LOCK_TRIES && lock_timed_out(&error) => {
+                nanocode_platform::sleep(Duration::from_millis(MIGRATE_LOCK_TIMEOUT_MS)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the last attempt returns its answer")
 }
 
 pub async fn migrate_format<H: Sql + ?Sized>(

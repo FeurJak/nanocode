@@ -57,7 +57,7 @@ pub use nanocode_durability_core::{
     StateCursor, StatePage, StateQuery, StateReader, StateStore, StateSummary, StoreError,
     StoreEvent, StoreFuture, StoreHandles, StoreRecord, StoreReplacement, StoreUpdate, StoredEvent,
     StoredState, SummaryFilter, SummaryUpdate, Versioned, base64_data_url,
-    build_index_concurrently, get_blob, migrate_format, migrate_format_then,
+    build_index_concurrently, drop_index_concurrently, get_blob, migrate_format, migrate_format_then,
 };
 pub use paged::{
     PagedWriter, PayloadReader, Prepared, Sequence, SequenceLog, load_sequence, load_sequence_from,
