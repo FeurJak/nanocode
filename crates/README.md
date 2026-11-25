@@ -31,7 +31,7 @@
 | `nanocode-tools`, `nanocode-tools-macros` | The `#[tool]` macro and the crate its expansion names |
 | `nanocode-process-contracts` | Portable shell and file host interfaces, `Redactor` |
 | `nanocode-platform` | The host interface WASM embedders install |
-| `nanocode-sync` | Lock-free primitives: `Atom`, `Mailbox`, `Actor`, `Sequencer`, `Slot`, `Signal`, ... |
+| `nanocode-sync` | Lock-free primitives: `Atom`, `Mailbox`, `Actor`, `Slot`, `Signal`, `SingleFlight`, ... |
 | `nanocode-machine` | `machine!`: a lifecycle declared once as states, wire names and moves, with its stored-state check and fence text |
 | `nanocode-http`, `nanocode-zstd`, `nanocode-tls` | HTTP layer contracts and retry rules, a streaming zstd decoder, cached TLS configuration |
 | `nanocode-mcp`, `nanocode-mcp-http` | The MCP client: portable session engine; native Streamable HTTP and OAuth |

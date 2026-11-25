@@ -53,6 +53,12 @@ struct Allowed {
 
 const ALLOWED: &[Allowed] = &[
     Allowed {
+        path: "crates/core/sync/src/backoff.rs",
+        call: "Instant::now",
+        uses: 2,
+        why: "Backoff::within reads the real clock for its overall deadline; retry delays are caller policy for host I/O outside the simulated crates, never a persisted value",
+    },
+    Allowed {
         path: "crates/core/sync/src/future.rs",
         call: "FuturesOrdered",
         uses: 3,
@@ -63,24 +69,6 @@ const ALLOWED: &[Allowed] = &[
         call: "join_all",
         uses: 2,
         why: "nanocode-sync's own join_all, which keeps futures-util's order: up to 30 futures polled together, past that through FuturesOrdered; simulated crates still use join_in_order",
-    },
-    Allowed {
-        path: "crates/core/sync/src/lease.rs",
-        call: "Instant::now",
-        uses: 3,
-        why: "a lease's watchdog measures renewals on its own thread so that it expires the lease even when the Tokio runtime stalls; leases guard a host's external locks and no simulated crate takes one",
-    },
-    Allowed {
-        path: "crates/core/sync/src/lease.rs",
-        call: ".elapsed()",
-        uses: 2,
-        why: "a lease's watchdog measures renewals from its own Instant::now readings on its own thread; leases guard a host's external locks and no simulated crate takes one",
-    },
-    Allowed {
-        path: "crates/core/sync/src/lease.rs",
-        call: "thread::spawn",
-        uses: 1,
-        why: "a lease's watchdog runs on its own thread so that it expires the lease even when the Tokio runtime stalls",
     },
     Allowed {
         path: "crates/core/sync/src/stream.rs",
@@ -105,12 +93,6 @@ const ALLOWED: &[Allowed] = &[
         call: "FuturesUnordered",
         uses: 7,
         why: "nanocode-sync's own FuturesUnordered, which keeps futures-util's order: futures polled in the order they were woken; simulated crates still use InOrder",
-    },
-    Allowed {
-        path: "crates/core/sync/src/waits.rs",
-        call: "Instant::now",
-        uses: 2,
-        why: "slow-wait diagnostics time how long a holder waited for slow_waits reports, never a decision or persisted bytes, on whatever thread holds it",
     },
     Allowed {
         path: "crates/core/turnlog/src/file.rs",
