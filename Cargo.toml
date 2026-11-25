@@ -112,6 +112,7 @@ members = [
     "bin/nanocode-fuzz",
     "examples/claims-pg",
     "examples/dispatch-pg",
+    "examples/scoped-api",
 ]
 default-members = ["crates/nanocode"]
 exclude = ["crates/patches", "bin/nanocode-front"]

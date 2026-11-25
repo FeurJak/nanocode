@@ -1158,6 +1158,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocode-scoped-api"
+version = "0.7.0"
+dependencies = [
+ "nanocode-durability-core",
+ "nanocode-executor",
+ "nanocode-io",
+ "nanocode-partitions",
+ "nanocode-store-sql",
+ "nanocode-sync",
+ "nanocode-turnlog",
+ "serde_json",
+]
+
+[[package]]
 name = "nanocode-shell"
 version = "0.7.0"
 dependencies = [
