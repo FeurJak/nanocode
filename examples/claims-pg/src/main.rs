@@ -698,7 +698,7 @@ async fn adopt(
     let began = Instant::now();
     let range = range_of(victim, options.nodes, options.parts);
     for part in log_parts_of(&log, count, range.clone()) {
-        log.claim(part, now_ms(), u64::MAX / 4, false)
+        log.claim(part, u64::MAX / 4)
             .await
             .map_err(|error| format!("adopt fence {}: {error}", part.0))?;
     }
@@ -817,7 +817,7 @@ fn main() -> std::process::ExitCode {
     let setup = runtime.block_on(async {
         log.migrate().await?;
         for part in &fences {
-            log.claim(*part, 0, u64::MAX / 4, false).await?;
+            log.claim(*part, u64::MAX / 4).await?;
         }
         Ok::<(), StoreError>(())
     });

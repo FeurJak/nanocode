@@ -93,7 +93,7 @@ async fn conformance(sql: Arc<Counted>, failed: &mut u32) -> Result<(), StoreErr
         .map(|index| format!("{scope}/other{index}"))
         .find(|other| a.partition(other) == part)
         .unwrap_or_default();
-    let epoch = a.claim(part, 0, 60_000, true).await?;
+    let epoch = a.claim(part, 60_000).await?;
     a.append(&scope, &[(0, "d0:1".into()), (1, "d1:2".into())])
         .await?;
     let conflict = a
@@ -118,14 +118,14 @@ async fn conformance(sql: Arc<Counted>, failed: &mut u32) -> Result<(), StoreErr
         &format!("{:?} {:?} {:?}", x.is_ok(), y.is_ok(), z.is_ok()),
         failed,
     );
-    let taken = b.claim(part, 1, 60_000, true).await;
+    let taken = b.claim(part, 60_000).await;
     check(
         "live holder keeps the partition",
         taken.is_err(),
         "",
         failed,
     );
-    let b_epoch = b.claim(part, 120_000, 60_000, true).await;
+    let b_epoch = b.claim(part, 60_000).await;
     check(
         "expired holder is taken over with a higher epoch",
         b_epoch.as_ref().is_ok_and(|next| *next > epoch),
@@ -425,7 +425,7 @@ fn main() -> std::process::ExitCode {
     let claimed = runtime.block_on(async {
         log.prepare().await?;
         for part in 0..parts {
-            let _ = log.claim(Partition(part), 0, u64::MAX / 4, false).await;
+            let _ = log.claim(Partition(part), u64::MAX / 4).await;
         }
         Ok::<(), StoreError>(())
     });
@@ -441,7 +441,7 @@ fn main() -> std::process::ExitCode {
         runtime.block_on(async {
             for part in 0..parts {
                 let _ = log
-                    .claim(Partition(part), u64::MAX / 2, u64::MAX / 4, false)
+                    .claim(Partition(part), u64::MAX / 4)
                     .await;
             }
         });

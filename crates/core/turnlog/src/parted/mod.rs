@@ -468,18 +468,11 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
         })
     }
 
-    /// Claims the partition's lease for this node on the store's clock, raising its epoch. It
-    /// lands only on a released row, this node's own, or one past expiry plus grace; membership
-    /// never lets it take a live lease, so holder_live and now_ms (the store judges expiry on its
-    /// own clock, the node self-fences on with_clock) are ignored. An unknown outcome is read
-    /// back from the row, and a lease read back as ours grants no time until a renewal lands.
-    pub async fn claim(
-        &self,
-        part: Partition,
-        _now_ms: u64,
-        ttl_ms: u64,
-        _holder_live: bool,
-    ) -> Result<u64, StoreError> {
+    /// Claims the partition's lease for this node, raising its epoch. The store judges expiry on
+    /// its own clock: the claim lands only on a released row, this node's own, or one past expiry
+    /// plus grace, never on a live lease. An unknown outcome is read back from the row, and a
+    /// lease read back as ours grants no time until a renewal lands.
+    pub async fn claim(&self, part: Partition, ttl_ms: u64) -> Result<u64, StoreError> {
         let node = self.node()?;
         let policy = Policy {
             ttl_ms,
@@ -506,7 +499,7 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
                 };
                 self.held
                     .update(|held| held.insert(part, Lease::Owned(owned)));
-                return match self.renew(part, 0, ttl_ms).await {
+                return match self.renew(part, ttl_ms).await {
                     Ok(()) => Ok(owned.epoch),
                     Err(StoreError::Fenced) => Err(StoreError::Fenced),
                     Err(_) => Ok(owned.epoch),
@@ -520,12 +513,7 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
 
     /// Extends the lease at the epoch this node holds; Fenced when the epoch moved (the lease is
     /// lost). An unknown outcome keeps the lease and its old deadline.
-    pub async fn renew(
-        &self,
-        part: Partition,
-        _now_ms: u64,
-        ttl_ms: u64,
-    ) -> Result<(), StoreError> {
+    pub async fn renew(&self, part: Partition, ttl_ms: u64) -> Result<(), StoreError> {
         let node = self.node()?;
         let epoch = self.held(part).ok_or(StoreError::Fenced)?;
         let policy = Policy {

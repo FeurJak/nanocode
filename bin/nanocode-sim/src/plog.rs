@@ -317,13 +317,13 @@ async fn worker(
         match rng.below(100) {
             0..=9 => {
                 let ttl = rng.range(LEASE_TICKS_MIN, LEASE_TICKS_MAX + 1);
-                if node.log.claim(part, 0, ttl, true).await.is_ok() {
+                if node.log.claim(part, ttl).await.is_ok() {
                     ledger.borrow_mut().stats.claims += 1;
                 }
             }
             10..=12 => {
                 let ttl = rng.range(LEASE_TICKS_MIN, LEASE_TICKS_MAX + 1);
-                let _ = node.log.renew(part, 0, ttl).await;
+                let _ = node.log.renew(part, ttl).await;
             }
             13..=14 => {
                 let _ = node.log.release(part).await;

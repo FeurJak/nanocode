@@ -209,7 +209,7 @@ fn main() -> std::process::ExitCode {
     };
     let result = runtime.block_on(async {
         log.migrate().await.map_err(|error| format!("{error}"))?;
-        log.claim(Partition(0), 0, u64::MAX / 4, false)
+        log.claim(Partition(0), u64::MAX / 4)
             .await
             .map_err(|error| format!("{error}"))?;
         let shown = |error: nanocode_board::BoardError| format!("{error:?}");

@@ -888,7 +888,7 @@ async fn balance(shared: &Arc<Shared>, renew: bool) -> Result<(), StoreError> {
             })
             .copied()
             .collect();
-        join_all(kept.iter().map(|part| renewed(shared, *part, now))).await;
+        join_all(kept.iter().map(|part| renewed(shared, *part))).await;
     }
     Ok(())
 }
@@ -903,7 +903,7 @@ async fn claim(shared: &Arc<Shared>, part: Partition, now: u64) {
     }
     match shared
         .log
-        .claim(part, now, shared.settings.lease_ms, false)
+        .claim(part, shared.settings.lease_ms)
         .await
     {
         Ok(epoch) => {
@@ -919,8 +919,8 @@ async fn claim(shared: &Arc<Shared>, part: Partition, now: u64) {
     }
 }
 
-async fn renewed(shared: &Shared, part: Partition, now: u64) {
-    match shared.log.renew(part, now, shared.settings.lease_ms).await {
+async fn renewed(shared: &Shared, part: Partition) {
+    match shared.log.renew(part, shared.settings.lease_ms).await {
         Ok(()) => {}
         Err(StoreError::Fenced) => {
             Counters::bump(&shared.counters.renew_failures);
