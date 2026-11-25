@@ -15,12 +15,12 @@ use std::{
 };
 
 use nanocode_durability_core::{Sql, StoreError};
-use nanocode_partitions::Partition;
+use nanocode_partitions::{Partition, Row};
 use nanocode_store_sql::{PgOptions, PgPool, PgSql, log_wake};
 use nanocode_sync::SwapOption;
 use nanocode_turnlog::{
     LogHost,
-    parted::{PartedLog, SqlParts},
+    parted::{PartStore, PartedLog, SqlParts},
 };
 
 static FIRST_ERROR: SwapOption<String> = SwapOption::const_empty();
@@ -65,18 +65,37 @@ fn check(name: &str, ok: bool, detail: &str, failed: &mut u32) {
     }
 }
 
+const CONFORMANCE_PARTS: u32 = 4;
+const CONFORMANCE_LEASE_MS: u64 = 1_000;
+const CONFORMANCE_GRACE_MS: u64 = 500;
+const CONFORMANCE_MARGIN_MS: u64 = 100;
+const CLOCK_SLACK_MS: u64 = 250;
+
+fn node(sql: &Arc<Counted>, name: &str) -> Result<Log, StoreError> {
+    let count = NonZeroU32::new(CONFORMANCE_PARTS).ok_or(StoreError::Fenced)?;
+    Ok(PartedLog::fenced(
+        Arc::new(SqlParts::new(Arc::clone(sql))),
+        count,
+        &format!("{name}-{}", std::process::id()),
+    )
+    .with_lease_bounds(CONFORMANCE_GRACE_MS, CONFORMANCE_MARGIN_MS))
+}
+
+fn sibling(log: &Log, scope: &str, part: Partition, wanted: bool) -> String {
+    (0..)
+        .map(|index| format!("{scope}/other{index}"))
+        .find(|other| (log.partition(other) == part) == wanted)
+        .unwrap_or_default()
+}
+
+async fn committed(log: &Log, part: Partition) -> Result<u64, StoreError> {
+    let entries = log.follow(part, 0, 1_000_000).await?;
+    Ok(entries.last().map_or(0, |entry| entry.pos))
+}
+
 async fn conformance(sql: Arc<Counted>, failed: &mut u32) -> Result<(), StoreError> {
-    let count = NonZeroU32::new(4).ok_or(StoreError::Fenced)?;
-    let a = PartedLog::fenced(
-        Arc::new(SqlParts::new(Arc::clone(&sql))),
-        count,
-        &format!("node-a-{}", std::process::id()),
-    );
-    let b = PartedLog::fenced(
-        Arc::new(SqlParts::new(Arc::clone(&sql))),
-        count,
-        &format!("node-b-{}", std::process::id()),
-    );
+    let (a, b) = (node(&sql, "node-a")?, node(&sql, "node-b")?);
+    a.migrate().await?;
     a.prepare().await?;
     let scope = format!("conf/{}", std::process::id());
     let part = a.partition(&scope);
@@ -89,11 +108,8 @@ async fn conformance(sql: Arc<Counted>, failed: &mut u32) -> Result<(), StoreErr
         "",
         failed,
     );
-    let other = (0..)
-        .map(|index| format!("{scope}/other{index}"))
-        .find(|other| a.partition(other) == part)
-        .unwrap_or_default();
-    let epoch = a.claim(part, 60_000).await?;
+    let other = sibling(&a, &scope, part, true);
+    let epoch = a.claim(part, CONFORMANCE_LEASE_MS).await?;
     a.append(&scope, &[(0, "d0:1".into()), (1, "d1:2".into())])
         .await?;
     let conflict = a
@@ -118,30 +134,50 @@ async fn conformance(sql: Arc<Counted>, failed: &mut u32) -> Result<(), StoreErr
         &format!("{:?} {:?} {:?}", x.is_ok(), y.is_ok(), z.is_ok()),
         failed,
     );
-    let taken = b.claim(part, 60_000).await;
+    let taken = b.claim(part, CONFORMANCE_LEASE_MS).await;
     check(
-        "live holder keeps the partition",
-        taken.is_err(),
-        "",
+        "a live lease is never claimed by another node",
+        matches!(taken, Err(StoreError::Fenced)),
+        &format!("{taken:?}"),
         failed,
     );
-    let b_epoch = b.claim(part, 60_000).await;
+    a.release(part).await?;
+    let position = committed(&a, part).await?;
+    let b_epoch = b.claim(part, CONFORMANCE_LEASE_MS).await;
     check(
-        "expired holder is taken over with a higher epoch",
-        b_epoch.as_ref().is_ok_and(|next| *next > epoch),
-        &format!("{b_epoch:?}"),
+        "a released lease is claimed at once at a higher epoch, resuming at the committed position",
+        b_epoch.as_ref().is_ok_and(|next| *next > epoch) && b.resume(part) == Some(position),
+        &format!("{b_epoch:?} resume={:?} committed={position}", b.resume(part)),
         failed,
     );
     let stale = a.append(&scope, &[(3, "d3:1".into())]).await;
     check(
-        "old owner is fenced after takeover",
+        "the old owner is fenced after the handoff",
         matches!(stale, Err(StoreError::Fenced)),
         "",
         failed,
     );
-    b.append(&scope, &[(3, "s5".into()), (4, "d4:1".into())])
+    reads(&b, &scope, part, failed).await?;
+    leases(&sql, &b, &scope, part, failed).await?;
+    b.cursor(part, &format!("reader-{scope}"), u64::MAX / 2)
         .await?;
-    let loaded = b.load(&scope).await?;
+    b.release(part).await?;
+    check(
+        "released partition refuses appends",
+        matches!(
+            b.append(&scope, &[(5, "d5:1".into())]).await,
+            Err(StoreError::Fenced)
+        ),
+        "",
+        failed,
+    );
+    Ok(())
+}
+
+async fn reads(b: &Log, scope: &str, part: Partition, failed: &mut u32) -> Result<(), StoreError> {
+    b.append(scope, &[(3, "s5".into()), (4, "d4:1".into())])
+        .await?;
+    let loaded = b.load(scope).await?;
     check(
         "load starts at the latest snapshot",
         loaded
@@ -167,8 +203,8 @@ async fn conformance(sql: Arc<Counted>, failed: &mut u32) -> Result<(), StoreErr
     );
     let floor = mine.get(1).map_or(0, |entry| entry.pos);
     b.cursor(part, &format!("reader-{scope}"), floor).await?;
-    let dropped = b.prune(&scope, 4).await?;
-    let left = b.scan(&scope, 0, u64::MAX).await?;
+    let dropped = b.prune(scope, 4).await?;
+    let left = b.scan(scope, 0, u64::MAX).await?;
     check(
         "prune keeps rows a cursor has not read and the snapshot",
         dropped == 2 && left.first().is_some_and(|(seq, _)| *seq == 2),
@@ -176,9 +212,9 @@ async fn conformance(sql: Arc<Counted>, failed: &mut u32) -> Result<(), StoreErr
         failed,
     );
     let more: Vec<(u64, String)> = (5..=14).map(|seq| (seq, format!("d{seq}:1"))).collect();
-    b.append(&scope, &more).await?;
-    let scanned = b.scan(&scope, 0, u64::MAX).await?;
-    let loaded = b.load(&scope).await?;
+    b.append(scope, &more).await?;
+    let scanned = b.scan(scope, 0, u64::MAX).await?;
+    let loaded = b.load(scope).await?;
     let in_order = |rows: &[(u64, String)]| rows.windows(2).all(|pair| pair[1].0 == pair[0].0 + 1);
     check(
         "scan and load return more than nine rows in seq order",
@@ -193,19 +229,56 @@ async fn conformance(sql: Arc<Counted>, failed: &mut u32) -> Result<(), StoreErr
         ),
         failed,
     );
-    b.cursor(part, &format!("reader-{scope}"), u64::MAX / 2)
-        .await?;
-    b.release(part).await?;
+    Ok(())
+}
+
+/// renew_all over two held partitions, then a crash handoff: the holder stops renewing, a peer is
+/// refused while the lease is live and lands once expiry plus grace passed on the database clock,
+/// and the old holder's next renew_all reports the lease lost.
+async fn leases(
+    sql: &Arc<Counted>,
+    b: &Log,
+    scope: &str,
+    part: Partition,
+    failed: &mut u32,
+) -> Result<(), StoreError> {
+    let second = b.partition(&sibling(b, scope, part, false));
+    b.claim(second, CONFORMANCE_LEASE_MS).await?;
+    let before = b.store().fence(second).await?;
+    nanocode_executor::sleep(Duration::from_millis(CLOCK_SLACK_MS)).await;
+    let lost = b.renew_all(CONFORMANCE_LEASE_MS).await;
+    let after = b.store().fence(second).await?;
+    let extended = match (&before, &after) {
+        (Row::Held { expires_at: was, .. }, Row::Held { expires_at: now, .. }) => now > was,
+        _ => false,
+    };
     check(
-        "released partition refuses appends",
-        matches!(
-            b.append(&scope, &[(5, "d5:1".into())]).await,
-            Err(StoreError::Fenced)
-        ),
-        "",
+        "renew_all renews every held lease in one statement",
+        lost.as_ref().is_ok_and(Vec::is_empty) && extended,
+        &format!("{lost:?} {before:?} -> {after:?}"),
         failed,
     );
-    Ok(())
+    let c = node(sql, "node-c")?;
+    let early = c.claim(second, CONFORMANCE_LEASE_MS).await;
+    nanocode_executor::sleep(Duration::from_millis(
+        CONFORMANCE_LEASE_MS + CONFORMANCE_GRACE_MS + CLOCK_SLACK_MS,
+    ))
+    .await;
+    let late = c.claim(second, CONFORMANCE_LEASE_MS).await;
+    check(
+        "a crashed holder's lease is refused while live and claimed past expiry plus grace",
+        matches!(early, Err(StoreError::Fenced)) && late.is_ok(),
+        &format!("early={early:?} late={late:?}"),
+        failed,
+    );
+    let gone = b.renew_all(CONFORMANCE_LEASE_MS).await;
+    check(
+        "renew_all reports the lease the old holder lost, and keeps the rest",
+        gone.as_ref().is_ok_and(|lost| *lost == [second]) && b.held(part).is_some(),
+        &format!("{gone:?}"),
+        failed,
+    );
+    c.release(second).await
 }
 
 async fn futures_join<A: std::future::Future, B: std::future::Future, C: std::future::Future>(
@@ -423,6 +496,7 @@ fn main() -> std::process::ExitCode {
         Instant::now().elapsed().as_nanos()
     );
     let claimed = runtime.block_on(async {
+        log.migrate().await?;
         log.prepare().await?;
         for part in 0..parts {
             let _ = log.claim(Partition(part), u64::MAX / 4).await;
@@ -437,14 +511,10 @@ fn main() -> std::process::ExitCode {
         .filter(|part| log.held(Partition(*part)).is_some())
         .count();
     if held != parts as usize {
-        // A previous run holds the rows: take them over as an expired holder would be.
-        runtime.block_on(async {
-            for part in 0..parts {
-                let _ = log
-                    .claim(Partition(part), u64::MAX / 4)
-                    .await;
-            }
-        });
+        println!(
+            "RESULT FAIL bench setup claimed {held} of {parts} partitions: another holder's lease is live; release it or wait for it to lapse"
+        );
+        return std::process::ExitCode::FAILURE;
     }
     for workers in [1, 16, 64] {
         measure(&runtime, &log, &sql, Kind::Append, workers, seconds, &run);
