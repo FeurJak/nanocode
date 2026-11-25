@@ -104,6 +104,12 @@ const RENEW: Dialects = [
     "UPDATE nanocode_log_fence SET expires_ms = CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER) + CAST(?4 AS INTEGER) WHERE part = CAST(?1 AS INTEGER) AND epoch = CAST(?2 AS INTEGER) AND holder = ?3 RETURNING 1",
     "UPDATE nanocode_log_fence SET expires_ms = CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT) + CAST($4::text AS BIGINT) WHERE part = CAST($1::text AS INTEGER) AND epoch = CAST($2::text AS BIGINT) AND holder = $3::text RETURNING 1",
 ];
+/// Every renewal of one node in one statement: [[part, epoch], ...] in ?2/$2. It touches only
+/// the lease rows, so it never waits behind a commit.
+const RENEW_ALL: Dialects = [
+    "UPDATE nanocode_log_fence SET expires_ms = CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER) + CAST(?3 AS INTEGER) WHERE holder = ?1 AND EXISTS (SELECT 1 FROM json_each(?2) AS h WHERE CAST(json_extract(h.value, '$[0]') AS INTEGER) = nanocode_log_fence.part AND CAST(json_extract(h.value, '$[1]') AS INTEGER) = nanocode_log_fence.epoch) RETURNING CAST(part AS TEXT)",
+    "UPDATE nanocode_log_fence f SET expires_ms = CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT) + CAST($3::text AS BIGINT) FROM (SELECT CAST(a.e ->> 0 AS INTEGER) AS part, CAST(a.e ->> 1 AS BIGINT) AS epoch FROM jsonb_array_elements(CAST($2::text AS jsonb)) AS a(e)) h WHERE f.part = h.part AND f.epoch = h.epoch AND f.holder = $1::text RETURNING CAST(f.part AS TEXT)",
+];
 /// Release at the committed position: the gainer claims at once and resumes from the cursor.
 const RELEASE: Dialects = [
     "UPDATE nanocode_log_fence SET holder = NULL, cursor = MAX(cursor, COALESCE((SELECT MAX(pos) FROM nanocode_plog WHERE part = CAST(?1 AS INTEGER)), 0)) WHERE part = CAST(?1 AS INTEGER) AND epoch = CAST(?2 AS INTEGER) AND holder = ?3 RETURNING CAST(cursor AS TEXT)",
@@ -796,6 +802,37 @@ impl<H: Sql + Send + Sync + ?Sized> PartStore for SqlParts<H> {
             }];
             let answer = self.host.transaction("plog_renew", &statements).await?;
             Ok(!result(&answer, 0)?.is_empty())
+        })
+    }
+
+    fn renew_leases<'a>(
+        &'a self,
+        node: &'a str,
+        held: &'a [(Partition, u64)],
+        ttl_ms: u64,
+    ) -> StoreFuture<'a, Result<Vec<Partition>, StoreError>> {
+        Box::pin(async move {
+            let pairs: Vec<[u64; 2]> = held
+                .iter()
+                .map(|(part, epoch)| [u64::from(part.0), *epoch])
+                .collect();
+            let json = serde_json::to_string(&pairs)
+                .map_err(|error| StoreError::Backend(format!("encode renewals: {error}")))?;
+            let ttl = ttl_ms.to_string();
+            let statements = [SqlStatement {
+                sql: self.pick(&RENEW_ALL),
+                params: vec![node, &json, &ttl],
+            }];
+            let answer = self.host.transaction("plog_renew_all", &statements).await?;
+            result(&answer, 0)?
+                .iter()
+                .map(|cells| {
+                    let part = number(cells, 0)?;
+                    u32::try_from(part)
+                        .map(Partition)
+                        .map_err(|error| invalid(format!("partition {part}: {error}")))
+                })
+                .collect()
         })
     }
 

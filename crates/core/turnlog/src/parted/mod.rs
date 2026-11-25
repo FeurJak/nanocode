@@ -8,7 +8,12 @@
 //! already exists rejects only its own append, and a stale fence rejects the whole batch. The
 //! store behind it is a PartStore: SqlParts for Postgres and SQLite, ModelParts for the simulator.
 
-use std::{collections::HashSet, num::NonZeroU32, ops::Range, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashSet},
+    num::NonZeroU32,
+    ops::Range,
+    sync::Arc,
+};
 
 use nanocode_durability_core::{StoreError, StoreFuture};
 use nanocode_partitions::{
@@ -142,6 +147,15 @@ pub trait PartStore: Send + Sync {
         epoch: u64,
         ttl_ms: u64,
     ) -> StoreFuture<'a, Result<bool, StoreError>>;
+
+    /// Extends every lease in held (partition, epoch) for node in one statement on the store's
+    /// clock; returns the partitions whose renewal landed, the others' epochs moved.
+    fn renew_leases<'a>(
+        &'a self,
+        node: &'a str,
+        held: &'a [(Partition, u64)],
+        ttl_ms: u64,
+    ) -> StoreFuture<'a, Result<Vec<Partition>, StoreError>>;
 
     /// Hands node's lease at epoch back at the committed position: Some(cursor) when it landed,
     /// None when the epoch moved.
@@ -315,6 +329,36 @@ pub struct PartedLog<S: ?Sized> {
     ring: Atom<Option<RingFn>>,
     stats: Atom<Stats>,
     max_rows: usize,
+}
+
+fn renewed(
+    held: &mut Map<Partition, Lease>,
+    part: Partition,
+    epoch: u64,
+    answer: Answer,
+    sent_at: u64,
+    policy: Policy,
+) {
+    let next = match held.get(&part).copied() {
+        Some(Lease::Owned(owned)) if owned.epoch == epoch => {
+            Some(owned.renewed(answer, sent_at, policy).map(Lease::Owned))
+        }
+        Some(Lease::Draining(draining)) if draining.epoch == epoch => Some(
+            draining
+                .renewed(answer, sent_at, policy)
+                .map(Lease::Draining),
+        ),
+        _ => None,
+    };
+    match next {
+        Some(Ok(lease)) => {
+            held.insert(part, lease);
+        }
+        Some(Err(_)) => {
+            held.remove(&part);
+        }
+        None => {}
+    }
 }
 
 fn uncertain() -> StoreError {
@@ -526,32 +570,64 @@ impl<S: PartStore + ?Sized> PartedLog<S> {
         } else {
             Answer::Moved { current: epoch + 1 }
         };
-        self.held.update(|held| {
-            let next = match held.get(&part).copied() {
-                Some(Lease::Owned(owned)) if owned.epoch == epoch => {
-                    Some(owned.renewed(answer, sent_at, policy).map(Lease::Owned))
-                }
-                Some(Lease::Draining(draining)) if draining.epoch == epoch => Some(
-                    draining
-                        .renewed(answer, sent_at, policy)
-                        .map(Lease::Draining),
-                ),
-                _ => None,
-            };
-            match next {
-                Some(Ok(lease)) => {
-                    held.insert(part, lease);
-                }
-                Some(Err(_)) => {
-                    held.remove(&part);
-                }
-                None => {}
-            }
-        });
+        self.held
+            .update(|held| renewed(held, part, epoch, answer, sent_at, policy));
         match answer {
             Answer::Landed | Answer::Unknown => Ok(()),
             Answer::Moved { .. } => Err(StoreError::Fenced),
         }
+    }
+
+    /// Renews every lease this node holds, owned or draining, in one store statement. Returns
+    /// the partitions whose epoch moved: those leases are lost. An error keeps every lease and
+    /// its old deadline.
+    pub async fn renew_all(&self, ttl_ms: u64) -> Result<Vec<Partition>, StoreError> {
+        let node = self.node()?;
+        let mut held: Vec<(Partition, u64)> = self.held.read(|held| {
+            held.iter()
+                .filter_map(|(part, lease)| lease.epoch().map(|epoch| (*part, epoch)))
+                .collect()
+        });
+        held.sort_unstable();
+        if held.is_empty() {
+            return Ok(Vec::new());
+        }
+        let policy = Policy {
+            ttl_ms,
+            ..self.bounds
+        };
+        let sent_at = (self.clock)();
+        let landed: BTreeSet<Partition> = self
+            .store
+            .renew_leases(&node, &held, ttl_ms)
+            .await?
+            .into_iter()
+            .collect();
+        if let Some(stray) = landed
+            .iter()
+            .find(|part| !held.iter().any(|(mine, _)| mine == *part))
+        {
+            return Err(StoreError::Backend(format!(
+                "the store renewed partition {} that this node did not ask for",
+                stray.0
+            )));
+        }
+        let lost: Vec<Partition> = held
+            .iter()
+            .filter(|(part, _)| !landed.contains(part))
+            .map(|(part, _)| *part)
+            .collect();
+        self.held.update(|leases| {
+            for (part, epoch) in &held {
+                let answer = if landed.contains(part) {
+                    Answer::Landed
+                } else {
+                    Answer::Moved { current: epoch + 1 }
+                };
+                renewed(leases, *part, *epoch, answer, sent_at, policy);
+            }
+        });
+        Ok(lost)
     }
 
     /// Drains then releases: stops admitting new appends to the partition but keeps its epoch

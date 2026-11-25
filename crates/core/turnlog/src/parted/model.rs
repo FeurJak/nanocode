@@ -507,6 +507,30 @@ impl PartStore for ModelParts {
         })
     }
 
+    fn renew_leases<'a>(
+        &'a self,
+        node: &'a str,
+        held: &'a [(Partition, u64)],
+        ttl_ms: u64,
+    ) -> StoreFuture<'a, Result<Vec<Partition>, StoreError>> {
+        Box::pin(async move {
+            let now = self.now();
+            let node = node.to_owned();
+            self.write("renew", move |model| {
+                let mut landed = Vec::new();
+                for (part, epoch) in held {
+                    let row = model.row(*part)?;
+                    if let Ok(next) = row.renew(*part, &node, *epoch, now, ttl_ms) {
+                        *row = next;
+                        landed.push(*part);
+                    }
+                }
+                Ok(landed)
+            })
+            .await
+        })
+    }
+
     fn release_lease<'a>(
         &'a self,
         part: Partition,

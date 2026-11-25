@@ -321,9 +321,13 @@ async fn worker(
                     ledger.borrow_mut().stats.claims += 1;
                 }
             }
-            10..=12 => {
+            10..=11 => {
                 let ttl = rng.range(LEASE_TICKS_MIN, LEASE_TICKS_MAX + 1);
                 let _ = node.log.renew(part, ttl).await;
+            }
+            12 => {
+                let ttl = rng.range(LEASE_TICKS_MIN, LEASE_TICKS_MAX + 1);
+                let _ = node.log.renew_all(ttl).await;
             }
             13..=14 => {
                 let _ = node.log.release(part).await;
