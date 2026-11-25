@@ -30,6 +30,7 @@ nanocode-digest.workspace = true
 nanocode-durability-core.workspace = true
 nanocode-partitions.workspace = true
 nanocode-durability.workspace = true
+nanocode-store-sql = { path = "../../crates/integrations/store-sql" }
 nanocode-executor.workspace = true
 graviola.workspace = true
 nanocode-http.workspace = true

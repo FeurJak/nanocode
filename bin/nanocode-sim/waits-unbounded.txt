@@ -1,5 +1,4 @@
 crates/integrations/store-sql/src/postgres/connection.rs 2
 crates/integrations/store-sql/src/postgres/log_wake.rs 1
-crates/integrations/store-sql/src/postgres/pool.rs 2
 crates/integrations/store-sql/src/postgres/sql.rs 2
 crates/integrations/store-sql/src/postgres/stream.rs 3

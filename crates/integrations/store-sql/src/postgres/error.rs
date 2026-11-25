@@ -9,6 +9,8 @@ pub enum PgError {
     Configuration(String),
     Database(DatabaseError),
     Broken,
+    Busy,
+    Unanswered,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -24,7 +26,12 @@ impl PgError {
     #[must_use]
     pub fn unavailable(&self) -> bool {
         match self {
-            Self::Io(_) | Self::Tls(_) | Self::Protocol(_) | Self::Broken => true,
+            Self::Io(_)
+            | Self::Tls(_)
+            | Self::Protocol(_)
+            | Self::Broken
+            | Self::Busy
+            | Self::Unanswered => true,
             Self::Database(error) => {
                 error.code.starts_with(CONNECTION_EXCEPTION)
                     || UNAVAILABLE_CODES.contains(&error.code.as_str())
@@ -63,6 +70,12 @@ impl fmt::Display for PgError {
             Self::Database(error) => write!(formatter, "{error}"),
             Self::Broken => formatter
                 .write_str("the Postgres connection was left mid-message by a cancelled operation"),
+            Self::Busy => formatter.write_str(
+                "no Postgres connection was acquired and connected within the pool's acquire deadline",
+            ),
+            Self::Unanswered => formatter.write_str(
+                "Postgres did not answer within the statement deadline; the statement was cancelled and its outcome is unknown",
+            ),
         }
     }
 }

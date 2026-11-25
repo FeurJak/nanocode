@@ -365,6 +365,9 @@ default_table='
 1 canary_holds_forgets_answer canary:8 --scenario holds --mutation forgets_answer
 1 canary_holds_resume_ignores_answer canary:8 --scenario holds --mutation resume_ignores_answer
 1 canary_holds_prunes_unsettled canary:20 --scenario holds --mutation prunes_unsettled
+4 pg_pool pass --scenario pg_pool
+1 pg_pool_twice pass --scenario pg_pool --twice
+1 canary_pg_pool_waits_unbounded canary:8 --scenario pg_pool --mutation waits_unbounded
 8 one_log_facts pass --scenario one_log_facts
 2 one_log_facts_twice pass --scenario one_log_facts --twice
 1 canary_one_log_facts_fold_reads_unlogged canary:8 --scenario one_log_facts --mutation fold_reads_unlogged

@@ -4,6 +4,7 @@ use std::ops::Range;
 
 pub(super) const PROTOCOL_VERSION: i32 = 196_608;
 pub(super) const SSL_REQUEST: i32 = 80_877_103;
+const CANCEL_REQUEST: i32 = 80_877_102;
 pub(super) const TEXT_OID: u32 = 25;
 const MESSAGE_BYTES_MAX: usize = 0x3fff_ffff;
 const LENGTH_BYTES: usize = 4;
@@ -84,6 +85,14 @@ fn length(bytes: usize) -> Result<i32, PgError> {
 pub(super) fn ssl_request(out: &mut Vec<u8>) {
     frame(out, None, |out| {
         out.extend_from_slice(&SSL_REQUEST.to_be_bytes())
+    });
+}
+
+pub(super) fn cancel_request(out: &mut Vec<u8>, process_id: u32, secret: &[u8]) {
+    frame(out, None, |out| {
+        out.extend_from_slice(&CANCEL_REQUEST.to_be_bytes());
+        out.extend_from_slice(&process_id.to_be_bytes());
+        out.extend_from_slice(secret);
     });
 }
 

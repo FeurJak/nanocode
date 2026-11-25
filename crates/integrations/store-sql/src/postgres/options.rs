@@ -1,9 +1,16 @@
 use crate::postgres::PgError;
-use std::path::PathBuf;
+use nanocode_durability_core::SqlAccess;
+use std::{path::PathBuf, time::Duration};
 
 const DEFAULT_PORT: u16 = 5432;
 const DEFAULT_HOST: &str = "localhost";
 const SCHEMES: [&str; 2] = ["postgres://", "postgresql://"];
+const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
+const SERVING_STATEMENT_TIMEOUT: Duration = Duration::from_secs(30);
+const SERVING_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+const SCHEMA_STATEMENT_TIMEOUT: Duration = Duration::from_secs(600);
+const SCHEMA_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+const INDEX_STATEMENT_TIMEOUT: Duration = Duration::from_secs(3600);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TlsMode {
@@ -30,6 +37,91 @@ pub struct PgOptions {
     pub tls: TlsMode,
     pub root_certificate: Option<PathBuf>,
     pub application_name: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PgBounds {
+    pub statement: Duration,
+    pub lock: Duration,
+    pub idle_in_transaction: Duration,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PgLimits {
+    pub acquire: Duration,
+    pub read: PgBounds,
+    pub write: PgBounds,
+    pub schema: PgBounds,
+    pub autocommit: PgBounds,
+}
+
+impl Default for PgLimits {
+    fn default() -> Self {
+        let serving = PgBounds {
+            statement: SERVING_STATEMENT_TIMEOUT,
+            lock: SERVING_LOCK_TIMEOUT,
+            idle_in_transaction: SERVING_STATEMENT_TIMEOUT,
+        };
+        Self {
+            acquire: ACQUIRE_TIMEOUT,
+            read: serving,
+            write: serving,
+            schema: PgBounds {
+                statement: SCHEMA_STATEMENT_TIMEOUT,
+                lock: SCHEMA_LOCK_TIMEOUT,
+                idle_in_transaction: SERVING_STATEMENT_TIMEOUT,
+            },
+            autocommit: PgBounds {
+                statement: INDEX_STATEMENT_TIMEOUT,
+                lock: SCHEMA_LOCK_TIMEOUT,
+                idle_in_transaction: SERVING_STATEMENT_TIMEOUT,
+            },
+        }
+    }
+}
+
+impl PgLimits {
+    #[must_use]
+    pub const fn bounds(&self, access: SqlAccess) -> PgBounds {
+        match access {
+            SqlAccess::Read => self.read,
+            SqlAccess::Write => self.write,
+            SqlAccess::Schema => self.schema,
+            SqlAccess::Autocommit => self.autocommit,
+        }
+    }
+
+    pub(super) fn assert_bounded(&self) {
+        assert!(
+            self.acquire.as_millis() > 0,
+            "a pool acquire deadline is at least a millisecond"
+        );
+        for bounds in [self.read, self.write, self.schema, self.autocommit] {
+            bounds.assert_bounded();
+        }
+    }
+}
+
+impl PgBounds {
+    fn assert_bounded(self) {
+        assert!(
+            self.statement.as_millis() > 0,
+            "a statement_timeout under a millisecond turns the bound off"
+        );
+        assert!(
+            self.lock.as_millis() > 0,
+            "a lock_timeout under a millisecond turns the bound off"
+        );
+        assert!(
+            self.idle_in_transaction.as_millis() > 0,
+            "an idle_in_transaction_session_timeout under a millisecond turns the bound off"
+        );
+    }
+
+    pub(super) fn settings(self) -> [String; 3] {
+        [self.statement, self.lock, self.idle_in_transaction]
+            .map(|bound| bound.as_millis().to_string())
+    }
 }
 
 impl PgOptions {

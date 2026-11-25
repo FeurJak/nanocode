@@ -165,7 +165,11 @@ fn answered(
 }
 
 fn lock_timed_out(error: &StoreError) -> bool {
-    matches!(error, StoreError::Backend(message) if message.contains(LOCK_NOT_AVAILABLE))
+    match error {
+        StoreError::Busy => true,
+        StoreError::Backend(message) => message.contains(LOCK_NOT_AVAILABLE),
+        _ => false,
+    }
 }
 
 async fn schema_batch<H: Sql + ?Sized>(

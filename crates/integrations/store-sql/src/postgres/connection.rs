@@ -1,5 +1,5 @@
 use crate::postgres::{
-    DatabaseError, PgError, PgOptions,
+    DatabaseError, PgBounds, PgError, PgOptions,
     scram::{self, Scram},
     stream::Stream,
     wire::{self, Body, Inbox, tag},
@@ -10,6 +10,7 @@ use rustls::ClientConfig;
 use std::{
     collections::{HashMap, VecDeque},
     fmt::Write as _,
+    time::Duration,
 };
 
 const STATEMENTS_CACHED_MAX: usize = 100;
@@ -25,6 +26,8 @@ const BEGIN: &str = "BEGIN";
 const UNSYNCED: &str = "SET LOCAL synchronous_commit = off";
 const COMMIT: &str = "COMMIT";
 const ROLLBACK: &str = "ROLLBACK";
+const BOUND_LOCAL: &str = "SELECT set_config('statement_timeout', $1, true), set_config('lock_timeout', $2, true), set_config('idle_in_transaction_session_timeout', $3, true)";
+pub(super) const BOUND_SESSION: &str = "SELECT set_config('statement_timeout', $1, false), set_config('lock_timeout', $2, false), set_config('idle_in_transaction_session_timeout', $3, false)";
 const SESSION: [(&str, &str); 4] = [
     ("DateStyle", "ISO, MDY"),
     ("client_encoding", "UTF8"),
@@ -52,6 +55,12 @@ pub struct Notification {
     pub payload: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PgCancel {
+    process_id: u32,
+    secret: Vec<u8>,
+}
+
 type StatementKey = (&'static str, usize);
 
 pub struct PgConnection {
@@ -62,6 +71,7 @@ pub struct PgConnection {
     name: String,
     notifications: VecDeque<Notification>,
     process_id: u32,
+    secret: Vec<u8>,
     phase: Phase,
 }
 
@@ -89,6 +99,7 @@ impl PgConnection {
             name: String::new(),
             notifications: VecDeque::new(),
             process_id: 0,
+            secret: Vec::new(),
             phase: Phase::Busy,
         };
         connection.start(options, reuse).await?;
@@ -99,6 +110,14 @@ impl PgConnection {
     #[must_use]
     pub const fn process_id(&self) -> u32 {
         self.process_id
+    }
+
+    #[must_use]
+    pub fn cancel_key(&self) -> PgCancel {
+        PgCancel {
+            process_id: self.process_id,
+            secret: self.secret.clone(),
+        }
     }
 
     #[must_use]
@@ -123,7 +142,10 @@ impl PgConnection {
             let (code, range) = self.receive().await?;
             let mut body = self.inbox.body(range);
             match code {
-                tag::BACKEND_KEY => self.process_id = body.i32()?.cast_unsigned(),
+                tag::BACKEND_KEY => {
+                    self.process_id = body.i32()?.cast_unsigned();
+                    self.secret = body.rest().to_vec();
+                }
                 tag::PARAMETER_STATUS | tag::NOTICE => {}
                 tag::ERROR => return Err(PgError::Database(body.error()?)),
                 tag::READY => return Ok(()),
@@ -240,11 +262,36 @@ impl PgConnection {
         settle: Settle,
         statements: &[SqlStatement<'_>],
     ) -> Result<Vec<Vec<SqlRow>>, PgError> {
-        let begin: &[&'static str] = match settle {
-            Settle::Durable => &[BEGIN],
-            Settle::Ordered => &[BEGIN, UNSYNCED],
-        };
-        let answer = self.pipeline(begin, statements, &[COMMIT]).await?;
+        self.settled(settle, None, statements).await
+    }
+
+    pub async fn bounded(
+        &mut self,
+        settle: Settle,
+        bounds: PgBounds,
+        statements: &[SqlStatement<'_>],
+    ) -> Result<Vec<Vec<SqlRow>>, PgError> {
+        self.settled(settle, Some(bounds), statements).await
+    }
+
+    async fn settled(
+        &mut self,
+        settle: Settle,
+        bounds: Option<PgBounds>,
+        statements: &[SqlStatement<'_>],
+    ) -> Result<Vec<Vec<SqlRow>>, PgError> {
+        let settings = bounds.map(PgBounds::settings);
+        let mut begin = vec![bare(BEGIN)];
+        if matches!(settle, Settle::Ordered) {
+            begin.push(bare(UNSYNCED));
+        }
+        if let Some(settings) = &settings {
+            begin.push(SqlStatement {
+                sql: BOUND_LOCAL,
+                params: settings.iter().map(String::as_str).collect(),
+            });
+        }
+        let answer = self.pipeline(&begin, statements, &[COMMIT]).await?;
         if let Some(error) = answer.error {
             if answer.status != IDLE {
                 self.simple(ROLLBACK).await?;
@@ -273,7 +320,7 @@ impl PgConnection {
 
     async fn pipeline(
         &mut self,
-        before: &[&'static str],
+        before: &[SqlStatement<'_>],
         statements: &[SqlStatement<'_>],
         after: &[&'static str],
     ) -> Result<Answer, PgError> {
@@ -284,7 +331,7 @@ impl PgConnection {
         let bare: &[&str] = &[];
         let sent = before
             .iter()
-            .map(|&sql| (sql, bare))
+            .map(|statement| (statement.sql, statement.params.as_slice()))
             .chain(
                 statements
                     .iter()
@@ -502,6 +549,43 @@ impl PgConnection {
                 return Ok((code, range));
             }
         }
+    }
+}
+
+impl PgCancel {
+    pub(super) async fn send(
+        &self,
+        options: &PgOptions,
+        reuse: &Reuse,
+        wait: Duration,
+    ) -> Result<(), PgError> {
+        let deadline = nanocode_platform::now() + wait;
+        let busy = |_| PgError::Busy;
+        let mut stream =
+            nanocode_platform::timeout_at(deadline, Stream::connect(options, &reuse.tls))
+                .await
+                .map_err(busy)??;
+        let mut out = Vec::new();
+        wire::cancel_request(&mut out, self.process_id, &self.secret);
+        nanocode_platform::timeout_at(deadline, stream.write_all(&out))
+            .await
+            .map_err(busy)??;
+        let mut closed = Vec::with_capacity(1);
+        while nanocode_platform::timeout_at(deadline, stream.read_buf(&mut closed))
+            .await
+            .map_err(busy)??
+            > 0
+        {
+            closed.clear();
+        }
+        Ok(())
+    }
+}
+
+const fn bare(sql: &'static str) -> SqlStatement<'static> {
+    SqlStatement {
+        sql,
+        params: Vec::new(),
     }
 }
 

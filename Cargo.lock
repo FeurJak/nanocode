@@ -1222,6 +1222,7 @@ dependencies = [
  "nanocode-repo-cache",
  "nanocode-sandbox",
  "nanocode-shell",
+ "nanocode-store-sql",
  "nanocode-subagents",
  "nanocode-sync",
  "nanocode-sys",
