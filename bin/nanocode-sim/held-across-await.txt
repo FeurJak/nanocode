@@ -7,7 +7,6 @@ crates/backends/claude/src/durability/mod.rs 2
 crates/backends/codex/src/durability/facts.rs 2
 crates/core/sync/src/once_cell.rs 2
 crates/core/workspace-fs/src/fs.rs 12
-crates/integrations/mpp/src/session.rs 1
 crates/runtime/subagents/src/runtime.rs 5
 crates/runtime/subagents/src/runtime/lifecycle.rs 1
 crates/runtime/subagents/src/runtime/restore.rs 2

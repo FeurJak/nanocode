@@ -1,4 +1,10 @@
-use std::{cell::Cell, ops::Range, process::ExitCode, sync::Arc};
+use std::{
+    cell::{Cell, RefCell},
+    ops::Range,
+    process::ExitCode,
+    sync::Arc,
+    time::Duration,
+};
 
 use nanocode_bytes::Bytes;
 use nanocode_http::{
@@ -11,6 +17,8 @@ use nanocode_mpp::{
     flow::{Exchange, FlowError, Policy, send_with_exchange},
     protocol::{Challenge, Credential, Receipt},
     provider::{ManagementTransport, PaymentContext, PaymentEventFuture, PaymentProvider},
+    sim::{Mutation as StoreMutation, mutate, open_channel, save_server_spent, server_spent},
+    store::ChannelStore,
 };
 use nanocode_sync::Atom;
 use nanocode_sys::base64::URL_SAFE_NO_PAD;
@@ -48,6 +56,9 @@ const TOOK_STATUSES: [u16; 2] = [200, 201];
 const REFUSED_STATUSES: [u16; 3] = [400, 403, 409];
 const SERVER_STATUSES: [u16; 2] = [500, 503];
 const PAYMENT_REQUIRED: u16 = 402;
+const SPENT_SAVERS_MAX: u64 = 6;
+const SPENT_STEP_MAX: u64 = 100;
+const SPENT_DELAY_US_MAX: u64 = 1000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MppMutation {
@@ -62,10 +73,11 @@ pub enum MppMutation {
     SettlesStale,
     StatusRewritten,
     SupportsAny,
+    SpentSaveRegresses,
 }
 
 impl MppMutation {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::None,
         Self::DropAbandon,
         Self::ReceiptOnRefusal,
@@ -77,6 +89,7 @@ impl MppMutation {
         Self::SettlesStale,
         Self::StatusRewritten,
         Self::SupportsAny,
+        Self::SpentSaveRegresses,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -98,6 +111,7 @@ impl MppMutation {
             Self::SettlesStale => "settles_stale",
             Self::StatusRewritten => "status_rewritten",
             Self::SupportsAny => "supports_any",
+            Self::SpentSaveRegresses => "spent_save_regresses",
         }
     }
 
@@ -752,7 +766,81 @@ pub struct MppOutcome {
     pub shape: String,
 }
 
+fn spent_saves(seed: u64, clock: &Arc<Clock>) -> Result<(), String> {
+    let mut rng = Rng::derive(seed, "server spent");
+    let savers: Vec<(u64, u64, u64)> = (0..rng.range(2, SPENT_SAVERS_MAX))
+        .map(|_| {
+            (
+                rng.below(SPENT_DELAY_US_MAX),
+                rng.range(1, SPENT_STEP_MAX),
+                rng.below(SPENT_DELAY_US_MAX),
+            )
+        })
+        .collect();
+    let store = ChannelStore::default();
+    let channel = [u8::try_from(seed % 256).expect("below 256"); 32];
+    let cumulative = u128::from(SPENT_STEP_MAX * SPENT_SAVERS_MAX);
+    let key = nanocode_sync::block_on(open_channel(&store, channel, cumulative))
+        .map_err(|error| format!("opening the channel failed: {error}"))?;
+    let ledger = Cell::new(0_u128);
+    let seen = Cell::new(0_u128);
+    let wrong = RefCell::new(None);
+    let tasks: Vec<Task<'_>> = savers
+        .iter()
+        .map(|&(before, step, after)| {
+            let (store, key, ledger, seen, wrong) = (&store, &key, &ledger, &seen, &wrong);
+            Box::pin(async move {
+                clock.sleep(Duration::from_micros(before)).await;
+                let spent = ledger.get() + u128::from(step);
+                ledger.set(spent);
+                clock.sleep(Duration::from_micros(after)).await;
+                let stored = match save_server_spent(store, key, &channel, spent).await {
+                    Ok(_) => server_spent(store, key, &channel).await,
+                    Err(error) => Err(error),
+                };
+                match stored {
+                    Ok(stored) => {
+                        let stored = stored.unwrap_or_default();
+                        if stored < seen.get() {
+                            wrong.replace(Some(format!(
+                                "the persisted server spent went back from {} to {stored}",
+                                seen.get()
+                            )));
+                        }
+                        seen.set(seen.get().max(stored));
+                    }
+                    Err(error) => {
+                        wrong.replace(Some(format!("a server spent save failed: {error}")));
+                    }
+                }
+            }) as Task<'_>
+        })
+        .collect();
+    if let Ended::Stuck =
+        Executor::new(Arc::clone(clock), Rng::derive(seed, "spent scheduler")).run(tasks, None)
+    {
+        return Err("stuck: the server spent savers never finished".to_owned());
+    }
+    if let Some(wrong) = wrong.take() {
+        return Err(wrong);
+    }
+    let stored = nanocode_sync::block_on(server_spent(&store, &key, &channel))
+        .map_err(|error| format!("reading the server spent failed: {error}"))?;
+    if stored != Some(ledger.get()) {
+        return Err(format!(
+            "the persisted server spent is {stored:?} after saves up to {}",
+            ledger.get()
+        ));
+    }
+    Ok(())
+}
+
 fn simulate(seed: u64, mutation: MppMutation) -> MppOutcome {
+    mutate(if mutation == MppMutation::SpentSaveRegresses {
+        StoreMutation::SpentSaveRegresses
+    } else {
+        StoreMutation::None
+    });
     let script = Script::of(seed);
     let shape = script.describe();
     let ledger = Arc::new(Atom::new(Vec::new()));
@@ -812,7 +900,9 @@ fn simulate(seed: u64, mutation: MppMutation) -> MppOutcome {
         (_, None) => Err("the payment flow never finished".to_owned()),
     };
     let entries = ledger.get().as_ref().clone();
-    let wrong = judge(&script, &exchange.sent, &entries, &result, mutation).err();
+    let wrong = judge(&script, &exchange.sent, &entries, &result, mutation)
+        .and_then(|()| spent_saves(seed, &clock))
+        .err();
     let count = |wanted: Settled| {
         u64::try_from(
             entries

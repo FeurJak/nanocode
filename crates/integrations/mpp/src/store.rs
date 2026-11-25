@@ -13,6 +13,7 @@ use super::accounts;
 use super::error::Fault;
 use super::session::channel::{Hash, parse_hash};
 use super::session::wire::{ChannelDescriptor, SettlementRoute};
+use super::sim::{Mutation, mutated};
 
 mod sqlite;
 
@@ -137,6 +138,10 @@ fn merged(
     };
     merged.origin = origin;
     Ok(merged)
+}
+
+fn spent_advances(recorded: Option<u128>, spent: u128) -> bool {
+    mutated(Mutation::SpentSaveRegresses) || recorded.is_none_or(|recorded| recorded <= spent)
 }
 
 pub fn default_channel_database_path() -> Result<PathBuf, Fault> {
@@ -276,14 +281,21 @@ impl MemoryChannelStore {
         })
     }
 
-    fn set_server_spent(&self, key: &str, channel_id: &Hash, spent: u128) {
-        if let Some(cumulative) = self.cumulative(key, channel_id) {
-            self.server_spent.update(|recorded| {
-                recorded
-                    .insert(key.to_owned(), (*channel_id, spent, cumulative))
-                    .map(drop)
-            });
-        }
+    fn set_server_spent(&self, key: &str, channel_id: &Hash, spent: u128) -> bool {
+        let Some(cumulative) = self.cumulative(key, channel_id) else {
+            return false;
+        };
+        self.server_spent.update(|recorded| {
+            let current = recorded
+                .get(key)
+                .filter(|(id, _, _)| id == channel_id)
+                .map(|(_, spent, _)| *spent);
+            if !spent_advances(current, spent) {
+                return false;
+            }
+            recorded.insert(key.to_owned(), (*channel_id, spent, cumulative));
+            true
+        })
     }
 }
 
@@ -589,17 +601,24 @@ impl FileStore {
         key: &str,
         channel_id: &Hash,
         spent: u128,
-    ) -> Result<(), StoreFault> {
+    ) -> Result<bool, StoreFault> {
         let scope_key = self.scoped_key(key);
         let channel_id = hex::encode_prefixed(channel_id);
         self.change(|document| {
-            for row in document.channels.iter_mut().filter(|row| {
+            let Some(row) = document.channels.iter_mut().find(|row| {
                 row.scope_key.as_deref() == Some(scope_key.as_str()) && row.channel_id == channel_id
-            }) {
-                row.server_spent = spent.to_string();
-                row.server_spent_cumulative = Some(row.cumulative_amount.clone());
+            }) else {
+                return Ok(false);
+            };
+            let recorded = row.server_spent.parse::<u128>().map_err(|error| {
+                StoreFault::InvalidEntry(format!("invalid server_spent: {error}"))
+            })?;
+            if !spent_advances(Some(recorded), spent) {
+                return Ok(false);
             }
-            Ok(())
+            row.server_spent = spent.to_string();
+            row.server_spent_cumulative = Some(row.cumulative_amount.clone());
+            Ok(true)
         })
     }
 }
@@ -922,12 +941,9 @@ impl ChannelStore {
         key: &str,
         channel_id: &Hash,
         spent: u128,
-    ) -> Result<(), StoreFault> {
+    ) -> Result<bool, StoreFault> {
         match self {
-            Self::Memory(store) => {
-                store.set_server_spent(key, channel_id, spent);
-                Ok(())
-            }
+            Self::Memory(store) => Ok(store.set_server_spent(key, channel_id, spent)),
             Self::File(store) => {
                 let (key, channel_id) = (key.to_owned(), *channel_id);
                 store

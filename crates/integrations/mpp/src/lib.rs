@@ -17,6 +17,7 @@ pub mod provider;
 pub mod proxy;
 mod rpc;
 pub mod session;
+pub mod sim;
 mod signing;
 pub mod store;
 pub mod tempo_id;

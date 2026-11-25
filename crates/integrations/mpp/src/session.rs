@@ -185,7 +185,6 @@ struct Shared {
     prepaid: Atom<HashMap<String, PrepaidVoucher>>,
     topping_up: Atom<HashSet<String>>,
     spend: Atom<SpendLedger>,
-    server_spent_saves: Arc<Semaphore>,
     uncertain_top_ups: Atom<HashSet<Hash>>,
     origin: Atom<Option<String>>,
 }
@@ -203,7 +202,6 @@ impl Default for Shared {
             prepaid: Atom::default(),
             topping_up: Atom::default(),
             spend: Atom::default(),
-            server_spent_saves: Arc::new(Semaphore::new(1)),
             uncertain_top_ups: Atom::default(),
             origin: Atom::default(),
         }
@@ -2092,9 +2090,6 @@ impl SessionProvider {
     }
 
     async fn save_server_spent(&self, channel_id: &str) {
-        let Ok(_save) = self.shared.server_spent_saves.clone().acquire_owned().await else {
-            return;
-        };
         let (Ok(id), Some(key)) = (parse_hash(channel_id), self.channel_key_of(channel_id)) else {
             return;
         };
