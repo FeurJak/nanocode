@@ -1,10 +1,12 @@
+mod subscription;
+
 use std::io::{IsTerminal, Write};
 use std::sync::Arc;
 use std::time::Duration;
 
 use nanocode::antigravity::{
-    Client, DEFAULT_MODEL, Endpoint, GoogleAuth, GoogleConfig, Probe, Project, Projects,
-    RetryPolicy, Route, Saved, Store, VERTEX_GLOBAL_LOCATION, VERTEX_SERVICE,
+    AuthMethod, Client, DEFAULT_MODEL, Endpoint, GoogleAuth, GoogleConfig, Probe, Project,
+    Projects, RetryPolicy, Route, Saved, Store, VERTEX_GLOBAL_LOCATION, VERTEX_SERVICE,
 };
 use nanocode_http::Method;
 
@@ -13,7 +15,7 @@ use nanocode_tui::transcript::NoticeLevel;
 
 use crate::{
     app::AppEvent,
-    cli::{SetupArgs, SetupCommand},
+    cli::{LoginArgs, SetupArgs, SetupCommand},
     host::Result,
 };
 
@@ -23,6 +25,7 @@ const SETTLED_SUCCESSES: usize = 3;
 const SETTLE_ATTEMPTS: usize = 60;
 const SETTLE_GAP: Duration = Duration::from_secs(5);
 const COUNT_TOKENS_BODY: &str = r#"{"contents":[{"role":"user","parts":[{"text":"ping"}]}]}"#;
+const GENERATE_BODY: &str = r#"{"contents":[{"role":"user","parts":[{"text":"ping"}]}],"generationConfig":{"maxOutputTokens":1}}"#;
 const SIGN_IN_PAGE: &str = "Google Cloud sign-in";
 const API_KEY_HELP: &str = "To use a Gemini API key instead, create one at https://aistudio.google.com/apikey and run GEMINI_API_KEY=... nanocode -m gemini-4-neon (gemini-4-neon needs a paid-tier key: enable billing for the key's project in AI Studio).";
 
@@ -58,22 +61,91 @@ fn lookup(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+pub(crate) fn login_config(mut config: GoogleConfig) -> GoogleConfig {
+    if config.method.is_none() {
+        let key = lookup("GEMINI_API_KEY").or_else(|| lookup("GOOGLE_API_KEY"));
+        config.method = Some(if lookup("AGY_LLM_GATEWAY_URL").is_some() {
+            AuthMethod::Gateway
+        } else if lookup("GOOGLE_GENAI_USE_VERTEXAI").is_some_and(|value| {
+            matches!(value.to_ascii_lowercase().as_str(), "true" | "1" | "yes")
+        }) {
+            if config.project.is_none() && lookup("GOOGLE_CLOUD_PROJECT").is_none() && key.is_some()
+            {
+                AuthMethod::VertexExpress
+            } else {
+                AuthMethod::Vertex
+            }
+        } else if key.is_some() {
+            AuthMethod::ApiKey
+        } else if config.project.is_some()
+            || config.location.is_some()
+            || [
+                "GOOGLE_CLOUD_PROJECT",
+                "GOOGLE_CLOUD_LOCATION",
+                "GOOGLE_APPLICATION_CREDENTIALS",
+                "GOOGLE_OAUTH_ACCESS_TOKEN",
+            ]
+            .iter()
+            .any(|name| lookup(name).is_some())
+        {
+            AuthMethod::Vertex
+        } else {
+            AuthMethod::Antigravity
+        });
+    }
+    config
+}
+
+pub(crate) async fn login(args: LoginArgs) -> Result<()> {
+    let config = login_config(args.google.config());
+    if args.no_browser && config.method != Some(AuthMethod::Antigravity) {
+        return Err(
+            "--no-browser requires subscription login; use nanocode login antigravity --no-browser"
+                .into(),
+        );
+    }
+    if config.method == Some(AuthMethod::Antigravity) {
+        subscription::login(&mut Report::Terminal, !args.no_browser).await?;
+        eprintln!(
+            "Signed in to Antigravity. Run: nanocode -m {DEFAULT_MODEL}\nUse --google-auth antigravity to override configured Google API keys, gateways or Vertex settings."
+        );
+    } else {
+        google(&config, DEFAULT_MODEL, &mut Report::Terminal).await?;
+        eprintln!("Done. Run: nanocode -m {DEFAULT_MODEL} --google-auth vertex");
+    }
+    Ok(())
+}
+
 pub async fn setup(args: SetupArgs) -> Result<()> {
     match args.command {
         SetupCommand::Google {
             google,
             model,
             check,
+            no_browser,
         } => {
             let config = google.config();
             let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_owned());
+            if no_browser && config.method != Some(AuthMethod::Antigravity) {
+                return Err("--no-browser requires --google-auth antigravity".into());
+            }
             match check {
                 true => self::check(&config, &model).await,
                 false => {
-                    self::google(&config, &model, &mut Report::Terminal).await?;
-                    eprintln!(
-                        "Done. Run: nanocode -m {model}\nOverride with --google-project or GOOGLE_CLOUD_PROJECT; check with nanocode setup google --check."
-                    );
+                    if no_browser {
+                        subscription::login(&mut Report::Terminal, false).await?;
+                    } else {
+                        self::google(&config, &model, &mut Report::Terminal).await?;
+                    }
+                    if config.method == Some(AuthMethod::Antigravity) {
+                        eprintln!(
+                            "Done. Run: nanocode -m {model}\nUse --google-auth antigravity to override configured Google API keys, gateways or Vertex settings.\nCheck with nanocode setup google --google-auth antigravity --check. Subscription access is separate from Vertex AI billing."
+                        );
+                    } else {
+                        eprintln!(
+                            "Done. Run: nanocode -m {model}\nOverride with --google-project or GOOGLE_CLOUD_PROJECT; check with nanocode setup google --check."
+                        );
+                    }
                     Ok(())
                 }
             }
@@ -169,7 +241,7 @@ fn piped_adc_login(
             } else if line.starts_with("https://") {
                 let text = match console {
                     true => format!(
-                        "{}, then paste the verification code it shows with /login google CODE",
+                        "{}, then paste the verification code it shows with /login vertex CODE",
                         crate::login::browse(SIGN_IN_PAGE, line)
                     ),
                     false => format!(
@@ -206,7 +278,7 @@ fn piped_adc_login(
     match status.success() {
         true => Ok(()),
         false => Err(format!(
-            "{GCLOUD} {} failed ({status}){}{}; to sign in outside nanocode, run it in a terminal, then /login google again",
+            "{GCLOUD} {} failed ({status}){}{}; to sign in outside nanocode, run it in a terminal, then /login vertex again",
             ADC_LOGIN.join(" "),
             match errors.is_empty() {
                 true => "",
@@ -301,6 +373,17 @@ pub(crate) async fn google(
     model: &str,
     report: &mut Report,
 ) -> Result<String> {
+    if config.method == Some(AuthMethod::Antigravity) {
+        return subscription::login(report, true).await;
+    }
+    if let Some(method @ (AuthMethod::ApiKey | AuthMethod::VertexExpress | AuthMethod::Gateway)) =
+        config.method
+    {
+        return Err(format!(
+            "Google {} is explicitly configured and does not use browser sign-in. Keep that configuration to use it, or explicitly run nanocode login antigravity (or /login antigravity) for subscription access; no billing route was changed.",
+            method.name()
+        ).into());
+    }
     let gcloud = on_path(GCLOUD);
     match &gcloud {
         Some(path) => report.say(format!("gcloud: {}", path.display())),
@@ -371,7 +454,7 @@ pub(crate) async fn google(
     }
     if let Report::Notices { .. } = report {
         return Err(format!(
-            "Vertex AI ({VERTEX_SERVICE}) is disabled in {}: enable it with gcloud services enable {VERTEX_SERVICE} --project PROJECT (Vertex AI calls bill to that project), or run nanocode setup google in a terminal to pick one, then /login google again. {API_KEY_HELP}",
+            "Vertex AI ({VERTEX_SERVICE}) is disabled in {}: enable it with gcloud services enable {VERTEX_SERVICE} --project PROJECT (Vertex AI calls bill to that project), or run nanocode setup google in a terminal to pick one, then /login vertex again. {API_KEY_HELP}",
             disabled.join(", ")
         )
         .into());
@@ -429,6 +512,9 @@ async fn check(config: &GoogleConfig, model: &str) -> Result<()> {
             println!("project:  {project}");
             println!("location: {location}");
         }
+        Route::Antigravity { project } => {
+            println!("project:  {project} (subscription-managed, not a Vertex billing project)");
+        }
         Route::GeminiApi | Route::Gateway | Route::VertexExpress => {}
     }
     println!("base:     {}", endpoint.base_url);
@@ -437,11 +523,25 @@ async fn check(config: &GoogleConfig, model: &str) -> Result<()> {
         println!("note:     {notice}");
     }
     let client = Client::new(endpoint, sender).with_retry(RetryPolicy::NONE);
-    let path = client.endpoint().model_path(model, "countTokens");
     let started = nanocode_platform::now();
-    match client.json(Method::POST, &path, COUNT_TOKENS_BODY).await {
+    let (operation, result) = if method == AuthMethod::Antigravity {
+        (
+            "generateContent",
+            client.generate(model, GENERATE_BODY).await.map(|_| ()),
+        )
+    } else {
+        let path = client.endpoint().model_path(model, "countTokens");
+        (
+            "countTokens",
+            client
+                .json(Method::POST, &path, COUNT_TOKENS_BODY)
+                .await
+                .map(|_| ()),
+        )
+    };
+    match result {
         Ok(_) => {
-            println!("probe:    ok (countTokens in {:?})", started.elapsed());
+            println!("probe:    ok ({operation} in {:?})", started.elapsed());
             Ok(())
         }
         Err(error) => {

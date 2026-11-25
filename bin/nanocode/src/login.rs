@@ -26,12 +26,38 @@ impl App {
             "tempo" => {
                 nanocode_platform::spawn_task(tempo(tx));
             }
-            "google" | "gemini" | "vertex" => self.login_google(rest.trim()),
-            _ => self.notice(NoticeLevel::Info, "usage: /login codex|claude|google|tempo"),
+            "antigravity" => self.login_google(
+                rest.trim(),
+                Some(nanocode::antigravity::AuthMethod::Antigravity),
+            ),
+            "vertex" => {
+                self.login_google(rest.trim(), Some(nanocode::antigravity::AuthMethod::Vertex))
+            }
+            "google" | "gemini" => {
+                let (method, callback) = rest
+                    .trim()
+                    .split_once(char::is_whitespace)
+                    .unwrap_or((rest.trim(), ""));
+                match method {
+                    "antigravity" => self.login_google(
+                        callback.trim(),
+                        Some(nanocode::antigravity::AuthMethod::Antigravity),
+                    ),
+                    "vertex" => self.login_google(
+                        callback.trim(),
+                        Some(nanocode::antigravity::AuthMethod::Vertex),
+                    ),
+                    _ => self.login_google(rest.trim(), None),
+                }
+            }
+            _ => self.notice(
+                NoticeLevel::Info,
+                "usage: /login codex|claude|google|antigravity|vertex|tempo",
+            ),
         }
     }
 
-    fn login_google(&mut self, code: &str) {
+    fn login_google(&mut self, code: &str, method: Option<nanocode::antigravity::AuthMethod>) {
         let waiting = self
             .google_codes
             .as_ref()
@@ -39,15 +65,15 @@ impl App {
         match (waiting, code.is_empty()) {
             (Some(codes), false) => {
                 drop(codes.send(code.to_owned()));
-                self.notice(NoticeLevel::Info, "sent the verification code to gcloud");
+                self.notice(NoticeLevel::Info, "sent the authorization response to the pending Google sign-in");
             }
             (Some(_), true) => self.notice(
                 NoticeLevel::Info,
-                "a Google sign-in is already running: finish it in the browser, or paste its verification code with /login google CODE",
+                "a Google sign-in is already running: finish it in the browser, or use the paste instructions shown when it started",
             ),
             (None, false) => self.notice(
                 NoticeLevel::Info,
-                "no Google sign-in is waiting for a code; /login google starts one",
+                "no Google sign-in is waiting for an authorization response; /login google or /login antigravity starts one",
             ),
             (None, true) => {
                 let (codes, waiting) = unbounded_channel();
@@ -62,9 +88,20 @@ impl App {
                     (true, false) => "restart nanocode to use it in a new session".to_owned(),
                     (false, _) => format!("restart with nanocode -m {model} to use it"),
                 };
+                let mut config = self.host.config.google.clone();
+                config.method = method.or(config.method);
+                let config = crate::setup::login_config(config);
+                let subscription = config.method == Some(nanocode::antigravity::AuthMethod::Antigravity);
+                let next = if subscription {
+                    format!("restart with nanocode -m {model} to use it; --google-auth antigravity overrides configured Google API keys, gateways or Vertex settings")
+                } else if method == Some(nanocode::antigravity::AuthMethod::Vertex) {
+                    format!("restart with nanocode -m {model} --google-auth vertex to use it")
+                } else {
+                    next
+                };
                 nanocode_platform::spawn_task(google(
                     self.tx.clone(),
-                    self.host.config.google.clone(),
+                    config,
                     model,
                     next,
                     (codes, waiting),
@@ -185,12 +222,16 @@ async fn google(
     };
     let notice = |level, text| drop(tx.send(AppEvent::Notice(level, text)));
     match crate::setup::google(&config, &model, &mut report).await {
-        Ok(project) => notice(
-            NoticeLevel::Info,
-            format!(
-                "signed in to Google Cloud: Vertex AI project {project} serves {model}; {next}"
-            ),
-        ),
+        Ok(account) => {
+            let text = if config.method == Some(nanocode::antigravity::AuthMethod::Antigravity) {
+                format!("signed in to Antigravity; {next}")
+            } else {
+                format!(
+                    "signed in to Google Cloud: Vertex AI project {account} serves {model}; {next}"
+                )
+            };
+            notice(NoticeLevel::Info, text);
+        }
         Err(error) => notice(NoticeLevel::Error, format!("login google: {error}")),
     }
 }
