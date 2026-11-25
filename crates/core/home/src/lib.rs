@@ -1,5 +1,7 @@
 #[cfg(unix)]
 pub mod account;
+#[cfg(not(target_family = "wasm"))]
+pub mod claim;
 mod fs_util;
 mod instructions;
 #[cfg(not(target_family = "wasm"))]

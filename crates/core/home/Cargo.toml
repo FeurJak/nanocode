@@ -16,9 +16,11 @@ categories = ["development-tools", "filesystem"]
 [dependencies]
 serde.workspace = true
 
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+nanocode-platform.workspace = true
+
 [target.'cfg(unix)'.dependencies]
 nanocode-sys.workspace = true
-nanocode-platform.workspace = true
 nanocode-digest.workspace = true
 
 [lints]

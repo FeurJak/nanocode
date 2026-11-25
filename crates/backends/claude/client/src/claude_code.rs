@@ -4,6 +4,7 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
+use nanocode_home::claim::Claimed;
 use nanocode_http::header::HeaderValue;
 use nanocode_trace::Instrument as _;
 use serde_json::{Value, json};
@@ -20,7 +21,9 @@ const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const REFRESH_MARGIN: Duration = Duration::from_secs(5 * 60);
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 const KEYCHAIN_COMMAND_LIMIT: usize = 4032;
-const LOCK_FILE: &str = ".nanocode-oauth-refresh.lock";
+const CLAIM_FILE: &str = ".nanocode-oauth-refresh";
+const CLAIM_LIFETIME: Duration = REFRESH_TIMEOUT.saturating_mul(2);
+const CLAIM_POLL: Duration = Duration::from_millis(100);
 
 #[derive(Clone)]
 struct ClaudeCodeLogin {
@@ -303,30 +306,6 @@ async fn write_keychain(
     Ok(())
 }
 
-async fn lock(directory: &Path) -> Result<std::fs::File, ClaudeAuthUnavailable> {
-    let path = directory.join(LOCK_FILE);
-    nanocode_platform::spawn_blocking(move || {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)?;
-        file.lock()?;
-        Ok::<_, std::io::Error>(file)
-    })
-    .await
-    .map_err(|error| unavailable(&format!("Claude Code login lock task failed: {error}")))?
-    .map_err(|error| {
-        unavailable(&format!(
-            "cannot lock {} for the Claude Code login refresh: {error}",
-            directory.join(LOCK_FILE).display()
-        ))
-    })
-}
-
 impl ClaudeCodeLogin {
     async fn current(
         &self,
@@ -351,16 +330,50 @@ impl ClaudeCodeLogin {
         directory: &Path,
         rejected: Option<&HeaderValue>,
     ) -> Result<ClaudeAccessToken, ClaudeAuthUnavailable> {
-        let guard = lock(directory).await?;
+        let path = directory.join(CLAIM_FILE);
+        let claim = nanocode_home::claim::Claim::new(path.clone(), CLAIM_LIFETIME);
+        let started = nanocode_platform::now();
+        loop {
+            let taken = claim.take().await.map_err(|error| {
+                unavailable(&format!(
+                    "cannot claim {} for the Claude Code login refresh: {error}",
+                    path.display()
+                ))
+            })?;
+            match taken {
+                Claimed::Won(revision) => {
+                    let refreshed = self.refresh_claimed(rejected).await;
+                    if let Err(error) = claim.release(revision).await {
+                        nanocode_trace::warn!(
+                            target: "nanocode_claude",
+                            %error,
+                            "Claude Code login refresh claim release failed; it lapses at its expiry"
+                        );
+                    }
+                    return refreshed;
+                }
+                Claimed::Busy if nanocode_platform::elapsed(started) >= CLAIM_LIFETIME => {
+                    return Err(unavailable(&format!(
+                        "another process held {} past its lifetime",
+                        path.display()
+                    )));
+                }
+                Claimed::Busy => nanocode_platform::sleep(CLAIM_POLL).await,
+            }
+        }
+    }
+
+    async fn refresh_claimed(
+        &self,
+        rejected: Option<&HeaderValue>,
+    ) -> Result<ClaudeAccessToken, ClaudeAuthUnavailable> {
         let mut login = Login::load().await?;
         if login.usable(rejected)? {
-            drop(guard);
             nanocode_trace::info!(target: "nanocode_claude", "reused a Claude Code login refreshed by another process");
             return login.token();
         }
         self.exchange(&mut login).await?;
         login.save().await?;
-        drop(guard);
         nanocode_trace::info!(target: "nanocode_claude", "refreshed the Claude Code login");
         login.token()
     }
