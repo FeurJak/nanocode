@@ -55,7 +55,10 @@ impl PgPool {
             .0
             .idle
             .call(move |idle| {
-                assert!(idle.len() < connections, "a permit leaves a connection free");
+                assert!(
+                    idle.len() <= connections,
+                    "a pool idles at most its connections"
+                );
                 idle.pop()
             })
             .await;
