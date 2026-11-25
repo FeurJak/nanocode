@@ -317,6 +317,7 @@ pub fn check(root: &Path) -> std::io::Result<Vec<String>> {
     }
     problems.extend(locks(root)?);
     problems.extend(held(root)?);
+    problems.extend(waits(root)?);
     let base = djs_base::make();
     let base_dir = root.join(BASE_DIR);
     for file in djs_base::stale(&base_dir, &base) {
@@ -370,6 +371,16 @@ const AWAIT: &[u8] = b".await";
 const TURN: &str = "Sequencer turn";
 const OWNED: &str = "Owned guard";
 const PERMIT: &str = "Semaphore::new(1) permit";
+const WAITS_ALLOWED: &str = "bin/nanocode-sim/waits-unbounded.txt";
+const WAITS_SCANNED: &[&str] = &["crates/integrations/store-sql/src", "crates/core/turnlog/src/parted"];
+const WAITS: &[&str] = &[
+    "acquire",
+    "acquire_owned",
+    "acquire_many",
+    "acquire_many_owned",
+    "connect",
+    "connect_reusing",
+];
 const ACQUIRES: &[&str] = &["acquire_owned", "try_acquire_owned", "try_acquire", "acquire"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -637,7 +648,12 @@ pub fn guards_held(sources: &[(String, String)]) -> Vec<(String, HeldGuard)> {
     held
 }
 
-pub fn held_problems(sources: &[(String, String)], allowed: &str) -> Vec<String> {
+fn counted(
+    listed: &str,
+    allowed: &str,
+    found: &BTreeMap<String, Vec<String>>,
+    what: &str,
+) -> Vec<String> {
     let mut problems = Vec::new();
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for line in allowed.lines().filter(|line| !line.trim().is_empty()) {
@@ -645,38 +661,87 @@ pub fn held_problems(sources: &[(String, String)], allowed: &str) -> Vec<String>
             Some((path, Ok(count))) if count > 0 => {
                 counts.insert(path.to_owned(), count);
             }
-            _ => problems.push(format!("{HELD_ALLOWED}: '{line}' is not '<path> <count above zero>'")),
+            _ => problems.push(format!("{listed}: '{line}' is not '<path> <count above zero>'")),
         }
     }
-    let held = guards_held(sources);
-    let mut found: BTreeMap<&str, Vec<&HeldGuard>> = BTreeMap::new();
-    for (path, guard) in &held {
-        found.entry(path.as_str()).or_default().push(guard);
-    }
-    for (path, guards) in &found {
-        let allowed = counts.get(*path).copied().unwrap_or(0);
-        if guards.len() > allowed {
-            for guard in guards {
-                problems.push(format!(
-                    "{path}:{}: {} {} lives across the .await on line {}; release it first or move the state to its owner's task ({} of {allowed} allowed in {HELD_ALLOWED})",
-                    guard.line,
-                    guard.kind,
-                    guard.name,
-                    guard.awaited,
-                    guards.len()
-                ));
-            }
+    for (path, found) in found {
+        let allowed = counts.get(path).copied().unwrap_or(0);
+        if found.len() > allowed {
+            problems.extend(found.iter().map(|problem| {
+                format!("{problem} ({} of {allowed} allowed in {listed})", found.len())
+            }));
         }
     }
     for (path, allowed) in &counts {
-        let count = found.get(path.as_str()).map_or(0, Vec::len);
+        let count = found.get(path).map_or(0, Vec::len);
         if count < *allowed {
             problems.push(format!(
-                "{HELD_ALLOWED}: {path} holds {count} guards across an .await where it allows {allowed}; lower it to {count}"
+                "{listed}: {path} has {count} {what} where it allows {allowed}; lower it to {count}"
             ));
         }
     }
     problems
+}
+
+pub fn held_problems(sources: &[(String, String)], allowed: &str) -> Vec<String> {
+    let mut found: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (path, guard) in guards_held(sources) {
+        let problem = format!(
+            "{path}:{}: {} {} lives across the .await on line {}; release it first or move the state to its owner's task",
+            guard.line, guard.kind, guard.name, guard.awaited
+        );
+        found.entry(path).or_default().push(problem);
+    }
+    counted(HELD_ALLOWED, allowed, &found, "guards held across an .await")
+}
+
+pub fn bare_waits(code: &[u8]) -> Vec<(usize, String)> {
+    let mut waits = Vec::new();
+    for (open, _) in code.iter().enumerate().filter(|(_, byte)| **byte == b'(') {
+        let call = word_before(code, open);
+        let before = &code[..open - call.len()];
+        if !WAITS.iter().any(|wait| wait.as_bytes() == call)
+            || !(before.ends_with(b".") || before.ends_with(b"::"))
+        {
+            continue;
+        }
+        let mut depth = 0_usize;
+        let Some(close) = code[open..].iter().position(|byte| {
+            match byte {
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                _ => {}
+            }
+            depth == 0
+        }) else {
+            continue;
+        };
+        let after = code[open + close + 1..].trim_ascii_start();
+        if after.starts_with(AWAIT) && !after.get(AWAIT.len()).copied().is_some_and(word_byte) {
+            waits.push((line_of(code, open), String::from_utf8_lossy(call).into_owned()));
+        }
+    }
+    waits
+}
+
+pub fn wait_problems(sources: &[(String, String)], allowed: &str) -> Vec<String> {
+    let mut found: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (path, text) in sources {
+        for (line, call) in bare_waits(&code_only(text)) {
+            found.entry(path.clone()).or_default().push(format!(
+                "{path}:{line}: {call} is awaited with no deadline; race it against one (nanocode_platform::timeout or a deadline future) and answer Busy"
+            ));
+        }
+    }
+    counted(WAITS_ALLOWED, allowed, &found, "waits with no deadline")
+}
+
+pub fn waits(root: &Path) -> std::io::Result<Vec<String>> {
+    let mut sources = Vec::new();
+    for directory in WAITS_SCANNED {
+        held_sources(root, &root.join(directory), &mut sources)?;
+    }
+    Ok(wait_problems(&sources, &std::fs::read_to_string(root.join(WAITS_ALLOWED))?))
 }
 
 fn held_sources(root: &Path, directory: &Path, found: &mut Vec<(String, String)>) -> std::io::Result<()> {

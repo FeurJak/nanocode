@@ -30,15 +30,18 @@ const SHARED: &[&str] = &[
 ];
 const NAMES: &[&str] = &["turn", "held", "permit", "_turn", "_guard", "mut guard"];
 const STORE_CALL: &str = "self.store.commit(n).await?;";
+const WAITS: RangeInclusive<u64> = 1..=8;
+const BARE_ACQUIRE: &str = "let permit = self.permits.clone().acquire_owned().await.map_err(|_| Busy)?;";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeldAwaitMutation {
     None,
     HeldAcrossAwait,
+    WaitsUnbounded,
 }
 
 impl HeldAwaitMutation {
-    const ALL: [Self; 2] = [Self::None, Self::HeldAcrossAwait];
+    const ALL: [Self; 3] = [Self::None, Self::HeldAcrossAwait, Self::WaitsUnbounded];
 
     pub fn parse(name: &str) -> Option<Self> {
         Self::ALL
@@ -50,6 +53,7 @@ impl HeldAwaitMutation {
         match self {
             Self::None => "none",
             Self::HeldAcrossAwait => "held_across_await",
+            Self::WaitsUnbounded => "waits_unbounded",
         }
     }
 
@@ -69,6 +73,7 @@ pub struct HeldAwaitStats {
     pub functions: u64,
     pub shapes: u64,
     pub held: u64,
+    pub waits: u64,
 }
 
 impl HeldAwaitStats {
@@ -78,6 +83,7 @@ impl HeldAwaitStats {
         self.functions += other.functions;
         self.shapes += other.shapes;
         self.held += other.held;
+        self.waits += other.waits;
     }
 }
 
@@ -110,6 +116,34 @@ fn shape(rng: &mut Rng, body: &mut String) -> u64 {
     };
     body.push_str(&text);
     held
+}
+
+fn wait(rng: &mut Rng) -> (&'static str, u64) {
+    match rng.below(6) {
+        0 => (BARE_ACQUIRE, 1),
+        1 => ("let connection = Connection::connect(&self.options).await?;", 1),
+        2 => ("let permit = timeout(self.acquire_ms, self.permits.clone().acquire_owned()).await.map_err(|_| Busy)?;", 0),
+        3 => ("let connection = timeout(self.connect_ms, Connection::connect_reusing(&self.options, &self.reuse)).await.map_err(|_| Busy)??;", 0),
+        4 => ("let mut acquire = pin!(self.capacity.acquire());", 0),
+        _ => ("// let permit = self.permits.acquire().await;\nlet text = \"self.permits.acquire().await\";", 0),
+    }
+}
+
+fn pool(rng: &mut Rng, mutation: HeldAwaitMutation) -> (String, u64) {
+    let mut source = "impl Pool {\n    pub async fn acquire(&self) -> Result<Lent, Busy> {\n".to_owned();
+    let mut bare = 0;
+    for _ in 0..draw(rng, &WAITS) {
+        let (text, count) = wait(rng);
+        bare += count;
+        for line in text.lines() {
+            let _ = writeln!(source, "        {line}");
+        }
+    }
+    if mutation == HeldAwaitMutation::WaitsUnbounded {
+        let _ = writeln!(source, "        {BARE_ACQUIRE}");
+    }
+    source.push_str("        Ok(Lent::new(permit, connection))\n    }\n}\n");
+    (source, bare)
 }
 
 fn function(rng: &mut Rng, index: u64, stats: &mut HeldAwaitStats) -> (String, u64) {
@@ -165,6 +199,24 @@ fn sources(
     (files, truth)
 }
 
+fn waits(
+    rng: &mut Rng,
+    mutation: HeldAwaitMutation,
+    stats: &mut HeldAwaitStats,
+) -> Option<String> {
+    let path = format!("{CRATE}/pool.rs");
+    let (source, bare) = pool(rng, mutation);
+    let found = u64::try_from(tidy::bare_waits(&tidy::code_only(&source)).len())
+        .expect("a wait count fits a u64");
+    stats.waits += found;
+    if mutation != HeldAwaitMutation::WaitsUnbounded && found != bare {
+        return Some(format!("detector found {found} bare waits in {path}, the pool has {bare}"));
+    }
+    let allowed = if bare > 0 { format!("{path} {bare}\n") } else { String::new() };
+    let problems = tidy::wait_problems(&[(path, source)], &allowed);
+    (!problems.is_empty()).then(|| format!("I6 waits unbounded: {}", problems.join("; ")))
+}
+
 fn run_seed(seed: u64, mutation: HeldAwaitMutation) -> (u64, Option<String>, HeldAwaitStats) {
     let mut rng = Rng::derive(seed, "held_await");
     let mut stats = HeldAwaitStats {
@@ -184,11 +236,13 @@ fn run_seed(seed: u64, mutation: HeldAwaitMutation) -> (u64, Option<String>, Hel
     let digest = files
         .iter()
         .fold(FNV_OFFSET, |hash, (_, text)| fnv(hash, text.as_bytes()));
-    if mutation == HeldAwaitMutation::None && found != truth {
+    if mutation != HeldAwaitMutation::HeldAcrossAwait && found != truth {
         return (digest, Some(format!("detector found {found:?}, the owners hold {truth:?}")), stats);
     }
     let problems = tidy::held_problems(&files, &allowed);
-    let wrong = (!problems.is_empty()).then(|| format!("I3 held across await: {}", problems.join("; ")));
+    let wrong = (!problems.is_empty())
+        .then(|| format!("I3 held across await: {}", problems.join("; ")))
+        .or_else(|| waits(&mut rng, mutation, &mut stats));
     (digest, wrong, stats)
 }
 
