@@ -70,8 +70,8 @@ pub async fn tools(backing: &Backing, root: PathBuf) -> Result<Tools> {
         Backing::Memory => Arc::new(MemStore::new()),
         Backing::Sqlite(path) => {
             let host = Sqlite::open(path, SQLITE_BUSY)?;
-            SqlStore::migrate(&host).await?;
-            Arc::new(SqlStore::open(Arc::new(host)).await?)
+            let migrated = SqlStore::migrate(&host).await?;
+            Arc::new(SqlStore::open(Arc::new(host), &migrated))
         }
     };
     let key = root.to_string_lossy().into_owned();

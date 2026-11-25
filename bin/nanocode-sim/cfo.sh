@@ -208,6 +208,7 @@ default_table='
 8 workspace_sql pass --scenario workspace_sql
 1 canary_workspace_sql_stale_read_skips_reload canary:400 --scenario workspace_sql --mutation stale_read_skips_reload
 1 canary_workspace_sql_sweep_ignores_refs canary:200 --scenario workspace_sql --mutation sweep_ignores_refs
+1 canary_workspace_sql_open_migrates canary:8 --scenario workspace_sql --mutation open_migrates
 1 canary_executor_skip_abort canary --scenario executor --mutation skip_abort
 1 canary_executor_leak_cancelled canary --scenario executor --mutation leak_cancelled
 1 canary_executor_uncounted_polls canary:100 --scenario executor --mutation uncounted_polls

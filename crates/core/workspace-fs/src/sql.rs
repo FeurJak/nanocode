@@ -6,7 +6,7 @@ use crate::{
 };
 use nanocode_bytes::Bytes;
 use nanocode_durability_core::{
-    Migration, Sql, SqlAccess, SqlDialect, SqlRow, SqlStatement, StoreError, StoreFuture,
+    Migrated, Migration, Sql, SqlAccess, SqlDialect, SqlRow, SqlStatement, StoreError, StoreFuture,
     migrate_format,
 };
 use nanocode_sys::base64::STANDARD;
@@ -68,11 +68,6 @@ const MIGRATIONS: [Migration; 3] = [
         statements: [REFS_SQLITE, REFS_POSTGRES],
         adopt: None,
     },
-];
-
-const FORMAT: Dialects = [
-    "SELECT CAST(version AS TEXT) FROM nanocode_formats WHERE component = ?1",
-    "SELECT CAST(version AS TEXT) FROM nanocode_formats WHERE component = $1::text",
 ];
 
 const LOAD: Dialects = [
@@ -362,61 +357,44 @@ fn json(values: Vec<Value>) -> String {
 impl SqlStore {
     pub const FORMAT: u32 = MIGRATIONS.len() as u32;
 
-    pub async fn migrate(host: &dyn Sql) -> Result<(), Failure> {
-        migrate_format(host, COMPONENT, &MIGRATIONS)
+    pub async fn migrate(host: &dyn Sql) -> Result<Migrated, Failure> {
+        Migrated::migrate(host, COMPONENT, &MIGRATIONS)
             .await
             .map_err(backend)
     }
 
-    pub async fn open(host: Arc<dyn Sql>) -> Result<Self, Failure> {
-        let dialect = host.dialect();
-        let statements = [SqlStatement {
-            sql: dialect.pick(&FORMAT),
-            params: vec![COMPONENT],
-        }];
-        let results = host
-            .run(SqlAccess::Read, "workspace_format", &statements)
+    pub async fn check(host: &dyn Sql) -> Result<Migrated, Failure> {
+        Migrated::check(host, COMPONENT, &MIGRATIONS)
             .await
-            .map_err(backend)?;
-        let stored: u64 = match results.first().and_then(|rows| rows.first()) {
-            Some(row) => number(row, 0, "")?,
-            None => 0,
-        };
-        let known = Self::FORMAT;
-        if stored > u64::from(known) {
-            return Err(backend(StoreError::UnsupportedFormat {
-                component: COMPONENT,
-                stored,
-                known,
-            }));
-        }
-        if stored < u64::from(known) {
-            return Err(backend(StoreError::SchemaBehind {
-                component: COMPONENT,
-                stored,
-                known,
-            }));
-        }
-        Ok(Self {
+            .map_err(backend)
+    }
+
+    #[must_use]
+    pub fn open(host: Arc<dyn Sql>, migrated: &Migrated) -> Self {
+        migrated.assert_opens(COMPONENT, &MIGRATIONS);
+        let dialect = host.dialect();
+        Self {
             host,
             dialect,
             bucket: None,
-        })
+        }
     }
 
-    pub async fn with_objects(
+    #[must_use]
+    pub fn with_objects(
         host: Arc<dyn Sql>,
+        migrated: &Migrated,
         objects: Arc<dyn Objects>,
         sweep: Sweep,
         clock: Clock,
-    ) -> Result<Self, Failure> {
-        let mut store = Self::open(host).await?;
+    ) -> Self {
+        let mut store = Self::open(host, migrated);
         store.bucket = Some(Bucket {
             objects,
             sweep,
             clock,
         });
-        Ok(store)
+        store
     }
 
     async fn put_objects(&self, batch: &Batch) -> Result<(), Failure> {
@@ -596,6 +574,11 @@ impl SqlStore {
     }
 
     async fn load_manifest(&self, workspace: &str) -> Result<Manifest, Failure> {
+        if mutated(Mutation::SqlOpenMigrates) {
+            migrate_format(&*self.host, COMPONENT, &MIGRATIONS)
+                .await
+                .map_err(backend)?;
+        }
         let statements = [SqlStatement {
             sql: self.pick(&LOAD),
             params: vec![workspace],

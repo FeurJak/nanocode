@@ -16,7 +16,9 @@ use std::{
 };
 
 use nanocode_bytes::Bytes;
-use nanocode_durability_core::{Sql, SqlAccess, SqlRow, SqlStatement, StoreError, StoreFuture};
+use nanocode_durability_core::{
+    Migrated, Sql, SqlAccess, SqlRow, SqlStatement, StoreError, StoreFuture,
+};
 use nanocode_shell::{FileSystem, Machine, Remove, Reply, Write};
 use nanocode_sync::Atom;
 use nanocode_sys::base64::STANDARD;
@@ -103,6 +105,8 @@ const GATED: [&str; 6] = [
     "DELETE FROM nanocode_workspace_refs ",
 ];
 
+const DDL: [&str; 4] = ["CREATE ", "ALTER ", "DROP ", "DO "];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkspaceSqlMutation {
     None,
@@ -112,10 +116,11 @@ pub enum WorkspaceSqlMutation {
     SweepSkipsTombstone,
     SweepIgnoresRefs,
     StaleReadSkipsReload,
+    OpenMigrates,
 }
 
 impl WorkspaceSqlMutation {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::None,
         Self::SkipVersionCas,
         Self::ReleaseBeforeCommit,
@@ -123,6 +128,7 @@ impl WorkspaceSqlMutation {
         Self::SweepSkipsTombstone,
         Self::SweepIgnoresRefs,
         Self::StaleReadSkipsReload,
+        Self::OpenMigrates,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -140,6 +146,7 @@ impl WorkspaceSqlMutation {
             Self::SweepSkipsTombstone => "sweep_skips_tombstone",
             Self::SweepIgnoresRefs => "sweep_ignores_refs",
             Self::StaleReadSkipsReload => "stale_read_skips_reload",
+            Self::OpenMigrates => "open_migrates",
         }
     }
 
@@ -161,6 +168,7 @@ impl WorkspaceSqlMutation {
             Self::SweepSkipsTombstone => FsRule::SqlSweepSkipsTombstone,
             Self::SweepIgnoresRefs => FsRule::SqlSweepIgnoresRefs,
             Self::StaleReadSkipsReload => FsRule::StaleReadSkipsReload,
+            Self::OpenMigrates => FsRule::SqlOpenMigrates,
         }
     }
 }
@@ -753,6 +761,7 @@ struct SimSql {
     aborts: AtomicU64,
     crashes_after: AtomicU64,
     now: AtomicU64,
+    ddl: AtomicU64,
 }
 
 impl SimSql {
@@ -778,6 +787,9 @@ impl SimSql {
         for statement in statements {
             if cut == Some(results.len()) {
                 break;
+            }
+            if DDL.iter().any(|head| statement.sql.starts_with(head)) {
+                self.ddl.fetch_add(1, Ordering::Relaxed);
             }
             results.push(scratch.execute(statement, self.now.load(Ordering::Relaxed))?);
         }
@@ -960,6 +972,7 @@ struct World {
     stats: WorkspaceSqlStats,
     objects: Option<Arc<SimObjects>>,
     sweeper: Option<Rc<SqlStore>>,
+    migrated: Option<(Migrated, u64)>,
     cursor: Rc<RefCell<String>>,
     reaped: Rc<Cell<u64>>,
     collected: Rc<RefCell<String>>,
@@ -968,27 +981,24 @@ struct World {
 }
 
 impl World {
-    fn store(&self) -> Result<Result<SqlStore, Failure>, String> {
+    fn store(&self) -> SqlStore {
         let host: Arc<dyn Sql> = self.host.clone();
+        let (migrated, _) = self
+            .migrated
+            .as_ref()
+            .expect("the world migrates before it opens a store");
         match &self.objects {
             Some(objects) => {
                 let clock = objects.clock();
                 let objects: Arc<dyn Objects> = objects.clone();
-                drive(SqlStore::with_objects(host, objects, SWEEP, clock))
+                SqlStore::with_objects(host, migrated, objects, SWEEP, clock)
             }
-            None => drive(SqlStore::open(host)),
+            None => SqlStore::open(host, migrated),
         }
     }
 
-    fn open_sweeper(&mut self) -> Result<(), String> {
-        for _ in 0..OPENS_MAX {
-            if let Ok(store) = self.store()? {
-                self.sweeper = Some(Rc::new(store));
-                return Ok(());
-            }
-            self.stats.failed_opens += 1;
-        }
-        Err(format!("the sweeper failed to open {OPENS_MAX} times"))
+    fn open_sweeper(&mut self) {
+        self.sweeper = Some(Rc::new(self.store()));
     }
 
     fn sweep(&mut self) -> Option<Flying> {
@@ -1063,7 +1073,8 @@ impl World {
 
     fn migrate(&mut self) -> Result<(), String> {
         for _ in 0..OPENS_MAX {
-            if drive(SqlStore::migrate(&*self.host))?.is_ok() {
+            if let Ok(migrated) = drive(SqlStore::migrate(&*self.host))? {
+                self.migrated = Some((migrated, self.host.ddl.load(Ordering::Relaxed)));
                 return Ok(());
             }
             self.stats.failed_opens += 1;
@@ -1071,12 +1082,21 @@ impl World {
         Err(format!("the store failed to migrate {OPENS_MAX} times"))
     }
 
+    fn served_ddl(&self) -> Result<(), String> {
+        let migrated = self.migrated.as_ref().map_or(0, |(_, ddl)| *ddl);
+        let issued = self.host.ddl.load(Ordering::Relaxed);
+        if issued == migrated {
+            return Ok(());
+        }
+        Err(format!(
+            "serving issued {} DDL statements after migrate",
+            issued - migrated
+        ))
+    }
+
     fn open(&mut self, workspace: usize) -> Result<WorkspaceFs, String> {
         for _ in 0..OPENS_MAX {
-            let Ok(inner) = self.store()? else {
-                self.stats.failed_opens += 1;
-                continue;
-            };
+            let inner = self.store();
             let store: Arc<dyn Store> = Arc::new(Recorder {
                 inner,
                 intents: Arc::clone(&self.intents),
@@ -1095,6 +1115,7 @@ impl World {
     }
 
     fn check_commits(&mut self) -> Result<(), String> {
+        self.served_ddl()?;
         let intents = self.intents.set(Vec::new());
         self.pending.extend(intents.iter().cloned());
         let commits = self.host.commits.set(Vec::new());
@@ -1616,6 +1637,7 @@ fn world(seed: u64) -> (World, u64, String) {
         transactions: AtomicU64::new(0),
         aborts: AtomicU64::new(0),
         crashes_after: AtomicU64::new(0),
+        ddl: AtomicU64::new(0),
         now: AtomicU64::new(0),
     });
     let objects = (fs_sim::mutated(FsRule::SqlSweepSkipsTombstone)
@@ -1646,6 +1668,7 @@ fn world(seed: u64) -> (World, u64, String) {
         },
         objects,
         sweeper: None,
+        migrated: None,
         cursor: Rc::new(RefCell::new(String::new())),
         reaped: Rc::new(Cell::new(0)),
         collected: Rc::new(RefCell::new(String::new())),
@@ -1663,7 +1686,7 @@ fn play(world: &mut World, rounds: u64) -> Result<(), String> {
             .map_err(|message| format!("open: {message}"))?;
         world.writers.push((workspace, opened));
     }
-    world.open_sweeper()?;
+    world.open_sweeper();
     world.check_commits()?;
     for round in 0..rounds {
         world
