@@ -808,11 +808,9 @@ impl State {
         }
         if matches!(result, Err(NanocodeError::TurnCancelled)) && self.life.closing() {
             let released = policy.release(operation.clone()).await;
-            if let Some(turn) = self.steering.acquire().await.get_mut(&request.key) {
-                turn.operation = None;
-            }
+            let cleared = self.clear_operation(request.key).await;
             self.persistence_ready.notify_waiters();
-            return released;
+            return released.and(cleared);
         }
         let mut snapshot = self.snapshot(&Conversation::default()).await?;
         snapshot.conversation = std::mem::take(conversation);
@@ -844,11 +842,19 @@ impl State {
         } else {
             self.committed();
         }
-        if let Some(turn) = self.steering.acquire().await.get_mut(&request.key) {
-            turn.operation = None;
-        }
+        let cleared = self.clear_operation(request.key).await;
         self.persistence_ready.notify_waiters();
-        settled
+        settled.and(cleared)
+    }
+
+    async fn clear_operation(&self, key: BackendTurnKey) -> Result<()> {
+        self.steering
+            .call(move |turns| {
+                if let Some(turn) = turns.get_mut(&key) {
+                    turn.operation = None;
+                }
+            })
+            .await
     }
     pub(super) async fn durable_tool(
         &self,

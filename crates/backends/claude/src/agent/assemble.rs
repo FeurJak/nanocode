@@ -602,7 +602,7 @@ pub(super) fn build(mut builder: ClaudeBuilder) -> Result<(Agent, AgentEvents)> 
         persistence_update: Sequencer::new(),
         persistence_ready: Notify::new(),
         paging: Slot::default(),
-        conversation: Owned::new(restored.conversation),
+        conversation: Owner::spawn(restored.conversation)?,
         round_boundary: Atom::new(round_boundary),
         side_view: Atom::default(),
         side_request: Atom::default(),
@@ -634,7 +634,7 @@ pub(super) fn build(mut builder: ClaudeBuilder) -> Result<(Agent, AgentEvents)> 
         cancellations: Atom::default(),
         life: AgentLife::new(),
         accepted_turns: AtomicU64::new(accepted_turns),
-        steering: Owned::default(),
+        steering: Owner::spawn(HashMap::new())?,
         live_nested_starts: Atom::default(),
         code_call_summaries: Atom::default(),
     });
@@ -647,26 +647,20 @@ pub(super) fn build(mut builder: ClaudeBuilder) -> Result<(Agent, AgentEvents)> 
             let Some(state) = state.upgrade() else {
                 return false;
             };
-            let accepted = {
-                let mut turns = state.steering.acquire().await;
-                let Some((_, turn)) = turns
-                    .iter_mut()
-                    .filter(|(_, turn)| turn.accepting)
-                    .min_by_key(|(key, _)| key.0)
-                else {
-                    return false;
-                };
-                match state.accept_steer(turn, None, text.into()).await {
-                    Ok(true) => Ok(state.start_code_preempt().await),
-                    Ok(false) => Ok(Vec::new()),
-                    Err(error) => Err(error),
-                }
-            };
-            let Ok(preempts) = accepted else {
-                return false;
-            };
-            State::finish_code_preempt(preempts);
-            true
+            let owner = Arc::clone(&state);
+            let accepted = state
+                .steering
+                .run(move |turns| {
+                    Box::pin(async move {
+                        let (_, turn) = turns
+                            .iter_mut()
+                            .filter(|(_, turn)| turn.accepting)
+                            .min_by_key(|(key, _)| key.0)?;
+                        Some(owner.steer_turn(turn, None, text.into()).await)
+                    })
+                })
+                .await;
+            matches!(accepted, Ok(Some(Ok(()))))
         })
     });
     let client = state.client.clone();

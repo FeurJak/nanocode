@@ -32,6 +32,7 @@ mod facts;
 mod history;
 mod images;
 mod keep;
+mod owner;
 mod parked;
 mod repair;
 mod request;
@@ -52,10 +53,11 @@ use history::HistoryMessage;
 use nanocode_http::layer::retry;
 use nanocode_platform::Instant;
 use nanocode_platform::sleep;
-use nanocode_sync::{Atom, Owned, Sequencer, Slot};
+use nanocode_sync::{Atom, Sequencer, Slot};
 use nanocode_sync::{Notify, oneshot, watch};
 use nanocode_tool_host::image::{ImageHistory, ImageWindow};
 use nanocode_trace::Instrument as _;
+use owner::Owner;
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
@@ -3549,6 +3551,12 @@ struct PendingSteer {
     durable: bool,
 }
 
+struct Steered {
+    messages: Vec<HistoryMessage>,
+    revision: Option<u64>,
+    through: u32,
+}
+
 struct TurnSteering {
     pending: std::collections::VecDeque<PendingSteer>,
     receipts: HashMap<String, (String, bool)>,
@@ -3693,7 +3701,7 @@ struct State {
     parallel_tools: bool,
 
     parallel_safe_tools: HashSet<String>,
-    conversation: Owned<Conversation>,
+    conversation: Owner<Conversation>,
     developer_notices: Atom<Vec<(String, String)>>,
     persistence_update: Sequencer,
     persistence_ready: Notify,
@@ -3739,7 +3747,7 @@ struct State {
     life: AgentLife,
 
     accepted_turns: AtomicU64,
-    steering: Owned<HashMap<BackendTurnKey, TurnSteering>>,
+    steering: Owner<HashMap<BackendTurnKey, TurnSteering>>,
 
     live_nested_starts: Atom<LiveNestedStarts>,
 
@@ -3965,14 +3973,14 @@ async fn fail_begun(
         let _ = policy.release(id).await;
         return;
     }
-    let checkpoint = {
-        let conversation = state.conversation.acquire().await;
-        state
-            .snapshot(&conversation)
-            .await
-            .ok()
-            .and_then(|snapshot| serde_json::to_value(snapshot).ok())
-    };
+    let shared = state.shared();
+    let checkpoint = state
+        .conversation
+        .run(move |conversation| Box::pin(async move { shared.snapshot(conversation).await }))
+        .await
+        .and_then(std::convert::identity)
+        .ok()
+        .and_then(|snapshot| serde_json::to_value(snapshot).ok());
     let settled = match checkpoint {
         Some(checkpoint) => policy
             .fail(id.clone(), checkpoint, error.to_string())
@@ -4031,24 +4039,33 @@ async fn start_turn(
     );
     let request_id = request.request_id.clone();
     let key = request.key;
-    state.steering.acquire().await.insert(
-        key,
-        TurnSteering {
-            pending: std::collections::VecDeque::new(),
-            receipts: HashMap::new(),
-            operation: request_id.clone(),
-            developer_notice_ids: state
-                .developer_notices
-                .read(|notices| notices.iter().map(|(id, _)| id.clone()).collect()),
-            model_call_index: 1,
-            next_index: 0,
-            revision: request.prompt.instruction_revision(),
-            accepting: true,
-            preempt: watch::Sender::new(0),
-            images: resolution,
-            events: request.events.clone(),
-        },
-    );
+    let steering = TurnSteering {
+        pending: std::collections::VecDeque::new(),
+        receipts: HashMap::new(),
+        operation: request_id.clone(),
+        developer_notice_ids: state
+            .developer_notices
+            .read(|notices| notices.iter().map(|(id, _)| id.clone()).collect()),
+        model_call_index: 1,
+        next_index: 0,
+        revision: request.prompt.instruction_revision(),
+        accepting: true,
+        preempt: watch::Sender::new(0),
+        images: resolution,
+        events: request.events.clone(),
+    };
+    if let Err(error) = state
+        .steering
+        .call(move |turns| {
+            turns.insert(key, steering);
+        })
+        .await
+    {
+        return BackendTurn {
+            request_id,
+            result: Box::pin(async move { Err(error) }),
+        };
+    }
     state.cancellations.update(|cancellations| {
         cancellations.insert(key, cancellation.clone());
     });
@@ -4073,10 +4090,9 @@ async fn start_turn(
             }
             let model_call_index = running
                 .steering
-                .acquire()
+                .call(move |turns| turns.get(&key).map_or(0, |turn| turn.model_call_index))
                 .await
-                .get(&key)
-                .map_or(0, |turn| turn.model_call_index);
+                .unwrap_or(0);
             for cleanup in &running.adapter_cleanup {
                 cleanup().await;
             }
@@ -4087,7 +4103,14 @@ async fn start_turn(
                 .min(u128::from(u64::MAX)) as u64;
             running.emit_run_finished(&events, &result, reasoning_mode, &effort, ns, None);
         }
-        running.steering.acquire().await.remove(&key);
+        drop(
+            running
+                .steering
+                .call(move |turns| {
+                    turns.remove(&key);
+                })
+                .await,
+        );
         running.cancellations.update(|cancellations| {
             cancellations.remove(&key);
         });
@@ -4425,12 +4448,24 @@ impl State {
         )
     }
 
+    fn shared(&self) -> Arc<Self> {
+        self.this
+            .get()
+            .and_then(Weak::upgrade)
+            .expect("an assembled Claude agent state is shared")
+    }
+
     async fn latest_boundary(&self) -> Result<Snapshot> {
-        if let Some(conversation) = self.conversation.try_acquire() {
-            if self.life.stopped() {
-                return Err(NanocodeError::AgentStopped);
-            }
-            return self.snapshot(&conversation).await;
+        let state = self.shared();
+        if let Some(snapshot) = self.conversation.try_run(move |conversation| {
+            Box::pin(async move {
+                if state.life.stopped() {
+                    return Err(NanocodeError::AgentStopped);
+                }
+                state.snapshot(conversation).await
+            })
+        }) {
+            return snapshot.await.and_then(std::convert::identity);
         }
         if self.boundary_stale.load(Ordering::SeqCst) {
             return Err(unsupported(
@@ -5630,33 +5665,74 @@ impl State {
         if request.cancel_on_admission {
             cancel.cancel();
         }
-        let mut conversation = if self.policy.is_none() {
+        let waits = self.policy.is_none();
+        let claim = Arc::new(AtomicBool::new(false));
+        let claimed = Arc::clone(&claim);
+        let state = self.shared();
+        let held = Arc::clone(&cancel);
+        let turn = self.conversation.run(move |conversation| {
+            Box::pin(async move {
+                if claimed.swap(true, Ordering::SeqCst) || (waits && held.is_cancelled()) {
+                    return Err(NanocodeError::TurnCancelled);
+                }
+                state
+                    .run_held(conversation, request, speed, &held, started)
+                    .await
+            })
+        });
+        let mut turn = std::pin::pin!(turn);
+        if waits {
             nanocode_sync::select! {
-                () = cancel.cancelled() => return Err(NanocodeError::TurnCancelled),
-                conversation = self.conversation.acquire() => conversation,
+                () = cancel.cancelled() => {
+                    if !claim.swap(true, Ordering::SeqCst) {
+                        return Err(NanocodeError::TurnCancelled);
+                    }
+                },
+                result = turn.as_mut() => return result.and_then(std::convert::identity),
             }
-        } else {
-            self.conversation.acquire().await
-        };
+        }
+        turn.await.and_then(std::convert::identity)
+    }
+
+    async fn run_held(
+        &self,
+        conversation: &mut Conversation,
+        request: BackendPrompt,
+        speed: Option<crate::Speed>,
+        cancel: &Cancellation,
+        started: Instant,
+    ) -> Result<TurnResult> {
         let events = &request.events;
         let (reasoning_mode, effort) = self.emit_run_started(&request);
         let notices_before = conversation.recovery_notices.len();
 
-        self.publish_round_boundary(&conversation).await;
+        self.publish_round_boundary(conversation).await;
         let body =
             (!matches!(self.lineage.origin, Origin::Subagent)).then(|| self.wire_cache.keep_body());
         let mut spent = Usage::default();
         let execution: AgentFuture<'_, Result<TurnResult>> =
-            Box::pin(self.run_locked(&mut conversation, &request, speed, &cancel, &mut spent));
+            Box::pin(self.run_locked(conversation, &request, speed, cancel, &mut spent));
         let mut result = execution.await;
         let spent = turn_usage(&spent);
         drop(body);
 
-        let mut model_call_index = 0;
-        if let Some(turn) = self.steering.acquire().await.get_mut(&request.key) {
-            turn.accepting = false;
-            model_call_index = turn.model_call_index;
-        }
+        let key = request.key;
+        let model_call_index = match self
+            .steering
+            .call(move |turns| {
+                turns.get_mut(&key).map_or(0, |turn| {
+                    turn.accepting = false;
+                    turn.model_call_index
+                })
+            })
+            .await
+        {
+            Ok(index) => index,
+            Err(error) => {
+                result = Err(error);
+                0
+            }
+        };
 
         for cleanup in &self.adapter_cleanup {
             cleanup().await;
@@ -5667,7 +5743,7 @@ impl State {
             .err()
             .is_some_and(|error| error.execution_policy_disposition().is_none())
         {
-            self.finalize_server_turn(&mut conversation).await;
+            self.finalize_server_turn(conversation).await;
         }
         if let Err(error) = &result
             && error.execution_policy_disposition().is_none()
@@ -5699,7 +5775,7 @@ impl State {
             )
             .await
             {
-                Ok(outcome) => Self::hook_context(&mut conversation, &outcome),
+                Ok(outcome) => Self::hook_context(conversation, &outcome),
                 Err(error) => result = Err(error),
             }
         }
@@ -5712,7 +5788,7 @@ impl State {
                 );
             }
         }
-        if let Err(error) = self.settle(&mut conversation, &request, &result).await {
+        if let Err(error) = self.settle(conversation, &request, &result).await {
             result = Err(error);
         }
         if matches!(result, Err(NanocodeError::TurnCancelled)) && self.life.closing() {
@@ -5732,7 +5808,7 @@ impl State {
             });
         }
 
-        if let Some(snapshot) = self.publish_round_boundary(&conversation).await {
+        if let Some(snapshot) = self.publish_round_boundary(conversation).await {
             result = result.map(|completed| self.retain_boundary(completed, snapshot));
         }
         let ns = nanocode_platform::elapsed(started)
@@ -6077,11 +6153,13 @@ impl State {
 
     async fn hold_turn(&self, key: &BackendTurnKey, cancel: &Cancellation) -> Result<bool> {
         let holds = self.turn_hold.iter().map(|hold| hold()).collect::<Vec<_>>();
-        let waiting = |turns: &HashMap<BackendTurnKey, TurnSteering>| {
-            turns.get(key).is_some_and(|turn| turn.pending.is_empty())
+        let key = *key;
+        let waiting = || {
+            self.steering
+                .call(move |turns| turns.get(&key).is_some_and(|turn| turn.pending.is_empty()))
         };
-        if holds.is_empty() || !waiting(&*self.steering.acquire().await) {
-            return Ok(!waiting(&*self.steering.acquire().await));
+        if holds.is_empty() || !waiting().await? {
+            return Ok(!waiting().await?);
         }
         let left = self.deadline.as_ref().map(crate::deadline::Reminders::left);
         for hold in holds {
@@ -6097,7 +6175,7 @@ impl State {
                 () = expired => {}
             }
         }
-        Ok(!waiting(&*self.steering.acquire().await))
+        Ok(!waiting().await?)
     }
 
     async fn consume_steering(
@@ -6107,11 +6185,44 @@ impl State {
         pending: &mut Vec<HistoryMessage>,
         replaying_boundary: bool,
     ) -> Result<bool> {
-        let mut turns = self.steering.acquire().await;
-        let Some(turn) = turns.get_mut(&request.key) else {
+        let state = self.shared();
+        let key = request.key;
+        let events = request.events.clone();
+        let boundary = cursor.index.saturating_add(cursor.model_step_offset);
+        let steered = self
+            .steering
+            .run(move |turns| {
+                Box::pin(async move {
+                    state
+                        .take_steers(turns.get_mut(&key), &events, boundary, replaying_boundary)
+                        .await
+                })
+            })
+            .await??;
+        let Some(steered) = steered else {
             return Ok(false);
         };
-        let boundary = cursor.index.saturating_add(cursor.model_step_offset);
+        cursor.instruction_revision = steered.revision;
+        cursor.steers = cursor.steers.max(steered.through);
+        pending.extend(steered.messages);
+        Ok(true)
+    }
+
+    async fn take_steers(
+        &self,
+        turn: Option<&mut TurnSteering>,
+        events: &AgentEventPublisher,
+        boundary: u32,
+        replaying_boundary: bool,
+    ) -> Result<Option<Steered>> {
+        let Some(turn) = turn else {
+            return Ok(None);
+        };
+        let mut steered = Steered {
+            messages: Vec::new(),
+            revision: None,
+            through: 0,
+        };
         let mut consumed = false;
         let mut bound_through = 0;
         while turn.pending.front().is_some_and(|steer| {
@@ -6147,21 +6258,36 @@ impl State {
             if let Some(revision) = steer.prompt.instruction_revision() {
                 turn.revision = Some(revision);
             }
-            cursor.instruction_revision = turn.revision;
-            pending.extend(messages.into_iter().map(HistoryMessage::from));
-            cursor.steers = cursor.steers.max(steer.index);
+            steered.revision = turn.revision;
+            steered
+                .messages
+                .extend(messages.into_iter().map(HistoryMessage::from));
+            steered.through = steered.through.max(steer.index);
             let mut data =
                 json!({"steer_index": steer.index, "instruction_bytes": steer.prompt.text_bytes()});
             if let Some(id) = steer.message_id {
                 data["message_id"] = json!(id);
             }
-            self.emit(&request.events, AgentEventKind::RunSteered, data);
+            self.emit(events, AgentEventKind::RunSteered, data);
             consumed = true;
         }
-        if consumed {
-            self.settle_code_preempt().await;
+        if !consumed {
+            return Ok(None);
         }
-        Ok(consumed)
+        self.settle_code_preempt().await;
+        Ok(Some(steered))
+    }
+
+    async fn steer_turn(
+        &self,
+        turn: &mut TurnSteering,
+        id: Option<String>,
+        prompt: Prompt,
+    ) -> Result<()> {
+        if self.accept_steer(turn, id, prompt).await? {
+            Self::finish_code_preempt(self.start_code_preempt().await);
+        }
+        Ok(())
     }
 
     fn invocation(
@@ -6369,17 +6495,16 @@ impl Driver {
             if state.life.stopped() {
                 return Err(NanocodeError::AgentStopped);
             }
-            let preempts = {
-                let mut turns = state.steering.acquire().await;
-                let turn = turns.get_mut(&key).ok_or(NanocodeError::TurnNotSteerable)?;
-                if state.accept_steer(turn, id, prompt).await? {
-                    state.start_code_preempt().await
-                } else {
-                    Vec::new()
-                }
-            };
-            State::finish_code_preempt(preempts);
-            Ok(())
+            let owner = Arc::clone(&state);
+            state
+                .steering
+                .run(move |turns| {
+                    Box::pin(async move {
+                        let turn = turns.get_mut(&key).ok_or(NanocodeError::TurnNotSteerable)?;
+                        owner.steer_turn(turn, id, prompt).await
+                    })
+                })
+                .await?
         })
     }
 }
@@ -6569,28 +6694,35 @@ impl LifecycleBackend for Driver {
     }
     fn withdraw_steer(&self, key: BackendTurnKey, id: String) -> BackendFuture<Result<bool>> {
         let state = self.state.clone();
+        let owner = Arc::clone(&state);
         Box::pin(async move {
-            let mut turns = state.steering.acquire().await;
-            let Some(turn) = turns.get_mut(&key) else {
-                return Ok(false);
-            };
-            let Some(steer) = turn.pending.back().filter(|steer| {
-                steer.message_id.as_deref() == Some(&id) && steer.boundary.is_none()
-            }) else {
-                return Ok(false);
-            };
-            if let (Some(policy), Some(operation)) = (&state.policy, &turn.operation) {
-                policy
-                    .withdraw_steer(operation.clone(), steer.index)
-                    .await?;
-            }
-            turn.pending.pop_back();
-            if let Some(receipt) = turn.receipts.get_mut(&id) {
-                receipt.1 = true;
-            }
+            owner
+                .steering
+                .run(move |turns| {
+                    Box::pin(async move {
+                        let Some(turn) = turns.get_mut(&key) else {
+                            return Ok(false);
+                        };
+                        let Some(steer) = turn.pending.back().filter(|steer| {
+                            steer.message_id.as_deref() == Some(&id) && steer.boundary.is_none()
+                        }) else {
+                            return Ok(false);
+                        };
+                        if let (Some(policy), Some(operation)) = (&state.policy, &turn.operation) {
+                            policy
+                                .withdraw_steer(operation.clone(), steer.index)
+                                .await?;
+                        }
+                        turn.pending.pop_back();
+                        if let Some(receipt) = turn.receipts.get_mut(&id) {
+                            receipt.1 = true;
+                        }
 
-            turn.next_index = turn.next_index.saturating_sub(1);
-            Ok(true)
+                        turn.next_index = turn.next_index.saturating_sub(1);
+                        Ok(true)
+                    })
+                })
+                .await?
         })
     }
     fn cancel(&self, key: BackendTurnKey) -> BackendFuture<Result<()>> {

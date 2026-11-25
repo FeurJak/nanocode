@@ -73,7 +73,7 @@ impl State {
         let one_hour = kept.request.cache_control.as_ref()?.ttl == Some(crate::CacheTtl::OneHour);
         let continues = self.lineage.depth == 0
             || matches!(self.lineage.origin, Origin::Fork | Origin::SideConversation);
-        if !continues && self.conversation.try_acquire().is_some() {
+        if !continues && !self.conversation.busy() {
             return None;
         }
         let allowed = kept

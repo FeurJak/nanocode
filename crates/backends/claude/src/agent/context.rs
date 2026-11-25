@@ -29,12 +29,16 @@ pub(super) fn append_developer_notice<'a>(
             if let Some(policy) = &state.policy {
                 let operation = state
                     .steering
-                    .acquire()
-                    .await
-                    .iter()
-                    .filter_map(|(key, turn)| turn.operation.as_ref().map(|id| (key.0, id.clone())))
-                    .min_by_key(|(key, _)| *key)
-                    .map(|(_, id)| id);
+                    .call(|turns| {
+                        turns
+                            .iter()
+                            .filter_map(|(key, turn)| {
+                                turn.operation.as_ref().map(|id| (key.0, id.clone()))
+                            })
+                            .min_by_key(|(key, _)| *key)
+                            .map(|(_, id)| id)
+                    })
+                    .await?;
                 if let Some(operation) = operation {
                     let notice = snapshot
                         .developer_notices

@@ -28,121 +28,11 @@ pub(super) fn compact(this: &Driver) -> BackendFuture<Result<()>> {
                     }
                     notified.await;
                 }
-                let mut context = state.conversation.acquire().await;
-                let mut operation = None;
-                let mut _compaction_attempt = None;
-                if let Some(policy) = &state.policy {
-                    let (id, admission) = policy
-                        .admit(
-                            durable::candidate_id("compact"),
-                            json!({"provider":"claude","kind":"compact"}),
-                            true,
-                        )
-                        .await?;
-                    match admission {
-                        Admission::Completed { .. } => return Ok(()),
-                        Admission::Failed { error, .. } => {
-                            return Err(NanocodeError::ReplayedExecutionFailed(error));
-                        }
-                        Admission::Cancelled => return Err(NanocodeError::TurnCancelled),
-                        Admission::Execute | Admission::Resume => {
-                            if let Err(error) = policy.begin_attempt(id.clone()).await {
-                                retire_unstarted(policy.as_ref(), id).await;
-                                return Err(error);
-                            }
-                            _compaction_attempt = Some(AttemptGuard::begin(state.clone()));
-                        }
-                    }
-                    operation = Some(id);
-                }
-                let mut journal = Journal::default();
-                let mut cursor = state
-                    .cursor(
-                        &mut context,
-                        operation.as_deref(),
-                        state.speed(),
-                        None,
-                        HashSet::new(),
-                        &mut journal,
-                    )
-                    .await?;
+                let held = Arc::clone(&state);
                 state
-                    .stage_cursor(&mut cursor, &mut context, &mut journal)
-                    .await?;
-                state.flush_journal(&mut journal).await?;
-                let compaction_started = nanocode_platform::now();
-                State::publish(
-                    &state.session_events,
-                    AgentEventKind::ModelCompactionStarted,
-                    &json!({
-                        "after_model_call_index": 0,
-                        "active_context_tokens": context.active_context_tokens,
-                        "auto_compact_token_limit": cursor.threshold,
-                    }),
-                );
-                let result = state
-                    .compact_locked(
-                        &mut context,
-                        &cancellation,
-                        CompactionMode::Manual,
-                        &cursor,
-                        "manual-compact",
-                    )
-                    .await;
-                let (kind, payload) = match &result {
-                    Ok(_) => (
-                        AgentEventKind::ModelCompactionCompleted,
-                        State::compacted_payload(0, compaction_started),
-                    ),
-                    Err(error) => (
-                        AgentEventKind::ModelCompactionFailed,
-                        json!({
-                            "after_model_call_index": 0,
-                            "duration_ns": u64::try_from(nanocode_platform::elapsed(compaction_started).as_nanos()).unwrap_or(u64::MAX),
-                            "error": error.to_string(),
-                        }),
-                    ),
-                };
-                State::publish(&state.session_events, kind, &payload);
-                state.publish_round_boundary(&context).await;
-                if let (Some(policy), Some(id)) = (&state.policy, operation) {
-                    if result
-                        .as_ref()
-                        .err()
-                        .is_some_and(|error| error.execution_policy_disposition().is_some())
-                    {
-                        state.life.stop();
-                    } else {
-                        let checkpoint = serde_json::to_value(state.snapshot(&context).await?)
-                            .map_err(provider_error)?;
-                        let settled = match &result {
-                            Ok(_) => policy.complete(id, checkpoint, Value::Null).await,
-                            Err(NanocodeError::TurnCancelled) => {
-                                policy.cancel(id, checkpoint).await
-                            }
-                            Err(error) => policy.fail(id, checkpoint, error.to_string()).await,
-                        };
-                        if settled.is_err() {
-                            state.life.stop();
-                        }
-                        settled.map_err(|error| {
-                            match error.execution_policy_disposition() {
-                                Some(
-                                    nanocode_agent_core::ExecutionPolicyDisposition::Retry,
-                                ) => durable::recovery_error(error),
-                                _ => error,
-                            }
-                        })?;
-                    }
-                }
-                result
-                    .map(|_| ())
-                    .map_err(|error| match error.execution_policy_disposition() {
-                        Some(nanocode_agent_core::ExecutionPolicyDisposition::Retry) => {
-                            durable::recovery_error(error)
-                        }
-                        _ => error,
-                    })
+                    .conversation
+                    .run(move |context| compact_held(held, context, cancellation))
+                    .await?
             }
             .await;
             cleanup.compaction_cancel.update(|registered| {
@@ -361,57 +251,11 @@ pub(super) fn shutdown(this: &Driver) -> BackendFuture<Result<()>> {
                 .iter()
                 .any(|hook| hook.handles_lifecycle(&end_event))
         {
-            let mut context = state.conversation.acquire().await;
-            if let Some(opened) = Option::clone(&state.lifecycle_opened.get()) {
-                let mut operation = None;
-                let mut deliver = true;
-                if let Some(policy) = &state.policy {
-                    let (id, admission) = policy
-                        .admit(
-                            format!("claude-session-end-{opened}"),
-                            json!({"provider":"claude","kind":"session_end"}),
-                            false,
-                        )
-                        .await?;
-                    deliver = matches!(admission, Admission::Execute | Admission::Resume);
-                    if deliver {
-                        policy.begin_attempt(id.clone()).await?;
-                    }
-                    operation = Some(id);
-                }
-                if deliver {
-                    let invocation = crate::ClaudeLifecycleInvocation {
-                        session_id: state.session_id.clone(),
-                        root_session_id: state.lineage.root_session_id.clone(),
-                        turn_id: operation
-                            .clone()
-                            .unwrap_or_else(|| durable::candidate_id("session-end")),
-                        event_id: format!("{opened}:session-end"),
-                        model: state.model(),
-                        instruction_revision: None,
-                        event: crate::ClaudeLifecycleEvent::SessionEnd {
-                            reason: "other".into(),
-                        },
-                    };
-                    let outcome = crate::hooks::run_lifecycle_hooks(
-                        &state.tool_hooks,
-                        &invocation,
-                        state.policy.as_deref(),
-                    )
-                    .await?;
-                    State::hook_context(&mut context, &outcome);
-                    if let (Some(policy), Some(operation)) = (&state.policy, operation) {
-                        policy
-                            .complete(
-                                operation,
-                                serde_json::to_value(state.snapshot(&context).await?)
-                                    .map_err(provider_error)?,
-                                Value::Null,
-                            )
-                            .await?;
-                    }
-                }
-            }
+            let held = Arc::clone(&state);
+            state
+                .conversation
+                .run(move |context| end_session(held, context))
+                .await??;
         }
         state.release_local().await
     })
@@ -430,43 +274,43 @@ pub(super) fn route(
         if state.life.stopped() {
             return Err(NanocodeError::AgentStopped);
         }
-        let accepted = {
-            let mut turns = state.steering.acquire().await;
-            if let (Some(policy), Some(id)) = (&state.policy, &request_id)
-                && policy
-                    .identified_steer_accepted(
-                        id.clone(),
-                        serde_json::to_string(&prompt).map_err(provider_error)?,
-                    )
-                    .await?
-            {
-                return Ok(BackendPromptRoute::Steered);
-            }
-            let unfinished = match (&state.policy, &request_id) {
-                (Some(policy), Some(id)) => policy.unfinished_operation(id.clone()).await?,
-                _ => false,
-            };
-            if !unfinished
-                && let Some((_, turn)) = turns
-                    .iter_mut()
-                    .filter(|(_, turn)| turn.accepting)
-                    .min_by_key(|(key, _)| key.0)
-            {
-                Some(if state.accept_steer(turn, request_id, prompt).await? {
-                    state.start_code_preempt().await
-                } else {
-                    Vec::new()
+        let owner = Arc::clone(&state);
+        let accepted = state
+            .steering
+            .run(move |turns| {
+                Box::pin(async move {
+                    if let (Some(policy), Some(id)) = (&owner.policy, &request_id)
+                        && policy
+                            .identified_steer_accepted(
+                                id.clone(),
+                                serde_json::to_string(&prompt).map_err(provider_error)?,
+                            )
+                            .await?
+                    {
+                        return Ok::<bool, NanocodeError>(true);
+                    }
+                    let unfinished = match (&owner.policy, &request_id) {
+                        (Some(policy), Some(id)) => policy.unfinished_operation(id.clone()).await?,
+                        _ => false,
+                    };
+                    if !unfinished
+                        && let Some((_, turn)) = turns
+                            .iter_mut()
+                            .filter(|(_, turn)| turn.accepting)
+                            .min_by_key(|(key, _)| key.0)
+                    {
+                        owner.steer_turn(turn, request_id, prompt).await?;
+                        Ok(true)
+                    } else {
+                        Ok(false)
+                    }
                 })
-            } else {
-                None
-            }
-        };
-        match accepted {
-            Some(preempts) => {
-                State::finish_code_preempt(preempts);
-                Ok(BackendPromptRoute::Steered)
-            }
-            None => start.await.map(BackendPromptRoute::Started),
+            })
+            .await??;
+        if accepted {
+            Ok(BackendPromptRoute::Steered)
+        } else {
+            start.await.map(BackendPromptRoute::Started)
         }
     })
 }
@@ -481,9 +325,14 @@ pub(super) fn cancel(this: &Driver, key: BackendTurnKey) -> BackendFuture<Result
                 .ok_or(NanocodeError::TurnNotCancellable)?
                 .cancel();
         }
-        if let Some(turn) = state.steering.acquire().await.get_mut(&key) {
-            turn.accepting = false;
-        }
+        state
+            .steering
+            .call(move |turns| {
+                if let Some(turn) = turns.get_mut(&key) {
+                    turn.accepting = false;
+                }
+            })
+            .await?;
         if state.policy.is_some() {
             loop {
                 let notified = state.idle.notified();
@@ -496,6 +345,181 @@ pub(super) fn cancel(this: &Driver, key: BackendTurnKey) -> BackendFuture<Result
             }
             if state.life.stopped() {
                 return Err(NanocodeError::ExecutionPolicyOwnerStopped);
+            }
+        }
+        Ok(())
+    })
+}
+
+fn compact_held(
+    state: Arc<State>,
+    context: &mut Conversation,
+    cancellation: Arc<Cancellation>,
+) -> AgentFuture<'_, Result<()>> {
+    Box::pin(async move {
+        let mut operation = None;
+        let mut _compaction_attempt = None;
+        if let Some(policy) = &state.policy {
+            let (id, admission) = policy
+                .admit(
+                    durable::candidate_id("compact"),
+                    json!({"provider":"claude","kind":"compact"}),
+                    true,
+                )
+                .await?;
+            match admission {
+                Admission::Completed { .. } => return Ok(()),
+                Admission::Failed { error, .. } => {
+                    return Err(NanocodeError::ReplayedExecutionFailed(error));
+                }
+                Admission::Cancelled => return Err(NanocodeError::TurnCancelled),
+                Admission::Execute | Admission::Resume => {
+                    if let Err(error) = policy.begin_attempt(id.clone()).await {
+                        retire_unstarted(policy.as_ref(), id).await;
+                        return Err(error);
+                    }
+                    _compaction_attempt = Some(AttemptGuard::begin(state.clone()));
+                }
+            }
+            operation = Some(id);
+        }
+        let mut journal = Journal::default();
+        let mut cursor = state
+            .cursor(
+                context,
+                operation.as_deref(),
+                state.speed(),
+                None,
+                HashSet::new(),
+                &mut journal,
+            )
+            .await?;
+        state
+            .stage_cursor(&mut cursor, context, &mut journal)
+            .await?;
+        state.flush_journal(&mut journal).await?;
+        let compaction_started = nanocode_platform::now();
+        State::publish(
+            &state.session_events,
+            AgentEventKind::ModelCompactionStarted,
+            &json!({
+                "after_model_call_index": 0,
+                "active_context_tokens": context.active_context_tokens,
+                "auto_compact_token_limit": cursor.threshold,
+            }),
+        );
+        let result = state
+            .compact_locked(
+                context,
+                &cancellation,
+                CompactionMode::Manual,
+                &cursor,
+                "manual-compact",
+            )
+            .await;
+        let (kind, payload) = match &result {
+            Ok(_) => (
+                AgentEventKind::ModelCompactionCompleted,
+                State::compacted_payload(0, compaction_started),
+            ),
+            Err(error) => (
+                AgentEventKind::ModelCompactionFailed,
+                json!({
+                    "after_model_call_index": 0,
+                    "duration_ns": u64::try_from(nanocode_platform::elapsed(compaction_started).as_nanos()).unwrap_or(u64::MAX),
+                    "error": error.to_string(),
+                }),
+            ),
+        };
+        State::publish(&state.session_events, kind, &payload);
+        state.publish_round_boundary(context).await;
+        if let (Some(policy), Some(id)) = (&state.policy, operation) {
+            if result
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.execution_policy_disposition().is_some())
+            {
+                state.life.stop();
+            } else {
+                let checkpoint =
+                    serde_json::to_value(state.snapshot(context).await?).map_err(provider_error)?;
+                let settled = match &result {
+                    Ok(_) => policy.complete(id, checkpoint, Value::Null).await,
+                    Err(NanocodeError::TurnCancelled) => policy.cancel(id, checkpoint).await,
+                    Err(error) => policy.fail(id, checkpoint, error.to_string()).await,
+                };
+                if settled.is_err() {
+                    state.life.stop();
+                }
+                settled.map_err(|error| match error.execution_policy_disposition() {
+                    Some(nanocode_agent_core::ExecutionPolicyDisposition::Retry) => {
+                        durable::recovery_error(error)
+                    }
+                    _ => error,
+                })?;
+            }
+        }
+        result
+            .map(|_| ())
+            .map_err(|error| match error.execution_policy_disposition() {
+                Some(nanocode_agent_core::ExecutionPolicyDisposition::Retry) => {
+                    durable::recovery_error(error)
+                }
+                _ => error,
+            })
+    })
+}
+
+fn end_session(state: Arc<State>, context: &mut Conversation) -> AgentFuture<'_, Result<()>> {
+    Box::pin(async move {
+        if let Some(opened) = Option::clone(&state.lifecycle_opened.get()) {
+            let mut operation = None;
+            let mut deliver = true;
+            if let Some(policy) = &state.policy {
+                let (id, admission) = policy
+                    .admit(
+                        format!("claude-session-end-{opened}"),
+                        json!({"provider":"claude","kind":"session_end"}),
+                        false,
+                    )
+                    .await?;
+                deliver = matches!(admission, Admission::Execute | Admission::Resume);
+                if deliver {
+                    policy.begin_attempt(id.clone()).await?;
+                }
+                operation = Some(id);
+            }
+            if deliver {
+                let invocation = crate::ClaudeLifecycleInvocation {
+                    session_id: state.session_id.clone(),
+                    root_session_id: state.lineage.root_session_id.clone(),
+                    turn_id: operation
+                        .clone()
+                        .unwrap_or_else(|| durable::candidate_id("session-end")),
+                    event_id: format!("{opened}:session-end"),
+                    model: state.model(),
+                    instruction_revision: None,
+                    event: crate::ClaudeLifecycleEvent::SessionEnd {
+                        reason: "other".into(),
+                    },
+                };
+                let outcome = crate::hooks::run_lifecycle_hooks(
+                    &state.tool_hooks,
+                    &invocation,
+                    state.policy.as_deref(),
+                )
+                .await?;
+                State::hook_context(context, &outcome);
+                if let (Some(policy), Some(operation)) = (&state.policy, operation) {
+                    policy
+                        .complete(
+                            operation,
+                            serde_json::to_value(state.snapshot(context).await?)
+                                .map_err(provider_error)?,
+                            Value::Null,
+                        )
+                        .await?;
+                }
             }
         }
         Ok(())

@@ -177,8 +177,7 @@ impl State {
     async fn side_transcript(&self) -> Result<Vec<HistoryMessage>> {
         let live = self
             .conversation
-            .try_acquire()
-            .is_none()
+            .busy()
             .then(|| Option::clone(&self.side_view.get()));
         if let Some(Some(messages)) = live {
             return Ok(messages.to_vec());

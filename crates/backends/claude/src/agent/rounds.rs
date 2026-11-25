@@ -19,14 +19,16 @@ pub(super) fn run_rounds<'a>(
         }
         state.publish_side_view(None);
         let mut prompt = prompt_messages(&request.prompt)?;
+        let key = request.key;
         let developer_notice_ids = state
             .steering
-            .acquire()
-            .await
-            .get(&request.key)
-            .ok_or(NanocodeError::TurnStopped)?
-            .developer_notice_ids
-            .clone();
+            .call(move |turns| {
+                turns
+                    .get(&key)
+                    .map(|turn| turn.developer_notice_ids.clone())
+            })
+            .await?
+            .ok_or(NanocodeError::TurnStopped)?;
         let mut cursor = Box::pin(state.cursor(
             conversation,
             request.request_id.as_deref(),
@@ -37,43 +39,48 @@ pub(super) fn run_rounds<'a>(
         ))
         .await?;
         if let (Some(policy), Some(operation)) = (&state.policy, &cursor.operation) {
-            let mut turns = state.steering.acquire().await;
-            let turn = turns
-                .get_mut(&request.key)
-                .ok_or(NanocodeError::TurnStopped)?;
-            for steer in policy.retained_steers(operation.clone()).await? {
-                turn.next_index = turn.next_index.max(steer.index);
-                if steer.index <= cursor.steers
-                    || turn
-                        .pending
-                        .iter()
-                        .any(|pending| pending.index == steer.index)
-                {
-                    continue;
-                }
-                let prompt =
-                    serde_json::from_str(&steer.input_json).map_err(durable::recovery_error)?;
-                turn.pending.push_back(PendingSteer {
-                    prompt: crate::prompt::freeze(prompt, turn.images, &state.images).await?,
-                    message_id: steer.message_id,
-                    index: steer.index,
-                    after: steer.accepted_after_model_call_index,
-                    boundary: steer.model_call_index,
-                    durable: true,
-                });
-            }
-            turn::carry_steers(
-                &state,
-                turn,
-                policy.as_ref(),
-                operation,
-                &request.carried_steers,
-            )
-            .await?;
-            turn.pending
-                .make_contiguous()
-                .sort_by_key(|steer| steer.index);
-            turn.model_call_index = cursor.index.max(1);
+            let owner = state.shared();
+            let policy = Arc::clone(policy);
+            let operation = operation.clone();
+            let carried = request.carried_steers.clone();
+            let (steers, index) = (cursor.steers, cursor.index);
+            state
+                .steering
+                .run(move |turns| {
+                    Box::pin(async move {
+                        let turn = turns.get_mut(&key).ok_or(NanocodeError::TurnStopped)?;
+                        for steer in policy.retained_steers(operation.clone()).await? {
+                            turn.next_index = turn.next_index.max(steer.index);
+                            if steer.index <= steers
+                                || turn
+                                    .pending
+                                    .iter()
+                                    .any(|pending| pending.index == steer.index)
+                            {
+                                continue;
+                            }
+                            let prompt = serde_json::from_str(&steer.input_json)
+                                .map_err(durable::recovery_error)?;
+                            turn.pending.push_back(PendingSteer {
+                                prompt: crate::prompt::freeze(prompt, turn.images, &owner.images)
+                                    .await?,
+                                message_id: steer.message_id,
+                                index: steer.index,
+                                after: steer.accepted_after_model_call_index,
+                                boundary: steer.model_call_index,
+                                durable: true,
+                            });
+                        }
+                        turn::carry_steers(&owner, turn, policy.as_ref(), &operation, &carried)
+                            .await?;
+                        turn.pending
+                            .make_contiguous()
+                            .sort_by_key(|steer| steer.index);
+                        turn.model_call_index = index.max(1);
+                        Ok::<(), NanocodeError>(())
+                    })
+                })
+                .await??;
         }
         if cursor.prepared && conversation.lifecycle_started {
             state.lifecycle_opened.set(Some(
@@ -369,17 +376,22 @@ pub(super) fn run_rounds<'a>(
             }
             let discovered = client_discovered_tools(&pending);
             state.discovered.set(discovered.clone());
-            let mut preempt = None;
-            if let Some(turn) = state.steering.acquire().await.get_mut(&request.key) {
-                turn.model_call_index = index.saturating_add(cursor.model_step_offset).max(1);
-                if state.steer_preempts_model && !replaying_boundary {
-                    let mut receiver = turn.preempt.subscribe();
-                    if turn.pending.iter().any(|steer| steer.boundary.is_none()) {
-                        receiver.mark_changed();
-                    }
-                    preempt = Some(receiver);
-                }
-            }
+            let model_call_index = index.saturating_add(cursor.model_step_offset).max(1);
+            let watches = state.steer_preempts_model && !replaying_boundary;
+            let mut preempt = state
+                .steering
+                .call(move |turns| {
+                    let turn = turns.get_mut(&key)?;
+                    turn.model_call_index = model_call_index;
+                    watches.then(|| {
+                        let mut receiver = turn.preempt.subscribe();
+                        if turn.pending.iter().any(|steer| steer.boundary.is_none()) {
+                            receiver.mark_changed();
+                        }
+                        receiver
+                    })
+                })
+                .await?;
             state.publish_side_view(Some(pending.as_slice().into()));
             state.publish_side_request(&cursor.template, cursor.wire_profile.as_ref());
             let step = format!("model-{}", index.saturating_add(cursor.model_step_offset));
@@ -1633,19 +1645,19 @@ pub(super) fn run_rounds<'a>(
             }
 
             state.hold_turn(&request.key, cancel).await?;
-            let more_instructions = {
-                let mut turns = state.steering.acquire().await;
-                if let Some(turn) = turns.get_mut(&request.key) {
-                    if turn.pending.is_empty() {
-                        turn.accepting = false;
-                        false
-                    } else {
-                        true
-                    }
-                } else {
-                    false
-                }
-            };
+            let more_instructions = state
+                .steering
+                .call(move |turns| {
+                    turns.get_mut(&key).is_some_and(|turn| {
+                        if turn.pending.is_empty() {
+                            turn.accepting = false;
+                            false
+                        } else {
+                            true
+                        }
+                    })
+                })
+                .await?;
             if more_instructions {
                 cursor.index = index + 1;
 
