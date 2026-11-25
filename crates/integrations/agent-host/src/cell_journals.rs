@@ -2,7 +2,7 @@ use nanocode_durability::{
     EncodedPayload, OwnedState, OwnerId, Settle, SharedStore, StateCommit, StateStore, StoreRecord,
     StoredState, SummaryUpdate,
 };
-use nanocode_sync::{Atom, Owned};
+use nanocode_sync::{Actor, Atom};
 use nanocode_tool_host::code_mode::{
     CellJournal, CellJournalSink, CellJournalUpdate, JournaledCallState,
 };
@@ -17,7 +17,7 @@ const VERSION: u32 = 2;
 
 pub(crate) struct DurableCellJournals {
     store: SharedStore,
-    sessions: Atom<HashMap<String, Arc<Owned<Session>>>>,
+    sessions: Arc<Atom<HashMap<String, Actor<Session>>>>,
 }
 
 #[derive(Default)]
@@ -76,7 +76,7 @@ impl DurableCellJournals {
     pub(crate) fn new(store: SharedStore) -> Arc<Self> {
         Arc::new(Self {
             store,
-            sessions: Atom::default(),
+            sessions: Arc::default(),
         })
     }
 
@@ -100,22 +100,28 @@ impl DurableCellJournals {
         });
         Ok(catalog)
     }
+}
 
-    fn session(&self, session_id: &str) -> Arc<Owned<Session>> {
-        if let Some(session) = self
-            .sessions
-            .read(|sessions| sessions.get(session_id).cloned())
-        {
-            return session;
-        }
-        self.sessions.update(|sessions| {
-            Arc::clone(
-                sessions
-                    .entry(session_id.to_owned())
-                    .or_insert_with(|| Arc::new(Owned::new(Session::Unread))),
-            )
-        })
+fn session(
+    sessions: &Atom<HashMap<String, Actor<Session>>>,
+    session_id: &str,
+) -> Result<Actor<Session>, String> {
+    let running = |sessions: &HashMap<String, Actor<Session>>| {
+        sessions
+            .get(session_id)
+            .filter(|session| !session.is_stopped())
+            .cloned()
+    };
+    if let Some(session) = sessions.read(running) {
+        return Ok(session);
     }
+    let spawned = Actor::spawn(Session::Unread).map_err(|error| error.to_string())?;
+    Ok(sessions.update(|sessions| {
+        running(sessions).unwrap_or_else(|| {
+            sessions.insert(session_id.to_owned(), spawned.clone());
+            spawned.clone()
+        })
+    }))
 }
 
 fn state_id(session_id: &str) -> String {
@@ -304,7 +310,7 @@ fn blanked(cell_id: u64, cell: Cell) -> Vec<StoreRecord> {
 impl CellJournalSink for DurableCellJournals {
     fn save(&self, mut update: CellJournalUpdate) -> HostFuture<'static, Result<(), String>> {
         let store = self.store.clone();
-        let session = self.session(&update.session_id);
+        let sessions = Arc::clone(&self.sessions);
         let catalog = update
             .header
             .as_mut()
@@ -319,163 +325,128 @@ impl CellJournalSink for DurableCellJournals {
             Settle::Durable
         };
         Box::pin(async move {
-            let mut slot = session.acquire().await;
-            let mut session = writing(&mut slot);
-            let saved = async {
-                let (owned, cells, catalogs, stored) =
-                    owned(&store, &update.session_id, &mut session).await?;
-                let mut records = Vec::new();
-                let (mut keys, catalog) = match catalog {
-                    Some(catalog) => {
-                        if let Some(replaced) = cells.remove(&update.cell_id) {
-                            records.extend(blanked(update.cell_id, replaced));
-                        }
-                        let mut catalog = catalog?;
-                        if catalogs.insert(catalog.key().to_owned()) {
-                            let mut pooled = Vec::new();
-                            catalog.stage(&mut pooled);
-                            store
-                                .pool(&state_id(&update.session_id), pooled)
-                                .await
-                                .map_err(|error| error.to_string())?;
-                        }
-                        (Vec::new(), Some(catalog.key().to_owned()))
+            let session = session(&sessions, &update.session_id)?;
+            let ran = session.run(move |slot| {
+                Box::pin(async move {
+                    let mut session = writing(slot);
+                    let saved = async {
+                        let (owned, cells, catalogs, stored) =
+                            owned(&store, &update.session_id, &mut session).await?;
+                        let mut records = Vec::new();
+                        let (mut keys, catalog) = match catalog {
+                            Some(catalog) => {
+                                if let Some(replaced) = cells.remove(&update.cell_id) {
+                                    records.extend(blanked(update.cell_id, replaced));
+                                }
+                                let mut catalog = catalog?;
+                                if catalogs.insert(catalog.key().to_owned()) {
+                                    let mut pooled = Vec::new();
+                                    catalog.stage(&mut pooled);
+                                    store
+                                        .pool(&state_id(&update.session_id), pooled)
+                                        .await
+                                        .map_err(|error| error.to_string())?;
+                                }
+                                (Vec::new(), Some(catalog.key().to_owned()))
+                            }
+                            None => match cells.remove(&update.cell_id) {
+                                Some(Cell::Chained(keys)) => (keys, None),
+                                Some(Cell::Numbered(_)) | None => {
+                                    return Err(format!(
+                                        "cell {} has no journal to continue",
+                                        update.cell_id
+                                    ));
+                                }
+                            },
+                        };
+                        let (session_id, cell_id) = (update.session_id.clone(), update.cell_id);
+                        let mut link = EncodedPayload::encode(&Link {
+                            previous: keys.last().cloned(),
+                            catalog,
+                            update,
+                        })
+                        .map_err(|error| error.to_string())?;
+                        keys.push(link.key().to_owned());
+                        link.stage(&mut records);
+                        cells.insert(cell_id, Cell::Chained(keys));
+                        replace(
+                            &store,
+                            &session_id,
+                            owned,
+                            cells,
+                            stored.as_deref(),
+                            &records,
+                            settle,
+                        )
+                        .await
                     }
-                    None => match cells.remove(&update.cell_id) {
-                        Some(Cell::Chained(keys)) => (keys, None),
-                        Some(Cell::Numbered(_)) | None => {
-                            return Err(format!(
-                                "cell {} has no journal to continue",
-                                update.cell_id
-                            ));
-                        }
-                    },
-                };
-                let (session_id, cell_id) = (update.session_id.clone(), update.cell_id);
-                let mut link = EncodedPayload::encode(&Link {
-                    previous: keys.last().cloned(),
-                    catalog,
-                    update,
+                    .await;
+                    if saved.is_ok() || keeps_head() {
+                        *slot = session;
+                    }
+                    saved
                 })
-                .map_err(|error| error.to_string())?;
-                keys.push(link.key().to_owned());
-                link.stage(&mut records);
-                cells.insert(cell_id, Cell::Chained(keys));
-                replace(
-                    &store,
-                    &session_id,
-                    owned,
-                    cells,
-                    stored.as_deref(),
-                    &records,
-                    settle,
-                )
-                .await
-            }
-            .await;
-            if saved.is_ok() || keeps_head() {
-                *slot = session;
-            }
-            saved
+            });
+            ran.await.map_err(|stopped| stopped.to_string())?
         })
     }
 
     fn forget(&self, session_id: &str, cell_id: u64) -> HostFuture<'static, ()> {
         let store = self.store.clone();
-        let session = self.session(session_id);
+        let sessions = Arc::clone(&self.sessions);
         let session_id = session_id.to_owned();
         Box::pin(async move {
-            let mut slot = session.acquire().await;
-            let mut session = writing(&mut slot);
-            let forgotten = async {
-                let (owned, cells, _, stored) = owned(&store, &session_id, &mut session).await?;
-                let Some(cell) = cells.remove(&cell_id) else {
-                    return Ok(());
-                };
-                let records = blanked(cell_id, cell);
-                replace(
-                    &store,
-                    &session_id,
-                    owned,
-                    cells,
-                    stored.as_deref(),
-                    &records,
-                    Settle::Ordered,
-                )
-                .await
+            let ran = session(&sessions, &session_id).map(|session| {
+                session.run(move |slot| {
+                    Box::pin(async move {
+                        let mut session = writing(slot);
+                        let forgotten = async {
+                            let (owned, cells, _, stored) =
+                                owned(&store, &session_id, &mut session).await?;
+                            let Some(cell) = cells.remove(&cell_id) else {
+                                return Ok(());
+                            };
+                            let records = blanked(cell_id, cell);
+                            replace(
+                                &store,
+                                &session_id,
+                                owned,
+                                cells,
+                                stored.as_deref(),
+                                &records,
+                                Settle::Ordered,
+                            )
+                            .await
+                        };
+                        let forgotten = forgotten.await;
+                        if forgotten.is_ok() || keeps_head() {
+                            *slot = session;
+                        }
+                        forgotten
+                    })
+                })
+            });
+            let forgotten = match ran {
+                Ok(ran) => ran
+                    .await
+                    .map_err(|stopped| stopped.to_string())
+                    .and_then(|forgotten| forgotten),
+                Err(error) => Err(error),
             };
-            match forgotten.await {
-                Ok(()) => *slot = session,
-                Err(error) => {
-                    if keeps_head() {
-                        *slot = session;
-                    }
-                    nanocode_trace::warn!(cell_id, %error, "a Code Mode cell journal could not be forgotten");
-                }
+            if let Err(error) = forgotten {
+                nanocode_trace::warn!(cell_id, %error, "a Code Mode cell journal could not be forgotten");
             }
         })
     }
 
     fn load(&self, session_id: &str) -> HostFuture<'static, Result<Vec<CellJournal>, String>> {
         let store = self.store.clone();
-        let session = self.session(session_id);
+        let sessions = Arc::clone(&self.sessions);
         let session_id = session_id.to_owned();
         Box::pin(async move {
-            let mut session = session.acquire().await;
-            let (_, cells, _, _) = owned(&store, &session_id, &mut session).await?;
-            let state = state_id(&session_id);
-            let mut journals = Vec::new();
-            for (cell_id, cell) in cells.iter() {
-                let mut updates = Vec::new();
-                match cell {
-                    Cell::Numbered(seqs) => {
-                        let keys = seqs
-                            .iter()
-                            .map(|seq| key(*cell_id, *seq))
-                            .collect::<Vec<_>>();
-                        let values = store
-                            .clone()
-                            .read_records(&state, &keys)
-                            .await
-                            .map_err(|error| error.to_string())?;
-                        for value in values
-                            .into_iter()
-                            .flatten()
-                            .filter(|value| !value.is_empty())
-                        {
-                            updates.push(
-                                serde_json::from_str::<CellJournalUpdate>(&value)
-                                    .map_err(|error| error.to_string())?,
-                            );
-                        }
-                    }
-                    Cell::Chained(keys) => {
-                        let links = keys
-                            .iter()
-                            .map(|key| EncodedPayload::by_key(key))
-                            .collect::<Vec<_>>();
-                        let loaded = EncodedPayload::load_many(&links, &mut store.clone(), &state)
-                            .await
-                            .map_err(|error| error.to_string())?;
-                        for payload in loaded {
-                            let mut link: Link =
-                                payload.decode().map_err(|error| error.to_string())?;
-                            if let (Some(header), Some(catalog)) =
-                                (&mut link.update.header, &link.catalog)
-                            {
-                                header.tools = EncodedPayload::by_key(catalog)
-                                    .load(&mut store.clone(), &state)
-                                    .await
-                                    .and_then(|payload| payload.decode())
-                                    .map_err(|error| error.to_string())?;
-                            }
-                            updates.push(link.update);
-                        }
-                    }
-                }
-                journals.extend(CellJournal::fold(updates));
-            }
-            Ok(journals)
+            let ran = session(&sessions, &session_id)?
+                .run(move |session| Box::pin(load(store, session_id, session)));
+            ran.await.map_err(|stopped| stopped.to_string())?
         })
     }
 
@@ -485,63 +456,141 @@ impl CellJournalSink for DurableCellJournals {
         stored: String,
     ) -> HostFuture<'static, Result<(), String>> {
         let store = self.store.clone();
-        let session = self.session(session_id);
+        let sessions = Arc::clone(&self.sessions);
         let session_id = session_id.to_owned();
         Box::pin(async move {
-            let mut slot = session.acquire().await;
-            let mut session = writing(&mut slot);
-            let written = async {
-                let (owned, cells, _, saved) = owned(&store, &session_id, &mut session).await?;
-                let mut payload = EncodedPayload::from_json(stored.into());
-                if saved.as_deref() == Some(payload.key()) {
-                    return Ok(());
-                }
-                let mut records = Vec::new();
-                if let Some(previous) = saved.clone() {
-                    records.push(StoreRecord {
-                        key: previous,
-                        value: Arc::default(),
-                    });
-                }
-                let key = payload.key().to_owned();
-                payload.stage(&mut records);
-                replace(
-                    &store,
-                    &session_id,
-                    owned,
-                    cells,
-                    Some(&key),
-                    &records,
-                    Settle::Ordered,
-                )
-                .await?;
-                *saved = Some(key);
-                Ok(())
-            }
-            .await;
-            if written.is_ok() {
-                *slot = session;
-            }
-            written
+            let ran = session(&sessions, &session_id)?
+                .run(move |slot| Box::pin(save_stored(store, session_id, stored, slot)));
+            ran.await.map_err(|stopped| stopped.to_string())?
         })
     }
 
     fn load_stored(&self, session_id: &str) -> HostFuture<'static, Result<Option<String>, String>> {
         let store = self.store.clone();
-        let session = self.session(session_id);
+        let sessions = Arc::clone(&self.sessions);
         let session_id = session_id.to_owned();
         Box::pin(async move {
-            let mut session = session.acquire().await;
-            let (_, _, _, saved) = owned(&store, &session_id, &mut session).await?;
-            let Some(key) = saved.clone() else {
-                return Ok(None);
-            };
-            EncodedPayload::by_key(&key)
-                .load(&mut store.clone(), &state_id(&session_id))
-                .await
-                .and_then(|payload| payload.json().map(str::to_owned))
-                .map(Some)
-                .map_err(|error| error.to_string())
+            let ran = session(&sessions, &session_id)?
+                .run(move |session| Box::pin(load_stored(store, session_id, session)));
+            ran.await.map_err(|stopped| stopped.to_string())?
         })
     }
+}
+
+async fn load(
+    store: SharedStore,
+    session_id: String,
+    session: &mut Session,
+) -> Result<Vec<CellJournal>, String> {
+    let (_, cells, _, _) = owned(&store, &session_id, session).await?;
+    let state = state_id(&session_id);
+    let mut journals = Vec::new();
+    for (cell_id, cell) in cells.iter() {
+        let mut updates = Vec::new();
+        match cell {
+            Cell::Numbered(seqs) => {
+                let keys = seqs
+                    .iter()
+                    .map(|seq| key(*cell_id, *seq))
+                    .collect::<Vec<_>>();
+                let values = store
+                    .clone()
+                    .read_records(&state, &keys)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                for value in values
+                    .into_iter()
+                    .flatten()
+                    .filter(|value| !value.is_empty())
+                {
+                    updates.push(
+                        serde_json::from_str::<CellJournalUpdate>(&value)
+                            .map_err(|error| error.to_string())?,
+                    );
+                }
+            }
+            Cell::Chained(keys) => {
+                let links = keys
+                    .iter()
+                    .map(|key| EncodedPayload::by_key(key))
+                    .collect::<Vec<_>>();
+                let loaded = EncodedPayload::load_many(&links, &mut store.clone(), &state)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                for payload in loaded {
+                    let mut link: Link = payload.decode().map_err(|error| error.to_string())?;
+                    if let (Some(header), Some(catalog)) = (&mut link.update.header, &link.catalog)
+                    {
+                        header.tools = EncodedPayload::by_key(catalog)
+                            .load(&mut store.clone(), &state)
+                            .await
+                            .and_then(|payload| payload.decode())
+                            .map_err(|error| error.to_string())?;
+                    }
+                    updates.push(link.update);
+                }
+            }
+        }
+        journals.extend(CellJournal::fold(updates));
+    }
+    Ok(journals)
+}
+
+async fn save_stored(
+    store: SharedStore,
+    session_id: String,
+    stored: String,
+    slot: &mut Session,
+) -> Result<(), String> {
+    let mut session = writing(slot);
+    let written = async {
+        let (owned, cells, _, saved) = owned(&store, &session_id, &mut session).await?;
+        let mut payload = EncodedPayload::from_json(stored.into());
+        if saved.as_deref() == Some(payload.key()) {
+            return Ok(());
+        }
+        let mut records = Vec::new();
+        if let Some(previous) = saved.clone() {
+            records.push(StoreRecord {
+                key: previous,
+                value: Arc::default(),
+            });
+        }
+        let key = payload.key().to_owned();
+        payload.stage(&mut records);
+        replace(
+            &store,
+            &session_id,
+            owned,
+            cells,
+            Some(&key),
+            &records,
+            Settle::Ordered,
+        )
+        .await?;
+        *saved = Some(key);
+        Ok(())
+    }
+    .await;
+    if written.is_ok() {
+        *slot = session;
+    }
+    written
+}
+
+async fn load_stored(
+    store: SharedStore,
+    session_id: String,
+    session: &mut Session,
+) -> Result<Option<String>, String> {
+    let (_, _, _, saved) = owned(&store, &session_id, session).await?;
+    let Some(key) = saved.clone() else {
+        return Ok(None);
+    };
+    EncodedPayload::by_key(&key)
+        .load(&mut store.clone(), &state_id(&session_id))
+        .await
+        .and_then(|payload| payload.json().map(str::to_owned))
+        .map(Some)
+        .map_err(|error| error.to_string())
 }
