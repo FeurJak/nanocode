@@ -544,6 +544,7 @@ dependencies = [
  "nanocode-executor",
  "nanocode-partitions",
  "nanocode-store-sql",
+ "nanocode-sync",
  "nanocode-turnlog",
 ]
 

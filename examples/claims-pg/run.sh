@@ -12,8 +12,9 @@
 # node) pins them in place of BENCH_CPUS. It prints a TOTAL line: claims over the span from the
 # first node's start to the last node's end, the slowest node's p99 and Postgres transactions per
 # claim over all nodes. TAKEOVER_MS=T adds adopt=0 adopt_ms=start+T to the last node, which then
-# takes node 0's partitions; TAKEOVER_KILL=1 (default) kills node 0 at that time first, as a crash;
-# 0 leaves it running, so its writes after the takeover are fenced.
+# gains node 0's partitions; TAKEOVER_KILL=1 (default) kills node 0 at that time, as a crash, so
+# the gainer claims once the leases lapse past grace; 0 hands them off instead: node 0 gets
+# release_ms=start+T, drains and releases them, and the gainer claims them at once.
 set -euo pipefail
 root=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 cd "$root"
@@ -51,6 +52,8 @@ multi() {
     local extra=""
     if [ -n "${TAKEOVER_MS:-}" ] && [ "$i" -eq $((nodes - 1)) ]; then
       extra="adopt=0 adopt_ms=$((start + TAKEOVER_MS))"
+    elif [ -n "${TAKEOVER_MS:-}" ] && [ "$i" -eq 0 ] && [ "${TAKEOVER_KILL:-1}" != 1 ]; then
+      extra="release_ms=$((start + TAKEOVER_MS))"
     fi
     # shellcheck disable=SC2086
     pin "${cpus[$i]:-${BENCH_CPUS:-}}" "$bin" "$url" $args node=$i start_ms=$start $extra \

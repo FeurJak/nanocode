@@ -24,10 +24,18 @@
 //! argument set with nodes=N. start_ms (a unix time in ms, 0) holds the claim phase until then so
 //! the nodes start together. race (1): race claimers of a partition walk the same tasks in the same
 //! order, so every claim races race ways and the losers' refusals count as lost, not as failures.
-//! adopt (a node index, off) with adopt_ms (unix ms): at adopt_ms, take that node's partitions as
-//! when it died (fence rows with a dead holder, then the boards from the store) and claim what it
-//! left, skipping tasks it finished or holds; a node that loses its partitions stops its claimers
-//! at the first fenced write and counts them as fenced.
+//! Log leases last lease_ms (10000) on the database clock and every node renews all of its own in
+//! one statement three times a lease; grace_ms (2000) and margin_ms (500) are the lease bounds.
+//! adopt (a node index, off) with adopt_ms (unix ms): at adopt_ms, gain that node's log partitions,
+//! each in its own task under recover (16) recovery permits (waiting up to recover_wait_ms, 60000,
+//! for one), retrying every retry_ms (50) while
+//! its lease is live (a killed node's until expiry plus grace, a releasing node's until its
+//! release lands), and claim what it left on each partition's boards as soon as that partition
+//! has recovered (serve_all=1: once all have), skipping tasks it finished or holds. release_ms
+//! (unix ms, off) is the planned side: at release_ms the node drains and releases every log
+//! partition it holds. A node that loses its partitions stops its claimers at the first fenced
+//! write and counts them as fenced. The ADOPT line gives the time from adopt_ms until the first,
+//! the median and the last gained partition served.
 //! Prints one METRIC line: claims/s over the whole claim phase and over its first 90% (before the
 //! tail where only some partitions still have tasks), claim latency, Postgres transactions per
 //! claim, board writes per log append and log appends per Postgres commit. checkpoint_every (0, the
@@ -41,7 +49,7 @@ use std::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use nanocode_board::{
@@ -56,12 +64,14 @@ use nanocode_partitions::{Partition, partition_of};
 use nanocode_store_sql::{PgOptions, PgPool, PgSql, PgTimes};
 use nanocode_turnlog::{
     LogHost,
-    parted::{PartedLog, SqlParts},
+    parted::{GainError, PartedLog, SqlParts},
 };
+use nanocode_sync::Semaphore;
 
 const OWNER: &str = "user:lead";
 const SCOPE: &str = "board";
 const LEASE_MS: u64 = 600_000;
+const RENEWALS_PER_LEASE: u64 = 3;
 
 /// Counts transactions, each one pipelined round trip on PgSql.
 struct Counted {
@@ -219,6 +229,14 @@ struct Options {
     adopt: Option<u32>,
     adopt_ms: u64,
     checkpoint_every: u64,
+    lease_ms: u64,
+    grace_ms: u64,
+    margin_ms: u64,
+    retry_ms: u64,
+    recover: usize,
+    recover_wait_ms: u64,
+    serve_all: bool,
+    release_ms: u64,
 }
 
 impl Options {
@@ -254,6 +272,14 @@ impl Options {
             "adopt",
             "adopt_ms",
             "checkpoint_every",
+            "lease_ms",
+            "grace_ms",
+            "margin_ms",
+            "retry_ms",
+            "recover",
+            "recover_wait_ms",
+            "serve_all",
+            "release_ms",
         ];
         if let Some(key) = values.keys().find(|key| !known.contains(&key.as_str())) {
             return Err(format!("unknown option {key}"));
@@ -299,8 +325,50 @@ impl Options {
             adopt,
             adopt_ms: get("adopt_ms", 0) as u64,
             checkpoint_every: get("checkpoint_every", 0) as u64,
+            lease_ms: get("lease_ms", 10_000) as u64,
+            grace_ms: get("grace_ms", 2_000) as u64,
+            margin_ms: get("margin_ms", 500) as u64,
+            retry_ms: get("retry_ms", 50).max(1) as u64,
+            recover: get("recover", 16).max(1),
+            recover_wait_ms: get("recover_wait_ms", 60_000) as u64,
+            serve_all: get("serve_all", 0) != 0,
+            release_ms: get("release_ms", 0) as u64,
         })
     }
+}
+
+/// Renews every log lease this node holds in one statement, RENEWALS_PER_LEASE times a lease.
+async fn renewing(log: Arc<PartedLog<SqlParts<Counted>>>, lease_ms: u64) {
+    let every = Duration::from_millis(lease_ms / RENEWALS_PER_LEASE);
+    loop {
+        nanocode_executor::sleep(every).await;
+        match log.renew_all(lease_ms).await {
+            Ok(lost) if !lost.is_empty() => {
+                eprintln!("claims-pg: lost log partitions {lost:?}");
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("claims-pg: renew_all: {error}"),
+        }
+    }
+}
+
+/// A planned handoff: at release_ms, drains and releases every log partition this node holds, so
+/// a gainer claims them at once at their committed cursors.
+async fn releasing(log: Arc<PartedLog<SqlParts<Counted>>>, release_ms: u64, parts: Vec<Partition>) {
+    let wait = release_ms.saturating_sub(now_ms());
+    nanocode_executor::sleep(Duration::from_millis(wait)).await;
+    let began = Instant::now();
+    let mut released = 0;
+    for part in parts {
+        match log.release(part).await {
+            Ok(()) => released += 1,
+            Err(error) => eprintln!("claims-pg: release {}: {error}", part.0),
+        }
+    }
+    println!(
+        "RELEASED partitions={released} drain_release_ms={:.1}",
+        began.elapsed().as_secs_f64() * 1e3
+    );
 }
 
 fn now_ms() -> u64 {
@@ -650,24 +718,18 @@ fn fail(what: &str) -> std::process::ExitCode {
     std::process::ExitCode::FAILURE
 }
 
-/// Opens the boards of range and starts a committer on each.
+/// Opens the boards and starts a committer on each.
 async fn open_boards(
     host: &Arc<dyn LogHost>,
     count: NonZeroU32,
-    range: std::ops::Range<u32>,
+    boards: &[u32],
     identity: &Identity,
     batch: usize,
-) -> Result<
-    (
-        Vec<Committer>,
-        Vec<nanocode_executor::JoinHandle<shards::Stats>>,
-    ),
-    BoardError,
-> {
+) -> Result<Opened, BoardError> {
     let mut committers = Vec::new();
     let mut drives = Vec::new();
-    for part in range {
-        let scope = shards::scope_of(SCOPE, count, Partition(part));
+    for part in boards {
+        let scope = shards::scope_of(SCOPE, count, Partition(*part));
         let board = Board::open(Arc::clone(host), &scope, identity.clone()).await?;
         let (committer, drive) = Committer::start(board, batch);
         committers.push(committer);
@@ -676,16 +738,89 @@ async fn open_boards(
     Ok((committers, drives))
 }
 
-/// What taking a dead node's partitions cost and claimed.
+/// What taking a dead or departing node's partitions cost and claimed.
 struct Adopted {
     claimed: Claimed,
     takeover_ms: f64,
+    serving_ms: Vec<f64>,
     seconds: f64,
     stats: Vec<shards::Stats>,
 }
 
-/// Waits until adopt_ms, takes victim's partitions as from a dead node (fence rows first, so the
-/// victim's later appends are fenced, then the boards from the store), and claims what it left.
+type Opened = (
+    Vec<Committer>,
+    Vec<nanocode_executor::JoinHandle<shards::Stats>>,
+);
+
+/// One gained log partition, recovered: its boards' committers and when it started serving.
+struct Recovered {
+    boards: Vec<u32>,
+    opened: Opened,
+    serving_ms: f64,
+}
+
+/// Gains one of victim's log partitions in its own task: retries the gain while the victim's
+/// lease is live (a crash: until expiry plus grace on the database clock; a planned handoff:
+/// until the victim's release lands), then recovers the boards that land on it.
+async fn gain_one(
+    log: Arc<PartedLog<SqlParts<Counted>>>,
+    options: Arc<Options>,
+    count: NonZeroU32,
+    part: Partition,
+    boards: Vec<u32>,
+    capacity: Arc<Semaphore>,
+    identity: Identity,
+    began: Instant,
+) -> Result<Recovered, String> {
+    let patience = Duration::from_millis(options.lease_ms + options.grace_ms + options.retry_ms);
+    let deadline = began + patience;
+    let room = Duration::from_millis(options.recover_wait_ms);
+    let batch = options.batch;
+    loop {
+        let recover = |_| {
+            let host: Arc<dyn LogHost> = Arc::clone(&log) as Arc<dyn LogHost>;
+            let (identity, boards) = (identity.clone(), boards.clone());
+            async move {
+                open_boards(&host, count, &boards, &identity, batch)
+                    .await
+                    .map_err(|error| StoreError::Backend(format!("open board: {error:?}")))
+            }
+        };
+        match log
+            .gain(
+                part,
+                options.lease_ms,
+                &capacity,
+                nanocode_executor::sleep(room),
+                recover,
+            )
+            .await
+        {
+            Ok((_, opened)) => {
+                return Ok(Recovered {
+                    boards,
+                    opened,
+                    serving_ms: began.elapsed().as_secs_f64() * 1e3,
+                });
+            }
+            Err(GainError::Fenced) if Instant::now() < deadline => {
+                nanocode_executor::sleep(Duration::from_millis(options.retry_ms)).await;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "gain log partition {} after {:.0} ms: {error:?}",
+                    part.0,
+                    began.elapsed().as_secs_f64() * 1e3
+                ));
+            }
+        }
+    }
+}
+
+/// Waits until adopt_ms, then gains victim's log partitions, each in its own task under a
+/// recovery capacity of recover permits, and starts claiming on each partition's boards as soon as
+/// it has recovered (serve_all=1: only once every partition has, as one readiness gate). It
+/// claims what the victim left, skipping tasks it finished or holds.
 async fn adopt(
     log: Arc<PartedLog<SqlParts<Counted>>>,
     options: Arc<Options>,
@@ -694,44 +829,53 @@ async fn adopt(
     identity: Identity,
 ) -> Result<Adopted, String> {
     let wait = options.adopt_ms.saturating_sub(now_ms());
-    nanocode_executor::sleep(std::time::Duration::from_millis(wait)).await;
+    nanocode_executor::sleep(Duration::from_millis(wait)).await;
     let began = Instant::now();
     let range = range_of(victim, options.nodes, options.parts);
+    let capacity = Arc::new(Semaphore::new(options.recover));
+    let mut gains = nanocode_executor::JoinSet::new();
     for part in log_parts_of(&log, count, range.clone()) {
-        log.claim(part, u64::MAX / 4)
-            .await
-            .map_err(|error| format!("adopt fence {}: {error}", part.0))?;
+        let boards: Vec<u32> = range
+            .clone()
+            .filter(|board| log.partition(&shards::scope_of(SCOPE, count, Partition(*board))) == part)
+            .collect();
+        gains.spawn(gain_one(
+            Arc::clone(&log),
+            Arc::clone(&options),
+            count,
+            part,
+            boards,
+            Arc::clone(&capacity),
+            identity.clone(),
+            began,
+        ));
     }
-    let host: Arc<dyn LogHost> = Arc::clone(&log) as Arc<dyn LogHost>;
-    let (committers, drives) = open_boards(&host, count, range.clone(), &identity, options.batch)
-        .await
-        .map_err(|error| format!("adopt open: {error:?}"))?;
-    let takeover_ms = began.elapsed().as_secs_f64() * 1e3;
     let homes = homes_of(range.clone(), count, options.tasks);
     let mine = range_of(options.node, options.nodes, options.parts)
         .len()
         .max(1);
     let per_part = (options.claimers / mine).max(1);
-    let race = options.race;
     let started = Instant::now();
-    let handles: Vec<_> = homes
-        .iter()
-        .enumerate()
-        .flat_map(|(local, home)| {
-            (0..per_part).map(move |rank| (local, share_of(home, rank, per_part, race)))
-        })
-        .enumerate()
-        .map(|(index, (local, tasks))| {
-            nanocode_executor::spawn(claimer(
-                committers[local].clone(),
-                format!("agent:n{}a{index}", options.node),
-                tasks,
-                started,
-                options.pipeline,
-                true,
-            ))
-        })
-        .collect();
+    let mut serving_ms = Vec::new();
+    let mut handles = Vec::new();
+    let mut drives = Vec::new();
+    let mut committers = Vec::new();
+    let mut waiting = Vec::new();
+    while let Some(joined) = gains.join_next().await {
+        let recovered = joined.map_err(|error| format!("gain task: {error}"))??;
+        if options.serve_all {
+            waiting.push(recovered);
+            continue;
+        }
+        serving_ms.push(recovered.serving_ms);
+        serve(&options, &homes, range.start, per_part, started, recovered, &mut handles, &mut committers, &mut drives);
+    }
+    for mut recovered in waiting {
+        recovered.serving_ms = began.elapsed().as_secs_f64() * 1e3;
+        serving_ms.push(recovered.serving_ms);
+        serve(&options, &homes, range.start, per_part, started, recovered, &mut handles, &mut committers, &mut drives);
+    }
+    let takeover_ms = serving_ms.iter().copied().fold(0.0, f64::max);
     let mut claimed = Claimed::default();
     for handle in handles {
         if let Ok(one) = handle.await {
@@ -746,12 +890,46 @@ async fn adopt(
             stats.push(one);
         }
     }
+    serving_ms.sort_by(f64::total_cmp);
     Ok(Adopted {
         claimed,
         takeover_ms,
+        serving_ms,
         seconds,
         stats,
     })
+}
+
+/// Starts per_part claimers on each board of a recovered partition.
+#[allow(clippy::too_many_arguments)]
+fn serve(
+    options: &Options,
+    homes: &[Vec<usize>],
+    first: u32,
+    per_part: usize,
+    started: Instant,
+    recovered: Recovered,
+    handles: &mut Vec<nanocode_executor::JoinHandle<Claimed>>,
+    committers: &mut Vec<Committer>,
+    drives: &mut Vec<nanocode_executor::JoinHandle<shards::Stats>>,
+) {
+    let (opened, more) = recovered.opened;
+    for (board, committer) in recovered.boards.iter().zip(opened) {
+        let home = &homes[(board - first) as usize];
+        for rank in 0..per_part {
+            let tasks = share_of(home, rank, per_part, options.race);
+            handles.push(nanocode_executor::spawn(claimer(
+                committer.clone(),
+                format!("agent:n{}a{board}r{rank}", options.node),
+                tasks,
+                started,
+                options.pipeline,
+                true,
+            )));
+        }
+        committers.push(committer);
+    }
+    drives.extend(more);
 }
 
 #[allow(clippy::too_many_lines)]
@@ -795,7 +973,9 @@ fn main() -> std::process::ExitCode {
         format!("node{}", options.node)
     };
     let log = Arc::new(
-        PartedLog::fenced(Arc::clone(&store), log_count, &name).with_max_rows(options.max_rows),
+        PartedLog::fenced(Arc::clone(&store), log_count, &name)
+            .with_max_rows(options.max_rows)
+            .with_lease_bounds(options.grace_ms, options.margin_ms),
     );
     let range = range_of(options.node, options.nodes, options.parts);
     // Each node fences only the log partitions its boards land on, which must be its own.
@@ -817,22 +997,27 @@ fn main() -> std::process::ExitCode {
     let setup = runtime.block_on(async {
         log.migrate().await?;
         for part in &fences {
-            log.claim(*part, u64::MAX / 4).await?;
+            log.claim(*part, options.lease_ms).await?;
         }
         Ok::<(), StoreError>(())
     });
     if let Err(error) = setup {
         return fail(&format!("log setup: {error}"));
     }
+    runtime.spawn(renewing(Arc::clone(&log), options.lease_ms));
+    if options.release_ms > 0 {
+        runtime.spawn(releasing(Arc::clone(&log), options.release_ms, fences.clone()));
+    }
     let host: Arc<dyn LogHost> = Arc::clone(&log) as Arc<dyn LogHost>;
     let identity = match Identity::verify(&Tokens, &format!("token:agent:node{}", options.node)) {
         Ok(identity) => identity,
         Err(error) => return fail(&format!("identity: {error:?}")),
     };
+    let boards: Vec<u32> = range.clone().collect();
     let opened = runtime.block_on(open_boards(
         &host,
         count,
-        range.clone(),
+        &boards,
         &identity,
         options.batch,
     ));
@@ -1020,15 +1205,22 @@ fn main() -> std::process::ExitCode {
             Ok(Adopted {
                 claimed,
                 takeover_ms,
+                serving_ms,
                 seconds,
                 stats,
             }) => {
                 let mut latencies = claimed.latencies;
                 latencies.sort_unstable();
+                let at = |q: f64| serving_ms.get(((serving_ms.len().max(1) - 1) as f64 * q).round() as usize).copied().unwrap_or(0.0);
                 println!(
-                    "ADOPT node={} from={} takeover_ms={takeover_ms:.1} claims={} claims_per_s={:.0} p99_ms={:.2} lost={} refused={} fenced={} seconds={seconds:.2} appends={}",
+                    "ADOPT node={} from={} serve_all={} recover={} partitions={} first_serving_ms={:.1} p50_serving_ms={:.1} takeover_ms={takeover_ms:.1} claims={} claims_per_s={:.0} p99_ms={:.2} lost={} refused={} fenced={} seconds={seconds:.2} appends={}",
                     options.node,
                     options.adopt.unwrap_or_default(),
+                    u8::from(options.serve_all),
+                    options.recover,
+                    serving_ms.len(),
+                    at(0.0),
+                    at(0.5),
                     latencies.len(),
                     latencies.len() as f64 / seconds.max(1e-9),
                     percentile(&latencies, 0.99),
