@@ -18,9 +18,10 @@ use nanocode_board::{
     tasks::{OnFail, Planned, TaskOp, Terms},
     watch::{Filter, Kind, Plan},
 };
-use nanocode_durability_core::{Sql as _, SqlStatement, StoreError};
+use nanocode_durability_core::{Migration, Sql as _, SqlRow, SqlStatement, migrate_format};
 use nanocode_executor::signal::unix::{SignalKind, signal};
 use nanocode_store_sql::{Host, PgConnection, PgError, PgOptions, PgPool, PgSql, log_wake};
+use nanocode_sync::Signal;
 use nanocode_turnlog::{
     FileLog, FileOptions, LogHost,
     parted::{PartedLog, SqlParts},
@@ -830,9 +831,37 @@ enum Wake {
 
 const PREPARED: &str = "SELECT CAST(to_regclass('nanocode_plog_p0') IS NOT NULL AS TEXT)";
 
-const HOLD: &str = "SELECT CAST(count(*) AS TEXT) FROM (SELECT pg_advisory_lock(hashtextextended($1::text, 0))) AS held";
+const HOLDS: Migration = Migration {
+    statements: [
+        &[
+            "CREATE TABLE IF NOT EXISTS nanocode_board_holds (key TEXT PRIMARY KEY, holder TEXT NOT NULL, expires_at TEXT NOT NULL)",
+        ],
+        &[
+            "CREATE TABLE IF NOT EXISTS nanocode_board_holds (key TEXT PRIMARY KEY, holder TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL)",
+        ],
+    ],
+    adopt: None,
+};
 
-const UNHOLD: &str = "SELECT CAST(pg_advisory_unlock(hashtextextended($1::text, 0)) AS TEXT)";
+const HOLDS_CHANNEL: &str = "nanocode_board_holds";
+
+const HOLD_LEASE: Duration = Duration::from_secs(15);
+
+const HOLD: &str = "INSERT INTO nanocode_board_holds AS hold (key, holder, expires_at) VALUES ($1::text, CAST(gen_random_uuid() AS TEXT), clock_timestamp() + CAST($2::text AS BIGINT) * interval '1 millisecond') ON CONFLICT (key) DO UPDATE SET holder = excluded.holder, expires_at = excluded.expires_at WHERE hold.expires_at <= clock_timestamp() RETURNING holder";
+
+const HELD_MS: &str = "SELECT CAST(CAST(GREATEST(CEIL(EXTRACT(EPOCH FROM expires_at - clock_timestamp()) * 1000), 0) AS BIGINT) AS TEXT) FROM nanocode_board_holds WHERE key = $1::text";
+
+const RENEW: &str = "UPDATE nanocode_board_holds SET expires_at = clock_timestamp() + CAST($3::text AS BIGINT) * interval '1 millisecond' WHERE key = $1::text AND holder = $2::text RETURNING holder";
+
+const UNHOLD: &str =
+    "DELETE FROM nanocode_board_holds WHERE key = $1::text AND holder = $2::text RETURNING holder";
+
+const WOKEN: &str = "SELECT CAST(count(*) AS TEXT) FROM (SELECT pg_notify('nanocode_board_holds', $1::text)) AS woken";
+
+enum Claimed {
+    Holding(String),
+    Busy(Duration),
+}
 
 impl Store {
     fn open(parsed: &Parsed, runtime: &nanocode_executor::Runtime) -> Result<Self, Failure> {
@@ -915,7 +944,7 @@ impl Postgres {
                 if !prepared {
                     log.prepare().await?;
                 }
-                Ok::<_, StoreError>(())
+                migrate_format(&*sql, "board_holds", &[HOLDS]).await
             })
             .map_err(|error| format!("{}: {error}", address(&options)))?;
         Ok(Self {
@@ -930,18 +959,142 @@ impl Postgres {
         address(&self.options)
     }
 
-    async fn advise(&self, statement: &'static str, actor: &str) -> Result<(), Failure> {
-        let key = format!("nc-board:{SCOPE}:{actor}");
-        let statements = [SqlStatement {
-            sql: statement,
-            params: vec![&key],
-        }];
-        self.sql
-            .transaction("nc_board_hold", &statements)
-            .await
-            .map(drop)
-            .map_err(|error| format!("{}: {error}", self.shown()).into())
+    async fn claim(&self, key: &str) -> Result<Claimed, Failure> {
+        let lease_ms = HOLD_LEASE.as_millis().to_string();
+        let statements = [
+            SqlStatement {
+                sql: HOLD,
+                params: vec![key, &lease_ms],
+            },
+            SqlStatement {
+                sql: HELD_MS,
+                params: vec![key],
+            },
+        ];
+        let answer = transact(&self.sql, &self.shown(), "nc_board_hold", &statements).await?;
+        if let Some(holder) = cell(&answer, 0) {
+            return Ok(Claimed::Holding(holder.to_owned()));
+        }
+        let held_ms = cell(&answer, 1)
+            .map_or(Ok(0), str::parse::<u64>)
+            .map_err(|error| format!("{}: hold expiry: {error}", self.shown()))?;
+        Ok(Claimed::Busy(Duration::from_millis(held_ms)))
     }
+
+    async fn hold(&self, key: &str) -> Result<String, Failure> {
+        let mut listening: Option<PgConnection> = None;
+        loop {
+            let held = match self.claim(key).await? {
+                Claimed::Holding(holder) => return Ok(holder),
+                Claimed::Busy(held) => held,
+            };
+            let Some(connection) = listening.as_mut() else {
+                let mut connection = PgConnection::connect(&self.options)
+                    .await
+                    .map_err(|error| format!("{}: {error}", self.shown()))?;
+                connection
+                    .listen(HOLDS_CHANNEL)
+                    .await
+                    .map_err(|error| format!("{}: {error}", self.shown()))?;
+                listening = Some(connection);
+                continue;
+            };
+            let woken = nanocode_executor::timeout(held, async {
+                loop {
+                    if connection.notification().await?.payload == key {
+                        return Ok::<_, PgError>(());
+                    }
+                }
+            })
+            .await;
+            if let Ok(Err(error)) = woken {
+                return Err(format!("{}: {error}", self.shown()).into());
+            }
+        }
+    }
+
+    async fn release(&self, key: &str, holder: &str) -> Result<bool, Failure> {
+        let statements = [
+            SqlStatement {
+                sql: UNHOLD,
+                params: vec![key, holder],
+            },
+            SqlStatement {
+                sql: WOKEN,
+                params: vec![key],
+            },
+        ];
+        let answer = transact(&self.sql, &self.shown(), "nc_board_unhold", &statements).await?;
+        Ok(cell(&answer, 0).is_some())
+    }
+
+    async fn held<T>(
+        &self,
+        key: &str,
+        work: impl Future<Output = Result<T, Failure>>,
+    ) -> Result<T, Failure> {
+        let holder = self.hold(key).await?;
+        let stop = Arc::new(Signal::new());
+        let renewing = nanocode_executor::spawn(renewing(
+            Arc::clone(&self.sql),
+            self.shown(),
+            (key.to_owned(), holder.clone()),
+            Arc::clone(&stop),
+        ));
+        let result = work.await;
+        stop.fire();
+        let joined = renewing.await;
+        let released = self.release(key, &holder).await;
+        joined.map_err(|error| format!("renewing the write hold on {key}: {error}"))?;
+        if !released? {
+            return Err(format!(
+                "{}: the write hold on {key} lapsed while writing; a write by the same actor may have been lost",
+                self.shown()
+            )
+            .into());
+        }
+        result
+    }
+}
+
+async fn renewing(sql: Arc<PgSql>, at: String, (key, holder): (String, String), stop: Arc<Signal>) {
+    let lease_ms = HOLD_LEASE.as_millis().to_string();
+    loop {
+        if nanocode_executor::timeout(HOLD_LEASE / 3, stop.wait())
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        let statements = [SqlStatement {
+            sql: RENEW,
+            params: vec![&key, &holder, &lease_ms],
+        }];
+        if let Ok(answer) = transact(&sql, &at, "nc_board_renew_hold", &statements).await
+            && cell(&answer, 0).is_none()
+        {
+            return;
+        }
+    }
+}
+
+async fn transact(
+    sql: &PgSql,
+    at: &str,
+    operation: &'static str,
+    statements: &[SqlStatement<'_>],
+) -> Result<Vec<Vec<SqlRow>>, String> {
+    sql.transaction(operation, statements)
+        .await
+        .map_err(|error| format!("{at}: {error}"))
+}
+
+fn cell(answer: &[Vec<SqlRow>], statement: usize) -> Option<&str> {
+    answer
+        .get(statement)
+        .and_then(|rows| rows.first())
+        .and_then(|row| row.first())
+        .and_then(|cell| cell.as_deref())
 }
 
 fn address(options: &PgOptions) -> String {
@@ -1028,19 +1181,17 @@ fn locked<T>(
             result
         }
         Store::Postgres(postgres) => runtime.block_on(async {
-            let actor = identity.actor().to_string();
-            if access == Access::Write {
-                postgres.advise(HOLD, &actor).await?;
-            }
-            let result = async {
+            let work = async {
                 let mut board = opened(store, identity.clone()).await?;
                 work(&mut board).await
+            };
+            match access {
+                Access::Read => work.await,
+                Access::Write => {
+                    let key = format!("nc-board:{SCOPE}:{}", identity.actor());
+                    postgres.held(&key, work).await
+                }
             }
-            .await;
-            if access == Access::Write {
-                postgres.advise(UNHOLD, &actor).await?;
-            }
-            result
         }),
     }
 }

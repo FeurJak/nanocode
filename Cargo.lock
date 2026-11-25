@@ -1537,6 +1537,7 @@ dependencies = [
  "nanocode-durability-core",
  "nanocode-executor",
  "nanocode-store-sql",
+ "nanocode-sync",
  "nanocode-turnlog",
  "serde_json",
 ]
