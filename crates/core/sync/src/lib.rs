@@ -430,7 +430,7 @@ impl<T: Clone> SingleFlight<T> {
 type Job<S> =
     Box<dyn for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> + Send>;
 #[cfg(target_family = "wasm")]
-type Job<S> = Box<dyn for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = ()> + 'a>>>;
+type Job<S> = Box<dyn for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = ()> + 'a>> + Send>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Stopped;
@@ -523,8 +523,8 @@ impl<S: 'static> Actor<S> {
     #[cfg(target_family = "wasm")]
     pub fn run<R, F>(&self, job: F) -> impl Future<Output = Result<R, Stopped>> + use<R, F, S>
     where
-        R: 'static,
-        F: for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = R> + 'a>> + 'static,
+        R: Send + 'static,
+        F: for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = R> + 'a>> + Send + 'static,
     {
         let (mut sender, receiver) = oneshot::channel();
         let job: Job<S> = Box::new(move |state| {
