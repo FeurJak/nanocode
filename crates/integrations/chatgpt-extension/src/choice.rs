@@ -50,10 +50,8 @@ impl Bridge {
         if !self.state().is_dir() {
             return Ok(());
         }
-        let guard = self.lock()?;
-        guard.release(&root)?;
-        guard.write_private(&declined, b"{}")?;
-        Ok(())
+        self.release(&root)?;
+        self.write_private(&declined, b"{}")
     }
 
     pub fn not_started(&self) -> Vec<String> {
@@ -139,7 +137,7 @@ impl Bridge {
             if record(root).is_some_and(|record| record.automatic)
                 && chosen.as_deref() != Some(root.as_path())
             {
-                match self.lock().and_then(|guard| guard.release(root)) {
+                match self.release(root) {
                     Ok(_) => choices.push(Choice::Released(name)),
                     Err(error) => choices.push(Choice::Failed(name, error.to_string())),
                 }

@@ -3,10 +3,12 @@ use crate::{
     host::manifest_path,
 };
 use nanocode_digest::Sha256;
+use nanocode_platform::{Committed, Revisioned};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    fs::{self, File, OpenOptions},
+    collections::BTreeSet,
+    fs::{self, OpenOptions},
     io::{self, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
@@ -19,6 +21,16 @@ pub struct Registration {
     pub original: Option<String>,
     #[serde(default, rename = "auto")]
     pub automatic: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Released {
+    released: Registration,
+}
+
+enum Stored {
+    Live(Registration),
+    Released(Registration),
 }
 
 #[derive(Clone, Debug)]
@@ -64,25 +76,7 @@ impl Launcher {
     }
 
     pub fn install(&self, path: &Path) -> Result<(), Error> {
-        let script = self.script(&[])?;
-        let temporary = path.with_extension("tmp");
-        let _ = fs::remove_file(&temporary);
-        let written = (|| -> Result<(), Error> {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o700)
-                .open(&temporary)?;
-            file.write_all(script.as_bytes())?;
-            file.sync_all()?;
-            fs::set_permissions(&temporary, fs::Permissions::from_mode(0o700))?;
-            fs::rename(&temporary, path)?;
-            Ok(())
-        })();
-        if written.is_err() {
-            let _ = fs::remove_file(&temporary);
-        }
-        written
+        write_atomic(path, self.script(&[])?.as_bytes(), EXECUTABLE)
     }
 
     fn script(&self, tail: &[&Path]) -> Result<String, Error> {
@@ -143,10 +137,10 @@ pub struct Bridge {
     alternative: Option<String>,
 }
 
-pub struct Guard<'a> {
-    bridge: &'a Bridge,
-    _file: File,
-}
+const EXECUTABLE: u32 = 0o700;
+const PRIVATE: u32 = 0o600;
+const RECORD_PREFIX: &str = "chatgpt-";
+const RECORD_SUFFIX: &str = ".json";
 
 pub fn host_path(root: &Path) -> PathBuf {
     manifest_path(root, HOST_NAME)
@@ -182,18 +176,58 @@ fn ours(path: &Path, launcher: &Path) -> bool {
             })
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), Error> {
-    let temporary = path.with_extension("tmp");
+fn temporary(path: &Path) -> Result<PathBuf, Error> {
+    let name = path
+        .file_name()
+        .ok_or("a written path must name a file")?
+        .to_string_lossy();
+    Ok(path.with_file_name(format!(".{name}.{}.tmp", random_hex()?)))
+}
+
+fn written(path: &Path, bytes: &[u8], mode: u32) -> Result<PathBuf, Error> {
+    let temporary = temporary(path)?;
+    let result = (|| -> Result<(), Error> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(mode))?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => Ok(temporary),
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            Err(error)
+        }
+    }
+}
+
+fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Error> {
+    let temporary = written(path, bytes, mode)?;
+    let renamed = fs::rename(&temporary, path);
+    if renamed.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    Ok(renamed?)
+}
+
+fn create_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Error> {
+    let temporary = written(path, bytes, mode)?;
+    let linked = fs::hard_link(&temporary, path);
     let _ = fs::remove_file(&temporary);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temporary)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    fs::rename(temporary, path)?;
-    Ok(())
+    Ok(linked?)
+}
+
+fn removed(path: &Path) -> Result<(), Error> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn official(bytes: &[u8]) -> Result<(PathBuf, Value), Error> {
@@ -358,39 +392,63 @@ impl Bridge {
 
     pub fn save_registration(&self, registration: &Registration) -> Result<(), Error> {
         let path = self.paths(&registration.root)?.0;
-        write_private(&path, &serde_json::to_vec(registration)?)
+        let bytes = serde_json::to_vec(registration)?;
+        loop {
+            let (revision, _) = self.record_at(&path)?;
+            if commit_record(&path, revision, &bytes)? {
+                return Ok(());
+            }
+        }
     }
 
-    pub fn lock(&self) -> Result<Guard<'_>, Error> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .mode(0o600)
-            .custom_flags(nanocode_sys::libc::O_NOFOLLOW)
-            .open(self.state.join("chatgpt.lock"))?;
-        file.lock()?;
-        Ok(Guard {
-            bridge: self,
-            _file: file,
-        })
+    pub fn release(&self, root: &Path) -> Result<bool, Error> {
+        self.uninstall_one(&self.paths(root)?.0)
+    }
+
+    pub fn write_private(&self, path: &Path, bytes: &[u8]) -> Result<(), Error> {
+        write_atomic(path, bytes, PRIVATE)
     }
 
     fn records(&self) -> Result<Vec<PathBuf>, Error> {
-        let mut result = Vec::new();
+        let mut result = BTreeSet::new();
         for entry in fs::read_dir(&self.state)? {
-            let entry = entry?;
-            let name = entry.file_name();
+            let name = entry?.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with("chatgpt-") && name.ends_with(".json") {
-                result.push(entry.path());
+            let record = name
+                .rsplit_once('.')
+                .filter(|(_, revision)| {
+                    !revision.is_empty() && revision.bytes().all(|byte| byte.is_ascii_digit())
+                })
+                .map_or(&*name, |(record, _)| record);
+            if record.starts_with(RECORD_PREFIX) && record.ends_with(RECORD_SUFFIX) {
+                result.insert(self.state.join(record));
             }
         }
-        Ok(result)
+        Ok(result.into_iter().collect())
     }
 
-    fn read_record(&self, path: &Path) -> Result<Registration, Error> {
-        let registration: Registration = serde_json::from_slice(&fs::read(path)?)?;
+    fn stored_at(&self, path: &Path) -> Result<(u64, Option<Stored>), Error> {
+        let revision = Revisioned::new(path).read()?;
+        let stored = match revision.bytes {
+            None => None,
+            Some(bytes) => Some(match serde_json::from_slice::<Released>(&bytes) {
+                Ok(Released { released }) => Stored::Released(self.checked(path, released)?),
+                Err(_) => Stored::Live(self.checked(path, serde_json::from_slice(&bytes)?)?),
+            }),
+        };
+        Ok((revision.number, stored))
+    }
+
+    fn record_at(&self, path: &Path) -> Result<(u64, Option<Registration>), Error> {
+        let (revision, stored) = self.stored_at(path)?;
+        let live = match stored {
+            Some(Stored::Live(registration)) => Some(registration),
+            Some(Stored::Released(_)) | None => None,
+        };
+        Ok((revision, live))
+    }
+
+    fn checked(&self, path: &Path, registration: Registration) -> Result<Registration, Error> {
         if !registration.root.is_absolute()
             || fs::canonicalize(&registration.root)? != registration.root
             || self.paths(&registration.root)?.0 != path
@@ -398,6 +456,12 @@ impl Bridge {
             return Err("ChatGPT registration does not match its browser directory".into());
         }
         Ok(registration)
+    }
+
+    fn read_record(&self, path: &Path) -> Result<Registration, Error> {
+        self.record_at(path)?
+            .1
+            .ok_or_else(|| format!("no ChatGPT registration at {}", path.display()).into())
     }
 
     pub(crate) fn owns(&self, manifest: &Path, launcher: &Path) -> bool {
@@ -423,18 +487,7 @@ impl Bridge {
         {
             return Ok(());
         }
-        let temporary = launcher.with_extension("tmp");
-        if temporary.exists() {
-            fs::remove_file(&temporary)?;
-        }
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o700)
-            .open(&temporary)?;
-        file.write_all(script.as_bytes())?;
-        fs::rename(&temporary, launcher)?;
-        Ok(())
+        write_atomic(launcher, script.as_bytes(), EXECUTABLE)
     }
 
     fn write_manifest(
@@ -451,25 +504,13 @@ impl Bridge {
             "type": "stdio",
             "allowed_origins": origins,
         });
-        let destination = path.with_extension(format!("{}-{}.tmp", self.namespace, random_hex()?));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&destination)?;
-        let result = (|| {
-            file.write_all(serde_json::to_string_pretty(&manifest)?.as_bytes())?;
-            file.write_all(b"\n")?;
-            file.sync_all()?;
-            if replace {
-                fs::rename(&destination, path)?;
-            } else {
-                fs::hard_link(&destination, path)?;
-            }
-            Ok::<_, Error>(())
-        })();
-        let _ = fs::remove_file(destination);
-        result
+        let mut bytes = serde_json::to_string_pretty(&manifest)?.into_bytes();
+        bytes.push(b'\n');
+        if replace {
+            write_atomic(path, &bytes, PRIVATE)
+        } else {
+            create_atomic(path, &bytes, PRIVATE)
+        }
     }
 
     pub fn upstream(&self, root: &Path) -> Result<Upstream, Error> {
@@ -530,30 +571,62 @@ impl Bridge {
     }
 
     fn reconcile_one(&self, record_path: &Path) -> Result<bool, Error> {
-        let mut record = self.read_record(record_path)?;
-        let (path, launcher) = (host_path(&record.root), self.paths(&record.root)?.1);
-        let current = match fs::symlink_metadata(&path) {
-            Ok(meta) if meta.file_type().is_file() => Some(fs::read_to_string(&path)?),
-            Ok(_) => return Err("ChatGPT native-host manifest is not a regular file".into()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.into()),
-        };
-        if current.is_some() && self.owns(&path, &launcher) {
+        let record = loop {
+            let (revision, stored) = self.stored_at(record_path)?;
+            let mut record = match stored {
+                None => return Ok(false),
+                Some(Stored::Released(record)) => {
+                    self.withdraw(&record)?;
+                    return Ok(false);
+                }
+                Some(Stored::Live(record)) => record,
+            };
+            let (path, launcher) = (host_path(&record.root), self.paths(&record.root)?.1);
+            let current = match fs::symlink_metadata(&path) {
+                Ok(meta) if meta.file_type().is_file() => Some(fs::read_to_string(&path)?),
+                Ok(_) => return Err("ChatGPT native-host manifest is not a regular file".into()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            };
+            if current.is_some() && self.owns(&path, &launcher) {
+                self.write_launcher(&launcher, &path, &record.root)?;
+                return Ok(false);
+            }
+            let replaced = current.is_some();
+            if let Some(ref bytes) = current {
+                official(bytes.as_bytes())?;
+                if record.original.as_deref() != Some(bytes) {
+                    record.original = Some(bytes.clone());
+                    if !commit_record(record_path, revision, &serde_json::to_vec(&record)?)? {
+                        continue;
+                    }
+                }
+            }
+            let upstream = self.upstream_of(&record)?;
             self.write_launcher(&launcher, &path, &record.root)?;
+            self.write_manifest(&path, &launcher, upstream.origins, replaced)?;
+            break record;
+        };
+        if self.record_at(record_path)?.1.is_none() {
+            self.withdraw(&record)?;
             return Ok(false);
         }
-        let replaced = current.is_some();
-        if let Some(ref bytes) = current {
-            official(bytes.as_bytes())?;
-            if record.original.as_deref() != Some(bytes) {
-                record.original = Some(bytes.clone());
-                write_private(record_path, &serde_json::to_vec(&record)?)?;
+        Ok(true)
+    }
+
+    fn withdraw(&self, record: &Registration) -> Result<(), Error> {
+        let (path, launcher) = (host_path(&record.root), self.paths(&record.root)?.1);
+        if ours(&path, &launcher) && self.proxy_manifest(&path) {
+            let original = record
+                .original
+                .clone()
+                .or_else(|| self.chrome_original().ok().flatten());
+            match original {
+                Some(original) => write_atomic(&path, original.as_bytes(), PRIVATE)?,
+                None => removed(&path)?,
             }
         }
-        let upstream = self.upstream_of(&record)?;
-        self.write_launcher(&launcher, &path, &record.root)?;
-        self.write_manifest(&path, &launcher, upstream.origins, replaced)?;
-        Ok(true)
+        removed(&launcher)
     }
 
     pub fn install(&self, root: &Path, browser: &str, automatic: bool) -> Result<PathBuf, Error> {
@@ -575,87 +648,85 @@ impl Bridge {
         if fs::canonicalize(hosts)?.parent() != Some(fs::canonicalize(&root)?.as_path()) {
             return Err("browser native-host directory must not redirect elsewhere".into());
         }
-        let _guard = self.lock()?;
         let (record_path, launcher) = self.paths(&root)?;
-        if !record_path.exists() {
-            let original = match fs::symlink_metadata(&path) {
-                Ok(meta) if meta.file_type().is_file() => {
-                    let bytes = fs::read_to_string(&path)?;
-                    official(bytes.as_bytes())?;
-                    Some(bytes)
-                }
-                Ok(_) => return Err("native-host manifest is not a regular file".into()),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-                Err(error) => return Err(error.into()),
-            };
-            if original.is_none() {
-                self.upstream_of(&Registration {
-                    root: root.clone(),
-                    original: None,
-                    automatic,
-                })?;
-            }
-            self.save_registration(&Registration {
-                root,
-                original,
-                automatic,
-            })?;
-        } else {
-            if !ours(&path, &launcher) && path.exists() {
-                official(&fs::read(&path)?)?;
-            }
-            if !automatic {
-                let mut record = self.read_record(&record_path)?;
-                if record.automatic {
+        loop {
+            let (revision, record) = self.record_at(&record_path)?;
+            let record = match record {
+                None => self.registered(&root, &path, automatic)?,
+                Some(mut record) => {
+                    if !ours(&path, &launcher) && path.exists() {
+                        official(&fs::read(&path)?)?;
+                    }
+                    if automatic || !record.automatic {
+                        break;
+                    }
                     record.automatic = false;
-                    self.save_registration(&record)?;
+                    record
                 }
+            };
+            if commit_record(&record_path, revision, &serde_json::to_vec(&record)?)? {
+                break;
             }
         }
         self.reconcile_one(&record_path)?;
         Ok(path)
     }
 
-    fn uninstall_one(&self, record_path: &Path) -> Result<(), Error> {
-        let record = self.read_record(record_path)?;
-        let (path, launcher) = (host_path(&record.root), self.paths(&record.root)?.1);
-        if ours(&path, &launcher) {
-            if !self.proxy_manifest(&path) {
+    fn registered(&self, root: &Path, path: &Path, automatic: bool) -> Result<Registration, Error> {
+        let original = match fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_file() => {
+                let bytes = fs::read_to_string(path)?;
+                official(bytes.as_bytes())?;
+                Some(bytes)
+            }
+            Ok(_) => return Err("native-host manifest is not a regular file".into()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        let registration = Registration {
+            root: root.to_path_buf(),
+            original,
+            automatic,
+        };
+        if registration.original.is_none() {
+            self.upstream_of(&registration)?;
+        }
+        Ok(registration)
+    }
+
+    fn uninstall_one(&self, record_path: &Path) -> Result<bool, Error> {
+        let record = loop {
+            let (revision, stored) = self.stored_at(record_path)?;
+            let record = match stored {
+                None => return Ok(false),
+                Some(Stored::Released(record)) => {
+                    self.withdraw(&record)?;
+                    return Ok(false);
+                }
+                Some(Stored::Live(record)) => record,
+            };
+            let (path, launcher) = (host_path(&record.root), self.paths(&record.root)?.1);
+            if ours(&path, &launcher) && !self.proxy_manifest(&path) {
                 return Err(format!(
                     "{}'s registration changed; refusing to restore over it",
                     self.owner
                 )
                 .into());
             }
-            let original = record
-                .original
-                .or_else(|| self.chrome_original().ok().flatten());
-            if let Some(original) = original {
-                let temporary = path.with_extension("restore.tmp");
-                let _ = fs::remove_file(&temporary);
-                let mut file = OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .open(&temporary)?;
-                file.write_all(original.as_bytes())?;
-                file.sync_all()?;
-                fs::rename(temporary, &path)?;
-            } else {
-                fs::remove_file(&path)?;
+            let released = Released { released: record };
+            if commit_record(record_path, revision, &serde_json::to_vec(&released)?)? {
+                break released.released;
             }
-        }
-        fs::remove_file(record_path)?;
-        let _ = fs::remove_file(launcher);
-        let _ = fs::remove_file(started_path(record_path));
-        Ok(())
+        };
+        self.withdraw(&record)?;
+        removed(&started_path(record_path))?;
+        Ok(true)
     }
 
     pub fn uninstall_all(&self) -> Result<(), Error> {
         if !self.state.is_dir() {
             return Ok(());
         }
-        let _guard = self.lock()?;
         for record in self.records()? {
             self.uninstall_one(&record)?;
         }
@@ -692,7 +763,6 @@ impl Bridge {
         if !self.state.is_dir() {
             return Ok(0);
         }
-        let _guard = self.lock()?;
         let mut repaired = 0;
         let mut failure = None;
         for record in self.records()? {
@@ -711,17 +781,17 @@ impl Bridge {
     }
 }
 
-impl Guard<'_> {
-    pub fn release(&self, root: &Path) -> Result<bool, Error> {
-        let record = self.bridge.paths(root)?.0;
-        if !record.exists() {
-            return Ok(false);
-        }
-        self.bridge.uninstall_one(&record)?;
-        Ok(true)
-    }
+pub(crate) fn live_record(path: &Path) -> bool {
+    Revisioned::new(path).read().is_ok_and(|revision| {
+        revision
+            .bytes
+            .is_some_and(|bytes| serde_json::from_slice::<Registration>(&bytes).is_ok())
+    })
+}
 
-    pub fn write_private(&self, path: &Path, bytes: &[u8]) -> Result<(), Error> {
-        write_private(path, bytes)
-    }
+fn commit_record(path: &Path, expected: u64, bytes: &[u8]) -> Result<bool, Error> {
+    Ok(matches!(
+        Revisioned::new(path).commit(expected, bytes)?,
+        Committed::Landed(_)
+    ))
 }

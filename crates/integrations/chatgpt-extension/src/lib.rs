@@ -11,7 +11,7 @@ mod relay;
 mod steps;
 mod watch;
 
-pub use bridge::{Bridge, Guard, Launch, Launcher, Registration, Upstream, host_path};
+pub use bridge::{Bridge, Launch, Launcher, Registration, Upstream, host_path};
 pub use browsers::{
     browser_dirs, browser_for_bundle, cached_default_browser, chatgpt_installed, config_base,
     default_browser, default_from_handlers, disable_reasons, extension_enabled, extension_on,

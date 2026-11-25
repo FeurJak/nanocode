@@ -1,6 +1,6 @@
 use crate::{
     Bridge, EDGE_EXTENSION_ID, EDGE_ORIGIN, EXTENSION_ID, Error, ORIGIN,
-    bridge::{host_path, random_prefix, started_path},
+    bridge::{host_path, live_record, random_prefix, started_path},
     native::{frame, read_body, standalone_reply, write_body},
     steps::Tabs,
 };
@@ -433,7 +433,7 @@ impl Connection {
     }
 
     pub fn owned(&self) -> bool {
-        self.record.exists()
+        live_record(&self.record)
     }
 
     pub fn live(&self) -> bool {

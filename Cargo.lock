@@ -528,7 +528,6 @@ dependencies = [
  "nanocode-io",
  "nanocode-platform",
  "nanocode-sync",
- "nanocode-sys",
  "nanocode-tool-contracts",
  "nanocode-url",
  "serde",
