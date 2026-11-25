@@ -516,7 +516,7 @@ pub(super) fn run_rounds<'a>(
                             "Claude refused the tool changes appended to the history; sending the current tool list instead and retrying once"
                         );
                         state.kept_prefix.set(None);
-                        state.sent_prefix.set(None);
+                        state.sent_prefix.update(super::SentPrefix::clear);
                         strip_tool_changes(&mut pending);
                         strip_tool_changes(&mut conversation.messages);
                         cursor.template.tools = state.available_tools();

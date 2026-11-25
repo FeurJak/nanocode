@@ -3607,6 +3607,19 @@ impl AgentLife {
     }
 }
 
+#[derive(Clone, Default)]
+struct SentPrefix {
+    cleared: u64,
+    prefix: Option<Arc<crate::durability::Prefix>>,
+}
+
+impl SentPrefix {
+    fn clear(&mut self) {
+        self.cleared = self.cleared.wrapping_add(1);
+        self.prefix = None;
+    }
+}
+
 struct State {
     adapter_cleanup: Vec<ToolCleanup>,
     adapter_shutdown: Vec<ToolCleanup>,
@@ -3725,7 +3738,7 @@ struct State {
     fixed_date: bool,
     kept_context: Option<durable::SystemContext>,
     kept_prefix: Atom<Option<Arc<crate::durability::Prefix>>>,
-    sent_prefix: Atom<Option<Arc<crate::durability::Prefix>>>,
+    sent_prefix: Atom<SentPrefix>,
     offered: std::sync::OnceLock<std::collections::BTreeMap<String, Value>>,
 
     boundary_stale: AtomicBool,
@@ -4999,16 +5012,25 @@ impl State {
         if let Some(kept) = Option::clone(&self.kept_prefix.get()) {
             return kept;
         }
-        if let Some(sent) = Option::clone(&self.sent_prefix.get()) {
+        let (cleared, sent) = self
+            .sent_prefix
+            .read(|sent| (sent.cleared, sent.prefix.clone()));
+        if let Some(sent) = sent {
             return sent;
         }
         let template = self.request_template(None, EffortPin::Unpinned);
-        let sent = Arc::new(crate::durability::Prefix {
+        let built = Arc::new(crate::durability::Prefix {
             system: template.system,
             tools: template.tools,
         });
-        self.sent_prefix.set(Some(Arc::clone(&sent)));
-        sent
+        self.sent_prefix.update(|sent| match &sent.prefix {
+            Some(filled) => Arc::clone(filled),
+            None if sent.cleared == cleared => {
+                sent.prefix = Some(Arc::clone(&built));
+                Arc::clone(&built)
+            }
+            None => Arc::clone(&built),
+        })
     }
     fn tool_changes(&self, messages: &[HistoryMessage]) -> Option<HistoryMessage> {
         let kept = Option::clone(&self.kept_prefix.get())?;
