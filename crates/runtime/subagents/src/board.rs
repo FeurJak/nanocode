@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use nanocode_board::access::{Identity, Verifier};
@@ -11,7 +11,7 @@ use nanocode_board::{
     Applied, Board, BoardError, Change, ClaimId, EventId, Fold, NewTask, Op, Outcome, Phase,
     Rejection, Retain, TaskId, Write,
 };
-use nanocode_sync::{Owned, mpsc, oneshot, watch};
+use nanocode_sync::{Slot, mpsc, oneshot, watch};
 use nanocode_turnlog::LogHost;
 
 use crate::model::{AgentId, AgentStatus, AgentUpdate, MessageSender};
@@ -262,20 +262,66 @@ struct Desk {
     letters: mpsc::UnboundedReceiver<Letter>,
 }
 
-impl Desk {
-    async fn drain(&mut self) {
-        while let Ok(letter) = self.letters.try_recv() {
-            letter(&mut self.inner).await;
+struct Post {
+    desk: Slot<Desk>,
+    driving: AtomicBool,
+    pending: AtomicIsize,
+}
+
+struct Driver {
+    post: Arc<Post>,
+    desk: Option<Desk>,
+    driving: bool,
+}
+
+impl Driver {
+    async fn drive(mut self) {
+        loop {
+            let desk = self.desk.insert(
+                self.post
+                    .desk
+                    .take()
+                    .expect("only the post's one driver takes its desk"),
+            );
+            while let Ok(letter) = desk.letters.try_recv() {
+                self.post.pending.fetch_sub(1, Ordering::SeqCst);
+                letter(&mut desk.inner).await;
+            }
+            desk.inner.settle().await;
+            self.release();
+            if self.post.pending.load(Ordering::SeqCst) <= 0
+                || self.post.driving.swap(true, Ordering::SeqCst)
+            {
+                return;
+            }
+            self.driving = true;
         }
-        self.inner.settle().await;
+    }
+
+    fn release(&mut self) {
+        if let Some(desk) = self.desk.take() {
+            assert!(
+                self.post.desk.put(desk).is_none(),
+                "the post's desk has one home"
+            );
+        }
+        self.driving = false;
+        self.post.driving.store(false, Ordering::SeqCst);
+    }
+}
+
+impl Drop for Driver {
+    fn drop(&mut self) {
+        if self.driving {
+            self.release();
+        }
     }
 }
 
 pub struct BoardCoordination {
     hosts: Arc<hosting::Hosts>,
-    desk: Arc<Owned<Desk>>,
+    post: Arc<Post>,
     letters: mpsc::UnboundedSender<Letter>,
-    draining: Arc<AtomicBool>,
     changes: watch::Sender<u64>,
 }
 
@@ -345,62 +391,62 @@ impl BoardCoordination {
             hosts: Arc::clone(&hosts),
             changes: changes.clone(),
             letters,
-            draining: Arc::new(AtomicBool::new(false)),
-            desk: Arc::new(Owned::new(Desk {
-                inner: Inner {
-                    host,
-                    scope: scope.to_owned(),
-                    retain,
-                    clock: 0,
-                    dispatcher: None,
-                    workers: BTreeMap::new(),
-                    opened: std::collections::VecDeque::new(),
-                    sessions: BTreeMap::new(),
-                    agents: BTreeMap::new(),
-                    roots: BTreeSet::new(),
-                    stats: BoardStats::default(),
-                    errors: Vec::new(),
-                    changes,
-                    brief: None,
-                    hosts,
-                    held: None,
-                },
-                letters: received,
-            })),
+            post: Arc::new(Post {
+                driving: AtomicBool::new(false),
+                pending: AtomicIsize::new(0),
+                desk: Slot::new(Some(Desk {
+                    inner: Inner {
+                        host,
+                        scope: scope.to_owned(),
+                        retain,
+                        clock: 0,
+                        dispatcher: None,
+                        workers: BTreeMap::new(),
+                        opened: std::collections::VecDeque::new(),
+                        sessions: BTreeMap::new(),
+                        agents: BTreeMap::new(),
+                        roots: BTreeSet::new(),
+                        stats: BoardStats::default(),
+                        errors: Vec::new(),
+                        changes,
+                        brief: None,
+                        hosts,
+                        held: None,
+                    },
+                    letters: received,
+                })),
+            }),
         })
     }
 
-    fn send(&self, letter: Letter) -> bool {
+    fn send(&self, letter: Letter) -> Option<Driver> {
         if self.letters.send(letter).is_err() {
-            return true;
+            return None;
         }
-        if self.draining.swap(true, Ordering::AcqRel) {
-            return true;
+        self.post.pending.fetch_add(1, Ordering::SeqCst);
+        if self.post.driving.swap(true, Ordering::SeqCst) {
+            return None;
         }
-        let desk = Arc::clone(&self.desk);
-        let draining = Arc::clone(&self.draining);
-        let drained = async move {
-            let mut desk = desk.acquire_owned().await;
-            draining.store(false, Ordering::Release);
-            desk.drain().await;
-        };
-        self.spawn(drained)
+        Self::spawn(Driver {
+            post: Arc::clone(&self.post),
+            desk: None,
+            driving: true,
+        })
     }
 
     #[cfg(not(target_family = "wasm"))]
-    fn spawn(&self, drained: impl Future<Output = ()> + Send + 'static) -> bool {
+    fn spawn(driver: Driver) -> Option<Driver> {
         let Ok(runtime) = nanocode_platform::Handle::try_current() else {
-            self.draining.store(false, Ordering::Release);
-            return false;
+            return Some(driver);
         };
-        runtime.spawn(drained);
-        true
+        runtime.spawn(driver.drive());
+        None
     }
 
     #[cfg(target_family = "wasm")]
-    fn spawn(&self, drained: impl Future<Output = ()> + 'static) -> bool {
-        nanocode_platform::spawn_local(drained);
-        true
+    fn spawn(driver: Driver) -> Option<Driver> {
+        nanocode_platform::spawn_local(driver.drive());
+        None
     }
 
     async fn call<R, F>(&self, job: F) -> Option<R>
@@ -409,15 +455,15 @@ impl BoardCoordination {
         F: for<'a> FnOnce(&'a mut Inner) -> ReadFuture<'a, R> + Send + 'static,
     {
         let (reply, replied) = oneshot::channel();
-        let spawned = self.send(Box::new(move |inner| {
+        let driver = self.send(Box::new(move |inner| {
             Box::pin(async move {
                 inner.settle().await;
                 let output = job(inner).await;
                 drop(reply.send(output));
             })
         }));
-        if !spawned {
-            self.desk.acquire().await.drain().await;
+        if let Some(driver) = driver {
+            driver.drive().await;
         }
         replied.await.ok()
     }
@@ -1630,12 +1676,12 @@ impl Coordination for BoardCoordination {
             return;
         };
         let root = root.to_owned();
-        self.send(Box::new(move |inner| {
+        drop(self.send(Box::new(move |inner| {
             Box::pin(async move {
                 inner.seen(&root, seen).await;
                 inner.changes.send_modify(|revision| *revision += 1);
             })
-        }));
+        })));
     }
 
     fn changes(&self) -> watch::Receiver<u64> {
@@ -1644,12 +1690,12 @@ impl Coordination for BoardCoordination {
 
     fn reconcile(&self, root: &str, finished: Vec<(AgentId, AgentStatus, Option<u64>)>) {
         let root = root.to_owned();
-        self.send(Box::new(move |inner| {
+        drop(self.send(Box::new(move |inner| {
             Box::pin(async move {
                 inner.reconcile(&root, finished).await;
                 inner.changes.send_modify(|revision| *revision += 1);
             })
-        }));
+        })));
     }
 
     fn agents<'a>(&'a self, root: &'a str) -> ReadFuture<'a, Result<BoardAgents, String>> {
