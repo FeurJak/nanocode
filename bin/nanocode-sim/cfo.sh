@@ -468,6 +468,7 @@ default_table='
 1 canary_partitions_replays_in_flight canary:64 --scenario partitions --mutation replays_in_flight
 1 canary_partitions_double_claim canary:64 --scenario partitions --mutation double_claim
 1 canary_partitions_lost_claim canary:64 --scenario partitions --mutation lost_claim
+1 canary_partitions_unbounded_load canary:64 --scenario partitions --mutation unbounded_load
 8 lease pass --scenario lease
 2 lease_twice pass --scenario lease --twice
 1 canary_lease_claim_keeps_epoch canary:64 --scenario lease --mutation claim_keeps_epoch

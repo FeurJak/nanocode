@@ -108,10 +108,47 @@ pub fn assignment<N: AsRef<[u8]> + Ord + Clone>(
     count: NonZeroU32,
     live: &BTreeSet<N>,
 ) -> BTreeMap<Partition, N> {
-    (0..count.get())
-        .map(Partition)
-        .filter_map(|partition| assignee(partition, live).map(|node| (partition, node.clone())))
-        .collect()
+    if mutated(Mutation::UnboundedLoad) || mutated(Mutation::AssignByIndex) {
+        return (0..count.get())
+            .map(Partition)
+            .filter_map(|partition| assignee(partition, live).map(|node| (partition, node.clone())))
+            .collect();
+    }
+    let nodes: Vec<&N> = live.iter().collect();
+    if nodes.is_empty() {
+        return BTreeMap::new();
+    }
+    let partitions = usize::try_from(count.get()).expect("a u32 partition count fits a usize");
+    let (base, extra) = (partitions / nodes.len(), partitions % nodes.len());
+    let mut pairs: Vec<(u64, u32, usize)> = (0..count.get())
+        .flat_map(|partition| {
+            nodes
+                .iter()
+                .enumerate()
+                .map(move |(at, node)| (weight(node.as_ref(), Partition(partition)), partition, at))
+        })
+        .collect();
+    pairs.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    let mut loads = vec![0_usize; nodes.len()];
+    let mut topped = 0;
+    let mut assigned = BTreeMap::new();
+    for (_, partition, at) in pairs {
+        if assigned.len() == partitions {
+            break;
+        }
+        let ceiling = base + usize::from(topped < extra);
+        if assigned.contains_key(&Partition(partition)) || loads[at] >= ceiling {
+            continue;
+        }
+        loads[at] += 1;
+        if loads[at] == base + 1 {
+            topped += 1;
+        }
+        assigned.insert(Partition(partition), nodes[at].clone());
+    }
+    assert_eq!(assigned.len(), partitions, "every partition finds a node under its ceiling");
+    assert!(topped <= extra, "at most count % nodes nodes hold one partition more");
+    assigned
 }
 
 #[must_use]
@@ -297,8 +334,9 @@ pub fn plan<N: AsRef<[u8]> + Ord + Clone>(
     grace: u64,
 ) -> Plan {
     let mut plan = Plan::default();
+    let assigned = assignment(count, live);
     for partition in (0..count.get()).map(Partition) {
-        let mine = assignee(partition, live) == Some(me);
+        let mine = assigned.get(&partition) == Some(me);
         match (mine, held.get(&partition)) {
             (true, None) => {
                 let claimable = rows.get(&partition).is_none_or(|row| {

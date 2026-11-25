@@ -6,7 +6,7 @@ use std::{
 };
 
 use nanocode_partitions::{
-    Fenced, Member, Partition, Refused, Row, Token, assignee, assignment, live, partition_of, plan,
+    Fenced, Member, Partition, Refused, Row, Token, assignment, live, partition_of, plan,
     sim::{self as partitions_sim, Mutation as Rule},
 };
 
@@ -59,10 +59,11 @@ pub enum PartitionsMutation {
     ReplaysInFlight,
     DoubleClaim,
     LostClaim,
+    UnboundedLoad,
 }
 
 impl PartitionsMutation {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::None,
         Self::Unfenced,
         Self::ClaimKeepsEpoch,
@@ -72,6 +73,7 @@ impl PartitionsMutation {
         Self::ReplaysInFlight,
         Self::DoubleClaim,
         Self::LostClaim,
+        Self::UnboundedLoad,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -91,6 +93,7 @@ impl PartitionsMutation {
             Self::ReplaysInFlight => "replays_in_flight",
             Self::DoubleClaim => "double_claim",
             Self::LostClaim => "lost_claim",
+            Self::UnboundedLoad => "unbounded_load",
         }
     }
 
@@ -110,6 +113,7 @@ impl PartitionsMutation {
             Self::WaitsForFree => Rule::WaitsForFree,
             Self::KeepsMoved => Rule::KeepsMoved,
             Self::AssignByIndex => Rule::AssignByIndex,
+            Self::UnboundedLoad => Rule::UnboundedLoad,
             Self::None | Self::ReplaysInFlight | Self::DoubleClaim | Self::LostClaim => Rule::None,
         }
     }
@@ -674,24 +678,49 @@ impl World {
 
     fn membership(&mut self, change: Change) -> Result<(), String> {
         let before = assignment(self.count, &self.members);
-        match change {
-            Change::Join(node) => self.members.insert(node),
-            Change::Leave(node) => self.members.remove(&node),
+        let nodes = match change {
+            Change::Join(node) => {
+                self.members.insert(node);
+                self.members.len()
+            }
+            Change::Leave(node) => {
+                let nodes = self.members.len();
+                self.members.remove(&node);
+                nodes
+            }
         };
         let after = assignment(self.count, &self.members);
-        for partition in self.partitions() {
-            let (from, to) = (before.get(&partition), after.get(&partition));
-            let allowed = match change {
-                _ if from == to => true,
-                Change::Join(node) => to == Some(&node),
-                Change::Leave(node) => from == Some(&node),
-            };
-            if !allowed {
-                return Err(format!(
-                    "invariant 6 (stability): {change:?} moved partition {} from {from:?} to {to:?}",
-                    partition.0
-                ));
-            }
+        let forced = match change {
+            Change::Join(node) => after.values().filter(|owner| **owner == node).count(),
+            Change::Leave(node) => before.values().filter(|owner| **owner == node).count(),
+        };
+        let moved = self
+            .partitions()
+            .filter(|partition| before.get(partition) != after.get(partition))
+            .count();
+        if moved > 2 * forced + nodes {
+            return Err(format!(
+                "invariant 6 (minimal movement): {change:?} moved {moved} partitions, {forced} of them forced, among {nodes} nodes"
+            ));
+        }
+        self.balanced(&after)
+    }
+
+    fn balanced(&self, assigned: &BTreeMap<Partition, NodeId>) -> Result<(), String> {
+        let loads: Vec<usize> = self
+            .members
+            .iter()
+            .map(|member| assigned.values().filter(|owner| *owner == member).count())
+            .collect();
+        let (Some(most), Some(least)) = (loads.iter().max(), loads.iter().min()) else {
+            return Ok(());
+        };
+        if most - least > 1 {
+            return Err(format!(
+                "invariant 7 (balance): {} partitions over {} nodes give {most} to one and {least} to another",
+                self.count,
+                self.members.len()
+            ));
         }
         Ok(())
     }
@@ -1534,7 +1563,7 @@ impl World {
             return Some(format!("{:?} is still leaving", node.id));
         }
         for partition in self.partitions() {
-            let expected = assignee(partition, &self.members).copied();
+            let expected = assignment(self.count, &self.members).get(&partition).copied();
             let row = &self.store.rows[&partition];
             let held = match (row, expected) {
                 (Row::Held { holder, epoch, .. }, Some(expected)) => {
