@@ -2,7 +2,7 @@ use crate::postgres::{PgConnection, PgError, PgPool};
 use nanocode_durability_core::{
     Settle, Sql, SqlAccess, SqlDialect, SqlRow, SqlStatement, StoreError, StoreFuture,
 };
-use nanocode_sync::Owned;
+use nanocode_sync::{Actor, Stopped};
 use std::{sync::Arc, time::Duration};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,26 +112,54 @@ impl Sql for PgSql {
     }
 }
 
-pub struct PgTransaction<'c>(Owned<&'c mut PgConnection>);
+pub struct PgTransaction(Actor<Option<PgConnection>>);
 
-impl<'c> PgTransaction<'c> {
-    pub fn new(connection: &'c mut PgConnection) -> Self {
-        Self(Owned::new(connection))
+impl PgTransaction {
+    pub fn new(connection: PgConnection) -> std::io::Result<Self> {
+        Actor::spawn(Some(connection)).map(Self)
+    }
+
+    pub async fn finish(self) -> Result<PgConnection, Stopped> {
+        let connection = self
+            .0
+            .run(|connection| Box::pin(std::future::ready(connection.take())))
+            .await?;
+        Ok(connection.expect("a transaction holds its connection until it finishes"))
     }
 }
 
-impl Sql for PgTransaction<'_> {
+impl Sql for PgTransaction {
     fn transaction<'a>(
         &'a self,
         _operation: &'static str,
         statements: &'a [SqlStatement<'a>],
     ) -> StoreFuture<'a, Result<Vec<Vec<SqlRow>>, StoreError>> {
+        let statements: Vec<(&'static str, Vec<String>)> = statements
+            .iter()
+            .map(|statement| {
+                let params = statement.params.iter().map(|&param| param.to_owned());
+                (statement.sql, params.collect())
+            })
+            .collect();
+        let ran = self.0.run(move |connection| {
+            Box::pin(async move {
+                let statements: Vec<SqlStatement<'_>> = statements
+                    .iter()
+                    .map(|(sql, params)| SqlStatement {
+                        sql,
+                        params: params.iter().map(String::as_str).collect(),
+                    })
+                    .collect();
+                connection
+                    .as_mut()
+                    .expect("a transaction holds its connection until it finishes")
+                    .run(&statements)
+                    .await
+            })
+        });
         Box::pin(async move {
-            self.0
-                .acquire()
-                .await
-                .run(statements)
-                .await
+            ran.await
+                .map_err(|stopped| StoreError::Backend(stopped.to_string()))?
                 .map_err(backend)
         })
     }

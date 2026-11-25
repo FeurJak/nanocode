@@ -1,6 +1,5 @@
 use crate::postgres::{PgConnection, PgError, PgOptions, connection::Reuse};
-use nanocode_sync::{Leased, Owned};
-use nanocode_sync::{OwnedSemaphorePermit, Semaphore};
+use nanocode_sync::{Mailbox, OwnedSemaphorePermit, Semaphore};
 use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
@@ -12,12 +11,14 @@ pub struct PgPool(Arc<Shared>);
 struct Shared {
     options: PgOptions,
     reuse: Reuse,
-    slots: Box<[Arc<Owned<Option<PgConnection>>>]>,
+    connections: usize,
+    idle: Mailbox<Vec<PgConnection>>,
     permits: Arc<Semaphore>,
 }
 
 pub struct Pooled {
-    slot: Leased<Option<PgConnection>>,
+    connection: Option<PgConnection>,
+    idle: Mailbox<Vec<PgConnection>>,
     _permit: OwnedSemaphorePermit,
 }
 
@@ -28,16 +29,15 @@ impl PgPool {
         Self(Arc::new(Shared {
             options,
             reuse: Reuse::default(),
-            slots: (0..connections)
-                .map(|_| Arc::new(Owned::new(None)))
-                .collect(),
+            connections,
+            idle: Mailbox::new(Vec::with_capacity(connections)),
             permits: Arc::new(Semaphore::new(connections)),
         }))
     }
 
     #[must_use]
     pub fn connections(&self) -> usize {
-        self.0.slots.len()
+        self.0.connections
     }
 
     #[must_use]
@@ -50,22 +50,33 @@ impl PgPool {
             .acquire_owned()
             .await
             .expect("a pool never closes its semaphore");
-        let slot = self
+        let connections = self.0.connections;
+        let idle = self
             .0
-            .slots
-            .iter()
-            .find_map(|slot| Arc::clone(slot).try_acquire_owned())
-            .expect("a permit leaves a slot free");
+            .idle
+            .call(move |idle| {
+                assert!(idle.len() < connections, "a permit leaves a connection free");
+                idle.pop()
+            })
+            .await;
         let mut pooled = Pooled {
-            slot,
+            connection: idle.filter(PgConnection::is_ready),
+            idle: self.0.idle.clone(),
             _permit: permit,
         };
-        if !pooled.slot.as_ref().is_some_and(PgConnection::is_ready) {
-            *pooled.slot = None;
-            *pooled.slot =
+        if pooled.connection.is_none() {
+            pooled.connection =
                 Some(PgConnection::connect_reusing(&self.0.options, &self.0.reuse).await?);
         }
         Ok(pooled)
+    }
+}
+
+impl Drop for Pooled {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.take() {
+            self.idle.send(move |idle| idle.push(connection));
+        }
     }
 }
 
@@ -73,7 +84,7 @@ impl Deref for Pooled {
     type Target = PgConnection;
 
     fn deref(&self) -> &PgConnection {
-        self.slot
+        self.connection
             .as_ref()
             .expect("a pooled connection is present while it is lent")
     }
@@ -81,7 +92,7 @@ impl Deref for Pooled {
 
 impl DerefMut for Pooled {
     fn deref_mut(&mut self) -> &mut PgConnection {
-        self.slot
+        self.connection
             .as_mut()
             .expect("a pooled connection is present while it is lent")
     }
