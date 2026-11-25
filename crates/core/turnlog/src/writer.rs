@@ -820,6 +820,12 @@ fn each_row(
     }
 }
 
+fn job_site(site: &std::panic::Location<'_>) -> String {
+    let file = site.file();
+    let name = file.rsplit(['/', '\\']).next().unwrap_or(file);
+    format!("{name}:{}", site.line())
+}
+
 fn timed() -> bool {
     nanocode_trace::enabled!(target: "nc_metrics", nanocode_trace::Level::INFO)
 }
@@ -1164,6 +1170,9 @@ impl Follower {
                 self.snapshot = row.bytes;
                 self.snapshot_row = Some(row.seq);
                 self.state = row.plain.len();
+                nanocode_trace::event!(target: "nc_metrics", nanocode_trace::Level::INFO, {
+                    histogram.nc.turnlog.opened_snapshot_plain_bytes = u64::try_from(row.plain.len()).unwrap_or(u64::MAX)
+                });
                 self.tail = 0;
                 self.tail_plain = 0;
             } else {
@@ -1517,6 +1526,7 @@ impl TurnLog {
         }
     }
 
+    #[track_caller]
     pub fn write<R, J>(&self, job: J) -> impl Future<Output = R>
     where
         R: Send + 'static,
@@ -1526,6 +1536,7 @@ impl TurnLog {
         async move { answered(self.served(replied).await) }
     }
 
+    #[track_caller]
     pub fn write_within<R, E, J>(&self, job: J) -> impl Future<Output = Result<R, E>>
     where
         R: Send + 'static,
@@ -1536,6 +1547,7 @@ impl TurnLog {
         async move { bounded.await? }
     }
 
+    #[track_caller]
     fn post<R, J>(&self, job: J) -> (oneshot::Receiver<()>, oneshot::Receiver<Replied<R>>)
     where
         R: Send + 'static,
@@ -1544,6 +1556,7 @@ impl TurnLog {
         let (started, start) = oneshot::channel();
         let (mut reply, replied) = oneshot::channel();
         let caller = nanocode_trace::Span::current();
+        let site = std::panic::Location::caller();
         let queued = timed().then(nanocode_platform::now);
         let letter: Job = Box::new(move |writing| {
             Box::pin(async move {
@@ -1554,20 +1567,25 @@ impl TurnLog {
                 let span = match taken {
                     Some((queued, taken)) => {
                         let waited = taken.saturating_duration_since(queued);
-                        nanocode_trace::event!(
-                            target: "nc_metrics",
-                            nanocode_trace::Level::INFO,
-                            {
-                                histogram.nc.turnlog.writer_queue_micros =
-                                    u64::try_from(waited.as_micros()).unwrap_or(u64::MAX)
-                            }
-                        );
-                        nanocode_trace::info_span!(
+                        let job = job_site(site);
+                        let span = nanocode_trace::info_span!(
                             target: "nanocode",
                             parent: caller.id(),
                             "turnlog.writer.job",
+                            job = job.as_str(),
                             queue.ms = waited.as_secs_f64() * 1_000.0,
-                        )
+                        );
+                        span.in_scope(|| {
+                            nanocode_trace::event!(
+                                target: "nc_metrics",
+                                nanocode_trace::Level::INFO,
+                                {
+                                    histogram.nc.turnlog.writer_queue_micros =
+                                        u64::try_from(waited.as_micros()).unwrap_or(u64::MAX)
+                                }
+                            );
+                        });
+                        span
                     }
                     None => nanocode_trace::Span::none(),
                 };
@@ -1576,21 +1594,28 @@ impl TurnLog {
                 let work = std::panic::AssertUnwindSafe(async move { job(writing).await });
                 let answer = {
                     let abandoned = Box::pin(reply.closed());
-                    match select(abandoned, Box::pin(work.catch_unwind().instrument(span))).await {
+                    match select(
+                        abandoned,
+                        Box::pin(work.catch_unwind().instrument(span.clone())),
+                    )
+                    .await
+                    {
                         Either::Left(_) => None,
                         Either::Right((answer, _)) => Some(answer),
                     }
                 };
                 if let Some((_, taken)) = taken {
                     let ran = nanocode_platform::now().saturating_duration_since(taken);
-                    nanocode_trace::event!(
-                        target: "nc_metrics",
-                        nanocode_trace::Level::INFO,
-                        {
-                            histogram.nc.turnlog.writer_job_micros =
-                                u64::try_from(ran.as_micros()).unwrap_or(u64::MAX)
-                        }
-                    );
+                    span.in_scope(|| {
+                        nanocode_trace::event!(
+                            target: "nc_metrics",
+                            nanocode_trace::Level::INFO,
+                            {
+                                histogram.nc.turnlog.writer_job_micros =
+                                    u64::try_from(ran.as_micros()).unwrap_or(u64::MAX)
+                            }
+                        );
+                    });
                 }
                 if let Some(answer) = answer {
                     drop(reply.send(answer));
@@ -1629,6 +1654,7 @@ impl TurnLog {
         answer.unwrap_or_else(|_| panic!("a turn log's writer answers every job it takes"))
     }
 
+    #[track_caller]
     fn bounded<R, J>(&self, reading: bool, job: J) -> impl Future<Output = Result<R, StoreError>>
     where
         R: Send + 'static,
@@ -2882,6 +2908,10 @@ impl Writing {
                 });
                 writer.snapshot = bytes + part.rewrite;
                 writer.check = bytes + part.rewrite;
+                nanocode_trace::event!(target: "nc_metrics", nanocode_trace::Level::INFO, {
+                    histogram.nc.turnlog.snapshot_bytes = u64::try_from(bytes + part.rewrite).unwrap_or(u64::MAX),
+                    histogram.nc.turnlog.snapshot_plain_bytes = u64::try_from(writer.state).unwrap_or(u64::MAX)
+                });
                 writer.tail = 0;
                 writer.tail_plain = 0;
                 writer.tail_rows = stored.len() - 1;
