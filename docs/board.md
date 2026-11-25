@@ -79,6 +79,8 @@ A checkpoint is used only when its version is this build's `CHECKPOINT_VERSION` 
 
 `src/Board.ts` opens a board over a `SqlHost` with wasm commands in `src/wasm/board.rs`, which builds a `SqlLog` and `shards::open`. Its methods map onto the ops above, and `key` selects a keyed write. `Board.work` claims, renews every third of the lease, heeds the last steer, finishes and throws `LeaseLost` when the fold refuses. The wasm `route` rejects a `Route::Cross`.
 
+nanocode-ts ships these commands in two modules: `nanocode_wasm.wasm`, with the whole agent runtime, and `nanocode_board.wasm` (`nanocode-ts/nanocode_board.wasm`, built from `src/board_wasm.rs` with `--no-default-features`), which holds only the board commands. `Board.open({ module })` takes either one; the board module is 4.2 MB where the full one is 32 MB, and V8 compiles it about five times faster.
+
 ## Behaviors that surprise
 
 - The fold never evaluates a write earlier than the log's latest event: `Fold::apply` keeps `now_ms` as the largest `at_ms` seen, and `claimable`, `room` and `held` use `now_ms.max(at_ms)`, so an older `atMs` cannot revive an expired lease.
