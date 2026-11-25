@@ -815,6 +815,10 @@ fn each_row(
     }
 }
 
+fn timed() -> bool {
+    nanocode_trace::enabled!(target: "nc_metrics", nanocode_trace::Level::INFO)
+}
+
 fn decoded(tag: char, started: nanocode_platform::Instant, bytes: usize) {
     let micros = u64::try_from(
         nanocode_platform::now()
@@ -854,7 +858,7 @@ fn decode_row(logical: Logical, history: &mut History) -> Result<Row, StoreError
     if boundary {
         history.clear();
     }
-    let decoding = nanocode_platform::now();
+    let decoding = timed().then(nanocode_platform::now);
     let plain = if tag == LINKED {
         let (back, compressed) = codec::linked(&text[tag.len_utf8()..])?;
         let keyframe = seq.checked_sub(back).ok_or_else(|| {
@@ -868,7 +872,9 @@ fn decode_row(logical: Logical, history: &mut History) -> Result<Row, StoreError
     } else {
         history.decode_records(seq, &text[tag.len_utf8()..])?
     };
-    decoded(tag, decoding, plain.len());
+    if let Some(decoding) = decoding {
+        decoded(tag, decoding, plain.len());
+    }
     drop(text);
     let plain = String::from_utf8(plain).map_err(|error| {
         StoreError::Backend(format!("turn log row {seq} is not UTF-8: {error}"))
@@ -1521,28 +1527,33 @@ impl TurnLog {
         let (started, start) = oneshot::channel();
         let (mut reply, replied) = oneshot::channel();
         let caller = nanocode_trace::Span::current();
-        let queued = nanocode_platform::now();
+        let queued = timed().then(nanocode_platform::now);
         let letter: Job = Box::new(move |writing| {
             Box::pin(async move {
                 if reply.is_closed() {
                     return;
                 }
-                let taken = nanocode_platform::now();
-                let waited = taken.saturating_duration_since(queued);
-                nanocode_trace::event!(
-                    target: "nc_metrics",
-                    nanocode_trace::Level::INFO,
-                    {
-                        histogram.nc.turnlog.writer_queue_micros =
-                            u64::try_from(waited.as_micros()).unwrap_or(u64::MAX)
+                let taken = queued.map(|queued| (queued, nanocode_platform::now()));
+                let span = match taken {
+                    Some((queued, taken)) => {
+                        let waited = taken.saturating_duration_since(queued);
+                        nanocode_trace::event!(
+                            target: "nc_metrics",
+                            nanocode_trace::Level::INFO,
+                            {
+                                histogram.nc.turnlog.writer_queue_micros =
+                                    u64::try_from(waited.as_micros()).unwrap_or(u64::MAX)
+                            }
+                        );
+                        nanocode_trace::info_span!(
+                            target: "nanocode",
+                            parent: caller.id(),
+                            "turnlog.writer.job",
+                            queue.ms = waited.as_secs_f64() * 1_000.0,
+                        )
                     }
-                );
-                let span = nanocode_trace::info_span!(
-                    target: "nanocode",
-                    parent: caller.id(),
-                    "turnlog.writer.job",
-                    queue.ms = waited.as_secs_f64() * 1_000.0,
-                );
+                    None => nanocode_trace::Span::none(),
+                };
                 let _ = started.send(());
                 writing.writer.chains.clear();
                 let work = std::panic::AssertUnwindSafe(async move { job(writing).await });
@@ -1553,15 +1564,17 @@ impl TurnLog {
                         Either::Right((answer, _)) => Some(answer),
                     }
                 };
-                let ran = nanocode_platform::now().saturating_duration_since(taken);
-                nanocode_trace::event!(
-                    target: "nc_metrics",
-                    nanocode_trace::Level::INFO,
-                    {
-                        histogram.nc.turnlog.writer_job_micros =
-                            u64::try_from(ran.as_micros()).unwrap_or(u64::MAX)
-                    }
-                );
+                if let Some((_, taken)) = taken {
+                    let ran = nanocode_platform::now().saturating_duration_since(taken);
+                    nanocode_trace::event!(
+                        target: "nc_metrics",
+                        nanocode_trace::Level::INFO,
+                        {
+                            histogram.nc.turnlog.writer_job_micros =
+                                u64::try_from(ran.as_micros()).unwrap_or(u64::MAX)
+                        }
+                    );
+                }
                 if let Some(answer) = answer {
                     drop(reply.send(answer));
                 }
