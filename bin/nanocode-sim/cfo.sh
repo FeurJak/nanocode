@@ -128,6 +128,7 @@ default_table='
 1 canary_sync_watch_rewind canary --scenario sync --mutation watch_rewind
 1 canary_sync_broadcast_extra canary --scenario sync --mutation broadcast_extra
 1 canary_sync_ring_off_by_one canary --scenario sync --mutation ring_off_by_one
+1 canary_sync_fill_keeps_abandoned canary --scenario sync --mutation fill_keeps_abandoned
 4 turns_turnlog_events pass --scenario turns --policy turnlog --event-bytes 32768
 4 turns_turnlog_snapshots pass --scenario turns --policy turnlog --snapshot-rows 4 --state-bytes 131072
 2 turns_turnlog_retain pass --scenario turns --policy turnlog --retain 1

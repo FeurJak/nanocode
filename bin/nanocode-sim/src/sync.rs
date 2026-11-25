@@ -13,7 +13,7 @@ use std::{
 };
 
 use nanocode_sync::{
-    Notify, Semaphore, SemaphorePermit,
+    Notify, OnceCell, Semaphore, SemaphorePermit,
     broadcast::{self, error::RecvError},
     mpsc::{self, error::TrySendError},
     watch,
@@ -40,6 +40,8 @@ const VALUES_MAX: u64 = 10;
 const RECEIVERS_MAX: u64 = 3;
 const TRY_SENDS_MAX: u64 = 8;
 const CLOSE_PPM: u64 = 20_000;
+const FILLERS_MAX: u64 = 5;
+const FILL_FAILS_PPM: u64 = 300_000;
 const PATIENCE: Duration = Duration::from_secs(1);
 const PATIENCE_STEP: Duration = Duration::from_micros(100);
 
@@ -61,10 +63,11 @@ pub enum SyncMutation {
     CloseEarly,
     NotifyOneForWaiters,
     WatchResendsStale,
+    FillKeepsAbandoned,
 }
 
 impl SyncMutation {
-    const ALL: [Self; 14] = [
+    const ALL: [Self; 15] = [
         Self::None,
         Self::SkipNotify,
         Self::LeakPermit,
@@ -79,6 +82,7 @@ impl SyncMutation {
         Self::CloseEarly,
         Self::NotifyOneForWaiters,
         Self::WatchResendsStale,
+        Self::FillKeepsAbandoned,
     ];
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -103,6 +107,7 @@ impl SyncMutation {
             Self::CloseEarly => "close_early",
             Self::NotifyOneForWaiters => "notify_one_for_waiters",
             Self::WatchResendsStale => "watch_resends_stale",
+            Self::FillKeepsAbandoned => "fill_keeps_abandoned",
         }
     }
 
@@ -232,6 +237,7 @@ struct Script {
     ring: u64,
     ring_values: u64,
     ring_receivers: u64,
+    fillers: u64,
 }
 
 impl Script {
@@ -265,12 +271,13 @@ impl Script {
             ring: rng.range(1, CAPACITY_MAX),
             ring_values: rng.range(1, VALUES_MAX),
             ring_receivers: rng.range(1, RECEIVERS_MAX),
+            fillers: rng.range(2, FILLERS_MAX),
         }
     }
 
     fn describe(&self) -> String {
         format!(
-            "notify={:?}/{} semaphore={}+{:?} holders={:?} mpsc={} senders={:?} watch={}x{} broadcast={}:{}x{}",
+            "notify={:?}/{} semaphore={}+{:?} holders={:?} mpsc={} senders={:?} watch={}x{} broadcast={}:{}x{} once={}",
             self.notify_wakes,
             self.everyone,
             self.permits,
@@ -282,8 +289,96 @@ impl Script {
             self.watch_receivers,
             self.ring,
             self.ring_values,
-            self.ring_receivers
+            self.ring_receivers,
+            self.fillers
         )
+    }
+}
+
+struct Filling<'a>(&'a Cell<u64>);
+
+impl Drop for Filling<'_> {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() - 1);
+    }
+}
+
+struct Fills {
+    cell: OnceCell<u64>,
+    active: Cell<u64>,
+    filled: Cell<Option<u64>>,
+}
+
+async fn once_filler(world: &World, fills: &Fills, index: usize, seed: u64) {
+    let mut rng = Rng::derive(seed, &format!("once-filler-{index}"));
+    world.pause(&mut rng).await;
+    let limit = World::limit(&mut rng);
+    let fails = rng.chance(FILL_FAILS_PPM);
+    let pause = Duration::from_micros(rng.range(1, PAUSE_MICROS_MAX));
+    let value = wide(index) + 1;
+    let fill = fills.cell.get_or_try_init(|| async {
+        fills.active.set(fills.active.get() + 1);
+        let _filling = Filling(&fills.active);
+        if fills.active.get() > 1 {
+            world.fail(format!("once filler {index} runs its init beside another"));
+        }
+        world.clock.sleep(pause).await;
+        if fails {
+            return Err(());
+        }
+        fills.filled.set(Some(value));
+        Ok(value)
+    });
+    match world.within(limit, fill).await {
+        Some(Ok(got)) => {
+            if fills.filled.get() != Some(*got) {
+                world.fail(format!(
+                    "once filler {index} got {got}, but the fill that landed was {:?}",
+                    fills.filled.get()
+                ));
+            }
+            world.note(format!("once filler {index} got {got}"));
+        }
+        Some(Err(())) => world.note(format!("once filler {index} failed its fill")),
+        None => world.note(format!("once filler {index} gave up")),
+    }
+}
+
+async fn once_scenario(world: &World, script: &Script, seed: u64) {
+    nanocode_sync::sim::mutate(if world.mutation == SyncMutation::FillKeepsAbandoned {
+        nanocode_sync::sim::Mutation::FillKeepsAbandoned
+    } else {
+        nanocode_sync::sim::Mutation::None
+    });
+    let fills = Fills {
+        cell: OnceCell::new(),
+        active: Cell::new(0),
+        filled: Cell::new(None),
+    };
+    let jobs: Vec<Job<'_>> = (0..count(script.fillers))
+        .map(|index| Box::pin(once_filler(world, &fills, index, seed)) as Job<'_>)
+        .collect();
+    join_all(jobs, world, "once fillers").await;
+    let before = fills.filled.get();
+    if fills.cell.get().copied() != before {
+        world.fail(format!(
+            "the cell holds {:?}, but the fill that landed was {before:?}",
+            fills.cell.get()
+        ));
+    }
+    let ran = Cell::new(false);
+    let last = fills
+        .cell
+        .get_or_try_init(|| async {
+            ran.set(true);
+            Ok::<u64, ()>(0)
+        })
+        .await;
+    if before.is_some() && ran.get() {
+        world.fail("a filled cell ran another init".to_owned());
+    }
+    if last.copied() != Ok(before.unwrap_or(0)) {
+        world.fail(format!("the last fill answered {last:?} over {before:?}"));
     }
 }
 
@@ -988,6 +1083,7 @@ fn simulate(seed: u64, mutation: SyncMutation) -> SyncOutcome {
         Box::pin(mpsc_scenario(&world, &script, seed)),
         Box::pin(watch_scenario(&world, &script, seed)),
         Box::pin(broadcast_scenario(&world, &script, seed)),
+        Box::pin(once_scenario(&world, &script, seed)),
     ];
     let ended = Executor::new(Arc::clone(&clock), Rng::derive(seed, "scheduler")).run(tasks, None);
     if ended == Ended::Stuck {

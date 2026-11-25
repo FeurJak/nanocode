@@ -1,9 +1,17 @@
-use crate::{Semaphore, TryAcquireError};
-use std::{fmt, future::Future, sync::OnceLock};
+use crate::{
+    Signal,
+    sim::{Mutation, mutated},
+};
+use nanocode_sys::SwapOption;
+use std::{
+    fmt,
+    future::Future,
+    sync::{Arc, OnceLock},
+};
 
 pub struct OnceCell<T> {
     value: OnceLock<T>,
-    semaphore: Semaphore,
+    filling: SwapOption<Signal>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -68,12 +76,34 @@ impl<T> From<T> for OnceCell<T> {
     }
 }
 
+struct Filling<'cell, T> {
+    cell: &'cell OnceCell<T>,
+    done: Arc<Signal>,
+}
+
+impl<T> Drop for Filling<'_, T> {
+    fn drop(&mut self) {
+        self.cell.filling.rcu(|filling| match filling {
+            Some(current) if Arc::ptr_eq(current, &self.done) => None,
+            other => other.clone(),
+        });
+        if !mutated(Mutation::FillKeepsAbandoned) {
+            self.done.fire();
+        }
+    }
+}
+
+enum Claim<'cell, T> {
+    Leads(Filling<'cell, T>),
+    Waits(Arc<Signal>),
+}
+
 impl<T> OnceCell<T> {
     #[must_use]
     pub fn new() -> Self {
         Self {
             value: OnceLock::new(),
-            semaphore: Semaphore::new(1),
+            filling: SwapOption::empty(),
         }
     }
 
@@ -82,7 +112,6 @@ impl<T> OnceCell<T> {
         let cell = Self::new();
         if let Some(value) = value {
             assert!(cell.value.set(value).is_ok(), "a new cell is empty");
-            cell.semaphore.close();
         }
         cell
     }
@@ -99,12 +128,23 @@ impl<T> OnceCell<T> {
         self.value.get_mut()
     }
 
-    fn fill(&self, value: T) -> &T {
+    fn claim(&self) -> Claim<'_, T> {
+        let done = Arc::new(Signal::new());
+        let running = self
+            .filling
+            .rcu(|filling| filling.clone().or_else(|| Some(Arc::clone(&done))));
+        match running {
+            Some(running) => Claim::Waits(running),
+            None => Claim::Leads(Filling { cell: self, done }),
+        }
+    }
+
+    fn fill(&self, value: T, filling: Filling<'_, T>) -> &T {
         assert!(
             self.value.set(value).is_ok(),
-            "only the permit holder fills the cell"
+            "only the caller leading the fill fills the cell"
         );
-        self.semaphore.close();
+        drop(filling);
         self.value.get().expect("the cell was just filled")
     }
 
@@ -112,15 +152,14 @@ impl<T> OnceCell<T> {
         if self.initialized() {
             return Err(SetError::AlreadyInitializedError(value));
         }
-        match self.semaphore.try_acquire() {
-            Ok(permit) => {
-                permit.forget();
-                self.fill(value);
-                Ok(())
-            }
-            Err(TryAcquireError::NoPermits) => Err(SetError::InitializingError(value)),
-            Err(TryAcquireError::Closed) => Err(SetError::AlreadyInitializedError(value)),
+        let Claim::Leads(filling) = self.claim() else {
+            return Err(SetError::InitializingError(value));
+        };
+        if self.initialized() {
+            return Err(SetError::AlreadyInitializedError(value));
         }
+        self.fill(value, filling);
+        Ok(())
     }
 
     pub async fn get_or_init<F, Fut>(&self, init: F) -> &T
@@ -128,18 +167,12 @@ impl<T> OnceCell<T> {
         F: FnOnce() -> Fut,
         Fut: Future<Output = T>,
     {
-        if let Some(value) = self.get() {
-            return value;
+        let filled = self
+            .get_or_try_init(move || async move { Ok::<T, std::convert::Infallible>(init().await) })
+            .await;
+        match filled {
+            Ok(value) => value,
         }
-        let Ok(permit) = self.semaphore.acquire().await else {
-            return self.get().expect("a closed cell holds its value");
-        };
-        if let Some(value) = self.get() {
-            return value;
-        }
-        let value = init().await;
-        permit.forget();
-        self.fill(value)
     }
 
     pub async fn get_or_try_init<E, F, Fut>(&self, init: F) -> Result<&T, E>
@@ -147,18 +180,21 @@ impl<T> OnceCell<T> {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<T, E>>,
     {
-        if let Some(value) = self.get() {
-            return Ok(value);
+        loop {
+            if let Some(value) = self.get() {
+                return Ok(value);
+            }
+            match self.claim() {
+                Claim::Waits(running) => running.wait().await,
+                Claim::Leads(filling) => {
+                    if let Some(value) = self.get() {
+                        return Ok(value);
+                    }
+                    let value = init().await?;
+                    return Ok(self.fill(value, filling));
+                }
+            }
         }
-        let Ok(permit) = self.semaphore.acquire().await else {
-            return Ok(self.get().expect("a closed cell holds its value"));
-        };
-        if let Some(value) = self.get() {
-            return Ok(value);
-        }
-        let value = init().await?;
-        permit.forget();
-        Ok(self.fill(value))
     }
 
     pub fn into_inner(self) -> Option<T> {

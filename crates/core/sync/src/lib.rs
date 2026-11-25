@@ -24,6 +24,8 @@ pub mod select;
 mod semaphore;
 mod set_once;
 mod shared;
+#[doc(hidden)]
+pub mod sim;
 pub mod sink;
 mod spine;
 #[cfg(not(target_family = "wasm"))]
