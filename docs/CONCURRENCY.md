@@ -126,7 +126,6 @@ Locations are paths at master. "Rule" is the rule broken. "Replacement" is what 
 | Entry | Location | Failure under load | Replacement |
 |---|---|---|---|
 | Claude conversation and steering | `crates/backends/claude/src/agent.rs`, `agent/{assemble,driver,durable,rounds,keep,side}.rs` | Guards nest and are held across model streaming and persistence | The session is one owner. Steer and interrupt are messages |
-| `Semaphore::new(1)` as a mutex | `crates/core/workspace-fs/src/fs.rs` `gate` | Held across store commits with no deadline. It protects only one process | Revision CAS on the manifest |
 | Turn log reads behind the writer | `crates/core/turnlog/src/writer.rs` `TurnLog::read`, `read_owner(s)`, `history`, `facts_from`, `blobs`, `stats` | Reads run as jobs on the writer's owning task, so they queue behind an append round trip and its read scans | Reads from a published fold snapshot |
 | Durable pool writer, listing | `crates/runtime/durability/src/pool.rs` `writer`, `listed` | The guard adds queuing on top of a revision CAS. A slow `peek` overwrites a newer listing | Drop the guard. Keep `(revision, keys)` and replace only with a newer revision |
 | Board desk | `crates/runtime/subagents/src/board.rs` `desk` | Held across `drain()`. The fallback drains inline in the caller | An always-spawned `Actor` |
