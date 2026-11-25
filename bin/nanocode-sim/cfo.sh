@@ -382,6 +382,10 @@ default_table='
 4 migrated pass --scenario migrated
 1 migrated_twice pass --scenario migrated --twice
 1 canary_migrated_open_migrates canary:32 --scenario migrated --mutation open_migrates
+4 kv_lease pass --scenario kv_lease
+1 kv_lease_twice pass --scenario kv_lease --twice
+1 canary_kv_lease_claim_steals_live canary:16 --scenario kv_lease --mutation claim_steals_live
+1 canary_kv_lease_claim_skips_grace canary:16 --scenario kv_lease --mutation claim_skips_grace
 8 repo_cache pass --scenario repo_cache
 2 repo_cache_twice pass --scenario repo_cache --twice
 1 canary_repo_cache_shared_head canary:8 --scenario repo_cache --mutation shared_head

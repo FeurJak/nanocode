@@ -3,7 +3,9 @@ use std::sync::Arc;
 use nanocode_platform::{MaybeSend, MaybeSync};
 
 use crate::{
-    OwnedState, OwnerId, OwnerToken, StateStore, StoreError, StoreFuture, StoreRecord, StoredState,
+    Lease, OwnedState, OwnerId, OwnerToken, StateStore, StoreError, StoreFuture, StoreRecord,
+    StoredState,
+    sim::{Mutation, mutated},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,6 +43,10 @@ pub trait KeyValue: MaybeSend + MaybeSync {
     ) -> StoreFuture<'a, Result<Vec<String>, StoreError>> {
         Box::pin(async { Err(listing_unsupported()) })
     }
+
+    fn clock_ms(&self) -> StoreFuture<'_, Result<u64, StoreError>> {
+        Box::pin(async { Err(clock_unsupported()) })
+    }
 }
 
 async fn get_each<B: KeyValue + ?Sized>(
@@ -54,6 +60,10 @@ async fn get_each<B: KeyValue + ?Sized>(
     Ok(values)
 }
 
+fn clock_unsupported() -> StoreError {
+    StoreError::Backend("this key-value store keeps no clock, so it cannot lease".to_owned())
+}
+
 fn listing_unsupported() -> StoreError {
     StoreError::Backend("this key-value store does not list keys".to_owned())
 }
@@ -61,6 +71,7 @@ fn listing_unsupported() -> StoreError {
 pub struct KeyValueStore<B: ?Sized> {
     backend: Arc<B>,
     prefix: Arc<str>,
+    lease: Option<Lease>,
 }
 
 impl<B: ?Sized> Clone for KeyValueStore<B> {
@@ -68,13 +79,17 @@ impl<B: ?Sized> Clone for KeyValueStore<B> {
         Self {
             backend: Arc::clone(&self.backend),
             prefix: Arc::clone(&self.prefix),
+            lease: self.lease,
         }
     }
 }
 
+const LEASED: char = 'L';
+
 struct Head<'a> {
     fence: u64,
     revision: u64,
+    expires_ms: Option<u64>,
     owner: &'a str,
 }
 
@@ -82,11 +97,25 @@ impl<'a> Head<'a> {
     fn parse(version: &'a str) -> Result<Self, StoreError> {
         let invalid =
             || StoreError::Backend(format!("invalid key-value state version `{version}`"));
-        let mut parts = version.splitn(3, '.');
-        let (Some(fence), Some(revision), Some(owner)) = (parts.next(), parts.next(), parts.next())
-        else {
+        let (leased, rest) = match version.strip_prefix(LEASED) {
+            Some(rest) => (true, rest),
+            None => (false, version),
+        };
+        let mut parts = rest.splitn(if leased { 4 } else { 3 }, '.');
+        let (Some(fence), Some(revision)) = (parts.next(), parts.next()) else {
             return Err(invalid());
         };
+        let expires_ms = match leased {
+            true => Some(
+                parts
+                    .next()
+                    .ok_or_else(invalid)?
+                    .parse()
+                    .map_err(|_| invalid())?,
+            ),
+            false => None,
+        };
+        let owner = parts.next().ok_or_else(invalid)?;
         let fence = fence.parse().map_err(|_| invalid())?;
         let revision = revision.parse().map_err(|_| invalid())?;
         if fence == 0 || owner.is_empty() {
@@ -95,8 +124,22 @@ impl<'a> Head<'a> {
         Ok(Self {
             fence,
             revision,
+            expires_ms,
             owner,
         })
+    }
+
+    fn live_for(&self, owner_id: &str, grace_ms: u64, now_ms: u64) -> bool {
+        if mutated(Mutation::KvClaimStealsLive) || self.owner == owner_id {
+            return false;
+        }
+        let grace_ms = if mutated(Mutation::KvClaimSkipsGrace) {
+            0
+        } else {
+            grace_ms
+        };
+        self.expires_ms
+            .is_some_and(|expires_ms| expires_ms.saturating_add(grace_ms) >= now_ms)
     }
 
     fn state(&self, value: String) -> StoredState {
@@ -117,7 +160,7 @@ fn conflicting_record(key: &str) -> StoreError {
     StoreError::NotCommitted(format!("durability record `{key}` has conflicting content"))
 }
 
-fn version(fence: u64, revision: u64, owner: &str) -> String {
+fn version(fence: u64, revision: u64, expires_ms: Option<u64>, owner: &str) -> String {
     assert!(
         fence > 0,
         "a key-value head is written with a granted fence"
@@ -126,8 +169,15 @@ fn version(fence: u64, revision: u64, owner: &str) -> String {
         !owner.is_empty(),
         "a key-value head is written with its owner"
     );
-    let version = format!("{fence}.{revision}.{owner}");
+    let version = match expires_ms {
+        Some(expires_ms) => format!("{LEASED}{fence}.{revision}.{expires_ms}.{owner}"),
+        None => format!("{fence}.{revision}.{owner}"),
+    };
     let head = Head::parse(&version);
+    assert!(
+        head.as_ref().is_ok_and(|head| head.expires_ms == expires_ms),
+        "a key-value head version parses back to its expiry"
+    );
     assert!(
         head.as_ref().is_ok_and(|head| head.fence == fence),
         "a key-value head version parses back to its fence"
@@ -141,6 +191,20 @@ fn version(fence: u64, revision: u64, owner: &str) -> String {
         "a key-value head version parses back to its owner"
     );
     version
+}
+
+fn held(current: &Versioned, owner: &OwnerToken, expected_revision: u64) -> Result<(), StoreError> {
+    let head = Head::parse(&current.version)?;
+    if head.fence != owner.fence() || head.owner != owner.owner_id().as_str() {
+        return Err(StoreError::Fenced);
+    }
+    if head.revision != expected_revision {
+        return Err(StoreError::Conflict {
+            expected: expected_revision,
+            actual: head.revision,
+        });
+    }
+    Ok(())
 }
 
 fn unnamed_owner() -> StoreError {
@@ -159,7 +223,22 @@ impl<B: KeyValue + ?Sized> KeyValueStore<B> {
         Self {
             backend,
             prefix: Arc::from(""),
+            lease: None,
         }
+    }
+
+    #[must_use]
+    pub const fn leased(mut self, lease: Lease) -> Self {
+        self.lease = Some(lease);
+        self
+    }
+
+    async fn expiry_ms(&self) -> Result<Option<u64>, StoreError> {
+        let Some(lease) = self.lease else {
+            return Ok(None);
+        };
+        let now_ms = self.backend.clock_ms().await?;
+        Ok(Some(now_ms.saturating_add(lease.ttl_ms)))
     }
 
     #[must_use]
@@ -203,17 +282,30 @@ impl<B: KeyValue + ?Sized> KeyValueStore<B> {
         let key = self.head_key(state_id);
         loop {
             let current = self.backend.get(&key).await?;
+            let now_ms = match self.lease {
+                Some(_) => Some(self.backend.clock_ms().await?),
+                None => None,
+            };
             let (fence, state) = match &current {
                 None => (0, StoredState::default()),
                 Some(entry) => {
                     let head = Head::parse(&entry.version)?;
+                    if let (Some(lease), Some(now_ms)) = (self.lease, now_ms)
+                        && head.live_for(owner_id.as_str(), lease.grace_ms, now_ms)
+                    {
+                        return Err(StoreError::Busy);
+                    }
                     (head.fence, head.state(entry.value.clone()))
                 }
             };
             let fence = fence.checked_add(1).ok_or_else(|| {
                 StoreError::NotCommitted("key-value durability owner fence overflow".to_owned())
             })?;
-            let next = version(fence, state.revision, owner_id.as_str());
+            let expires_ms = self
+                .lease
+                .zip(now_ms)
+                .map(|(lease, now_ms)| now_ms.saturating_add(lease.ttl_ms));
+            let next = version(fence, state.revision, expires_ms, owner_id.as_str());
             let swapped = self
                 .backend
                 .compare_and_swap(
@@ -255,8 +347,16 @@ impl<B: KeyValue + ?Sized> KeyValueStore<B> {
         .await?;
         let owner_id = owner.owner_id().as_str();
         let key = self.head_key(state_id);
-        let expected = version(owner.fence(), expected_revision, owner_id);
-        let next = version(owner.fence(), revision, owner_id);
+        let expires_ms = self.expiry_ms().await?;
+        let next = version(owner.fence(), revision, expires_ms, owner_id);
+        let expected = match self.lease {
+            Some(_) => {
+                let current = self.backend.get(&key).await?.ok_or(StoreError::Fenced)?;
+                held(&current, owner, expected_revision)?;
+                current.version
+            }
+            None => version(owner.fence(), expected_revision, None, owner_id),
+        };
         if self
             .backend
             .compare_and_swap(&key, Some(&expected), &next, payload)
@@ -267,16 +367,7 @@ impl<B: KeyValue + ?Sized> KeyValueStore<B> {
         let Some(current) = self.backend.get(&key).await? else {
             return Err(StoreError::Fenced);
         };
-        let head = Head::parse(&current.version)?;
-        if head.fence != owner.fence() || head.owner != owner_id {
-            return Err(StoreError::Fenced);
-        }
-        if head.revision != expected_revision {
-            return Err(StoreError::Conflict {
-                expected: expected_revision,
-                actual: head.revision,
-            });
-        }
+        held(&current, owner, expected_revision)?;
         Err(StoreError::Backend(format!(
             "key-value store refused to replace version `{expected}` of state {state_id} while reporting it as current"
         )))

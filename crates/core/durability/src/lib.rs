@@ -5,6 +5,7 @@ mod kv;
 mod migrated;
 mod payload;
 mod row;
+pub mod sim;
 mod sql;
 mod staged;
 mod state;
