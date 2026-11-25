@@ -779,6 +779,32 @@ fn each_row(
     }
 }
 
+fn decoded(tag: char, started: nanocode_platform::Instant, bytes: usize) {
+    let micros = u64::try_from(
+        nanocode_platform::now()
+            .saturating_duration_since(started)
+            .as_micros(),
+    )
+    .unwrap_or(u64::MAX);
+    let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+    if tag == LINKED {
+        nanocode_trace::event!(target: "nc_metrics", nanocode_trace::Level::INFO, {
+            histogram.nc.turnlog.decode_linked_micros = micros,
+            monotonic_counter.nc.turnlog.decoded_linked_bytes = bytes
+        });
+    } else if tag == SECTION {
+        nanocode_trace::event!(target: "nc_metrics", nanocode_trace::Level::INFO, {
+            histogram.nc.turnlog.decode_section_micros = micros,
+            monotonic_counter.nc.turnlog.decoded_section_bytes = bytes
+        });
+    } else {
+        nanocode_trace::event!(target: "nc_metrics", nanocode_trace::Level::INFO, {
+            histogram.nc.turnlog.decode_records_micros = micros,
+            monotonic_counter.nc.turnlog.decoded_records_bytes = bytes
+        });
+    }
+}
+
 fn decode_row(logical: Logical, history: &mut History) -> Result<Row, StoreError> {
     let Logical {
         bytes,
@@ -792,6 +818,7 @@ fn decode_row(logical: Logical, history: &mut History) -> Result<Row, StoreError
     if boundary {
         history.clear();
     }
+    let decoding = nanocode_platform::now();
     let plain = if tag == LINKED {
         let (back, compressed) = codec::linked(&text[tag.len_utf8()..])?;
         let keyframe = seq.checked_sub(back).ok_or_else(|| {
@@ -805,6 +832,7 @@ fn decode_row(logical: Logical, history: &mut History) -> Result<Row, StoreError
     } else {
         history.decode_records(seq, &text[tag.len_utf8()..])?
     };
+    decoded(tag, decoding, plain.len());
     drop(text);
     let plain = String::from_utf8(plain).map_err(|error| {
         StoreError::Backend(format!("turn log row {seq} is not UTF-8: {error}"))
