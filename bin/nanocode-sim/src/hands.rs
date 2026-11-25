@@ -25,7 +25,7 @@ use nanocode_durability_core::{
 };
 use nanocode_http::StatusCode;
 use nanocode_sync::FutureExt;
-use nanocode_sync::{Atom, Owned, mpsc};
+use nanocode_sync::{Actor, Atom, OnceCell, mpsc};
 use nanocode_tool_runtime::remote::accept::{
     Acceptor, AcceptorOptions, AcceptorRoute, HandRequests, PendingRequest, Refusal,
 };
@@ -926,7 +926,8 @@ fn durable_step(host: &Arc<StepHost>, index: usize) -> bool {
 }
 
 struct SimLink {
-    incoming: Owned<mpsc::UnboundedReceiver<String>>,
+    incoming: nanocode_sync::Slot<mpsc::UnboundedReceiver<String>>,
+    reader: OnceCell<Actor<mpsc::UnboundedReceiver<String>>>,
     outgoing: mpsc::UnboundedSender<String>,
     resumes: String,
     read: Arc<Atom<BTreeSet<u64>>>,
@@ -965,7 +966,23 @@ impl RemoteLink for SimLink {
 
     fn receive(&self) -> HostFuture<'_, Result<Vec<RemoteFrame>, CodeModeHostError>> {
         Box::pin(async move {
-            match self.incoming.acquire().await.recv().await {
+            let reader = self
+                .reader
+                .get_or_try_init(|| {
+                    std::future::ready(match self.incoming.take() {
+                        Some(incoming) => Actor::spawn(incoming),
+                        None => Err(std::io::Error::other(
+                            "the simulated socket was lost when its reader could not start",
+                        )),
+                    })
+                })
+                .await
+                .map_err(|error| CodeModeHostError::new(error.to_string()))?;
+            let received = reader
+                .run(|incoming| Box::pin(async move { incoming.recv().await }))
+                .await
+                .map_err(|stopped| CodeModeHostError::new(stopped.to_string()))?;
+            match received {
                 Some(text) => {
                     let frame = RemoteFrame::decode(&text, FRAME_BYTES_MAX)?;
                     if let RemoteFrame::Reply { id, .. } = &frame {
@@ -1453,7 +1470,8 @@ impl World {
             let (to_brain, from_hand) = mpsc::unbounded_channel();
             let (to_hand, from_brain) = mpsc::unbounded_channel();
             let link = SimLink {
-                incoming: Owned::new(from_hand),
+                incoming: nanocode_sync::Slot::new(Some(from_hand)),
+                reader: OnceCell::new(),
                 outgoing: to_hand,
                 resumes: runtime,
                 read: Arc::clone(&slot.read),

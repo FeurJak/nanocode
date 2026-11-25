@@ -1,11 +1,18 @@
 use std::fmt::Display;
 
-use nanocode_sync::Owned;
+use nanocode_sync::future::{self, Either};
+use nanocode_sync::{OnceCell, Slot};
 use nanocode_sync::{Sink, SinkExt, Stream, StreamExt};
 use nanocode_sync::{mpsc, oneshot};
 
 use super::{PEER_CLOSED, RemoteDelivery, RemoteFrame, RemoteLink};
 use crate::embedded::{CodeModeHostError, HostFuture};
+
+const STREAM_LOST: &str = "the message stream was lost when its reader could not start";
+const READER_STOPPED: &str = "the message stream's reader stopped";
+
+type Received = Option<Result<String, String>>;
+type Reads = mpsc::UnboundedSender<oneshot::Sender<Received>>;
 
 type Writes<M> = mpsc::UnboundedSender<(Vec<M>, Option<oneshot::Sender<bool>>)>;
 
@@ -91,7 +98,8 @@ impl<M: Send + 'static> MessageWriter<M> {
 }
 
 pub struct MessageLink<St, M> {
-    stream: Owned<St>,
+    stream: Slot<St>,
+    reader: OnceCell<Reads>,
     writer: MessageWriter<M>,
     max_frame_bytes: Option<usize>,
     resumes: Option<String>,
@@ -105,7 +113,8 @@ impl<St, M> MessageLink<St, M> {
         resumes: Option<String>,
     ) -> Self {
         Self {
-            stream: Owned::new(stream),
+            stream: Slot::new(Some(stream)),
+            reader: OnceCell::new(),
             writer,
             max_frame_bytes,
             resumes,
@@ -116,7 +125,7 @@ impl<St, M> MessageLink<St, M> {
 impl<St, M, E> RemoteLink for MessageLink<St, M>
 where
     St: Stream<Item = Result<String, E>> + Unpin + Send + 'static,
-    E: Display,
+    E: Display + 'static,
     M: From<String> + Send + 'static,
 {
     fn send(
@@ -153,12 +162,24 @@ where
 
     fn receive(&self) -> HostFuture<'_, Result<Vec<RemoteFrame>, CodeModeHostError>> {
         Box::pin(async move {
-            match self.stream.acquire().await.next().await {
+            let reader = self
+                .reader
+                .get_or_try_init(|| std::future::ready(start_reader(self.stream.take())))
+                .await
+                .map_err(|error| CodeModeHostError::new(error.to_string()))?;
+            let (reply, received) = oneshot::channel();
+            reader
+                .send(reply)
+                .map_err(|_| CodeModeHostError::new(READER_STOPPED))?;
+            let received = received
+                .await
+                .map_err(|_| CodeModeHostError::new(READER_STOPPED))?;
+            match received {
                 Some(Ok(text)) => Ok(vec![RemoteFrame::decode(
                     &text,
                     self.max_frame_bytes.unwrap_or(usize::MAX),
                 )?]),
-                Some(Err(error)) => Err(CodeModeHostError::new(error.to_string())),
+                Some(Err(error)) => Err(CodeModeHostError::new(error)),
                 None => Err(CodeModeHostError::new(PEER_CLOSED)),
             }
         })
@@ -174,6 +195,57 @@ where
 
     fn resumes(&self) -> Option<String> {
         self.resumes.clone()
+    }
+}
+
+fn start_reader<St, E>(stream: Option<St>) -> std::io::Result<Reads>
+where
+    St: Stream<Item = Result<String, E>> + Unpin + Send + 'static,
+    E: Display + 'static,
+{
+    let stream = stream.ok_or_else(|| std::io::Error::other(STREAM_LOST))?;
+    let (reads, requests) = mpsc::unbounded_channel();
+    spawn_reader(read(stream, requests))?;
+    Ok(reads)
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn spawn_reader(reading: impl Future<Output = ()> + Send + 'static) -> std::io::Result<()> {
+    nanocode_platform::Handle::try_current()
+        .map_err(std::io::Error::other)?
+        .spawn(reading);
+    Ok(())
+}
+
+#[cfg(target_family = "wasm")]
+fn spawn_reader(reading: impl Future<Output = ()> + 'static) -> std::io::Result<()> {
+    nanocode_platform::spawn_local(reading);
+    Ok(())
+}
+
+async fn read<St, E>(
+    mut stream: St,
+    mut requests: mpsc::UnboundedReceiver<oneshot::Sender<Received>>,
+) where
+    St: Stream<Item = Result<String, E>> + Unpin,
+    E: Display,
+{
+    while let Some(mut reply) = requests.recv().await {
+        if reply.is_closed() {
+            continue;
+        }
+        let received = {
+            let abandoned = std::pin::pin!(reply.closed());
+            match future::select(stream.next(), abandoned).await {
+                Either::Left((received, _)) => {
+                    Some(received.map(|item| item.map_err(|error| error.to_string())))
+                }
+                Either::Right(_) => None,
+            }
+        };
+        if let Some(received) = received {
+            let _ = reply.send(received);
+        }
     }
 }
 
