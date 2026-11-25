@@ -2,6 +2,7 @@ mod blob;
 mod fact;
 mod fact_log;
 mod kv;
+mod migrated;
 mod payload;
 mod row;
 mod sql;
@@ -20,6 +21,7 @@ pub use fact_log::{Append, FactLog, FactLogs, Replay, commit_fact, fold_facts};
 pub use kv::{KeyValue, KeyValueStore, Versioned};
 pub use payload::EncodedPayload;
 pub use row::{Examined, PageCodec, RowStore};
+pub use migrated::Migrated;
 pub use sql::{
     Collected, ConcurrentIndex, Migration, MissingColumn, Sql, SqlAccess, SqlDialect, SqlRow,
     SqlStatement, SqlStore, Unreachable, build_index_concurrently, migrate_format,

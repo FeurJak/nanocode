@@ -1,7 +1,8 @@
 use std::{ops::Range, sync::Arc};
 
 use nanocode_durability_core::{
-    Migration, Sql, SqlAccess, SqlDialect, SqlStatement, StoreError, StoreFuture, migrate_format,
+    Migrated, Migration, Sql, SqlAccess, SqlDialect, SqlStatement, StoreError, StoreFuture,
+    migrate_format,
 };
 use nanocode_sync::Atom;
 
@@ -196,26 +197,29 @@ const DROP: Dialects = [
     "DELETE FROM nanocode_log WHERE scope = $1::text AND seq >= CAST($2::text AS BIGINT) AND seq < CAST($3::text AS BIGINT)",
 ];
 pub struct SqlLog<H: ?Sized> {
-    /// Set once this log created its table and index, so later loads read without the schema lock.
-    prepared: std::sync::atomic::AtomicBool,
     host: Arc<H>,
 }
 
+const COMPONENT: &str = "turn_log";
+
 impl<H: Sql + ?Sized> SqlLog<H> {
-    pub const fn new(host: Arc<H>) -> Self {
-        Self {
-            prepared: std::sync::atomic::AtomicBool::new(false),
-            host,
-        }
+    pub fn new(host: Arc<H>, migrated: &Migrated) -> Self {
+        migrated.assert_opens(COMPONENT, &MIGRATIONS);
+        Self { host }
+    }
+
+    pub async fn migrate(host: &H) -> Result<Migrated, StoreError> {
+        Migrated::migrate(host, COMPONENT, &MIGRATIONS).await
+    }
+
+    pub async fn check(host: &H) -> Result<Migrated, StoreError> {
+        Migrated::check(host, COMPONENT, &MIGRATIONS).await
     }
 
     async fn prepare(&self) -> Result<(), StoreError> {
-        use std::sync::atomic::Ordering;
-        if self.prepared.load(Ordering::Acquire) {
-            return Ok(());
+        if crate::sim::mutated(crate::sim::Mutation::OpenMigrates) {
+            migrate_format(&*self.host, COMPONENT, &MIGRATIONS).await?;
         }
-        migrate_format(&*self.host, "turn_log", &MIGRATIONS).await?;
-        self.prepared.store(true, Ordering::Release);
         Ok(())
     }
 

@@ -1,10 +1,7 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Arc;
 
 use nanocode_durability_core::{
-    Migration, Sql, SqlAccess, SqlStatement, StoreError, StoreFuture, migrate_format,
+    Migrated, Migration, Sql, SqlAccess, SqlStatement, StoreError, StoreFuture, migrate_format,
 };
 
 use crate::{Wakes, host::host_id};
@@ -102,9 +99,10 @@ pub trait WakeRider: Send + Sync {
 }
 
 pub struct WakeIndex<H: ?Sized> {
-    prepared: AtomicBool,
     host: Arc<H>,
 }
+
+const COMPONENT: &str = "wake_index";
 
 fn invalid(detail: impl std::fmt::Display) -> StoreError {
     StoreError::Backend(format!("wake index is invalid: {detail}"))
@@ -117,11 +115,17 @@ fn number(text: Option<&String>, column: &str) -> Result<u64, StoreError> {
 }
 
 impl<H: Sql + ?Sized> WakeIndex<H> {
-    pub const fn new(host: Arc<H>) -> Self {
-        Self {
-            prepared: AtomicBool::new(false),
-            host,
-        }
+    pub fn new(host: Arc<H>, migrated: &Migrated) -> Self {
+        migrated.assert_opens(COMPONENT, &MIGRATIONS);
+        Self { host }
+    }
+
+    pub async fn migrate(host: &H) -> Result<Migrated, StoreError> {
+        Migrated::migrate(host, COMPONENT, &MIGRATIONS).await
+    }
+
+    pub async fn check(host: &H) -> Result<Migrated, StoreError> {
+        Migrated::check(host, COMPONENT, &MIGRATIONS).await
     }
 
     fn pick(&self, statements: &Dialects) -> &'static str {
@@ -219,11 +223,9 @@ impl<H: Sql + Send + Sync + ?Sized + 'static> WakeRider for WakeIndex<H> {
 
     fn prepare(&self) -> StoreFuture<'_, Result<(), StoreError>> {
         Box::pin(async move {
-            if self.prepared.load(Ordering::Acquire) {
-                return Ok(());
+            if crate::sim::mutated(crate::sim::Mutation::OpenMigrates) {
+                migrate_format(&*self.host, COMPONENT, &MIGRATIONS).await?;
             }
-            migrate_format(&*self.host, "wake_index", &MIGRATIONS).await?;
-            self.prepared.store(true, Ordering::Release);
             Ok(())
         })
     }

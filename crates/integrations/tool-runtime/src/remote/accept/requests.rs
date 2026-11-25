@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use nanocode_durability_core::{Migration, Sql, SqlRow, SqlStatement, StoreError, migrate_format};
+use nanocode_durability_core::{Migrated, Migration, Sql, SqlRow, SqlStatement, StoreError};
 
 use crate::embedded::HostFuture;
 use crate::remote::{Carried, RemoteBarrier, RemoteReply};
@@ -56,6 +56,7 @@ const CREATE: [&str; 2] = [
     "CREATE TABLE IF NOT EXISTS nanocode_hand_requests (session_id TEXT NOT NULL, call_id TEXT NOT NULL, id TEXT NOT NULL, key TEXT NOT NULL, runtime TEXT NOT NULL, turn_id TEXT NOT NULL, reply TEXT, PRIMARY KEY (session_id, call_id))",
     "CREATE INDEX IF NOT EXISTS nanocode_hand_requests_runtime ON nanocode_hand_requests (key, runtime)",
 ];
+const COMPONENT: &str = "hand_requests";
 const TABLE: Migration = Migration {
     statements: [&CREATE, &CREATE],
     adopt: None,
@@ -102,12 +103,17 @@ fn encoded(error: serde_json::Error) -> String {
 
 impl SqlRequests {
     #[must_use]
-    pub fn new(host: Arc<dyn Sql>) -> Self {
+    pub fn new(host: Arc<dyn Sql>, migrated: &Migrated) -> Self {
+        migrated.assert_opens(COMPONENT, &[TABLE]);
         Self { host }
     }
 
-    pub async fn migrate(&self) -> Result<(), StoreError> {
-        migrate_format(&*self.host, "hand_requests", &[TABLE]).await
+    pub async fn migrate(host: &dyn Sql) -> Result<Migrated, StoreError> {
+        Migrated::migrate(host, COMPONENT, &[TABLE]).await
+    }
+
+    pub async fn check(host: &dyn Sql) -> Result<Migrated, StoreError> {
+        Migrated::check(host, COMPONENT, &[TABLE]).await
     }
 
     async fn run(
