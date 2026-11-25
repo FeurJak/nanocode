@@ -8,7 +8,11 @@ use std::{
 };
 
 pub(crate) use nanocode_platform::unix_millis as now;
-use nanocode_sync::{Held, Owned};
+use nanocode_sync::{
+    OnceCell, Stopped,
+    future::{Either, select},
+    mpsc, oneshot,
+};
 use nanocode_tool_host::embedded::HostFuture;
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
 use serde_json::{Map, Value, value::RawValue};
@@ -725,7 +729,17 @@ fn page_of(events: Vec<LoggedEvent>, start: u64, has_more: bool) -> LogPage {
     }
 }
 
-pub struct SessionLog<H: ?Sized> {
+struct Submit {
+    request_id: String,
+    digest: String,
+    prompt: String,
+    body: Box<RawValue>,
+    stored: Prompt,
+    hand: Option<String>,
+    metadata: Box<RawValue>,
+}
+
+struct Log<H: ?Sized> {
     host: Arc<H>,
     scope: Arc<str>,
     pub(crate) compact: bool,
@@ -733,58 +747,24 @@ pub struct SessionLog<H: ?Sized> {
     limit: Option<usize>,
     physical_limit: Option<usize>,
     blobs: Option<Blobs>,
-    writer: Owned<Writer>,
 }
 
-impl<H: Sql + ?Sized> SessionLog<H> {
-    pub fn new(host: Arc<H>, scope: impl Into<Arc<str>>) -> Self {
+impl<H: Sql + ?Sized> Log<H> {
+    fn new(host: Arc<H>, scope: Arc<str>) -> Self {
         Self {
             host,
-            scope: scope.into(),
+            scope,
             compact: false,
             ready: AtomicBool::new(false),
             limit: None,
             physical_limit: None,
             blobs: None,
-            writer: Owned::new(Writer::default()),
         }
     }
 
-    #[must_use]
-    pub const fn compact_events(mut self) -> Self {
-        self.compact = true;
-        self
-    }
-
-    #[must_use]
-    pub const fn value_limit(mut self, bytes: usize) -> Self {
-        self.physical_limit = Some(bytes);
-        self
-    }
-
-    #[must_use]
-    pub const fn logical_limit(mut self, bytes: usize) -> Self {
-        self.limit = Some(bytes);
-        self
-    }
-
-    #[must_use]
-    pub fn blobs(mut self, store: SharedBlobStore, threshold: usize) -> Self {
-        self.blobs = Some(Blobs { store, threshold });
-        self
-    }
-
-    pub(crate) fn event_fits(&self, request_id: Option<&str>, body: &str) -> bool {
+    fn event_fits(&self, request_id: Option<&str>, body: &str) -> bool {
         self.limit
             .is_none_or(|limit| event_bytes(&self.scope, request_id, body.len()) <= limit)
-    }
-
-    pub fn scope(&self) -> &str {
-        &self.scope
-    }
-
-    pub fn host(&self) -> &H {
-        &self.host
     }
 
     async fn run(
@@ -803,9 +783,7 @@ impl<H: Sql + ?Sized> SessionLog<H> {
         Ok(results)
     }
 
-    pub const FORMAT: u32 = MIGRATIONS.len() as u32;
-
-    pub async fn migrate(&self) -> Result<(), StoreError> {
+    async fn migrate(&self) -> Result<(), StoreError> {
         migrate_format(&*self.host, "session_log", &MIGRATIONS).await?;
         migrate_format(&*self.host, "session_log_indexes", &INDEXES).await?;
         migrate_format(&*self.host, "session_log_order", &ORDER).await?;
@@ -1035,10 +1013,9 @@ impl<H: Sql + ?Sized> SessionLog<H> {
         Ok(())
     }
 
-    async fn writer(&self) -> Result<Held<'_, Writer>, StoreError> {
-        let mut writer = self.writer.acquire().await;
+    async fn open(&self, writer: &mut Writer) -> Result<(), StoreError> {
         if writer.ready && !writer.stale {
-            return Ok(writer);
+            return Ok(());
         }
         let scope = self.scope.to_string();
         let open = [
@@ -1116,7 +1093,7 @@ impl<H: Sql + ?Sized> SessionLog<H> {
                 ..Writer::default()
             };
         }
-        Ok(writer)
+        Ok(())
     }
 
     fn turn_fits(&self, request_id: &str, other: usize, tail: usize, add: usize) -> bool {
@@ -1459,12 +1436,13 @@ impl<H: Sql + ?Sized> SessionLog<H> {
         writer.buffer.push(line);
     }
 
-    pub async fn stage(&self, entries: &[LogEntry]) -> Result<Vec<LoggedEvent>, StoreError> {
-        if entries.is_empty() {
-            return Ok(Vec::new());
-        }
+    async fn stage(
+        &self,
+        writer: &mut Writer,
+        entries: &[LogEntry],
+    ) -> Result<Vec<LoggedEvent>, StoreError> {
         let created_at = now();
-        let mut writer = self.writer().await?;
+        self.open(writer).await?;
         let mut logged = Vec::with_capacity(entries.len());
         for entry in entries {
             let request_id = entry.request_id.as_deref();
@@ -1480,20 +1458,9 @@ impl<H: Sql + ?Sized> SessionLog<H> {
                 body,
             };
             logged.push(line.logged());
-            self.buffer(&mut writer, line);
+            self.buffer(writer, line);
         }
-        self.flush_locked(&mut writer).await?;
-        Ok(logged)
-    }
-
-    pub async fn flush(&self) -> Result<(), StoreError> {
-        let mut writer = self.writer().await?;
-        self.flush_locked(&mut writer).await
-    }
-
-    pub async fn append(&self, entries: &[LogEntry]) -> Result<Vec<LoggedEvent>, StoreError> {
-        let logged = self.stage(entries).await?;
-        self.flush().await?;
+        self.flush_locked(writer).await?;
         Ok(logged)
     }
 
@@ -1544,16 +1511,17 @@ impl<H: Sql + ?Sized> SessionLog<H> {
             .map(|event| event.event))
     }
 
-    pub async fn turn(&self, request_id: &str) -> Result<Option<TurnRecord>, StoreError> {
-        let mut writer = self.writer().await?;
-        Ok(self
-            .read(&mut writer, request_id)
-            .await?
-            .map(|row| row.record))
+    async fn turn(
+        &self,
+        writer: &mut Writer,
+        request_id: &str,
+    ) -> Result<Option<TurnRecord>, StoreError> {
+        self.open(writer).await?;
+        Ok(self.read(writer, request_id).await?.map(|row| row.record))
     }
 
-    pub async fn pending(&self) -> Result<Vec<TurnRecord>, StoreError> {
-        let mut writer = self.writer().await?;
+    async fn pending(&self, writer: &mut Writer) -> Result<Vec<TurnRecord>, StoreError> {
+        self.open(writer).await?;
         let mut rows = self
             .query("pending", &PENDING, vec![self.scope.to_string()])
             .await?;
@@ -1585,41 +1553,19 @@ impl<H: Sql + ?Sized> SessionLog<H> {
         })
     }
 
-    pub async fn submit(&self, submission: &Submission) -> Result<Submitted, StoreError> {
-        let id = submission.request_id.as_str();
-        let digest = submission_digest(&submission.prompt, submission.hand.as_deref())?;
-        let mut images = BlobWrites::new();
-        let stored = self.stored_prompt(&submission.prompt, &mut images);
-        let prompt = serde_json::to_string(&*stored).map_err(encoding)?;
-        let body = encoded(&Lifecycle {
-            kind: "queued",
-            request_id: id,
-        })?;
-        let metadata = submission.metadata.get();
-        if let Some(limit) = self.limit {
-            let row = record_bytes(
-                TURN_TEXTS,
-                self.scope.len()
-                    + id.len()
-                    + digest.len()
-                    + TurnState::Running.as_str().len()
-                    + prompt.len()
-                    + submission.hand.as_deref().map_or(0, str::len)
-                    + metadata.len(),
-                TURN_INTEGERS,
-            );
-            let accepted = event_bytes(
-                &self.scope,
-                Some(id),
-                accepted_bytes(id, &stored.instruction).map_err(encoding)?,
-            );
-            let bytes = row.max(accepted);
-            if bytes > limit {
-                return Ok(Submitted::TooLarge { bytes, limit });
-            }
-        }
-        self.put_blobs(&images).await?;
-        let mut writer = self.writer().await?;
+    async fn submit(&self, writer: &mut Writer, submit: Submit) -> Result<Submitted, StoreError> {
+        let Submit {
+            request_id,
+            digest,
+            prompt,
+            body,
+            stored,
+            hand: chosen,
+            metadata: raw,
+        } = submit;
+        let id = request_id.as_str();
+        let metadata = raw.get();
+        self.open(writer).await?;
         let existing = |found: Row| {
             if found.record.digest == digest {
                 Submitted::Existing(found.record)
@@ -1631,7 +1577,7 @@ impl<H: Sql + ?Sized> SessionLog<H> {
             return Ok(existing(found));
         }
         let mut spill = Spill::default();
-        let hand = serde_json::to_string(&submission.hand).map_err(encoding)?;
+        let hand = serde_json::to_string(&chosen).map_err(encoding)?;
         let overhead = record_bytes(
             TURN_TEXTS,
             self.scope.len() + id.len() + digest.len() + hand.len() + metadata.len() + SEAL_BYTES,
@@ -1640,7 +1586,7 @@ impl<H: Sql + ?Sized> SessionLog<H> {
         let prompt = self
             .store_value(&prompt, overhead, false, &mut spill)?
             .into_owned();
-        let line = self.line(&mut writer, id, body)?;
+        let line = self.line(writer, id, body)?;
         let event = line.logged();
         let seq = line.seq;
         let other = digest.len() + prompt.len() + hand.len() + metadata.len();
@@ -1648,7 +1594,7 @@ impl<H: Sql + ?Sized> SessionLog<H> {
         let digested = digest.clone();
         let committed = self
             .commit(
-                &mut writer,
+                writer,
                 "submit",
                 vec![line],
                 Some(Own {
@@ -1679,7 +1625,7 @@ impl<H: Sql + ?Sized> SessionLog<H> {
             )
             .await;
         if let Err(error) = committed {
-            return match self.read(&mut writer, id).await {
+            return match self.read(writer, id).await {
                 Ok(Some(found)) => Ok(existing(found)),
                 _ => Err(error),
             };
@@ -1688,9 +1634,9 @@ impl<H: Sql + ?Sized> SessionLog<H> {
             request_id: id.to_owned(),
             state: TurnState::Queued,
             digest: digest.clone(),
-            prompt: Some(stored.into_owned()),
-            hand: submission.hand.clone(),
-            metadata: submission.metadata.clone(),
+            prompt: Some(stored),
+            hand: chosen,
+            metadata: raw,
             cancel_requested: false,
             note: None,
             first_seq: seq,
@@ -1715,13 +1661,17 @@ impl<H: Sql + ?Sized> SessionLog<H> {
         Ok(Submitted::Accepted { record, event })
     }
 
-    pub async fn start(&self, request_id: &str) -> Result<Option<Started>, StoreError> {
+    async fn start(
+        &self,
+        writer: &mut Writer,
+        request_id: &str,
+    ) -> Result<Option<Started>, StoreError> {
         let body = encoded(&Lifecycle {
             kind: "running",
             request_id,
         })?;
-        let mut writer = self.writer().await?;
-        let Some(found) = self.read(&mut writer, request_id).await? else {
+        self.open(writer).await?;
+        let Some(found) = self.read(writer, request_id).await? else {
             return Ok(None);
         };
         if found.record.state.is_terminal() {
@@ -1730,13 +1680,13 @@ impl<H: Sql + ?Sized> SessionLog<H> {
         let previous = found.record.state;
         let mut record = found.record.clone();
         started(&mut record);
-        let line = self.line(&mut writer, request_id, body)?;
+        let line = self.line(writer, request_id, body)?;
         let event = line.logged();
         let mut change = Self::change(&record);
         change.note = Some(None);
         change.retry = Some(None);
         self.update(
-            &mut writer,
+            writer,
             "start",
             &found,
             change,
@@ -1997,8 +1947,9 @@ impl<H: Sql + ?Sized> SessionLog<H> {
         }
     }
 
-    pub async fn finish(
+    async fn finish(
         &self,
+        writer: &mut Writer,
         request_id: &str,
         state: TurnState,
         fields: &Map<String, Value>,
@@ -2038,20 +1989,21 @@ impl<H: Sql + ?Sized> SessionLog<H> {
                 fields: &failure,
             })?;
         }
-        let mut writer = self.writer().await?;
-        let Some(found) = self.read(&mut writer, request_id).await? else {
+        self.open(writer).await?;
+        let Some(found) = self.read(writer, request_id).await? else {
             return Ok(None);
         };
         if found.record.state.is_terminal() {
             return Ok(None);
         }
-        self.close(&mut writer, "finish", found, state, body)
+        self.close(writer, "finish", found, state, body)
             .await
             .map(Some)
     }
 
-    pub async fn cancel(
+    async fn cancel(
         &self,
+        writer: &mut Writer,
         request_id: &str,
         fields: &Map<String, Value>,
     ) -> Result<Option<(TurnRecord, Option<LoggedEvent>)>, StoreError> {
@@ -2061,8 +2013,8 @@ impl<H: Sql + ?Sized> SessionLog<H> {
             status: TurnState::Cancelled.as_str(),
             fields,
         })?;
-        let mut writer = self.writer().await?;
-        let Some(found) = self.read(&mut writer, request_id).await? else {
+        self.open(writer).await?;
+        let Some(found) = self.read(writer, request_id).await? else {
             return Ok(None);
         };
         match found.record.state {
@@ -2070,7 +2022,7 @@ impl<H: Sql + ?Sized> SessionLog<H> {
                 let mut change = Self::change(&found.record);
                 change.cancel_requested = true;
                 self.update(
-                    &mut writer,
+                    writer,
                     "cancel",
                     &found,
                     change,
@@ -2084,7 +2036,7 @@ impl<H: Sql + ?Sized> SessionLog<H> {
             }
             TurnState::Queued => {
                 let (record, event) = self
-                    .close(&mut writer, "cancel", found, TurnState::Cancelled, body)
+                    .close(writer, "cancel", found, TurnState::Cancelled, body)
                     .await?;
                 Ok(Some((record, Some(event))))
             }
@@ -2092,8 +2044,9 @@ impl<H: Sql + ?Sized> SessionLog<H> {
         }
     }
 
-    pub async fn replace_queued(
+    async fn replace_queued(
         &self,
+        writer: &mut Writer,
         request_id: &str,
         edit_id: &str,
         text: &str,
@@ -2110,8 +2063,8 @@ impl<H: Sql + ?Sized> SessionLog<H> {
             edit_id,
             digest: &edit,
         })?;
-        let mut writer = self.writer().await?;
-        let Some(found) = self.read(&mut writer, request_id).await? else {
+        self.open(writer).await?;
+        let Some(found) = self.read(writer, request_id).await? else {
             return Ok(Replaced::NotQueued);
         };
         let mut edits: BTreeMap<String, String> = match &found.edits {
@@ -2164,14 +2117,14 @@ impl<H: Sql + ?Sized> SessionLog<H> {
         }
         self.put_blobs(&images).await?;
         edits.insert(edit_id.to_owned(), edit);
-        let line = self.line(&mut writer, request_id, body)?;
+        let line = self.line(writer, request_id, body)?;
         let event = line.logged();
         let mut change = Self::change(&found.record);
         change.digest = Some(digest);
         change.prompt = Some(Some(stored));
         change.edits = Some(Some(serde_json::to_string(&edits).map_err(encoding)?));
         self.update(
-            &mut writer,
+            writer,
             "replace",
             &found,
             change,
@@ -2182,8 +2135,9 @@ impl<H: Sql + ?Sized> SessionLog<H> {
         Ok(Replaced::Applied(Some(event)))
     }
 
-    pub async fn withdraw_steered(
+    async fn withdraw_steered(
         &self,
+        writer: &mut Writer,
         request_id: &str,
         digest: &str,
     ) -> Result<Option<(TurnRecord, LoggedEvent)>, StoreError> {
@@ -2197,15 +2151,15 @@ impl<H: Sql + ?Sized> SessionLog<H> {
             status: TurnState::Cancelled.as_str(),
             fields: &fields,
         })?;
-        let mut writer = self.writer().await?;
-        let Some(found) = self.read(&mut writer, request_id).await? else {
+        self.open(writer).await?;
+        let Some(found) = self.read(writer, request_id).await? else {
             return Ok(None);
         };
         if found.record.state != TurnState::Queued || found.record.digest != digest {
             return Ok(None);
         }
         self.close(
-            &mut writer,
+            writer,
             "withdraw_steered",
             found,
             TurnState::Cancelled,
@@ -2215,15 +2169,16 @@ impl<H: Sql + ?Sized> SessionLog<H> {
         .map(Some)
     }
 
-    pub async fn retry(
+    async fn retry(
         &self,
+        writer: &mut Writer,
         request_id: &str,
         error: &str,
         kind: &str,
         retry_at: u64,
     ) -> Result<Option<(TurnRecord, Option<LoggedEvent>)>, StoreError> {
-        let mut writer = self.writer().await?;
-        let Some(found) = self.read(&mut writer, request_id).await? else {
+        self.open(writer).await?;
+        let Some(found) = self.read(writer, request_id).await? else {
             return Ok(None);
         };
         if found.record.state.is_terminal() {
@@ -2254,7 +2209,7 @@ impl<H: Sql + ?Sized> SessionLog<H> {
                 attempts: retry.attempts,
                 retry_at,
             })?;
-            Some(self.line(&mut writer, request_id, body)?)
+            Some(self.line(writer, request_id, body)?)
         } else {
             None
         };
@@ -2262,7 +2217,7 @@ impl<H: Sql + ?Sized> SessionLog<H> {
         let mut change = Self::change(&found.record);
         change.retry = Some(Some(serde_json::to_string(&retry).map_err(encoding)?));
         self.update(
-            &mut writer,
+            writer,
             "retry",
             &found,
             change,
@@ -2275,9 +2230,14 @@ impl<H: Sql + ?Sized> SessionLog<H> {
         Ok(Some((record, event)))
     }
 
-    pub async fn interrupted(&self, request_id: &str, note: &str) -> Result<(), StoreError> {
-        let mut writer = self.writer().await?;
-        let Some(found) = self.read(&mut writer, request_id).await? else {
+    async fn interrupted(
+        &self,
+        writer: &mut Writer,
+        request_id: &str,
+        note: &str,
+    ) -> Result<(), StoreError> {
+        self.open(writer).await?;
+        let Some(found) = self.read(writer, request_id).await? else {
             return Ok(());
         };
         if found.record.state != TurnState::Running {
@@ -2286,7 +2246,7 @@ impl<H: Sql + ?Sized> SessionLog<H> {
         let mut change = Self::change(&found.record);
         change.note = Some(Some(note.to_owned()));
         self.update(
-            &mut writer,
+            writer,
             "interrupted",
             &found,
             change,
@@ -2442,67 +2402,41 @@ impl<H: Sql + ?Sized> SessionLog<H> {
         Ok((logged, has_more))
     }
 
-    pub async fn page(&self, after: u64, limit: usize) -> Result<LogPage, StoreError> {
-        if limit == 0 {
-            return Ok(page_of(Vec::new(), after, true));
-        }
-        let writer = self.writer().await?;
-        let (events, has_more) = self.select(&writer, after, None, None, limit, None).await?;
+    async fn page(
+        &self,
+        writer: &mut Writer,
+        after: u64,
+        limit: usize,
+    ) -> Result<LogPage, StoreError> {
+        self.open(writer).await?;
+        let (events, has_more) = self.select(writer, after, None, None, limit, None).await?;
         Ok(page_of(events, after, has_more))
     }
 
-    pub async fn page_bounded(
+    async fn page_bounded(
         &self,
+        writer: &mut Writer,
         after: u64,
         limit: usize,
         max_bytes: usize,
     ) -> Result<LogPage, StoreError> {
-        if limit == 0 {
-            return Err(StoreError::NotCommitted(
-                "bounded session log pages require a positive event count".into(),
-            ));
-        }
-        let writer = self.writer().await?;
+        self.open(writer).await?;
         let (events, has_more) = self
-            .select(&writer, after, None, None, limit, Some(max_bytes))
+            .select(writer, after, None, None, limit, Some(max_bytes))
             .await?;
         Ok(page_of(events, after, has_more))
     }
 
-    pub async fn turn_page(
-        &self,
-        request_id: &str,
-        after: u64,
-        limit: usize,
-    ) -> Result<LogPage, StoreError> {
-        self.turn_events(request_id, after, limit, None).await
-    }
-
-    pub async fn turn_page_bounded(
-        &self,
-        request_id: &str,
-        after: u64,
-        limit: usize,
-        max_bytes: usize,
-    ) -> Result<LogPage, StoreError> {
-        if limit == 0 {
-            return Err(StoreError::NotCommitted(
-                "bounded session log pages require a positive event count".into(),
-            ));
-        }
-        self.turn_events(request_id, after, limit, Some(max_bytes))
-            .await
-    }
-
     async fn turn_events(
         &self,
+        writer: &mut Writer,
         request_id: &str,
         after: u64,
         limit: usize,
         max_bytes: Option<usize>,
     ) -> Result<LogPage, StoreError> {
-        let mut writer = self.writer().await?;
-        let Some(found) = self.read(&mut writer, request_id).await? else {
+        self.open(writer).await?;
+        let Some(found) = self.read(writer, request_id).await? else {
             return Ok(page_of(Vec::new(), after, false));
         };
         let start = after.max(found.record.first_seq.saturating_sub(1));
@@ -2511,7 +2445,7 @@ impl<H: Sql + ?Sized> SessionLog<H> {
         }
         let (events, has_more) = self
             .select(
-                &writer,
+                writer,
                 start,
                 found.record.last_seq,
                 Some(request_id),
@@ -2522,11 +2456,12 @@ impl<H: Sql + ?Sized> SessionLog<H> {
         Ok(page_of(events, start, has_more))
     }
 
-    pub async fn import(&self, turns: &[ImportedTurn]) -> Result<usize, StoreError> {
-        if turns.is_empty() {
-            return Ok(0);
-        }
-        let mut writer = self.writer().await?;
+    async fn import(
+        &self,
+        writer: &mut Writer,
+        turns: &[ImportedTurn],
+    ) -> Result<usize, StoreError> {
+        self.open(writer).await?;
         let ids = serde_json::to_string(
             &turns
                 .iter()
@@ -2562,7 +2497,7 @@ impl<H: Sql + ?Sized> SessionLog<H> {
                 .transpose()?;
             let last_seq = match (&result, turn.last_seq) {
                 (Some(body), None) => {
-                    let line = self.line(&mut writer, &turn.request_id, body.clone())?;
+                    let line = self.line(writer, &turn.request_id, body.clone())?;
                     let seq = line.seq;
                     lines.push(line);
                     Some(seq)
@@ -2615,7 +2550,7 @@ impl<H: Sql + ?Sized> SessionLog<H> {
         }
         let batches = self.batches(&rows)?;
         let scope = self.scope.to_string();
-        self.commit(&mut writer, "import", lines, None, spill, |_| {
+        self.commit(writer, "import", lines, None, spill, |_| {
             batches
                 .into_iter()
                 .map(|batch| Stmt {
@@ -2628,8 +2563,9 @@ impl<H: Sql + ?Sized> SessionLog<H> {
         Ok(turns.len())
     }
 
-    pub async fn import_events(
+    async fn import_events(
         &self,
+        writer: &mut Writer,
         after: u64,
         events: &[LoggedEvent],
     ) -> Result<u64, StoreError> {
@@ -2652,8 +2588,8 @@ impl<H: Sql + ?Sized> SessionLog<H> {
             }
             previous = event.seq;
         }
-        let mut writer = self.writer().await?;
-        self.flush_locked(&mut writer).await?;
+        self.open(writer).await?;
+        self.flush_locked(writer).await?;
         let ends = writer.durable;
         if ends < after {
             return Err(StoreError::NotCommitted(format!(
@@ -2662,7 +2598,7 @@ impl<H: Sql + ?Sized> SessionLog<H> {
             )));
         }
         let (held, _) = self
-            .select(&writer, after, Some(last.seq), None, usize::MAX, None)
+            .select(writer, after, Some(last.seq), None, usize::MAX, None)
             .await?;
         let imported: BTreeMap<u64, &LoggedEvent> =
             events.iter().map(|event| (event.seq, event)).collect();
@@ -2764,10 +2700,399 @@ impl<H: Sql + ?Sized> SessionLog<H> {
     }
 }
 
+type WriterJob = Box<dyn for<'a> FnOnce(&'a mut Writer) -> HostFuture<'a, ()> + Send>;
+
+struct WriterTask {
+    jobs: mpsc::UnboundedSender<WriterJob>,
+}
+
+impl WriterTask {
+    fn spawn() -> std::io::Result<Self> {
+        let (jobs, received) = mpsc::unbounded_channel();
+        #[cfg(not(target_family = "wasm"))]
+        nanocode_platform::Handle::try_current()
+            .map_err(std::io::Error::other)?
+            .spawn(Self::serve(received));
+        #[cfg(target_family = "wasm")]
+        nanocode_platform::spawn_local(Self::serve(received));
+        Ok(Self { jobs })
+    }
+
+    async fn serve(mut jobs: mpsc::UnboundedReceiver<WriterJob>) {
+        let mut writer = Writer::default();
+        while let Some(job) = jobs.recv().await {
+            job(&mut writer).await;
+        }
+    }
+
+    async fn run<R, F>(&self, job: F) -> Result<R, Stopped>
+    where
+        R: Send + 'static,
+        F: for<'a> FnOnce(&'a mut Writer) -> HostFuture<'a, R> + Send + 'static,
+    {
+        let (mut sender, receiver) = oneshot::channel();
+        let job: WriterJob = Box::new(move |writer| {
+            Box::pin(async move {
+                if sender.is_closed() {
+                    return;
+                }
+                let work = job(writer);
+                let output = {
+                    let abandoned = Box::pin(sender.closed());
+                    match select(work, abandoned).await {
+                        Either::Left((output, _)) => Some(output),
+                        Either::Right(_) => None,
+                    }
+                };
+                if let Some(output) = output {
+                    drop(sender.send(output));
+                }
+            })
+        });
+        self.jobs.send(job).map_err(|_| Stopped)?;
+        receiver.await.map_err(|_| Stopped)
+    }
+}
+
+pub struct SessionLog<H: ?Sized> {
+    log: Arc<Log<H>>,
+    writer: OnceCell<WriterTask>,
+}
+
+impl<H: Sql + ?Sized> SessionLog<H> {
+    pub const FORMAT: u32 = MIGRATIONS.len() as u32;
+
+    pub fn new(host: Arc<H>, scope: impl Into<Arc<str>>) -> Self {
+        Self {
+            log: Arc::new(Log::new(host, scope.into())),
+            writer: OnceCell::new(),
+        }
+    }
+
+    fn configured(mut self, configure: impl FnOnce(&mut Log<H>)) -> Self {
+        configure(
+            Arc::get_mut(&mut self.log)
+                .expect("a session log is configured before its first write"),
+        );
+        self
+    }
+
+    #[must_use]
+    pub fn compact_events(self) -> Self {
+        self.configured(|log| log.compact = true)
+    }
+
+    #[must_use]
+    pub fn value_limit(self, bytes: usize) -> Self {
+        self.configured(|log| log.physical_limit = Some(bytes))
+    }
+
+    #[must_use]
+    pub fn logical_limit(self, bytes: usize) -> Self {
+        self.configured(|log| log.limit = Some(bytes))
+    }
+
+    #[must_use]
+    pub fn blobs(self, store: SharedBlobStore, threshold: usize) -> Self {
+        self.configured(|log| log.blobs = Some(Blobs { store, threshold }))
+    }
+
+    pub(crate) fn event_fits(&self, request_id: Option<&str>, body: &str) -> bool {
+        self.log.event_fits(request_id, body)
+    }
+
+    pub fn scope(&self) -> &str {
+        &self.log.scope
+    }
+
+    pub fn host(&self) -> &H {
+        &self.log.host
+    }
+
+    pub async fn migrate(&self) -> Result<(), StoreError> {
+        self.log.migrate().await
+    }
+}
+
 impl<H: Sql + Send + Sync + ?Sized + 'static> SessionLog<H> {
+    async fn write<R, F>(&self, job: F) -> Result<R, StoreError>
+    where
+        R: Send + 'static,
+        F: for<'a> FnOnce(&'a Log<H>, &'a mut Writer) -> Logged<'a, R> + Send + 'static,
+    {
+        let writer = self
+            .writer
+            .get_or_try_init(|| async { WriterTask::spawn() })
+            .await
+            .map_err(|error| {
+                StoreError::Backend(format!("start the session log writer: {error}"))
+            })?;
+        let log = Arc::clone(&self.log);
+        writer
+            .run(move |writer| Box::pin(async move { job(&log, writer).await }))
+            .await
+            .map_err(|stopped| StoreError::Backend(format!("session log writer: {stopped}")))?
+    }
+
+    pub async fn stage(&self, entries: &[LogEntry]) -> Result<Vec<LoggedEvent>, StoreError> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let entries = entries.to_vec();
+        self.write(move |log, writer| Box::pin(async move { log.stage(writer, &entries).await }))
+            .await
+    }
+
+    pub async fn flush(&self) -> Result<(), StoreError> {
+        self.write(|log, writer| {
+            Box::pin(async move {
+                log.open(writer).await?;
+                log.flush_locked(writer).await
+            })
+        })
+        .await
+    }
+
+    pub async fn append(&self, entries: &[LogEntry]) -> Result<Vec<LoggedEvent>, StoreError> {
+        let logged = self.stage(entries).await?;
+        self.flush().await?;
+        Ok(logged)
+    }
+
+    pub async fn turn(&self, request_id: &str) -> Result<Option<TurnRecord>, StoreError> {
+        let request_id = request_id.to_owned();
+        self.write(move |log, writer| Box::pin(async move { log.turn(writer, &request_id).await }))
+            .await
+    }
+
+    pub async fn pending(&self) -> Result<Vec<TurnRecord>, StoreError> {
+        self.write(|log, writer| Box::pin(log.pending(writer)))
+            .await
+    }
+
+    pub async fn submit(&self, submission: &Submission) -> Result<Submitted, StoreError> {
+        let id = submission.request_id.as_str();
+        let digest = submission_digest(&submission.prompt, submission.hand.as_deref())?;
+        let mut images = BlobWrites::new();
+        let stored = self.log.stored_prompt(&submission.prompt, &mut images);
+        let prompt = serde_json::to_string(&*stored).map_err(encoding)?;
+        let body = encoded(&Lifecycle {
+            kind: "queued",
+            request_id: id,
+        })?;
+        let metadata = submission.metadata.get();
+        if let Some(limit) = self.log.limit {
+            let row = record_bytes(
+                TURN_TEXTS,
+                self.log.scope.len()
+                    + id.len()
+                    + digest.len()
+                    + TurnState::Running.as_str().len()
+                    + prompt.len()
+                    + submission.hand.as_deref().map_or(0, str::len)
+                    + metadata.len(),
+                TURN_INTEGERS,
+            );
+            let accepted = event_bytes(
+                &self.log.scope,
+                Some(id),
+                accepted_bytes(id, &stored.instruction).map_err(encoding)?,
+            );
+            let bytes = row.max(accepted);
+            if bytes > limit {
+                return Ok(Submitted::TooLarge { bytes, limit });
+            }
+        }
+        self.log.put_blobs(&images).await?;
+        let submit = Submit {
+            request_id: submission.request_id.clone(),
+            digest,
+            prompt,
+            body,
+            stored: stored.into_owned(),
+            hand: submission.hand.clone(),
+            metadata: submission.metadata.clone(),
+        };
+        self.write(move |log, writer| Box::pin(log.submit(writer, submit)))
+            .await
+    }
+
+    pub async fn start(&self, request_id: &str) -> Result<Option<Started>, StoreError> {
+        let request_id = request_id.to_owned();
+        self.write(move |log, writer| Box::pin(async move { log.start(writer, &request_id).await }))
+            .await
+    }
+
+    pub async fn finish(
+        &self,
+        request_id: &str,
+        state: TurnState,
+        fields: &Map<String, Value>,
+    ) -> Result<Option<(TurnRecord, LoggedEvent)>, StoreError> {
+        let (request_id, fields) = (request_id.to_owned(), fields.clone());
+        self.write(move |log, writer| {
+            Box::pin(async move { log.finish(writer, &request_id, state, &fields).await })
+        })
+        .await
+    }
+
+    pub async fn cancel(
+        &self,
+        request_id: &str,
+        fields: &Map<String, Value>,
+    ) -> Result<Option<(TurnRecord, Option<LoggedEvent>)>, StoreError> {
+        let (request_id, fields) = (request_id.to_owned(), fields.clone());
+        self.write(move |log, writer| {
+            Box::pin(async move { log.cancel(writer, &request_id, &fields).await })
+        })
+        .await
+    }
+
+    pub async fn replace_queued(
+        &self,
+        request_id: &str,
+        edit_id: &str,
+        text: &str,
+    ) -> Result<Replaced, StoreError> {
+        let (request_id, edit_id, text) =
+            (request_id.to_owned(), edit_id.to_owned(), text.to_owned());
+        self.write(move |log, writer| {
+            Box::pin(async move {
+                log.replace_queued(writer, &request_id, &edit_id, &text)
+                    .await
+            })
+        })
+        .await
+    }
+
+    pub async fn withdraw_steered(
+        &self,
+        request_id: &str,
+        digest: &str,
+    ) -> Result<Option<(TurnRecord, LoggedEvent)>, StoreError> {
+        let (request_id, digest) = (request_id.to_owned(), digest.to_owned());
+        self.write(move |log, writer| {
+            Box::pin(async move { log.withdraw_steered(writer, &request_id, &digest).await })
+        })
+        .await
+    }
+
+    pub async fn retry(
+        &self,
+        request_id: &str,
+        error: &str,
+        kind: &str,
+        retry_at: u64,
+    ) -> Result<Option<(TurnRecord, Option<LoggedEvent>)>, StoreError> {
+        let (request_id, error, kind) = (request_id.to_owned(), error.to_owned(), kind.to_owned());
+        self.write(move |log, writer| {
+            Box::pin(async move {
+                log.retry(writer, &request_id, &error, &kind, retry_at)
+                    .await
+            })
+        })
+        .await
+    }
+
+    pub async fn interrupted(&self, request_id: &str, note: &str) -> Result<(), StoreError> {
+        let (request_id, note) = (request_id.to_owned(), note.to_owned());
+        self.write(move |log, writer| {
+            Box::pin(async move { log.interrupted(writer, &request_id, &note).await })
+        })
+        .await
+    }
+
+    pub async fn page(&self, after: u64, limit: usize) -> Result<LogPage, StoreError> {
+        if limit == 0 {
+            return Ok(page_of(Vec::new(), after, true));
+        }
+        self.write(move |log, writer| Box::pin(log.page(writer, after, limit)))
+            .await
+    }
+
+    pub async fn page_bounded(
+        &self,
+        after: u64,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<LogPage, StoreError> {
+        if limit == 0 {
+            return Err(StoreError::NotCommitted(
+                "bounded session log pages require a positive event count".into(),
+            ));
+        }
+        self.write(move |log, writer| Box::pin(log.page_bounded(writer, after, limit, max_bytes)))
+            .await
+    }
+
+    pub async fn turn_page(
+        &self,
+        request_id: &str,
+        after: u64,
+        limit: usize,
+    ) -> Result<LogPage, StoreError> {
+        self.turn_events(request_id, after, limit, None).await
+    }
+
+    pub async fn turn_page_bounded(
+        &self,
+        request_id: &str,
+        after: u64,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<LogPage, StoreError> {
+        if limit == 0 {
+            return Err(StoreError::NotCommitted(
+                "bounded session log pages require a positive event count".into(),
+            ));
+        }
+        self.turn_events(request_id, after, limit, Some(max_bytes))
+            .await
+    }
+
+    async fn turn_events(
+        &self,
+        request_id: &str,
+        after: u64,
+        limit: usize,
+        max_bytes: Option<usize>,
+    ) -> Result<LogPage, StoreError> {
+        let request_id = request_id.to_owned();
+        self.write(move |log, writer| {
+            Box::pin(async move {
+                log.turn_events(writer, &request_id, after, limit, max_bytes)
+                    .await
+            })
+        })
+        .await
+    }
+
+    pub async fn import(&self, turns: &[ImportedTurn]) -> Result<usize, StoreError> {
+        if turns.is_empty() {
+            return Ok(0);
+        }
+        let turns = turns.to_vec();
+        self.write(move |log, writer| Box::pin(async move { log.import(writer, &turns).await }))
+            .await
+    }
+
+    pub async fn import_events(
+        &self,
+        after: u64,
+        events: &[LoggedEvent],
+    ) -> Result<u64, StoreError> {
+        if events.is_empty() {
+            return Ok(after);
+        }
+        let events = events.to_vec();
+        self.write(move |log, writer| {
+            Box::pin(async move { log.import_events(writer, after, &events).await })
+        })
+        .await
+    }
     async fn recorded(&self, recording: Recording<'_>) -> Result<Vec<LoggedEvent>, String> {
         let unannotated = Map::new();
-        let compact = self.compact.then_some(recording.session_id);
+        let compact = self.log.compact.then_some(recording.session_id);
         let (entries, live): (Vec<_>, Vec<_>) = recording
             .events
             .iter()
