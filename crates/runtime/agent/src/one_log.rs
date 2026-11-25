@@ -735,20 +735,27 @@ impl OneLog {
     async fn whole(
         &self,
         state: &str,
+        keys: &[String],
         values: Vec<Option<String>>,
     ) -> Result<Vec<Option<String>>, StoreError> {
-        let keys = shared::spliced_keys(state, &values)?;
-        if keys.is_empty() {
+        let owners = shared::spliced_keys(
+            state,
+            keys.iter()
+                .zip(&values)
+                .filter_map(|(key, value)| Some((key.as_str(), value.as_deref()?))),
+        )?;
+        if owners.is_empty() {
             return Ok(values);
         }
         let state = state.to_owned();
+        let keys = keys.to_vec();
         self.log
-            .read_owners(&keys, move |fold| {
-                values
-                    .into_iter()
-                    .map(|value| {
+            .read_owners(&owners, move |fold| {
+                keys.iter()
+                    .zip(values)
+                    .map(|(key, value)| {
                         value
-                            .map(|value| shared::whole(fold, &state, value))
+                            .map(|value| shared::whole(fold, &state, key, value))
                             .transpose()
                     })
                     .collect()
@@ -2300,7 +2307,12 @@ impl StateStore for OneLogStore {
                     move |fold| fold.stored(&owned).map(str::to_owned)
                 })
                 .await?;
-            Ok(self.0.whole(state_id, vec![value]).await?.pop().flatten())
+            Ok(self
+                .0
+                .whole(state_id, &[key.to_owned()], vec![value])
+                .await?
+                .pop()
+                .flatten())
         })
     }
 
@@ -2327,7 +2339,7 @@ impl StateStore for OneLogStore {
                     }
                 })
                 .await?;
-            self.0.whole(state_id, values).await
+            self.0.whole(state_id, keys, values).await
         })
     }
 

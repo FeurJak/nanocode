@@ -12,6 +12,7 @@ const KIND: &str = "kind";
 const RESULT: &str = "result";
 const ENCODED: &str = "encoded";
 const SHARED: &str = "stored";
+const CONTENT: &str = "b3:";
 
 pub(super) struct Shared {
     pub(super) update: Box<RawValue>,
@@ -19,7 +20,11 @@ pub(super) struct Shared {
 }
 
 fn content(record: &StoreRecord) -> bool {
-    record.key.starts_with("b3:") && record.value.starts_with('=')
+    record.key.starts_with(CONTENT) && record.value.starts_with('=')
+}
+
+fn spliced(key: &str, value: &str) -> bool {
+    key.starts_with(CONTENT) && EncodedPayload::is_spliced(value)
 }
 
 pub(super) fn candidates(state: &str, records: &[StoreRecord]) -> Vec<String> {
@@ -39,13 +44,13 @@ pub(super) fn staged<'a>(fold: &Fold, state: &str, record: &'a StoreRecord) -> C
     EncodedPayload::splice(&record.value, &held).map_or(Cow::Borrowed(&record.value), Cow::Owned)
 }
 
-pub(super) fn spliced_keys(
+pub(super) fn spliced_keys<'a>(
     state: &str,
-    values: &[Option<String>],
+    records: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> Result<Vec<String>, StoreError> {
     let mut keys = Vec::new();
-    for value in values.iter().flatten() {
-        if EncodedPayload::is_spliced(value) {
+    for (key, value) in records {
+        if spliced(key, value) {
             for key in EncodedPayload::spliced_keys(value).map_err(invalid)? {
                 keys.push(stored_key(state, key));
             }
@@ -56,8 +61,13 @@ pub(super) fn spliced_keys(
     Ok(keys)
 }
 
-pub(super) fn whole(fold: &Fold, state: &str, value: String) -> Result<String, StoreError> {
-    if !EncodedPayload::is_spliced(&value) {
+pub(super) fn whole(
+    fold: &Fold,
+    state: &str,
+    key: &str,
+    value: String,
+) -> Result<String, StoreError> {
+    if !spliced(key, &value) {
         return Ok(value);
     }
     EncodedPayload::unspliced(&value, &|key| fold.stored(&stored_key(state, key))).map_err(invalid)

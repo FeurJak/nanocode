@@ -25,12 +25,9 @@ impl OneLog {
                     if writing.buffered() > 0 && !sim::mutated(sim::Mutation::ExportSkipsCommit) {
                         writing.commit(Point::Progress).await?;
                     }
-                    let values = records_of(writing.fold(), state_id)
-                        .map(|(_, value)| Some(value.to_owned()))
-                        .collect::<Vec<_>>();
-                    writing
-                        .load_owners(&shared::spliced_keys(state_id, &values)?)
-                        .await?;
+                    let owners =
+                        shared::spliced_keys(state_id, records_of(writing.fold(), state_id))?;
+                    writing.load_owners(&owners).await?;
                     let fold = writing.fold();
                     let Some(checkpoint) = fold.checkpoint(state_id) else {
                         return Ok(None);
@@ -39,7 +36,7 @@ impl OneLog {
                         .map(|(key, value)| {
                             Ok(StoreRecord {
                                 key: key.to_owned(),
-                                value: shared::whole(fold, state_id, value.to_owned())?.into(),
+                                value: shared::whole(fold, state_id, key, value.to_owned())?.into(),
                             })
                         })
                         .collect::<Result<_, StoreError>>()?;
