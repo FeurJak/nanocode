@@ -466,6 +466,15 @@ default_table='
 1 canary_partitions_replays_in_flight canary:64 --scenario partitions --mutation replays_in_flight
 1 canary_partitions_double_claim canary:64 --scenario partitions --mutation double_claim
 1 canary_partitions_lost_claim canary:64 --scenario partitions --mutation lost_claim
+8 lease pass --scenario lease
+2 lease_twice pass --scenario lease --twice
+1 canary_lease_claim_keeps_epoch canary:64 --scenario lease --mutation claim_keeps_epoch
+1 canary_lease_release_drops_cursor canary:400 --scenario lease --mutation release_drops_cursor
+1 canary_lease_renew_ignores_epoch canary:400 --scenario lease --mutation renew_ignores_epoch
+1 canary_lease_claim_skips_grace canary:64 --scenario lease --mutation claim_skips_grace
+1 canary_lease_claim_steals_live canary:64 --scenario lease --mutation claim_steals_live
+1 canary_lease_write_skips_head_cas canary:64 --scenario lease --mutation write_skips_head_cas
+1 canary_lease_commit_locks_lease canary:64 --scenario lease --mutation commit_locks_lease
 4 scale pass --scenario scale
 1 scale_twice pass --scenario scale --twice
 1 canary_scale_global_lock canary:16 --scenario scale --mutation global_lock
