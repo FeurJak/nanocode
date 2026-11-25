@@ -112,7 +112,6 @@ Locations are paths at master. "Rule" is the rule broken. "Replacement" is what 
 | Board task leases on the writer's clock | `crates/core/board-fold/src/lib.rs` `claimable` and `tasks.rs` (`now_ms.max(at_ms)`) | Task claims lapse in the fold | `at_ms` comes from the writer. One writer with a fast clock pushes the fold's `now_ms` forward and lapses everyone's task leases early, causing takeovers | 5 | Stamp `at_ms` from the log's commit time at append, or have the owner bound how far `at_ms` may run ahead |
 | `mpp` file lock | `crates/integrations/mpp/src/store.rs` `lock_file` (`StoreLease::File`) | Cross-process exclusion per payment key | A process stalled mid-payment holds the `flock`, and every other process's payment for that key blocks a thread with no deadline | 3, 6 | A nonce or cumulative-amount CAS in the store, a reservation row with epoch and expiry, and no file lock |
 | No timeouts | `crates/integrations/store-sql/src/postgres/{pool,sql,connection}.rs` | — | Pool `acquire` waits forever. No `lock_timeout`, `statement_timeout` or `idle_in_transaction_session_timeout` is set, so one blocked statement holds its connection until the server gives up | 6 | Set all three per transaction class, give acquire and connect one deadline, and cancel the server statement on client timeout |
-| SQLite `BEGIN IMMEDIATE` for reads | `bin/nc-lite/src/sqlite.rs` | Avoids `SQLITE_BUSY` on lock upgrade | Reads serialize with writes across processes | 3 | One owner process per file. Reads use `DEFERRED` |
 
 ### DDL on the request path
 

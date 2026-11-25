@@ -1,12 +1,13 @@
 use std::{future::poll_fn, path::Path, pin::Pin, time::Duration};
 
-use nanocode_durability_core::{Sql, SqlRow, SqlStatement, StoreError, StoreFuture};
+use nanocode_durability_core::{Sql, SqlAccess, SqlRow, SqlStatement, StoreError, StoreFuture};
 use nanocode_sync::{Stream, oneshot, unbounded};
 use rusqlite::{Connection, TransactionBehavior, params_from_iter, types::ValueRef};
 
 type Rows = Result<Vec<Vec<SqlRow>>, StoreError>;
 
 struct Job {
+    behavior: TransactionBehavior,
     statements: Vec<(&'static str, Vec<String>)>,
     reply: oneshot::Sender<Rows>,
 }
@@ -38,13 +39,19 @@ fn serve(mut connection: Connection, mut jobs: unbounded::Receiver<Job>) {
     while let Some(job) =
         nanocode_sync::block_on(poll_fn(|context| Pin::new(&mut jobs).poll_next(context)))
     {
-        let _ = job.reply.send(run(&mut connection, &job.statements));
+        let _ = job
+            .reply
+            .send(run(&mut connection, job.behavior, &job.statements));
     }
 }
 
-fn run(connection: &mut Connection, statements: &[(&'static str, Vec<String>)]) -> Rows {
+fn run(
+    connection: &mut Connection,
+    behavior: TransactionBehavior,
+    statements: &[(&'static str, Vec<String>)],
+) -> Rows {
     let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .transaction_with_behavior(behavior)
         .map_err(backend)?;
     let mut answered = Vec::with_capacity(statements.len());
     for (sql, params) in statements {
@@ -93,11 +100,27 @@ impl Sql for Sqlite {
 
     fn transaction<'a>(
         &'a self,
+        operation: &'static str,
+        statements: &'a [SqlStatement<'a>],
+    ) -> StoreFuture<'a, Rows> {
+        self.run(SqlAccess::Write, operation, statements)
+    }
+
+    fn run<'a>(
+        &'a self,
+        access: SqlAccess,
         _operation: &'static str,
         statements: &'a [SqlStatement<'a>],
     ) -> StoreFuture<'a, Rows> {
+        let behavior = match access {
+            SqlAccess::Read => TransactionBehavior::Deferred,
+            SqlAccess::Write | SqlAccess::Schema | SqlAccess::Autocommit => {
+                TransactionBehavior::Immediate
+            }
+        };
         let (reply, answer) = oneshot::channel();
         let job = Job {
+            behavior,
             statements: statements
                 .iter()
                 .map(|statement| {
