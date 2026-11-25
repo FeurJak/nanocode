@@ -217,6 +217,7 @@ fn placing(
     buffer: &[Record],
     seq: u64,
     limit: Option<usize>,
+    chain_bytes: Option<usize>,
 ) -> Result<Option<Placing>, StoreError> {
     let mut values = BTreeMap::new();
     for record in buffer {
@@ -229,7 +230,11 @@ fn placing(
     if values.is_empty() {
         return Ok(None);
     }
-    let keyframe = history.keyframe().unwrap_or(seq);
+    let keyframe = match history.keyframe() {
+        Some(_) if chain_bytes.is_some_and(|max| history.chain_bytes() >= max) => seq,
+        Some(keyframe) => keyframe,
+        None => seq,
+    };
     let mut plain = Vec::new();
     let mut lines = Vec::new();
     let mut owners = Vec::with_capacity(values.len());
@@ -1250,6 +1255,7 @@ impl Follower {
             host: Arc::clone(&host),
             limit: None,
             max_tail: None,
+            chain_bytes: None,
             ratio: SNAPSHOT_RATIO,
             retain: None,
             rows: None,
@@ -1358,6 +1364,7 @@ pub struct Writing {
     host: Arc<dyn LogHost>,
     limit: Option<usize>,
     max_tail: Option<usize>,
+    chain_bytes: Option<usize>,
     ratio: usize,
     retain: Option<usize>,
     rows: Option<usize>,
@@ -1438,6 +1445,16 @@ impl TurnLog {
     #[must_use]
     pub fn max_tail_bytes(self, max: Option<usize>) -> Self {
         self.configure(move |writing| writing.max_tail = max);
+        self
+    }
+
+    #[must_use]
+    pub fn chain_bytes_max(self, max: Option<usize>) -> Self {
+        assert!(
+            max.is_none_or(|max| max >= codec::WINDOW),
+            "a linked chain restarts no sooner than its window"
+        );
+        self.configure(move |writing| writing.chain_bytes = max);
         self
     }
 
@@ -2397,6 +2414,7 @@ impl Writing {
             &writer.buffer,
             seq,
             self.limit,
+            self.chain_bytes,
         )?;
         let placed = placing.as_ref().map(|placing| Record::Placed {
             chain: Some(placing.keyframe),

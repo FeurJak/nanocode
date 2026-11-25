@@ -431,6 +431,7 @@ impl Durable {
                     self.lost_acks.clone(),
                 ));
                 let policy = nanocode::turnlog::Policy {
+                    chain_bytes_max: None,
                     effects: nanocode::turnlog::Effects::default(),
                     host_call_bound: None,
                     max_row_bytes: None,

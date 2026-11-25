@@ -573,6 +573,7 @@ pub fn text(value: &RawValue) -> String {
 
 pub struct TurnLogPolicy {
     bound: Option<usize>,
+    chain_bytes: Option<usize>,
     cached: BTreeMap<String, BTreeSet<u64>>,
     collect_live: bool,
     disk: Arc<Disk>,
@@ -598,6 +599,12 @@ pub struct TurnLogPolicy {
 }
 
 impl TurnLogPolicy {
+    #[must_use]
+    pub const fn chain_bytes(mut self, chain_bytes: Option<usize>) -> Self {
+        self.chain_bytes = chain_bytes;
+        self
+    }
+
     pub fn new(
         disk: Arc<Disk>,
         protections: Protections,
@@ -608,6 +615,7 @@ impl TurnLogPolicy {
     ) -> Self {
         Self {
             bound: None,
+            chain_bytes: None,
             cached: BTreeMap::new(),
             collect_live: false,
             disk: Arc::clone(&disk),
@@ -745,6 +753,7 @@ impl TurnLogPolicy {
         }
         .retain_finished(self.retain)
         .row_limit(self.limit)
+        .chain_bytes_max(self.chain_bytes)
         .snapshot_ratio(if self.ratio_ignored {
             u32::MAX as usize
         } else {
@@ -820,6 +829,7 @@ impl TurnLogPolicy {
             let log = refused(ready(TurnLog::open(Arc::clone(&self.host), scope)))
                 .retain_finished(self.retain)
                 .row_limit(self.limit)
+                .chain_bytes_max(self.chain_bytes)
                 .snapshot_ratio(if self.ratio_ignored {
                     u32::MAX as usize
                 } else {
@@ -992,6 +1002,7 @@ impl TurnDurability for TurnLogPolicy {
         let log = refused(ready(TurnLog::open(Arc::clone(&self.host), scope)))
             .retain_finished(self.retain)
             .row_limit(self.limit)
+            .chain_bytes_max(self.chain_bytes)
             .snapshot_ratio(if self.ratio_ignored {
                 u32::MAX as usize
             } else {
@@ -1326,6 +1337,7 @@ impl TurnDurability for TurnLogPolicy {
             let forced = refused(ready(TurnLog::open(host, scope)))
                 .retain_finished(self.retain)
                 .row_limit(self.limit)
+                .chain_bytes_max(self.chain_bytes)
                 .snapshot_ratio(self.ratio)
                 .snapshot_rows(Some(0));
             crate::facts::writing(&forced, move |writing| {

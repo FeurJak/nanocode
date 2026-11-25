@@ -58,6 +58,7 @@ const STORED_MARK: &str = "$nanocode_stored";
 
 #[derive(Clone, Debug)]
 pub struct Policy {
+    pub chain_bytes_max: Option<usize>,
     pub effects: Effects,
     pub host_call_bound: Option<std::time::Duration>,
     pub max_row_bytes: Option<usize>,
@@ -73,6 +74,7 @@ pub struct Policy {
 impl Default for Policy {
     fn default() -> Self {
         Self {
+            chain_bytes_max: None,
             effects: Effects::default(),
             host_call_bound: None,
             max_row_bytes: None,
@@ -469,6 +471,7 @@ impl OneLog {
             .host_calls_within(policy.host_call_bound)
             .row_limit(policy.max_row_bytes)
             .max_tail_bytes(policy.max_tail_bytes)
+            .chain_bytes_max(policy.chain_bytes_max)
             .snapshot_ratio(policy.snapshot_ratio)
             .snapshot_rows(policy.snapshot_rows);
         log.write_within(|writing| {

@@ -256,6 +256,7 @@ pub struct TurnOptions {
     pub policy: PolicyKind,
     pub row_limit: Option<usize>,
     pub reopen_row_limit: Option<usize>,
+    pub chain_bytes: Option<usize>,
     pub protections: Protections,
     pub verbose: bool,
 }
@@ -1316,6 +1317,7 @@ impl Sim {
                     self.options.mutation == TurnMutation::SectionsKept,
                 )
                 .owners(self.options.owners)
+                .chain_bytes(self.options.chain_bytes)
                 .single_snapshot(self.options.reopen_row_limit.is_none())
                 .collect_live(self.options.mutation == TurnMutation::ContentCollectedLive)
                 .read_unloaded(self.options.mutation == TurnMutation::PartReadUnloaded)

@@ -133,6 +133,8 @@ default_table='
 4 turns_turnlog_snapshots pass --scenario turns --policy turnlog --snapshot-rows 4 --state-bytes 131072
 2 turns_turnlog_retain pass --scenario turns --policy turnlog --retain 1
 4 turns_turnlog_takeover pass --scenario turns --policy turnlog --snapshot-rows 4 --state-bytes 131072 --takeover
+4 turns_turnlog_chain_bytes pass --scenario turns --policy turnlog --chain-bytes 32768 --state-bytes 131072
+4 turns_turnlog_chain_bytes_snapshots pass --scenario turns --policy turnlog --chain-bytes 32768 --snapshot-rows 4 --state-bytes 131072
 4 runtime_kv_remote pass --scenario runtime --store kv --children remote
 1 runtime_kv_remote_twice pass --scenario runtime --store kv --children remote --twice
 8 hands pass --scenario hands

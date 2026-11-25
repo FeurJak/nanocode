@@ -296,7 +296,7 @@ type Caught = BTreeMap<Invariant, (u64, u64, (u64, u64))>;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|steer_carry|inbox_stress|capture|executor|dns|board|board_shards|controlplane|cost|plog|secrets|wakes|imports|facts|backend_facts|hand_router|workspace_host|board_sync|dispatcher|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|workspace_crash|live|partitions|lease|durable|scale|gc_unwind|interp_drop|held_await|holds|slog|one_log_facts|migrated|kv_lease|pg_pool] [--ops N] [--twice] [--seed-lines] [--jobs N] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
+        "usage: nanocode-sim --tidy | --mutations | (--seed S | --seeds A..B) [--scenario store|agents|turns|runtime|websocket|http_server|alloc|egress|mpp|sync|streams|hands|cell_calls|long_thread|request_close|steer_carry|inbox_stress|capture|executor|dns|board|board_shards|controlplane|cost|plog|secrets|wakes|imports|facts|backend_facts|hand_router|workspace_host|board_sync|dispatcher|board_steer|board_brief|workspace_fs|repo_cache|workspace_sql|git_remote|workspace_stack|workspace_crash|live|partitions|lease|durable|scale|gc_unwind|interp_drop|held_await|holds|slog|one_log_facts|migrated|kv_lease|pg_pool] [--ops N] [--twice] [--seed-lines] [--jobs N] [--mutation {}] [--records content|slots] [--verbose]\n       turns: [--mutation {}] [--without {}]... [--live-seqs temporary|floor|gap|reuse] [--calm] [--policy reference|turnlog] [--row-limit BYTES] [--reopen-row-limit BYTES] [--chain-bytes BYTES] [--long TURNS] [--snapshot-ratio K] [--snapshot-rows N] [--takeover] [--retain TURNS] [--state-bytes N] [--event-bytes N] [--owners N]\n       runtime: [--store memory|kv|log] [--deferred-start] [--calm] [--wire transport|http] [--children local|remote] [--mutation {}|{}]\n       agents: [--mutation {}]
        websocket: [--mutation {}]
        http_server: [--mutation {}]
        alloc: [--mutation overstate_size|forget_free|scribble]
@@ -432,6 +432,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         policy: PolicyKind::Reference,
         row_limit: None,
         reopen_row_limit: None,
+        chain_bytes: None,
         protections: Protections::ALL,
         verbose: false,
     };
@@ -522,6 +523,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
             "--policy" => turns.policy = PolicyKind::parse(rest.next()?)?,
             "--row-limit" => turns.row_limit = Some(rest.next()?.parse().ok()?),
             "--reopen-row-limit" => turns.reopen_row_limit = Some(rest.next()?.parse().ok()?),
+            "--chain-bytes" => turns.chain_bytes = Some(rest.next()?.parse().ok()?),
             "--long" => turns.long = Some(rest.next()?.parse().ok()?),
             "--snapshot-ratio" => turns.snapshot_ratio = rest.next()?.parse().ok()?,
             "--snapshot-rows" => turns.snapshot_rows = Some(rest.next()?.parse().ok()?),
@@ -1035,6 +1037,9 @@ fn scenario_replay(seed: u64, args: &Args) -> String {
         }
         if let Some(limit) = args.turns.reopen_row_limit {
             command.push_str(&format!(" --reopen-row-limit {limit}"));
+        }
+        if let Some(bytes) = args.turns.chain_bytes {
+            command.push_str(&format!(" --chain-bytes {bytes}"));
         }
         if let Some(turns) = args.turns.long {
             command.push_str(&format!(" --long {turns}"));

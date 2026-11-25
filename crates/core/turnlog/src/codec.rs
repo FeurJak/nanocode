@@ -87,6 +87,7 @@ pub(crate) struct History {
     records: Window,
     records_lzma: Lzma,
     chain: Option<(u64, Window)>,
+    chain_bytes: usize,
     chain_lzma: Lzma,
 }
 
@@ -240,6 +241,7 @@ impl History {
         self.records.0.clear();
         self.records_lzma = Lzma::default();
         self.chain = None;
+        self.chain_bytes = 0;
         self.chain_lzma = Lzma::default();
     }
 
@@ -330,13 +332,21 @@ impl History {
     pub(crate) fn link(&mut self, keyframe: u64, plain: &[u8]) {
         self.chain_lzma = Lzma::default();
         match &mut self.chain {
-            Some((current, window)) if *current == keyframe => window.extend(plain),
+            Some((current, window)) if *current == keyframe => {
+                window.extend(plain);
+                self.chain_bytes = self.chain_bytes.saturating_add(plain.len());
+            }
             _ => {
                 let mut window = Window::default();
                 window.extend(plain);
                 self.chain = Some((keyframe, window));
+                self.chain_bytes = plain.len();
             }
         }
+    }
+
+    pub(crate) const fn chain_bytes(&self) -> usize {
+        self.chain_bytes
     }
 }
 
