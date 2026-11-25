@@ -4,11 +4,12 @@ use nanocode_durability_core::{
     OwnedState, OwnerId, Settle, StateCommit, StateStore, StoreError, StoreRecord, StoredState,
     SummaryUpdate,
 };
-use nanocode_sync::{Atom, AtomMap, Owned};
+use nanocode_sync::{Atom, AtomMap, OnceCell, future, mpsc, oneshot};
 
 use crate::SharedStore;
 
 const POOL: &str = ":pool";
+const POOL_WRITER_STOPPED: &str = "the record pool's writer stopped";
 
 #[derive(Default)]
 pub(crate) struct Pools {
@@ -19,8 +20,14 @@ pub(crate) struct Pools {
 pub(crate) struct Pool {
     state: String,
     held: Atom<nanocode_sync::Map<String, Arc<str>>>,
-    listed: Atom<Option<Arc<BTreeSet<String>>>>,
-    writer: Owned<Writer>,
+    listed: Arc<Atom<Option<Arc<BTreeSet<String>>>>>,
+    writer: OnceCell<mpsc::UnboundedSender<Ensure>>,
+}
+
+struct Ensure {
+    store: SharedStore,
+    fresh: Vec<StoreRecord>,
+    reply: oneshot::Sender<Result<Vec<StoreRecord>, StoreError>>,
 }
 
 enum Writer {
@@ -124,8 +131,8 @@ impl Pools {
                 Arc::new(Pool {
                     state: pool_state(&root),
                     held: Atom::default(),
-                    listed: Atom::default(),
-                    writer: Owned::new(Writer::Unread),
+                    listed: Arc::default(),
+                    writer: OnceCell::new(),
                 })
             }))
         }))
@@ -227,65 +234,125 @@ impl Pool {
         if fresh.is_empty() {
             return Ok(());
         }
-        let mut store = store.clone();
-        let mut writer = self.writer.acquire().await;
-        let mut fenced = false;
-        loop {
-            if matches!(*writer, Writer::Unread) {
-                let owned = store.acquire(&self.state, OwnerId::new()).await?;
-                let keys = listed(owned.state.payload.as_deref())?;
-                *writer = Writer::Owned { owned, keys };
-            }
-            let Writer::Owned { owned, keys } = &mut *writer else {
-                continue;
-            };
-            let added = fresh
-                .iter()
-                .filter(|record| !keys.contains(&record.key))
-                .cloned()
-                .collect::<Vec<_>>();
-            if added.is_empty() {
-                break;
-            }
-            let mut all = keys.clone();
-            all.extend(added.iter().map(|record| record.key.clone()));
-            let payload = serde_json::to_string(&HeadRef { pool: &all })
+        let writer = self
+            .writer
+            .get_or_try_init(|| async {
+                let (jobs, received) = mpsc::unbounded_channel();
+                crate::shared_store::spawn_driver(write(
+                    self.state.clone(),
+                    Arc::clone(&self.listed),
+                    received,
+                ))
                 .map_err(|error| StoreError::Backend(error.to_string()))?;
-            match store
-                .commit(
-                    &self.state,
-                    &owned.owner,
-                    owned.state.revision,
-                    StateCommit {
-                        payload: &payload,
-                        records: &added,
-                        events: &[],
-                        summary: &SummaryUpdate::Unchanged,
-                        settle: Settle::Ordered,
-                    },
-                )
-                .await
-            {
-                Ok(committed) => {
-                    owned.state = StoredState {
-                        revision: committed.revision,
-                        payload: Some(payload),
-                    };
-                    *keys = all;
-                    break;
-                }
-                Err(StoreError::Fenced | StoreError::Conflict { .. }) if !fenced => {
-                    fenced = true;
-                    *writer = Writer::Unread;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        if let Writer::Owned { keys, .. } = &*writer {
-            self.listed.set(Some(Arc::new(keys.clone())));
-        }
-        drop(writer);
+                Ok::<_, StoreError>(jobs)
+            })
+            .await?;
+        let (reply, written) = oneshot::channel();
+        writer
+            .send(Ensure {
+                store: store.clone(),
+                fresh,
+                reply,
+            })
+            .map_err(|_| StoreError::Backend(POOL_WRITER_STOPPED.to_owned()))?;
+        let fresh = written
+            .await
+            .map_err(|_| StoreError::Backend(POOL_WRITER_STOPPED.to_owned()))??;
         self.hold(fresh.into_iter().map(|record| (record.key, record.value)));
         Ok(())
     }
+}
+
+async fn write(
+    state: String,
+    cached: Arc<Atom<Option<Arc<BTreeSet<String>>>>>,
+    mut jobs: mpsc::UnboundedReceiver<Ensure>,
+) {
+    let mut writer = Writer::Unread;
+    while let Some(Ensure {
+        mut store,
+        fresh,
+        mut reply,
+    }) = jobs.recv().await
+    {
+        if reply.is_closed() {
+            continue;
+        }
+        let written = {
+            let work = std::pin::pin!(commit(&state, &cached, &mut writer, &mut store, &fresh));
+            let abandoned = std::pin::pin!(reply.closed());
+            match future::select(work, abandoned).await {
+                future::Either::Left((written, _)) => Some(written),
+                future::Either::Right(_) => None,
+            }
+        };
+        if let Some(written) = written {
+            drop(reply.send(written.map(|()| fresh)));
+        }
+    }
+}
+
+async fn commit(
+    state: &str,
+    cached: &Atom<Option<Arc<BTreeSet<String>>>>,
+    writer: &mut Writer,
+    store: &mut SharedStore,
+    fresh: &[StoreRecord],
+) -> Result<(), StoreError> {
+    let mut fenced = false;
+    loop {
+        if matches!(writer, Writer::Unread) {
+            let owned = store.acquire(state, OwnerId::new()).await?;
+            let keys = listed(owned.state.payload.as_deref())?;
+            *writer = Writer::Owned { owned, keys };
+        }
+        let Writer::Owned { owned, keys } = writer else {
+            continue;
+        };
+        let added = fresh
+            .iter()
+            .filter(|record| !keys.contains(&record.key))
+            .cloned()
+            .collect::<Vec<_>>();
+        if added.is_empty() {
+            break;
+        }
+        let mut all = keys.clone();
+        all.extend(added.iter().map(|record| record.key.clone()));
+        let payload = serde_json::to_string(&HeadRef { pool: &all })
+            .map_err(|error| StoreError::Backend(error.to_string()))?;
+        match store
+            .commit(
+                state,
+                &owned.owner,
+                owned.state.revision,
+                StateCommit {
+                    payload: &payload,
+                    records: &added,
+                    events: &[],
+                    summary: &SummaryUpdate::Unchanged,
+                    settle: Settle::Ordered,
+                },
+            )
+            .await
+        {
+            Ok(committed) => {
+                owned.state = StoredState {
+                    revision: committed.revision,
+                    payload: Some(payload),
+                };
+                *keys = all;
+                break;
+            }
+            Err(StoreError::Fenced | StoreError::Conflict { .. }) if !fenced => {
+                fenced = true;
+                *writer = Writer::Unread;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    if let Writer::Owned { keys, .. } = writer {
+        cached.set(Some(Arc::new(keys.clone())));
+    }
+    Ok(())
 }

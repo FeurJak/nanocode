@@ -2145,7 +2145,7 @@ pub(crate) fn spawn_driver(driver: impl Future<Output = ()> + Send + 'static) ->
 }
 
 #[cfg(target_family = "wasm")]
-fn spawn_driver(driver: impl Future<Output = ()> + 'static) -> crate::Result<()> {
+pub(crate) fn spawn_driver(driver: impl Future<Output = ()> + 'static) -> crate::Result<()> {
     nanocode_platform::spawn_local(driver);
     Ok(())
 }
