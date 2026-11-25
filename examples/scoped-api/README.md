@@ -25,7 +25,8 @@ that holds it, by its listen address.
   commit. A commit refused as `Fenced` means the lease moved: the owner answers `lost` and stops.
 - A request on any replica goes to the scope's owner: in process when the replica holds the
   partition, otherwise forwarded over HTTP to the holder read from the lease row (cached, and
-  re-read and retried once on a refusal). A replica with nothing to forward to answers
+  re-read and retried once on a refusal). Pooled connections to a holder are checked before
+  reuse, so ones a restarted holder closed are dropped instead of failing the forward. A replica with nothing to forward to answers
   `unowned` (503) and the client retries.
 - A planned handoff (`POST /admin/drain`) leaves membership, drains each owner (its batch in
   flight lands, queued work is refused as `draining`) and releases each lease, so the next

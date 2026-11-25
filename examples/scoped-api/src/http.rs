@@ -65,6 +65,13 @@ impl Conn {
         Self::new(TcpStream::connect(address).await?)
     }
 
+    /// Whether an idle connection can carry another request: false once the peer closed or reset
+    /// it (a restarted peer leaves every pooled connection to it closed) or sent unasked bytes.
+    pub fn reusable(&self) -> bool {
+        let probe = self.stream.try_read(&mut [0; 1]);
+        matches!(probe, Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+    }
+
     async fn fill(&mut self) -> io::Result<usize> {
         if self.filled == self.buffer.len() {
             if self.buffer.len() >= HEAD_BYTES_MAX + BODY_BYTES_MAX {

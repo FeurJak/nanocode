@@ -223,8 +223,10 @@ struct Peer {
 }
 
 impl Peer {
+    /// An idle connection that is still open, dropping the closed ones it passes: a forward over
+    /// a connection the peer closed fails, and its outcome would be unknown for an append.
     fn take(&self) -> Option<Conn> {
-        self.idle.iter().find_map(Slot::take)
+        self.idle.iter().filter_map(Slot::take).find(Conn::reusable)
     }
 
     fn put(&self, mut conn: Conn) {
